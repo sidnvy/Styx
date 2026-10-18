@@ -7,6 +7,7 @@ import {fileURLToPath} from 'node:url';
 
 export const MAC_BUNDLE_ID='app.styx.host';
 const SOURCE=fileURLToPath(new URL('./macos/Styx.swift',import.meta.url));
+const LICENSES=fileURLToPath(new URL('../licenses/',import.meta.url));
 const assert=(condition,message)=>{if(!condition)throw Error(message)};
 const xml=value=>value.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');
 export function appInfoPlist(version){
@@ -64,6 +65,10 @@ export function buildMacApp({app,cuaBinary,version,identity,teamID,notaryProfile
   fs.mkdirSync(path.dirname(app),{recursive:true});
   fs.mkdirSync(app);
   try{
+    const notices=path.join(app,'Contents/Resources/licenses');
+    fs.mkdirSync(notices,{recursive:true});
+    for(const name of ['cua-LICENSE','styx-LICENSE','provenance.json'])
+      fs.copyFileSync(path.join(LICENSES,name),path.join(notices,name),fs.constants.COPYFILE_EXCL);
     const macos=path.join(app,'Contents/MacOS');
     fs.mkdirSync(macos,{recursive:true});
     fs.writeFileSync(path.join(app,'Contents/Info.plist'),plist,{flag:'wx'});

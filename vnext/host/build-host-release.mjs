@@ -11,6 +11,8 @@ const STATIC=Object.freeze([
   'host/connect.mjs','host/computer.mjs',
   'host/launch.mjs','host/installer.mjs',
   'shared/private-file.mjs',
+  'licenses/styx-LICENSE','licenses/cua-LICENSE',
+  'licenses/codex-LICENSE','licenses/codex-NOTICE','licenses/provenance.json',
   'packages/styx-exec-adapter/rpc.mjs',
   'packages/styx-exec-adapter/errors.mjs'
 ]);

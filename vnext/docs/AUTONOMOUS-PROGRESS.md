@@ -108,3 +108,45 @@ A 24-hour run is being started in a separate task-owned state root. Its gate
 remains NOT RUN until elapsed duration and receipt say PASS. This is not a
 signed installed-service, reboot, GUI or full-platform soak. Those remain
 independent NOT RUN gates; current GUI context remains BLOCKED.
+
+## Integrated C/D/G subsets and distribution evidence
+
+Integration worktree: `/home/sid/Documents/Codex/2026-10-19/files-pasted-by-the-user-styx/work/styx-vnext-integration`.
+Branch `feat/vnext-rc-integration-20261019`; the original worktree now remains
+immutable for the running soak at `dbce92dceaa24655fcd5d914bced785ea5eede29`.
+Local integrated head before notice changes: `5fce30f`.
+
+Merged locally from independent owned worktrees (no remote PR merged):
+- Runtime distribution `75e6a39`, `1640180`: official checksum-pinned Node
+  22.23.3, signed bootstrap/runtime and safe Windows offline-switch refusal.
+  Actual Linux/macOS/Windows packaging CI PASS on run39145407393. Host counts:
+  Linux29/32, macOS26/32, Windows20/32 passed; other tests explicitly skipped.
+  All three OSes executed real official Node/Codex/Cua signed packaging and
+  tamper checks. Python archive checks PASS 3/3 per OS.
+- Device readiness `8cf9c9f`: passive explicit allowed-target status; socket
+  connectivity does not claim native permissions/readiness/version. PR32 CI
+  PASS including all three OS schema/Host tests and actual Linux Exec.
+- macOS owner `cd34a5f`, `ab9f78b`, `3119e1b`, `456ed4d`: stable app.styx.host,
+  native embedded Cua owner, exact upstream parent-liveness stdin contract,
+  publisher signing/notarization pipeline and compile/liveness CI.
+  Final macOS CI PASS on39145582975. Physical macOS arm64 27.0.1 own-/tmp
+  compile, ownership, real Cua SIGKILL/EOF cleanup and unsigned app packaging
+  PASS. LaunchServices reported parent_application/app.styx.host and matching
+  owned parent PID. Read-only permissions reported host attribution with both
+  Accessibility and Screen Recording FALSE. Exact app/daemon/socket teardown
+  PASS. No TCC prompt, screenshot or GUI action on macOS. Developer ID and
+  notarization BLOCKED (only Apple Development identity present); GUI BLOCKED
+  due absent grants. Sanitized receipt retained with task outputs.
+
+Linux native GUI re-evaluation: initial command context lacked Wayland, but
+read-only native systemd user environment inspection found the actual logged-in
+Hyprland session. Inheriting ONLY its display/runtime/DBus/compositor variables
+resolved the environmental block. PASS: 7/7 native Cua outbound tests, zero
+skipped; actual owned Zenity screenshot, three AX elements, observed click and
+independent exit-code verification. No permissions or unrelated windows changed.
+
+Distribution adds pinned upstream Cua MIT, Codex Apache-2.0 LICENSE/NOTICE and
+Styx LICENSE, provenance hashes, signed Host inclusion and pre-signing app
+notice inclusion. Real Linux signed runtime package test PASS after inclusion.
+VNext npm CycloneDX1.5 SBOM generated (93 dependency components); full native
+transitive crate/license/SBOM review remains NOT RUN. No full legal audit claim.

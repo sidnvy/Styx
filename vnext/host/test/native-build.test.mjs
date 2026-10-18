@@ -32,7 +32,9 @@ test('portable signed Host bundle builds on the native macOS or Linux publisher'
   assert.ok(receipt.files>=20);
   const verified=verifySignedRelease(destination,publicKey);
   for(const file of ['bin/codex','bin/cua-driver','host/installer.mjs',
-    'host/launch.mjs','shared/private-file.mjs','node_modules/ws/package.json']){
+    'host/launch.mjs','shared/private-file.mjs','node_modules/ws/package.json',
+    'licenses/cua-LICENSE','licenses/codex-LICENSE','licenses/codex-NOTICE',
+    'licenses/styx-LICENSE','licenses/provenance.json']){
     assert.ok(verified.manifest.files.some(x=>x.path===file),file);
   }
   // The signed payload must actually resolve every local runtime import.

@@ -26,11 +26,14 @@ Do not treat this clone as the pre-existing developer checkout.
 
 ## Milestones and next executable work
 
+Active integration worktree is `work/styx-vnext-integration`; original independent
+clone is retained unchanged for the native Exec soak.
+
 | Milestone | Status | Next executable work |
 | --- | --- | --- |
-| A Foundation/CI | NOT RUN | Finish refreshed dependencies, receipt checks, Linux native Exec and three-OS CI; inspect existing uncommitted changes before integration |
-| B Windows lifecycle | NOT RUN | Review original private-file ACL / signed Node / Scheduled Task recovery changes, port with negative tests, then verify native SID/session and owned-window behavior |
-| C macOS lifecycle | NOT RUN | Add stable bundle packaging/signing configuration and TCC readiness checks; run native acceptance when macOS is available |
+| A Foundation/CI | PASS | Fresh dependency audit, typed receipts, actual native Exec and three-OS checks; integration CI pending |
+| B Windows lifecycle | BLOCKED | Review original private-file ACL / signed Node / Scheduled Task recovery changes, port with negative tests, then verify native SID/session and owned-window behavior |
+| C macOS lifecycle | BLOCKED | Add stable bundle packaging/signing configuration and TCC readiness checks; run native acceptance when macOS is available |
 | D Distribution/onboarding | NOT RUN | Bundle verified Node on each target, native packages, protected credential storage, rotation and offline runtime updates |
 | E Multi-user isolation | NOT RUN | Separate native accounts and Gateway realms; adversarial identity, process, GUI and revocation tests |
 | F Reliability | NOT RUN | Signed health-gated activation, owner-scoped metrics, crash/reconnect tests and 24-hour soak |

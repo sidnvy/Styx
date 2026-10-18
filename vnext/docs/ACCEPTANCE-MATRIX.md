@@ -12,15 +12,17 @@ older pilot evidence remains qualified in acceptance.md.
 | Updated native Exec | PASS | Linux pinned Codex 0.163.0: 18 passed, zero skipped |
 | Cua portable 0.36.0 native schema | PASS | freshly checksum-verified Linux binary, 64 native tools |
 | Dependency advisory audit | PASS | full npm audit: zero reported vulnerabilities |
-| Owned native Linux GUI | BLOCKED | native_wayland_session_required in current native command environment |
+| Owned native Linux GUI | PASS | 7/7 native tests after inheriting real existing systemd Hyprland session; screenshot/AX/click/readback |
 | Native Windows lifecycle/GUI | BLOCKED | no Windows execution backend in this chat |
-| Native macOS lifecycle/TCC | BLOCKED | no macOS execution backend in this chat |
+| Native macOS owner/liveness/attribution | PASS | own scratch compile, SIGKILL/EOF cleanup, LaunchServices parent attribution and teardown on native arm64 |
+| Native macOS signed GUI/TCC grants | BLOCKED | AX and Screen Recording absent; Developer ID Application identity unavailable |
 | Signed/notarized production distribution | BLOCKED | publisher/platform signing identities not supplied |
 | Independent cold install | NOT RUN | native product packaging incomplete |
 | Distinct-account physical isolation | NOT RUN | needs separate native OS users/session contexts |
 | Actual ChatGPT authorization/onboarding | BLOCKED | account-side product integration not supplied |
 | 24-hour per-platform soak | NOT RUN | requires stable isolated native deployment and elapsed runtime |
-| Feature-branch three-OS CI | NOT RUN | pending PR run |
+| Focused feature-branch three-OS CI | PASS | PR27, PR28, PR31, PR32 native jobs; macOS owner PR29 compile/liveness PASS |
+| Integration-branch CI | NOT RUN | pending publication/run |
 
 Same native account installations provide logical separation only. Mocked
 launchctl, fixture binaries, compilation and schema-only smoke never satisfy

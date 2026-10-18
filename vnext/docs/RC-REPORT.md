@@ -9,9 +9,11 @@ worktrees are preserved. Independent feature branch starts at
 
 Foundation changes remediate two dependency advisories and produce explicit
 fixture/native-Exec evidence with skipped-count preservation and CI artifacts.
-Linux native Cua protocol compatibility passed; current graphical-session
-absence blocks a new GUI action claim. Prior Windows/macOS pilots are historical
-evidence only. Signed native packages, cold installation, native multi-user
+Linux native Cua protocol and fresh owned-window screenshot/AX/click/readback
+passed. New physical macOS app-parent attribution and real daemon crash cleanup
+passed in scratch space, while macOS GUI grants and publisher signing remain
+BLOCKED. Three-OS official runtime packaging passed CI. The 24-hour native Exec
+loopback soak is running with completion NOT RUN. Signed native packages, cold installation, native multi-user
 isolation, actual ChatGPT onboarding and 24-hour soak are not accepted.
 
 See AUTONOMOUS-PROGRESS.md for exact checks and RELEASE-BLOCKERS.md for

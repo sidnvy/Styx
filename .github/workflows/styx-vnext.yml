@@ -29,6 +29,11 @@ jobs:
           python-version: '3.12'
       - name: Install locked JavaScript deps
         run: npm ci --ignore-scripts --no-audit --no-fund
+      - name: Dependency advisory audit and VNext npm SBOM
+        run: |
+          mkdir -p acceptance
+          npm audit --audit-level=moderate
+          npm sbom --package-lock-only --sbom-format cyclonedx > acceptance/npm-sbom.cdx.json
       - name: Pin and verify the official Codex executor
         run: python3 packages/styx-exec-adapter/prepare-runtime.py
       - name: Fixture and protocol regression with explicit skipped counts
