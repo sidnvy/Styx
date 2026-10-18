@@ -37,8 +37,9 @@ async function fixture(t) {
     adminTokenFile:path.join(tmp,'admin.token'),registry:gateway.registry,
     relay:gateway.relay});
   const hosts=[];
+  const mcpToken=randomBytes(40).toString('base64url');
   http=await createGatewayHttp(gateway,{
-    token:randomBytes(40).toString('base64url'),port:0,
+    token:mcpToken,port:0,
     allowedHosts:hosts,enrollment:controller,
     tlsCertificateFile:cert,tlsPrivateKeyFile:key
   });
@@ -57,7 +58,7 @@ async function fixture(t) {
   const admin=(route,data)=>enrollmentRequest(config('admin-client'),route,data,{
     adminToken
   });
-  return {tmp,gateway,controller,admin,config,http,cert,adminToken,enrollDir};
+  return {tmp,gateway,controller,admin,config,http,cert,adminToken,mcpToken,enrollDir};
 }
 
 test('one-use invitation + device-generated key + owner-approved fingerprint + encrypted host token',
@@ -324,4 +325,123 @@ test('a newly approved first Host becomes visible to MCP tools without Gateway r
   const removed=await model.callTool({
     name:'list_execution_environments',arguments:{}});
   assert.equal(removed.structuredContent.environments.length,0);
+});
+
+test('owner recovery retires exact identity, closes both lanes and requires fresh proof and approval',
+  {timeout:30000},async t=>{
+  const f=await fixture(t),guest=f.config('recover-old');
+  const oldInvitation=(await f.admin('invitations',{})).body.invitation;
+  const pending=await requestEnrollment(guest,oldInvitation);
+  await f.admin('approve',{request_id:pending.request_id,fingerprint:pending.fingerprint,
+    enable_computer:true});
+  await claimEnrollment(guest);
+  const token=(await fs.readFile(path.join(guest.storage_dir,'host.token'),'utf8')).trim();
+  const device=(await f.admin('devices')).body[0];
+  const recovery={device_id:device.device_id,fingerprint:device.fingerprint,
+    generation:device.generation};
+  const adminConfig={gateway_url:guest.gateway_url,gateway_ca_file:f.cert,
+    admin_token_file:path.join(f.tmp,'admin.token')};
+  const {ownerCommand}=await import('../enroll-admin.mjs');
+  await assert.rejects(ownerCommand(adminConfig,'recover',[device.device_id]),
+    /recover_requires_device_id_fingerprint_and_generation/);
+  for(const adminToken of [token,f.mcpToken])
+    await assert.rejects(enrollmentRequest(guest,'recover',recovery,{adminToken}),/unauthorized/);
+  for(const bad of [{...recovery,device_id:'styx-'+'0'.repeat(24)},
+    {...recovery,fingerprint:'0'.repeat(64)},{...recovery,generation:'old-generation'},
+    {...recovery,unexpected:'credential'}])
+    await assert.rejects(f.admin('recover',bad),/device_not_found|recovery_identity_mismatch|invalid_fields/);
+  assert.equal(f.gateway.registry.resolve(device.device_id).allowed,true);
+  const sockets=[];
+  for(const lane of ['exec','computer']){
+    const ws=new WebSocket(guest.gateway_url.replace('https:','wss:')+
+      '/styx/hosts/'+device.device_id+'/'+lane,{ca:await fs.readFile(f.cert),
+      headers:{Authorization:'Bearer '+token}});
+    await once(ws,'open');sockets.push(ws);
+  }
+  const {sign,constants}=await import('node:crypto');
+  const {joinPayload}=await import('../enrollment.mjs');
+  const retiredIdentity=initLocalIdentity(guest);
+  const staleApprovalBody={invitation:(await f.admin('invitations',{})).body.invitation,
+    device_id:'styx-'+randomBytes(12).toString('hex'),label:guest.label,
+    platform:process.platform,cwd:guest.cwd,shell:guest.shell,
+    computer_requested:true,public_key_pem:retiredIdentity.public_key_pem};
+  const privateKey=await fs.readFile(path.join(guest.storage_dir,'identity.pem'),'utf8');
+  staleApprovalBody.signature=sign('sha256',Buffer.from(joinPayload(staleApprovalBody)),{
+    key:privateKey,padding:constants.RSA_PKCS1_PSS_PADDING,saltLength:32}).toString('base64url');
+  const staleApproval=(await enrollmentRequest(guest,'join',staleApprovalBody)).body;
+  // Claiming an executor binding races with an owner retirement. Acquisition
+  // may have happened, but the peer and all subsequent bindings must fail.
+  const binding=f.gateway.pool.binding(device.device_id).catch(e=>e);
+  const closes=sockets.map(ws=>once(ws,'close'));
+  const recovered=await ownerCommand(adminConfig,'recover',[
+    device.device_id,device.fingerprint,device.generation]);
+  assert.deepEqual(recovered,{device_id:device.device_id,status:'revoked',
+    recovery:'fresh_enrollment_required'});
+  await Promise.all(closes);
+  assert.equal(f.gateway.relay.connected(device.device_id),false);
+  await assert.rejects(f.gateway.pool.binding(device.device_id),/environment_access_denied/);
+  await assert.rejects(f.admin('recover',recovery),/device_not_found/);
+  await assert.rejects(f.admin('approve',{request_id:staleApproval.request_id,
+    fingerprint:device.fingerprint}),/device_identity_retired/);
+  assert.equal((await binding) instanceof Error,true);
+  assert.doesNotMatch(JSON.stringify(recovered),/token|secret|private|fingerprint|generation/);
+  await assert.rejects(fs.stat(path.join(f.enrollDir,'tokens',device.device_id+'.token')),/ENOENT/);
+  const rebootRegistry=new TargetRegistry({version:1,targets:[]});
+  const reboot=new EnrollmentController({rootDir:f.enrollDir,
+    adminTokenFile:path.join(f.tmp,'admin.token'),registry:rebootRegistry});
+  assert.equal(reboot.devices()[0].status,'revoked');
+  assert.throws(()=>rebootRegistry.resolve(device.device_id),/environment_not_found/);
+  const rejected=new WebSocket(guest.gateway_url.replace('https:','wss:')+
+    '/styx/hosts/'+device.device_id+'/exec',{ca:await fs.readFile(f.cert),
+    headers:{Authorization:'Bearer '+token}});
+  const status=await new Promise(resolve=>{
+    rejected.on('unexpected-response',(_req,res)=>{res.resume();rejected.terminate();resolve(res.statusCode)});
+    rejected.on('error',()=>{});
+    rejected.on('open',()=>{rejected.close();resolve(101)});
+  });
+  assert.equal(status,403);
+  // The replacement obtains a different identity and bearer via the existing
+  // signed join and encrypted claim, with independent fingerprint approval.
+  const replacement=f.config('recover-new',false);
+  await assert.rejects(requestEnrollment(replacement,oldInvitation),/invitation_expired_or_used/);
+  const fresh=(await f.admin('invitations',{})).body.invitation;
+  const replay={invitation:fresh,device_id:device.device_id,label:guest.label,
+    platform:process.platform,cwd:guest.cwd,shell:guest.shell,
+    computer_requested:true,public_key_pem:retiredIdentity.public_key_pem};
+  replay.signature=sign('sha256',Buffer.from(joinPayload(replay)),{
+    key:await fs.readFile(path.join(guest.storage_dir,'identity.pem'),'utf8'),
+    padding:constants.RSA_PKCS1_PSS_PADDING,saltLength:32}).toString('base64url');
+  await assert.rejects(enrollmentRequest(guest,'join',replay),/device_identity_retired/);
+  replay.device_id='styx-'+randomBytes(12).toString('hex');
+  replay.signature=sign('sha256',Buffer.from(joinPayload(replay)),{
+    key:await fs.readFile(path.join(guest.storage_dir,'identity.pem'),'utf8'),
+    padding:constants.RSA_PKCS1_PSS_PADDING,saltLength:32}).toString('base64url');
+  await assert.rejects(enrollmentRequest(guest,'join',replay),/device_identity_retired/);
+  const newPending=await requestEnrollment(replacement,fresh);
+  assert.notEqual(newPending.device_id,device.device_id);
+  assert.notEqual(newPending.fingerprint,device.fingerprint);
+  assert.equal((await claimEnrollment(replacement)).status,'pending');
+  await assert.rejects(f.admin('approve',{request_id:newPending.request_id,
+    fingerprint:device.fingerprint}),/fingerprint_mismatch/);
+  await f.admin('approve',{request_id:newPending.request_id,fingerprint:newPending.fingerprint});
+  assert.equal((await claimEnrollment(replacement)).status,'ready_to_connect');
+  assert.notEqual((await fs.readFile(path.join(replacement.storage_dir,'host.token'),'utf8')).trim(),token);
+});
+
+test('recovery persistence failure never acknowledges retirement or mutates live admission',async t=>{
+  const f=await fixture(t),guest=f.config('recover-failure',false);
+  const pending=await requestEnrollment(guest,(await f.admin('invitations',{})).body.invitation);
+  await f.admin('approve',{request_id:pending.request_id,fingerprint:pending.fingerprint});
+  const before=(await f.admin('devices')).body[0];
+  const save=f.controller.save;
+  f.controller.save=()=>{throw Error('private filesystem failure /secret/path')};
+  await assert.rejects(f.admin('recover',{device_id:before.device_id,
+    fingerprint:before.fingerprint,generation:before.generation}),/^Error: enrollment_internal_error$/);
+  f.controller.save=save;
+  assert.equal(f.gateway.registry.resolve(before.device_id).allowed,true);
+  assert.equal(f.controller.devices()[0].status,'approved');
+  const registry=new TargetRegistry({version:1,targets:[]});
+  const restored=new EnrollmentController({rootDir:f.enrollDir,
+    adminTokenFile:path.join(f.tmp,'admin.token'),registry});
+  assert.equal(restored.devices()[0].status,'approved');
 });
