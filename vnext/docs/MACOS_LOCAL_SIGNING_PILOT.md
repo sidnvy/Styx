@@ -30,3 +30,12 @@ The staged helper SHA256 is
 `0971f11b4e080c4ed7a3ca7207dde5bc59a30db5461286e5d4beafc3778094d1`.
 The scratch directory is mode0700; config and ownership marker are mode0600.
 No existing personal app, service, or permission was modified.
+
+Separate native Exec acceptance passed on macOS using the official checksum-pinned
+Codex0.163.0 arm64 archive and Node25.6.1. The isolated adapter exercised pipe
+stdout/stderr and exit7, PTY stdin/readback, exact `unknown_session` cross-owner
+refusal, confirmed cleanup followed by OS PID absence, and fresh transport
+reconnection. Its private execution home was removed. The sanitized receipt is
+`evidence/macos-native-exec-20261019.json`. This proves the direct native adapter,
+not the signed app, HTTP gateway, TCC or GUI. Only public runtime/source material
+and the signing-ready owned app remain in the marked scratch directory.
