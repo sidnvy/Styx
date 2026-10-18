@@ -168,6 +168,27 @@ stateful VNext Gateway, implement a separate reviewed compatibility adapter.
 Do NOT casually replace VNext's authenticated MCP session and native Cua
 transport contracts.
 
+## CAS-only MCP session capacity recovery
+
+The real ChatGPT Host can create many Streamable HTTP MCP sessions and leave
+passive SSE subscriptions open without sending a matching DELETE. In one
+live experiment the Gateway exhausted its 32-session limit and authenticated
+new `initialize` requests returned HTTP 503 even while the Tunnel Client
+reported ready. This is separate from the App View's `ui/message` dispatch.
+
+Only when the CAS-only CLI profile is active, the Gateway now uses an
+`idleSessionTimeoutMs=120000` policy and reaps idle sessions at saturation.
+A passive long-lived GET/SSE subscription does not count as an in-flight
+operation; active POST operations are protected against eviction. A stale
+client may have to reconnect after its session is reclaimed. This is a
+capacity recovery mechanism, not a guarantee that the Host continues to
+mount an MCP App View or schedules another model turn. Production Gateway
+retains the previous default without idle eviction.
+
+The isolated test suite covers default maxSessions behavior, idle recovery,
+and preservation of an active in-flight request. Do not infer that this
+fix alone establishes multi-turn autonomous continuation reliability.
+
 ## Future CAS (out of P0)
 
 Native MCP App and workstation Browser Companion remain alternative,
