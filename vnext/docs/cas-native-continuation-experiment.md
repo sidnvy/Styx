@@ -1,7 +1,7 @@
 # CAS P0 — native MCP App turn-continuation spike
 
 **Status:** experimental implementation with local contract and simulated-Host tests.
-**Source baseline:** Styx VNext branch feat/styx-vnext-unified-runtime, commit c81a111f.
+**Source baseline:** created from c81a111f, then integrated VNext 236c7bbb (same-host multi-user isolation release gate).
 **Production:** NOT installed, NOT deployed, NOT accepted by a real ChatGPT Host.
 
 ## Goal and non-goals
