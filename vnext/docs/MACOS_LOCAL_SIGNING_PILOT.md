@@ -1,5 +1,12 @@
 # Local development signing pilot
 
+Current result: existing Apple Development signatures and exact app/team checks
+PASS. LaunchServices and normal/crash cleanup PASS. GUI remains BLOCKED on
+human Accessibility and Screen Recording grants. Do not rerun the historical
+signing command below; verification-only completion has already succeeded.
+
+## Historical signing attempts
+
 This pilot uses the existing Apple Development certificate for a local owned
 Styx app. It does not establish Developer ID distribution or notarization.
 Native compilation and plist validation passed. The first signing operation on
