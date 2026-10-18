@@ -52,8 +52,10 @@ async function until(check,why,timeout=18000){
   throw Error(why);
 }
 function save(file,value){
-  fs.writeFileSync(file+'.new',JSON.stringify(value,null,2)+'\n',{mode:0o600});
-  fs.renameSync(file+'.new',file);
+  const temporary=file+'.new',fd=fs.openSync(temporary,'w',0o600);
+  try{fs.writeFileSync(fd,JSON.stringify(value,null,2)+'\n');fs.fsyncSync(fd)}finally{fs.closeSync(fd)}
+  fs.renameSync(temporary,file);
+  const dir=fs.openSync(path.dirname(file),'r');try{fs.fsyncSync(dir)}finally{fs.closeSync(dir)}
 }
 // Per-client CA trust and origin pinning; never disable certificate checks or
 // alter global trust. SDK uses JSON requests and streamed SSE responses.
@@ -74,8 +76,9 @@ function caFetch(origin,ca){
   };
 }
 export async function runManagedLinuxPilot(raw,{optIn=process.env.STYX_RUN_MANAGED_LINUX_PILOT,
-  buildRelease=buildHostRelease,updateAcceptance}={}){
+  buildRelease=buildHostRelease,updateAcceptance,signal}={}){
   assert(optIn==='1','managed_linux_pilot_requires_explicit_opt_in');
+  if(signal?.aborted)throw Error('managed_pilot_aborted');
   assert(process.platform==='linux'&&process.arch==='x64','native_linux_x64_required');
   const options=pilotOptions(raw);
   const {directory,unitName,nodeBinary,codexBinary,cuaBinary}=options;
@@ -159,6 +162,7 @@ export async function runManagedLinuxPilot(raw,{optIn=process.env.STYX_RUN_MANAG
       computer:{enabled:true,binary:cuaBinary,connections:1,
         env:{...graphical,CUA_DRIVER_RS_ENABLE_WAYLAND:'1'}}};
     const configFile=path.join(state,'host.json');fs.writeFileSync(configFile,JSON.stringify(config),{mode:0o600});
+    if(signal?.aborted)throw Error('managed_pilot_aborted');
     phase='managed_start_ready';
     try { installLinuxService({unitName,installRoot,hostConfigFile:configFile,trustPublicKeyFile:publicKeyFile,restartSec:1}) }
     finally { installed=fs.existsSync(unitFile) }
@@ -172,8 +176,28 @@ export async function runManagedLinuxPilot(raw,{optIn=process.env.STYX_RUN_MANAG
         return children.some(pid=>fs.readFileSync('/proc/'+pid+'/cmdline','utf8').split('\0').includes(script));
       }catch{return false}
     }
+    async function sampleExec(marker){
+      assert(/^[A-Z0-9_]{1,100}$/.test(marker),'invalid_owned_exec_marker');
+      if(signal?.aborted)throw Error('managed_pilot_aborted');
+      let result,output='';
+      try{
+        const requestOptions={timeout:10000,...(signal?{signal}:{})};
+        result=await client.callTool({name:'exec_command',arguments:{environment_id:target,
+          cmd:'printf '+marker,login:false,yield_time_ms:250}},undefined,requestOptions);
+        output=result.structuredContent?.output??'';
+        const deadline=Date.now()+10000;
+        while(!result.isError&&result.structuredContent?.session_id&&Date.now()<deadline){
+          result=await client.callTool({name:'write_stdin',arguments:{session_id:result.structuredContent.session_id,
+            chars:'',yield_time_ms:250}},undefined,requestOptions);
+          output+=result.structuredContent?.output??'';
+        }
+      }catch(error){if(signal?.aborted)throw Error('managed_pilot_aborted');throw error}
+      assert(!result.isError&&result.structuredContent?.exit_code===0&&output===marker,'managed_native_exec_readback_failed');
+      return true;
+    }
     async function ready(version){
       await until(()=>{
+        if(signal?.aborted)throw Error('managed_pilot_aborted');
         const s=statusUserService(unitName);
         return s.active==='active'&&s.pid>1&&ownsGeneration(s,version)&&
           gateway.relay.connected(target)&&gateway.relay.sessions.get(target)!==lastExecPeer&&
@@ -189,16 +213,7 @@ export async function runManagedLinuxPilot(raw,{optIn=process.env.STYX_RUN_MANAG
         requestInit:{headers:{Authorization:'Bearer '+modelToken}},fetch:caFetch(origin,ca)});
       client=new Client({name:'styx-owned-managed-pilot',version:'0.1.0'});
       await client.connect(transport);clients.push({client,transport});
-      const marker='STYX_MANAGED_'+receipt.samples.length;
-      let result=await client.callTool({name:'exec_command',arguments:{environment_id:target,
-        cmd:'printf '+marker,login:false,yield_time_ms:250}});
-      let output=result.structuredContent?.output??'';
-      const execDeadline=Date.now()+10000;
-      while(!result.isError&&result.structuredContent?.session_id&&Date.now()<execDeadline){
-        result=await client.callTool({name:'write_stdin',arguments:{session_id:result.structuredContent.session_id,chars:'',yield_time_ms:250}});
-        output+=result.structuredContent?.output??'';
-      }
-      assert(!result.isError&&result.structuredContent?.exit_code===0&&output===marker,'managed_native_exec_readback_failed');
+      await sampleExec('STYX_MANAGED_'+receipt.samples.length);
       receipt.samples.push({phase,version,status:'PASS',service_active:true,exec_wss_connected:true,
         computer_wss_slots:1,systemd_restarts:status.restarts,signed_stable_node:true,signed_connector_generation:true});
       save(receiptFile,receipt);return status;
@@ -215,7 +230,7 @@ export async function runManagedLinuxPilot(raw,{optIn=process.env.STYX_RUN_MANAG
       // Trusted local acceptance code only: these hooks are never loaded from
       // Host configuration, an agent tool argument, or a remote document.
       phase='update_transaction_acceptance';
-      await updateAcceptance({installRoot,unitName,publicKeyPem:publisher.publicKey,
+      await updateAcceptance({installRoot,unitName,directory,signal,sampleExec,publicKeyPem:publisher.publicKey,
         publicKeyFile,release1,release2,ready,closeClient,gateway,target,receipt,
         setPhase:value=>{phase=value},saveReceipt:()=>save(receiptFile,receipt)});
     }else{
@@ -230,6 +245,7 @@ export async function runManagedLinuxPilot(raw,{optIn=process.env.STYX_RUN_MANAG
       refreshVerifiedBootstrap(installRoot,publisher.publicKey,release1);
       systemdUser(unitName,'start');await ready(release1);note(phase);
     }
+    if(signal?.aborted)throw Error('managed_pilot_aborted');
     phase='owned_gui_screenshot_ax_action_readback';
     async function tool(name,args){
       const res=await client.callTool({name,arguments:args});
@@ -269,9 +285,9 @@ export async function runManagedLinuxPilot(raw,{optIn=process.env.STYX_RUN_MANAG
       accessibility_elements:elements.length,observed_button_clicked:true,independent_exit_code:0};
     note(phase);receipt.status='PASS';
   }catch(error){
-    receipt.status='FAIL';receipt.failed_phase=phase;
+    receipt.status=error.message==='managed_pilot_aborted'?'BLOCKED':'FAIL';receipt.failed_phase=phase;
     receipt.reason=String(error.message).replaceAll(directory,'<private-pilot>').slice(0,150);
-    if(phase in receipt.evidence)receipt.evidence[phase]='FAIL';
+    if(phase in receipt.evidence)receipt.evidence[phase]=receipt.status;
   }finally{
     await closeClient();
     for(const pair of clients){await pair.transport.terminateSession().catch(()=>{});await pair.client.close().catch(()=>{})}
