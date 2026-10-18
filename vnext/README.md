@@ -203,3 +203,36 @@ uses Styx exec_command, Cua list_windows/get_window_state/click and
 write_stdin for independent scratch readback; no SSH/Coder tools are in
 the test execution path. See docs/outbound-computer.md. It does not provision
 a production install or change OS permissions.
+
+
+## Pair a device without SSH/Coder — opt-in prototype
+
+Gateway enrollment is disabled by default. If the operator additionally
+configures STYX_ENROLLMENT_DIR and STYX_ENROLL_ADMIN_TOKEN_FILE (owner bearer
+different from model MCP bearer), a private local-first device enrollment
+controller is available over HTTPS.
+
+On a new Host, native user generates a device-local identity and starts
+one bounded pairing workflow using the short-lived invitation:
+
+    node host/enroll.mjs onboard /private/local-config.json /private/invitation.txt
+
+Trusted Gateway owner inspects, compares the full key fingerprint and
+explicitly approves the proposed Host:
+
+    node gateway/enroll-admin.mjs /private/admin.json pending
+    node gateway/enroll-admin.mjs /private/admin.json approve REQUEST_ID FULL_FINGERPRINT computer
+
+Upon approval the Host saves a private outbound token and host.json; the
+Gateway dynamically admits its environment ID and can revoke it immediately.
+This does not install/enable a service or grant GUI permissions.
+
+An offline Ed25519-signed release prototype provides verified staging,
+activation and rollback through host/installer.mjs and host/launch.mjs.
+Native cold-install and the ChatGPT device-picker UI remain product release
+blockers; see docs/enrollment-pilot.md and docs/onboarding-installation.md.
+
+Run local and platform-native tests:
+
+    npm run test:host
+    npm run test:all

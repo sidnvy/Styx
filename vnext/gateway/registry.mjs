@@ -78,6 +78,24 @@ export class TargetRegistry {
       this.targets.has(config.default_environment_id), 'Unknown default target');
     this.defaultId = config.default_environment_id;
   }
+  // Enrollment is a trusted Gateway control-plane operation, never a model
+  // tool. Reuse the catalog validator so a newly paired Host cannot bypass
+  // normal platform, shell, or authentication admission checks.
+  admitApprovedHost(target) {
+    if (this.targets.has(target?.id)) throw Error('device_identity_conflict');
+    const checked = new TargetRegistry({
+      version: 1,
+      default_environment_id: this.defaultId,
+      targets: [...this.targets.values(), target]
+    });
+    this.targets = checked.targets;
+    return this.targets.get(target.id);
+  }
+  revokeHost(id) {
+    const existing = this.targets.get(id);
+    if (!existing || existing.kind !== 'host') throw Error('device_not_found');
+    this.targets.set(id, Object.freeze({...existing, allowed: false}));
+  }
   resolve(id) {
     const actual = id === undefined ? this.defaultId : id;
     if (typeof actual !== 'string') throw new Error('default_environment_required');

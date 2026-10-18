@@ -215,6 +215,15 @@ export class OutboundHostRelay {
     return [...(this.computerPeers.get(id)??[])].filter(
       e=>!e.closed && e.ws?.readyState===WebSocket.OPEN).length;
   }
+  // Explicit owner-approved device revocation terminates both reverse
+  // lanes. Connection closure makes old Codex/Cua identities unusable.
+  disconnectHost(id) {
+    const exec = this.sessions.get(id);
+    if (exec) {exec.ws?.terminate();this.drop(exec)}
+    for (const peer of [...(this.computerPeers.get(id)??[])]) {
+      peer.ws?.terminate();this.drop(peer);
+    }
+  }
   connected(id) {
     const e=this.sessions.get(id);
     return Boolean(e && !e.closed && e.ws?.readyState===WebSocket.OPEN);

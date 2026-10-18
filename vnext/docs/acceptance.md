@@ -112,3 +112,27 @@ docs/onboarding-installation.md.
 - NOT TESTED: autonomous service-manager restart after machine reboot or a
   disconnected GUI session. The existing OOB manager started this isolated
   test connector and is not the intended production installer/runtime.
+
+
+## Device pairing and immutable installer pilot — 2026-10-18
+
+- PASS on isolated HTTPS Gateway: private owner invitation, native RSA
+  possession proof, full fingerprint approval, unapproved refusal, signed
+  request tamper rejection, public-key-encrypted first Host credential,
+  device-local decryption and keyed confirmation.
+- PASS: one-use and expired requests rejected; secrets and HTTP owner token
+  distinct from model MCP token; device revocation terminates live Host
+  sessions and survives Gateway restart.
+- PASS: newly approved first Host is visible in live MCP tools and
+  list_execution_environments without Gateway restart.
+- PASS: one native onboarding command can wait until owner approval.
+- PASS: offline Ed25519-signed release verification, side-by-side version
+  staging, activation, corruption refusal and safe rollback.
+- PASS: portable user-level service-plan generation WITHOUT actual OS
+  registration.
+- NOT RUN: physical two-machine cold pairing without OOB bootstrap.
+- NOT IMPLEMENTED: production native signed app/package, keychain-backed
+  identity, real ChatGPT onboarding UI, service manager activation,
+  reboot/login/startup upgrade and independently verified uninstall.
+
+See docs/enrollment-pilot.md for code and the explicit security boundary.

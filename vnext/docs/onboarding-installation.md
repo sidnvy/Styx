@@ -1,6 +1,8 @@
 # Styx — production onboarding and installer release gate
 
-Status: DESIGN REQUIREMENTS, not implemented. This file is a release gate for
+Status: PRODUCTION RELEASE REQUIREMENTS. Narrow device pairing and offline
+signed staging PILOTS are implemented; native cold installers and the ChatGPT
+setup UI are NOT implemented. This file is a release gate for
 the single Styx product. It does not authorize production Charon/Coder changes.
 
 ## Initial trust/bootstrap boundary
@@ -106,3 +108,25 @@ These are product onboarding operations, not new Codex/Cua execution tools.
 
 Current state: these are gates, NOT claims of implemented installer, pairing
 service, ChatGPT visual setup or completed production rollout.
+
+
+## What the October 2026 installation prototype actually provides
+
+- Opt-in owner-only Gateway enrollment endpoints, separate from model MCP tools.
+- A device-generated RSA identity and proof-of-possession at first contact,
+  a short-lived single-use invitation, user-approved exact fingerprint,
+  and a public-key-encrypted Host capability. Keys stay local.
+- Persisted registry admission and durable device revocation that terminates
+  admitted outbound Host connections, with no Gateway restart.
+- CLI owner and native-device fallback, including bounded unattended approval
+  wait. These support a future ChatGPT guided UI but are not the UI itself.
+- Offline Ed25519-signed manifest and all-file SHA-256 verification, protected
+  version staging, activation, stable launch shim and signed rollback.
+- OS-specific service plans WITHOUT registering/enabling services.
+- All unit/integration and multi-platform tests are isolated; no production
+  Charon/Coder/Tunnel endpoint has been replaced.
+
+Reference implementation and reproduction: docs/enrollment-pilot.md.
+The cold installer, downloadable signed product, PKI/keychain, unattended
+OS service registration, device picker and production rollout are still
+explicit release blockers.

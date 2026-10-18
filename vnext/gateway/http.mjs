@@ -3,6 +3,7 @@ import {createServer as createSecureServer} from 'node:https';
 import fs from 'node:fs';
 import {randomUUID, createHash, timingSafeEqual} from 'node:crypto';
 import {StreamableHTTPServerTransport} from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import {handleEnrollment} from './enrollment.mjs';
 
 function authorize(req, digest, hosts, origins) {
   if (!hosts.includes(req.headers.host)) return 403;
@@ -19,7 +20,7 @@ function authorize(req, digest, hosts, origins) {
 // connection cannot reuse an old process or GUI element reference.
 export async function createGatewayHttp(gateway, {
   token, host = '127.0.0.1', port = 8795, allowedHosts, allowedOrigins = [],
-  maxSessions = 32, tlsCertificateFile, tlsPrivateKeyFile
+  maxSessions = 32, tlsCertificateFile, tlsPrivateKeyFile, enrollment = null
 } = {}) {
   if (typeof token !== 'string' || token.length < 32 || /\s/.test(token))
     throw new Error('Strong inbound bearer required');
@@ -30,6 +31,8 @@ export async function createGatewayHttp(gateway, {
     throw new Error('Explicit allowed hosts required for non-loopback binding');
   const hosts = allowedHosts ?? [host + ':' + port];
   const digest = createHash('sha256').update(token).digest();
+  if(enrollment && timingSafeEqual(digest,enrollment.adminDigest))
+    throw Error('Enrollment owner token must differ from MCP bearer');
   const sessions = new Map();
   if (Boolean(tlsCertificateFile) !== Boolean(tlsPrivateKeyFile))
     throw new Error('TLS certificate and key must be supplied together');
@@ -37,6 +40,11 @@ export async function createGatewayHttp(gateway, {
     const refuse = (code, message) => {
       if (!res.headersSent) { res.writeHead(code, {'content-type': 'text/plain'}); res.end(message); }
     };
+    if (req.url?.startsWith('/styx/enroll/')) {
+      if(!enrollment) return refuse(404,'Not found');
+      await handleEnrollment(req,res,{controller:enrollment,allowedHosts:hosts});
+      return;
+    }
     if (req.url !== '/mcp') return refuse(404, 'Not found');
     const denied = authorize(req, digest, hosts, allowedOrigins);
     if (denied) return refuse(denied, 'Forbidden');

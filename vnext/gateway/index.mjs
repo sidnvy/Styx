@@ -10,9 +10,11 @@ export function createStyxGateway({catalog, connect, computer, gui = null}) {
   const relay=new OutboundHostRelay({registry});
   const pool = new RuntimePool(registry, {connect,relay});
   const exec = new ExecAdapter({resolve: async (id, _owner) => pool.binding(id)});
+  // Enrollment can admit the FIRST desktop-capable Host after Gateway starts.
+  // Keep the provider ready but advertise its tools only when such a Host
+  // is approved. Preserve the legacy fixture broker only when injected.
   const cua = computer === undefined
-    ? (registry.list().some(t => t.capabilities.includes('computer'))
-      ? new CuaProvider({registry,relay}) : null)
+    ? (gui ? null : new CuaProvider({registry,relay}))
     : computer;
   return {
     registry, pool, exec, computer: cua, gui, relay,

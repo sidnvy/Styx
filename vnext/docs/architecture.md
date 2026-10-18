@@ -133,3 +133,22 @@ The installer, enrollment control-plane, service supervisors, signed update
 and rollback lifecycle are not yet implemented. See
 docs/onboarding-installation.md. Production switch requires their separate
 cold-install and independent no-OOB recovery acceptance.
+
+
+## New dedicated pairing and install responsibilities
+
+Gateway enrollment is a small OWNER-authorized control plane, separate from
+the ChatGPT-visible Codex Exec and Cua MCP tools. The device establishes
+trust locally, obtains an approved per-Host outbound identity, and can be
+admitted to the live registry without restarting Gateway. Revocation closes
+old Host sockets and excludes the ID from tool discovery.
+
+The Host installer verifies signed release contents, stages versioned
+generations and offers safe activation/rollback without modifying any
+production OS startup configuration. A separate native service manager will
+eventually supervise the stable launcher. ChatGPT guided selection/approval
+is a future UI over these deterministic operations, never an AI-managed
+secret generation or TCC bypass.
+
+Sources and limitations: docs/enrollment-pilot.md and
+docs/onboarding-installation.md.

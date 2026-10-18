@@ -13,10 +13,12 @@ const targetsTool = {
 export function createGatewayMcp({exec, computer, gui, registry, owner}) {
   if (typeof owner !== 'string' || !owner) throw new TypeError('Authenticated session required');
   const server = new Server({name: 'styx-vnext', version: '0.1.0'}, {capabilities: {tools: {}}});
-  const enabled = gui && registry.list().some(t => t.capabilities.includes('computer'));
+  const computerAllowed=()=>registry.list().some(t=>t.capabilities.includes('computer'));
   async function definitions() {
-    const computerTools = computer ? await computer.listTools() : [];
-    return [...execTools, ...computerTools, ...(enabled && !computer ? guiTools : []), targetsTool];
+    const computerTools = computer && computerAllowed()
+      ? await computer.listTools() : [];
+    return [...execTools, ...computerTools,
+      ...(gui && !computer && computerAllowed() ? guiTools : []), targetsTool];
   }
   server.setRequestHandler(ListToolsRequestSchema, async () => ({tools: await definitions()}));
   server.setRequestHandler(CallToolRequestSchema, async ({params}) => {
@@ -29,10 +31,11 @@ export function createGatewayMcp({exec, computer, gui, registry, owner}) {
       return {structuredContent: result, content: [{type: 'text', text: JSON.stringify(result)}]};
     }
     if (execTools.some(t => t.name === name)) return exec.callTool(name, args, owner);
-    if (computer && (await computer.listTools()).some(t => t.name === name)) {
+    if (computer && computerAllowed() &&
+      (await computer.listTools()).some(t => t.name === name)) {
       return computer.callTool(name,args,owner);
     }
-    if (enabled && !computer && guiTools.some(t => t.name === name)) {
+    if (gui && !computer && computerAllowed() && guiTools.some(t => t.name === name)) {
       return gui.callTool(name, args, owner);
     }
     return {isError: true, content: [{type: 'text', text: 'unknown_tool'}]};
