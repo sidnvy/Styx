@@ -68,7 +68,8 @@ function caFetch(origin,ca){
     });
   };
 }
-export async function runManagedLinuxPilot(raw,{optIn=process.env.STYX_RUN_MANAGED_LINUX_PILOT}={}){
+export async function runManagedLinuxPilot(raw,{optIn=process.env.STYX_RUN_MANAGED_LINUX_PILOT,
+  buildRelease=buildHostRelease,updateAcceptance}={}){
   assert(optIn==='1','managed_linux_pilot_requires_explicit_opt_in');
   assert(process.platform==='linux'&&process.arch==='x64','native_linux_x64_required');
   const options=pilotOptions(raw);
@@ -123,7 +124,7 @@ export async function runManagedLinuxPilot(raw,{optIn=process.env.STYX_RUN_MANAG
     const release1='0.1.0-managed-pilot-1',release2='0.1.0-managed-pilot-2';
     for(const version of [release1,release2]){
       const destination=path.join(state,version);
-      buildHostRelease({destination,version,privateKeyFile,codexBinary,cuaBinary,nodeBinary});
+      buildRelease({destination,version,privateKeyFile,codexBinary,cuaBinary,nodeBinary});
       stageSignedRelease({sourceDir:destination,installRoot,publicKeyPem:publisher.publicKey});
     }
     note('signed_build');
@@ -205,16 +206,25 @@ export async function runManagedLinuxPilot(raw,{optIn=process.env.STYX_RUN_MANAG
     command(['kill','--signal=SIGKILL','--kill-whom=all',unitName]);
     await until(()=>{const s=statusUserService(unitName);return s.pid>1&&s.pid!==previous.pid&&s.restarts>previous.restarts},'managed_crash_not_restarted');
     previous=await ready(release1);note(phase);
-    phase='signed_upgrade';await closeClient();systemdUser(unitName,'stop');
-    await until(()=>!gateway.relay.connected(target)&&gateway.relay.computerConnected(target)===0,'managed_stop_not_disconnected');
-    activateRelease(installRoot,release2,publisher.publicKey);
-    refreshVerifiedBootstrap(installRoot,publisher.publicKey,release2);
-    systemdUser(unitName,'start');previous=await ready(release2);note(phase);
-    phase='signed_rollback';await closeClient();systemdUser(unitName,'stop');
-    await until(()=>!gateway.relay.connected(target)&&gateway.relay.computerConnected(target)===0,'managed_stop_not_disconnected');
-    rollbackRelease(installRoot,publisher.publicKey);
-    refreshVerifiedBootstrap(installRoot,publisher.publicKey,release1);
-    systemdUser(unitName,'start');await ready(release1);note(phase);
+    if(updateAcceptance){
+      // Trusted local acceptance code only: these hooks are never loaded from
+      // Host configuration, an agent tool argument, or a remote document.
+      phase='update_transaction_acceptance';
+      await updateAcceptance({installRoot,unitName,publicKeyPem:publisher.publicKey,
+        publicKeyFile,release1,release2,ready,closeClient,gateway,target,receipt,
+        setPhase:value=>{phase=value},saveReceipt:()=>save(receiptFile,receipt)});
+    }else{
+      phase='signed_upgrade';await closeClient();systemdUser(unitName,'stop');
+      await until(()=>!gateway.relay.connected(target)&&gateway.relay.computerConnected(target)===0,'managed_stop_not_disconnected');
+      activateRelease(installRoot,release2,publisher.publicKey);
+      refreshVerifiedBootstrap(installRoot,publisher.publicKey,release2);
+      systemdUser(unitName,'start');previous=await ready(release2);note(phase);
+      phase='signed_rollback';await closeClient();systemdUser(unitName,'stop');
+      await until(()=>!gateway.relay.connected(target)&&gateway.relay.computerConnected(target)===0,'managed_stop_not_disconnected');
+      rollbackRelease(installRoot,publisher.publicKey);
+      refreshVerifiedBootstrap(installRoot,publisher.publicKey,release1);
+      systemdUser(unitName,'start');await ready(release1);note(phase);
+    }
     phase='owned_gui_screenshot_ax_action_readback';
     async function tool(name,args){
       const res=await client.callTool({name,arguments:args});
