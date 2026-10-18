@@ -2,7 +2,7 @@
 """Opt-in actual installed Styx embedded socket, exact owned AppKit window only.
 No permission prompts, screenshots retained, or personal windows enumerated.
 """
-import hashlib,json,os,struct,subprocess,sys,time,uuid
+import hashlib,json,os,select,struct,subprocess,sys,time,uuid
 from pathlib import Path
 
 def run(root):
@@ -17,10 +17,23 @@ def run(root):
     assert Path(command).resolve()==Path('/Applications/Styx.app/Contents/MacOS/Styx')
     fixture_binary=root/'OwnedGuiFixture';fst=fixture_binary.lstat()
     assert fixture_binary.is_file() and not fixture_binary.is_symlink() and fst.st_uid==os.getuid()
+    worker=None
     session='styx-owned-'+uuid.uuid4().hex[:12]
     def call(tool,args):
+        if worker is not None:
+            worker.stdin.write(json.dumps({'name':tool,'arguments':args})+'\n');worker.stdin.flush()
+            assert select.select([worker.stdout],[],[],15)[0],'mcp_worker_timeout'
+            response=json.loads(worker.stdout.readline());assert not response.get('error'),'native_mcp_request_failed'
+            r=response['result']
+            if r.get('isError'):
+                (root/'owned-gui-tool-error.json').write_text(json.dumps({'tool':tool,'result':r},indent=2)+'\n')
+                os.chmod(root/'owned-gui-tool-error.json',0o600)
+                raise RuntimeError('native_mcp_tool_refused')
+            return r
         p=subprocess.run([driver,'call',tool,json.dumps(args),'--socket',socket],capture_output=True,text=True,timeout=12)
-        assert p.returncode==0,'native_tool_refused';r=json.loads(p.stdout)
+        if p.returncode!=0:
+            raise RuntimeError('native_tool_refused_'+str(p.returncode))
+        r=json.loads(p.stdout)
         assert not r.get('isError'), 'native_tool_error'
         return r
     permissions=call('check_permissions',{'prompt':False,'probe_direct_capture':False})
@@ -30,8 +43,9 @@ def run(root):
     if not (permissions.get('accessibility') and permissions.get('screen_recording')):
         receipt['reason']='actual_host_grants_not_ready';return receipt
     run_dir=root/('owned-gui-'+uuid.uuid4().hex[:12]);run_dir.mkdir(mode=0o700)
-    fixture=None;phase='fixture_start'
+    fixture=None;phase='fixture_start';started=time.monotonic()
     try:
+        worker=subprocess.Popen(['/opt/homebrew/bin/node',str(root/'vnext/host/macos/owned-gui-mcp-worker.mjs'),socket],stdin=subprocess.PIPE,stdout=subprocess.PIPE,stderr=subprocess.DEVNULL,text=True)
         title='STYX_OWNED_GUI_'+uuid.uuid4().hex[:12];readback=run_dir/'readback.json'
         fixture=subprocess.Popen([str(root/'OwnedGuiFixture'),title,str(readback)],stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL)
         deadline=time.monotonic()+12;window=None
@@ -45,6 +59,7 @@ def run(root):
         png=run_dir/'owned-window.png'
         r=call('get_window_state',{'pid':fixture.pid,'window_id':window_id,'tree_format':'elements',
             'include_screenshot':True,'screenshot_out_file':str(png),'max_elements':80,'session':session})
+        receipt['screenshot_elapsed_ms']=round((time.monotonic()-started)*1000)
         data=r.get('structuredContent',r);elements=data.get('elements',[])
         button=next((e for e in elements if e.get('label')=='Styx Verify Click' and e.get('element_token')),None)
         assert button,'owned_button_not_observed'
@@ -52,13 +67,26 @@ def run(root):
         receipt.update({'screenshot':'PASS','screenshot_dimensions':[width,height],'screenshot_sha256':hashlib.sha256(image).hexdigest(),
                         'accessibility_tree':'PASS','element_count':len(elements)})
         png.unlink();phase='observed_click'
+        receipt['click_elapsed_ms']=round((time.monotonic()-started)*1000)
+        receipt['fixture_alive_at_click']=fixture.poll() is None
+        assert receipt['fixture_alive_at_click'],'owned_fixture_exited'
         call('click',{'pid':fixture.pid,'window_id':window_id,'element_token':button['element_token'],'session':session})
-        fixture.wait(timeout=8);assert fixture.returncode==0 and readback.exists(),'owned_independent_readback_missing'
+        phase='independent_readback'
+        fixture.wait(timeout=8);receipt['fixture_exit_code']=fixture.returncode;assert fixture.returncode==0 and readback.exists(),'owned_independent_readback_missing'
         result=json.loads(readback.read_text());assert result.get('pid')==fixture.pid and result.get('title')==title and result.get('status')=='PASS'
         receipt.update({'status':'PASS','gui':'PASS','observed_click':'PASS','independent_readback':'PASS'})
-    except Exception:
-        receipt.update({'status':'FAIL','gui':'FAIL','failed_phase':phase})
+    except Exception as error:
+        allowed={'native_tool_error','owned_fixture_exited','owned_window_not_found','owned_button_not_observed','owned_independent_readback_missing','native_mcp_tool_refused','native_mcp_request_failed','mcp_worker_timeout'}
+        code=str(error) if str(error) in allowed or str(error).startswith('native_tool_refused_') else type(error).__name__
+        receipt.update({'status':'FAIL','gui':'FAIL','failed_phase':phase,'error_code':code})
+        if fixture is not None:
+            receipt['fixture_exit_code_at_failure']=fixture.poll()
+            receipt['independent_receipt_existed_at_failure']=readback.exists()
     finally:
+        if worker is not None:
+            worker.stdin.close()
+            try:worker.wait(timeout=5)
+            except subprocess.TimeoutExpired:worker.kill();worker.wait(timeout=5)
         if fixture is not None and fixture.poll() is None:
             fixture.terminate()
             try:fixture.wait(timeout=5)

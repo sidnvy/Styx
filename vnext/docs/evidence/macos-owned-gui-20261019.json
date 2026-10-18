@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "scope": "installed Styx embedded Cua socket; no Gateway/Exec integration claim",
+  "status": "PASS",
+  "screen_recording": true,
+  "accessibility": true,
+  "gui": "PASS",
+  "permission_prompt": "NOT RUN",
+  "screenshot_elapsed_ms": 277,
+  "screenshot": "PASS",
+  "screenshot_dimensions": [
+    840,
+    384
+  ],
+  "screenshot_sha256": "ade785f4c647a6c259417f18197314477ee6c4179bcca5e65705df8224e60bfb",
+  "accessibility_tree": "PASS",
+  "element_count": 6,
+  "click_elapsed_ms": 277,
+  "fixture_alive_at_click": true,
+  "fixture_exit_code": 0,
+  "observed_click": "PASS",
+  "independent_readback": "PASS",
+  "owned_fixture_cleanup": "PASS",
+  "installed_app": "/Applications/Styx.app",
+  "owner_pid": 29842,
+  "daemon_pid": 29844,
+  "screenshot_persistence": "ephemeral private file removed; hash only retained",
+  "signing_mutation": "NOT RUN",
+  "tcc_mutation": "NOT RUN"
+}

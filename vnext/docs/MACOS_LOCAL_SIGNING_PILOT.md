@@ -161,3 +161,31 @@ that fresh row, and quit/reopen Styx. Screen Recording already passes and need
 not be changed. No TCC database access, reset, permission mutation or GUI fixture
 launch was performed. Exact diagnostic evidence is retained in
 `evidence/macos-accessibility-requirement-mismatch-20261019.json`.
+
+## Actual owned-window GUI PASS
+
+After the user removed the stale Accessibility entry, re-added the installed
+app and restarted it, the actual app owner29842/Cua29844 reported both grants
+true. Bounded GUI acceptance then passed through the installed Styx embedded
+Cua socket: screenshot840×384, six AX elements, an observed exact-button token
+click, fixture exit0 and independent private JSON readback. Capture/click were
+277ms after fixture setup, with the fixture still alive. The fixture, private
+screenshot and independent readback were cleaned; only a screenshot hash is
+retained. The installed app remains running for the user. This is native local
+embedded GUI evidence; Gateway/Exec integration and distribution notarization
+are separate gates.
+
+Initial fresh-fixture attempts failed honestly: screenshot and AX observation
+passed, but action returned `tool_invocation_failed` with
+`AXUIElementPerformAction(AXPress) returned -25204`. The first harness did not
+retain the exact error; later instrumentation captured it. Changing to the
+official persistent MCP SDK alone did not resolve it, disproving transport as
+an established fix. The fixture's button handler immediately terminated its
+own AX responder. Deferring termination one second after the independent write
+allowed the AX call to finish; a new fixture then passed. The fixture also uses
+a single exclusive write option instead of the ambiguous atomic/no-overwrite
+combination. Every prior fixture was cleaned before a distinct fresh test; no
+uncertain action was replayed. Product app code, signatures and TCC settings
+were not changed. Exact PASS and initial failure evidence are retained in
+`evidence/macos-owned-gui-20261019.json` and
+`evidence/macos-owned-gui-initial-failures-20261019.json`.

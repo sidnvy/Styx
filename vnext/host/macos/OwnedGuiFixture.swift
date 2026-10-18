@@ -24,9 +24,10 @@ final class OwnedFixture: NSObject, NSApplicationDelegate {
             "pid": ProcessInfo.processInfo.processIdentifier, "title": title]
         do {
             let data = try JSONSerialization.data(withJSONObject: result)
-            try data.write(to: readback, options: [.atomic, .withoutOverwriting])
+            try data.write(to: readback, options: [.withoutOverwriting])
             try FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: readback.path)
-            NSApp.terminate(nil)
+            // Keep the AX responder alive until AXPress has returned to Cua.
+            DispatchQueue.main.asyncAfter(deadline: .now() + 1) { NSApp.terminate(nil) }
         } catch { exit(3) }
     }
 }

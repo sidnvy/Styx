@@ -1,0 +1,47 @@
+{
+  "schema": 1,
+  "scope": "fresh synthetic owned AppKit fixtures only",
+  "attempts": [
+    {
+      "transport": "one-shot CLI",
+      "status": "FAIL",
+      "screenshot": "PASS",
+      "accessibility_tree": "PASS",
+      "failed_phase": "observed_click",
+      "diagnostic": "Initial harness did not distinguish click refusal from independent readback failure",
+      "cleanup": "PASS"
+    },
+    {
+      "transport": "one-shot CLI",
+      "status": "FAIL",
+      "screenshot": "PASS",
+      "accessibility_tree": "PASS",
+      "failed_phase": "observed_click",
+      "error_code": "native_tool_refused_1",
+      "cleanup": "PASS"
+    },
+    {
+      "transport": "official persistent MCP SDK",
+      "status": "FAIL",
+      "screenshot": "PASS",
+      "accessibility_tree": "PASS",
+      "failed_phase": "observed_click",
+      "error_code": "native_mcp_tool_refused",
+      "cleanup": "PASS"
+    },
+    {
+      "transport": "official persistent MCP SDK",
+      "status": "FAIL",
+      "screenshot": "PASS",
+      "accessibility_tree": "PASS",
+      "failed_phase": "observed_click",
+      "native_code": "tool_invocation_failed",
+      "exact_error": "AX action failed: AXUIElementPerformAction(AXPress) returned -25204",
+      "cleanup": "PASS"
+    }
+  ],
+  "transport_hypothesis": "Not established: persistent transport alone did not fix failure",
+  "fixture_fix": "Defer fixture termination one second after private independent receipt write so AX responder survives AXPress return; exclusive write replaces ambiguous atomic+withoutOverwriting combination",
+  "after_fix": "New unique fixture PASS; prior uncertain actions never replayed",
+  "product_code_changed": false
+}
