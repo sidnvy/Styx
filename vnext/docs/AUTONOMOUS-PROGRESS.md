@@ -52,3 +52,24 @@ exact resulting SHA is recorded in the task output and PR.
 No production endpoint, tunnel, installed Charon/Coder or existing user service
 was changed. No physical native result from an older pilot is claimed as a
 new acceptance result.
+
+## Milestone B/E subset — native credential boundaries and Windows recovery
+
+Baseline: `0f08b370a370f2dfcc0dd77101a4bd863251d1aa`.
+Recovered the original unpublished private-file implementation into the separate
+branch, added POSIX UID enforcement and Windows null-DACL refusal, and wired
+Gateway/Host credential consumers and signed payload packaging. Added actual
+signed-module import verification. Windows task now includes explicit
+owner-scoped enable/disable and disables recovery before a deliberate stop.
+
+Files: shared/private-file.mjs; Gateway cli/cua/runtime/outbound; Host connect,
+build-host-release, windows-task; private-file/native-build/linux-build tests;
+docs/native-private-state.md and progress tracking.
+
+Linux fixture/protocol rerun: PASS, 132 passed / 9 skipped (141 total).
+Actual pinned native Exec rerun: PASS, 18 passed / zero skipped.
+Windows ACL tests: NOT RUN locally, queued for native Windows CI.
+Real interactive Windows task recovery/GUI: BLOCKED in current Linux context.
+This is a subset of B/E, not full native Windows acceptance. Original dirty
+worktree is unchanged; portable signed Node and Computer lease wait changes
+remain separate unintegrated work.

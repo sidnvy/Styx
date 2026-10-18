@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
+import {execFileSync} from 'node:child_process';
+import {pathToFileURL} from 'node:url';
 import {generateKeyPairSync} from 'node:crypto';
 import {buildHostRelease} from '../build-host-release.mjs';
 import {verifySignedRelease} from '../installer.mjs';
@@ -30,9 +32,13 @@ test('portable signed Host bundle builds on the native macOS or Linux publisher'
   assert.ok(receipt.files>=20);
   const verified=verifySignedRelease(destination,publicKey);
   for(const file of ['bin/codex','bin/cua-driver','host/installer.mjs',
-    'host/launch.mjs','node_modules/ws/package.json']){
+    'host/launch.mjs','shared/private-file.mjs','node_modules/ws/package.json']){
     assert.ok(verified.manifest.files.some(x=>x.path===file),file);
   }
+  // The signed payload must actually resolve every local runtime import.
+  execFileSync(process.execPath,['--input-type=module','--eval',
+    'await import('+JSON.stringify(pathToFileURL(path.join(destination,'host/connect.mjs')).href)+')'],
+    {timeout:7000,stdio:'pipe'});
   assert.throws(()=>buildHostRelease({destination:path.join(root,'wrong-platform'),
     version:'0.1.0-bad',privateKeyFile:key,codexBinary:codex,cuaBinary:cua,
     platform:process.platform==='darwin'?'linux':'darwin'

@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import {requirePrivateFile} from '../shared/private-file.mjs';
 import {EventEmitter} from 'node:events';
 import {createHash,timingSafeEqual} from 'node:crypto';
 import {WebSocket,WebSocketServer} from 'ws';
@@ -10,8 +11,7 @@ const HOST_PATH = /^\/styx\/hosts\/([A-Za-z0-9][A-Za-z0-9._-]{0,127})\/(exec|com
 const TOKEN = /^Bearer ([A-Za-z0-9_-]{32,})$/;
 function readToken(filename) {
   if (typeof filename !== 'string') throw Error('outbound_token_not_configured');
-  const s=fs.statSync(filename);
-  if (!s.isFile() || (s.mode & 0o077)) throw Error('outbound_token_permissions');
+  requirePrivateFile(filename);
   const value=fs.readFileSync(filename,'utf8').trim();
   if (value.length<32 || /\s/.test(value) || !/^[A-Za-z0-9_-]+$/.test(value))
     throw Error('outbound_token_invalid');

@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import {requirePrivateFile} from '../shared/private-file.mjs';
 import {ExecConnection, stdioClient, websocketClient} from '../packages/styx-exec-adapter/rpc.mjs';
 
 // Runtime sessions are independent of MCP HTTP requests. No implicit restart or
@@ -63,8 +64,7 @@ async function createConnection(target,{relay}={}) {
   }
   let token;
   if (t.token_file) {
-    const stat = fs.statSync(t.token_file);
-    if (!stat.isFile() || (stat.mode & 0o077) !== 0) throw new Error('executor_token_permissions');
+    requirePrivateFile(t.token_file);
     token = fs.readFileSync(t.token_file, 'utf8').trim();
   }
   return new ExecConnection(() => websocketClient({

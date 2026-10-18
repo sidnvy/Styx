@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import {requirePrivateFile} from '../shared/private-file.mjs';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
 import {StreamableHTTPClientTransport} from '@modelcontextprotocol/sdk/client/streamableHttp.js';
@@ -20,8 +21,7 @@ const failure = (code,uncertain=false) => {
 const sessionKey = (owner, id) => JSON.stringify([owner, id]);
 
 function requireToken(path) {
-  const info = fs.statSync(path);
-  if (!info.isFile() || (info.mode & 0o077)) throw Error('computer_token_permissions');
+  requirePrivateFile(path);
   const token = fs.readFileSync(path, 'utf8').trim();
   if (token.length < 32 || /\s/.test(token)) throw Error('computer_token_invalid');
   return token;

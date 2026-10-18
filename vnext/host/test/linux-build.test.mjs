@@ -38,7 +38,7 @@ test('Linux signed Host bundle uses only reviewed source and pinned runtime vers
   assert.ok(!checked.manifest.files.some(f=>f.path.includes('secret')));
   const actual=(await fs.readdir(destination)).sort();
   assert.deepEqual(actual,['bin','host','manifest.json','manifest.sig',
-    'node_modules','packages']);
+    'node_modules','packages','shared']);
   assert.throws(()=>buildLinuxRelease({destination,version:'0.1.0-linuxtest',
     privateKeyFile:keyPath,codexBinary:codex,cuaBinary:cua}),
     /release_destination_must_be_empty/);
