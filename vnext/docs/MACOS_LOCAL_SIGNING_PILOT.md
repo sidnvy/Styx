@@ -39,3 +39,25 @@ reconnection. Its private execution home was removed. The sanitized receipt is
 `evidence/macos-native-exec-20261019.json`. This proves the direct native adapter,
 not the signed app, HTTP gateway, TCC or GUI. Only public runtime/source material
 and the signing-ready owned app remain in the marked scratch directory.
+
+A user retry from an SSH terminal returned the same signing error. Read-only
+follow-up found an existing `pier` UID501 Aqua console login and the normal
+`login.keychain-db` default user keychain. The public code-signing certificate
+chain verified successfully, using local certificates and offline cached
+revocation information, through WWDRG3 to Apple Root CA. Its validity covers
+the test date. This rules out a missing local intermediate or expired leaf in
+that evaluation; it does not establish fresh online revocation status.
+
+In SSH, reading keychain settings returned `User interaction is not allowed.`
+That is evidence that this session cannot interact with the keychain, rather
+than proof that the keychain is locked or that a particular private-key ACL
+is wrong. No private key was inspected or used by these diagnostic commands.
+The next meaningful attempt requires physical Mac desktop access or Screen
+Sharing into the existing `pier` graphical session: open Terminal **on that Mac
+desktop**, then run the command above. A terminal connected by SSH is still the
+same remote security context. The user handles any OS key-use approval dialog.
+If the graphical attempt also fails without a dialog, stop and inspect the
+login keychain's visible state and this certificate's associated private-key
+Access Control in Keychain Access; do not blindly retry or automatically
+change permissions. This pilot does not require a new certificate or paid
+membership to diagnose the existing local key.
