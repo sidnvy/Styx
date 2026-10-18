@@ -1,9 +1,10 @@
 # Local development signing pilot
 
-Current result: existing Apple Development signatures and exact app/team checks
-PASS. LaunchServices and normal/crash cleanup PASS. GUI remains BLOCKED on
-human Accessibility and Screen Recording grants. Do not rerun the historical
-signing command below; verification-only completion has already succeeded.
+Current result: `/Applications/Styx.app` signature/identity, LaunchServices,
+normal/crash cleanup, both user-granted permissions and owned-window local GUI
+acceptance PASS. Screenshot, AX observation, observed click, independent readback
+and fixture cleanup passed. Gateway integration and external distribution remain
+separate gates. Historical signing commands below are not current instructions.
 
 ## Historical signing attempts
 
