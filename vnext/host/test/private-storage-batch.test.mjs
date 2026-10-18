@@ -48,3 +48,14 @@ test('one foreign owner refuses every result in a native batch',t=>{
   }
   assert.throws(()=>requirePrivatePaths([f.entries[0],foreign]),/private_(paths_acl_not_owner_only|directory_owner_mismatch)/);
 });
+
+
+test('native batch preserves single and multiple path values including spaces and Unicode',t=>{
+  const f=fixture(t),second=path.join(f.state,'two words-私有.test');
+  fs.writeFileSync(second,'test-only',{mode:0o600});
+  assert.equal(requirePrivatePaths([f.entries[1]]).length,1);
+  const entries=[...f.entries,{path:second,kind:'file'}];
+  const infos=requirePrivatePaths(entries);
+  assert.equal(infos.length,3);assert.equal(infos[0].isDirectory(),true);
+  assert.equal(infos[1].isFile(),true);assert.equal(infos[2].isFile(),true);
+});

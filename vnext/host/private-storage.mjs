@@ -11,7 +11,11 @@ const WINDOWS_ACL_TIMEOUT_MS = 30_000;
 const WINDOWS_ACL_CHECK = [
   "$ErrorActionPreference='Stop'",
   'try {',
-  '  $files=@(ConvertFrom-Json $env:STYX_PRIVATE_PATHS_TO_VERIFY)',
+  // Windows PowerShell5 emits the JSON array as one pipeline object. An
+  // array-subexpression would wrap it again, so foreach would receive an
+  // Object[] and Get-Acl would return multiple descriptors at once. Direct
+  // typed assignment preserves a flat path list on both PowerShell5 and7.
+  '  [string[]]$files=ConvertFrom-Json -InputObject $env:STYX_PRIVATE_PATHS_TO_VERIFY',
   '  if($files.Count -lt 1 -or $files.Count -gt 32){exit 2}',
   '  $current=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value',
   '  function IdentitySid($reference) {',
