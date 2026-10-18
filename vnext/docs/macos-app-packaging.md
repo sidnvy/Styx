@@ -144,3 +144,7 @@ Application, so notarized publisher release validation remains blocked.
 The harness entrypoint exists only in a `-D STYX_TESTING` build. Publisher
 bundles omit both headless entrypoints and cannot launch a caller-selected
 driver through a test argument. The production driver path is bundle-relative.
+
+Evidence fields use only PASS / FAIL / BLOCKED / NOT RUN. Signing and
+notarization mechanics are described separately in `signing_detail` and
+`notarization_detail`; an unsigned bundle has signing and notarization NOT RUN.

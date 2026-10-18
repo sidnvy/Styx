@@ -78,9 +78,11 @@ export function buildMacApp({app,cuaBinary,version,identity,teamID,notaryProfile
     }
     return {schema:1,bundle_id:MAC_BUNDLE_ID,version,arch:process.arch,
       cua_version:observed,cua_input_sha256:inputHash,app,
-      signing:identity?'developer_id_verified':'UNSIGNED',
-      notarization:notaryProfile?'accepted_stapled_assessed':'NOT_RUN',
-      native_gui_acceptance:'NOT_RUN',tcc_attribution:'NOT_VERIFIED'};
+      signing:identity?'PASS':'NOT RUN',
+      signing_detail:identity?'developer_id_verified':'unsigned_development_bundle',
+      notarization:notaryProfile?'PASS':'NOT RUN',
+      notarization_detail:notaryProfile?'accepted_stapled_assessed':'not_submitted',
+      native_gui_acceptance:'NOT RUN',tcc_attribution:'NOT RUN'};
   }catch(error){
     // Preserve failed output for diagnostics; never identify it as a release.
     throw Error('macos_app_build_failed: '+error.message,{cause:error});
