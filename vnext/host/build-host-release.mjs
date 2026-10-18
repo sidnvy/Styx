@@ -10,6 +10,7 @@ const ROOT=fileURLToPath(new URL('../',import.meta.url));
 const STATIC=Object.freeze([
   'host/connect.mjs','host/computer.mjs',
   'host/launch.mjs','host/installer.mjs',
+  'shared/private-file.mjs',
   'packages/styx-exec-adapter/rpc.mjs',
   'packages/styx-exec-adapter/errors.mjs'
 ]);

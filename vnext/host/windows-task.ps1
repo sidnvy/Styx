@@ -4,7 +4,7 @@
 [CmdletBinding()]
 param(
     [Parameter(Mandatory=$true)]
-    [ValidateSet('install','start','stop','restart','status','uninstall')]
+    [ValidateSet('install','enable','disable','start','stop','restart','status','uninstall')]
     [string]$Action,
     [string]$TaskName = 'StyxPilot-Host',
     [string]$ConfigPath
@@ -89,9 +89,18 @@ if ($Action -eq 'install') {
     $argstring=(Q "$root\launch.mjs")+' '+(Q $root)+' '+
         (Q $hostFile)+' '+(Q $keyFile)
     $taskAction=New-ScheduledTaskAction -Execute $node -Argument $argstring -WorkingDirectory $root
-    $taskTrigger=New-ScheduledTaskTrigger -AtLogOn -User $sid
+    # This host's Task Scheduler has been observed NOT to resume a killed
+    # process on RestartOnFailure alone. A native once+repetition trigger
+    # probes the service every minute. IgnoreNew never launches duplicates.
+    # The task remains bound to THIS interactive user SID.
+    $taskTrigger=@(
+      (New-ScheduledTaskTrigger -AtLogOn -User $sid)
+      (New-ScheduledTaskTrigger -Once -At (Get-Date).AddMinutes(1) -RepetitionInterval (New-TimeSpan -Minutes 1))
+    )
     $taskPrincipal=New-ScheduledTaskPrincipal -UserId $sid -LogonType Interactive -RunLevel Limited
-    $taskSettings=New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Seconds 0) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
+    # Native Task Scheduler restarts an unexpectedly terminated Host process.
+    # The signed launcher exits normally on a deliberate stop/restart.
+    $taskSettings=New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Seconds 0) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
     Register-ScheduledTask -TaskName $TaskName -Action $taskAction -Trigger $taskTrigger -Principal $taskPrincipal -Settings $taskSettings -Description $marker -ErrorAction Stop | Out-Null
     @{task=$TaskName;status='installed_not_started';logonType='InteractiveToken';session=$session} | ConvertTo-Json -Compress
     exit 0
@@ -103,13 +112,29 @@ if ($null -eq $task -and $Action -eq 'status') {
 }
 if ($null -eq $task) { throw 'task_not_installed' }
 switch ($Action) {
- 'start' { Start-ScheduledTask -TaskName $TaskName -ErrorAction Stop }
- 'stop' { Stop-ScheduledTask -TaskName $TaskName -ErrorAction Stop }
+ 'enable' { Enable-ScheduledTask -TaskName $TaskName -ErrorAction Stop | Out-Null }
+ 'disable' { Disable-ScheduledTask -TaskName $TaskName -ErrorAction Stop | Out-Null }
+ 'start' {
+   Enable-ScheduledTask -TaskName $TaskName -ErrorAction Stop | Out-Null
+   Start-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+ }
+ 'stop' {
+   # Disable BEFORE stopping, otherwise the native recovery timer could
+   # restart a service the user explicitly asked to stop.
+   Disable-ScheduledTask -TaskName $TaskName -ErrorAction Stop | Out-Null
+   if ($task.State -eq 'Running') {
+     Stop-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+   }
+ }
  'restart' {
-   Stop-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
+   Enable-ScheduledTask -TaskName $TaskName -ErrorAction Stop | Out-Null
+   if ($task.State -eq 'Running') {
+     Stop-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+   }
    Start-ScheduledTask -TaskName $TaskName -ErrorAction Stop
  }
  'uninstall' {
+   Disable-ScheduledTask -TaskName $TaskName -ErrorAction Stop | Out-Null
    if ($task.State -eq 'Running') {
      Stop-ScheduledTask -TaskName $TaskName -ErrorAction Stop
    }

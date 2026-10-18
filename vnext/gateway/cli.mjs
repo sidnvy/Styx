@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import {requirePrivateFile} from '../shared/private-file.mjs';
 import {fileURLToPath} from 'node:url';
 import {createStyxGateway} from './index.mjs';
 import {createGatewayHttp} from './http.mjs';
@@ -11,8 +12,7 @@ if (!catalogFile || !tokenFile) {
   process.stderr.write('Required: STYX_MCP_TOKEN_FILE and target catalog path\n');
   process.exit(2);
 }
-const stat = fs.statSync(tokenFile);
-if (!stat.isFile() || (stat.mode & 0o077)) throw new Error('Inbound token file must be mode 0600');
+requirePrivateFile(tokenFile);
 const catalog = JSON.parse(fs.readFileSync(catalogFile, 'utf8'));
 // CAS is a strictly opt-in experiment. The default Gateway surface is unchanged.
 const casStateDir = process.env.STYX_CAS_EXPERIMENT_STATE_DIR;

@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import {requirePrivateFile} from '../shared/private-file.mjs';
 import path from 'node:path';
 import {randomInt} from 'node:crypto';
 import WebSocket from 'ws';
@@ -8,9 +9,7 @@ import {stdioClient} from '../packages/styx-exec-adapter/rpc.mjs';
 import {runComputerConnectors} from './computer.mjs';
 
 function tokenFrom(filename) {
-  const stat=fs.statSync(filename);
-  if (!stat.isFile() || (process.platform!=='win32' && (stat.mode & 0o077)))
-    throw Error('host_token_permissions');
+  requirePrivateFile(filename);
   const value=fs.readFileSync(filename,'utf8').trim();
   if (!/^[A-Za-z0-9_-]{32,}$/.test(value)) throw Error('invalid_host_token');
   return value;
@@ -59,10 +58,7 @@ export function hostAuthentication(config){
   let clientCert,clientKey,gatewayCa;
   if(c.client_cert_file){
     clientCert=fs.readFileSync(c.client_cert_file);
-    const privateKeyStat=fs.statSync(c.client_key_file);
-    if(!privateKeyStat.isFile() ||
-      (process.platform!=='win32' && (privateKeyStat.mode & 0o077)))
-      throw Error('client_key_permissions');
+    requirePrivateFile(c.client_key_file);
     clientKey=fs.readFileSync(c.client_key_file);
   }
   if(c.gateway_ca_file) gatewayCa=fs.readFileSync(c.gateway_ca_file);
@@ -154,10 +150,7 @@ if (process.argv[1] && path.resolve(process.argv[1])===fileURLToPath(import.meta
     if(config.token_file) tokenFrom(config.token_file);
     if(config.client_cert_file) {
       fs.readFileSync(config.client_cert_file);
-      const keyStat=fs.statSync(config.client_key_file);
-      if(!keyStat.isFile() ||
-        (process.platform!=='win32' && (keyStat.mode & 0o077)))
-        throw Error('client_key_permissions');
+      requirePrivateFile(config.client_key_file);
     }
   } catch {
     process.stderr.write('Styx Host configuration invalid.\n');process.exit(2);
