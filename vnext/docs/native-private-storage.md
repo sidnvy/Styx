@@ -31,3 +31,13 @@ key/database writes, broadened identity-file rejection and junction denial. Thes
 checks establish native permission enforcement, not protection from a hostile
 administrator, full filesystem race resistance, physical desktop permission
 approval, actual ChatGPT connector authorization or production enrollment.
+
+
+Synchronous transaction boundaries can use `requirePrivatePaths` with 1–32 typed
+file/directory entries and at most 16,384 JSON path characters. Every invocation
+freshly lstats every member, checks each POSIX UID/mode, and on Windows checks
+each actual owner/DACL in one bounded PowerShell process. One invalid member
+refuses the entire batch. This is not a persistent authorization cache: the
+updater repeats the checks after callbacks, awaits and filesystem mutations.
+Native tests include broad/foreign/symlink batch members and permissions changed
+across an awaited service-health callback.

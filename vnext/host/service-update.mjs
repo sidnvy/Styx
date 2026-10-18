@@ -2,7 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {randomBytes,createHash} from 'node:crypto';
-import {requirePrivateDirectory,ensurePrivateDirectory,requirePrivateFile} from './private-storage.mjs';
+import {requirePrivateDirectory,ensurePrivateDirectory,requirePrivateFile,requirePrivatePaths} from './private-storage.mjs';
 import {verifySignedRelease,activeRelease} from './installer.mjs';
 
 const assert=(ok,code)=>{if(!ok)throw Error(code)};
@@ -36,13 +36,23 @@ function save(ctx,phase,extra={}){
   ctx.record={...ctx.record,...extra,phase,updatedAt:new Date().toISOString()};
   atomic(receiptFile(ctx.records,ctx.record.transactionId),JSON.stringify(ctx.record,null,2)+'\n');
 }
-function ownership(ctx){
-  requirePrivateDirectory(ctx.lock);
-  assert(snapshot(path.join(ctx.lock,'owner'))===ctx.record.transactionId,'update_ownership_changed');
+function ownerValue(ctx){
+  assert(fs.readFileSync(path.join(ctx.lock,'owner'),'utf8')===ctx.record.transactionId,
+    'update_ownership_changed');
 }
-function pointerOwned(ctx){
-  ownership(ctx);
-  const current=snapshot(ctx.pointer);
+function ownership(ctx){
+  requirePrivatePaths([{path:ctx.lock,kind:'directory'},
+    {path:path.join(ctx.lock,'owner'),kind:'file'}]);
+  ownerValue(ctx);
+}
+function pointerOwned(ctx,extra=[]){
+  // These checks share one synchronous boundary with their subsequent reads.
+  // Calls after every callback/mutation remain independent fresh validations.
+  requirePrivatePaths([{path:ctx.lock,kind:'directory'},
+    {path:path.join(ctx.lock,'owner'),kind:'file'},
+    {path:ctx.pointer,kind:'file'},...extra]);
+  ownerValue(ctx);
+  const current=fs.readFileSync(ctx.pointer,'utf8');
   assert((ctx.recoveryPointers??[ctx.record.expectedPointer]).includes(current),
     'active_pointer_changed_during_update');
 }
@@ -62,10 +72,10 @@ function checked(installRoot,version,publicKeyPem,options,expected){
   return {...result,folder,entries};
 }
 function verifyStable(ctx,previous,candidate,{previousOnly=false}={}){
-  pointerOwned(ctx);
+  pointerOwned(ctx,previous.entries.map(entry=>({
+    path:path.join(ctx.installRoot,entry.destination),kind:'file'})));
   for(const entry of previous.entries){
     const file=path.join(ctx.installRoot,entry.destination);
-    requirePrivateFile(file);
     const actual=sha(fs.readFileSync(file));
     const other=candidate?.entries.find(e=>e.destination===entry.destination);
     assert(actual===entry.sha256||(!previousOnly&&actual===other?.sha256),

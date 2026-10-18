@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import {spawn} from 'node:child_process';
+import {spawn,execFileSync} from 'node:child_process';
 import {once} from 'node:events';
 import {generateKeyPairSync,sign,createHash} from 'node:crypto';
 import {ensurePrivateDirectory} from '../private-storage.mjs';
@@ -205,4 +205,22 @@ test('corrupted pointer evidence cannot restore an unrelated version or invoke r
   await assert.rejects(recoverServiceUpdate({...f.args,transactionId:result.transactionId,
     confirmStopped:()=>{observations++;return true}}),/invalid_update_receipt/);
   assert.equal(observations,0);assert.equal(activeRelease(f.installRoot,f.publicKeyPem).version,'candidate');
+});
+
+
+test('permissions modified across awaited health callback fail fresh transaction boundary checks',async t=>{
+  const f=fixture(t);let starts=0;
+  const result=await updateServiceRelease({...f.args,...callbacks([]),
+    startService:async()=>{starts++;return true},
+    checkHealth:async()=>{
+      await new Promise(resolve=>setImmediate(resolve));
+      const owner=path.join(f.installRoot,'.health-update-lock','owner');
+      if(process.platform==='win32')execFileSync('icacls.exe',[owner,'/grant','*S-1-1-0:(R)'],
+        {stdio:'ignore',windowsHide:true,timeout:30000});
+      else fs.chmodSync(owner,0o644);
+      return true;
+    }});
+  assert.equal(result.status,'needs_recovery');assert.equal(starts,1);
+  assert.equal(activeRelease(f.installRoot,f.publicKeyPem).version,'candidate');
+  assert.equal(fs.existsSync(path.join(f.installRoot,'.health-update-lock')),true);
 });
