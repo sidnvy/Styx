@@ -54,9 +54,12 @@ GO for additive implementation; NO-GO for production cutover.
 - PASS: the physical macOS-to-Linux cross-host Cua GUI test using an exact
   owned scratch window, PNG + AX snapshot, button action, and independently
   confirmed native scratch exit code 0.
-- IN PROGRESS: the self-contained unattended physical acceptance script
-  that uses Styx Exec tools, rather than external test orchestration, to
-  create and independently verify the owned scratch window.
+- PASS: self-contained unattended physical acceptance using ONLY Styx
+  MCP tools for scratch GUI creation, PID discovery, Cua PNG + AX observation,
+  click and independent process-exit readback. Executed four successive
+  times on the actual Piermini Gateway -> Workstation Host WSS/mTLS path,
+  including the corrected Codex Exec envPolicy. No SSH/Coder Agent in the
+  action/test data path.
 
 Source documentation and evidence: docs/cua-0.36-source-contract.md.
 
@@ -73,3 +76,24 @@ independent operation without the old control plane.
 
 These are mandatory for production migration, not just paperwork.
 Design and threat/acceptance checklist: docs/onboarding-installation.md.
+
+
+### GUI environment inheritance regression (2026-10-18)
+
+- Codex Exec Server rust-v0.163.0 with no envPolicy uses the exact process/start
+  env; therefore a Gateway-provided empty env does not preserve native GUI
+  session variables and the unattended scratch fixture was undiscoverable.
+- Styx now sets the upstream process/start.envPolicy with an explicit
+  platform-specific allowlist for native session essentials. It never
+  blindly inherits the Host's key/token/credential variables.
+- PASS: real Codex contract test found the Wayland, XDG_RUNTIME_DIR and DBus
+  markers in a child process; sensitive canary variables were absent.
+- PASS: three repeated additional physical cross-Host native Cua GUI runs,
+  plus the original successful run; each had screenshot, three AX elements,
+  observed click and independent native exit code zero.
+- PASS: authenticated Gateway/Host WSS/mTLS, no Coder execution tools
+  involved beyond temporary OOB test-process startup.
+
+Installers, device pairing, upgrade/rollback, login/reboot lifecycle, and
+ChatGPT device selection remain independent production gates documented in
+docs/onboarding-installation.md.

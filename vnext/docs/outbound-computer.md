@@ -132,3 +132,21 @@ Cua's Wayland feature must be explicitly enabled on this Host with trusted
 computer.env.CUA_DRIVER_RS_ENABLE_WAYLAND=1, as documented in the source-
 contract review. No personal clipboard, browser profile, or user window
 can be selected by this test.
+
+
+## Self-contained physical GUI acceptance after Codex envPolicy correction
+
+The unattended test script is included in the repository and can be run with
+the operator-provisioned private Gateway test connection. It creates the
+precise native scratch dialog through Styx exec_command and observes/acts with
+Cua, then confirms the actual native process exit through write_stdin.
+Run npm run test:physical:cua with STYX_PILOT_MCP_URL,
+STYX_PILOT_MCP_TOKEN_FILE, STYX_PILOT_ENVIRONMENT_ID and correct private
+Gateway CA trust. It never operates on real user windows.
+
+Codex Exec Server 0.163.0 requires process/start.envPolicy for restricted
+native graphical environment inheritance; blindly copying Gateway env is
+incorrect and leaks secrets. Styx includes only platform-specific GUI/session
+and OS core variables, with upstream environment-policy filtering. A real
+cross-host WSS/mTLS acceptance passed four successive times using the fixed
+policy and the trusted Linux Cua native Wayland opt-in.

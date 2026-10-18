@@ -191,3 +191,15 @@ ChatGPT (with a native setup fallback), OS-specific permissions, startup,
 updates, rollback and revocation without depending on SSH/Coder Agent.
 See docs/onboarding-installation.md and docs/acceptance.md. These are tracked
 release requirements, not currently implemented features.
+
+
+## Unattended physical GUI test
+
+Once an isolated Gateway/Host pair is provisioned and both native execution
+lanes are available, use npm run test:physical:cua on the Gateway host with
+STYX_PILOT_MCP_URL, STYX_PILOT_MCP_TOKEN_FILE and
+STYX_PILOT_ENVIRONMENT_ID set in the trusted test environment. The test
+uses Styx exec_command, Cua list_windows/get_window_state/click and
+write_stdin for independent scratch readback; no SSH/Coder tools are in
+the test execution path. See docs/outbound-computer.md. It does not provision
+a production install or change OS permissions.
