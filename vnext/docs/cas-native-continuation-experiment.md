@@ -124,6 +124,21 @@ checksum-validated Codex Exec binary prepared ONLY in this checkout:
 Running local tests proves only our code and simulated Host contract.
 It does not prove a current ChatGPT account permits unattended turns.
 
+## Real Host observation: first follow-up passed, second dispatch unresolved
+
+On October 18, the first `ui/message` produced an actual new ordinary-Chat
+model turn and an exact `cas_experiment_consume` receipt. The next scheduled
+wake was prepared and subsequently marked `delivery_unknown` without a
+second consume. The original controller discarded the `ui/message` exception.
+This does NOT prove a Host-wide continuation limit or a failed model turn.
+
+The lab-only follow-up adds bounded diagnostic fields `failure_kind` and
+`host_rpc_code` to Wake public status. It never stores the raw Host response,
+private tokens, or user conversation text in a dispatch diagnostic.
+`delivery_unknown` is still fenced against automatic replay. The next
+separate trial should use a longer interval after the first consumption,
+and compare RPC rejection versus timeout before changing scheduling policy.
+
 ## Future real-Host acceptance (NOT performed)
 
 Use a disposable Gateway, separate credentials, separate tunnel/custom Plugin
