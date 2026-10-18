@@ -59,6 +59,8 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
+      - name: Install locked Host test dependencies
+        run: npm --prefix vnext ci --ignore-scripts --no-audit --no-fund
       - name: Validate portable signed staging and local pairing identity
         run: node --test --test-concurrency=1 vnext/host/test/*.test.mjs
       - name: Run pinned native Cua MCP compatibility test
