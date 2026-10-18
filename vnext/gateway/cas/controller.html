@@ -38,6 +38,9 @@
       const pending = new Map();
       let serial = 0, runId = null, active = true, busy = false, timer = null;
       let hostReady = false;
+      let hostMessageCapable = false;
+      let pendingLifecycleEvent = 'bound';
+      let lastVisibility = null;
 
       function paint(label, explanation = '') {
         state.textContent = label;
@@ -112,7 +115,18 @@
         if (busy || !hostReady || !runId || !active) return;
         busy = true;
         try {
-          const row = await tool('cas_experiment_poll', {run_id: runId});
+          const visibility = ['visible','hidden','prerender'].includes(document.visibilityState)
+            ? document.visibilityState : 'unknown';
+          const lifecycleEvent = pendingLifecycleEvent ??
+            (lastVisibility !== visibility ? 'visibility_change' : null);
+          const row = await tool('cas_experiment_poll', {
+            run_id: runId, controller_id: controllerId, visibility,
+            host_message_capable: hostMessageCapable,
+            compat_available: typeof window.openai?.sendFollowUpMessage === 'function',
+            ...(lifecycleEvent ? {lifecycle_event: lifecycleEvent} : {})
+          });
+          pendingLifecycleEvent = null;
+          lastVisibility = visibility;
           if (row.status !== 'running' || !row.wake) {
             paint('CAS ' + row.status, 'Consumed rounds: ' + row.completed_rounds + '/' + row.rounds);
             return;
@@ -131,6 +145,8 @@
           let accepted = false;
           let failureKind = null;
           let hostRpcCode = null;
+          let primaryRpcCode = null;
+          let dispatchTransport = 'mcp_apps';
           try {
             paint('Dispatching round ' + prepared.round + '…',
               'The Host may accept ui/message without actually starting a new model turn.');
@@ -143,16 +159,38 @@
             failureKind = ['rpc_rejected', 'result_rejected', 'host_timeout', 'view_closed']
               .includes(error?.casFailureKind) ? error.casFailureKind : 'unknown';
             hostRpcCode = Number.isInteger(error?.casRpcCode) ? error.casRpcCode : null;
-            // A refusal or timeout does not prove non-delivery.
+            primaryRpcCode = hostRpcCode;
+            // JSON-RPC -32601 is a definitive method-not-found response.
+            // Only then, and only when the documented ChatGPT compatibility
+            // bridge exists, try that supported transport ONCE in the SAME
+            // already-prepared dispatch. Never retry after uncertain delivery.
+            if (failureKind === 'rpc_rejected' && hostRpcCode === -32601 &&
+                typeof window.openai?.sendFollowUpMessage === 'function') {
+              dispatchTransport = 'openai_compat';
+              try {
+                await window.openai.sendFollowUpMessage({
+                  prompt: prepared.message, scrollToBottom: false
+                });
+                accepted = true;
+                failureKind = null;
+                hostRpcCode = null;
+              } catch (_) {
+                failureKind = 'compat_rejected';
+                hostRpcCode = null;
+              }
+            }
+            // Other failures and timeouts are always treated as uncertain.
           }
           try {
             const outcome = await tool('cas_experiment_finish', {
               run_id: runId, controller_id: controllerId,
               attempt_id: prepared.attempt_id, accepted,
+              dispatch_transport: dispatchTransport,
+              ...(primaryRpcCode === null ? {} : {primary_rpc_code: primaryRpcCode}),
               ...(accepted ? {} : {failure_kind: failureKind, ...(hostRpcCode === null ? {} : {host_rpc_code: hostRpcCode})})
             });
             paint(outcome.wake?.phase || outcome.status,
-              accepted ? 'Host accepted dispatch; awaiting exact model consume.' :
+              accepted ? 'Host accepted via ' + dispatchTransport + '; awaiting exact model consume.' :
                 'Delivery unknown (' + (outcome.wake?.failure_kind ?? failureKind ?? 'unknown') +
                 '); never auto-resend this attempt.');
           } catch (_) {
@@ -198,13 +236,14 @@
       });
       request('ui/initialize', {
         protocolVersion: '2026-01-26',
-        appInfo: {name: 'styx-cas-experiment-view', version: '0.1.0'},
+        appInfo: {name: 'styx-cas-experiment-view', version: '0.2.0'},
         appCapabilities: {}
       }).then(host => {
         if (!active) return;
         notify('ui/notifications/initialized');
         const caps = host?.hostCapabilities || {};
         const textMessage = caps.message?.text || caps.experimental?.['openai/message'];
+        hostMessageCapable = Boolean(textMessage);
         if (!textMessage) {
           paint('Host did not advertise ui/message',
             'This ChatGPT App cannot request model turns on this surface.');

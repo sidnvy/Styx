@@ -26,8 +26,9 @@ async function setup(t) {
   return {clock, ledger, script};
 }
 
-function createHostView({clock, ledger, script, rejectUiMessage = false, messageCapability = true}) {
-  const handlers = new Map(), tasks = new Map(), sent = [];
+function createHostView({clock, ledger, script, rejectUiMessage = false, messageCapability = true,
+  methodMissingOnSecond = false, compatAvailable = false, compatFails = false}) {
+  const handlers = new Map(), tasks = new Map(), sent = [], compatSent = [];
   const elements = new Map();
   let counter = 0, inFlight = 0, timerSeq = 0, closed = false;
   const listen = (type, cb) => handlers.set(type, cb);
@@ -51,9 +52,11 @@ function createHostView({clock, ledger, script, rejectUiMessage = false, message
           assert.equal(validateMessage({method: message.method, params: message.params}), true,
             JSON.stringify(validateMessage.errors));
           sent.push(message.params.content[0].text);
-          return rejectUiMessage
-            ? {jsonrpc: '2.0', id: message.id, error: {code: -32000, message: 'host_refused'}}
-            : {jsonrpc: '2.0', id: message.id, result: {}};
+          if (rejectUiMessage)
+            return {jsonrpc: '2.0', id: message.id, error: {code: -32000, message: 'host_refused'}};
+          if (methodMissingOnSecond && sent.length === 2)
+            return {jsonrpc: '2.0', id: message.id, error: {code: -32601, message: 'method not found'}};
+          return {jsonrpc: '2.0', id: message.id, result: {}};
         }
         throw Error('Unexpected Host message: ' + message.method);
       }).then(result => {
@@ -61,7 +64,17 @@ function createHostView({clock, ledger, script, rejectUiMessage = false, message
       }).finally(() => { inFlight--; });
     }
   };
-  const fakeWindow = {parent, addEventListener: listen};
+  const fakeWindow = {parent, addEventListener: listen,
+    ...(compatAvailable ? {openai: {
+      async sendFollowUpMessage(input) {
+        assert.equal(typeof input.prompt, 'string');
+        assert.equal(input.scrollToBottom, false);
+        compatSent.push(input.prompt);
+        if (compatFails) throw Error('simulated_compat_failure');
+        return {};
+      }
+    }} : {})
+  };
   const button = {disabled: true, addEventListener: (_event, fn) => {button.onclick = fn;}};
   elements.set('stop', button);
   elements.set('state', {textContent: ''});
@@ -83,7 +96,7 @@ function createHostView({clock, ledger, script, rejectUiMessage = false, message
   };
   vm.runInNewContext(script, context, {timeout: 1500});
   return {
-    sent, elements, document, get inFlight() {return inFlight;},
+    sent, compatSent, elements, document, get inFlight() {return inFlight;},
     async settle() {
       for (let i = 0; i < 20; i++) {
         await new Promise(resolve => setTimeout(resolve, 2));
@@ -171,4 +184,64 @@ test('Host without an advertised message capability does not dispatch a Wake', a
   assert.equal(view.sent.length, 0);
   assert.equal((await f.ledger.read(start.run_id)).wake.phase, 'pending');
   assert.match(view.elements.get('state').textContent, /did not advertise/);
+});
+
+test('lifecycle View records bounded metadata and a new poll remains idempotent', async t => {
+  const f = await setup(t);
+  const run = await f.ledger.start({objective: 'view heartbeat', rounds: 1, delay_ms: 15000});
+  const view = createHostView({...f, compatAvailable: true});
+  t.after(() => view.close());
+  await view.settle();
+  view.giveRun(run.run_id);
+  await view.advanceTo(f.clock.value + 9000);
+  const read = await f.ledger.read(run.run_id);
+  assert.equal(read.view?.host_message_capable, true);
+  assert.equal(read.view?.compat_available, true);
+  assert.equal(read.view?.visibility, 'visible');
+  assert.equal(read.view_events[0].event, 'bound');
+  assert.equal(read.view_events[0].host_message_capable, true);
+  assert.ok(!JSON.stringify(read).includes('consume_token'));
+});
+
+test('Host method-not-found on round 2 may use documented compatibility bridge exactly once', async t => {
+  const f = await setup(t);
+  const run = await f.ledger.start({objective: 'native then compat', rounds: 2, delay_ms: 15000});
+  const view = createHostView({...f, methodMissingOnSecond: true, compatAvailable: true});
+  t.after(() => view.close());
+  await view.settle();
+  view.giveRun(run.run_id);
+  await view.advanceTo(f.clock.value + 25000);
+  assert.equal(view.sent.length, 1);
+  assert.equal(view.compatSent.length, 0);
+  assert.equal((await f.ledger.read(run.run_id)).wake.dispatch_transport, 'mcp_apps');
+  const first = JSON.parse(view.sent[0].match(/with exactly (\{.*?\})\./)[1]);
+  assert.equal((await f.ledger.consume(first)).completed_rounds, 1);
+  await view.advanceTo(f.clock.value + 24000);
+  assert.equal(view.sent.length, 2);
+  assert.equal(view.compatSent.length, 1);
+  assert.equal(view.compatSent[0], view.sent[1]);
+  const secondState = await f.ledger.read(run.run_id);
+  assert.equal(secondState.wake.phase, 'dispatch_accepted');
+  assert.equal(secondState.wake.dispatch_transport, 'openai_compat');
+  assert.equal(secondState.wake.primary_rpc_code, -32601);
+  const second = JSON.parse(view.sent[1].match(/with exactly (\{.*?\})\./)[1]);
+  assert.equal((await f.ledger.consume(second)).status, 'completed');
+  await view.advanceTo(f.clock.value + 18000);
+  assert.equal(view.sent.length, 2);
+  assert.equal(view.compatSent.length, 1);
+});
+
+test('a generic Host refusal never invokes compatibility fallback', async t => {
+  const f = await setup(t);
+  const run = await f.ledger.start({objective: 'reject without retry', rounds: 1, delay_ms: 15000});
+  const view = createHostView({...f, rejectUiMessage: true, compatAvailable: true});
+  t.after(() => view.close());
+  await view.settle();
+  view.giveRun(run.run_id);
+  await view.advanceTo(f.clock.value + 30000);
+  assert.equal(view.sent.length, 1);
+  assert.equal(view.compatSent.length, 0);
+  const outcome = await f.ledger.read(run.run_id);
+  assert.equal(outcome.wake.host_rpc_code, -32000);
+  assert.equal(outcome.wake.phase, 'delivery_unknown');
 });

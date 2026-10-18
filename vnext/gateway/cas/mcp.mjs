@@ -1,6 +1,6 @@
 import fs from 'node:fs/promises';
 
-export const CAS_APP_URI = 'ui://styx/cas-continuation/v1';
+export const CAS_APP_URI = 'ui://styx/cas-continuation/v2';
 const uuid = {type: 'string', pattern: '^[0-9a-fA-F-]{36}$'};
 const string = (maxLength = 1200) => ({type: 'string', minLength: 1, maxLength});
 const object = (properties, required = []) => ({
@@ -40,8 +40,12 @@ export const CAS_TOOLS = [
     ['run_id', 'round', 'wake_id', 'consume_token'])),
   tool('cas_experiment_stop', 'Stop all further CAS automatic turns for a specified run.',
     object({run_id: uuid}, ['run_id'])),
-  tool('cas_experiment_poll', 'App-only, read bounded run state.',
-    object({run_id: uuid}, ['run_id']), {visibility: ['app'], readOnly: true}),
+  tool('cas_experiment_poll', 'App-only, read run state and record bounded, non-sensitive View lifecycle metadata.',
+    object({run_id: uuid, controller_id: uuid,
+      visibility: {type: 'string', enum: ['visible','hidden','prerender','unknown']},
+      host_message_capable: {type: 'boolean'}, compat_available: {type: 'boolean'},
+      lifecycle_event: {type: 'string', enum: ['bound','visibility_change']}},
+      ['run_id']), {visibility: ['app'], readOnly: true}),
   tool('cas_experiment_claim', 'App-only, claim an exact due wake with one expiring controller lease.',
     object({run_id: uuid, controller_id: uuid}, ['run_id', 'controller_id']), {visibility: ['app']}),
   tool('cas_experiment_prepare', 'App-only, durably spend one dispatch attempt before Host ui/message.',
@@ -49,8 +53,10 @@ export const CAS_TOOLS = [
       ['run_id', 'controller_id', 'claim_id']), {visibility: ['app']}),
   tool('cas_experiment_finish', 'App-only, record Host acceptance or unknown delivery; never imply model execution.',
     object({run_id: uuid, controller_id: uuid, attempt_id: uuid, accepted: {type: 'boolean'},
-      failure_kind: {type: 'string', enum: ['rpc_rejected', 'result_rejected', 'host_timeout', 'view_closed', 'unknown']},
-      host_rpc_code: {type: 'integer', minimum: -99999, maximum: 99999}},
+      failure_kind: {type: 'string', enum: ['rpc_rejected', 'result_rejected', 'host_timeout', 'view_closed', 'compat_rejected', 'unknown']},
+      host_rpc_code: {type: 'integer', minimum: -99999, maximum: 99999},
+      dispatch_transport: {type: 'string', enum: ['mcp_apps','openai_compat']},
+      primary_rpc_code: {type: 'integer', minimum: -99999, maximum: 99999}},
       ['run_id', 'controller_id', 'attempt_id', 'accepted']), {visibility: ['app']})
 ];
 
@@ -65,7 +71,7 @@ export async function casCall(ledger, name, args) {
       cas_experiment_status: () => ledger.read(args.run_id),
       cas_experiment_consume: () => ledger.consume(args),
       cas_experiment_stop: () => ledger.stop(args),
-      cas_experiment_poll: () => ledger.read(args.run_id),
+      cas_experiment_poll: () => ledger.poll(args),
       cas_experiment_claim: () => ledger.claim(args),
       cas_experiment_prepare: () => ledger.prepare(args),
       cas_experiment_finish: () => ledger.finish(args)

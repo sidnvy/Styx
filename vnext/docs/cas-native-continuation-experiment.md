@@ -81,7 +81,7 @@ when this section was written. See
 App-only tool names are cas_experiment_poll, cas_experiment_claim,
 cas_experiment_prepare and cas_experiment_finish. Their metadata declares
 ui.visibility=["app"] and deliberately does not bind a new App card.
-The presenting tool alone binds ui://styx/cas-continuation/v1.
+The presenting tool alone binds ui://styx/cas-continuation/v2.
 
 ## Delivery safety
 
@@ -138,6 +138,37 @@ private tokens, or user conversation text in a dispatch diagnostic.
 `delivery_unknown` is still fenced against automatic replay. The next
 separate trial should use a longer interval after the first consumption,
 and compare RPC rejection versus timeout before changing scheduling policy.
+
+## P0 Host lifecycle isolation: ui/message method not found
+
+A real ordinary Chat produced one automatic cas_experiment_consume receipt,
+then the second scheduled Wake received failure_kind=rpc_rejected and
+host_rpc_code=-32601. JSON-RPC -32601 means method not found. This is
+distinct from the separate MCP Gateway HTTP 503 session-exhaustion issue
+previously fixed in CAS-only lab mode. This evidence alone cannot establish
+whether the Host's App bridge lifecycle changed or a platform restriction
+applies.
+
+The v2 App resource persists only bounded lifecycle information: View
+controller UUID, last seen/poll time, visibility, initialized message
+capability, and presence of the documented ChatGPT compatibility function.
+Never record raw Host error strings, sensitive tool arguments, user messages,
+or continuation tokens in diagnostics.
+
+First use MCP Apps ui/message. Only on an exact JSON-RPC -32601 response,
+and only if window.openai.sendFollowUpMessage is feature-detected, invoke
+that documented compatibility bridge once for the SAME prepared Wake.
+No fallback after a generic rejection, timeout, or uncertain delivery.
+Accepted transport and initial error code are recorded separately.
+A compatibility API acknowledgement is not a resumed model Turn: only
+an exact new cas_experiment_consume call qualifies as completion evidence.
+
+Retest two rounds using a NEW v2 View in ordinary Chat. Compare the
+view.last_seen_at, view_events, wake.dispatch_transport, and
+wake.primary_rpc_code against the actual new model Turn and consume.
+If repeated turns are not supported reliably, separately investigate
+new explicit App cards per Turn and the optional workstation Browser
+Companion; never silently retry an uncertain attempt or bypass limits.
 
 ## Future real-Host acceptance (NOT performed)
 

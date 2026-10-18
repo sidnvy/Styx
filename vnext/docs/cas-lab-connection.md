@@ -74,6 +74,20 @@ Actual ChatGPT MCP App admission may require an isolated compatibility change
 to the experimental Gateway before any Host test can work. Do not modify
 production transport and Cua leases to paper over a failing lab handshake.
 
+## Native MCP App v2 diagnostic refresh
+
+After deploying the CAS-only Gateway, verify ChatGPT refreshed the
+cas_experiment_present descriptor to ui://styx/cas-continuation/v2.
+The old v1 card in a previous conversation remains a stale View.
+Use a new ordinary Chat and a new v2 card to test the lifecycle.
+Refresh only the isolated CAS Lab Plugin, never production Charon.
+
+The bounded view and view_events contain no prompt text or secrets.
+When a repeated ui/message returns exactly -32601, the controller may
+feature-detect the documented ChatGPT compatibility entry point and
+use it once in the same already prepared Wake. Unknown delivery is
+fenced; only the next model Turn's exact consumption proves success.
+
 ## Local acceptance / cleanup
 
 From the disposable branch checkout:

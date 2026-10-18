@@ -45,8 +45,20 @@ function publicView(row) {
       phase: row.wake.phase,
       attempt_status: row.wake.attempt?.status ?? null,
       failure_kind: row.wake.attempt?.failure_kind ?? null,
-      host_rpc_code: row.wake.attempt?.host_rpc_code ?? null
-    } : null
+      host_rpc_code: row.wake.attempt?.host_rpc_code ?? null,
+      dispatch_transport: row.wake.attempt?.dispatch_transport ?? null,
+      primary_rpc_code: row.wake.attempt?.primary_rpc_code ?? null
+    } : null,
+    view: row.view ? {
+      controller_id: row.view.controller_id,
+      first_seen_at: row.view.first_seen_at,
+      last_seen_at: row.view.last_seen_at,
+      poll_count: row.view.poll_count,
+      visibility: row.view.visibility,
+      host_message_capable: row.view.host_message_capable,
+      compat_available: row.view.compat_available
+    } : null,
+    view_events: (row.view_events ?? []).slice(-12)
   };
 }
 
@@ -133,7 +145,9 @@ export class CasExperimentLedger {
         created_at: now,
         expires_at: now + RUN_LIFETIME_MS,
         wake: newWake(1, now, delay_ms),
-        consumed: []
+        consumed: [],
+        view: null,
+        view_events: []
       };
       await this.save(row);
       return publicView(row);
@@ -141,6 +155,42 @@ export class CasExperimentLedger {
   }
   read(run_id) {
     return this.serial(async () => publicView(await this.load(run_id)));
+  }
+  poll({run_id, controller_id = null, visibility = 'unknown',
+    host_message_capable = null, compat_available = null, lifecycle_event = null}) {
+    return this.serial(async () => {
+      const row = await this.load(run_id);
+      if (controller_id === null) return publicView(row);
+      requireUuid(controller_id, 'controller_id');
+      if (!['visible', 'hidden', 'prerender', 'unknown'].includes(visibility))
+        throw Error('cas_invalid_visibility');
+      if (typeof host_message_capable !== 'boolean' || typeof compat_available !== 'boolean')
+        throw Error('cas_invalid_capability');
+      if (lifecycle_event !== null && !['bound','visibility_change'].includes(lifecycle_event))
+        throw Error('cas_invalid_lifecycle_event');
+      const now = this.now();
+      const old = row.view;
+      const same = old?.controller_id === controller_id;
+      const change = !same || old?.visibility !== visibility ||
+        old?.host_message_capable !== host_message_capable ||
+        old?.compat_available !== compat_available;
+      const due = !same || now - old.last_seen_at >= 20000;
+      if (change || due || lifecycle_event) {
+        row.view = {
+          controller_id, first_seen_at: same ? old.first_seen_at : now,
+          last_seen_at: now, poll_count: same ? old.poll_count + 1 : 1,
+          visibility, host_message_capable, compat_available
+        };
+        if (change || lifecycle_event) {
+          row.view_events = (row.view_events ?? []).concat([{
+            at: now, event: lifecycle_event ?? (same ? 'view_change' : 'new_view'),
+            controller_id, visibility, host_message_capable, compat_available
+          }]).slice(-16);
+        }
+        await this.save(row);
+      }
+      return publicView(row);
+    });
   }
   claim({run_id, controller_id}) {
     return this.serial(async () => {
@@ -195,18 +245,26 @@ export class CasExperimentLedger {
       return {attempt_id, message, round: wake.round, wake_id: wake.wake_id};
     });
   }
-  finish({run_id, controller_id, attempt_id, accepted, failure_kind = null, host_rpc_code = null}) {
+  finish({run_id, controller_id, attempt_id, accepted, failure_kind = null,
+    host_rpc_code = null, dispatch_transport = 'mcp_apps', primary_rpc_code = null}) {
     return this.serial(async () => {
       requireUuid(controller_id, 'controller_id');
       requireUuid(attempt_id, 'attempt_id');
       if (typeof accepted !== 'boolean') throw Error('cas_invalid_accepted');
-      const allowedKinds = ['rpc_rejected', 'result_rejected', 'host_timeout', 'view_closed', 'unknown'];
+      const allowedKinds = ['rpc_rejected', 'result_rejected', 'host_timeout', 'view_closed', 'compat_rejected', 'unknown'];
       if (failure_kind !== null && !allowedKinds.includes(failure_kind))
         throw Error('cas_invalid_failure_kind');
       if (host_rpc_code !== null && (!Number.isInteger(host_rpc_code) || host_rpc_code < -99999 || host_rpc_code > 99999))
         throw Error('cas_invalid_host_rpc_code');
       if (accepted && (failure_kind !== null || host_rpc_code !== null))
         throw Error('cas_invalid_accepted');
+      if (!['mcp_apps','openai_compat'].includes(dispatch_transport))
+        throw Error('cas_invalid_dispatch_transport');
+      if (primary_rpc_code !== null &&
+          (!Number.isInteger(primary_rpc_code) || primary_rpc_code < -99999 || primary_rpc_code > 99999))
+        throw Error('cas_invalid_primary_rpc_code');
+      if (dispatch_transport === 'openai_compat' && primary_rpc_code !== -32601)
+        throw Error('cas_compat_requires_method_not_found');
       const row = await this.load(run_id);
       if (row.consumed.some(item => item.attempt_id === attempt_id))
         return {phase: 'consumed', ...publicView(row)};
@@ -221,6 +279,8 @@ export class CasExperimentLedger {
         wake.attempt.status = wake.phase;
         wake.attempt.failure_kind = accepted ? null : failure_kind ?? 'unknown';
         wake.attempt.host_rpc_code = accepted ? null : host_rpc_code;
+        wake.attempt.dispatch_transport = dispatch_transport;
+        wake.attempt.primary_rpc_code = primary_rpc_code;
         wake.attempt.finished_at = this.now();
         await this.save(row);
       }
