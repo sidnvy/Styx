@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {appInfoPlist,macSigningPlan,buildMacApp,MAC_BUNDLE_ID} from '../build-macos-app.mjs';
+import {appInfoPlist,macSigningPlan,macDevelopmentSigningPlan,buildMacApp,MAC_BUNDLE_ID} from '../build-macos-app.mjs';
 
 test('stable macOS bundle identity and version reject injected plist values',()=>{
   const plist=appInfoPlist('0.1.0');
@@ -30,4 +30,17 @@ test('signing fails closed for ad-hoc identity, wrong team and unsafe profile',(
 });
 test('Linux cannot accidentally produce a macOS signing receipt',{skip:process.platform==='darwin'},()=>{
   assert.throws(()=>buildMacApp({}),/native_macos_build_required/);
+});
+
+test('explicit local-development signing allows distinct CN user id and OU team without distribution claims',()=>{
+  const plan=macDevelopmentSigningPlan({app:'/scratch/Styx.app',identity:'Apple Development: Example (U123456789)',teamID:'T123456789'});
+  assert.equal(plan[0][1].at(-1),'/scratch/Styx.app/Contents/MacOS/cua-driver');
+  assert.ok(plan[0][1].includes('--timestamp=none'));
+  assert.ok(plan[3][1].some(arg=>arg.includes('T123456789')));
+  assert.ok(!plan.some(([,args])=>args.includes('notarytool')));
+  assert.throws(()=>macSigningPlan({app:'/scratch/Styx.app',identity:'Apple Development: Example (U123456789)',teamID:'T123456789'}),/developer_id_application_required/);
+});
+test('local-development signing rejects ad-hoc identities and absent team',()=>{
+  assert.throws(()=>macDevelopmentSigningPlan({app:'/scratch/Styx.app',identity:'-',teamID:'T123456789'}),/apple_development_identity_required/);
+  assert.throws(()=>macDevelopmentSigningPlan({app:'/scratch/Styx.app',identity:'Apple Development: Example (U123456789)'}),/development_signing_team_required/);
 });

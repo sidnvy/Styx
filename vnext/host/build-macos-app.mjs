@@ -49,9 +49,26 @@ export function macSigningPlan({app,identity,teamID,notaryProfile}={}){
   }
   return steps;
 }
-export function buildMacApp({app,cuaBinary,version,identity,teamID,notaryProfile}={}){
+// Explicit local Mac acceptance only. Apple Development CN suffix is a user
+// identifier and need not equal the certificate OU/TeamIdentifier. Verify the
+// supplied team against the signed code requirement instead of guessing it.
+export function macDevelopmentSigningPlan({app,identity,teamID}={}){
+  assert(typeof app==='string'&&path.posix.isAbsolute(app)&&path.posix.basename(app)==='Styx.app','invalid_styx_app_path');
+  assert(typeof identity==='string'&&/^Apple Development: [^\n]+ \([A-Z0-9]{10}\)$/.test(identity),'apple_development_identity_required');
+  assert(/^[A-Z0-9]{10}$/.test(teamID??''),'development_signing_team_required');
+  return [
+    ['/usr/bin/codesign',['--force','--options','runtime','--timestamp=none','--sign',identity,path.posix.join(app,'Contents/MacOS/cua-driver')]],
+    ['/usr/bin/codesign',['--force','--options','runtime','--timestamp=none','--sign',identity,app]],
+    ['/usr/bin/codesign',['--verify','--deep','--strict','--verbose=2',app]],
+    ['/usr/bin/codesign',['--verify','--strict','-R',`anchor apple generic and identifier "${MAC_BUNDLE_ID}" and certificate leaf[subject.OU] = "${teamID}"`,app]]
+  ];
+}
+export function buildMacApp({app,cuaBinary,version,identity,teamID,notaryProfile,signingMode='distribution'}={}){
   assert(process.platform==='darwin','native_macos_build_required');
   const plist=appInfoPlist(version);
+  assert(['distribution','local-development'].includes(signingMode),'invalid_macos_signing_mode');
+  assert(signingMode!=='local-development'||identity,'local_development_identity_required');
+  assert(signingMode!=='local-development'||!notaryProfile,'local_development_notarization_not_supported');
   assert(typeof app==='string'&&path.isAbsolute(app)&&path.basename(app)==='Styx.app','invalid_styx_app_path');
   assert(typeof cuaBinary==='string'&&path.isAbsolute(cuaBinary),'absolute_cua_binary_required');
   assert(!fs.existsSync(app)&&!fs.existsSync(app+'.notarization.zip'),'app_destination_exists');
@@ -61,7 +78,9 @@ export function buildMacApp({app,cuaBinary,version,identity,teamID,notaryProfile
   assert(/^cua-driver 0\.36\.0(?:\s|$)/.test(observed),'pinned_cua_036_required');
   assert(!notaryProfile||identity,'notarization_requires_signing');
   assert(!teamID||identity,'team_requires_signing');
-  const steps=identity?macSigningPlan({app,identity,teamID,notaryProfile}):[];
+  const steps=identity?(signingMode==='local-development'
+    ?macDevelopmentSigningPlan({app,identity,teamID})
+    :macSigningPlan({app,identity,teamID,notaryProfile})):[];
   fs.mkdirSync(path.dirname(app),{recursive:true});
   fs.mkdirSync(app);
   try{
@@ -78,13 +97,15 @@ export function buildMacApp({app,cuaBinary,version,identity,teamID,notaryProfile
     execFileSync('/usr/bin/xcrun',['swiftc','-O','-target',`${process.arch==='arm64'?'arm64':'x86_64'}-apple-macosx13.0`,SOURCE,'-o',path.join(macos,'Styx'),'-framework','AppKit','-framework','ApplicationServices','-framework','CoreGraphics'],{stdio:'inherit',timeout:180000});
     execFileSync('/usr/bin/plutil',['-lint',path.join(app,'Contents/Info.plist')],{stdio:'inherit'});
     for(const [command,args] of steps){
-      const output=execFileSync(command,args,{encoding:'utf8',timeout:1800000});
+      // A local keychain approval must not turn into an unattended long wait.
+      const output=execFileSync(command,args,{encoding:'utf8',timeout:signingMode==='local-development'?15000:1800000});
       if(args[0]==='notarytool')assert(JSON.parse(output).status==='Accepted','notarization_not_accepted');
     }
     return {schema:1,bundle_id:MAC_BUNDLE_ID,version,arch:process.arch,
       cua_version:observed,cua_input_sha256:inputHash,app,
       signing:identity?'PASS':'NOT RUN',
-      signing_detail:identity?'developer_id_verified':'unsigned_development_bundle',
+      signing_detail:identity?(signingMode==='local-development'?'apple_development_local_only':'developer_id_verified'):'unsigned_development_bundle',
+      signing_mode:signingMode,external_distribution:'NOT RUN',
       notarization:notaryProfile?'PASS':'NOT RUN',
       notarization_detail:notaryProfile?'accepted_stapled_assessed':'not_submitted',
       native_gui_acceptance:'NOT RUN',tcc_attribution:'NOT RUN'};
