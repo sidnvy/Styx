@@ -37,6 +37,8 @@ async function fixture(t) {
         files[f]=await fs.readFile(new URL('../'+f.split('/')[1],import.meta.url),'utf8');
       }
     }
+    if(process.platform==='win32'&&(options.bootstrap||options.runtime))
+      files['bin/node.exe']=await fs.readFile(process.execPath);
     for(const [name,contents] of Object.entries(files))
       await fs.writeFile(path.join(source,name),contents);
     const manifest={
@@ -138,7 +140,7 @@ test('rollback works even if the just-activated release is damaged',async t=>{
 });
 test('stable launcher verifies active generation before executing signed code',async t=>{
   const f=await fixture(t);
-  const v=await f.make('0.1.0-launch');
+  const v=await f.make('0.1.0-launch',{runtime:true});
   stageSignedRelease({sourceDir:v.source,installRoot:f.installRoot,
     publicKeyPem:f.publicKey});
   activateRelease(f.installRoot,v.manifest.version,f.publicKey);
