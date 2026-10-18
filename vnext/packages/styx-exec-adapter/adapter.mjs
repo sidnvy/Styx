@@ -224,15 +224,30 @@ export class ExecAdapter {
     const results = [];
     for (const r of this.sessions.values()) {
       await r.queue;
+      let confirmed = false;
       try {
+        // terminate only requests cancellation; a successful RPC ack is NOT
+        // independent evidence that the OS process has exited.
         await r.runtime.request('process/terminate', {processId: r.process});
-        const final = await r.runtime.request('process/read', {
-          processId: r.process, afterSeq: null, maxBytes: 1, waitMs: 1000
-        });
-        results.push({session_id: r.id, confirmed: final.exited === true || final.closed === true});
-      } catch { results.push({session_id: r.id, confirmed: false}); }
+        const deadline = performance.now() + 2000;
+        do {
+          const final = await r.runtime.request('process/read', {
+            processId: r.process, afterSeq: null, maxBytes: 1,
+            waitMs: Math.max(0, Math.min(300, Math.ceil(deadline - performance.now())))
+          });
+          if (final.exited === true || final.closed === true) {
+            confirmed = true;
+            break;
+          }
+          if (performance.now() < deadline) await delay(20);
+        } while (performance.now() < deadline);
+      } catch {
+        // Unknown termination is never silently converted to a success.
+      }
+      results.push({session_id: r.id, confirmed});
     }
-    this.sessions.clear(); return results;
+    this.sessions.clear();
+    return results;
   }
   async callTool(name, args, owner) {
     try {

@@ -12,10 +12,11 @@ const READ_TOOLS = new Set([
   'list_apps', 'list_windows', 'get_window_state', 'get_desktop_state', 'verify_state'
 ]);
 const plain = x => x !== null && typeof x === 'object' && !Array.isArray(x);
-const failure = code => ({
-  isError: true, structuredContent: {error: code},
-  content: [{type:'text', text: JSON.stringify({error: code})}]
-});
+const failure = (code,uncertain=false) => {
+  const data={error:code,...(uncertain?{uncertain:true}:{})};
+  return {isError:true,structuredContent:data,
+    content:[{type:'text',text:JSON.stringify(data)}]};
+};
 const sessionKey = (owner, id) => JSON.stringify([owner, id]);
 
 function requireToken(path) {
@@ -26,7 +27,7 @@ function requireToken(path) {
   return token;
 }
 
-export async function connectCuaMcp(target) {
+export async function connectCuaMcp(target,{relay}={}) {
   const cfg = target.computer;
   if (!cfg || cfg.enabled !== true) throw Error('computer_disabled');
   const client = new Client({name:'styx-cua-provider', version:'0.1.0'}, {capabilities:{}});
@@ -47,6 +48,10 @@ export async function connectCuaMcp(target) {
     transport = new StreamableHTTPClientTransport(url, {
       requestInit: {headers:{Authorization:'Bearer ' + requireToken(cfg.token_file)}, redirect:'error'}
     });
+  } else if(cfg.transport === 'outbound') {
+    if (!relay) throw Error('computer_outbound_relay_missing');
+    transport=await relay.acquireComputer(target);
+    client.styxTransport=transport;
   } else {
     throw Error('unsupported_computer_transport');
   }
@@ -63,6 +68,9 @@ function wrapTool(tool) {
   const schema = structuredClone(tool.inputSchema);
   if (!plain(schema) || schema.type !== 'object' || !plain(schema.properties) ||
       Object.hasOwn(schema.properties, 'environment_id')) throw Error('invalid_cua_schema');
+  // Every model-facing MCP connection receives a separate Cua transport
+  // lease; the user cannot override its implicit native session name.
+  delete schema.properties.session;
   schema.properties.environment_id = {type:'string', description:
     'Styx execution environment; defaults to the configured default when omitted.'};
   return {
@@ -77,11 +85,13 @@ function wrapTool(tool) {
 // own Cua MCP Client, so Cua's implicit session and element token cache cannot
 // be shared across unrelated ChatGPT sessions.
 export class CuaProvider {
-  constructor({registry, connect=connectCuaMcp, toolNames=COMMON_CUA_TOOLS,
+  constructor({registry, relay, connect, toolNames=COMMON_CUA_TOOLS,
     manifest=CONTRACT} = {}) {
     if (!registry || typeof registry.resolve !== 'function' ||
-        typeof connect !== 'function') throw TypeError('Cua registry and connector required');
-    this.registry = registry; this.connect = connect;
+        (connect!==undefined && typeof connect !== 'function'))
+      throw TypeError('Cua registry and connector required');
+    this.registry = registry;
+    this.connect = connect ?? (target=>connectCuaMcp(target,{relay}));
     this.toolNames = new Set(toolNames);
     this.manifest=manifest;
     this.schema=(manifest.tools??[]).filter(t=>this.toolNames.has(t.name))
@@ -102,6 +112,11 @@ export class CuaProvider {
     const key=sessionKey(owner, target.id);
     const current = this.sessions.get(key);
     if (current) {
+      if(current.client.styxTransport?.closed){
+        this.sessions.delete(key);
+        await current.client.close().catch(()=>{});
+        throw Error('computer_session_lost');
+      }
       if (current.generation !== target.generation) {
         this.sessions.delete(key);
         await current.client.close().catch(() => {});
@@ -161,9 +176,11 @@ export class CuaProvider {
       const code = e.message;
       if (['environment_not_found','environment_access_denied','computer_not_available',
         'computer_generation_changed','computer_version_mismatch',
-        'invalid_owner','computer_provider_closed'].includes(code))
+        'computer_session_lost','invalid_owner','computer_provider_closed'].includes(code))
         return failure(code);
-      return failure('computer_transport_unavailable');
+      // A transport failure during a GUI mutation has an unknown outcome.
+      // Never automatically replay click/type/set_value/etc.
+      return failure('computer_transport_unavailable',!READ_TOOLS.has(name));
     }
   }
 

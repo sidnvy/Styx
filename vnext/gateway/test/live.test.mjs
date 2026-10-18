@@ -91,7 +91,7 @@ test('real Codex Exec Server -> authenticated Styx HTTP -> shell and PTY', {skip
   }}));
   assert.equal(out, 'STYX_HTTP_EXEC_OK');
   const initial = await client.callTool({name: 'exec_command', arguments: {
-    cmd: 'read line; printf "ACK:%s" "$line"', yield_time_ms: 0
+    cmd: 'read line; printf "ACK:%s" "$line"', yield_time_ms: 0, login: false
   }});
   assert.ok(initial.structuredContent.session_id);
   const fed = await client.callTool({name: 'write_stdin', arguments: {

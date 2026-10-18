@@ -12,7 +12,7 @@ export function createStyxGateway({catalog, connect, computer, gui = null}) {
   const exec = new ExecAdapter({resolve: async (id, _owner) => pool.binding(id)});
   const cua = computer === undefined
     ? (registry.list().some(t => t.capabilities.includes('computer'))
-      ? new CuaProvider({registry}) : null)
+      ? new CuaProvider({registry,relay}) : null)
     : computer;
   return {
     registry, pool, exec, computer: cua, gui, relay,

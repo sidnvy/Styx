@@ -31,7 +31,7 @@ Native screenshot/session handles are not Codex Exec process session IDs.
 | Linux Hyprland Wayland owned scratch window screenshot/AX/click/readback | PASS |
 | macOS Styx.app Embedded Cua owned scratch window | PASS in prior isolated pilot |
 | Windows Cua MCP on interactive session | PASS read-only |
-| Windows owned scratch GUI mutation | BLOCKED / NOT RUN |
+| Windows owned scratch GUI mutation | PASS, isolated Edge Profile + system UIA readback |
 | Real Codex Exec through authenticated Gateway MCP | PASS, Linux loopback |
 | Host Outbound WebSocket, signed distribution, ChatGPT product integration | NOT RUN |
 
@@ -107,3 +107,43 @@ separate private Cua MCP connection remains necessary.
 See docs/outbound-host.md. No production rollouts occurred.
 
 Outbound Host identity can use either a private bearer token or certificate-pinned WSS mTLS. See docs/outbound-host.md.
+
+
+## New milestone: Cua native MCP over outbound Host WebSocket
+
+The same installed Styx Host Connector can open a bounded pool of outbound
+Computer connections alongside its Codex Exec connection. Computer WebSockets
+carry unmodified native Cua MCP JSON-RPC, not shell commands or Styx desktop
+RPC. Each ChatGPT MCP session claims one dedicated Cua stdio worker.
+Native Cua remains the final authority over screen, UIA/AX and input.
+
+The Host configuration optionally contains:
+
+    "computer": {
+      "enabled": true,
+      "binary": "/absolute/path/to/cua-driver",
+      "connections": 2
+    }
+
+and the matching Gateway target has:
+
+    "computer": {
+      "enabled": true,
+      "transport": "outbound",
+      "max_connections": 2
+    }
+
+For macOS the Host computer configuration MUST include an absolute socket
+path for a running Styx.app-managed embedded Cua daemon. The generic Host
+Connector will not silently launch an unprivileged macOS GUI worker.
+
+Cua tool schemas remain pinned to portable v0.36.0. The model-facing
+session field is hidden: Host and Gateway bind implicit native sessions to
+distinct authenticated MCP connections. Mutating GUI calls interrupted
+by transport loss are marked uncertain and never automatically retried.
+
+With the verified Cua binary present at its isolated pilot path:
+
+    STYX_LIVE_CUA_TEST=1 npm test
+
+See docs/outbound-computer.md and gateway/test/computer-outbound.test.mjs.

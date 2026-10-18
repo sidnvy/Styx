@@ -51,12 +51,18 @@ export class TargetRegistry {
         requireValue(plain(computer) && typeof computer.enabled === 'boolean',
           'Invalid computer capability');
         if (computer.enabled) {
-          requireValue(['stdio','mcp-http'].includes(computer.transport), 'Invalid Cua transport');
+          requireValue(['stdio','mcp-http','outbound'].includes(computer.transport), 'Invalid Cua transport');
           if (computer.transport === 'stdio') {
             requireValue(typeof computer.binary === 'string' &&
               nativePaths(target.platform).isAbsolute(computer.binary), 'Cua local binary required');
             requireValue(computer.socket === undefined || typeof computer.socket === 'string',
               'Invalid Cua socket');
+          } else if(computer.transport==='outbound') {
+            requireValue(target.kind==='host' && transport.transport==='outbound' &&
+              (computer.max_connections===undefined ||
+              (Number.isInteger(computer.max_connections) &&
+                computer.max_connections>=1 && computer.max_connections<=8)),
+              'Invalid outbound computer connection pool');
           } else {
             requireValue(typeof computer.url === 'string' &&
               (computer.url.startsWith('https://') || computer.url.startsWith('http://')),

@@ -5,6 +5,7 @@ import WebSocket from 'ws';
 import {once} from 'node:events';
 import {fileURLToPath} from 'node:url';
 import {stdioClient} from '../packages/styx-exec-adapter/rpc.mjs';
+import {runComputerConnectors} from './computer.mjs';
 
 function tokenFrom(filename) {
   const stat=fs.statSync(filename);
@@ -52,7 +53,7 @@ export function normalizeConnector(config) {
 
 // No local listening socket. One host outbound WebSocket transports unmodified
 // Codex Exec JSON-RPC frames from a locally supervised stdio child.
-export async function connectHostOnce(config, {signal,onReady}={}) {
+export function hostAuthentication(config){
   const c=normalizeConnector(config);
   const token=c.token_file ? tokenFrom(c.token_file) : undefined;
   let clientCert,clientKey,gatewayCa;
@@ -65,6 +66,16 @@ export async function connectHostOnce(config, {signal,onReady}={}) {
     clientKey=fs.readFileSync(c.client_key_file);
   }
   if(c.gateway_ca_file) gatewayCa=fs.readFileSync(c.gateway_ca_file);
+  return {
+    ...(token?{headers:{Authorization:'Bearer '+token}}:{}),
+    ...(clientCert?{cert:clientCert,key:clientKey}:{}),
+    ...(gatewayCa?{ca:gatewayCa}:{})
+  };
+}
+
+export async function connectHostOnce(config, {signal,onReady}={}) {
+  const c=normalizeConnector(config);
+  const auth=hostAuthentication(c);
   if (signal?.aborted) throw Error('connector_cancelled');
   let client,ws;
   try {
@@ -74,9 +85,7 @@ export async function connectHostOnce(config, {signal,onReady}={}) {
     });
     ws=new WebSocket(c.endpoint,{maxPayload:2*1024*1024,
       handshakeTimeout:5000,followRedirects:false,perMessageDeflate:false,
-      ...(token?{headers:{Authorization:'Bearer '+token}}:{}),
-      ...(clientCert?{cert:clientCert,key:clientKey}:{}),
-      ...(gatewayCa?{ca:gatewayCa}:{})});
+      ...auth});
     await Promise.race([
       once(ws,'open'),
       new Promise((_,reject)=>signal?.addEventListener('abort',
@@ -150,8 +159,15 @@ if (process.argv[1] && path.resolve(process.argv[1])===fileURLToPath(import.meta
   const abort=new AbortController();
   process.once('SIGINT',()=>abort.abort());
   process.once('SIGTERM',()=>abort.abort());
-  await runHostConnector(config,{signal:abort.signal,
-    onStatus:status=>process.stdout.write(JSON.stringify({host:config.host_id,status})+'\n'),
-    onReady:info=>process.stdout.write(JSON.stringify({...info,status:'connected'})+'\n')
-  });
+  const status=(state,{lane='exec',slot}={})=>
+    process.stdout.write(JSON.stringify({host:config.host_id,lane,
+      ...(slot!==undefined?{slot}:{}),status:state})+'\n');
+  await Promise.all([
+    runHostConnector(config,{signal:abort.signal,
+      onStatus:state=>status(state),
+      onReady:info=>status('connected',{lane:'exec'})}),
+    runComputerConnectors(config,{signal:abort.signal,
+      onStatus:(state,meta)=>status(state,meta),
+      onReady:()=>status('connected',{lane:'computer'})})
+  ]);
 }

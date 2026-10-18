@@ -12,9 +12,11 @@
 | Linux Hyprland Wayland screenshot + AX + click | PASS scratch | host/native-cua-gui.cjs |
 | macOS Embedded Cua Styx.app GUI scratch | PASS prior pilot | isolated 2026-10-17 prototype; not repeated in this work |
 | Windows Cua MCP on user logon session | PASS read-only | native smoke init / list_apps |
-| Windows GUI screenshot / click / independent readback | BLOCKED / NOT RUN | safe scratch fixture unavailable |
+| Windows GUI screenshot / click / independent readback | PASS owned Edge scratch | Cua 0.36.0 screenshot + 10 UIA elements + button click; independent Windows UIAutomation found STYX_CLICKED |
 | Three-OS unattended headless CI | PENDING CI | .github/workflows/styx-vnext.yml |
 | Host Outbound WS (Codex Exec lane) | PASS isolated loopback with real Codex | gateway/test/outbound.test.mjs, STYX_LIVE_EXEC_TEST=1 |
+| Host Outbound WS (Cua MCP lane) | PASS isolated with real Linux Cua 0.36.0 | gateway/test/computer-outbound.test.mjs, STYX_LIVE_CUA_TEST=1 |
+| Per-owner Cua transport and GUI uncertain-result behavior | PASS fixture integration | gateway/test/computer-outbound.test.mjs |
 | Signed/notarized macOS product | NOT RUN | release gate |
 | Physical macOS Host to separate Gateway via private-network WSS/mTLS | PASS bounded native pilot | Real Codex 0.163.0: Shell, stdin, PTY, stdout/exit validation; 2026-10-18 |
 | Real ChatGPT -> Styx -> three host execution | NOT RUN | integration gate |

@@ -76,3 +76,23 @@ session. See docs/outbound-host.md.
 
 Cua is NOT tunneled by this first milestone; it remains a separate native
 MCP transport, independently authenticated and bound to the GUI session.
+
+
+## Computer outbound lane
+
+A dedicated /computer WebSocket carries native Cua MCP JSON-RPC (one stdio
+Cua process per connection) while /exec carries Codex Exec JSON-RPC.
+No new Computer Use action protocol exists inside Styx. Host admission,
+authentication, generation binding, heartbeat and connection limits are shared
+at the transport edge; session ownership is not shared between Exec and GUI.
+
+The Gateway allocates one Cua MCP transport to each authenticated model-side
+session and never returns it to another owner. Model inputs cannot set Cua's
+native session label: Cua uses its authenticated transport lease. A
+reconnected Host creates a fresh native worker and never revives previous
+desktop tokens.
+
+On macOS a signed Styx.app owns the embedded native Cua daemon; the Host
+Connector only proxies to its socket. On Windows and Linux Cua mcp directly
+owns its worker in the interactive session. The Windows/Hyprland native
+Driver acceptance gates remain separate from MCP compatibility.

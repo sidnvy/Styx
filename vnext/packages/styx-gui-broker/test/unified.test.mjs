@@ -32,7 +32,7 @@ test('unified MCP routes actual Exec Server sessions and fixture GUI scopes inde
  await server.connect(st);await client.connect(ct);
  t.after(async()=>{await client.close();await server.close();await gui.close();assert.ok((await exec.cleanup()).every(x=>x.confirmed));await runtime.close();await rm(root,{recursive:true,force:true});});
  const tools=await client.listTools();assert.deepEqual(tools.tools.map(x=>x.name),['exec_command','write_stdin','get_window_state','click','set_value']);
- const initial=await client.callTool({name:'exec_command',arguments:{cmd:'read line; printf "shell:%s" "$line"',environment_id:'pilot',yield_time_ms:0}});
+ const initial=await client.callTool({name:'exec_command',arguments:{cmd:'read line; printf "shell:%s" "$line"',environment_id:'pilot',yield_time_ms:0,login:false}});
  const session=initial.structuredContent.session_id;assert.ok(session);
  const observed=await client.callTool({name:'get_window_state',arguments:{environment_id:'pilot',pid:12,window_id:34}});
  const old=observed.structuredContent.elements[0].element_token;

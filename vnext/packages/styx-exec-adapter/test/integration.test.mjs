@@ -21,8 +21,16 @@ async function scratch(t) {
   t.after(() => rm(root, {recursive: true, force: true}));
   return {root, env: {PATH: '/usr/bin:/bin', HOME: root, CODEX_HOME: path.join(root, 'codex-home')}};
 }
+// Integration fixtures never source the workstation user's personal login
+// profile. Production exec_command keeps the upstream Codex login behavior;
+// only this test harness injects login:false when a test does not specify it.
+class IsolatedTestExecAdapter extends ExecAdapter {
+  execCommand(args, owner) {
+    return super.execCommand({...args, login:args.login??false}, owner);
+  }
+}
 function adapter(runtime, root) {
-  return new ExecAdapter({resolve: async (id, caller) => {
+  return new IsolatedTestExecAdapter({resolve: async (id, caller) => {
     if (caller !== owner || (id !== undefined && id !== 'pilot')) throw new ExecError('access_denied');
     return {id: 'pilot', generation: 'test-generation', runtime, cwd: root,
       platform: 'linux', shell: '/bin/sh', shells: ['/bin/sh', '/bin/bash'], env: {PATH: '/usr/bin:/bin'}};
