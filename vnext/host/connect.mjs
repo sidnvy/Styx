@@ -140,10 +140,16 @@ export async function runHostConnector(config,{signal,once:runOnce=false,
 }
 if (process.argv[1] && path.resolve(process.argv[1])===fileURLToPath(import.meta.url)) {
   const filename=process.argv[2];
-  if (!filename) {process.stderr.write('Usage: node host/connect.mjs /private/host.json\n');process.exit(2)}
+  if (!filename) {process.stderr.write('Usage: node host/connect.mjs /private/host.json or --stdin-config\n');process.exit(2)}
   let config;
   try {
-    config=JSON.parse(fs.readFileSync(filename,'utf8'));
+    // The signed stable launcher passes a verified, generation-specific
+    // configuration over a one-shot local stdin pipe. No secret-bearing
+    // temporary config file is created. Ordinary direct Host CLI remains.
+    const raw=filename==='--stdin-config' ? fs.readFileSync(0,'utf8')
+      :fs.readFileSync(filename,'utf8');
+    if(raw.length>65536)throw Error('host_config_too_large');
+    config=JSON.parse(raw);
     normalizeConnector(config);
     if(config.token_file) tokenFrom(config.token_file);
     if(config.client_cert_file) {

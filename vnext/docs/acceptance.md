@@ -173,3 +173,42 @@ itself was not preprovisioned; it was generated only after explicit approval.
 
 No personal application or production Host registration was modified.
 All native execution was restricted to separate temporary test directories.
+
+
+## Linux managed Host installation pilot acceptance (2026-10-18)
+
+PASS in an isolated native Workstation user context:
+
+- Offline release builder selected only the pinned Codex Exec Server, Cua
+  Driver and minimal Node websocket Host implementation. The Ed25519-signed
+  manifest covered each file hash/size and target platform.
+- Verified stage, activation and owner-scoped systemd user unit install,
+  enable/start. Actual managed Host process and both signed Cua/Codex native
+  executables ran from the installed version folder, not the Git checkout.
+- The managed Host completed real scratch GUI Observe/Act/Verify via its
+  outbound channels, including PNG image, three AX nodes, native button
+  action and independent program exit code zero.
+- Signed upgrade pilot1 -> pilot2 -> pilot3 and stable launcher refresh from
+  a verified signed release; explicit normal restart no longer reports a
+  false failure.
+- Pilot launcher crash injected by SIGKILL; systemd automatically recovered,
+  increased NRestarts, and the repaired Host passed GUI acceptance again.
+- Signed rollback pilot3 -> pilot2 passed native GUI verification, followed
+  by reactivation of the signed pilot3.
+- Loss and restoration of the isolated private loopback Gateway caused
+  Host outbound disconnect/reconnect WITHOUT restarting the user service;
+  the subsequent native GUI test again returned PASS.
+- Only Styx-owned unit was removed by uninstall. Reinstallation preserved
+  signed releases; enabling/starting it passed native GUI acceptance.
+- Signed release retention pruned inactive pilot1 while retaining verified
+  pilot3 and previous pilot2; unexpected/untrusted releases block pruning.
+- No sudo/system-wide services, other user units, network routes, production
+  Coder agents or production MCP endpoints were changed.
+
+Not tested or not implemented: a user-login/reboot test, screen lock and
+headless Cua behavior, 24-hour soak, real cold install from a separately
+trusted publisher, bundled Node runtime, full native package notarization/
+signing, device pairing from a real ChatGPT UI, or production cutover.
+
+The user-scoped Pilot is deliberately NOT the final supported installation.
+See docs/linux-managed-host.md and docs/onboarding-installation.md.

@@ -130,3 +130,22 @@ Reference implementation and reproduction: docs/enrollment-pilot.md.
 The cold installer, downloadable signed product, PKI/keychain, unattended
 OS service registration, device picker and production rollout are still
 explicit release blockers.
+
+
+## Linux user-service pilot evidence
+
+Linux now has an actual, user-scoped signed Host release and systemd service
+installer pilot. It has passed real native installation, upgrade, restart,
+fatal-signal recovery, private Gateway link-loss reconnect, signed rollback,
+service removal/reinstallation and Cua GUI Observe/Act/Verify from the
+managed Host process. It leaves the existing production stack unchanged.
+
+The signed bundles select real Codex/Cua releases and minimal Host tools.
+The systemd service manager uses a stable verified bootstrap, no sudo and no
+OOB execution runtime. The pilot still assumes an existing Node.js binary
+and a developer-generated ephemeral publisher key; production requires
+properly signed native packages, a bundled or standalone runtime, cold
+installation without Coder/SSH, secure keychain backing, and a native
+onboarding UI for per-device selection/confirmation.
+
+Full runbook and acceptance: docs/linux-managed-host.md.

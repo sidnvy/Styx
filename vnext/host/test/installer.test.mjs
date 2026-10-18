@@ -8,7 +8,7 @@ import {
 } from 'node:crypto';
 import {
   verifySignedRelease,stageSignedRelease,activateRelease,activeRelease,
-  rollbackRelease,servicePlan
+  rollbackRelease,servicePlan,refreshVerifiedBootstrap,pruneVerifiedReleases
 } from '../installer.mjs';
 import {launchActive} from '../launch.mjs';
 
@@ -27,9 +27,16 @@ async function fixture(t) {
     await fs.mkdir(path.join(source,'bin'),{recursive:true});
     const files={
       'host/connect.mjs':options.code??"process.stdout.write('STYX_LAUNCH_OK\\n')",
-      'bin/codex':'codex-pinned-0.163.0',
-      'bin/cua':'cua-pinned-0.36.0'
+      [process.platform==='win32'?'bin/codex.exe':'bin/codex']:
+        'codex-pinned-0.163.0',
+      [process.platform==='win32'?'bin/cua-driver.exe':'bin/cua']:
+        'cua-pinned-0.36.0'
     };
+    if(options.bootstrap){
+      for(const f of ['host/installer.mjs','host/launch.mjs']){
+        files[f]=await fs.readFile(new URL('../'+f.split('/')[1],import.meta.url),'utf8');
+      }
+    }
     for(const [name,contents] of Object.entries(files))
       await fs.writeFile(path.join(source,name),contents);
     const manifest={
@@ -37,7 +44,7 @@ async function fixture(t) {
       arch:process.arch,
       files:Object.entries(files).map(([name,content])=>({
         path:name,sha256:sha(content),size:Buffer.byteLength(content),
-        executable:name==='bin/codex'||name==='bin/cua'
+        executable:name.startsWith('bin/')
       }))
     };
     const raw=JSON.stringify(manifest)+'\n';
@@ -93,10 +100,11 @@ test('unsigned changes, extra binaries and wrong signing key cannot stage',async
     assert.throws(()=>verifySignedRelease(v.source,f.publicKey),/archive_symlink_forbidden/);
     await fs.unlink(path.join(v.source,'extra.js'));
   }
-  await fs.writeFile(path.join(v.source,'bin/cua'),'compromised');
+  const cuaName=process.platform==='win32'?'bin/cua-driver.exe':'bin/cua';
+  await fs.writeFile(path.join(v.source,...cuaName.split('/')),'compromised');
   assert.throws(()=>stageSignedRelease({sourceDir:v.source,installRoot:f.installRoot,
     publicKeyPem:f.publicKey}),/release_file_(hash|metadata)_mismatch/);
-  await fs.writeFile(path.join(v.source,'bin/cua'),'cua-pinned-0.36.0');
+  await fs.writeFile(path.join(v.source,...cuaName.split('/')),'cua-pinned-0.36.0');
   await fs.writeFile(path.join(v.source,'unlisted.js'),'malware');
   assert.throws(()=>verifySignedRelease(v.source,f.publicKey),
     /unexpected_release_members/);
@@ -136,7 +144,10 @@ test('stable launcher verifies active generation before executing signed code',a
   activateRelease(f.installRoot,v.manifest.version,f.publicKey);
   const config=path.join(f.tmp,'host.json');
   const key=path.join(f.tmp,'trusted-ed25519.pem');
-  await fs.writeFile(config,'{}\n',{mode:0o600});
+  await fs.writeFile(config,JSON.stringify({
+    host_id:'signed-launch-fixture',
+    exec:{binary:'/untrusted/binary',cwd:f.tmp}
+  })+'\n',{mode:0o600});
   await fs.writeFile(key,f.publicKey,{mode:0o600});
   const result=await launchActive({
     installRoot:f.installRoot,hostConfigFile:config,trustPublicKeyFile:key
@@ -163,4 +174,92 @@ test('service plans never mutate OS startup state',async t=>{
     assert.ok(planned.args.every(x=>path.isAbsolute(x)));
   }
   assert.equal((await fs.readdir(f.tmp)).filter(x=>x.includes('service')).length,0);
+});
+
+test('stable bootstrap can only be refreshed using a publisher-signed bundled shim',
+  async t=>{
+  const f=await fixture(t);
+  const bare=await f.make('0.1.0-bare');
+  stageSignedRelease({sourceDir:bare.source,installRoot:f.installRoot,
+    publicKeyPem:f.publicKey});
+  assert.throws(()=>refreshVerifiedBootstrap(f.installRoot,f.publicKey,
+    '0.1.0-bare'),/signed_bootstrap_payload_missing/);
+  const full=await f.make('0.1.0-full',{bootstrap:true});
+  stageSignedRelease({sourceDir:full.source,installRoot:f.installRoot,
+    publicKeyPem:f.publicKey});
+  const receipt=refreshVerifiedBootstrap(f.installRoot,f.publicKey,'0.1.0-full');
+  assert.equal(receipt.status,'bootstrap_refreshed');
+  for(const name of ['launch.mjs','installer.mjs']){
+    assert.equal(await fs.readFile(path.join(f.installRoot,name),'utf8'),
+      await fs.readFile(path.join(full.source,'host',name),'utf8'));
+  }
+  await fs.writeFile(path.join(f.installRoot,'releases','0.1.0-full',
+    'host/launch.mjs'),'not-trusted');
+  assert.throws(()=>refreshVerifiedBootstrap(f.installRoot,f.publicKey,
+    '0.1.0-full'),/release_file_(hash|metadata)_mismatch/);
+});
+
+test('an intentional launcher termination is not reported as a crash',
+  {skip:process.platform==='win32',timeout:9000},async t=>{
+  const f=await fixture(t);
+  const v=await f.make('0.1.0-term',{
+    code:"process.on('SIGTERM',()=>process.exit(1));setInterval(()=>{},1000)"
+  });
+  stageSignedRelease({sourceDir:v.source,installRoot:f.installRoot,
+    publicKeyPem:f.publicKey});
+  activateRelease(f.installRoot,'0.1.0-term',f.publicKey);
+  const config=path.join(f.tmp,'stop-config.json');
+  const key=path.join(f.tmp,'publisher.pub');
+  await fs.writeFile(config,JSON.stringify({exec:{cwd:f.tmp}}),{mode:0o600});
+  await fs.writeFile(key,f.publicKey,{mode:0o600});
+  const signal=new AbortController();
+  const result=launchActive({installRoot:f.installRoot,hostConfigFile:config,
+    trustPublicKeyFile:key,signal:signal.signal});
+  await new Promise(resolve=>setTimeout(resolve,180));
+  signal.abort();
+  const outcome=await result;
+  assert.equal(outcome.expected_stop,true);
+  assert.equal(outcome.version,'0.1.0-term');
+});
+
+test('signed release retention keeps exactly active and previous, with preview first',
+  async t=>{
+  const f=await fixture(t);
+  for(const version of ['pilot-a','pilot-b','pilot-c']){
+    const bundle=await f.make(version);
+    stageSignedRelease({sourceDir:bundle.source,installRoot:f.installRoot,
+      publicKeyPem:f.publicKey});
+    activateRelease(f.installRoot,version,f.publicKey);
+  }
+  const preview=pruneVerifiedReleases(f.installRoot,f.publicKey);
+  assert.equal(preview.status,'dry_run');
+  assert.deepEqual(preview.planned,['pilot-a']);
+  assert.deepEqual(preview.keep,['pilot-c','pilot-b']);
+  assert.deepEqual((await fs.readdir(path.join(f.installRoot,'releases'))).sort(),
+    ['pilot-a','pilot-b','pilot-c']);
+  const cleaned=pruneVerifiedReleases(f.installRoot,f.publicKey,{dryRun:false});
+  assert.deepEqual(cleaned.removed,['pilot-a']);
+  assert.deepEqual((await fs.readdir(path.join(f.installRoot,'releases'))).sort(),
+    ['pilot-b','pilot-c']);
+  assert.equal(activeRelease(f.installRoot,f.publicKey).version,'pilot-c');
+  assert.equal(rollbackRelease(f.installRoot,f.publicKey).version,'pilot-b');
+});
+
+test('an unknown unsigned release blocks deletion of any old release',
+  async t=>{
+  const f=await fixture(t);
+  for(const version of ['safe-a','safe-b','safe-c']){
+    const bundle=await f.make(version);
+    stageSignedRelease({sourceDir:bundle.source,installRoot:f.installRoot,
+      publicKeyPem:f.publicKey});
+    activateRelease(f.installRoot,version,f.publicKey);
+  }
+  const extra=path.join(f.installRoot,'releases','untrusted-build');
+  await fs.mkdir(extra);
+  await fs.writeFile(path.join(extra,'unknown'), 'do-not-touch');
+  assert.throws(()=>pruneVerifiedReleases(f.installRoot,f.publicKey,
+    {dryRun:false}),/ENOENT|unexpected_release_members|invalid_manifest/);
+  assert.equal((await fs.readdir(path.join(f.installRoot,'releases')))
+    .includes('safe-a'),true);
+  assert.equal((await fs.readFile(path.join(extra,'unknown'),'utf8')),'do-not-touch');
 });

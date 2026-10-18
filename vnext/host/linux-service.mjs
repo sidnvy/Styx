@@ -1,0 +1,206 @@
+// Styx Linux user-service lifecycle. Only named Styx-owned user unit files.
+// No root, sudo, linger modification, Coder changes, or non-Styx services.
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+import {execFileSync} from 'node:child_process';
+import {fileURLToPath} from 'node:url';
+import {activeRelease} from './installer.mjs';
+
+const UNIT_PATTERN=/^styx-(?:vnext-)?[a-z0-9][a-z0-9-]{0,48}\.service$/;
+const SAFE_PATH=/^\/[A-Za-z0-9._/+@-]+$/;
+const OWNER_MARKER='# Managed by Styx VNext Linux user installer. ID: styx-linux-user-v1';
+function requireValue(ok,msg){if(!ok)throw Error(msg)}
+function absoluteSafe(p,label){
+  requireValue(typeof p==='string'&&path.isAbsolute(p)&&SAFE_PATH.test(p) &&
+    path.normalize(p)===p,label+'_unsafe_path');
+  return p;
+}
+function validateUnitName(name){
+  requireValue(typeof name==='string'&&UNIT_PATTERN.test(name),'invalid_styx_unit_name');
+  return name;
+}
+function userUnitDir(home=os.homedir()) {
+  const dir=path.join(home,'.config/systemd/user');
+  requireValue(absoluteSafe(dir,'unit_dir')===dir,'invalid_unit_directory');
+  return dir;
+}
+function verifyConfigFile(file){
+  absoluteSafe(file,'host_config');
+  const st=fs.lstatSync(file);
+  requireValue(st.isFile()&&!st.isSymbolicLink()&&
+    (process.platform!=='win32'?(st.mode&0o077)===0:true),'host_config_not_private');
+}
+function requireLinux(){requireValue(process.platform==='linux','linux_only')}
+function assertLocalFile(file){
+  const s=fs.lstatSync(file);
+  requireValue(s.isFile()&&!s.isSymbolicLink(),'invalid_local_trust_file');
+}
+export function linuxUserUnit({unitName='styx-vnext-pilot.service',
+  installRoot,hostConfigFile,trustPublicKeyFile,nodeBinary=process.execPath,
+  restartSec=3}={}){
+  requireLinux();
+  validateUnitName(unitName);
+  for(const [name,p] of [['install_root',installRoot],
+    ['host_config',hostConfigFile],['publisher_key',trustPublicKeyFile],
+    ['node_binary',nodeBinary]])absoluteSafe(p,name);
+  verifyConfigFile(hostConfigFile);
+  assertLocalFile(trustPublicKeyFile);
+  requireValue(Number.isInteger(restartSec)&&restartSec>=1&&restartSec<=30,
+    'invalid_restart_delay');
+  const pub=fs.readFileSync(trustPublicKeyFile,'utf8');
+  activeRelease(installRoot,pub);
+  const unit=[
+    OWNER_MARKER,
+    '[Unit]',
+    'Description=Styx VNext isolated Host connector ('+unitName+')',
+    'Documentation=https://github.com/sidnvy/Styx',
+    'StartLimitIntervalSec=45',
+    'StartLimitBurst=6',
+    '',
+    '[Service]',
+    'Type=simple',
+    'ExecStart='+nodeBinary+' '+installRoot+'/launch.mjs '+installRoot+' '+
+       hostConfigFile+' '+trustPublicKeyFile,
+    'WorkingDirectory='+installRoot,
+    'Restart=on-failure',
+    'RestartSec='+restartSec,
+    'TimeoutStopSec=12',
+    'KillMode=control-group',
+    'UMask=0077',
+    'NoNewPrivileges=true',
+    'StandardOutput=journal',
+    'StandardError=journal',
+    '',
+    '[Install]',
+    'WantedBy=default.target',
+    ''
+  ].join('\n');
+  return unit;
+}
+function localUnit({unitName,home}){
+  validateUnitName(unitName);
+  const dir=userUnitDir(home);
+  requireValue(path.resolve(dir).startsWith(path.resolve(home)+path.sep),'invalid_user_unit_dir');
+  const unit=path.join(dir,unitName);
+  return {dir,unit};
+}
+function ownedService(file){
+  const st=fs.lstatSync(file);
+  requireValue(st.isFile()&&!st.isSymbolicLink()&&
+    fs.readFileSync(file,'utf8').startsWith(OWNER_MARKER+'\n'),
+    'service_unit_not_owned');
+}
+function atomicWrite(file,text){
+  const p=file+'.new-'+process.pid;
+  const fd=fs.openSync(p,'wx',0o600);
+  try{fs.writeFileSync(fd,text);fs.fsyncSync(fd);}
+  finally{fs.closeSync(fd)}
+  try{fs.renameSync(p,file)}
+  catch(e){fs.rmSync(p,{force:true});throw e}
+  fs.chmodSync(file,0o600);
+}
+export function writeUserService(options,{home=os.homedir(),overwrite=false}={}){
+  requireLinux();
+  const unitText=linuxUserUnit(options);
+  const {dir,unit}=localUnit({unitName:options.unitName??'styx-vnext-pilot.service',home});
+  fs.mkdirSync(dir,{recursive:true,mode:0o700});
+  const stat=fs.lstatSync(dir);
+  requireValue(stat.isDirectory()&&!stat.isSymbolicLink(),'user_unit_dir_not_regular');
+  if(fs.existsSync(unit)){
+    ownedService(unit);
+    requireValue(overwrite,'service_already_installed');
+  }
+  atomicWrite(unit,unitText);
+  return {status:'installed_disabled',unitName:path.basename(unit),
+    unitFile:unit,serviceManager:'systemd-user'};
+}
+// No shells, implicit sudo, privileged system services, or arbitrary units.
+export function systemdUser(unitName,verb,{run=execFileSync}={}){
+  requireLinux();
+  validateUnitName(unitName);
+  requireValue(['daemon-reload','enable','disable','start','stop','restart',
+    'reset-failed','is-active','is-enabled'].includes(verb),'unsupported_service_verb');
+  const args=['--user',verb,...(verb==='daemon-reload'?[]:[unitName])];
+  const output=run('/usr/bin/systemctl',args,{
+    encoding:'utf8',timeout:25000,stdio:['ignore','pipe','pipe']
+  });
+  return String(output).trim();
+}
+export function statusUserService(unitName,{run=execFileSync}={}){
+  requireLinux();
+  validateUnitName(unitName);
+  let text;
+  try {
+    text=run('/usr/bin/systemctl',['--user','show',unitName,
+      '--property=LoadState,ActiveState,SubState,UnitFileState,MainPID,NRestarts',
+      '--no-pager'],{
+        encoding:'utf8',timeout:13000,stdio:['ignore','pipe','pipe']
+      });
+  }catch(e){
+    return {unitName,status:'unavailable',reason:'user_manager_unreachable'};
+  }
+  const fields=Object.fromEntries(String(text).split('\n').filter(Boolean).map(line=>{
+    const i=line.indexOf('=');
+    return [line.slice(0,i),line.slice(i+1)];
+  }));
+  return {unitName,status:'reported',load:fields.LoadState??null,
+    active:fields.ActiveState??null,sub:fields.SubState??null,
+    enabled:fields.UnitFileState??null,
+    pid:Number(fields.MainPID||0),
+    restarts:Number(fields.NRestarts||0)};
+}
+export function installLinuxService(options,{home=os.homedir(),run=execFileSync}={}){
+  const result=writeUserService(options,{home});
+  systemdUser(result.unitName,'daemon-reload',{run});
+  return result;
+}
+export function removeLinuxService(unitName,{home=os.homedir(),
+  run=execFileSync}={}){
+  requireLinux();
+  const {unit}=localUnit({unitName,home});
+  ownedService(unit);
+  for(const verb of ['stop','disable']){
+    try{systemdUser(unitName,verb,{run});}
+    catch(e){
+      // A disabled/stopped service is not an error, but an unreachable user
+      // manager is. Explicitly check observable state before proceeding.
+      const state=statusUserService(unitName,{run});
+      requireValue(state.status==='reported' &&
+        (verb==='stop' ? state.active!=='active' : state.enabled!=='enabled'),
+        'service_stop_or_disable_failed');
+    }
+  }
+  fs.unlinkSync(unit);
+  systemdUser(unitName,'daemon-reload',{run});
+  return {status:'uninstalled',unitName,removedUnitFile:true,
+    preservedInstallRoot:true};
+}
+export function serviceCtl({command,unitName='styx-vnext-pilot.service',
+  options,home=os.homedir()}={}){
+  requireLinux();
+  validateUnitName(unitName);
+  if(command==='install')return installLinuxService({...options,unitName},{home});
+  if(command==='uninstall')return removeLinuxService(unitName,{home});
+  if(command==='status')return statusUserService(unitName);
+  const {unit}=localUnit({unitName,home});
+  ownedService(unit);
+  if(['enable','disable','start','stop','restart','reset-failed'].includes(command)){
+    systemdUser(unitName,command);
+    return statusUserService(unitName);
+  }
+  throw Error('unsupported_service_command');
+}
+if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){
+  const [command,unitName,configPath]=process.argv.slice(2);
+  try {
+    const options=command==='install'
+      ?JSON.parse(fs.readFileSync(absoluteSafe(configPath,'installer_config'),'utf8'))
+      :undefined;
+    const result=serviceCtl({command,unitName,options});
+    process.stdout.write(JSON.stringify(result)+'\n');
+  }catch(e){
+    process.stderr.write('Styx Linux service: '+e.message+'\n');
+    process.exitCode=2;
+  }
+}

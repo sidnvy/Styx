@@ -13,7 +13,8 @@
     "test:all": "npm run test && npm run test:exec && npm run test:gui && npm run test:host",
     "test:native:cua": "node host/run-native-cua.mjs",
     "test:physical:cua": "node host/physical-cua-acceptance.mjs",
-    "test:host": "node --test --test-concurrency=1 host/test/*.test.mjs"
+    "test:host": "node --test --test-concurrency=1 host/test/*.test.mjs",
+    "test:linux-installer": "node --test --test-concurrency=1 host/test/linux-build.test.mjs host/test/linux-service.test.mjs host/test/installer.test.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.1",
