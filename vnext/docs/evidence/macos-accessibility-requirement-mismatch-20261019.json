@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "status": "BLOCKED",
+  "observed_utc": "2026-10-18T18:44:22Z",
+  "installed_path": "/Applications/Styx.app",
+  "owner_pid": 29512,
+  "daemon_pid": 29514,
+  "owner_start_local": "2026-10-19 02:43:57",
+  "accessibility": false,
+  "screen_recording": true,
+  "gui": "NOT RUN",
+  "permission_prompt": "NOT RUN",
+  "fixture_launch": "NOT RUN",
+  "targeted_log_source": "read-only com.apple.TCC unified log, filtered eventMessage app.styx.host, last3m",
+  "exact_tcc_message": "Failed to match existing code requirement for subject app.styx.host and service kTCCServiceAccessibility",
+  "logged_existing_requirement": "cdhash H\"553904db1f5ee2a15a3864641253d6d8f902aa01\"",
+  "current_signed_cdhash": "2907afe8b13cba6363b38d39b74dbec941fe22f6",
+  "current_designated_requirement": "identifier app.styx.host; anchor apple generic; Apple Development SUN TAO certificate; WWDR certificate extension",
+  "conclusion": "Accessibility authorization has a code-requirement mismatch; repeated toggling/relaunch does not repair the old requirement",
+  "historical_hash_origin": "Not established by this diagnostic",
+  "tcc_database_access": "NOT RUN",
+  "tcc_reset_or_mutation": "NOT RUN"
+}

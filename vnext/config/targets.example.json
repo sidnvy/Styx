@@ -1,0 +1,76 @@
+{
+  "version": 1,
+  "default_environment_id": "linux-test",
+  "targets": [
+    {
+      "id": "linux-test",
+      "kind": "host",
+      "platform": "linux",
+      "generation": "manual-generation-1",
+      "allowed": false,
+      "cwd": "/tmp/styx-scratch",
+      "shell": "/bin/sh",
+      "shells": [
+        "/bin/sh"
+      ],
+      "exec": {
+        "transport": "websocket",
+        "url": "wss://linux.example.invalid:8765",
+        "token_file": "/run/secrets/styx-exec-linux-token"
+      },
+      "computer": {
+        "enabled": true,
+        "transport": "mcp-http",
+        "url": "https://linux.example.invalid/mcp",
+        "token_file": "/run/secrets/styx-computer-linux-token"
+      }
+    },
+    {
+      "id": "mac-test",
+      "kind": "host",
+      "platform": "darwin",
+      "generation": "manual-generation-1",
+      "allowed": false,
+      "cwd": "/Users/example/styx-scratch",
+      "shell": "/bin/zsh",
+      "shells": [
+        "/bin/zsh",
+        "/bin/sh"
+      ],
+      "exec": {
+        "transport": "websocket",
+        "url": "wss://mac.example.invalid:8765",
+        "token_file": "/run/secrets/styx-exec-mac-token"
+      },
+      "computer": {
+        "enabled": true,
+        "transport": "mcp-http",
+        "url": "https://mac.example.invalid/mcp",
+        "token_file": "/run/secrets/styx-computer-mac-token"
+      }
+    },
+    {
+      "id": "win-test",
+      "kind": "host",
+      "platform": "win32",
+      "generation": "manual-generation-1",
+      "allowed": false,
+      "cwd": "C:\\Users\\example\\styx-scratch",
+      "shell": "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe",
+      "shells": [
+        "C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe"
+      ],
+      "exec": {
+        "transport": "websocket",
+        "url": "wss://windows.example.invalid:8765",
+        "token_file": "/run/secrets/styx-exec-win-token"
+      },
+      "computer": {
+        "enabled": true,
+        "transport": "mcp-http",
+        "url": "https://windows.example.invalid/mcp",
+        "token_file": "/run/secrets/styx-computer-win-token"
+      }
+    }
+  ]
+}

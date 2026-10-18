@@ -1,0 +1,129 @@
+{
+  "schema": 1,
+  "kind": "linux-managed-service-exec-soak",
+  "status": "PASS",
+  "driver_pid": 1632290,
+  "node": "v22.23.3",
+  "revision": "1635af6b8a9dd8f26738c8438066b726968b6cb6",
+  "runtime": {
+    "node": "22.23.3",
+    "codex": "0.163.0",
+    "cua": "0.36.0"
+  },
+  "binary_sha256": {
+    "node": "fde6a4bf8d0562f7751d1a2d6cb9b417c4cfe107bbcb0aa3e9a24e125e348f48",
+    "codex": "399ff69c431c066e40de318fba45c2b07f45a76b19939d247ee4828fc70c4215",
+    "cua": "d09deb163d5c505493c865c0882ccf261d460c515afe9df1ad1e5d4173f2a4f9"
+  },
+  "evidence": {
+    "signed_build": "PASS",
+    "signed_install": "PASS",
+    "managed_start_ready": "PASS",
+    "managed_restart": "PASS",
+    "managed_sigkill_recovery": "PASS",
+    "signed_upgrade": "NOT RUN",
+    "signed_rollback": "NOT RUN",
+    "owned_gui_screenshot_ax_action_readback": "PASS",
+    "managed_uninstall": "PASS",
+    "secret_cleanup": "PASS",
+    "cold_install": "NOT RUN",
+    "publisher_trust_distribution": "NOT RUN",
+    "full_platform_24h_soak": "NOT RUN",
+    "managed_service_exec_sampling": "PASS",
+    "managed_service_exec_soak_24h": "NOT RUN",
+    "full_gui_session_soak_24h": "NOT RUN"
+  },
+  "boundaries": {
+    "gateway": "private loopback HTTPS/WSS with per-client test CA",
+    "service": "one explicitly named user systemd unit; no sudo, lingering or session changes",
+    "publisher": "ephemeral pilot Ed25519 key, not established distribution trust",
+    "gui": "self-expiring exact-title/pid owned scratch only; no screenshot bytes persisted"
+  },
+  "samples": [
+    {
+      "phase": "managed_start_ready",
+      "version": "0.1.0-managed-pilot-1",
+      "status": "PASS",
+      "service_active": true,
+      "exec_wss_connected": true,
+      "computer_wss_slots": 1,
+      "systemd_restarts": 0,
+      "signed_stable_node": true,
+      "signed_connector_generation": true
+    },
+    {
+      "phase": "managed_restart",
+      "version": "0.1.0-managed-pilot-1",
+      "status": "PASS",
+      "service_active": true,
+      "exec_wss_connected": true,
+      "computer_wss_slots": 1,
+      "systemd_restarts": 0,
+      "signed_stable_node": true,
+      "signed_connector_generation": true
+    },
+    {
+      "phase": "managed_sigkill_recovery",
+      "version": "0.1.0-managed-pilot-1",
+      "status": "PASS",
+      "service_active": true,
+      "exec_wss_connected": true,
+      "computer_wss_slots": 1,
+      "systemd_restarts": 1,
+      "signed_stable_node": true,
+      "signed_connector_generation": true
+    }
+  ],
+  "tls": {
+    "validity_days": 3,
+    "certificate_not_after": "2026-10-21T17:52:23.000Z",
+    "trust_scope": "per-client private test CA only; no global trust change"
+  },
+  "soak": {
+    "schema": 1,
+    "status": "PASS",
+    "phase": "completed",
+    "driver_pid": 1632290,
+    "node": "v22.23.3",
+    "revision": "1635af6b8a9dd8f26738c8438066b726968b6cb6",
+    "unit_name": "styx-rc20261019-owned-soakproof.service",
+    "duration_seconds": 2,
+    "interval_seconds": 1,
+    "passed_samples": 3,
+    "elapsed_seconds": 2,
+    "started_at": "2026-10-18T17:52:28.959Z",
+    "initial_main_pid": 1632788,
+    "initial_restarts": 1,
+    "scope": "owned user service + native Exec over private HTTPS/WSS; no periodic GUI calls",
+    "full_gui_session_soak_24h": "NOT RUN",
+    "tls_certificate_validity_days": 3,
+    "tls_not_after": "2026-10-21T17:52:23.000Z",
+    "tls_required_duration_safety_margin_seconds": 3600,
+    "last_sample": {
+      "at": "2026-10-18T17:52:30.973Z",
+      "sample": 3,
+      "status": "PASS",
+      "elapsed_seconds": 2,
+      "main_pid": 1632788,
+      "restarts": 1,
+      "native_exec_latency_ms": 9,
+      "main_rss_bytes": 245358592,
+      "main_threads": 7,
+      "cgroup_memory_current_bytes": 337043456,
+      "cgroup_cpu_usage_nanoseconds": 760195000,
+      "cgroup_tasks": 61,
+      "exec_wss_connected": true,
+      "computer_wss_slots": 1
+    },
+    "completed_at": "2026-10-18T17:52:31.011Z"
+  },
+  "gui": {
+    "owned_window": true,
+    "pid_and_exact_title_scoped": true,
+    "screenshot": true,
+    "accessibility_elements": 3,
+    "observed_button_clicked": true,
+    "independent_exit_code": 0
+  },
+  "completed_at": "2026-10-18T17:52:32.214Z"
+}

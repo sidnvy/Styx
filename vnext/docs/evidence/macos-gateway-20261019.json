@@ -1,0 +1,61 @@
+{
+  "schema": 1,
+  "status": "PASS",
+  "source_revision": "e0d6b80096b49219cac0031509a82a13f778cbb3",
+  "reference_revision": "32791a1",
+  "scope": "native macOS SDK -> private HTTPS Gateway -> outbound WSS Host -> installed Styx.app embedded Cua; same Gateway native Exec",
+  "chatgpt_connector": "NOT RUN",
+  "production_endpoint": "NOT RUN",
+  "service_install": "NOT RUN",
+  "signing_mutation": "NOT RUN",
+  "tcc_mutation": "NOT RUN",
+  "node": "v25.6.1",
+  "evidence": {
+    "outbound_exec_connected": "PASS",
+    "outbound_computer_connected": "PASS",
+    "native_exec": "PASS",
+    "owned_gui": "PASS",
+    "cleanup": "PASS"
+  },
+  "installed_app_owner": 29842,
+  "gui": {
+    "screenshot": "PASS",
+    "screenshot_sha256": "69001aedb134b592d1fea490c4760d9e95be85aa1543c76d350f50548df3123f",
+    "accessibility_elements": 6,
+    "observed_click": "PASS",
+    "independent_readback": "PASS",
+    "fixture_exit_code": 0
+  },
+  "runtime": {
+    "node": {
+      "version": "25.6.1",
+      "sha256": "37b13b63da3c59714eeabc9422575c7a7a44f0af45762d51e8094f6c94e60ff9",
+      "scope": "existing Homebrew native test runner; production supported Node22.23.3 pin unchanged"
+    },
+    "codex": {
+      "version": "0.163.0",
+      "sha256": "8813367285524ac798dd96d1b071aea30d58708c7226fd236cd275cf1cfdee31",
+      "official_archive_sha256": "61c4d9a92521bdb42b0c1d9f87c673f6da628a06de5945cbdd9a0010632f6d10"
+    },
+    "cua": {
+      "version": "0.36.0",
+      "sha256_after_local_development_signing": "4a6d43f068af16b3b598364eab5f2fa2b264df1a5c537774540ac5aa708fd71e",
+      "scope": "existing installed signed Styx app child"
+    }
+  },
+  "final_cleanup_observation": {
+    "owned_pilot_process_count": 0,
+    "private_credentials_directory_absent": true,
+    "installed_app_preserved": true,
+    "host_accessibility": true,
+    "host_screen_recording": true
+  },
+  "initial_attempt": {
+    "functional_exec_gui": "PASS",
+    "autonomous_cleanup": "FAIL",
+    "reason": "HTTP close awaited live outbound WebSockets before Host was stopped",
+    "assistance": "SIGTERM only verified owned Host PID31332",
+    "fix": "Clean owned Exec, stop owned Host, then close HTTP",
+    "corrected_fresh_state_rerun": "PASS"
+  }
+}

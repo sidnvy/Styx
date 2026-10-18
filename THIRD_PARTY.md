@@ -100,3 +100,11 @@ Generated from the committed npm lockfile. This is a declaration inventory, not 
 | wrappy | 1.0.2 | ISC |
 | zod | 4.4.3 | MIT |
 | zod-to-json-schema | 3.25.2 | ISC |
+
+## Optional bundled Node runtime
+
+Native Host distributions may include official Node.js 22.23.3 (required for
+Windows). Each such signed bundle includes the exact upstream LICENSE file at
+`licenses/node-LICENSE`, including notices for Node's bundled dependencies, and
+`provenance/node.json` with source and checksums. Preparation and remaining
+release gates are documented in `vnext/docs/bundled-node-runtime.md`.

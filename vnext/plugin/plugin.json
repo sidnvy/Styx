@@ -1,0 +1,20 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "styx-native",
+  "version": "0.1.0",
+  "description": "Connect an independent Styx Gateway to explicitly enrolled native devices.",
+  "author": {"name": "Styx contributors"},
+  "extensions": {
+    "com.openai": {
+      "interface": {
+        "displayName": "Styx",
+        "shortDescription": "Native device execution",
+        "longDescription": "Onboard a native Styx device with publisher-verified runtime, explicit owner approval, and independently connected native execution and computer tools.",
+        "developerName": "Styx contributors",
+        "category": "Developer Tools",
+        "capabilities": [],
+        "defaultPrompt": "Help me onboard a new native device to my independent Styx Gateway."
+      }
+    }
+  }
+}

@@ -1,0 +1,18 @@
+{
+  "name": "styx-exec-adapter-prototype",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "test": "node --test test/unit.test.mjs",
+    "test:integration": "node --test --test-concurrency=1 test/integration.test.mjs",
+    "test:all": "node --test --test-concurrency=1 test/*.test.mjs"
+  },
+  "dependencies": {
+    "ws": "8.22.0",
+    "@modelcontextprotocol/sdk": "1.30.1"
+  }
+}

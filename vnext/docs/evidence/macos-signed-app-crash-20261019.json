@@ -1,0 +1,8 @@
+{
+  "schema": 1,
+  "owner_sigkill_child_eof_cleanup": "PASS",
+  "fresh_launch_generation": "PASS",
+  "no_gui_replay": "NOT RUN",
+  "gui": "NOT RUN",
+  "final_teardown": "PASS"
+}

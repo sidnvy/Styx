@@ -1,0 +1,113 @@
+{
+  "schema": 1,
+  "signing": "PASS",
+  "launchservices": "PASS",
+  "ownership": "PASS",
+  "permissions": "PASS",
+  "normal_teardown": "PASS",
+  "native_gui": "BLOCKED",
+  "tcc_requests": "NOT RUN",
+  "owner_pid": 27691,
+  "health_report": {
+    "build": {
+      "exe_sha256": "4a6d43f068af16b3b598364eab5f2fa2b264df1a5c537774540ac5aa708fd71e",
+      "git_sha": "6d6c734c127025fb39ad5d585a10382808b39dc1",
+      "version": "0.36.0"
+    },
+    "checks": [
+      {
+        "message": "Skipped by include/skip filter.",
+        "name": "binary_version",
+        "status": "skip"
+      },
+      {
+        "message": "Skipped by include/skip filter.",
+        "name": "platform_supported",
+        "status": "skip"
+      },
+      {
+        "message": "Skipped by include/skip filter.",
+        "name": "session_active",
+        "status": "skip"
+      },
+      {
+        "data": {
+          "bundle_identifier": "app.styx.host",
+          "configured_bundle_identifier": "app.styx.host",
+          "executable_path": "/private/tmp/styx-local-dev-20261019-0743bc4c/Styx.app/Contents/MacOS/cua-driver",
+          "identity_source": "parent_application",
+          "parent_process_id": 27691
+        },
+        "message": "Embedded daemon is directly hosted by app.styx.host.",
+        "name": "bundle_identity",
+        "status": "pass"
+      },
+      {
+        "message": "Skipped by include/skip filter.",
+        "name": "tcc_accessibility",
+        "status": "skip"
+      },
+      {
+        "message": "Skipped by include/skip filter.",
+        "name": "tcc_screen_recording",
+        "status": "skip"
+      },
+      {
+        "message": "Skipped by include/skip filter.",
+        "name": "ax_capability",
+        "status": "skip"
+      },
+      {
+        "message": "Skipped by include/skip filter.",
+        "name": "screen_capture_capability",
+        "status": "skip"
+      },
+      {
+        "message": "Skipped by include/skip filter.",
+        "name": "windowserver_connection",
+        "status": "skip"
+      }
+    ],
+    "driver_version": "0.36.0",
+    "overall": "ok",
+    "platform": "darwin",
+    "schema_version": "1"
+  },
+  "check_permissions": {
+    "accessibility": false,
+    "direct_capture_error": null,
+    "direct_capture_status": "not_checked",
+    "screen_recording": false,
+    "screen_recording_capturable": null,
+    "source": {
+      "attribution": "host",
+      "direct_runtime": false,
+      "disclaim_env": false,
+      "embedded": true,
+      "executable": "/private/tmp/styx-local-dev-20261019-0743bc4c/Styx.app/Contents/MacOS/cua-driver",
+      "host_bundle_id": "app.styx.host",
+      "note": "Embedded mode: these booleans reflect the HOST app's TCC grant (the driver is a child in the host's responsibility chain). No separate driver grant exists or is needed. If a permission is NOT granted, the host app must request it \u2014 the driver never raises its own prompt.",
+      "pid": 27693,
+      "responsible_ppid": 27691
+    }
+  },
+  "descriptor": {
+    "bundle_id": "app.styx.host",
+    "daemon_pid": 27693,
+    "generation": "92E5DD11-D165-4253-A2D5-105D5E43A19E",
+    "host_accessibility": false,
+    "host_screen_recording": false,
+    "mcp_attribution": "NOT RUN",
+    "native_gui_acceptance": "NOT RUN",
+    "owner_pid": 27691,
+    "schema": 1,
+    "socket": "/tmp/styx-cua-501/cua.sock",
+    "transport": "socket_accepting"
+  },
+  "permissions_readback": "PASS",
+  "native_gui_blocker": "Actual signed app host accessibility=false and screen_recording=false; human grants required",
+  "deep_strict_signature": "PASS",
+  "exact_apple_anchor_bundle_ou_requirement": "PASS",
+  "team_id": "MGPKJXPZX4",
+  "source_revision": "372ce4cdcfa26a020d992e539eed2d5006eb83e5"
+}

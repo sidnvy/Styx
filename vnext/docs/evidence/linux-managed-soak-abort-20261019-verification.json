@@ -1,0 +1,13 @@
+{
+  "status": "PASS",
+  "test": "managed_service_soak_sigterm_cleanup",
+  "tested_revision": "1635af6b8a9dd8f26738c8438066b726968b6cb6",
+  "actual_samples_before_abort": 1,
+  "runner_exit_code": 2,
+  "aborted_receipt_status": "BLOCKED",
+  "owned_unit_uninstall": "PASS",
+  "secret_cleanup": "PASS",
+  "periodic_gui_calls": "NOT RUN",
+  "final_gui_after_abort": "NOT RUN",
+  "managed_service_exec_soak_24h": "NOT RUN"
+}

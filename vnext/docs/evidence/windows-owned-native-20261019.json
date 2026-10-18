@@ -1,0 +1,47 @@
+{
+  "schema": 1,
+  "kind": "windows-owned-native-host-pilot",
+  "status": "PASS",
+  "task": "StyxPilot-RC20261019-2b629090",
+  "node": "v22.23.3",
+  "started_at": "2026-10-18T18:33:13.324Z",
+  "source_sha256": {
+    "orchestrator": "fe9fa190212dea978e84594a472f375b486cfe90e4a7a83d15b9446d0e77e6ed",
+    "gui": "46082382eb4c1fac95228c1f8ea29b4003a9b97a06eb2de5689fa1285a53a271"
+  },
+  "binary_sha256": {
+    "node": "9c9245166b4a8e182e0b797da9c20136117ff24368eaff1fec8343a123c8db0e",
+    "codex": "2692c8c7bb2cf8b0aefe638741fc90236f4b824c59578ce84994f9de58200993",
+    "cua": "99291d8d6a4851d9df96da5813a1ef2761f2c9d3a59d2a7036c0bf4d09652f4f"
+  },
+  "evidence": {
+    "signed_native_build_install": "PASS",
+    "interactive_task_start_native_exec": "PASS",
+    "owned_gui_screenshot_ax_click_independent_readback": "PASS",
+    "managed_stop_start": "PASS",
+    "managed_crash_recovery": "PASS",
+    "owned_task_uninstall": "PASS",
+    "secret_and_signed_fixture_cleanup": "PASS"
+  },
+  "boundaries": {
+    "service": "fresh Interactive/Limited owner task only",
+    "gateway": "fresh loopback HTTP/WS only; no external controller for product operations",
+    "publisher": "ephemeral pilot key, no distribution trust claim",
+    "gui": "exact owned pid/title self-expiring WinForms; no screenshots persisted",
+    "runtime_upgrade": "NOT RUN"
+  },
+  "gui": {
+    "pilot": "styx-windows-fully-selfcontained-cua",
+    "result": "PASS",
+    "platform": "win32",
+    "nativeUi": "WinForms/UIA",
+    "observedExactOwnedPid": true,
+    "png": true,
+    "accessibilityElements": 6,
+    "clickedOwnedButton": true,
+    "independentExitCode": 0,
+    "externalControlPlane": "none"
+  },
+  "stopped_recovery_observation_ms": 65925,
+  "completed_at": "2026-10-18T18:35:34.544Z"
+}

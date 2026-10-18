@@ -1,0 +1,306 @@
+# Styx VNext — native standalone release candidate
+
+**Scope: macOS, Linux (including Hyprland), Windows. No iOS.**
+
+One Styx project, two deployment roles: a model-facing MCP Gateway and native
+Styx Host execution processes. ChatGPT is the sole reasoning/planning layer.
+The product is implemented under vnext/ and is independent of deployed
+Charon/Coder services. Merging the candidate does not switch an endpoint or
+decommission an existing installation. Begin with [fresh native onboarding](docs/fresh-onboarding.md).
+
+The native CLI preparation, pairing, signed staging and per-user service helpers
+are implemented. A fresh plugin/account connection is an explicit acceptance
+step; historical native/SDK pilots do not establish it. There is no graphical
+installer or browser automation provider in this candidate.
+
+## Optional CAS continuation experiment (not production)
+
+An opt-in native MCP App controller can test bounded ordinary-Chat turn continuation
+without Work, Codex model delegation or a Browser Companion. It is **off by
+default** and has **no Host mutation actions**. Enable it only in a separate
+experimental Gateway using the private `STYX_CAS_EXPERIMENT_STATE_DIR` setting.
+Local contract/iframe Host-simulator tests pass, including pinned MCP Apps
+ui/message schema validation. Real ordinary ChatGPT Web testing confirmed
+single automatic follow-up Turns, but **repeated unattended continuation
+is not yet reliable or accepted** (the Host has returned RPC -32601).
+Mobile/background acceptance remains pending. A separate CAS-only
+lab mode advertises no native Exec or Computer tools.
+See [CAS P0 experiment](docs/cas-native-continuation-experiment.md)
+and [isolated lab connection](docs/cas-lab-connection.md).
+
+## Native runtimes
+
+- **Execution:** OpenAI Codex Exec Server, with exec_command and write_stdin.
+- **Computer Use:** TryCua Cua Driver 0.36.0, using original MCP tool names and
+  input schemas. Styx adds only the optional environment_id routing parameter.
+- **Portable tools:** list_apps, list_windows, get_window_state,
+  get_desktop_state, click, set_value, type_text, press_key, scroll,
+  verify_state.
+- **Browser:** separate Playwright/CDP decision; not implemented. No iOS.
+
+The portable schema is generated from official live Cua v0.36.0 tool
+declarations captured on macOS, Linux and Windows. Fields that differ between
+platforms are excluded. Native Cua always performs final action validation.
+Native screenshot/session handles are not Codex Exec process session IDs.
+
+## Test results, October 17 2026
+
+| Test | Result |
+| --- | --- |
+| Native Cua 0.36.0 MCP init, discovery and schema on three OS hosts | PASS |
+| Linux Hyprland XWayland owned scratch window screenshot/AX/click/readback | PASS |
+| Linux Hyprland Wayland owned scratch window screenshot/AX/click/readback | PASS |
+| macOS Styx.app Embedded Cua owned scratch window | PASS in prior isolated pilot |
+| Windows Cua MCP on interactive session | PASS read-only |
+| Windows owned scratch GUI mutation | PASS, isolated Edge Profile + system UIA readback |
+| Real Codex Exec through authenticated Gateway MCP | PASS, Linux loopback |
+| Host Outbound WebSocket, including real private-link Exec and bounded Cua GUI | PASS isolated pilots |
+| Signed distribution and ChatGPT product registration | NOT RUN |
+
+The actual native binaries were staged in private temporary directories and
+official checksum files were checked. No package-manager or system-level
+installation occurred. No unrelated application was touched.
+
+## Developer tests
+
+Requires Node.js 22+, Python 3, and Linux x86_64 for pinned Codex binary test.
+
+    cd vnext
+    npm ci --ignore-scripts --no-audit --no-fund
+    python3 packages/styx-exec-adapter/prepare-runtime.py
+    npm run test:all
+    STYX_LIVE_EXEC_TEST=1 npm test
+
+GitHub Actions also runs Cua MCP protocol/schema tests in ubuntu-24.04,
+macos-15 and windows-2025, downloading pinned official archives and checking
+the SHA256 digest before running a headless schema-only smoke test. This is
+not a native GUI action test on CI runners.
+
+Native Cua smoke example after supplying a verified absolute executable:
+
+    DO_NOT_TRACK=1 STYX_CUA_PORTABLE_MANIFEST=./gateway/cua-portable-0.36.0.json STYX_CUA_SCHEMA_ONLY=1 node host/native-cua-smoke.cjs /absolute/path/to/cua-driver
+
+On macOS, STYX_CUA_DIRECT=1 is permitted only for read-only native smoke. For
+GUI action, a signed, TCC-authorized Styx.app must own the Embedded Cua runtime.
+Do not assume standalone macOS MCP inherits the GUI application's privileges.
+
+To update the Cua version deliberately, capture official tools/list on all
+three operating systems into non-committed host/fixture-cua-OS.json inputs,
+review versions and generate using node host/generate-portable-cua.mjs.
+Run all unit, integration and OS checks. Never silently pull latest binaries.
+
+## Starting a local test Gateway
+
+Use config/targets.example.json only as an example; all endpoints are
+placeholders and there are no committed credentials. Save a private configured
+catalog and strong mode-0600 inbound bearer token. Then run:
+
+    STYX_MCP_TOKEN_FILE=/path/to/token node gateway/cli.mjs /path/to/targets.json
+
+By default MCP listens on 127.0.0.1:8795/mcp. The Gateway does not start a
+Host daemon or provision any Cua/Codex executors. Direct WSS and native Cua
+HTTPS MCP require independently configured, authenticated endpoints.
+Never expose an unauthenticated plaintext remote RPC endpoint.
+
+Unattended native tests create only owned scratch GUI windows. If session,
+permission, driver, or fixture is unavailable the outcome is BLOCKED, not PASS.
+Production deployment, OS permission changes, Tunnel changes, Coder/Charon
+migration and access to personal applications are explicitly excluded.
+
+
+## Outbound Host execution (implemented in preview)
+
+The Gateway now accepts one authenticated Host-originated WebSocket per
+admitted Host ID. The connector supervises a local pinned Codex Exec
+Server over stdio and forwards its native JSON-RPC byte frames with no
+secondary execution protocol. The Host needs no inbound port or Coder.
+
+The model tools remain exec_command / write_stdin with environment_id.
+Use host/config.example.json, host/prepare-codex.py, host/doctor.mjs and
+host/connect.mjs for isolated bootstrap, then configure a Gateway target
+with exec.transport set to outbound and a strong per-Host token_file.
+
+Actual Codex process, PTY, input and disconnect/reconnect tests run via
+the authenticated Gateway MCP and Host connector in separate OS processes.
+TLS/WSS termination supports an operator-supplied private certificate.
+Native Cua-outbound access is not part of this milestone: the existing
+separate private Cua MCP connection remains necessary.
+
+See docs/outbound-host.md. No production rollouts occurred.
+
+Outbound Host identity can use either a private bearer token or certificate-pinned WSS mTLS. See docs/outbound-host.md.
+
+
+## New milestone: Cua native MCP over outbound Host WebSocket
+
+The same installed Styx Host Connector can open a bounded pool of outbound
+Computer connections alongside its Codex Exec connection. Computer WebSockets
+carry unmodified native Cua MCP JSON-RPC, not shell commands or Styx desktop
+RPC. Each ChatGPT MCP session claims one dedicated Cua stdio worker.
+Native Cua remains the final authority over screen, UIA/AX and input.
+
+The Host configuration optionally contains:
+
+    "computer": {
+      "enabled": true,
+      "binary": "/absolute/path/to/cua-driver",
+      "connections": 2
+    }
+
+and the matching Gateway target has:
+
+    "computer": {
+      "enabled": true,
+      "transport": "outbound",
+      "max_connections": 2
+    }
+
+For macOS the Host computer configuration MUST include an absolute socket
+path for a running Styx.app-managed embedded Cua daemon. The generic Host
+Connector will not silently launch an unprivileged macOS GUI worker.
+
+Cua tool schemas remain pinned to portable v0.36.0. The model-facing
+session field is hidden: Host and Gateway bind implicit native sessions to
+distinct authenticated MCP connections. Mutating GUI calls interrupted
+by transport loss are marked uncertain and never automatically retried.
+
+With the verified Cua binary present at its isolated pilot path:
+
+    STYX_LIVE_CUA_TEST=1 npm test
+
+See docs/outbound-computer.md and gateway/test/computer-outbound.test.mjs.
+
+
+## Documented native Cua behavior and unattended Wayland acceptance
+
+Cua v0.36.0 is the source of truth for macOS, Linux and Windows native tools.
+Before changing a Cua-related execution path, consult the tag-pinned
+docs/cua-0.36-source-contract.md and the linked official source files.
+
+Linux native Wayland support explicitly requires the trusted Host environment
+setting CUA_DRIVER_RS_ENABLE_WAYLAND=1, per Cua's platform support documentation.
+The Styx Host example config provides this opt-in. With the setting present,
+a real Cua 0.36.0 MCP process was able to find an owned Hyprland Wayland
+test window, capture PNG + accessibility tree, click its observed button and
+independently verify exit code zero over Styx's outbound Computer lane.
+
+For unattended owned-window acceptance on a Linux graphical Host, first
+prepare the official checksum-verified Codex/Cua binaries, set
+STYX_CUA_NATIVE_BINARY to the absolute Cua executable path, then run:
+
+    npm run test:native:cua
+
+This is an **explicitly opt-in** real GUI test which only operates on its own
+scratch Zenity dialog; it fails BLOCKED when the native graphical session or
+binary/fixture is unavailable. It does not start an unattended production
+daemon, change the compositor, modify host TCC/permission grants, or touch
+personal application windows.
+
+The Gateway uses a model-session-scoped Cua Transport Lease. An explicit MCP
+session DELETE frees it immediately; an abandoned idle lease is reaped after
+five minutes to avoid exhausting the Host's small native connection pool.
+This is Styx resource management, not a replacement for Cua's own session
+semantics. The original MCP SDK Client.close() by itself does not send DELETE.
+
+
+## Production onboarding is a separate acceptance gate
+
+The host/connect.mjs script and Cua/Exec pilots are **not** a production
+installer or a Host enrollment service. Future production must offer signed
+single-product installers, local-first trust/pairing, choosing devices from
+ChatGPT (with a native setup fallback), OS-specific permissions, startup,
+updates, rollback and revocation without depending on SSH/Coder Agent.
+See docs/onboarding-installation.md and docs/acceptance.md. These are tracked
+release requirements, not currently implemented features.
+
+
+## Unattended physical GUI test
+
+Once an isolated Gateway/Host pair is provisioned and both native execution
+lanes are available, use npm run test:physical:cua on the Gateway host with
+STYX_PILOT_MCP_URL, STYX_PILOT_MCP_TOKEN_FILE and
+STYX_PILOT_ENVIRONMENT_ID set in the trusted test environment. The test
+uses Styx exec_command, Cua list_windows/get_window_state/click and
+write_stdin for independent scratch readback; no SSH/Coder tools are in
+the test execution path. See docs/outbound-computer.md. It does not provision
+a production install or change OS permissions.
+
+
+## Pair a device without SSH/Coder — opt-in prototype
+
+Gateway enrollment is disabled by default. If the operator additionally
+configures STYX_ENROLLMENT_DIR and STYX_ENROLL_ADMIN_TOKEN_FILE (owner bearer
+different from model MCP bearer), a private local-first device enrollment
+controller is available over HTTPS.
+
+On a new Host, native user generates a device-local identity and starts
+one bounded pairing workflow using the short-lived invitation:
+
+    node host/enroll.mjs onboard /private/local-config.json /private/invitation.txt
+
+Trusted Gateway owner inspects, compares the full key fingerprint and
+explicitly approves the proposed Host:
+
+    node gateway/enroll-admin.mjs /private/admin.json pending
+    node gateway/enroll-admin.mjs /private/admin.json approve REQUEST_ID FULL_FINGERPRINT computer
+
+Upon approval the Host saves a private outbound token and host.json; the
+Gateway dynamically admits its environment ID and can revoke it immediately.
+This does not install/enable a service or grant GUI permissions.
+
+An offline Ed25519-signed release prototype provides verified staging,
+activation and rollback through host/installer.mjs and host/launch.mjs.
+Native cold-install and the ChatGPT device-picker UI remain product release
+blockers; see docs/enrollment-pilot.md and docs/onboarding-installation.md.
+
+Run local and platform-native tests:
+
+    npm run test:host
+    npm run test:all
+
+
+## Real new-device pilot (not cold installation)
+
+A two-machine first-contact trial began with ZERO pre-registered Hosts and
+successfully completed local device identity -> owner approval -> encrypted
+Host capability -> dynamic Gateway admission -> outbound Exec and Computer
+connection -> native scratch GUI verification -> device revocation, including
+revocation persistence after Gateway restart. Physical test bootstrap
+still used existing OOB controls to place the installer source and convey
+the one-time invitation; normal Styx execution and authentication did not.
+
+This is the pairing contract to embed in future native installers. It is not
+yet a signed cold-install experience or the ChatGPT intelligent setup UI.
+
+
+## Linux signed Host + user service (native pilot completed)
+
+A local Linux signed Host build, user-owned systemd service lifecycle, and
+installed native Cua/Exec end-to-end acceptance have been implemented.
+No production Charon/Coder or MCP endpoint changed.
+
+The Linux builder includes pinned Codex 0.163.0 and Cua 0.36.0 binaries,
+the minimal ws runtime package, and a signed manifest. The installer
+verifies, stages and activates versioned releases, while a tiny bootstrap
+verifies the active publisher signature and starts the actual signed Host.
+A native systemd --user manager can start, stop, restart, enable, disable
+and uninstall ONLY Styx-owned services. No sudo or lingering-mode changes.
+
+Real Workstation acceptance passed for signed first install, Cua screenshot/
+AX/click independent readback, multiple signed version upgrades, automatic
+SIGKILL recovery, Gateway disconnect/reconnect, signed rollback, unit
+uninstall/reinstall and bounded signed-release retention.
+
+This remains a Pilot: system Node.js is assumed present, native Linux
+package signing/cold install and reboot/logout behavior have NOT been
+validated, and the app is not registered as a production gateway Host.
+See docs/linux-managed-host.md for isolated reproduction and limitations.
+
+
+The installed signed Host can be checked independently of enrollment config's
+placeholder executable paths:
+
+    node host/doctor.mjs /private/host.json /private/install /private/publisher.pub
+
+This validates the active publisher-signed release and actual pinned Codex/Cua
+versions. It does not grant GUI permissions or automatically start services.

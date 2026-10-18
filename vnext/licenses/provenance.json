@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "files": [
+    {
+      "file": "cua-LICENSE",
+      "repository": "trycua/cua",
+      "ref": "cua-driver-rs-v0.36.0",
+      "source_path": "LICENSE.md",
+      "source_url": "https://raw.githubusercontent.com/trycua/cua/cua-driver-rs-v0.36.0/LICENSE.md",
+      "sha256": "c0779290c1d4783169aa3dbfb55feb505e563ef8a004bbf55298ceffcfbda8d9"
+    },
+    {
+      "file": "codex-LICENSE",
+      "repository": "openai/codex",
+      "ref": "rust-v0.163.0",
+      "source_path": "LICENSE",
+      "source_url": "https://raw.githubusercontent.com/openai/codex/rust-v0.163.0/LICENSE",
+      "sha256": "d17f227e4df5da1600391338865ce0f3055211760a36688f816941d58232d8dc"
+    },
+    {
+      "file": "codex-NOTICE",
+      "repository": "openai/codex",
+      "ref": "rust-v0.163.0",
+      "source_path": "NOTICE",
+      "source_url": "https://raw.githubusercontent.com/openai/codex/rust-v0.163.0/NOTICE",
+      "sha256": "9d71575ecfd9a843fc1677b0efb08053c6ba9fd686a0de1a6f5382fd3c220915"
+    },
+    {
+      "file": "styx-LICENSE",
+      "repository": "sidnvy/Styx",
+      "source_path": "LICENSE",
+      "sha256": "de3c0919041879897ed73fde50a4f4173b88604c0460b7c5ada96a5af0b4fc21"
+    }
+  ]
+}

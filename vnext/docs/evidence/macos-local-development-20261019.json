@@ -1,0 +1,45 @@
+{
+  "schema": 1,
+  "source_revision": "259448f03e531b4638ee7c094070a0f3163f6b14",
+  "scope": "owned scratch local Apple Development app; no external distribution",
+  "platform": "macOS 27.0.1 arm64",
+  "initial_cli_entry": {
+    "status": "FAIL",
+    "observed": "exit 0 without producing app under /tmp symlink path; fixed by canonical entry guard"
+  },
+  "swift_compilation": "PASS",
+  "plist_validation": "PASS",
+  "certificate_available": "PASS",
+  "certificate_type": "Apple Development",
+  "certificate_ou": "MGPKJXPZX4",
+  "local_signing": {
+    "status": "BLOCKED",
+    "phase": "nested cua-driver signing",
+    "observed_error": "errSecInternalComponent",
+    "exit_code": 2
+  },
+  "app_signature_verification": "NOT RUN",
+  "notarization": "NOT RUN",
+  "external_distribution": "NOT RUN",
+  "new_signed_app_lifecycle": "NOT RUN",
+  "new_signed_app_tcc": "NOT RUN",
+  "new_signed_app_gui": "NOT RUN",
+  "key_export": "NOT RUN",
+  "keychain_unlock_or_acl_change": "NOT RUN",
+  "scratch_retention": "Prepared private marked app and interactive finisher retained for explicit local user action; no app launched by this attempt",
+  "finisher_sha256": "0971f11b4e080c4ed7a3ca7207dde5bc59a30db5461286e5d4beafc3778094d1",
+  "prepared_styx_sha256": "754256c25f71492f1a0a60cfd6918c593d3806ccd715891629cbab967205edf7",
+  "prepared_cua_sha256": "87c7e782e69703d95524e4ceb7ceba03c8a159caabf1f1ce2c118eade7d2a5ec",
+  "readonly_followup": {
+    "user_ssh_retry": "BLOCKED: same errSecInternalComponent reported by user",
+    "console_login": "PASS: pier UID501 active Aqua gui/501",
+    "default_user_keychain": "login.keychain-db",
+    "local_codesign_certificate_chain": "PASS",
+    "chain": "Apple Development -> Apple Worldwide Developer Relations G3 -> Apple Root CA",
+    "verification_scope": "local certificates and offline cached revocation only",
+    "ssh_keychain_settings_read": "BLOCKED: User interaction is not allowed.",
+    "keychain_locked_state": "NOT RUN",
+    "private_key_acl_diagnosis": "NOT RUN",
+    "conclusion": "SSH interactive keychain access unavailable; locked state or exact key authorization cause not established"
+  }
+}

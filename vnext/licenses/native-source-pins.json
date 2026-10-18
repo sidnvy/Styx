@@ -1,0 +1,2186 @@
+{
+  "schema": 1,
+  "scope": "pinned upstream source evidence; not a binary-equivalent SBOM",
+  "sources": [
+    {
+      "component": "codex",
+      "repository": "openai/codex",
+      "release": "rust-v0.163.0",
+      "commit": "83086188ae0614bd882818ff1aa23f3194962012",
+      "files": [
+        {
+          "path": ".github/workflows/rust-release.yml",
+          "kind": "build-evidence",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/.github/workflows/rust-release.yml",
+          "sha256": "536d07d677b2fa2b44a11eb1e853b001217e39c6fd3bae6845f57f90e9eea6da",
+          "size": 87300
+        },
+        {
+          "path": "LICENSE",
+          "kind": "license",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/LICENSE",
+          "sha256": "d17f227e4df5da1600391338865ce0f3055211760a36688f816941d58232d8dc",
+          "size": 10926
+        },
+        {
+          "path": "NOTICE",
+          "kind": "license",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/NOTICE",
+          "sha256": "9d71575ecfd9a843fc1677b0efb08053c6ba9fd686a0de1a6f5382fd3c220915",
+          "size": 242
+        },
+        {
+          "path": "codex-rs/Cargo.lock",
+          "kind": "cargo-lock",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/Cargo.lock",
+          "sha256": "17cdd862471774ba7aef836aaf0a0a3ed76bd23e503b1fc7278c89d1f2719d03",
+          "size": 408369
+        },
+        {
+          "path": "codex-rs/Cargo.toml",
+          "kind": "cargo-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/Cargo.toml",
+          "sha256": "b017f28f91f7506b730c247ffb3dab5250d9848514c194331fd774836d480f0b",
+          "size": 20960
+        },
+        {
+          "path": "codex-rs/agent-graph-store/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/agent-graph-store/Cargo.toml",
+          "sha256": "6d13bbf262fa180b318e43ff1295a7db31f4939bc5f174c1fc1f63c46b2ea568",
+          "size": 649,
+          "git_blob_sha1": "1bb5ed2699fb0d986efb8740286775d76e76db92"
+        },
+        {
+          "path": "codex-rs/agent-identity/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/agent-identity/Cargo.toml",
+          "sha256": "6abd72371d8289b9a216491aee14eef2dde7627e42bf3dc4c4aa05979c0901b8",
+          "size": 737,
+          "git_blob_sha1": "36d5eb41fd694a9eb283cbd6af4bc0977fa36c80"
+        },
+        {
+          "path": "codex-rs/agent-message-board-client/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/agent-message-board-client/Cargo.toml",
+          "sha256": "16fbc6e9009e3b4183c66c514211939b12b459db0aac9ed908ffb161cc97fc9f",
+          "size": 967,
+          "git_blob_sha1": "52a9c9c272016d260948a260f5b7ec59039404cc"
+        },
+        {
+          "path": "codex-rs/agent-roles/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/agent-roles/Cargo.toml",
+          "sha256": "3af8b9b54fb46748eccf7ffa346d3ab6151e3d340840d52b0cdbf5bc4b748882",
+          "size": 549,
+          "git_blob_sha1": "85fa40ce0863ec79c4e0ade1b8be92201be33d43"
+        },
+        {
+          "path": "codex-rs/analytics/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/analytics/Cargo.toml",
+          "sha256": "afc0af9c9765b77c05aca745d48db31acc507f84ffc17f51b785b24726de5e7d",
+          "size": 969,
+          "git_blob_sha1": "61e6f7210cccb6fc4844133339a0d59e319b9be9"
+        },
+        {
+          "path": "codex-rs/ansi-escape/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/ansi-escape/Cargo.toml",
+          "sha256": "082f09f80662226c37c5818d271582e30ce93d67b2204286330a9b2ade5372a8",
+          "size": 444,
+          "git_blob_sha1": "60b1aedf29c74cc3dcf216692d0ec6bf0d3cc9c8"
+        },
+        {
+          "path": "codex-rs/app-server-client/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/app-server-client/Cargo.toml",
+          "sha256": "74fd9123b3697f600e1913c2665c4f235ca1c9999756b109361de41636e288c7",
+          "size": 1162,
+          "git_blob_sha1": "daa6ef661f00486af405e764705a60bdcf7b1036"
+        },
+        {
+          "path": "codex-rs/app-server-daemon/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/app-server-daemon/Cargo.toml",
+          "sha256": "daad74daffbfa0d3d40dc8fa0d13ce40049e0ea215a2af0649b97bac117edb71",
+          "size": 1347,
+          "git_blob_sha1": "4dabe9bc273db3b518fd493f01127c2a66ecc315"
+        },
+        {
+          "path": "codex-rs/app-server-protocol-noop-macros/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/app-server-protocol-noop-macros/Cargo.toml",
+          "sha256": "86cca540f740f40a7dd58b1d2d62f518517b54c14915c0f3f2171df9223c0226",
+          "size": 212,
+          "git_blob_sha1": "93a24b070beffa187ab27f331e35cdcefe21c4b8"
+        },
+        {
+          "path": "codex-rs/app-server-protocol/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/app-server-protocol/Cargo.toml",
+          "sha256": "eed16bab0bada46556378b378820cc51c73f09db677802e9de14c652ef13b92d",
+          "size": 1602,
+          "git_blob_sha1": "2122f79ba5f6014c7b79ae86a0013076ab7a753f"
+        },
+        {
+          "path": "codex-rs/app-server-test-client/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/app-server-test-client/Cargo.toml",
+          "sha256": "1929e157ff492633b4dd806ef5627e1c53ccf9241e72dd73944ff5f489483080",
+          "size": 847,
+          "git_blob_sha1": "901afb70d00f16e004913c764337d92afc82808b"
+        },
+        {
+          "path": "codex-rs/app-server-transport/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/app-server-transport/Cargo.toml",
+          "sha256": "bfa7635164e851f166b7e12b07f890802ce8e1dee2fdd36eada21e9cf8f79237",
+          "size": 1888,
+          "git_blob_sha1": "f78bfebe55d4920081a35999859a70f0212034d0"
+        },
+        {
+          "path": "codex-rs/app-server/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/app-server/Cargo.toml",
+          "sha256": "b42b0fcb26e284d66c32411f8995512337e3a826a8aefcd2ae6bad7e5e708b0c",
+          "size": 5326,
+          "git_blob_sha1": "0ef30505cc5e78102d8bfb64e18adaf0e0ad008b"
+        },
+        {
+          "path": "codex-rs/app-server/tests/common/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/app-server/tests/common/Cargo.toml",
+          "sha256": "bdf6850d84b5a089ddca7fa26d5d6b79c844b768d1933c4c3087fc9d53c8d6c0",
+          "size": 1186,
+          "git_blob_sha1": "8efd1763c84ed2d1d2b93e5c8f96b7bb44745819"
+        },
+        {
+          "path": "codex-rs/apply-patch/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/apply-patch/Cargo.toml",
+          "sha256": "388b18e13d8e3f8aa419e30385e33fe58748b2bd972df32eb66aa1484ab3d54a",
+          "size": 846,
+          "git_blob_sha1": "8e1d7f651f47a76de2a6ed6226aa2ec1a55cf5d6"
+        },
+        {
+          "path": "codex-rs/arg0/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/arg0/Cargo.toml",
+          "sha256": "b5ccf100791cf2cd47304683b1807bd7399845813ac162060be7bdaba77cb46c",
+          "size": 968,
+          "git_blob_sha1": "fad5169ffa9e150e70fbe725b853f68594ee38bc"
+        },
+        {
+          "path": "codex-rs/async-utils/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/async-utils/Cargo.toml",
+          "sha256": "880a0c8ea54a30e1db09db6398a01706ad501c834ba32eecd37b7ac3de8dcf4f",
+          "size": 373,
+          "git_blob_sha1": "eee5fb73b8874e65d58953b347cd933336610593"
+        },
+        {
+          "path": "codex-rs/attachment-store/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/attachment-store/Cargo.toml",
+          "sha256": "740aa9e40fb205501ace3b6176c96e76a4737952fc47f2f07a456842225ae018",
+          "size": 444,
+          "git_blob_sha1": "dd66412fa1621fbe762140498e9149a3676cace0"
+        },
+        {
+          "path": "codex-rs/aws-auth/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/aws-auth/Cargo.toml",
+          "sha256": "b42bbe49eea0f86ba859b05db8d3d948b5c493122cd607dcc8630412279cf8da",
+          "size": 1021,
+          "git_blob_sha1": "f9b5e7139a1dcffb97daab6f8e1c8712cd69473f"
+        },
+        {
+          "path": "codex-rs/backend-client/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/backend-client/Cargo.toml",
+          "sha256": "3f536d6194f6e2221e10ec9ca11b7d1c5bdc89b71cb0ef35b28c6f6d7aa153ac",
+          "size": 801,
+          "git_blob_sha1": "8a8948a9a219740e09e9e5399a4e8730e633d33d"
+        },
+        {
+          "path": "codex-rs/build-info/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/build-info/Cargo.toml",
+          "sha256": "492f56d0347f602e21786b2f432bd10aeba5266d9cac0fc83e639cbbb16c06da",
+          "size": 526,
+          "git_blob_sha1": "bd9bb036dc36a5ab65e67b9911441859297d1536"
+        },
+        {
+          "path": "codex-rs/bwrap/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/bwrap/Cargo.toml",
+          "sha256": "5b524ac2c30f4029cae77721c026d3487a6628473b042d26f354ab6075ec4a7c",
+          "size": 305,
+          "git_blob_sha1": "ed7010c8fdaea270f028ceb9a053e60c278d2b4c"
+        },
+        {
+          "path": "codex-rs/chatgpt/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/chatgpt/Cargo.toml",
+          "sha256": "ed8da55f97753db776cbcc798e5deb68bc8da3089fa376004be29f0d8a579435",
+          "size": 836,
+          "git_blob_sha1": "04b9cb7df6786401aa2c2cbad225cc40a26d277d"
+        },
+        {
+          "path": "codex-rs/cli/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/cli/Cargo.toml",
+          "sha256": "7b08adfee7b456f52209fa994a28d58ed51f3d942507cf5072d310768d77272c",
+          "size": 4723,
+          "git_blob_sha1": "608921c370a184c0c465e5cf079be947f0a9664a"
+        },
+        {
+          "path": "codex-rs/cloud-client/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/cloud-client/Cargo.toml",
+          "sha256": "0c9742a41ee08870a00e7f5baf6d61e8f5a50b6f8b11c32ec8fdebac312ba605",
+          "size": 944,
+          "git_blob_sha1": "58ba2d07e858ae9d5bdde7c0d14d9f113470cd71"
+        },
+        {
+          "path": "codex-rs/cloud-config/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/cloud-config/Cargo.toml",
+          "sha256": "6e42c4572722749dcce3136cdb9093b1f03edba1c4d68cea0301a99063fc18a9",
+          "size": 1043,
+          "git_blob_sha1": "2077502017d90fe5a229835d9aee64fdf78c8411"
+        },
+        {
+          "path": "codex-rs/cloud-tasks-client/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/cloud-tasks-client/Cargo.toml",
+          "sha256": "713fe5694a802106a72bdb245ed973ce80dd1bd977abfde5f308a14bf3180028",
+          "size": 606,
+          "git_blob_sha1": "8efd78cb22d0b6458e9ec9138f0df03590f75d75"
+        },
+        {
+          "path": "codex-rs/cloud-tasks-mock-client/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/cloud-tasks-mock-client/Cargo.toml",
+          "sha256": "c00ebb5e69c81d6d15793069773c1a84a521cc4d71a2a27b06854c71557f24d4",
+          "size": 369,
+          "git_blob_sha1": "b249b654e02f36360389a12ccc14bffb787b9726"
+        },
+        {
+          "path": "codex-rs/cloud-tasks/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/cloud-tasks/Cargo.toml",
+          "sha256": "5f06b8116e9f3f2486953e3776d256946c4faaab9f3c26c2e4001b9d14a95faf",
+          "size": 1502,
+          "git_blob_sha1": "12bd6fdf7fd03e8b9c16de911f4ca69d625fba90"
+        },
+        {
+          "path": "codex-rs/code-mode-host/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/code-mode-host/Cargo.toml",
+          "sha256": "102bd33db5a318765e9c4259147f2e69cfb09ba51dd358aff19aa010019862cd",
+          "size": 1340,
+          "git_blob_sha1": "d56661f7d0ad2ac661ae788812a23190241b2569"
+        },
+        {
+          "path": "codex-rs/code-mode-protocol/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/code-mode-protocol/Cargo.toml",
+          "sha256": "2ac9af96867f5babb423d9865e1e1277329e6e1fb10a069d0cb9e380beef2b70",
+          "size": 1026,
+          "git_blob_sha1": "cad10b47ebf4e577d9d9278703424f266ba6cc71"
+        },
+        {
+          "path": "codex-rs/code-mode-runtime/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/code-mode-runtime/Cargo.toml",
+          "sha256": "593ded78596279c8e6ce85f2d9708d549c44b3fe693cbbab9341aeb57e3ea923",
+          "size": 829,
+          "git_blob_sha1": "5a4d9e1d0930806689a04bc5857b177656bd775b"
+        },
+        {
+          "path": "codex-rs/code-mode/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/code-mode/Cargo.toml",
+          "sha256": "38656fd4118bdfdf740f2877dddb18d2598147a90c35150e893031c4025b0f09",
+          "size": 1045,
+          "git_blob_sha1": "daa2de54718268e12418ca981af1481841312867"
+        },
+        {
+          "path": "codex-rs/codex-api/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/codex-api/Cargo.toml",
+          "sha256": "41fa3554b49fcfa0bfe7473e20fc41bff9a672bb3fc3da9aa4c1f3835c7e1266",
+          "size": 1471,
+          "git_blob_sha1": "82bec69218844915b5e986fc17d473966466e888"
+        },
+        {
+          "path": "codex-rs/codex-backend-openapi-models/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/codex-backend-openapi-models/Cargo.toml",
+          "sha256": "f1357552f32833762da0fe2730c65a542da56314ed07371a98fa420fceb45da4",
+          "size": 571,
+          "git_blob_sha1": "7baf01935d36ad701d79d0c6e7e9ece0b056142f"
+        },
+        {
+          "path": "codex-rs/codex-client/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/codex-client/Cargo.toml",
+          "sha256": "76e3da92b54ed0c96b14be755fe8d072559d2a9ac6f11e82c1979487edb55b25",
+          "size": 487,
+          "git_blob_sha1": "9ffe57d95f8c9c0cc51b215666969f3082bc4aa5"
+        },
+        {
+          "path": "codex-rs/codex-experimental-api-macros/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/codex-experimental-api-macros/Cargo.toml",
+          "sha256": "b8fcf3a548dfb052195e49969073aa22d8a2e0948d46732598cbeaaf9826f10b",
+          "size": 311,
+          "git_blob_sha1": "2e148a21d782b2ca20f5c81fc4ea896523d4d80d"
+        },
+        {
+          "path": "codex-rs/codex-home/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/codex-home/Cargo.toml",
+          "sha256": "6c80a87eaad697efc4dc24f5eca9e7268dd8de29d2f84bc8982af3f89733c92b",
+          "size": 492,
+          "git_blob_sha1": "068ec55b4e274c002dc37e3584e96a2c9ab1f7c7"
+        },
+        {
+          "path": "codex-rs/codex-mcp/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/codex-mcp/Cargo.toml",
+          "sha256": "87adc337f2864b8b83f2f9a05bd925e61a1ee5736f1dce0efde9e639dd5f6dad",
+          "size": 1855,
+          "git_blob_sha1": "f54c6f1cbdf112af2f93524508bcce9935700740"
+        },
+        {
+          "path": "codex-rs/collaboration-mode-templates/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/collaboration-mode-templates/Cargo.toml",
+          "sha256": "52aa162c5ba6085b0eead685bd21a15043150789fcd08000465c95db0044fef4",
+          "size": 255,
+          "git_blob_sha1": "2c17b1fd2ad989bda8a38e80dee1c5380f887c03"
+        },
+        {
+          "path": "codex-rs/config-schema/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/config-schema/Cargo.toml",
+          "sha256": "070bac9380f4f7140aee21972c9f52e7eb5816be2c306ee00201177cebce5ec9",
+          "size": 338,
+          "git_blob_sha1": "ec6458bd3e8307150fe44792aa4d1f5d47871c4f"
+        },
+        {
+          "path": "codex-rs/config/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/config/Cargo.toml",
+          "sha256": "b0656312318ec8c4edabb57d62ad301aa952ab498950dcc73e47665b7c46150a",
+          "size": 2394,
+          "git_blob_sha1": "b4be94bb585c6757234299a78f8b42a02b3d2017"
+        },
+        {
+          "path": "codex-rs/connectors/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/connectors/Cargo.toml",
+          "sha256": "20515657b4ab715652a6be25d3b2ff408f36d8b53e0d1dddc1ea014910f95ea0",
+          "size": 815,
+          "git_blob_sha1": "ac3ce9241c2d6f4deb3ac09ced64087fd51b29b3"
+        },
+        {
+          "path": "codex-rs/context-fragments/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/context-fragments/Cargo.toml",
+          "sha256": "e03ff3b43b8eb2763a545cb88e4ffe09c05a10873112c17263c4a7133041bb0f",
+          "size": 411,
+          "git_blob_sha1": "74ecc5f209889b9aee2065c921004ec5b2cbf587"
+        },
+        {
+          "path": "codex-rs/core-api/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/core-api/Cargo.toml",
+          "sha256": "64d89566ae6c63d3dbd6c655fe9f5277dd93765330611be3f05ebf09e15dd015",
+          "size": 922,
+          "git_blob_sha1": "b82d5ee4802d68b29f574bc8ebee1334cf751caa"
+        },
+        {
+          "path": "codex-rs/core-plugin-common/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/core-plugin-common/Cargo.toml",
+          "sha256": "d68f45e18a957624d9a22d18c206b22976887b2c06d27b1ae3036850ca0a0424",
+          "size": 436,
+          "git_blob_sha1": "654faa8af18541b95f23a45183566e4c892bf904"
+        },
+        {
+          "path": "codex-rs/core-plugins/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/core-plugins/Cargo.toml",
+          "sha256": "992e28441d3fe0ba864e49ee1c47d1f18700fd0f52701a3a9af815a8c9f4b547",
+          "size": 2219,
+          "git_blob_sha1": "668da25d6c4db37e737b3401e78333290bf1f2f8"
+        },
+        {
+          "path": "codex-rs/core/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/core/Cargo.toml",
+          "sha256": "a621144467796a1859039f1c1748cbceab901354e22ce14083b34178c2341ec4",
+          "size": 6576,
+          "git_blob_sha1": "39c860803af2517d97344d491cd9b995e2e89288"
+        },
+        {
+          "path": "codex-rs/core/tests/common/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/core/tests/common/Cargo.toml",
+          "sha256": "8befa624d00c33ca9a7bb8ed077d503265ccd7e625d9d4f06e9cd5cac483223e",
+          "size": 1772,
+          "git_blob_sha1": "5644a06e0a1e7f5962c7e9e1bb7e8a5225630777"
+        },
+        {
+          "path": "codex-rs/diagnostics/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/diagnostics/Cargo.toml",
+          "sha256": "11974d3cc33cfe81cc15a3def4cdaace9eae05d4ac3b22af0af2e35e12ef6d66",
+          "size": 313,
+          "git_blob_sha1": "2eb2125a102e121ed5a51d8dad3013c7cc258cf0"
+        },
+        {
+          "path": "codex-rs/exec-server-protocol/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/exec-server-protocol/Cargo.toml",
+          "sha256": "af6d5a0d2c2b8af1f5a7b69c16dc450d9bb1c0daab1b997d2a00e51ed708f703",
+          "size": 801,
+          "git_blob_sha1": "eda1add2726e1129b6cc7fba69fe7c6f08cb9243"
+        },
+        {
+          "path": "codex-rs/exec-server/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/exec-server/Cargo.toml",
+          "sha256": "083817da36c4fac2215dd6a5a8d80c1d9a5599b214f329064774457182937f30",
+          "size": 3625,
+          "git_blob_sha1": "0d1f1f5209ca66c6efdd9f6bb54058e89bc7a542"
+        },
+        {
+          "path": "codex-rs/exec-server/tests/support/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/exec-server/tests/support/Cargo.toml",
+          "sha256": "9bec1539cc8fc173c4691863ca16386b3b0f683402160219bea89d2ef0db9048",
+          "size": 553,
+          "git_blob_sha1": "073d4e341141ea59286b5563b4b6af1930d7ca51"
+        },
+        {
+          "path": "codex-rs/exec/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/exec/Cargo.toml",
+          "sha256": "152344aec325b7769804e2e5aef39f590b7fb9faf6e324c83a91d84035e73c47",
+          "size": 2380,
+          "git_blob_sha1": "d5190c2caa2d37217a0335e4c9dd84f796486458"
+        },
+        {
+          "path": "codex-rs/execpolicy/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/execpolicy/Cargo.toml",
+          "sha256": "a30850d1134be2b9a37a15d383d1cf7a3df72c81c3a4b970bcfac8bf15528e94",
+          "size": 874,
+          "git_blob_sha1": "42040222336513132da0b6a274bcd3fc80589f99"
+        },
+        {
+          "path": "codex-rs/ext/agent-message-board/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/ext/agent-message-board/Cargo.toml",
+          "sha256": "314735cda3a3b9e8ad8b2aceb7496b37991ae749ef15fdba0b84dbb84e833eaf",
+          "size": 1036,
+          "git_blob_sha1": "f522893f599b3f766331315719e7be15c11437f2"
+        },
+        {
+          "path": "codex-rs/ext/agent/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/ext/agent/Cargo.toml",
+          "sha256": "684fe7c7a41900dd8c394b6cee6d1fcfd206a44c661811f356c846dcc07d51db",
+          "size": 520,
+          "git_blob_sha1": "6c3f10a43319a122e2da129e31ba34aa4f1df49a"
+        },
+        {
+          "path": "codex-rs/ext/connectors/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/ext/connectors/Cargo.toml",
+          "sha256": "d0dd96da7c42189b2e5a3c6976a54b565b02441bd2f4979652e3192b30b279a8",
+          "size": 556,
+          "git_blob_sha1": "1aead727731475bc9590ac90efb37c2ae7adef64"
+        },
+        {
+          "path": "codex-rs/ext/extension-api/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/ext/extension-api/Cargo.toml",
+          "sha256": "fc9696d53a84326f578afc6cfa1084d083026dcfceb631df1db59f85cbf3b6ce",
+          "size": 927,
+          "git_blob_sha1": "4b487226eb7deb0a44ad5d9ae16e53f90fd7ec8e"
+        },
+        {
+          "path": "codex-rs/ext/git-attribution/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/ext/git-attribution/Cargo.toml",
+          "sha256": "15e8f2143ff99c657b40045c9b0609dd93f89b55cc37a95039b9aed89f5e6687",
+          "size": 589,
+          "git_blob_sha1": "e96d0dbcd577bcc0645f3f6175bbe31429f87159"
+        },
+        {
+          "path": "codex-rs/ext/goal/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/ext/goal/Cargo.toml",
+          "sha256": "e03430bf9732d45b9aaebe6969d4a90e63daf348107f4b74bf227dfb38e33454",
+          "size": 1059,
+          "git_blob_sha1": "3939da1ab7f1c2e13c1263190abf91b17108fb7c"
+        },
+        {
+          "path": "codex-rs/ext/guardian-reviewer/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/ext/guardian-reviewer/Cargo.toml",
+          "sha256": "1eed62189d9f282ff45b464cdb505916951c95ece9eefff46c0b4eda08416717",
+          "size": 999,
+          "git_blob_sha1": "6c7b9cd55b642b19303193df0c8cbbc5d49ce613"
+        },
+        {
+          "path": "codex-rs/ext/guardian-v2/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/ext/guardian-v2/Cargo.toml",
+          "sha256": "ef195ba40c9e2ebf46ab818e19f119ddd3a6694335808b7c6a5948d3c8dac282",
+          "size": 1515,
+          "git_blob_sha1": "68da6179d9409a448aaf025983f94053eb554433"
+        },
+        {
+          "path": "codex-rs/ext/history-notes/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/ext/history-notes/Cargo.toml",
+          "sha256": "1ef6280b0fd4c6a1cb9e6bda55212fdd8368359f1192a9a5855c87b2a6cdb368",
+          "size": 1017,
+          "git_blob_sha1": "df2f272945b956dfcd3c9f9af8e74ceb2060d6cc"
+        },
+        {
+          "path": "codex-rs/ext/image-generation/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/ext/image-generation/Cargo.toml",
+          "sha256": "aa8a6fec46b64f183014df9f6f410ab47c2d453714c543e8163089d572af7555",
+          "size": 1152,
+          "git_blob_sha1": "4b6155730645092549a69e2f46b926407091c78d"
+        },
+        {
+          "path": "codex-rs/ext/items/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/ext/items/Cargo.toml",
+          "sha256": "bbb3630e5a2dd711a1ff6d118e095a062606afaa5ca970316d668114d45d7df5",
+          "size": 489,
+          "git_blob_sha1": "4d58b29bc7004171361e4828e1dda712815ad8d1"
+        },
+        {
+          "path": "codex-rs/ext/mcp/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/ext/mcp/Cargo.toml",
+          "sha256": "e60c59addd49727ad528724025c2a647e3ff8e38d88c0d6befcc62bae6263862",
+          "size": 1368,
+          "git_blob_sha1": "5185f6cab12c5b692dc558d15443b4934ea165ff"
+        },
+        {
+          "path": "codex-rs/ext/memories/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/ext/memories/Cargo.toml",
+          "sha256": "b53ffe9567465a01a696bb0de03bcc9c3fcaa0052a0aab794143a025c778526c",
+          "size": 956,
+          "git_blob_sha1": "9111571fa40c4a37f4a3937a172796e806a18bc7"
+        },
+        {
+          "path": "codex-rs/ext/queue/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/ext/queue/Cargo.toml",
+          "sha256": "d7553e62f33e7cf4feb38f5f21b5e0c628773584340479dfa8155fca8886639e",
+          "size": 930,
+          "git_blob_sha1": "4b5e5d04f4cf6bb414305a3badffda7038014e43"
+        },
+        {
+          "path": "codex-rs/ext/skills/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/ext/skills/Cargo.toml",
+          "sha256": "2c53f8efcdd8f386b69b3df1e5ccefad7e2748d7391a130952e494acb42bde0e",
+          "size": 1543,
+          "git_blob_sha1": "80bcfba8cb37de4c62d0f80d3c54a8290fdb084d"
+        },
+        {
+          "path": "codex-rs/ext/web-search/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/ext/web-search/Cargo.toml",
+          "sha256": "b74df62ad7dd3159d96f68b3be17c8804cfc4ec280fbbfd9df06ab4326cfe9e4",
+          "size": 855,
+          "git_blob_sha1": "a464b56beadec898c998c6ae6fdcae3ee01a8df4"
+        },
+        {
+          "path": "codex-rs/external-agent-migration/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/external-agent-migration/Cargo.toml",
+          "sha256": "762a2915a42cbab1e1e4035bb9a3d0f66608a985010549c8b157699d2a498744",
+          "size": 1292,
+          "git_blob_sha1": "3f49a1ae00cc48720b766d9e76bc050e954cf0fa"
+        },
+        {
+          "path": "codex-rs/features/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/features/Cargo.toml",
+          "sha256": "a554de5c70b3ba2040cb5248522c9157dd3fc0b9a7e2afb6a5786eb111f14814",
+          "size": 574,
+          "git_blob_sha1": "d45e70ff885415bfde31352e3af1dd05372ab8db"
+        },
+        {
+          "path": "codex-rs/feedback/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/feedback/Cargo.toml",
+          "sha256": "7ffe759dbf4967611fdde3f5c97ddf538c89b56e1b88f011de463b3fe9984e25",
+          "size": 993,
+          "git_blob_sha1": "ee56043b1cabfbc99eb8df45693f782c1b025f2f"
+        },
+        {
+          "path": "codex-rs/file-search/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/file-search/Cargo.toml",
+          "sha256": "ac012c6347e727e2a7a9cb927eec9fe4ece2c17a38474f7efa0563d3adbc98d4",
+          "size": 692,
+          "git_blob_sha1": "e235898982f6eba908c5c0751eae91a5b25cdb1a"
+        },
+        {
+          "path": "codex-rs/file-system/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/file-system/Cargo.toml",
+          "sha256": "158866b3e775b98e57d73003f46143c07fde852d70d8d2014aae41e5c94de8ab",
+          "size": 433,
+          "git_blob_sha1": "382eacb43d3353b2046806f91ba0f976866c9282"
+        },
+        {
+          "path": "codex-rs/file-watcher/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/file-watcher/Cargo.toml",
+          "sha256": "901925f6f2141e4f9e70e4ad1850bab4f26826a232b3dbca7a15666716b8a535",
+          "size": 474,
+          "git_blob_sha1": "781698794773a3b4b16205573510d296acce5f8a"
+        },
+        {
+          "path": "codex-rs/git-utils/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/git-utils/Cargo.toml",
+          "sha256": "f30878ea0371fdebc17efc37199c561f225f52783ae0815c0ef79ec6706a0bdc",
+          "size": 1139,
+          "git_blob_sha1": "c9409d41e0dc30d1b837e9a07bcea2bd0f36a2ab"
+        },
+        {
+          "path": "codex-rs/guardian-context/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/guardian-context/Cargo.toml",
+          "sha256": "81b4b5327fdce01da9ce53c887b91eac1356ba33d2d6e3b326a8fcb24b90111b",
+          "size": 503,
+          "git_blob_sha1": "7b212ffe428a16652424308e76fe3d961ef2c38e"
+        },
+        {
+          "path": "codex-rs/history/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/history/Cargo.toml",
+          "sha256": "1efeca5a9781224b2682eb98ce880f0d1ed9ee614ff2d9a906195458924c0a89",
+          "size": 463,
+          "git_blob_sha1": "bd938d2c2ea45333b8f040f41399674a28e54644"
+        },
+        {
+          "path": "codex-rs/hooks/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/hooks/Cargo.toml",
+          "sha256": "13c244a381eb28ff7ce3fc2af33827edd331bbaf2b2a47859b90da27d3629fc5",
+          "size": 1282,
+          "git_blob_sha1": "4ad0b1ce9730fcb9dde048a589a3e1aae7a92a59"
+        },
+        {
+          "path": "codex-rs/http-client/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/http-client/Cargo.toml",
+          "sha256": "1751d649e2cead46bef5b8b6da355f3d6c3b53eedbc59660cde3579f1eb8fd94",
+          "size": 1583,
+          "git_blob_sha1": "858322033812cbc0d767f8373a3a1f31b5640842"
+        },
+        {
+          "path": "codex-rs/install-context/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/install-context/Cargo.toml",
+          "sha256": "f3889e33551bedcf564069d27568c5f1ea01e9e696cf122e4b8f99a7292fbff8",
+          "size": 556,
+          "git_blob_sha1": "ee84ad2962acf57a698e399b38dbc0a03c51bd11"
+        },
+        {
+          "path": "codex-rs/keyring-store/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/keyring-store/Cargo.toml",
+          "sha256": "6a6a49f225ecefe5b2d5c85e7b667001113363a4b75e4c30427c8e17adff1dc6",
+          "size": 874,
+          "git_blob_sha1": "7a2f1e15bdc3c79b0d74866c3e8d371d13fa9193"
+        },
+        {
+          "path": "codex-rs/linux-sandbox/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/linux-sandbox/Cargo.toml",
+          "sha256": "7cbb24a865c6aec28e381fbbd75786cb73b99218666d36e5e95925a63312dea9",
+          "size": 1315,
+          "git_blob_sha1": "26abe26d713fc86d4d3112c5fe53fbf190ee0f27"
+        },
+        {
+          "path": "codex-rs/lmstudio/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/lmstudio/Cargo.toml",
+          "sha256": "f90889e3a31ae28b860e6a86da3d1fb9941f5b2232f82d42e178a777432cac48",
+          "size": 571,
+          "git_blob_sha1": "e84bcfed51c3683e87ea7ae2e0a7809aade43a76"
+        },
+        {
+          "path": "codex-rs/login/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/login/Cargo.toml",
+          "sha256": "56f70c2fa40e353ead788e74077b5b25e3f6707f8809b1f9af95aef69ec51673",
+          "size": 1793,
+          "git_blob_sha1": "50de4dc83a8d67c55a56ec51148b431f14a55511"
+        },
+        {
+          "path": "codex-rs/memories/read/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/memories/read/Cargo.toml",
+          "sha256": "e51d8384f3a844f0687b9ea4864e19286b3fec7edfee69bd365cd02fd42886b5",
+          "size": 419,
+          "git_blob_sha1": "2c0c5f2c954ceb8b986057bdd929badca4ecd64d"
+        },
+        {
+          "path": "codex-rs/memories/write/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/memories/write/Cargo.toml",
+          "sha256": "2ce09ca433559076a62b478f42c5a820a531c79811834bc2084b48e12f1276c1",
+          "size": 1586,
+          "git_blob_sha1": "bf031a6a164f5a098757efdb6c791d9e2705ca50"
+        },
+        {
+          "path": "codex-rs/mermaid/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/mermaid/Cargo.toml",
+          "sha256": "ceab314f8c1be29d0483813175f304e7114fb40442a66dbc2f3235a770432f67",
+          "size": 343,
+          "git_blob_sha1": "b01437b433d7b8960d775041a9a59b0e9da24ee7"
+        },
+        {
+          "path": "codex-rs/message-history/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/message-history/Cargo.toml",
+          "sha256": "adb2d2b3f7c7a6068b87deb69cb2dcd4afcbe45ad86e9b0a41bc4b5dce724722",
+          "size": 664,
+          "git_blob_sha1": "176b9579097499b050e24823217eec93502c004b"
+        },
+        {
+          "path": "codex-rs/model-provider-info/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/model-provider-info/Cargo.toml",
+          "sha256": "026e69af570a3758282196acbd142a47984539e6dd9610d2977225adf52debe7",
+          "size": 704,
+          "git_blob_sha1": "e6a740d25ddfc26edffa23a32e6b8f9123eef982"
+        },
+        {
+          "path": "codex-rs/model-provider/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/model-provider/Cargo.toml",
+          "sha256": "db38085ac58979599b551c8160ebd3dfbe942b4985a44ec449bccf297f111342",
+          "size": 1438,
+          "git_blob_sha1": "ffda92383e9db329c3d449a038d0d5496289af0e"
+        },
+        {
+          "path": "codex-rs/models-manager/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/models-manager/Cargo.toml",
+          "sha256": "843d1a014174611f14256305ba2fcdcb1a0e150620a8a513bd20a4bef5648847",
+          "size": 848,
+          "git_blob_sha1": "159f75023431e3bd579fac871ccda63d9ab8ccd2"
+        },
+        {
+          "path": "codex-rs/mxc-sandbox/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/mxc-sandbox/Cargo.toml",
+          "sha256": "4073459ebc0f6a9377ff01207e88a09f66466839ce64c9c7af0d043f2d4bcd41",
+          "size": 1238,
+          "git_blob_sha1": "49b5c16e668a7ddff572a81dd149492c97a6f479"
+        },
+        {
+          "path": "codex-rs/network-proxy/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/network-proxy/Cargo.toml",
+          "sha256": "598c33a71ece584501a4510974cda744f6bde2e3a634ecfbc34725dbd7186917",
+          "size": 2443,
+          "git_blob_sha1": "1fc4a89b6b281399da9c43483e073d4b85683b65"
+        },
+        {
+          "path": "codex-rs/ollama/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/ollama/Cargo.toml",
+          "sha256": "4acd659c88671e6be1ce2be7b2920977c221461245b198c81c195197789ce2eb",
+          "size": 835,
+          "git_blob_sha1": "29c0852092c0ebdb9846f50f91384e4720f15d71"
+        },
+        {
+          "path": "codex-rs/otel-trace-websocket/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/otel-trace-websocket/Cargo.toml",
+          "sha256": "61b323decc2b50de473480971f498a580e3c89574530743bef685f33febde7bf",
+          "size": 429,
+          "git_blob_sha1": "538666ec72de29f79eff181ed5fb34e6066af4b6"
+        },
+        {
+          "path": "codex-rs/otel/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/otel/Cargo.toml",
+          "sha256": "02b7e6d1e204279c6aef6aef6d2c653ad69483ba138efb2ad536b686b67661ff",
+          "size": 2088,
+          "git_blob_sha1": "3197eaa846bc1e072f34ce60066383114570a451"
+        },
+        {
+          "path": "codex-rs/plugin/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/plugin/Cargo.toml",
+          "sha256": "1032b4bf35e2a8426d07840a371f09a48bc568cac97292b4a29dfeac6838a088",
+          "size": 600,
+          "git_blob_sha1": "462fb5e1891c4033c84dc115268c6f8a5d2f62e8"
+        },
+        {
+          "path": "codex-rs/process-hardening/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/process-hardening/Cargo.toml",
+          "sha256": "93c8131ae5485a66d16cff10dd254bf56bd49fd33235399cd5f59ccf0d75396d",
+          "size": 325,
+          "git_blob_sha1": "60a5729ff57a961dd9ccc145f8ae7171fe0b3176"
+        },
+        {
+          "path": "codex-rs/prompts/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/prompts/Cargo.toml",
+          "sha256": "922d79c1dcdfec2ab5c2698c01cc3c0f59a08d4e72f839765bef7d1aaa3b8fb5",
+          "size": 699,
+          "git_blob_sha1": "7f0b492a4339b88ef20baf07d7f432f92c4f22bb"
+        },
+        {
+          "path": "codex-rs/protocol/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/protocol/Cargo.toml",
+          "sha256": "9653705eb71d1f73744e48ff369a77ded7ef8a0bcdaa0bd02db2b1029b567f5d",
+          "size": 2220,
+          "git_blob_sha1": "914ed5260c95654bd3d806a553b26f1a09c66d4f"
+        },
+        {
+          "path": "codex-rs/realtime-webrtc/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/realtime-webrtc/Cargo.toml",
+          "sha256": "ba4f869d40ef25beea5e2ea534c3951ca155e545541208bfb2810f378778a1ea",
+          "size": 791,
+          "git_blob_sha1": "bd1e058f37b1a8b48b6d5cc03505c5e09766fd9f"
+        },
+        {
+          "path": "codex-rs/response-debug-context/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/response-debug-context/Cargo.toml",
+          "sha256": "a6075edb089d3c6ab4588c5cf17604e15827821d67320508344e0af5a9c49070",
+          "size": 432,
+          "git_blob_sha1": "fcdb6c9630c4d04da55b9c64318e4c111afce441"
+        },
+        {
+          "path": "codex-rs/responses-api-proxy/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/responses-api-proxy/Cargo.toml",
+          "sha256": "b1d9acb9187527fd7dad5110f0a0e3755a728e8f79f67969304cd8777cfab305",
+          "size": 778,
+          "git_blob_sha1": "05d638843f64eacad298a79011798f3a2ef924f7"
+        },
+        {
+          "path": "codex-rs/rmcp-client/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/rmcp-client/Cargo.toml",
+          "sha256": "1d27143238c12d32abfff50eafeaea0feac6d338a2d8bf1300c4f07c75d07836",
+          "size": 3375,
+          "git_blob_sha1": "4702b0f53f1b9aeec01e57839b4460dcf2ea81d8"
+        },
+        {
+          "path": "codex-rs/rollout-trace/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/rollout-trace/Cargo.toml",
+          "sha256": "1945dfdbca622a193f680d98cc0a733eec58510e9d3bc3a6efe0e3db153f4c62",
+          "size": 620,
+          "git_blob_sha1": "b368c9acc5ffc3a0ba3a27ae7ea1ab48e38baa31"
+        },
+        {
+          "path": "codex-rs/rollout/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/rollout/Cargo.toml",
+          "sha256": "e6a5419cffe5887650ca3f387814871ca0264ad54cf95a885b5667bf5f27b28f",
+          "size": 1412,
+          "git_blob_sha1": "6bb676c9b63fc083167ef131b311228c0a43e89f"
+        },
+        {
+          "path": "codex-rs/sandboxing/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/sandboxing/Cargo.toml",
+          "sha256": "24d17ffd9c5d3f9667738ba0ed0111f4398f2d67c0cb015ca6426300758eab7c",
+          "size": 1222,
+          "git_blob_sha1": "64ebac488ae3237f0f0b91e6bdfe203460be513d"
+        },
+        {
+          "path": "codex-rs/secrets/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/secrets/Cargo.toml",
+          "sha256": "99d0a0c6bb4972d0ee5336949870ce0b2bc4b05c22bfe34f47edfb3655602150",
+          "size": 677,
+          "git_blob_sha1": "2a294ee39134e0a4d4160ed7b422d5fe3c2ba6da"
+        },
+        {
+          "path": "codex-rs/shell-command/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/shell-command/Cargo.toml",
+          "sha256": "6967abe322f82037b6c57f3e6bbe6425030c4ed0a388915527a59dea7317b856",
+          "size": 801,
+          "git_blob_sha1": "999295ec314a37a523f65bd050e8b95453cc7c77"
+        },
+        {
+          "path": "codex-rs/skills/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/skills/Cargo.toml",
+          "sha256": "099f2da853fa6853df18b7923ccd55b6bd1374af7741fd6156ec84b7765ae086",
+          "size": 682,
+          "git_blob_sha1": "7342975aaea0e3ecc61da41f145674cd154a12c9"
+        },
+        {
+          "path": "codex-rs/state/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/state/Cargo.toml",
+          "sha256": "3e9face226d5ec81bbd67cc96951c8b17d3bfd7c7f57b2bf02cf704232703df7",
+          "size": 1003,
+          "git_blob_sha1": "d98de0da11092416064aa21dc309d3ccb2fd2c3d"
+        },
+        {
+          "path": "codex-rs/stdio-to-uds/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/stdio-to-uds/Cargo.toml",
+          "sha256": "86bc7744cb3455915a0dca21bdf9b95b1f446c03eee70dccda8ade7497ee1510",
+          "size": 609,
+          "git_blob_sha1": "6b5c037d755d4dc8006424aa836b29036cea8185"
+        },
+        {
+          "path": "codex-rs/tcp-tunnel/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/tcp-tunnel/Cargo.toml",
+          "sha256": "28342e9cc76b554fde97237814d2ac1d46fa45cb39d280a7a23aecb23c4751ff",
+          "size": 1001,
+          "git_blob_sha1": "617ed7e0670f2ad945e9796cd5bd61ab0fb237a6"
+        },
+        {
+          "path": "codex-rs/terminal-detection/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/terminal-detection/Cargo.toml",
+          "sha256": "d6afc64a36ea33610d0fb4506f9b9fe809105ccde228bfa41c8ed24497dc4546",
+          "size": 330,
+          "git_blob_sha1": "9b1bf3a51663289c68b61f566201df8d05e385cf"
+        },
+        {
+          "path": "codex-rs/test-binary-support/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/test-binary-support/Cargo.toml",
+          "sha256": "72707d0f0238886c11269f3a9bf28fab63107120c13477e4e34b798add3dc9c5",
+          "size": 280,
+          "git_blob_sha1": "12d995b9720b942daf802ce30c2976b3f36e7371"
+        },
+        {
+          "path": "codex-rs/thread-manager-sample/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/thread-manager-sample/Cargo.toml",
+          "sha256": "502a50a536c149f205579a25ba8175d0ba35a657810ff7a9a85dfb3af21dfd9a",
+          "size": 524,
+          "git_blob_sha1": "9e857ad0bc7fa670089008eeddf7d593a4a6f45f"
+        },
+        {
+          "path": "codex-rs/thread-store/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/thread-store/Cargo.toml",
+          "sha256": "2abe7eb1f6e1a5c48a7364b2453296840ad27f911b43f9c9601f353a72227853",
+          "size": 1313,
+          "git_blob_sha1": "31e16dd72a9523bbb1c9b3eea00dc5377037e2e2"
+        },
+        {
+          "path": "codex-rs/tools/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/tools/Cargo.toml",
+          "sha256": "e984f7b3adb0e7a73b312ed14bf117606cf242c7eecb9f9f9aea506c693326c5",
+          "size": 1028,
+          "git_blob_sha1": "fc75ad22ce146ee5dd852ef2cad03b4bbcdffffb"
+        },
+        {
+          "path": "codex-rs/tui/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/tui/Cargo.toml",
+          "sha256": "fa376ac84e37181dee40c719b38b62d377aee33b40bc1f6420bfc405161b16b0",
+          "size": 6730,
+          "git_blob_sha1": "ea0894b3e1d3777f4c598727b03199c1f69cbd05"
+        },
+        {
+          "path": "codex-rs/uds/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/uds/Cargo.toml",
+          "sha256": "9d12d74d08723dd5ff1ac2cf1998e79b03a5de65cb4c014e90b225167405577c",
+          "size": 934,
+          "git_blob_sha1": "a985ebd3a69605ac4b6a6246267909cf00227c8b"
+        },
+        {
+          "path": "codex-rs/user-verification/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/user-verification/Cargo.toml",
+          "sha256": "fe1b79e40821aa32e765ef9a3e49cba3d75178058fc2b0260ae0877a2e3d7cb6",
+          "size": 990,
+          "git_blob_sha1": "fe4d5298f0484de68d9e417e47206f5be74fc729"
+        },
+        {
+          "path": "codex-rs/utils/absolute-path/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/utils/absolute-path/Cargo.toml",
+          "sha256": "ad98dc1a75333700db00f6bde0685ce7a3e0f5558b0520e7a09e9bbcc6576736",
+          "size": 547,
+          "git_blob_sha1": "7c5b4840d15d81deed1d1ea30c0b269d399772bc"
+        },
+        {
+          "path": "codex-rs/utils/approval-presets/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/utils/approval-presets/Cargo.toml",
+          "sha256": "a8a1723c8fc4fef9815fa02f426b1bee8b1e16f43e9382b5fb878c9a603cdaff",
+          "size": 239,
+          "git_blob_sha1": "6efd2c482b4386b505a15d96bf60504050633e61"
+        },
+        {
+          "path": "codex-rs/utils/audio/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/utils/audio/Cargo.toml",
+          "sha256": "a8bd5661a23ac093df6f9a307dc9e440201e7bf7995044dbfc632869f62914c0",
+          "size": 486,
+          "git_blob_sha1": "90540228a6bf5608329d2f2773225271229b9813"
+        },
+        {
+          "path": "codex-rs/utils/cache/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/utils/cache/Cargo.toml",
+          "sha256": "79bf902f30726d663ca11ab7dad4bcd617de94b36baaeb33016d188ec06ebe89",
+          "size": 404,
+          "git_blob_sha1": "3c120c032e8d595a7675f0474ab6d91b0b52a59e"
+        },
+        {
+          "path": "codex-rs/utils/cargo-bin/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/utils/cargo-bin/Cargo.toml",
+          "sha256": "eecb409357a98472df8a81d9fd1a25902b967433f4df3403cf213f07e68f8786",
+          "size": 293,
+          "git_blob_sha1": "a56e5758306799cc5962eaf57e8ad3a26b73033f"
+        },
+        {
+          "path": "codex-rs/utils/cli/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/utils/cli/Cargo.toml",
+          "sha256": "144258eae359f1b20753dcedff9d8c60a5947e261cec4ad97514b1daf1b35ca8",
+          "size": 438,
+          "git_blob_sha1": "9d330c5ce6badd0d15e6c401cd777fb3d13c8d08"
+        },
+        {
+          "path": "codex-rs/utils/elapsed/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/utils/elapsed/Cargo.toml",
+          "sha256": "998e972175e47355bcc0f14b326e5c71955bd670a12ab3200890d9168855ff40",
+          "size": 163,
+          "git_blob_sha1": "7ba5e6ae6614fddadaa1ba1e1f8299ffc251d78f"
+        },
+        {
+          "path": "codex-rs/utils/fuzzy-match/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/utils/fuzzy-match/Cargo.toml",
+          "sha256": "d233d52afa20bbf405df269a31a76aeb7fe45de5e6e6bcc872dd331668996fbb",
+          "size": 167,
+          "git_blob_sha1": "704386e74f6924a016c30bfbaa6447b093f70be0"
+        },
+        {
+          "path": "codex-rs/utils/git-discovery/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/utils/git-discovery/Cargo.toml",
+          "sha256": "79bb0d98647a830492dda425dca98b6a5f89a62841db9824a339502dbcd2cb51",
+          "size": 642,
+          "git_blob_sha1": "bb5345f9b2ef9b55111c9512546151e16f45c09f"
+        },
+        {
+          "path": "codex-rs/utils/home-dir/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/utils/home-dir/Cargo.toml",
+          "sha256": "9b81719e70c693dc156d90fb43a8d71b328e650ef566816b7bcc8014c4bd8e50",
+          "size": 350,
+          "git_blob_sha1": "2d2de0230e38004d562b8ab5546888cd5da74851"
+        },
+        {
+          "path": "codex-rs/utils/image/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/utils/image/Cargo.toml",
+          "sha256": "2f84e8c60810db1ec6ae392715d130117b27f6e3b94be089790a1a85221be9bd",
+          "size": 903,
+          "git_blob_sha1": "3ac43b6df0dfad7087ec566af71df90104244cb7"
+        },
+        {
+          "path": "codex-rs/utils/json-to-toml/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/utils/json-to-toml/Cargo.toml",
+          "sha256": "aa9e8d0262bbc8e021f32488083d6d003a83c2bca10186da2d2b17f764bb77f9",
+          "size": 307,
+          "git_blob_sha1": "57a28696c8fc2148525480511551b256b35d8b02"
+        },
+        {
+          "path": "codex-rs/utils/oss/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/utils/oss/Cargo.toml",
+          "sha256": "204e3ba8509541c37b2088dd6c8e596286f502a8990d2655e861c6babcac9b19",
+          "size": 332,
+          "git_blob_sha1": "78cc0cb2f8ed60f3d4b8a3bb007b348d700024ac"
+        },
+        {
+          "path": "codex-rs/utils/output-truncation/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/utils/output-truncation/Cargo.toml",
+          "sha256": "76ce40f57554264573715e04ab9754cc3ac09fa37091d3abba71a8f22837e45e",
+          "size": 364,
+          "git_blob_sha1": "3f83bd5fb10d757103f9be4a3e9d4d4bad751340"
+        },
+        {
+          "path": "codex-rs/utils/path-uri/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/utils/path-uri/Cargo.toml",
+          "sha256": "d45031c71d6dbcf8c7770ce1feebabbc2f3224841c5eb770d9e2dc70d19d9d20",
+          "size": 596,
+          "git_blob_sha1": "5bb6328139c7fe2f7759e7edf34be0de9e2f0371"
+        },
+        {
+          "path": "codex-rs/utils/path-utils/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/utils/path-utils/Cargo.toml",
+          "sha256": "71503aeb2195cbcecd60ab50b6cf3bd853ef4db4815d8c966336825591103fea",
+          "size": 538,
+          "git_blob_sha1": "c4cc1c74812ec1965e4a6a2b014be5380359185f"
+        },
+        {
+          "path": "codex-rs/utils/plugins/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/utils/plugins/Cargo.toml",
+          "sha256": "2aa0eb685dc9595b71c33740108080bea0f448e3439afee76c75e0701d275a28",
+          "size": 609,
+          "git_blob_sha1": "1a4576d59d0fcf04a54236f57976e42683c266a6"
+        },
+        {
+          "path": "codex-rs/utils/process/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/utils/process/Cargo.toml",
+          "sha256": "f7c5bbba88c3f9166a31bfd68d39ec215861db67028becb2a34b782a73b22bf0",
+          "size": 306,
+          "git_blob_sha1": "3d5bbd66ad92385e005b3b961b7f222ec84a7b1d"
+        },
+        {
+          "path": "codex-rs/utils/pty/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/utils/pty/Cargo.toml",
+          "sha256": "bacf71d7afedb321054493d7353ea3c2f04eb0ba609e567fef4b7fec9906a2c4",
+          "size": 975,
+          "git_blob_sha1": "f7cabb697538c8135a4f38c98fc3d142f7e13b57"
+        },
+        {
+          "path": "codex-rs/utils/readiness/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/utils/readiness/Cargo.toml",
+          "sha256": "fae1bb2669768af1ef70d76bc3b124977110f1969c1a977ea65926cdbb0d5353",
+          "size": 435,
+          "git_blob_sha1": "076651d5227baa047d95a42e9e8795c65dc0bc52"
+        },
+        {
+          "path": "codex-rs/utils/redacted-string/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/utils/redacted-string/Cargo.toml",
+          "sha256": "b4db650414f5dff6c4823eeb5e05be5adb9bbf6bfaf87c5763a475379528d81d",
+          "size": 284,
+          "git_blob_sha1": "39f60d8eb109312fba4b052e69649b1c9382a1a4"
+        },
+        {
+          "path": "codex-rs/utils/rustls-provider/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/utils/rustls-provider/Cargo.toml",
+          "sha256": "21fda73b6ea661f3626372e94b16bce766c5278e6c695c92fc490274d4582f33",
+          "size": 230,
+          "git_blob_sha1": "af79eff69252fc01244e2ae721b5a263c1d2fc4c"
+        },
+        {
+          "path": "codex-rs/utils/sandbox-summary/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/utils/sandbox-summary/Cargo.toml",
+          "sha256": "f8ee68013858432e2ff468e643345db592988e5482c59998d724deb0311dd58e",
+          "size": 379,
+          "git_blob_sha1": "413b64214bd132c7dfbe4625dc5d110c38d974cc"
+        },
+        {
+          "path": "codex-rs/utils/sleep-inhibitor/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/utils/sleep-inhibitor/Cargo.toml",
+          "sha256": "ade46cdb5e13c8986605574caf47745a0b78e5382f847432765c3e3dec347ca8",
+          "size": 588,
+          "git_blob_sha1": "14ab4d675eb907b7f80e86b67b956602e721df3f"
+        },
+        {
+          "path": "codex-rs/utils/stream-parser/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/utils/stream-parser/Cargo.toml",
+          "sha256": "d48dda6b4337f17002ae1698fa9a0aeb38df8fd6f35193980396f722afe09fe5",
+          "size": 230,
+          "git_blob_sha1": "6eb5fb9a8747b95cb3dbd113f4ebfcda53b8fed5"
+        },
+        {
+          "path": "codex-rs/utils/string/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/utils/string/Cargo.toml",
+          "sha256": "3d4f0131321ca76f08410c8a3278d1d2373c8a43118fafa5add9bd8fbb8672ff",
+          "size": 336,
+          "git_blob_sha1": "8710cffe4697ae4cce6e97d6bac35566db426672"
+        },
+        {
+          "path": "codex-rs/utils/template/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/utils/template/Cargo.toml",
+          "sha256": "5785b0365d1f99f5d719c8d6b16586fcaadedc373f4342c92aa28a52eb778368",
+          "size": 225,
+          "git_blob_sha1": "f24caec190455f3ac685004fc1f6e474ee8f8ed9"
+        },
+        {
+          "path": "codex-rs/v8-poc/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/v8-poc/Cargo.toml",
+          "sha256": "e98d307ee1683087debb02cf5fba46cc1a23177a25cd6b03f74f1539239312c9",
+          "size": 348,
+          "git_blob_sha1": "9615ab977f9dfdb35467d1eadaf0bc6dfa641625"
+        },
+        {
+          "path": "codex-rs/voice-host/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/voice-host/Cargo.toml",
+          "sha256": "cc697897a4d9dbe53d24855dc579be170ae75b11471a76a2e0a6fcbb3d5b5bb2",
+          "size": 1565,
+          "git_blob_sha1": "6ce04e3de934bf1daf74cc1835d73a0cfe51fbc3"
+        },
+        {
+          "path": "codex-rs/websocket-auth/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/websocket-auth/Cargo.toml",
+          "sha256": "899992915b3b1d746389d3c7c5e7a284ea2af9bf819b8544013d9c29f04e708d",
+          "size": 675,
+          "git_blob_sha1": "038b161237d596e4e2480089ccdab4bcf6e2c58a"
+        },
+        {
+          "path": "codex-rs/websocket-client/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/websocket-client/Cargo.toml",
+          "sha256": "7575122d37c47bbb011945d68541422dc0122ab7be1374c9bc9c78ec56a74231",
+          "size": 657,
+          "git_blob_sha1": "19baf9842b591c6aba15d5253f124a737d0d1cdf"
+        },
+        {
+          "path": "codex-rs/windows-sandbox-rs/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/windows-sandbox-rs/Cargo.toml",
+          "sha256": "1695a3007995156a1933d5d7daae3f68a58b3d40e9ba329684b296b341c67fd8",
+          "size": 2792,
+          "git_blob_sha1": "a798fb828d3d064eefdf5d9c90f9e91f15129972"
+        },
+        {
+          "path": "codex-rs/windows-sandbox-rs/tests/support/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/windows-sandbox-rs/tests/support/Cargo.toml",
+          "sha256": "ada0b514811022b794d23c714596c346e857160a7f29879faf4827aa079a504b",
+          "size": 257,
+          "git_blob_sha1": "6cfb1fb78e852fd83e96d9e38323208b22939995"
+        },
+        {
+          "path": "codex-rs/windows-sandbox-service/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/windows-sandbox-service/Cargo.toml",
+          "sha256": "987d5888c60769213b4722ed44e19ab3d10f81c3a05038669b1d261eaf9c0355",
+          "size": 1574,
+          "git_blob_sha1": "381fec9888248e7b6b182baec592ba9813355306"
+        },
+        {
+          "path": "codex-rs/workload-identity/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/workload-identity/Cargo.toml",
+          "sha256": "347f3a72058b81058498c83529b69d01a1055384ce6021112038193853a0d0fb",
+          "size": 686,
+          "git_blob_sha1": "b64177282accbb1975aa7adbe2411ace4da52662"
+        },
+        {
+          "path": "codex-rs/worktree/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/openai/codex/83086188ae0614bd882818ff1aa23f3194962012/codex-rs/worktree/Cargo.toml",
+          "sha256": "9d62ce3cda20191520e11f0d0dbc13a9a3c67d15f64a0261637698365039ab4f",
+          "size": 581,
+          "git_blob_sha1": "05a4bdd82508e5f532a5a83301a2a5dcfe457c36"
+        },
+        {
+          "path": "codex-x86_64-unknown-linux-musl.sigstore",
+          "kind": "unverified-release-signature",
+          "url": "https://github.com/openai/codex/releases/download/rust-v0.163.0/codex-x86_64-unknown-linux-musl.sigstore",
+          "sha256": "3147bce4ddb9cb961124809719f5c1c2763b6cc1ffc6243d69e1f765a0523fbb",
+          "size": 8509
+        },
+        {
+          "path": "git/helix-editor/nucleo/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/helix-editor/nucleo.git?rev=4253de9faabb4e5c6d81d946a5e35a90f87347ee#4253de9faabb4e5c6d81d946a5e35a90f87347ee",
+          "url": "https://raw.githubusercontent.com/helix-editor/nucleo/4253de9faabb4e5c6d81d946a5e35a90f87347ee/Cargo.toml",
+          "sha256": "8d9ecdf6f400d02ce84e8d4557fdef711e99d080e6a256cd6a3cc178fad3133f",
+          "size": 525,
+          "git_blob_sha1": "eb6315fb5357e49fd68049f55a57a9bb8dc16244"
+        },
+        {
+          "path": "git/helix-editor/nucleo/bench/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/helix-editor/nucleo.git?rev=4253de9faabb4e5c6d81d946a5e35a90f87347ee#4253de9faabb4e5c6d81d946a5e35a90f87347ee",
+          "url": "https://raw.githubusercontent.com/helix-editor/nucleo/4253de9faabb4e5c6d81d946a5e35a90f87347ee/bench/Cargo.toml",
+          "sha256": "c7d9806e766d6fb89bff7b5cd284e3d631edf558a64c882e11e4bb7e22644990",
+          "size": 272,
+          "git_blob_sha1": "0dfb81d58849fa3a43cfa0383624fa1f0456dd1b"
+        },
+        {
+          "path": "git/helix-editor/nucleo/matcher/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/helix-editor/nucleo.git?rev=4253de9faabb4e5c6d81d946a5e35a90f87347ee#4253de9faabb4e5c6d81d946a5e35a90f87347ee",
+          "url": "https://raw.githubusercontent.com/helix-editor/nucleo/4253de9faabb4e5c6d81d946a5e35a90f87347ee/matcher/Cargo.toml",
+          "sha256": "86aa0dbe66e99ae147e0f19b5dd847fea39cd0873558a209ebad63d6d8f18fb9",
+          "size": 563,
+          "git_blob_sha1": "4b90ddbb035ae2a8169f997fa6de371f9ca50520"
+        },
+        {
+          "path": "git/helix-editor/nucleo/matcher/fuzz/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/helix-editor/nucleo.git?rev=4253de9faabb4e5c6d81d946a5e35a90f87347ee#4253de9faabb4e5c6d81d946a5e35a90f87347ee",
+          "url": "https://raw.githubusercontent.com/helix-editor/nucleo/4253de9faabb4e5c6d81d946a5e35a90f87347ee/matcher/fuzz/Cargo.toml",
+          "sha256": "c0ba163c405ff77f8a07b699300052f1958156d3c37012f87f8799cd1e72ad27",
+          "size": 455,
+          "git_blob_sha1": "1b9d8a7fd3203813651a84763275c49117adb1d3"
+        },
+        {
+          "path": "git/hyperium/h3/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/hyperium/h3?rev=e07e69412876f7e26f026bd75a48b2704d8c8283#e07e69412876f7e26f026bd75a48b2704d8c8283",
+          "url": "https://raw.githubusercontent.com/hyperium/h3/e07e69412876f7e26f026bd75a48b2704d8c8283/Cargo.toml",
+          "sha256": "976b2197927b013f6a5ea6d269b3e13d09a7f432dac18f889fe7418cc7a12b72",
+          "size": 141,
+          "git_blob_sha1": "647fdddfbab42135b1ef6c8a4ba215634cfe0fe3"
+        },
+        {
+          "path": "git/hyperium/h3/examples/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/hyperium/h3?rev=e07e69412876f7e26f026bd75a48b2704d8c8283#e07e69412876f7e26f026bd75a48b2704d8c8283",
+          "url": "https://raw.githubusercontent.com/hyperium/h3/e07e69412876f7e26f026bd75a48b2704d8c8283/examples/Cargo.toml",
+          "sha256": "58a2765d6de2f57955ac59946e98490cfd01bcc5e7daca2e8ca0ffa8cbc54cb5",
+          "size": 1237,
+          "git_blob_sha1": "16446daa860c317369b70061aa1cbe212411311d"
+        },
+        {
+          "path": "git/hyperium/h3/fuzz/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/hyperium/h3?rev=e07e69412876f7e26f026bd75a48b2704d8c8283#e07e69412876f7e26f026bd75a48b2704d8c8283",
+          "url": "https://raw.githubusercontent.com/hyperium/h3/e07e69412876f7e26f026bd75a48b2704d8c8283/fuzz/Cargo.toml",
+          "sha256": "767c2566fd33225ff82ce449b4e5f6386ffc487556b2304010e640fc17add072",
+          "size": 375,
+          "git_blob_sha1": "54e5b92c5c446007586f9c43193eb721d6c6d355"
+        },
+        {
+          "path": "git/hyperium/h3/h3-datagram/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/hyperium/h3?rev=e07e69412876f7e26f026bd75a48b2704d8c8283#e07e69412876f7e26f026bd75a48b2704d8c8283",
+          "url": "https://raw.githubusercontent.com/hyperium/h3/e07e69412876f7e26f026bd75a48b2704d8c8283/h3-datagram/Cargo.toml",
+          "sha256": "91ee7684b70b032822bdfa46b8c02a482f33472470929d66e103347864a8c0a3",
+          "size": 682,
+          "git_blob_sha1": "0501b418f71c019ae2f9ebf65a7188bee274eb88"
+        },
+        {
+          "path": "git/hyperium/h3/h3-quinn/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/hyperium/h3?rev=e07e69412876f7e26f026bd75a48b2704d8c8283#e07e69412876f7e26f026bd75a48b2704d8c8283",
+          "url": "https://raw.githubusercontent.com/hyperium/h3/e07e69412876f7e26f026bd75a48b2704d8c8283/h3-quinn/Cargo.toml",
+          "sha256": "2b0611252fcba006661dd742733e62e1b6d9e04ae2fa7095ab8dae913092625d",
+          "size": 920,
+          "git_blob_sha1": "69c4e983a5661a2991c831f2ceeb46b69af4ea87"
+        },
+        {
+          "path": "git/hyperium/h3/h3-webtransport/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/hyperium/h3?rev=e07e69412876f7e26f026bd75a48b2704d8c8283#e07e69412876f7e26f026bd75a48b2704d8c8283",
+          "url": "https://raw.githubusercontent.com/hyperium/h3/e07e69412876f7e26f026bd75a48b2704d8c8283/h3-webtransport/Cargo.toml",
+          "sha256": "ec9f40ee724bddf1668e16f7088736d435a3a1052d24561cc1466c1141dc0b7c",
+          "size": 879,
+          "git_blob_sha1": "28009d668073d2c77813dce72e73448b6dcecea5"
+        },
+        {
+          "path": "git/hyperium/h3/h3/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/hyperium/h3?rev=e07e69412876f7e26f026bd75a48b2704d8c8283#e07e69412876f7e26f026bd75a48b2704d8c8283",
+          "url": "https://raw.githubusercontent.com/hyperium/h3/e07e69412876f7e26f026bd75a48b2704d8c8283/h3/Cargo.toml",
+          "sha256": "a9029e4b068fe5c49b478ed433a64f491929bfdb3fd1310c7bca7bf4c8658821",
+          "size": 1679,
+          "git_blob_sha1": "c6767a4136436e9bb35d94d6fd48b82da2c2a420"
+        },
+        {
+          "path": "git/microsoft/mxc/src/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/microsoft/mxc?rev=6cd3d58f05d3447e67109cfb75e042803b843ca4#6cd3d58f05d3447e67109cfb75e042803b843ca4",
+          "url": "https://raw.githubusercontent.com/microsoft/mxc/6cd3d58f05d3447e67109cfb75e042803b843ca4/src/Cargo.toml",
+          "sha256": "c9ea04a6724215ae95d0729e89fb7e9caee2d0ae2ddc7b92d78154c07b4321db",
+          "size": 5206,
+          "git_blob_sha1": "4a5ed2640189c9673edfae87ef8b81127f9a8451"
+        },
+        {
+          "path": "git/microsoft/mxc/src/backends/appcontainer/common/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/microsoft/mxc?rev=6cd3d58f05d3447e67109cfb75e042803b843ca4#6cd3d58f05d3447e67109cfb75e042803b843ca4",
+          "url": "https://raw.githubusercontent.com/microsoft/mxc/6cd3d58f05d3447e67109cfb75e042803b843ca4/src/backends/appcontainer/common/Cargo.toml",
+          "sha256": "52526c26a2d0e7f010f1e09831a1dd16bc1602415bd814f78d9f854f5f61b2bf",
+          "size": 1092,
+          "git_blob_sha1": "835e3679474ceeb327295d05d00ac35ec1712b2e"
+        },
+        {
+          "path": "git/microsoft/mxc/src/backends/bubblewrap/common/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/microsoft/mxc?rev=6cd3d58f05d3447e67109cfb75e042803b843ca4#6cd3d58f05d3447e67109cfb75e042803b843ca4",
+          "url": "https://raw.githubusercontent.com/microsoft/mxc/6cd3d58f05d3447e67109cfb75e042803b843ca4/src/backends/bubblewrap/common/Cargo.toml",
+          "sha256": "e1a72253f4d46244cf464b4fd6d4938ff5924370d9dc542ddafdc747692e12e4",
+          "size": 406,
+          "git_blob_sha1": "89e04e8e24777edb3b4a4d2ed44102377d2328c6"
+        },
+        {
+          "path": "git/microsoft/mxc/src/backends/hyperlight/common/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/microsoft/mxc?rev=6cd3d58f05d3447e67109cfb75e042803b843ca4#6cd3d58f05d3447e67109cfb75e042803b843ca4",
+          "url": "https://raw.githubusercontent.com/microsoft/mxc/6cd3d58f05d3447e67109cfb75e042803b843ca4/src/backends/hyperlight/common/Cargo.toml",
+          "sha256": "dd6209be6184eecf365caa1664936d45f8255f19633618accb5c252e8e422054",
+          "size": 426,
+          "git_blob_sha1": "27fb7d09839a3865317e57c0021bdb972bbaf35d"
+        },
+        {
+          "path": "git/microsoft/mxc/src/backends/isolation_session/bindings/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/microsoft/mxc?rev=6cd3d58f05d3447e67109cfb75e042803b843ca4#6cd3d58f05d3447e67109cfb75e042803b843ca4",
+          "url": "https://raw.githubusercontent.com/microsoft/mxc/6cd3d58f05d3447e67109cfb75e042803b843ca4/src/backends/isolation_session/bindings/Cargo.toml",
+          "sha256": "6bf8f41921a960902f640eefefe9ff860f09e2a2d421c0096f92d43c9ab52a08",
+          "size": 385,
+          "git_blob_sha1": "b61268d0cbb887aff43c5f2153ba4402c68bfeda"
+        },
+        {
+          "path": "git/microsoft/mxc/src/backends/isolation_session/common/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/microsoft/mxc?rev=6cd3d58f05d3447e67109cfb75e042803b843ca4#6cd3d58f05d3447e67109cfb75e042803b843ca4",
+          "url": "https://raw.githubusercontent.com/microsoft/mxc/6cd3d58f05d3447e67109cfb75e042803b843ca4/src/backends/isolation_session/common/Cargo.toml",
+          "sha256": "a5baace80a84a43cbad07f260230968e4fc0844bd7937295b75bf50dcc4b1cf2",
+          "size": 536,
+          "git_blob_sha1": "7714290293618bc361b878ee0aa612ef4a56a885"
+        },
+        {
+          "path": "git/microsoft/mxc/src/backends/learning_mode/windows/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/microsoft/mxc?rev=6cd3d58f05d3447e67109cfb75e042803b843ca4#6cd3d58f05d3447e67109cfb75e042803b843ca4",
+          "url": "https://raw.githubusercontent.com/microsoft/mxc/6cd3d58f05d3447e67109cfb75e042803b843ca4/src/backends/learning_mode/windows/Cargo.toml",
+          "sha256": "60f09bcec45ce016867d1e7a3ff6cdb29847f070cadd817049cb9141d6edc3e7",
+          "size": 536,
+          "git_blob_sha1": "861bcdd1bdf66e0a5185eee404d10dd8819c49eb"
+        },
+        {
+          "path": "git/microsoft/mxc/src/backends/lxc/common/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/microsoft/mxc?rev=6cd3d58f05d3447e67109cfb75e042803b843ca4#6cd3d58f05d3447e67109cfb75e042803b843ca4",
+          "url": "https://raw.githubusercontent.com/microsoft/mxc/6cd3d58f05d3447e67109cfb75e042803b843ca4/src/backends/lxc/common/Cargo.toml",
+          "sha256": "49f11d0fcc7dcbd636265a10651c27aa7293a9da33d22429a2405cdad31ebb9c",
+          "size": 365,
+          "git_blob_sha1": "f40cae257e7917caba7e11b7a9c83a4e1bdc88f2"
+        },
+        {
+          "path": "git/microsoft/mxc/src/backends/nanvix/binaries/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/microsoft/mxc?rev=6cd3d58f05d3447e67109cfb75e042803b843ca4#6cd3d58f05d3447e67109cfb75e042803b843ca4",
+          "url": "https://raw.githubusercontent.com/microsoft/mxc/6cd3d58f05d3447e67109cfb75e042803b843ca4/src/backends/nanvix/binaries/Cargo.toml",
+          "sha256": "c759a08a5d118e96e712fe9d4dda8568f639de016d0657e3dbf705ebbc4af62c",
+          "size": 754,
+          "git_blob_sha1": "8b71c06e3a9135837fa7bb2806966b513a857a83"
+        },
+        {
+          "path": "git/microsoft/mxc/src/backends/nanvix/build_common/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/microsoft/mxc?rev=6cd3d58f05d3447e67109cfb75e042803b843ca4#6cd3d58f05d3447e67109cfb75e042803b843ca4",
+          "url": "https://raw.githubusercontent.com/microsoft/mxc/6cd3d58f05d3447e67109cfb75e042803b843ca4/src/backends/nanvix/build_common/Cargo.toml",
+          "sha256": "aea28fca9bab463e1ba70de96af72240c21593b2041749b75176033f99fea3e5",
+          "size": 281,
+          "git_blob_sha1": "30f31a2bd60434e66f2b6a9117b5addeb4c2ee95"
+        },
+        {
+          "path": "git/microsoft/mxc/src/backends/nanvix/common/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/microsoft/mxc?rev=6cd3d58f05d3447e67109cfb75e042803b843ca4#6cd3d58f05d3447e67109cfb75e042803b843ca4",
+          "url": "https://raw.githubusercontent.com/microsoft/mxc/6cd3d58f05d3447e67109cfb75e042803b843ca4/src/backends/nanvix/common/Cargo.toml",
+          "sha256": "527963c148a20e89f08f15e3bdb66fde482b1fc8dd43fba018162842a832a20e",
+          "size": 273,
+          "git_blob_sha1": "264a1c287ff7c9c765bbe0673a9cec476ec3d4d9"
+        },
+        {
+          "path": "git/microsoft/mxc/src/backends/nanvix/runner/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/microsoft/mxc?rev=6cd3d58f05d3447e67109cfb75e042803b843ca4#6cd3d58f05d3447e67109cfb75e042803b843ca4",
+          "url": "https://raw.githubusercontent.com/microsoft/mxc/6cd3d58f05d3447e67109cfb75e042803b843ca4/src/backends/nanvix/runner/Cargo.toml",
+          "sha256": "b1ec33cd5ba5cf996d1635556b083b5020115a296cf1182a84a90f5f11d11c64",
+          "size": 410,
+          "git_blob_sha1": "081942e2123d8dbd8b2ace768c9f3446141db254"
+        },
+        {
+          "path": "git/microsoft/mxc/src/backends/seatbelt/common/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/microsoft/mxc?rev=6cd3d58f05d3447e67109cfb75e042803b843ca4#6cd3d58f05d3447e67109cfb75e042803b843ca4",
+          "url": "https://raw.githubusercontent.com/microsoft/mxc/6cd3d58f05d3447e67109cfb75e042803b843ca4/src/backends/seatbelt/common/Cargo.toml",
+          "sha256": "70138b760b54833265b7c443704db2cea54e0683f40baa5b2882b7b712421d2e",
+          "size": 403,
+          "git_blob_sha1": "fb7029ae6286e645894057f756875ef543bd3b44"
+        },
+        {
+          "path": "git/microsoft/mxc/src/backends/windows_sandbox/common/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/microsoft/mxc?rev=6cd3d58f05d3447e67109cfb75e042803b843ca4#6cd3d58f05d3447e67109cfb75e042803b843ca4",
+          "url": "https://raw.githubusercontent.com/microsoft/mxc/6cd3d58f05d3447e67109cfb75e042803b843ca4/src/backends/windows_sandbox/common/Cargo.toml",
+          "sha256": "a10951dbe0b8ef5d081045858d4915102cb118e2541677da9f52f3f51c5a742c",
+          "size": 286,
+          "git_blob_sha1": "617a5dd23210307f3d204f87749fa5a54e5434d9"
+        },
+        {
+          "path": "git/microsoft/mxc/src/backends/windows_sandbox/daemon/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/microsoft/mxc?rev=6cd3d58f05d3447e67109cfb75e042803b843ca4#6cd3d58f05d3447e67109cfb75e042803b843ca4",
+          "url": "https://raw.githubusercontent.com/microsoft/mxc/6cd3d58f05d3447e67109cfb75e042803b843ca4/src/backends/windows_sandbox/daemon/Cargo.toml",
+          "sha256": "02ab278c557a6c6c3e53fadb3beb5414562bc4c5066fa19f17a1da434f8bc580",
+          "size": 626,
+          "git_blob_sha1": "48ea42c05d3c5eb50dc3479b18ca55ca135a1782"
+        },
+        {
+          "path": "git/microsoft/mxc/src/backends/windows_sandbox/guest/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/microsoft/mxc?rev=6cd3d58f05d3447e67109cfb75e042803b843ca4#6cd3d58f05d3447e67109cfb75e042803b843ca4",
+          "url": "https://raw.githubusercontent.com/microsoft/mxc/6cd3d58f05d3447e67109cfb75e042803b843ca4/src/backends/windows_sandbox/guest/Cargo.toml",
+          "sha256": "4d996c685aeb3f231e43156e315026b16ec341dbb784445527fecd4e538a17c3",
+          "size": 529,
+          "git_blob_sha1": "c9dad5cdfa649fcdddd1314f199d024f5be46949"
+        },
+        {
+          "path": "git/microsoft/mxc/src/backends/windows_sandbox/lifecycle/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/microsoft/mxc?rev=6cd3d58f05d3447e67109cfb75e042803b843ca4#6cd3d58f05d3447e67109cfb75e042803b843ca4",
+          "url": "https://raw.githubusercontent.com/microsoft/mxc/6cd3d58f05d3447e67109cfb75e042803b843ca4/src/backends/windows_sandbox/lifecycle/Cargo.toml",
+          "sha256": "43cfefbceb2ec20928e051042da0e827510c22afe6cf096069d75157399f9d87",
+          "size": 438,
+          "git_blob_sha1": "48cfcc67f39cd7bfb20549b9a31b8c89cd712527"
+        },
+        {
+          "path": "git/microsoft/mxc/src/backends/wslc/common/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/microsoft/mxc?rev=6cd3d58f05d3447e67109cfb75e042803b843ca4#6cd3d58f05d3447e67109cfb75e042803b843ca4",
+          "url": "https://raw.githubusercontent.com/microsoft/mxc/6cd3d58f05d3447e67109cfb75e042803b843ca4/src/backends/wslc/common/Cargo.toml",
+          "sha256": "0a6f5b606466c5d14c779406d22850849a49cb738d9f697fd470d4de816429a3",
+          "size": 568,
+          "git_blob_sha1": "7d69b232bead74fb7291c569300e4bf5cea52433"
+        },
+        {
+          "path": "git/microsoft/mxc/src/backends/wslc/daemon/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/microsoft/mxc?rev=6cd3d58f05d3447e67109cfb75e042803b843ca4#6cd3d58f05d3447e67109cfb75e042803b843ca4",
+          "url": "https://raw.githubusercontent.com/microsoft/mxc/6cd3d58f05d3447e67109cfb75e042803b843ca4/src/backends/wslc/daemon/Cargo.toml",
+          "sha256": "6da8ca820221ebe256276f39b8c24cc447296c3260b9841f70890adecba451c7",
+          "size": 648,
+          "git_blob_sha1": "f65add0f999704ed7b335e9b8f11ca81b7f9ef32"
+        },
+        {
+          "path": "git/microsoft/mxc/src/core/generated/base_container_specification/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/microsoft/mxc?rev=6cd3d58f05d3447e67109cfb75e042803b843ca4#6cd3d58f05d3447e67109cfb75e042803b843ca4",
+          "url": "https://raw.githubusercontent.com/microsoft/mxc/6cd3d58f05d3447e67109cfb75e042803b843ca4/src/core/generated/base_container_specification/Cargo.toml",
+          "sha256": "3b87b9783d27b82ff09dee63729423253bf46c00e82e592dc931ddd38eac6d7e",
+          "size": 247,
+          "git_blob_sha1": "6765005eee43a4226065fc4084d6cb553fc2d838"
+        },
+        {
+          "path": "git/microsoft/mxc/src/core/generated/process_security_environment_specification/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/microsoft/mxc?rev=6cd3d58f05d3447e67109cfb75e042803b843ca4#6cd3d58f05d3447e67109cfb75e042803b843ca4",
+          "url": "https://raw.githubusercontent.com/microsoft/mxc/6cd3d58f05d3447e67109cfb75e042803b843ca4/src/core/generated/process_security_environment_specification/Cargo.toml",
+          "sha256": "bfa87eb71e35aa9304b8ad2af0602d2f760b4d7cafb5428b591833c7256d6b24",
+          "size": 560,
+          "git_blob_sha1": "386f526f341e3243b5c6b0f1fbe8190034fe0618"
+        },
+        {
+          "path": "git/microsoft/mxc/src/core/learning_mode_core/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/microsoft/mxc?rev=6cd3d58f05d3447e67109cfb75e042803b843ca4#6cd3d58f05d3447e67109cfb75e042803b843ca4",
+          "url": "https://raw.githubusercontent.com/microsoft/mxc/6cd3d58f05d3447e67109cfb75e042803b843ca4/src/core/learning_mode_core/Cargo.toml",
+          "sha256": "9201e681e71ae17587a2b53258523ecd00037be8c04f55e79b5025881262e8ac",
+          "size": 318,
+          "git_blob_sha1": "5ec4c520c8b4ed64bb48654ca4d47353ebab10bb"
+        },
+        {
+          "path": "git/microsoft/mxc/src/core/lxc/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/microsoft/mxc?rev=6cd3d58f05d3447e67109cfb75e042803b843ca4#6cd3d58f05d3447e67109cfb75e042803b843ca4",
+          "url": "https://raw.githubusercontent.com/microsoft/mxc/6cd3d58f05d3447e67109cfb75e042803b843ca4/src/core/lxc/Cargo.toml",
+          "sha256": "c8ad4d259ddf156234486fb3dd14bcf164b848b78c37f78a676847e45657cd0d",
+          "size": 829,
+          "git_blob_sha1": "6b0b692d7e3fdc8fb29e8f031a2d3abd501cb4bd"
+        },
+        {
+          "path": "git/microsoft/mxc/src/core/mxc-sdk/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/microsoft/mxc?rev=6cd3d58f05d3447e67109cfb75e042803b843ca4#6cd3d58f05d3447e67109cfb75e042803b843ca4",
+          "url": "https://raw.githubusercontent.com/microsoft/mxc/6cd3d58f05d3447e67109cfb75e042803b843ca4/src/core/mxc-sdk/Cargo.toml",
+          "sha256": "c145b9ed454b83474073e6491d7c634e256375770974f6f2276aa29727829d1c",
+          "size": 1223,
+          "git_blob_sha1": "b3a4bd747b407c20d74cbb64007c4cc4dc4ea567"
+        },
+        {
+          "path": "git/microsoft/mxc/src/core/mxc_build_common/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/microsoft/mxc?rev=6cd3d58f05d3447e67109cfb75e042803b843ca4#6cd3d58f05d3447e67109cfb75e042803b843ca4",
+          "url": "https://raw.githubusercontent.com/microsoft/mxc/6cd3d58f05d3447e67109cfb75e042803b843ca4/src/core/mxc_build_common/Cargo.toml",
+          "sha256": "471671ec0c8ae09df19d6687e48b8d8123241581a2c2e0d6393b540a3a784491",
+          "size": 304,
+          "git_blob_sha1": "d26d1b744f0954da542802c6ef74abb56b02ec3b"
+        },
+        {
+          "path": "git/microsoft/mxc/src/core/mxc_config_contract/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/microsoft/mxc?rev=6cd3d58f05d3447e67109cfb75e042803b843ca4#6cd3d58f05d3447e67109cfb75e042803b843ca4",
+          "url": "https://raw.githubusercontent.com/microsoft/mxc/6cd3d58f05d3447e67109cfb75e042803b843ca4/src/core/mxc_config_contract/Cargo.toml",
+          "sha256": "b379093fc2fa54dee0680a91c4b99a9ecee3e5fd7b5794dd0f3fccb04eb6a766",
+          "size": 417,
+          "git_blob_sha1": "601c398d755977b85accc26daf062d8a681e2370"
+        },
+        {
+          "path": "git/microsoft/mxc/src/core/mxc_darwin/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/microsoft/mxc?rev=6cd3d58f05d3447e67109cfb75e042803b843ca4#6cd3d58f05d3447e67109cfb75e042803b843ca4",
+          "url": "https://raw.githubusercontent.com/microsoft/mxc/6cd3d58f05d3447e67109cfb75e042803b843ca4/src/core/mxc_darwin/Cargo.toml",
+          "sha256": "a100e26cabda66849a3f6c7321f10307f60f8dba9a1745a689487eb608add322",
+          "size": 325,
+          "git_blob_sha1": "14818cf7b2125ef3620da9b40ac2f2b9fc44b359"
+        },
+        {
+          "path": "git/microsoft/mxc/src/core/mxc_engine/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/microsoft/mxc?rev=6cd3d58f05d3447e67109cfb75e042803b843ca4#6cd3d58f05d3447e67109cfb75e042803b843ca4",
+          "url": "https://raw.githubusercontent.com/microsoft/mxc/6cd3d58f05d3447e67109cfb75e042803b843ca4/src/core/mxc_engine/Cargo.toml",
+          "sha256": "b8925e16afff61a95a66f78a50afec94705afa9e067683d03228529dbbedafde",
+          "size": 2447,
+          "git_blob_sha1": "e53e400db01fef22b9cadd27dd6282909b9d4c5b"
+        },
+        {
+          "path": "git/microsoft/mxc/src/core/mxc_pty/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/microsoft/mxc?rev=6cd3d58f05d3447e67109cfb75e042803b843ca4#6cd3d58f05d3447e67109cfb75e042803b843ca4",
+          "url": "https://raw.githubusercontent.com/microsoft/mxc/6cd3d58f05d3447e67109cfb75e042803b843ca4/src/core/mxc_pty/Cargo.toml",
+          "sha256": "ebbc9d671bccf4a79669ca25b7d5cf47b62f1574de5a40137469bbd8e39e8f6d",
+          "size": 608,
+          "git_blob_sha1": "cba91f42061954e2d503c28e5a8de772904fe93b"
+        },
+        {
+          "path": "git/microsoft/mxc/src/core/mxc_schema_support/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/microsoft/mxc?rev=6cd3d58f05d3447e67109cfb75e042803b843ca4#6cd3d58f05d3447e67109cfb75e042803b843ca4",
+          "url": "https://raw.githubusercontent.com/microsoft/mxc/6cd3d58f05d3447e67109cfb75e042803b843ca4/src/core/mxc_schema_support/Cargo.toml",
+          "sha256": "5328cc89b64f67776ab5c3294feb50f4afe5eab14e6f44b3210d7830eb185007",
+          "size": 250,
+          "git_blob_sha1": "06d01722888767d415bf51ec508795ab653bd45c"
+        },
+        {
+          "path": "git/microsoft/mxc/src/core/wxc/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/microsoft/mxc?rev=6cd3d58f05d3447e67109cfb75e042803b843ca4#6cd3d58f05d3447e67109cfb75e042803b843ca4",
+          "url": "https://raw.githubusercontent.com/microsoft/mxc/6cd3d58f05d3447e67109cfb75e042803b843ca4/src/core/wxc/Cargo.toml",
+          "sha256": "883a7fc59691a493b019d105ff3941852ff94b1b2b6b8a3eaec30e9ee86e95b9",
+          "size": 1530,
+          "git_blob_sha1": "346fb399f93de01e69daddfaa37f2247729ec17d"
+        },
+        {
+          "path": "git/microsoft/mxc/src/core/wxc_common/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/microsoft/mxc?rev=6cd3d58f05d3447e67109cfb75e042803b843ca4#6cd3d58f05d3447e67109cfb75e042803b843ca4",
+          "url": "https://raw.githubusercontent.com/microsoft/mxc/6cd3d58f05d3447e67109cfb75e042803b843ca4/src/core/wxc_common/Cargo.toml",
+          "sha256": "5df0a3565f9c0f61e3d23cc3a632f1a8b9a0c630ad950071e0e55be6adb02a85",
+          "size": 1370,
+          "git_blob_sha1": "e5dfd7df794f88747f98eb2d3a6b3e3ac51aaa5a"
+        },
+        {
+          "path": "git/microsoft/mxc/src/ffi/mxc_ffi/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/microsoft/mxc?rev=6cd3d58f05d3447e67109cfb75e042803b843ca4#6cd3d58f05d3447e67109cfb75e042803b843ca4",
+          "url": "https://raw.githubusercontent.com/microsoft/mxc/6cd3d58f05d3447e67109cfb75e042803b843ca4/src/ffi/mxc_ffi/Cargo.toml",
+          "sha256": "1bb62e41c3c99232d1de529ef9baf51615190eda2019f710380183566e8a5520",
+          "size": 1599,
+          "git_blob_sha1": "53d140471e810241f9a76e4a5a4bc0239c361deb"
+        },
+        {
+          "path": "git/microsoft/mxc/src/host/plm/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/microsoft/mxc?rev=6cd3d58f05d3447e67109cfb75e042803b843ca4#6cd3d58f05d3447e67109cfb75e042803b843ca4",
+          "url": "https://raw.githubusercontent.com/microsoft/mxc/6cd3d58f05d3447e67109cfb75e042803b843ca4/src/host/plm/Cargo.toml",
+          "sha256": "aa435a361d9828beafc00a070313327b11aab4f10ea851b2881a694759db6617",
+          "size": 1297,
+          "git_blob_sha1": "cb7e0178912424193a6633b445662d9f6b9bc334"
+        },
+        {
+          "path": "git/microsoft/mxc/src/host/wxc_host_prep/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/microsoft/mxc?rev=6cd3d58f05d3447e67109cfb75e042803b843ca4#6cd3d58f05d3447e67109cfb75e042803b843ca4",
+          "url": "https://raw.githubusercontent.com/microsoft/mxc/6cd3d58f05d3447e67109cfb75e042803b843ca4/src/host/wxc_host_prep/Cargo.toml",
+          "sha256": "8e4bf9e6914b2841cb772aec3120f9f1b1f53f9be30d4f62f6846323db75ca0a",
+          "size": 773,
+          "git_blob_sha1": "f7ca714111167555ad5022b20236531560f52c19"
+        },
+        {
+          "path": "git/microsoft/mxc/src/host/wxc_winhttp_proxy_shim/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/microsoft/mxc?rev=6cd3d58f05d3447e67109cfb75e042803b843ca4#6cd3d58f05d3447e67109cfb75e042803b843ca4",
+          "url": "https://raw.githubusercontent.com/microsoft/mxc/6cd3d58f05d3447e67109cfb75e042803b843ca4/src/host/wxc_winhttp_proxy_shim/Cargo.toml",
+          "sha256": "f52f76c47839c27844b9de83b08f9f2d3c458d4ecd6feb15fe94176b2a01377e",
+          "size": 352,
+          "git_blob_sha1": "28e5dd16b792360138a22b5510b8a8e5a9f2de5d"
+        },
+        {
+          "path": "git/microsoft/mxc/src/mxc_telemetry/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/microsoft/mxc?rev=6cd3d58f05d3447e67109cfb75e042803b843ca4#6cd3d58f05d3447e67109cfb75e042803b843ca4",
+          "url": "https://raw.githubusercontent.com/microsoft/mxc/6cd3d58f05d3447e67109cfb75e042803b843ca4/src/mxc_telemetry/Cargo.toml",
+          "sha256": "f0cddbaa3cb8545b943b0ebcae3e48c0074b044eef2039152bfe358c835e39c4",
+          "size": 614,
+          "git_blob_sha1": "fa5d8a47f091c0740e9f800eeda5c672d9a08bfb"
+        },
+        {
+          "path": "git/microsoft/mxc/src/testing/fuzz/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/microsoft/mxc?rev=6cd3d58f05d3447e67109cfb75e042803b843ca4#6cd3d58f05d3447e67109cfb75e042803b843ca4",
+          "url": "https://raw.githubusercontent.com/microsoft/mxc/6cd3d58f05d3447e67109cfb75e042803b843ca4/src/testing/fuzz/Cargo.toml",
+          "sha256": "4e27f1042b0c07483a15162e4a44d366b9fcbb1529f9959a4f1e5f77851a6c95",
+          "size": 1380,
+          "git_blob_sha1": "bcdda08b908f73a626a608d94bac5eec3c48618b"
+        },
+        {
+          "path": "git/microsoft/mxc/src/testing/unix_test_proxy/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/microsoft/mxc?rev=6cd3d58f05d3447e67109cfb75e042803b843ca4#6cd3d58f05d3447e67109cfb75e042803b843ca4",
+          "url": "https://raw.githubusercontent.com/microsoft/mxc/6cd3d58f05d3447e67109cfb75e042803b843ca4/src/testing/unix_test_proxy/Cargo.toml",
+          "sha256": "39d94794ace7c0f447d46a0d19b232886ea9dc910148ed579a10411b07e11171",
+          "size": 423,
+          "git_blob_sha1": "e8f261fec146e319376921201d44e5591baabd09"
+        },
+        {
+          "path": "git/microsoft/mxc/src/testing/wxc_e2e_tests/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/microsoft/mxc?rev=6cd3d58f05d3447e67109cfb75e042803b843ca4#6cd3d58f05d3447e67109cfb75e042803b843ca4",
+          "url": "https://raw.githubusercontent.com/microsoft/mxc/6cd3d58f05d3447e67109cfb75e042803b843ca4/src/testing/wxc_e2e_tests/Cargo.toml",
+          "sha256": "5c6885592067dfb8c7e2883642664654bee22a4f23747522126cc81bcb006a1b",
+          "size": 491,
+          "git_blob_sha1": "947b8c811a6eb9976b3dadc7c1a10ee216cd8f96"
+        },
+        {
+          "path": "git/microsoft/mxc/src/testing/wxc_test_driver/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/microsoft/mxc?rev=6cd3d58f05d3447e67109cfb75e042803b843ca4#6cd3d58f05d3447e67109cfb75e042803b843ca4",
+          "url": "https://raw.githubusercontent.com/microsoft/mxc/6cd3d58f05d3447e67109cfb75e042803b843ca4/src/testing/wxc_test_driver/Cargo.toml",
+          "sha256": "bd7c39af8b9f1bda5bb038ae7efd6832e7bc4c71597b4d51d880858c7a0418dd",
+          "size": 290,
+          "git_blob_sha1": "f9556dd53872db35367479182379d61ff93a7b21"
+        },
+        {
+          "path": "git/microsoft/mxc/src/testing/wxc_test_proxy/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/microsoft/mxc?rev=6cd3d58f05d3447e67109cfb75e042803b843ca4#6cd3d58f05d3447e67109cfb75e042803b843ca4",
+          "url": "https://raw.githubusercontent.com/microsoft/mxc/6cd3d58f05d3447e67109cfb75e042803b843ca4/src/testing/wxc_test_proxy/Cargo.toml",
+          "sha256": "8472040d648469b3f15ed0a59bb6c598690ef281637de4d7befd3d5d45c6e226",
+          "size": 463,
+          "git_blob_sha1": "c10f7f2711d2d2f4700cc970e101f45be731450e"
+        },
+        {
+          "path": "git/microsoft/mxc/src/testing/wxc_ui_probe/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/microsoft/mxc?rev=6cd3d58f05d3447e67109cfb75e042803b843ca4#6cd3d58f05d3447e67109cfb75e042803b843ca4",
+          "url": "https://raw.githubusercontent.com/microsoft/mxc/6cd3d58f05d3447e67109cfb75e042803b843ca4/src/testing/wxc_ui_probe/Cargo.toml",
+          "sha256": "7352315ed7c64c8cf91b9ec5ce4a94cac2cb6f9016d2ac1e6f45a0e420485559",
+          "size": 152,
+          "git_blob_sha1": "8cc5204d21b7c3e36d3a821ceff5f217f7234193"
+        },
+        {
+          "path": "git/microsoft/mxc/src/tools/mxc_diagnostic_console/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/microsoft/mxc?rev=6cd3d58f05d3447e67109cfb75e042803b843ca4#6cd3d58f05d3447e67109cfb75e042803b843ca4",
+          "url": "https://raw.githubusercontent.com/microsoft/mxc/6cd3d58f05d3447e67109cfb75e042803b843ca4/src/tools/mxc_diagnostic_console/Cargo.toml",
+          "sha256": "910c24ed42af830e1ba12f990ae7c5e5e8b7286f5f4e0f18edd33aeedf6d8db2",
+          "size": 427,
+          "git_blob_sha1": "541678e8211d4c5826d7f9b4c4cc51cd03b40f7f"
+        },
+        {
+          "path": "git/microsoft/mxc/src/tools/mxc_schema_gen/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/microsoft/mxc?rev=6cd3d58f05d3447e67109cfb75e042803b843ca4#6cd3d58f05d3447e67109cfb75e042803b843ca4",
+          "url": "https://raw.githubusercontent.com/microsoft/mxc/6cd3d58f05d3447e67109cfb75e042803b843ca4/src/tools/mxc_schema_gen/Cargo.toml",
+          "sha256": "1b95ba957f19dfa3f9fcd7ad04b45740fe5795003ba6ad4cb8296557f040c91c",
+          "size": 443,
+          "git_blob_sha1": "b6fa6d5103c4739ac4cb16d8a9ea71eda3a129fd"
+        },
+        {
+          "path": "git/modelcontextprotocol/rust-sdk/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/modelcontextprotocol/rust-sdk?rev=4048ac40e958fb1a7d614617a2ae8d26666ee2fa#4048ac40e958fb1a7d614617a2ae8d26666ee2fa",
+          "url": "https://raw.githubusercontent.com/modelcontextprotocol/rust-sdk/4048ac40e958fb1a7d614617a2ae8d26666ee2fa/Cargo.toml",
+          "sha256": "412924b369aee11eea632b8dfa2b427f9b0150d5555dce08cf8c8273f384e450",
+          "size": 842,
+          "git_blob_sha1": "2708023c7ba578c65e534728b46e3b25240d4003"
+        },
+        {
+          "path": "git/modelcontextprotocol/rust-sdk/conformance/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/modelcontextprotocol/rust-sdk?rev=4048ac40e958fb1a7d614617a2ae8d26666ee2fa#4048ac40e958fb1a7d614617a2ae8d26666ee2fa",
+          "url": "https://raw.githubusercontent.com/modelcontextprotocol/rust-sdk/4048ac40e958fb1a7d614617a2ae8d26666ee2fa/conformance/Cargo.toml",
+          "sha256": "f15c0d8370f13bdf143f61b9b4311dd6b185c23eec524724c984322cea78df3d",
+          "size": 943,
+          "git_blob_sha1": "e8de6f072d44ef7626b4b1641a053efbc5dbc5ba"
+        },
+        {
+          "path": "git/modelcontextprotocol/rust-sdk/crates/rmcp-macros/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/modelcontextprotocol/rust-sdk?rev=4048ac40e958fb1a7d614617a2ae8d26666ee2fa#4048ac40e958fb1a7d614617a2ae8d26666ee2fa",
+          "url": "https://raw.githubusercontent.com/modelcontextprotocol/rust-sdk/4048ac40e958fb1a7d614617a2ae8d26666ee2fa/crates/rmcp-macros/Cargo.toml",
+          "sha256": "e5b43c9c585f987a71abfc2dca5a687cb6aae424c15615ff94e60a29547f99cb",
+          "size": 578,
+          "git_blob_sha1": "9f0b3d309ac2fd1198acd81241ff456fa11a4e66"
+        },
+        {
+          "path": "git/modelcontextprotocol/rust-sdk/crates/rmcp/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/modelcontextprotocol/rust-sdk?rev=4048ac40e958fb1a7d614617a2ae8d26666ee2fa#4048ac40e958fb1a7d614617a2ae8d26666ee2fa",
+          "url": "https://raw.githubusercontent.com/modelcontextprotocol/rust-sdk/4048ac40e958fb1a7d614617a2ae8d26666ee2fa/crates/rmcp/Cargo.toml",
+          "sha256": "549e268c14b284c2bcc22303348a19b0f5227097eb41b37f2e2c1adeaa29c4ff",
+          "size": 13565,
+          "git_blob_sha1": "772844d864c954f989ef7607e6e6616258378a45"
+        },
+        {
+          "path": "git/modelcontextprotocol/rust-sdk/examples/clients/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/modelcontextprotocol/rust-sdk?rev=4048ac40e958fb1a7d614617a2ae8d26666ee2fa#4048ac40e958fb1a7d614617a2ae8d26666ee2fa",
+          "url": "https://raw.githubusercontent.com/modelcontextprotocol/rust-sdk/4048ac40e958fb1a7d614617a2ae8d26666ee2fa/examples/clients/Cargo.toml",
+          "sha256": "8bf7f6362740e5cd0020c9c951603e31bc1f79d53847cade9d3e86bea925cd4b",
+          "size": 1415,
+          "git_blob_sha1": "419a176f9fd2ee38c80a36b466cb83f593714429"
+        },
+        {
+          "path": "git/modelcontextprotocol/rust-sdk/examples/servers/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/modelcontextprotocol/rust-sdk?rev=4048ac40e958fb1a7d614617a2ae8d26666ee2fa#4048ac40e958fb1a7d614617a2ae8d26666ee2fa",
+          "url": "https://raw.githubusercontent.com/modelcontextprotocol/rust-sdk/4048ac40e958fb1a7d614617a2ae8d26666ee2fa/examples/servers/Cargo.toml",
+          "sha256": "a71a0911909f5dc68870f5d89fb31a96d06d9a51e3fc390c31f8f5a897348584",
+          "size": 2707,
+          "git_blob_sha1": "061f7b2ea049c69fe1285c4b195de549d6abc8a1"
+        },
+        {
+          "path": "git/modelcontextprotocol/rust-sdk/examples/simple-chat-client/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/modelcontextprotocol/rust-sdk?rev=4048ac40e958fb1a7d614617a2ae8d26666ee2fa#4048ac40e958fb1a7d614617a2ae8d26666ee2fa",
+          "url": "https://raw.githubusercontent.com/modelcontextprotocol/rust-sdk/4048ac40e958fb1a7d614617a2ae8d26666ee2fa/examples/simple-chat-client/Cargo.toml",
+          "sha256": "bc09754027716e309024bdd9db432a4e51579a968612cf13355852316c39b023",
+          "size": 544,
+          "git_blob_sha1": "e382e63c74fc51a4ffe5cdce88bfae7ee1cc8a02"
+        },
+        {
+          "path": "git/modelcontextprotocol/rust-sdk/examples/transport/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/modelcontextprotocol/rust-sdk?rev=4048ac40e958fb1a7d614617a2ae8d26666ee2fa#4048ac40e958fb1a7d614617a2ae8d26666ee2fa",
+          "url": "https://raw.githubusercontent.com/modelcontextprotocol/rust-sdk/4048ac40e958fb1a7d614617a2ae8d26666ee2fa/examples/transport/Cargo.toml",
+          "sha256": "88cc919b67df421577c9263d1512ab90adf5e973ca2d8d08bfbb8f5580f06f07",
+          "size": 1454,
+          "git_blob_sha1": "6ffe963046a5caf64faddc52060fce55e1ef3f68"
+        },
+        {
+          "path": "git/modelcontextprotocol/rust-sdk/examples/wasi/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/modelcontextprotocol/rust-sdk?rev=4048ac40e958fb1a7d614617a2ae8d26666ee2fa#4048ac40e958fb1a7d614617a2ae8d26666ee2fa",
+          "url": "https://raw.githubusercontent.com/modelcontextprotocol/rust-sdk/4048ac40e958fb1a7d614617a2ae8d26666ee2fa/examples/wasi/Cargo.toml",
+          "sha256": "023c55d9b94eca9cec703d12c101b263649c800a05f899b2ceeefcde008b1a1b",
+          "size": 790,
+          "git_blob_sha1": "4eb77350ba769bb7404c5ec45d8412e5034ddb33"
+        },
+        {
+          "path": "git/openai-oss-forks/crossterm/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/openai-oss-forks/crossterm?rev=ed1cdab335221515706178d68495bba2aed1924f#ed1cdab335221515706178d68495bba2aed1924f",
+          "url": "https://raw.githubusercontent.com/openai-oss-forks/crossterm/ed1cdab335221515706178d68495bba2aed1924f/Cargo.toml",
+          "sha256": "b598eb7f8a4ce6a247cbf87dd7fe27b4920b1f5fe4c306d1b8d9a02eb7d22d93",
+          "size": 4015,
+          "git_blob_sha1": "a3755cec695b82cce113c511d530a16d854874b7"
+        },
+        {
+          "path": "git/openai-oss-forks/crossterm/examples/interactive-demo/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/openai-oss-forks/crossterm?rev=ed1cdab335221515706178d68495bba2aed1924f#ed1cdab335221515706178d68495bba2aed1924f",
+          "url": "https://raw.githubusercontent.com/openai-oss-forks/crossterm/ed1cdab335221515706178d68495bba2aed1924f/examples/interactive-demo/Cargo.toml",
+          "sha256": "92e4fad8aaf288ae627ac6d299ef2a920a3f0bac7c047f877b32e5d12f620b7e",
+          "size": 332,
+          "git_blob_sha1": "989c07a0115e20fcc50bf5826aece5d7f63e1d82"
+        },
+        {
+          "path": "git/openai-oss-forks/tokio-tungstenite/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/openai-oss-forks/tokio-tungstenite?rev=0e5b2d73aa18dd9f0a50ee9ff199d5aef7594186#0e5b2d73aa18dd9f0a50ee9ff199d5aef7594186",
+          "url": "https://raw.githubusercontent.com/openai-oss-forks/tokio-tungstenite/0e5b2d73aa18dd9f0a50ee9ff199d5aef7594186/Cargo.toml",
+          "sha256": "1bb36f490668711ad63b88c5805c64f25ea16101bea4c924858b874a35521290",
+          "size": 3325,
+          "git_blob_sha1": "b3bd4ba0dc4b7d1c6651cf67a15a6def4fdc8407"
+        },
+        {
+          "path": "git/openai-oss-forks/tungstenite-rs/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/openai-oss-forks/tungstenite-rs?rev=4fffad30fe373adbdcffab9545e9e9bf4f2fc19f#4fffad30fe373adbdcffab9545e9e9bf4f2fc19f",
+          "url": "https://raw.githubusercontent.com/openai-oss-forks/tungstenite-rs/4fffad30fe373adbdcffab9545e9e9bf4f2fc19f/Cargo.toml",
+          "sha256": "d83cc5d81bfbf9c793e261be449cb3e115894e49b3d35d5ca7e7bce3d7190817",
+          "size": 3106,
+          "git_blob_sha1": "6f8e819877f317b601b8a13ffcfa2e93f382184c"
+        },
+        {
+          "path": "git/openai-oss-forks/tungstenite-rs/fuzz/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/openai-oss-forks/tungstenite-rs?rev=4fffad30fe373adbdcffab9545e9e9bf4f2fc19f#4fffad30fe373adbdcffab9545e9e9bf4f2fc19f",
+          "url": "https://raw.githubusercontent.com/openai-oss-forks/tungstenite-rs/4fffad30fe373adbdcffab9545e9e9bf4f2fc19f/fuzz/Cargo.toml",
+          "sha256": "766c8f98cb658089f50163f611a9cabfd2c2f90ffc18639e33169225f4555e8c",
+          "size": 620,
+          "git_blob_sha1": "6bf180e682c6b9eb5753cb9bb35ed8174f9d6bd7"
+        },
+        {
+          "path": "git/dzbarsky/rules_rust/rust/runfiles/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/dzbarsky/rules_rust?rev=b56cbaa8465e74127f1ea216f813cd377295ad81#b56cbaa8465e74127f1ea216f813cd377295ad81",
+          "url": "https://raw.githubusercontent.com/dzbarsky/rules_rust/b56cbaa8465e74127f1ea216f813cd377295ad81/rust/runfiles/Cargo.toml",
+          "sha256": "b38b96101d25e690fe4c1c9681b69434075d660bc51bd062982771b4b8da7084",
+          "size": 251,
+          "git_blob_sha1": "dde46286abb79589370afd63d416d376495d3d21"
+        }
+      ],
+      "version": "0.163.0"
+    },
+    {
+      "component": "cua",
+      "repository": "trycua/cua",
+      "release": "cua-driver-rs-v0.36.0",
+      "commit": "6d6c734c127025fb39ad5d585a10382808b39dc1",
+      "files": [
+        {
+          "path": ".github/workflows/cd-rust-cua-driver.yml",
+          "kind": "build-evidence",
+          "url": "https://raw.githubusercontent.com/trycua/cua/6d6c734c127025fb39ad5d585a10382808b39dc1/.github/workflows/cd-rust-cua-driver.yml",
+          "sha256": "21ca874e4d4a9c40559dee131f51eb3b1b60564f081b96ed1fabf9690366656f",
+          "size": 82107
+        },
+        {
+          "path": "LICENSE.md",
+          "kind": "license",
+          "url": "https://raw.githubusercontent.com/trycua/cua/6d6c734c127025fb39ad5d585a10382808b39dc1/LICENSE.md",
+          "sha256": "c0779290c1d4783169aa3dbfb55feb505e563ef8a004bbf55298ceffcfbda8d9",
+          "size": 1069
+        },
+        {
+          "path": "cua-driver-rs-0.36.0-linux-x86_64-binary.tar.gz.sigstore.json",
+          "kind": "unverified-release-signature",
+          "url": "https://github.com/trycua/cua/releases/download/cua-driver-rs-v0.36.0/cua-driver-rs-0.36.0-linux-x86_64-binary.tar.gz.sigstore.json",
+          "sha256": "76ff51c9b126fde79a4a4ea3c7ec0d41f0d314f28f0ca877d3c0ce7e1b7705bb",
+          "size": 8741
+        },
+        {
+          "path": "libs/cua-driver/rust/Cargo.lock",
+          "kind": "cargo-lock",
+          "url": "https://raw.githubusercontent.com/trycua/cua/6d6c734c127025fb39ad5d585a10382808b39dc1/libs/cua-driver/rust/Cargo.lock",
+          "sha256": "f9d49ce2dccdc43b2f7f027185301138fdd45eab4f9a556aace4cb0f4a98d46c",
+          "size": 160713
+        },
+        {
+          "path": "libs/cua-driver/rust/Cargo.toml",
+          "kind": "cargo-manifest",
+          "url": "https://raw.githubusercontent.com/trycua/cua/6d6c734c127025fb39ad5d585a10382808b39dc1/libs/cua-driver/rust/Cargo.toml",
+          "sha256": "26c985c8195f7a5703ca2cce4fb45552c000fa542fdd08a25c31eaee7675b895",
+          "size": 1822
+        },
+        {
+          "path": "libs/cua-driver/rust/crates/cua-cursor-motion/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/trycua/cua/6d6c734c127025fb39ad5d585a10382808b39dc1/libs/cua-driver/rust/crates/cua-cursor-motion/Cargo.toml",
+          "sha256": "6e72d6bfc8cd56a38b202c06d29191328e32203ade501f5a013c70f6f0b2afaa",
+          "size": 817,
+          "git_blob_sha1": "2b43c7604f1dbe707738f71b3df99510564b0739"
+        },
+        {
+          "path": "libs/cua-driver/rust/crates/cua-driver-bindgen/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/trycua/cua/6d6c734c127025fb39ad5d585a10382808b39dc1/libs/cua-driver/rust/crates/cua-driver-bindgen/Cargo.toml",
+          "sha256": "ee45147d4985c8ad155ac2c08d8045b67bcc0d5caa18ae2457ae43ac23524b72",
+          "size": 394,
+          "git_blob_sha1": "10257e7b15098f5943eeb13ef269050c967a5b4f"
+        },
+        {
+          "path": "libs/cua-driver/rust/crates/cua-driver-contract/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/trycua/cua/6d6c734c127025fb39ad5d585a10382808b39dc1/libs/cua-driver/rust/crates/cua-driver-contract/Cargo.toml",
+          "sha256": "a0bfc462c279b13e3021325ffdfcb9240848f54273a5a4b8fc0d9a92a99528ac",
+          "size": 324,
+          "git_blob_sha1": "a41ae2a7769314bd97548493ed9262dd7a43be89"
+        },
+        {
+          "path": "libs/cua-driver/rust/crates/cua-driver-core/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/trycua/cua/6d6c734c127025fb39ad5d585a10382808b39dc1/libs/cua-driver/rust/crates/cua-driver-core/Cargo.toml",
+          "sha256": "76a3632fb2ea88ac4b7649252111ee0ce75bb7bfb76538ccc8dde91d2c439433",
+          "size": 2909,
+          "git_blob_sha1": "de9e618d6b514fa4508b8a247a3cd66213574b8a"
+        },
+        {
+          "path": "libs/cua-driver/rust/crates/cua-driver-e2e/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/trycua/cua/6d6c734c127025fb39ad5d585a10382808b39dc1/libs/cua-driver/rust/crates/cua-driver-e2e/Cargo.toml",
+          "sha256": "997988a94104d50d8f6ecba4813fd2af15ee277157395b9850ea30f5d5d03043",
+          "size": 2196,
+          "git_blob_sha1": "d413d182aa997517fe6021ffbb4b049eef51dab1"
+        },
+        {
+          "path": "libs/cua-driver/rust/crates/cua-driver-sdk/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/trycua/cua/6d6c734c127025fb39ad5d585a10382808b39dc1/libs/cua-driver/rust/crates/cua-driver-sdk/Cargo.toml",
+          "sha256": "f04ba5347c3ab010bb571cbb19c27150718f38156d4f2ab7131c8671f60b5ae0",
+          "size": 1535,
+          "git_blob_sha1": "cdadd053eb4e28b80b47419854518b80129f92af"
+        },
+        {
+          "path": "libs/cua-driver/rust/crates/cua-driver-testkit/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/trycua/cua/6d6c734c127025fb39ad5d585a10382808b39dc1/libs/cua-driver/rust/crates/cua-driver-testkit/Cargo.toml",
+          "sha256": "36ff9a0d7a30d72a9b5b3bb68dd58e71510acc9d946b711f79c4770c0b54d87a",
+          "size": 1958,
+          "git_blob_sha1": "617bf5df8715e5014baff54b3a4021469ea2ac1b"
+        },
+        {
+          "path": "libs/cua-driver/rust/crates/cua-driver-uia/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/trycua/cua/6d6c734c127025fb39ad5d585a10382808b39dc1/libs/cua-driver/rust/crates/cua-driver-uia/Cargo.toml",
+          "sha256": "df8c6a635f068ead7c8fa38af2ac618191079c556542ae3abba71f5517797eb3",
+          "size": 1359,
+          "git_blob_sha1": "52abca90d16966ef4abf0113471f70c01008729f"
+        },
+        {
+          "path": "libs/cua-driver/rust/crates/cua-driver/Cargo.toml",
+          "kind": "cargo-manifest",
+          "url": "https://raw.githubusercontent.com/trycua/cua/6d6c734c127025fb39ad5d585a10382808b39dc1/libs/cua-driver/rust/crates/cua-driver/Cargo.toml",
+          "sha256": "3733ec872f09da41d2e7571582fedb4c0f8d788e8316b5be7d9a6cb5b2e6fabb",
+          "size": 5260
+        },
+        {
+          "path": "libs/cua-driver/rust/crates/cua-perception/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/trycua/cua/6d6c734c127025fb39ad5d585a10382808b39dc1/libs/cua-driver/rust/crates/cua-perception/Cargo.toml",
+          "sha256": "bc43d4f9a3435beb9a14d010d1d65b894a00003175aa237711ad64f12160dcf2",
+          "size": 560,
+          "git_blob_sha1": "d41c008a5a57e28cd43319a146fee7666ef48b14"
+        },
+        {
+          "path": "libs/cua-driver/rust/crates/cursor-overlay/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/trycua/cua/6d6c734c127025fb39ad5d585a10382808b39dc1/libs/cua-driver/rust/crates/cursor-overlay/Cargo.toml",
+          "sha256": "de44389abe226ebe55a31578467a0732e90e82274e4c52a7f03502c3bb40237d",
+          "size": 960,
+          "git_blob_sha1": "0b55e9e2b1b999ca4f9e450585611b0643c0a669"
+        },
+        {
+          "path": "libs/cua-driver/rust/crates/cursor-theme-cli/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/trycua/cua/6d6c734c127025fb39ad5d585a10382808b39dc1/libs/cua-driver/rust/crates/cursor-theme-cli/Cargo.toml",
+          "sha256": "67da4b7a9a536262bb0faf78b0448889971babca384f59e12000a3fc75d30f45",
+          "size": 617,
+          "git_blob_sha1": "348e0ceffc32d1829866785a89b66f97a0aa099c"
+        },
+        {
+          "path": "libs/cua-driver/rust/crates/pip-preview/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/trycua/cua/6d6c734c127025fb39ad5d585a10382808b39dc1/libs/cua-driver/rust/crates/pip-preview/Cargo.toml",
+          "sha256": "7277a1ae52015d4e6352bb47e4f64f8bfdf4764928e85454c701eb8bf2c42c62",
+          "size": 156,
+          "git_blob_sha1": "efa5f7b49d6e480a7fd703de9fa0a4f858a0d5b1"
+        },
+        {
+          "path": "libs/cua-driver/rust/crates/platform-linux/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/trycua/cua/6d6c734c127025fb39ad5d585a10382808b39dc1/libs/cua-driver/rust/crates/platform-linux/Cargo.toml",
+          "sha256": "18f8925950b55903a973eec91ff94c914b5e21332e7d84758c789b74a6339224",
+          "size": 8851,
+          "git_blob_sha1": "dfb5ec0fdc3f971970dfd9e05a244ac8099fa87b"
+        },
+        {
+          "path": "libs/cua-driver/rust/crates/platform-macos/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/trycua/cua/6d6c734c127025fb39ad5d585a10382808b39dc1/libs/cua-driver/rust/crates/platform-macos/Cargo.toml",
+          "sha256": "fc1aad47cb395cb7705ac10811dba8eeed129fe48bcc31a44b6a823c6c68c093",
+          "size": 3111,
+          "git_blob_sha1": "8d429484aa477f95a1cc6af5dde832cfc019db0e"
+        },
+        {
+          "path": "libs/cua-driver/rust/crates/platform-windows/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/trycua/cua/6d6c734c127025fb39ad5d585a10382808b39dc1/libs/cua-driver/rust/crates/platform-windows/Cargo.toml",
+          "sha256": "1a1cbc82841bc738694c114995d9d2c4003441e6e7b0bb2e745c5df676d5cd33",
+          "size": 3879,
+          "git_blob_sha1": "1d2a2ae148db9ffe7d9ee599babd4fd89ba416df"
+        },
+        {
+          "path": "libs/cua/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/trycua/cua/6d6c734c127025fb39ad5d585a10382808b39dc1/libs/cua/Cargo.toml",
+          "sha256": "39bdb036d5cff37fd2eb056d25c90b282782b76ba1d64a625d5176f3fdf2fc6a",
+          "size": 8294,
+          "git_blob_sha1": "c470eb0bdfb1b5e7c455dbfd4fb09bda1085f538"
+        },
+        {
+          "path": "libs/cua/crates/cua-telemetry/Cargo.toml",
+          "kind": "package-manifest",
+          "url": "https://raw.githubusercontent.com/trycua/cua/6d6c734c127025fb39ad5d585a10382808b39dc1/libs/cua/crates/cua-telemetry/Cargo.toml",
+          "sha256": "0bbfb01118980044cef350e82317d3c251526dc21b960bb74a929c6a881b0bb0",
+          "size": 1023,
+          "git_blob_sha1": "732437749deacf5ccf946ca61750f64115848630"
+        }
+      ],
+      "version": "0.36.0"
+    },
+    {
+      "component": "node",
+      "repository": "nodejs/node",
+      "release": "v22.23.3",
+      "commit": "80dc632040e6bada37aac1220dde9c79581c9c22",
+      "files": [
+        {
+          "path": "LICENSE",
+          "kind": "license",
+          "url": "https://raw.githubusercontent.com/nodejs/node/80dc632040e6bada37aac1220dde9c79581c9c22/LICENSE",
+          "sha256": "c738ae413cf561f174e34f6961f8ca458aae2369a73640dda6234c629b98bcc4",
+          "size": 145485
+        },
+        {
+          "path": "src/node_version.h",
+          "kind": "build-evidence",
+          "url": "https://raw.githubusercontent.com/nodejs/node/80dc632040e6bada37aac1220dde9c79581c9c22/src/node_version.h",
+          "sha256": "df20e6517f37fa5b0e56cac9e64b3e489e1df5b89ddd0cc4113ce68fc12a3092",
+          "size": 4243
+        }
+      ],
+      "version": "22.23.3"
+    }
+  ]
+}
