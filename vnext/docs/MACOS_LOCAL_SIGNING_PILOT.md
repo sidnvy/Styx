@@ -121,3 +121,28 @@ click the text **Styx** in the top-right macOS menu bar, then **Request macOS
 permissions…** to initiate the local OS flow. Permission requests and grant
 changes remain the user's actions. No private key, signature or TCC setting was
 changed during installation. Evidence: `evidence/macos-stable-install-20261019.json`.
+
+## Owned GUI acceptance preparation
+
+After the user's grant changes, Screen Recording readback became true but
+Accessibility remained false, including after one exact installed-app graceful
+restart. GUI acceptance was not started. No window was captured or acted on.
+
+`host/macos/OwnedGuiFixture.swift` is a separate test-only AppKit window with a
+unique title/PID, one button, private independent JSON readback and35second
+expiration. It compiled natively with warnings-as-errors. It is never bundled
+into the product and uses no signing identity. The opt-in
+`host/macos/owned-gui-acceptance.py` checks actual host grants before launching
+it, scopes every window query/capture/action to its exact PID/title, and removes
+its private screenshot/readback and fixture process in cleanup. It uses the
+installed app's existing embedded Cua socket, not a separate Cua daemon; it does
+not claim Gateway or end-to-end native Exec integration. It uses the pinned
+CLI's inspected `describe` schemas and a fixed per-run session for snapshot
+tokens. Actual GUI results remain NOT RUN until both host grants read back true.
+
+The prepared native binary and script are in the private marked scratch. When
+both grants are ready, the explicit opt-in command on piermini is:
+
+```sh
+STYX_MAC_OWNED_GUI=1 /usr/bin/python3 /private/tmp/styx-local-dev-20261019-0743bc4c/owned-gui-acceptance.py /private/tmp/styx-local-dev-20261019-0743bc4c
+```
