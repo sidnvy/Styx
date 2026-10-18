@@ -1,18 +1,20 @@
-# Release blockers
+# Release blockers and next verification
 
-Production RC status: BLOCKED. Production cutover remains outside authorization.
+RC gate: BLOCKED. Production release decision: NO-GO.
 
-| Gate | Status | Reproduction / resolution |
+| Gate | Status | Reproducible next work |
 | --- | --- | --- |
-| Linux GUI | PASS | Current logged-in Hyprland user environment inherited from systemd; 7/7 native tests and independent owned-window readback passed |
-| Windows native lifecycle | BLOCKED | On a permitted interactive Windows user device test install/status/enable/disable/start/stop/remove, restart, signed rollback, locked/logout refusal and exact owned-window UIA readback; never Session 0 |
-| macOS signed app | BLOCKED | Supply reviewed stable bundle identity and signing/notary configuration, build Styx.app owning Embedded Cua, obtain user TCC consent, verify signed upgrade and rollback on native macOS |
-| Publisher trusted artifacts | BLOCKED | Configure independent publisher trust and platform credentials; ephemeral developer keys prove only staging/signature mechanics |
-| Cold install / bundled runtime | NOT RUN | Build per-OS packages containing locked runtime and pinned upstreams; install without old managed agent, then pair/execute/revoke/recover |
-| Strong native-account isolation | NOT RUN | Execute docs/multi-user-isolation.md negative gates with two actual OS accounts and separate Gateway realms |
-| Runtime health and soak | NOT RUN | First establish isolated signed stable Host service, then persist 24h resource/reconnect receipts; never infer elapsed soak from unit tests |
-| ChatGPT product acceptance | BLOCKED | Register isolated Gateway using actual account authorization, explicitly select device, verify readiness and end-to-end execution; local MCP SDK is insufficient |
+| Physical Windows interactive lifecycle | BLOCKED | Run docs/native-private-state.md on an authorized native user/session; task enable/disable/start/stop, owner refusal, controlled crash recovery, locked/logout behavior and exact owned-window readback; never Session0 |
+| Signed macOS release and TCC GUI | BLOCKED | docs/macos-app-packaging.md: eligible Developer ID Application + notary profile, explicit native user TCC grants via LaunchServices, signed upgrade/rollback and owned-window acceptance; no auto grants |
+| Native cold install/durable publisher trust | NOT RUN | Install a verified per-platform product on a clean device with no existing agent; bundled runtime/bootstrap -> native pairing -> owner approval -> execution -> revoke/recover -> uninstall |
+| Distinct native-account isolation | NOT RUN | Execute docs/multi-user-isolation.md across two actual OS accounts/separate Gateway realms; do not substitute same-UID fixtures |
+| Full update recovery | NOT RUN | Validate post-switch service-health rollback and offline runtime replacement; current health API deliberately retains the old pointer before switching |
+| Full native dependency/license inventory | NOT RUN | Obtain/reconcile native transitive binary/Cargo inventories; top-level copied notices and npm SBOM are narrower |
+| Actual ChatGPT authorization | BLOCKED | Register isolated Gateway with account-owner authorization; use docs/device-readiness.md selection/readiness checklist, then real Exec/GUI flows; no local SDK substitution |
+| 24-hour component/full-platform soak | NOT RUN | Final-code Exec soak is running; inspect receipt after real elapsed duration. Separately run service/GUI/session/resource acceptance per available native OS |
 
-Independent implementation is still available for Windows/macOS packaging,
-protected state/ACL, native readiness, update health checks, negative isolation
-and observability. These external gates do not justify stopping that work.
+The prior baseline Exec soak was stopped after 1675 seconds when the EOF bug
+was found and fixed. It is retained as BLOCKED/interrupted evidence and is not
+counted toward the new immutable-code24h run. External signing/OS/account
+consent gates are not bypassed. Remaining product work is not silently marked
+complete merely because smaller fixtures or native pilots pass.

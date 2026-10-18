@@ -37,8 +37,8 @@ clone is retained unchanged for the native Exec soak.
 | D Distribution/onboarding | NOT RUN | Bundle verified Node on each target, native packages, protected credential storage, rotation and offline runtime updates |
 | E Multi-user isolation | NOT RUN | Separate native accounts and Gateway realms; adversarial identity, process, GUI and revocation tests |
 | F Reliability | NOT RUN | Signed health-gated activation, owner-scoped metrics, crash/reconnect tests and 24-hour soak |
-| G ChatGPT | NOT RUN | Deterministic readiness/discovery tools and actual account-side onboarding acceptance |
-| H RC | NOT RUN | SBOM/licenses/provenance, signed artifacts, physical evidence and final assessment |
+| G ChatGPT | BLOCKED | Deterministic readiness/discovery tools and actual account-side onboarding acceptance |
+| H RC | BLOCKED | SBOM/licenses/provenance, signed artifacts, physical evidence and final assessment |
 
 Each implementation milestone requires its own coherent commit and actual test
 receipts. PASS applies only to the tested layer/environment. Skipped native

@@ -1,29 +1,34 @@
-# Release acceptance matrix
+# VNext acceptance matrix — 2026-10-19 Asia/Shanghai
 
-Baseline `212814388967cf748030c2315de9f3442e0b01c8`.
-Client date 2026-10-19. These statuses refer to this engineering run;
-older pilot evidence remains qualified in acceptance.md.
+Implementation code: `fb7f0aae9b4f2bb15c71a0f904f2b27000159b2f`. The final documentation commit is discoverable
+from this file's Git history; CI and exact observed final head are recorded in
+this task's output report and draft PR37. Original developer worktrees preserved.
 
-| Gate | Status | Environment / evidence |
+| Gate | Status | Exact evidence / boundary |
 | --- | --- | --- |
-| GitHub baseline three-OS CI | PASS | upstream run 39143276897, baseline SHA only |
-| Baseline full local tests | PASS | native Linux, actual Codex 0.163.0; some explicit skips |
-| Updated fixture/protocol regressions | PASS | Linux Node 26.5.0; 128 passes, 9 skips, receipt logs |
-| Updated native Exec | PASS | Linux pinned Codex 0.163.0: 18 passed, zero skipped |
-| Cua portable 0.36.0 native schema | PASS | freshly checksum-verified Linux binary, 64 native tools |
-| Dependency advisory audit | PASS | full npm audit: zero reported vulnerabilities |
-| Owned native Linux GUI | PASS | 7/7 native tests after inheriting real existing systemd Hyprland session; screenshot/AX/click/readback |
-| Native Windows lifecycle/GUI | BLOCKED | no Windows execution backend in this chat |
-| Native macOS owner/liveness/attribution | PASS | own scratch compile, SIGKILL/EOF cleanup, LaunchServices parent attribution and teardown on native arm64 |
-| Native macOS signed GUI/TCC grants | BLOCKED | AX and Screen Recording absent; Developer ID Application identity unavailable |
-| Signed/notarized production distribution | BLOCKED | publisher/platform signing identities not supplied |
-| Independent cold install | NOT RUN | native product packaging incomplete |
-| Distinct-account physical isolation | NOT RUN | needs separate native OS users/session contexts |
-| Actual ChatGPT authorization/onboarding | BLOCKED | account-side product integration not supplied |
-| 24-hour per-platform soak | NOT RUN | requires stable isolated native deployment and elapsed runtime |
-| Focused feature-branch three-OS CI | PASS | PR27, PR28, PR31, PR32 native jobs; macOS owner PR29 compile/liveness PASS |
-| Integration-branch CI | NOT RUN | pending publication/run |
+| Locate legitimate development lineage | PASS | Original /tmp/styx-cua-session-doc-audit-20261018 atb51cfb0; latest baseline2128143 descends1736a10 |
+| Locked dependency audit | PASS | MCP SDK 1.32.1 / Ajv8.20.0, full npm audit zero reported vulnerabilities |
+| Fixture/protocol/Host regressions | PASS | 182 total:171 passed,11 explicit skipped, Linux receipt56458aa; final test-only schedule fixes onfb7f0aa |
+| Real native Linux Exec | PASS | 19 passed, zero skipped including late-output-before-EOF regression |
+| Native Cua portable contract | PASS | Fixed0.36.0 schema checks, real native OS CI; GUI not implied |
+| Signed bundled native runtime | PASS | Actual Node/Codex/Cua packaging/staging/runtime/tamper tests on Linux/macOS/Windows CI |
+| Windows native credential privacy | PASS | Six new actual Windows ACL/storage tests, fresh restricted creation, existing broad/foreign/junction refusal |
+| Windows physical lifecycle/GUI | BLOCKED | No authorized independent native Windows pilot in this run; parsing and package CI are insufficient |
+| macOS native owner/liveness/attribution | PASS | Native27.0.1 own scratch compile, SIGKILL/EOF cleanup, LaunchServices parent identity, read-only host attribution and teardown |
+| macOS signed GUI/TCC | BLOCKED | AX and Screen Recording false; only Apple Development identity, no eligible Developer ID/notary credentials |
+| Linux installed managed Host | PASS | Fresh signed Node22/Codex/Cua start/restart/cgroup crash recovery/upgrade/rollback/GUI/uninstall/secret cleanup on56458aa |
+| Owner-recovery/revocation negatives | PASS | Wrong realm/id/fingerprint/generation, retired key/invitation, live lane close, persistence/save failure fixture tests |
+| Strong physical two-account isolation | NOT RUN | Separate native accounts/session contexts and GUI evidence still required |
+| Preactivation health failure retention | PASS | Bounded trusted local callback, signed candidate/bootstrap/helper checks, exact old pointer retention and race/timeout tests |
+| Post-switch automatic health rollback/offline runtime switch | NOT RUN | Preactivation API does not implement a service update orchestrator |
+| JavaScript SBOM/top-level native notices | PASS | npm CycloneDX 1.5,93 components; signed pinned Cua/Codex/Styx notices, Node full upstream LICENSE |
+| Complete native transitive SBOM/license review | NOT RUN | Top-level notices are not a full native dependency audit |
+| Independent cold install/publisher trust | NOT RUN | Pilot uses existing machine/session and ephemeral publisher trust |
+| Actual ChatGPT account integration | BLOCKED | Local SDK/status tool tests do not establish account authorization; manual checklist included |
+| 24-hour final-code Exec component soak | NOT RUN | Running immutablefb7f0aa under Node 22.23.3; no completion inferred |
+| Full-platform 24-hour service/GUI soak | NOT RUN | Exec component soak does not cover these gates |
+| Final integration CI | NOT RUN | Pending at documentation snapshot; see PR37/current task report for actual run completion |
 
-Same native account installations provide logical separation only. Mocked
-launchctl, fixture binaries, compilation and schema-only smoke never satisfy
-physical service recovery, signed-app consent or GUI action acceptance.
+All receipts are scoped to their tested source/environment. Physical macOS
+permission attribution does not mean permissions were granted. No production
+endpoint, tunnel, Charon/Coder installation or unrelated service was changed.

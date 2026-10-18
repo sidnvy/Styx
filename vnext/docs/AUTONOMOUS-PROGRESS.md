@@ -180,3 +180,52 @@ The initial observer race is retained as FAIL evidence, corrected before PASS.
 No production services or the independent 24-hour soak were modified.
 See docs/linux-managed-pilot.md and docs/evidence/ for exact sanitized receipts.
 Cold-install trust and full-platform soak remain NOT RUN.
+
+## Final correctness/security closure and native rerun
+
+Implementation code SHA:`fb7f0aae9b4f2bb15c71a0f904f2b27000159b2f`. Output-drain sourcec8070c0 (integrated343d1e3)
+reproduced true missing stdout with official binary: exited=true,closed=false,
+empty page can precede late output. Fix waits for EOF; deterministic regression
+failed before/fixed after, real native19/19 and both push/PR CI PASS. Raw benign
+before/after transcripts are committed; original failed CI is retained.
+
+Native storage source2668cf8 (integrated56458aa), test followup1d00701:
+current owner UID/SID and actual private DACL validation precede secret writes.
+New leaf directories only receive protected ACLs; existing broad/foreign/
+symlink/junction state is refused. Stable signed helper is included and health
+hash checks cover it. Windows planner default now matches StyxPilot-Host.
+All six new actual Windows storage tests passed; Mac symlink fixture was
+corrected with realpath. Test-only CAS async waits now observe bounded RPC
+completion rather than fixed sleeps; no experiment runtime change.
+
+Final integrated Linux fixture/protocol/Host receipt56458aa:PASS182 tests,
+171 passed,11 skipped; native ExecPASS19/19. Fresh integrated managed Linux
+pilot56458aa repeats all10 scoped real gates PASS, including GUI and cleanup.
+Standalone signed package imports all onboarding/Doctor/service helpers.
+
+Soak rollover: baseline dbce92d run stopped with BLOCKED/interrupted after1675s
+and its test credentials removed. Fresh immutable`fb7f0aae9b4f2bb15c71a0f904f2b27000159b2f` run started
+2026-10-19 00:58:29 Asia/Shanghai under verified Node22.23.3, PID1559314.
+Completion NOT RUN until actual elapsed24h and successful receipt. No production
+service or unrelated process was stopped. Final documentation-only revision/CI
+are recorded in the task output and PR37.
+
+## Exact focused-milestone source commits
+
+These are implementation/review source commits; integration uses equivalent
+cherry-picked commits. The RC itself remains BLOCKED.
+
+| Scope | Baseline SHA | Final source SHA |
+| --- | --- | --- |
+| A foundation | `212814388967cf748030c2315de9f3442e0b01c8` | `0f08b370a370f2dfcc0dd77101a4bd863251d1aa` |
+| B/E native private files | `0f08b370a370f2dfcc0dd77101a4bd863251d1aa` | `65252490b47d07b17b4b0f05fc8d036df6f848aa` |
+| C native Mac owner | `0f08b370a370f2dfcc0dd77101a4bd863251d1aa` | `456ed4d22c2963e6109be36716efff084c8d507c` |
+| D bundled runtime | `65252490b47d07b17b4b0f05fc8d036df6f848aa` | `1640180cb9c6bf507e97fca355e1f8aac2342e82` |
+| E/F admission fencing | `65252490b47d07b17b4b0f05fc8d036df6f848aa` | `d6b4ff2eabf2e4ff615f97db824f28db7e2a29eb` |
+| F component soak harness | `d6b4ff2eabf2e4ff615f97db824f28db7e2a29eb` | `dbce92dceaa24655fcd5d914bced785ea5eede29` |
+| G passive status | `65252490b47d07b17b4b0f05fc8d036df6f848aa` | `8cf9c9f3f1b1429a53d1f3a5ef6ae918f91ac5d1` |
+| D/E owner recovery | `5fce30f4cf44ee964ff450a3c8d6d6cc85bbaf1b` | `383ebbd779f747c736873550a0518f2080dcb1bb` |
+| F preactivation health | `5fce30f4cf44ee964ff450a3c8d6d6cc85bbaf1b` | `93f67fe5c6909c8848ef1610cafa22a4c805b6b0` |
+| D/E native private storage | `0bb1f6cdc5b5d72a62a954a92cd0e5c144eafb51` | `1d00701d096aca5457a1d9f6055a2c284da77d21` |
+| F output EOF correctness | `0bb1f6cdc5b5d72a62a954a92cd0e5c144eafb51` | `c8070c0271beaa0f5935c51f5fb14566cd2acbd3` |
+| D/F native Linux managed pilot | `fe3f3e94f9e82735cd46252c3af4e303ff0d0f39` | `a78279aed46e358cb8fe49331157f97b39241166` |
