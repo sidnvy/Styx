@@ -32,7 +32,7 @@ async function setup(t, {idleSessionTimeoutMs = 0} = {}) {
 test('default transport still enforces max MCP sessions', async t => {
   const x = await setup(t);
   const a = await x.client();
-  assert.equal((await a.listTools()).tools.length, 3);
+  assert.equal((await a.listTools()).tools.length, 4);
   assert.equal(x.server.sessions.size, 1);
   await assert.rejects(x.client(), /503|Session capacity/i);
   assert.equal(x.server.sessions.size, 1);
@@ -41,7 +41,7 @@ test('default transport still enforces max MCP sessions', async t => {
 test('CAS lab reaps inactive orphan sessions on saturation and permits fresh initialize', async t => {
   const x = await setup(t, {idleSessionTimeoutMs: 20});
   const a = await x.client();
-  assert.equal((await a.listTools()).tools.length, 3);
+  assert.equal((await a.listTools()).tools.length, 4);
   assert.equal(x.server.sessions.size, 1);
   const active = [...x.server.sessions.values()][0];
   assert.equal(active.inFlight, 0);
@@ -51,7 +51,7 @@ test('CAS lab reaps inactive orphan sessions on saturation and permits fresh ini
   const b = await x.client();
   assert.equal(x.server.sessions.size, 1);
   assert.deepEqual((await b.listTools()).tools.map(v => v.name),
-    ['exec_command', 'write_stdin', 'list_execution_environments']);
+    ['exec_command', 'write_stdin', 'list_execution_environments', 'get_execution_environment_status']);
   assert.equal(x.server.sessions.size, 1);
 });
 

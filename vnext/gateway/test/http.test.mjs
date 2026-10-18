@@ -73,9 +73,16 @@ test('authenticated HTTP MCP transport, Codex tools and session isolation', asyn
   const a = await client(), b = await client();
   const list = await a.listTools();
   assert.deepEqual(list.tools.map(t => t.name),
-    ['exec_command', 'write_stdin', 'list_execution_environments']);
+    ['exec_command', 'write_stdin', 'list_execution_environments', 'get_execution_environment_status']);
   const environments = await a.callTool({name: 'list_execution_environments', arguments: {}});
   assert.equal(environments.structuredContent.environments[0].environment_id, 'dev');
+  const status = await a.callTool({name: 'get_execution_environment_status',
+    arguments: {environment_id: 'dev'}});
+  assert.equal(status.structuredContent.exec.connection, 'unknown');
+  assert.equal(status.structuredContent.exec.readiness, 'unknown');
+  assert.equal(status.structuredContent.computer.configured, false);
+  assert.equal((await a.callTool({name: 'get_execution_environment_status',
+    arguments: {}})).isError, true);
   const finished = await a.callTool({name: 'exec_command', arguments: {
     cmd: 'test', yield_time_ms: 0
   }});

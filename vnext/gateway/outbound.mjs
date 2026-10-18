@@ -211,6 +211,21 @@ export class OutboundHostRelay {
     entry.computerTransport=transport;
     return transport;
   }
+  // Passive snapshot only: never claims a slot, probes a native process, or
+  // trusts a connection from a previous catalog generation.
+  status(target) {
+    const current = this.registry.resolve(target.id);
+    const valid = entry => !this.stopped && current.generation === target.generation &&
+      entry?.generation === current.generation && !entry.closed &&
+      entry.ws?.readyState === WebSocket.OPEN;
+    return {
+      exec: target.exec.transport === 'outbound'
+        ? (valid(this.sessions.get(target.id)) ? 'connected' : 'offline') : 'unknown',
+      computer: target.computer?.transport === 'outbound'
+        ? ([...(this.computerPeers.get(target.id) ?? [])].some(valid) ? 'connected' : 'offline')
+        : 'unknown'
+    };
+  }
   computerConnected(id) {
     return [...(this.computerPeers.get(id)??[])].filter(
       e=>!e.closed && e.ws?.readyState===WebSocket.OPEN).length;

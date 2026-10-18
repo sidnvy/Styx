@@ -19,7 +19,7 @@ export function createStyxGateway({catalog, connect, computer, gui = null, cas =
   return {
     registry, pool, exec, computer: cua, gui, relay,
     serverForOwner(owner) {
-      return createGatewayMcp({exec, computer:cua, gui, registry, owner, cas, casOnly});
+      return createGatewayMcp({exec, computer:cua, gui, registry, owner, relay, cas, casOnly});
     },
     async closeOwner(owner) { await cua?.closeOwner?.(owner); },
     async close() {
