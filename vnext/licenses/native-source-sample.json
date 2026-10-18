@@ -1,0 +1,107 @@
+{
+  "counts": {
+    "crate_archives_verified": 3,
+    "distinct_crates_io_archives": 1596,
+    "license_expression_unresolved_entries": 2061,
+    "lock_entries": 2116,
+    "manifest_version_mismatch_entries": 160,
+    "pinned_manifest_license_entries": 34,
+    "registry_metadata_errors": 0,
+    "registry_metadata_selected": 12,
+    "resolved_source_edges": 9170,
+    "unresolved_source_edges": 0
+  },
+  "gates": {
+    "binary_equivalence": "NOT RUN",
+    "native_license_completeness": "BLOCKED",
+    "registry_metadata": "PASS",
+    "upstream_signature_verification": "NOT RUN"
+  },
+  "node_notice_heading_count": 43,
+  "registry_metadata_snapshot": {
+    "Inflector@0.11.4": "cd151b0d5762b6e695f1eee2f017e9509f7adc87de8800eb89ec03da6e54e0dd",
+    "addr2line@0.25.1": "ad4bcc65d197d4572c646fd54cc75feee36c0d99094b40450c445d07f6e4489f",
+    "adler2@2.0.1": "c0318061d8e86d6240887466038188ce434173e51e23aa7a218af5475ead151a",
+    "aead@0.5.2": "69abd9a3b414d5c4987ae27fca47cc4756b3698b592776d1c60500831105c98d",
+    "aead@0.6.1": "0978a1c7676dd04d03a2d867c2d1e70b9a46e8fc209156f1cac178d119fef61e",
+    "aes-gcm@0.10.3": "3955df95e97cb4625b552db48597b54179fbbb7a5832e0f50f48295e4f3579cd",
+    "aes@0.8.4": "1e4ffe6042b7c34615bc70ccf32e414c2680461df0a2a5f69d61240cf0f1f316",
+    "age-core@0.12.0": "c1d818c265e04038d938bd9aa187eaa231b8b28672c7a7583689c1e2df057a45",
+    "age@0.12.1": "d83d60855f8225fb52f5a45aeb2ccebb5afe6e6e2a8b1477dca93edcf4a63565",
+    "ahash@0.8.12": "a75e85f1f603e5990f7aa461eaebd5b797163cd5414514213db363debda3de51",
+    "aho-corasick@1.1.4": "4465d2821a9fa6b27377a42d1a4d1802b7300c9319fa151a01309b92d1b64441",
+    "allocative@0.3.6": "7618325fc2bb9ce5f13fad6bcb4d1706c351c4bcb8c7229968be246faef8256e"
+  },
+  "sample": "bounded12 registry metadata/3 archives; full registry sweep is separate work",
+  "schema": 1,
+  "scope": "upstream-source-resolution; includes dev/optional/all-platform entries; not binary-equivalent",
+  "source_archive_samples": [
+    {
+      "license": {
+        "archive_sha256": "a4689e6c2294d81e88dc6261c768b63bc4fcdb852be6d1352498b114f61383b7",
+        "declared_expression": "Apache-2.0 AND ISC",
+        "declared_license_file": null,
+        "manifest_sha256": "b81a19b27cc744410b056eb1d1195ecd41e25a163acadfca3c6457e96b797d3f",
+        "note": "Source archive declaration and selected notices; no legal or binary-completeness conclusion.",
+        "notices": [
+          {
+            "path": "LICENSE",
+            "sha256": "b3d734001a94efff3579978d953391aa7115f877657d25eb54037a43875d078a"
+          },
+          {
+            "path": "LICENSE-BoringSSL",
+            "sha256": "005fc765ddc5115da796cca915baa9557abae13ff35e0a47c47affc56f6c414d"
+          },
+          {
+            "path": "LICENSE-other-bits",
+            "sha256": "f025ccfb7dfb6bdfedc75ca0f67acc69e6fb4998143d834f7c2f38a29989680f"
+          }
+        ],
+        "status": "CHECKSUM_VERIFIED_ARCHIVE"
+      },
+      "name": "ring",
+      "version": "0.17.14"
+    },
+    {
+      "license": {
+        "archive_sha256": "9a8e94ea7f378bd32cbbd37198a4a91436180c5bb472411e48b5ec2e2124ae9e",
+        "declared_expression": "MIT OR Apache-2.0",
+        "declared_license_file": null,
+        "manifest_sha256": "d7fc24e39691a0831eaa0eac677b46ecbae407a40fa816b904759822d10f42e8",
+        "note": "Source archive declaration and selected notices; no legal or binary-completeness conclusion.",
+        "notices": [
+          {
+            "path": "LICENSE-APACHE",
+            "sha256": "62c7a1e35f56406896d7aa7ca52d0cc0d272ac022b5d2796e7d6905db8a3636a"
+          },
+          {
+            "path": "LICENSE-MIT",
+            "sha256": "23f18e03dc49df91622fe2a76176497404e46ced8a715d9d2b67a7446571cca3"
+          }
+        ],
+        "status": "CHECKSUM_VERIFIED_ARCHIVE"
+      },
+      "name": "serde",
+      "version": "1.0.228"
+    },
+    {
+      "license": {
+        "archive_sha256": "8fc7f01b389ac15039e4dc9531aa973a135d7a4135281b12d7c1bc79fd57fffe",
+        "declared_expression": "MIT",
+        "declared_license_file": null,
+        "manifest_sha256": "53fbe58d71858bf5364c6f2235a3fd4af4797b61d700424550bbeed776da8ae2",
+        "note": "Source archive declaration and selected notices; no legal or binary-completeness conclusion.",
+        "notices": [
+          {
+            "path": "LICENSE",
+            "sha256": "253cd04c6714889df2d32f3f64d669179a1c95c76ac43c40882c52eb06bc3552"
+          }
+        ],
+        "status": "CHECKSUM_VERIFIED_ARCHIVE"
+      },
+      "name": "tokio",
+      "version": "1.52.3"
+    }
+  ],
+  "source_pins_sha256": "923276da2c5d5e0f0aa3cbf5e34c84f7ec52511703a193d431b660abbe14a7f7"
+}

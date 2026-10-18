@@ -34,6 +34,14 @@ jobs:
           mkdir -p acceptance
           npm audit --audit-level=moderate
           npm sbom --package-lock-only --sbom-format cyclonedx > acceptance/npm-sbom.cdx.json
+      - name: Pinned native source inventory and bounded license evidence
+        run: |
+          python -m unittest discover -s ci/test -p test_native_inventory.py
+          python ci/native_inventory.py --fetch \
+            --cache acceptance/native-source-cache \
+            --output acceptance/native-source-inventory \
+            --metadata-limit 12 \
+            --crate serde@1.0.228 --crate ring@0.17.14 --crate tokio@1.52.3
       - name: Pin and verify the official Codex executor
         run: python3 packages/styx-exec-adapter/prepare-runtime.py
       - name: Fixture and protocol regression with explicit skipped counts
