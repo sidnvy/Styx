@@ -152,6 +152,7 @@ final class StyxDelegate: NSObject, NSApplicationDelegate {
         timer?.invalidate(); timer = nil
         // Withdraw the advertised generation before terminating its daemon.
         if let runtime = runtime { unlink(runtime.descriptor) }
+        let ownedChild = daemon != nil
         if let child = daemon {
             child.terminationHandler = nil
             if child.isRunning {
@@ -162,7 +163,9 @@ final class StyxDelegate: NSObject, NSApplicationDelegate {
                 child.waitUntilExit()
             }
         }
-        daemon = nil; runtime?.clear(); phase = "stopped"
+        daemon = nil
+        if ownedChild { runtime?.clear() }
+        phase = "stopped"
     }
     @objc func requestPermissions() {
         // Only an explicit local menu action can trigger OS-owned permission UI.
