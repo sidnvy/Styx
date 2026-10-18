@@ -83,8 +83,9 @@ test('macOS user domain service installs disabled and uninstalls only owned plis
   });
   assert.equal(started.loaded,true);
   assert.equal(started.pid,922);
-  assert.deepEqual(calls[0],['bootstrap','gui/501',created.plist]);
-  assert.ok(calls[1][1]==='gui/501/'+f.label);
+  assert.deepEqual(calls[0],['enable','gui/501/'+f.label]);
+  assert.deepEqual(calls[1],['bootstrap','gui/501',created.plist]);
+  assert.deepEqual(calls[2],['print','gui/501/'+f.label]);
   const removed=removeMacLaunchAgent(f.label,{home:f.home,uid:501,run:mock});
   assert.equal(removed.preservedInstallRoot,true);
   await assert.rejects(fs.stat(created.plist),{code:'ENOENT'});

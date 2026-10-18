@@ -111,6 +111,10 @@ export function controlMacLaunchAgent(action,label,{home=os.homedir(),
   const domain='gui/'+uid;
   const target=domain+'/'+label;
   if(action==='start'){
+    // launchctl disable persists across bootout/uninstall even after a new
+    // user-owned plist is installed. Explicit start is user authorization
+    // to re-enable exactly this verified Styx label before bootstrap.
+    launchctl('enable',[target],{run});
     launchctl('bootstrap',[domain,plist],{run});
     return statusMacLaunchAgent(label,{uid,run});
   }
