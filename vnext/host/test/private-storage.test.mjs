@@ -54,8 +54,9 @@ test('private directory creation rejects symlinks and never creates missing pare
   const missing=path.join(root,'missing','state');
   assert.throws(()=>ensurePrivateDirectory(missing),/ENOENT/);
   assert.equal(fs.existsSync(path.dirname(missing)),false);
-  if(!windows&&fs.statSync('/etc').uid!==process.getuid())
-    assert.throws(()=>requirePrivateDirectory('/etc'),/private_directory_owner_mismatch/);
+  const foreign=windows?null:fs.realpathSync('/etc');
+  if(foreign&&fs.statSync(foreign).uid!==process.getuid())
+    assert.throws(()=>requirePrivateDirectory(foreign),/private_directory_owner_mismatch/);
 });
 
 test('Gateway refuses broad existing enrollment state before writing tokens or database',async t=>{

@@ -98,11 +98,15 @@ function createHostView({clock, ledger, script, rejectUiMessage = false, message
   return {
     sent, compatSent, elements, document, get inFlight() {return inFlight;},
     async settle() {
-      for (let i = 0; i < 20; i++) {
-        await new Promise(resolve => setTimeout(resolve, 2));
-        if (!inFlight) break;
+      // Fake browser time must not move past a real asynchronous ledger RPC.
+      // Drain observable work instead of assuming disk I/O completes in 40ms.
+      const deadline=Date.now()+5000;
+      let idle=0;
+      while(Date.now()<deadline){
+        await new Promise(resolve=>setTimeout(resolve,2));
+        if(inFlight===0){if(++idle===2)return}else idle=0;
       }
-      await new Promise(resolve => setTimeout(resolve, 15));
+      assert.fail('browser RPCs did not settle within 5000ms');
     },
     giveRun(run_id) {
       handlers.get('message')({source: parent, data: {
