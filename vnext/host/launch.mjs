@@ -42,7 +42,12 @@ export async function launchActive({installRoot,hostConfigFile,trustPublicKeyFil
   const nativeConfig=activeHostConfig(
     JSON.parse(fs.readFileSync(hostConfigFile,'utf8')),active.release_root);
   return new Promise((resolve,reject)=>{
-    const child=spawn(process.execPath,[hostScript,'--stdin-config'],{
+    const bundledRuntime=path.join(active.release_root,'bin',process.platform==='win32'?'node.exe':'node');
+    // activeRelease verifies every signed member before executable selection.
+    const runtime=fs.existsSync(bundledRuntime)?bundledRuntime:process.execPath;
+    if(process.platform==='win32' && runtime===process.execPath && !fs.existsSync(bundledRuntime))
+      throw Error('signed_windows_node_missing');
+    const child=spawn(runtime,[hostScript,'--stdin-config'],{
       cwd:active.release_root,stdio:['pipe','inherit','inherit'],windowsHide:true
     });
     child.stdin.on('error',()=>{});

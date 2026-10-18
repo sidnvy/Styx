@@ -6,7 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {execFileSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
-import {activeRelease} from './installer.mjs';
+import {verifiedServiceNode} from './installer.mjs';
 
 const LABEL=/^app\.styx\.host(?:-pilot)?(?:\.[a-z0-9][a-z0-9-]{0,32})?$/;
 const PATH_SAFE=/^\/[A-Za-z0-9._+@/-]+$/;
@@ -36,16 +36,17 @@ function owned(p){
     'launchagent_not_owned');
 }
 export function macLaunchAgent({label='app.styx.host-pilot',
-  installRoot,hostConfigFile,trustPublicKeyFile,nodeBinary=process.execPath,
+  installRoot,hostConfigFile,trustPublicKeyFile,nodeBinary,
   logDir}={}){
   isDarwin();safeLabel(label);
   for(const [name,p] of [['install_root',installRoot],
     ['config',hostConfigFile],['publisher',trustPublicKeyFile],
-    ['node',nodeBinary],['logs',logDir]])safePath(p,name);
+    ['logs',logDir]])safePath(p,name);
   verifyPrivate(hostConfigFile);
   const keyInfo=fs.lstatSync(trustPublicKeyFile);
   assert(keyInfo.isFile()&&!keyInfo.isSymbolicLink(),'invalid_publisher_file');
-  activeRelease(installRoot,fs.readFileSync(trustPublicKeyFile,'utf8'));
+  nodeBinary=verifiedServiceNode({installRoot,publicKeyPem:fs.readFileSync(trustPublicKeyFile,'utf8'),nodeBinary});
+  safePath(nodeBinary,'node');
   const args=[nodeBinary,path.join(installRoot,'launch.mjs'),
     installRoot,hostConfigFile,trustPublicKeyFile];
   const body=[

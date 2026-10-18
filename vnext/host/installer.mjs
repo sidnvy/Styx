@@ -146,8 +146,22 @@ export function refreshVerifiedBootstrap(installRoot,publicKeyPem,version,
   const releaseRoot=path.join(installRoot,'releases',version);
   const verified=verifySignedRelease(releaseRoot,publicKeyPem,options);
   const signed=new Set(verified.manifest.files.map(e=>e.path));
-  const bootstrap=['host/installer.mjs','host/launch.mjs'];
+  const runtime=verified.platform==='win32'?'bin/node.exe':'bin/node';
+  const bootstrap=['host/installer.mjs','host/launch.mjs',
+    ...(signed.has(runtime)?[runtime]:[])];
   assert(bootstrap.every(name=>signed.has(name)),'signed_bootstrap_payload_missing');
+  if(verified.platform==='win32')assert(signed.has(runtime),'signed_windows_node_missing');
+  // Preflight ALL destinations before writing any shim. Windows can lock the
+  // running executable; runtime changes require a stopped-service/offline switch.
+  if(verified.platform==='win32' && signed.has(runtime)){
+    const dest=path.join(installRoot,'node.exe');
+    if(fs.existsSync(dest)){
+      const st=fs.lstatSync(dest);
+      assert(st.isFile()&&!st.isSymbolicLink(),'untrusted_bootstrap_destination');
+      assert(hash(dest)===hash(path.join(releaseRoot,runtime)),
+        'windows_node_runtime_requires_offline_switch');
+    }
+  }
   const staged=[];
   try {
     for(const name of bootstrap){
@@ -157,9 +171,10 @@ export function refreshVerifiedBootstrap(installRoot,publicKeyPem,version,
         assert(st.isFile()&&!st.isSymbolicLink(),
           'untrusted_bootstrap_destination');
       }
+      if(name===runtime && verified.platform==='win32' && fs.existsSync(dest))continue;
       const tmp=dest+'.signed-'+randomBytes(8).toString('hex');
       fs.copyFileSync(path.join(releaseRoot,name),tmp,fs.constants.COPYFILE_EXCL);
-      fs.chmodSync(tmp,0o600);
+      fs.chmodSync(tmp,name===runtime?0o700:0o600);
       staged.push([tmp,dest]);
     }
     // Update verifier first: the older launch shim can safely import the
@@ -239,9 +254,34 @@ export function pruneVerifiedReleases(installRoot,publicKeyPem,{
     keep:[...keep],removed:dryRun?[]:removals,
     planned:removals};
 }
+// Service managers need a stable runtime outside prunable release generations.
+// When a release contains Node, accept only the verified stable copy or that
+// exact signed generation. This validates selection; no files/services mutate.
+export function verifiedServiceNode({installRoot,publicKeyPem,nodeBinary,
+  platform=process.platform,arch=process.arch}={}) {
+  const active=activeRelease(installRoot,publicKeyPem,{platform,arch});
+  assert(active,'no_active_release');
+  const checked=verifySignedRelease(active.release_root,publicKeyPem,{platform,arch});
+  const name=platform==='win32'?'node.exe':'node';
+  const entry=checked.manifest.files.find(e=>e.path==='bin/'+name);
+  if(!entry){
+    assert(platform!=='win32','signed_windows_node_missing');
+    return nodeBinary??process.execPath;
+  }
+  assert(entry.executable,'signed_node_not_executable');
+  const stable=path.join(installRoot,name);
+  const generation=path.join(active.release_root,'bin',name);
+  const selected=nodeBinary??stable;
+  assert(selected===stable||selected===generation,'node_runtime_outside_signed_install');
+  const st=fs.lstatSync(selected);
+  assert(st.isFile()&&!st.isSymbolicLink()&&st.size===entry.size&&
+    hash(selected)===entry.sha256,'service_node_hash_mismatch');
+  return selected;
+}
 // This is a PLAN only; it never installs/enables OS startup services.
-export function servicePlan({installRoot,configFile,nodeBinary=process.execPath,
+export function servicePlan({installRoot,configFile,nodeBinary,
   platform=process.platform,publicKeyFile}) {
+  nodeBinary??=platform==='win32'?path.join(installRoot,'node.exe'):process.execPath;
   assert(path.isAbsolute(installRoot)&&path.isAbsolute(configFile) &&
     path.isAbsolute(nodeBinary)&&path.isAbsolute(publicKeyFile),
     'absolute_service_paths_required');

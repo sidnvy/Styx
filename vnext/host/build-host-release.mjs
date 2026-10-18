@@ -54,7 +54,7 @@ function version(binary,prefix) {
   return observed.slice(0,120);
 }
 export function buildHostRelease({destination,version,privateKeyFile,
-  codexBinary,cuaBinary,sourceRoot=ROOT,platform=process.platform,
+  codexBinary,cuaBinary,nodeBinary,sourceRoot=ROOT,platform=process.platform,
   arch=process.arch}={}){
   assert(['linux','darwin','win32'].includes(platform) &&
     platform===process.platform && arch===process.arch,'native_build_platform_required');
@@ -70,6 +70,19 @@ export function buildHostRelease({destination,version,privateKeyFile,
   assert(privateKey.asymmetricKeyType==='ed25519','ed25519_signing_key_required');
   const codexVer=versionBinary(codexBinary,'codex-cli 0.163.0');
   const cuaVer=versionBinary(cuaBinary,'cua-driver 0.36.0');
+  if(platform==='win32')assert(nodeBinary,'windows_node_runtime_required');
+  let nodeProvenance=null;
+  if(nodeBinary){
+    assert(path.isAbsolute(nodeBinary),'absolute_node_path_required');
+    regular(nodeBinary);
+    nodeProvenance=JSON.parse(fs.readFileSync(regular(path.join(path.dirname(nodeBinary),'node-provenance.json')),'utf8'));
+    assert(nodeProvenance.schema===1 && nodeProvenance.component==='node' &&
+      nodeProvenance.version==='22.23.3' && nodeProvenance.platform===platform &&
+      nodeProvenance.arch===arch && nodeProvenance.binary_sha256===sha256(nodeBinary) &&
+      nodeProvenance.license_sha256===sha256(regular(path.join(path.dirname(nodeBinary),'LICENSE'))),
+      'invalid_node_provenance');
+    assert(versionBinary(nodeBinary,'v22.23.3')==='v22.23.3','unsupported_node_version');
+  }
   const names={
     codex:platform==='win32'?'codex.exe':'codex',
     cua:platform==='win32'?'cua-driver.exe':'cua-driver'
@@ -83,6 +96,11 @@ export function buildHostRelease({destination,version,privateKeyFile,
       copy(path.join(dependencies,name),path.join(destination,'node_modules/ws',name));
     copy(codexBinary,path.join(destination,'bin',names.codex));
     copy(cuaBinary,path.join(destination,'bin',names.cua));
+    if(nodeBinary){
+      copy(nodeBinary,path.join(destination,'bin',platform==='win32'?'node.exe':'node'));
+      copy(path.join(path.dirname(nodeBinary),'LICENSE'),path.join(destination,'licenses/node-LICENSE'));
+      copy(path.join(path.dirname(nodeBinary),'node-provenance.json'),path.join(destination,'provenance/node.json'));
+    }
     const files=walk(destination).map(name=>{
       const abs=path.join(destination,...name.split('/'));
       const executable=name.startsWith('bin/');
@@ -90,7 +108,7 @@ export function buildHostRelease({destination,version,privateKeyFile,
       return {path:name,sha256:sha256(abs),size:fs.statSync(abs).size,executable};
     });
     const manifest={schema:1,version,platform,arch,
-      upstream:{codex:codexVer,cua:cuaVer,
+      upstream:{codex:codexVer,cua:cuaVer,...(nodeProvenance?{node:nodeProvenance.version}:{}),
         ws:JSON.parse(fs.readFileSync(path.join(dependencies,'package.json'),'utf8')).version},
       files
     };
@@ -106,9 +124,9 @@ export function buildHostRelease({destination,version,privateKeyFile,
 }
 const versionBinary=version;
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){
-  const [destination,version,privateKeyFile,codexBinary,cuaBinary]=process.argv.slice(2);
+  const [destination,version,privateKeyFile,codexBinary,cuaBinary,nodeBinary]=process.argv.slice(2);
   try{
-    const result=buildHostRelease({destination,version,privateKeyFile,codexBinary,cuaBinary});
+    const result=buildHostRelease({destination,version,privateKeyFile,codexBinary,cuaBinary,nodeBinary});
     process.stdout.write(JSON.stringify(result)+'\n');
   }catch(e){
     process.stderr.write('Styx Host bundle: '+e.message+'\n');process.exitCode=2;
