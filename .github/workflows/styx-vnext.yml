@@ -68,6 +68,19 @@ jobs:
           python-version: '3.12'
       - name: Install locked Host test dependencies
         run: npm --prefix vnext ci --ignore-scripts --no-audit --no-fund
+      - name: Prepare official independent Node and native Host executors
+        run: |
+          set -euo pipefail
+          python vnext/host/prepare-node.py "$RUNNER_TEMP/styx-node-native"
+          python vnext/host/prepare-codex.py --output "$RUNNER_TEMP/styx-codex-native"
+          python vnext/host/prepare-cua.py --output "$RUNNER_TEMP/styx-cua-native"
+          suffix=''
+          if [[ "$RUNNER_OS" == 'Windows' ]]; then suffix='.exe'; fi
+          echo "STYX_TEST_NODE_BINARY=$RUNNER_TEMP/styx-node-native/node$suffix" >> "$GITHUB_ENV"
+          echo "STYX_TEST_CODEX_BINARY=$RUNNER_TEMP/styx-codex-native/codex$suffix" >> "$GITHUB_ENV"
+          echo "STYX_TEST_CUA_BINARY=$RUNNER_TEMP/styx-cua-native/cua-driver$suffix" >> "$GITHUB_ENV"
+      - name: Validate checksum and safe archive extraction regressions
+        run: python -m unittest discover -s vnext/host/test -p test_prepare_node.py
       - name: Validate portable signed staging and local pairing identity
         run: node --test --test-concurrency=1 vnext/host/test/*.test.mjs
       - name: Check Windows interactive-task installer syntax
@@ -102,7 +115,6 @@ jobs:
           STYX_CUA_DIRECT: '0'
         run: |
           set -euo pipefail
-          python vnext/host/prepare-cua.py --output "$RUNNER_TEMP/styx-cua-native"
           if [[ "$RUNNER_OS" == 'Windows' ]]; then
             executable=cua-driver.exe
           else

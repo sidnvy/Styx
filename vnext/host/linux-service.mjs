@@ -5,7 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import {execFileSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
-import {activeRelease} from './installer.mjs';
+import {verifiedServiceNode} from './installer.mjs';
 
 const UNIT_PATTERN=/^styx-(?:vnext-)?[a-z0-9][a-z0-9-]{0,48}\.service$/;
 const SAFE_PATH=/^\/[A-Za-z0-9._/+@-]+$/;
@@ -37,19 +37,19 @@ function assertLocalFile(file){
   requireValue(s.isFile()&&!s.isSymbolicLink(),'invalid_local_trust_file');
 }
 export function linuxUserUnit({unitName='styx-vnext-pilot.service',
-  installRoot,hostConfigFile,trustPublicKeyFile,nodeBinary=process.execPath,
+  installRoot,hostConfigFile,trustPublicKeyFile,nodeBinary,
   restartSec=3}={}){
   requireLinux();
   validateUnitName(unitName);
   for(const [name,p] of [['install_root',installRoot],
-    ['host_config',hostConfigFile],['publisher_key',trustPublicKeyFile],
-    ['node_binary',nodeBinary]])absoluteSafe(p,name);
+    ['host_config',hostConfigFile],['publisher_key',trustPublicKeyFile]])absoluteSafe(p,name);
   verifyConfigFile(hostConfigFile);
   assertLocalFile(trustPublicKeyFile);
   requireValue(Number.isInteger(restartSec)&&restartSec>=1&&restartSec<=30,
     'invalid_restart_delay');
   const pub=fs.readFileSync(trustPublicKeyFile,'utf8');
-  activeRelease(installRoot,pub);
+  nodeBinary=verifiedServiceNode({installRoot,publicKeyPem:pub,nodeBinary});
+  absoluteSafe(nodeBinary,'node_binary');
   const unit=[
     OWNER_MARKER,
     '[Unit]',

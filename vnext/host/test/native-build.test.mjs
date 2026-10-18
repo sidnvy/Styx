@@ -39,6 +39,18 @@ test('portable signed Host bundle builds on the native macOS or Linux publisher'
   execFileSync(process.execPath,['--input-type=module','--eval',
     'await import('+JSON.stringify(pathToFileURL(path.join(destination,'host/connect.mjs')).href)+')'],
     {timeout:7000,stdio:'pipe'});
+  if(process.env.STYX_TEST_NODE_BINARY){
+    const runtimeBundle=path.join(root,'bundle-node');
+    buildHostRelease({destination:runtimeBundle,version:'0.1.0-with-node',
+      privateKeyFile:key,codexBinary:codex,cuaBinary:cua,nodeBinary:process.env.STYX_TEST_NODE_BINARY});
+    const runtime=verifySignedRelease(runtimeBundle,publicKey);
+    assert.equal(runtime.manifest.upstream.node,'22.23.3');
+    for(const name of ['bin/node','licenses/node-LICENSE','provenance/node.json'])
+      assert.ok(runtime.manifest.files.some(x=>x.path===name));
+    assert.equal(execFileSync(path.join(runtimeBundle,'bin/node'),['--version'],{encoding:'utf8'}).trim(),'v22.23.3');
+    await fs.appendFile(path.join(runtimeBundle,'bin/node'),'tampered');
+    assert.throws(()=>verifySignedRelease(runtimeBundle,publicKey),/metadata_mismatch|hash_mismatch/);
+  }
   assert.throws(()=>buildHostRelease({destination:path.join(root,'wrong-platform'),
     version:'0.1.0-bad',privateKeyFile:key,codexBinary:codex,cuaBinary:cua,
     platform:process.platform==='darwin'?'linux':'darwin'
