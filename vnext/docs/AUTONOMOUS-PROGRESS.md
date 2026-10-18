@@ -277,3 +277,16 @@ including NTFS DACLs, before executing binary version probes or creating a bundl
 The native runtime packaging fixture creates its signing key in a protected
 directory. Linux publisher/build tests passed; actual Windows check is in the
 existing three-OS CI matrix. No real publisher key was accessed or changed.
+
+## Continued independent work: offline service update transaction
+
+Integrated source commits02cb27c/e5d473b/50f5b7f from a separate worktree based
+on4e5d0f3. New host/service-update.mjs provides signed bootstrap/runtime switch,
+post-switch observed health, exact previous-pointer/verified-byte rollback and
+private durable intent receipts. Known unhealthy results roll back once; uncertain
+callbacks retain the lock for explicit stopped recovery with no replay. Native
+stop observations must include durable restart inhibition. Recovery validates
+receipt identity, phase, pointer versions and signed hashes before callbacks.
+The new module ships in the signed Host payload and its packaged imports are
+checked. Focused API tests:12 PASS; a separate native Linux service pilot will
+provide service-level evidence. Windows/macOS physical updates remain NOT RUN.

@@ -35,13 +35,13 @@ test('portable signed Host bundle builds on the native macOS or Linux publisher'
     'host/launch.mjs','shared/private-file.mjs','node_modules/ws/package.json',
     'licenses/cua-LICENSE','licenses/codex-LICENSE','licenses/codex-NOTICE',
     'licenses/styx-LICENSE','licenses/provenance.json','host/enroll.mjs',
-    'host/doctor.mjs','host/linux-service.mjs','host/macos-launchagent.mjs',
+    'host/doctor.mjs','host/service-update.mjs','host/linux-service.mjs','host/macos-launchagent.mjs',
     'host/windows-task.ps1','shared/enrollment-protocol.mjs']){
     assert.ok(verified.manifest.files.some(x=>x.path===file),file);
   }
   // The signed payload must actually resolve every local runtime import.
   execFileSync(process.execPath,['--input-type=module','--eval',
-    'for(const name of '+JSON.stringify(['connect','enroll','doctor','linux-service','macos-launchagent','health-update'])+')await import('+
+    'for(const name of '+JSON.stringify(['connect','enroll','doctor','linux-service','macos-launchagent','health-update','service-update'])+')await import('+
       JSON.stringify(pathToFileURL(destination+path.sep).href)+'+"host/"+name+".mjs")'],
     {timeout:7000,stdio:'pipe'});
   if(process.env.STYX_TEST_NODE_BINARY){

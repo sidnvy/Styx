@@ -10,7 +10,7 @@ import {requirePrivateFile} from './private-storage.mjs';
 const ROOT=fileURLToPath(new URL('../',import.meta.url));
 const STATIC=Object.freeze([
   'host/connect.mjs','host/computer.mjs',
-  'host/launch.mjs','host/installer.mjs','host/health-update.mjs',
+  'host/launch.mjs','host/installer.mjs','host/health-update.mjs','host/service-update.mjs',
   'host/enroll.mjs','host/doctor.mjs','host/linux-service.mjs',
   'host/macos-launchagent.mjs','host/windows-task.ps1',
   'shared/enrollment-protocol.mjs',
