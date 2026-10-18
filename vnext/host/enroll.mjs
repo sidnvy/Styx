@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import {requirePrivateFile,ensurePrivateDirectory} from '../shared/private-file.mjs';
 import path from 'node:path';
 import {
   randomBytes,generateKeyPairSync,createPublicKey,createPrivateKey,createHash,
@@ -13,16 +14,10 @@ const TOKEN=/^[A-Za-z0-9_-]{32,}$/;
 const sha=b=>createHash('sha256').update(b).digest('hex');
 const assert=(truth,msg)=>{if(!truth)throw Error(msg)};
 function protectedDir(folder){
-  assert(typeof folder==='string'&&path.isAbsolute(folder),'absolute_storage_dir_required');
-  if(!fs.existsSync(folder))fs.mkdirSync(folder,{recursive:true,mode:0o700});
-  const stat=fs.lstatSync(folder);
-  assert(stat.isDirectory()&&!stat.isSymbolicLink()&&
-    (process.platform==='win32'||!(stat.mode&0o077)),'private_storage_dir_required');
+  ensurePrivateDirectory(folder);
 }
 function protectedRead(p) {
-  const stat=fs.lstatSync(p);
-  assert(stat.isFile()&&!stat.isSymbolicLink()&&
-    (process.platform==='win32'||!(stat.mode&0o077)),'private_file_permissions');
+  requirePrivateFile(p);
   return fs.readFileSync(p,'utf8');
 }
 function privateWrite(p,content){
