@@ -97,14 +97,14 @@ Observed bounded sample results (also in `native-source-sample.json`):
 | Distinct crates.io name/version/archive-checksum identities | 1596 |
 | Registry metadata selected | 12 |
 | Checksum-verified source archives | 3 |
-| Exact workspace/Git manifest license declarations | 34 |
+| Exact workspace/Git manifest license declarations | 35 |
 | Codex workspace lock/manifest version mismatches observed | 160 |
-| Lock entries without exact-identity license expression after this sample | 2061 |
+| Lock entries without exact-identity license expression after this sample | 2060 |
 
 All 17 Cua workspace licenses resolve from exact inherited/explicit manifests.
-Seventeen of the 18 locked Git packages resolve from exact commit manifests;
-runfiles remains unresolved in this initial snapshot after repeated transport
-failures fetching its source tree. Exact Codex source manifests inherit version
+All 18 locked Git packages resolve from exact commit manifests. The final
+runfiles manifest was fetched from its immutable commit over verified HTTPS
+after earlier transport failures; those failures remain recorded separately. Exact Codex source manifests inherit version
 0.163.0 while all 160 workspace lock identities record 0.0.0. Their actual source
 license declarations are exposed as version-mismatch observations, not silently
 assigned to a different locked identity. No root license is guessed.

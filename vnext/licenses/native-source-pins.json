@@ -1959,6 +1959,15 @@
           "sha256": "766c8f98cb658089f50163f611a9cabfd2c2f90ffc18639e33169225f4555e8c",
           "size": 620,
           "git_blob_sha1": "6bf180e682c6b9eb5753cb9bb35ed8174f9d6bd7"
+        },
+        {
+          "path": "git/dzbarsky/rules_rust/rust/runfiles/Cargo.toml",
+          "kind": "package-manifest",
+          "package_source": "git+https://github.com/dzbarsky/rules_rust?rev=b56cbaa8465e74127f1ea216f813cd377295ad81#b56cbaa8465e74127f1ea216f813cd377295ad81",
+          "url": "https://raw.githubusercontent.com/dzbarsky/rules_rust/b56cbaa8465e74127f1ea216f813cd377295ad81/rust/runfiles/Cargo.toml",
+          "sha256": "b38b96101d25e690fe4c1c9681b69434075d660bc51bd062982771b4b8da7084",
+          "size": 251,
+          "git_blob_sha1": "dde46286abb79589370afd63d416d376495d3d21"
         }
       ],
       "version": "0.163.0"

@@ -2,10 +2,10 @@
   "counts": {
     "crate_archives_verified": 3,
     "distinct_crates_io_archives": 1596,
-    "license_expression_unresolved_entries": 2061,
+    "license_expression_unresolved_entries": 2060,
     "lock_entries": 2116,
     "manifest_version_mismatch_entries": 160,
-    "pinned_manifest_license_entries": 34,
+    "pinned_manifest_license_entries": 35,
     "registry_metadata_errors": 0,
     "registry_metadata_selected": 12,
     "resolved_source_edges": 9170,
@@ -103,5 +103,5 @@
       "version": "1.52.3"
     }
   ],
-  "source_pins_sha256": "923276da2c5d5e0f0aa3cbf5e34c84f7ec52511703a193d431b660abbe14a7f7"
+  "source_pins_sha256": "5210d2996989b9894087ea06fdafc8425f2da2ee760dd8dfc885d6cf6c03e614"
 }
