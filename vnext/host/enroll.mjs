@@ -6,7 +6,7 @@ import {
 } from 'node:crypto';
 import https from 'node:https';
 import {fileURLToPath} from 'node:url';
-import {joinPayload} from '../gateway/enrollment.mjs';
+import {joinPayload} from '../shared/enrollment-protocol.mjs';
 
 const ID=/^styx-[a-f0-9]{24}$/;
 const TOKEN=/^[A-Za-z0-9_-]{32,}$/;

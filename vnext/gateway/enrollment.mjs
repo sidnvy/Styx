@@ -1,5 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import {joinPayload} from '../shared/enrollment-protocol.mjs';
+export {joinPayload};
 import {
   randomBytes, createHash, timingSafeEqual, createPublicKey,
   verify, publicEncrypt, constants, createHmac
@@ -37,11 +39,6 @@ function commitFile(filename,content,mode=0o600){
   finally {fs.closeSync(fd);}
   try {fs.renameSync(tmp,filename)}
   catch(e){try{fs.unlinkSync(tmp)}catch{};throw e}
-}
-export function joinPayload(body){
-  const keys=['invitation','device_id','label','platform','cwd','shell',
-    'computer_requested','public_key_pem'];
-  return JSON.stringify(Object.fromEntries(keys.map(k=>[k,body[k]])));
 }
 function validateJoin(body){
   exact(body,['invitation','device_id','label','platform','cwd','shell',

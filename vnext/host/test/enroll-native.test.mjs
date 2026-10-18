@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {verify,createPublicKey,constants} from 'node:crypto';
 import {initLocalIdentity} from '../enroll.mjs';
-import {joinPayload} from '../../gateway/enrollment.mjs';
+import {joinPayload} from '../../shared/enrollment-protocol.mjs';
 
 test('native device identity is device-local, stable and cryptographically bound',
   async t=>{
