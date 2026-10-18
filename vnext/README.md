@@ -33,7 +33,8 @@ Native screenshot/session handles are not Codex Exec process session IDs.
 | Windows Cua MCP on interactive session | PASS read-only |
 | Windows owned scratch GUI mutation | PASS, isolated Edge Profile + system UIA readback |
 | Real Codex Exec through authenticated Gateway MCP | PASS, Linux loopback |
-| Host Outbound WebSocket, signed distribution, ChatGPT product integration | NOT RUN |
+| Host Outbound WebSocket, including real private-link Exec and bounded Cua GUI | PASS isolated pilots |
+| Signed distribution and ChatGPT product registration | NOT RUN |
 
 The actual native binaries were staged in private temporary directories and
 official checksum files were checked. No package-manager or system-level

@@ -77,8 +77,10 @@ DELETE releases it promptly. Reaper never ends a call in progress.
 - The older physical cross-host `computer_transport_unavailable` error
   has no surviving complete transport trace. These tests show plausible
   reproducible causes, not proof of that historical event's exact cause.
-- Windows native GUI readback and macOS final signed application packaging
-  remain separate acceptance gates. No production cutover is implied.
+- The previously completed Windows native Edge scratch UIA test is documented
+  in docs/outbound-computer.md; the native GUI test was not re-run in this
+  source audit. Windows GUI over the Outbound channel and macOS final signed
+  packaging remain separate release gates. No production cutover is implied.
 
 All test-only secrets, screenshot payloads and machine-specific IPs are
 excluded from this document.

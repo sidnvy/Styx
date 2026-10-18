@@ -48,7 +48,14 @@ GO for additive implementation; NO-GO for production cutover.
   leases at five minutes without terminating an active tool call.
 - PASS: macOS Embedded Cua stdio proxy uses upstream documented
   mcp --embedded --socket against an app-owned daemon.
-- NOT RUN: physical cross-host Cua GUI action acceptance and Windows
-  scratch GUI action. The loopback native GUI proof does not imply these pass.
+- PASS: the bounded Windows Edge scratch UIA action and independent
+  system readback were previously recorded in the native Windows pilot;
+  not re-executed during this source review.
+- PASS: the physical macOS-to-Linux cross-host Cua GUI test using an exact
+  owned scratch window, PNG + AX snapshot, button action, and independently
+  confirmed native scratch exit code 0.
+- IN PROGRESS: the self-contained unattended physical acceptance script
+  that uses Styx Exec tools, rather than external test orchestration, to
+  create and independently verify the owned scratch window.
 
 Source documentation and evidence: docs/cua-0.36-source-contract.md.

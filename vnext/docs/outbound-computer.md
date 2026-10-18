@@ -51,8 +51,9 @@ connection closes.
 
 macOS requires a signed, GUI-session-owned Styx.app with Embedded Cua. The
 Host config must also supply the absolute Cua daemon socket path. The generic
-Host Connector uses cua-driver mcp --socket to proxy that existing permission
-owner; it will not use --direct or launch a GUI daemon under SSH.
+Host Connector uses cua-driver mcp --embedded --socket to proxy the
+app-owned daemon, as required by Cua 0.36.0 embedding documentation. It
+never uses --direct or launches a GUI daemon under SSH.
 
 All Host paths and credentials live outside Git. The Gateway Host bearer/mTLS
 identity and process directory are explicitly registered. The test harness
@@ -74,8 +75,10 @@ Run in a Linux graphical test environment with a verified isolated Cua binary:
 
     STYX_LIVE_CUA_TEST=1 node --test gateway/test/computer-outbound.test.mjs
 
-The macOS signed-app and Windows native UIA mutation acceptance remain
-separate from this transport test. Native browser use is not included.
+macOS signed-app distribution and Windows UIA over this cross-host
+transport remain separate acceptance gates. A distinct bounded Windows
+scratch test already established native UIA mutation as described below.
+Native browser use is not included.
 Production Charon, Coder, Styx and network rules were not changed.
 
 ## Unattended health and acceptance
@@ -103,3 +106,29 @@ it unsuitable as an isolated fixture. No personal document was modified.
 
 This validates a bounded native Windows UIA execution path, not arbitrary
 Windows-app reliability, unattended login service packaging, or GUI-over-WSS.
+
+
+## Physical unattended GUI acceptance through Styx tools
+
+Run host/physical-cua-acceptance.mjs on the Gateway machine with a running
+trusted remote Linux/Wayland Host and these private (non-model) environment
+settings:
+
+    STYX_PILOT_MCP_URL=https://gateway.private.example/mcp
+    STYX_PILOT_MCP_TOKEN_FILE=/private/mcp.token
+    STYX_PILOT_ENVIRONMENT_ID=registered-wayland-host
+    NODE_EXTRA_CA_CERTS=/private/accepted-gateway-ca.pem
+    node host/physical-cua-acceptance.mjs
+
+This test is all-Styx: it invokes native Host exec_command to create a
+self-expiring scratch Zenity dialog (30-second timeout), reads the emitted
+owned PID, uses Cua list_windows(pid) and get_window_state for PNG + AX,
+clicks only the observed scratch button, then uses write_stdin to confirm
+the remote process's independent exit code 0. It terminates its own MCP
+HTTP session explicitly with terminateSession(), ensuring immediate native
+Cua lease release. Never run against a user's real application.
+
+Cua's Wayland feature must be explicitly enabled on this Host with trusted
+computer.env.CUA_DRIVER_RS_ENABLE_WAYLAND=1, as documented in the source-
+contract review. No personal clipboard, browser profile, or user window
+can be selected by this test.
