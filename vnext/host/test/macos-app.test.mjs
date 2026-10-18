@@ -60,3 +60,12 @@ test('symlinked CLI entrypoint cannot silently report a successful no-op',{skip:
   assert.equal(result.status,2);
   assert.ok(result.stderr.includes('Styx macOS app:'));
 });
+
+ test('codesign inline requirements use equals prefix rather than a requirement filename',()=>{
+  for(const make of [macSigningPlan,macDevelopmentSigningPlan]){
+    const identity=make===macSigningPlan?'Developer ID Application: Example (A123456789)':'Apple Development: Example (A123456789)';
+    const plan=make({app:'/build/Styx.app',identity,teamID:'A123456789'});
+    const args=plan.find(([,args])=>args.includes('-R'))[1];
+    assert.ok(args[args.indexOf('-R')+1].startsWith('=anchor apple generic'));
+  }
+});

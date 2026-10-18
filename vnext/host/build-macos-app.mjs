@@ -37,7 +37,7 @@ export function macSigningPlan({app,identity,teamID,notaryProfile}={}){
     ['/usr/bin/codesign',['--force','--options','runtime','--timestamp','--sign',identity,path.posix.join(app,'Contents/MacOS/cua-driver')]],
     ['/usr/bin/codesign',['--force','--options','runtime','--timestamp','--sign',identity,app]],
     ['/usr/bin/codesign',['--verify','--deep','--strict','--verbose=2',app]],
-    ['/usr/bin/codesign',['--verify','--strict','-R',`anchor apple generic and identifier "${MAC_BUNDLE_ID}" and certificate leaf[subject.OU] = "${teamID}"`,app]]
+    ['/usr/bin/codesign',['--verify','--strict','-R',`=anchor apple generic and identifier "${MAC_BUNDLE_ID}" and certificate leaf[subject.OU] = "${teamID}"`,app]]
   ];
   if(notaryProfile){
     const archive=app+'.notarization.zip';
@@ -60,7 +60,7 @@ export function macDevelopmentSigningPlan({app,identity,teamID}={}){
     ['/usr/bin/codesign',['--force','--options','runtime','--timestamp=none','--sign',identity,path.posix.join(app,'Contents/MacOS/cua-driver')]],
     ['/usr/bin/codesign',['--force','--options','runtime','--timestamp=none','--sign',identity,app]],
     ['/usr/bin/codesign',['--verify','--deep','--strict','--verbose=2',app]],
-    ['/usr/bin/codesign',['--verify','--strict','-R',`anchor apple generic and identifier "${MAC_BUNDLE_ID}" and certificate leaf[subject.OU] = "${teamID}"`,app]]
+    ['/usr/bin/codesign',['--verify','--strict','-R',`=anchor apple generic and identifier "${MAC_BUNDLE_ID}" and certificate leaf[subject.OU] = "${teamID}"`,app]]
   ];
 }
 export function buildMacApp({app,cuaBinary,version,identity,teamID,notaryProfile,signingMode='distribution'}={}){
