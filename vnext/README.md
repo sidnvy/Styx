@@ -1,11 +1,17 @@
-# Styx VNext — unattended three-OS developer preview
+# Styx VNext — native standalone release candidate
 
 **Scope: macOS, Linux (including Hyprland), Windows. No iOS.**
 
 One Styx project, two deployment roles: a model-facing MCP Gateway and native
 Styx Host execution processes. ChatGPT is the sole reasoning/planning layer.
-This is an additive preview under vnext/, not a replacement for deployed
-Styx/Charon/Coder services.
+The product is implemented under vnext/ and is independent of deployed
+Charon/Coder services. Merging the candidate does not switch an endpoint or
+decommission an existing installation. Begin with [fresh native onboarding](docs/fresh-onboarding.md).
+
+The native CLI preparation, pairing, signed staging and per-user service helpers
+are implemented. A fresh plugin/account connection is an explicit acceptance
+step; historical native/SDK pilots do not establish it. There is no graphical
+installer or browser automation provider in this candidate.
 
 ## Optional CAS continuation experiment (not production)
 

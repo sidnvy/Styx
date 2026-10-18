@@ -1,8 +1,9 @@
 # Styx — production onboarding and installer release gate
 
-Status: PRODUCTION RELEASE REQUIREMENTS. Narrow device pairing and offline
-signed staging PILOTS are implemented; native cold installers and the ChatGPT
-setup UI are NOT implemented. This file is a release gate for
+Status: PRODUCTION RELEASE REQUIREMENTS. The implemented native CLI path is
+[fresh native onboarding](fresh-onboarding.md): trusted signed bundle preparation,
+fresh device pairing and explicit per-user service setup. A graphical cold
+installer and ChatGPT setup UI are NOT implemented. This file is a release gate for
 the single Styx product. It does not authorize production Charon/Coder changes.
 
 ## Initial trust/bootstrap boundary

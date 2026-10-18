@@ -1,4 +1,16 @@
-# Styx (formerly Chat-Codex)
+# Styx
+
+The current native product is under [`vnext/`](vnext/README.md): a standalone
+Styx plugin, MCP Gateway, outbound native Host Connector, pinned Codex Exec
+Server and Cua Driver. It does not use a Charon plugin, Coder Agent or legacy
+execution backend.
+
+Start a clean candidate evaluation with [fresh native onboarding](vnext/docs/fresh-onboarding.md).
+Use the `vnext` package and entrypoints for this product; the repository-root
+Node scripts and the historical documentation below describe the older server.
+Candidate merge is separate from publication and actual account-side acceptance.
+
+## Historical server documentation
 
 > **Repository migration in progress.** The private package metadata, MCP Server identity and portable Plugin template still use `chat-codex` / `Chat-Codex` at v0.3.0. Renaming the repository does **not** update or reconnect existing installations. See [Styx Foundation RFC](docs/RFC-0002-STYX-FOUNDATION.md).
 
