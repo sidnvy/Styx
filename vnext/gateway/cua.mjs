@@ -105,6 +105,7 @@ export class CuaProvider {
     // it never sends a new GUI action on behalf of the model.
     this.idleMs=idleMs;this.clock=clock;
     this.sessions = new Map(); this.pending = new Map();
+    this.ownerStates = new Map();
     this.stopped = false;
     this.reaper=setInterval(()=>{void this.reapIdle()},reapIntervalMs);
     this.reaper.unref?.();
@@ -116,7 +117,7 @@ export class CuaProvider {
     return target;
   }
 
-  async #get(owner, target) {
+  async #get(owner, target, ownerState) {
     if (this.stopped) throw Error('computer_provider_closed');
     if (typeof owner !== 'string' || !owner) throw Error('invalid_owner');
     const key=sessionKey(owner, target.id);
@@ -139,7 +140,9 @@ export class CuaProvider {
     if (opening) return opening;
     const promise = (async () => {
       const client = await this.connect(target,owner);
-      if (this.stopped) {await client.close(); throw Error('computer_provider_closed');}
+      if (this.stopped || ownerState.closed) {
+        await client.close();throw Error(this.stopped?'computer_provider_closed':'computer_owner_closed');
+      }
       const identity=client.getServerVersion?.();
       if (!identity || identity.name!==this.manifest.driver ||
         identity.version!==this.manifest.version) {
@@ -147,9 +150,11 @@ export class CuaProvider {
         throw Error('computer_version_mismatch');
       }
       // Re-read admission after an asynchronous connection handshake.
-      const now = this.#target(target.id);
-      if (now.generation !== target.generation) {
-        await client.close();throw Error('computer_generation_changed');
+      try {
+        const now = this.#target(target.id);
+        if (now.generation !== target.generation) throw Error('computer_generation_changed');
+      } catch(error) {
+        await client.close().catch(()=>{});throw error;
       }
       const snapshot = {generation:target.generation,client,active:0,
         lastUsed:this.clock()};
@@ -181,7 +186,12 @@ export class CuaProvider {
     let dispatched=false;
     try {
       const target=this.#target(environment_id);
-      const client=await this.#get(owner,target);
+      let ownerState=this.ownerStates.get(owner);
+      if(!ownerState){ownerState={closed:false};this.ownerStates.set(owner,ownerState);}
+      const client=await this.#get(owner,target,ownerState);
+      if(ownerState.closed)throw Error('computer_owner_closed');
+      const admitted=this.#target(target.id);
+      if(admitted.generation!==target.generation)throw Error('computer_generation_changed');
       const current=this.sessions.get(sessionKey(owner,target.id));
       if(!current || current.client!==client) throw Error('computer_session_lost');
       current.active++;
@@ -199,7 +209,7 @@ export class CuaProvider {
       const code=e?.message;
       if (['environment_not_found','environment_access_denied','computer_not_available',
         'computer_generation_changed','computer_version_mismatch',
-        'computer_session_lost','invalid_owner','computer_provider_closed',
+        'computer_session_lost','invalid_owner','computer_provider_closed','computer_owner_closed',
         'computer_slots_busy','computer_host_offline'].includes(code))
         return failure(code);
       // Before dispatch, nothing could have mutated. After dispatch an
@@ -221,12 +231,17 @@ export class CuaProvider {
   }
 
   async closeOwner(owner) {
+    const state=this.ownerStates.get(owner);
+    if(state)state.closed=true;
+    this.ownerStates.delete(owner);
     const prefix=JSON.stringify([owner]).slice(0,-1)+',';
     await Promise.allSettled([...this.sessions.entries()].filter(([k])=>k.startsWith(prefix))
       .map(async ([key,item])=>{this.sessions.delete(key);await item.client.close();}));
   }
   async close() {
     this.stopped=true;
+    for(const state of this.ownerStates.values())state.closed=true;
+    this.ownerStates.clear();
     clearInterval(this.reaper);
     await Promise.allSettled([...this.pending.values()]);
     await Promise.allSettled([...this.sessions.values()].map(x=>x.client.close()));

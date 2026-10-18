@@ -47,3 +47,31 @@ test('runtime initialized once per target generation, never per tool request', a
   assert.deepEqual([created, initialized], [1, 1]);
   await pool.close(); assert.equal(closed, 1);
 });
+test('revocation during executor handshake cannot return an execution binding',async()=>{
+  const c=catalog();c.targets[0].kind='host';
+  const registry=new TargetRegistry(c);
+  let release,entered;
+  const started=new Promise(resolve=>{entered=resolve});
+  const gate=new Promise(resolve=>{release=resolve});
+  let closed=0;
+  const runtime={sessionId:'pending-session',lost:false,async close(){closed++}};
+  const pool=new RuntimePool(registry,{connect:async()=>{entered();await gate;return runtime}});
+  const opening=pool.binding('dev');await started;
+  registry.revokeHost('dev');release();
+  await assert.rejects(opening,/environment_access_denied/);
+  assert.equal(closed,1);assert.equal(runtime.lost,true);
+  assert.equal(pool.pending.size,0);
+  await pool.close();
+});
+test('generation replacement during executor handshake invalidates the old runtime',async()=>{
+  const registry=new TargetRegistry(catalog());
+  let release;
+  const gate=new Promise(resolve=>{release=resolve});let closed=0;
+  const pool=new RuntimePool(registry,{connect:async()=>{await gate;return {
+    sessionId:'old',async close(){closed++}
+  }}});
+  const opening=pool.binding('dev');
+  registry.targets.set('dev',{...registry.resolve('dev'),generation:'build-2'});
+  release();await assert.rejects(opening,/environment_generation_changed/);
+  assert.equal(closed,1);assert.equal(pool.pending.size,0);await pool.close();
+});

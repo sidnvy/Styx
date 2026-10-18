@@ -175,3 +175,25 @@ test('an active native Cua action is never released by idle transport reaper',as
     await broker.close();
   }
 });
+for(const revoke of ['device','owner'])test(revoke+' closure during native Cua handshake closes the orphan without dispatch',async t=>{
+  const registry=new TargetRegistry({version:1,default_environment_id:'linux',
+    targets:[target('linux','linux')]});
+  let release,entered;
+  const gate=new Promise(resolve=>{release=resolve});
+  const started=new Promise(resolve=>{entered=resolve});
+  let closed=0,calls=0;
+  const provider=new CuaProvider({registry,toolNames:['list_apps'],connect:async()=>{
+    entered();await gate;
+    return {getServerVersion:()=>({name:'cua-driver',version:'0.36.0'}),
+      async close(){closed++},async callTool(){calls++;return {content:[]}}};
+  }});
+  t.after(()=>provider.close());
+  const pending=provider.callTool('list_apps',{},'closing-owner');await started;
+  if(revoke==='device')registry.revokeHost('linux');
+  else await provider.closeOwner('closing-owner');
+  release();const result=await pending;
+  assert.equal(result.isError,true);
+  assert.match(result.content[0].text,revoke==='device'?/environment_access_denied/:/computer_owner_closed/);
+  assert.equal(closed,1);assert.equal(calls,0);
+  assert.equal(provider.sessions.size,0);assert.equal(provider.pending.size,0);
+});
