@@ -6,7 +6,7 @@ import path from 'node:path';
 import https from 'node:https';
 import {Readable} from 'node:stream';
 import {execFileSync} from 'node:child_process';
-import {createHash,generateKeyPairSync,randomBytes} from 'node:crypto';
+import {createHash,generateKeyPairSync,randomBytes,X509Certificate} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StreamableHTTPClientTransport} from '@modelcontextprotocol/sdk/client/streamableHttp.js';
@@ -76,9 +76,10 @@ function caFetch(origin,ca){
   };
 }
 export async function runManagedLinuxPilot(raw,{optIn=process.env.STYX_RUN_MANAGED_LINUX_PILOT,
-  buildRelease=buildHostRelease,updateAcceptance,signal}={}){
+  buildRelease=buildHostRelease,updateAcceptance,signal,tlsDays=1}={}){
   assert(optIn==='1','managed_linux_pilot_requires_explicit_opt_in');
   if(signal?.aborted)throw Error('managed_pilot_aborted');
+  assert(Number.isInteger(tlsDays)&&tlsDays>=1&&tlsDays<=7,'bounded_pilot_tls_validity_required');
   assert(process.platform==='linux'&&process.arch==='x64','native_linux_x64_required');
   const options=pilotOptions(raw);
   const {directory,unitName,nodeBinary,codexBinary,cuaBinary}=options;
@@ -141,9 +142,12 @@ export async function runManagedLinuxPilot(raw,{optIn=process.env.STYX_RUN_MANAG
     const token=randomBytes(32).toString('hex'),modelToken=randomBytes(32).toString('hex');
     const tokenFile=path.join(state,'host.token');fs.writeFileSync(tokenFile,token,{mode:0o600});
     const keyFile=path.join(state,'gateway-key.pem'),certFile=path.join(state,'gateway-cert.pem');
-    execFileSync('openssl',['req','-x509','-newkey','rsa:2048','-nodes','-sha256','-days','1',
+    execFileSync('openssl',['req','-x509','-newkey','rsa:2048','-nodes','-sha256','-days',String(tlsDays),
       '-keyout',keyFile,'-out',certFile,'-subj','/CN=styx-managed-owned',
       '-addext','subjectAltName=IP:127.0.0.1'],{stdio:'ignore',timeout:10000});
+    const certificateNotAfter=Date.parse(new X509Certificate(fs.readFileSync(certFile)).validTo);
+    receipt.tls={validity_days:tlsDays,certificate_not_after:new Date(certificateNotAfter).toISOString(),
+      trust_scope:'per-client private test CA only; no global trust change'};
     const target='managed-owned-host';
     gateway=createStyxGateway({catalog:{version:1,default_environment_id:target,targets:[{
       id:target,kind:'host',platform:'linux',generation:'owned-managed-pilot-g1',
@@ -230,7 +234,7 @@ export async function runManagedLinuxPilot(raw,{optIn=process.env.STYX_RUN_MANAG
       // Trusted local acceptance code only: these hooks are never loaded from
       // Host configuration, an agent tool argument, or a remote document.
       phase='update_transaction_acceptance';
-      await updateAcceptance({installRoot,unitName,directory,signal,sampleExec,publicKeyPem:publisher.publicKey,
+      await updateAcceptance({installRoot,unitName,directory,signal,sampleExec,certificateNotAfter,publicKeyPem:publisher.publicKey,
         publicKeyFile,release1,release2,ready,closeClient,gateway,target,receipt,
         setPhase:value=>{phase=value},saveReceipt:()=>save(receiptFile,receipt)});
     }else{

@@ -15,6 +15,18 @@ export function managedSoakOptions(raw={}){
   assert(Number.isSafeInteger(intervalSeconds)&&intervalSeconds>=1&&intervalSeconds<=3600,'bounded_managed_soak_interval_required');
   return {...pilot,durationSeconds,intervalSeconds};
 }
+const SAFE_ERRORS=new Set(['managed_pilot_aborted','managed_native_exec_readback_failed',
+  'managed_soak_initial_unit_not_confirmed','managed_soak_unit_not_active_enabled',
+  'managed_soak_unexpected_service_restart','managed_soak_transport_disconnected',
+  'managed_soak_process_not_owned','managed_soak_proc_resources_unavailable',
+  'managed_soak_certificate_window_too_short','managed_soak_sample_failed']);
+export function managedSoakErrorCode(error,{aborted=false}={}){
+  return aborted?'managed_pilot_aborted':SAFE_ERRORS.has(error?.message)?error.message:'managed_soak_sample_failed';
+}
+export function assertManagedSoakCertificateWindow(notAfter,durationSeconds,now=Date.now()){
+  assert(Number.isFinite(notAfter)&&notAfter>=now+(durationSeconds+3600)*1000,
+    'managed_soak_certificate_window_too_short');
+}
 function wait(ms,signal){
   return new Promise((resolve,reject)=>{
     const abort=()=>{clearTimeout(timer);signal?.removeEventListener('abort',abort);reject(Error('managed_pilot_aborted'))};
@@ -48,8 +60,9 @@ function resources(unitName,pid,installRoot){
 export async function runManagedServiceSoak(raw,{optIn=process.env.STYX_RUN_MANAGED_SERVICE_SOAK,signal}={}){
   assert(optIn==='1','managed_service_soak_requires_explicit_opt_in');
   const options=managedSoakOptions(raw);
-  return runManagedLinuxPilot(options,{optIn:'1',signal,updateAcceptance:async context=>{
-    const {unitName,directory,installRoot,sampleExec,gateway,target,receipt,setPhase,saveReceipt}=context;
+  return runManagedLinuxPilot(options,{optIn:'1',signal,tlsDays:3,updateAcceptance:async context=>{
+    const {unitName,directory,installRoot,sampleExec,certificateNotAfter,gateway,target,receipt,setPhase,saveReceipt}=context;
+    assertManagedSoakCertificateWindow(certificateNotAfter,options.durationSeconds);
     setPhase('managed_service_exec_sampling');receipt.kind='linux-managed-service-exec-soak';
     receipt.evidence.managed_service_exec_sampling='NOT RUN';
     receipt.evidence.managed_service_exec_soak_24h='NOT RUN';
@@ -61,7 +74,8 @@ export async function runManagedServiceSoak(raw,{optIn=process.env.STYX_RUN_MANA
       interval_seconds:options.intervalSeconds,passed_samples:0,elapsed_seconds:0,
       started_at:new Date().toISOString(),initial_main_pid:original.pid,initial_restarts:original.restarts,
       scope:'owned user service + native Exec over private HTTPS/WSS; no periodic GUI calls',
-      full_gui_session_soak_24h:'NOT RUN'};
+      full_gui_session_soak_24h:'NOT RUN',tls_certificate_validity_days:3,
+      tls_not_after:new Date(certificateNotAfter).toISOString(),tls_required_duration_safety_margin_seconds:3600};
     receipt.soak=soak;
     const receiptFile=path.join(directory,'managed-soak.json'),samplesFile=path.join(directory,'managed-soak-samples.jsonl');
     function persist(){durable(receiptFile,soak);saveReceipt()}
@@ -80,7 +94,7 @@ export async function runManagedServiceSoak(raw,{optIn=process.env.STYX_RUN_MANA
           sample.native_exec_latency_ms=Math.round(performance.now()-callBegan);
           Object.assign(sample,resources(unitName,current.pid,installRoot));
           sample.exec_wss_connected=true;sample.computer_wss_slots=1;sample.status='PASS';
-        }catch(error){sample.status=signal?.aborted?'BLOCKED':'FAIL';sample.reason=signal?.aborted?'managed_pilot_aborted':String(error.message).slice(0,100);append(samplesFile,sample);throw error}
+        }catch(error){sample.status=signal?.aborted?'BLOCKED':'FAIL';sample.reason=managedSoakErrorCode(error,{aborted:signal?.aborted});append(samplesFile,sample);throw Error(sample.reason)}
         append(samplesFile,sample);soak.passed_samples++;
         soak.elapsed_seconds=Math.floor((performance.now()-began)/1000);soak.last_sample=sample;persist();
         if(performance.now()-began>=options.durationSeconds*1000)break;
@@ -92,8 +106,8 @@ export async function runManagedServiceSoak(raw,{optIn=process.env.STYX_RUN_MANA
         receipt.evidence.managed_service_exec_soak_24h='PASS';
     }catch(error){
       soak.status=signal?.aborted?'BLOCKED':'FAIL';soak.phase='stopped';
-      soak.reason=signal?.aborted?'managed_pilot_aborted':String(error.message).slice(0,100);
-      receipt.evidence.managed_service_exec_sampling=soak.status;throw error;
+      soak.reason=managedSoakErrorCode(error,{aborted:signal?.aborted});
+      receipt.evidence.managed_service_exec_sampling=soak.status;throw Error(soak.reason);
     }finally{
       soak.elapsed_seconds=Math.floor((performance.now()-began)/1000);soak.completed_at=new Date().toISOString();persist();
     }
@@ -105,5 +119,5 @@ if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.ur
     const [file]=process.argv.slice(2);assert(file&&path.isAbsolute(file),'absolute_managed_soak_config_required');
     const result=await runManagedServiceSoak(JSON.parse(fs.readFileSync(file,'utf8')),{signal:abort.signal});
     console.log(JSON.stringify(result));process.exitCode=result.status==='PASS'?0:result.status==='BLOCKED'?2:1;
-  }catch(error){console.log(JSON.stringify({status:'BLOCKED',reason:String(error.message).slice(0,120)}));process.exitCode=2}
+  }catch(error){console.log(JSON.stringify({status:'BLOCKED',reason:abort.signal.aborted?'managed_pilot_aborted':'managed_soak_setup_failed'}));process.exitCode=2}
 }
