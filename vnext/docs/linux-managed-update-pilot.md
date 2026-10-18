@@ -53,7 +53,9 @@ STYX_RUN_MANAGED_LINUX_UPDATE_PILOT=1 /absolute/pinned-node/node \
 Only a new `styx-rcYYYYMMDD-owned-suffix.service` may be used. Existing units
 and nonfresh output directories are refused. Before every offline file switch,
 the stop callback executes `systemctl --user disable --now` for only that unit
-and observes inactive, PID 0, disabled and disconnected. Thus login/reboot
+and requires manager status reported, unit load loaded, active state inactive
+or failed, PID 0, enablement exactly disabled, and disconnected. Unknown and
+enabled-runtime states never attest the offline boundary. Thus login/reboot
 activation is inhibited before multi-file replacement. Health may start the
 unit while disabled. Original enablement is restored only after a completed
 transaction with coherent signed bytes. Uncertain transactions stay disabled.
@@ -63,8 +65,10 @@ No reboot, session change, global service action or permission grant occurs.
 
 ## Observed result on 2026-10-19 (Asia/Shanghai)
 
-The [sanitized receipt](evidence/linux-managed-update-20261019-pass.json) records
-source `38fcb8b8162ebe1daccb7d379b753e4162ef69c5`. Actual user-systemd operations
+The [strict-stop sanitized receipt](evidence/linux-managed-update-20261019-strict-pass.json)
+records source `583d633aaf4d5386e597b9e284972574fb7408fe`. The earlier
+[receipt](evidence/linux-managed-update-20261019-pass.json) is retained unchanged
+as the prior run. Actual user-systemd operations
 and official binaries were used throughout:
 
 - PASS: initial signed install, controlled restart and owned-cgroup SIGKILL
@@ -73,7 +77,8 @@ and official binaries were used throughout:
   Node 22.23.2. The mapped service executable's `/proc/<owned-pid>/exe --version`
   independently confirmed the version actually running.
 - PASS: a subsequent switch back to release 1 was deliberately reported
-  unhealthy after its actual native Exec readback. The transaction stopped it,
+  unhealthy by a controlled health-rejection injection after its successful
+  native Exec readback. This does not show a natural candidate malfunction. The transaction stopped it,
   restored the exact previous active.json bytes and independently signed helper,
   installer, distinct launcher and Node bytes, restarted release 2 and observed
   native Exec health with the actual Node 22.23.2 mapped runtime.

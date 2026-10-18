@@ -1,0 +1,236 @@
+{
+  "schema": 1,
+  "kind": "linux-native-signed-service-update-pilot",
+  "status": "PASS",
+  "revision": "583d633aaf4d5386e597b9e284972574fb7408fe",
+  "runtime": {
+    "node": "22.23.3",
+    "codex": "0.163.0",
+    "cua": "0.36.0",
+    "candidate_node": "22.23.2",
+    "candidate_distribution": "test-only signed fixture"
+  },
+  "binary_sha256": {
+    "node": "fde6a4bf8d0562f7751d1a2d6cb9b417c4cfe107bbcb0aa3e9a24e125e348f48",
+    "codex": "399ff69c431c066e40de318fba45c2b07f45a76b19939d247ee4828fc70c4215",
+    "cua": "d09deb163d5c505493c865c0882ccf261d460c515afe9df1ad1e5d4173f2a4f9",
+    "candidate_node": "3517c2df0b2f8cd7f422b4b8450ef81c6889f08eb03e281d6de9079b15e6a327"
+  },
+  "evidence": {
+    "signed_build": "PASS",
+    "signed_install": "PASS",
+    "managed_start_ready": "PASS",
+    "managed_restart": "PASS",
+    "managed_sigkill_recovery": "PASS",
+    "signed_upgrade": "PASS",
+    "signed_rollback": "PASS",
+    "owned_gui_screenshot_ax_action_readback": "PASS",
+    "managed_uninstall": "PASS",
+    "secret_cleanup": "PASS",
+    "cold_install": "NOT RUN",
+    "publisher_trust_distribution": "NOT RUN",
+    "full_platform_24h_soak": "NOT RUN",
+    "successful_update_transaction": "PASS",
+    "unhealthy_candidate_rollback_transaction": "PASS",
+    "uncertain_timeout_no_replay": "PASS",
+    "explicit_stopped_recovery": "PASS",
+    "runtime_version_change": "PASS"
+  },
+  "boundaries": {
+    "gateway": "private loopback HTTPS/WSS with per-client test CA",
+    "service": "one explicitly named user systemd unit; no sudo, lingering or session changes",
+    "publisher": "ephemeral pilot Ed25519 key, not established distribution trust",
+    "gui": "self-expiring exact-title/pid owned scratch only; no screenshot bytes persisted"
+  },
+  "samples": [
+    {
+      "phase": "managed_start_ready",
+      "version": "0.1.0-managed-pilot-1",
+      "status": "PASS",
+      "service_active": true,
+      "exec_wss_connected": true,
+      "computer_wss_slots": 1,
+      "systemd_restarts": 0,
+      "signed_stable_node": true,
+      "signed_connector_generation": true
+    },
+    {
+      "phase": "managed_restart",
+      "version": "0.1.0-managed-pilot-1",
+      "status": "PASS",
+      "service_active": true,
+      "exec_wss_connected": true,
+      "computer_wss_slots": 1,
+      "systemd_restarts": 0,
+      "signed_stable_node": true,
+      "signed_connector_generation": true
+    },
+    {
+      "phase": "managed_sigkill_recovery",
+      "version": "0.1.0-managed-pilot-1",
+      "status": "PASS",
+      "service_active": true,
+      "exec_wss_connected": true,
+      "computer_wss_slots": 1,
+      "systemd_restarts": 1,
+      "signed_stable_node": true,
+      "signed_connector_generation": true
+    },
+    {
+      "phase": "successful_update_transaction",
+      "version": "0.1.0-managed-pilot-2",
+      "status": "PASS",
+      "service_active": true,
+      "exec_wss_connected": true,
+      "computer_wss_slots": 1,
+      "systemd_restarts": 0,
+      "signed_stable_node": true,
+      "signed_connector_generation": true
+    },
+    {
+      "phase": "unhealthy_candidate_rollback_transaction",
+      "version": "0.1.0-managed-pilot-1",
+      "status": "PASS",
+      "service_active": true,
+      "exec_wss_connected": true,
+      "computer_wss_slots": 1,
+      "systemd_restarts": 0,
+      "signed_stable_node": true,
+      "signed_connector_generation": true
+    },
+    {
+      "phase": "unhealthy_candidate_rollback_transaction",
+      "version": "0.1.0-managed-pilot-2",
+      "status": "PASS",
+      "service_active": true,
+      "exec_wss_connected": true,
+      "computer_wss_slots": 1,
+      "systemd_restarts": 0,
+      "signed_stable_node": true,
+      "signed_connector_generation": true
+    },
+    {
+      "phase": "uncertain_timeout_no_replay",
+      "version": "0.1.0-managed-pilot-1",
+      "status": "PASS",
+      "service_active": true,
+      "exec_wss_connected": true,
+      "computer_wss_slots": 1,
+      "systemd_restarts": 0,
+      "signed_stable_node": true,
+      "signed_connector_generation": true
+    },
+    {
+      "phase": "explicit_stopped_recovery",
+      "version": "0.1.0-managed-pilot-2",
+      "status": "PASS",
+      "service_active": true,
+      "exec_wss_connected": true,
+      "computer_wss_slots": 1,
+      "systemd_restarts": 0,
+      "signed_stable_node": true,
+      "signed_connector_generation": true
+    }
+  ],
+  "alternate_runtime_provenance": {
+    "version": "22.23.2",
+    "archive_sha256": "d60acfe00a2932254bb0ad20e01b0d74397a0875595de719654b214f4b03f307",
+    "binary_sha256": "3517c2df0b2f8cd7f422b4b8450ef81c6889f08eb03e281d6de9079b15e6a327",
+    "license_sha256": "c738ae413cf561f174e34f6961f8ca458aae2369a73640dda6234c629b98bcc4"
+  },
+  "update_transactions": [
+    {
+      "scenario": "healthy_candidate",
+      "status": "PASS",
+      "outcome": "activated",
+      "callbacks": {
+        "stop": 1,
+        "start": 1,
+        "health": 1
+      },
+      "service_runtime_observations": [
+        {
+          "phase": "health_intent",
+          "release": "0.1.0-managed-pilot-2",
+          "node": "v22.23.2"
+        }
+      ],
+      "selected_version": "0.1.0-managed-pilot-2",
+      "stable_matches_signed_generation": true,
+      "startup_disabled_before_switch": true,
+      "initial_enabled_state_restored_only_after_terminal": true
+    },
+    {
+      "scenario": "controlled_health_rejection_after_successful_exec",
+      "health_rejection_injected": true,
+      "candidate_native_exec_succeeded": true,
+      "status": "PASS",
+      "outcome": "rolled_back",
+      "callbacks": {
+        "stop": 2,
+        "start": 2,
+        "health": 2
+      },
+      "service_runtime_observations": [
+        {
+          "phase": "health_intent",
+          "release": "0.1.0-managed-pilot-1",
+          "node": "v22.23.3"
+        },
+        {
+          "phase": "rollback_health_intent",
+          "release": "0.1.0-managed-pilot-2",
+          "node": "v22.23.2"
+        }
+      ],
+      "selected_version": "0.1.0-managed-pilot-2",
+      "exact_previous_pointer_restored": true,
+      "distinct_previous_launcher_restored": true,
+      "previous_signed_helper_installer_and_node_restored": true,
+      "healthy_previous_native_exec_observed": true,
+      "startup_disabled_before_switch": true,
+      "initial_enabled_state_restored_only_after_terminal": true
+    },
+    {
+      "scenario": "health_completion_timeout",
+      "status": "PASS",
+      "outcome": "needs_recovery",
+      "callbacks": {
+        "stop": 1,
+        "start": 1,
+        "health": 1
+      },
+      "service_runtime_observations": [
+        {
+          "phase": "health_intent",
+          "release": "0.1.0-managed-pilot-1",
+          "node": "v22.23.3"
+        }
+      ],
+      "lock_retained": true,
+      "durable_journal_observed": true,
+      "startup_remained_disabled": true,
+      "late_health_completion_did_not_mutate_or_replay": true
+    },
+    {
+      "scenario": "operator_confirmed_stopped_recovery",
+      "status": "PASS",
+      "outcome": "recovered_stopped",
+      "exact_previous_pointer_restored": true,
+      "distinct_previous_launcher_restored": true,
+      "previous_signed_helper_installer_and_node_restored": true,
+      "recovery_did_not_start_service": true,
+      "explicit_operator_start_native_exec_healthy": true,
+      "initial_enabled_state_restored_only_after_terminal": true
+    }
+  ],
+  "gui": {
+    "owned_window": true,
+    "pid_and_exact_title_scoped": true,
+    "screenshot": true,
+    "accessibility_elements": 3,
+    "observed_button_clicked": true,
+    "independent_exit_code": 0
+  },
+  "completed_at": "2026-10-18T17:47:38.116Z"
+}
