@@ -147,9 +147,10 @@ export function refreshVerifiedBootstrap(installRoot,publicKeyPem,version,
   const verified=verifySignedRelease(releaseRoot,publicKeyPem,options);
   const signed=new Set(verified.manifest.files.map(e=>e.path));
   const runtime=verified.platform==='win32'?'bin/node.exe':'bin/node';
-  if(verified.platform==='win32')assert(signed.has(runtime),'signed_windows_node_missing');
   const bootstrap=['host/installer.mjs','host/launch.mjs',
     ...(signed.has(runtime)?[runtime]:[])];
+  assert(bootstrap.every(name=>signed.has(name)),'signed_bootstrap_payload_missing');
+  if(verified.platform==='win32')assert(signed.has(runtime),'signed_windows_node_missing');
   // Preflight ALL destinations before writing any shim. Windows can lock the
   // running executable; runtime changes require a stopped-service/offline switch.
   if(verified.platform==='win32' && signed.has(runtime)){
@@ -161,7 +162,6 @@ export function refreshVerifiedBootstrap(installRoot,publicKeyPem,version,
         'windows_node_runtime_requires_offline_switch');
     }
   }
-  assert(bootstrap.every(name=>signed.has(name)),'signed_bootstrap_payload_missing');
   const staged=[];
   try {
     for(const name of bootstrap){
