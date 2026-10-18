@@ -148,6 +148,8 @@ export class EnrollmentController {
     const {fingerprint,publicKey}=validateJoin(body);
     const invite=this.db.invitations.find(x=>x.hash===sha(body.invitation));
     assert(invite && !invite.used && invite.exp>this.now(),'invitation_expired_or_used',403);
+    assert(!this.db.devices.some(x=>x.status==='revoked'&&x.fingerprint===fingerprint),
+      'device_identity_retired',403);
     assert(!this.db.pending.some(x=>x.device_id===body.device_id) &&
       !this.db.devices.some(x=>x.id===body.device_id) &&
       !this.registry.targets.has(body.device_id),'device_identity_conflict',409);
@@ -188,6 +190,8 @@ export class EnrollmentController {
     const pending=this.db.pending.find(x=>x.request_id===request_id);
     assert(pending&&pending.status==='pending'&&pending.exp>this.now(),
       'request_not_pending',409);
+    assert(!this.db.devices.some(x=>x.status==='revoked'&&x.fingerprint===pending.fingerprint),
+      'device_identity_retired',403);
     assert(timingSafeEqual(Buffer.from(fingerprint,'hex'),
       Buffer.from(pending.fingerprint,'hex')),'fingerprint_mismatch',403);
     assert(!enable_computer||pending.computer_requested,
@@ -283,20 +287,40 @@ export class EnrollmentController {
       fingerprint:x.fingerprint
     }));
   }
+  recover(body={}){
+    exact(body,['device_id','fingerprint','generation']);
+    const {device_id,fingerprint,generation}=body;
+    assert(typeof device_id==='string'&&ID.test(device_id),'invalid_device_id');
+    assert(typeof fingerprint==='string'&&/^[a-f0-9]{64}$/.test(fingerprint),
+      'invalid_fingerprint');
+    assert(typeof generation==='string'&&generation.length>0&&generation.length<=128,
+      'invalid_generation');
+    const record=this.db.devices.find(x=>x.id===device_id);
+    assert(record&&record.status==='approved','device_not_found',404);
+    assert(record.fingerprint===fingerprint&&record.target.generation===generation,
+      'recovery_identity_mismatch',409);
+    // Recovery retires an identity. New keys, a fresh one-use invitation and
+    // independent owner approval are required; no automatic credential rollover.
+    return {...this.revoke({device_id}),recovery:'fresh_enrollment_required'};
+  }
   revoke(body={}){
     exact(body,['device_id']);
     const {device_id}=body;
     assert(typeof device_id==='string'&&ID.test(device_id),'invalid_device_id');
     const record=this.db.devices.find(x=>x.id===device_id);
     assert(record&&record.status==='approved','device_not_found',404);
+    const before=structuredClone(this.db);
     record.status='revoked';
     record.revoked_at=this.now();
-    this.registry.revokeHost(device_id);
-    this.relay?.disconnectHost(device_id);
     for(const pending of this.db.pending.filter(x=>x.device_id===device_id)) {
       pending.status='revoked';delete pending.sealed_token;delete pending.claim_hash;
     }
-    this.save();
+    // Commit the tombstone before reporting success or disconnecting peers.
+    // These operations are synchronous in the single-process control plane:
+    // no HTTP or Exec callback can interleave between commit and denial.
+    try{this.save()}catch(e){this.db=before;throw e}
+    this.registry.revokeHost(device_id);
+    this.relay?.disconnectHost(device_id);
     try{fs.unlinkSync(record.target.exec.token_file)}
     catch(e){if(e.code!=='ENOENT')throw e}
     return {device_id,status:'revoked'};
@@ -337,6 +361,7 @@ export async function handleEnrollment(req,res,{controller,allowedHosts}={}){
       '/styx/enroll/approve':['POST',true,'approve'],
       '/styx/enroll/devices':['GET',true,'devices'],
       '/styx/enroll/revoke':['POST',true,'revoke'],
+      '/styx/enroll/recover':['POST',true,'recover'],
       '/styx/enroll/join':['POST',false,'join'],
       '/styx/enroll/claim':['POST',false,'claim'],
       '/styx/enroll/confirm':['POST',false,'confirm']

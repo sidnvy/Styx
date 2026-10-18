@@ -35,6 +35,10 @@ export async function ownerCommand(config,cmd,args=[]) {
       data={request_id:args[0],fingerprint:args[1],
         enable_computer:args[2]==='computer'};
       break;
+    case 'recover':
+      if(args.length!==3||args.some(x=>!x))
+        throw Error('recover_requires_device_id_fingerprint_and_generation');
+      route='recover';data={device_id:args[0],fingerprint:args[1],generation:args[2]};break;
     case 'revoke':
       if(!args[0]||args.length!==1)throw Error('revoke_requires_device_id');
       route='revoke';data={device_id:args[0]};break;
@@ -47,7 +51,7 @@ if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.ur
   if(!configFile||!command){
     process.stderr.write(
       'Usage: node gateway/enroll-admin.mjs /private/admin.json '+
-      'invite|pending|devices|approve|revoke [args]\n');
+      'invite|pending|devices|approve|revoke|recover [args]\n');
     process.exit(2);
   }
   try{
