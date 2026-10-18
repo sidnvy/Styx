@@ -1,6 +1,7 @@
 # Styx CAS Lab — isolated real-ChatGPT acceptance runbook
 
-Status: **local Gateway ready; OpenAI Tunnel and ChatGPT app enrollment pending**.
+Status: **disposable CAS Lab Gateway, dedicated Tunnel and Custom Plugin
+provisioned; live one-shot follow-up observed, repeated-turn acceptance pending**.
 This runbook intentionally creates no production migration or Coder/Charon changes.
 
 ## Current lab profile
@@ -23,8 +24,11 @@ This runbook intentionally creates no production migration or Coder/Charon chang
 - Launcher: <state>/start-tunnel.sh. It does not work without a new Tunnel ID
   and restricted runtime key. This is intentional.
 
-The authenticated local client has verified tool discovery, MCP App resource
-read, and safe start/stop. This is not real ChatGPT Host acceptance.
+Authenticated local clients verify discovery, MCP App resource read and safe
+start/stop. The real ChatGPT Web Host has also produced at least one exact
+automatic Wake consume, but repeated autonomous Turns remain unverified.
+The latest v2 Host test returned RPC -32601 with no consume; investigate
+the actual View mount/Host capability lifecycle before promising continuity.
 
 ## OpenAI Platform provisioning — requires a human session
 

@@ -1,8 +1,8 @@
 # CAS P0 — native MCP App turn-continuation spike
 
-**Status:** experimental implementation with local contract and simulated-Host tests.
-**Source baseline:** created from c81a111f, then integrated VNext 236c7bbb (same-host multi-user isolation release gate).
-**Production:** NOT installed, NOT deployed, NOT accepted by a real ChatGPT Host.
+**Status:** opt-in experiment; local/simulated Host regression verified, live Web one-shot continuation confirmed, multi-turn acceptance pending.
+**Source baseline:** built on the Styx VNext development branch; continuously integrated with native Host changes.
+**Production:** CAS is NOT enabled or validated for production unattended execution.
 
 ## Goal and non-goals
 
@@ -31,10 +31,10 @@ capability, otherwise the View does not dispatch.
 For a real ChatGPT test use STYX_CAS_EXPERIMENT_ONLY=1 and an empty
 Target Catalog. The Gateway then advertises only the nine CAS tools and
 rejects native Exec/Cua requests even if the caller guesses their names.
-A separate local-only Gateway has been smoke-tested on workstation at
-127.0.0.1:18895/mcp; no OpenAI Tunnel or Custom Plugin was installed
-when this section was written. See
-[CAS Lab connection runbook](cas-lab-connection.md).
+A separate local-only Gateway was smoke-tested on workstation at
+127.0.0.1:18895/mcp, then connected through a dedicated Secure MCP Tunnel
+and disposable ChatGPT Plugin. Production Charon/Tunnel are unchanged.
+See [CAS Lab connection runbook](cas-lab-connection.md).
 
 ## VNext integration boundaries
 
@@ -170,7 +170,7 @@ If repeated turns are not supported reliably, separately investigate
 new explicit App cards per Turn and the optional workstation Browser
 Companion; never silently retry an uncertain attempt or bypass limits.
 
-## Future real-Host acceptance (NOT performed)
+## Remaining real-Host acceptance (not yet passed)
 
 Use a disposable Gateway, separate credentials, separate tunnel/custom Plugin
 and an explicit user-initiated test conversation. Do not replace production
@@ -198,6 +198,25 @@ If the real ChatGPT protocol/tool-registration path differs from the current
 stateful VNext Gateway, implement a separate reviewed compatibility adapter.
 Do NOT casually replace VNext's authenticated MCP session and native Cua
 transport contracts.
+
+## Latest live Web result before merge
+
+Run 64cc29e8-a79c-4941-843b-b77617e52f5e used the v2 controller.
+Its first Wake was prepared but ui/message returned JSON-RPC -32601;
+delivery_unknown was recorded with zero exact consume receipts.
+The View lifecycle projection was absent (view=null, no view_events).
+It is not known whether ChatGPT cached the old App tool schema/resource,
+unmounted the View, or omitted lifecycle-bound poll calls.
+
+Earlier ordinary Web Chat Runs did exact-consume one automatic Wake.
+No run yet provided two fresh successive exact consumption receipts.
+The Host outcome cannot be classified as an unconditional platform limit.
+
+Merge gate for the CAS module is limited to being **opt-in, off by default,
+isolated from real Host mutation in CAS-only mode, with passing automated
+tests**. Actual unattended/Phone/Web-background release gates remain OPEN.
+Merge does not enable CAS in production and must not be presented as a
+production autonomous Agent.
 
 ## CAS-only MCP session capacity recovery
 

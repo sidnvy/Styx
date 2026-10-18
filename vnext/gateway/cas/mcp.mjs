@@ -45,7 +45,7 @@ export const CAS_TOOLS = [
       visibility: {type: 'string', enum: ['visible','hidden','prerender','unknown']},
       host_message_capable: {type: 'boolean'}, compat_available: {type: 'boolean'},
       lifecycle_event: {type: 'string', enum: ['bound','visibility_change']}},
-      ['run_id']), {visibility: ['app'], readOnly: true}),
+      ['run_id']), {visibility: ['app']}),
   tool('cas_experiment_claim', 'App-only, claim an exact due wake with one expiring controller lease.',
     object({run_id: uuid, controller_id: uuid}, ['run_id', 'controller_id']), {visibility: ['app']}),
   tool('cas_experiment_prepare', 'App-only, durably spend one dispatch attempt before Host ui/message.',

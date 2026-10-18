@@ -66,6 +66,10 @@ test('CAS tools, exact resource, two-turn simulated Host handoff across MCP sess
   const present = inventory.tools.find(t => t.name === 'cas_experiment_present');
   assert.equal(present._meta.ui.resourceUri, CAS_APP_URI);
   assert.deepEqual(present._meta.ui.visibility, ['model']);
+  const poll = inventory.tools.find(t => t.name === 'cas_experiment_poll');
+  assert.deepEqual(poll._meta.ui.visibility, ['app']);
+  // Poll may update bounded View heartbeats, so it must not be labeled read-only.
+  assert.notEqual(poll.annotations?.readOnlyHint, true);
   const appPrivate = inventory.tools.find(t => t.name === 'cas_experiment_claim');
   assert.deepEqual(appPrivate._meta.ui.visibility, ['app']);
   assert.equal(appPrivate._meta.ui.resourceUri, undefined);
