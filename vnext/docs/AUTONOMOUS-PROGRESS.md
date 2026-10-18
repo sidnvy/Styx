@@ -229,3 +229,14 @@ cherry-picked commits. The RC itself remains BLOCKED.
 | D/E native private storage | `0bb1f6cdc5b5d72a62a954a92cd0e5c144eafb51` | `1d00701d096aca5457a1d9f6055a2c284da77d21` |
 | F output EOF correctness | `0bb1f6cdc5b5d72a62a954a92cd0e5c144eafb51` | `c8070c0271beaa0f5935c51f5fb14566cd2acbd3` |
 | D/F native Linux managed pilot | `fe3f3e94f9e82735cd46252c3af4e303ff0d0f39` | `a78279aed46e358cb8fe49331157f97b39241166` |
+
+## Final Windows cold-start timeout correction
+
+The final documentation-head push run 39147772569 failed enrollment directory
+creation after 7056 ms, while the same-head PR run 39147776400 passed all native
+Windows checks. The ACL subprocess had a 7000 ms deadline. Increase that bounded
+deadline to 30000 ms for loaded Windows PowerShell startup and retain fail-closed
+behavior with explicit timeout errors. No retry, ACL relaxation or skipped native
+test is introduced. Preserve the original failure; replacement CI must be read
+against its actual new head before any PASS claim. The existing frozen soak is
+evidence only for its recorded Linux implementation snapshot.

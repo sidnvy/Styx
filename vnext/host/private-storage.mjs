@@ -2,6 +2,10 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {execFileSync} from 'node:child_process';
 
+// PowerShell cold startup on loaded native Windows runners can exceed seven
+// seconds. Keep ACL operations bounded without retrying a partially applied ACL.
+const WINDOWS_ACL_TIMEOUT_MS = 30_000;
+
 // POSIX mode bits do not represent NTFS ACLs. Validate the actual Windows
 // DACL and reject any Allow rule for a different OS user or generic group.
 const WINDOWS_ACL_CHECK = [
@@ -37,8 +41,9 @@ function checkWindowsAcl(filename,kind) {
     execFileSync('powershell.exe',[
       '-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',encoded
     ],{env:{...process.env,STYX_PRIVATE_PATH_TO_VERIFY:filename},
-      windowsHide:true,timeout:7000,stdio:['ignore','ignore','ignore']});
-  }catch{throw Error('private_'+kind+'_acl_not_owner_only')}
+      windowsHide:true,timeout:WINDOWS_ACL_TIMEOUT_MS,stdio:['ignore','ignore','ignore']});
+  }catch(e){throw Error('private_'+kind+(e.code==='ETIMEDOUT'
+    ?'_acl_check_timed_out':'_acl_not_owner_only'))}
 }
 function requirePrivatePath(filename,kind) {
   if(typeof filename!=='string'||!path.isAbsolute(filename))
@@ -85,12 +90,13 @@ export function ensurePrivateDirectory(folder) {
       execFileSync('powershell.exe',['-NoLogo','-NoProfile','-NonInteractive',
         '-EncodedCommand',Buffer.from(script,'utf16le').toString('base64')],{
         env:{...process.env,STYX_NEW_PRIVATE_DIRECTORY:folder},windowsHide:true,
-        timeout:7000,stdio:['ignore','ignore','ignore']});
+        timeout:WINDOWS_ACL_TIMEOUT_MS,stdio:['ignore','ignore','ignore']});
     }
     return requirePrivateDirectory(folder);
-  }catch{
+  }catch(e){
     // rmdir cannot delete files an external process may have placed here.
     try{fs.rmdirSync(folder)}catch{}
-    throw Error('private_directory_creation_failed');
+    throw Error(e.code==='ETIMEDOUT'
+      ?'private_directory_creation_timed_out':'private_directory_creation_failed');
   }
 }
