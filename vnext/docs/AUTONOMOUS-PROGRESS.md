@@ -1,0 +1,54 @@
+# Autonomous engineering progress
+
+## Reconnaissance — 2026-10-19 Asia/Shanghai
+
+Baseline: `212814388967cf748030c2315de9f3442e0b01c8`.
+Initial isolated clone status: clean. Original checkout status: dirty (preserved).
+Reviewed VNext README, architecture, acceptance, onboarding, per-user isolation,
+enrollment, Linux managed Host, native service/build adapters and CI.
+
+GitHub baseline CI: PASS for VNext contracts and legacy project CI.
+VNext run: https://github.com/sidnvy/Styx/actions/runs/39143276897
+These are historical upstream results, not results for this feature branch.
+
+Original unpublished changes include Windows ACL checks, portable signed Node,
+Windows timer recovery, Computer transport acquisition wait and a Windows GUI
+acceptance script. They have NOT been silently incorporated or counted as tested.
+
+## Milestone A implementation
+
+Files: `vnext/package.json`, `vnext/package-lock.json`,
+`vnext/ci/acceptance.mjs`, `vnext/host/test/acceptance-receipt.test.mjs`,
+`.github/workflows/styx-vnext.yml`, `vnext/.gitignore`, and these tracking docs.
+
+Fixed pinned MCP SDK 1.30.1 -> 1.32.1 (GHSA-6qxp-vccf-f47h) and Ajv
+8.17.1 -> 8.20.0 (GHSA-2g4f-4pwh-qvx6). Full npm audit after update: PASS,
+zero reported vulnerabilities; this is an advisory check, not a security proof.
+
+New TAP receipts record per-suite passes, failures, cancellations and skips.
+All-skipped or absent/malformed results cannot produce PASS. Native Exec,
+GUI, physical Host, cold-install, signed distribution, ChatGPT and soak are
+separate gates. CI uploads raw logs/receipts even on failure.
+
+Execution environment: native Workstation/m600, Arch Linux x64,
+kernel 7.1.5-arch1-2, Node v26.5.0; CI remains Node 22.
+Sandbox-restricted first test attempt: FAIL, requiring native loopback/process
+execution. Native baseline `npm run test:all`: PASS, including actual pinned
+Codex executor tests. Post-update fixture receipts: PASS, 128 passed and
+9 skipped out of 137 tests. The 9 skipped operations are not native evidence.
+Native Cua 0.36.0 schema smoke: PASS, portable contract compatible;
+GUI owned-window attempt: BLOCKED (`native_wayland_session_required`).
+No graphical-session variables were manufactured and no permissions changed.
+
+Pinned upstreams: Codex rust-v0.163.0, Cua 0.36.0, ws 8.22.0;
+official archive SHA-256 checks passed for locally prepared Codex and Cua.
+Complete dependency tree and audit are retained in this task's work directory.
+Refreshed native Exec: PASS, 18 passed / zero skipped, including authenticated
+MCP shell/PTY, outbound transport, disconnect isolation and envPolicy.
+Feature CI must be recorded after completion.
+
+Implementation commit: the commit introducing this record (`git log -- vnext/ci/acceptance.mjs`);
+exact resulting SHA is recorded in the task output and PR.
+No production endpoint, tunnel, installed Charon/Coder or existing user service
+was changed. No physical native result from an older pilot is claimed as a
+new acceptance result.
