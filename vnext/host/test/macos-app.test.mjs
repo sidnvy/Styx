@@ -1,5 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+import {fileURLToPath} from 'node:url';
+import {spawnSync} from 'node:child_process';
 import {appInfoPlist,macSigningPlan,macDevelopmentSigningPlan,buildMacApp,MAC_BUNDLE_ID} from '../build-macos-app.mjs';
 
 test('stable macOS bundle identity and version reject injected plist values',()=>{
@@ -43,4 +48,15 @@ test('explicit local-development signing allows distinct CN user id and OU team 
 test('local-development signing rejects ad-hoc identities and absent team',()=>{
   assert.throws(()=>macDevelopmentSigningPlan({app:'/scratch/Styx.app',identity:'-',teamID:'T123456789'}),/apple_development_identity_required/);
   assert.throws(()=>macDevelopmentSigningPlan({app:'/scratch/Styx.app',identity:'Apple Development: Example (U123456789)'}),/development_signing_team_required/);
+});
+
+test('symlinked CLI entrypoint cannot silently report a successful no-op',{skip:process.platform==='win32'},t=>{
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'styx-mac-cli-'));
+  t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+  const cli=path.join(dir,'linked-builder.mjs'),config=path.join(dir,'build.json');
+  fs.symlinkSync(fileURLToPath(new URL('../build-macos-app.mjs',import.meta.url)),cli);
+  fs.writeFileSync(config,'{}');
+  const result=spawnSync(process.execPath,[cli,config],{encoding:'utf8',timeout:5000});
+  assert.equal(result.status,2);
+  assert.ok(result.stderr.includes('Styx macOS app:'));
 });

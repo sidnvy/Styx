@@ -114,7 +114,7 @@ export function buildMacApp({app,cuaBinary,version,identity,teamID,notaryProfile
     throw Error('macos_app_build_failed: '+error.message,{cause:error});
   }
 }
-if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){
+if(process.argv[1]&&fs.realpathSync(process.argv[1])===fs.realpathSync(fileURLToPath(import.meta.url))){
   const [configFile]=process.argv.slice(2);
   try{
     assert(configFile&&path.isAbsolute(configFile),'absolute_build_config_required');
