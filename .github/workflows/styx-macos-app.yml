@@ -1,0 +1,23 @@
+name: Styx macOS app compile
+on:
+  pull_request:
+    paths: ['vnext/host/macos/**', 'vnext/host/build-macos-app.mjs', 'vnext/host/test/macos-app.test.mjs', '.github/workflows/styx-macos-app.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  compile:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'
+      - name: Packaging contract tests
+        run: node --test vnext/host/test/macos-app.test.mjs
+      - name: Compile native owner (no driver or signing credentials)
+        run: xcrun swiftc -warnings-as-errors vnext/host/macos/Styx.swift -o "$RUNNER_TEMP/Styx" -framework AppKit -framework ApplicationServices -framework CoreGraphics
+      - name: Native ownership self-test
+        run: '"$RUNNER_TEMP/Styx" --self-test'
+      - name: Record boundaries
+        run: echo 'Developer ID signing, notarization, LaunchServices responsibility, TCC, native GUI, crash recovery, and upgrade permission persistence NOT RUN.' >> "$GITHUB_STEP_SUMMARY"
