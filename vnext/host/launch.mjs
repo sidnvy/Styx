@@ -10,8 +10,10 @@ import {activeRelease} from './installer.mjs';
 export function activeHostConfig(raw,releaseRoot) {
   if(!raw || typeof raw!=='object' || Array.isArray(raw) ||
     !raw.exec || typeof raw.exec!=='object')throw Error('host_config_invalid');
-  const codex=path.join(releaseRoot,'bin','codex');
-  const cua=path.join(releaseRoot,'bin','cua-driver');
+  const codex=path.join(releaseRoot,'bin',
+    process.platform==='win32'?'codex.exe':'codex');
+  const cua=path.join(releaseRoot,'bin',
+    process.platform==='win32'?'cua-driver.exe':'cua-driver');
   if(!fs.statSync(codex).isFile())throw Error('signed_codex_binary_missing');
   const updated={...raw,exec:{...raw.exec,binary:codex}};
   if(raw.computer?.enabled){

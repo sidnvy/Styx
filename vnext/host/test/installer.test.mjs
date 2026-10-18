@@ -27,8 +27,10 @@ async function fixture(t) {
     await fs.mkdir(path.join(source,'bin'),{recursive:true});
     const files={
       'host/connect.mjs':options.code??"process.stdout.write('STYX_LAUNCH_OK\\n')",
-      'bin/codex':'codex-pinned-0.163.0',
-      'bin/cua':'cua-pinned-0.36.0'
+      [process.platform==='win32'?'bin/codex.exe':'bin/codex']:
+        'codex-pinned-0.163.0',
+      [process.platform==='win32'?'bin/cua-driver.exe':'bin/cua']:
+        'cua-pinned-0.36.0'
     };
     if(options.bootstrap){
       for(const f of ['host/installer.mjs','host/launch.mjs']){
@@ -42,7 +44,7 @@ async function fixture(t) {
       arch:process.arch,
       files:Object.entries(files).map(([name,content])=>({
         path:name,sha256:sha(content),size:Buffer.byteLength(content),
-        executable:name==='bin/codex'||name==='bin/cua'
+        executable:name.startsWith('bin/')
       }))
     };
     const raw=JSON.stringify(manifest)+'\n';
@@ -98,10 +100,11 @@ test('unsigned changes, extra binaries and wrong signing key cannot stage',async
     assert.throws(()=>verifySignedRelease(v.source,f.publicKey),/archive_symlink_forbidden/);
     await fs.unlink(path.join(v.source,'extra.js'));
   }
-  await fs.writeFile(path.join(v.source,'bin/cua'),'compromised');
+  const cuaName=process.platform==='win32'?'bin/cua-driver.exe':'bin/cua';
+  await fs.writeFile(path.join(v.source,...cuaName.split('/')),'compromised');
   assert.throws(()=>stageSignedRelease({sourceDir:v.source,installRoot:f.installRoot,
     publicKeyPem:f.publicKey}),/release_file_(hash|metadata)_mismatch/);
-  await fs.writeFile(path.join(v.source,'bin/cua'),'cua-pinned-0.36.0');
+  await fs.writeFile(path.join(v.source,...cuaName.split('/')),'cua-pinned-0.36.0');
   await fs.writeFile(path.join(v.source,'unlisted.js'),'malware');
   assert.throws(()=>verifySignedRelease(v.source,f.publicKey),
     /unexpected_release_members/);

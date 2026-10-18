@@ -50,6 +50,7 @@ test('Doctor checks an actually signed active Host, not untrusted enrollment bin
     token_file:token,
     exec:{binary:'/untrusted/not-real',cwd:tmp},
     computer:{enabled:true,binary:'/another/untrusted/path',connections:1,
+      ...(process.platform==='darwin'?{socket:path.join(tmp,'embedded.sock')}:{}),
       env:{CUA_DRIVER_RS_ENABLE_WAYLAND:'1'}}
   };
   const d=await doctor(config,{installRoot,trustPublicKeyFile:pub});
