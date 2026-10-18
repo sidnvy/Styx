@@ -87,3 +87,10 @@ accepts its correct inline identifier requirement, and rejects a wrong one.
 This uses no private key. Native packaging tests:8PASS,1platformskip. The first
 run's matcher expected different rejection wording; the actual OS correctly
 rejected the wrong requirement and the diagnostic matcher was corrected.
+
+A further bounded signed-app lifecycle check killed only the verified owned
+Styx PID with SIGKILL. Its exact Cua child exited via parent-liveness EOF and
+removed the socket. LaunchServices then started a fresh app/daemon generation;
+normal termination again removed descriptor/socket. All three observations
+passed (`evidence/macos-signed-app-crash-20261019.json`). No GUI action or
+interrupted-action replay was tested.
