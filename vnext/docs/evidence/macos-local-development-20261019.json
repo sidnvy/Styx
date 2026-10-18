@@ -19,7 +19,7 @@
   "key_export":"NOT RUN",
   "keychain_unlock_or_acl_change":"NOT RUN",
   "scratch_retention":"Prepared private marked app and interactive finisher retained for explicit local user action; no app launched by this attempt",
-  "finisher_sha256":"dc2010bfd955a01fb39c700118816aaa9477fa1038b03f9f31704e04cdef9e95",
+  "finisher_sha256":"0971f11b4e080c4ed7a3ca7207dde5bc59a30db5461286e5d4beafc3778094d1",
   "prepared_styx_sha256":"754256c25f71492f1a0a60cfd6918c593d3806ccd715891629cbab967205edf7",
   "prepared_cua_sha256":"87c7e782e69703d95524e4ceb7ceba03c8a159caabf1f1ce2c118eade7d2a5ec"
 }

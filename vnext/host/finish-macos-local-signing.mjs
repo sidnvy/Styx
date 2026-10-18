@@ -21,6 +21,11 @@ export function finishMacDevelopmentSigning(configFile){
   assert(info.isDirectory()&&!info.isSymbolicLink()&&info.uid===process.getuid()&&!(info.mode&0o077),'marked_private_scratch_required');
   const marker=path.join(root,'.styx-local-owner.json');privateFile(marker);
   assert(JSON.parse(fs.readFileSync(marker,'utf8')).kind==='styx-local-development-app-pilot','owned_local_pilot_marker_required');
+  for(const dir of [config.app,path.join(config.app,'Contents'),path.join(config.app,'Contents/MacOS')]){
+    const st=fs.lstatSync(dir);
+    assert(st.isDirectory()&&!st.isSymbolicLink()&&st.uid===process.getuid(),'prepared_app_directory_not_owned_regular');
+    assert(fs.realpathSync(dir).startsWith(fs.realpathSync(root)+path.sep),'prepared_app_path_redirect_refused');
+  }
   for(const member of ['Contents/Info.plist','Contents/MacOS/Styx','Contents/MacOS/cua-driver']){
     const st=fs.lstatSync(path.join(config.app,member));
     assert(st.isFile()&&!st.isSymbolicLink()&&st.uid===process.getuid(),'prepared_app_member_not_owned_regular');

@@ -27,6 +27,6 @@ without blindly retrying. Local signing does not prove TCC permissions or GUI
 acceptance. Those remain separate gates after signature verification.
 
 The staged helper SHA256 is
-`dc2010bfd955a01fb39c700118816aaa9477fa1038b03f9f31704e04cdef9e95`.
+`0971f11b4e080c4ed7a3ca7207dde5bc59a30db5461286e5d4beafc3778094d1`.
 The scratch directory is mode0700; config and ownership marker are mode0600.
 No existing personal app, service, or permission was modified.
