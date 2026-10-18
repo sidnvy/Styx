@@ -52,7 +52,9 @@
         return new Promise((resolve, reject) => {
           const alarm = setTimeout(() => {
             pending.delete(id);
-            reject(Error('cas_host_timeout'));
+            const err = Error('cas_host_timeout');
+            err.casFailureKind = 'host_timeout';
+            reject(err);
           }, timeout);
           pending.set(id, {resolve, reject, alarm});
           post({jsonrpc: '2.0', id, method, params});
@@ -75,7 +77,9 @@
         timer = null;
         for (const item of pending.values()) {
           clearTimeout(item.alarm);
-          item.reject(Error('cas_view_closed'));
+          const err = Error('cas_view_closed');
+          err.casFailureKind = 'view_closed';
+          item.reject(err);
         }
         pending.clear();
       }
@@ -125,6 +129,8 @@
             run_id: runId, controller_id: controllerId, claim_id: claim.claim_id
           });
           let accepted = false;
+          let failureKind = null;
+          let hostRpcCode = null;
           try {
             paint('Dispatching round ' + prepared.round + '…',
               'The Host may accept ui/message without actually starting a new model turn.');
@@ -132,17 +138,23 @@
               role: 'user', content: [{type: 'text', text: prepared.message}]
             }, 30000);
             accepted = true;
-          } catch (_) {
-            // A timeout or rejection cannot prove whether the Host delivered the message.
+          } catch (error) {
+            // Never persist raw Host error messages or response bodies.
+            failureKind = ['rpc_rejected', 'result_rejected', 'host_timeout', 'view_closed']
+              .includes(error?.casFailureKind) ? error.casFailureKind : 'unknown';
+            hostRpcCode = Number.isInteger(error?.casRpcCode) ? error.casRpcCode : null;
+            // A refusal or timeout does not prove non-delivery.
           }
           try {
             const outcome = await tool('cas_experiment_finish', {
               run_id: runId, controller_id: controllerId,
-              attempt_id: prepared.attempt_id, accepted
+              attempt_id: prepared.attempt_id, accepted,
+              ...(accepted ? {} : {failure_kind: failureKind, ...(hostRpcCode === null ? {} : {host_rpc_code: hostRpcCode})})
             });
             paint(outcome.wake?.phase || outcome.status,
               accepted ? 'Host accepted dispatch; awaiting exact model consume.' :
-                'Delivery unknown; never auto-resend this attempt.');
+                'Delivery unknown (' + (outcome.wake?.failure_kind ?? failureKind ?? 'unknown') +
+                '); never auto-resend this attempt.');
           } catch (_) {
             paint('Dispatch outcome not confirmed', 'Never auto-resend a prepared attempt.');
           }
@@ -155,9 +167,12 @@
           const item = pending.get(message.id);
           pending.delete(message.id);
           clearTimeout(item.alarm);
-          if (message.error || message.result?.isError)
-            item.reject(Error(message.error?.message || 'cas_host_error'));
-          else item.resolve(message.result);
+          if (message.error || message.result?.isError) {
+            const err = Error('cas_host_rpc_failure');
+            err.casFailureKind = message.error ? 'rpc_rejected' : 'result_rejected';
+            if (Number.isInteger(message.error?.code)) err.casRpcCode = message.error.code;
+            item.reject(err);
+          } else item.resolve(message.result);
           return;
         }
         if (message.method === 'ui/notifications/tool-input')

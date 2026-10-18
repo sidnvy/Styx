@@ -48,7 +48,9 @@ export const CAS_TOOLS = [
     object({run_id: uuid, controller_id: uuid, claim_id: uuid},
       ['run_id', 'controller_id', 'claim_id']), {visibility: ['app']}),
   tool('cas_experiment_finish', 'App-only, record Host acceptance or unknown delivery; never imply model execution.',
-    object({run_id: uuid, controller_id: uuid, attempt_id: uuid, accepted: {type: 'boolean'}},
+    object({run_id: uuid, controller_id: uuid, attempt_id: uuid, accepted: {type: 'boolean'},
+      failure_kind: {type: 'string', enum: ['rpc_rejected', 'result_rejected', 'host_timeout', 'view_closed', 'unknown']},
+      host_rpc_code: {type: 'integer', minimum: -99999, maximum: 99999}},
       ['run_id', 'controller_id', 'attempt_id', 'accepted']), {visibility: ['app']})
 ];
 

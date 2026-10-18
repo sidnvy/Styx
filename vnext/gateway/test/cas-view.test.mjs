@@ -145,6 +145,8 @@ test('Host ui/message refusal becomes delivery_unknown with no automatic resend'
   await view.advanceTo(f.clock.value + 45000);
   assert.equal(view.sent.length, 1);
   assert.equal((await f.ledger.read(start.run_id)).wake.phase, 'delivery_unknown');
+  assert.equal((await f.ledger.read(start.run_id)).wake.failure_kind, 'rpc_rejected');
+  assert.equal((await f.ledger.read(start.run_id)).wake.host_rpc_code, -32000);
   await view.advanceTo(f.clock.value + 150000);
   assert.equal(view.sent.length, 1);
 });

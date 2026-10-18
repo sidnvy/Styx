@@ -43,7 +43,9 @@ function publicView(row) {
       wake_id: row.wake.wake_id,
       due_at: row.wake.due_at,
       phase: row.wake.phase,
-      attempt_status: row.wake.attempt?.status ?? null
+      attempt_status: row.wake.attempt?.status ?? null,
+      failure_kind: row.wake.attempt?.failure_kind ?? null,
+      host_rpc_code: row.wake.attempt?.host_rpc_code ?? null
     } : null
   };
 }
@@ -193,11 +195,18 @@ export class CasExperimentLedger {
       return {attempt_id, message, round: wake.round, wake_id: wake.wake_id};
     });
   }
-  finish({run_id, controller_id, attempt_id, accepted}) {
+  finish({run_id, controller_id, attempt_id, accepted, failure_kind = null, host_rpc_code = null}) {
     return this.serial(async () => {
       requireUuid(controller_id, 'controller_id');
       requireUuid(attempt_id, 'attempt_id');
       if (typeof accepted !== 'boolean') throw Error('cas_invalid_accepted');
+      const allowedKinds = ['rpc_rejected', 'result_rejected', 'host_timeout', 'view_closed', 'unknown'];
+      if (failure_kind !== null && !allowedKinds.includes(failure_kind))
+        throw Error('cas_invalid_failure_kind');
+      if (host_rpc_code !== null && (!Number.isInteger(host_rpc_code) || host_rpc_code < -99999 || host_rpc_code > 99999))
+        throw Error('cas_invalid_host_rpc_code');
+      if (accepted && (failure_kind !== null || host_rpc_code !== null))
+        throw Error('cas_invalid_accepted');
       const row = await this.load(run_id);
       if (row.consumed.some(item => item.attempt_id === attempt_id))
         return {phase: 'consumed', ...publicView(row)};
@@ -210,6 +219,8 @@ export class CasExperimentLedger {
       if (wake.phase === 'prepared') {
         wake.phase = accepted ? 'dispatch_accepted' : 'delivery_unknown';
         wake.attempt.status = wake.phase;
+        wake.attempt.failure_kind = accepted ? null : failure_kind ?? 'unknown';
+        wake.attempt.host_rpc_code = accepted ? null : host_rpc_code;
         wake.attempt.finished_at = this.now();
         await this.save(row);
       }
