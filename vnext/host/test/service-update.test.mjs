@@ -43,7 +43,7 @@ function fixture(t){
     args:{installRoot,publicKeyPem,version:'candidate'}};
 }
 function callbacks(events,{health=true}={}){return {
-  stopService:async ctx=>{events.push('stop:'+ctx.version);return true},
+  stopService:async ctx=>{assert.equal(ctx.restartInhibitionRequired,true);events.push('stop:'+ctx.version);return true},
   startService:async ctx=>{events.push('start:'+ctx.version);return true},
   checkHealth:async ctx=>{events.push('health:'+ctx.version);return ctx.version==='candidate'?health:true}
 };}
@@ -177,4 +177,18 @@ test('killed updater leaves durable start intent; recovery never invokes an old 
   assert.equal(inspectServiceUpdate({...f.args,transactionId}).phase,'start_intent');
   const result=await recoverServiceUpdate({...f.args,transactionId,confirmStopped:async()=>true});
   assert.equal(result.status,'recovered_stopped');assert.equal(fs.readFileSync(f.pointer,'utf8'),f.before);
+});
+
+
+test('unconfirmed stop or durable restart inhibition never switches pointer, bootstrap or starts',async t=>{
+  const f=fixture(t);let starts=0;
+  const result=await updateServiceRelease({...f.args,...callbacks([]),
+    stopService:ctx=>{assert.equal(ctx.restartInhibitionRequired,true);return false},
+    startService:()=>{starts++;return true}});
+  assert.equal(result.status,'needs_recovery');assert.equal(result.phase,'stop_intent');
+  assert.equal(starts,0);assert.equal(fs.readFileSync(f.pointer,'utf8'),f.before);
+  assert.equal(fs.readFileSync(path.join(f.installRoot,f.runtime),'utf8'),'// signed old bin/'+f.runtime+'\n');
+  const recovered=await recoverServiceUpdate({...f.args,transactionId:result.transactionId,
+    confirmStopped:ctx=>{assert.equal(ctx.restartInhibitionRequired,true);return true}});
+  assert.equal(recovered.status,'recovered_stopped');assert.equal(starts,0);
 });

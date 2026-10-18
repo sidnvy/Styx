@@ -26,11 +26,23 @@ const result = await updateServiceRelease({
 ```
 
 Callbacks receive a frozen `{transactionId, version, previousVersion, phase,
-signal}`. They are trusted executable owner code bound to one exact owned native
+signal, restartInhibitionRequired}`. They are trusted executable owner code bound to one exact owned native
 service. `true` means observed completion; health `false` means an observed
-unhealthy service. Stop/start callbacks must not infer completion from an ACK;
-observe actual service state. They must honor AbortSignal, never retry an
+unhealthy service. Stop callbacks with `restartInhibitionRequired: true` must **durably disable
+startup and restart triggers**, then observe both stopped and disabled before
+returning true (for example, `systemctl --user disable --now` for the exact owned
+unit). Merely inactive or an acknowledged stop is insufficient: a login/reboot
+could otherwise load partially switched bootstrap files. The same requirement
+applies to the recovery observer. The portable API cannot infer platform service
+enablement; trusted wrappers must enforce this contract. Stop/start callbacks
+must not infer completion from an ACK; observe actual service state. They must honor AbortSignal, never retry an
 uncertain command internally, and keep credentials/output out of receipts.
+Before invoking the API, the trusted wrapper must durably preserve the service's
+original enablement state. Start callbacks explicitly start the coherent selected
+release while keeping automatic startup inhibited. Only after a terminal
+`activated`/`rolled_back` result and signed-byte verification may the wrapper
+restore the original enablement; an initially disabled service stays disabled.
+`needs_recovery` and `recovered_stopped` leave it disabled pending owner action.
 Timeout is bounded from 1 to 60000ms per callback; blocking callbacks cannot
 avoid a timeout by returning after its deadline.
 
@@ -54,7 +66,7 @@ Windows is therefore not asserted.
 
 ## Explicit interrupted-transaction recovery
 
-1. Stop and inspect the exact owned service through an independent trusted
+1. Stop, durably disable automatic startup/restart, and inspect the exact owned service through an independent trusted
    administrative channel. Verify no stale start/stop callback or updater is
    still executing. Never steal another updater's lock.
 2. Read the recorded transaction with
@@ -63,7 +75,7 @@ Windows is therefore not asserted.
    and unsigned/modified previous releases are refused.
 3. Invoke `recoverServiceUpdate({installRoot, publicKeyPem, transactionId,
    confirmStopped, timeoutMs})`. `confirmStopped` is a **read-only** observer of
-   the already stopped service. It receives the same callback context. Recovery
+   the already stopped **and durably restart-inhibited** service. It receives the same callback context. Recovery
    does not replay an uncertain stop/start, perform a health action, or start the
    service. It restores signed previous bootstrap/runtime and the exact original
    active pointer, then returns `recovered_stopped` and releases its own lock.

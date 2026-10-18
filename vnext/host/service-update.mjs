@@ -92,14 +92,16 @@ async function callback(ctx,fn,phase,version,timeoutMs){
   save(ctx,phase);ownership(ctx);
   const controller=new AbortController();let timer;const started=performance.now();
   const context=Object.freeze({transactionId:ctx.record.transactionId,version,
-    previousVersion:ctx.record.previousVersion,phase,signal:controller.signal});
+    previousVersion:ctx.record.previousVersion,phase,signal:controller.signal,
+    restartInhibitionRequired:['stop_intent','rollback_stop_intent','recovery_observe_intent'].includes(phase)});
   try{
     const outcome=await Promise.race([
       Promise.resolve().then(()=>fn(context)).then(value=>({value}),()=>({error:'callback_failed'})),
       new Promise(resolve=>{timer=setTimeout(()=>{controller.abort();resolve({error:'callback_timeout'})},timeoutMs)})
     ]);
+    const callbackElapsed=performance.now()-started;
     ownership(ctx);
-    if(performance.now()-started>=timeoutMs)throw Error('callback_timeout');
+    if(callbackElapsed>=timeoutMs)throw Error('callback_timeout');
     if(outcome.error)throw Error(outcome.error);
     assert(typeof outcome.value==='boolean','callback_result_invalid');
     return outcome.value;
@@ -139,7 +141,10 @@ export async function updateServiceRelease({installRoot,version,publicKeyPem,
       manifest_sha256:candidate.sha256,activated_at:new Date().toISOString()},null,2)+'\n'}};
   atomic(path.join(ctx.lock,'owner'),transactionId);syncDirectory(installRoot);
   try{
-    save(ctx,'prepared');verifyStable(ctx,previous,candidate,{previousOnly:true});
+    save(ctx,'prepared',{restartInhibition:'required_before_switch_and_during_recovery'});verifyStable(ctx,previous,candidate,{previousOnly:true});
+    // true must attest both stopped AND durable startup/restart inhibition.
+    // Trusted wrappers keep startup inhibited through terminal health; a
+    // merely inactive but still enabled service is not safe for this switch.
     assert(await callback(ctx,stopService,'stop_intent',previous.version,timeoutMs),'service_stop_not_confirmed');
     save(ctx,'stopped');pointerOwned(ctx);
     const candidateNow=checked(installRoot,version,publicKeyPem,options,candidate.sha256);
@@ -188,7 +193,8 @@ export async function recoverServiceUpdate({installRoot,publicKeyPem,transaction
   ctx.record.expectedPointer=snapshot(ctx.pointer);delete ctx.recoveryPointers;
   const previous=checked(installRoot,record.previousVersion,publicKeyPem,{platform,arch},record.previousManifest);
   // Recovery never replays an uncertain stop/start callback. The operator must
-  // independently stop the service and supply a read-only stopped observer.
+  // independently stop AND durably inhibit startup/restarts, then supply a
+  // read-only observer confirming both conditions. Merely inactive is unsafe.
   try{
     assert(await callback(ctx,confirmStopped,'recovery_observe_intent',record.previousVersion,timeoutMs),
       'service_stop_not_confirmed');
