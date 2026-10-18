@@ -1,0 +1,11 @@
+{
+  "existing_task_observed_contract_unchanged": true,
+  "fresh_owned_task_count": 0,
+  "checked_at": "2026-10-18T18:36:27.4877375Z",
+  "private_run_state_count": 0,
+  "fresh_owned_node_count": 0,
+  "public_bootstrap_artifacts_removed": true,
+  "schema": 1,
+  "retained": "owner-private receipts, logs, options and exclusive driver lock receipts only",
+  "batch_scratch_removed": true
+}
