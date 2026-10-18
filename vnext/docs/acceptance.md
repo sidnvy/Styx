@@ -136,3 +136,40 @@ docs/onboarding-installation.md.
   reboot/login/startup upgrade and independently verified uninstall.
 
 See docs/enrollment-pilot.md for code and the explicit security boundary.
+
+
+## Physical first-contact enrollment and revocation pilot — 2026-10-18
+
+PASS: Started a new isolated TLS Gateway with an EMPTY target catalog on
+the native macOS Host. A separate native Linux device generated its own new
+RSA identity and applied with a single-use invitation. The owner-side
+pending list and Host console independently displayed the identical
+64-character SHA-256 public key fingerprint.
+
+PASS: An explicit owner approval enabled Exec and Computer capabilities.
+The Host received its encrypted initial capability and locally generated a
+private host.json and host.token, mode 0600. styx doctor reported
+ready_for_exec, a present graphical session and native Wayland opt-in.
+
+PASS: Without restarting Gateway, the newly registered Host established
+both authenticated outbound lanes over private WSS. The owner device list
+changed from approved/offline to approved/online.
+
+PASS: The pre-existing but fully independent Styx MCP GUI acceptance script
+executed a self-owned Wayland scratch dialog using BOTH new device lanes:
+Exec created the window, Cua returned screenshot and 3 AX elements, clicked
+the observed button, Exec independently confirmed native exit code 0.
+
+PASS: The owner revoked this specific device. Both reverse lanes closed
+and further reconnection attempts were denied. After stopping and starting
+the Gateway from the unchanged private state directory, device listing
+remained revoked/offline and the old Host could not reconnect.
+
+IMPORTANT LIMIT: existing Charon OOB actions still transferred the public
+Gateway certificate and one-time invitation and started the isolated native
+processes. This is a physical FIRST-CONTACT PAIRING acceptance, not proof of
+a signed cold install or ChatGPT UI onboarding without OOB. The Host token
+itself was not preprovisioned; it was generated only after explicit approval.
+
+No personal application or production Host registration was modified.
+All native execution was restricted to separate temporary test directories.

@@ -80,7 +80,7 @@ try {
      !collected.includes('STYX_EXIT=0'))throw Error('independent_readback_failed');
   console.log(JSON.stringify({pilot:'styx-physical-cua-unattended',
     status:'PASS',physicalHost:true,
-    connection:'Gateway MCP + Host Outbound WSS/mTLS',
+    connection:'Gateway MCP + authenticated Host Outbound WSS',
     driver:'cua-driver 0.36.0',
     ownWindow:true,screenshot:true,accessibilityElements:elements.length,
     clickedObservedButton:true,independentExitCode:0,

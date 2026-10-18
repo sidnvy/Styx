@@ -236,3 +236,17 @@ Run local and platform-native tests:
 
     npm run test:host
     npm run test:all
+
+
+## Real new-device pilot (not cold installation)
+
+A two-machine first-contact trial began with ZERO pre-registered Hosts and
+successfully completed local device identity -> owner approval -> encrypted
+Host capability -> dynamic Gateway admission -> outbound Exec and Computer
+connection -> native scratch GUI verification -> device revocation, including
+revocation persistence after Gateway restart. Physical test bootstrap
+still used existing OOB controls to place the installer source and convey
+the one-time invitation; normal Styx execution and authentication did not.
+
+This is the pairing contract to embed in future native installers. It is not
+yet a signed cold-install experience or the ChatGPT intelligent setup UI.

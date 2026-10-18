@@ -112,3 +112,25 @@ The physical first-contact cold install, ChatGPT interactive device picker,
 native permissions, keychain/PKI rotation, OS background service enrollment,
 upgrade/uninstall and user rollback UI are future release gates. This pilot
 does not assert otherwise. Read docs/onboarding-installation.md.
+
+
+## Real two-machine pairing evidence (October 18, 2026)
+
+The native Gateway was started on macOS with an empty Host catalog and a
+private, short-lived HTTPS enrollment authority. The native Linux Host
+created its RSA identity locally, applied with a one-use invitation and
+waited for explicit owner approval. Its public fingerprint matched the
+Gateway pending request exactly. The Gateway dynamically admitted it,
+without restart, and the Host decrypted a new per-device bearer capability.
+
+Both Codex Exec Server and Cua Driver connected over the private WSS
+transport. A real scratch GUI test completed Exec -> Cua PNG/Accessibility ->
+Cua click -> independent Exec exit code 0. The Host was then revoked,
+connections dropped and attempts to reconnect were rejected even after
+Gateway restart with its persisted state.
+
+This was NOT an unattended cold install. Existing OOB controls transferred
+the public Gateway CA and the one-use invitation and started the test Host.
+The per-device capability and RSA private key were never prewritten by
+Gateway or shipped to the Host. A signed installer, ChatGPT selection UI
+and OS-managed service start remain separate production requirements.
