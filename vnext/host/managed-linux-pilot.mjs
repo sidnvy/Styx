@@ -157,18 +157,27 @@ export async function runManagedLinuxPilot(raw,{optIn=process.env.STYX_RUN_MANAG
     try { installLinuxService({unitName,installRoot,hostConfigFile:configFile,trustPublicKeyFile:publicKeyFile,restartSec:1}) }
     finally { installed=fs.existsSync(unitFile) }
     systemdUser(unitName,'enable');systemdUser(unitName,'start');
+    let lastExecPeer,lastComputerPeer;
+    function ownsGeneration(status,version){
+      try {
+        if(fs.realpathSync('/proc/'+status.pid+'/exe')!==path.join(installRoot,'node'))return false;
+        const children=fs.readFileSync('/proc/'+status.pid+'/task/'+status.pid+'/children','utf8').trim().split(/\s+/).filter(Boolean);
+        const script=path.join(installRoot,'releases',version,'host/connect.mjs');
+        return children.some(pid=>fs.readFileSync('/proc/'+pid+'/cmdline','utf8').split('\0').includes(script));
+      }catch{return false}
+    }
     async function ready(version){
       await until(()=>{
         const s=statusUserService(unitName);
-        return s.active==='active'&&s.pid>1&&gateway.relay.connected(target)&&gateway.relay.computerConnected(target)===1;
+        return s.active==='active'&&s.pid>1&&ownsGeneration(s,version)&&
+          gateway.relay.connected(target)&&gateway.relay.sessions.get(target)!==lastExecPeer&&
+          gateway.relay.computerConnected(target)===1&&
+          [...gateway.relay.computerPeers.get(target)][0]!==lastComputerPeer;
       },'managed_host_readiness_timeout');
       const status=statusUserService(unitName);
       assert(activeRelease(installRoot,publisher.publicKey).version===version,'active_release_mismatch');
-      assert(fs.realpathSync('/proc/'+status.pid+'/exe')===path.join(installRoot,'node'),'service_not_using_signed_stable_node');
-      const children=fs.readFileSync('/proc/'+status.pid+'/task/'+status.pid+'/children','utf8').trim().split(/\s+/).filter(Boolean);
-      const signedScript=path.join(installRoot,'releases',version,'host/connect.mjs');
-      assert(children.some(pid=>fs.readFileSync('/proc/'+pid+'/cmdline','utf8').split('\0').includes(signedScript)),
-        'service_not_running_expected_signed_generation');
+      lastExecPeer=gateway.relay.sessions.get(target);
+      lastComputerPeer=[...gateway.relay.computerPeers.get(target)][0];
       await closeClient();
       transport=new StreamableHTTPClientTransport(new URL(origin+'/mcp'),{
         requestInit:{headers:{Authorization:'Bearer '+modelToken}},fetch:caFetch(origin,ca)});
