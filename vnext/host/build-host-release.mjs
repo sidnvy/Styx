@@ -13,7 +13,7 @@ const STATIC=Object.freeze([
   'host/enroll.mjs','host/doctor.mjs','host/linux-service.mjs',
   'host/macos-launchagent.mjs','host/windows-task.ps1',
   'shared/enrollment-protocol.mjs',
-  'shared/private-file.mjs',
+  'host/private-storage.mjs','shared/private-file.mjs',
   'licenses/styx-LICENSE','licenses/cua-LICENSE',
   'licenses/codex-LICENSE','licenses/codex-NOTICE','licenses/provenance.json',
   'packages/styx-exec-adapter/rpc.mjs',

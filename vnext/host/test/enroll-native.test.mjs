@@ -14,7 +14,7 @@ test('native device identity is device-local, stable and cryptographically bound
   await fs.chmod(root,0o700);
   const config={
     gateway_url:'https://gateway.example.invalid',
-    storage_dir:root,label:'test-host',
+    storage_dir:path.join(root,'state'),label:'test-host',
     cwd:process.cwd(),
     shell:process.platform==='win32'
       ?'C:\\Windows\\System32\\WindowsPowerShell\\v1.0\\powershell.exe'
@@ -26,7 +26,7 @@ test('native device identity is device-local, stable and cryptographically bound
   const second=initLocalIdentity(config);
   assert.equal(first.device_id,second.device_id);
   assert.match(first.fingerprint,/^[a-f0-9]{64}$/);
-  const priv=await fs.readFile(path.join(root,'identity.pem'),'utf8');
+  const priv=await fs.readFile(path.join(config.storage_dir,'identity.pem'),'utf8');
   assert.match(priv,/BEGIN PRIVATE KEY/);
   const {sign}=await import('node:crypto');
   const payload={
@@ -49,7 +49,7 @@ test('native device identity is device-local, stable and cryptographically bound
     padding:constants.RSA_PKCS1_PSS_PADDING,saltLength:32
   },signature),false);
   if(process.platform!=='win32'){
-    const st=await fs.stat(path.join(root,'identity.pem'));
+    const st=await fs.stat(path.join(config.storage_dir,'identity.pem'));
     assert.equal(st.mode&0o077,0);
   }
 });

@@ -1,6 +1,7 @@
 // Local staged-release activation only. Never starts/restarts services, runs
 // shell commands, refreshes bootstrap, retries probes or steals stale locks.
 import fs from 'node:fs';
+import {requirePrivateDirectory} from './private-storage.mjs';
 import path from 'node:path';
 import {createHash,randomBytes} from 'node:crypto';
 import {activeRelease,activateRelease,verifySignedRelease} from './installer.mjs';
@@ -18,6 +19,8 @@ const same=(a,b)=>a===null?b===null:b!==null&&a.equals(b);
 function bootstrapCompatible(installRoot,checked){
   const runtime=checked.platform==='win32'?'node.exe':'node';
   const required=['host/installer.mjs','host/launch.mjs'];
+  if(checked.manifest.files.some(e=>e.path==='host/private-storage.mjs'))
+    required.unshift('host/private-storage.mjs');
   const bundled=checked.manifest.files.find(e=>e.path==='bin/'+runtime);
   if(checked.platform==='win32')assert(bundled,'signed_windows_node_missing');
   if(bundled)required.push('bin/'+runtime);
@@ -41,10 +44,7 @@ export async function activateHealthyRelease({installRoot,version,publicKeyPem,
   assert(Number.isInteger(timeoutMs)&&timeoutMs>=1&&timeoutMs<=60000,'invalid_health_timeout');
   assert(typeof installRoot==='string'&&path.isAbsolute(installRoot),'absolute_install_root_required');
   assert(/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(version??''),'invalid_version');
-  const rootStat=fs.lstatSync(installRoot);
-  assert(rootStat.isDirectory()&&!rootStat.isSymbolicLink()&&
-    (process.platform==='win32'||(rootStat.uid===process.getuid()&&!(rootStat.mode&0o077))),
-    'private_install_root_required');
+  requirePrivateDirectory(installRoot);
   const options={platform,arch};
   const releaseRoot=path.join(installRoot,'releases',version);
   // Invalid publishers cannot cause a health callback or acquire a local lock.

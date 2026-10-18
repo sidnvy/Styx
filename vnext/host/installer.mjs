@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import {requirePrivateDirectory,ensurePrivateDirectory} from './private-storage.mjs';
 import path from 'node:path';
 import {
   createHash,createPublicKey,verify,randomBytes
@@ -18,10 +19,8 @@ const hash=file=>{
 function assert(yes,reason){if(!yes)throw Error(reason)}
 function privateRoot(root,{create=false}={}) {
   assert(typeof root==='string'&&path.isAbsolute(root),'absolute_install_root_required');
-  if(create)fs.mkdirSync(root,{recursive:true,mode:0o700});
-  const st=fs.lstatSync(root);
-  assert(st.isDirectory()&&!st.isSymbolicLink() &&
-    (process.platform==='win32'||!(st.mode & 0o077)),'private_install_root_required');
+  if(create)ensurePrivateDirectory(root);
+  else requirePrivateDirectory(root);
 }
 function fileAtomic(dest,content){
   const temp=dest+'.new-'+randomBytes(8).toString('hex');
@@ -90,7 +89,7 @@ export function stageSignedRelease({sourceDir,installRoot,publicKeyPem,
   // Stable launcher and its verification helper are supplied by the trusted
   // local Styx installer executable, NEVER accepted from unsigned bundle
   // contents. They are not an alternative unsigned update path.
-  for(const filename of ['installer.mjs','launch.mjs']) {
+  for(const filename of ['private-storage.mjs','installer.mjs','launch.mjs']) {
     const destShim=path.join(installRoot,filename);
     if(!fs.existsSync(destShim)){
       const sourceShim=fileURLToPath(new URL('./'+filename,import.meta.url));
@@ -147,7 +146,12 @@ export function refreshVerifiedBootstrap(installRoot,publicKeyPem,version,
   const verified=verifySignedRelease(releaseRoot,publicKeyPem,options);
   const signed=new Set(verified.manifest.files.map(e=>e.path));
   const runtime=verified.platform==='win32'?'bin/node.exe':'bin/node';
-  const bootstrap=['host/installer.mjs','host/launch.mjs',
+  const helper='host/private-storage.mjs';
+  const installerSource=signed.has('host/installer.mjs')
+    ?fs.readFileSync(path.join(releaseRoot,'host/installer.mjs'),'utf8'):'';
+  assert(signed.has(helper)||!installerSource.includes('./private-storage.mjs'),
+    'signed_bootstrap_payload_missing');
+  const bootstrap=[...(signed.has(helper)?[helper]:[]),'host/installer.mjs','host/launch.mjs',
     ...(signed.has(runtime)?[runtime]:[])];
   assert(bootstrap.every(name=>signed.has(name)),'signed_bootstrap_payload_missing');
   if(verified.platform==='win32')assert(signed.has(runtime),'signed_windows_node_missing');
@@ -287,7 +291,7 @@ export function servicePlan({installRoot,configFile,nodeBinary,
     'absolute_service_paths_required');
   const argv=[nodeBinary,path.join(installRoot,'launch.mjs'),
     installRoot,configFile,publicKeyFile];
-  const serviceName='Styx Host';
+  const serviceName='StyxPilot-Host';
   if(platform==='darwin') return {status:'NOT_INSTALLED',
     manager:'launchd-user',label:'app.styx.host',
     args:argv,runAtLoad:true,keepAlive:true};

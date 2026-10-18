@@ -33,7 +33,8 @@ async function fixture(t) {
         'cua-pinned-0.36.0'
     };
     if(options.bootstrap){
-      for(const f of ['host/installer.mjs','host/launch.mjs']){
+      for(const f of ['host/private-storage.mjs','host/installer.mjs','host/launch.mjs']){
+        if(options.omitPrivateHelper&&f==='host/private-storage.mjs')continue;
         files[f]=await fs.readFile(new URL('../'+f.split('/')[1],import.meta.url),'utf8');
       }
     }
@@ -186,10 +187,17 @@ test('stable bootstrap can only be refreshed using a publisher-signed bundled sh
     publicKeyPem:f.publicKey});
   assert.throws(()=>refreshVerifiedBootstrap(f.installRoot,f.publicKey,
     '0.1.0-bare'),/signed_bootstrap_payload_missing/);
+  const missingHelper=await f.make('0.1.0-missing-helper',{
+    bootstrap:true,omitPrivateHelper:true});
+  stageSignedRelease({sourceDir:missingHelper.source,installRoot:f.installRoot,
+    publicKeyPem:f.publicKey});
+  assert.throws(()=>refreshVerifiedBootstrap(f.installRoot,f.publicKey,
+    '0.1.0-missing-helper'),/signed_bootstrap_payload_missing/);
   const full=await f.make('0.1.0-full',{bootstrap:true});
   stageSignedRelease({sourceDir:full.source,installRoot:f.installRoot,
     publicKeyPem:f.publicKey});
   const receipt=refreshVerifiedBootstrap(f.installRoot,f.publicKey,'0.1.0-full');
+  assert.ok(receipt.shims.includes('private-storage.mjs'));
   assert.equal(receipt.status,'bootstrap_refreshed');
   for(const name of ['launch.mjs','installer.mjs']){
     assert.equal(await fs.readFile(path.join(f.installRoot,name),'utf8'),
