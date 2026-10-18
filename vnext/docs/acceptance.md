@@ -59,3 +59,17 @@ GO for additive implementation; NO-GO for production cutover.
   create and independently verify the owned scratch window.
 
 Source documentation and evidence: docs/cua-0.36-source-contract.md.
+
+
+## Installation and onboarding release gates — production only
+
+Not implemented or verified: signed per-OS installer and full binary manifest;
+local-first trust establishment without SSH/Coder Agent; user device selection
+and one-time mutual-auth pairing; ChatGPT-guided onboarding plus native/CLI
+fallback; OS permission ownership (stable macOS TCC app identity);
+supervised user services on three OSes; reboot/reconnect/upgrade/rollback;
+revocation/uninstall; 24-hour unattended soak; real ChatGPT registration and
+independent operation without the old control plane.
+
+These are mandatory for production migration, not just paperwork.
+Design and threat/acceptance checklist: docs/onboarding-installation.md.

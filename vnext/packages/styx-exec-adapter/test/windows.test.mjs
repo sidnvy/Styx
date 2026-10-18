@@ -35,3 +35,21 @@ test('Win32 rejects POSIX shell and Windows paths do not fall back to Gateway OS
   const adapter=new ExecAdapter({resolve:async()=>context});
   await assert.rejects(adapter.execCommand({cmd:'dir',yield_time_ms:0},'owner-1'),/unsupported_shell/);
 });
+
+test('Codex native envPolicy preserves only platform variables, not host secrets',async()=>{
+  const {codexEnvPolicy}=await import('../adapter.mjs');
+  const linux=codexEnvPolicy('linux');
+  assert.equal(linux.inherit,'all');
+  assert.equal(linux.ignoreDefaultExcludes,false);
+  for(const key of ['WAYLAND_DISPLAY','XDG_RUNTIME_DIR','DBUS_SESSION_BUS_ADDRESS',
+    'DISPLAY','XAUTHORITY','PATH','HOME'])
+    assert.ok(linux.includeOnly.includes(key),key);
+  for(const key of ['CODER_AGENT_AUTH','SSH_AUTH_SOCK','GITHUB_TOKEN',
+    'AWS_SECRET_ACCESS_KEY','OPENAI_API_KEY','NODE_REPL_AUTH_TOKEN'])
+    assert.ok(!linux.includeOnly.includes(key),key);
+  const win=codexEnvPolicy('win32');
+  for(const key of ['SystemRoot','Path','PATHEXT','USERPROFILE','APPDATA'])
+    assert.ok(win.includeOnly.includes(key));
+  assert.ok(!win.includeOnly.includes('WAYLAND_DISPLAY'));
+  assert.deepEqual(codexEnvPolicy('darwin').includeOnly,linux.includeOnly);
+});

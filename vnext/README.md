@@ -180,3 +180,14 @@ session DELETE frees it immediately; an abandoned idle lease is reaped after
 five minutes to avoid exhausting the Host's small native connection pool.
 This is Styx resource management, not a replacement for Cua's own session
 semantics. The original MCP SDK Client.close() by itself does not send DELETE.
+
+
+## Production onboarding is a separate acceptance gate
+
+The host/connect.mjs script and Cua/Exec pilots are **not** a production
+installer or a Host enrollment service. Future production must offer signed
+single-product installers, local-first trust/pairing, choosing devices from
+ChatGPT (with a native setup fallback), OS-specific permissions, startup,
+updates, rollback and revocation without depending on SSH/Coder Agent.
+See docs/onboarding-installation.md and docs/acceptance.md. These are tracked
+release requirements, not currently implemented features.

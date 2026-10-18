@@ -117,3 +117,19 @@ responsible for rejecting old snapshot tokens after session expiry.
 See docs/cua-0.36-source-contract.md for upstream source links and qualified
 test evidence. A legacy production desktop core is not required by this
 design.
+
+
+## Installer, device pairing and ChatGPT guided UI — PRODUCTION GATE
+
+Before production cutover, use one signed Styx product to onboard native
+macOS, Linux and Windows devices through an explicit local-first pairing
+process. ChatGPT may offer an intelligent guided setup UI, but the first
+installation cannot depend on SSH, Coder Agent, or a previously reachable
+Host. Device private keys and native permission approvals belong to the
+Host/user; enrollment and Host selection must be authorized and revocable.
+A native/CLI fallback is mandatory.
+
+The installer, enrollment control-plane, service supervisors, signed update
+and rollback lifecycle are not yet implemented. See
+docs/onboarding-installation.md. Production switch requires their separate
+cold-install and independent no-OOB recovery acceptance.

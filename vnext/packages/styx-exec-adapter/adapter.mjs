@@ -36,6 +36,32 @@ function cwdUri(location, platform) {
   }
   return pathToFileURL(location).href;
 }
+// Codex Exec Server 0.163.0 process/start.env is an exact environment, NOT
+// inherited by default. Use its upstream envPolicy contract to preserve only
+// benign platform/session variables on the native Host. Never forward Host
+// bearer credentials, SSH sockets, arbitrary user environment or Gateway env.
+const TRUSTED_UNIX_ENV = Object.freeze([
+  'PATH','HOME','SHELL','USER','LOGNAME','TMPDIR','TMP','TEMP',
+  'LANG','LC_ALL','LC_CTYPE','TZ',
+  'WAYLAND_DISPLAY','DISPLAY','XDG_RUNTIME_DIR','XDG_SESSION_TYPE',
+  'XDG_CURRENT_DESKTOP','DBUS_SESSION_BUS_ADDRESS','XAUTHORITY'
+]);
+const TRUSTED_WINDOWS_ENV = Object.freeze([
+  'Path','PATHEXT','SystemRoot','WinDir','ComSpec','USERNAME','USERPROFILE',
+  'HOMEDRIVE','HOMEPATH','APPDATA','LOCALAPPDATA','TEMP','TMP',
+  'PSModulePath','LANG'
+]);
+export function codexEnvPolicy(platform) {
+  if (!['linux','darwin','win32'].includes(platform)) fail('unsupported_platform');
+  return {
+    inherit: 'all',
+    ignoreDefaultExcludes: false,
+    exclude: [],
+    set: {},
+    includeOnly: platform==='win32' ? [...TRUSTED_WINDOWS_ENV] : [...TRUSTED_UNIX_ENV]
+  };
+}
+
 function commandArgs(platform, shell, command, login) {
   const name = nativePath(platform).basename(shell).toLowerCase();
   if (platform === 'win32') {
@@ -91,7 +117,8 @@ export class ExecAdapter {
       try {
         const started = await b.runtime.request('process/start', {
           processId: record.process, argv,
-          cwd: cwdFileUri, env: {...b.env}, tty: record.tty, pipeStdin: !record.tty,
+          cwd: cwdFileUri, env: {...b.env}, envPolicy: codexEnvPolicy(b.platform),
+          tty: record.tty, pipeStdin: !record.tty,
           arg0: null, ...(b.sandbox ? {sandbox: b.sandbox} : {})
         });
         if (started?.processId !== record.process) { record.state = 'start_unknown'; fail('outcome_unknown', id, true); }

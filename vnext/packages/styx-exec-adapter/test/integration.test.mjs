@@ -237,3 +237,29 @@ test('stdio: real Codex interleaves terminal and output sequences without invali
     assert.match(r.output, /err/);
   }
 });
+
+test('stdio: Codex envPolicy inherits native graphical session but rejects sensitive values', async t=>{
+  const {root} = await scratch(t);
+  const env = {
+    PATH:'/usr/bin:/bin',HOME:root,CODEX_HOME:path.join(root,'codex-home'),
+    WAYLAND_DISPLAY:'styx-wayland-fixture-17',
+    XDG_RUNTIME_DIR:'/tmp/styx-test-runtime',
+    DBUS_SESSION_BUS_ADDRESS:'unix:path=/tmp/styx-owned-bus',
+    STYX_API_KEY:'SHOULD_NOT_INHERIT',
+    CODER_AGENT_AUTH:'SHOULD_NOT_INHERIT'
+  };
+  const runtime=await new ExecConnection(()=>
+    stdioClient({binary,cwd:root,env})).initialize();
+  const a=adapter(runtime,root);
+  t.after(async()=>{await a.cleanup();await runtime.close();});
+  const cmd="printf '%s|%s|%s|%s|%s' \"$WAYLAND_DISPLAY\" \"$XDG_RUNTIME_DIR\" " +
+    "\"$DBUS_SESSION_BUS_ADDRESS\" \"$(printenv STYX_API_KEY || echo absent)\" " +
+    "\"$(printenv CODER_AGENT_AUTH || echo absent)\"";
+  const result=await complete(a,await a.execCommand({
+    cmd,login:false,yield_time_ms:250
+  },owner));
+  assert.equal(result.exit_code,0);
+  assert.equal(result.output,
+    'styx-wayland-fixture-17|/tmp/styx-test-runtime|' +
+    'unix:path=/tmp/styx-owned-bus|absent|absent');
+});
