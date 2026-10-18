@@ -290,3 +290,32 @@ receipt identity, phase, pointer versions and signed hashes before callbacks.
 The new module ships in the signed Host payload and its packaged imports are
 checked. Focused API tests:12 PASS; a separate native Linux service pilot will
 provide service-level evidence. Windows/macOS physical updates remain NOT RUN.
+
+
+## Continued integration: real service recovery, source inventory and soak
+
+Clean integration17fd0e0683431bd1c557a06e2fdb2356e9aa1385 passed213
+fixture/protocol/Host cases:201 passed,12 platform skips,0 failures. Signed
+payload imports include the updater. Doctor/config/publisher-key privacy fixes
+are included. Native ACL batching preserves fresh per-path checks at each
+synchronous boundary and revalidation after callbacks; native Windows timing
+improvement must be measured by final CI rather than inferred from spawn counts.
+
+Real Linux update pilot receipts establish actual mapped official runtime
+22.23.3 ->22.23.2 test-fixture replacement, controlled health rejection with
+exact rollback, and uncertain timeout/late-result refusal plus explicit stopped
+recovery. This does not relax the production22.23.3 pin. Owned GUI and cleanup
+passed. Physical Windows/macOS updater lifecycle remains NOT RUN.
+
+Source inventory now pins exact upstream inputs,2116 Cargo lock entries and
+9170 unambiguous resolved edges; all18 Git dependency declarations are observed.
+Bounded CI verifies selected crate archives/notices. Full registry metadata
+collection is recorded separately; exact shipped binary composition, all notice
+texts and upstream publisher attestation are not established by source graphs.
+
+New installed-service/native Exec24h sampling started2026-10-19 01:59:37
+Asia/Shanghai from frozen17fd0e0, driver1645138, owned unit
+styx-rc20261019-owned-soak24h.service. The existing fb7f0aa component run remains
+untouched. Both gates stay NOT RUN until actual elapsed completion; full
+GUI/session/platform soak remains separate. Final CI/status snapshots are in
+task outputs and PR37, with no production deployment or remote merge.

@@ -36,7 +36,7 @@ clone retains the shared Git directory; immutable Exec soak uses work/styx-vnext
 | C macOS lifecycle | BLOCKED | Stable app, native owner/liveness and packaging exist; Developer ID/notary/TCC GUI evidence required |
 | D Distribution/onboarding | NOT RUN | Signed bundles, Node, private enrollment and recovery exist; clean-device installation/persistent publisher trust remain |
 | E Multi-user isolation | NOT RUN | Adversarial realm/session/credential tests exist; distinct native accounts still required |
-| F Reliability | NOT RUN | Post-switch rollback/offline runtime recovery has real Linux evidence; component soak running, managed-service soak being prepared |
+| F Reliability | NOT RUN | Post-switch rollback/offline runtime recovery has real Linux evidence; component soak running, independent managed-service/Exec/resource soak running from frozen17fd0e0 |
 | G ChatGPT | BLOCKED | Passive deterministic discovery/status tools and manual checklist exist; account-side authorization required |
 | H RC | BLOCKED | Native source dependency/license inventory underway; signing, binary-equivalent SBOM, physical and soak evidence remain |
 

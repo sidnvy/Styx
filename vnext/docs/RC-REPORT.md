@@ -17,7 +17,7 @@ reference `1736a10ab9922c7d95f39f8f5d9dcba754a301aa`.
 
 Persistent integration worktree:
 `/home/sid/Documents/Codex/2026-10-19/files-pasted-by-the-user-styx/work/styx-vnext-integration`.
-Branch: `feat/vnext-rc-integration-20261019`; implementation code SHA: `fb7f0aae9b4f2bb15c71a0f904f2b27000159b2f`.
+Branch: `feat/vnext-rc-integration-20261019`; current verified implementation SHA: `17fd0e0683431bd1c557a06e2fdb2356e9aa1385`.
 Its independent Git common directory is under`work/styx-vnext/.git`; retain
 that clone with its worktrees. Review:https://github.com/sidnvy/Styx/pull/37
 All PRs remain drafts; none merged or promoted.
@@ -47,10 +47,36 @@ All PRs remain drafts; none merged or promoted.
 - Complete signed Host payload now contains onboarding/Doctor/native service
   helper entrypoints, with actual module resolution tested from the product.
 
+## Continued device-independent work
+
+Doctor refuses runtime probes after invalid signed selection or private credential
+validation. Launch, direct CLI, native service setup and publisher signing-key
+consumers enforce native owner/private permissions before reading executable
+paths or creating bundles. Windows checks actual DACLs; bounded synchronous
+batching reduces PowerShell starts without caching permissions across callbacks.
+
+The signed Host now ships a durable offline service-update transaction: verify
+both releases, inhibit service restart, switch signed bootstrap/runtime, observe
+health, and roll back exactly once on a known rejection. Uncertain callbacks
+retain a private recovery journal and exclusive lock; explicit recovery requires
+observed stopped/restart-inhibited state and never auto-replays service actions.
+Real Linux evidence verifies official Node22.23.3 ->22.23.2 test-only replacement,
+actual mapped executable versions, controlled health-rejection rollback and
+uncertain recovery. Production release building still pins22.23.3. The injected
+rejection follows a successful native Exec call; it is not evidence of a broken
+upstream runtime. See linux-managed-update-pilot.md and its strict receipt.
+
+Native source inventory pins exact upstream commits and Cargo files, resolves
+2116 lock entries/9170 edges without ambiguity, and records all18 Git package
+license declarations. A paced registry metadata sweep supplements the bounded
+CI sample. Source lock graphs include dev/optional/all-target dependencies;
+these are not claims about exact shipped binary composition or complete legal
+review. See ../licenses/NATIVE-SOURCE-INVENTORY.md for explicit remaining gates.
+
 ## Verification and practical boundaries
 
-PASS:182 fixture/protocol/Host tests,171 passed/11 explicitly skipped on native
-Linux (receipt56458aa); real native Exec19/19; top-level dependency audit zero
+PASS:213 fixture/protocol/Host tests,201 passed/12 explicitly skipped on native
+Linux (clean source17fd0e0, Node22.23.3); real native Exec19/19 on the same source; top-level dependency audit zero
 reported vulnerabilities; npm CycloneDX 1.5 SBOM with 93 components. CI platform
 fixtures and actual binary packaging/ACL tests are recorded separately.
 
@@ -69,7 +95,7 @@ Developer ID signing/notarization and signed GUI acceptance remain BLOCKED.
 
 PASS:actual Linux/macOS/Windows official runtime package CI, Windows native
 ACL/storage negative checks and Mac compile/liveness CI on focused branches.
-The final integration CI is pending at this documentation snapshot; its actual
+The latest integration CI is pending at this documentation snapshot; its actual
 completed result and observed head belong in the task output/PR, not inferred
 from sibling branch success.
 
@@ -81,9 +107,17 @@ with its receipt preserved. The fixed source `fb7f0aae9b4f2bb15c71a0f904f2b27000
 Node 22.23.3. State:`work/soak-linux-final-24h/receipt.json`; running status is
 NOT RUN until actual completion. It does not prove installed-service/GUI soak.
 
+A separate frozen17fd0e0 installed-service/native Exec24h run started at
+2026-10-19 01:59:37 Asia/Shanghai. State:
+`work/soak-managed-service-24h/managed-soak.json`; owned unit:
+`styx-rc20261019-owned-soak24h.service`. It records service identity/restart count,
+real Exec roundtrips and process/cgroup resources. Short completion and graceful
+abort/cleanup tests passed; the24h gate remains NOT RUN while active. Even its
+completion would not establish full GUI/session or per-platform stability.
+
 Physical Windows lifecycle/GUI, macOS Developer ID/notary/TCC, clean-device
 independent installation and durable publisher trust, distinct-account native
-isolation, full post-switch recovery/offline runtime upgrades, complete native
+isolation, physical Windows/macOS post-switch recovery and offline runtime upgrades, complete native
 transitive SBOM/license review, actual ChatGPT account authorization and full
 per-platform 24h soak are still outstanding. See RELEASE-BLOCKERS.md and
 SUPPORTED-PLATFORMS.md. These limits prevent RC approval.
