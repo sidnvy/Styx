@@ -20,9 +20,9 @@ this task's output report and draft PR37. Original developer worktrees preserved
 | Owner-recovery/revocation negatives | PASS | Wrong realm/id/fingerprint/generation, retired key/invitation, live lane close, persistence/save failure fixture tests |
 | Strong physical two-account isolation | NOT RUN | Separate native accounts/session contexts and GUI evidence still required |
 | Preactivation health failure retention | PASS | Bounded trusted local callback, signed candidate/bootstrap/helper checks, exact old pointer retention and race/timeout tests |
-| Post-switch automatic health rollback/offline runtime switch | NOT RUN | Preactivation API does not implement a service update orchestrator |
+| Post-switch health rollback/offline runtime switch | PASS | Linux owned-service pilot: two actual official Node versions, controlled health rejection, exact signed prior-byte/pointer restoration, timeout no replay and explicit stopped recovery; Windows/macOS physical behavior NOT RUN |
 | JavaScript SBOM/top-level native notices | PASS | npm CycloneDX 1.5,93 components; signed pinned Cua/Codex/Styx notices, Node full upstream LICENSE |
-| Complete native transitive SBOM/license review | NOT RUN | Top-level notices are not a full native dependency audit |
+| Complete native binary SBOM/license review | BLOCKED | Source lock/license inventory is in progress; binary-equivalence and full native/system/build provenance remain unproven |
 | Independent cold install/publisher trust | NOT RUN | Pilot uses existing machine/session and ephemeral publisher trust |
 | Actual ChatGPT account integration | BLOCKED | Local SDK/status tool tests do not establish account authorization; manual checklist included |
 | 24-hour final-code Exec component soak | NOT RUN | Running immutablefb7f0aa under Node 22.23.3; no completion inferred |

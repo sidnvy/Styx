@@ -27,18 +27,18 @@ Do not treat this clone as the pre-existing developer checkout.
 ## Milestones and next executable work
 
 Active integration worktree is `work/styx-vnext-integration`; original independent
-clone is retained unchanged for the native Exec soak.
+clone retains the shared Git directory; immutable Exec soak uses work/styx-vnext-soak-final.
 
 | Milestone | Status | Next executable work |
 | --- | --- | --- |
-| A Foundation/CI | PASS | Fresh dependency audit, typed receipts, actual native Exec and three-OS checks; integration CI pending |
-| B Windows lifecycle | BLOCKED | Review original private-file ACL / signed Node / Scheduled Task recovery changes, port with negative tests, then verify native SID/session and owned-window behavior |
-| C macOS lifecycle | BLOCKED | Add stable bundle packaging/signing configuration and TCC readiness checks; run native acceptance when macOS is available |
-| D Distribution/onboarding | NOT RUN | Bundle verified Node on each target, native packages, protected credential storage, rotation and offline runtime updates |
-| E Multi-user isolation | NOT RUN | Separate native accounts and Gateway realms; adversarial identity, process, GUI and revocation tests |
-| F Reliability | NOT RUN | Signed health-gated activation, owner-scoped metrics, crash/reconnect tests and 24-hour soak |
-| G ChatGPT | BLOCKED | Deterministic readiness/discovery tools and actual account-side onboarding acceptance |
-| H RC | BLOCKED | SBOM/licenses/provenance, signed artifacts, physical evidence and final assessment |
+| A Foundation/CI | PASS | Locked audits, native Exec and three-OS checks; final successor integration checks tracked per SHA |
+| B Windows lifecycle | BLOCKED | Native private storage/config/signing-key checks and Scheduled Task implementation exist; physical interactive lifecycle/GUI remains required |
+| C macOS lifecycle | BLOCKED | Stable app, native owner/liveness and packaging exist; Developer ID/notary/TCC GUI evidence required |
+| D Distribution/onboarding | NOT RUN | Signed bundles, Node, private enrollment and recovery exist; clean-device installation/persistent publisher trust remain |
+| E Multi-user isolation | NOT RUN | Adversarial realm/session/credential tests exist; distinct native accounts still required |
+| F Reliability | NOT RUN | Post-switch rollback/offline runtime recovery has real Linux evidence; component soak running, managed-service soak being prepared |
+| G ChatGPT | BLOCKED | Passive deterministic discovery/status tools and manual checklist exist; account-side authorization required |
+| H RC | BLOCKED | Native source dependency/license inventory underway; signing, binary-equivalent SBOM, physical and soak evidence remain |
 
 Each implementation milestone requires its own coherent commit and actual test
 receipts. PASS applies only to the tested layer/environment. Skipped native
