@@ -7,6 +7,21 @@ Styx Host execution processes. ChatGPT is the sole reasoning/planning layer.
 This is an additive preview under vnext/, not a replacement for deployed
 Styx/Charon/Coder services.
 
+## Optional CAS continuation experiment (not production)
+
+An opt-in native MCP App controller can test bounded ordinary-Chat turn continuation
+without Work, Codex model delegation or a Browser Companion. It is **off by
+default** and has **no Host mutation actions**. Enable it only in a separate
+experimental Gateway using the private `STYX_CAS_EXPERIMENT_STATE_DIR` setting.
+Local contract/iframe Host-simulator tests pass, including pinned MCP Apps
+ui/message schema validation. Real ordinary ChatGPT Web testing confirmed
+single automatic follow-up Turns, but **repeated unattended continuation
+is not yet reliable or accepted** (the Host has returned RPC -32601).
+Mobile/background acceptance remains pending. A separate CAS-only
+lab mode advertises no native Exec or Computer tools.
+See [CAS P0 experiment](docs/cas-native-continuation-experiment.md)
+and [isolated lab connection](docs/cas-lab-connection.md).
+
 ## Native runtimes
 
 - **Execution:** OpenAI Codex Exec Server, with exec_command and write_stdin.

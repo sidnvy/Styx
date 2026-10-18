@@ -3,6 +3,7 @@ import {fileURLToPath} from 'node:url';
 import {createStyxGateway} from './index.mjs';
 import {createGatewayHttp} from './http.mjs';
 import {EnrollmentController} from './enrollment.mjs';
+import {CasExperimentLedger} from './cas/ledger.mjs';
 
 const catalogFile = process.argv[2] || process.env.STYX_TARGETS_FILE;
 const tokenFile = process.env.STYX_MCP_TOKEN_FILE;
@@ -13,7 +14,13 @@ if (!catalogFile || !tokenFile) {
 const stat = fs.statSync(tokenFile);
 if (!stat.isFile() || (stat.mode & 0o077)) throw new Error('Inbound token file must be mode 0600');
 const catalog = JSON.parse(fs.readFileSync(catalogFile, 'utf8'));
-const gateway = createStyxGateway({catalog});
+// CAS is a strictly opt-in experiment. The default Gateway surface is unchanged.
+const casStateDir = process.env.STYX_CAS_EXPERIMENT_STATE_DIR;
+const cas = casStateDir ? await new CasExperimentLedger({directory: casStateDir}).init() : null;
+const casOnly = process.env.STYX_CAS_EXPERIMENT_ONLY === '1';
+if (casOnly && (!cas || catalog.targets?.length !== 0))
+  throw Error('CAS lab-only Gateway requires a private CAS directory and EMPTY target catalog');
+const gateway = createStyxGateway({catalog, cas, casOnly});
 const enrollmentDir=process.env.STYX_ENROLLMENT_DIR;
 const enrollmentAdminFile=process.env.STYX_ENROLL_ADMIN_TOKEN_FILE;
 if (Boolean(enrollmentDir)!==Boolean(enrollmentAdminFile))
@@ -29,6 +36,8 @@ const handle = await createGatewayHttp(gateway, {
   allowedHosts: process.env.STYX_ALLOWED_HOSTS?.split(',') || undefined,
   tlsCertificateFile: process.env.STYX_TLS_CERT_FILE || undefined,
   tlsPrivateKeyFile: process.env.STYX_TLS_KEY_FILE || undefined,
+  // Lab only. Production sessions retain their original indefinite lifetime.
+  idleSessionTimeoutMs: casOnly ? 120000 : 0,
   enrollment
 });
 process.stdout.write(JSON.stringify({status: 'listening', host: handle.address.address,

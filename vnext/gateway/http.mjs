@@ -20,12 +20,16 @@ function authorize(req, digest, hosts, origins) {
 // connection cannot reuse an old process or GUI element reference.
 export async function createGatewayHttp(gateway, {
   token, host = '127.0.0.1', port = 8795, allowedHosts, allowedOrigins = [],
-  maxSessions = 32, tlsCertificateFile, tlsPrivateKeyFile, enrollment = null
+  maxSessions = 32, idleSessionTimeoutMs = 0,
+  tlsCertificateFile, tlsPrivateKeyFile, enrollment = null
 } = {}) {
   if (typeof token !== 'string' || token.length < 32 || /\s/.test(token))
     throw new Error('Strong inbound bearer required');
   if (!Number.isInteger(port) || port < 0 || port > 65535)
     throw new Error('Invalid listen port');
+  if (!Number.isInteger(maxSessions) || maxSessions < 1 ||
+      !Number.isInteger(idleSessionTimeoutMs) || idleSessionTimeoutMs < 0)
+    throw new Error('Invalid MCP session limits');
   if (!['127.0.0.1', '::1', 'localhost'].includes(host) &&
       (!allowedHosts || allowedHosts.length === 0))
     throw new Error('Explicit allowed hosts required for non-loopback binding');
@@ -34,6 +38,20 @@ export async function createGatewayHttp(gateway, {
   if(enrollment && timingSafeEqual(digest,enrollment.adminDigest))
     throw Error('Enrollment owner token must differ from MCP bearer');
   const sessions = new Map();
+  // Optional cleanup for the isolated CAS research Gateway only. A model's MCP
+  // client can abandon a session without sending DELETE; orphan sessions must
+  // not permanently exhaust the capacity and block all future tool calls.
+  async function reapIdleSessions() {
+    if (!idleSessionTimeoutMs) return;
+    const threshold = Date.now() - idleSessionTimeoutMs;
+    for (const [id, session] of sessions) {
+      if (session.inFlight > 0 || session.lastActivityAt > threshold) continue;
+      sessions.delete(id);
+      await session.transport.close().catch(() => {});
+      await session.server.close().catch(() => {});
+      await gateway.closeOwner?.(session.owner).catch(() => {});
+    }
+  }
   if (Boolean(tlsCertificateFile) !== Boolean(tlsPrivateKeyFile))
     throw new Error('TLS certificate and key must be supplied together');
   const handler=async (req, res) => {
@@ -54,17 +72,30 @@ export async function createGatewayHttp(gateway, {
     if (sessionId) {
       const established = sessions.get(sessionId);
       if (!established) return refuse(404, 'Session not found');
+      // A long-lived GET SSE subscription is passive, not an active tool call.
+      // Otherwise an abandoned client with an open SSE stream is never reaped.
+      const activeOperation = req.method !== 'GET';
+      if (activeOperation) established.inFlight++;
+      established.lastActivityAt = Date.now();
       try { await established.transport.handleRequest(req, res); }
       catch { refuse(500, 'Request failed'); }
+      finally {
+        if (activeOperation) established.inFlight--;
+        established.lastActivityAt = Date.now();
+      }
       return;
     }
     if (req.method !== 'POST') return refuse(400, 'MCP initialization required');
+    if (sessions.size >= maxSessions) await reapIdleSessions();
     if (sessions.size >= maxSessions) return refuse(503, 'Session capacity reached');
     const owner = 'mcp-session:' + randomUUID();
     let sid;
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: () => randomUUID(),
-      onsessioninitialized: id => { sid = id; sessions.set(id, {transport, server}); }
+      onsessioninitialized: id => {
+        sid = id;
+        sessions.set(id, {transport, server, owner, inFlight: 1, lastActivityAt: Date.now()});
+      }
     });
     const server = gateway.serverForOwner(owner);
     transport.onclose = () => {
@@ -74,6 +105,11 @@ export async function createGatewayHttp(gateway, {
     try {
       await server.connect(transport);
       await transport.handleRequest(req, res);
+      if (sid && sessions.has(sid)) {
+        const session = sessions.get(sid);
+        session.inFlight--;
+        session.lastActivityAt = Date.now();
+      }
       if (!sid) { await transport.close(); await server.close(); }
     } catch {
       if (sid) sessions.delete(sid);
