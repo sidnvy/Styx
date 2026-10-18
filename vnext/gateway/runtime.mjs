@@ -36,6 +36,17 @@ export class RuntimePool {
   async binding(environmentId) {
     const target = this.registry.resolve(environmentId);
     const runtime = await this.get(target);
+    // A trusted owner can revoke or replace admission while the native
+    // handshake is in flight. Do not return authority from the old decision.
+    try {
+      const current=this.registry.resolve(target.id);
+      if(current.generation!==target.generation)throw Error('environment_generation_changed');
+    }catch(error){
+      this.pending.delete(target.id+':'+target.generation);
+      runtime.lost=true;
+      await runtime.close().catch(()=>{});
+      throw error;
+    }
     return {
       id: target.id, generation: target.generation,
       platform: target.platform, cwd: target.cwd, shell: target.shell,

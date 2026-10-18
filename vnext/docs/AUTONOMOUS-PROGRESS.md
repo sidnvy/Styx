@@ -73,3 +73,23 @@ Real interactive Windows task recovery/GUI: BLOCKED in current Linux context.
 This is a subset of B/E, not full native Windows acceptance. Original dirty
 worktree is unchanged; portable signed Node and Computer lease wait changes
 remain separate unintegrated work.
+
+## Milestone E/F subset — authorization across asynchronous handshakes
+
+Baseline: `65252490b47d07b17b4b0f05fc8d036df6f848aa`.
+Changed gateway/runtime.mjs and gateway/cua.mjs plus registry/Cua tests.
+Exec binding now rechecks target admission and generation after the handshake;
+a revoked/replaced runtime is closed and discarded. Native Cua closes clients
+when admission is revoked during its handshake. Closing a model owner fences
+pending native Cua connections so an orphan cannot dispatch after session exit.
+No dispatched GUI action is retried.
+
+PASS: 16 targeted protocol/negative tests. Complete fixture/protocol rerun:
+PASS, 136 passed / 9 skipped (145 total). Real Codex Exec rerun: PASS,
+18 passed / zero skipped. These are fixture race and real executor results,
+not physical cross-account or native GUI isolation evidence. Separate native
+account adversarial tests and soak remain NOT RUN.
+
+Foundation PR #27: upstream feature-branch CI PASS on Linux/macOS/Windows.
+Native private-state PR #28: Windows ACL tests and portable contract CI PASS;
+real interactive Task Scheduler recovery remains BLOCKED.
