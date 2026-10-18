@@ -146,3 +146,18 @@ both grants are ready, the explicit opt-in command on piermini is:
 ```sh
 STYX_MAC_OWNED_GUI=1 /usr/bin/python3 /private/tmp/styx-local-dev-20261019-0743bc4c/owned-gui-acceptance.py /private/tmp/styx-local-dev-20261019-0743bc4c
 ```
+
+A fresh permission readback at02:44:22 after the user's02:43:57 app restart still
+showed AXfalse/ScreenRecordingtrue. Narrow read-only `com.apple.TCC` logs for
+`app.styx.host` identify the actual blocker: **Failed to match existing code
+requirement … service kTCCServiceAccessibility**. The logged existing requirement
+was a CDHash `553904db1f5ee2a15a3864641253d6d8f902aa01`; the installed signed
+app's CDHash is `2907afe8b13cba6363b38d39b74dbec941fe22f6`, with an Apple
+Development designated requirement. The old hash's origin was not established.
+Both responsible app and child were attributed to the installed app and UID501.
+The appropriate human repair is to remove the existing Styx row from
+Accessibility using its minus button, then add `/Applications/Styx.app`, enable
+that fresh row, and quit/reopen Styx. Screen Recording already passes and need
+not be changed. No TCC database access, reset, permission mutation or GUI fixture
+launch was performed. Exact diagnostic evidence is retained in
+`evidence/macos-accessibility-requirement-mismatch-20261019.json`.
