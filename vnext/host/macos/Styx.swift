@@ -29,7 +29,7 @@ final class RuntimeDirectory {
         }
         guard flock(lock, LOCK_EX | LOCK_NB) == 0 else { close(lock); throw HostError.alreadyRunning }
     }
-    func clear() { unlink(descriptor); unlink(socket) }
+    func clear() { unlink(descriptor); unlink(socket); unlink(path + "/cua.pid") }
     deinit { close(lock) }
 }
 
@@ -56,9 +56,28 @@ func socketAccepts(_ path: String) -> Bool {
     }
 }
 
+// Pinned Cua 0.36.0 cli.rs exports this internal host contract; serve.rs
+// waits for embedded stdin EOF and shuts down its runtime. The sole writer
+// stays in Styx: process death closes it without a PID watchdog or guessed API.
+func makeEmbeddedDaemon(driver: URL, socketPath: String, pidFile: String) -> (Process, Pipe) {
+    let child = Process(), lifetime = Pipe()
+    child.executableURL = driver
+    child.arguments = ["serve", "--embedded", "--parent-liveness-stdio",
+        "--socket", socketPath, "--pid-file", pidFile]
+    child.environment = ["PATH": "/usr/bin:/bin", "HOME": NSHomeDirectory(),
+        "TMPDIR": NSTemporaryDirectory(), "CUA_DRIVER_EMBEDDED": "1",
+        "CUA_DRIVER_HOST_BUNDLE_ID": bundleID, "CUA_DRIVER_PERMISSION_MODE": "standard",
+        "DO_NOT_TRACK": "1", "CUA_DRIVER_RS_TELEMETRY_ENABLED": "false"]
+    child.standardInput = lifetime
+    child.standardOutput = FileHandle.nullDevice
+    child.standardError = FileHandle.nullDevice
+    return (child, lifetime)
+}
+
 final class StyxDelegate: NSObject, NSApplicationDelegate {
     var runtime: RuntimeDirectory?
     var daemon: Process?
+    var lifetimeWriter: FileHandle?
     var timer: Timer?
     var statusItem: NSStatusItem?
     var statusLine: NSMenuItem?
@@ -97,28 +116,26 @@ final class StyxDelegate: NSObject, NSApplicationDelegate {
             throw HostError.daemonUnavailable
         }
         runtime.clear(); generation = UUID().uuidString; lastGrants = nil
-        let child = Process()
-        child.executableURL = Bundle.main.url(forAuxiliaryExecutable: "cua-driver")
-        guard child.executableURL != nil else { throw HostError.daemonUnavailable }
-        child.arguments = ["serve", "--embedded", "--socket", runtime.socket]
-        // Do not inherit arbitrary permission-mode, loader, or agent-controlled env.
-        child.environment = ["PATH": "/usr/bin:/bin", "HOME": NSHomeDirectory(),
-            "TMPDIR": NSTemporaryDirectory(), "CUA_DRIVER_EMBEDDED": "1",
-            "CUA_DRIVER_HOST_BUNDLE_ID": bundleID, "CUA_DRIVER_PERMISSION_MODE": "standard",
-            "DO_NOT_TRACK": "1", "CUA_DRIVER_RS_TELEMETRY_ENABLED": "false"]
-        child.standardInput = FileHandle.nullDevice
-        child.standardOutput = FileHandle.nullDevice
-        child.standardError = FileHandle.nullDevice
+        guard let driver = Bundle.main.url(forAuxiliaryExecutable: "cua-driver") else {
+            throw HostError.daemonUnavailable
+        }
+        let (child, lifetime) = makeEmbeddedDaemon(driver: driver,
+            socketPath: runtime.socket, pidFile: runtime.path + "/cua.pid")
         child.terminationHandler = { [weak self] terminated in
             DispatchQueue.main.async {
                 guard let owner = self, owner.daemon === terminated else { return }
+                try? owner.lifetimeWriter?.close(); owner.lifetimeWriter = nil
                 owner.daemon = nil; owner.timer?.invalidate(); owner.runtime?.clear()
                 owner.phase = "daemon_exited"
                 owner.statusLine?.title = "Cua exited; reconnect after restart"
                 // Never replay an interrupted GUI action or silently restart a generation.
             }
         }
-        try child.run(); daemon = child; phase = "starting"
+        do { try child.run() }
+        catch { try? lifetime.fileHandleForWriting.close(); try? lifetime.fileHandleForReading.close(); throw error }
+        try? lifetime.fileHandleForReading.close()
+        lifetimeWriter = lifetime.fileHandleForWriting
+        daemon = child; phase = "starting"
         deadline = Date().addingTimeInterval(15)
         timer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in self?.poll() }
     }
@@ -153,13 +170,19 @@ final class StyxDelegate: NSObject, NSApplicationDelegate {
         // Withdraw the advertised generation before terminating its daemon.
         if let runtime = runtime { unlink(runtime.descriptor) }
         let ownedChild = daemon != nil
+        // Prefer upstream orderly EOF shutdown. Fall back only on this owned child.
+        try? lifetimeWriter?.close(); lifetimeWriter = nil
         if let child = daemon {
             child.terminationHandler = nil
             if child.isRunning {
-                child.terminate()
                 let limit = Date().addingTimeInterval(3)
                 while child.isRunning && Date() < limit { Thread.sleep(forTimeInterval: 0.02) }
-                if child.isRunning { kill(child.processIdentifier, SIGKILL) }
+                if child.isRunning {
+                    child.terminate()
+                    let termLimit = Date().addingTimeInterval(1)
+                    while child.isRunning && Date() < termLimit { Thread.sleep(forTimeInterval: 0.02) }
+                    if child.isRunning { kill(child.processIdentifier, SIGKILL) }
+                }
                 child.waitUntilExit()
             }
         }
@@ -184,6 +207,25 @@ final class StyxDelegate: NSObject, NSApplicationDelegate {
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         stop(); return .terminateNow
     }
+}
+
+#if STYX_TESTING
+// CI-only headless harness uses the exact production launch and lifetime
+// pipe, but creates no NSApplication, requests no TCC and invokes no GUI tool.
+if CommandLine.arguments.count == 4 && CommandLine.arguments[1] == "--liveness-owner-fixture" {
+    let driver = URL(fileURLWithPath: CommandLine.arguments[2])
+    let socketPath = CommandLine.arguments[3]
+    let (child, lifetime) = makeEmbeddedDaemon(driver: driver,
+        socketPath: socketPath, pidFile: socketPath + ".pid")
+    do {
+        try child.run(); try lifetime.fileHandleForReading.close()
+        let data = try JSONSerialization.data(withJSONObject: ["daemon_pid": child.processIdentifier])
+        FileHandle.standardOutput.write(data + Data([10]))
+        withExtendedLifetime(lifetime) {
+            while child.isRunning { Thread.sleep(forTimeInterval: 0.05) }
+        }
+        exit(child.terminationStatus)
+    } catch { fputs("Styx lifetime harness failed: \(error)\n", stderr); exit(1) }
 }
 
 // Runs without starting NSApplication, a daemon, or permission prompts in CI.
@@ -212,6 +254,7 @@ if CommandLine.arguments.contains("--self-test") {
         exit(0)
     } catch { fputs("Styx self-test failed: \(error)\n", stderr); exit(1) }
 }
+#endif
 let app = NSApplication.shared
 let delegate = StyxDelegate()
 app.delegate = delegate

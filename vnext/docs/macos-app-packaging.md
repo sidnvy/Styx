@@ -48,8 +48,10 @@ a separate existing installer mechanism.
 
 No signing/notarization runs occur in pull-request CI. The dedicated macOS
 workflow compiles the actual Swift source and runs the ownership self-test
-without starting AppKit, requesting grants, spawning Cua, or driving a GUI.
-Its execution remains NOT RUN until that workflow actually runs.
+without starting AppKit or requesting grants. A separate headless test starts the
+checksum-pinned native Cua through the exact production helper, kills only its
+own test owner subprocess, and checks both daemon exit and socket removal. It
+invokes no GUI tool and does not verify TCC. CI must pass for the current commit.
 
 ## Local operator flow and connection boundary
 
@@ -79,7 +81,8 @@ when collecting acceptance evidence. Restart invalidates all old sessions and
 requires new MCP connections, even though the private pathname is stable.
 
 Quit/SIGTERM/SIGINT withdraws the descriptor, terminates the child, waits up to
-three seconds before kill escalation, waits for exit and removes its socket.
+three seconds for EOF shutdown, then sends SIGTERM and, after one further
+second, SIGKILL only to its owned child, waits for exit and removes its socket.
 Unexpected daemon exit invalidates the descriptor and requires an explicit
 menu restart. A permission-state change withdraws the generation and asks for
 an app relaunch. Interrupted GUI actions are never replayed automatically.
@@ -101,12 +104,10 @@ Milestone C a release candidate, retain actual evidence for:
   TCC booleans alone are insufficient.
 - Quitting, explicit restart, daemon failure, connector reconnect, user logout,
   concurrent launch, OS restart and permission revocation. No action replay.
-- **Abnormal owner death remains an implementation gate:** this direct `Process`
-  launcher does not implement the SDK owner's parent-liveness pipe. SIGKILL or
-  app crash can leave a daemon alive and the descriptor stale. Do not enable
-  unattended startup or mark lifecycle acceptance complete until an upstream
-  supported liveness mechanism is integrated and crash-tested. A live old
-  daemon blocks replacement at its stable socket until explicit operator recovery.
+- Full-app crash/relaunch and existing MCP-client invalidation remain native
+  release gates. The isolated native owner-death test is narrower: it verifies
+  the real Cua daemon exits and removes its socket after the production launch
+  helper's owner receives SIGKILL, without asserting GUI permission inheritance.
 - Signed upgrade at the same bundle ID/team/install path retaining intended
   grants, with old clients disconnected; rollback and uninstall preserving only
   intentionally retained Host config. Removing the `.app` alone is insufficient
@@ -114,3 +115,32 @@ Milestone C a release candidate, retain actual evidence for:
 
 The build receipt cannot promote any of these physical checks to PASS. Stable
 identity, signing and an accepting private socket establish distinct boundaries.
+
+## Source-backed lifetime contract and observed evidence
+
+Pinned upstream [CLI parsing](https://github.com/trycua/cua/blob/cua-driver-rs-v0.36.0/libs/cua-driver/rust/crates/cua-driver/src/cli.rs)
+recognizes `--parent-liveness-stdio`; its [core guard](https://github.com/trycua/cua/blob/cua-driver-rs-v0.36.0/libs/cua-driver/rust/crates/cua-driver-core/src/lib.rs)
+requires both the lifetime sentinel and embedded mode. The
+[serve loop](https://github.com/trycua/cua/blob/cua-driver-rs-v0.36.0/libs/cua-driver/rust/crates/cua-driver/src/serve.rs)
+waits for EOF and shuts down the SDK runtime, removes its PID file and releases
+its socket. This is an upstream internal host contract pinned to 0.36.0, not a
+new Styx protocol or an argument forwarded from an agent.
+
+Styx supplies a dedicated stdin pipe, retains only its writer while the daemon
+runs, and closes it on orderly stop. OS closure on app death triggers the same
+upstream shutdown. The child gets a private PID-file path as well as its private
+socket; standalone Cua PID files are not overwritten. There is no watchdog
+sending signals to a PID discovered on disk.
+
+On 2026-10-19 an authorized arm64 Mac (macOS 27.0.1) compiled the updated source
+with warnings as errors, passed the native ownership test, and passed
+`native_cua_owner_sigkill_eof` using the checksum-pinned official universal
+0.36.0 binary (`584e44435a26f5aa90c2f0097242307efbd63e843fc3f61072147c1963b0e592`).
+The isolated owner subprocess was killed; the daemon exited and its socket
+vanished. No NSApplication was started by that harness and no TCC/GUI claim
+follows. The available signing identity was Apple Development, not Developer ID
+Application, so notarized publisher release validation remains blocked.
+
+The harness entrypoint exists only in a `-D STYX_TESTING` build. Publisher
+bundles omit both headless entrypoints and cannot launch a caller-selected
+driver through a test argument. The production driver path is bundle-relative.
