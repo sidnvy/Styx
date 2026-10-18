@@ -7,6 +7,21 @@ import {activeRelease} from './installer.mjs';
 // Stable, tiny launch shim: service manager restarts this entrypoint after
 // login, reboot, or an approved version switch. It verifies signed active
 // generation before loading any executable code from that generation.
+export function activeHostConfig(raw,releaseRoot) {
+  if(!raw || typeof raw!=='object' || Array.isArray(raw) ||
+    !raw.exec || typeof raw.exec!=='object')throw Error('host_config_invalid');
+  const codex=path.join(releaseRoot,'bin','codex');
+  const cua=path.join(releaseRoot,'bin','cua-driver');
+  if(!fs.statSync(codex).isFile())throw Error('signed_codex_binary_missing');
+  const updated={...raw,exec:{...raw.exec,binary:codex}};
+  if(raw.computer?.enabled){
+    if(!fs.statSync(cua).isFile())throw Error('signed_cua_binary_missing');
+    updated.computer={...raw.computer,binary:cua};
+  }
+  // The Host binary paths are intentionally derived from the signed active
+  // release, never from mutable onboarding/Host config fields.
+  return updated;
+}
 export async function launchActive({installRoot,hostConfigFile,trustPublicKeyFile,
   signal}={}) {
   if(![installRoot,hostConfigFile,trustPublicKeyFile].every(
@@ -18,11 +33,19 @@ export async function launchActive({installRoot,hostConfigFile,trustPublicKeyFil
   if(!active)throw Error('no_active_release');
   const hostScript=path.join(active.release_root,'host','connect.mjs');
   if(!fs.statSync(hostScript).isFile())throw Error('host_connector_not_packaged');
+  const stat=fs.lstatSync(hostConfigFile);
+  if(!stat.isFile()||stat.isSymbolicLink()||
+    (process.platform!=='win32'&&(stat.mode&0o077)))
+    throw Error('host_config_not_private');
+  const nativeConfig=activeHostConfig(
+    JSON.parse(fs.readFileSync(hostConfigFile,'utf8')),active.release_root);
   return new Promise((resolve,reject)=>{
-    const child=spawn(process.execPath,[hostScript,hostConfigFile],{
-      cwd:active.release_root,stdio:'inherit',windowsHide:true
+    const child=spawn(process.execPath,[hostScript,'--stdin-config'],{
+      cwd:active.release_root,stdio:['pipe','inherit','inherit'],windowsHide:true
     });
-    let settled=false;
+    child.stdin.on('error',()=>{});
+    child.stdin.end(JSON.stringify(nativeConfig));
+    let settled=false,requestedStop=false;
     const finish=(status)=>{
       if(settled)return;
       settled=true;
@@ -31,15 +54,15 @@ export async function launchActive({installRoot,hostConfigFile,trustPublicKeyFil
       process.off('SIGTERM',onTerm);
       resolve(status);
     };
-    const abort=()=>child.kill('SIGTERM');
-    const onInt=()=>child.kill('SIGINT');
-    const onTerm=()=>child.kill('SIGTERM');
+    const abort=()=>{requestedStop=true;child.kill('SIGTERM')};
+    const onInt=()=>{requestedStop=true;child.kill('SIGINT')};
+    const onTerm=()=>{requestedStop=true;child.kill('SIGTERM')};
     process.once('SIGINT',onInt);
     process.once('SIGTERM',onTerm);
     signal?.addEventListener('abort',abort,{once:true});
     child.once('error',e=>{if(!settled){settled=true;reject(e)}});
     child.once('close',(code,terminationSignal)=>finish({
-      exit_code:code,signal:terminationSignal,
+      exit_code:code,signal:terminationSignal,expected_stop:requestedStop,
       version:active.version
     }));
   });
@@ -48,7 +71,8 @@ if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.ur
   const [installRoot,hostConfigFile,trustPublicKeyFile]=process.argv.slice(2);
   try{
     const outcome=await launchActive({installRoot,hostConfigFile,trustPublicKeyFile});
-    if(outcome.signal)process.exitCode=1;
+    if(outcome.expected_stop)process.exitCode=0;
+    else if(outcome.signal)process.exitCode=1;
     else process.exitCode=outcome.exit_code??1;
   }catch(e){
     process.stderr.write('Styx launch: '+e.message+'\n');

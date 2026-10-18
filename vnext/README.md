@@ -250,3 +250,36 @@ the one-time invitation; normal Styx execution and authentication did not.
 
 This is the pairing contract to embed in future native installers. It is not
 yet a signed cold-install experience or the ChatGPT intelligent setup UI.
+
+
+## Linux signed Host + user service (native pilot completed)
+
+A local Linux signed Host build, user-owned systemd service lifecycle, and
+installed native Cua/Exec end-to-end acceptance have been implemented.
+No production Charon/Coder or MCP endpoint changed.
+
+The Linux builder includes pinned Codex 0.163.0 and Cua 0.36.0 binaries,
+the minimal ws runtime package, and a signed manifest. The installer
+verifies, stages and activates versioned releases, while a tiny bootstrap
+verifies the active publisher signature and starts the actual signed Host.
+A native systemd --user manager can start, stop, restart, enable, disable
+and uninstall ONLY Styx-owned services. No sudo or lingering-mode changes.
+
+Real Workstation acceptance passed for signed first install, Cua screenshot/
+AX/click independent readback, multiple signed version upgrades, automatic
+SIGKILL recovery, Gateway disconnect/reconnect, signed rollback, unit
+uninstall/reinstall and bounded signed-release retention.
+
+This remains a Pilot: system Node.js is assumed present, native Linux
+package signing/cold install and reboot/logout behavior have NOT been
+validated, and the app is not registered as a production gateway Host.
+See docs/linux-managed-host.md for isolated reproduction and limitations.
+
+
+The installed signed Host can be checked independently of enrollment config's
+placeholder executable paths:
+
+    node host/doctor.mjs /private/host.json /private/install /private/publisher.pub
+
+This validates the active publisher-signed release and actual pinned Codex/Cua
+versions. It does not grant GUI permissions or automatically start services.

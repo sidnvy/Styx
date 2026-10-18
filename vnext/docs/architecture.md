@@ -152,3 +152,19 @@ secret generation or TCC bypass.
 
 Sources and limitations: docs/enrollment-pilot.md and
 docs/onboarding-installation.md.
+
+
+## Linux signed Host installation role
+
+The managed Linux Host does not execute out of the source checkout or
+development node_modules. A trusted, user-scoped installer stages an
+Ed25519-signed, versioned Host bundle and a systemd user unit. A stable
+bootstrap verifies the publisher signature before launching a generation
+and passes the selected native binaries via private one-shot stdin.
+The model cannot choose another release or substitute executable paths.
+
+Linux service install/restart/upgrades/rollback/owned uninstall now have
+native acceptance. The analogous macOS and Windows production packages,
+node runtime bundling, cold first-contact onboarding and ChatGPT visual
+device selection remain separate release gates.
+See docs/linux-managed-host.md.

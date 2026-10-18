@@ -136,6 +136,44 @@ function readPointer(installRoot) {
       VERSION.test(data.previous)),'invalid_active_pointer');
   return data;
 }
+// This locally run updater only refreshes the stable bootstrap shim from
+// publisher-signed, already-staged payloads. Never copy a mutable Git
+// workspace launcher directly into an active Host install.
+export function refreshVerifiedBootstrap(installRoot,publicKeyPem,version,
+  options={}) {
+  privateRoot(installRoot);
+  assert(VERSION.test(version??''),'invalid_bootstrap_version');
+  const releaseRoot=path.join(installRoot,'releases',version);
+  const verified=verifySignedRelease(releaseRoot,publicKeyPem,options);
+  const signed=new Set(verified.manifest.files.map(e=>e.path));
+  const bootstrap=['host/installer.mjs','host/launch.mjs'];
+  assert(bootstrap.every(name=>signed.has(name)),'signed_bootstrap_payload_missing');
+  const staged=[];
+  try {
+    for(const name of bootstrap){
+      const dest=path.join(installRoot,path.basename(name));
+      if(fs.existsSync(dest)){
+        const st=fs.lstatSync(dest);
+        assert(st.isFile()&&!st.isSymbolicLink(),
+          'untrusted_bootstrap_destination');
+      }
+      const tmp=dest+'.signed-'+randomBytes(8).toString('hex');
+      fs.copyFileSync(path.join(releaseRoot,name),tmp,fs.constants.COPYFILE_EXCL);
+      fs.chmodSync(tmp,0o600);
+      staged.push([tmp,dest]);
+    }
+    // Update verifier first: the older launch shim can safely import the
+    // backward-compatible signed new installer even if interrupted here.
+    for(const [src,dest] of staged) fs.renameSync(src,dest);
+    return {status:'bootstrap_refreshed',version,
+      verified_manifest_sha256:verified.sha256,
+      shims:bootstrap.map(name=>path.basename(name))};
+  }catch(e){
+    for(const [src] of staged)fs.rmSync(src,{force:true});
+    throw e;
+  }
+}
+
 export function activeRelease(installRoot,publicKeyPem,{platform=process.platform,
   arch=process.arch}={}) {
   privateRoot(installRoot);
@@ -176,6 +214,31 @@ export function rollbackRelease(installRoot,publicKeyPem,options={}) {
   },null,2)+'\n');
   return {status:'rolled_back',version:target};
 }
+// Retain active and one previous signed generation, never delete unknown
+// directories or symlinks. Preview mode is the default.
+export function pruneVerifiedReleases(installRoot,publicKeyPem,{
+  dryRun=true,platform=process.platform,arch=process.arch
+}={}) {
+  privateRoot(installRoot);
+  const active=activeRelease(installRoot,publicKeyPem,{platform,arch});
+  assert(active?.version,'no_active_release');
+  const keep=new Set([active.version,active.previous].filter(Boolean));
+  const folder=path.join(installRoot,'releases');
+  const removals=[];
+  for(const entry of fs.readdirSync(folder,{withFileTypes:true})) {
+    const name=entry.name;
+    assert(entry.isDirectory() && !entry.isSymbolicLink() && VERSION.test(name),
+      'unexpected_release_dir');
+    if(keep.has(name))continue;
+    verifySignedRelease(path.join(folder,name),publicKeyPem,{platform,arch});
+    removals.push(name);
+  }
+  if(!dryRun)for(const name of removals)
+    fs.rmSync(path.join(folder,name),{recursive:true,force:false});
+  return {status:dryRun?'dry_run':'pruned',
+    keep:[...keep],removed:dryRun?[]:removals,
+    planned:removals};
+}
 // This is a PLAN only; it never installs/enables OS startup services.
 export function servicePlan({installRoot,configFile,nodeBinary=process.execPath,
   platform=process.platform,publicKeyFile}) {
@@ -199,8 +262,9 @@ export function servicePlan({installRoot,configFile,nodeBinary=process.execPath,
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){
   const [action,installRoot,other,publicKeyFile]=process.argv.slice(2);
   try{
-    if(!['stage','activate','rollback','active'].includes(action)||!installRoot||
-      !publicKeyFile)throw Error('install_usage_invalid');
+    if(!['stage','activate','rollback','active','refresh-bootstrap',
+      'prune-preview','prune'].includes(action)||
+      !installRoot||!publicKeyFile)throw Error('install_usage_invalid');
     const key=fs.readFileSync(path.resolve(publicKeyFile),'utf8');
     const result=action==='stage'
       ?stageSignedRelease({sourceDir:path.resolve(other),installRoot:path.resolve(installRoot),
@@ -209,6 +273,11 @@ if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.ur
         ?activateRelease(path.resolve(installRoot),other,key)
         :action==='rollback'
           ?rollbackRelease(path.resolve(installRoot),key)
+        :action==='refresh-bootstrap'
+          ?refreshVerifiedBootstrap(path.resolve(installRoot),key,other)
+        :action==='prune-preview'||action==='prune'
+          ?pruneVerifiedReleases(path.resolve(installRoot),key,
+              {dryRun:action==='prune-preview'})
           :activeRelease(path.resolve(installRoot),key);
     process.stdout.write(JSON.stringify(result)+'\n');
   }catch(e){process.stderr.write('Styx installer: '+e.message+'\n');process.exitCode=2}

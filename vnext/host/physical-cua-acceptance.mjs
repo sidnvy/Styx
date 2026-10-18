@@ -10,8 +10,17 @@ import {StreamableHTTPClientTransport} from '@modelcontextprotocol/sdk/client/st
 const url=process.env.STYX_PILOT_MCP_URL;
 const tokenFile=process.env.STYX_PILOT_MCP_TOKEN_FILE;
 const target=process.env.STYX_PILOT_ENVIRONMENT_ID;
-if(!url?.startsWith('https://') ||
-   !tokenFile || !path.isAbsolute(tokenFile) ||
+let safeEndpoint=false;
+try {
+  const endpoint=new URL(url);
+  safeEndpoint=endpoint.pathname==='/mcp' &&
+    !endpoint.username && !endpoint.password && !endpoint.search &&
+    !endpoint.hash &&
+    (endpoint.protocol==='https:' ||
+      (endpoint.protocol==='http:' &&
+        ['127.0.0.1','localhost','[::1]'].includes(endpoint.hostname)));
+}catch{}
+if(!safeEndpoint || !tokenFile || !path.isAbsolute(tokenFile) ||
    !/^[a-zA-Z0-9][a-zA-Z0-9._-]{0,127}$/.test(target??'')) {
   console.log(JSON.stringify({status:'BLOCKED',reason:'private_gateway_not_configured'}));
   process.exit(2);
