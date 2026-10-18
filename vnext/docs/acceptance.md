@@ -97,7 +97,7 @@ Design and threat/acceptance checklist: docs/onboarding-installation.md.
 Installers, device pairing, upgrade/rollback, login/reboot lifecycle, and
 ChatGPT device selection remain independent production gates documented in
 docs/onboarding-installation.md.
- 
+
 
 ### Explicit Host restart acceptance (isolated, 2026-10-18)
 
