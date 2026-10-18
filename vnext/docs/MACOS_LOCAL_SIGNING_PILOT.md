@@ -61,3 +61,29 @@ login keychain's visible state and this certificate's associated private-key
 Access Control in Keychain Access; do not blindly retry or automatically
 change permissions. This pilot does not require a new certificate or paid
 membership to diagnose the existing local key.
+
+## Successful graphical signing and corrected final verification
+
+The user subsequently signed Cua and Styx successfully in the Mac graphical
+session. The final verifier exposed a separate product bug: `codesign -R`
+treats a plain argument as a requirement filename. Both development and
+Developer ID plans now prefix inline expressions with `=`. Verification-only
+completion performed deep/strict checks and the exact Apple anchor, app bundle
+identifier, and OU requirement successfully, without re-signing or using keys.
+The original blocked attempts above remain historical evidence.
+
+The actual signed app then launched through LaunchServices. Cua's read-only
+health check attributed it to parent application `app.styx.host`, matching the
+owned app PID. Permission inspection, with prompting and capture probes disabled,
+reported the host's Accessibility and Screen Recording grants both false.
+Native GUI acceptance is therefore BLOCKED on human grants for this signed app.
+No screenshot, AX operation, permission request, or automatic grant occurred.
+Normal owned app termination removed its descriptor and socket. The evidence
+is `evidence/macos-signed-app-20261019.json`. External Developer ID distribution
+and notarization remain NOT RUN for this local Apple Development artifact.
+
+A native macOS regression now ad-hoc signs an isolated copy of `/usr/bin/true`,
+accepts its correct inline identifier requirement, and rejects a wrong one.
+This uses no private key. Native packaging tests:8PASS,1platformskip. The first
+run's matcher expected different rejection wording; the actual OS correctly
+rejected the wrong requirement and the diagnostic matcher was corrected.

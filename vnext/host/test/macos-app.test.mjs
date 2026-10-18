@@ -69,3 +69,17 @@ test('symlinked CLI entrypoint cannot silently report a successful no-op',{skip:
     assert.ok(args[args.indexOf('-R')+1].startsWith('=anchor apple generic'));
   }
 });
+
+test('native codesign parses an inline requirement and rejects a mismatched identifier',{skip:process.platform!=='darwin'},()=>{
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'styx-requirement-'));
+  try{
+    const binary=path.join(dir,'fixture');fs.copyFileSync('/usr/bin/true',binary);
+    let result=spawnSync('/usr/bin/codesign',['--force','--sign','-','--identifier','app.styx.requirement.fixture',binary],{encoding:'utf8'});
+    assert.equal(result.status,0,result.stderr);
+    result=spawnSync('/usr/bin/codesign',['--verify','--strict','-R','=identifier "app.styx.requirement.fixture"',binary],{encoding:'utf8'});
+    assert.equal(result.status,0,result.stderr);
+    result=spawnSync('/usr/bin/codesign',['--verify','--strict','-R','=identifier "app.styx.requirement.wrong"',binary],{encoding:'utf8'});
+    assert.notEqual(result.status,0);
+    assert.match(result.stderr,/does not satisfy|failed to satisfy|requirement failed/i);
+  }finally{fs.rmSync(dir,{recursive:true,force:true})}
+});
