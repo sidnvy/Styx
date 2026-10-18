@@ -34,10 +34,10 @@ export async function runMacGatewayAcceptance(directory){
  assert(execFileSync('/bin/ps',['-p',String(descriptor.owner_pid),'-o','comm='],{encoding:'utf8'}).trim()==='/Applications/Styx.app/Contents/MacOS/Styx','installed_app_owner_required');
  const permissions=JSON.parse(execFileSync(driver,['call','check_permissions',JSON.stringify({prompt:false,probe_direct_capture:false}),'--socket',socket],{encoding:'utf8',timeout:10000}));
  assert(permissions.accessibility&&permissions.screen_recording,'actual_host_grants_required');
- const receipt={schema:1,status:'NOT RUN',source_revision:'32791a1',scope:'native macOS SDK -> private HTTPS Gateway -> outbound WSS Host -> installed Styx.app embedded Cua; same Gateway native Exec',
+ const receipt={schema:1,status:'NOT RUN',source_revision:JSON.parse(fs.readFileSync(path.join(root,'.styx-local-owner.json'))).source_revision,reference_revision:'32791a1',scope:'native macOS SDK -> private HTTPS Gateway -> outbound WSS Host -> installed Styx.app embedded Cua; same Gateway native Exec',
   chatgpt_connector:'NOT RUN',production_endpoint:'NOT RUN',service_install:'NOT RUN',signing_mutation:'NOT RUN',tcc_mutation:'NOT RUN',node:process.version,
   evidence:{outbound_exec_connected:'NOT RUN',outbound_computer_connected:'NOT RUN',native_exec:'NOT RUN',owned_gui:'NOT RUN',cleanup:'NOT RUN'},installed_app_owner:descriptor.owner_pid};
- let gateway,server,host,transport,client,phase='setup';
+ let gateway,server,host,transport,client,fixturePid,phase='setup';
  const hostToken=randomBytes(32).toString('hex'),modelToken=randomBytes(32).toString('hex');
  try{
   const tokenFile=path.join(state,'host.token');fs.writeFileSync(tokenFile,hostToken,{mode:0o600});
@@ -66,7 +66,7 @@ export async function runMacGatewayAcceptance(directory){
   const fixture=path.join(root,'OwnedGuiFixture');assert(fs.lstatSync(fixture).isFile()&&!fs.lstatSync(fixture).isSymbolicLink(),'owned_fixture_required');
   const cmd=quote(fixture)+' '+quote(title)+' '+quote(readback)+' & pid=$!; printf "STYX_PID=%s\\n" "$pid"; wait "$pid"; rc=$?; printf "STYX_EXIT=%s\\n" "$rc"; exit "$rc"';
   const started=await tool('exec_command',{environment_id:target,cmd,login:false,yield_time_ms:250}),out=started.structuredContent?.output??'';
-  const match=/STYX_PID=(\d+)/.exec(out),session=started.structuredContent?.session_id;assert(match&&session,'owned_fixture_pid_session_required');const pid=Number(match[1]);
+  const match=/STYX_PID=(\d+)/.exec(out),session=started.structuredContent?.session_id;assert(match&&session,'owned_fixture_pid_session_required');const pid=Number(match[1]);fixturePid=pid;
   let window;await until(async()=>{const r=await tool('list_windows',{environment_id:target,pid,on_screen_only:false});window=r.structuredContent?.windows?.find(w=>w.pid===pid&&w.title===title);return !!window},'owned_window_timeout',8000);
   const window_id=Number(window.window_id);assert(Number.isSafeInteger(window_id),'owned_window_id_required');
   const snapshot=await tool('get_window_state',{environment_id:target,pid,window_id,tree_format:'elements',max_elements:80,include_screenshot:true});
@@ -81,9 +81,13 @@ export async function runMacGatewayAcceptance(directory){
  }catch(error){receipt.status='FAIL';receipt.failed_phase=phase;receipt.error_code=/^[a-z_]+$/.test(error.message)?error.message:'native_gateway_acceptance_failed'}
  finally{
   await transport?.terminateSession().catch(()=>{});await client?.close().catch(()=>{});
-  if(server)await server.close().catch(()=>{});else await gateway?.close().catch(()=>{});
+  let cleanupOK=true;
+  await gateway?.exec.cleanup().then(stops=>{if(stops.some(s=>!s.confirmed))cleanupOK=false}).catch(()=>{cleanupOK=false});
   if(host&&host.exitCode===null&&host.signalCode===null){host.kill('SIGTERM');await Promise.race([new Promise(r=>host.once('close',r)),sleep(7000)]);if(host.exitCode===null&&host.signalCode===null){host.kill('SIGKILL');await new Promise(r=>host.once('close',r))}}
-  fs.rmSync(state,{recursive:true,force:true});receipt.evidence.cleanup='PASS';
+  if(server)await server.close().catch(()=>{cleanupOK=false});else await gateway?.close().catch(()=>{cleanupOK=false});
+  if(fixturePid){try{process.kill(fixturePid,0);cleanupOK=false}catch(error){if(error.code!=='ESRCH')cleanupOK=false}}
+  if(cleanupOK){fs.rmSync(state,{recursive:true,force:true});receipt.evidence.cleanup='PASS'}
+  else{receipt.evidence.cleanup='FAIL';receipt.status='FAIL'}
   fs.writeFileSync(path.join(root,'gateway-acceptance.json'),JSON.stringify(receipt,null,2)+'\n',{mode:0o600});
  }
  return receipt;
