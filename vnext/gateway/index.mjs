@@ -5,7 +5,7 @@ import {createGatewayMcp} from './mcp.mjs';
 import {CuaProvider} from './cua.mjs';
 import {OutboundHostRelay} from './outbound.mjs';
 
-export function createStyxGateway({catalog, connect, computer, gui = null, cas = null}) {
+export function createStyxGateway({catalog, connect, computer, gui = null, cas = null, casOnly = false}) {
   const registry = catalog instanceof TargetRegistry ? catalog : new TargetRegistry(catalog);
   const relay=new OutboundHostRelay({registry});
   const pool = new RuntimePool(registry, {connect,relay});
@@ -19,7 +19,7 @@ export function createStyxGateway({catalog, connect, computer, gui = null, cas =
   return {
     registry, pool, exec, computer: cua, gui, relay,
     serverForOwner(owner) {
-      return createGatewayMcp({exec, computer:cua, gui, registry, owner, cas});
+      return createGatewayMcp({exec, computer:cua, gui, registry, owner, cas, casOnly});
     },
     async closeOwner(owner) { await cua?.closeOwner?.(owner); },
     async close() {

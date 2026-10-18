@@ -17,7 +17,10 @@ const catalog = JSON.parse(fs.readFileSync(catalogFile, 'utf8'));
 // CAS is a strictly opt-in experiment. The default Gateway surface is unchanged.
 const casStateDir = process.env.STYX_CAS_EXPERIMENT_STATE_DIR;
 const cas = casStateDir ? await new CasExperimentLedger({directory: casStateDir}).init() : null;
-const gateway = createStyxGateway({catalog, cas});
+const casOnly = process.env.STYX_CAS_EXPERIMENT_ONLY === '1';
+if (casOnly && (!cas || catalog.targets?.length !== 0))
+  throw Error('CAS lab-only Gateway requires a private CAS directory and EMPTY target catalog');
+const gateway = createStyxGateway({catalog, cas, casOnly});
 const enrollmentDir=process.env.STYX_ENROLLMENT_DIR;
 const enrollmentAdminFile=process.env.STYX_ENROLL_ADMIN_TOKEN_FILE;
 if (Boolean(enrollmentDir)!==Boolean(enrollmentAdminFile))

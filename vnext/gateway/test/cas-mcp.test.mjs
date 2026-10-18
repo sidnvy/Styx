@@ -19,8 +19,8 @@ function catalog() {
     exec: {transport: 'websocket', url: 'ws://127.0.0.1:9'}
   }]};
 }
-async function start(t, cas = null) {
-  const controller = createStyxGateway({catalog: catalog(), computer: null, cas});
+async function start(t, cas = null, casOnly = false) {
+  const controller = createStyxGateway({catalog: catalog(), computer: null, cas, casOnly});
   const token = 'styx_vnext_ephemeral_cas_test_' + 'p'.repeat(36);
   const hosts = [];
   const gateway = await createGatewayHttp(controller, {token, port: 0, allowedHosts: hosts});
@@ -126,4 +126,21 @@ test('CAS tools, exact resource, two-turn simulated Host handoff across MCP sess
   assert.equal((await tool(view, 'cas_experiment_claim', {
     run_id: begin.run_id, controller_id: controllerId
   })).claimed, false);
+});
+
+test('CAS-only lab profile advertises zero execution tools and denies hidden execution calls', async t => {
+  const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'styx-cas-isolated-'));
+  t.after(() => fs.rm(directory, {recursive: true, force: true}));
+  const ledger = await new CasExperimentLedger({directory}).init();
+  const {client} = await start(t, ledger, true);
+  const conn = await client();
+  const names = (await conn.listTools()).tools.map(t => t.name);
+  assert.ok(names.length > 0);
+  assert.ok(names.every(name => name.startsWith('cas_experiment_')));
+  assert.ok(!names.includes('exec_command'));
+  assert.ok(!names.includes('write_stdin'));
+  assert.ok(!names.includes('list_execution_environments'));
+  const rejected = await conn.callTool({name: 'exec_command', arguments: {cmd: 'echo dangerous'}});
+  assert.equal(rejected.isError, true);
+  assert.match(rejected.content[0].text, /unknown_tool/);
 });

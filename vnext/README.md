@@ -13,9 +13,12 @@ An opt-in native MCP App controller can test bounded ordinary-Chat turn continua
 without Work, Codex model delegation or a Browser Companion. It is **off by
 default** and has **no Host mutation actions**. Enable it only in a separate
 experimental Gateway using the private `STYX_CAS_EXPERIMENT_STATE_DIR` setting.
-Local contract/iframe Host-simulator tests pass, but actual ChatGPT Web/Mobile
-turn scheduling and account/Plugin compatibility are **not yet validated**.
-See [CAS P0 experiment](docs/cas-native-continuation-experiment.md).
+Local contract/iframe Host-simulator tests pass, including pinned MCP Apps
+ui/message schema validation, but actual ChatGPT Web/Mobile turn scheduling
+and account/Plugin compatibility are **not yet validated**. A separate
+CAS-only lab mode advertises no native Exec or Computer tools.
+See [CAS P0 experiment](docs/cas-native-continuation-experiment.md)
+and [isolated lab connection](docs/cas-lab-connection.md).
 
 ## Native runtimes
 

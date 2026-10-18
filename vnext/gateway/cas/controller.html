@@ -185,10 +185,17 @@
         protocolVersion: '2026-01-26',
         appInfo: {name: 'styx-cas-experiment-view', version: '0.1.0'},
         appCapabilities: {}
-      }).then(() => {
+      }).then(host => {
         if (!active) return;
-        hostReady = true;
         notify('ui/notifications/initialized');
+        const caps = host?.hostCapabilities || {};
+        const textMessage = caps.message?.text || caps.experimental?.['openai/message'];
+        if (!textMessage) {
+          paint('Host did not advertise ui/message',
+            'This ChatGPT App cannot request model turns on this surface.');
+          return;
+        }
+        hostReady = true;
         paint('Waiting for Run ID', 'The presenting tool must bind this exact card to one run.');
         schedule(100);
       }).catch(() => paint('Host does not support MCP Apps initialization'));

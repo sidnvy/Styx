@@ -19,6 +19,23 @@ confirmed model-turn receipt. Maximum four rounds, 15–180 seconds between
 rounds, maximum one hour per Run. The operator must use a dedicated test
 Gateway with independent credentials, Run directory and connection.
 
+## Strict protocol and lab-only access
+
+The ui/message request keeps MCP Apps ContentBlock[] array semantics;
+it is NOT a single TextContent object. Simulated-Host tests validate
+the exact outgoing message against the pinned official
+@modelcontextprotocol/ext-apps@2.0.3 McpUiMessageRequest JSON Schema.
+The Host must advertise message.text or OpenAI's experimental openai/message
+capability, otherwise the View does not dispatch.
+
+For a real ChatGPT test use STYX_CAS_EXPERIMENT_ONLY=1 and an empty
+Target Catalog. The Gateway then advertises only the nine CAS tools and
+rejects native Exec/Cua requests even if the caller guesses their names.
+A separate local-only Gateway has been smoke-tested on workstation at
+127.0.0.1:18895/mcp; no OpenAI Tunnel or Custom Plugin was installed
+when this section was written. See
+[CAS Lab connection runbook](cas-lab-connection.md).
+
 ## VNext integration boundaries
 
 - VNext retains the exact Codex Exec and native Cua tools and session owners.

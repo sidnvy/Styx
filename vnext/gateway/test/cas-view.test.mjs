@@ -7,6 +7,14 @@ import vm from 'node:vm';
 import {randomUUID} from 'node:crypto';
 import {CasExperimentLedger} from '../cas/ledger.mjs';
 import {casCall} from '../cas/mcp.mjs';
+import Ajv2020 from 'ajv/dist/2020.js';
+
+const MESSAGE_SCHEMA = JSON.parse(await fs.readFile(
+  new URL('./fixtures/mcp-ui-message-schema.2.0.3.json', import.meta.url), 'utf8'
+));
+// Snapshot of official @modelcontextprotocol/ext-apps@2.0.3 generated schema,
+// $defs.McpUiMessageRequest. Do not replace the ContentBlock[] with an object.
+const validateMessage = new Ajv2020({strict: false, validateFormats: false}).compile(MESSAGE_SCHEMA);
 
 async function setup(t) {
   const directory = await fs.mkdtemp(path.join(os.tmpdir(), 'styx-cas-view-'));
@@ -18,7 +26,7 @@ async function setup(t) {
   return {clock, ledger, script};
 }
 
-function createHostView({clock, ledger, script, rejectUiMessage = false}) {
+function createHostView({clock, ledger, script, rejectUiMessage = false, messageCapability = true}) {
   const handlers = new Map(), tasks = new Map(), sent = [];
   const elements = new Map();
   let counter = 0, inFlight = 0, timerSeq = 0, closed = false;
@@ -30,12 +38,18 @@ function createHostView({clock, ledger, script, rejectUiMessage = false}) {
       inFlight++;
       Promise.resolve().then(async () => {
         if (message.method === 'ui/initialize')
-          return {jsonrpc: '2.0', id: message.id, result: {}};
+          return {jsonrpc: '2.0', id: message.id, result: {
+            protocolVersion: '2026-01-26',
+            hostInfo: {name: 'CAS simulated MCP Apps Host', version: '0.1.0'},
+            hostCapabilities: messageCapability ? {message: {text: {}}} : {}
+          }};
         if (message.method === 'tools/call') {
           const result = await casCall(ledger, message.params.name, message.params.arguments);
           return {jsonrpc: '2.0', id: message.id, result};
         }
         if (message.method === 'ui/message') {
+          assert.equal(validateMessage({method: message.method, params: message.params}), true,
+            JSON.stringify(validateMessage.errors));
           sent.push(message.params.content[0].text);
           return rejectUiMessage
             ? {jsonrpc: '2.0', id: message.id, error: {code: -32000, message: 'host_refused'}}
@@ -133,4 +147,26 @@ test('Host ui/message refusal becomes delivery_unknown with no automatic resend'
   assert.equal((await f.ledger.read(start.run_id)).wake.phase, 'delivery_unknown');
   await view.advanceTo(f.clock.value + 150000);
   assert.equal(view.sent.length, 1);
+});
+
+test('official MCP Apps ui/message schema accepts the text ContentBlock array and rejects an object', () => {
+  const good = {method: 'ui/message', params: {role: 'user', content: [{type: 'text', text: 'test'}]}};
+  assert.equal(validateMessage(good), true, JSON.stringify(validateMessage.errors));
+  const invalidContent = {method: 'ui/message', params: {role: 'user', content: {type: 'text', text: 'test'}}};
+  assert.equal(validateMessage(invalidContent), false);
+  const invalidRole = {method: 'ui/message', params: {role: 'assistant', content: [{type: 'text', text: 'test'}]}};
+  assert.equal(validateMessage(invalidRole), false);
+});
+
+test('Host without an advertised message capability does not dispatch a Wake', async t => {
+  const f = await setup(t);
+  const start = await f.ledger.start({objective: 'Unsupported Host', delay_ms: 15000});
+  const view = createHostView({...f, messageCapability: false});
+  t.after(() => view.close());
+  await view.settle();
+  view.giveRun(start.run_id);
+  await view.advanceTo(f.clock.value + 60000);
+  assert.equal(view.sent.length, 0);
+  assert.equal((await f.ledger.read(start.run_id)).wake.phase, 'pending');
+  assert.match(view.elements.get('state').textContent, /did not advertise/);
 });

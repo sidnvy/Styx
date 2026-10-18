@@ -12,12 +12,14 @@ const targetsTool = {
   annotations: {readOnlyHint: true, destructiveHint: false, idempotentHint: true}
 };
 
-export function createGatewayMcp({exec, computer, gui, registry, owner, cas = null}) {
+export function createGatewayMcp({exec, computer, gui, registry, owner, cas = null, casOnly = false}) {
   if (typeof owner !== 'string' || !owner) throw new TypeError('Authenticated session required');
+  if (casOnly && !cas) throw Error('cas_lab_requires_explicit_experiment_ledger');
   const server = new Server({name: 'styx-vnext', version: '0.1.0'},
     {capabilities: {tools: {}, ...(cas ? {resources: {}} : {})}});
   const computerAllowed=()=>registry.list().some(t=>t.capabilities.includes('computer'));
   async function definitions() {
+    if (casOnly) return CAS_TOOLS;
     const computerTools = computer && computerAllowed()
       ? await computer.listTools() : [];
     return [...execTools, ...computerTools,
@@ -36,6 +38,8 @@ export function createGatewayMcp({exec, computer, gui, registry, owner, cas = nu
     const {name, arguments: args = {}} = params;
     if (cas && CAS_TOOLS.some(tool => tool.name === name))
       return casCall(cas, name, args);
+    // Lab-only credentials must never unlock production Exec or native Cua.
+    if (casOnly) return {isError: true, content: [{type: 'text', text: 'unknown_tool'}]};
     if (name === targetsTool.name) {
       if (Object.keys(args).length) {
         return {isError: true, content: [{type: 'text', text: 'invalid_arguments'}]};
