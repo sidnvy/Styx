@@ -48,7 +48,7 @@ test('disabled by default: original tool discovery and capabilities remain uncha
   const http = await start(t);
   const client = await http.client();
   assert.deepEqual((await client.listTools()).tools.map(t => t.name),
-    ['exec_command', 'write_stdin', 'list_execution_environments']);
+    ['exec_command', 'write_stdin', 'list_execution_environments', 'get_execution_environment_status']);
   const response = await client.callTool({name: 'cas_experiment_create', arguments: {objective: 'no'}});
   assert.equal(response.isError, true);
 });
@@ -144,6 +144,10 @@ test('CAS-only lab profile advertises zero execution tools and denies hidden exe
   assert.ok(!names.includes('exec_command'));
   assert.ok(!names.includes('write_stdin'));
   assert.ok(!names.includes('list_execution_environments'));
+  assert.ok(!names.includes('get_execution_environment_status'));
+  assert.equal((await conn.callTool({name:'get_execution_environment_status',
+    arguments:{environment_id:'dev'}})).isError,true);
+
   const rejected = await conn.callTool({name: 'exec_command', arguments: {cmd: 'echo dangerous'}});
   assert.equal(rejected.isError, true);
   assert.match(rejected.content[0].text, /unknown_tool/);

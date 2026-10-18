@@ -101,7 +101,7 @@ test('Gateway advertises Codex and dynamically discovered official Cua tool name
   await client.connect(ct);
   const list=await client.listTools();
   assert.deepEqual(list.tools.map(x=>x.name),
-    ['exec_command','write_stdin','list_apps','click','list_execution_environments']);
+    ['exec_command','write_stdin','list_apps','click','list_execution_environments', 'get_execution_environment_status']);
   const r=await client.callTool({name:'click',arguments:{
     environment_id:'linux',target:{kind:'window'},element_token:'x'}});
   assert.equal(r.structuredContent.target,'linux');

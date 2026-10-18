@@ -12,7 +12,15 @@ const targetsTool = {
   annotations: {readOnlyHint: true, destructiveHint: false, idempotentHint: true}
 };
 
-export function createGatewayMcp({exec, computer, gui, registry, owner, cas = null, casOnly = false}) {
+const statusTool = {
+  name: 'get_execution_environment_status',
+  description: 'Read an explicitly selected allowed environment status without connecting or running native tools. Connection does not imply permission or readiness.',
+  inputSchema: {type: 'object', properties: {environment_id: {type: 'string', minLength: 1}},
+    required: ['environment_id'], additionalProperties: false},
+  annotations: {readOnlyHint: true, destructiveHint: false, idempotentHint: true}
+};
+
+export function createGatewayMcp({exec, computer, gui, registry, owner, relay = null, cas = null, casOnly = false}) {
   if (typeof owner !== 'string' || !owner) throw new TypeError('Authenticated session required');
   if (casOnly && !cas) throw Error('cas_lab_requires_explicit_experiment_ledger');
   const server = new Server({name: 'styx-vnext', version: '0.1.0'},
@@ -24,7 +32,7 @@ export function createGatewayMcp({exec, computer, gui, registry, owner, cas = nu
       ? await computer.listTools() : [];
     return [...execTools, ...computerTools,
       ...(gui && !computer && computerAllowed() ? guiTools : []),
-      ...(cas ? CAS_TOOLS : []), targetsTool];
+      ...(cas ? CAS_TOOLS : []), targetsTool, statusTool];
   }
   if (cas) {
     server.setRequestHandler(ListResourcesRequestSchema, async () => casResourceList());
@@ -45,6 +53,26 @@ export function createGatewayMcp({exec, computer, gui, registry, owner, cas = nu
         return {isError: true, content: [{type: 'text', text: 'invalid_arguments'}]};
       }
       const result = {environments: registry.list()};
+      return {structuredContent: result, content: [{type: 'text', text: JSON.stringify(result)}]};
+    }
+    if (name === statusTool.name) {
+      if (!args || typeof args !== 'object' || Array.isArray(args) ||
+          Object.keys(args).length !== 1 || typeof args.environment_id !== 'string' ||
+          !args.environment_id.length)
+        return {isError: true, content: [{type: 'text', text: 'invalid_arguments'}]};
+      let target;
+      try { target = registry.resolve(args.environment_id); }
+      catch { return {isError: true, content: [{type: 'text', text: 'environment_unavailable'}]}; }
+      const connection = relay?.status(target) ?? {exec: 'unknown', computer: 'unknown'};
+      const result = {
+        environment_id: target.id, kind: target.kind, platform: target.platform,
+        access: 'allowed',
+        exec: {configured: true, connection: connection.exec,
+          readiness: 'unknown', version: 'unknown'},
+        computer: {configured: target.computer?.enabled === true,
+          connection: target.computer?.enabled ? connection.computer : 'not_configured',
+          permission: 'unknown', readiness: 'unknown', version: 'unknown'}
+      };
       return {structuredContent: result, content: [{type: 'text', text: JSON.stringify(result)}]};
     }
     if (execTools.some(t => t.name === name)) return exec.callTool(name, args, owner);
