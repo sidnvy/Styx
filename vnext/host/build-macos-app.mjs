@@ -27,13 +27,13 @@ export function appInfoPlist(version){
 </dict></plist>\n`;
 }
 export function macSigningPlan({app,identity,teamID,notaryProfile}={}){
-  assert(typeof app==='string'&&path.isAbsolute(app)&&path.basename(app)==='Styx.app','invalid_styx_app_path');
+  assert(typeof app==='string'&&path.posix.isAbsolute(app)&&path.posix.basename(app)==='Styx.app','invalid_styx_app_path');
   assert(typeof identity==='string'&&/^Developer ID Application: [^\n]+ \([A-Z0-9]{10}\)$/.test(identity),'developer_id_application_required');
   assert(/^[A-Z0-9]{10}$/.test(teamID??'')&&identity.endsWith(`(${teamID})`),'signing_team_mismatch');
   if(notaryProfile!==undefined)assert(/^[A-Za-z0-9._-]{1,80}$/.test(notaryProfile),'invalid_notary_profile');
   // Sign nested code first. Never use --deep to paper over unidentified code.
   const steps=[
-    ['/usr/bin/codesign',['--force','--options','runtime','--timestamp','--sign',identity,path.join(app,'Contents/MacOS/cua-driver')]],
+    ['/usr/bin/codesign',['--force','--options','runtime','--timestamp','--sign',identity,path.posix.join(app,'Contents/MacOS/cua-driver')]],
     ['/usr/bin/codesign',['--force','--options','runtime','--timestamp','--sign',identity,app]],
     ['/usr/bin/codesign',['--verify','--deep','--strict','--verbose=2',app]],
     ['/usr/bin/codesign',['--verify','--strict','-R',`anchor apple generic and identifier "${MAC_BUNDLE_ID}" and certificate leaf[subject.OU] = "${teamID}"`,app]]
