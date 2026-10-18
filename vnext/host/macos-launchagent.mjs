@@ -7,6 +7,7 @@ import path from 'node:path';
 import {execFileSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {verifiedServiceNode} from './installer.mjs';
+import {requirePrivateFile} from './private-storage.mjs';
 
 const LABEL=/^app\.styx\.host(?:-pilot)?(?:\.[a-z0-9][a-z0-9-]{0,32})?$/;
 const PATH_SAFE=/^\/[A-Za-z0-9._+@/-]+$/;
@@ -20,9 +21,8 @@ const safePath=(str,label)=>{assert(typeof str==='string' && path.isAbsolute(str
 const safeLabel=label=>{assert(LABEL.test(label??''),'invalid_styx_launchagent_label');return label};
 function verifyPrivate(p){
   safePath(p,'host_config');
-  const st=fs.lstatSync(p);
-  assert(st.isFile()&&!st.isSymbolicLink()&&!(st.mode&0o077),
-    'host_config_not_private');
+  try{requirePrivateFile(p)}
+  catch{throw Error('host_config_not_private')}
 }
 function unitFile(label,home){
   safeLabel(label);

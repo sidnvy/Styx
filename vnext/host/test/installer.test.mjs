@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
+import {execFileSync} from 'node:child_process';
 import {
   createHash,generateKeyPairSync,sign,randomBytes
 } from 'node:crypto';
@@ -145,7 +146,7 @@ test('stable launcher verifies active generation before executing signed code',a
   stageSignedRelease({sourceDir:v.source,installRoot:f.installRoot,
     publicKeyPem:f.publicKey});
   activateRelease(f.installRoot,v.manifest.version,f.publicKey);
-  const config=path.join(f.tmp,'host.json');
+  const config=path.join(f.installRoot,'host.json');
   const key=path.join(f.tmp,'trusted-ed25519.pem');
   await fs.writeFile(config,JSON.stringify({
     host_id:'signed-launch-fixture',
@@ -162,6 +163,13 @@ test('stable launcher verifies active generation before executing signed code',a
   await assert.rejects(launchActive({
     installRoot:f.installRoot,hostConfigFile:config,trustPublicKeyFile:key
   }),/release_file_(hash|metadata)_mismatch/);
+  if(process.platform==='win32')
+    execFileSync('icacls.exe',[config,'/grant','*S-1-1-0:(R)'],
+      {stdio:'ignore',windowsHide:true,timeout:30000});
+  else await fs.chmod(config,0o644);
+  await assert.rejects(launchActive({
+    installRoot:f.installRoot,hostConfigFile:config,trustPublicKeyFile:key
+  }),/host_config_not_private/);
 });
 test('service plans never mutate OS startup state',async t=>{
   const f=await fixture(t);

@@ -3,6 +3,7 @@ import path from 'node:path';
 import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {activeRelease} from './installer.mjs';
+import {requirePrivateFile} from './private-storage.mjs';
 
 // Stable, tiny launch shim: service manager restarts this entrypoint after
 // login, reboot, or an approved version switch. It verifies signed active
@@ -29,16 +30,13 @@ export async function launchActive({installRoot,hostConfigFile,trustPublicKeyFil
   if(![installRoot,hostConfigFile,trustPublicKeyFile].every(
       p=>typeof p==='string'&&path.isAbsolute(p)))
     throw Error('absolute_launcher_paths_required');
-  if(!fs.statSync(hostConfigFile).isFile())throw Error('host_config_missing');
+  try{requirePrivateFile(hostConfigFile)}
+  catch{throw Error('host_config_not_private')}
   const key=fs.readFileSync(trustPublicKeyFile,'utf8');
   const active=activeRelease(installRoot,key);
   if(!active)throw Error('no_active_release');
   const hostScript=path.join(active.release_root,'host','connect.mjs');
   if(!fs.statSync(hostScript).isFile())throw Error('host_connector_not_packaged');
-  const stat=fs.lstatSync(hostConfigFile);
-  if(!stat.isFile()||stat.isSymbolicLink()||
-    (process.platform!=='win32'&&(stat.mode&0o077)))
-    throw Error('host_config_not_private');
   const nativeConfig=activeHostConfig(
     JSON.parse(fs.readFileSync(hostConfigFile,'utf8')),active.release_root);
   return new Promise((resolve,reject)=>{

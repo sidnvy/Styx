@@ -62,11 +62,31 @@ function Require-SafePath([string]$p) {
         $p -match '\.\.[\\/]') { throw 'unsafe_native_path' }
     return $p
 }
+# Setup configuration controls executable paths. Reject foreign owners, null
+# DACLs, reparse points and broad access before reading it or creating a task.
+function Require-PrivateFile([string]$p) {
+    $item=Get-Item -LiteralPath $p -Force -ErrorAction Stop
+    if ($item.PSIsContainer -or ($item.Attributes -band [IO.FileAttributes]::ReparsePoint)) {
+        throw 'task_config_not_private'
+    }
+    $acl=Get-Acl -LiteralPath $p
+    $descriptor=New-Object Security.AccessControl.RawSecurityDescriptor -ArgumentList $acl.Sddl
+    if ($null -eq $descriptor.DiscretionaryAcl) { throw 'task_config_not_private' }
+    $userSid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+    $ownerSid=$acl.GetOwner([Security.Principal.SecurityIdentifier]).Value
+    if ($ownerSid -ne $userSid) { throw 'task_config_not_private' }
+    $allowed=@($userSid,'S-1-5-18','S-1-5-32-544')
+    foreach ($rule in $acl.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])) {
+        if ($rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and
+            $allowed -notcontains $rule.IdentityReference.Value) {
+            throw 'task_config_not_private'
+        }
+    }
+}
 if ($Action -eq 'install') {
     if (-not $ConfigPath) { throw 'task_install_config_required' }
     $ConfigPath=Require-SafePath $ConfigPath
-    $file=Get-Item -LiteralPath $ConfigPath -ErrorAction Stop
-    if (-not $file -or $file.PSIsContainer) { throw 'invalid_task_config_file' }
+    Require-PrivateFile $ConfigPath
     $cfg=Get-Content -LiteralPath $ConfigPath -Raw | ConvertFrom-Json
     if ([string]$cfg.task_name -ne $TaskName) { throw 'task_identity_mismatch' }
     if ($null -ne (Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue)) {
@@ -74,6 +94,7 @@ if ($Action -eq 'install') {
     }
     $root=Require-SafePath ([string]$cfg.install_root)
     $hostFile=Require-SafePath ([string]$cfg.host_config_file)
+    Require-PrivateFile $hostFile
     $keyFile=Require-SafePath ([string]$cfg.publisher_key_file)
     $node=Require-SafePath ([string]$cfg.node_binary)
     foreach($p in @($hostFile,$keyFile,$node,("$root\installer.mjs"),

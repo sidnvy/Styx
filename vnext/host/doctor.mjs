@@ -164,6 +164,7 @@ if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.ur
   }
   let result;
   try {
+    requirePrivateFile(configFile);
     result=await doctor(JSON.parse(fs.readFileSync(configFile,'utf8')),
       {installRoot,trustPublicKeyFile});
   }catch{

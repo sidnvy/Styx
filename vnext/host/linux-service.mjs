@@ -6,6 +6,7 @@ import os from 'node:os';
 import {execFileSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {verifiedServiceNode} from './installer.mjs';
+import {requirePrivateFile} from './private-storage.mjs';
 
 const UNIT_PATTERN=/^styx-(?:vnext-)?[a-z0-9][a-z0-9-]{0,48}\.service$/;
 const SAFE_PATH=/^\/[A-Za-z0-9._/+@-]+$/;
@@ -27,9 +28,8 @@ function userUnitDir(home=os.homedir()) {
 }
 function verifyConfigFile(file){
   absoluteSafe(file,'host_config');
-  const st=fs.lstatSync(file);
-  requireValue(st.isFile()&&!st.isSymbolicLink()&&
-    (process.platform!=='win32'?(st.mode&0o077)===0:true),'host_config_not_private');
+  try{requirePrivateFile(file)}
+  catch{throw Error('host_config_not_private')}
 }
 function requireLinux(){requireValue(process.platform==='linux','linux_only')}
 function assertLocalFile(file){

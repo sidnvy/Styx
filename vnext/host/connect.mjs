@@ -142,6 +142,7 @@ if (process.argv[1] && path.resolve(process.argv[1])===fileURLToPath(import.meta
     // The signed stable launcher passes a verified, generation-specific
     // configuration over a one-shot local stdin pipe. No secret-bearing
     // temporary config file is created. Ordinary direct Host CLI remains.
+    if(filename!=='--stdin-config')requirePrivateFile(filename);
     const raw=filename==='--stdin-config' ? fs.readFileSync(0,'utf8')
       :fs.readFileSync(filename,'utf8');
     if(raw.length>65536)throw Error('host_config_too_large');

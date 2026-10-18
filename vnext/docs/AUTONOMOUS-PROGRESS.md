@@ -255,3 +255,16 @@ Windows/macOS execution of the new cases remains dependent on subsequent CI.
 Physical device, signed GUI and account integration gates are unchanged.
 Final commit is the commit containing this entry; final consolidated receipt
 will record its full SHA and successor integration revision.
+
+## Continued independent work: private launch configuration
+
+Baseline Doctor commit: `f9d2f75`. Stable launch, direct Host/Doctor file CLI and
+Linux/macOS service setup now require native-owned private Host configuration,
+using the existing UID/SID/DACL implementation. Windows task setup checks its
+setup and Host config owner/DACL before reading executable paths or registering
+a task; it rejects reparse points and null/broad DACLs. Caller-approved stdin
+configuration from the signed launcher retains its existing pipe boundary.
+Linux focused installation/service/Doctor suite: 21 passed, 3 platform skips.
+Windows native DACL helper test uses AST extraction of only the checker; it
+does not create a scheduled task or count as physical lifecycle acceptance.
+The final integration CI will record actual Windows execution.
