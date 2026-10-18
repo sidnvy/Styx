@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import {requirePrivateFile,ensurePrivateDirectory} from '../shared/private-file.mjs';
 import path from 'node:path';
 import {joinPayload} from '../shared/enrollment-protocol.mjs';
 export {joinPayload};
@@ -25,9 +26,7 @@ function exact(obj,keys){
 }
 function assert(condition,code,status=400){if(!condition)fail(code,status)}
 function secretFile(filename){
-  const st=fs.statSync(filename);
-  if(!st.isFile() || (process.platform!=='win32' && (st.mode & 0o077)))
-    fail('credential_file_permissions',403);
+  try{requirePrivateFile(filename)}catch{fail('credential_file_permissions',403)}
   const v=fs.readFileSync(filename,'utf8').trim();
   assert(B64URL.test(v),'invalid_owner_token',403);
   return v;
@@ -97,25 +96,14 @@ export class EnrollmentController {
     this.root=path.resolve(rootDir);
     this.registry=registry;this.relay=relay;this.now=now;
     this.adminDigest=Buffer.from(sha(secretFile(adminTokenFile)),'hex');
-    fs.mkdirSync(this.root,{recursive:true,mode:0o700});
-    fs.mkdirSync(path.join(this.root,'tokens'),{recursive:true,mode:0o700});
-    const st=fs.lstatSync(this.root);
-    const tokensStat=fs.lstatSync(path.join(this.root,'tokens'));
-    assert(st.isDirectory()&&!st.isSymbolicLink()&&
-      tokensStat.isDirectory()&&!tokensStat.isSymbolicLink()&&
-      (process.platform==='win32'||(!(st.mode&0o077)&&!(tokensStat.mode&0o077))),
-      'enrollment_dir_permissions',403);
+    ensurePrivateDirectory(this.root);
+    ensurePrivateDirectory(path.join(this.root,'tokens'));
     const file=path.join(this.root,'state.json');
     this.stateFile=file;
+    if(fs.existsSync(file))requirePrivateFile(file);
     this.db=fs.existsSync(file)
       ?stateShape(JSON.parse(fs.readFileSync(file,'utf8')))
       :{version:1,invitations:[],pending:[],devices:[]};
-    if(fs.existsSync(file)) {
-      const stat=fs.lstatSync(file);
-      assert(stat.isFile()&&!stat.isSymbolicLink()&&
-        (process.platform==='win32'||!(stat.mode&0o077)),
-        'enrollment_state_permissions',403);
-    }
     for(const rec of this.db.devices) {
       if(rec.status==='approved'){
         const token=rec.target?.exec?.token_file;

@@ -19,6 +19,7 @@ function fixture(t,{platform=process.platform}={}){
     fs.mkdirSync(path.join(sourceDir,'host'),{recursive:true});
     fs.mkdirSync(path.join(sourceDir,'bin'));
     const bytes={
+      'host/private-storage.mjs':fs.readFileSync(fileURLToPath(new URL('../private-storage.mjs',import.meta.url))),
       'host/installer.mjs':fs.readFileSync(fileURLToPath(new URL('../installer.mjs',import.meta.url))),
       'host/launch.mjs':Buffer.from(bootstrap??fs.readFileSync(fileURLToPath(new URL('../launch.mjs',import.meta.url)))) ,
       ['bin/'+(platform==='win32'?'node.exe':'node')]:Buffer.from(runtime)
@@ -127,4 +128,17 @@ test('previous signed payload corruption blocks a successful probe from committi
     fs.appendFileSync(path.join(f.installRoot,'releases','old','host/launch.mjs'),'tamper');return true;
   }}),/metadata_mismatch/);
   assert.deepEqual(fs.readFileSync(f.pointer),f.before);
+});
+
+test('stable signed private-storage dependency is verified before and after health',async t=>{
+  for(const during of [false,true]){
+    const f=fixture(t);let calls=0;
+    const helper=path.join(f.installRoot,'private-storage.mjs');
+    if(!during)fs.appendFileSync(helper,'// changed');
+    await assert.rejects(activateHealthyRelease({...f.args,checkHealth:()=>{
+      calls++;fs.appendFileSync(helper,'// changed during probe');return true;
+    }}),/bootstrap_requires_offline_switch/);
+    assert.equal(calls,during?1:0);
+    assert.deepEqual(fs.readFileSync(f.pointer),f.before);
+  }
 });
