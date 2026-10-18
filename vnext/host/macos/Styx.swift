@@ -153,8 +153,8 @@ final class StyxDelegate: NSObject, NSApplicationDelegate {
                 "owner_pid": getpid(), "daemon_pid": daemon.processIdentifier,
                 "bundle_id": bundleID, "socket": runtime.socket,
                 "transport": "socket_accepting", "host_accessibility": ax,
-                "host_screen_recording": screen, "native_gui_acceptance": "NOT_RUN",
-                "mcp_attribution": "NOT_VERIFIED"]
+                "host_screen_recording": screen, "native_gui_acceptance": "NOT RUN",
+                "mcp_attribution": "NOT RUN"]
             do {
                 let data = try JSONSerialization.data(withJSONObject: descriptor, options: [.sortedKeys])
                 try data.write(to: URL(fileURLWithPath: runtime.descriptor), options: .atomic)

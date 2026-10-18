@@ -72,7 +72,7 @@ def main():
             time.sleep(0.05)
         print(json.dumps({"schema": 1, "test": "native_cua_owner_sigkill_eof",
                           "result": "PASS", "cua_version": version,
-                          "native_gui": "NOT_RUN", "tcc_attribution": "NOT_VERIFIED"}))
+                          "native_gui": "NOT RUN", "tcc_attribution": "NOT RUN"}))
     finally:
         if process is not None and process.poll() is None:
             process.terminate()
