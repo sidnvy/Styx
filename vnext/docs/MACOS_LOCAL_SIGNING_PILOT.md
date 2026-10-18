@@ -101,3 +101,23 @@ removed the socket. LaunchServices then started a fresh app/daemon generation;
 normal termination again removed descriptor/socket. All three observations
 passed (`evidence/macos-signed-app-crash-20261019.json`). No GUI action or
 interrupted-action replay was tested.
+
+## Stable local installation
+
+After the user reported difficulty selecting the temporary app in Privacy &
+Security, the existing signed app was installed to `/Applications/Styx.app`.
+The destination was absent and writable; exclusive directory creation prevented
+an overwrite. The exact owned temporary app was gracefully stopped first.
+All7bundle files were identical after `ditto`; deep/strict and exact
+Apple-anchor/app-identifier/team-OU checks passed without re-signing. LaunchServices
+started the installed app and Cua health confirmed its exact installed parent
+application. Prompt-disabled permission readback still reported both grants
+false. This establishes a stable selection path; it does not prove the temporary
+path was the cause of the user's selection issue.
+
+The installed app is intentionally retained and running for the user. Select
+`/Applications/Styx.app` in Finder or Privacy & Security. It is a menu-bar app:
+click the text **Styx** in the top-right macOS menu bar, then **Request macOS
+permissions…** to initiate the local OS flow. Permission requests and grant
+changes remain the user's actions. No private key, signature or TCC setting was
+changed during installation. Evidence: `evidence/macos-stable-install-20261019.json`.
