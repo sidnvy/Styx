@@ -30,9 +30,12 @@ function disconnected() { return Error('host_disconnected'); }
 // Exec JSON-RPC frames. No second RPC protocol is defined by Styx.
 // The Host bearer is distinct from inbound MCP authorization.
 export class OutboundHostRelay {
-  constructor({registry,heartbeatMs=15000}={}) {
+  constructor({registry,heartbeatMs=15000,computerAcquireWaitMs=5000}={}) {
     if (!registry || typeof registry.resolve!=='function') throw TypeError('Registry required');
+    if(!Number.isSafeInteger(computerAcquireWaitMs)||computerAcquireWaitMs<0||computerAcquireWaitMs>30000)
+      throw TypeError('Invalid Computer acquisition wait');
     this.registry=registry;this.heartbeatMs=heartbeatMs;
+    this.computerAcquireWaitMs=computerAcquireWaitMs;
     this.sessions=new Map();this.computerPeers=new Map();
     this.stopped=false;this.attached=false;
     this.wss=new WebSocketServer({noServer:true,maxPayload:MAX_COMPUTER_FRAME,perMessageDeflate:false});
@@ -173,14 +176,27 @@ export class OutboundHostRelay {
   }
   async acquireComputer(target) {
     if (this.stopped || target.computer?.transport!=='outbound') throw disconnected();
-    this.registry.resolve(target.id);
-    const peers=this.computerPeers.get(target.id);
-    const connected=[...(peers??[])].filter(e=>!e.closed &&
-      e.generation===target.generation && e.ws?.readyState===WebSocket.OPEN);
-    if(!connected.length) throw Error('computer_host_offline');
-    const entry=connected.find(e=>!e.claimed);
-    if(!entry) throw Error('computer_slots_busy');
-    entry.claimed=true;
+    // Wait only for a fresh authenticated transport before ANY dispatch.
+    // A completed model lease closes its native worker; a subsequent owner
+    // can arrive during normal Host reconnect. No action is ever replayed.
+    const deadline=performance.now()+this.computerAcquireWaitMs;
+    let entry;
+    while(!entry){
+      if(this.stopped)throw disconnected();
+      const current=this.registry.resolve(target.id);
+      if(current.generation!==target.generation)throw Error('computer_generation_changed');
+      const peers=this.computerPeers.get(target.id);
+      const connected=[...(peers??[])].filter(e=>!e.closed &&
+        e.generation===target.generation&&e.ws?.readyState===WebSocket.OPEN);
+      if(connected.length){
+        entry=connected.find(e=>!e.claimed);
+        if(!entry)throw Error('computer_slots_busy');
+        entry.claimed=true;break;
+      }
+      const remaining=deadline-performance.now();
+      if(remaining<=0)throw Error('computer_host_offline');
+      await new Promise(resolve=>setTimeout(resolve,Math.min(100,remaining)));
+    }
     // Each MCP owner exclusively claims one independent Host-originated WS
     // connected to exactly one native Cua stdio MCP server process.
     const transport={

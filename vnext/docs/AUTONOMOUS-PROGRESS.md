@@ -150,3 +150,33 @@ Styx LICENSE, provenance hashes, signed Host inclusion and pre-signing app
 notice inclusion. Real Linux signed runtime package test PASS after inclusion.
 VNext npm CycloneDX1.5 SBOM generated (93 dependency components); full native
 transitive crate/license/SBOM review remains NOT RUN. No full legal audit claim.
+
+## Final E/F/D additions
+
+Owner recovery source `30841f8` retires an exact device fingerprint/generation
+before a new key/device identity, fresh invitation and independent approval.
+Revocation tombstones persist before live effects; save failure does not
+silently claim revocation. Negative tests cover wrong realm/identity, old
+invitations/keys, live Exec+Computer disconnect and restart persistence.
+PR35 corrected cross-platform macOS plan paths; latest native CI passed.
+
+Health gate source `e9c9df1` verifies staged/previous signatures and unchanged
+stable bootstrap/runtime, retains exact old active pointer on a failed bounded
+local trusted health callback, and refuses concurrent/stale/late results.
+It does NOT implement post-switch service restart rollback or offline runtime
+replacement. PR34 actual native Linux/macOS/Windows health tests passed.
+
+Original unpublished Computer reconnect wait is now integrated with additional
+bounds/generation checks: up to five seconds for a newly authenticated native
+worker before dispatch, immediate busy-slot refusal, no action retry/replay.
+New targeted tests PASS (8 passed, 2 existing native tests explicitly skipped).
+
+Native Linux managed pilot source `e06e24e`: PASS signed bundled Node/Codex/Cua
+build/install, real loopback HTTPS/WSS with CA checks, systemd start/restart,
+exact owned cgroup SIGKILL recovery (NRestarts=1), signed upgrade and rollback,
+actual signed connector-generation and fresh-peer checks, owned Zenity
+screenshot/3 AX elements/click/independent exit 0, uninstall and secret cleanup.
+The initial observer race is retained as FAIL evidence, corrected before PASS.
+No production services or the independent 24-hour soak were modified.
+See docs/linux-managed-pilot.md and docs/evidence/ for exact sanitized receipts.
+Cold-install trust and full-platform soak remain NOT RUN.
