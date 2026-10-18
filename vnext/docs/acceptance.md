@@ -97,3 +97,18 @@ Design and threat/acceptance checklist: docs/onboarding-installation.md.
 Installers, device pairing, upgrade/rollback, login/reboot lifecycle, and
 ChatGPT device selection remain independent production gates documented in
 docs/onboarding-installation.md.
+ 
+
+### Explicit Host restart acceptance (isolated, 2026-10-18)
+
+- PASS: stopped the isolated Linux Host Connector and confirmed its temporary
+  Cua/Exec children and WSS sockets exited; the gateway remained running.
+- PASS: restarted the Host Connector from an existing OOB test process manager;
+  both independently authenticated outbound Exec and Cua connections became
+  connected again.
+- PASS: a NEW model-side MCP client executed the complete owned-window
+  npm run test:physical:cua after reconnect, with PNG, AX tree, observed
+  click and independent scratch program exit code zero.
+- NOT TESTED: autonomous service-manager restart after machine reboot or a
+  disconnected GUI session. The existing OOB manager started this isolated
+  test connector and is not the intended production installer/runtime.
