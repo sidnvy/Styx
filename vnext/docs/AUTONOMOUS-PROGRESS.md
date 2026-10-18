@@ -93,3 +93,18 @@ account adversarial tests and soak remain NOT RUN.
 Foundation PR #27: upstream feature-branch CI PASS on Linux/macOS/Windows.
 Native private-state PR #28: Windows ACL tests and portable contract CI PASS;
 real interactive Task Scheduler recovery remains BLOCKED.
+
+## Milestone F subset — bounded native Exec soak
+
+Baseline: `d6b4ff2eabf2e4ff615f97db824f28db7e2a29eb`.
+Files: host/exec-soak.mjs, host/test/exec-soak.test.mjs, docs/exec-soak.md.
+PASS: option-boundary tests and actual two-second native Exec smoke, three
+exact-output samples, isolated loopback Gateway/outbound Host/Codex 0.163.0.
+Cleanup terminates only the spawned connector. Metrics are Gateway-only;
+no Host-total memory/CPU claim is made. Runtime requires the fixed executable
+hash, fresh private state and no operator-supplied shell commands.
+
+A 24-hour run is being started in a separate task-owned state root. Its gate
+remains NOT RUN until elapsed duration and receipt say PASS. This is not a
+signed installed-service, reboot, GUI or full-platform soak. Those remain
+independent NOT RUN gates; current GUI context remains BLOCKED.
