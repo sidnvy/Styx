@@ -268,3 +268,12 @@ Linux focused installation/service/Doctor suite: 21 passed, 3 platform skips.
 Windows native DACL helper test uses AST extraction of only the checker; it
 does not create a scheduled task or count as physical lifecycle acceptance.
 The final integration CI will record actual Windows execution.
+
+## Continued independent work: publisher key privacy
+
+Baseline: `f1c01290cc6e92afbd2dee4b607ee3f90c935553`. The release builder
+now validates native owner/private permissions for signing keys on all OSes,
+including NTFS DACLs, before executing binary version probes or creating a bundle.
+The native runtime packaging fixture creates its signing key in a protected
+directory. Linux publisher/build tests passed; actual Windows check is in the
+existing three-OS CI matrix. No real publisher key was accessed or changed.

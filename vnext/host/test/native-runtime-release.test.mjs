@@ -6,6 +6,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {generateKeyPairSync} from 'node:crypto';
 import {execFileSync} from 'node:child_process';
+import {ensurePrivateDirectory} from '../private-storage.mjs';
 import {buildHostRelease} from '../build-host-release.mjs';
 import {stageSignedRelease,activateRelease,refreshVerifiedBootstrap,verifiedServiceNode} from '../installer.mjs';
 import {linuxUserUnit} from '../linux-service.mjs';
@@ -18,7 +19,8 @@ test('official native Node is signed, staged, selected by service planner and ta
   t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
   const {privateKey,publicKey}=generateKeyPairSync('ed25519');
   const pem=publicKey.export({type:'spki',format:'pem'});
-  const privateKeyFile=path.join(root,'publisher.key'),trustPublicKeyFile=path.join(root,'publisher.pub');
+  const privateDir=path.join(root,'private');ensurePrivateDirectory(privateDir);
+  const privateKeyFile=path.join(privateDir,'publisher.key'),trustPublicKeyFile=path.join(root,'publisher.pub');
   fs.writeFileSync(privateKeyFile,privateKey.export({type:'pkcs8',format:'pem'}),{mode:0o600});
   fs.writeFileSync(trustPublicKeyFile,pem,{mode:0o600});
   const sourceDir=path.join(root,'bundle'),installRoot=path.join(root,'installed');

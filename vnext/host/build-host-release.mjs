@@ -5,6 +5,7 @@ import path from 'node:path';
 import {execFileSync} from 'node:child_process';
 import {createHash,createPrivateKey,createPublicKey,sign} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
+import {requirePrivateFile} from './private-storage.mjs';
 
 const ROOT=fileURLToPath(new URL('../',import.meta.url));
 const STATIC=Object.freeze([
@@ -67,10 +68,8 @@ export function buildHostRelease({destination,version,privateKeyFile,
   for(const p of [destination,privateKeyFile,codexBinary,cuaBinary,sourceRoot])
     assert(typeof p==='string'&&path.isAbsolute(p),'absolute_release_path_required');
   assert(!fs.existsSync(destination),'release_destination_must_be_empty');
-  const k=fs.lstatSync(privateKeyFile);
-  assert(k.isFile()&&!k.isSymbolicLink() &&
-    (process.platform==='win32'||(k.mode&0o077)===0),
-    'release_signing_key_permissions');
+  try{requirePrivateFile(privateKeyFile)}
+  catch{throw Error('release_signing_key_permissions')}
   const privateKey=createPrivateKey(fs.readFileSync(privateKeyFile,'utf8'));
   assert(privateKey.asymmetricKeyType==='ed25519','ed25519_signing_key_required');
   const codexVer=versionBinary(codexBinary,'codex-cli 0.163.0');
