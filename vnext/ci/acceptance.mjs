@@ -30,7 +30,8 @@ export function runAcceptance(tier,directory) {
     ['exec-contract',['packages/styx-exec-adapter/test/unit.test.mjs',
       'packages/styx-exec-adapter/test/windows.test.mjs']],
     ['gui-broker',files('packages/styx-gui-broker/test')],
-    ['host',files('host/test')]
+    ['host',files('host/test')],
+    ['plugin',files('plugin/test')]
   ]:[['native-exec',[
     'packages/styx-exec-adapter/test/integration.test.mjs',
     'gateway/test/live.test.mjs','gateway/test/outbound.test.mjs']]];
