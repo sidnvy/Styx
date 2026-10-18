@@ -1,0 +1,150 @@
+# CAS P0 — native MCP App turn-continuation spike
+
+**Status:** experimental implementation with local contract and simulated-Host tests.
+**Source baseline:** Styx VNext branch feat/styx-vnext-unified-runtime, commit c81a111f.
+**Production:** NOT installed, NOT deployed, NOT accepted by a real ChatGPT Host.
+
+## Goal and non-goals
+
+Test whether an explicitly started, harmless Run in ordinary ChatGPT Chat
+can use one native MCP App card to request subsequent model turns with
+the standard ui/message host bridge. Preserve the official ChatGPT Mobile/Web
+as the user entry point. This is NOT Work, Codex-agent orchestration,
+a browser extension, a shell executor, quota extension or a Stop interceptor.
+
+This is a bounded, single-user experiment. It does not authorize real file
+writes, shell, desktop actions, deployment or automatic host mutation.
+All follow-ups ask only for cas_experiment_consume, which records a single
+confirmed model-turn receipt. Maximum four rounds, 15–180 seconds between
+rounds, maximum one hour per Run. The operator must use a dedicated test
+Gateway with independent credentials, Run directory and connection.
+
+## VNext integration boundaries
+
+- VNext retains the exact Codex Exec and native Cua tools and session owners.
+- The optional CAS tools/resources are registered only if an operator passes
+  STYX_CAS_EXPERIMENT_STATE_DIR in the Gateway launch environment.
+- CAS Run ID is durable and is not an MCP HTTP session ID, Codex process
+  session, Cua lease, target identity, or ChatGPT Conversation ID.
+- A single private JSON record per Run is atomically replaced (mode 0600)
+  before tool acknowledgement. The directory must be private mode 0700.
+- All CAS operations run through the authenticated existing MCP Gateway;
+  no independent public listener, credential or second provider is created.
+- The App View is a lightweight carrier. It is never the canonical owner
+  of Run state, execution results or retry permission.
+- The Server is the only authority for Wake claims, dispatch fences,
+  follow-up identity and exact consumption.
+- The experiment uses one process per CAS state directory. It is not
+  distributed locking or durable execution across Host reconnects.
+- The experiment currently uses the existing VNext stateful MCP SDK
+  and transport; real ChatGPT MCP App admission and protocol compatibility
+  must be checked separately. Passing local SDK tests is insufficient.
+
+## Model-visible flow
+
+1. The user explicitly requests a harmless CAS test.
+2. Model calls cas_experiment_create with bounded objective, rounds and delay_ms.
+3. Model calls cas_experiment_present with the exact returned run_id.
+4. Model promptly finishes its CURRENT assistant turn with a normal final
+   answer. The tool card alone is not a final; do not keep doing other work
+   in that turn after presenting the carrier.
+5. The hosted App initializes through ui/initialize, receives the exact
+   run_id through ui/notifications/tool-input, and polls App-only state.
+6. After the server-owned due time the App atomically claims one Wake,
+   then calls prepare. Prepare durably spends that exact dispatch attempt.
+7. The App calls Host ui/message with the one server-authored safe message,
+   and reports accepted vs unknown dispatch. It never reissues that attempt.
+8. If ChatGPT truly starts a later MODEL turn, that turn calls
+   cas_experiment_consume with the exact Run, round, Wake and token.
+9. Only exact consume advances the round, creates the next due Wake,
+   and eventually completes the bounded Run.
+10. cas_experiment_status can inspect progress from any authorized Chat.
+    cas_experiment_stop permanently halts further automatic dispatch.
+
+App-only tool names are cas_experiment_poll, cas_experiment_claim,
+cas_experiment_prepare and cas_experiment_finish. Their metadata declares
+ui.visibility=["app"] and deliberately does not bind a new App card.
+The presenting tool alone binds ui://styx/cas-continuation/v1.
+
+## Delivery safety
+
+States include pending, claimed, prepared, dispatch_accepted,
+delivery_unknown, and consumed (subsequent run may be running/completed,
+stopped, or expired). Dispatch accepted means Host acknowledged ui/message,
+NOT that a model turn began. Delivery unknown NEVER authorizes replay.
+
+An unprepared claim may expire and be taken by a different View. Once
+prepared, no View may automatically prepare or send that Wake again.
+A follow-up model may consume a prepared Wake before the iframe receives
+the ui/message ACK; the Server accepts that exact consume and prevents
+a later ACK from undoing it. Duplicate exact consumes are idempotent.
+Stale and foreign claim IDs fail closed.
+
+This experiment does not infer the source ChatGPT Conversation ID from the
+Gateway's MCP owner, page recency or Host target. A real CAS product will
+need an exact Session Binder and user-account scoping before multiclient use.
+
+## Local tests — no ChatGPT account involved
+
+Run only inside a disposable checkout of the experiment branch:
+
+    cd vnext
+    npm ci --ignore-scripts --no-audit --no-fund
+    node --test gateway/test/cas-*.test.mjs
+    npm run test
+
+The tests check state persistence, expiry, concurrency, identity mismatches,
+restart recovery, tool/resource metadata, isolated MCP HTTP clients, the
+real iframe controller script through a simulated MCP Apps Host, ui/message
+ACK versus exact consume, and never-resend on Host refusal.
+
+The complete VNext test suite additionally needs the documented pinned,
+checksum-validated Codex Exec binary prepared ONLY in this checkout:
+
+    python3 packages/styx-exec-adapter/prepare-runtime.py
+    npm run test:all
+
+Running local tests proves only our code and simulated Host contract.
+It does not prove a current ChatGPT account permits unattended turns.
+
+## Future real-Host acceptance (NOT performed)
+
+Use a disposable Gateway, separate credentials, separate tunnel/custom Plugin
+and an explicit user-initiated test conversation. Do not replace production
+Styx, Charon, Coder, Tunnel, existing Plugin or OS service.
+
+For each of the following conditions, collect an exact Run ID, Wake ID,
+attempt ID, dispatch state, first new ChatGPT turn and consume receipt:
+
+1. Web foreground, 30 seconds, two rounds without another user message.
+2. Web foreground, five minutes, two rounds.
+3. Web background tab, five minutes, two rounds.
+4. Web tab closed then reopened; note that no View can poll while unmounted.
+5. Mobile foreground, then background/locked, under account-supported Apps UI.
+6. Host ui/message refusal, View teardown, and ambiguous Host ACK.
+7. Two mounted Views for one Run; prove no duplicate Send or consume.
+
+**Acceptance:** cas_experiment_consume must actually be dispatched by a
+fresh model turn for every claimed success. A rendered card, successful
+tools/call, accepted ui/message RPC, displayed user text, or status poll alone
+does not prove resumption. Do not advertise unattended based on local tests.
+Hosts may request user consent, throttle background Apps, discard hidden
+Views or lack ui/message support entirely.
+
+If the real ChatGPT protocol/tool-registration path differs from the current
+stateful VNext Gateway, implement a separate reviewed compatibility adapter.
+Do NOT casually replace VNext's authenticated MCP session and native Cua
+transport contracts.
+
+## Future CAS (out of P0)
+
+Native MCP App and workstation Browser Companion remain alternative,
+separately authorized continuation carriers above one durable CAS Run Ledger.
+Only one carrier may own a Wake. Execution remains on Styx VNext's Codex Exec,
+Cua and typed Host registry; no duplicate execution plane. Deterministic
+task acceptance would precede Goal-helper decisions, with user Stop always
+taking precedence over further dispatch.
+
+Background-browser automation must be separately reviewed for applicable
+ChatGPT terms and safety. This P0 does not automate ChatGPT DOM, browser
+navigation, account selection, or model-access restrictions.
