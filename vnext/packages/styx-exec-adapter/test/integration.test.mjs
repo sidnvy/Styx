@@ -101,6 +101,23 @@ test('stdio: stdout/stderr, exit 7, login flag and file URI conversion', async t
   }, owner));
   assert.equal(r.exit_code, 7); assert.match(r.output, /out/); assert.match(r.output, /err/);
 });
+test('stdio: process exit before inherited stdout EOF preserves delayed output', async t => {
+  const {a,runtime}=await stdio(t);
+  const request=runtime.request.bind(runtime),reads=[];
+  runtime.request=async(method,params)=>{
+    const reply=await request(method,params);
+    if(method==='process/read')reads.push(reply);
+    return reply;
+  };
+  // The parent exits immediately; its child still owns the stdout pipe.
+  // This is deliberate fixture work, never a replay of an uncertain command.
+  const result=await complete(a,await a.execCommand({
+    cmd:'(sleep 0.2; printf LATE_ACK) & exit 0',yield_time_ms:250,login:false
+  },owner));
+  assert.equal(result.output,'LATE_ACK',JSON.stringify(reads));
+  assert.equal(result.exit_code,0);
+  assert.equal(a.sessions.size,0);
+});
 test('stdio: adapter stdin and PTY both work through the real executor', async t => {
   const {a} = await stdio(t);
   const first = await a.execCommand({cmd: 'read line; printf "<%s>" "$line"', yield_time_ms: 0}, owner);
