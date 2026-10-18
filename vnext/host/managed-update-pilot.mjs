@@ -6,7 +6,7 @@ import {createHash,sign} from 'node:crypto';
 import {execFileSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {buildHostRelease} from './build-host-release.mjs';
-import {runManagedLinuxPilot,pilotOptions} from './managed-linux-pilot.mjs';
+import {runManagedLinuxPilot,pilotOptions,confirmedInactiveDisabled} from './managed-linux-pilot.mjs';
 import {systemdUser,statusUserService} from './linux-service.mjs';
 import {activeRelease,verifySignedRelease} from './installer.mjs';
 import {updateServiceRelease,recoverServiceUpdate,inspectServiceUpdate} from './service-update.mjs';
@@ -96,22 +96,25 @@ async function exerciseTransactions(context){
     const end=Date.now()+15000;
     do{
       const s=statusUserService(unitName);
-      if(s.active!=='active'&&s.pid===0&&s.enabled!=='enabled'&&!gateway.relay.connected(target)&&gateway.relay.computerConnected(target)===0)return true;
+      if(confirmedInactiveDisabled(s)&&!gateway.relay.connected(target)&&gateway.relay.computerConnected(target)===0)return true;
       await sleep(100);
     }while(Date.now()<end);
     throw Error('owned_update_service_did_not_stop');
   }
-  const initialEnabled=statusUserService(unitName).enabled==='enabled';
+  const initialState=statusUserService(unitName);
+  assert(initialState.status==='reported'&&initialState.load==='loaded'&&initialState.enabled==='enabled','initial_managed_unit_enablement_not_confirmed');
+  const initialEnabled=true;
   async function operatorStop(){
     await closeClient();
     // Persistently inhibit login/reboot activation before any offline write.
     execFileSync('/usr/bin/systemctl',['--user','disable','--now',unitName],
       {stdio:'ignore',timeout:25000});
-    await stopped();assert(statusUserService(unitName).enabled!=='enabled','owned_update_service_still_enabled');
+    await stopped();assert(confirmedInactiveDisabled(statusUserService(unitName)),'owned_update_service_stop_or_inhibition_not_confirmed');
     return true;
   }
   function restoreEnabled(){
     assert(!fs.existsSync(path.join(installRoot,'.health-update-lock')),'uncertain_update_must_remain_disabled');
+    assert(statusUserService(unitName).enabled==='disabled','terminal_unit_not_disabled');
     if(initialEnabled)systemdUser(unitName,'enable');
   }
   function assertSelected(version,expected){
@@ -123,7 +126,7 @@ async function exerciseTransactions(context){
     const result=await updateServiceRelease({installRoot,version,publicKeyPem,
       timeoutMs:mode==='timeout'?3000:15000,
       stopService:async()=>{calls.stop++;return operatorStop()},
-      startService:async()=>{calls.start++;systemdUser(unitName,'start');return statusUserService(unitName).active==='active'},
+      startService:async()=>{calls.start++;systemdUser(unitName,'start');const s=statusUserService(unitName);return s.status==='reported'&&s.load==='loaded'&&s.active==='active'&&s.pid>1&&s.enabled==='disabled'},
       checkHealth:async check=>{
         calls.health++;await ready(check.version);
         const actual=execFileSync('/proc/'+statusUserService(unitName).pid+'/exe',['--version'],{encoding:'utf8',timeout:5000}).trim();
@@ -153,7 +156,7 @@ async function exerciseTransactions(context){
   assert(JSON.stringify(stableSnapshot(installRoot))===JSON.stringify(beforeRollback),'native_rollback_did_not_restore_exact_previous_state');
   restoreEnabled();
   receipt.evidence.unhealthy_candidate_rollback_transaction='PASS';receipt.evidence.signed_rollback='PASS';
-  receipt.update_transactions.push({scenario:'observed_unhealthy_candidate',status:'PASS',outcome:rejected.result.status,
+  receipt.update_transactions.push({scenario:'controlled_health_rejection_after_successful_exec',health_rejection_injected:true,candidate_native_exec_succeeded:true,status:'PASS',outcome:rejected.result.status,
     callbacks:rejected.calls,service_runtime_observations:rejected.versions,selected_version:release2,exact_previous_pointer_restored:true,
     distinct_previous_launcher_restored:true,previous_signed_helper_installer_and_node_restored:true,
     healthy_previous_native_exec_observed:true,startup_disabled_before_switch:true,
@@ -165,7 +168,7 @@ async function exerciseTransactions(context){
   assert(uncertain.result.status==='needs_recovery','native_timeout_must_be_explicitly_uncertain');
   assert(fs.existsSync(path.join(installRoot,'.health-update-lock')),'native_uncertain_lock_not_retained');
   assert(typeof uncertain.lateFinish==='function','native_timeout_did_not_reach_owned_health_boundary');
-  assert(statusUserService(unitName).enabled!=='enabled','uncertain_update_was_reenabled');
+  assert(statusUserService(unitName).enabled==='disabled','uncertain_update_enablement_not_confirmed_disabled');
   const held=stableSnapshot(installRoot),callsBefore=JSON.stringify(uncertain.calls);
   uncertain.lateFinish(true);await sleep(100);
   assert(JSON.stringify(uncertain.calls)===callsBefore,'native_uncertain_operation_was_replayed');
@@ -179,11 +182,11 @@ async function exerciseTransactions(context){
 
   setPhase('explicit_stopped_recovery');await operatorStop();
   const recovered=await recoverServiceUpdate({installRoot,transactionId:uncertain.result.transactionId,
-    publicKeyPem,confirmStopped:async()=>{const s=statusUserService(unitName);return s.active!=='active'&&s.pid===0&&s.enabled!=='enabled'}});
+    publicKeyPem,confirmStopped:async()=>confirmedInactiveDisabled(statusUserService(unitName))});
   assert(recovered.status==='recovered_stopped','native_explicit_recovery_did_not_leave_service_stopped');
   assertSelected(release2,newHashes);
   assert(JSON.stringify(stableSnapshot(installRoot))===JSON.stringify(beforeUncertain),'native_recovery_did_not_restore_exact_previous_state');
-  assert(statusUserService(unitName).active!=='active'&&statusUserService(unitName).pid===0,'native_recovery_restarted_without_operator');
+  assert(confirmedInactiveDisabled(statusUserService(unitName)),'native_recovery_not_confirmed_stopped_disabled');
   systemdUser(unitName,'start');await ready(release2);
   assert(execFileSync('/proc/'+statusUserService(unitName).pid+'/exe',['--version'],{encoding:'utf8',timeout:5000}).trim()==='v22.23.2','native_recovered_runtime_version_mismatch');
   restoreEnabled();

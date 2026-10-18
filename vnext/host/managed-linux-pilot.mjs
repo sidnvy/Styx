@@ -32,6 +32,11 @@ export function pilotOptions({directory,unitName,nodeBinary,codexBinary,cuaBinar
   for(const p of [nodeBinary,codexBinary,cuaBinary])assert(typeof p==='string'&&path.isAbsolute(p),'absolute_pinned_binary_required');
   return {directory,unitName,nodeBinary,codexBinary,cuaBinary};
 }
+// Unknown manager/load/enablement states never attest an offline boundary.
+export function confirmedInactiveDisabled(state={}){
+  return state.status==='reported'&&state.load==='loaded'&&
+    ['inactive','failed'].includes(state.active)&&state.pid===0&&state.enabled==='disabled';
+}
 export function graphicalEnvironment(text){
   const values={};
   for(const line of String(text).split('\n')){
