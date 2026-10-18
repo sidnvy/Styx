@@ -31,10 +31,17 @@ jobs:
         run: npm ci --ignore-scripts --no-audit --no-fund
       - name: Pin and verify the official Codex executor
         run: python3 packages/styx-exec-adapter/prepare-runtime.py
-      - name: Gateway + Exec + GUI broker regression
-        run: npm run test:all
-      - name: Real executor via authenticated MCP HTTP
-        run: STYX_LIVE_EXEC_TEST=1 npm test
+      - name: Fixture and protocol regression with explicit skipped counts
+        run: node ci/acceptance.mjs fixtures acceptance/fixtures
+      - name: Real executor via authenticated MCP and native process RPC
+        run: node ci/acceptance.mjs native-exec acceptance/native-exec
+      - name: Preserve acceptance receipts even on failure
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: linux-contract-and-native-exec-evidence
+          path: vnext/acceptance/
+          if-no-files-found: error
   native-cua-contract:
     name: Cua MCP on ${{ matrix.runner }}
     runs-on: ${{ matrix.runner }}
@@ -82,6 +89,11 @@ jobs:
               -not $script.Contains('task_owner_mismatch')) {
             throw 'Windows scheduled task must retain interactive user identity checks'
           }
+      - name: Record native GUI acceptance boundary
+        shell: bash
+        run: |
+          echo 'Native Cua schema compatibility is a protocol check.' >> "$GITHUB_STEP_SUMMARY"
+          echo 'Native GUI: NOT RUN. Physical Host: NOT RUN. Cold install: NOT RUN. ChatGPT: NOT RUN. 24-hour soak: NOT RUN.' >> "$GITHUB_STEP_SUMMARY"
       - name: Run pinned native Cua MCP compatibility test
         env:
           DO_NOT_TRACK: '1'

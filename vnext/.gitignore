@@ -11,3 +11,6 @@ host/scratch-*.ps1
 host/scratch-*.cs
 __pycache__/
 *.pyc
+
+# Local acceptance evidence is uploaded by CI, not committed.
+acceptance/
