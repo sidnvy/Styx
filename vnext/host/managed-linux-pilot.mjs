@@ -100,6 +100,7 @@ export async function runManagedLinuxPilot(raw,{optIn=process.env.STYX_RUN_MANAG
   const state=path.join(directory,'private');fs.mkdirSync(state,{mode:0o700});
   const receiptFile=path.join(directory,'receipt.json');
   const receipt={schema:1,kind:'linux-owned-managed-host-pilot',status:'NOT RUN',
+    driver_pid:process.pid,node:process.version,
     revision:execFileSync('git',['rev-parse','HEAD'],{cwd:root,encoding:'utf8'}).trim(),
     runtime:{node:'22.23.3',codex:'0.163.0',cua:'0.36.0'},binary_sha256:PINNED,
     evidence:{signed_build:'NOT RUN',signed_install:'NOT RUN',managed_start_ready:'NOT RUN',

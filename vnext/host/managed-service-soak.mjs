@@ -70,7 +70,8 @@ export async function runManagedServiceSoak(raw,{optIn=process.env.STYX_RUN_MANA
     const original=statusUserService(unitName),began=performance.now();
     assert(original.status==='reported'&&original.load==='loaded'&&original.active==='active'&&original.pid>1&&original.enabled==='enabled',
       'managed_soak_initial_unit_not_confirmed');
-    const soak={schema:1,status:'NOT RUN',phase:'running',duration_seconds:options.durationSeconds,
+    const soak={schema:1,status:'NOT RUN',phase:'running',driver_pid:receipt.driver_pid,
+      node:receipt.node,revision:receipt.revision,unit_name:unitName,duration_seconds:options.durationSeconds,
       interval_seconds:options.intervalSeconds,passed_samples:0,elapsed_seconds:0,
       started_at:new Date().toISOString(),initial_main_pid:original.pid,initial_restarts:original.restarts,
       scope:'owned user service + native Exec over private HTTPS/WSS; no periodic GUI calls',
