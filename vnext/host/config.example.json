@@ -8,5 +8,13 @@
     "env": {
       "CODEX_HOME": "/home/operator/.local/share/styx/codex-home"
     }
+  },
+  "computer": {
+    "enabled": true,
+    "binary": "/home/operator/.local/share/styx/cua-driver",
+    "connections": 2,
+    "env": {
+      "CUA_DRIVER_RS_ENABLE_WAYLAND": "1"
+    }
   }
 }

@@ -86,7 +86,8 @@ function wrapTool(tool) {
 // be shared across unrelated ChatGPT sessions.
 export class CuaProvider {
   constructor({registry, relay, connect, toolNames=COMMON_CUA_TOOLS,
-    manifest=CONTRACT} = {}) {
+    manifest=CONTRACT, idleMs=5*60*1000, reapIntervalMs=30*1000,
+    clock=()=>Date.now()} = {}) {
     if (!registry || typeof registry.resolve !== 'function' ||
         (connect!==undefined && typeof connect !== 'function'))
       throw TypeError('Cua registry and connector required');
@@ -96,8 +97,17 @@ export class CuaProvider {
     this.manifest=manifest;
     this.schema=(manifest.tools??[]).filter(t=>this.toolNames.has(t.name))
       .map(t=>wrapTool(t));
+    if (!Number.isSafeInteger(idleMs) || idleMs<1000 ||
+      !Number.isSafeInteger(reapIntervalMs) || reapIntervalMs<100 ||
+      typeof clock !== 'function') throw TypeError('Invalid native Cua lease policy');
+    // Cua v0.36.0 defaults to five idle minutes per implicit session.
+    // Styx releases unclaimed WebSocket *resources* after that same window;
+    // it never sends a new GUI action on behalf of the model.
+    this.idleMs=idleMs;this.clock=clock;
     this.sessions = new Map(); this.pending = new Map();
     this.stopped = false;
+    this.reaper=setInterval(()=>{void this.reapIdle()},reapIntervalMs);
+    this.reaper.unref?.();
   }
 
   #target(environmentId) {
@@ -122,6 +132,7 @@ export class CuaProvider {
         await current.client.close().catch(() => {});
         throw Error('computer_generation_changed');
       }
+      current.lastUsed=this.clock();
       return current.client;
     }
     const opening = this.pending.get(key);
@@ -140,7 +151,8 @@ export class CuaProvider {
       if (now.generation !== target.generation) {
         await client.close();throw Error('computer_generation_changed');
       }
-      const snapshot = {generation:target.generation,client};
+      const snapshot = {generation:target.generation,client,active:0,
+        lastUsed:this.clock()};
       this.sessions.set(key,snapshot);
       return client;
     })();
@@ -166,22 +178,46 @@ export class CuaProvider {
     if (Object.keys(nativeArgs).some(k=>!Object.hasOwn(permitted,k)) ||
       (tool.inputSchema.required||[]).some(k=>!Object.hasOwn(nativeArgs,k)))
       return failure('invalid_arguments');
+    let dispatched=false;
     try {
       const target=this.#target(environment_id);
       const client=await this.#get(owner,target);
-      // Native Cua tools validate their own official input schema.
-      // Never modify tool arguments or substitute another target on failure.
-      return await client.callTool({name, arguments:nativeArgs});
+      const current=this.sessions.get(sessionKey(owner,target.id));
+      if(!current || current.client!==client) throw Error('computer_session_lost');
+      current.active++;
+      current.lastUsed=this.clock();
+      try {
+        // The Cua server validates the official native input schema.
+        // Model arguments cannot override the transport lease or Host identity.
+        dispatched=true;
+        return await client.callTool({name,arguments:nativeArgs});
+      } finally {
+        current.active--;
+        current.lastUsed=this.clock();
+      }
     } catch (e) {
-      const code = e.message;
+      const code=e?.message;
       if (['environment_not_found','environment_access_denied','computer_not_available',
         'computer_generation_changed','computer_version_mismatch',
-        'computer_session_lost','invalid_owner','computer_provider_closed'].includes(code))
+        'computer_session_lost','invalid_owner','computer_provider_closed',
+        'computer_slots_busy','computer_host_offline'].includes(code))
         return failure(code);
-      // A transport failure during a GUI mutation has an unknown outcome.
-      // Never automatically replay click/type/set_value/etc.
-      return failure('computer_transport_unavailable',!READ_TOOLS.has(name));
+      // Before dispatch, nothing could have mutated. After dispatch an
+      // action transport failure is ambiguous; never replay automatically.
+      return failure('computer_transport_unavailable',dispatched&&!READ_TOOLS.has(name));
     }
+  }
+
+  async reapIdle() {
+    if (this.stopped)return;
+    const stale=[];
+    for (const [key,item] of this.sessions) {
+      if(item.active===0 && this.clock()-item.lastUsed>=this.idleMs) {
+        this.sessions.delete(key);
+        stale.push(item.client);
+      }
+    }
+    await Promise.allSettled(stale.map(client=>client.close()));
   }
 
   async closeOwner(owner) {
@@ -191,6 +227,7 @@ export class CuaProvider {
   }
   async close() {
     this.stopped=true;
+    clearInterval(this.reaper);
     await Promise.allSettled([...this.pending.values()]);
     await Promise.allSettled([...this.sessions.values()].map(x=>x.client.close()));
     this.sessions.clear();this.pending.clear();

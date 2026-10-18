@@ -175,9 +175,11 @@ export class OutboundHostRelay {
     if (this.stopped || target.computer?.transport!=='outbound') throw disconnected();
     this.registry.resolve(target.id);
     const peers=this.computerPeers.get(target.id);
-    const entry=[...(peers??[])].find(e=>!e.claimed && !e.closed &&
+    const connected=[...(peers??[])].filter(e=>!e.closed &&
       e.generation===target.generation && e.ws?.readyState===WebSocket.OPEN);
-    if(!entry) throw disconnected();
+    if(!connected.length) throw Error('computer_host_offline');
+    const entry=connected.find(e=>!e.claimed);
+    if(!entry) throw Error('computer_slots_busy');
     entry.claimed=true;
     // Each MCP owner exclusively claims one independent Host-originated WS
     // connected to exactly one native Cua stdio MCP server process.

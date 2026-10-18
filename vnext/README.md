@@ -147,3 +147,35 @@ With the verified Cua binary present at its isolated pilot path:
     STYX_LIVE_CUA_TEST=1 npm test
 
 See docs/outbound-computer.md and gateway/test/computer-outbound.test.mjs.
+
+
+## Documented native Cua behavior and unattended Wayland acceptance
+
+Cua v0.36.0 is the source of truth for macOS, Linux and Windows native tools.
+Before changing a Cua-related execution path, consult the tag-pinned
+docs/cua-0.36-source-contract.md and the linked official source files.
+
+Linux native Wayland support explicitly requires the trusted Host environment
+setting CUA_DRIVER_RS_ENABLE_WAYLAND=1, per Cua's platform support documentation.
+The Styx Host example config provides this opt-in. With the setting present,
+a real Cua 0.36.0 MCP process was able to find an owned Hyprland Wayland
+test window, capture PNG + accessibility tree, click its observed button and
+independently verify exit code zero over Styx's outbound Computer lane.
+
+For unattended owned-window acceptance on a Linux graphical Host, first
+prepare the official checksum-verified Codex/Cua binaries, set
+STYX_CUA_NATIVE_BINARY to the absolute Cua executable path, then run:
+
+    npm run test:native:cua
+
+This is an **explicitly opt-in** real GUI test which only operates on its own
+scratch Zenity dialog; it fails BLOCKED when the native graphical session or
+binary/fixture is unavailable. It does not start an unattended production
+daemon, change the compositor, modify host TCC/permission grants, or touch
+personal application windows.
+
+The Gateway uses a model-session-scoped Cua Transport Lease. An explicit MCP
+session DELETE frees it immediately; an abandoned idle lease is reaped after
+five minutes to avoid exhausting the Host's small native connection pool.
+This is Styx resource management, not a replacement for Cua's own session
+semantics. The original MCP SDK Client.close() by itself does not send DELETE.

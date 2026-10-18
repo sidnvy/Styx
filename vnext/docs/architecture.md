@@ -96,3 +96,24 @@ On macOS a signed Styx.app owns the embedded native Cua daemon; the Host
 Connector only proxies to its socket. On Windows and Linux Cua mcp directly
 owns its worker in the interactive session. The Windows/Hyprland native
 Driver acceptance gates remain separate from MCP compatibility.
+
+
+## Cua upstream lifecycle reconciliation (v0.36.0)
+
+Styx uses Cua's documented implicit transport-scoped Session, not a new
+desktop action or session protocol. Native stdio on Windows/Linux owns
+the runtime; a macOS Embedded proxy connects with mcp --embedded --socket
+to the daemon spawned by the signed GUI app. An explicitly configured
+Linux Host opts into native Wayland via CUA_DRIVER_RS_ENABLE_WAYLAND=1.
+
+Styx resource ownership is distinct from native Cua lifecycle: an HTTP MCP
+model session may retain a Host Computer WebSocket after Client.close()
+because the installed MCP SDK sends DELETE only through terminateSession().
+Closing an explicit Gateway MCP session releases the Cua lease. If the model
+session is abandoned, the Gateway releases its otherwise idle Computer lease
+after five minutes while protecting active tool calls. Native Cua is still
+responsible for rejecting old snapshot tokens after session expiry.
+
+See docs/cua-0.36-source-contract.md for upstream source links and qualified
+test evidence. A legacy production desktop core is not required by this
+design.

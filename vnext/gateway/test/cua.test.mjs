@@ -113,3 +113,65 @@ test('Windows absolute paths use Windows rules regardless of gateway OS',()=>{
   assert.equal(r.resolve().platform,'win32');
   assert.ok(r.list()[0].capabilities.includes('computer'));
 });
+
+test('an idle Styx transport lease expires at the documented five-minute boundary',async()=>{
+  let clock=0,open=0,closed=0;
+  const f=fixture();
+  const broker=new CuaProvider({registry:f.registry,
+    connect:async()=> {
+      open++;
+      return {
+        getServerVersion(){return {name:'cua-driver',version:'0.36.0'}},
+        async callTool(){return {structuredContent:{open},content:[]}},
+        async close(){closed++}
+      };
+    },
+    idleMs:300000,reapIntervalMs:30000,clock:()=>clock
+  });
+  try{
+    let result=await broker.callTool('list_apps',{},'owner');
+    assert.equal(result.structuredContent.open,1);
+    clock=299999;
+    await broker.reapIdle();
+    assert.equal(closed,0);
+    clock=300000;
+    await broker.reapIdle();
+    assert.equal(closed,1);
+    result=await broker.callTool('list_apps',{},'owner');
+    assert.equal(result.structuredContent.open,2);
+  }finally{
+    await broker.close();
+  }
+});
+
+test('an active native Cua action is never released by idle transport reaper',async()=>{
+  let clock=0,closed=0,resolveAction;
+  const gate=new Promise(resolve=>{resolveAction=resolve});
+  const f=fixture();
+  const broker=new CuaProvider({registry:f.registry,
+    connect:async()=> ({
+      getServerVersion(){return {name:'cua-driver',version:'0.36.0'}},
+      async callTool(){await gate;return {structuredContent:{effect:'confirmed'},content:[]}},
+      async close(){closed++}
+    }),idleMs:300000,reapIntervalMs:30000,clock:()=>clock
+  });
+  try{
+    const call=broker.callTool('click',{element_token:'test'},'owner');
+    for(let i=0;broker.sessions.size===0&&i<20;i++)
+      await new Promise(resolve=>setImmediate(resolve));
+    assert.equal(broker.sessions.size,1);
+    clock=400000;
+    await broker.reapIdle();
+    assert.equal(closed,0);
+    resolveAction();
+    await call;
+    await broker.reapIdle();
+    assert.equal(closed,0);
+    clock=700001;
+    await broker.reapIdle();
+    assert.equal(closed,1);
+  }finally{
+    resolveAction();
+    await broker.close();
+  }
+});

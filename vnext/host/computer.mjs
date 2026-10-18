@@ -37,6 +37,19 @@ export function computerConfig(config) {
   return {...c,computer:{...driver,connections},computerEndpoint:endpoint.href};
 }
 
+
+// Documented Cua v0.36.0 launch shapes:
+// - Windows/Linux: bare mcp owns runtime unless a daemon socket is used.
+// - macOS Embedded: mcp --embedded --socket <app-owned-private-socket>
+//   attaches to a daemon spawned by the signed GUI application.
+export function computerMcpArgs(driver,{platform=process.platform}={}) {
+  if(platform==='darwin') {
+    if(!driver.socket)throw Error('macos_requires_embedded_cua_socket');
+    return ['mcp','--embedded','--socket',driver.socket];
+  }
+  return ['mcp',...(driver.socket?['--socket',driver.socket]:[])];
+}
+
 export async function connectComputerOnce(config,{signal,onReady}={}) {
   const c=computerConfig(config);
   if(!c)throw Error('computer_not_configured');
@@ -54,10 +67,11 @@ export async function connectComputerOnce(config,{signal,onReady}={}) {
   const abort=()=>stop();
   signal?.addEventListener('abort',abort,{once:true});
   try {
-    const args=['mcp',...(c.computer.socket?['--socket',c.computer.socket]:[])];
+    const args=computerMcpArgs(c.computer);
     child=spawn(c.computer.binary,args,{
       cwd:c.exec.cwd,windowsHide:true,
       env:{...process.env,DO_NOT_TRACK:'1',CUA_DRIVER_RS_TELEMETRY_ENABLED:'false',
+        ...(process.platform==='darwin'?{CUA_DRIVER_EMBEDDED:'1'}:{}),
         ...(c.computer.env??{})},
       stdio:['pipe','pipe','pipe']
     });

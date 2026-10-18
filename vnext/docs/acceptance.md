@@ -31,3 +31,24 @@ dispatch alone is not proof of an actual state change.
 
 No production service, user authorization or Tunnel configuration changed.
 GO for additive implementation; NO-GO for production cutover.
+
+## Additional Cua v0.36.0 source audit and isolated regression — 2026-10-18
+
+- PASS: tag-pinned upstream CLI, process/session, proxy, embedding, Wayland
+  and tool reference contracts checked directly against source.
+- PASS: native Hyprland Wayland scratch via Styx outbound Cua MCP:
+  list_windows(pid) -> get_window_state(PNG + AX tree) -> click(element_token)
+  -> independent scratch process readback exit code 0.
+- PASS: Cua Host connection pool separates owners and reports
+  computer_slots_busy for lease exhaustion, without inventing generic
+  execution errors or replaying uncertain actions.
+- PASS: explicit HTTP MCP terminateSession() permits immediate native lease
+  release; Client.close() alone does not imply a server-side DELETE.
+- PASS: unattended resource cleanup reaps genuinely idle native transport
+  leases at five minutes without terminating an active tool call.
+- PASS: macOS Embedded Cua stdio proxy uses upstream documented
+  mcp --embedded --socket against an app-owned daemon.
+- NOT RUN: physical cross-host Cua GUI action acceptance and Windows
+  scratch GUI action. The loopback native GUI proof does not imply these pass.
+
+Source documentation and evidence: docs/cua-0.36-source-contract.md.

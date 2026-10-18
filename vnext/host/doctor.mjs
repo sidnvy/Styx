@@ -21,7 +21,7 @@ async function version(binary) {
   return result?stdout.trim().slice(0,120):null;
 }
 export async function doctor(config,{platform=process.platform}={}) {
-  const checks={}, blockers=[];
+  const checks={}, blockers=[],warnings=[];
   let normalized;
   try {normalized=normalizeConnector(config);checks.configuration='ok'}
   catch {checks.configuration='invalid';blockers.push('invalid_host_configuration')}
@@ -59,9 +59,19 @@ export async function doctor(config,{platform=process.platform}={}) {
         process.env.DISPLAY ? 'x11' : 'headless');
   checks.native_gui=graphical;
   if(platform==='linux' && graphical==='headless')blockers.push('desktop_session_unavailable');
+  if(normalized?.computer?.enabled && platform==='linux' && graphical==='wayland'){
+    const nativeFlag=normalized.computer.env?.CUA_DRIVER_RS_ENABLE_WAYLAND ??
+      process.env.CUA_DRIVER_RS_ENABLE_WAYLAND;
+    checks.cua_wayland=nativeFlag==='1'?'native_opted_in':'xwayland_fallback';
+    if(nativeFlag!=='1') warnings.push('native_wayland_requires_explicit_opt_in');
+  }
+  if(normalized?.computer?.enabled && platform==='darwin' && !normalized.computer.socket){
+    checks.cua_embedded='blocked';
+    blockers.push('macos_requires_embedded_cua_socket');
+  }
   return {product:'styx-vnext',platform,architecture:os.arch(),
     status:blockers.length?'blocked':'ready_for_exec',
-    checks,blockers};
+    checks,blockers,warnings};
 }
 if (process.argv[1] && path.resolve(process.argv[1])===fileURLToPath(import.meta.url)) {
   const cfgFile=process.argv[2];

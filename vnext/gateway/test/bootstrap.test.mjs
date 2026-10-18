@@ -57,3 +57,48 @@ test('mTLS certificate pin is an alternate Host identity, never bearer fallback'
     ...base,exec:authRemoved
   }]}),/outbound Host authentication/);
 });
+
+test('Cua 0.36.0 native process launch modes follow upstream documentation',async()=>{
+  const {computerMcpArgs}=await import('../../host/computer.mjs');
+  assert.deepEqual(computerMcpArgs({}, {platform:'linux'}),['mcp']);
+  assert.deepEqual(computerMcpArgs({}, {platform:'win32'}),['mcp']);
+  assert.deepEqual(computerMcpArgs({socket:'/tmp/cua.sock'},{platform:'linux'}),
+    ['mcp','--socket','/tmp/cua.sock']);
+  assert.deepEqual(computerMcpArgs({socket:'/private/tmp/app-owned.sock'},{platform:'darwin'}),
+    ['mcp','--embedded','--socket','/private/tmp/app-owned.sock']);
+  assert.throws(()=>computerMcpArgs({},{platform:'darwin'}),
+    /macos_requires_embedded_cua_socket/);
+});
+
+test('Host doctor reports native Wayland opt-in separately from Exec readiness',async()=>{
+  const old=process.env.WAYLAND_DISPLAY, oldFlag=process.env.CUA_DRIVER_RS_ENABLE_WAYLAND;
+  const root=await (await import('node:fs/promises')).mkdtemp(
+    (await import('node:path')).join((await import('node:os')).tmpdir(),'styx-cua-doctor-'));
+  try{
+    process.env.WAYLAND_DISPLAY='styx-virtual-session';
+    delete process.env.CUA_DRIVER_RS_ENABLE_WAYLAND;
+    const {writeFile,rm}=await import('node:fs/promises');
+    const {join}=await import('node:path');
+    const privateToken=join(root,'secret.token');
+    await writeFile(privateToken,'b'.repeat(50),{mode:0o600});
+    const options={
+      host_id:'native-demo',gateway_ws_url:'wss://example.invalid',
+      token_file:privateToken,
+      exec:{binary:process.execPath,cwd:root},
+      computer:{enabled:true,binary:'/usr/bin/cua-driver'}
+    };
+    let report=await doctor(options,{platform:'linux'});
+    assert.equal(report.checks.cua_wayland,'xwayland_fallback');
+    assert.ok(report.warnings.includes('native_wayland_requires_explicit_opt_in'));
+    report=await doctor({...options,computer:{...options.computer,
+      env:{CUA_DRIVER_RS_ENABLE_WAYLAND:'1'}}},{platform:'linux'});
+    assert.equal(report.checks.cua_wayland,'native_opted_in');
+    assert.ok(!report.warnings.includes('native_wayland_requires_explicit_opt_in'));
+  }finally{
+    if(old===undefined)delete process.env.WAYLAND_DISPLAY;
+    else process.env.WAYLAND_DISPLAY=old;
+    if(oldFlag===undefined)delete process.env.CUA_DRIVER_RS_ENABLE_WAYLAND;
+    else process.env.CUA_DRIVER_RS_ENABLE_WAYLAND=oldFlag;
+    await (await import('node:fs/promises')).rm(root,{recursive:true,force:true});
+  }
+});

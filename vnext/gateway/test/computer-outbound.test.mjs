@@ -42,7 +42,9 @@ async function setup(t,{slots=2,native=false}={}){
   const fixture=path.resolve('gateway/test/fixtures/cua-driver-mcp.mjs');
   await fs.chmod(fixture,0o755);
   const computerBinary=native
-    ? '/tmp/styx-cua-linux-Hp38ba/cua-driver' : fixture;
+    ? process.env.STYX_CUA_NATIVE_BINARY : fixture;
+  if(native && (!computerBinary || !path.isAbsolute(computerBinary)))
+    throw Error('STYX_CUA_NATIVE_BINARY_required');
   const target={id:'cua-pilot',kind:'host',platform:'linux',generation:'g1',
     allowed:true,cwd:tmp,shell:'/bin/sh',shells:['/bin/sh'],
     exec:{transport:'outbound',token_file:tokenFile},
@@ -56,7 +58,8 @@ async function setup(t,{slots=2,native=false}={}){
     token_file:tokenFile,
     exec:{binary:path.resolve('packages/styx-exec-adapter/.runtime/codex'),cwd:tmp,
       env:{CODEX_HOME:path.join(tmp,'codex-home')}},
-    computer:{enabled:true,binary:computerBinary,connections:slots}};
+    computer:{enabled:true,binary:computerBinary,connections:slots,
+      ...(native?{env:{CUA_DRIVER_RS_ENABLE_WAYLAND:'1'}}:{})}};
   await fs.mkdir(cfg.exec.env.CODEX_HOME);
   const cfgPath=path.join(tmp,'host.json');
   await fs.writeFile(cfgPath,JSON.stringify(cfg),{mode:0o600});
@@ -74,6 +77,9 @@ async function setup(t,{slots=2,native=false}={}){
       });
     const client=new Client({name:'styx-cua-session-test',version:'0.1.0'});
     await client.connect(transport);
+    // Client.close() does not send HTTP Session DELETE. Expose this only to
+    // the test so the immediate-release path exercises terminateSession().
+    client.testTransport=transport;
     clients.push(client);
     return client;
   }
@@ -103,7 +109,7 @@ test('dedicated Cua MCP connection per owner; cannot reuse another lease',
   assert.deepEqual(one.structuredContent.args,{});
   const denied=await call(c);
   assert.equal(denied.isError,true);
-  assert.equal(denied.structuredContent.error,'computer_transport_unavailable');
+  assert.equal(denied.structuredContent.error,'computer_slots_busy');
   assert.equal(gateway.relay.computerConnected('cua-pilot'),2);
   const still=await call(b);
   assert.equal(still.structuredContent.lease,leaseB);
@@ -137,4 +143,99 @@ test('real native Cua Driver over loopback reverse MCP, read-only',
   const res=await c.callTool({name:'list_apps',arguments:{}});
   assert.notEqual(res.isError,true);
   assert.ok(Array.isArray(res.structuredContent?.apps));
+});
+
+test('real Cua on owned Wayland scratch: list window, screenshot, AX and action readback',
+  {skip:!canRun || process.env.STYX_LIVE_CUA_GUI_TEST!=='1',timeout:45000},async t=>{
+  const {newClient}=await setup(t,{slots:1,native:true});
+  const {spawn}=await import('node:child_process');
+  const title='STYX_CUA_OWNED_SESSION_PROOF_'+process.pid+'_'+Date.now();
+  const fixture=spawn('/usr/bin/zenity',['--question',
+    '--title='+title,
+    '--text=Owned test dialog, not a personal application',
+    '--ok-label=Styx Verify Click','--cancel-label=Cancel'],{
+    env:{...process.env,GDK_BACKEND:'wayland'},stdio:'ignore'
+  });
+  t.after(async()=>{
+    if(fixture.exitCode===null && fixture.signalCode===null)fixture.kill('SIGTERM');
+  });
+  const mcp=await newClient();
+  async function call(name,args){
+    const result=await mcp.callTool({name,arguments:args});
+    if(result.isError){
+      throw Error(name+'_error_'+result.structuredContent?.error);
+    }
+    return result;
+  }
+  const app=await call('list_apps',{});
+  assert.ok(Array.isArray(app.structuredContent?.apps));
+  let window;
+  for(let i=0;i<20;i++){
+    const r=await call('list_windows',{pid:fixture.pid,on_screen_only:false});
+    const windows=r.structuredContent?.windows??r.structuredContent?.data?.windows??[];
+    window=windows.find(x=>String(x.title||'')===title);
+    if(window)break;
+    await wait(120);
+  }
+  assert.ok(window,'owned window discovery failed');
+  const pid=Number(window.pid),id=Number(window.window_id);
+  assert.equal(pid,fixture.pid);
+  const state=await call('get_window_state',{pid,window_id:id,tree_format:'elements',
+    include_screenshot:true,max_elements:80});
+  const elements=state.structuredContent?.elements??[];
+  const screenshot=state.content?.some(x=>x.type==='image'&&x.mimeType==='image/png');
+  assert.equal(screenshot,true,'native Cua screenshot required');
+  const button=elements.find(x=>String(x.label??'').includes('Styx Verify Click'));
+  assert.ok(button?.element_token,'native Cua accessibility button not found');
+  const reply=await call('click',{pid,window_id:id,element_token:button.element_token});
+  assert.notEqual(reply.isError,true);
+  for(let i=0;i<18&&fixture.exitCode===null;i++)await wait(150);
+  assert.equal(fixture.exitCode,0,'independent owned-window exit must confirm action');
+  console.log(JSON.stringify({nativeCuaVersion:'0.36.0',ownedPid:pid,verified:true,
+    screenshot:true,elementCount:elements.length,action:'owned_button'}));
+});
+
+
+test('after closing a model MCP lease, the Host recycles its one native Cua worker',
+  {skip:!canRun,timeout:16000},async t=>{
+  const {newClient,gateway}=await setup(t,{slots:1});
+  const first=await newClient();
+  const a=await first.callTool({name:'list_apps',arguments:{}});
+  assert.equal(a.isError,false);
+  const leaseA=a.structuredContent.lease;
+  assert.equal(gateway.computer.sessions.size,1);
+  assert.equal(gateway.relay.computerConnected('cua-pilot'),1);
+  // The MCP SDK exposes session DELETE separately from Client.close().
+  // An explicitly terminated transport lease must release its Cua worker.
+  await first.testTransport.terminateSession();
+  await first.close();
+  await until(()=>gateway.computer.sessions.size===0);
+  await until(()=>gateway.relay.computerConnected('cua-pilot')===1 &&
+    [...gateway.relay.computerPeers.get('cua-pilot')].every(e=>!e.claimed));
+  const second=await newClient();
+  const b=await second.callTool({name:'list_apps',arguments:{}});
+  assert.equal(b.isError,false);
+  assert.notEqual(b.structuredContent.lease,leaseA);
+});
+
+test('Gateway five-minute abandoned lease cleanup frees the Cua Host worker',
+  {skip:!canRun,timeout:16000},async t=>{
+  const {newClient,gateway}=await setup(t,{slots:1});
+  const first=await newClient();
+  const a=await first.callTool({name:'list_apps',arguments:{}});
+  const leaseA=a.structuredContent.lease;
+  assert.ok(leaseA);
+  // Simulate five-minute idle in the test-only broker; no real waiting.
+  const session=[...gateway.computer.sessions.values()][0];
+  await first.close(); // No HTTP DELETE, so Gateway still owns the Cua lease.
+  assert.equal(gateway.computer.sessions.size,1);
+  session.lastUsed=Date.now()-5*60*1000-2000;
+  await gateway.computer.reapIdle();
+  assert.equal(gateway.computer.sessions.size,0);
+  await until(()=>gateway.relay.computerConnected('cua-pilot')===1 &&
+    [...gateway.relay.computerPeers.get('cua-pilot')].every(e=>!e.claimed));
+  const second=await newClient();
+  const b=await second.callTool({name:'list_apps',arguments:{}});
+  assert.equal(b.isError,false);
+  assert.notEqual(b.structuredContent.lease,leaseA);
 });

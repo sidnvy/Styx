@@ -3,12 +3,15 @@
   "private": true,
   "type": "module",
   "version": "0.1.0",
-  "engines": {"node": ">=22"},
+  "engines": {
+    "node": ">=22"
+  },
   "scripts": {
     "test": "node --test --test-concurrency=1 gateway/test/*.test.mjs",
     "test:exec": "node --test --test-concurrency=1 packages/styx-exec-adapter/test/*.test.mjs",
     "test:gui": "node --test --test-concurrency=1 packages/styx-gui-broker/test/*.test.mjs",
-    "test:all": "npm run test && npm run test:exec && npm run test:gui"
+    "test:all": "npm run test && npm run test:exec && npm run test:gui",
+    "test:native:cua": "node host/run-native-cua.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.30.1",
