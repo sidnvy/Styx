@@ -192,3 +192,17 @@ test('unconfirmed stop or durable restart inhibition never switches pointer, boo
     confirmStopped:ctx=>{assert.equal(ctx.restartInhibitionRequired,true);return true}});
   assert.equal(recovered.status,'recovered_stopped');assert.equal(starts,0);
 });
+
+
+test('corrupted pointer evidence cannot restore an unrelated version or invoke recovery observer',async t=>{
+  const f=fixture(t);
+  const result=await updateServiceRelease({...f.args,...callbacks([]),startService:()=>{throw Error('uncertain')}});
+  const record=inspectServiceUpdate({...f.args,transactionId:result.transactionId});
+  const original=JSON.parse(record.originalPointer);original.version='other';
+  record.originalPointer=JSON.stringify(original);record.expectedPointer=record.candidatePointer;
+  fs.writeFileSync(path.join(f.installRoot,'update-transactions',result.transactionId+'.json'),JSON.stringify(record));
+  let observations=0;
+  await assert.rejects(recoverServiceUpdate({...f.args,transactionId:result.transactionId,
+    confirmStopped:()=>{observations++;return true}}),/invalid_update_receipt/);
+  assert.equal(observations,0);assert.equal(activeRelease(f.installRoot,f.publicKeyPem).version,'candidate');
+});

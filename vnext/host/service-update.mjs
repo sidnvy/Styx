@@ -170,12 +170,38 @@ export async function updateServiceRelease({installRoot,version,publicKeyPem,
   }catch(error){return failure(ctx,error)}
 }
 
+function validateReceipt(record,transactionId){
+  const phases=['prepared','stop_intent','stopped','switch_intent','switched',
+    'start_intent','health_intent','rollback_stop_intent','rollback_switch_intent',
+    'rollback_switched','rollback_start_intent','rollback_health_intent',
+    'recovery_observe_intent','recovery_switch_intent',...terminal];
+  assert(record&&record.schema===1&&record.transactionId===transactionId&&
+    phases.includes(record.phase)&&versionPattern.test(record.previousVersion??'')&&
+    versionPattern.test(record.candidateVersion??'')&&record.previousVersion!==record.candidateVersion&&
+    /^[a-f0-9]{64}$/.test(record.previousManifest??'')&&
+    /^[a-f0-9]{64}$/.test(record.candidateManifest??'')&&
+    ['linux','darwin','win32'].includes(record.platform),'invalid_update_receipt');
+  let original,candidate;
+  try{original=JSON.parse(record.originalPointer);candidate=JSON.parse(record.candidatePointer)}
+  catch{throw Error('invalid_update_receipt')}
+  assert(original?.schema===1&&original.version===record.previousVersion&&
+    original.manifest_sha256===record.previousManifest&&candidate?.schema===1&&
+    candidate.version===record.candidateVersion&&candidate.previous===record.previousVersion&&
+    candidate.manifest_sha256===record.candidateManifest&&
+    [record.originalPointer,record.candidatePointer].includes(record.expectedPointer),
+    'invalid_update_receipt');
+  const names=['private-storage.mjs','installer.mjs','launch.mjs',record.platform==='win32'?'node.exe':'node'];
+  assert(Array.isArray(record.candidateBootstrap)&&record.candidateBootstrap.length===4&&
+    names.every(name=>record.candidateBootstrap.filter(entry=>entry.destination===name&&
+      /^[a-f0-9]{64}$/.test(entry.sha256??'')).length===1),'invalid_update_receipt');
+}
+
 export function inspectServiceUpdate({installRoot,transactionId}={}){
   requirePrivateDirectory(installRoot);
   const records=path.join(installRoot,'update-transactions');requirePrivateDirectory(records);
   const file=receiptFile(records,transactionId);
   requirePrivateFile(file);const record=JSON.parse(fs.readFileSync(file,'utf8'));
-  assert(record.schema===1&&record.transactionId===transactionId,'invalid_update_receipt');
+  validateReceipt(record,transactionId);
   return record;
 }
 
