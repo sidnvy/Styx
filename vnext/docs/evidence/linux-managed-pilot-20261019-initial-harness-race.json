@@ -1,0 +1,53 @@
+{
+  "schema": 1,
+  "kind": "linux-owned-managed-host-pilot",
+  "status": "FAIL",
+  "revision": "53087fbebfa34758868d0eb0bbc954de719a120c",
+  "runtime": {
+    "node": "22.23.3",
+    "codex": "0.163.0",
+    "cua": "0.36.0"
+  },
+  "binary_sha256": {
+    "node": "fde6a4bf8d0562f7751d1a2d6cb9b417c4cfe107bbcb0aa3e9a24e125e348f48",
+    "codex": "399ff69c431c066e40de318fba45c2b07f45a76b19939d247ee4828fc70c4215",
+    "cua": "d09deb163d5c505493c865c0882ccf261d460c515afe9df1ad1e5d4173f2a4f9"
+  },
+  "evidence": {
+    "signed_build": "PASS",
+    "signed_install": "PASS",
+    "managed_start_ready": "PASS",
+    "managed_restart": "FAIL",
+    "managed_sigkill_recovery": "NOT RUN",
+    "signed_upgrade": "NOT RUN",
+    "signed_rollback": "NOT RUN",
+    "owned_gui_screenshot_ax_action_readback": "NOT RUN",
+    "managed_uninstall": "PASS",
+    "secret_cleanup": "PASS",
+    "cold_install": "NOT RUN",
+    "publisher_trust_distribution": "NOT RUN",
+    "full_platform_24h_soak": "NOT RUN"
+  },
+  "boundaries": {
+    "gateway": "private loopback HTTPS/WSS with per-client test CA",
+    "service": "one explicitly named user systemd unit; no sudo, lingering or session changes",
+    "publisher": "ephemeral pilot Ed25519 key, not established distribution trust",
+    "gui": "self-expiring exact-title/pid owned scratch only; no screenshot bytes persisted"
+  },
+  "samples": [
+    {
+      "phase": "managed_start_ready",
+      "version": "0.1.0-managed-pilot-1",
+      "status": "PASS",
+      "service_active": true,
+      "exec_wss_connected": true,
+      "computer_wss_slots": 1,
+      "systemd_restarts": 0,
+      "signed_stable_node": true,
+      "signed_connector_generation": true
+    }
+  ],
+  "failed_phase": "managed_restart",
+  "reason": "service_not_running_expected_signed_generation",
+  "completed_at": "2026-10-18T16:41:30.266Z"
+}
