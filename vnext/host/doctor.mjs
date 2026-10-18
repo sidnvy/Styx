@@ -5,6 +5,7 @@ import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {normalizeConnector} from './connect.mjs';
 import {activeRelease} from './installer.mjs';
+import {requirePrivateFile} from './private-storage.mjs';
 
 // A local preflight only; no automatic service or OS permission changes.
 async function version(binary) {
@@ -82,17 +83,13 @@ export async function doctor(config,{platform=process.platform,
     checks.host_id=normalized.host_id;
     try {
       if(normalized.token_file){
-        const stat=fs.lstatSync(normalized.token_file);
+        requirePrivateFile(normalized.token_file);
         const token=fs.readFileSync(normalized.token_file,'utf8').trim();
-        if(!stat.isFile() || stat.isSymbolicLink() ||
-          (platform!=='win32' && (stat.mode & 0o077)) ||
-          !/^[A-Za-z0-9_-]{32,}$/.test(token))throw Error();
+        if(!/^[A-Za-z0-9_-]{32,}$/.test(token))throw Error();
       }else{
         const cert=fs.readFileSync(normalized.client_cert_file,'utf8');
-        const stat=fs.lstatSync(normalized.client_key_file);
-        if(!stat.isFile()||stat.isSymbolicLink()||
-          (platform!=='win32'&&(stat.mode&0o077))||
-          !cert.includes('BEGIN CERTIFICATE')||
+        requirePrivateFile(normalized.client_key_file);
+        if(!cert.includes('BEGIN CERTIFICATE')||
           !fs.readFileSync(normalized.client_key_file,'utf8').includes('BEGIN PRIVATE KEY'))
           throw Error();
       }
@@ -102,26 +99,34 @@ export async function doctor(config,{platform=process.platform,
       checks.host_credential='blocked';
       blockers.push('host_credential_unavailable');
     }
-    try {
-      const ver=await version(normalized.exec.binary);
-      checks.executor_version=ver;
-      if(!ver?.startsWith('codex-cli '))throw Error();
-      if(selected.release && !ver.startsWith('codex-cli 0.163.0'))
-        throw Error();
-    }catch{
-      checks.executor_version=null;
-      blockers.push('codex_executor_unavailable');
-    }
-    if(normalized.computer?.enabled){
+    // A requested signed installation must fail closed: never fall back to
+    // enrollment paths after signature/payload verification failed.
+    if(checks.signed_install!=='invalid' && checks.host_credential==='ok'){
       try {
-        const ver=await version(normalized.computer.binary);
-        checks.computer_version=ver;
-        if(selected.release && !ver?.startsWith('cua-driver 0.36.0'))
+        const ver=await version(normalized.exec.binary);
+        checks.executor_version=ver;
+        if(!ver?.startsWith('codex-cli '))throw Error();
+        if(selected.release && !/^codex-cli 0\.163\.0(?:$|\s)/.test(ver))
           throw Error();
       }catch{
-        checks.computer_version=null;
-        if(selected.release)blockers.push('signed_computer_runtime_unavailable');
+        checks.executor_version=null;
+        blockers.push('codex_executor_unavailable');
       }
+      if(normalized.computer?.enabled){
+        try {
+          const ver=await version(normalized.computer.binary);
+          checks.computer_version=ver;
+          if(selected.release && !/^cua-driver 0\.36\.0(?:$|\s)/.test(ver??''))
+            throw Error();
+        }catch{
+          checks.computer_version=null;
+          if(selected.release)blockers.push('signed_computer_runtime_unavailable');
+        }
+      }
+    }else{
+      checks.executor_version=null;
+      if(normalized.computer?.enabled)checks.computer_version=null;
+      checks.runtime_probe='not_run_preflight_blocked';
     }
     checks.gateway_transport=normalized.endpoint.startsWith('wss:')?'wss':'loopback_ws';
   }

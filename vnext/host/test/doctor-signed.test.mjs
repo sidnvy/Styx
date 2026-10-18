@@ -63,9 +63,17 @@ test('Doctor checks an actually signed active Host, not untrusted enrollment bin
   assert.ok(baseline.blockers.includes('codex_executor_unavailable'));
   await fs.writeFile(path.join(installRoot,'releases','0.1.0-signed','bin','codex'),
     '#!/bin/sh\nprintf "codex-cli 999.0\\n"\n');
-  const damaged=await doctor(config,{installRoot,trustPublicKeyFile:pub});
+  const marker=path.join(tmp,'untrusted-program-ran');
+  const untrusted=path.join(tmp,'untrusted-program');
+  await fs.writeFile(untrusted,'#!/bin/sh\nprintf invoked > "'+marker+'"\nprintf "codex-cli 0.163.0\\n"\n',{mode:0o700});
+  const damaged=await doctor({...config,exec:{...config.exec,binary:untrusted},
+    computer:{...config.computer,binary:untrusted}},
+    {installRoot,trustPublicKeyFile:pub});
   assert.equal(damaged.status,'blocked');
   assert.ok(damaged.blockers.includes('signed_install_unavailable'));
+  assert.equal(damaged.checks.runtime_probe,'not_run_preflight_blocked');
+  assert.equal(damaged.checks.executor_version,null);
+  await assert.rejects(fs.access(marker),{code:'ENOENT'});
 });
 test('Doctor never accepts only one of the trusted installed-release parameters',
   async()=>{

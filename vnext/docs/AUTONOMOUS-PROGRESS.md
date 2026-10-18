@@ -240,3 +240,18 @@ behavior with explicit timeout errors. No retry, ACL relaxation or skipped nativ
 test is introduced. Preserve the original failure; replacement CI must be read
 against its actual new head before any PASS claim. The existing frozen soak is
 evidence only for its recorded Linux implementation snapshot.
+
+## Continued independent work: Doctor trust boundary
+
+Baseline: `4e5d0f33d339f15ae1367240d572de8bbc391e37`. Doctor now stops
+all runtime version probes if selected signed-install validation or native
+credential privacy fails. It reuses the UID/SID/NTFS checker used by the Host
+connector. Previously invalid signed selection could fall back to raw enrollment
+binary paths, and Doctor did not enforce Windows DACL/native owner checks.
+Files: host/doctor.mjs; host/test/doctor-{signed,private}.test.mjs.
+Native Linux Node22.23.3 focused tests: 6 passed, zero skipped; includes an
+executable marker proving no fallback program runs after signed payload damage.
+Windows/macOS execution of the new cases remains dependent on subsequent CI.
+Physical device, signed GUI and account integration gates are unchanged.
+Final commit is the commit containing this entry; final consolidated receipt
+will record its full SHA and successor integration revision.
