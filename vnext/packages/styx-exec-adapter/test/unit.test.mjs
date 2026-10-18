@@ -298,3 +298,33 @@ test('genuine output gaps exceeding proven terminal event slots remain rejected'
     /invalid_executor_response/
   );
 });
+
+test('exit before output EOF retains session and UTF-8 decoder until closed drain', async () => {
+  const f=fixture(), initial=await f.start();
+  const empty={chunks:[],nextSeq:2,exited:true,closed:false,exitCode:0,failure:null};
+  f.options.reply=empty;
+  const early=await f.adapter.writeStdin({session_id:initial.session_id,yield_time_ms:0},owner);
+  assert.equal(early.session_id,initial.session_id);
+  assert.equal(early.exit_code,undefined);
+  const bytes=Buffer.from('你好');
+  f.options.reply={...empty,chunks:[{seq:2,stream:'stdout',chunk:bytes.subarray(0,2).toString('base64')}],nextSeq:3};
+  const partial=await f.adapter.writeStdin({session_id:initial.session_id,yield_time_ms:0},owner);
+  assert.equal(partial.output,'');assert.equal(partial.session_id,initial.session_id);
+  f.options.reply={...empty,chunks:[{seq:3,stream:'stdout',chunk:bytes.subarray(2).toString('base64')}],nextSeq:5,closed:true};
+  const tail=await f.adapter.writeStdin({session_id:initial.session_id,yield_time_ms:0},owner);
+  assert.equal(tail.output,'你好');assert.equal(tail.session_id,initial.session_id);
+  f.options.reply={...empty,nextSeq:5,closed:true};
+  const drained=await f.adapter.writeStdin({session_id:initial.session_id,yield_time_ms:0},owner);
+  assert.equal(drained.exit_code,0);assert.equal(drained.output,'');
+  assert.equal(f.adapter.sessions.size,0);
+  assert.equal(f.calls.filter(c=>c.method==='process/start').length,1);
+  assert.equal(f.calls.filter(c=>c.method==='process/write').length,0);
+});
+test('exited but open streams yield a retained session without a busy read loop', async () => {
+  const f=fixture(),initial=await f.start(),before=f.calls.length;
+  f.options.reply={chunks:[],nextSeq:2,exited:true,closed:false,exitCode:0,failure:null};
+  const result=await f.adapter.writeStdin({session_id:initial.session_id,yield_time_ms:30},owner);
+  assert.equal(result.session_id,initial.session_id);assert.equal(result.exit_code,undefined);
+  const reads=f.calls.slice(before).filter(c=>c.method==='process/read');
+  assert.ok(reads.length>=1&&reads.length<=8,'open streams must use bounded observation, not hot spin');
+});

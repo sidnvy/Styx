@@ -189,9 +189,11 @@ export class ExecAdapter {
       if (reply.failure !== null && reply.failure !== undefined) fail('execution_failed', r.id);
       for (const bytes of decoded) { chunks.push(bytes); size += bytes.length; }
       final = reply;
-      if (reply.exited && reply.chunks.length === 0) { drained = true; break; }
+      // Upstream exit may precede output EOF. Only closed plus an empty
+      // cursor page proves all stdout/stderr/PTY bytes have been drained.
+      if (reply.exited && reply.closed && reply.chunks.length === 0) { drained = true; break; }
       if (size >= tokens || (!reply.exited && decoded.length > 0)) break;
-      if (reply.exited) continue;
+      if (reply.exited && reply.closed) continue;
       const remaining = deadline - performance.now();
       if (remaining > 0) await delay(Math.min(10, remaining));
     } while (performance.now() < deadline);
