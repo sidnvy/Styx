@@ -10,7 +10,7 @@ import {createHash,createPublicKey,generateKeyPairSync,sign,randomUUID} from 'no
 import {ensurePrivateDirectory} from '../../host/private-storage.mjs';
 import {main} from '../cli.mjs';
 import {ownerCommand} from '../../gateway/enroll-admin.mjs';
-import {createDeployment,readDeployment,planDeployment,advanceDeployment,stopDeploymentGateway,validateDeployment,controlDeploymentHostService,createDeploymentPairingLink,listDeploymentPending,approveDeploymentPending} from '../core.mjs';
+import {createDeployment,readDeployment,planDeployment,advanceDeployment,stopDeploymentGateway,validateDeployment,controlDeploymentHostService,createDeploymentPairingLink,listDeploymentPending,approveDeploymentPending,localGatewayAddresses} from '../core.mjs';
 const sha=b=>createHash('sha256').update(b).digest('hex');
 async function fixture(t){
  const root=path.join(os.tmpdir(),'styx-onboarding-'+randomUUID());ensurePrivateDirectory(root);t.after(async()=>{const d=path.join(root,'deployment');if(fs.existsSync(d))await stopDeploymentGateway(d);fs.rmSync(root,{recursive:true,force:true});});
@@ -168,4 +168,17 @@ test('owner pairing link joins a fresh second deployment with explicit origin, C
  assert.equal((await reopened.approveDeploymentPending(f.stateDir,approved)).status,'approved');
  joined=await advanceDeployment(joinState,{authorize:['host.claim']});assert.equal(steps(joined)['host.claim'].status,'succeeded');
  const secret=fs.readFileSync(material.invitationFile,'utf8').trim();for(const state of [readDeployment(f.stateDir),joined]){assert.equal(JSON.stringify(state).includes(secret),false);assert.equal(JSON.stringify(state).includes(issued.link),false);}
+});
+
+test('network exposure requires explicit authorization and an exact owned IPv4 interface without binding LAN', {skip:process.platform!=='linux'},async t=>{
+ const f=await fixture(t);assert.equal(validateDeployment(f.config).gateway.listenHost,undefined);
+ const network=address=>({...f.config,gateway:{...f.config.gateway,url:'https://'+address+':18765',listenHost:address,allowRemoteHosts:true}});
+ for(const address of ['0.0.0.0','203.0.113.111','::','gateway.example'])assert.throws(()=>validateDeployment(network(address)));
+ assert.throws(()=>validateDeployment({...f.config,gateway:{...f.config.gateway,listenHost:'192.0.2.11',allowRemoteHosts:true}}),/gateway_url_must_match_exact_bind_ip/);
+ for(const address of localGatewayAddresses()){
+  assert.equal(validateDeployment(network(address)).gateway.listenHost,address);
+  const missing=network(address);delete missing.gateway.allowRemoteHosts;assert.throws(()=>validateDeployment(missing),/explicit_owned_network_interface_required/);
+ }
+ // Configuration validation is the only operation: no LAN listener or deployment is created.
+ assert.equal(fs.existsSync(f.stateDir),false);
 });

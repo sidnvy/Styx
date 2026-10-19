@@ -1,5 +1,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
+import {isIP} from 'node:net';
 import {randomBytes,createHash} from 'node:crypto';
 import {execFileSync} from 'node:child_process';
 import {ensurePrivateDirectory,requirePrivateDirectory,requirePrivateFile} from '../host/private-storage.mjs';
@@ -20,18 +22,23 @@ function read(file){requirePrivateFile(file);if(fs.statSync(file).size>1024*1024
 function write(file,value){const tmp=file+'.'+randomBytes(8).toString('hex')+'.tmp',fd=fs.openSync(tmp,'wx',0o600);try{fs.writeFileSync(fd,JSON.stringify(value,null,2)+'\n');fs.fsyncSync(fd);}finally{fs.closeSync(fd);}try{requirePrivateFile(tmp);fs.renameSync(tmp,file);if(process.platform!=='win32'){const dir=fs.openSync(path.dirname(file),'r');try{fs.fsyncSync(dir);}finally{fs.closeSync(dir);}}}finally{if(fs.existsSync(tmp))fs.unlinkSync(tmp);}}
 const hash=file=>createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 const evidenceFile=file=>({path:file,sha256:hash(file)});
-export function validateDeployment(config){
+export function localGatewayAddresses(){return [...new Set(Object.values(os.networkInterfaces()).flatMap(items=>items??[]).filter(x=>!x.internal&&isIP(x.address)===4).map(x=>x.address))].sort();}
+export function validateDeployment(config,{checkNetwork=true}={}){
  exact(config,['schema','mode','gateway','host','invitationFile','pairingMode']);
  if(config.schema!==1||!['create-local','join-existing'].includes(config.mode))fail('unsupported_deployment_schema_or_mode');
  if(config.pairingMode!==undefined&&!['manual','owner-local'].includes(config.pairingMode))fail('invalid_pairing_mode');
  if(config.mode==='join-existing'&&config.pairingMode==='owner-local')fail('join_requires_external_owner_approval');
- exact(config.gateway,['url','openssl','caFile']);
+ exact(config.gateway,['url','openssl','caFile','listenHost','allowRemoteHosts']);
  let u;try{u=new URL(config.gateway.url)}catch{fail('gateway_https_origin_required')}
  if(u.protocol!=='https:'||u.username||u.password||u.search||u.hash||u.pathname!=='/')fail('gateway_https_origin_required');
  if(config.mode==='create-local'){
-  if(u.hostname!=='127.0.0.1'||!u.port||Number(u.port)<1024||!abs(config.gateway.openssl)||config.gateway.caFile!==undefined)fail('local_gateway_requires_loopback_port_and_trusted_openssl');
+  if(!u.port||Number(u.port)<1024||!abs(config.gateway.openssl)||config.gateway.caFile!==undefined)fail('local_gateway_requires_port_and_trusted_openssl');
+  const listen=config.gateway.listenHost??'127.0.0.1';
+  if(isIP(listen)!==4||u.hostname!==listen)fail('gateway_url_must_match_exact_bind_ip');
+  if(config.gateway.allowRemoteHosts!==undefined&&typeof config.gateway.allowRemoteHosts!=='boolean')fail('invalid_network_exposure_authorization');
+  if(listen!=='127.0.0.1'&&(config.gateway.allowRemoteHosts!==true||checkNetwork&&!localGatewayAddresses().includes(listen)))fail('explicit_owned_network_interface_required');
   const st=fs.lstatSync(config.gateway.openssl);if(!st.isFile()||st.isSymbolicLink())fail('trusted_openssl_regular_file_required');
- }else if(config.gateway.openssl!==undefined)fail('join_cannot_prepare_gateway');
+ }else if(['openssl','listenHost','allowRemoteHosts'].some(k=>config.gateway[k]!==undefined))fail('join_cannot_prepare_gateway');
  if(config.gateway.caFile!==undefined&&!abs(config.gateway.caFile))fail('absolute_ca_file_required');
  exact(config.host,['bundle','publisherKeyFile','publisherSha256','baseDir','label','computer','macTeamID','wayland','shell']);
  for(const k of ['bundle','publisherKeyFile','baseDir'])if(!abs(config.host[k]))fail('absolute_host_paths_required');
@@ -42,7 +49,7 @@ export function validateDeployment(config){
  if(config.invitationFile!==undefined&&(!abs(config.invitationFile)||config.mode!=='join-existing'))fail('invalid_invitation_file');
  return config;
 }
-function load(d){if(!abs(d))fail('absolute_state_directory_required');requirePrivateDirectory(d);const config=read(filename(d,'deployment.json')),state=read(filename(d,'state.json'));validateDeployment(config);if(state.schema!==1||state.mode!==config.mode||state.configSha256!==hash(filename(d,'deployment.json'))||!Array.isArray(state.steps))fail('invalid_onboarding_state');return {config,state};}
+function load(d){if(!abs(d))fail('absolute_state_directory_required');requirePrivateDirectory(d);const config=read(filename(d,'deployment.json')),state=read(filename(d,'state.json'));validateDeployment(config,{checkNetwork:false});if(state.schema!==1||state.mode!==config.mode||state.configSha256!==hash(filename(d,'deployment.json'))||!Array.isArray(state.steps))fail('invalid_onboarding_state');return {config,state};}
 function publicState(d,state){
  const observations=[...state.steps.filter(s=>s.id.startsWith('host.service.')&&s.evidence).map(s=>({at:s.updatedAt,evidence:s.evidence})),...(state.maintenance??[])].filter(x=>x.evidence).sort((a,b)=>String(a.at??'').localeCompare(String(b.at??'')));
  const hostServiceMaintenance={lastObservation:observations.at(-1)?.evidence??null,hasUncertainMutation:(state.maintenance??[]).some(x=>['uncertain','running'].includes(x.status))||state.steps.some(x=>x.id.startsWith('host.service.')&&['uncertain','running'].includes(x.status)),history:(state.maintenance??[]).map(x=>({action:x.action,status:x.status,at:x.at}))};
@@ -85,21 +92,21 @@ function gatewayPaths(d){const root=filename(d,'gateway');return {root,cert:file
 function prepareGateway(d,c){
  const p=gatewayPaths(d);if(fs.existsSync(p.root))fail('gateway_directory_already_exists');ensurePrivateDirectory(p.root);
  for(const f of [p.model,p.admin])fs.writeFileSync(f,randomBytes(48).toString('base64url')+'\n',{flag:'wx',mode:0o600});
- execFileSync(c.gateway.openssl,['req','-x509','-newkey','rsa:2048','-nodes','-sha256','-days','30','-keyout',p.key,'-out',p.cert,'-subj','/CN=Styx local Gateway','-addext','subjectAltName=IP:127.0.0.1'],{stdio:'ignore',timeout:20000});
+ execFileSync(c.gateway.openssl,['req','-x509','-newkey','rsa:2048','-nodes','-sha256','-days','30','-keyout',p.key,'-out',p.cert,'-subj','/CN=Styx local Gateway','-addext','subjectAltName=IP:'+(c.gateway.listenHost??'127.0.0.1')],{stdio:'ignore',timeout:20000});
  fs.chmodSync(p.key,0o600);fs.chmodSync(p.cert,0o600);requirePrivateFile(p.key);requirePrivateFile(p.cert);
  write(p.catalog,{version:1,targets:[]});write(p.owner,{gateway_url:c.gateway.url,gateway_ca_file:p.cert,admin_token_file:p.admin});
- write(p.runtime,{schema:1,url:c.gateway.url,listenHost:'127.0.0.1',tlsCertificateFile:p.cert,tlsPrivateKeyFile:p.key,modelTokenFile:p.model,adminTokenFile:p.admin,enrollmentDir:filename(p.root,'enrollment'),catalogFile:p.catalog});
+ write(p.runtime,{schema:1,url:c.gateway.url,listenHost:c.gateway.listenHost??'127.0.0.1',tlsCertificateFile:p.cert,tlsPrivateKeyFile:p.key,modelTokenFile:p.model,adminTokenFile:p.admin,enrollmentDir:filename(p.root,'enrollment'),catalogFile:p.catalog});
  return {runtime:evidenceFile(p.runtime),certificate:evidenceFile(p.cert),ownerConfig:p.owner,ownerConfiguration:evidenceFile(p.owner),modelCredentialFile:p.model,tlsTrust:'dedicated_self_signed_ca_local_only',publicIngress:'NOT CONFIGURED'};
 }
 export async function startDeploymentGateway(d){
- const {config,state}=load(d);if(config.mode!=='create-local')fail('not_local_gateway');
+ const {config,state}=load(d);if(config.mode!=='create-local')fail('not_local_gateway');validateDeployment(config);verifyEvidence(state);
  if(live.has(d))return {status:'running',url:config.gateway.url,ownership:'current_process'};
  if(state.steps.find(s=>s.id==='gateway.prepare')?.status!=='succeeded')fail('gateway_prepare_required');
  const p=gatewayPaths(d),cfg=read(p.runtime);
  const {createStyxGateway}=await import('../gateway/index.mjs');const {createGatewayHttp}=await import('../gateway/http.mjs');const {EnrollmentController}=await import('../gateway/enrollment.mjs');
  const gateway=createStyxGateway({catalog:read(cfg.catalogFile)});
  const enrollment=new EnrollmentController({rootDir:cfg.enrollmentDir,adminTokenFile:cfg.adminTokenFile,registry:gateway.registry,relay:gateway.relay});
- let handle;try{handle=await createGatewayHttp(gateway,{token:fs.readFileSync(cfg.modelTokenFile,'utf8').trim(),host:'127.0.0.1',port:Number(new URL(cfg.url).port),allowedHosts:[new URL(cfg.url).host],tlsCertificateFile:cfg.tlsCertificateFile,tlsPrivateKeyFile:cfg.tlsPrivateKeyFile,enrollment});}catch(e){await gateway.close();throw e;}
+ let handle;try{handle=await createGatewayHttp(gateway,{token:fs.readFileSync(cfg.modelTokenFile,'utf8').trim(),host:cfg.listenHost,port:Number(new URL(cfg.url).port),allowedHosts:[new URL(cfg.url).host],tlsCertificateFile:cfg.tlsCertificateFile,tlsPrivateKeyFile:cfg.tlsPrivateKeyFile,enrollment});}catch(e){await gateway.close();throw e;}
  live.set(d,{http:handle,gateway,controller:enrollment});return {status:'running',url:cfg.url,ownership:'current_process',persistentService:'NOT INSTALLED'};
 }
 export async function stopDeploymentGateway(d){if(!abs(d))fail('absolute_state_directory_required');const h=live.get(d);if(!h)return {status:'not_owned_by_current_process'};let timer;try{await Promise.race([(async()=>{await h.gateway.relay.close();await h.http.close();})(),new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('gateway_shutdown_timed_out')),5000);})]);live.delete(d);}finally{clearTimeout(timer);}return {status:'stopped',ownership:'current_process'};}
@@ -117,7 +124,7 @@ export async function createDeploymentPairingLink(d,options={}){
  const g=ownedGateway(d),release=lock(d);
  try{const {createPairingLink}=await import('./pairing-links.mjs');
   const invitation=g.controller?g.controller.invite({ttl_seconds:600}):await ownerCommand(g.owner,'invite',['600']);
-  return {...createPairingLink({controller:{invite:()=>invitation},gatewayOrigin:g.config.gateway.url,approved:true,caPem:fs.readFileSync(gatewayPaths(d).cert,'utf8'),ttlSeconds:600}),reachability:'loopback_only',remoteUsable:false};
+  return {...createPairingLink({controller:{invite:()=>invitation},gatewayOrigin:g.config.gateway.url,approved:true,caPem:fs.readFileSync(gatewayPaths(d).cert,'utf8'),ttlSeconds:600}),reachability:(g.config.gateway.listenHost??'127.0.0.1')==='127.0.0.1'?'loopback_only':'local_interface_configured_unverified',remoteUsable:false,reachabilityVerification:'NOT RUN'};
  }catch{throw Error('owner_pairing_link_failed_inspect_private_gateway');}finally{release();}
 }
 function pendingPublic(items){
