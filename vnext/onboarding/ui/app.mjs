@@ -10,13 +10,14 @@ let linkInspection,joinLinkId;
 let serviceObservations={};
 let csrf,capabilities,deployment=null,dependencies=[],ownerPairingScope=null,locked=false;
 function message(text){notice.textContent=text;notice.hidden=false}
+const ERROR_MESSAGES={foreground_host_handoff_required:'检测到另一个前台设备进程。请先由 Styx 或 Codex 核实并交接该进程，再启用后台服务；没有启动重复进程。',tunnel_running_or_interrupted:'连接正在运行或上次中断尚未核实。请先停止并检查连接，再修改配置。',tunnel_client_integrity_failed:'内置连接组件校验失败，请重新获取完整的官方安装包。',background_uncertain_requires_reconciliation:'上次后台变更的结果不确定。已保留现场，请诊断后继续。',capability_uncertain_requires_reconciliation:'上次能力变更未完成，需先诊断；不会自动重复变更。'};
 async function api(route,{method='GET',data}={}){
  const response=await fetch('/api/'+route,{method,credentials:'omit',cache:'no-store',headers:{Authorization:'Bearer '+session,...(method==='POST'?{'Content-Type':'application/json','X-Styx-CSRF':csrf}:{})},...(data!==undefined?{body:JSON.stringify(data)}:{})});
  const value=await response.json();if(!response.ok)throw Error(value.error??'request_failed');return value;
 }
 function mode(){return new FormData(form).get('mode')}
 function fields(){
- const join=mode()==='join-existing';$('#join-fields').hidden=!join;
+ const join=mode()==='join-existing';$('#join-fields').hidden=!join;$('#gateway-address').hidden=!join&&!!capabilities?.packagedPreviewTrusted;
  form.elements.invitationFile.required=join&&!joinLinkId;$('#link-import').hidden=!join||!capabilities?.pairingLinkImportSupported;
  $('#mac-fields').hidden=!(capabilities?.platform==='darwin'&&form.elements.computer.checked&&!capabilities?.packagedPreviewTrusted);
  form.elements.macTeamID.required=!$('#mac-fields').hidden;
@@ -25,7 +26,7 @@ function fields(){
  $('#create').disabled=locked||(!join&&!capabilities?.localGatewayAvailable);
 }
 function render(){
- form.hidden=!!deployment;$('#progress').hidden=!deployment;$('#maintenance').hidden=!deployment;
+ form.hidden=!!deployment;$('#advanced-settings').hidden=!deployment;$('#account-connection').hidden=!deployment||!capabilities?.tunnelSupported;$('#progress').hidden=!deployment;$('#maintenance').hidden=!deployment;
  $('#pause').disabled=locked||!capabilities?.pauseSupported||deployment?.mode!=='create-local'||deployment?.gatewayRuntime!=='running';
  $('#start-gateway').disabled=locked||!capabilities?.startSupported||deployment?.mode!=='create-local'||deployment?.gatewayRuntime==='running'||!deployment?.steps.some(s=>s.id==='gateway.prepare'&&s.status==='succeeded');
  const gatewayStartup=capabilities?.gatewayService?.startEnablesStartup===true;
@@ -40,6 +41,16 @@ function render(){
  $('#create-link').disabled=locked;$('#list-pending').disabled=locked||!capabilities?.pendingApprovalSupported;
  $('#steps').replaceChildren();
  if(!deployment)return;
+ const prepared=deployment.steps.some(s=>s.id==='host.doctor'&&s.status==='succeeded');
+ const needsAttention=deployment.steps.some(s=>['uncertain','blocked','failed'].includes(s.status));
+ $('#setup-summary').textContent=prepared?'本机准备完成。后台运行、桌面权限和聊天连接将分别检查。':needsAttention?'设置需要处理一个问题，已保留进度。请查看技术详情或让 Codex 协助诊断。':'正在准备这台电脑。';
+ $('#continue-setup').hidden=deployment.mode!=='create-local'||prepared;
+ $('#continue-setup').disabled=locked||needsAttention;
+ $('#enable-background').hidden=deployment.mode!=='create-local'||!prepared||!capabilities?.backgroundSupported;
+ $('#enable-background').disabled=locked;
+ $('#device-settings').hidden=!prepared||deployment.mode!=='create-local';
+ for(const id of ['desktop-enable','desktop-disable','load-devices'])$('#'+id).disabled=locked;
+ if(needsAttention)$('#technical-progress').open=true;
  const running=deployment.gatewayRuntime==='running';
  $('#runtime').textContent=deployment.mode==='join-existing'?'加入现有环境；本页面不控制远端 Gateway。':running?'当前 Gateway：本设置进程正在运行。系统服务的安装和登录启动状态请在下方单独读取。':'当前 Gateway：本进程未持有运行实例。先前步骤记录不等于正在运行；不要重复执行结果不确定的操作。';
  for(const step of deployment.steps){
@@ -66,13 +77,13 @@ function render(){
  }
 }
 async function refresh(){
- try{const state=await api('status');deployment=state.deployment;dependencies=state.dependencies??[];ownerPairingScope=state.ownerPairingScope??null;serviceObservations=state.services??serviceObservations;locked=!!state.busy;render()}
+ try{const state=await api('status');deployment=state.deployment;dependencies=state.dependencies??[];ownerPairingScope=state.ownerPairingScope??null;serviceObservations=state.services??serviceObservations;locked=!!state.busy;render();if(state.deviceCapabilities?.computer!==null&&state.deviceCapabilities?.computer!==undefined)$('#desktop-setting-status').textContent='桌面能力：'+(state.deviceCapabilities.computer?'已启用':'已停用')+' · '+state.deviceCapabilities.status; if(state.tunnel)$('#tunnel-status').textContent='连接进程：'+({running:'正在运行（账号尚未验收）',configured:'已配置，未启动',not_configured:'尚未配置',interrupted:'上次运行中断，需检查'}[state.tunnel.status]??state.tunnel.status);if(state.background)$('#background-summary').textContent=state.background.status==='running'?'本机检查：连接服务与设备服务在后台运行（'+(state.background.observedAt??state.background.updatedAt??'时间未知')+'）。账号连接尚需单独验收。':'后台运行：'+state.background.status}
  catch{message('无法读取本地部署状态。请保留状态目录，查看本机诊断；不要删除状态后盲目重试。')}
 }
 async function mutate(route,data,success){
  if(locked)return;locked=true;message('正在执行已授权的操作，请保留此页面与本地状态目录。');render();fields();
  try{await api(route,{method:'POST',data});message(success)}
- catch{message('操作未完成。请先检查最新状态与本地诊断；结果不确定的步骤不会自动重放。')}
+ catch(error){message(ERROR_MESSAGES[error.message]??'操作未完成。请先检查最新状态与本地诊断；结果不确定的步骤不会自动重放。')}
  finally{locked=false;await refresh();fields()}
 }
 form.addEventListener('change',event=>{if(event.target.name==='listenHost'&&event.target.value){try{const url=new URL(form.elements.gatewayUrl.value);url.hostname=event.target.value;form.elements.gatewayUrl.value=url.origin}catch{}}if(event.target.name==='allowRemoteHosts'&&!event.target.checked){try{const url=new URL(form.elements.gatewayUrl.value);url.hostname='127.0.0.1';form.elements.gatewayUrl.value=url.origin}catch{}}if(['mode','gatewayUrl','invitationFile','caFile'].includes(event.target.name)){joinLinkId=null;$('#link-import-result').textContent='连接条件已改变，请重新检查配对链接或使用手动邀请文件。'}fields()});
@@ -84,8 +95,47 @@ form.addEventListener('submit',async event=>{
  if(capabilities.platform==='linux'&&values.has('wayland'))host.wayland=true;
  const gateway={url:values.get('gatewayUrl').trim()};if(!join&&values.has('allowRemoteHosts')){gateway.allowRemoteHosts=true;gateway.listenHost=values.get('listenHost');}if(join&&!joinLinkId&&values.get('caFile').trim())gateway.caFile=values.get('caFile').trim();
  const config={schema:1,mode:join?'join-existing':'create-local',gateway,host,...(join?(joinLinkId?{joinLinkId}:{invitationFile:values.get('invitationFile').trim()}):{})};
- await mutate('create',config,'配置已保存。请逐项授权执行，不会自动启动全部服务。');
+ await mutate('create',config,'配置已保存。');
+ if(!join&&deployment)await runLocalSetup();
 });
+async function runLocalSetup(){
+ if(locked||!ownerPairingScope)return;
+ const scope={approve:true,...ownerPairingScope};
+ await mutate('local-setup',{ownerApproval:scope},'本机设置操作已结束，请查看设备状态。');
+}
+$('#continue-setup').addEventListener('click',()=>{
+ if(!ownerPairingScope)return;
+ if(confirm('继续设置 '+ownerPairingScope.label+'？允许终端操作'+(ownerPairingScope.enableComputer?'及桌面控制（仍需系统授权）':'')+'，自动完成本机准备、配对与检查。'))void runLocalSetup();
+});
+$('#enable-background').addEventListener('click',async()=>{
+ if(locked||!confirm('允许 Styx 的连接服务和设备服务在后台运行，并在登录后自动启动？聊天账号连接和系统权限将单独验证。'))return;
+ await mutate('background',{authorize:true},'后台设置已返回，请查看实际状态。');
+});
+for(const [id,computer]of [['desktop-enable',true],['desktop-disable',false]])$('#'+id).addEventListener('click',()=>{
+ if(locked||!confirm((computer?'启用':'停用')+'这台设备的桌面控制？设备连接会短暂重启，正在执行的操作可能中断。'))return;
+ void mutate('capabilities',{authorize:true,computer},'能力设置已更新；请重新检查桌面权限与连接。');
+});
+$('#load-devices').addEventListener('click',async()=>{
+ if(locked)return;locked=true;render();
+ try{const result=await api('devices',{method:'POST',data:{}});const select=$('#default-device');select.replaceChildren();
+  for(const device of result.devices){const option=document.createElement('option');option.value=device.device_id;option.textContent=device.label+(device.is_default?'（默认）':'');option.selected=device.is_default;select.append(option)}
+  $('#device-setting-status').textContent=result.devices.some(d=>d.is_default)?'当前默认设备已标出。':'尚未选择默认设备，请选择后保存。';
+ }catch{message('无法读取设备，请确认本机连接服务正在运行。')}finally{locked=false;render()}
+});
+$('#default-device-form').addEventListener('submit',async event=>{
+ event.preventDefault();if(locked||!event.currentTarget.reportValidity())return;
+ await mutate('default-device',{authorize:true,deviceId:$('#default-device').value},'默认设备已保存。');
+});
+$('#tunnel-form').addEventListener('submit',async event=>{
+ event.preventDefault();const f=event.currentTarget;if(locked||!f.reportValidity())return;
+ const values=new FormData(f),data={tunnelId:values.get('tunnelId').trim(),apiKey:values.get('apiKey').trim(),authorize:values.has('authorize'),autoStart:values.has('autoStart')};
+ f.elements.apiKey.value='';locked=true;render();message('正在安全保存连接配置…');
+ try{await api('tunnel/configure',{method:'POST',data});data.apiKey='';await api('tunnel/start',{method:'POST',data:{authorize:true}});message('连接进程已启动；请完成账号连接并在聊天中验证一次工具调用。')}
+ catch{message('连接未完成。密钥不会显示在错误信息中；请检查连接状态。')}
+ finally{data.apiKey='';locked=false;await refresh()}
+});
+$('#tunnel-start').addEventListener('click',()=>mutate('tunnel/start',{authorize:true},'已请求启动连接，请检查状态。'));
+$('#tunnel-stop').addEventListener('click',()=>mutate('tunnel/stop',{authorize:true},'连接已停止。'));
 $('#refresh').addEventListener('click',refresh);
 $('#start-gateway').addEventListener('click',()=>mutate('start',{},'前台 Gateway 启动请求已完成，请检查当前运行状态。'));
 $('#pause').addEventListener('click',()=>mutate('pause',{},'停止请求已提交。请检查 Gateway 当前运行状态；部署步骤记录会保留。'));
@@ -138,12 +188,12 @@ else{
   if(capabilities.packagedPreviewTrusted){
    $('#artifacts summary').textContent='内置软件包 · 高级详情';
    $('#artifacts .hint').textContent='此预览版使用当前 App 内置的软件包，路径和校验信息已自动填写。App 未经 Apple 公证；请确认下载来源。';
-   $('#package-review').textContent='我确认使用此 App 内置的软件包，并已核对设备、连接方式与所选能力。每个执行步骤仍由我单独确认。';
+   $('#package-review').textContent='我确认使用此 App 内置的软件包，并已核对设备、连接方式与所选能力。授权 Styx 按所选能力准备并连接这台电脑；后台自动运行另行选择。';
   }
   form.hidden=false;fields();await refresh();
 
   if(!capabilities.localGatewayAvailable)message('本机尚未配置可信的 TLS 准备工具，创建本机 Gateway 暂不可用。可先加入现有环境，或由本地启动器配置可信工具后重新打开设置。');
   if(capabilities.trustedForwarding)message('正在使用明确配置的本机端口转发。请保持受信任的转发连接；不要把设置端口发布到局域网或公网。');
   setInterval(()=>{if(!document.hidden&&!locked)void refresh()},5000);
- }catch{$('#access').hidden=false;form.hidden=true;message('此设置会话已失效。请从本地终端重新打开当前私有链接。')}
+ }catch{$('#access').hidden=false;form.hidden=true;message('此设置会话已失效。请从 Styx 菜单重新打开 Setup / Settings。')}
 }

@@ -4,6 +4,10 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import net from 'node:net';
+import {completeLocalSetup} from './local-setup.mjs';
+import {enableDeploymentBackground,observeDeploymentBackground} from './background.mjs';
+import {configureTunnel,TunnelRuntime} from './tunnel-runtime.mjs';
+import {changeDeploymentCapabilities,readDeploymentCapabilities} from './capabilities.mjs';
 import {requirePrivateFile} from '../host/private-storage.mjs';
 import {randomBytes,timingSafeEqual} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
@@ -61,10 +65,11 @@ async function body(req){
  req.setEncoding('utf8');let data='';for await(const chunk of req){data+=chunk;if(Buffer.byteLength(data)>65536)fail('body_too_large')}
  try{return JSON.parse(data)}catch{fail('invalid_json')}
 }
-export async function createOnboardingServer({stateDir,port=0,trustedForwardOrigin,trustedOpenSSL=process.platform==='win32'?undefined:'/usr/bin/openssl',core,artifactDefaultsFile,verifyConnection,gatewayService,pairingLinks,trustedMacPreviewApp}={}){
+export async function createOnboardingServer({stateDir,port=0,trustedForwardOrigin,trustedOpenSSL=process.platform==='win32'?undefined:'/usr/bin/openssl',core,artifactDefaultsFile,verifyConnection,gatewayService,pairingLinks,trustedMacPreviewApp,backgroundControl=enableDeploymentBackground,backgroundRead=observeDeploymentBackground,trustedTunnelClient}={}){
  if(typeof stateDir!=='string'||!path.isAbsolute(stateDir))fail('absolute_state_directory_required');
  if(!Number.isInteger(port)||port<0||port>65535)fail('invalid_port');
  const forwarded=trustedForwardOrigin?browserOrigin(trustedForwardOrigin):null;
+ const tunnel=trustedTunnelClient?new TunnelRuntime({stateDir,...trustedTunnelClient}):null;
  const api=core??await import('./core.mjs');
  let macPreviewApp;
  if(trustedMacPreviewApp!==undefined){const {verifyMacPreviewApp}=await import('../host/macos-preview-trust.mjs');macPreviewApp=verifyMacPreviewApp(trustedMacPreviewApp);}
@@ -97,7 +102,7 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
   if(req.headers.origin!==undefined&&req.headers.origin!==origin){send(403,{error:'origin_refused'});return}
   if(req.method==='POST'&&(req.headers.origin!==origin||!equal(req.headers['x-styx-csrf'],csrf))){send(403,{error:'mutation_refused'});return}
   if(req.method==='GET'&&url.pathname==='/api/session'){
-   send(200,{csrf,platform:process.platform,packagedPreviewTrusted:!!macPreviewApp,localGatewayAvailable:!!trustedOpenSSL,pauseSupported:typeof api.stopDeploymentGateway==='function',startSupported:typeof api.startDeploymentGateway==='function',
+   send(200,{csrf,platform:process.platform,packagedPreviewTrusted:!!macPreviewApp,backgroundSupported:true,capabilityChangeSupported:true,deviceSettingsSupported:typeof api.readDeploymentDevices==='function',tunnelSupported:!!tunnel,localGatewayAvailable:!!trustedOpenSSL,pauseSupported:typeof api.stopDeploymentGateway==='function',startSupported:typeof api.startDeploymentGateway==='function',
     pairingLinkImportSupported:linkImportAvailable,pairingLinkCreateSupported:typeof api.createDeploymentPairingLink==='function',pendingApprovalSupported:typeof api.listDeploymentPending==='function'&&typeof api.approveDeploymentPending==='function',hostServiceSupported:typeof api.controlDeploymentHostService==='function',gatewayServiceSupported:gatewayServiceAvailable,gatewayService:gatewayServiceCapability,localGatewayAddresses:typeof api.localGatewayAddresses==='function'?api.localGatewayAddresses():[],defaults,accountAcceptance:'NOT RUN',nativeInstaller:'NOT RUN',trustedForwarding:!!forwarded});return;
   }
   if(req.method==='GET'&&url.pathname==='/api/status'){
@@ -106,11 +111,14 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
     const dependencies=Array.isArray(plan?.steps)?plan.steps.filter(s=>STEPS.has(s.id)).map(s=>({id:s.id,requires:Array.isArray(s.requires)?s.requires.filter(id=>STEPS.has(id)):[]})):[];
     const scope=plan?.ownerPairingScope;
     const ownerPairingScope=scope&&typeof scope.gatewayUrl==='string'&&typeof scope.label==='string'&&typeof scope.enableComputer==='boolean'?{gatewayUrl:scope.gatewayUrl,label:scope.label,enableComputer:scope.enableComputer}:null;
-    send(200,{deployment,dependencies,ownerPairingScope,services,busy});
+    let background=null;try{background=await backgroundRead(stateDir)}catch{}
+    let tunnelStatus=null;try{tunnelStatus=tunnel?await tunnel.health():null}catch{}
+    let deviceCapabilities=null;try{deviceCapabilities=readDeploymentCapabilities(stateDir)}catch{}
+    send(200,{deployment,dependencies,ownerPairingScope,services,background,deviceCapabilities,tunnel:tunnelStatus,busy});
    }catch{if(!fs.existsSync(stateDir))send(200,{deployment:null,dependencies:[],busy});else send(409,{error:'deployment_unavailable'})}return;
   }
   if(req.method!=='POST'){send(405,{error:'method_refused'});return}
-  if(!['/api/create','/api/advance','/api/pause','/api/start','/api/verify-gateway','/api/service','/api/pairing-link/inspect','/api/pairing-link/accept','/api/pairing-link/create','/api/pending/list','/api/pending/approve'].includes(url.pathname)){send(404,{error:'not_found'});return}
+  if(!['/api/create','/api/devices','/api/default-device','/api/capabilities','/api/tunnel/configure','/api/tunnel/start','/api/tunnel/stop','/api/background','/api/local-setup','/api/advance','/api/pause','/api/start','/api/verify-gateway','/api/service','/api/pairing-link/inspect','/api/pairing-link/accept','/api/pairing-link/create','/api/pending/list','/api/pending/approve'].includes(url.pathname)){send(404,{error:'not_found'});return}
   if(busy){send(409,{error:'operation_in_progress'});return}busy=true;
   try{
    const data=await body(req);
@@ -124,6 +132,28 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
     const temp=fs.mkdtempSync(path.join(os.tmpdir(),'styx-ui-config-'));fs.chmodSync(temp,0o700);
     try{const file=path.join(temp,'config.json');fs.writeFileSync(file,JSON.stringify(config),{mode:0o600});await api.createDeployment(file,{stateDir})}
     finally{fs.rmSync(temp,{recursive:true,force:true})}
+   }else if(url.pathname==='/api/devices'){
+    keys(data,[]);if(typeof api.readDeploymentDevices!=='function')fail('device_settings_unavailable');send(200,{devices:await api.readDeploymentDevices(stateDir)});return;
+   }else if(url.pathname==='/api/default-device'){
+    keys(data,['authorize','deviceId']);if(typeof api.setDeploymentDefault!=='function')fail('device_settings_unavailable');await api.setDeploymentDefault(stateDir,data);send(200,{status:'updated'});return;
+   }else if(url.pathname==='/api/capabilities'){
+    keys(data,['authorize','computer']);const result=await changeDeploymentCapabilities(stateDir,data,{trustedMacPreviewApp:macPreviewApp});send(200,{capabilities:result});return;
+   }else if(url.pathname==='/api/tunnel/configure'){
+    keys(data,['tunnelId','apiKey','authorize','autoStart']);if(!tunnel)fail('bundled_tunnel_unavailable');
+    const result=configureTunnel(stateDir,data);send(200,{tunnel:result});return;
+   }else if(url.pathname==='/api/tunnel/start'){
+    keys(data,['authorize']);if(!tunnel||data.authorize!==true)fail('explicit_tunnel_authorization_required');
+    const result=await tunnel.start({authorize:true});send(200,{tunnel:result});return;
+   }else if(url.pathname==='/api/tunnel/stop'){
+    keys(data,['authorize']);if(!tunnel||data.authorize!==true)fail('explicit_tunnel_authorization_required');
+    const result=await tunnel.stop();send(200,{tunnel:result});return;
+   }else if(url.pathname==='/api/background'){
+    keys(data,['authorize']);if(data.authorize!==true)fail('explicit_background_authorization_required');
+    const background=await backgroundControl(stateDir,{authorize:true});if(background.reason==='foreground_host_handoff_required'){send(409,{error:background.reason});return}send(200,{background});return;
+   }else if(url.pathname==='/api/local-setup'){
+    keys(data,['ownerApproval']);
+    const result=await completeLocalSetup(api,stateDir,data.ownerApproval);
+    send(200,{workflow:result,deployment:publicDeployment(await api.readDeployment(stateDir))});return;
    }else if(url.pathname==='/api/advance'){
     keys(data,['authorize','ownerApproval']);if(!Array.isArray(data.authorize)||data.authorize.length!==1||!STEPS.has(data.authorize[0]))fail('one_known_step_required');
     if(data.authorize[0]==='host.pair'){keys(data.ownerApproval,['approve','gatewayUrl','label','enableComputer']);if(data.ownerApproval.approve!==true||typeof data.ownerApproval.gatewayUrl!=='string'||typeof data.ownerApproval.label!=='string'||typeof data.ownerApproval.enableComputer!=='boolean')fail('explicit_owner_pairing_scope_required')}else if(data.ownerApproval!==undefined)fail('unexpected_owner_approval');
@@ -162,13 +192,15 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
     await api.stopDeploymentGateway(stateDir);
    }
    send(200,{deployment:publicDeployment(await api.readDeployment(stateDir))});
-  }catch{send(409,{error:'operation_failed_check_status'})}finally{busy=false}
+  }catch(error){const safe=['foreground_host_handoff_required','tunnel_running_or_interrupted','tunnel_client_integrity_failed','background_uncertain_requires_reconciliation','capability_uncertain_requires_reconciliation','local_owner_capability_change_only','host_state_not_safe_for_capability_change'];send(409,{error:safe.includes(error?.message)?error.message:'operation_failed_check_status'})}finally{busy=false}
  });
  server.requestTimeout=30000;server.headersTimeout=10000;server.maxHeadersCount=30;
  await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(port,'127.0.0.1',resolve)});
  origin=forwarded??`http://127.0.0.1:${server.address().port}`;
+ // Only a previously recorded user opt-in can resume this App-owned connection.
+ if(tunnel&&fs.existsSync(stateDir))await tunnel.resume().catch(()=>{});
  return {server,origin,url:origin+'/#session='+session,
-  async close(){if(closed)return;closed=true;pendingLink=null;await new Promise(resolve=>server.close(resolve));await Promise.resolve().then(()=>api.stopDeploymentGateway?.(stateDir)).catch(()=>{})}};
+  async close(){if(closed)return;closed=true;pendingLink=null;await tunnel?.stop();await new Promise(resolve=>server.close(resolve));await Promise.resolve().then(()=>api.stopDeploymentGateway?.(stateDir)).catch(()=>{})}};
 }
 if(process.argv[1]&&fs.realpathSync(process.argv[1])===fs.realpathSync(fileURLToPath(import.meta.url))){
  try{

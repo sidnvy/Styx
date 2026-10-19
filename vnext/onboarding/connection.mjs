@@ -63,9 +63,14 @@ export async function verifyGatewayConnection(config) {
       names.push(...result.tools.map(x=>x.name));cursor=result.nextCursor;if(!cursor)break;
     }
     if(cursor||new Set(names).size!==names.length||required.some(n=>!names.includes(n))||names.some(n=>/^(env_|project_|service_|cas_)/.test(n)))throw Error('wrong_gateway_contract');
+    // Discovery proves only that definitions are reachable. Exercise the same
+    // authenticated tools/call path a conversation needs, without native work.
+    const probe=await client.callTool({name:'list_execution_environments',arguments:{}},undefined,{timeout:10000});
+    if(probe.isError||!Array.isArray(probe.structuredContent?.environments))throw Error('gateway_probe_failed');
     return {scope:'sdk_gateway',account_acceptance:'NOT RUN',status:'gateway_verified',
       receipt:{version:1,connection:{url:endpoint.href},independentStyx:true,freshConnection:true,
-        verifiedAt:new Date().toISOString(),serverName:server.name,tools:names,method:'authenticated-mcp-discovery'}};
+        verifiedAt:new Date().toISOString(),serverName:server.name,tools:names,method:'authenticated-mcp-discovery-and-readonly-call',
+        toolCall:{name:'list_execution_environments',status:'PASS',environmentCount:probe.structuredContent.environments.length}}};
   }catch{
     // SDK/server errors may include response text. Never surface it to chat/UI.
     throw Error('gateway_verification_failed');

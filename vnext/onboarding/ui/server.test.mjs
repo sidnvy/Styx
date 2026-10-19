@@ -195,3 +195,37 @@ test('Gateway service UI capabilities reflect native platform coupling without a
  assert.equal(gatewayServiceUiCapabilities('freebsd',true).supported,false);assert.equal(gatewayServiceUiCapabilities('darwin',false).supported,false);
  const state=publicDeployment({mode:'create-local',gatewayRuntime:{status:'running',persistentService:'NOT OBSERVED'},steps:[]});assert.equal(state.gatewayRuntime,'running');assert.equal(JSON.stringify(state).includes('NOT INSTALLED'),false);
 });
+
+test('aggregate setup preserves one exact owner scope and stops before background startup',async()=>{
+ const scope={gatewayUrl:'https://127.0.0.1:8795',label:'Owned test',enableComputer:false};
+ const steps=['gateway.prepare','gateway.start','gateway.verify','host.prepare','host.pair','host.doctor','host.service.install'].map(id=>({id,status:'pending'}));
+ const calls=[];
+ const f=await fixture({core:{readDeployment:()=>({mode:'create-local',steps}),planDeployment:()=>({ownerPairingScope:scope,steps}),advanceDeployment:(_d,args)=>{calls.push(args);steps.find(s=>s.id===args.authorize[0]).status='succeeded'}}});
+ try{
+  const approval={approve:true,...scope};
+  assert.equal((await f.post('/api/local-setup',{ownerApproval:{...approval,enableComputer:true}})).status,409);assert.equal(calls.length,0);
+  assert.equal((await f.post('/api/local-setup',{ownerApproval:approval},{'X-Styx-CSRF':''})).status,403);
+  const res=await f.post('/api/local-setup',{ownerApproval:approval});assert.equal(res.status,200);
+  const result=await res.json();assert.equal(result.workflow.status,'local_preparation_complete');assert.equal(calls.length,6);assert.equal(steps[6].status,'pending');assert.deepEqual(calls[4].ownerApproval,approval);
+ }finally{await f.cleanup()}
+});
+
+test('background aggregate needs explicit CSRF-protected consent and returns separate observation',async()=>{
+ let calls=0;
+ const f=await fixture({backgroundControl:async(_d,options)=>{assert.deepEqual(options,{authorize:true});calls++;return {status:'running',accountAcceptance:'NOT RUN'}},backgroundRead:()=>({status:'not_configured'})});
+ try{
+  assert.equal((await f.post('/api/background',{})).status,409);
+  assert.equal((await f.post('/api/background',{authorize:true,command:'injected'})).status,409);
+  assert.equal((await f.post('/api/background',{authorize:true},{'X-Styx-CSRF':''})).status,403);assert.equal(calls,0);
+  const r=await f.post('/api/background',{authorize:true});assert.equal(r.status,200);assert.equal((await r.json()).background.accountAcceptance,'NOT RUN');assert.equal(calls,1);
+ }finally{await f.cleanup()}
+});
+
+test('account runtime endpoints cannot accept executable paths or reveal credentials when unavailable',async()=>{
+ const f=await fixture();try{
+  for(const data of [{tunnelId:'tunnel_ownedtest',apiKey:'sk-secret-not-real',authorize:true},{binary:'/tmp/arbitrary',authorize:true}]){
+   const r=await f.post('/api/tunnel/configure',data);assert.equal(r.status,409);assert.doesNotMatch(await r.text(),/sk-secret|arbitrary/);
+  }
+  assert.equal((await f.post('/api/capabilities',{authorize:true,computer:true,trustedMacPreviewApp:{path:'/tmp/evil'}})).status,409);
+ }finally{await f.cleanup()}
+});

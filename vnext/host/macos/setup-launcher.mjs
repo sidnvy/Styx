@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {spawnSync} from 'node:child_process';
+import {createHash} from 'node:crypto';
 import {fileURLToPath,pathToFileURL} from 'node:url';
 const assert=(ok,code)=>{if(!ok)throw Error(code)};
 function regular(file){const s=fs.lstatSync(file);assert(s.isFile()&&!s.isSymbolicLink(),'bundled_setup_regular_file_required');return file}
@@ -23,6 +24,14 @@ export function previewLayout(resourceRoot){
  const bundle=within(resources,defaults.bundle);assert(fs.lstatSync(bundle).isDirectory(),'bundled_host_directory_required');
  return{resources,app,node:regular(within(resources,'runtime/node')),server:regular(within(resources,'onboarding/vnext/onboarding/server.mjs')),
   artifacts:{bundle,publisherKeyFile:regular(within(resources,defaults.publisherKeyFile)),publisherSha256:defaults.publisherSha256}};
+}
+export function previewTunnelClient(layout){
+ const record=path.join(layout.resources,'tunnel-client.json');if(!fs.existsSync(record))return undefined;
+ const pin=JSON.parse(fs.readFileSync(regular(record),'utf8'));
+ assert(pin.version==='0.0.16'&&pin.platform==='darwin'&&pin.arch==='arm64'&&pin.path==='runtime/tunnel-client'&&/^[a-f0-9]{64}$/.test(pin.binary_sha256??''),'bundled_tunnel_record_invalid');
+ const binary=regular(within(layout.resources,pin.path));
+ assert(createHash('sha256').update(fs.readFileSync(binary)).digest('hex')===pin.binary_sha256,'bundled_tunnel_integrity_failed');
+ return {binary,sha256:pin.binary_sha256};
 }
 export function previewSigningIdentity(layout,{run=spawnSync}={}){
  const opts={encoding:'utf8',timeout:10000,maxBuffer:65536,stdio:['ignore','pipe','pipe']};
@@ -62,7 +71,7 @@ export async function startBundledSetup(resourceRoot,{setupRoot}={}){
  }else storage=setupStorage(os.homedir());
  privateJson(storage.artifactDefaultsFile,layout.artifacts);
  const{createOnboardingServer}=await import(pathToFileURL(layout.server));
- const instance=await createOnboardingServer({stateDir:storage.stateDir,artifactDefaultsFile:storage.artifactDefaultsFile,trustedMacPreviewApp,trustedOpenSSL:'/usr/bin/openssl'});
+ const instance=await createOnboardingServer({stateDir:storage.stateDir,artifactDefaultsFile:storage.artifactDefaultsFile,trustedMacPreviewApp,trustedTunnelClient:previewTunnelClient(layout),trustedOpenSSL:'/usr/bin/openssl'});
  const url=new URL(instance.url);assert(url.protocol==='http:'&&url.hostname==='127.0.0.1'&&url.pathname==='/'&&!url.username&&!url.password&&!url.search&&/^#session=[A-Za-z0-9_-]{43}$/.test(url.hash),'bundled_setup_loopback_session_required');
  return instance;
 }

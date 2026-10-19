@@ -20,7 +20,7 @@ function authorize(req, digest, hosts, origins) {
 // connection cannot reuse an old process or GUI element reference.
 export async function createGatewayHttp(gateway, {
   token, host = '127.0.0.1', port = 8795, allowedHosts, allowedOrigins = [],
-  maxSessions = 32, idleSessionTimeoutMs = 0,
+  maxSessions = 32, idleSessionTimeoutMs = 15 * 60 * 1000,
   tlsCertificateFile, tlsPrivateKeyFile, enrollment = null
 } = {}) {
   if (typeof token !== 'string' || token.length < 32 || /\s/.test(token))
@@ -38,14 +38,16 @@ export async function createGatewayHttp(gateway, {
   if(enrollment && timingSafeEqual(digest,enrollment.adminDigest))
     throw Error('Enrollment owner token must differ from MCP bearer');
   const sessions = new Map();
-  // Optional cleanup for the isolated CAS research Gateway only. A model's MCP
-  // client can abandon a session without sending DELETE; orphan sessions must
-  // not permanently exhaust the capacity and block all future tool calls.
+  let initializing = 0;
+  // Clients can abandon discovery sessions without DELETE. Reclaim them only
+  // under capacity pressure, after 15 idle minutes, and never while a response
+  // or an owned Exec process is outstanding. Zero explicitly disables cleanup.
   async function reapIdleSessions() {
     if (!idleSessionTimeoutMs) return;
     const threshold = Date.now() - idleSessionTimeoutMs;
     for (const [id, session] of sessions) {
-      if (session.inFlight > 0 || session.lastActivityAt > threshold) continue;
+      if (session.inFlight > 0 || session.lastActivityAt > threshold ||
+          gateway.hasOwnerWork?.(session.owner)) continue;
       sessions.delete(id);
       await session.transport.close().catch(() => {});
       await session.server.close().catch(() => {});
@@ -56,7 +58,10 @@ export async function createGatewayHttp(gateway, {
     throw new Error('TLS certificate and key must be supplied together');
   const handler=async (req, res) => {
     const refuse = (code, message) => {
-      if (!res.headersSent) { res.writeHead(code, {'content-type': 'text/plain'}); res.end(message); }
+      if (!res.headersSent) {
+        res.writeHead(code, {'content-type': 'application/json'});
+        res.end(JSON.stringify({jsonrpc:'2.0',id:null,error:{code:-32000,message}}));
+      }
     };
     if (req.url?.startsWith('/styx/enroll/')) {
       if(!enrollment) return refuse(404,'Not found');
@@ -75,19 +80,26 @@ export async function createGatewayHttp(gateway, {
       // A long-lived GET SSE subscription is passive, not an active tool call.
       // Otherwise an abandoned client with an open SSE stream is never reaped.
       const activeOperation = req.method !== 'GET';
-      if (activeOperation) established.inFlight++;
+      if (activeOperation) {
+        established.inFlight++;
+        let settled = false;
+        const complete = () => {
+          if (settled) return;
+          settled = true;
+          established.inFlight--;
+          established.lastActivityAt = Date.now();
+        };
+        // SDK handleRequest can return before an async tools/call response.
+        res.once('finish', complete); res.once('close', complete);
+      }
       established.lastActivityAt = Date.now();
       try { await established.transport.handleRequest(req, res); }
       catch { refuse(500, 'Request failed'); }
-      finally {
-        if (activeOperation) established.inFlight--;
-        established.lastActivityAt = Date.now();
-      }
       return;
     }
     if (req.method !== 'POST') return refuse(400, 'MCP initialization required');
-    if (sessions.size >= maxSessions) await reapIdleSessions();
-    if (sessions.size >= maxSessions) return refuse(503, 'Session capacity reached');
+    if (sessions.size + initializing >= maxSessions) await reapIdleSessions();
+    if (sessions.size + initializing >= maxSessions) return refuse(503, 'Session capacity reached');
     const owner = 'mcp-session:' + randomUUID();
     let sid;
     const transport = new StreamableHTTPServerTransport({
@@ -102,6 +114,7 @@ export async function createGatewayHttp(gateway, {
       if (sid) sessions.delete(sid);
       void gateway.closeOwner?.(owner).catch(() => {});
     };
+    initializing++;
     try {
       await server.connect(transport);
       await transport.handleRequest(req, res);
@@ -116,6 +129,8 @@ export async function createGatewayHttp(gateway, {
       await transport.close().catch(() => {});
       await server.close().catch(() => {});
       refuse(500, 'Initialization failed');
+    } finally {
+      initializing--;
     }
   };
   const http=tlsCertificateFile

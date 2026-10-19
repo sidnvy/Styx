@@ -29,7 +29,7 @@ async function setup(t, {idleSessionTimeoutMs = 0} = {}) {
   };
 }
 
-test('default transport still enforces max MCP sessions', async t => {
+test('explicit zero idle timeout still enforces max MCP sessions', async t => {
   const x = await setup(t);
   const a = await x.client();
   assert.equal((await a.listTools()).tools.length, 4);
@@ -65,4 +65,49 @@ test('CAS lab does not evict a session holding an active request', async t => {
   await assert.rejects(x.client(), /503|Session capacity/i);
   assert.equal(x.server.sessions.size, 1);
   active.inFlight--;
+});
+
+test('production defaults reclaim abandoned discovery but preserve owned Exec work', async t => {
+  const gateway = createStyxGateway({catalog:{version:1,targets:[]},computer:null});
+  const hosts=[];const token='production_gc_test_'+'z'.repeat(40);
+  const server=await createGatewayHttp(gateway,{token,port:0,allowedHosts:hosts,maxSessions:1});
+  hosts.push('127.0.0.1:'+server.address.port);t.after(()=>server.close());
+  async function connect(){
+    const transport=new StreamableHTTPClientTransport(new URL('http://'+hosts[0]+'/mcp'),{requestInit:{headers:{Authorization:'Bearer '+token}}});
+    const client=new Client({name:'production-gc',version:'1'});
+    t.after(()=>client.close().catch(()=>{}));await client.connect(transport);return client;
+  }
+  const a=await connect();await a.listTools();
+  const previous=[...server.sessions.values()][0];
+  previous.lastActivityAt=Date.now()-16*60*1000;
+  // Retained Exec records include yielded interactive and uncertain processes.
+  gateway.exec.sessions.set(17,{owner:previous.owner,state:'running'});
+  await assert.rejects(connect(),/503|Session capacity/);
+  assert.equal(server.sessions.size,1);
+  // A lost native runtime cannot be resumed and must not pin its HTTP owner.
+  gateway.exec.sessions.get(17).runtime={lost:true};
+  const b=await connect();
+  gateway.exec.sessions.delete(17);assert.equal((await b.listTools()).tools.length,4);
+  assert.notEqual([...server.sessions.values()][0].owner,previous.owner);
+  await assert.rejects(a.listTools(),/404|Session not found/);
+});
+
+test('an actual asynchronous tools/call remains active until its HTTP response ends',async t=>{
+  const {CallToolRequestSchema}=await import('@modelcontextprotocol/sdk/types.js');
+  const gateway=createStyxGateway({catalog:{version:1,targets:[]},computer:null});
+  let release,started;const began=new Promise(resolve=>{started=resolve});
+  const blocked=new Promise(resolve=>{release=resolve});
+  const original=gateway.serverForOwner.bind(gateway);
+  gateway.serverForOwner=owner=>{const s=original(owner);s.setRequestHandler(CallToolRequestSchema,async()=>{started();await blocked;return{content:[{type:'text',text:'done'}]}});return s;};
+  const hosts=[];const token='inflight_gc_test_'+'z'.repeat(40);
+  const server=await createGatewayHttp(gateway,{token,port:0,allowedHosts:hosts,maxSessions:1,idleSessionTimeoutMs:10});
+  hosts.push('127.0.0.1:'+server.address.port);t.after(()=>server.close());
+  async function connect(){const tr=new StreamableHTTPClientTransport(new URL('http://'+hosts[0]+'/mcp'),{requestInit:{headers:{Authorization:'Bearer '+token}}});const c=new Client({name:'inflight-gc',version:'1'});t.after(()=>c.close().catch(()=>{}));await c.connect(tr);return c;}
+  const a=await connect();const pending=a.callTool({name:'list_execution_environments',arguments:{}});
+  await began;await new Promise(r=>setTimeout(r,30));
+  const session=[...server.sessions.values()][0];
+  try{assert.equal(session.inFlight,1);await assert.rejects(connect(),/503|Session capacity/);}
+  finally{release();await pending;}
+  await new Promise(r=>setTimeout(r,15));
+  const b=await connect();assert.equal((await b.listTools()).tools.length,4);
 });

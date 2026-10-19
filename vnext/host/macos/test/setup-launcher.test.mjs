@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import {previewLayout,previewSigningIdentity,setupStorage} from '../setup-launcher.mjs';
+import {createHash} from 'node:crypto';
+import {previewLayout,previewSigningIdentity,setupStorage,previewTunnelClient} from '../setup-launcher.mjs';
 function fixture(){
  const root=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'styx-preview-launcher-'))),resources=path.join(root,'Styx.app/Contents/Resources');
  fs.mkdirSync(resources,{recursive:true});for(const p of['runtime/node','onboarding/vnext/onboarding/server.mjs','publisher.pem']){fs.mkdirSync(path.dirname(path.join(resources,p)),{recursive:true});fs.writeFileSync(path.join(resources,p),'test-only')}
@@ -34,4 +35,15 @@ test('settings state is owner-private outside read-only bundle and never hardens
   const storage=setupStorage(home);assert.equal(storage.root,path.join(home,'Library/Application Support/Styx/Setup'));assert.equal(fs.statSync(storage.root).mode&0o077,0);assert.equal(fs.existsSync(storage.stateDir),false);assert.equal(storage.root.includes('Styx.app'),false);
   fs.chmodSync(storage.root,0o755);assert.throws(()=>setupStorage(home),/private_state/);assert.equal(fs.statSync(storage.root).mode&0o777,0o755);
  }finally{f.close()}
+});
+
+test('optional bundled tunnel is fixed-path and verifies signed-resource content hash',()=>{
+ const f=fixture();try{
+  const layout=previewLayout(f.resources);assert.equal(previewTunnelClient(layout),undefined);
+  const binary=path.join(f.resources,'runtime/tunnel-client');fs.writeFileSync(binary,'pinned fixture');
+  const sha256=createHash('sha256').update('pinned fixture').digest('hex'),record=path.join(f.resources,'tunnel-client.json');
+  fs.writeFileSync(record,JSON.stringify({version:'0.0.16',platform:'darwin',arch:'arm64',path:'runtime/tunnel-client',binary_sha256:sha256}));
+  assert.deepEqual(previewTunnelClient(layout),{binary,sha256});fs.appendFileSync(binary,'tamper');assert.throws(()=>previewTunnelClient(layout),/integrity_failed/);
+  fs.writeFileSync(record,JSON.stringify({version:'0.0.16',platform:'darwin',arch:'arm64',path:'../untrusted',binary_sha256:sha256}));assert.throws(()=>previewTunnelClient(layout),/record_invalid/);
+ }finally{fs.rmSync(f.root,{recursive:true,force:true});}
 });

@@ -62,15 +62,26 @@ export function finalizePreviewHostBundle(root,privateKey){
  const raw=JSON.stringify(m,null,2)+'\n';fs.writeFileSync(path.join(root,'manifest.json'),raw);fs.writeFileSync(path.join(root,'manifest.sig'),sign(null,Buffer.from(raw),privateKey).toString('base64url')+'\n');
  return m;
 }
+// Verified from openai/tunnel-client v0.0.16 darwin-arm64 release archive.
+export const TUNNEL_PREVIEW_PIN=Object.freeze({version:'0.0.16',platform:'darwin',arch:'arm64',archive_sha256:'a160820d45089b5253d8d671fe2a689bde0f73d78c135d1497a7b33f28a3ac62',binary_sha256:'6f1e8d5494d6c4d6c45cd4f6e07b5291459c0b23f4b8cd8266c7a64be3d9a2a0',source:'https://github.com/openai/tunnel-client/releases/tag/v0.0.16'});
+const TUNNEL_NOTICES=Object.freeze({'LICENSE':'f4c1d7ba32ef5bcf5cf03e2eefec5825ebafedf50fa330a36700a49c605c1ef4','NOTICE':'1364c020d86ecf948b78b7c655175032068203d13aece70fb0bfe112d7802dc2','tunnel-client-v0.0.16-darwin-arm64-licenses.txt':'88cb2f313e4d12adc110cc5ebd9d626a5b4aae3874bb4abf386fdda59c215062','tunnel-client-v0.0.16-darwin-arm64.spdx.json':'2d116935e74f5571a0880e7d1ccda1ffe57332ab8b8b5f0a1fe447b58502457a'});
+export function verifyPreviewTunnelInput(binary){
+ assert(ABS(binary),'absolute_tunnel_binary_required');
+ for(const [file,pin] of [[binary,TUNNEL_PREVIEW_PIN.binary_sha256],...Object.entries(TUNNEL_NOTICES).map(([name,pin])=>[path.join(path.dirname(binary),name),pin])]){
+  const st=fs.lstatSync(file);assert(st.isFile()&&!st.isSymbolicLink()&&sha(file)===pin,'verified_original_tunnel_input_required');
+ }
+ return {...TUNNEL_PREVIEW_PIN};
+}
 function publicModes(root){for(const e of fs.readdirSync(root,{withFileTypes:true})){const f=path.join(root,e.name);assert(!e.isSymbolicLink(),'distribution_symlink_forbidden');if(e.isDirectory()){fs.chmodSync(f,0o755);publicModes(f)}else fs.chmodSync(f,fs.statSync(f).mode&0o111?0o755:0o644);}}
 export function buildMacPreview(config){
  assert(process.platform==='darwin'&&process.arch==='arm64','native_arm64_macos_preview_build_required');
- assert(config&&typeof config==='object'&&!Object.keys(config).some(k=>!['destination','version','releaseVersion','sourceRevision','nodeBinary','codexBinary','cuaBinary','sourceRoot','dependenciesDir','createDmg'].includes(k)),'invalid_preview_configuration');
- const {destination,version,releaseVersion,sourceRevision,nodeBinary,codexBinary,cuaBinary,sourceRoot=ROOT,dependenciesDir=path.join(sourceRoot,'node_modules'),createDmg=true}=config;
+ assert(config&&typeof config==='object'&&!Object.keys(config).some(k=>!['destination','version','releaseVersion','sourceRevision','nodeBinary','codexBinary','cuaBinary','sourceRoot','dependenciesDir','createDmg','tunnelBinary'].includes(k)),'invalid_preview_configuration');
+ const {destination,version,releaseVersion,sourceRevision,nodeBinary,codexBinary,cuaBinary,tunnelBinary,sourceRoot=ROOT,dependenciesDir=path.join(sourceRoot,'node_modules'),createDmg=true}=config;
  for(const p of [destination,nodeBinary,codexBinary,cuaBinary,sourceRoot,dependenciesDir])assert(ABS(p),'absolute_preview_paths_required');
  assert(/^[a-f0-9]{40}$/.test(sourceRevision??'')&&typeof createDmg==='boolean','preview_revision_and_archive_selection_required');
  assert(!fs.existsSync(destination),'fresh_preview_destination_required');
  const sourceFiles=previewSourceFiles(sourceRoot,{revision:sourceRevision});
+ const tunnelRecord=tunnelBinary===undefined?null:verifyPreviewTunnelInput(tunnelBinary);
  const nodeRecord=JSON.parse(fs.readFileSync(path.join(path.dirname(nodeBinary),'node-provenance.json'),'utf8'));
  assert(nodeRecord.version==='22.23.3'&&nodeRecord.platform==='darwin'&&nodeRecord.arch==='arm64'&&nodeRecord.archive_sha256==='23b25245dcfb9af7262f8ff142e9e2e0af025368117329e7a7458a51e5922f53'&&nodeRecord.binary_sha256===sha(nodeBinary),'verified_original_node_input_required');
  fs.mkdirSync(destination,{mode:0o700});const image=path.join(destination,'image-root');fs.mkdirSync(image);
@@ -90,10 +101,16 @@ export function buildMacPreview(config){
   fs.writeFileSync(path.join(resources,'publisher.pem'),publicPem);fs.writeFileSync(path.join(resources,'artifact-defaults.json'),JSON.stringify({bundle:'host-bundle',publisherKeyFile:'publisher.pem',publisherSha256:fingerprint},null,2)+'\n');
   for(const name of sourceFiles.filter(n=>n.startsWith('licenses/')))tree(path.join(sourceRoot,...name.split('/')),path.join(resources,...name.split('/')));
   fs.copyFileSync(path.join(runtime,'LICENSE'),path.join(resources,'licenses/node-LICENSE'));
+  if(tunnelRecord){
+   fs.copyFileSync(tunnelBinary,path.join(runtime,'tunnel-client'));fs.chmodSync(path.join(runtime,'tunnel-client'),0o755);
+   const notices=path.join(resources,'licenses/tunnel-client');fs.mkdirSync(notices);
+   for(const name of Object.keys(TUNNEL_NOTICES))fs.copyFileSync(path.join(path.dirname(tunnelBinary),name),path.join(notices,name));
+  }
   fs.writeFileSync(path.join(resources,'production-dependencies.json'),JSON.stringify({schema:1,sourceRevision,graph:'npm-package-lock-production',packages:dependencies},null,2)+'\n');
   // Sign native payload bytes first; Ed25519 then covers their transformed bytes.
   const native=machOFiles(app);for(const [command,args]of macAdhocSigningPlan({app,files:native,sealApp:false}))execFileSync(command,args,{stdio:'pipe',timeout:30000});
   fs.writeFileSync(path.join(runtime,'node-provenance.json'),JSON.stringify({...nodeRecord,upstream_binary_sha256:nodeRecord.binary_sha256,binary_sha256:sha(path.join(runtime,'node')),transformation:'macos_adhoc_codesign',upstream_verification_record:'node-upstream.json'},null,2)+'\n');
+  if(tunnelRecord)fs.writeFileSync(path.join(resources,'tunnel-client.json'),JSON.stringify({...tunnelRecord,path:'runtime/tunnel-client',upstream_binary_sha256:tunnelRecord.binary_sha256,binary_sha256:sha(path.join(runtime,'tunnel-client')),transformation:'macos_adhoc_codesign'},null,2)+'\n');
   finalizePreviewHostBundle(bundle,privateKey);verifySignedRelease(bundle,publicPem);
   scanPrivateMaterial(app);publicModes(app);for(const [command,args]of macAdhocSigningPlan({app,files:[],sealApp:true}))execFileSync(command,args,{stdio:'pipe',timeout:30000});
   execFileSync(path.join(runtime,'node'),['--version'],{stdio:'pipe',timeout:10000});
@@ -101,7 +118,7 @@ export function buildMacPreview(config){
   fs.symlinkSync('/Applications',path.join(image,'Applications'));
   const zip='Styx-'+releaseVersion+'-macos-arm64.zip';execFileSync('/usr/bin/ditto',['-c','-k','--keepParent',app,path.join(destination,zip)],{stdio:'pipe',timeout:180000});
   const artifacts=[zip];if(createDmg){const dmg='Styx-'+releaseVersion+'-macos-arm64.dmg';execFileSync('/usr/bin/hdiutil',['create','-volname','Styx Developer Preview','-srcfolder',image,'-format','UDZO',path.join(destination,dmg)],{stdio:'pipe',timeout:300000});artifacts.push(dmg);}
-  const receipt={schema:1,kind:'precompiled_developer_preview',sourceRevision,version,releaseVersion,platform:'darwin',arch:'arm64',signing:'adhoc_preview',notarization:'NOT RUN',external_publisher_identity:'NOT ESTABLISHED',private_key_in_artifact:false,publisher_spki_sha256:fingerprint,production_packages:dependencies.length,native_code_files:native.map(p=>path.relative(app,p).split(path.sep).join('/')),artifacts:artifacts.map(name=>({name,sha256:sha(path.join(destination,name)),bytes:fs.statSync(path.join(destination,name)).size})),native_ui_acceptance:'NOT RUN',cold_install:'NOT RUN'};
+  const receipt={schema:1,kind:'precompiled_developer_preview',sourceRevision,version,releaseVersion,platform:'darwin',arch:'arm64',signing:'adhoc_preview',notarization:'NOT RUN',external_publisher_identity:'NOT ESTABLISHED',private_key_in_artifact:false,publisher_spki_sha256:fingerprint,production_packages:dependencies.length,tunnel_client:tunnelRecord?{version:tunnelRecord.version,archive_sha256:tunnelRecord.archive_sha256}:null,native_code_files:native.map(p=>path.relative(app,p).split(path.sep).join('/')),artifacts:artifacts.map(name=>({name,sha256:sha(path.join(destination,name)),bytes:fs.statSync(path.join(destination,name)).size})),native_ui_acceptance:'NOT RUN',cold_install:'NOT RUN'};
   fs.writeFileSync(path.join(destination,'preview-receipt.json'),JSON.stringify(receipt,null,2)+'\n');return receipt;
  }finally{fs.rmSync(privateRoot,{recursive:true,force:true});}
 }

@@ -15,7 +15,7 @@ const native=process.env.STYX_ONBOARDING_NATIVE_BUNDLE==='1';
 const enabled=process.env.STYX_ONBOARDING_BROWSER_TEST==='1';
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 async function until(fn,code,ms=12000){const end=Date.now()+ms;while(Date.now()<end){if(await fn())return;await sleep(100)}throw Error(code)}
-test(native?'real browser prepares native Hosts, verifies Gateway, pairs locally and joins by private link with separate approval':'real browser saves config, explicitly prepares/starts/pauses owned Gateway and resumes status',{skip:!enabled,timeout:120000},async()=>{
+test(native?'real browser prepares native Hosts, verifies Gateway, pairs locally and joins by private link with separate approval':'real browser automatically prepares Gateway, preserves blocked Host setup and resumes status',{skip:!enabled,timeout:120000},async()=>{
  const binary=process.env.STYX_ONBOARDING_BROWSER_BINARY;assert.ok(binary&&path.isAbsolute(binary));
  const coreUrl=process.env.STYX_ONBOARDING_CORE_MODULE?pathToFileURL(process.env.STYX_ONBOARDING_CORE_MODULE):new URL('../core.mjs',import.meta.url);
  const core=await import(coreUrl);const pairingLinks=native?await import(new URL('./pairing-links.mjs',coreUrl)):undefined;
@@ -48,21 +48,19 @@ test(native?'real browser prepares native Hosts, verifies Gateway, pairs locally
   const fields={gatewayUrl:'https://127.0.0.1:'+gatewayPort,label:'Owned UI Gateway test',bundle:path.join(root,'bundle-not-executed'),publisherKeyFile:path.join(root,'publisher-not-read.pem'),publisherSha256:'a'.repeat(64),baseDir:path.join(root,'host-not-created'),...(artifacts??{})};
   await evaluate(`(()=>{const f=document.querySelector('#setup');for(const[k,v]of Object.entries(${JSON.stringify(fields)}))f.elements[k].value=v;f.elements.reviewed.checked=true;f.requestSubmit();return true})()`);
   await until(()=>evaluate("document.querySelector('#progress')?.hidden===false"),'config_not_saved');
-  assert.equal(fs.existsSync(path.join(root,'host-not-created')),false);
+  if(!native)assert.equal(fs.existsSync(path.join(root,'host-not-created')),false);
   async function clickStep(label,status){await evaluate(`(()=>{const s=[...document.querySelectorAll('.step')].find(s=>s.querySelector('strong').textContent===${JSON.stringify(label)});if(!s||s.querySelector('button').disabled)throw Error('step_not_ready');s.querySelector('button').click();return true})()`);await until(()=>evaluate(`(()=>{const s=[...document.querySelectorAll('.step')].find(s=>s.querySelector('strong').textContent===${JSON.stringify(label)});return s?.querySelector('.status').textContent===${JSON.stringify(status)}})()`),'step_not_completed')}
-  await clickStep('准备本机 Gateway','已记录成功');await clickStep('启动前台 Gateway','已记录成功');
+  await until(()=>evaluate("document.querySelectorAll('.step .status.succeeded').length>=3"),'automatic_gateway_setup_not_completed');
   await until(()=>evaluate("document.querySelector('#runtime').textContent.includes('正在运行')"),'actual_gateway_not_running');
   if(native){
-   await clickStep('验证 Gateway 认证与工具发现','已记录成功');
+   await until(()=>evaluate("document.querySelectorAll('.step .status.succeeded').length>=6"),'automatic_local_pairing_not_completed');
    const discovery={url:'https://127.0.0.1:'+gatewayPort+'/mcp',tokenFile:path.join(root,'state/gateway/model.token'),caFile:path.join(root,'state/gateway/certificate.pem')};
    await evaluate(`(()=>{const f=document.querySelector('#discovery-form');for(const[k,v]of Object.entries(${JSON.stringify(discovery)}))f.elements[k].value=v;f.elements.independentStyx.checked=true;f.elements.freshConnection.checked=true;f.requestSubmit();return true})()`);
    await until(()=>evaluate("document.querySelector('#discovery-result').textContent.includes('SDK 工具发现已验证')"),'discovery_not_verified');
    assert.equal(await evaluate("document.querySelector('#discovery-form').elements.tokenFile.value"),'');
    const modelToken=fs.readFileSync(discovery.tokenFile,'utf8').trim();assert.equal((await evaluate('document.body.textContent')).includes(modelToken),false);
 
-   await clickStep('验证并准备 Host','已记录成功');
-   await command('Page.enable');await clickStep('批准并配对这台 Host','已记录成功');
-   await clickStep('检查 Host','已记录成功');
+   await command('Page.enable');
    const status=core.readDeployment(path.join(root,'state'));assert.equal(status.steps.find(s=>s.id==='host.pair').status,'succeeded');assert.equal(status.steps.find(s=>s.id==='host.doctor').evidence.status,'ready_for_exec');
    assert.equal(status.accountAcceptance,'NOT RUN');
    await evaluate("document.querySelector('#create-link').click();true");
@@ -91,10 +89,11 @@ test(native?'real browser prepares native Hosts, verifies Gateway, pairs locally
    await command('Page.navigate',{url:instance.origin});await until(()=>evaluate("document.querySelector('#progress')?.hidden===false"),'owner_final_resume_not_ready');
 
   }
+  await until(()=>evaluate("!document.querySelector('#pause').disabled"),'workflow_not_settled');
   await evaluate("document.querySelector('#pause').click();true");
   await until(()=>evaluate("document.querySelector('#runtime').textContent.includes('未持有运行实例')"),'actual_gateway_not_stopped');
   await command('Page.reload');await until(()=>evaluate("document.querySelector('#progress')?.hidden===false"),'resume_not_loaded');
-  assert.equal(await evaluate("document.querySelectorAll('.step .status.succeeded').length"),native?6:2);
+  assert.equal(await evaluate("document.querySelectorAll('.step .status.succeeded').length"),native?6:3);
   assert.equal(fs.existsSync(path.join(root,'host-not-created')),native);
   if(process.env.STYX_ONBOARDING_SCREENSHOT_DIR){
    const directory=process.env.STYX_ONBOARDING_SCREENSHOT_DIR;assert.ok(path.isAbsolute(directory));fs.mkdirSync(directory,{recursive:true});

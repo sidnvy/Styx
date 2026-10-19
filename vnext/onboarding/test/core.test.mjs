@@ -10,7 +10,7 @@ import {createHash,createPublicKey,generateKeyPairSync,sign,randomUUID} from 'no
 import {ensurePrivateDirectory} from '../../host/private-storage.mjs';
 import {main} from '../cli.mjs';
 import {ownerCommand} from '../../gateway/enroll-admin.mjs';
-import {createDeployment,readDeployment,planDeployment,advanceDeployment,stopDeploymentGateway,validateDeployment,controlDeploymentHostService,createDeploymentPairingLink,listDeploymentPending,approveDeploymentPending,localGatewayAddresses} from '../core.mjs';
+import {createDeployment,readDeployment,planDeployment,advanceDeployment,stopDeploymentGateway,validateDeployment,controlDeploymentHostService,createDeploymentPairingLink,listDeploymentPending,approveDeploymentPending,localGatewayAddresses,readDeploymentDevices,setLocalDeploymentDefault,setDeploymentDefault} from '../core.mjs';
 const sha=b=>createHash('sha256').update(b).digest('hex');
 async function fixture(t){
  const root=path.join(os.tmpdir(),'styx-onboarding-'+randomUUID());ensurePrivateDirectory(root);t.after(async()=>{const d=path.join(root,'deployment');if(fs.existsSync(d))await stopDeploymentGateway(d);fs.rmSync(root,{recursive:true,force:true});});
@@ -104,6 +104,7 @@ test('explicit owner-local pairing avoids invitation shuttle and bounded shutdow
  const ownerApproval={approve:true,...planDeployment(f.stateDir).ownerPairingScope};
  const s=await advanceDeployment(f.stateDir,{authorize:['host.pair'],ownerApproval});
  assert.equal(steps(s)['host.pair'].status,'succeeded');assert.equal(steps(s)['host.pair'].evidence.status,'ready_to_connect');
+ await setLocalDeploymentDefault(f.stateDir);const devices=await readDeploymentDevices(f.stateDir);assert.equal(devices.length,1);assert.equal(devices[0].is_default,true);await assert.rejects(setDeploymentDefault(f.stateDir,{authorize:false,deviceId:devices[0].device_id}),/explicit_default/);
  assert.equal(fs.existsSync(path.join(f.stateDir,'invitation')),false);
  const host=JSON.parse(fs.readFileSync(path.join(f.config.host.baseDir,'device/host.json')));
  const token=fs.readFileSync(host.token_file,'utf8').trim();

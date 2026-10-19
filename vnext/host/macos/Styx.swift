@@ -3,6 +3,7 @@ import AppKit
 import ApplicationServices
 import CoreGraphics
 import Darwin
+import WebKit
 
 let bundleID = "app.styx.host"
 enum HostError: Error { case unsafeRuntime, alreadyRunning, socketPath, daemonUnavailable }
@@ -87,15 +88,122 @@ func setupSessionURL(_ line: String) -> URL? {
     return parts.url
 }
 
+// Only the owned loopback origin is rendered inside the settings window. Account
+// and OS links require a user click and native confirmation; redirects cannot
+// turn a setup response into an external browser launch or file/protocol access.
+enum SetupNavigation { case local, external, blocked }
+func setupNavigation(_ url: URL, origin: URL, userActivated: Bool) -> SetupNavigation {
+    guard let target = URLComponents(url: url, resolvingAgainstBaseURL: false),
+          target.user == nil, target.password == nil else { return .blocked }
+    if target.scheme == "http", target.host == "127.0.0.1", target.port == origin.port {
+        return .local
+    }
+    guard userActivated else { return .blocked }
+    if target.scheme == "https", let host = target.host, !host.isEmpty { return .external }
+    if target.scheme == "x-apple.systempreferences",
+       target.path == "com.apple.preference.security",
+       ["Privacy_Accessibility", "Privacy_ScreenCapture"].contains(target.query ?? "") { return .external }
+    return .blocked
+}
+
+final class SetupWindowController: NSWindowController, WKNavigationDelegate, WKUIDelegate {
+    let origin: URL
+    let webView: WKWebView
+    init(sessionURL: URL) {
+        origin = sessionURL
+        let configuration = WKWebViewConfiguration()
+        // Session credentials never enter the user's browser profile or disk cache.
+        configuration.websiteDataStore = .nonPersistent()
+        webView = WKWebView(frame: .zero, configuration: configuration)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 1040, height: 760),
+            styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        window.title = "Styx — Setup & Settings"
+        window.minSize = NSSize(width: 760, height: 560)
+        window.isReleasedWhenClosed = false
+        window.contentView = webView
+        window.center()
+        super.init(window: window)
+        webView.navigationDelegate = self
+        webView.uiDelegate = self
+        webView.load(URLRequest(url: sessionURL))
+    }
+    required init?(coder: NSCoder) { fatalError("Programmatic settings window only") }
+    func present() {
+        showWindow(nil)
+        NSApp.activate(ignoringOtherApps: true)
+        window?.makeKeyAndOrderFront(nil)
+    }
+    func confirmExternal(_ url: URL) {
+        let alert = NSAlert()
+        alert.messageText = url.scheme == "https" ? "Continue in your browser?" : "Open macOS Settings?"
+        // Show the destination origin, never query strings containing credentials.
+        alert.informativeText = url.scheme == "https"
+            ? "Styx will open \(url.host ?? "the selected site") in your default browser."
+            : "Styx will open the selected privacy settings. You decide whether to grant access."
+        alert.addButton(withTitle: "Continue"); alert.addButton(withTitle: "Cancel")
+        if alert.runModal() == .alertFirstButtonReturn { NSWorkspace.shared.open(url) }
+    }
+    func webView(_ webView: WKWebView, decidePolicyFor navigationAction: WKNavigationAction,
+                 decisionHandler: @escaping (WKNavigationActionPolicy) -> Void) {
+        guard let url = navigationAction.request.url else { decisionHandler(.cancel); return }
+        switch setupNavigation(url, origin: origin, userActivated: navigationAction.navigationType == .linkActivated) {
+        case .local:
+            // Keep target=_blank local links in the same owned window.
+            if navigationAction.targetFrame == nil {
+                decisionHandler(.cancel); webView.load(navigationAction.request)
+            } else { decisionHandler(.allow) }
+        case .external:
+            decisionHandler(.cancel); confirmExternal(url)
+        case .blocked: decisionHandler(.cancel)
+        }
+    }
+    func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse,
+                 decisionHandler: @escaping (WKNavigationResponsePolicy) -> Void) {
+        guard let url = navigationResponse.response.url,
+              setupNavigation(url, origin: origin, userActivated: false) == .local,
+              navigationResponse.canShowMIMEType else { decisionHandler(.cancel); return }
+        decisionHandler(.allow)
+    }
+    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
+                 for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? { nil }
+    func trustedFrame(_ frame: WKFrameInfo) -> Bool {
+        frame.isMainFrame && frame.securityOrigin.protocol == "http"
+            && frame.securityOrigin.host == "127.0.0.1" && frame.securityOrigin.port == origin.port
+    }
+    // WKWebView does not display JavaScript dialogs itself. Preserve the setup
+    // core's explicit approval boundaries using App-owned confirmation dialogs.
+    func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String,
+                 initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
+        guard trustedFrame(frame) else { completionHandler(false); return }
+        let alert = NSAlert(); alert.messageText = "Styx — Confirm change"
+        alert.informativeText = message
+        alert.addButton(withTitle: "Continue"); alert.addButton(withTitle: "Cancel")
+        completionHandler(alert.runModal() == .alertFirstButtonReturn)
+    }
+    func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String,
+                 initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping () -> Void) {
+        if trustedFrame(frame) {
+            let alert = NSAlert(); alert.messageText = "Styx"; alert.informativeText = message
+            alert.runModal()
+        }
+        completionHandler()
+    }
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        if (error as NSError).code == NSURLErrorCancelled { return }
+        window?.title = "Styx — Settings unavailable; reopen Settings"
+    }
+}
+
 final class StyxDelegate: NSObject, NSApplicationDelegate {
     var setupProcess: Process?
     var setupInput: Pipe?
     var setupOutput: Pipe?
     var setupURL: URL?
+    var setupWindow: SetupWindowController?
     var setupBuffer = ""
     var setupOpenRequested = false
     var setupStatusLine: NSMenuItem?
-    let setupPreference = "Styx.SetupBrowserOpened.v1"
+    let setupPreference = "Styx.SetupWindowOpened.v1"
     var runtime: RuntimeDirectory?
     var daemon: Process?
     var lifetimeWriter: FileHandle?
@@ -140,12 +248,12 @@ final class StyxDelegate: NSObject, NSApplicationDelegate {
         // A competing Cua owner does not prevent opening this app's setup UI.
         if let resources = Bundle.main.resourceURL,
            FileManager.default.isExecutableFile(atPath: resources.appendingPathComponent("runtime/node").path) {
-            do { try startSetup(openBrowser: !UserDefaults.standard.bool(forKey: setupPreference)) }
+            do { try startSetup(openWindow: !UserDefaults.standard.bool(forKey: setupPreference)) }
             catch { setupStatusLine?.title = "Local setup unavailable; reopen Settings" }
         }
     }
-    func startSetup(openBrowser: Bool) throws {
-        setupOpenRequested = setupOpenRequested || openBrowser
+    func startSetup(openWindow: Bool) throws {
+        setupOpenRequested = setupOpenRequested || openWindow
         if let url = setupURL { if setupOpenRequested { showSetup(url) }; return }
         guard setupProcess == nil else { return }
         guard let resources = Bundle.main.resourceURL else { throw HostError.daemonUnavailable }
@@ -185,6 +293,7 @@ final class StyxDelegate: NSObject, NSApplicationDelegate {
                 owner.setupOutput?.fileHandleForReading.readabilityHandler = nil
                 try? owner.setupInput?.fileHandleForWriting.close()
                 owner.setupProcess = nil; owner.setupInput = nil; owner.setupOutput = nil; owner.setupURL = nil
+                owner.setupWindow?.close(); owner.setupWindow = nil
                 owner.setupStatusLine?.title = "Local setup stopped; reopen Settings"
             }
         }
@@ -194,13 +303,13 @@ final class StyxDelegate: NSObject, NSApplicationDelegate {
         try? input.fileHandleForReading.close(); try? output.fileHandleForWriting.close()
     }
     func showSetup(_ url: URL) {
-        if NSWorkspace.shared.open(url) {
-            setupOpenRequested = false
-            UserDefaults.standard.set(true, forKey: setupPreference)
-        } else { setupStatusLine?.title = "Browser unavailable; reopen Settings" }
+        if setupWindow == nil { setupWindow = SetupWindowController(sessionURL: url) }
+        setupWindow?.present()
+        setupOpenRequested = false
+        UserDefaults.standard.set(true, forKey: setupPreference)
     }
     @objc func openSettings() {
-        do { try startSetup(openBrowser: true) }
+        do { try startSetup(openWindow: true) }
         catch {
             let alert = NSAlert(); alert.messageText = "Styx local setup is unavailable"
             alert.informativeText = "Keep the complete Styx.app bundle together and reopen Settings. No global Node installation is needed."
@@ -211,6 +320,7 @@ final class StyxDelegate: NSObject, NSApplicationDelegate {
         openSettings(); return true
     }
     func stopSetup() {
+        setupWindow?.close(); setupWindow = nil
         setupOutput?.fileHandleForReading.readabilityHandler = nil
         try? setupInput?.fileHandleForWriting.close()
         if let child = setupProcess {
@@ -330,6 +440,35 @@ final class StyxDelegate: NSObject, NSApplicationDelegate {
 }
 
 #if STYX_TESTING
+// Opt-in native WebKit acceptance against a fresh private test server only.
+if CommandLine.arguments.count == 4 && CommandLine.arguments[1] == "--setup-window-fixture" {
+    let input = URL(fileURLWithPath: CommandLine.arguments[2])
+    let snapshot = URL(fileURLWithPath: CommandLine.arguments[3])
+    guard let line = try? String(contentsOf: input, encoding: .utf8),
+          let sessionURL = setupSessionURL("STYX_SETUP_URL\t" + line.trimmingCharacters(in: .whitespacesAndNewlines)) else { exit(2) }
+    let application = NSApplication.shared
+    application.setActivationPolicy(.accessory)
+    let controller = SetupWindowController(sessionURL: sessionURL)
+    controller.present()
+    var attempts = 0
+    let timer = Timer.scheduledTimer(withTimeInterval: 0.25, repeats: true) { timer in
+        attempts += 1
+        if attempts > 80 { fputs("Styx WebKit setup acceptance timed out\n", stderr); exit(2) }
+        controller.webView.evaluateJavaScript("document.querySelector('#setup')?.hidden === false && location.hash === ''") { result, error in
+            guard error == nil, result as? Bool == true else { return }
+            timer.invalidate()
+            controller.webView.takeSnapshot(with: nil) { image, error in
+                guard error == nil, let image = image, let tiff = image.tiffRepresentation,
+                      let bitmap = NSBitmapImageRep(data: tiff), let png = bitmap.representation(using: .png, properties: [:]) else { exit(2) }
+                do { try png.write(to: snapshot); print("Styx WebKit authenticated setup and fragment removal PASS"); exit(0) }
+                catch { exit(2) }
+            }
+        }
+    }
+    withExtendedLifetime((controller,timer)) { application.run() }
+    exit(2)
+}
+
 // CI-only headless harness uses the exact production launch and lifetime
 // pipe, but creates no NSApplication, requests no TCC and invokes no GUI tool.
 if CommandLine.arguments.count == 4 && CommandLine.arguments[1] == "--liveness-owner-fixture" {
@@ -360,6 +499,19 @@ if CommandLine.arguments.contains("--self-test") {
         guard setupSessionURL(bad) == nil else { fatalError("unsafe setup bootstrap accepted") }
     }
 
+    let origin = URL(string: "http://127.0.0.1:1234/")!
+    for local in ["http://127.0.0.1:1234/", "http://127.0.0.1:1234/#progress", "http://127.0.0.1:1234/api/state"] {
+        guard setupNavigation(URL(string: local)!, origin: origin, userActivated: false) == .local else { fatalError("local navigation rejected") }
+    }
+    for bad in ["http://127.0.0.1:4321/", "http://localhost:1234/", "http://127.0.0.1:1234@example.com/", "file:///etc/passwd", "javascript:alert(1)", "data:text/html,hello", "x-apple.systempreferences:com.apple.preference.security?Privacy_AllFiles", "https://user:secret@example.com/"] {
+        guard setupNavigation(URL(string: bad)!, origin: origin, userActivated: true) == .blocked else { fatalError("unsafe navigation accepted") }
+    }
+    for external in ["https://accounts.example.com/login", "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility", "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture"] {
+        let url = URL(string: external)!
+        guard setupNavigation(url, origin: origin, userActivated: true) == .external,
+              setupNavigation(url, origin: origin, userActivated: false) == .blocked else { fatalError("external navigation requires explicit activation") }
+    }
+
     let dir = NSTemporaryDirectory() + "styx-owner-test-" + UUID().uuidString
     do {
         var owner: RuntimeDirectory? = try RuntimeDirectory(path: dir)
@@ -380,7 +532,7 @@ if CommandLine.arguments.contains("--self-test") {
         catch HostError.unsafeRuntime { }
         chmod(dir, 0o700)
         try FileManager.default.removeItem(atPath: dir)
-        print("Styx native ownership self-test passed; GUI and TCC NOT RUN")
+        print("Styx native ownership and settings navigation self-test passed; GUI and TCC NOT RUN")
         exit(0)
     } catch { fputs("Styx self-test failed: \(error)\n", stderr); exit(1) }
 }

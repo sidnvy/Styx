@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import {requirePrivateFile,ensurePrivateDirectory} from '../shared/private-file.mjs';
 import path from 'node:path';
-import {joinPayload} from '../shared/enrollment-protocol.mjs';
+import {joinPayload,capabilityPayload} from '../shared/enrollment-protocol.mjs';
 export {joinPayload};
 import {
   randomBytes, createHash, timingSafeEqual, createPublicKey,
@@ -112,6 +112,10 @@ export class EnrollmentController {
           'approved_device_token_missing',500);
         this.registry.admitApprovedHost(rec.target);
       }
+    }
+    if(this.db.default_environment_id!==undefined){
+      assert(this.db.devices.some(x=>x.id===this.db.default_environment_id&&x.status==='approved'),'invalid_default_device',500);
+      this.registry.setDefault(this.db.default_environment_id);
     }
   }
   save(){commitFile(this.stateFile,JSON.stringify(this.db,null,2)+'\n')}
@@ -268,12 +272,50 @@ export class EnrollmentController {
   devices(){
     return this.db.devices.map(x=>({
       device_id:x.id,label:x.label,platform:x.target.platform,
+      is_default:this.db.default_environment_id===x.id,
       capabilities:{exec:x.status==='approved',
         computer:x.status==='approved'&&x.target.computer.enabled},
       status:x.status,generation:x.target.generation,
       online:x.status==='approved'&&Boolean(this.relay?.connected(x.id)),
       fingerprint:x.fingerprint
     }));
+  }
+  setDefault(body={}){
+    exact(body,['device_id']);
+    assert(typeof body.device_id==='string'&&ID.test(body.device_id),'invalid_device_id');
+    assert(this.db.devices.some(x=>x.id===body.device_id&&x.status==='approved'),'device_not_found',404);
+    this.registry.resolve(body.device_id);
+    const previous=this.db.default_environment_id;
+    this.db.default_environment_id=body.device_id;
+    try{this.save()}catch(error){if(previous===undefined)delete this.db.default_environment_id;else this.db.default_environment_id=previous;throw error}
+    this.registry.setDefault(body.device_id);
+    return {status:'updated',default_environment_id:body.device_id};
+  }
+  capabilities(body={}){
+    exact(body,['device_id','fingerprint','generation','enable_computer','public_key_pem','signature']);
+    assert(typeof body.device_id==='string'&&ID.test(body.device_id),'invalid_device_id');
+    assert(typeof body.fingerprint==='string'&&/^[a-f0-9]{64}$/.test(body.fingerprint),'invalid_fingerprint');
+    assert(typeof body.generation==='string'&&body.generation.length<=128,'invalid_generation');
+    assert(typeof body.enable_computer==='boolean','invalid_computer_approval');
+    assert(typeof body.public_key_pem==='string'&&body.public_key_pem.length<=2400&&typeof body.signature==='string'&&body.signature.length<=2048,'invalid_identity_proof');
+    const record=this.db.devices.find(x=>x.id===body.device_id);
+    assert(record&&record.status==='approved','device_not_found',404);
+    assert(record.fingerprint===body.fingerprint&&record.target.generation===body.generation,'capability_revision_mismatch',409);
+    let pub,valid=false;
+    try{pub=createPublicKey(body.public_key_pem);valid=pub.asymmetricKeyType==='rsa'&&
+      sha(pub.export({type:'spki',format:'der'}))===record.fingerprint&&
+      verify('sha256',Buffer.from(capabilityPayload(body)),{key:pub,padding:constants.RSA_PKCS1_PSS_PADDING,saltLength:32},Buffer.from(body.signature,'base64url'));}catch{}
+    assert(valid,'invalid_identity_proof',403);
+    const previous=record.target;
+    const target={...previous,generation:'capability-'+randomBytes(8).toString('hex'),
+      computer:{enabled:body.enable_computer,...(body.enable_computer?{transport:'outbound',max_connections:2}:{})}};
+    // Synchronous validation/update/save prevents requests interleaving with intent.
+    this.registry.replaceApprovedHost(target,previous.generation);
+    record.target=target;
+    try{this.save()}catch(error){record.target=previous;this.registry.replaceApprovedHost(previous,target.generation);throw error}
+    this.relay?.disconnectHost(record.id);
+    return {status:'updated',device_id:record.id,fingerprint:record.fingerprint,
+      generation:target.generation,capabilities:{exec:true,computer:body.enable_computer}};
   }
   recover(body={}){
     exact(body,['device_id','fingerprint','generation']);
@@ -298,6 +340,7 @@ export class EnrollmentController {
     const record=this.db.devices.find(x=>x.id===device_id);
     assert(record&&record.status==='approved','device_not_found',404);
     const before=structuredClone(this.db);
+    if(this.db.default_environment_id===device_id)delete this.db.default_environment_id;
     record.status='revoked';
     record.revoked_at=this.now();
     for(const pending of this.db.pending.filter(x=>x.device_id===device_id)) {
@@ -308,6 +351,7 @@ export class EnrollmentController {
     // no HTTP or Exec callback can interleave between commit and denial.
     try{this.save()}catch(e){this.db=before;throw e}
     this.registry.revokeHost(device_id);
+    if(this.registry.defaultId===device_id)this.registry.setDefault(undefined);
     this.relay?.disconnectHost(device_id);
     try{fs.unlinkSync(record.target.exec.token_file)}
     catch(e){if(e.code!=='ENOENT')throw e}
@@ -350,6 +394,8 @@ export async function handleEnrollment(req,res,{controller,allowedHosts}={}){
       '/styx/enroll/devices':['GET',true,'devices'],
       '/styx/enroll/revoke':['POST',true,'revoke'],
       '/styx/enroll/recover':['POST',true,'recover'],
+      '/styx/enroll/capabilities':['POST',true,'capabilities'],
+      '/styx/enroll/set-default':['POST',true,'setDefault'],
       '/styx/enroll/join':['POST',false,'join'],
       '/styx/enroll/claim':['POST',false,'claim'],
       '/styx/enroll/confirm':['POST',false,'confirm']

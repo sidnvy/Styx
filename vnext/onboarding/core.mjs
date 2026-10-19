@@ -150,6 +150,23 @@ export async function approveDeploymentPending(d,options={}){
   return {status:result.status,device_id:result.device_id,fingerprint:result.fingerprint,approved_capabilities:result.approved_capabilities};
  }catch(e){if(e.message==='pending_identity_or_capability_mismatch')throw e;throw Error('owner_approval_failed_inspect_private_gateway');}finally{release();}
 }
+export async function readDeploymentDevices(d){
+ const g=ownedGateway(d);
+ const rows=g.controller?g.controller.devices():await ownerCommand(g.owner,'devices');
+ return rows.filter(r=>r.status==='approved').map(r=>({device_id:r.device_id,label:r.label,platform:r.platform,is_default:r.is_default===true,computer:r.capabilities?.computer===true}));
+}
+export async function setDeploymentDefault(d,{authorize=false,deviceId}={}){
+ if(authorize!==true||!/^styx-[a-f0-9]{24}$/.test(deviceId??''))fail('explicit_default_device_selection_required');
+ const g=ownedGateway(d),release=lock(d);
+ try{return g.controller?g.controller.setDefault({device_id:deviceId}):await ownerCommand(g.owner,'set-default',[deviceId]);}
+ finally{release();}
+}
+export async function setLocalDeploymentDefault(d){
+ const {config,state}=load(d);
+ if(config.mode!=='create-local'||state.steps.find(s=>s.id==='host.pair')?.status!=='succeeded')fail('paired_local_device_required');
+ const identity=read(path.join(config.host.baseDir,'device','identity.json'));
+ return setDeploymentDefault(d,{authorize:true,deviceId:identity.device_id});
+}
 export async function verifyDeploymentGateway(d){
  const {config}=load(d);if(config.mode!=='create-local')fail('join_connection_verification_requires_explicit_model_credential');
  const p=gatewayPaths(d);return verifyGatewayConnection({url:new URL('/mcp',config.gateway.url).href,tokenFile:p.model,caFile:p.cert,independentStyx:true,freshConnection:true});

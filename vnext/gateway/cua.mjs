@@ -13,8 +13,13 @@ const READ_TOOLS = new Set([
   'list_apps', 'list_windows', 'get_window_state', 'get_desktop_state', 'verify_state'
 ]);
 const plain = x => x !== null && typeof x === 'object' && !Array.isArray(x);
+const RECOVERY = Object.freeze({
+  default_environment_required: 'Call list_execution_environments and pass the selected environment_id, or choose a default device in Styx Settings.',
+  computer_slots_busy: 'This desktop is reserved by another conversation. Finish that conversation or wait for its idle lease to expire, then take a fresh snapshot. Do not reuse element tokens from another conversation.',
+  computer_host_offline: 'Open Styx on the selected device and check its connection in Settings.'
+});
 const failure = (code,uncertain=false) => {
-  const data={error:code,...(uncertain?{uncertain:true}:{})};
+  const data={error:code,...(RECOVERY[code]?{recovery:RECOVERY[code]}:{}),...(uncertain?{uncertain:true}:{})};
   return {isError:true,structuredContent:data,
     content:[{type:'text',text:JSON.stringify(data)}]};
 };
@@ -72,7 +77,7 @@ function wrapTool(tool) {
   // lease; the user cannot override its implicit native session name.
   delete schema.properties.session;
   schema.properties.environment_id = {type:'string', description:
-    'Styx execution environment; defaults to the configured default when omitted.'};
+    'Device from list_execution_environments. Pass its environment_id unless a default device has been configured.'};
   return {
     name:tool.name, title:tool.title || tool.name,
     description:tool.description,
@@ -207,7 +212,7 @@ export class CuaProvider {
       }
     } catch (e) {
       const code=e?.message;
-      if (['environment_not_found','environment_access_denied','computer_not_available',
+      if (['default_environment_required','environment_not_found','environment_access_denied','computer_not_available',
         'computer_generation_changed','computer_version_mismatch',
         'computer_session_lost','invalid_owner','computer_provider_closed','computer_owner_closed',
         'computer_slots_busy','computer_host_offline'].includes(code))

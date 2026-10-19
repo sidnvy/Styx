@@ -445,3 +445,60 @@ test('recovery persistence failure never acknowledges retirement or mutates live
     adminTokenFile:path.join(f.tmp,'admin.token'),registry});
   assert.equal(restored.devices()[0].status,'approved');
 });
+
+import {sign,constants} from 'node:crypto';
+import {capabilityPayload} from '../../shared/enrollment-protocol.mjs';
+test('capability changes need owner and exact device proof, rotate revision and preserve enrolled credentials',async t=>{
+ const f=await fixture(t),cfg=f.config('capability',false),identity=initLocalIdentity(cfg);
+ const invitation=(await f.admin('invitations',{})).body;
+ const pending=await requestEnrollment(cfg,invitation.invitation);
+ await f.admin('approve',{request_id:pending.request_id,fingerprint:identity.fingerprint,enable_computer:false});
+ await claimEnrollment(cfg);
+ const tokenFile=f.gateway.registry.resolve(identity.device_id).exec.token_file;
+ const token=await fs.readFile(tokenFile,'utf8');
+ const key=await fs.readFile(path.join(cfg.storage_dir,'identity.pem'),'utf8');
+ const request=enabled=>{
+  const device=f.controller.devices().find(x=>x.device_id===identity.device_id);
+  const body={device_id:identity.device_id,fingerprint:identity.fingerprint,generation:device.generation,enable_computer:enabled,public_key_pem:identity.public_key_pem};
+  body.signature=sign('sha256',Buffer.from(capabilityPayload(body)),{key,padding:constants.RSA_PKCS1_PSS_PADDING,saltLength:32}).toString('base64url');return body;
+ };
+ const enable=request(true);
+ await assert.rejects(enrollmentRequest(cfg,'capabilities',enable),/unauthorized/);
+ await assert.rejects(f.admin('capabilities',{...enable,enable_computer:false}),/invalid_identity_proof/);
+ const changed=(await f.admin('capabilities',enable)).body;
+ assert.equal(changed.capabilities.computer,true);assert.notEqual(changed.generation,enable.generation);
+ assert.equal(f.gateway.registry.resolve(identity.device_id).computer.enabled,true);
+ assert.equal(await fs.readFile(tokenFile,'utf8'),token);
+ await assert.rejects(f.admin('capabilities',enable),/revision_mismatch/);
+ const deny=request(false);await f.admin('capabilities',deny);
+ assert.equal(f.gateway.registry.resolve(identity.device_id).computer.enabled,false);
+ assert.equal(await fs.readFile(tokenFile,'utf8'),token);
+ const originalSave=f.controller.save;f.controller.save=()=>{throw Error('disk failure')};
+ await assert.rejects(f.admin('capabilities',request(true)),/enrollment_internal_error/);
+ assert.equal(f.gateway.registry.resolve(identity.device_id).computer.enabled,false);
+ assert.equal(f.controller.devices().find(x=>x.device_id===identity.device_id).capabilities.computer,false);
+ f.controller.save=originalSave;
+ const restored=new EnrollmentController({rootDir:f.enrollDir,adminTokenFile:path.join(f.tmp,'admin.token'),registry:new TargetRegistry({version:1,targets:[]})});
+ assert.equal(restored.devices().find(x=>x.device_id===identity.device_id).capabilities.computer,false);
+});
+
+test('owner-selected default persists across restart and revocation clears it without selecting another device',async t=>{
+ const f=await fixture(t),cfg=f.config('default',false),identity=initLocalIdentity(cfg);
+ const invitation=(await f.admin('invitations',{})).body;
+ const pending=await requestEnrollment(cfg,invitation.invitation);
+ await f.admin('approve',{request_id:pending.request_id,fingerprint:identity.fingerprint,enable_computer:false});
+ assert.throws(()=>f.gateway.registry.resolve(),/default_environment_required/);
+ await assert.rejects(enrollmentRequest(cfg,'set-default',{device_id:identity.device_id}),/unauthorized/);
+ await assert.rejects(f.admin('set-default',{device_id:'styx-'+'0'.repeat(24)}),/device_not_found/);
+ const selected=(await f.admin('set-default',{device_id:identity.device_id})).body;
+ assert.equal(selected.default_environment_id,identity.device_id);
+ assert.equal(f.gateway.registry.resolve().id,identity.device_id);
+ const registry=new TargetRegistry({version:1,targets:[]});
+ const restored=new EnrollmentController({rootDir:f.enrollDir,adminTokenFile:path.join(f.tmp,'admin.token'),registry});
+ assert.equal(registry.resolve().id,identity.device_id);
+ restored.revoke({device_id:identity.device_id});
+ assert.throws(()=>registry.resolve(),/default_environment_required/);
+ const after=new TargetRegistry({version:1,targets:[]});
+ new EnrollmentController({rootDir:f.enrollDir,adminTokenFile:path.join(f.tmp,'admin.token'),registry:after});
+ assert.throws(()=>after.resolve(),/default_environment_required/);
+});

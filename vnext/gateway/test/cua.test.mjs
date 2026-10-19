@@ -197,3 +197,20 @@ for(const revoke of ['device','owner'])test(revoke+' closure during native Cua h
   assert.equal(closed,1);assert.equal(calls,0);
   assert.equal(provider.sessions.size,0);assert.equal(provider.pending.size,0);
 });
+
+test('missing default and busy desktop return actionable categories without raw driver errors',async()=>{
+ const f=fixture();f.registry.defaultId=undefined;
+ const missing=await f.provider.callTool('list_apps',{},'alice');
+ assert.equal(missing.structuredContent.error,'default_environment_required');
+ assert.match(missing.structuredContent.recovery,/list_execution_environments.*environment_id/);
+ assert.equal(f.instances.length,0);
+ f.provider.connect=async()=>{throw Error('computer_slots_busy')};
+ const busy=await f.provider.callTool('list_apps',{environment_id:'mac'},'alice');
+ assert.equal(busy.structuredContent.error,'computer_slots_busy');
+ assert.match(busy.structuredContent.recovery,/another conversation/);
+ f.provider.connect=async()=>{throw Error('PRIVATE_RAW_DRIVER_MESSAGE')};
+ const unknown=await f.provider.callTool('list_apps',{environment_id:'mac'},'alice');
+ assert.equal(unknown.structuredContent.error,'computer_transport_unavailable');
+ assert.doesNotMatch(JSON.stringify(unknown),/PRIVATE_RAW_DRIVER_MESSAGE/);
+ await f.provider.close();
+});

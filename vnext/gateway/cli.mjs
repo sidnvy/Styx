@@ -36,8 +36,8 @@ const handle = await createGatewayHttp(gateway, {
   allowedHosts: process.env.STYX_ALLOWED_HOSTS?.split(',') || undefined,
   tlsCertificateFile: process.env.STYX_TLS_CERT_FILE || undefined,
   tlsPrivateKeyFile: process.env.STYX_TLS_KEY_FILE || undefined,
-  // Lab only. Production sessions retain their original indefinite lifetime.
-  idleSessionTimeoutMs: casOnly ? 120000 : 0,
+  // Production uses bounded idle discovery cleanup; running Exec owners survive.
+  ...(casOnly ? {idleSessionTimeoutMs:120000} : {}),
   enrollment
 });
 process.stdout.write(JSON.stringify({status: 'listening', host: handle.address.address,

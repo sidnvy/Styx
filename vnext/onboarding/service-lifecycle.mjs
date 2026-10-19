@@ -46,7 +46,7 @@ function fixedWindows(run,d,release,action,configFile){
 }
 function sanitized(platform,native){
  if(platform==='linux')return native.status!=='reported'?{state:'unknown',persistence:'unknown'}:{state:native.load==='not-found'?'not_installed':native.active==='active'&&native.pid>0?'running':['inactive','failed'].includes(native.active)&&native.pid===0?'stopped':'transitioning',persistence:native.enabled==='enabled'?'enabled':native.enabled==='disabled'?'disabled':'unknown'};
- if(platform==='darwin')return {state:native.loaded&&native.state==='running'&&native.pid>0?'running':native.loaded?'loaded':'not_loaded_or_unavailable',persistence:'unknown'};
+ if(platform==='darwin')return {state:native.status==='unavailable'?'unknown':native.loaded&&native.state==='running'&&native.pid>0?'running':native.loaded?'loaded':'stopped',persistence:'unknown'};
  return {state:native.status==='not_installed'?'not_installed':native.status==='Running'?'running':['Ready','Disabled'].includes(native.status)?'stopped':'unknown',persistence:native.status==='Disabled'?'disabled':native.status==='not_installed'?'none':'unknown'};
 }
 export async function hostServiceAction({action,role='host',serviceConfigFile,authorization}={}, {home=os.homedir(),run=execFileSync}={}){
@@ -82,9 +82,25 @@ export async function hostServiceAction({action,role='host',serviceConfigFile,au
    else{if(platform!=='win32')control('disable');if(platform!=='darwin'||observe().loaded)control('stop')}
   }else if(file&&fs.existsSync(file))binding();else if(!file)binding();
   let native=observe(),state=sanitized(platform,native);
+  const installed=file?fs.existsSync(file):state.state!=='not_installed';
+  // An active job without our exact on-disk definition is not ours to adopt.
+  if(!installed&&((platform==='darwin'&&native.loaded)||state.state==='running'))throw Error('service_definition_missing');
   if(['start','stop'].includes(action)){
-   const deadline=Date.now()+10000;while(Date.now()<deadline&&state.state!==(action==='start'?'running':'stopped')){if(platform==='darwin'&&state.state==='not_loaded_or_unavailable')break;await new Promise(r=>setTimeout(r,100));native=observe();state=sanitized(platform,native)}
+   const deadline=Date.now()+10000;while(Date.now()<deadline&&state.state!==(action==='start'?'running':'stopped')){if(platform==='darwin'&&state.state==='unknown')break;await new Promise(r=>setTimeout(r,100));native=observe();state=sanitized(platform,native)}
   }
-  return {status:['start','stop'].includes(action)&&state.state!==(action==='start'?'running':'stopped')?'needs_attention':'reported',role,action,manager:managers[platform],serviceId:d.id,...state,health:'not_checked'};
+  return {status:['start','stop'].includes(action)&&state.state!==(action==='start'?'running':'stopped')?'needs_attention':'reported',role,action,manager:managers[platform],serviceId:d.id,installed,...state,health:'not_checked'};
  }catch{return {status:attempted?'uncertain':'blocked',role:role==='host'?'host':'unknown',action:['install','status','start','stop'].includes(action)?action:'unsupported',reason:'service_scope_or_native_operation_refused'}}
+}
+
+// Read-only fixed descriptor inspection for UI refresh; no maintenance journal writes.
+export async function observeHostService({serviceConfigFile}={},options={}){
+ try{
+  const d=descriptor(readConfig(serviceConfigFile));
+  return await hostServiceAction({action:'status',role:'host',serviceConfigFile,authorization:{
+   approved:true,action:'status',role:'host',serviceConfigFile,serviceId:d.id,
+   installRoot:d.installRoot,hostConfigFile:d.hostConfigFile,trustPublicKeyFile:d.trustPublicKeyFile,
+   nodeBinary:d.nodeBinary,...(d.logDir!==undefined?{logDir:d.logDir}:{}),
+   ...(d.restartSec!==undefined?{restartSec:d.restartSec}:{})
+  }},options);
+ }catch{return {status:'blocked',action:'status',role:'host',reason:'service_scope_or_native_operation_refused'}}
 }

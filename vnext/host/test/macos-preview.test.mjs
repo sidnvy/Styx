@@ -7,7 +7,7 @@ import {execFileSync,spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {createHash,generateKeyPairSync} from 'node:crypto';
 import {macAdhocSigningPlan,macSigningPlan} from '../build-macos-app.mjs';
-import {copyOfflineDependencies,finalizePreviewHostBundle,machOFiles,previewSourceFiles} from '../build-macos-preview.mjs';
+import {copyOfflineDependencies,finalizePreviewHostBundle,machOFiles,previewSourceFiles,verifyPreviewTunnelInput} from '../build-macos-preview.mjs';
 import {verifySignedRelease} from '../installer.mjs';
 import {verifyMacPreviewApp} from '../macos-preview-trust.mjs';
 const hash=b=>createHash('sha256').update(b).digest('hex');
@@ -44,4 +44,10 @@ test('symlinked preview CLI entry reports a refused build instead of silent succ
  fs.symlinkSync(fileURLToPath(new URL('../build-macos-preview.mjs',import.meta.url)),entry);fs.writeFileSync(config,'{}');
  const result=spawnSync(process.execPath,[entry,config],{encoding:'utf8',timeout:5000});
  assert.equal(result.status,2);assert.match(result.stderr,/Styx developer preview build failed/);
+});
+
+test('tunnel packaging rejects unpinned binaries before distribution',t=>{
+ const root=scratch(t),binary=path.join(root,'tunnel-client');fs.writeFileSync(binary,'untrusted binary');
+ assert.throws(()=>verifyPreviewTunnelInput(binary),/verified_original_tunnel_input_required/);
+ assert.throws(()=>verifyPreviewTunnelInput('relative'),/absolute_tunnel_binary_required/);
 });

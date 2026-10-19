@@ -35,6 +35,12 @@ export async function ownerCommand(config,cmd,args=[]) {
       data={request_id:args[0],fingerprint:args[1],
         enable_computer:args[2]==='computer'};
       break;
+    case 'set-default':
+      if(args.length!==1||typeof args[0]!=='string')throw Error('default_device_id_required');
+      route='set-default';data={device_id:args[0]};break;
+    case 'capabilities':
+      if(args.length!==1||!args[0]||typeof args[0]!=='object'||Array.isArray(args[0]))throw Error('signed_capability_request_required');
+      route='capabilities';data=args[0];break;
     case 'recover':
       if(args.length!==3||args.some(x=>!x))
         throw Error('recover_requires_device_id_fingerprint_and_generation');

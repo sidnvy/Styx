@@ -10,14 +10,17 @@ import {verifiedServiceNode} from './installer.mjs';
 import {requirePrivateFile} from './private-storage.mjs';
 
 const LABEL=/^app\.styx\.(?:connector|host(?:-pilot)?(?:\.[a-z0-9][a-z0-9-]{0,32})?)$/;
-const PATH_SAFE=/^\/[A-Za-z0-9._+@/-]+$/;
+// Paths become XML strings and argv entries, never shell source. Accept normal
+// macOS names (including Application Support and Unicode), but reject controls
+// and characters XML 1.0 cannot represent losslessly.
+const INVALID_PATH_CHARACTERS=/[\u0000-\u001f\u007f-\u009f\ud800-\udfff\ufffe\uffff]/u;
 const MARKER='Managed-by: Styx-VNext-user-launchagent-v1';
 const esc=s=>s.replaceAll('&','&amp;').replaceAll('<','&lt;')
   .replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'",'&apos;');
 const assert=(ok,msg)=>{if(!ok)throw Error(msg)};
 const isDarwin=()=>assert(process.platform==='darwin','macos_only');
 const safePath=(str,label)=>{assert(typeof str==='string' && path.isAbsolute(str) &&
-  path.normalize(str)===str&&PATH_SAFE.test(str),label+'_unsafe_path');return str};
+  path.normalize(str)===str&&!INVALID_PATH_CHARACTERS.test(str),label+'_unsafe_path');return str};
 const safeLabel=label=>{assert(LABEL.test(label??''),'invalid_styx_launchagent_label');return label};
 function verifyPrivate(p){
   safePath(p,'host_config');
@@ -101,7 +104,10 @@ export function statusMacLaunchAgent(label,{uid=process.getuid?.(),
     const state=/^\s*state = ([^\n]+)/m.exec(data);
     return {label,status:'reported',loaded:true,pid:pid?Number(pid[1]):null,
       state:state?.[1]?.trim()??null};
-  }catch{return {label,status:'not_loaded',loaded:false}}
+  }catch(error){
+    if(/Could not find (?:specified )?service/i.test(String(error.stderr??'')))return {label,status:'not_loaded',loaded:false};
+    return {label,status:'unavailable',loaded:null};
+  }
 }
 export function controlMacLaunchAgent(action,label,{home=os.homedir(),
   uid=process.getuid?.(),run=execFileSync}={}){
@@ -147,6 +153,7 @@ export function removeMacLaunchAgent(label,{home=os.homedir(),
   // Unload before unlinking; unknown launchd errors must not be interpreted
   // as successful removal of a potentially running service.
   const status=statusMacLaunchAgent(label,{uid,run});
+  assert(status.status!=='unavailable','launchagent_status_unavailable');
   if(status.loaded)launchctl('bootout',[domain,plist],{run});
   launchctl('disable',[domain+'/'+label],{run});
   fs.unlinkSync(plist);

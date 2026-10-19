@@ -91,6 +91,18 @@ export class TargetRegistry {
     this.targets = checked.targets;
     return this.targets.get(target.id);
   }
+  setDefault(id) {
+    if(id!==undefined)this.resolve(id);
+    this.defaultId=id;
+  }
+  replaceApprovedHost(target,expectedGeneration) {
+    const current=this.targets.get(target?.id);
+    if(!current||current.kind!=='host'||!current.allowed||current.generation!==expectedGeneration)throw Error('device_generation_mismatch');
+    const checked=new TargetRegistry({version:1,default_environment_id:this.defaultId,
+      targets:[...this.targets.values()].map(x=>x.id===target.id?target:x)});
+    this.targets=checked.targets;
+    return this.targets.get(target.id);
+  }
   revokeHost(id) {
     const existing = this.targets.get(id);
     if (!existing || existing.kind !== 'host') throw Error('device_not_found');

@@ -102,3 +102,15 @@ test('authenticated HTTP MCP transport, Codex tools and session isolation', asyn
   assert.equal(stolen.isError, true);
   assert.equal(stolen.structuredContent.error, 'unknown_session');
 });
+
+test('Exec target-selection errors remain actionable before connecting a native runtime',async()=>{
+ const config=catalog();delete config.default_environment_id;let connected=false;
+ const gateway=createStyxGateway({catalog:config,connect:async()=>{connected=true;return fakeRuntime()}});
+ try{
+  const missing=await gateway.exec.callTool('exec_command',{cmd:'pwd'},'test-owner');
+  assert.equal(missing.structuredContent.error,'default_environment_required');
+  const unknown=await gateway.exec.callTool('exec_command',{cmd:'pwd',environment_id:'unknown'},'test-owner');
+  assert.equal(unknown.structuredContent.error,'environment_not_found');
+  assert.equal(connected,false);
+ }finally{await gateway.close()}
+});

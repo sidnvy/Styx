@@ -66,3 +66,11 @@ test('opt-in actual isolated Linux user service lifecycle',{skip:!linux||process
  t.diagnostic('exact owned unit '+f.id+' observed running, then stopped and disabled');
  removeLinuxService(f.id);t.diagnostic('exact owned unit removed; signed fixture is not a native Host tool health claim');assert.equal(execFileSync('/usr/bin/systemctl',['--user','show',f.id,'-p','LoadState','--value'],{encoding:'utf8'}).trim(),'not-found');
 });
+
+import {observeHostService} from '../service-lifecycle.mjs';
+test('read-only service observation constructs fixed scope and never mutates native service',{skip:!linux},async t=>{
+ const f=fixture(t),native=manager();
+ const result=await observeHostService({serviceConfigFile:f.config},{home:f.home,run:native.run});
+ assert.equal(result.status,'reported');assert.equal(result.installed,false);
+ assert.deepEqual(native.calls.map(c=>c[1]),['show']);
+});

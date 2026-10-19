@@ -7,3 +7,8 @@ const JOIN_FIELDS = Object.freeze([
 export function joinPayload(body) {
   return JSON.stringify(Object.fromEntries(JOIN_FIELDS.map(k=>[k,body[k]])));
 }
+
+// Separate domain and exact revision prevent reusing enrollment or stale consent.
+export function capabilityPayload(body){
+ return JSON.stringify(['styx-device-capabilities-v1',body.device_id,body.fingerprint,body.generation,body.enable_computer]);
+}
