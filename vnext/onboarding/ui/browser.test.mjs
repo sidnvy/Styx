@@ -20,7 +20,7 @@ test(native?'real browser prepares native Hosts, verifies Gateway, pairs locally
  const coreUrl=process.env.STYX_ONBOARDING_CORE_MODULE?pathToFileURL(process.env.STYX_ONBOARDING_CORE_MODULE):new URL('../core.mjs',import.meta.url);
  const core=await import(coreUrl);const pairingLinks=native?await import(new URL('./pairing-links.mjs',coreUrl)):undefined;
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'styx-ui-browser-'));fs.chmodSync(root,0o700);
- let instance,joinInstance,browser,ws;let next=0;const pending=new Map();
+ let instance,joinInstance,browser,browserClosed,ws,primaryFailure;let next=0;const pending=new Map();
  const command=(method,params={})=>new Promise((resolve,reject)=>{const id=++next;const timer=setTimeout(()=>{pending.delete(id);reject(Error('browser_command_timeout'))},15000);pending.set(id,{resolve,reject,timer});ws.send(JSON.stringify({id,method,params}))});
  async function evaluate(expression){const r=await command('Runtime.evaluate',{expression,awaitPromise:true,returnByValue:true});assert.equal(r.exceptionDetails,undefined);return r.result.value}
  try{
@@ -37,6 +37,7 @@ test(native?'real browser prepares native Hosts, verifies Gateway, pairs locally
   instance=await createOnboardingServer({stateDir:path.join(root,'state'),core,artifactDefaultsFile,pairingLinks});
   const profile=path.join(root,'browser');fs.mkdirSync(profile,{mode:0o700});
   browser=spawn(binary,['--headless','--disable-gpu','--no-first-run','--no-default-browser-check','--remote-debugging-port=0','--user-data-dir='+profile,instance.url],{stdio:'ignore'});
+  browserClosed=new Promise(resolve=>browser.once('close',resolve));
   const active=path.join(profile,'DevToolsActivePort');await until(()=>fs.existsSync(active),'browser_not_started');const debugPort=fs.readFileSync(active,'utf8').split('\n')[0];
   const targets=await(await fetch('http://127.0.0.1:'+debugPort+'/json/list')).json();const page=targets.find(p=>p.type==='page');assert.ok(page);
   ws=new WebSocket(page.webSocketDebuggerUrl);await new Promise((resolve,reject)=>{ws.addEventListener('open',resolve,{once:true});ws.addEventListener('error',reject,{once:true})});
@@ -104,9 +105,23 @@ test(native?'real browser prepares native Hosts, verifies Gateway, pairs locally
    image=await command('Page.captureScreenshot',{format:'png',captureBeyondViewport:false});fs.writeFileSync(path.join(directory,'onboarding-mobile.png'),Buffer.from(image.data,'base64'));
   }
 
- }finally{
-  for(const entry of pending.values()){clearTimeout(entry.timer);entry.reject(Error('browser_cleanup'))}pending.clear();ws?.close();
-  if(browser&&browser.exitCode===null){browser.kill('SIGTERM');await Promise.race([new Promise(r=>browser.once('close',r)),sleep(5000)]);if(browser.exitCode===null&&browser.signalCode===null){browser.kill('SIGKILL');await new Promise(r=>browser.once('close',r))}}
-  await joinInstance?.close();await instance?.close();fs.rmSync(root,{recursive:true,force:true});
+ }catch(error){primaryFailure=error;throw error}
+ finally{
+  try{
+   // Ask this isolated browser to close its own children/profile first. Retain
+   // the close promise from spawn, so a prior exit cannot race the observer.
+   if(ws?.readyState===1)ws.send(JSON.stringify({id:++next,method:'Browser.close'}));
+   if(browserClosed){
+    const closed=await Promise.race([browserClosed.then(()=>true),sleep(5000).then(()=>false)]);
+    if(!closed){browser.kill('SIGTERM');const stopped=await Promise.race([browserClosed.then(()=>true),sleep(5000).then(()=>false)]);if(!stopped){browser.kill('SIGKILL');await browserClosed}}
+   }
+   for(const entry of pending.values()){clearTimeout(entry.timer);entry.reject(Error('browser_cleanup'))}pending.clear();ws?.close();
+   await joinInstance?.close();await instance?.close();
+   // Chromium profile children may finish SQLite cleanup after browser close.
+   fs.rmSync(root,{recursive:true,force:true,maxRetries:10,retryDelay:150});
+  }catch(cleanupError){
+   if(primaryFailure)primaryFailure.cleanupFailure=cleanupError.code??'owned_browser_cleanup_failed';
+   else throw cleanupError;
+  }
  }
 });
