@@ -48,9 +48,12 @@ processes must not be mistaken for installed persistent services.
 MCP discovery sessions could consume all 32 slots because ordinary idle expiry
 was disabled. Abandoned diagnostics that called close() without terminateSession()
 also contributed; the evidence does not attribute all sessions to ChatGPT.
-Production cleanup now uses a bounded idle policy at capacity while protecting
-in-flight calls and retained Exec owners. Desktop slot contention and a missing
-default device must remain distinct actionable errors.
+A later account trial reproduced HTTP 503 with all components running: the
+32-session cap still rejected repeated short-lived sessions before their 15-minute
+idle expiry. The owner requested removal of the MCP HTTP session-count cap.
+There is now no count-based admission rejection; idle cleanup runs on each new
+initialization while protecting in-flight calls and retained Exec owners.
+Desktop worker queues and a missing default device remain separate concerns.
 
 The reported desktop permissions subsequently passed, and actual local read-only
 desktop and terminal calls passed. This does not retroactively prove the original
