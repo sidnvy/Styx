@@ -11,6 +11,11 @@ import {fileURLToPath} from 'node:url';
 import {createDeployment} from '../core.mjs';
 import {configureTunnel,TunnelRuntime} from '../tunnel-runtime.mjs';
 const key='sk-test_'+ 'a'.repeat(40),token='b'.repeat(64),tunnelId='tunnel_12345678';
+test('first-open status, health, resume and stop before deployment are read-only and safe',async t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'styx-fresh-tunnel-'));t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
+ const stateDir=path.join(root,'not-created'),runtime=new TunnelRuntime({stateDir,binary:process.execPath,sha256:'a'.repeat(64)});
+ assert.equal(runtime.status().status,'not_configured');assert.equal((await runtime.health()).transport,'not_running');assert.equal((await runtime.resume()).status,'not_configured');assert.equal((await runtime.stop()).status,'not_configured');assert.equal(fs.existsSync(stateDir),false);
+});
 function fixture(t){
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'styx tunnel '));t.after(()=>fs.rmSync(root,{recursive:true,force:true}));fs.chmodSync(root,0o700);
  const stateDir=path.join(root,'state'),cfg=path.join(root,'input.json');
@@ -22,6 +27,9 @@ function fixture(t){
  const calls=[],children=[];const spawnProcess=(...args)=>{calls.push(args);const child=new EventEmitter();child.kill=signal=>{queueMicrotask(()=>child.emit('exit',null,signal));return true;};children.push(child);queueMicrotask(()=>child.emit('spawn'));return child;};
  return {root,stateDir,binary,sha256,spawnProcess,calls,children,model};
 }
+test('status and stopping an unused tunnel do not create a tunnel directory in an existing deployment',async t=>{
+ const f=fixture(t),runtime=new TunnelRuntime(f);assert.equal(runtime.status().status,'not_configured');await runtime.stop();assert.equal(fs.existsSync(path.join(f.stateDir,'tunnel')),false);
+});
 test('private configuration never returns credentials and supports atomic credential replacement',t=>{
  const f=fixture(t);const result=configureTunnel(f.stateDir,{tunnelId,apiKey:key,authorize:true});
  assert.equal(result.status,'configured');assert.equal(JSON.stringify(result).includes(key),false);

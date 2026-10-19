@@ -5,13 +5,13 @@ import path from 'node:path';
 import {createHash,randomBytes} from 'node:crypto';
 import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
-import {ensurePrivateDirectory,requirePrivateFile,openPrivateFile,writePrivateFile} from '../host/private-storage.mjs';
+import {ensurePrivateDirectory,requirePrivateDirectory,requirePrivateFile,openPrivateFile,writePrivateFile} from '../host/private-storage.mjs';
 import {readDeployment} from './core.mjs';
 const fail=code=>{throw Error(code)};
 const hash=file=>createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 function read(file){requirePrivateFile(file);if(fs.statSync(file).size>65536)fail('tunnel_state_too_large');return fs.readFileSync(file,'utf8');}
 function write(file,value){const tmp=file+'.'+randomBytes(8).toString('hex');try{writePrivateFile(tmp,value);fs.renameSync(tmp,file);}finally{if(fs.existsSync(tmp))fs.unlinkSync(tmp);}}
-function locations(stateDir){readDeployment(stateDir);const root=path.join(stateDir,'tunnel');ensurePrivateDirectory(root);return {root,config:path.join(root,'connection.json'),lock:path.join(root,'owner.lock'),header:path.join(root,'gateway-header'),health:path.join(root,'health.url')};}
+function locations(stateDir,{create=false}={}){readDeployment(stateDir);const root=path.join(stateDir,'tunnel');if(create)ensurePrivateDirectory(root);else if(fs.existsSync(root))requirePrivateDirectory(root);return {root,config:path.join(root,'connection.json'),lock:path.join(root,'owner.lock'),header:path.join(root,'gateway-header'),health:path.join(root,'health.url')};}
 function configAt(p){if(!fs.existsSync(p.config))return null;const c=JSON.parse(read(p.config));if(c.schema!==1||typeof c.autoStart!=='boolean'||!/^tunnel_[A-Za-z0-9_-]{8,128}$/.test(c.tunnelId)||!/^key-[a-f0-9]{32}$/.test(c.keyFile))fail('invalid_tunnel_configuration');read(path.join(p.root,c.keyFile));return c;}
 function acquireOwnerLock(p){
  let fd;try{fd=openPrivateFile(p.lock,0o600)}catch{fail('tunnel_running_or_interrupted')}
@@ -33,7 +33,7 @@ export function configureTunnel(stateDir,{tunnelId,apiKey,autoStart=false,author
  if(typeof autoStart!=='boolean')fail('invalid_tunnel_autostart');
  if(!/^tunnel_[A-Za-z0-9_-]{8,128}$/.test(tunnelId??''))fail('invalid_tunnel_id');
  if(typeof apiKey!=='string'||!/^sk-[A-Za-z0-9_-]{16,512}$/.test(apiKey))fail('invalid_tunnel_runtime_key');
- const p=locations(stateDir);gatewayAt(stateDir);
+ const p=locations(stateDir,{create:true});gatewayAt(stateDir);
  const lockToken=acquireOwnerLock(p);
  try{
   // Configuration and process startup share the same cross-process lock. Read
@@ -52,10 +52,16 @@ export class TunnelRuntime {
   this.#stateDir=stateDir;this.#binary=binary;this.#sha=sha256;this.#spawn=spawnProcess;
  }
  status(){
+  const available=typeof this.#binary==='string'&&/^[a-f0-9]{64}$/.test(this.#sha??'');
+  // Opening/closing the first setup window is valid before a deployment exists.
+  // Status is read-only: neither that case nor an unconfigured tunnel creates
+  // directories, repairs state or claims a connection is running.
+  try{fs.lstatSync(this.#stateDir)}catch(error){if(error.code!=='ENOENT')throw error;return {status:'not_configured',available,tunnelId:null,autoStart:false,ownership:'none',lastExit:this.#exit,accountAcceptance:'NOT RUN'}}
   const p=locations(this.#stateDir),c=configAt(p);
   return {status:this.#child?'running':fs.existsSync(p.lock)?'interrupted':c?'configured':'not_configured',available:typeof this.#binary==='string'&&/^[a-f0-9]{64}$/.test(this.#sha??''),tunnelId:c?.tunnelId??null,autoStart:c?.autoStart??false,ownership:this.#child?'current_app':'none',lastExit:this.#exit,accountAcceptance:'NOT RUN'};
  }
  async resume(){
+  const status=this.status();if(status.status==='not_configured')return status;
   const c=configAt(locations(this.#stateDir));
   return c?.autoStart===true?this.start({authorize:true}):this.status();
  }
@@ -83,7 +89,7 @@ export class TunnelRuntime {
   this.#pending=this.#start();try{return await this.#pending;}catch(e){this.#schedule();throw e;}finally{this.#pending=null;}
  }
  async #start(){
-  const p=locations(this.#stateDir);
+  const p=locations(this.#stateDir,{create:true});
   if(typeof this.#binary!=='string'||!path.isAbsolute(this.#binary)||! /^[a-f0-9]{64}$/.test(this.#sha??''))fail('pinned_tunnel_client_required');
   const st=fs.lstatSync(this.#binary);if(!st.isFile()||st.isSymbolicLink()||hash(this.#binary)!==this.#sha)fail('tunnel_client_integrity_failed');
   fs.accessSync(this.#binary,fs.constants.X_OK);const g=gatewayAt(this.#stateDir);

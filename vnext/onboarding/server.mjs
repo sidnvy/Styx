@@ -93,7 +93,7 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
  const probe=net.createServer();await new Promise((resolve,reject)=>{probe.once('error',reject);probe.listen(0,'127.0.0.1',resolve)});const suggestedPort=probe.address().port;await new Promise(resolve=>probe.close(resolve));
  const defaults={label:os.hostname().slice(0,72),baseDir:path.join(path.dirname(stateDir),'styx-host-'+randomBytes(5).toString('hex')),gatewayUrl:'https://127.0.0.1:'+suggestedPort,...artifacts};
  const session=randomBytes(32).toString('base64url'),csrf=randomBytes(32).toString('base64url');
- let origin,closed=false,busy=false;
+ let origin,closing=null,busy=false;
  const services={host:null,gateway:null};
  let pendingLink,acceptedLink;
  const linkImportAvailable=!!pairingLinks||fs.existsSync(new URL('./pairing-links.mjs',import.meta.url));
@@ -261,7 +261,16 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
  // Only a previously recorded user opt-in can resume this App-owned connection.
  if(tunnel&&fs.existsSync(stateDir))await tunnel.resume().catch(()=>{});
  return {server,origin,url:origin+'/#session='+session,
-  async close(){if(closed)return;closed=true;pendingLink=null;await tunnel?.stop();await new Promise(resolve=>server.close(resolve));try{await api.stopDeploymentForeground?.(stateDir)}finally{await Promise.resolve().then(()=>api.stopDeploymentGateway?.(stateDir)).catch(()=>{})}}};
+  close(){if(closing)return closing;pendingLink=null;
+   closing=(async()=>{
+    let failure;
+    // Every owned lifetime must be settled even if an earlier cleanup fails.
+    // Keep the failure visible on repeated close calls rather than marking an
+    // interrupted shutdown successful after setting a boolean too early.
+    for(const stop of [()=>tunnel?.stop(),()=>new Promise(resolve=>server.close(resolve)),()=>api.stopDeploymentForeground?.(stateDir),()=>api.stopDeploymentGateway?.(stateDir)])try{await stop()}catch(error){failure??=error}
+    if(failure)throw failure;
+   })();return closing;
+  }};
 }
 if(process.argv[1]&&fs.realpathSync(process.argv[1])===fs.realpathSync(fileURLToPath(import.meta.url))){
  try{

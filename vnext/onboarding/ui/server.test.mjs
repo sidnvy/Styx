@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import http from 'node:http';
 import path from 'node:path';
+import {createHash} from 'node:crypto';
 import {createOnboardingServer,publicDeployment,validateUiConfig,browserOrigin,gatewayServiceUiCapabilities} from '../server.mjs';
 const config=()=>({schema:1,mode:'create-local',gateway:{url:'https://127.0.0.1:8795'},host:{bundle:'/private/bundle',publisherKeyFile:'/private/publisher.pem',publisherSha256:'a'.repeat(64),baseDir:'/private/new-host',label:'Owned test',computer:false}});
 async function fixture(options={}){
@@ -36,6 +37,15 @@ test('loopback bootstrap serves real static UI but no unauthenticated state or m
   assert.equal((await f.get('/api/status',{Origin:'https://attacker.example'})).status,403);
   assert.equal((await f.get('/private/state.json')).status,404);assert.equal(f.calls,0);
  }finally{await f.cleanup()}
+});
+test('fresh bundled-style server with a pinned tunnel closes before any deployment exists',async()=>{
+ const f=await fixture({trustedTunnelClient:{binary:process.execPath,sha256:createHash('sha256').update(fs.readFileSync(process.execPath)).digest('hex')}});
+ try{assert.equal((await fetch(f.origin+'/')).status,200);assert.equal(fs.existsSync(path.join(f.root,'deployment')),false);await Promise.all([f.close(),f.close()]);assert.equal(f.server.listening,false);assert.equal(fs.existsSync(path.join(f.root,'deployment')),false)}finally{await f.cleanup()}
+});
+test('a tunnel shutdown error cannot skip HTTP and foreground/Gateway cleanup or become success on retry',async()=>{
+ const calls=[],f=await fixture({trustedTunnelClient:{binary:process.execPath,sha256:'a'.repeat(64)},core:{stopDeploymentForeground:()=>{calls.push('foreground')},stopDeploymentGateway:()=>{calls.push('gateway')}}});
+ fs.mkdirSync(path.join(f.root,'deployment'),{mode:0o700}); // Deliberately corrupt local state after startup.
+ try{await assert.rejects(f.close());assert.equal(f.server.listening,false);assert.deepEqual(calls,['foreground','gateway']);await assert.rejects(f.close());assert.deepEqual(calls,['foreground','gateway'])}finally{fs.rmSync(f.root,{recursive:true,force:true})}
 });
 
 test('shared journey and diagnostics are authenticated read-only whitelists, not account or permission shortcuts',async()=>{
