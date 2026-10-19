@@ -74,7 +74,28 @@ func makeEmbeddedDaemon(driver: URL, socketPath: String, pidFile: String) -> (Pr
     return (child, lifetime)
 }
 
+// Accept only the one private loopback bootstrap message from our owned child.
+func setupSessionURL(_ line: String) -> URL? {
+    guard line.hasPrefix("STYX_SETUP_URL\t"),
+          let parts = URLComponents(string: String(line.dropFirst(15))),
+          parts.scheme == "http", parts.host == "127.0.0.1", let port = parts.port,
+          (1...65535).contains(port), parts.path == "/", parts.query == nil,
+          parts.user == nil, parts.password == nil,
+          let fragment = parts.fragment, fragment.hasPrefix("session="),
+          fragment.dropFirst(8).count == 43,
+          fragment.dropFirst(8).allSatisfy({ "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789_-".contains($0) }) else { return nil }
+    return parts.url
+}
+
 final class StyxDelegate: NSObject, NSApplicationDelegate {
+    var setupProcess: Process?
+    var setupInput: Pipe?
+    var setupOutput: Pipe?
+    var setupURL: URL?
+    var setupBuffer = ""
+    var setupOpenRequested = false
+    var setupStatusLine: NSMenuItem?
+    let setupPreference = "Styx.SetupBrowserOpened.v1"
     var runtime: RuntimeDirectory?
     var daemon: Process?
     var lifetimeWriter: FileHandle?
@@ -98,14 +119,113 @@ final class StyxDelegate: NSObject, NSApplicationDelegate {
         item.button?.title = "Styx"
         let menu = NSMenu()
         statusLine = menu.addItem(withTitle: "Starting…", action: nil, keyEquivalent: "")
+        menu.addItem(withTitle: "Setup / Settings…", action: #selector(openSettings), keyEquivalent: ",")
+        setupStatusLine = menu.addItem(withTitle: "Local setup is not running", action: nil, keyEquivalent: "")
+        menu.addItem(NSMenuItem.separator())
         menu.addItem(withTitle: "Request macOS permissions…", action: #selector(requestPermissions), keyEquivalent: "")
         menu.addItem(withTitle: "Restart embedded Cua", action: #selector(restart), keyEquivalent: "r")
         menu.addItem(NSMenuItem.separator())
         menu.addItem(withTitle: "Quit Styx", action: #selector(quit), keyEquivalent: "q")
         for entry in menu.items { entry.target = self }
         item.menu = menu; statusItem = item
+        if let resources = Bundle.main.resourceURL,
+           FileManager.default.isExecutableFile(atPath: resources.appendingPathComponent("runtime/node").path),
+           Bundle.main.bundleURL.standardizedFileURL.path != "/Applications/Styx.app" {
+            let alert = NSAlert(); alert.messageText = "Move Styx to Applications first"
+            alert.informativeText = "Drag the complete Styx.app to /Applications, then open it there. Do not replace an existing Styx installation without reviewing it first. Settings and permissions need a stable app location."
+            alert.runModal(); NSApp.terminate(nil); return
+        }
         do { runtime = try RuntimeDirectory(); try start() }
         catch { phase = "blocked"; statusLine?.title = "Blocked: \(error)" }
+        // A competing Cua owner does not prevent opening this app's setup UI.
+        if let resources = Bundle.main.resourceURL,
+           FileManager.default.isExecutableFile(atPath: resources.appendingPathComponent("runtime/node").path) {
+            do { try startSetup(openBrowser: !UserDefaults.standard.bool(forKey: setupPreference)) }
+            catch { setupStatusLine?.title = "Local setup unavailable; reopen Settings" }
+        }
+    }
+    func startSetup(openBrowser: Bool) throws {
+        setupOpenRequested = setupOpenRequested || openBrowser
+        if let url = setupURL { if setupOpenRequested { showSetup(url) }; return }
+        guard setupProcess == nil else { return }
+        guard let resources = Bundle.main.resourceURL else { throw HostError.daemonUnavailable }
+        let node = resources.appendingPathComponent("runtime/node")
+        let launcher = resources.appendingPathComponent("onboarding/vnext/host/macos/setup-launcher.mjs")
+        guard FileManager.default.isExecutableFile(atPath: node.path),
+              FileManager.default.fileExists(atPath: launcher.path) else { throw HostError.daemonUnavailable }
+        let child = Process(), input = Pipe(), output = Pipe()
+        child.executableURL = node; child.arguments = [launcher.path, resources.path]
+        child.environment = ["PATH": "/usr/bin:/bin", "HOME": NSHomeDirectory(),
+            "TMPDIR": NSTemporaryDirectory(), "LANG": "en_US.UTF-8"]
+        child.standardInput = input; child.standardOutput = output; child.standardError = FileHandle.nullDevice
+        setupBuffer = ""; setupStatusLine?.title = "Local setup is starting…"
+        output.fileHandleForReading.readabilityHandler = { [weak self] handle in
+            let data = handle.availableData
+            if data.isEmpty { handle.readabilityHandler = nil; return }
+            DispatchQueue.main.async {
+                guard let owner = self, owner.setupProcess === child else { return }
+                guard let text = String(data: data, encoding: .utf8), owner.setupBuffer.utf8.count + data.count <= 4096 else {
+                    owner.stopSetup(); owner.setupStatusLine?.title = "Local setup protocol unavailable"; return
+                }
+                owner.setupBuffer += text
+                while let newline = owner.setupBuffer.firstIndex(of: "\n") {
+                    let line = String(owner.setupBuffer[..<newline])
+                    owner.setupBuffer.removeSubrange(...newline)
+                    guard owner.setupURL == nil, let url = setupSessionURL(line) else {
+                        owner.stopSetup(); owner.setupStatusLine?.title = "Local setup protocol unavailable"; return
+                    }
+                    owner.setupURL = url; owner.setupStatusLine?.title = "Local setup ready"
+                    if owner.setupOpenRequested { owner.showSetup(url) }
+                }
+            }
+        }
+        child.terminationHandler = { [weak self] terminated in
+            DispatchQueue.main.async {
+                guard let owner = self, owner.setupProcess === terminated else { return }
+                owner.setupOutput?.fileHandleForReading.readabilityHandler = nil
+                try? owner.setupInput?.fileHandleForWriting.close()
+                owner.setupProcess = nil; owner.setupInput = nil; owner.setupOutput = nil; owner.setupURL = nil
+                owner.setupStatusLine?.title = "Local setup stopped; reopen Settings"
+            }
+        }
+        setupProcess = child; setupInput = input; setupOutput = output
+        do { try child.run() }
+        catch { stopSetup(); throw error }
+        try? input.fileHandleForReading.close(); try? output.fileHandleForWriting.close()
+    }
+    func showSetup(_ url: URL) {
+        if NSWorkspace.shared.open(url) {
+            setupOpenRequested = false
+            UserDefaults.standard.set(true, forKey: setupPreference)
+        } else { setupStatusLine?.title = "Browser unavailable; reopen Settings" }
+    }
+    @objc func openSettings() {
+        do { try startSetup(openBrowser: true) }
+        catch {
+            let alert = NSAlert(); alert.messageText = "Styx local setup is unavailable"
+            alert.informativeText = "Keep the complete Styx.app bundle together and reopen Settings. No global Node installation is needed."
+            alert.runModal()
+        }
+    }
+    func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
+        openSettings(); return true
+    }
+    func stopSetup() {
+        setupOutput?.fileHandleForReading.readabilityHandler = nil
+        try? setupInput?.fileHandleForWriting.close()
+        if let child = setupProcess {
+            child.terminationHandler = nil
+            if child.isRunning {
+                let limit = Date().addingTimeInterval(6)
+                while child.isRunning && Date() < limit { Thread.sleep(forTimeInterval: 0.02) }
+                if child.isRunning { child.terminate() }
+                let termLimit = Date().addingTimeInterval(2)
+                while child.isRunning && Date() < termLimit { Thread.sleep(forTimeInterval: 0.02) }
+                if child.isRunning { kill(child.processIdentifier, SIGKILL) }
+                child.waitUntilExit()
+            }
+        }
+        setupProcess = nil; setupInput = nil; setupOutput = nil; setupURL = nil; setupBuffer = ""
     }
     func start() throws {
         guard let runtime = runtime, daemon == nil else { return }
@@ -205,7 +325,7 @@ final class StyxDelegate: NSObject, NSApplicationDelegate {
     }
     @objc func quit() { NSApp.terminate(nil) }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        stop(); return .terminateNow
+        stopSetup(); stop(); return .terminateNow
     }
 }
 
@@ -230,6 +350,16 @@ if CommandLine.arguments.count == 4 && CommandLine.arguments[1] == "--liveness-o
 
 // Runs without starting NSApplication, a daemon, or permission prompts in CI.
 if CommandLine.arguments.contains("--self-test") {
+    let token = String(repeating: "a", count: 43)
+    guard setupSessionURL("STYX_SETUP_URL\thttp://127.0.0.1:1234/#session=" + token) != nil else { fatalError("setup bootstrap rejected") }
+    for bad in ["STYX_SETUP_URL\thttps://example.com/#session=" + token,
+                "STYX_SETUP_URL\thttp://127.0.0.1:0/#session=" + token,
+                "STYX_SETUP_URL\thttp://127.0.0.1:1234/?secret=bad#session=" + token,
+                "STYX_SETUP_URL\thttp://user@127.0.0.1:1234/#session=" + token,
+                "STYX_SETUP_URL\thttp://127.0.0.1:1234/#session=bad"] {
+        guard setupSessionURL(bad) == nil else { fatalError("unsafe setup bootstrap accepted") }
+    }
+
     let dir = NSTemporaryDirectory() + "styx-owner-test-" + UUID().uuidString
     do {
         var owner: RuntimeDirectory? = try RuntimeDirectory(path: dir)
