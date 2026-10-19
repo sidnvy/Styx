@@ -42,8 +42,8 @@ function keys(value,allowed){if(!object(value)||Object.keys(value).some(k=>!allo
 export function validateUiConfig(config,{trustedOpenSSL}={}){
  keys(config,['schema','mode','gateway','host','invitationFile']);
  if(config.schema!==1||!MODES.has(config.mode))fail('invalid_configuration');
- keys(config.gateway,['url','caFile']);keys(config.host,['bundle','publisherKeyFile','publisherSha256','baseDir','label','computer','macTeamID','wayland']);
- for(const [name,value]of Object.entries(config.gateway))if(typeof value!=='string'||!value||value.length>4096)fail('invalid_gateway_field');
+ keys(config.gateway,['url','caFile','listenHost','allowRemoteHosts']);keys(config.host,['bundle','publisherKeyFile','publisherSha256','baseDir','label','computer','macTeamID','wayland']);
+ for(const [name,value]of Object.entries(config.gateway)){if(name==='allowRemoteHosts'){if(value!==true)fail('explicit_network_exposure_required')}else if(typeof value!=='string'||!value||value.length>4096)fail('invalid_gateway_field');}
  for(const [name,value]of Object.entries(config.host)){
   if(['computer','wayland'].includes(name)){if(typeof value!=='boolean')fail('invalid_capability_selection')}
   else if(typeof value!=='string'||!value||value.length>4096)fail('invalid_host_field');
@@ -60,7 +60,7 @@ async function body(req){
  req.setEncoding('utf8');let data='';for await(const chunk of req){data+=chunk;if(Buffer.byteLength(data)>65536)fail('body_too_large')}
  try{return JSON.parse(data)}catch{fail('invalid_json')}
 }
-export async function createOnboardingServer({stateDir,port=0,trustedForwardOrigin,trustedOpenSSL=process.platform==='win32'?undefined:'/usr/bin/openssl',core,artifactDefaultsFile,verifyConnection,gatewayService}={}){
+export async function createOnboardingServer({stateDir,port=0,trustedForwardOrigin,trustedOpenSSL=process.platform==='win32'?undefined:'/usr/bin/openssl',core,artifactDefaultsFile,verifyConnection,gatewayService,pairingLinks}={}){
  if(typeof stateDir!=='string'||!path.isAbsolute(stateDir))fail('absolute_state_directory_required');
  if(!Number.isInteger(port)||port<0||port>65535)fail('invalid_port');
  const forwarded=trustedForwardOrigin?browserOrigin(trustedForwardOrigin):null;
@@ -72,6 +72,9 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
  const session=randomBytes(32).toString('base64url'),csrf=randomBytes(32).toString('base64url');
  let origin,closed=false,busy=false;
  const services={host:null,gateway:null};
+ let pendingLink,acceptedLink;
+ const linkImportAvailable=!!pairingLinks||fs.existsSync(new URL('./pairing-links.mjs',import.meta.url));
+ const linkApi=async()=>pairingLinks??await import('./pairing-links.mjs');
  const gatewayServiceAvailable=process.platform==='linux'&&(typeof gatewayService==='function'||fs.existsSync(new URL('./gateway-service.mjs',import.meta.url)));
  const assets=new Map([['/',['index.html','text/html; charset=utf-8']],['/ui/app.mjs',['app.mjs','text/javascript; charset=utf-8']],['/ui/style.css',['style.css','text/css; charset=utf-8']]]);
  const server=http.createServer(async(req,res)=>{
@@ -91,7 +94,7 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
   if(req.method==='POST'&&(req.headers.origin!==origin||!equal(req.headers['x-styx-csrf'],csrf))){send(403,{error:'mutation_refused'});return}
   if(req.method==='GET'&&url.pathname==='/api/session'){
    send(200,{csrf,platform:process.platform,localGatewayAvailable:!!trustedOpenSSL,pauseSupported:typeof api.stopDeploymentGateway==='function',startSupported:typeof api.startDeploymentGateway==='function',
-    hostServiceSupported:typeof api.controlDeploymentHostService==='function',gatewayServiceSupported:gatewayServiceAvailable,defaults,accountAcceptance:'NOT RUN',nativeInstaller:'NOT RUN',trustedForwarding:!!forwarded});return;
+    pairingLinkImportSupported:linkImportAvailable,pairingLinkCreateSupported:typeof api.createDeploymentPairingLink==='function',pendingApprovalSupported:typeof api.listDeploymentPending==='function'&&typeof api.approveDeploymentPending==='function',hostServiceSupported:typeof api.controlDeploymentHostService==='function',gatewayServiceSupported:gatewayServiceAvailable,localGatewayAddresses:typeof api.localGatewayAddresses==='function'?api.localGatewayAddresses():[],defaults,accountAcceptance:'NOT RUN',nativeInstaller:'NOT RUN',trustedForwarding:!!forwarded});return;
   }
   if(req.method==='GET'&&url.pathname==='/api/status'){
    try{
@@ -103,12 +106,16 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
    }catch{if(!fs.existsSync(stateDir))send(200,{deployment:null,dependencies:[],busy});else send(409,{error:'deployment_unavailable'})}return;
   }
   if(req.method!=='POST'){send(405,{error:'method_refused'});return}
-  if(!['/api/create','/api/advance','/api/pause','/api/start','/api/verify-gateway','/api/service'].includes(url.pathname)){send(404,{error:'not_found'});return}
+  if(!['/api/create','/api/advance','/api/pause','/api/start','/api/verify-gateway','/api/service','/api/pairing-link/inspect','/api/pairing-link/accept','/api/pairing-link/create','/api/pending/list','/api/pending/approve'].includes(url.pathname)){send(404,{error:'not_found'});return}
   if(busy){send(409,{error:'operation_in_progress'});return}busy=true;
   try{
    const data=await body(req);
    if(url.pathname==='/api/create'){
-    const config=validateUiConfig(data,{trustedOpenSSL});
+    const{joinLinkId,...input}=data;
+    if(joinLinkId!==undefined){if(!acceptedLink||acceptedLink.id!==joinLinkId||input.mode!=='join-existing'||input.gateway?.url!==acceptedLink.refs.gatewayOrigin||(!Number.isSafeInteger(acceptedLink.refs.expiresAt)||acceptedLink.refs.expiresAt<=Date.now())||input.invitationFile||input.gateway.caFile)fail('accepted_pairing_scope_required');input.invitationFile=acceptedLink.refs.invitationFile;input.gateway={...input.gateway,...(acceptedLink.refs.gatewayCaFile?{caFile:acceptedLink.refs.gatewayCaFile}:{})}}
+    const config=validateUiConfig(input,{trustedOpenSSL});
+    if(config.mode==='create-local'&&new URL(config.gateway.url).hostname!=='127.0.0.1'&&config.gateway.allowRemoteHosts!==true)fail('explicit_network_exposure_required');
+    if(config.gateway.allowRemoteHosts){const addresses=typeof api.localGatewayAddresses==='function'?api.localGatewayAddresses():[];if(!addresses.includes(config.gateway.listenHost)||new URL(config.gateway.url).hostname!==config.gateway.listenHost)fail('explicit_owned_network_interface_required')}
     const temp=fs.mkdtempSync(path.join(os.tmpdir(),'styx-ui-config-'));fs.chmodSync(temp,0o700);
     try{const file=path.join(temp,'config.json');fs.writeFileSync(file,JSON.stringify(config),{mode:0o600});await api.createDeployment(file,{stateDir})}
     finally{fs.rmSync(temp,{recursive:true,force:true})}
@@ -116,6 +123,19 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
     keys(data,['authorize','ownerApproval']);if(!Array.isArray(data.authorize)||data.authorize.length!==1||!STEPS.has(data.authorize[0]))fail('one_known_step_required');
     if(data.authorize[0]==='host.pair'){keys(data.ownerApproval,['approve','gatewayUrl','label','enableComputer']);if(data.ownerApproval.approve!==true||typeof data.ownerApproval.gatewayUrl!=='string'||typeof data.ownerApproval.label!=='string'||typeof data.ownerApproval.enableComputer!=='boolean')fail('explicit_owner_pairing_scope_required')}else if(data.ownerApproval!==undefined)fail('unexpected_owner_approval');
     await api.advanceDeployment(stateDir,{authorize:data.authorize,...(data.ownerApproval?{ownerApproval:data.ownerApproval}:{})});
+   }else if(url.pathname==='/api/pairing-link/inspect'){
+    keys(data,['link']);if(!linkImportAvailable||typeof data.link!=='string'||data.link.length>65536)fail('pairing_link_required');const helper=await linkApi(),preview=helper.inspectPairingLink(data.link);const publicPreview={origin:preview.origin,expiresAt:preview.expiresAt,requiresCertificateApproval:preview.requiresCertificateApproval===true,...(preview.caSha256?{caSha256:preview.caSha256}:{})};pendingLink={id:randomBytes(16).toString('hex'),link:data.link,preview:publicPreview};send(200,{inspectionId:pendingLink.id,preview:publicPreview});return;
+   }else if(url.pathname==='/api/pairing-link/accept'){
+    keys(data,['inspectionId','approvedGatewayOrigin','approvedCaSha256']);if(!pendingLink||data.inspectionId!==pendingLink.id||data.approvedGatewayOrigin!==pendingLink.preview.origin||(pendingLink.preview.caSha256&&data.approvedCaSha256!==pendingLink.preview.caSha256))fail('pairing_scope_confirmation_required');
+    const helper=await linkApi(),directory=path.join(path.dirname(stateDir),'styx-pairing-'+randomBytes(8).toString('hex'));const result=helper.acceptPairingLink(pendingLink.link,{stateDir:directory,approvedGatewayOrigin:data.approvedGatewayOrigin,...(data.approvedCaSha256?{approvedCaSha256:data.approvedCaSha256}:{})});
+    const file=path.join(directory,'pairing.json');requirePrivateFile(file);acceptedLink={id:randomBytes(16).toString('hex'),refs:JSON.parse(fs.readFileSync(file,'utf8'))};pendingLink=null;send(200,{joinLinkId:acceptedLink.id,status:result.status,origin:result.origin,expiresAt:result.expiresAt,customCertificateApproved:result.customCertificateApproved===true});return;
+   }else if(url.pathname==='/api/pairing-link/create'){
+    keys(data,['authorize']);if(data.authorize!==true||typeof api.createDeploymentPairingLink!=='function')fail('owner_link_not_supported');const result=await api.createDeploymentPairingLink(stateDir,{authorize:true});send(200,{link:result.link,origin:result.origin,expiresAt:result.expiresAt,...(result.caSha256?{caSha256:result.caSha256}:{}),reachability:result.reachability,remoteUsable:result.remoteUsable===true});return;
+   }else if(url.pathname==='/api/pending/list'){
+    keys(data,['authorize']);if(data.authorize!==true||typeof api.listDeploymentPending!=='function')fail('owner_list_not_supported');const rows=await api.listDeploymentPending(stateDir,{authorize:true});
+    const pending=rows.filter(r=>/^[a-f0-9]{32}$/.test(r.request_id??'')&&/^[a-f0-9]{64}$/.test(r.fingerprint??'')).map(r=>({request_id:r.request_id,fingerprint:r.fingerprint,label:String(r.label??'').slice(0,72),platform:['linux','darwin','win32'].includes(r.platform)?r.platform:'unknown',cwd:String(r.cwd??'').slice(0,4096),shell:String(r.shell??'').slice(0,4096),computer_requested:r.computer_requested===true,expires_at:r.expires_at}));send(200,{pending});return;
+   }else if(url.pathname==='/api/pending/approve'){
+    keys(data,['authorize','requestId','fingerprint','fingerprintConfirmation','enableComputer']);if(data.authorize!==true||typeof api.approveDeploymentPending!=='function'||typeof api.listDeploymentPending!=='function'||!/^[a-f0-9]{32}$/.test(data.requestId??'')||typeof data.enableComputer!=='boolean')fail('explicit_device_approval_required');const typed=data.fingerprintConfirmation??data.fingerprint;if(typeof typed!=='string'||typed.length>80)fail('fingerprint_confirmation_required');const confirmation=typed.replace(/[\s-]/g,'').toLowerCase();if(!/^(?:[a-f0-9]{16}|[a-f0-9]{64})$/.test(confirmation))fail('fingerprint_confirmation_required');const requests=await api.listDeploymentPending(stateDir,{authorize:true}),selected=requests.find(r=>r.request_id===data.requestId);if(!selected||!/^[a-f0-9]{64}$/.test(selected.fingerprint??'')||(confirmation.length===64?selected.fingerprint!==confirmation:selected.fingerprint.slice(0,16)!==confirmation))fail('fingerprint_confirmation_mismatch');const result=await api.approveDeploymentPending(stateDir,{authorize:true,requestId:data.requestId,fingerprint:selected.fingerprint,enableComputer:data.enableComputer});send(200,{status:result.status??'approved'});return;
    }else if(url.pathname==='/api/service'){
     keys(data,['role','action','authorize']);if(data.authorize!==true||!['host','gateway'].includes(data.role))fail('explicit_service_authorization_required');
     let result;
@@ -143,7 +163,7 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
  await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(port,'127.0.0.1',resolve)});
  origin=forwarded??`http://127.0.0.1:${server.address().port}`;
  return {server,origin,url:origin+'/#session='+session,
-  async close(){if(closed)return;closed=true;await new Promise(resolve=>server.close(resolve));await Promise.resolve().then(()=>api.stopDeploymentGateway?.(stateDir)).catch(()=>{})}};
+  async close(){if(closed)return;closed=true;pendingLink=null;await new Promise(resolve=>server.close(resolve));await Promise.resolve().then(()=>api.stopDeploymentGateway?.(stateDir)).catch(()=>{})}};
 }
 if(process.argv[1]&&fs.realpathSync(process.argv[1])===fs.realpathSync(fileURLToPath(import.meta.url))){
  try{

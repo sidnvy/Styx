@@ -15,11 +15,12 @@ const native=process.env.STYX_ONBOARDING_NATIVE_BUNDLE==='1';
 const enabled=process.env.STYX_ONBOARDING_BROWSER_TEST==='1';
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 async function until(fn,code,ms=12000){const end=Date.now()+ms;while(Date.now()<end){if(await fn())return;await sleep(100)}throw Error(code)}
-test(native?'real browser verifies Gateway, prepares pinned native Host, explicitly pairs, diagnoses and resumes':'real browser saves config, explicitly prepares/starts/pauses owned Gateway and resumes status',{skip:!enabled,timeout:120000},async()=>{
+test(native?'real browser prepares native Hosts, verifies Gateway, pairs locally and joins by private link with separate approval':'real browser saves config, explicitly prepares/starts/pauses owned Gateway and resumes status',{skip:!enabled,timeout:120000},async()=>{
  const binary=process.env.STYX_ONBOARDING_BROWSER_BINARY;assert.ok(binary&&path.isAbsolute(binary));
- const core=await import(process.env.STYX_ONBOARDING_CORE_MODULE?pathToFileURL(process.env.STYX_ONBOARDING_CORE_MODULE):new URL('../core.mjs',import.meta.url));
+ const coreUrl=process.env.STYX_ONBOARDING_CORE_MODULE?pathToFileURL(process.env.STYX_ONBOARDING_CORE_MODULE):new URL('../core.mjs',import.meta.url);
+ const core=await import(coreUrl);const pairingLinks=native?await import(new URL('./pairing-links.mjs',coreUrl)):undefined;
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'styx-ui-browser-'));fs.chmodSync(root,0o700);
- let instance,browser,ws;let next=0;const pending=new Map();
+ let instance,joinInstance,browser,ws;let next=0;const pending=new Map();
  const command=(method,params={})=>new Promise((resolve,reject)=>{const id=++next;const timer=setTimeout(()=>{pending.delete(id);reject(Error('browser_command_timeout'))},15000);pending.set(id,{resolve,reject,timer});ws.send(JSON.stringify({id,method,params}))});
  async function evaluate(expression){const r=await command('Runtime.evaluate',{expression,awaitPromise:true,returnByValue:true});assert.equal(r.exceptionDetails,undefined);return r.result.value}
  try{
@@ -33,7 +34,7 @@ test(native?'real browser verifies Gateway, prepares pinned native Host, explici
    artifacts={bundle,publisherKeyFile,publisherSha256:createHash('sha256').update(createPublicKey(key.publicKey).export({type:'spki',format:'der'})).digest('hex')};
    artifactDefaultsFile=path.join(root,'artifacts.json');fs.writeFileSync(artifactDefaultsFile,JSON.stringify(artifacts),{mode:0o600});
   }
-  instance=await createOnboardingServer({stateDir:path.join(root,'state'),core,artifactDefaultsFile});
+  instance=await createOnboardingServer({stateDir:path.join(root,'state'),core,artifactDefaultsFile,pairingLinks});
   const profile=path.join(root,'browser');fs.mkdirSync(profile,{mode:0o700});
   browser=spawn(binary,['--headless','--disable-gpu','--no-first-run','--no-default-browser-check','--remote-debugging-port=0','--user-data-dir='+profile,instance.url],{stdio:'ignore'});
   const active=path.join(profile,'DevToolsActivePort');await until(()=>fs.existsSync(active),'browser_not_started');const debugPort=fs.readFileSync(active,'utf8').split('\n')[0];
@@ -63,15 +64,49 @@ test(native?'real browser verifies Gateway, prepares pinned native Host, explici
    await clickStep('检查 Host','已记录成功');
    const status=core.readDeployment(path.join(root,'state'));assert.equal(status.steps.find(s=>s.id==='host.pair').status,'succeeded');assert.equal(status.steps.find(s=>s.id==='host.doctor').evidence.status,'ready_for_exec');
    assert.equal(status.accountAcceptance,'NOT RUN');
+   await evaluate("document.querySelector('#create-link').click();true");
+   await until(()=>evaluate("document.querySelector('#created-link')?.hidden===false"),'owner_link_not_created');
+   const link=await evaluate("document.querySelector('#created-link-value').value");assert.match(link,/^styx:\/\/join#/);
+   assert.equal((await evaluate('document.body.textContent')).includes(link),false);
+   joinInstance=await createOnboardingServer({stateDir:path.join(root,'join-state'),core,artifactDefaultsFile,pairingLinks});
+   await command('Page.navigate',{url:joinInstance.url});await until(()=>evaluate("document.querySelector('#setup')?.hidden===false"),'join_setup_not_ready');
+   await evaluate(`(()=>{const f=document.querySelector('#setup'),radio=f.querySelector('[value="join-existing"]');radio.checked=true;radio.dispatchEvent(new Event('change',{bubbles:true}));document.querySelector('#pairing-link-input').value=${JSON.stringify(link)};document.querySelector('#inspect-link').click();return true})()`);
+   await until(()=>evaluate("document.querySelector('#link-preview')?.hidden===false"),'join_link_not_inspected');
+   assert.equal(await evaluate("document.querySelector('#pairing-link-input').value"),'');
+   await evaluate("document.querySelector('#accept-link').click();true");await until(()=>evaluate("document.querySelector('#link-import-result').textContent.includes('私有配对材料已保存')"),'join_link_not_accepted');
+   const joinFields={label:'Owned linked Host',baseDir:path.join(root,'linked-host')};
+   await evaluate(`(()=>{const f=document.querySelector('#setup');for(const[k,v]of Object.entries(${JSON.stringify(joinFields)}))f.elements[k].value=v;f.elements.reviewed.checked=true;f.requestSubmit();return true})()`);
+   await until(()=>evaluate("document.querySelector('#progress')?.hidden===false"),'linked_config_not_saved');
+   await clickStep('验证并准备 Host','已记录成功');await clickStep('提交设备加入请求','已记录成功');
+   const independentFingerprint=core.readDeployment(path.join(root,'join-state')).steps.find(s=>s.id==='host.request').evidence.fingerprint;
+   await command('Page.navigate',{url:instance.origin});await until(()=>evaluate("document.querySelector('#progress')?.hidden===false"),'owner_resume_not_ready');
+   await evaluate("document.querySelector('#list-pending').click();true");await until(()=>evaluate("document.querySelector('#pending-devices').textContent.includes('Owned linked Host')"),'pending_device_not_listed');
+   await evaluate(`(()=>{const card=[...document.querySelectorAll('#pending-devices>.prerequisite')].find(c=>c.querySelector('strong').textContent.includes('Owned linked Host'));card.querySelector('input:not([type=checkbox])').value=${JSON.stringify(independentFingerprint.slice(0,16))};card.querySelector('button').click();return true})()`);
+   await until(()=>evaluate("document.querySelector('#pending-devices').textContent.includes('设备已批准')"),'explicit_linked_approval_not_completed');
+   await command('Page.navigate',{url:joinInstance.origin});await until(()=>evaluate("document.querySelector('#progress')?.hidden===false"),'linked_resume_not_ready');
+   await clickStep('领取管理员审批结果','已记录成功');await clickStep('检查 Host','已记录成功');
+   assert.equal(core.readDeployment(path.join(root,'join-state')).steps.find(s=>s.id==='host.doctor').evidence.status,'ready_for_exec');
+   assert.equal(await evaluate('location.hash'),'');
+   await command('Page.navigate',{url:instance.origin});await until(()=>evaluate("document.querySelector('#progress')?.hidden===false"),'owner_final_resume_not_ready');
+
   }
   await evaluate("document.querySelector('#pause').click();true");
   await until(()=>evaluate("document.querySelector('#runtime').textContent.includes('未持有运行实例')"),'actual_gateway_not_stopped');
   await command('Page.reload');await until(()=>evaluate("document.querySelector('#progress')?.hidden===false"),'resume_not_loaded');
   assert.equal(await evaluate("document.querySelectorAll('.step .status.succeeded').length"),native?6:2);
   assert.equal(fs.existsSync(path.join(root,'host-not-created')),native);
+  if(process.env.STYX_ONBOARDING_SCREENSHOT_DIR){
+   const directory=process.env.STYX_ONBOARDING_SCREENSHOT_DIR;assert.ok(path.isAbsolute(directory));fs.mkdirSync(directory,{recursive:true});
+   await evaluate("(()=>{for(const id of ['created-link-value','pairing-link-input']){const input=document.getElementById(id);if(input)input.value=''}document.querySelector('#created-link').hidden=true;window.scrollTo(0,0);return true})()");
+   await command('Emulation.setDeviceMetricsOverride',{width:1440,height:1200,deviceScaleFactor:1,mobile:false});
+   let image=await command('Page.captureScreenshot',{format:'png',captureBeyondViewport:false});fs.writeFileSync(path.join(directory,'onboarding-desktop.png'),Buffer.from(image.data,'base64'));
+   await command('Emulation.setDeviceMetricsOverride',{width:390,height:1500,deviceScaleFactor:1,mobile:true});
+   image=await command('Page.captureScreenshot',{format:'png',captureBeyondViewport:false});fs.writeFileSync(path.join(directory,'onboarding-mobile.png'),Buffer.from(image.data,'base64'));
+  }
+
  }finally{
   for(const entry of pending.values()){clearTimeout(entry.timer);entry.reject(Error('browser_cleanup'))}pending.clear();ws?.close();
   if(browser&&browser.exitCode===null){browser.kill('SIGTERM');await Promise.race([new Promise(r=>browser.once('close',r)),sleep(5000)]);if(browser.exitCode===null&&browser.signalCode===null){browser.kill('SIGKILL');await new Promise(r=>browser.once('close',r))}}
-  await instance?.close();fs.rmSync(root,{recursive:true,force:true});
+  await joinInstance?.close();await instance?.close();fs.rmSync(root,{recursive:true,force:true});
  }
 });

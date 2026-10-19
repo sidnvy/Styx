@@ -161,3 +161,29 @@ test('service controls accept only explicit fixed scoped actions and redact resu
   }
  }finally{await f.cleanup()}
 });
+
+test('pairing-link inspection/acceptance isolates secrets from public responses and binds later join config',async()=>{
+ const secret='styx://join#SECRET_ONE_USE_INVITATION';let saved;
+ const origin='https://independent.invalid';const expiresAt=Date.now()+60000;
+ const pairingLinks={inspectPairingLink(link){assert.equal(link,secret);return{origin,expiresAt,requiresCertificateApproval:false,invitation:'SECRET_ONE_USE_INVITATION'}},acceptPairingLink(link,{stateDir,approvedGatewayOrigin}){assert.equal(link,secret);assert.equal(approvedGatewayOrigin,origin);fs.mkdirSync(stateDir,{mode:0o700});const invitationFile=path.join(stateDir,'invitation');fs.writeFileSync(invitationFile,'SECRET_ONE_USE_INVITATION',{mode:0o600});fs.writeFileSync(path.join(stateDir,'pairing.json'),JSON.stringify({schema:1,gatewayOrigin:origin,expiresAt,invitationFile}),{mode:0o600});saved=stateDir;return{status:'pairing_material_saved',origin,expiresAt,invitationFile,invitation:'SECRET_ONE_USE_INVITATION'}}};
+ const f=await fixture({pairingLinks});try{
+  const inspected=await f.post('/api/pairing-link/inspect',{link:secret});const preview=await inspected.json();assert.doesNotMatch(JSON.stringify(preview),/SECRET|invitation/);
+  assert.equal((await f.post('/api/pairing-link/accept',{inspectionId:preview.inspectionId,approvedGatewayOrigin:'https://wrong.invalid'})).status,409);
+  const accepted=await(await f.post('/api/pairing-link/accept',{inspectionId:preview.inspectionId,approvedGatewayOrigin:origin})).json();assert.doesNotMatch(JSON.stringify(accepted),/SECRET|invitationFile|private|styx-pairing/);assert.equal(accepted.status,'pairing_material_saved');
+  const join=config();join.mode='join-existing';join.gateway={url:origin};join.joinLinkId=accepted.joinLinkId;assert.equal((await f.post('/api/create',join)).status,200);
+  const status=await(await f.get('/api/status')).text();assert.doesNotMatch(status,/SECRET|styx:\/\/join|invitation/);
+ }finally{await f.cleanup();assert.equal(fs.existsSync(saved),false)}
+});
+
+test('human comparison code is resolved to current full fingerprint before approval; network exposure is never implicit',async()=>{
+ let approved;
+ const id='c'.repeat(32),fingerprint='0123456789abcdef'+'b'.repeat(48);
+ const f=await fixture({core:{listDeploymentPending:async()=>[{request_id:id,fingerprint}],approveDeploymentPending:async(_dir,request)=>{approved=request;return{status:'approved'}}}});
+ try{
+  await f.post('/api/create',config());
+  assert.equal((await f.post('/api/pending/approve',{authorize:true,requestId:id,fingerprintConfirmation:'ffff ffff ffff ffff',enableComputer:false})).status,409);assert.equal(approved,undefined);
+  assert.equal((await f.post('/api/pending/approve',{authorize:true,requestId:id,fingerprintConfirmation:'0123 4567 89ab cdef',enableComputer:false})).status,200);assert.equal(approved.fingerprint,fingerprint);
+  const lan=config();lan.gateway.url='https://192.0.2.10:8795';lan.gateway.listenHost='192.0.2.10';assert.equal((await f.post('/api/create',lan)).status,409);
+  lan.gateway.allowRemoteHosts=true;assert.equal((await f.post('/api/create',lan)).status,409);
+ }finally{await f.cleanup()}
+});

@@ -150,3 +150,45 @@ never treats a successful old action as current process health. Security
 regressions cover arbitrary-scope/action denial, authorization and secret path/
 stdout suppression. Actual system service installation is not performed by the
 browser native-pairing test; native adapter acceptance is separate evidence.
+
+## Private pairing link and separate device approval
+
+A joiner can paste a `styx://join#…` link into the password input on this local
+page. The link is never navigated to, placed in a URL query/history, persisted
+in browser storage or written into public status. Inspection retains it only
+in server memory and projects the Gateway origin, expiry and optional DER
+certificate fingerprint. The user separately confirms that origin/pin through
+a trusted owner channel. Acceptance writes private invitation/CA references;
+the later join configuration is bound to those references without manual
+invitation paths or JSON. Public preview is not proof of the sender's identity.
+The Gateway still enforces expiry and one use.
+
+The owner can create a one-use link or list pending devices using the fixed
+private owner API. The link appears only in an explicit authenticated response
+and a password field, with user-triggered copy; it never appears in normal
+status. Device approval remains separate: both sides show a grouped16hex
+human comparison code, with the full64hex fingerprint available in details.
+The owner must enter the independently compared code (or full hash) and choose
+desktop capability explicitly. The server reloads the current pending request,
+compares the typed code, then submits its full fingerprint to the Gateway.
+The64bit comparison code is a human comparison aid, not a replacement for full
+cryptographic identity binding. No approval input is prefilled.
+
+LAN listening is optional and capability-gated by core's native IPv4 interface
+list. Default listening remains loopback. A user must explicitly opt into network
+exposure and select an owned interface; the exact HTTPS host must match. No DNS,
+wildcard bind, tunnel, router or firewall changes are performed. A configured
+interface/link does not establish remote reachability; unverified reachability
+is displayed honestly.
+
+Final observed tests:13HTTP/security PASS, plus a real browser test with two
+native signed Host installations on the same machine. The browser created the
+owner's private link, inspected/confirmed it in a second local setup session,
+prepared the second Host, requested enrollment, separately approved the typed
+comparison code on the owner page, claimed the result and passed Host doctor.
+Both Hosts used official fixed native runtimes and temporary publisher trust.
+No Host service was installed. This is same-host HTTPS onboarding evidence,
+not a claim that a second physical machine or ChatGPT account connected.
+The test supports an optional absolute `STYX_ONBOARDING_SCREENSHOT_DIR`; it
+clears link fields before saving desktop/mobile screenshots. All test browser
+profiles, Gateway instances, private pairing state and ephemeral keys are removed.
