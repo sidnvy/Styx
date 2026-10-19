@@ -16,7 +16,7 @@ export function platformGatewayPlan(descriptor,{platform=process.platform}={}){
  for(const k of ['stateDir','nodeBinary','runner'])assert(typeof descriptor[k]==='string'&&parser.isAbsolute(descriptor[k])&&parser.normalize(descriptor[k])===descriptor[k]&&!/[\x00-\x1f\x7f]/.test(descriptor[k]),'gateway_path_invalid');
  assert(/^[a-f0-9]{64}$/.test(descriptor.identityHash??'')&&hash(descriptor.stateDir)===descriptor.identityHash,'gateway_identity_mismatch');
  const suffix=descriptor.identityHash.slice(0,12),name=platform==='darwin'?'app.styx.gateway.'+suffix:'StyxGateway-'+suffix;
- return {name,marker:'Styx-VNext-Gateway-v1:'+descriptor.identityHash,platform,startup:'interactive_user_login',systemBootWithoutLogin:'NOT CONFIGURED',startEnablesStartup:true};
+ return {name,marker:'Styx-VNext-Gateway-v1:'+descriptor.identityHash,platform,startup:platform==='win32'?'interactive_user_login_and_minute_recovery':'interactive_user_login',systemBootWithoutLogin:'NOT CONFIGURED',startEnablesStartup:true,enableCanTriggerRecovery:platform==='win32'};
 }
 function macPlist(d,p){const logs=path.join(d.stateDir,'gateway-service-logs');return [
  '<?xml version="1.0" encoding="UTF-8"?>','<plist version="1.0">','<!-- '+p.marker+' -->','<dict>',
@@ -133,6 +133,6 @@ export function platformGatewayService({action,authorize=false,descriptor}={}, {
  const info=fs.lstatSync(descriptor.nodeBinary);assert(info.isFile()&&!info.isSymbolicLink(),'gateway_runtime_not_regular');
  // Signature/source provenance is the verified facade's responsibility. Never
  // put credentials in descriptor/arguments: runner reads private state itself.
- try{return {...(process.platform==='darwin'?macService(action,descriptor,p,{run,home}):windowsService(action,descriptor,p,{run})),startup:p.startup,startEnablesStartup:true}}
+ try{return {...(process.platform==='darwin'?macService(action,descriptor,p,{run,home}):windowsService(action,descriptor,p,{run})),startup:p.startup,startEnablesStartup:true,enableCanTriggerRecovery:p.enableCanTriggerRecovery}}
  catch{throw Error(action==='status'?'gateway_service_status_unavailable':'gateway_service_operation_uncertain_inspect_owned_state')}
 }
