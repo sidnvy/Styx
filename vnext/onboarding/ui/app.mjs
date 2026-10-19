@@ -31,7 +31,8 @@ function render(){
  const gatewayStartup=capabilities?.gatewayService?.startEnablesStartup===true;
  $('#gateway-service-title').textContent='本机 Gateway 系统服务 · '+({linux:'Linux 用户服务',darwin:'macOS 用户服务',win32:'Windows 登录任务'}[capabilities?.platform]??'平台服务');
  $('#gateway-service-policy').textContent=gatewayStartup?'这是持久服务，与本设置进程的前台 Gateway 不同。启动会同时启用登录后自动运行，停止会禁用；先停止前台 Gateway 再启动持久服务。实际状态以本机观察为准，未知不推断为已启用。':'这是持久服务，与本设置进程的前台 Gateway 不同。先停止前台 Gateway，再启动持久服务。启动与登录启用是分别授权的操作；实际状态以本机观察为准。';
- for(const button of document.querySelectorAll('[data-service="gateway"]')){if(button.dataset.action==='start')button.textContent=gatewayStartup?'启动并启用登录后自动运行':'启动 Gateway 服务';if(button.dataset.action==='stop')button.textContent=gatewayStartup?'停止并关闭自动运行':'停止 Gateway 服务'}
+ for(const button of document.querySelectorAll('[data-service="gateway"]')){if(button.dataset.action==='start')button.textContent=gatewayStartup?'启动并启用登录后自动运行':'启动 Gateway 服务';if(button.dataset.action==='stop')button.textContent=gatewayStartup?'停止并关闭自动运行':'停止 Gateway 服务';if(button.dataset.action==='enable')button.textContent=capabilities?.gatewayService?.enableCanTriggerRecovery?'启用登录启动与每分钟恢复':'启用登录启动'}
+ if(capabilities?.gatewayService?.enableCanTriggerRecovery)$('#gateway-service-policy').textContent+=' Windows 任务启用后，每分钟后台恢复可能在下一分钟自动启动任务。';
  $('#host-service').hidden=!capabilities?.hostServiceSupported;$('#gateway-service').hidden=!capabilities?.gatewayServiceSupported||deployment?.mode!=='create-local';
  for(const button of document.querySelectorAll('[data-service]'))button.disabled=locked||(button.dataset.service==='host'&&['install','start'].includes(button.dataset.action)&&deployment?.hostServiceMaintenance?.hasUncertainMutation)||(button.dataset.service==='gateway'&&button.dataset.action==='start'&&deployment?.gatewayRuntime==='running');
  for(const role of ['host','gateway']){const observation=serviceObservations[role]??(role==='host'?deployment?.hostServiceMaintenance?.lastObservation:null);if(observation)$('#'+role+'-service-status').textContent='本机观察：'+['status','state','active','enabled','persistence'].filter(k=>observation[k]).map(k=>k+' = '+observation[k]).join(' · ')+'（'+(observation.observedAt??'持久记录，需重新读取状态确认')+'）';}
@@ -115,7 +116,7 @@ $('#list-pending').addEventListener('click',async()=>{
 for(const button of document.querySelectorAll('[data-service]'))button.addEventListener('click',async()=>{
  if(locked)return;const role=button.dataset.service,action=button.dataset.action;
  const startupLinked=role==='host'||(role==='gateway'&&capabilities?.gatewayService?.startEnablesStartup===true);
- const description=startupLinked&&action==='start'?'启动 '+role+' 并启用登录后自动运行':startupLinked&&action==='stop'?'停止 '+role+' 并关闭自动运行':role+' 系统服务操作：'+action;
+ const description=role==='gateway'&&action==='enable'&&capabilities?.gatewayService?.enableCanTriggerRecovery?'启用 Gateway 登录启动与每分钟后台恢复（下一分钟可能自动启动任务）':startupLinked&&action==='start'?'启动 '+role+' 并启用登录后自动运行':startupLinked&&action==='stop'?'停止 '+role+' 并关闭自动运行':role+' 系统服务操作：'+action;
  if(action!=='status'&&!confirm('明确授权：'+description+'？这将修改当前设备上受范围绑定保护的服务。'))return;
  locked=true;render();message('正在执行固定系统服务操作…');
  try{const result=await api('service',{method:'POST',data:{role,action,authorize:true}});serviceObservations[role]=result.service;message('服务操作已返回。请查看本机观察结果；进程运行不等于账号或工具链验收通过。')}catch{message('服务操作被拒绝或未完成。保留本地状态，先读取状态；不要重复结果不确定的变更。')}finally{locked=false;await refresh()}

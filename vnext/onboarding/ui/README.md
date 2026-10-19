@@ -136,13 +136,18 @@ a service name, manager command, executable or config path. Installation and
 start are separate steps after the Host doctor. Running is not claimed to prove
 account acceptance or tool health.
 
-Persistent Gateway service controls appear only on Linux when the independent
-`gateway-service.mjs` adapter is present. Install/start/stop/enable/disable/status/
+Persistent Gateway service controls appear on supported Linux, macOS and
+Windows platforms when the independent `gateway-service.mjs` facade is present. Install/start/stop/enable/disable/status/
 uninstall are fixed actions; uninstall preserves deployment data. Foreground
 Gateway ownership is checked server-side before persistent start. The UI requires
-stopping its owned foreground Gateway first. Login enablement is an actual
-explicit adapter operation with observed `enabled` state, replacing the earlier
-browser-only preference. macOS/Windows persistent Gateway support is not claimed.
+stopping its owned foreground Gateway first. Linux Gateway startup and login enablement are separate explicit actions.
+macOS/Windows Gateway start also enables login startup, and stop disables it;
+button text and confirmation disclose this coupling. Windows enable also enables
+minute-based recovery, which may start the background task at its next minute.
+Actual observed `enabled`/persistence state replaces the earlier browser-only
+preference; unknown native state stays unknown. Platform capability does not
+assert that any service is installed, and a running foreground Gateway does not
+assert that a persistent service is absent.
 
 Service observations have timestamps and are not a live heartbeat. A new UI
 process starts with unknown observations until an explicit status request; it

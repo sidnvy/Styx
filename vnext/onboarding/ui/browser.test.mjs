@@ -110,10 +110,10 @@ test(native?'real browser prepares native Hosts, verifies Gateway, pairs locally
   try{
    // Ask this isolated browser to close its own children/profile first. Retain
    // the close promise from spawn, so a prior exit cannot race the observer.
-   if(ws?.readyState===1)ws.send(JSON.stringify({id:++next,method:'Browser.close'}));
+   if(ws?.readyState===1){try{ws.send(JSON.stringify({id:++next,method:'Browser.close'}))}catch{}}
    if(browserClosed){
-    const closed=await Promise.race([browserClosed.then(()=>true),sleep(5000).then(()=>false)]);
-    if(!closed){browser.kill('SIGTERM');const stopped=await Promise.race([browserClosed.then(()=>true),sleep(5000).then(()=>false)]);if(!stopped){browser.kill('SIGKILL');await browserClosed}}
+    const waitClosed=()=>new Promise(resolve=>{const timer=setTimeout(()=>resolve(false),5000);browserClosed.then(()=>{clearTimeout(timer);resolve(true)})});
+    if(!await waitClosed()){browser.kill('SIGTERM');if(!await waitClosed()){browser.kill('SIGKILL');if(!await waitClosed())throw Error('owned_browser_close_timeout')}}
    }
    for(const entry of pending.values()){clearTimeout(entry.timer);entry.reject(Error('browser_cleanup'))}pending.clear();ws?.close();
    await joinInstance?.close();await instance?.close();

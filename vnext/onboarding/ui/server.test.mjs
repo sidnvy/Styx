@@ -190,8 +190,8 @@ test('human comparison code is resolved to current full fingerprint before appro
 
 
 test('Gateway service UI capabilities reflect native platform coupling without asserting installation',()=>{
- assert.deepEqual(gatewayServiceUiCapabilities('linux',true),{supported:true,startEnablesStartup:false});
- for(const platform of ['darwin','win32'])assert.deepEqual(gatewayServiceUiCapabilities(platform,true),{supported:true,startEnablesStartup:true});
+ assert.deepEqual(gatewayServiceUiCapabilities('linux',true),{supported:true,startEnablesStartup:false,enableCanTriggerRecovery:false});
+ for(const platform of ['darwin','win32'])assert.deepEqual(gatewayServiceUiCapabilities(platform,true),{supported:true,startEnablesStartup:true,enableCanTriggerRecovery:platform==='win32'});
  assert.equal(gatewayServiceUiCapabilities('freebsd',true).supported,false);assert.equal(gatewayServiceUiCapabilities('darwin',false).supported,false);
  const state=publicDeployment({mode:'create-local',gatewayRuntime:{status:'running',persistentService:'NOT OBSERVED'},steps:[]});assert.equal(state.gatewayRuntime,'running');assert.equal(JSON.stringify(state).includes('NOT INSTALLED'),false);
 });
