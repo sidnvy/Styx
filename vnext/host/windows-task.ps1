@@ -1,6 +1,6 @@
 # Styx VNext Windows user-scoped Scheduled Task pilot.
 # Run with native interactive user. No SYSTEM, Session 0 or elevated task.
-# Only StyxPilot- prefixed tasks are accepted and owner verified.
+# Only the canonical Styx-Host or scoped StyxPilot- tasks are accepted and owner verified.
 [CmdletBinding()]
 param(
     [Parameter(Mandatory=$true)]
@@ -12,7 +12,7 @@ param(
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 $marker='Styx-VNext-Windows-Interactive-User-v1'
-if ($TaskName -notmatch '^StyxPilot-[A-Za-z0-9-]{1,30}$') {
+if ($TaskName -ne 'Styx-Host' -and $TaskName -notmatch '^StyxPilot-[A-Za-z0-9-]{1,30}$') {
     throw 'invalid_styx_task_name'
 }
 $current=[Security.Principal.WindowsIdentity]::GetCurrent()

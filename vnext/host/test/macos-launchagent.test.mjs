@@ -59,6 +59,8 @@ test('macOS LaunchAgent config includes only signed Styx runtime and user paths'
   assert.ok(xml.includes(f.installRoot+'/launch.mjs'));
   assert.ok(!xml.includes('coder'));
   assert.ok(!xml.includes('sudo'));
+  assert.ok(macLaunchAgent({...f.options,label:'app.styx.connector'}).includes('<string>app.styx.connector</string>'));
+  assert.throws(()=>macLaunchAgent({...f.options,label:'app.styx.connector.foreign'}),/invalid_styx_launchagent_label/);
   assert.throws(()=>macLaunchAgent({...f.options,
     label:'com.chat-codex.tunnel'}),/invalid_styx_launchagent_label/);
   assert.throws(()=>macLaunchAgent({...f.options,
