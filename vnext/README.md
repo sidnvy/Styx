@@ -15,6 +15,10 @@ preview provides a native menu-bar entry point and bundled local setup UI; see
 [macOS preview installation](docs/macos-preview-install.md). It is not notarized.
 No browser automation provider is included.
 
+The agreed product boundaries, current implementation gaps and migration acceptance
+criteria are tracked in [product boundaries](docs/product-boundaries.md). App and CLI
+are management surfaces over the same roles; deployment intent is not runtime readiness.
+
 ## Onboarding
 
 The deterministic CLI and authenticated local setup UI are documented in

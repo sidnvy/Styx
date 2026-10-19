@@ -85,12 +85,18 @@ test('concurrent gateway start is serialized and stopped runtime differs from su
 test('signed preparation failure records uncertainty and refuses resume without replay',{skip:process.platform!=='linux'},async t=>{
  const f=await fixture(t);const c={...f.config,mode:'join-existing',gateway:{url:'https://verified.styx.test'},host:{...f.config.host,publisherSha256:'0'.repeat(64)}};
  fs.writeFileSync(f.configFile,JSON.stringify(c));createDeployment(f.configFile,{stateDir:f.stateDir});
+ const before=await main(['status',f.stateDir]);
+ assert.equal(before.roles.gateway,'external');assert.equal(before.roles.deviceIngress,'not_hosted');
+ assert.equal(before.steps.some(x=>x.id.startsWith('gateway.')),false);
+ assert.equal(fs.existsSync(path.join(f.stateDir,'gateway')),false);
  const s=await advanceDeployment(f.stateDir,{authorize:['host.prepare']});assert.equal(steps(s)['host.prepare'].status,'uncertain');
  assert.equal(fs.existsSync(f.config.host.baseDir),false);await assert.rejects(advanceDeployment(f.stateDir,{authorize:['host.prepare']}),/uncertain_step/);
 });
 
 test('CLI accepts only fixed workflow commands and returns persisted redacted status',{skip:process.platform!=='linux'},async t=>{
  const f=await fixture(t);const created=await main(['create',f.configFile,f.stateDir]);assert.equal(created.mode,'create-local');
+ assert.equal(created.roles.gateway,'local');assert.equal(created.roles.deviceIngress,'loopback_only');
+ assert.deepEqual((await main(['plan',f.stateDir])).roles,created.roles);
  assert.deepEqual(await main(['status',f.stateDir]),created);
  await assert.rejects(main(['exec',f.stateDir,'whoami']),/usage_/);
 });

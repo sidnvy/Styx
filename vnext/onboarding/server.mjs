@@ -33,6 +33,14 @@ export function publicDeployment(value){
  if(value==null)return null;
  const steps=Array.isArray(value.steps)?value.steps:[];
  return {schema:1,mode:MODES.has(value.mode)?value.mode:null,
+  roles: value.roles ? {
+   gateway:['local','external'].includes(value.roles.gateway)?value.roles.gateway:'unknown',
+   host:value.roles.host==='local'?'local':'unknown',
+   exec:value.roles.exec==='enabled'?'enabled':'unknown',
+   computer:['requested','disabled'].includes(value.roles.computer)?value.roles.computer:'unknown',
+   deviceIngress:['loopback_only','configured_unverified','not_hosted'].includes(value.roles.deviceIngress)?value.roles.deviceIngress:'unknown',
+   readiness:'not_inferred'
+  } : null,
   activeStep:STEPS.has(value.activeStep)?value.activeStep:null,
   hostServiceMaintenance:{lastObservation:publicService(value.hostServiceMaintenance?.lastObservation),hasUncertainMutation:value.hostServiceMaintenance?.hasUncertainMutation===true},
   gatewayRuntime:typeof value.gatewayRuntime?.status==='string'&&['running','stopped','not_owned_by_current_process'].includes(value.gatewayRuntime.status)?value.gatewayRuntime.status:'unknown',

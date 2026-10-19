@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import {deploymentRoles} from './roles.mjs';
 import path from 'node:path';
 import os from 'node:os';
 import {isIP} from 'node:net';
@@ -50,20 +51,20 @@ export function validateDeployment(config,{checkNetwork=true}={}){
  return config;
 }
 function load(d){if(!abs(d))fail('absolute_state_directory_required');requirePrivateDirectory(d);const config=read(filename(d,'deployment.json')),state=read(filename(d,'state.json'));validateDeployment(config,{checkNetwork:false});if(state.schema!==1||state.mode!==config.mode||state.configSha256!==hash(filename(d,'deployment.json'))||!Array.isArray(state.steps))fail('invalid_onboarding_state');return {config,state};}
-function publicState(d,state){
+function publicState(d,state,config){
  const observations=[...state.steps.filter(s=>s.id.startsWith('host.service.')&&s.evidence).map(s=>({at:s.updatedAt,evidence:s.evidence})),...(state.maintenance??[])].filter(x=>x.evidence).sort((a,b)=>String(a.at??'').localeCompare(String(b.at??'')));
  const hostServiceMaintenance={lastObservation:observations.at(-1)?.evidence??null,hasUncertainMutation:hasUncertainServiceMutation(state),history:(state.maintenance??[]).map(x=>({action:x.action,status:x.status,at:x.at}))};
- return {schema:1,mode:state.mode,stateDir:d,hostServiceMaintenance,gatewayRuntime:{status:live.has(d)?'running':'not_owned_by_current_process',ownership:live.has(d)?'current_process':'none',persistentService:'NOT OBSERVED'},activeStep:state.steps.find(s=>s.status==='running')?.id??null,steps:state.steps.map(s=>({...s,...(s.status==='running'?{status:'uncertain',error:'interrupted_or_in_progress_do_not_replay'}:{})})),accountAcceptance:'NOT RUN'};}
+ return {schema:1,mode:state.mode,roles:deploymentRoles(config),stateDir:d,hostServiceMaintenance,gatewayRuntime:{status:live.has(d)?'running':'not_owned_by_current_process',ownership:live.has(d)?'current_process':'none',persistentService:'NOT OBSERVED'},activeStep:state.steps.find(s=>s.status==='running')?.id??null,steps:state.steps.map(s=>({...s,...(s.status==='running'?{status:'uncertain',error:'interrupted_or_in_progress_do_not_replay'}:{})})),accountAcceptance:'NOT RUN'};}
 export function createDeployment(configFile,{stateDir}={}){
  if(!abs(configFile)||!abs(stateDir))fail('absolute_paths_required');
  const config=validateDeployment(read(configFile));requirePrivateDirectory(path.dirname(stateDir));if(fs.existsSync(stateDir))fail('deployment_directory_already_exists');
  ensurePrivateDirectory(stateDir);write(filename(stateDir,'deployment.json'),config);
  const localPair=config.mode==='create-local'&&config.pairingMode!=='manual';
  const ids=[...(config.mode==='create-local'?['gateway.prepare','gateway.start','gateway.verify']:[]),'host.prepare',...(localPair?['host.pair']:[...(config.mode==='create-local'?['host.invite']:[]),'host.request','host.claim']),'host.doctor','host.service.install','host.service.start','host.service.status'];
- const state={schema:1,mode:config.mode,configSha256:hash(filename(stateDir,'deployment.json')),steps:ids.map(id=>({id,status:'pending'}))};write(filename(stateDir,'state.json'),state);return publicState(stateDir,state);
+ const state={schema:1,mode:config.mode,configSha256:hash(filename(stateDir,'deployment.json')),steps:ids.map(id=>({id,status:'pending'}))};write(filename(stateDir,'state.json'),state);return publicState(stateDir,state,config);
 }
-export function readDeployment(stateDir){const {state}=load(stateDir);return publicState(stateDir,state);}
-export function planDeployment(stateDir){const {config,state}=load(stateDir);return {schema:1,mode:config.mode,steps:state.steps.map((s,i)=>({id:s.id,status:s.status,requires:state.steps.slice(0,i).map(x=>x.id),authorizationRequired:true})),ownerPairingScope:config.mode==='create-local'?{gatewayUrl:config.gateway.url,label:config.host.label,enableComputer:config.host.computer}:null,service:{status:'not_checked',lastObservation:publicState(stateDir,state).hostServiceMaintenance.lastObservation,configFile:path.join(config.host.baseDir,'service.json'),platform:process.platform},accountAcceptance:'NOT RUN'};}
+export function readDeployment(stateDir){const {config,state}=load(stateDir);return publicState(stateDir,state,config);}
+export function planDeployment(stateDir){const {config,state}=load(stateDir);return {schema:1,mode:config.mode,roles:deploymentRoles(config),steps:state.steps.map((s,i)=>({id:s.id,status:s.status,requires:state.steps.slice(0,i).map(x=>x.id),authorizationRequired:true})),ownerPairingScope:config.mode==='create-local'?{gatewayUrl:config.gateway.url,label:config.host.label,enableComputer:config.host.computer}:null,service:{status:'not_checked',lastObservation:publicState(stateDir,state,config).hostServiceMaintenance.lastObservation,configFile:path.join(config.host.baseDir,'service.json'),platform:process.platform},accountAcceptance:'NOT RUN'};}
 function lock(d){const file=filename(d,'advance.lock');let fd;try{fd=fs.openSync(file,'wx',0o600);}catch{fail('onboarding_busy_or_interrupted_lock');}return ()=>{fs.closeSync(fd);fs.unlinkSync(file)};}
 function serviceScope(c,action){
  const serviceConfigFile=path.join(c.host.baseDir,'service.json'),raw=read(serviceConfigFile),windows=process.platform==='win32';
@@ -236,6 +237,6 @@ export async function advanceDeployment(d,{authorize=[],ownerApproval}={}){
     step.status=['host.doctor','host.claim','gateway.start','gateway.verify','host.service.status'].includes(step.id)?'blocked':'uncertain';step.error='step_failed_inspect_local_evidence_no_automatic_replay';write(filename(d,'state.json'),state);break;
    }
   }
-  return publicState(d,state);
+  return publicState(d,state,config);
  }finally{release();}
 }
