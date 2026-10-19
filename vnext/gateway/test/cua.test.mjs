@@ -105,7 +105,10 @@ test('Gateway advertises Codex and dynamically discovered official Cua tool name
   await server.connect(st);
   const client=new Client({name:'styx-cua-test',version:'0.1'});
   await client.connect(ct);
+  assert.match(client.getInstructions(),/Do not replace desktop tools with osascript/);
   const list=await client.listTools();
+  assert.match(list.tools.find(t=>t.name==='exec_command').description,/not osascript/);
+  assert.match(list.tools.find(t=>t.name==='write_stdin').description,/not osascript/);
   assert.deepEqual(list.tools.map(x=>x.name),
     ['exec_command','write_stdin','list_apps','click','list_execution_environments', 'get_execution_environment_status']);
   const r=await client.callTool({name:'click',arguments:{

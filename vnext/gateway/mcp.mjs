@@ -5,6 +5,10 @@ import {tools as execTools} from '../packages/styx-exec-adapter/schema.mjs';
 import {guiTools} from '../packages/styx-gui-broker/mcp.mjs';
 import {CAS_TOOLS, CAS_APP_URI, casCall, casResourceList, casResourceRead} from './cas/mcp.mjs';
 
+export const DESKTOP_ROUTING_INSTRUCTIONS = `For desktop tasks, use Styx computer tools: discover apps/windows, observe with get_window_state or get_desktop_state, then act using fresh references. Use the app bundle identifier or observed PID when localized app names do not match. Use exec_command for terminal, files and development work. Do not replace desktop tools with osascript, AppleScript/System Events, JXA or shell-driven input automation, including when a computer tool fails. Those paths have separate macOS permissions and can expose a node authorization prompt. For computer_snapshot_required or stale element references, observe again and use the new references; never reuse another conversation's references. For a permission or connection error, check get_execution_environment_status and report the specific missing permission or connection. Do not reset permissions or request additional Node/System Events access as a desktop fallback. Only use application scripting when the user explicitly requests that scripting workflow, explain its separate Automation permission before the first invocation, and let the user grant it through macOS. Styx desktop permission does not authorize that separate path.`;
+const guidedExecTools = execTools.map(tool => ({...tool, description: tool.description +
+  ' Terminal/files/development only for ordinary tasks. For GUI reading or interaction use Styx computer tools, not osascript/System Events or shell-driven input. Do not fall back to scripting after a desktop error; refresh stale observations or report the missing permission. Explicit user-requested application scripting needs separate macOS Automation consent.'}));
+
 const targetsTool = {
   name: 'list_execution_environments',
   description: 'List allowed execution contexts and their available capabilities.',
@@ -24,13 +28,14 @@ export function createGatewayMcp({exec, computer, gui, registry, owner, relay = 
   if (typeof owner !== 'string' || !owner) throw new TypeError('Authenticated session required');
   if (casOnly && !cas) throw Error('cas_lab_requires_explicit_experiment_ledger');
   const server = new Server({name: 'styx-vnext', version: '0.1.0'},
-    {capabilities: {tools: {}, ...(cas ? {resources: {}} : {})}});
+    {capabilities: {tools: {}, ...(cas ? {resources: {}} : {})},
+      instructions: DESKTOP_ROUTING_INSTRUCTIONS});
   const computerAllowed=()=>registry.list().some(t=>t.capabilities.includes('computer'));
   async function definitions() {
     if (casOnly) return CAS_TOOLS;
     const computerTools = computer && computerAllowed()
       ? await computer.listTools() : [];
-    return [...execTools, ...computerTools,
+    return [...guidedExecTools, ...computerTools,
       ...(gui && !computer && computerAllowed() ? guiTools : []),
       ...(cas ? CAS_TOOLS : []), targetsTool, statusTool];
   }

@@ -17,7 +17,7 @@ const plain = x => x !== null && typeof x === 'object' && !Array.isArray(x);
 const RECOVERY = Object.freeze({
   default_environment_required: 'Call list_execution_environments and pass the selected environment_id, or choose a default device in Styx Settings.',
   computer_slots_busy: 'The desktop connection is temporarily unavailable. Retry after the current operation finishes.',
-  computer_snapshot_required: 'Take a fresh get_window_state or get_desktop_state snapshot in this conversation before acting. Desktop observations from another connection cannot be reused.',
+  computer_snapshot_required: 'Stay on Styx computer tools; do not use AppleScript/System Events or shell input as a fallback. Take a fresh get_window_state or get_desktop_state snapshot in this conversation before acting. Desktop observations from another connection cannot be reused.',
   computer_queue_full: 'The desktop has too many pending operations. Wait for the current operations to finish, then retry.',
   computer_host_offline: 'Open Styx on the selected device and check its connection in Settings.'
 });

@@ -74,3 +74,15 @@ Use `exec_command` with explicit `environment_id`, native command and working di
 Computer tools are discovered dynamically. Use their actual input schemas, starting with supported observation tools such as `list_apps`, `list_windows`, `get_window_state` or `get_desktop_state`. Actions require current observed references and the selected device. Observe again after a mutation. Do not invent cross-platform tool names or reuse stale GUI references. If permission is absent, guide the user through native OS permission UI.
 
 For fresh-conversation acceptance, execute an exact harmless marker, verify output, exercise a bounded PTY and cleanup, then use a self-expiring owned GUI fixture on the explicitly selected device. Check actual effect separately from dispatch. Verify revocation using owner-controlled administration, then confirm the removed device is rejected. Report the exact environment, revision, evidence and any failures. Never claim account-side acceptance from SDK tests or package creation alone.
+
+
+For ordinary desktop tasks, stay on the discovered Styx computer tools. Do not use
+`exec_command`/`write_stdin` with AppleScript, `osascript`, JXA, System Events or
+shell-driven input as a fallback for stale references, unavailable tools or
+missing desktop permissions. Refresh the observation for stale references;
+report and resolve the specific connection or native permission problem otherwise.
+Use an observed PID or bundle identifier when localized app names do not match.
+Application scripting is a separate, explicitly requested workflow: explain its
+macOS Automation permission before first invocation and let the user grant it.
+Do not ask users to authorize generic Node/System Events access just to complete
+ordinary Cua desktop tasks, or reset their existing permissions.
