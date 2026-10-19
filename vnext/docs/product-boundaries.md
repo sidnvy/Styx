@@ -197,3 +197,12 @@ HTTP initialize 成功且仍加载前次无 MCP 连接上限的源码。ExecAdap
 保留句柄所属 MCP 会话校验、随机 ID 不复用、输出游标与排空后移除，不驱逐运行命令。
 测试覆盖 96 个未轮询句柄、其他会话继续执行、原句柄输出仍可正确读取和 ID 累计。
 前次 96 个 MCP 连接验收不能替代这项连续命令句柄验收。
+
+
+## 浏览器操作是独立的第三类工具
+
+2026-10-20 用户重申此前讨论的三类工具：Exec（进程／命令行）、Browser（浏览器会话／标签页／网页内容与交互）、Cua（原生桌面观察和操作）。Browser 不因 Cua 可以点击浏览器窗口而被视为已实现或已覆盖。三类工具由 Agent 选择，本地不做任务语义路由。
+
+当前 VNext Gateway 的实际工具目录仅接入 Exec 与十个通用 Cua 工具及设备发现／状态；没有独立 Browser provider、浏览器会话契约或 DOM/标签页工具。onboarding 的官方浏览器跳转和 Chrome/CDP UI 测试是引导／测试基础设施，不是面向用户的 Browser 能力。现有 acceptance.md 已把 Browser Playwright/CDP 标为 separate component / NOT RUN；该项不能从后续范围中遗漏，也不据此否认项目外既有浏览器方案。
+
+后续应先核对并复用已讨论／已存在的浏览器接入方案，再补同一 Core 下的能力配置、连接／授权、状态和生命周期，并单独验收真实网页观察与操作、标签页／会话归属和恢复。具体 Browser 实现尚未在此定型；不得把 Cua 的浏览器窗口点击或测试专用 CDP 连通当成 Browser provider 验收。
