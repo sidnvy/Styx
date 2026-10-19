@@ -5,8 +5,9 @@ shipped native graphical installer. It supports editable create-local or
 join-existing configuration, terminal/desktop capability selection, explicit
 one-step authorization, persisted progress/resume, manual account prerequisites,
 fixed Host doctor checks, and start/stop of the current process-owned Gateway.
-Startup preference is saved only in browser local storage; no system service is
-installed. The actual Gateway runtime is shown separately from successful
+System service changes are offered only when a fixed supported core adapter
+is available and require separate authorization. Login startup is shown from
+observed backend state, never inferred from browser preferences. The actual Gateway runtime is shown separately from successful
 journal entries. `uncertain` steps are never offered an automatic retry.
 
 Run with the project's supported Node runtime and the core module installed:
@@ -124,3 +125,28 @@ state, browser profile, local Gateway and ephemeral key was cleaned. No system
 service was installed and desktop capability was disabled. This stronger opt-in
 mode supersedes the earlier Gateway-only test's narrower coverage; the default
 browser mode still does not prepare a Host. Current security suite:10PASS.
+
+
+## Fixed service controls
+
+When `controlDeploymentHostService` is available, Host maintenance exposes only
+install/start/stop/status with explicit authorization. The core derives the
+service identity and private signed configuration; the browser cannot provide
+a service name, manager command, executable or config path. Installation and
+start are separate steps after the Host doctor. Running is not claimed to prove
+account acceptance or tool health.
+
+Persistent Gateway service controls appear only on Linux when the independent
+`gateway-service.mjs` adapter is present. Install/start/stop/enable/disable/status/
+uninstall are fixed actions; uninstall preserves deployment data. Foreground
+Gateway ownership is checked server-side before persistent start. The UI requires
+stopping its owned foreground Gateway first. Login enablement is an actual
+explicit adapter operation with observed `enabled` state, replacing the earlier
+browser-only preference. macOS/Windows persistent Gateway support is not claimed.
+
+Service observations have timestamps and are not a live heartbeat. A new UI
+process starts with unknown observations until an explicit status request; it
+never treats a successful old action as current process health. Security
+regressions cover arbitrary-scope/action denial, authorization and secret path/
+stdout suppression. Actual system service installation is not performed by the
+browser native-pairing test; native adapter acceptance is separate evidence.

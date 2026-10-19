@@ -144,3 +144,20 @@ test('local device pairing requires explicit structured owner approval; ordinary
   assert.equal((await f.post('/api/verify-gateway',{url:'https://independent.invalid/mcp',tokenFile:'/private/token',independentStyx:false,freshConnection:true})).status,409);
  }finally{await f.cleanup()}
 });
+
+test('service controls accept only explicit fixed scoped actions and redact results',async()=>{
+ let called;
+ const f=await fixture({core:{controlDeploymentHostService:async(_dir,data)=>{called=data;return{status:'reported',state:'stopped',persistence:'disabled',stdout:'SECRET_VALUE',serviceConfigFile:'/private/SECRET_PATH'}}},gatewayService:async(_dir,data)=>{called=data;return{active:'inactive',enabled:'disabled',pid:0}}});
+ try{
+  await f.post('/api/create',config());
+  assert.equal((await f.post('/api/service',{role:'host',action:'start',authorize:false})).status,409);assert.equal(called,undefined);
+  assert.equal((await f.post('/api/service',{role:'host',action:'exec',authorize:true})).status,409);assert.equal(called,undefined);
+  assert.equal((await f.post('/api/service',{role:'host',action:'status',authorize:true,serviceId:'someone-else'})).status,409);
+  const response=await f.post('/api/service',{role:'host',action:'status',authorize:true});assert.equal(response.status,200);assert.deepEqual(called,{action:'status',authorize:true});assert.doesNotMatch(await response.text(),/SECRET|private|stdout|serviceConfigFile/);
+  assert.equal((await(await f.get('/api/status')).json()).services.host.persistence,'disabled');
+  if(process.platform==='linux'){
+   await f.post('/api/start',{});called=undefined;assert.equal((await f.post('/api/service',{role:'gateway',action:'start',authorize:true})).status,409);assert.equal(called,undefined);
+   await f.post('/api/pause',{});assert.equal((await f.post('/api/service',{role:'gateway',action:'status',authorize:true})).status,200);
+  }
+ }finally{await f.cleanup()}
+});
