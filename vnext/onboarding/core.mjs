@@ -40,7 +40,7 @@ export function validateDeployment(config,{checkNetwork=true}={}){
   const st=fs.lstatSync(config.gateway.openssl);if(!st.isFile()||st.isSymbolicLink())fail('trusted_openssl_regular_file_required');
  }else if(['openssl','listenHost','allowRemoteHosts'].some(k=>config.gateway[k]!==undefined))fail('join_cannot_prepare_gateway');
  if(config.gateway.caFile!==undefined&&!abs(config.gateway.caFile))fail('absolute_ca_file_required');
- exact(config.host,['bundle','publisherKeyFile','publisherSha256','baseDir','label','computer','macTeamID','wayland','shell']);
+ exact(config.host,['bundle','publisherKeyFile','publisherSha256','baseDir','label','computer','macTeamID','wayland','shell','macPreviewApp']);
  for(const k of ['bundle','publisherKeyFile','baseDir'])if(!abs(config.host[k]))fail('absolute_host_paths_required');
  if(!/^[a-f0-9]{64}$/.test(config.host.publisherSha256??'')||typeof config.host.label!=='string'||!config.host.label||config.host.label.length>72||typeof config.host.computer!=='boolean')fail('invalid_host_setup');
  if(config.host.wayland!==undefined&&typeof config.host.wayland!=='boolean')fail('invalid_wayland_selection');
