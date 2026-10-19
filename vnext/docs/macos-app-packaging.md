@@ -14,6 +14,23 @@ not sandboxed. It adds no unrestricted/bypass flag. Its child environment is
 allowlisted and selects the upstream `standard` runtime mode. Residual native
 approval boundaries still follow Cua; unsupported approval cases must fail.
 
+## Precompiled preview without Apple membership
+
+A downloadable macOS preview can be compiled and packaged by the project without
+Developer ID or notarization. Ad-hoc code signing seals the bundle but does not
+identify an Apple-verified publisher. This is distinct from the optional
+Developer ID distribution path below; it must not be labeled notarized.
+
+Users do not need Xcode, Node, a developer account or a local source build for a
+self-contained preview. The bundle supplies its own runtime, Host payload and
+local onboarding interface. Gatekeeper may require the user to explicitly allow
+this particular app in System Settings. Do not disable Gatekeeper globally or
+instruct users to recursively remove quarantine. Managed devices can disallow
+such exceptions. Native Accessibility and Screen Recording grants remain
+separate from first-launch approval.
+
+See [macOS preview installation](macos-preview-install.md) for the end-user flow.
+
 ## Build on the target Mac
 
 Use Node >=22, Xcode command line tools, and a trusted, native architecture
@@ -87,7 +104,7 @@ Unexpected daemon exit invalidates the descriptor and requires an explicit
 menu restart. A permission-state change withdraws the generation and asks for
 an app relaunch. Interrupted GUI actions are never replayed automatically.
 
-## Release gates still blocked / NOT RUN
+## Notarized production release gates still blocked / NOT RUN
 
 Linux contract tests do not satisfy any native acceptance gate. Before calling
 Milestone C a release candidate, retain actual evidence for:

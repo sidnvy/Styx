@@ -1,7 +1,7 @@
 name: Styx macOS app compile
 on:
   pull_request:
-    paths: ['vnext/host/macos/**', 'vnext/host/build-macos-app.mjs', 'vnext/host/test/macos-app.test.mjs', '.github/workflows/styx-macos-app.yml']
+    paths: ['vnext/host/macos/**', 'vnext/host/*macos*', 'vnext/host/test/*macos*', 'vnext/onboarding/**', '.github/workflows/styx-macos-app.yml']
   workflow_dispatch:
 permissions:
   contents: read
@@ -13,6 +13,8 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - name: Install locked VNext dependencies
+        run: npm --prefix vnext ci --ignore-scripts --no-audit --no-fund
       - name: Packaging contract tests
         run: node --test vnext/host/test/macos-app.test.mjs
       - name: Compile native owner (no driver or signing credentials)
