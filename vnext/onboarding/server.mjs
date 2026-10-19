@@ -72,9 +72,9 @@ export function validateUiConfig(config,{trustedOpenSSL}={}){
  if(config.mode==='create-local'&&(!trustedOpenSSL||!path.isAbsolute(trustedOpenSSL)))fail('local_tls_helper_not_configured');
  return {...config,gateway:{...config.gateway,...(config.mode==='create-local'?{openssl:trustedOpenSSL}:{})}};
 }
-async function body(req){
+async function body(req,maximumBytes=65536){
  if(req.headers['content-type']!=='application/json')fail('json_required');
- req.setEncoding('utf8');let data='';for await(const chunk of req){data+=chunk;if(Buffer.byteLength(data)>65536)fail('body_too_large')}
+ req.setEncoding('utf8');let data='';for await(const chunk of req){data+=chunk;if(Buffer.byteLength(data)>maximumBytes)fail('body_too_large')}
  try{return JSON.parse(data)}catch{fail('invalid_json')}
 }
 export async function createOnboardingServer({stateDir,port=0,trustedForwardOrigin,trustedOpenSSL=process.platform==='win32'?undefined:'/usr/bin/openssl',core,artifactDefaultsFile,verifyConnection,gatewayService,pairingLinks,trustedMacPreviewApp,backgroundControl=enableDeploymentBackground,backgroundRead=observeDeploymentBackground,trustedTunnelClient}={}){
@@ -120,6 +120,10 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
    send(200,{csrf,platform:process.platform,journeySupported:true,diagnosticsSupported:true,foregroundSupported:typeof api.startDeploymentForeground==='function'&&typeof api.stopDeploymentForeground==='function',acceptanceSupported:['readDeploymentAcceptance','beginDeploymentAcceptance','confirmDeploymentAcceptance','recordDeploymentDesktopReadback'].every(k=>typeof api[k]==='function'),connectionHandoffSupported:typeof api.prepareDeploymentConnectionHandoff==='function',packagedPreviewTrusted:!!macPreviewApp,backgroundSupported:true,capabilityChangeSupported:true,deviceSettingsSupported:typeof api.readDeploymentDevices==='function',tunnelSupported:!!tunnel,localGatewayAvailable:!!trustedOpenSSL,pauseSupported:typeof api.stopDeploymentGateway==='function',startSupported:typeof api.startDeploymentGateway==='function',
     deviceIngressSupported:typeof api.planDeviceIngress==='function'&&typeof api.verifyDeviceIngress==='function',pairingLinkImportSupported:linkImportAvailable,pairingLinkCreateSupported:typeof api.createDeploymentPairingLink==='function',pendingApprovalSupported:typeof api.listDeploymentPending==='function'&&typeof api.approveDeploymentPending==='function',hostServiceSupported:typeof api.controlDeploymentHostService==='function',gatewayServiceSupported:gatewayServiceAvailable,gatewayService:gatewayServiceCapability,localGatewayAddresses:typeof api.localGatewayAddresses==='function'?api.localGatewayAddresses():[],defaults,accountAcceptance:'NOT RUN',nativeInstaller:'NOT RUN',trustedForwarding:!!forwarded});return;
   }
+  if(req.method==='GET'&&url.pathname==='/api/plugin'){
+   if(typeof api.readDeploymentPlugin!=='function'){send(404,{error:'plugin_workflow_unavailable'});return}
+   try{send(200,{plugin:await api.readDeploymentPlugin(stateDir)})}catch{send(409,{error:'plugin_state_unavailable'})}return;
+  }
   if(req.method==='GET'&&url.pathname==='/api/status'){
    try{
     const deployment=publicDeployment(await api.readDeployment(stateDir)),plan=await api.planDeployment(stateDir);
@@ -141,11 +145,20 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
    }catch{send(409,{error:'observation_unavailable'})}return;
   }
   if(req.method!=='POST'){send(405,{error:'method_refused'});return}
-  if(!['/api/foreground','/api/journey/background-preference','/api/connection-handoff','/api/acceptance/begin','/api/acceptance/confirm','/api/acceptance/desktop-readback','/api/host-update/plan','/api/host-update/status','/api/runtime-change/status','/api/runtime-change/plan','/api/runtime-change/apply','/api/runtime-change/recover','/api/native-migration/plan','/api/native-migration/apply','/api/native-migration/rollback','/api/device-ingress/plan','/api/device-ingress/verify','/api/create','/api/devices','/api/default-device','/api/capabilities','/api/tunnel/configure','/api/tunnel/start','/api/tunnel/stop','/api/background','/api/local-setup','/api/advance','/api/pause','/api/start','/api/verify-gateway','/api/service','/api/pairing-link/inspect','/api/pairing-link/accept','/api/pairing-link/create','/api/pending/list','/api/pending/approve'].includes(url.pathname)){send(404,{error:'not_found'});return}
+  if(!['/api/plugin/profile','/api/plugin/export','/api/plugin/record','/api/foreground','/api/journey/background-preference','/api/connection-handoff','/api/acceptance/begin','/api/acceptance/confirm','/api/acceptance/desktop-readback','/api/host-update/plan','/api/host-update/status','/api/runtime-change/status','/api/runtime-change/plan','/api/runtime-change/apply','/api/runtime-change/recover','/api/native-migration/plan','/api/native-migration/apply','/api/native-migration/rollback','/api/device-ingress/plan','/api/device-ingress/verify','/api/create','/api/devices','/api/default-device','/api/capabilities','/api/tunnel/configure','/api/tunnel/start','/api/tunnel/stop','/api/background','/api/local-setup','/api/advance','/api/pause','/api/start','/api/verify-gateway','/api/service','/api/pairing-link/inspect','/api/pairing-link/accept','/api/pairing-link/create','/api/pending/list','/api/pending/approve'].includes(url.pathname)){send(404,{error:'not_found'});return}
   if(busy){send(409,{error:'operation_in_progress'});return}busy=true;
   try{
-   const data=await body(req);
-   if(url.pathname==='/api/foreground'){
+   const data=await body(req,url.pathname==='/api/plugin/profile'?400*1024:65536);
+   if(url.pathname==='/api/plugin/profile'){
+    keys(data,['authorize','presentation','selection']);if(data.authorize!==true||typeof api.setDeploymentPluginProfile!=='function')fail('plugin_authorization_required');send(200,{plugin:await api.setDeploymentPluginProfile(stateDir,data)});return;
+   }else if(url.pathname==='/api/plugin/record'){
+    keys(data,['authorize','stage','pluginUrl']);if(data.authorize!==true||typeof api.recordDeploymentPluginAction!=='function')fail('plugin_authorization_required');send(200,{plugin:await api.recordDeploymentPluginAction(stateDir,data)});return;
+   }else if(url.pathname==='/api/plugin/export'){
+    keys(data,['authorize']);if(data.authorize!==true||typeof api.exportDeploymentPlugin!=='function')fail('plugin_authorization_required');
+    const result=await api.exportDeploymentPlugin(stateDir,data);
+    if(!Buffer.isBuffer(result?.archive)||result.archive.length>2*1024*1024||result.fileName!=='styx-native.zip')fail('invalid_plugin_archive');
+    res.writeHead(200,{'Content-Type':'application/zip','Content-Disposition':'attachment; filename="styx-native.zip"','Content-Length':result.archive.length});res.end(result.archive);return;
+   }else if(url.pathname==='/api/foreground'){
     keys(data,['authorize']);if(data.authorize!==true||typeof api.startDeploymentForeground!=='function')fail('foreground_authorization_required');send(200,{foreground:await api.startDeploymentForeground(stateDir,{authorize:true})});return;
    }else if(url.pathname==='/api/journey/background-preference'){
     keys(data,['background','authorize']);if(data.authorize!==true||!['foreground','login'].includes(data.background)||typeof api.setDeploymentOnboardingPreference!=='function')fail('background_preference_authorization_required');

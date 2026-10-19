@@ -7,6 +7,11 @@ import {randomBytes} from 'node:crypto';
 import {doctor} from '../../host/doctor.mjs';
 import {normalizeConnector} from '../../host/connect.mjs';
 import {TargetRegistry} from '../registry.mjs';
+import {createGatewayMcp} from '../mcp.mjs';
+import {Client} from '@modelcontextprotocol/sdk/client/index.js';
+import {InMemoryTransport} from '@modelcontextprotocol/sdk/inMemory.js';
+import {tools as execTools} from '../../packages/styx-exec-adapter/schema.mjs';
+import {guiTools} from '../../packages/styx-gui-broker/mcp.mjs';
 
 test('catalog admits only an explicit trusted outbound Host',()=>{
   const base={id:'mac',kind:'host',platform:'darwin',generation:'a1',
@@ -101,4 +106,68 @@ test('Host doctor reports native Wayland opt-in separately from Exec readiness',
     else process.env.CUA_DRIVER_RS_ENABLE_WAYLAND=oldFlag;
     await (await import('node:fs/promises')).rm(root,{recursive:true,force:true});
   }
+});
+
+test('MCP initialize and tools/list deliver Exec-first guidance with both computer providers',async t=>{
+  const sharedDefinitions=JSON.stringify({execTools,guiTools});
+  for(const mode of ['native-cua','legacy-gui'])await t.test(mode,async t=>{
+    const nativeTools=Object.freeze([
+      Object.freeze({name:'list_apps',description:'Observe running native applications.',
+        inputSchema:{type:'object',properties:{}}}),
+      Object.freeze({name:'click',description:'Click a freshly observed native element.',
+        inputSchema:{type:'object',properties:{}}})
+    ]);
+    const calls=[];
+    const error={isError:true,content:[{type:'text',text:'exec_disconnected'}]};
+    const exec={async callTool(name,args,owner){calls.push({lane:'exec',name,args,owner});return error;}};
+    const computer={async listTools(){return nativeTools;},
+      async callTool(name,args,owner){calls.push({lane:'computer',name,args,owner});return {content:[]};}};
+    const registry={list(){return [{capabilities:['exec','computer']}];},resolve(){return null;}};
+    const server=createGatewayMcp({exec,registry,owner:'routing-test-owner',
+      ...(mode==='native-cua'?{computer}:{gui:computer})});
+    const client=new Client({name:'routing-protocol-test',version:'1'});
+    const [ct,st]=InMemoryTransport.createLinkedPair();
+    t.after(async()=>{await client.close();await server.close();});
+    await server.connect(st);
+    await client.connect(ct); // Actual MCP initialize, not an instructions constant assertion.
+    const instructions=client.getInstructions();
+    assert.match(instructions,/Default to exec_command for Git\/GitHub clone/);
+    assert.match(instructions,/downloads \(curl\/wget\), file operations, builds, tests/);
+    assert.match(instructions,/TTY sessions managed by exec_command\/write_stdin are Exec sessions/);
+    assert.match(instructions,/Do not open Terminal.*Spotlight/);
+    assert.match(instructions,/authentication, permission or sandbox errors.*get_execution_environment_status/);
+    assert.match(instructions,/For genuine GUI tasks, use Styx computer tools first/);
+    assert.match(instructions,/explicitly requested GUI workflow may use computer tools/);
+    assert.match(instructions,/Do not replace desktop tools with osascript/);
+    assert.match(instructions,/separate Automation permission/);
+    const {tools}=await client.listTools();
+    for(const name of ['exec_command','write_stdin']){
+      const delivered=tools.find(tool=>tool.name===name);
+      assert.match(delivered.description,/Default to exec_command for Git\/GitHub clone/);
+      assert.match(delivered.description,/never use a desktop terminal to bypass it/);
+      assert.match(delivered.description,/not osascript\/System Events/);
+      assert.deepEqual(delivered.inputSchema,execTools.find(tool=>tool.name===name).inputSchema);
+    }
+    for(const original of mode==='native-cua'?nativeTools:guiTools){
+      const delivered=tools.find(tool=>tool.name===original.name);
+      assert.ok(delivered.description.startsWith(original.description+' '));
+      assert.match(delivered.description,/GUI observation\/interaction is necessary or the user explicitly requests a GUI workflow/);
+      assert.match(delivered.description,/CLI work default to exec_command, including foreground\/TTY sessions/);
+      assert.match(delivered.description,/Do not open Terminal through Spotlight/);
+      assert.match(delivered.description,/authentication, sandbox restrictions or disconnection/);
+      assert.match(delivered.description,/not osascript\/System Events/);
+      assert.deepEqual(delivered.inputSchema,original.inputSchema);
+    }
+    assert.deepEqual(calls,[]); // Discovery does not run either capability.
+    const args={cmd:'git clone local-source checkout',environment_id:'selected'};
+    assert.equal((await client.callTool({name:'exec_command',arguments:args})).isError,true);
+    assert.deepEqual(calls,[{lane:'exec',name:'exec_command',args,owner:'routing-test-owner'}]);
+    // Guidance preserves explicit GUI calls; an Exec failure does not dispatch a GUI fallback.
+    await client.callTool({name:'click',arguments:{}});
+    assert.equal(calls.at(-1).lane,'computer');
+    assert.equal(calls.length,2);
+    await client.listTools();
+    assert.equal(JSON.stringify({execTools,guiTools}),sharedDefinitions);
+    assert.equal(nativeTools[0].description,'Observe running native applications.');
+  });
 });

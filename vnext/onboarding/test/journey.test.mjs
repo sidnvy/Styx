@@ -21,6 +21,15 @@ test('a running process, requested desktop, doctor or SDK success never verifies
  assert.equal(row(j,'local_setup').status,'completed');assert.equal(row(j,'system_permissions').status,'pending');assert.equal(row(j,'external_entry').status,'completed');assert.equal(row(j,'chat_request_proof').status,'pending');
  assert.equal(j.acceptance.requestProof.status,'pending');assert.equal(j.acceptance.complete,false);assert.doesNotMatch(JSON.stringify(j),/SECRET|\/private/);
 });
+test('plugin export, account installation attestation and actual MCP evidence remain separate in journey',()=>{
+ const plugin={required:true,profileSaved:true,selection:{mode:'create',accountLabel:'PRIVATE_ACCOUNT_REMARK'},presentation:{icon:{dataBase64:'PRIVATE_ICON'}},export:{status:'exported'},accountActions:{upload:'user_confirmed',installation:'not_observed'}};
+ let j=projectOnboardingJourney({deployment:ready(),plugin,acceptance:accepted()});
+ assert.equal(row(j,'chat_connection').status,'pending');assert.equal(row(j,'chat_connection').nextAction,'configure_or_reuse_plugin');
+ assert.doesNotMatch(JSON.stringify(j.plugin),/PRIVATE|presentation|icon|accountLabel/);
+ plugin.accountActions.installation='user_confirmed';j=projectOnboardingJourney({deployment:ready(),plugin});
+ assert.equal(row(j,'chat_connection').status,'pending');assert.equal(j.account.status,'not_verified');
+ j=projectOnboardingJourney({deployment:ready(),plugin,acceptance:accepted()});assert.equal(row(j,'chat_connection').status,'completed');assert.equal(j.plugin.providerIdentity,'not_verified');
+});
 test('proof, desktop readback and target-chat user attestation are distinct and provider identity remains unverified',()=>{
  const proof={status:'request_observed',requestProof:{status:'verified'},targetChatConfirmation:{status:'pending'},desktop:{status:'pending'},complete:false};
  let j=projectOnboardingJourney({deployment:ready(),acceptance:proof});

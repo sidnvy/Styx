@@ -5,6 +5,7 @@ import ApplicationServices
 import CoreGraphics
 import Darwin
 import WebKit
+import UniformTypeIdentifiers
 
 let bundleID = "app.styx.host"
 enum HostError: Error { case unsafeRuntime, alreadyRunning, socketPath, daemonUnavailable }
@@ -202,9 +203,63 @@ func setupNavigation(_ url: URL, origin: URL, userActivated: Bool) -> SetupNavig
     return .blocked
 }
 
-final class SetupWindowController: NSWindowController, WKNavigationDelegate, WKUIDelegate {
+let pluginExportHandlerName = "styxPluginExport"
+let pluginExportMaximumBytes = 2 * 1024 * 1024
+enum PluginExportError: Error { case refused }
+func pluginExportArchive(_ body: Any) throws -> Data {
+    guard let message = body as? [String: Any], message.count == 1,
+          let encoded = message["base64"] as? String, !encoded.isEmpty,
+          encoded.utf8.count <= ((pluginExportMaximumBytes + 2) / 3) * 4,
+          let bytes = Data(base64Encoded: encoded), bytes.count <= pluginExportMaximumBytes,
+          bytes.base64EncodedString() == encoded,
+          bytes.starts(with: [0x50, 0x4b, 0x03, 0x04]) else { throw PluginExportError.refused }
+    return bytes
+}
+func pluginExportPage(_ url: URL?, origin: URL) -> Bool {
+    guard let url = url else { return false }
+    return setupNavigation(url, origin: origin, userActivated: false) == .local
+}
+func pluginExportContext(origin: URL, currentURL: URL?, frameURL: URL?, isMainFrame: Bool,
+                         securityProtocol: String, securityHost: String, securityPort: Int) -> Bool {
+    origin.scheme == "http" && origin.host == "127.0.0.1" && origin.user == nil && origin.password == nil
+        && origin.port != nil && isMainFrame && securityProtocol == "http" && securityHost == "127.0.0.1"
+        && securityPort == origin.port && pluginExportPage(frameURL, origin: origin) && pluginExportPage(currentURL, origin: origin)
+}
+// This URL comes only from the user's native picker, never from JavaScript.
+// Core validates the complete PNG structure, dimensions and pixels afterward.
+func pluginIconFile(_ url: URL) throws -> URL {
+    guard url.isFileURL, url.pathExtension.lowercased() == "png",
+          UTType(filenameExtension: url.pathExtension.lowercased())?.conforms(to: .png) == true else { throw PluginExportError.refused }
+    var info = stat()
+    guard lstat(url.path, &info) == 0, info.st_mode & S_IFMT == S_IFREG,
+          info.st_size >= 8, info.st_size <= 256 * 1024 else { throw PluginExportError.refused }
+    let fd = Darwin.open(url.path, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+    guard fd >= 0 else { throw PluginExportError.refused }
+    defer { Darwin.close(fd) }
+    var opened = stat()
+    guard fstat(fd, &opened) == 0, opened.st_dev == info.st_dev, opened.st_ino == info.st_ino,
+          opened.st_mode & S_IFMT == S_IFREG, opened.st_size == info.st_size else { throw PluginExportError.refused }
+    var header = [UInt8](repeating: 0, count: 8)
+    let count = header.withUnsafeMutableBytes { Darwin.read(fd, $0.baseAddress, $0.count) }
+    guard count == 8, header == [137, 80, 78, 71, 13, 10, 26, 10] else { throw PluginExportError.refused }
+    return url
+}
+// WebKit retains its handler. This proxy must not retain the window/controller.
+final class PluginExportBridge: NSObject, WKScriptMessageHandlerWithReply {
+    weak var owner: SetupWindowController?
+    func userContentController(_ userContentController: WKUserContentController, didReceive message: WKScriptMessage,
+                               replyHandler: @escaping (Any?, String?) -> Void) {
+        guard let owner = owner else { replyHandler(nil, "plugin_export_unavailable"); return }
+        owner.savePluginExport(message, replyHandler: replyHandler)
+    }
+}
+
+final class SetupWindowController: NSWindowController, WKNavigationDelegate, WKUIDelegate, NSWindowDelegate {
     let origin: URL
     let webView: WKWebView
+    private let pluginExportBridge = PluginExportBridge()
+    private var pluginExportRegistered = false
+    private var pluginFilePanelInProgress = false
     init(sessionURL: URL) {
         origin = sessionURL
         let configuration = WKWebViewConfiguration()
@@ -221,13 +276,82 @@ final class SetupWindowController: NSWindowController, WKNavigationDelegate, WKU
         super.init(window: window)
         webView.navigationDelegate = self
         webView.uiDelegate = self
+        window.delegate = self
+        enablePluginExport()
         webView.load(URLRequest(url: sessionURL))
     }
     required init?(coder: NSCoder) { fatalError("Programmatic settings window only") }
     func present() {
+        enablePluginExport()
         showWindow(nil)
         NSApp.activate(ignoringOtherApps: true)
         window?.makeKeyAndOrderFront(nil)
+    }
+    private func enablePluginExport() {
+        guard !pluginExportRegistered else { return }
+        pluginExportBridge.owner = self
+        webView.configuration.userContentController.addScriptMessageHandler(pluginExportBridge, contentWorld: .page, name: pluginExportHandlerName)
+        pluginExportRegistered = true
+    }
+    func windowWillClose(_ notification: Notification) {
+        webView.configuration.userContentController.removeScriptMessageHandler(forName: pluginExportHandlerName, contentWorld: .page)
+        pluginExportBridge.owner = nil
+        pluginExportRegistered = false
+    }
+    private func trustedPluginFrame(_ frame: WKFrameInfo) -> Bool {
+        pluginExportRegistered && pluginExportContext(origin: origin, currentURL: webView.url, frameURL: frame.request.url,
+            isMainFrame: frame.isMainFrame, securityProtocol: frame.securityOrigin.protocol,
+            securityHost: frame.securityOrigin.host, securityPort: frame.securityOrigin.port)
+    }
+    private func trustedPluginExport(_ message: WKScriptMessage) -> Bool {
+        message.name == pluginExportHandlerName && message.webView === webView && trustedPluginFrame(message.frameInfo)
+    }
+    func savePluginExport(_ message: WKScriptMessage, replyHandler: @escaping (Any?, String?) -> Void) {
+        guard trustedPluginExport(message), !pluginFilePanelInProgress, let window = window,
+              let bytes = try? pluginExportArchive(message.body) else { replyHandler(nil, "plugin_export_refused"); return }
+        pluginFilePanelInProgress = true
+        let panel = NSSavePanel()
+        panel.title = "Export Styx plugin"
+        panel.nameFieldStringValue = "styx-native.zip"
+        panel.allowedContentTypes = [.zip]
+        panel.allowsOtherFileTypes = false
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard let owner = self else { replyHandler(nil, "plugin_export_unavailable"); return }
+            owner.pluginFilePanelInProgress = false
+            guard response == .OK else { replyHandler(["status": "cancelled"], nil); return }
+            // A closed window or page outside the owned origin loses authority.
+            // JavaScript never supplies a path, URL, or filename.
+            guard owner.trustedPluginExport(message), let destination = panel.url,
+                  destination.isFileURL, destination.pathExtension.lowercased() == "zip" else {
+                replyHandler(nil, "plugin_export_refused"); return
+            }
+            do {
+                var info = stat()
+                if lstat(destination.path, &info) == 0 && info.st_mode & S_IFMT != S_IFREG { throw PluginExportError.refused }
+                try bytes.write(to: destination, options: .atomic)
+                replyHandler(["status": "saved"], nil)
+            } catch { replyHandler(nil, "plugin_export_save_failed") }
+        }
+    }
+    func webView(_ webView: WKWebView, runOpenPanelWith parameters: WKOpenPanelParameters,
+                 initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping ([URL]?) -> Void) {
+        guard webView === self.webView, trustedPluginFrame(frame), !pluginFilePanelInProgress,
+              !parameters.allowsDirectories, !parameters.allowsMultipleSelection, let window = window else { completionHandler(nil); return }
+        pluginFilePanelInProgress = true
+        let panel = NSOpenPanel()
+        panel.title = "Choose Styx plugin icon"
+        panel.message = "Choose one square PNG image, up to 256 KiB."
+        panel.allowedContentTypes = [.png]
+        panel.allowsOtherFileTypes = false
+        panel.canChooseFiles = true; panel.canChooseDirectories = false
+        panel.allowsMultipleSelection = false; panel.resolvesAliases = false
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard let owner = self else { completionHandler(nil); return }
+            owner.pluginFilePanelInProgress = false
+            guard response == .OK, owner.trustedPluginFrame(frame), panel.urls.count == 1,
+                  let selected = panel.urls.first, let accepted = try? pluginIconFile(selected) else { completionHandler(nil); return }
+            completionHandler([accepted])
+        }
     }
     func confirmExternal(_ url: URL) {
         let alert = NSAlert()
@@ -626,6 +750,40 @@ if CommandLine.arguments.contains("--self-test") {
     }
 
     let origin = URL(string: "http://127.0.0.1:1234/")!
+    let archive = Data([0x50, 0x4b, 0x03, 0x04, 0x00])
+    guard (try? pluginExportArchive(["base64": archive.base64EncodedString()])) == archive else { fatalError("bounded ZIP export rejected") }
+    func expectPluginExportRefused(_ input: Any) {
+        do { _ = try pluginExportArchive(input); fatalError("unsafe plugin export accepted") }
+        catch PluginExportError.refused { }
+        catch { fatalError("unexpected plugin export validation error") }
+    }
+    let invalidPluginExports: [Any] = [[:], ["base64": 123], ["base64": ""], ["path": "/tmp/no-write.zip"],
+                         ["base64": archive.base64EncodedString(), "filename": "chosen-by-page.zip"],
+                         ["base64": "UEsDBB=="], ["base64": "UEsDBA"], ["base64": "UEsDBA==\n"],
+                         ["base64": Data([0x50, 0x4b, 0x05, 0x06]).base64EncodedString()],
+                         ["base64": Data("not a ZIP".utf8).base64EncodedString()],
+                         ["base64": String(repeating: "A", count: ((pluginExportMaximumBytes + 2) / 3) * 4 + 4)]]
+    for invalid in invalidPluginExports {
+        expectPluginExportRefused(invalid)
+    }
+    var largestArchive = Data([0x50, 0x4b, 0x03, 0x04])
+    largestArchive.append(Data(repeating: 0, count: pluginExportMaximumBytes - 4))
+    guard (try? pluginExportArchive(["base64": largestArchive.base64EncodedString()])) == largestArchive else { fatalError("ZIP export size boundary rejected") }
+    largestArchive.append(0)
+    expectPluginExportRefused(["base64": largestArchive.base64EncodedString()])
+    func exportContext(_ current: URL? = origin, _ frame: URL? = origin, _ main: Bool = true,
+                       _ scheme: String = "http", _ host: String = "127.0.0.1", _ port: Int = 1234) -> Bool {
+        pluginExportContext(origin: origin, currentURL: current, frameURL: frame, isMainFrame: main,
+                            securityProtocol: scheme, securityHost: host, securityPort: port)
+    }
+    guard exportContext() else { fatalError("owned main-frame export context rejected") }
+    guard !exportContext(origin, origin, false), !exportContext(nil), !exportContext(origin, nil),
+          !exportContext(origin, origin, true, "https"), !exportContext(origin, origin, true, "http", "localhost"),
+          !exportContext(origin, origin, true, "http", "127.0.0.1", 4321) else { fatalError("foreign export frame accepted") }
+    for bad in ["https://example.com/", "http://127.0.0.1:4321/", "http://user@127.0.0.1:1234/", "file:///tmp/plugin.zip", "blob:http://127.0.0.1:1234/arbitrary"] {
+        let target = URL(string: bad)!
+        guard !exportContext(target), !exportContext(origin, target) else { fatalError("unowned page authorized export") }
+    }
     for local in ["http://127.0.0.1:1234/", "http://127.0.0.1:1234/#progress", "http://127.0.0.1:1234/api/state"] {
         guard setupNavigation(URL(string: local)!, origin: origin, userActivated: false) == .local else { fatalError("local navigation rejected") }
     }
@@ -663,6 +821,29 @@ if CommandLine.arguments.contains("--self-test") {
         }
         try FileManager.default.removeItem(atPath: fileLink)
         try FileManager.default.removeItem(atPath: privateFile)
+        let icon = URL(fileURLWithPath: dir + "/plugin-icon.png")
+        let pngHeader = Data([137, 80, 78, 71, 13, 10, 26, 10])
+        try pngHeader.write(to: icon)
+        guard try pluginIconFile(icon) == icon else { fatalError("selected PNG rejected") }
+        func expectIconRefused(_ url: URL) {
+            do { _ = try pluginIconFile(url); fatalError("unsafe icon file accepted") }
+            catch PluginExportError.refused { }
+            catch { fatalError("unexpected icon validation error") }
+        }
+        let iconLink = URL(fileURLWithPath: dir + "/plugin-icon-link.png")
+        try FileManager.default.createSymbolicLink(atPath: iconLink.path, withDestinationPath: icon.path)
+        expectIconRefused(iconLink)
+        try FileManager.default.removeItem(at: iconLink)
+        expectIconRefused(URL(fileURLWithPath: dir + "/missing.png"))
+        expectIconRefused(URL(fileURLWithPath: dir))
+        expectIconRefused(URL(string: "https://example.com/icon.png")!)
+        try Data("not a PNG".utf8).write(to: icon); expectIconRefused(icon)
+        var largestIcon = pngHeader
+        largestIcon.append(Data(repeating: 0, count: 256 * 1024 - pngHeader.count))
+        try largestIcon.write(to: icon)
+        guard try pluginIconFile(icon) == icon else { fatalError("PNG size boundary rejected") }
+        largestIcon.append(0); try largestIcon.write(to: icon); expectIconRefused(icon)
+        try FileManager.default.removeItem(at: icon)
         do { _ = try RuntimeDirectory(path: dir); fatalError("duplicate ownership") }
         catch HostError.alreadyRunning { }
         guard !socketAccepts(dir + "/absent.sock") else { fatalError("false socket readiness") }
@@ -679,7 +860,7 @@ if CommandLine.arguments.contains("--self-test") {
         catch HostError.unsafeRuntime { }
         chmod(dir, 0o700)
         try FileManager.default.removeItem(atPath: dir)
-        print("Styx native ownership and settings navigation self-test passed; GUI and TCC NOT RUN")
+        print("Styx native ownership, settings navigation, ZIP export and PNG picker validation self-test passed; GUI file dialogs and TCC NOT RUN")
         exit(0)
     } catch { fputs("Styx self-test failed: \(error)\n", stderr); exit(1) }
 }

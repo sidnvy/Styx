@@ -9,8 +9,9 @@ const session=sessionStorage.getItem('styx.local.session');
 let linkInspection,joinLinkId;
 let serviceObservations={};
 let csrf,capabilities,deployment=null,dependencies=[],ownerPairingScope=null,locked=false;
+let plugin=null,pluginDraftDirty=false,pluginLoadedSignature=null,pluginIcon=null,pluginIconBusy=false,pluginDraftVersion=0;
 let journey=null,acceptance=null,tunnelObservation=null,backgroundObservation=null,handoffTimer,desktopReadbackTimer,renderedChallengeId;
-const JOURNEY=[['local_setup','本机准备','先准备这台电脑'],['system_permissions','权限与可用性','检查终端与桌面权限'],['background','后台偏好','选择本次运行方式'],['external_entry','连接账号平台','在官方浏览器完成账号平台设置'],['chat_connection','添加到 ChatGPT','添加专用 Styx 连接并完成认证'],['chat_request_proof','聊天中真实调用','在目标聊天中执行本次验证请求'],['target_chat_confirmation','确认目标聊天','核对本次请求与实际聊天来源']];
+const JOURNEY=[['local_setup','本机准备','先准备这台电脑'],['system_permissions','权限与可用性','检查终端与桌面权限'],['background','后台偏好','选择本次运行方式'],['external_entry','连接账号平台','在官方浏览器完成账号平台设置'],['chat_connection','创建／复用插件','在同一账号创建或复用 Styx 插件'],['chat_request_proof','聊天中真实调用','在目标聊天中执行本次验证请求'],['target_chat_confirmation','确认目标聊天','核对本次请求与实际聊天来源']];
 const REASONS={local_setup_required:'先完成本机准备，再继续下一步。',interactive_desktop_session_required:'没有可用的交互桌面会话；终端能力可以单独检查。',desktop_permission_or_native_proof_required:'系统权限与真实桌面操作尚未完成验证。',chat_request_not_verified:'等待目标聊天通过 Styx 执行真实验证请求。',target_chat_not_confirmed:'请在目标聊天看到真实结果后，记录你的来源确认。',background_choice_required:'选择后台运行或本次保持前台。',native_permissions_require_user_authorization_and_restart:'请亲自完成系统授权，然后退出并重新打开 Styx。',permissions_native_state_not_observed:'尚未读取当前 App 的授权，请保持 App 运行并刷新。',native_permission_preflight_granted_desktop_test_separate:'系统权限预检查已通过，真实桌面操作仍需聊天验收。'};
 function message(text){notice.textContent=text;notice.hidden=false}
 const ERROR_MESSAGES={foreground_host_handoff_required:'检测到另一个前台设备进程。请先由 Styx 或 Codex 核实并交接该进程，再启用后台服务；没有启动重复进程。',tunnel_running_or_interrupted:'连接正在运行或上次中断尚未核实。请先停止并检查连接，再修改配置。',tunnel_client_integrity_failed:'内置连接组件校验失败，请重新获取完整的官方安装包。',background_uncertain_requires_reconciliation:'上次后台变更的结果不确定。已保留现场，请诊断后继续。',capability_uncertain_requires_reconciliation:'上次能力变更未完成，需先诊断；不会自动重复变更。'};
@@ -60,6 +61,45 @@ function renderAcceptance(){
  $('#target-chat-status').textContent=confirmed?'已记录你在目标聊天中看到结果的确认。此来源仍是用户确认，未认证账号平台身份。':!proof?'先等待本次真实请求通过验证。':!desktopReady?'终端请求已验证；所选桌面能力仍待真实验收。':'真实请求已验证。请回到目标聊天核对结果，再记录来源确认。';
  $('#acceptance-completion').textContent=acceptance?.complete===true?'本次所选能力的聊天验收条件已满足。':proof&&desktopReady&&!confirmed?'还差一步：确认这次结果来自你的目标聊天。':'';
 }
+function officialPluginUrl(value){
+ try{const url=new URL(value);return typeof value==='string'&&value.length<=2048&&url.protocol==='https:'&&url.hostname==='chatgpt.com'&&!url.port&&!url.username&&!url.password&&!url.search&&!url.hash&&url.pathname.startsWith('/plugins/')&&url.pathname.length>'/plugins/'.length?url.href:null}catch{return null}
+}
+function pluginMode(){return $('#plugin-profile-form').elements.pluginMode.value}
+function renderPlugin(){
+ const joined=deployment?.mode==='join-existing',available=!!plugin&&plugin.required!==false;
+ $('#plugin-onboarding').hidden=joined||!available;$('#plugin-unavailable').hidden=joined||available;
+ if(!available){$('#plugin-profile-fields').disabled=true;return}
+ const f=$('#plugin-profile-form'),signature=JSON.stringify([plugin.presentation,plugin.selection]);
+ if(!pluginDraftDirty&&pluginLoadedSignature!==signature){
+  const presentation=plugin.presentation??{},selection=plugin.selection??{};
+  f.elements.pluginMode.value=selection.mode==='reuse'?'reuse':'create';
+  for(const name of ['displayName','shortDescription','longDescription'])f.elements[name].value=presentation[name]??(name==='displayName'?'Styx':'');
+  f.elements.accountLabel.value=selection.accountLabel??'';f.elements.existingPluginUrl.value=selection.pluginUrl??'';$('#plugin-returned-url').value=selection.pluginUrl??'';
+  pluginIcon=presentation.icon??null;pluginLoadedSignature=signature;
+  $('#plugin-icon-file').value='';$('#plugin-icon-preview').hidden=true;
+  $('#plugin-icon-status').textContent=pluginIcon?'已保存自定义 PNG 图标。':'未选自定义图片，使用平台默认图标。';
+ }
+ const reuse=pluginMode()==='reuse',saved=plugin.profileSaved===true&&!pluginDraftDirty&&!plugin.contextChanged;
+ $('#plugin-profile-fields').disabled=locked||pluginIconBusy;
+ $('#plugin-reuse-url').hidden=!reuse;f.elements.existingPluginUrl.required=reuse;
+ $('#plugin-create-path').hidden=reuse;$('#plugin-reuse-note').hidden=!reuse;
+ $('#plugin-profile-status').textContent=plugin.contextChanged?'当前 Gateway 身份或隧道绑定已变化。请重新核对目标并保存本机选择，再重新记录账号操作；旧确认不代表当前连接。':pluginDraftDirty?'选择或外观尚未保存，请先保存本机记录。':plugin.profileSaved?'已保存本机选择。账号／工作区备注仅用于本机辨认，不代表已登录或远端身份认证。':'先确认首次创建还是复用已有插件，默认外观可以直接保存。';
+ const exported=plugin.export?.status;
+ $('#export-plugin').disabled=locked||pluginIconBusy||!saved||reuse||!['configured','running'].includes(tunnelObservation?.status);
+ $('#plugin-export-status').textContent=exported==='exported'?'本机导出已记录（'+String(plugin.export.filename??'styx-native.zip')+'）。仅证明本机认证与工具发现及配置绑定，不代表账号上传或云端连通。':exported==='stale'?'上次导出与当前设置不一致，请重新导出。':!saved?'先保存本机插件选择。':!['configured','running'].includes(tunnelObservation?.status)?'先在上一步配置专用隧道；导出时还会进行真实本机认证与工具发现检查。':'尚未导出。导出前会检查本机认证与工具发现，不会自动上传到账号。';
+ const savedUrl=officialPluginUrl(plugin.selection?.pluginUrl??'');
+ if(savedUrl)$('#plugin-returned-url').value=savedUrl;
+ const canRecordUpload=saved&&plugin.export?.status==='exported';
+ $('#plugin-upload-form').querySelector('button').disabled=locked||!canRecordUpload;
+ $('#plugin-upload-confirmed').disabled=locked||!canRecordUpload;
+ $('#plugin-returned-url').disabled=locked||!canRecordUpload;$('#plugin-returned-url').readOnly=!!savedUrl;
+ $('#plugin-upload-status').textContent=plugin.accountActions?.upload==='user_confirmed'?'创建／上传：已记录你的确认。Styx 未观察账号平台的上传结果。':!canRecordUpload?'先完成当前本机插件 ZIP 导出，再记录官方账号中的创建／上传确认。':'创建／上传：尚无用户确认，不会仅凭本机导出标记为已上传。';
+ const link=$('#open-saved-plugin');link.hidden=!savedUrl;if(savedUrl)link.href=savedUrl;else link.removeAttribute('href');
+ const canRecordInstallation=saved&&!!savedUrl&&(reuse||plugin.accountActions?.upload==='user_confirmed');
+ $('#record-plugin-installation').disabled=locked||!canRecordInstallation;
+ $('#plugin-installed-confirmed').disabled=locked||!canRecordInstallation;
+ $('#plugin-installation-status').textContent=plugin.accountActions?.installation==='user_confirmed'?'安装：已记录你的确认；真实连接仍须在目标聊天执行验证。':!savedUrl?'先保存已有插件地址，或记录官方创建后返回的插件地址。':'安装：尚无用户确认。请打开这个插件，在同一账号／工作区安装或启用。';
+}
 function renderJourney(){
  $('#journey-overview').hidden=!session;
  const joinedComplete=deployment?.mode==='join-existing'&&journey?.status==='complete';
@@ -87,7 +127,7 @@ function renderJourney(){
  const join=deployment?.mode==='join-existing';
  $('#account-connection').hidden=!deployment||join;
  $('#join-account-note').hidden=!join;
- $('#chatgpt-title').textContent=join?'回主台完成聊天验收':'在 ChatGPT 添加 Styx';
+ $('#chatgpt-title').textContent=join?'回主台完成聊天验收':'创建或复用你的 Styx 插件';
  $('#chat-request-proof').hidden=!deployment||join;$('#target-chat-confirmation').hidden=!deployment||join;
  $('#main-account-instructions').hidden=join;
  $('#prepare-handoff').hidden=join;$('#connection-handoff').hidden=join||!$('#connection-credential').value;
@@ -107,7 +147,7 @@ function renderJourney(){
  $('#keep-foreground').disabled=locked||!localPrepared||!capabilities?.journeySupported||!capabilities?.foregroundSupported;
  $('#keep-foreground').textContent=journey?.background?.preference==='foreground'?'启动／恢复本次前台连接':'保持 App 打开并启动本次连接';
  if(!capabilities?.foregroundSupported)$('#background-blocker').textContent+=' 当前版本未提供前台连接管理，请使用完整安装包。';
- renderAcceptance();
+ renderPlugin();renderAcceptance();
 }
 function render(){
  form.hidden=!!deployment;$('#advanced-settings').hidden=!deployment;$('#account-connection').hidden=!deployment||!capabilities?.tunnelSupported;$('#progress').hidden=!deployment;$('#maintenance').hidden=!deployment;
@@ -176,8 +216,8 @@ function render(){
 }
 async function refresh(){
  try{const state=await api('status');deployment=state.deployment;dependencies=state.dependencies??[];ownerPairingScope=state.ownerPairingScope??null;serviceObservations=state.services??serviceObservations;locked=!!state.busy;tunnelObservation=state.tunnel??null;backgroundObservation=state.background??null;
-  const extras=await Promise.allSettled([capabilities?.journeySupported?api('journey'):Promise.resolve(null),capabilities?.acceptanceSupported?api('acceptance'):Promise.resolve(null)]);
-  journey=extras[0].status==='fulfilled'?extras[0].value?.journey??null:null;acceptance=extras[1].status==='fulfilled'?extras[1].value?.acceptance??null:null;
+  const extras=await Promise.allSettled([capabilities?.journeySupported?api('journey'):Promise.resolve(null),capabilities?.acceptanceSupported?api('acceptance'):Promise.resolve(null),deployment?.mode==='create-local'?api('plugin'):Promise.resolve(null)]);
+  journey=extras[0].status==='fulfilled'?extras[0].value?.journey??null:null;acceptance=extras[1].status==='fulfilled'?extras[1].value?.acceptance??null:null;plugin=extras[2].status==='fulfilled'?extras[2].value?.plugin??null:null;
   render();if(state.deviceCapabilities?.computer!==null&&state.deviceCapabilities?.computer!==undefined)$('#desktop-setting-status').textContent='桌面能力：'+(state.deviceCapabilities.computer?'已启用':'已停用')+' · '+state.deviceCapabilities.status; if(state.tunnel)$('#tunnel-status').textContent='连接进程：'+({running:'正在运行，真实聊天尚需验收',configured:'已配置，未启动',not_configured:'尚未配置',interrupted:'上次运行中断，需检查'}[state.tunnel.status]??'状态待核实');if(state.background)$('#background-summary').textContent=state.background.status==='running'?'本机当前观察：后台进程正在运行（'+(state.background.observedAt??state.background.updatedAt??'时间未知')+'）。':'后台运行尚未确认。';if(journey?.background?.preference==='foreground')$('#background-summary').textContent+=' 已选择本次保持前台，关闭 App 可能停止相关进程。';}
  catch{clearHandoff();$('#readiness-exec').textContent='当前状态暂不可读';$('#readiness-desktop').textContent='当前状态暂不可读';message('无法读取本地部署状态。请保留状态目录，查看本机诊断；不要删除状态后盲目重试。')}
 }
@@ -237,6 +277,67 @@ $('#run-diagnostics').addEventListener('click',async()=>{
  try{await api('diagnostics');message('已重新读取本机诊断。请查看终端、桌面权限和运行状态。')}
  catch{message('本机诊断暂不可读。进度已保留，请从 Styx 重新打开设置或稍后重试。')}
  finally{locked=false;await refresh()}
+});
+const pluginForm=$('#plugin-profile-form');
+function validatePluginText(){
+ for(const [name,max]of [['displayName',64],['shortDescription',30],['longDescription',2000]]){
+  const input=pluginForm.elements[name],text=name==='longDescription'?input.value.replace(/\r\n/g,'\n'):input.value,checked=name==='longDescription'?text.replace(/\n/g,''):text;
+  input.setCustomValidity(/[\p{Cc}\p{Cf}\p{Cs}\u2028\u2029]/u.test(checked)?'请勿包含控制字符、隐藏格式符或连接符；详细描述可以换行，其他字段不支持换行。':Array.from(text.trim()).length>max?'最多 '+max+' 个字符（emoji 按字符计数）。':'');
+ }
+ const input=pluginForm.elements.existingPluginUrl;input.setCustomValidity(input.value&&!officialPluginUrl(input.value)?'请使用无查询参数、片段或账号凭据的 https://chatgpt.com/plugins/ 插件地址。':'');
+}
+pluginForm.addEventListener('input',()=>{pluginDraftVersion++;pluginDraftDirty=true;validatePluginText();renderPlugin()});
+pluginForm.addEventListener('change',()=>{pluginDraftVersion++;pluginDraftDirty=true;validatePluginText();renderPlugin()});
+$('#plugin-icon-file').addEventListener('change',async()=>{
+ const file=$('#plugin-icon-file').files[0];if(!file)return;
+ pluginIconBusy=true;renderPlugin();let bitmap;
+ try{
+  if(file.type!=='image/png'||file.size>256*1024)throw Error('invalid_png');
+  const bytes=new Uint8Array(await file.arrayBuffer());
+  if(bytes.length<8||![137,80,78,71,13,10,26,10].every((b,i)=>bytes[i]===b))throw Error('invalid_png');
+  bitmap=await createImageBitmap(file);
+  if(bitmap.width!==bitmap.height||bitmap.width<48||bitmap.width>1024)throw Error('invalid_dimensions');
+  let binary='';for(const byte of bytes)binary+=String.fromCharCode(byte);
+  pluginIcon={mimeType:'image/png',dataBase64:btoa(binary)};pluginDraftVersion++;pluginDraftDirty=true;
+  const canvas=$('#plugin-icon-preview');canvas.getContext('2d').clearRect(0,0,64,64);canvas.getContext('2d').drawImage(bitmap,0,0,64,64);canvas.hidden=false;
+  $('#plugin-icon-status').textContent='已选择 '+bitmap.width+' × '+bitmap.height+' PNG；保存后随插件导出。';
+ }catch{$('#plugin-icon-file').value='';$('#plugin-icon-status').textContent='图片未接受。请选择 48–1024 像素的正方形 PNG，最多 256 KiB；原有图标保持不变。'}
+ finally{bitmap?.close();pluginIconBusy=false;renderPlugin()}
+});
+$('#plugin-icon-default').addEventListener('click',()=>{pluginIcon=null;pluginDraftVersion++;pluginDraftDirty=true;$('#plugin-icon-file').value='';$('#plugin-icon-preview').hidden=true;$('#plugin-icon-status').textContent='将使用平台默认图标；请保存本机选择。';renderPlugin()});
+pluginForm.addEventListener('submit',async event=>{
+ event.preventDefault();if(locked||pluginIconBusy||!plugin||deployment?.mode!=='create-local')return;
+ validatePluginText();if(!pluginForm.reportValidity())return;
+ const presentation={displayName:pluginForm.elements.displayName.value.trim(),shortDescription:pluginForm.elements.shortDescription.value.trim(),longDescription:pluginForm.elements.longDescription.value.replace(/\r\n/g,'\n').trim(),icon:pluginIcon};
+ const selection={mode:pluginMode(),accountLabel:pluginForm.elements.accountLabel.value.trim(),pluginUrl:pluginMode()==='reuse'?pluginForm.elements.existingPluginUrl.value.trim():plugin.selection?.mode==='create'?plugin.selection.pluginUrl??'':''};
+ const version=pluginDraftVersion;
+ const result=await mutate('plugin/profile',{authorize:true,presentation,selection},'已保存本机插件选择。账号中的创建、上传和安装仍需你分别完成。');
+ if(result){if(version===pluginDraftVersion){pluginDraftDirty=false;pluginLoadedSignature=null}await refresh()}
+});
+function bytesBase64(bytes){let result='';for(let i=0;i<bytes.length;i+=32768)result+=String.fromCharCode(...bytes.subarray(i,i+32768));return btoa(result)}
+$('#export-plugin').addEventListener('click',async()=>{
+ if(locked||$('#export-plugin').disabled||deployment?.mode!=='create-local')return;
+ locked=true;render();
+ try{
+  const response=await fetch('/api/plugin/export',{method:'POST',credentials:'omit',cache:'no-store',headers:{Authorization:'Bearer '+session,'Content-Type':'application/json','X-Styx-CSRF':csrf},body:JSON.stringify({authorize:true})});
+  if(!response.ok||!response.headers.get('content-type')?.startsWith('application/zip'))throw Error('plugin_export_failed');
+  const bytes=new Uint8Array(await response.arrayBuffer());if(bytes.length<4||bytes.length>2*1024*1024||![80,75,3,4].every((byte,index)=>bytes[index]===byte))throw Error('invalid_plugin_archive');
+  const bridge=window.webkit?.messageHandlers?.styxPluginExport;
+  if(bridge){const result=await bridge.postMessage({base64:bytesBase64(bytes)});if(result?.status==='saved')message('插件 ZIP 已通过系统保存面板保存。下一步请使用受支持的官方创建／上传流程；本机保存不代表已上传。');else if(result?.status==='cancelled')message('你已取消保存插件 ZIP。没有上传到账号；需要时可再次导出。');else throw Error('plugin_save_not_confirmed')}
+  else{const url=URL.createObjectURL(new Blob([bytes],{type:'application/zip'})),link=document.createElement('a');link.href=url;link.download='styx-native.zip';document.body.append(link);link.click();link.remove();setTimeout(()=>URL.revokeObjectURL(url),60000);message('已请求浏览器下载 styx-native.zip。请确认文件已保存，再使用受支持的创建／上传流程；导出不代表插件已上传。')}
+ }catch{message('插件包尚未导出。请先保存选择、配置专用隧道并启动本机连接，再重新检查认证与工具发现；不会把失败标记为账号已完成。')}
+ finally{locked=false;await refresh()}
+});
+$('#plugin-upload-form').addEventListener('submit',async event=>{
+ event.preventDefault();if(locked||deployment?.mode!=='create-local'||!$('#plugin-upload-form').reportValidity())return;
+ const input=$('#plugin-returned-url'),url=officialPluginUrl(input.value.trim());
+ if(!url){input.setCustomValidity('请填写官方返回的 https://chatgpt.com/plugins/ 插件地址，不包含查询参数、片段或账号凭据。');input.reportValidity();return}
+ const result=await mutate('plugin/record',{authorize:true,stage:'upload',pluginUrl:url},'已记录你的创建／上传确认。这是用户确认，不是 Styx 观察到的远端状态。');if(result)$('#plugin-upload-confirmed').checked=false;
+});
+$('#plugin-returned-url').addEventListener('input',()=>$('#plugin-returned-url').setCustomValidity(''));
+$('#plugin-install-form').addEventListener('submit',async event=>{
+ event.preventDefault();const url=officialPluginUrl(plugin?.selection?.pluginUrl??'');if(locked||!url||deployment?.mode!=='create-local'||!$('#plugin-install-form').reportValidity())return;
+ const result=await mutate('plugin/record',{authorize:true,stage:'installation',pluginUrl:url},'已记录你的安装确认。请继续到真实目标聊天执行验证，当前并未认证账号平台身份。');if(result)$('#plugin-installed-confirmed').checked=false;
 });
 $('#prepare-handoff').addEventListener('click',async()=>{
  if(locked||!capabilities?.connectionHandoffSupported||deployment?.mode==='join-existing')return;
@@ -390,7 +491,7 @@ else{
   if(capabilities.packagedPreviewTrusted){
    $('#artifacts summary').textContent='内置软件包 · 高级详情';
    $('#artifacts .hint').textContent='软件包路径和发布者信息已由本机 App 带入；实际签名与完整性由 Styx 检查。';
-   $('#package-review').textContent='使用此 App 内置的安装组件，并按以上能力准备这台电脑。后台运行和聊天连接稍后分别选择。';
+   $('#package-review').textContent='允许 Styx 按以上选择设置这台电脑。';
   }
   form.hidden=false;fields();await refresh();
 

@@ -176,3 +176,8 @@ App 的七步引导与 CLI 使用同一个 Core。新增只读 journey/脱敏诊
 PR #26 的 CAS 已有持久 Run/Wake 账本及真实模型自动回合证据，并在当前源码中保留；
 当前普通 App 默认未启用，通用 Exec/Cua 任务、连续续接及平台可靠性仍需集成与验收。
 详见会话与任务生命周期文档，不能把“未作为普通产品接入”写成“没有实现”。
+
+
+## Command and GUI routing
+
+Command-line work defaults to the Host's Exec Server: repository clone/pull, CLI downloads, file/search operations, package management, builds and tests. An interactive PTY is still an Exec session managed through write_stdin. Cua is for required GUI observation/interaction and explicitly requested GUI workflows. Do not open a desktop Terminal through Cua merely to paste an executable command; do not use it to bypass an Exec connection, authentication or policy failure. Resolve or report the original failure, and do not replay uncertain effects. Mixed tasks use the applicable channel for each step. Genuine GUI operations retain the no-AppleScript/System Events fallback rule. Gateway MCP initialization instructions, Exec/Cua descriptions and plugin guidance carry the same priorities. This is model routing guidance rather than a keyword-based execution firewall; actual account selection behavior needs a fresh real chat check after metadata refresh.

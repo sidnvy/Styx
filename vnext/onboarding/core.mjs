@@ -260,6 +260,7 @@ export {inspectPairingLink,acceptPairingLink} from './pairing-links.mjs';
 export {planHostUpdate,readHostUpdate} from './host-update.mjs';
 
 export {readDeploymentAcceptance,beginDeploymentAcceptance,confirmDeploymentAcceptance,recordDeploymentDesktopReadback,readDeploymentConnectionHandoff,prepareDeploymentConnectionHandoff} from './account-acceptance.mjs';
+export {readDeploymentPlugin,setDeploymentPluginProfile,exportDeploymentPlugin,recordDeploymentPluginAction} from './plugin-flow.mjs';
 export {readDeploymentPermissions} from './permissions.mjs';
 export {startDeploymentForeground,stopDeploymentForeground,readDeploymentForeground} from './foreground.mjs';
 export function readDeploymentOnboardingPreference(stateDir){

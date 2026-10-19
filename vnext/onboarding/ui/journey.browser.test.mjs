@@ -12,7 +12,7 @@ const sleep=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 async function until(fn,code,timeout=10000){const end=Date.now()+timeout;while(Date.now()<end){if(await fn())return;await sleep(50)}throw Error(code)}
 const ids=['local_setup','system_permissions','background','external_entry','chat_connection','chat_request_proof','target_chat_confirmation'];
 function fixture(){
- const state={deployment:null,background:'foreground',tunnel:'not_configured',acceptance:{schema:1,status:'not_started',challenge:null,requestProof:{status:'pending'},targetChatConfirmation:{status:'pending',providerIdentity:'not_verified'},desktop:{status:'pending'},complete:false},calls:[],handoffExpires:5000,tunnelShouldFail:false};
+ const state={deployment:null,background:'foreground',tunnel:'not_configured',acceptance:{schema:1,status:'not_started',challenge:null,requestProof:{status:'pending'},targetChatConfirmation:{status:'pending',providerIdentity:'not_verified'},desktop:{status:'pending'},complete:false},plugin:{schema:1,required:true,presentation:{displayName:'Styx',shortDescription:'让聊天连接这台电脑',longDescription:'通过 Styx 安全连接本机终端与可选桌面能力。',icon:null},selection:{mode:'create',accountLabel:'',pluginUrl:''},profileSaved:false,export:{status:'not_exported'},accountActions:{upload:'not_observed',installation:'not_observed',connection:'not_verified'},requiresAccountAction:true},calls:[],handoffExpires:5000,tunnelShouldFail:false};
  const secret='UI_TEST_MODEL_ONLY_CREDENTIAL_0123456789abcdef';
  const capability={csrf:'fixture-csrf',platform:'darwin',packagedPreviewTrusted:true,journeySupported:true,diagnosticsSupported:true,acceptanceSupported:true,connectionHandoffSupported:true,foregroundSupported:true,backgroundSupported:true,tunnelSupported:true,localGatewayAvailable:true,localGatewayAddresses:['192.0.2.8'],pauseSupported:true,startSupported:true,pairingLinkImportSupported:true,gatewayService:{},defaults:{label:'我的 MacBook',gatewayUrl:'https://127.0.0.1:48795',bundle:'/private/tmp/fixture/bundle',publisherKeyFile:'/private/tmp/fixture/publisher.pem',publisherSha256:'a'.repeat(64),baseDir:'/private/tmp/fixture/host'}};
  const deployment=config=>({schema:1,mode:config.mode,roles:{gateway:config.mode==='join-existing'?'external':'local',host:'local',exec:'enabled',computer:config.host.computer?'requested':'disabled'},gatewayRuntime:'running',steps:(config.mode==='join-existing'?['host.prepare','host.request','host.claim','host.doctor']:['gateway.prepare','gateway.start','gateway.verify','host.prepare','host.pair','host.doctor']).map(id=>({id,status:config.mode==='join-existing'?'pending':'succeeded'})),hostServiceMaintenance:{hasUncertainMutation:false},gatewayServiceMaintenance:{}});
@@ -24,6 +24,10 @@ function fixture(){
    const joined=state.deployment?.mode==='join-existing';
    return {journey:{schema:1,currentStep:!state.deployment?'local_setup':state.acceptance.complete?null:state.tunnel==='running'?'chat_request_proof':'system_permissions',steps:ids.map((id,i)=>({id,status:joined&&i>=3?'not_required':i===0&&state.deployment?'completed':'pending',reason:'user_action_or_observation_required'})),readiness:{exec:{status:state.deployment?'connected':'unknown'},desktop:{status:state.acceptance.desktop.status==='verified'?'verified':'not_verified'}},permissions:[{id:'accessibility',label:'辅助功能',status:'not_observed'},{id:'screen_recording',label:'屏幕录制',status:'not_observed'},{id:'automation',label:'应用自动化',status:'not_required'}],background:{preference:state.background},connectionHandoff:{status:state.tunnel==='running'?'available':'unavailable'},diagnostics:{canRetry:true}}};
   }
+  if(route==='plugin')return {plugin:state.plugin};
+  if(route==='plugin/profile'){assert.equal(data.authorize,true);state.plugin={...state.plugin,presentation:data.presentation,selection:data.selection,profileSaved:true,contextChanged:false,export:{status:'not_exported'}};return {plugin:state.plugin};}
+  if(route==='plugin/export'){assert.equal(data.authorize,true);assert.equal(state.plugin.selection.mode,'create');state.plugin.export={status:'exported',filename:'styx-native.zip',sha256:'f'.repeat(64)};return {fixtureBinary:Buffer.from('PK\x03\x04UI ZIP contract fixture; not a real package')};}
+  if(route==='plugin/record'){assert.equal(data.authorize,true);assert.match(data.pluginUrl,/^https:\/\/chatgpt\.com\//);state.plugin.selection.pluginUrl=data.pluginUrl;state.plugin.accountActions[data.stage]='user_confirmed';return {plugin:state.plugin};}
   if(route==='acceptance')return {acceptance:state.acceptance};
   if(route==='diagnostics')return {diagnostics:{schema:1,status:'observed'}};
   if(route==='create'){state.config=data;state.deployment=deployment(data);return {deployment:state.deployment};}
@@ -52,7 +56,7 @@ async function browserFixture(t){
  const f=fixture(),profile=fs.mkdtempSync(path.join(os.tmpdir(),'styx-journey-browser-'));let browser,ws,closed,next=0;const pending=new Map();
  const server=http.createServer(async(req,res)=>{
   const send=(code,value,type='application/json')=>{res.writeHead(code,{'Content-Type':type,'Cache-Control':'no-store'});res.end(type==='application/json'?JSON.stringify(value):value)};
-  if(req.url.startsWith('/api/')){let body='';for await(const chunk of req)body+=chunk;try{send(200,await f.api(req.url.slice(5),body?JSON.parse(body):undefined))}catch{send(409,{error:'fixture_operation_refused'})}return;}
+  if(req.url.startsWith('/api/')){let body='';for await(const chunk of req)body+=chunk;try{const result=await f.api(req.url.slice(5),body?JSON.parse(body):undefined);if(result.fixtureBinary){res.writeHead(200,{'Content-Type':'application/zip','Content-Disposition':'attachment; filename=styx-native.zip','Cache-Control':'no-store'});res.end(result.fixtureBinary)}else send(200,result)}catch{send(409,{error:'fixture_operation_refused'})}return;}
   const file=req.url==='/'?'index.html':req.url.startsWith('/ui/')?req.url.slice(4):null;
   if(!['index.html','app.mjs','style.css'].includes(file)){send(404,{});return;}
   send(200,fs.readFileSync(new URL(file,import.meta.url)),file.endsWith('.mjs')?'text/javascript':file.endsWith('.css')?'text/css':'text/html');
@@ -66,9 +70,10 @@ async function browserFixture(t){
  const command=(method,params={})=>new Promise((resolve,reject)=>{const id=++next,timer=setTimeout(()=>{pending.delete(id);reject(Error('browser_timeout'))},12000);pending.set(id,{resolve,reject,timer});ws.send(JSON.stringify({id,method,params}));});
  ws.addEventListener('message',event=>{const value=JSON.parse(event.data);if(value.method==='Page.javascriptDialogOpening'){void command('Page.handleJavaScriptDialog',{accept:true});return;}const entry=pending.get(value.id);if(entry){pending.delete(value.id);clearTimeout(entry.timer);value.error?entry.reject(Error('browser_protocol_error')):entry.resolve(value.result);}});
  await command('Page.enable');
+ const downloadDir=path.join(profile,'downloads');fs.mkdirSync(downloadDir);await command('Browser.setDownloadBehavior',{behavior:'allow',downloadPath:downloadDir});
  const evaluate=async expression=>{const r=await command('Runtime.evaluate',{expression,awaitPromise:true,returnByValue:true});assert.equal(r.exceptionDetails,undefined);return r.result.value;};
  await until(()=>evaluate("document.querySelector('#setup')?.hidden===false"),'ui_not_ready');
- return {...f,command,evaluate,origin};
+ return {...f,command,evaluate,origin,downloadDir};
 }
 
 test('real browser guides ordinary setup and keeps secret handoff, native readiness and chat proofs separate',{skip:!enabled,timeout:60000},async t=>{
@@ -152,10 +157,87 @@ test('real browser joins only after explicit invitation confirmation and returns
  assert.equal(f.state.deployment.steps.find(step=>step.id==='host.doctor').status,'pending');
  assert.equal(f.state.config.joinLinkId,'joined-link-fixture');assert.equal(f.state.config.gateway.url,'https://existing-gateway.example');
  assert.equal(f.state.calls.filter(call=>call.route==='local-setup').length,0);
+ assert.equal(f.state.calls.filter(call=>call.route.startsWith('plugin')).length,0);
  assert.equal(await e("document.querySelector('#account-connection').hidden"),true);
  assert.equal(await e("document.querySelector('#prepare-handoff').hidden"),true);
  assert.equal(await e("document.querySelector('#chat-request-proof').hidden"),true);
  assert.match(await e("document.querySelector('#join-account-note').textContent"),/无需另建隧道或重复添加账号/);
  f.state.ownerApproved=true;await e("document.querySelector('#continue-join').click();true");await until(()=>f.state.deployment.steps.find(step=>step.id==='host.doctor').status==='succeeded','join_did_not_continue_after_owner_approval');
  assert.ok(f.state.calls.filter(call=>call.route==='advance').every(call=>call.data.authorize.every(id=>id.startsWith('host.'))));
+});
+
+
+test('real browser customizes, exports and records plugin account actions separately, then reuses the same plugin',{skip:!enabled,timeout:60000},async t=>{
+ const f=await browserFixture(t),e=f.evaluate;
+ assert.equal(await e("document.querySelector('#package-review').textContent"),'允许 Styx 按以上选择设置这台电脑。');
+ await e("(()=>{const form=document.querySelector('#setup');form.elements.reviewed.checked=true;form.requestSubmit();return true})()");
+ await until(()=>e("!document.querySelector('#plugin-profile-fields').disabled"),'plugin_not_loaded');
+ assert.equal(await e("document.querySelector('#plugin-profile-form').elements.displayName.value"),'Styx');
+ assert.equal(await e("document.querySelector('#advanced-chat-auth').open"),false);
+ await e("document.querySelector('#plugin-profile-form').requestSubmit();true");
+ await until(()=>f.state.plugin.profileSaved,'default_plugin_choice_not_saved');
+ await until(()=>e("document.querySelector('#plugin-profile-status').textContent.includes('已保存本机选择')&&!document.querySelector('#plugin-profile-fields').disabled"),'default_plugin_save_not_settled');
+ assert.equal(f.state.plugin.presentation.icon,null);assert.equal(f.state.plugin.selection.mode,'create');
+ assert.equal(await e("document.querySelector('#export-plugin').disabled"),true);
+ assert.equal(await e("document.querySelector('#record-plugin-upload').disabled"),true);
+ await e("(()=>{const form=document.querySelector('#plugin-profile-form');form.elements.shortDescription.value='😀'.repeat(31);form.elements.shortDescription.dispatchEvent(new Event('input',{bubbles:true}));return true})()");
+ assert.equal(await e("document.querySelector('#plugin-profile-form').elements.shortDescription.validity.customError"),true);
+ const saves=f.state.calls.filter(c=>c.route==='plugin/profile').length;
+ await e("document.querySelector('#plugin-profile-form').requestSubmit();true");assert.equal(f.state.calls.filter(c=>c.route==='plugin/profile').length,saves);
+ await e("(()=>{const form=document.querySelector('#plugin-profile-form');form.elements.displayName.value='我的 Styx';form.elements.accountLabel.value='个人工作区';form.elements.shortDescription.value='😀'.repeat(30);form.elements.longDescription.value='我的电脑连接工具\\n\\n明确授权后使用。';form.elements.shortDescription.dispatchEvent(new Event('input',{bubbles:true}));return true})()");
+ async function pngFile(size){await e(`(async()=>{const canvas=document.createElement('canvas');canvas.width=canvas.height=${size};canvas.getContext('2d').fillRect(0,0,${size},${size});const blob=await new Promise(resolve=>canvas.toBlob(resolve,'image/png'));const data=new DataTransfer();data.items.add(new File([blob],'test-icon.png',{type:'image/png'}));const input=document.querySelector('#plugin-icon-file');input.files=data.files;input.dispatchEvent(new Event('change',{bubbles:true}));return true})()`)}
+ await pngFile(32);await until(()=>e("document.querySelector('#plugin-icon-status').textContent.includes('图片未接受')"),'invalid_icon_accepted');
+ await pngFile(64);await until(()=>e("document.querySelector('#plugin-icon-status').textContent.includes('64 × 64')"),'valid_icon_not_accepted');
+ assert.equal(await e("document.querySelector('#plugin-profile-form').checkValidity()"),true);
+ assert.equal(await e("document.querySelector('#plugin-profile-form').elements.displayName.value"),'我的 Styx');
+ await e("document.querySelector('#plugin-profile-form').requestSubmit();true");
+ await until(()=>f.state.plugin.presentation.displayName==='我的 Styx','custom_plugin_not_saved');
+ assert.equal(Array.from(f.state.plugin.presentation.shortDescription).length,30);assert.equal(f.state.plugin.presentation.longDescription,'我的电脑连接工具\n\n明确授权后使用。');assert.equal(f.state.plugin.presentation.icon.mimeType,'image/png');assert.ok(f.state.plugin.presentation.icon.dataBase64.length>0);
+ if(process.env.STYX_ONBOARDING_SCREENSHOT_DIR){await f.command('Emulation.setDeviceMetricsOverride',{width:1440,height:1200,deviceScaleFactor:1,mobile:false});await e("document.querySelector('#chatgpt-connect').scrollIntoView();true");const shot=await f.command('Page.captureScreenshot',{format:'png',captureBeyondViewport:false});fs.writeFileSync(path.join(process.env.STYX_ONBOARDING_SCREENSHOT_DIR,'plugin-create-desktop.png'),Buffer.from(shot.data,'base64'));}
+ f.state.tunnel='configured';await e("document.querySelector('#refresh').click();true");await until(()=>e("!document.querySelector('#export-plugin').disabled"),'plugin_export_not_enabled');
+ await e("document.querySelector('#export-plugin').click();true");await until(()=>fs.existsSync(path.join(f.downloadDir,'styx-native.zip')),'plugin_zip_not_downloaded');
+ await until(()=>e("!document.querySelector('#export-plugin').disabled"),'plugin_export_not_settled');
+ assert.equal(f.state.plugin.accountActions.upload,'not_observed');assert.equal(f.state.plugin.accountActions.installation,'not_observed');
+ assert.match(await e("document.querySelector('#plugin-export-status').textContent"),/本机认证.*不代表账号上传/);
+ // A reply-capable native bridge contract fixture, not a native save proof.
+ await e("window.webkit={messageHandlers:{styxPluginExport:{postMessage:async value=>{window.__pluginBridgePayload=value;return {status:'cancelled'}}}}};document.querySelector('#export-plugin').click();true");
+ await until(()=>e("document.querySelector('#notice').textContent.includes('取消保存')"),'native_cancel_not_distinguished');
+ assert.equal(await e("Object.keys(window.__pluginBridgePayload).join(',')"),'base64');
+ assert.match(await e("window.__pluginBridgePayload.base64"),/^UEs/);
+ await e("window.webkit.messageHandlers.styxPluginExport.postMessage=async()=>({status:'saved'});document.querySelector('#export-plugin').click();true");await until(()=>e("document.querySelector('#notice').textContent.includes('系统保存面板保存')"),'native_save_reply_not_displayed');
+ assert.equal(f.state.plugin.accountActions.upload,'not_observed');
+ f.state.plugin.contextChanged=true;await e("document.querySelector('#refresh').click();true");
+ await until(()=>e("document.querySelector('#plugin-profile-status').textContent.includes('绑定已变化')"),'changed_plugin_target_not_disclosed');
+ assert.equal(await e("document.querySelector('#record-plugin-upload').disabled"),true);
+ assert.equal(await e("document.querySelector('#export-plugin').disabled"),true);
+ await e("document.querySelector('#plugin-profile-form').requestSubmit();true");
+ await until(()=>e("document.querySelector('#plugin-profile-status').textContent.includes('已保存本机选择')&&!document.querySelector('#export-plugin').disabled"),'plugin_target_not_reconfirmed');
+ await e("document.querySelector('#export-plugin').click();true");await until(()=>e("!document.querySelector('#record-plugin-upload').disabled"),'reconfirmed_plugin_not_exported');
+ await e("(()=>{document.querySelector('#plugin-returned-url').value='https://chatgpt.com/plugins/styx-fixture';document.querySelector('#plugin-upload-confirmed').checked=true;document.querySelector('#plugin-upload-form').requestSubmit();return true})()");
+ await until(()=>f.state.plugin.accountActions.upload==='user_confirmed','plugin_upload_attestation_missing');
+ await until(()=>e("!document.querySelector('#record-plugin-installation').disabled"),'saved_plugin_link_not_ready');
+ assert.equal(await e("document.querySelector('#open-saved-plugin').href"),'https://chatgpt.com/plugins/styx-fixture');
+ assert.equal(f.state.plugin.accountActions.connection,'not_verified');
+ assert.equal(await e("document.querySelector('#plugin-returned-url').readOnly"),true);
+ await e("(()=>{document.querySelector('#plugin-installed-confirmed').checked=true;document.querySelector('#plugin-install-form').requestSubmit();return true})()");await until(()=>f.state.plugin.accountActions.installation==='user_confirmed','plugin_install_attestation_missing');
+ assert.equal(f.state.acceptance.complete,false);assert.equal(f.state.plugin.accountActions.connection,'not_verified');
+ await until(()=>e("!document.querySelector('#plugin-profile-fields').disabled"),'plugin_profile_still_locked');
+ const exports=f.state.calls.filter(c=>c.route==='plugin/export').length;
+ await e("(()=>{const form=document.querySelector('#plugin-profile-form');form.elements.pluginMode.value='reuse';form.elements.existingPluginUrl.value='https://chatgpt.com/c/not-a-plugin';form.elements.existingPluginUrl.dispatchEvent(new Event('input',{bubbles:true}));return true})()");
+ assert.equal(await e("document.querySelector('#plugin-profile-form').elements.existingPluginUrl.validity.customError"),true);
+ await e("(()=>{const form=document.querySelector('#plugin-profile-form');form.elements.pluginMode.value='reuse';form.elements.existingPluginUrl.value='https://chatgpt.com/plugins';form.elements.existingPluginUrl.dispatchEvent(new Event('input',{bubbles:true}));return true})()");
+ assert.equal(await e("document.querySelector('#plugin-profile-form').elements.existingPluginUrl.validity.customError"),true);
+ await e("(()=>{const form=document.querySelector('#plugin-profile-form');form.elements.pluginMode.value='reuse';form.elements.existingPluginUrl.value='https://chatgpt.com/plugins/styx-fixture';form.elements.existingPluginUrl.dispatchEvent(new Event('input',{bubbles:true}));form.requestSubmit();return true})()");
+ await until(()=>f.state.plugin.selection.mode==='reuse','plugin_reuse_not_saved');
+ assert.equal(await e("document.querySelector('#plugin-create-path').hidden"),true);
+ assert.equal(f.state.calls.filter(c=>c.route==='plugin/export').length,exports);
+ assert.equal(await e("document.querySelector('#open-saved-plugin').href"),'https://chatgpt.com/plugins/styx-fixture');
+ await f.command('Page.reload');await until(()=>e("document.querySelector('#plugin-profile-form').elements.pluginMode.value==='reuse'"),'plugin_reuse_not_restored');
+ assert.equal(await e("document.querySelector('#plugin-profile-form').elements.existingPluginUrl.value"),'https://chatgpt.com/plugins/styx-fixture');
+ await f.command('Emulation.setDeviceMetricsOverride',{width:390,height:1200,deviceScaleFactor:1,mobile:true});assert.equal(await e('document.documentElement.scrollWidth<=window.innerWidth'),true);
+ if(process.env.STYX_ONBOARDING_SCREENSHOT_DIR){await e("document.querySelector('#chatgpt-connect').scrollIntoView();true");const shot=await f.command('Page.captureScreenshot',{format:'png',captureBeyondViewport:false});fs.writeFileSync(path.join(process.env.STYX_ONBOARDING_SCREENSHOT_DIR,'plugin-reuse-mobile.png'),Buffer.from(shot.data,'base64'));}
+ await e("(()=>{const form=document.querySelector('#plugin-profile-form');form.elements.pluginMode.value='create';form.elements.displayName.dispatchEvent(new Event('input',{bubbles:true}));form.requestSubmit();return true})()");
+ await until(()=>f.state.plugin.selection.mode==='create'&&f.state.plugin.selection.pluginUrl==='','new_create_retained_old_plugin_url');
+ await until(()=>e("document.querySelector('#plugin-profile-status').textContent.includes('已保存本机选择')&&document.querySelector('#plugin-returned-url').value===''"),'new_create_url_not_cleared_in_ui');
+ assert.equal(await e("document.querySelector('#open-saved-plugin').hidden"),true);
 });

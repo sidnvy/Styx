@@ -1,0 +1,31 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+import {execFileSync} from 'node:child_process';
+import {fileURLToPath} from 'node:url';
+import {Client} from '@modelcontextprotocol/sdk/client/index.js';
+import {StreamableHTTPClientTransport} from '@modelcontextprotocol/sdk/client/streamableHttp.js';
+import {createStyxGateway} from '../index.mjs';
+import {createGatewayHttp} from '../http.mjs';
+const enabled=process.env.STYX_LIVE_EXEC_TEST==='1'&&process.platform==='linux'&&process.arch==='x64';
+const quote=value=>"'"+value.replaceAll("'","'\\''")+"'";
+test('real Exec clones and reads a Git repository without a GUI or a Terminal application',{skip:!enabled,timeout:30000},async t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'styx-exec-clone-'));t.after(()=>fs.rmSync(root,{force:true,recursive:true}));
+ const source=path.join(root,'source'),clone=path.join(root,'clone'),home=path.join(root,'codex-home');fs.mkdirSync(source);fs.mkdirSync(home,{mode:0o700});
+ const env={PATH:process.env.PATH,HOME:root,GIT_CONFIG_GLOBAL:'/dev/null',GIT_CONFIG_NOSYSTEM:'1'};
+ const git=args=>execFileSync('git',args,{cwd:source,env,stdio:'ignore',timeout:10000});
+ git(['init','--quiet']);fs.writeFileSync(path.join(source,'marker.txt'),'STYX_EXEC_CLONE_OK\n');git(['add','marker.txt']);git(['-c','user.name=Styx isolated test','-c','user.email=isolated@localhost','commit','-qm','fixture']);
+ const binary=fileURLToPath(new URL('../../packages/styx-exec-adapter/.runtime/codex',import.meta.url));
+ const target={id:'exec-clone',kind:'host',allowed:true,platform:'linux',generation:'isolated-clone-test',cwd:root,shell:'/bin/sh',shells:['/bin/sh'],exec:{transport:'stdio',binary,home:root,env:{CODEX_HOME:home,PATH:'/usr/bin:/bin',GIT_CONFIG_GLOBAL:'/dev/null',GIT_CONFIG_NOSYSTEM:'1'}}};
+ const gateway=createStyxGateway({catalog:{version:1,default_environment_id:target.id,targets:[target]},computer:null});
+ const hosts=[],token='ISOLATED_TEST_MODEL_'+'t'.repeat(48),server=await createGatewayHttp(gateway,{token,allowedHosts:hosts,port:0});hosts.push('127.0.0.1:'+server.address.port);t.after(()=>server.close());
+ const client=new Client({name:'isolated-exec-clone',version:'1'});t.after(()=>client.close());
+ await client.connect(new StreamableHTTPClientTransport(new URL('http://127.0.0.1:'+server.address.port+'/mcp'),{requestInit:{headers:{Authorization:'Bearer '+token}}}));
+ const tools=(await client.listTools()).tools;assert.ok(tools.some(x=>x.name==='exec_command'));assert.ok(!tools.some(x=>x.name==='type_text'||x.name==='list_windows'));
+ let result=await client.callTool({name:'exec_command',arguments:{cmd:'git clone --no-hardlinks -- '+quote(source)+' '+quote(clone)+' && cat '+quote(path.join(clone,'marker.txt')),environment_id:target.id,workdir:root,login:false,yield_time_ms:1000}}),output=result.structuredContent?.output??'';
+ for(let n=0;result.structuredContent?.session_id&&n<20;n++){result=await client.callTool({name:'write_stdin',arguments:{session_id:result.structuredContent.session_id,chars:'',yield_time_ms:250}});output+=result.structuredContent?.output??''}
+ assert.ok(!result.isError);assert.equal(result.structuredContent.exit_code,0);assert.match(output,/STYX_EXEC_CLONE_OK/);
+ assert.equal(fs.readFileSync(path.join(clone,'marker.txt'),'utf8'),'STYX_EXEC_CLONE_OK\n');
+});

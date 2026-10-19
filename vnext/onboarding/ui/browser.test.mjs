@@ -56,6 +56,13 @@ test(native?'real browser prepares native Hosts, verifies Gateway, pairs locally
   await until(()=>evaluate("document.querySelector('#ingress-status').textContent.includes('当前仅限本机')"),'device_ingress_plan_missing');
   await evaluate("document.querySelector('#verify-ingress').click();true");
   await until(()=>evaluate("document.querySelector('#ingress-status').textContent.includes('远端可达性、Host 连接和聊天账号仍未验收')"),'device_ingress_probe_claim_incorrect');
+  if(typeof core.readDeploymentPlugin==='function'){
+   await until(()=>evaluate("!document.querySelector('#plugin-profile-fields').disabled"),'real_core_plugin_profile_unavailable');
+   await evaluate("(()=>{const f=document.querySelector('#plugin-profile-form');f.elements.displayName.value='Owned UI Plugin';f.elements.accountLabel.value='Isolated browser test';f.elements.displayName.dispatchEvent(new Event('input',{bubbles:true}));f.requestSubmit();return true})()");
+   await until(()=>evaluate("document.querySelector('#plugin-profile-status').textContent.includes('已保存本机选择')"),'real_core_plugin_profile_not_saved');
+   assert.equal(core.readDeploymentPlugin(path.join(root,'state')).presentation.displayName,'Owned UI Plugin');
+   assert.equal(core.readDeploymentPlugin(path.join(root,'state')).accountActions.connection,'not_verified');
+  }
   if(native){
    await until(()=>evaluate("document.querySelectorAll('.step .status.succeeded').length>=6"),'automatic_local_pairing_not_completed');
    const discovery={url:'https://127.0.0.1:'+gatewayPort+'/mcp',tokenFile:path.join(root,'state/gateway/model.token'),caFile:path.join(root,'state/gateway/certificate.pem')};
