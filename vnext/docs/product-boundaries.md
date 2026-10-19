@@ -127,3 +127,26 @@ Gateway 继续加载 desktop-routing 热修复源码；未替换签名 App。
 保留默认 15 分钟空闲清理，在每次新初始化时执行，并保护正在返回的响应及
 持有 Exec 工作的会话。96 个并发客户端验证连接、DELETE 和互不影响。
 这与设备桌面共享/操作队列、Exec 进程句柄限制是不同层次，不改变后两者。
+
+
+2026-10-19 隔离原生开发验收补充（不代表正式发布）：
+
+- pilotmac 上使用已有 SDK 26.5，Swift 测试与生产入口均通过严格编译；
+  原生自测及 Cua owner 死亡后的 EOF/私有 socket 清理通过。未安装或授权签名 App，
+  App/Exec responsibility chain、Accessibility、Screen Recording、Automation 仍未验收。
+- NAB 的提升 SSH 会话中新文件默认 owner 为 Administrators，即使 DACL 仅允许当前用户、
+  SYSTEM 和 Administrators。新增独占空文件创建接口，在写入秘密前按原生文件 handle
+  验证身份并设置本次新文件 owner/DACL；已有文件和目录不自动修权限或接管。
+  Core、配对、安装、签名运行时和恢复事务统一接入。Windows 原生相关测试 12 项通过。
+- Windows 固定原生探针改为有长度限制的本地编码命令，长声明使用本地压缩源，
+  不修改 ExecutionPolicy；中文和特殊字符作为字面参数保留。Restricted 策略下原生
+  编译/参数测试通过，生产探针在 SSH Session 0 明确返回无交互桌面。
+- Windows 真实 Codex Exec 和 Core/CLI 同配置检查通过；join-existing 不生成 Gateway 步骤。
+  Mac Gateway＋Windows Host 临时 TLS 配对、明确指纹审批、真实 Exec、同身份重连、
+  撤销后旧凭据拒绝通过；该次基线 harness 对新建文件修正过 owner，不算完整新用户安装。
+- Host 更新低层事务增加存活执行者互斥和串行恢复；中断恢复 guard 留作人工归属核验。
+  App/CLI 仍只暴露 Host 更新计划和凭据不外泄的状态检查，托管更新执行仍明确阻止。
+
+真实 Windows Host 服务生命周期（包括 Restricted 策略下现有 -File 入口）、
+无人登录启动、整机重启、GUI 操作、安装升级/回滚后的系统权限及真实聊天账号验收，
+均不得从这些测试推断为通过。用户选择先完成无需签名的开发验收。
