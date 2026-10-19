@@ -28,6 +28,10 @@ function render(){
  form.hidden=!!deployment;$('#progress').hidden=!deployment;$('#maintenance').hidden=!deployment;
  $('#pause').disabled=locked||!capabilities?.pauseSupported||deployment?.mode!=='create-local'||deployment?.gatewayRuntime!=='running';
  $('#start-gateway').disabled=locked||!capabilities?.startSupported||deployment?.mode!=='create-local'||deployment?.gatewayRuntime==='running'||!deployment?.steps.some(s=>s.id==='gateway.prepare'&&s.status==='succeeded');
+ const gatewayStartup=capabilities?.gatewayService?.startEnablesStartup===true;
+ $('#gateway-service-title').textContent='本机 Gateway 系统服务 · '+({linux:'Linux 用户服务',darwin:'macOS 用户服务',win32:'Windows 登录任务'}[capabilities?.platform]??'平台服务');
+ $('#gateway-service-policy').textContent=gatewayStartup?'这是持久服务，与本设置进程的前台 Gateway 不同。启动会同时启用登录后自动运行，停止会禁用；先停止前台 Gateway 再启动持久服务。实际状态以本机观察为准，未知不推断为已启用。':'这是持久服务，与本设置进程的前台 Gateway 不同。先停止前台 Gateway，再启动持久服务。启动与登录启用是分别授权的操作；实际状态以本机观察为准。';
+ for(const button of document.querySelectorAll('[data-service="gateway"]')){if(button.dataset.action==='start')button.textContent=gatewayStartup?'启动并启用登录后自动运行':'启动 Gateway 服务';if(button.dataset.action==='stop')button.textContent=gatewayStartup?'停止并关闭自动运行':'停止 Gateway 服务'}
  $('#host-service').hidden=!capabilities?.hostServiceSupported;$('#gateway-service').hidden=!capabilities?.gatewayServiceSupported||deployment?.mode!=='create-local';
  for(const button of document.querySelectorAll('[data-service]'))button.disabled=locked||(button.dataset.service==='host'&&['install','start'].includes(button.dataset.action)&&deployment?.hostServiceMaintenance?.hasUncertainMutation)||(button.dataset.service==='gateway'&&button.dataset.action==='start'&&deployment?.gatewayRuntime==='running');
  for(const role of ['host','gateway']){const observation=serviceObservations[role]??(role==='host'?deployment?.hostServiceMaintenance?.lastObservation:null);if(observation)$('#'+role+'-service-status').textContent='本机观察：'+['status','state','active','enabled','persistence'].filter(k=>observation[k]).map(k=>k+' = '+observation[k]).join(' · ')+'（'+(observation.observedAt??'持久记录，需重新读取状态确认')+'）';}
@@ -36,7 +40,7 @@ function render(){
  $('#steps').replaceChildren();
  if(!deployment)return;
  const running=deployment.gatewayRuntime==='running';
- $('#runtime').textContent=deployment.mode==='join-existing'?'加入现有环境；本页面不控制远端 Gateway。':running?'当前 Gateway：本设置进程正在运行。系统服务尚未安装。':'当前 Gateway：本进程未持有运行实例。先前步骤记录不等于正在运行；不要重复执行结果不确定的操作。';
+ $('#runtime').textContent=deployment.mode==='join-existing'?'加入现有环境；本页面不控制远端 Gateway。':running?'当前 Gateway：本设置进程正在运行。系统服务的安装和登录启动状态请在下方单独读取。':'当前 Gateway：本进程未持有运行实例。先前步骤记录不等于正在运行；不要重复执行结果不确定的操作。';
  for(const step of deployment.steps){
   const item=document.createElement('li');item.className='step';
   const detail=document.createElement('div'),title=document.createElement('strong'),status=document.createElement('p');
@@ -110,7 +114,8 @@ $('#list-pending').addEventListener('click',async()=>{
 
 for(const button of document.querySelectorAll('[data-service]'))button.addEventListener('click',async()=>{
  if(locked)return;const role=button.dataset.service,action=button.dataset.action;
- const description=role==='host'&&action==='start'?'启动 Host 并启用登录后自动运行':role==='host'&&action==='stop'?'停止 Host 并关闭自动运行':role+' 系统服务操作：'+action;
+ const startupLinked=role==='host'||(role==='gateway'&&capabilities?.gatewayService?.startEnablesStartup===true);
+ const description=startupLinked&&action==='start'?'启动 '+role+' 并启用登录后自动运行':startupLinked&&action==='stop'?'停止 '+role+' 并关闭自动运行':role+' 系统服务操作：'+action;
  if(action!=='status'&&!confirm('明确授权：'+description+'？这将修改当前设备上受范围绑定保护的服务。'))return;
  locked=true;render();message('正在执行固定系统服务操作…');
  try{const result=await api('service',{method:'POST',data:{role,action,authorize:true}});serviceObservations[role]=result.service;message('服务操作已返回。请查看本机观察结果；进程运行不等于账号或工具链验收通过。')}catch{message('服务操作被拒绝或未完成。保留本地状态，先读取状态；不要重复结果不确定的变更。')}finally{locked=false;await refresh()}

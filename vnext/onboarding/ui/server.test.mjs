@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import os from 'node:os';
 import http from 'node:http';
 import path from 'node:path';
-import {createOnboardingServer,publicDeployment,validateUiConfig,browserOrigin} from '../server.mjs';
+import {createOnboardingServer,publicDeployment,validateUiConfig,browserOrigin,gatewayServiceUiCapabilities} from '../server.mjs';
 const config=()=>({schema:1,mode:'create-local',gateway:{url:'https://127.0.0.1:8795'},host:{bundle:'/private/bundle',publisherKeyFile:'/private/publisher.pem',publisherSha256:'a'.repeat(64),baseDir:'/private/new-host',label:'Owned test',computer:false}});
 async function fixture(options={}){
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'styx-ui-test-'));let state=null,calls=0;
@@ -186,4 +186,12 @@ test('human comparison code is resolved to current full fingerprint before appro
   const lan=config();lan.gateway.url='https://192.0.2.10:8795';lan.gateway.listenHost='192.0.2.10';assert.equal((await f.post('/api/create',lan)).status,409);
   lan.gateway.allowRemoteHosts=true;assert.equal((await f.post('/api/create',lan)).status,409);
  }finally{await f.cleanup()}
+});
+
+
+test('Gateway service UI capabilities reflect native platform coupling without asserting installation',()=>{
+ assert.deepEqual(gatewayServiceUiCapabilities('linux',true),{supported:true,startEnablesStartup:false});
+ for(const platform of ['darwin','win32'])assert.deepEqual(gatewayServiceUiCapabilities(platform,true),{supported:true,startEnablesStartup:true});
+ assert.equal(gatewayServiceUiCapabilities('freebsd',true).supported,false);assert.equal(gatewayServiceUiCapabilities('darwin',false).supported,false);
+ const state=publicDeployment({mode:'create-local',gatewayRuntime:{status:'running',persistentService:'NOT OBSERVED'},steps:[]});assert.equal(state.gatewayRuntime,'running');assert.equal(JSON.stringify(state).includes('NOT INSTALLED'),false);
 });
