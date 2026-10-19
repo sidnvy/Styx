@@ -6,6 +6,7 @@ import {ensurePrivateDirectory,requirePrivateDirectory,requirePrivateFile} from 
 import {prepareNativeSetup} from '../host/setup-native.mjs';
 import {requestEnrollment,claimEnrollment} from '../host/enroll.mjs';
 import {ownerCommand} from '../gateway/enroll-admin.mjs';
+import {verifyGatewayConnection} from './connection.mjs';
 import {pairDevice,createLocalPairingTransport} from './pairing.mjs';
 import {doctor} from '../host/doctor.mjs';
 
@@ -48,7 +49,7 @@ export function createDeployment(configFile,{stateDir}={}){
  const config=validateDeployment(read(configFile));requirePrivateDirectory(path.dirname(stateDir));if(fs.existsSync(stateDir))fail('deployment_directory_already_exists');
  ensurePrivateDirectory(stateDir);write(filename(stateDir,'deployment.json'),config);
  const localPair=config.mode==='create-local'&&config.pairingMode!=='manual';
- const ids=[...(config.mode==='create-local'?['gateway.prepare','gateway.start']:[]),'host.prepare',...(localPair?['host.pair']:[...(config.mode==='create-local'?['host.invite']:[]),'host.request','host.claim']),'host.doctor'];
+ const ids=[...(config.mode==='create-local'?['gateway.prepare','gateway.start','gateway.verify']:[]),'host.prepare',...(localPair?['host.pair']:[...(config.mode==='create-local'?['host.invite']:[]),'host.request','host.claim']),'host.doctor'];
  const state={schema:1,mode:config.mode,configSha256:hash(filename(stateDir,'deployment.json')),steps:ids.map(id=>({id,status:'pending'}))};write(filename(stateDir,'state.json'),state);return publicState(stateDir,state);
 }
 export function readDeployment(stateDir){const {state}=load(stateDir);return publicState(stateDir,state);}
@@ -76,11 +77,16 @@ export async function startDeploymentGateway(d){
  live.set(d,{http:handle,gateway,controller:enrollment});return {status:'running',url:cfg.url,ownership:'current_process',persistentService:'NOT INSTALLED'};
 }
 export async function stopDeploymentGateway(d){if(!abs(d))fail('absolute_state_directory_required');const h=live.get(d);if(!h)return {status:'not_owned_by_current_process'};let timer;try{await Promise.race([(async()=>{await h.gateway.relay.close();await h.http.close();})(),new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('gateway_shutdown_timed_out')),5000);})]);live.delete(d);}finally{clearTimeout(timer);}return {status:'stopped',ownership:'current_process'};}
+export async function verifyDeploymentGateway(d){
+ const {config}=load(d);if(config.mode!=='create-local')fail('join_connection_verification_requires_explicit_model_credential');
+ const p=gatewayPaths(d);return verifyGatewayConnection({url:config.gateway.url+'/mcp',tokenFile:p.model,caFile:p.cert,independentStyx:true,freshConnection:true});
+}
 async function execute(d,c,id,ownerApproval){
  const p=gatewayPaths(d),base=c.host.baseDir;
  const enrollment=()=>read(path.join(base,'enrollment.json'));
  if(id==='gateway.prepare')return prepareGateway(d,c);
  if(id==='gateway.start')return startDeploymentGateway(d);
+ if(id==='gateway.verify')return verifyDeploymentGateway(d);
  if(id==='host.prepare'){
   const r=prepareNativeSetup({...c.host,gatewayUrl:c.gateway.url,...(c.mode==='create-local'?{gatewayCaFile:p.cert}:c.gateway.caFile?{gatewayCaFile:c.gateway.caFile}:{})});
   return {status:r.status,version:r.version,receipt:evidenceFile(path.join(base,'setup-receipt.json')),node:r.node,release_root:r.release_root};
@@ -134,7 +140,7 @@ export async function advanceDeployment(d,{authorize=[],ownerApproval}={}){
     write(filename(d,'state.json'),state);
     if(step.status!=='succeeded')break;
    }catch{
-    step.status=['host.doctor','host.claim','gateway.start'].includes(step.id)?'blocked':'uncertain';step.error='step_failed_inspect_local_evidence_no_automatic_replay';write(filename(d,'state.json'),state);break;
+    step.status=['host.doctor','host.claim','gateway.start','gateway.verify'].includes(step.id)?'blocked':'uncertain';step.error='step_failed_inspect_local_evidence_no_automatic_replay';write(filename(d,'state.json'),state);break;
    }
   }
   return publicState(d,state);

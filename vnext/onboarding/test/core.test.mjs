@@ -32,7 +32,7 @@ const steps=s=>Object.fromEntries(s.steps.map(x=>[x.id,x]));
 test('unified workflow uses actual TLS enrollment and separate explicit owner approval', {skip:process.platform!=='linux',timeout:30000},async t=>{
  const f=await fixture(t);createDeployment(f.configFile,{stateDir:f.stateDir});
  assert.equal(planDeployment(f.stateDir).service.status,'not_installed');
- let s=await advanceDeployment(f.stateDir,{authorize:['gateway.prepare','gateway.start','host.prepare','host.invite','host.request','host.claim']});
+ let s=await advanceDeployment(f.stateDir,{authorize:['gateway.prepare','gateway.start','gateway.verify','host.prepare','host.invite','host.request','host.claim']});
  assert.equal(steps(s)['host.request'].status,'succeeded');assert.equal(steps(s)['host.claim'].status,'awaiting_approval');
  const pending=steps(s)['host.request'].evidence;assert.match(pending.fingerprint,/^[a-f0-9]{64}$/);
  assert.equal(fs.existsSync(path.join(f.config.host.baseDir,'device/host.json')),false);
@@ -97,7 +97,7 @@ test('CLI accepts only fixed workflow commands and returns persisted redacted st
 
 test('explicit owner-local pairing avoids invitation shuttle and bounded shutdown closes a live Host websocket',{skip:process.platform!=='linux',timeout:20000},async t=>{
  const f=await fixture(t);delete f.config.pairingMode;fs.writeFileSync(f.configFile,JSON.stringify(f.config));createDeployment(f.configFile,{stateDir:f.stateDir});
- await advanceDeployment(f.stateDir,{authorize:['gateway.prepare','gateway.start','host.prepare']});
+ await advanceDeployment(f.stateDir,{authorize:['gateway.prepare','gateway.start','gateway.verify','host.prepare']});
  assert.equal(readDeployment(f.stateDir).steps.some(x=>x.id==='host.pair'),true);
  await assert.rejects(advanceDeployment(f.stateDir,{authorize:['host.pair']}),/invalid_configuration_fields/);
  assert.equal(steps(readDeployment(f.stateDir))['host.pair'].status,'pending');
@@ -111,4 +111,12 @@ test('explicit owner-local pairing avoids invitation shuttle and bounded shutdow
  await once(ws,'open');const closed=once(ws,'close');const started=Date.now();
  await stopDeploymentGateway(f.stateDir);await closed;assert.ok(Date.now()-started<5000);assert.equal(ws.readyState,WebSocket.CLOSED);
  assert.equal(readDeployment(f.stateDir).gatewayRuntime.status,'not_owned_by_current_process');
+});
+
+test('CLI scoped local approval flag performs real pairing and verification evidence stays SDK scoped',{skip:process.platform!=='linux',timeout:20000},async t=>{
+ const f=await fixture(t);delete f.config.pairingMode;fs.writeFileSync(f.configFile,JSON.stringify(f.config));await main(['create',f.configFile,f.stateDir]);
+ const setup=await main(['advance',f.stateDir,'gateway.prepare','gateway.start','gateway.verify','host.prepare']);
+ assert.equal(steps(setup)['gateway.verify'].evidence.scope,'sdk_gateway');assert.equal(steps(setup)['gateway.verify'].evidence.account_acceptance,'NOT RUN');
+ await assert.rejects(main(['advance',f.stateDir,'host.doctor','--approve-local-device']),/owner_approval_requires/);
+ const paired=await main(['advance',f.stateDir,'host.pair','--approve-local-device']);assert.equal(steps(paired)['host.pair'].status,'succeeded');
 });
