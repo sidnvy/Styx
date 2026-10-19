@@ -1,6 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {createHash} from 'node:crypto';
+import {createHash,randomBytes} from 'node:crypto';
+import fs from 'node:fs';
+import path from 'node:path';
+import os from 'node:os';
+import {ensurePrivateDirectory} from '../../host/private-storage.mjs';
 import {platformGatewayPlan,platformGatewayDefinition,platformGatewayService,launchdEnablement} from '../gateway-platform-services.mjs';
 const descriptor=platform=>{const stateDir=platform==='win32'?'C:\\Users\\Owner\\Styx State':'/Users/owner/Styx State';return {stateDir,nodeBinary:platform==='win32'?'C:\\Styx Runtime\\node.exe':'/Users/owner/Styx Runtime/node',runner:platform==='win32'?'C:\\Styx Source\\gateway-runner.mjs':'/Users/owner/Styx Source/gateway-runner.mjs',identityHash:createHash('sha256').update(stateDir).digest('hex')}};
 test('fixed per-user identity is bound to the full verified state path hash',()=>{
@@ -27,4 +31,24 @@ test('invalid verbs or absent user authorization never execute a native command'
 test('launchd enablement accepts actual current macOS words and older Boolean rows',()=>{
  const name='app.styx.gateway.123';for(const [native,expected] of [['disabled','disabled'],['enabled','enabled'],['true','disabled'],['false','enabled'],['unrecognized','unknown']])assert.equal(launchdEnablement('\t"'+name+'" => '+native+'\n',name),expected);
  assert.equal(launchdEnablement('"other" => disabled',name),'default');
+});
+
+// Explicit native acceptance only; ordinary CI never registers a service.
+test('opt-in isolated native per-user Gateway manager lifecycle',{
+ skip:!['darwin','win32'].includes(process.platform)||process.env.STYX_RUN_GATEWAY_PLATFORM_NATIVE!=='1',timeout:90000
+},async t=>{
+ const root=path.join(os.tmpdir(),'styx-gateway-owned-'+randomBytes(8).toString('hex'));ensurePrivateDirectory(root);
+ const stateDir=path.join(root,'private state');ensurePrivateDirectory(stateDir);const runner=path.join(root,'owned runner.mjs');fs.writeFileSync(runner,'setInterval(()=>{},1000);\n',{mode:0o600});
+ const d={stateDir,nodeBinary:fs.realpathSync(process.execPath),runner,identityHash:createHash('sha256').update(stateDir).digest('hex')};const p=platformGatewayPlan(d);
+ let attempted=false,clean=false;const call=action=>platformGatewayService({action,authorize:true,descriptor:d});
+ const observe=async active=>{const end=Date.now()+10000;let s;do{s=call('status');if(s.active===active)return s;await new Promise(r=>setTimeout(r,200))}while(Date.now()<end);assert.fail('native state not observed')};
+ try{
+  assert.equal(call('status').status,'not_installed');attempted=true;const install=call('install');assert.equal(install.active,'inactive');assert.equal(install.enabled,'disabled');
+  assert.equal(call('enable').enabled,'enabled');assert.equal(call('disable').enabled,'disabled');call('start');assert.ok((await observe('active')).pid>0);
+  call('stop');assert.equal((await observe('inactive')).enabled,'disabled');assert.equal(call('uninstall').status,'uninstalled_state_preserved');assert.equal(call('status').status,'not_installed');clean=true;
+  t.diagnostic('exact owned service '+p.name+' lifecycle and cleanup PASS; pinned runtime/Gateway protocol health NOT RUN');
+ }finally{
+  if(attempted&&!clean){try{call('uninstall');clean=true}catch{t.diagnostic('retain private fixture for exact owned service '+p.name+' inspection')}}
+  if(clean||!attempted)fs.rmSync(root,{recursive:true,force:true});
+ }
 });
