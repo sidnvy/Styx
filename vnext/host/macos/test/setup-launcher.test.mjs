@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {previewLayout,previewSigningIdentity,setupStorage} from '../setup-launcher.mjs';
 function fixture(){
- const root=fs.mkdtempSync(path.join(os.tmpdir(),'styx-preview-launcher-')),resources=path.join(root,'Styx.app/Contents/Resources');
+ const root=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'styx-preview-launcher-'))),resources=path.join(root,'Styx.app/Contents/Resources');
  fs.mkdirSync(resources,{recursive:true});for(const p of['runtime/node','onboarding/vnext/onboarding/server.mjs','publisher.pem']){fs.mkdirSync(path.dirname(path.join(resources,p)),{recursive:true});fs.writeFileSync(path.join(resources,p),'test-only')}
  fs.mkdirSync(path.join(resources,'host-bundle'));fs.writeFileSync(path.join(resources,'artifact-defaults.json'),JSON.stringify({bundle:'host-bundle',publisherKeyFile:'publisher.pem',publisherSha256:'a'.repeat(64)}));
  return{root,resources,close(){fs.rmSync(root,{recursive:true,force:true})}};

@@ -11,7 +11,7 @@ import {copyOfflineDependencies,finalizePreviewHostBundle,machOFiles,previewSour
 import {verifySignedRelease} from '../installer.mjs';
 import {verifyMacPreviewApp} from '../macos-preview-trust.mjs';
 const hash=b=>createHash('sha256').update(b).digest('hex');
-function scratch(t){const root=fs.mkdtempSync(path.join(os.tmpdir(),'styx-preview-test-'));t.after(()=>fs.rmSync(root,{recursive:true,force:true}));return root;}
+function scratch(t){const root=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'styx-preview-test-')));t.after(()=>fs.rmSync(root,{recursive:true,force:true}));return root;}
 test('ad-hoc preview signs all contained nested code before final app, separate from Developer ID',()=>{
  const app='/build/Styx.app',files=[app+'/Contents/MacOS/Styx',app+'/Contents/Resources/host-bundle/bin/node'];
  const steps=macAdhocSigningPlan({app,files});assert.equal(steps[0][1].at(-1),files[1]);assert.equal(steps.at(-2)[1].at(-1),app);
