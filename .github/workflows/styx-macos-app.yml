@@ -1,7 +1,7 @@
 name: Styx macOS app compile
 on:
   pull_request:
-    paths: ['vnext/host/macos/**', 'vnext/host/build-macos-app.mjs', 'vnext/host/test/macos-app.test.mjs', '.github/workflows/styx-macos-app.yml']
+    paths: ['vnext/host/macos/**', 'vnext/host/*macos*', 'vnext/host/test/*macos*', 'vnext/onboarding/**', '.github/workflows/styx-macos-app.yml']
   workflow_dispatch:
 permissions:
   contents: read
@@ -13,8 +13,10 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
+      - name: Install locked VNext dependencies
+        run: npm --prefix vnext ci --ignore-scripts --no-audit --no-fund
       - name: Packaging contract tests
-        run: node --test vnext/host/test/macos-app.test.mjs
+        run: node --test vnext/host/test/macos-app.test.mjs vnext/host/macos/test/*.test.mjs
       - name: Compile native owner (no driver or signing credentials)
         run: xcrun swiftc -D STYX_TESTING -warnings-as-errors vnext/host/macos/Styx.swift -o "$RUNNER_TEMP/Styx" -framework AppKit -framework ApplicationServices -framework CoreGraphics
       - name: Native ownership self-test

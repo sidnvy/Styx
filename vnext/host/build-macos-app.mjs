@@ -63,6 +63,14 @@ export function macDevelopmentSigningPlan({app,identity,teamID}={}){
     ['/usr/bin/codesign',['--verify','--strict','-R',`=anchor apple generic and identifier "${MAC_BUNDLE_ID}" and certificate leaf[subject.OU] = "${teamID}"`,app]]
   ];
 }
+export function macAdhocSigningPlan({app,files=[],sealApp=true}={}){
+  assert(typeof app==='string'&&path.posix.isAbsolute(app)&&path.posix.normalize(app)===app&&path.posix.basename(app)==='Styx.app','invalid_styx_app_path');
+  assert(Array.isArray(files)&&new Set(files).size===files.length&&files.every(f=>typeof f==='string'&&path.posix.isAbsolute(f)&&path.posix.normalize(f)===f&&f.startsWith(app+'/')),'adhoc_nested_code_paths_required');
+  const ordered=[...files].sort((a,b)=>b.split('/').length-a.split('/').length||a.localeCompare(b));
+  const steps=ordered.map(file=>['/usr/bin/codesign',['--force','--timestamp=none','--sign','-',file]]);
+  if(sealApp)steps.push(['/usr/bin/codesign',['--force','--timestamp=none','--sign','-',app]],['/usr/bin/codesign',['--verify','--deep','--strict','--verbose=2',app]]);
+  return steps;
+}
 export function buildMacApp({app,cuaBinary,version,identity,teamID,notaryProfile,signingMode='distribution'}={}){
   assert(process.platform==='darwin','native_macos_build_required');
   const plist=appInfoPlist(version);

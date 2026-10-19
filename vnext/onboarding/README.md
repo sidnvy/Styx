@@ -2,7 +2,9 @@
 
 This directory implements the next onboarding workflow. It is not included in
 `v0.1.0-dev.20261019`, whose source remains pinned to d34fe57. It is not a shipped
-native graphical installer, public signing service or automatic account login.
+cross-platform native graphical installer, public signing service or automatic
+account login. A self-contained macOS preview launcher can bundle this core; see
+[macOS installation](../docs/macos-preview-install.md).
 
 ## Ownership and trust
 

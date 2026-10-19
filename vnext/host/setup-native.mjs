@@ -5,6 +5,7 @@ import {createHash,createPublicKey} from 'node:crypto';
 import {execFileSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {requirePrivateDirectory,requirePrivateFile,ensurePrivateDirectory} from './private-storage.mjs';
+import {verifyMacPreviewApp} from './macos-preview-trust.mjs';
 import {verifySignedRelease,stageSignedRelease,activateRelease,refreshVerifiedBootstrap} from './installer.mjs';
 const assert=(ok,code)=>{if(!ok)throw Error(code)};
 const absolute=p=>typeof p==='string'&&path.isAbsolute(p)&&path.normalize(p)===p;
@@ -31,7 +32,9 @@ export function prepareNativeSetup(config){
   assert(absolute(shell)&&fs.statSync(shell).isFile(),'native_shell_required');
   let ca;
   if(gatewayCaFile!==undefined){assert(absolute(gatewayCaFile),'absolute_gateway_ca_required');const st=fs.lstatSync(gatewayCaFile);assert(st.isFile()&&!st.isSymbolicLink(),'regular_gateway_ca_required');ca=fs.readFileSync(gatewayCaFile);}
-  if(computer&&process.platform==='darwin'){
+  let previewApp;
+  if(config.macPreviewApp!==undefined){assert(process.platform==='darwin','mac_preview_only');previewApp=verifyMacPreviewApp(config.macPreviewApp);}
+  if(computer&&process.platform==='darwin'&&!previewApp){
     assert(/^[A-Z0-9]{10}$/.test(config.macTeamID??''),'mac_team_required');
     execFileSync('/usr/bin/codesign',['--verify','--deep','--strict','/Applications/Styx.app'],{stdio:'ignore',timeout:10000});
     execFileSync('/usr/bin/codesign',['--verify','--strict','-R',`=anchor apple generic and identifier "app.styx.host" and certificate leaf[subject.OU] = "${config.macTeamID}"`,'/Applications/Styx.app'],{stdio:'ignore',timeout:10000});
@@ -50,7 +53,7 @@ export function prepareNativeSetup(config){
   const release=path.join(installRoot,'releases',verified.version);
   const enrollment={gateway_url:gateway.origin,...(caFile?{gateway_ca_file:caFile}:{}),storage_dir:device,label,
     cwd:path.join(baseDir,'work'),shell,codex_home:path.join(baseDir,'codex-home'),exec_binary:path.join(release,'bin','codex'+exe),computer_requested:computer,
-    ...(computer?{computer_binary:process.platform==='darwin'?'/Applications/Styx.app/Contents/MacOS/cua-driver':path.join(release,'bin','cua-driver'+exe),
+    ...(computer?{computer_binary:process.platform==='darwin'?path.join(previewApp?.path??'/Applications/Styx.app','Contents/MacOS/cua-driver'):path.join(release,'bin','cua-driver'+exe),
       ...(process.platform==='darwin'?{computer_socket:`/tmp/styx-cua-${process.getuid()}/cua.sock`}:{}),
       ...(process.platform==='linux'&&config.wayland===true?{computer_env:{CUA_DRIVER_RS_ENABLE_WAYLAND:'1'}}:{})}:{})};
   write(path.join(baseDir,'enrollment.json'),enrollment);

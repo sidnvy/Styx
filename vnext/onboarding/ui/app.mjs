@@ -18,7 +18,7 @@ function mode(){return new FormData(form).get('mode')}
 function fields(){
  const join=mode()==='join-existing';$('#join-fields').hidden=!join;
  form.elements.invitationFile.required=join&&!joinLinkId;$('#link-import').hidden=!join||!capabilities?.pairingLinkImportSupported;
- $('#mac-fields').hidden=!(capabilities?.platform==='darwin'&&form.elements.computer.checked);
+ $('#mac-fields').hidden=!(capabilities?.platform==='darwin'&&form.elements.computer.checked&&!capabilities?.packagedPreviewTrusted);
  form.elements.macTeamID.required=!$('#mac-fields').hidden;
  $('#wayland-field').hidden=capabilities?.platform!=='linux';
  $('#network-exposure').hidden=join||!capabilities?.localGatewayAddresses?.length;form.elements.listenHost.disabled=join||!form.elements.allowRemoteHosts.checked;form.elements.listenHost.required=!join&&form.elements.allowRemoteHosts.checked;
@@ -80,7 +80,7 @@ form.addEventListener('submit',async event=>{
  event.preventDefault();if(!form.reportValidity())return;
  const values=new FormData(form),join=mode()==='join-existing';
  const host={bundle:values.get('bundle').trim(),publisherKeyFile:values.get('publisherKeyFile').trim(),publisherSha256:values.get('publisherSha256').trim(),baseDir:values.get('baseDir').trim(),label:values.get('label').trim(),computer:values.has('computer')};
- if(host.computer&&capabilities.platform==='darwin')host.macTeamID=values.get('macTeamID').trim();
+ if(host.computer&&capabilities.platform==='darwin'&&!capabilities.packagedPreviewTrusted)host.macTeamID=values.get('macTeamID').trim();
  if(capabilities.platform==='linux'&&values.has('wayland'))host.wayland=true;
  const gateway={url:values.get('gatewayUrl').trim()};if(!join&&values.has('allowRemoteHosts')){gateway.allowRemoteHosts=true;gateway.listenHost=values.get('listenHost');}if(join&&!joinLinkId&&values.get('caFile').trim())gateway.caFile=values.get('caFile').trim();
  const config={schema:1,mode:join?'join-existing':'create-local',gateway,host,...(join?(joinLinkId?{joinLinkId}:{invitationFile:values.get('invitationFile').trim()}):{})};
@@ -135,6 +135,11 @@ else{
   for(const address of capabilities.localGatewayAddresses??[]){const option=document.createElement('option');option.value=address;option.textContent=address;form.elements.listenHost.append(option)}
   const d=capabilities.defaults??{};for(const name of ['label','baseDir','bundle','publisherKeyFile','publisherSha256'])if(d[name])form.elements[name].value=d[name];if(d.gatewayUrl)form.elements.gatewayUrl.value=d.gatewayUrl;
   $('#artifacts').open=!d.bundle;$('#discovery').hidden=false;
+  if(capabilities.packagedPreviewTrusted){
+   $('#artifacts summary').textContent='内置软件包 · 高级详情';
+   $('#artifacts .hint').textContent='此预览版使用当前 App 内置的软件包，路径和校验信息已自动填写。App 未经 Apple 公证；请确认下载来源。';
+   $('#package-review').textContent='我确认使用此 App 内置的软件包，并已核对设备、连接方式与所选能力。每个执行步骤仍由我单独确认。';
+  }
   form.hidden=false;fields();await refresh();
 
   if(!capabilities.localGatewayAvailable)message('本机尚未配置可信的 TLS 准备工具，创建本机 Gateway 暂不可用。可先加入现有环境，或由本地启动器配置可信工具后重新打开设置。');
