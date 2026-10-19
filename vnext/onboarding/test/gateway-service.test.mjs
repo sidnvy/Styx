@@ -44,3 +44,11 @@ test('owned persistent Gateway survives installer exit boundary and uninstalls w
  controlGatewayService(state,{action:'uninstall',authorize:true});installed=false;
  assert.equal(controlGatewayService(state,{action:'status'}).status,'not_installed');assert.ok(fs.existsSync(path.join(state,'deployment.json')));
 });
+import {verifyGatewayServiceDefinition} from '../gateway-service.mjs';
+test('same ownership marker cannot authorize a changed service executable',{skip:process.platform==='win32'},t=>{
+ const dir=fs.mkdtempSync(path.join(os.tmpdir(),'styx-unit-binding-'));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+ const file=path.join(dir,'unit.service'),plan={marker:'# Styx test binding',unit:'# Styx test binding\nExecStart=/trusted/node /trusted/runner\n'};
+ fs.writeFileSync(file,plan.unit,{mode:0o600});assert.doesNotThrow(()=>verifyGatewayServiceDefinition(file,plan));
+ fs.writeFileSync(file,plan.unit.replace('/trusted/runner','/other/program'));
+ assert.throws(()=>verifyGatewayServiceDefinition(file,plan),/gateway_service_definition_changed/);
+});

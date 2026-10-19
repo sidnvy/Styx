@@ -48,15 +48,20 @@ capabilities. `resume` accepts the same explicitly authorized step IDs. It does
 not steal a crashed process lock or replay an uncertain side effect.
 
 The `create-local` mode prepares private TLS, separate owner/model credentials,
-an empty registry and native Host configuration. Its current listener is
-127.0.0.1: it does NOT supply remote Host ingress or public account reachability.
+an empty registry and native Host configuration. The default listener is
+127.0.0.1. An explicit LAN profile may choose an IPv4 address actually assigned
+to this computer, with separate permission to accept remote Host connections;
+this does not configure router forwarding or establish public account reachability.
 The owner must configure and verify an actual reachable deployment before
 claiming remote device or account connectivity. A local development certificate
 expires after 30 days; automatic production certificate renewal is not provided.
 
 `join-existing` uses a reachable HTTPS origin and separately established trust.
-There is no central shortcode discovery or network relay service. The private
-invitation-file path remains an advanced compatibility route. No SSH is required
+There is no central shortcode discovery or network relay service. The owner can issue a short-lived pairing link. The receiving local UI inspects
+the origin and optional CA fingerprint before explicit trust confirmation, then
+writes private invitation/config references without exposing credentials to
+chat or URLs sent to servers. Device fingerprint approval remains independent.
+The private invitation-file path remains an advanced compatibility route. No SSH is required
 by enrollment itself. The trusted SSH transport uses existing verified host keys,
 a previously verified installed runtime, and stdin-only invitation delivery; it
 is not an arbitrary remote installation mechanism.
@@ -75,7 +80,8 @@ and startup before stopping. Neither asserts actual tool health just because the
 service manager reports running. macOS TCC and Windows interactive-session
 requirements still apply. This is not a system/SYSTEM/root service installer.
 
-Linux persistent Gateway uses a separate fixed user service:
+Persistent Gateway uses an owned user service on Linux, a LaunchAgent on macOS,
+and an interactive scheduled task on Windows:
 
     node vnext/onboarding/cli.mjs gateway-service ABS_STATE install --authorize
     node vnext/onboarding/cli.mjs gateway-service ABS_STATE start --authorize
@@ -83,12 +89,15 @@ Linux persistent Gateway uses a separate fixed user service:
     node vnext/onboarding/cli.mjs gateway-service ABS_STATE status
 
 Stop the current process-owned foreground Gateway explicitly before starting
-its persistent service; the installer refuses duplicate owners. Gateway startup
-and enablement are separate choices. Stop, disable and uninstall are fixed
+its persistent service; the installer refuses duplicate owners. Linux Gateway startup
+and enablement are separate choices. On macOS and Windows, start also enables
+login startup, and stop disables it. Stop, disable and uninstall are fixed
 supported actions; uninstall preserves deployment/device state. The runner needs
 the stable trusted source checkout and verified bundled Node. User-service start
 at login is not unattended boot without a user session; linger is not changed.
-Persistent Gateway management on macOS and Windows is not implemented here.
+These mechanisms require the owning user session; they do not install a system
+service. Native isolated manager lifecycle checks have passed on all three
+platforms; they are separate from account-side and GUI permission acceptance.
 
 ## Failure and acceptance boundaries
 
