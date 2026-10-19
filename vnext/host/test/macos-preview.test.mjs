@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import {execFileSync} from 'node:child_process';
+import {execFileSync,spawnSync} from 'node:child_process';
+import {fileURLToPath} from 'node:url';
 import {createHash,generateKeyPairSync} from 'node:crypto';
 import {macAdhocSigningPlan,macSigningPlan} from '../build-macos-app.mjs';
 import {copyOfflineDependencies,finalizePreviewHostBundle,machOFiles,previewSourceFiles} from '../build-macos-preview.mjs';
@@ -25,7 +26,7 @@ test('offline production dependency copy is lock-bound, excludes dev/local mater
  fs.symlinkSync('/tmp',path.join(deps,'ws','escape'));assert.throws(()=>copyOfflineDependencies({lockFile:lock,dependenciesDir:deps,destination:path.join(root,'bad')}),/distribution_symlink_forbidden/);
 });
 test('source snapshot uses clean tracked files only and excludes tests and runtime caches',{skip:process.platform==='win32'},t=>{
- const root=scratch(t);for(const name of ['onboarding/core.mjs','host/test/private.pem','host/.runtime/node','work/private.json']){const p=path.join(root,name);fs.mkdirSync(path.dirname(p),{recursive:true});fs.writeFileSync(p,name);}
+ const root=scratch(t);for(const name of ['onboarding/core.mjs','onboarding/ui/browser.test.mjs','host/test/private.pem','host/.runtime/node','work/private.json']){const p=path.join(root,name);fs.mkdirSync(path.dirname(p),{recursive:true});fs.writeFileSync(p,name);}
  const git=args=>execFileSync('/usr/bin/git',['-C',root,...args],{encoding:'utf8',stdio:['ignore','pipe','pipe']});git(['init','-q']);git(['add','-A']);git(['-c','user.name=Test','-c','user.email=test@example.invalid','commit','-qm','fixture']);const revision=git(['rev-parse','HEAD']).trim();
  fs.writeFileSync(path.join(root,'host/untracked-private.pem'),'not copied');assert.deepEqual(previewSourceFiles(root,{revision}),['onboarding/core.mjs']);fs.appendFileSync(path.join(root,'onboarding/core.mjs'),'changed');assert.throws(()=>previewSourceFiles(root,{revision}));
 });
@@ -36,4 +37,11 @@ test('explicit preview trust checks whole app, exact ad-hoc CDHash and app ident
  const root=scratch(t),app=path.join(root,'Styx.app');fs.mkdirSync(app);const cdhash='a'.repeat(40),calls=[];
  const run=(command,args)=>{calls.push(args);return {status:0,stderr:args[0]==='-d'?`Identifier=app.styx.host\nSignature=adhoc\nCDHash=${cdhash}\n`:''}};
  assert.equal(verifyMacPreviewApp({path:app,cdhash},{platform:'darwin',run}).trust,'local_adhoc_preview_not_notarized');assert.deepEqual(calls[0].slice(0,3),['--verify','--deep','--strict']);assert.throws(()=>verifyMacPreviewApp({path:app,cdhash:'b'.repeat(40)},{platform:'darwin',run}),/adhoc_preview_identity_mismatch/);assert.throws(()=>verifyMacPreviewApp({path:app,cdhash},{platform:'linux',run}));
+});
+
+test('symlinked preview CLI entry reports a refused build instead of silent success',{skip:process.platform==='win32'},t=>{
+ const root=scratch(t),entry=path.join(root,'preview.mjs'),config=path.join(root,'config.json');
+ fs.symlinkSync(fileURLToPath(new URL('../build-macos-preview.mjs',import.meta.url)),entry);fs.writeFileSync(config,'{}');
+ const result=spawnSync(process.execPath,[entry,config],{encoding:'utf8',timeout:5000});
+ assert.equal(result.status,2);assert.match(result.stderr,/Styx developer preview build failed/);
 });

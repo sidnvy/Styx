@@ -24,7 +24,7 @@ export function previewSourceFiles(sourceRoot,{revision}={}){
  execFileSync('/usr/bin/git',['-C',sourceRoot,'diff','--quiet','HEAD','--','.'],{stdio:'pipe'});
  const files=execFileSync('/usr/bin/git',['-C',sourceRoot,'ls-files','-z','--','.'],{encoding:'utf8'}).split('\0').filter(Boolean);
  const tops=new Set(['onboarding','gateway','host','shared','packages','licenses','plugin']);
- return files.filter(name=>{const parts=name.split('/');assert(parts.every(x=>x&&x!=='.'&&x!=='..')&&!name.includes('\\'),'invalid_source_snapshot_path');return (tops.has(parts[0])||['package.json','package-lock.json'].includes(name))&&!parts.some(p=>p.startsWith('.')||SKIP.has(p));}).sort();
+ return files.filter(name=>{const parts=name.split('/');assert(parts.every(x=>x&&x!=='.'&&x!=='..')&&!name.includes('\\'),'invalid_source_snapshot_path');return (tops.has(parts[0])||['package.json','package-lock.json'].includes(name))&&!name.endsWith('.test.mjs')&&!parts.some(p=>p.startsWith('.')||SKIP.has(p));}).sort();
 }
 function scanPrivateMaterial(root){
  function walk(dir){for(const e of fs.readdirSync(dir,{withFileTypes:true})){const file=path.join(dir,e.name);assert(!e.isSymbolicLink(),'distribution_symlink_forbidden');if(e.isDirectory())walk(file);else{assert(!['admin.token','model.token','device.token','identity.pem','publisher-private.pem'].includes(e.name),'private_material_filename_in_distribution');const bytes=fs.readFileSync(file);assert(!/-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----[\r\n]/.test(bytes.toString('utf8')),'private_key_in_distribution');}}}walk(root);
@@ -105,7 +105,7 @@ export function buildMacPreview(config){
   fs.writeFileSync(path.join(destination,'preview-receipt.json'),JSON.stringify(receipt,null,2)+'\n');return receipt;
  }finally{fs.rmSync(privateRoot,{recursive:true,force:true});}
 }
-if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){
+if(process.argv[1]&&fs.realpathSync(process.argv[1])===fs.realpathSync(fileURLToPath(import.meta.url))){
  try{assert(process.argv.length===3&&ABS(process.argv[2]),'usage_absolute_preview_config');console.log(JSON.stringify(buildMacPreview(JSON.parse(fs.readFileSync(process.argv[2],'utf8')))));}
  catch{console.error('Styx developer preview build failed; preserve incomplete output for inspection.');process.exitCode=2;}
 }
