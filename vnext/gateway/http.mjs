@@ -20,16 +20,15 @@ function authorize(req, digest, hosts, origins) {
 // connection cannot reuse an old process or GUI element reference.
 export async function createGatewayHttp(gateway, {
   token, host = '127.0.0.1', port = 8795, allowedHosts, allowedOrigins = [],
-  maxSessions = 32, idleSessionTimeoutMs = 15 * 60 * 1000,
+  idleSessionTimeoutMs = 15 * 60 * 1000,
   tlsCertificateFile, tlsPrivateKeyFile, enrollment = null
 } = {}) {
   if (typeof token !== 'string' || token.length < 32 || /\s/.test(token))
     throw new Error('Strong inbound bearer required');
   if (!Number.isInteger(port) || port < 0 || port > 65535)
     throw new Error('Invalid listen port');
-  if (!Number.isInteger(maxSessions) || maxSessions < 1 ||
-      !Number.isInteger(idleSessionTimeoutMs) || idleSessionTimeoutMs < 0)
-    throw new Error('Invalid MCP session limits');
+  if (!Number.isInteger(idleSessionTimeoutMs) || idleSessionTimeoutMs < 0)
+    throw new Error('Invalid MCP idle session timeout');
   if (!['127.0.0.1', '::1', 'localhost'].includes(host) &&
       (!allowedHosts || allowedHosts.length === 0))
     throw new Error('Explicit allowed hosts required for non-loopback binding');
@@ -38,10 +37,10 @@ export async function createGatewayHttp(gateway, {
   if(enrollment && timingSafeEqual(digest,enrollment.adminDigest))
     throw Error('Enrollment owner token must differ from MCP bearer');
   const sessions = new Map();
-  let initializing = 0;
-  // Clients can abandon discovery sessions without DELETE. Reclaim them only
-  // under capacity pressure, after 15 idle minutes, and never while a response
-  // or an owned Exec process is outstanding. Zero explicitly disables cleanup.
+  // Clients can abandon short-lived sessions without DELETE. There is no MCP
+  // session-count cap: one account must not block another account from connecting.
+  // Reclaim 15-minute idle sessions on new initialization, preserving in-flight
+  // responses and owned Exec work. Zero explicitly disables idle cleanup.
   async function reapIdleSessions() {
     if (!idleSessionTimeoutMs) return;
     const threshold = Date.now() - idleSessionTimeoutMs;
@@ -98,8 +97,7 @@ export async function createGatewayHttp(gateway, {
       return;
     }
     if (req.method !== 'POST') return refuse(400, 'MCP initialization required');
-    if (sessions.size + initializing >= maxSessions) await reapIdleSessions();
-    if (sessions.size + initializing >= maxSessions) return refuse(503, 'Session capacity reached');
+    await reapIdleSessions();
     const owner = 'mcp-session:' + randomUUID();
     let sid;
     const transport = new StreamableHTTPServerTransport({
@@ -114,7 +112,6 @@ export async function createGatewayHttp(gateway, {
       if (sid) sessions.delete(sid);
       void gateway.closeOwner?.(owner).catch(() => {});
     };
-    initializing++;
     try {
       await server.connect(transport);
       await transport.handleRequest(req, res);
@@ -129,8 +126,6 @@ export async function createGatewayHttp(gateway, {
       await transport.close().catch(() => {});
       await server.close().catch(() => {});
       refuse(500, 'Initialization failed');
-    } finally {
-      initializing--;
     }
   };
   const http=tlsCertificateFile

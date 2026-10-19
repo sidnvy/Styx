@@ -119,3 +119,11 @@ App 启动后仍由 App 本身创建嵌入式 Cua 和临时 socket，不由 Gate
 piermini 该次保留 .3 App/Host 的签名、身份和授权，现场使用已生成的登录服务，
 Gateway 继续加载 desktop-routing 热修复源码；未替换签名 App。
 受控 App 退出和 Gateway/Host/隧道进程恢复已实测，不能等同整机重启验收。
+
+
+2026-10-19 跨账号连接复发：外部隧道记录到 Gateway initialize HTTP 503，
+即使 Gateway/Host/App/隧道都正常运行。按用户要求移除 MCP HTTP 会话数量上限，
+删除 maxSessions 选项和按数量拒绝新初始化的分支；不以提高数值代替删除。
+保留默认 15 分钟空闲清理，在每次新初始化时执行，并保护正在返回的响应及
+持有 Exec 工作的会话。96 个并发客户端验证连接、DELETE 和互不影响。
+这与设备桌面共享/操作队列、Exec 进程句柄限制是不同层次，不改变后两者。

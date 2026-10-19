@@ -226,18 +226,17 @@ live experiment the Gateway exhausted its 32-session limit and authenticated
 new `initialize` requests returned HTTP 503 even while the Tunnel Client
 reported ready. This is separate from the App View's `ui/message` dispatch.
 
-Only when the CAS-only CLI profile is active, the Gateway now uses an
-`idleSessionTimeoutMs=120000` policy and reaps idle sessions at saturation.
-A passive long-lived GET/SSE subscription does not count as an in-flight
-operation; active POST operations are protected against eviction. A stale
-client may have to reconnect after its session is reclaimed. This is a
-capacity recovery mechanism, not a guarantee that the Host continues to
-mount an MCP App View or schedules another model turn. Production Gateway
-retains the previous default without idle eviction.
+Historical mitigation used an idle timeout and reclaimed sessions at saturation.
+On 2026-10-19, a production account trial still hit the 32-session cap while the
+Tunnel Client was healthy. At the owner's explicit request, the MCP HTTP
+session-count limit and its 503 rejection have now been removed for all profiles.
+The production default still reclaims 15-minute idle sessions on new initialize;
+zero explicitly disables idle cleanup. In-flight responses and retained Exec
+owners remain protected, independently of how many other clients connect.
 
-The isolated test suite covers default maxSessions behavior, idle recovery,
-and preservation of an active in-flight request. Do not infer that this
-fix alone establishes multi-turn autonomous continuation reliability.
+The lifecycle regression now establishes 96 simultaneous MCP clients, closes one
+without interrupting another, and checks idle cleanup and active-request/Exec
+protection. This does not establish multi-turn autonomous continuation reliability.
 
 ## Future CAS (out of P0)
 
