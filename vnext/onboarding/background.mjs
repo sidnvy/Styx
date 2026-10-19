@@ -7,9 +7,17 @@ import {requirePrivateDirectory,requirePrivateFile} from '../host/private-storag
 import {readDeployment,planDeployment,controlDeploymentHostService,controlDeploymentService,stopDeploymentGateway,verifyDeploymentGateway} from './core.mjs';
 import {observeHostService} from './service-lifecycle.mjs';
 import {ownerCommand} from '../gateway/enroll-admin.mjs';
-import {controlGatewayService} from './gateway-service.mjs';
+import {controlMacLoginRecovery} from './macos-login-recovery.mjs';
+function desktopRecovery(d,action){
+ if(process.platform!=='darwin')return {status:'not_applicable'};
+ const file=path.join(d,'deployment.json');requirePrivateFile(file);
+ const app=JSON.parse(fs.readFileSync(file,'utf8')).host?.macPreviewApp;
+ if(!app)return {status:'not_configured'};
+ const result=controlMacLoginRecovery({appPath:app.path,logDir:path.join(d,'login-recovery-logs')},{action,authorize:action==='install'});
+ return {status:result.services.every(s=>s.installed&&s.loaded&&s.running)?'running':'needs_attention',...result};
+}
 const fail=code=>{throw Error(code)};
-const defaults={read:readDeployment,host:controlDeploymentHostService,gateway:(d,o)=>controlDeploymentService(d,{role:'gateway',...o}),
+const defaults={desktopRecovery,read:readDeployment,host:controlDeploymentHostService,gateway:(d,o)=>controlDeploymentService(d,{role:'gateway',...o}),
  stopForeground:stopDeploymentGateway,verifyGateway:verifyDeploymentGateway,hostConnection:observeLocalHostConnection,
  sleep:ms=>new Promise(resolve=>setTimeout(resolve,ms))};
 // Owner-authenticated, identity-bound Exec relay observation. This is not tool
@@ -48,7 +56,7 @@ function save(d,journal){
 }
 function projection(journal){return {schema:1,status:journal.status,
  observation:'last_recorded',startup:'current_user_login',systemBootWithoutLogin:'NOT CONFIGURED',
- gateway:journal.gateway??'not_observed',host:journal.host??'not_observed',
+ gateway:journal.gateway??'not_observed',host:journal.host??'not_observed',desktop:journal.desktop??'not_observed',
  gatewayConnection:journal.gatewayConnection??'not_checked',hostConnection:journal.hostConnection??'not_checked',hostHealth:'not_checked',accountAcceptance:'NOT RUN',
  ...(journal.reason?{reason:journal.reason}:{}),
  ...(journal.updatedAt?{updatedAt:journal.updatedAt,observedAt:journal.updatedAt}:{}),
@@ -137,7 +145,10 @@ export async function enableDeploymentBackground(d,{authorize=false}={},operatio
    journal.hostConnection=connected?'exec_connected':'not_connected';persist();
    if(!connected)fail('host_exec_connection_not_ready');
   }
-  }else{journal.host='disabled';journal.hostConnection='not_applicable';}
+  const desktop=await mutate('desktop.login_recovery',()=>ops.desktopRecovery(d,'install'));
+  journal.desktop=desktop.status;
+  if(desktop.status==='needs_attention')fail('desktop_login_recovery_not_ready');
+  }else{journal.host='disabled';journal.hostConnection='not_applicable';journal.desktop='not_applicable';}
   journal.status='running';persist();return projection(journal);
  }catch(error){
   if(journal&&journal.status==='configuring'){
@@ -151,7 +162,7 @@ export async function enableDeploymentBackground(d,{authorize=false}={},operatio
 // Refresh actual OS process observations without changing either service or journals.
 export async function observeDeploymentBackground(d,operations={}){
  scope(d);
- const ops={read:readDeployment,plan:planDeployment,hostStatus:observeHostService,gateway:(d,o)=>controlDeploymentService(d,{role:'gateway',...o}),hostConnection:observeLocalHostConnection,...operations};
+ const ops={desktopRecovery,read:readDeployment,plan:planDeployment,hostStatus:observeHostService,gateway:(d,o)=>controlDeploymentService(d,{role:'gateway',...o}),hostConnection:observeLocalHostConnection,...operations};
  const state=ops.read(d),hasHost=state.roles?.host!=='disabled';
  const result={schema:1,observation:'current',observedAt:new Date().toISOString(),
   startup:'current_user_login',systemBootWithoutLogin:'NOT CONFIGURED',
@@ -170,6 +181,7 @@ export async function observeDeploymentBackground(d,operations={}){
   }catch{result.gateway='unknown'}
   if(hasHost)try{const connection=await ops.hostConnection(d);result.hostConnection=connection.status==='observed'?(connection.online?'exec_connected':'not_connected'):'unknown'}catch{result.hostConnection='unknown'}
  }
- result.status=(!hasHost||result.host==='running')&&['running','external'].includes(result.gateway)&&(!hasHost||state.mode!=='create-local'||result.hostConnection==='exec_connected')?'running':'needs_attention';
+ if(hasHost)try{result.desktop=(await ops.desktopRecovery(d,'status')).status}catch{result.desktop='unknown'}else result.desktop='not_applicable';
+ result.status=!['needs_attention','unknown'].includes(result.desktop)&&(!hasHost||result.host==='running')&&['running','external'].includes(result.gateway)&&(!hasHost||state.mode!=='create-local'||result.hostConnection==='exec_connected')?'running':'needs_attention';
  return result;
 }

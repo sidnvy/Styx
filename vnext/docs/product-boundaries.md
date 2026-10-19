@@ -92,3 +92,30 @@ Mac原生监督器仅为签名身份配置和可编译测试入口，未在本�
 待完成：Host更新/恢复完整管理链、无人登录启动策略、既有Gateway安全入口迁移与续证、
 双端握手确认交互、Mac主台+Windows Host、headless主台+桌面Host、Cua实际操作、新用户
 聊天端验收，以及登录/重启/App退出/升级/回滚后的真实原生证据。开发预览不称正式产品。
+
+## 2026-10-19 重启恢复修复
+
+`onboarding/macos-login-recovery.mjs` 补充 Aqua 用户登录级的 App 生命周期；
+`background.mjs` 在明确启用后台运行的事务中为已登记的 macPreviewApp 安装它。
+通过 LaunchServices `open -W -g` 保持原 App 权限身份，launchd 对正常/异常退出均
+限速恢复。停用必须先 stop/uninstall 登录恢复服务；直接 Quit 会被重新拉起。
+App 启动后仍由 App 本身创建嵌入式 Cua 和临时 socket，不由 Gateway 代管。
+此修复不把 launchd PID 或 socket 存在当成 GUI 可用，也不承诺独立 Cua 子进程崩溃
+或 App SIGKILL 后遗留 socket 的自动恢复；这两项需要原生 App 后续修复及签名发布。
+
+既有外置 Bieber 隧道可显式接管为独立登录服务，复用原 profile 和 file 引用凭据，
+不会导入/复制秘密或创建新隧道。配置文件必须为私有绝对路径，内容为
+`{"appPath":"/Applications/Styx.app","tunnelRoot":"/absolute/existing/tunnel","logDir":"/absolute/private/logs"}`。
+省略 tunnelRoot 只管理 App；该迁移入口不自动发现或采用任意外部隧道。
+运行 `node onboarding/cli.mjs mac-login-recovery CONFIG install --authorize`；
+同一 CONFIG 支持 status、start、stop、uninstall（变更需 --authorize）。
+已有定义不一致或观察失败时拒绝覆盖；先核对实际状态及回滚记录。
+
+内置 `TunnelRuntime` 对已经授权的连接启动失败、进程退出每 15 秒重试，
+显式 stop 取消重试。它只恢复连接进程，不重放 MCP 请求，不清除未知 owner lock。
+网络未就绪不再导致单次启动失败后永久断开；仍需有效凭据和账号侧验收。
+
+以下为875c4c3原故障排查thread的历史现场记录，本架构thread未实施线上变更。
+piermini 该次保留 .3 App/Host 的签名、身份和授权，现场使用已生成的登录服务，
+Gateway 继续加载 desktop-routing 热修复源码；未替换签名 App。
+受控 App 退出和 Gateway/Host/隧道进程恢复已实测，不能等同整机重启验收。

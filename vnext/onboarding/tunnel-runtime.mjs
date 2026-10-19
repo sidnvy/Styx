@@ -47,7 +47,7 @@ export function configureTunnel(stateDir,{tunnelId,apiKey,autoStart=false,author
 }
 // Only publisher/server configuration may supply this pin, never HTTP input.
 export class TunnelRuntime {
- #child=null;#pending=null;#ownedLock=false;#lockToken=null;#exit=null;#spawn;#binary;#sha;#stateDir;
+ #retry=null;#wanted=false;#child=null;#pending=null;#ownedLock=false;#lockToken=null;#exit=null;#spawn;#binary;#sha;#stateDir;
  constructor({stateDir,binary,sha256,spawnProcess=spawn}){
   this.#stateDir=stateDir;this.#binary=binary;this.#sha=sha256;this.#spawn=spawnProcess;
  }
@@ -76,9 +76,11 @@ export class TunnelRuntime {
  }
  async start({authorize=false}={}){
   if(authorize!==true)fail('explicit_tunnel_authorization_required');
+  this.#wanted=true;
+  if(this.#retry){clearTimeout(this.#retry);this.#retry=null;}
   if(this.#pending) return this.#pending;
   if(this.#child)return this.status();
-  this.#pending=this.#start();try{return await this.#pending;}finally{this.#pending=null;}
+  this.#pending=this.#start();try{return await this.#pending;}catch(e){this.#schedule();throw e;}finally{this.#pending=null;}
  }
  async #start(){
   const p=locations(this.#stateDir);
@@ -93,13 +95,21 @@ export class TunnelRuntime {
    // No inherited proxy, profile, NODE_OPTIONS or credential environment; no raw logs.
    const child=this.#spawn(process.execPath,[fileURLToPath(new URL('./tunnel-runner.mjs',import.meta.url)),this.#binary,this.#sha,JSON.stringify(args),this.#lockToken],{cwd:p.root,env:{PATH:'/usr/bin:/bin',HOME:p.root,XDG_CONFIG_HOME:p.root},stdio:['pipe','ignore','ignore'],windowsHide:true});
    this.#child=child;this.#exit=null;
-   child.once('exit',(code,signal)=>{if(this.#child===child){this.#child=null;this.#exit={code,signal};this.#release(p);}});
+   child.once('exit',(code,signal)=>{if(this.#child===child){this.#child=null;this.#exit={code,signal};this.#release(p);this.#schedule();}});
    await new Promise((resolve,reject)=>{child.once('spawn',resolve);child.once('error',()=>reject(Error('tunnel_client_start_failed')));});
    return this.status();
   }catch(e){this.#child=null;this.#release(p);throw e;}
  }
  #release(p){if(this.#ownedLock){this.#ownedLock=false;releaseOwnerLock(p,this.#lockToken);this.#lockToken=null;}}
+ #schedule(){
+  if(!this.#wanted||this.#retry)return;
+  // Retry connection startup, never replay an MCP request. Network/Gateway may
+  // become ready after login; stop() explicitly cancels this desired runtime.
+  this.#retry=setTimeout(()=>{this.#retry=null;if(this.#wanted)void this.start({authorize:true}).catch(()=>{});},15000);
+  this.#retry.unref?.();
+ }
  async stop(){
+  this.#wanted=false;if(this.#retry){clearTimeout(this.#retry);this.#retry=null;}
   if(this.#pending)await this.#pending.catch(()=>{});
   const child=this.#child;if(!child)return this.status();
   // Never kill a persisted PID: only this App's ChildProcess object is authority.

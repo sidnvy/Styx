@@ -105,3 +105,13 @@ test('Gateway-only handoff and observation never call Host adapters or connectio
  const observation=await observeDeploymentBackground(f.dir,{read:f.ops.read,hostStatus:forbidden,hostConnection:forbidden,gateway:f.ops.gateway});
  assert.equal(observation.status,'running');assert.equal(observation.host,'disabled');assert.equal(observation.hostConnection,'not_applicable');
 });
+
+
+test('desktop login recovery is included in the authorized background transaction',async t=>{
+ const f=fixture(t);f.ops.desktopRecovery=async(d,action)=>{assert.equal(d,f.dir);assert.equal(action,'install');f.calls.push('desktop.install');return {status:'running'}};
+ const result=await enableDeploymentBackground(f.dir,{authorize:true},f.ops);assert.equal(result.desktop,'running');assert.ok(f.calls.indexOf('desktop.install')>f.calls.indexOf('host.start'));
+});
+test('desktop recovery failure cannot be reported as successful background setup',async t=>{
+ const f=fixture(t);f.ops.desktopRecovery=async()=>({status:'needs_attention'});
+ await assert.rejects(enableDeploymentBackground(f.dir,{authorize:true},f.ops),/background_operation_uncertain_no_replay/);assert.equal(readDeploymentBackground(f.dir).status,'needs_attention');
+});
