@@ -1,0 +1,130 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import {randomBytes,createHash} from 'node:crypto';
+import {execFileSync} from 'node:child_process';
+import {ensurePrivateDirectory,requirePrivateDirectory,requirePrivateFile} from '../host/private-storage.mjs';
+import {prepareNativeSetup} from '../host/setup-native.mjs';
+import {requestEnrollment,claimEnrollment} from '../host/enroll.mjs';
+import {ownerCommand} from '../gateway/enroll-admin.mjs';
+import {doctor} from '../host/doctor.mjs';
+
+const live=new Map();
+const fail=code=>{throw Error(code)};
+const obj=x=>x&&typeof x==='object'&&!Array.isArray(x);
+const abs=x=>typeof x==='string'&&path.isAbsolute(x)&&path.normalize(x)===x;
+const exact=(x,keys)=>{if(!obj(x)||Object.keys(x).some(k=>!keys.includes(k)))fail('invalid_configuration_fields')};
+const filename=(d,n)=>path.join(d,n);
+function read(file){requirePrivateFile(file);if(fs.statSync(file).size>1024*1024)fail('state_file_too_large');return JSON.parse(fs.readFileSync(file,'utf8'));}
+function write(file,value){const tmp=file+'.'+randomBytes(8).toString('hex')+'.tmp';fs.writeFileSync(tmp,JSON.stringify(value,null,2)+'\n',{mode:0o600,flag:'wx'});try{requirePrivateFile(tmp);fs.renameSync(tmp,file);}finally{if(fs.existsSync(tmp))fs.unlinkSync(tmp);}}
+const hash=file=>createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+const evidenceFile=file=>({path:file,sha256:hash(file)});
+export function validateDeployment(config){
+ exact(config,['schema','mode','gateway','host','invitationFile']);
+ if(config.schema!==1||!['create-local','join-existing'].includes(config.mode))fail('unsupported_deployment_schema_or_mode');
+ exact(config.gateway,['url','openssl','caFile']);
+ let u;try{u=new URL(config.gateway.url)}catch{fail('gateway_https_origin_required')}
+ if(u.protocol!=='https:'||u.username||u.password||u.search||u.hash||u.pathname!=='/')fail('gateway_https_origin_required');
+ if(config.mode==='create-local'){
+  if(u.hostname!=='127.0.0.1'||!u.port||Number(u.port)<1024||!abs(config.gateway.openssl)||config.gateway.caFile!==undefined)fail('local_gateway_requires_loopback_port_and_trusted_openssl');
+  const st=fs.lstatSync(config.gateway.openssl);if(!st.isFile()||st.isSymbolicLink())fail('trusted_openssl_regular_file_required');
+ }else if(config.gateway.openssl!==undefined)fail('join_cannot_prepare_gateway');
+ if(config.gateway.caFile!==undefined&&!abs(config.gateway.caFile))fail('absolute_ca_file_required');
+ exact(config.host,['bundle','publisherKeyFile','publisherSha256','baseDir','label','computer','macTeamID','wayland','shell']);
+ for(const k of ['bundle','publisherKeyFile','baseDir'])if(!abs(config.host[k]))fail('absolute_host_paths_required');
+ if(!/^[a-f0-9]{64}$/.test(config.host.publisherSha256??'')||typeof config.host.label!=='string'||!config.host.label||config.host.label.length>72||typeof config.host.computer!=='boolean')fail('invalid_host_setup');
+ if(config.host.wayland!==undefined&&typeof config.host.wayland!=='boolean')fail('invalid_wayland_selection');
+ if(config.host.shell!==undefined&&!abs(config.host.shell))fail('absolute_native_shell_required');
+ if(config.host.macTeamID!==undefined&&!/^[A-Z0-9]{10}$/.test(config.host.macTeamID))fail('invalid_mac_team_identity');
+ if(config.invitationFile!==undefined&&(!abs(config.invitationFile)||config.mode!=='join-existing'))fail('invalid_invitation_file');
+ return config;
+}
+function load(d){if(!abs(d))fail('absolute_state_directory_required');requirePrivateDirectory(d);const config=read(filename(d,'deployment.json')),state=read(filename(d,'state.json'));validateDeployment(config);if(state.schema!==1||state.mode!==config.mode||state.configSha256!==hash(filename(d,'deployment.json'))||!Array.isArray(state.steps))fail('invalid_onboarding_state');return {config,state};}
+function publicState(d,state){return {schema:1,mode:state.mode,stateDir:d,gatewayRuntime:{status:live.has(d)?'running':'not_owned_by_current_process',ownership:live.has(d)?'current_process':'none',persistentService:'NOT INSTALLED'},activeStep:state.steps.find(s=>s.status==='running')?.id??null,steps:state.steps.map(s=>({...s,...(s.status==='running'?{status:'uncertain',error:'interrupted_or_in_progress_do_not_replay'}:{})})),accountAcceptance:'NOT RUN'};}
+export function createDeployment(configFile,{stateDir}={}){
+ if(!abs(configFile)||!abs(stateDir))fail('absolute_paths_required');
+ const config=validateDeployment(read(configFile));requirePrivateDirectory(path.dirname(stateDir));if(fs.existsSync(stateDir))fail('deployment_directory_already_exists');
+ ensurePrivateDirectory(stateDir);write(filename(stateDir,'deployment.json'),config);
+ const ids=[...(config.mode==='create-local'?['gateway.prepare','gateway.start']:[]),'host.prepare',...(config.mode==='create-local'?['host.invite']:[]),'host.request','host.claim','host.doctor'];
+ const state={schema:1,mode:config.mode,configSha256:hash(filename(stateDir,'deployment.json')),steps:ids.map(id=>({id,status:'pending'}))};write(filename(stateDir,'state.json'),state);return publicState(stateDir,state);
+}
+export function readDeployment(stateDir){const {state}=load(stateDir);return publicState(stateDir,state);}
+export function planDeployment(stateDir){const {config,state}=load(stateDir);return {schema:1,mode:config.mode,steps:state.steps.map((s,i)=>({id:s.id,status:s.status,requires:state.steps.slice(0,i).map(x=>x.id),authorizationRequired:true})),service:{status:'not_installed',configFile:path.join(config.host.baseDir,'service.json'),platform:process.platform},accountAcceptance:'NOT RUN'};}
+function lock(d){const file=filename(d,'advance.lock');let fd;try{fd=fs.openSync(file,'wx',0o600);}catch{fail('onboarding_busy_or_interrupted_lock');}return ()=>{fs.closeSync(fd);fs.unlinkSync(file)};}
+function gatewayPaths(d){const root=filename(d,'gateway');return {root,cert:filename(root,'certificate.pem'),key:filename(root,'private-key.pem'),model:filename(root,'model.token'),admin:filename(root,'admin.token'),owner:filename(root,'owner.json'),runtime:filename(root,'runtime.json'),catalog:filename(root,'targets.json')};}
+function prepareGateway(d,c){
+ const p=gatewayPaths(d);if(fs.existsSync(p.root))fail('gateway_directory_already_exists');ensurePrivateDirectory(p.root);
+ for(const f of [p.model,p.admin])fs.writeFileSync(f,randomBytes(48).toString('base64url')+'\n',{flag:'wx',mode:0o600});
+ execFileSync(c.gateway.openssl,['req','-x509','-newkey','rsa:2048','-nodes','-sha256','-days','30','-keyout',p.key,'-out',p.cert,'-subj','/CN=Styx local Gateway','-addext','subjectAltName=IP:127.0.0.1'],{stdio:'ignore',timeout:20000});
+ fs.chmodSync(p.key,0o600);fs.chmodSync(p.cert,0o600);requirePrivateFile(p.key);requirePrivateFile(p.cert);
+ write(p.catalog,{version:1,targets:[]});write(p.owner,{gateway_url:c.gateway.url,gateway_ca_file:p.cert,admin_token_file:p.admin});
+ write(p.runtime,{schema:1,url:c.gateway.url,listenHost:'127.0.0.1',tlsCertificateFile:p.cert,tlsPrivateKeyFile:p.key,modelTokenFile:p.model,adminTokenFile:p.admin,enrollmentDir:filename(p.root,'enrollment'),catalogFile:p.catalog});
+ return {runtime:evidenceFile(p.runtime),certificate:evidenceFile(p.cert),ownerConfig:p.owner,modelCredentialFile:p.model,tlsTrust:'dedicated_self_signed_ca_local_only',publicIngress:'NOT CONFIGURED'};
+}
+export async function startDeploymentGateway(d){
+ const {config,state}=load(d);if(config.mode!=='create-local')fail('not_local_gateway');
+ if(live.has(d))return {status:'running',url:config.gateway.url,ownership:'current_process'};
+ if(state.steps.find(s=>s.id==='gateway.prepare')?.status!=='succeeded')fail('gateway_prepare_required');
+ const p=gatewayPaths(d),cfg=read(p.runtime);
+ const {createStyxGateway}=await import('../gateway/index.mjs');const {createGatewayHttp}=await import('../gateway/http.mjs');const {EnrollmentController}=await import('../gateway/enrollment.mjs');
+ const gateway=createStyxGateway({catalog:read(cfg.catalogFile)});
+ const enrollment=new EnrollmentController({rootDir:cfg.enrollmentDir,adminTokenFile:cfg.adminTokenFile,registry:gateway.registry,relay:gateway.relay});
+ let handle;try{handle=await createGatewayHttp(gateway,{token:fs.readFileSync(cfg.modelTokenFile,'utf8').trim(),host:'127.0.0.1',port:Number(new URL(cfg.url).port),allowedHosts:[new URL(cfg.url).host],tlsCertificateFile:cfg.tlsCertificateFile,tlsPrivateKeyFile:cfg.tlsPrivateKeyFile,enrollment});}catch(e){await gateway.close();throw e;}
+ live.set(d,handle);return {status:'running',url:cfg.url,ownership:'current_process',persistentService:'NOT INSTALLED'};
+}
+export async function stopDeploymentGateway(d){if(!abs(d))fail('absolute_state_directory_required');const h=live.get(d);if(!h)return {status:'not_owned_by_current_process'};await h.close();live.delete(d);return {status:'stopped',ownership:'current_process'};}
+async function execute(d,c,id){
+ const p=gatewayPaths(d),base=c.host.baseDir;
+ const enrollment=()=>read(path.join(base,'enrollment.json'));
+ if(id==='gateway.prepare')return prepareGateway(d,c);
+ if(id==='gateway.start')return startDeploymentGateway(d);
+ if(id==='host.prepare'){
+  const r=prepareNativeSetup({...c.host,gatewayUrl:c.gateway.url,...(c.mode==='create-local'?{gatewayCaFile:p.cert}:c.gateway.caFile?{gatewayCaFile:c.gateway.caFile}:{})});
+  return {status:r.status,version:r.version,receipt:evidenceFile(path.join(base,'setup-receipt.json')),node:r.node,release_root:r.release_root};
+ }
+ if(id==='host.invite'){
+  const r=await ownerCommand(read(p.owner),'invite',['600']);const file=filename(d,'invitation');fs.writeFileSync(file,r.invitation+'\n',{mode:0o600,flag:'wx'});requirePrivateFile(file);return {invitationFile:file,oneUse:true};
+ }
+ if(id==='host.request'){
+  const file=c.mode==='create-local'?filename(d,'invitation'):c.invitationFile;if(!file)fail('private_invitation_file_required');requirePrivateFile(file);
+  const r=await requestEnrollment(enrollment(),fs.readFileSync(file,'utf8').trim());return {status:r.status,request_id:r.request_id,device_id:r.device_id,fingerprint:r.fingerprint,ownerApproval:'REQUIRED'};
+ }
+ if(id==='host.claim'){
+  const r=await claimEnrollment(enrollment());return {status:r.status,...(r.device_id?{device_id:r.device_id}:{}),...(r.status==='ready_to_connect'?{hostConfigFile:r.local_host_config}:{ownerApproval:'REQUIRED'})};
+ }
+ if(id==='host.doctor'){
+  const r=await doctor(read(path.join(base,'device','host.json')),{installRoot:path.join(base,'install'),trustPublicKeyFile:path.join(base,'publisher.pem')});
+  return {status:r.status,blockers:r.blockers,warnings:r.warnings};
+ }
+ fail('unsupported_onboarding_step');
+}
+// Resume advances only explicitly authorized pending/read-only-blocked steps.
+// A lock left by a crash is intentionally retained for owner inspection; never steal it.
+export async function advanceDeployment(d,{authorize=[]}={}){
+ if(!Array.isArray(authorize)||authorize.some(x=>typeof x!=='string')||new Set(authorize).size!==authorize.length)fail('explicit_step_authorization_required');
+ load(d);
+ const release=lock(d);
+ try{
+  const {config,state}=load(d);
+  if(authorize.some(id=>!state.steps.some(s=>s.id===id)))fail('unknown_authorized_step');
+  for(const done of state.steps.filter(s=>s.status==='succeeded')){
+   for(const value of Object.values(done.evidence??{})){
+    if(obj(value)&&typeof value.path==='string'&&typeof value.sha256==='string'&&hash(value.path)!==value.sha256)fail('completed_step_evidence_changed');
+   }
+  }
+  for(const step of state.steps){
+   if(step.status==='succeeded')continue;
+   if(!authorize.includes(step.id))break;
+   if(['running','uncertain'].includes(step.status))fail('uncertain_step_requires_manual_reconciliation');
+   step.status='running';delete step.error;write(filename(d,'state.json'),state);
+   try{
+    step.evidence=await execute(d,config,step.id);
+    step.status=step.id==='host.claim'&&step.evidence.status==='pending'?'awaiting_approval':step.id==='host.doctor'&&step.evidence.status!=='ready_for_exec'?'blocked':'succeeded';
+    write(filename(d,'state.json'),state);
+    if(step.status!=='succeeded')break;
+   }catch{
+    step.status=['host.doctor','host.claim','gateway.start'].includes(step.id)?'blocked':'uncertain';step.error='step_failed_inspect_local_evidence_no_automatic_replay';write(filename(d,'state.json'),state);break;
+   }
+  }
+  return publicState(d,state);
+ }finally{release();}
+}
