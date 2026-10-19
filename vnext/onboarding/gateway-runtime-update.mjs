@@ -116,6 +116,12 @@ function lock(stateDir,{transactionId,recover=false}={}){
   // alone lets two recoverers remove one another's newly live lock. A guard
   // left by process death is intentionally not stolen, even when its PID died.
   if(recover)acquire(guardFile);
+  else{
+   // An interrupted recovery guard also blocks a fresh update; do not bypass
+   // an ownership question merely because advance.lock is temporarily absent.
+   try{fs.lstatSync(guardFile);fail('onboarding_busy_or_interrupted_lock');}
+   catch(error){if(error.code!=='ENOENT')throw error;}
+  }
   if(recover&&fs.existsSync(file)){
    let prior,identity,raw;
    try{identity=requirePrivateFile(file);raw=fs.readFileSync(file,'utf8');prior=JSON.parse(raw);}

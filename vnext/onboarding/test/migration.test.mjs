@@ -5,7 +5,9 @@ import os from 'node:os';
 import path from 'node:path';
 import {createHash, randomUUID} from 'node:crypto';
 import {ensurePrivateDirectory} from '../../host/private-storage.mjs';
-import {planNativeSupervisorMigration, applyNativeSupervisorMigration, rollbackNativeSupervisorMigration} from '../migration.mjs';
+import {planNativeSupervisorMigration, applyNativeSupervisorMigration, rollbackNativeSupervisorMigration, observeNativeSupervisorServiceAbsence} from '../migration.mjs';
+import {spawn} from 'node:child_process';
+import {once} from 'node:events';
 
 const nativeApp = {path: '/Applications/Styx.app', teamID: 'ABCDEFGHIJ'};
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
@@ -14,7 +16,7 @@ const read = file => JSON.parse(fs.readFileSync(file, 'utf8'));
 // These injected observations exercise transaction logic only. They are not
 // evidence that launchd, a compiled App or TCC has been tested on macOS.
 const observedAbsent = {status: 'reported', installed: false, state: 'stopped', role: 'host', action: 'status', manager: 'launchd-user'};
-const adapters = () => ({platform: 'darwin', observeService: async () => observedAbsent, verifyLauncher() {}});
+const adapters = () => ({platform: 'darwin', observeService: async () => observedAbsent, verifyLauncher() {}, ownerAlive: () => false});
 const lockNames = ['advance.lock', 'background.lock', 'capabilities.lock'];
 function fixture(t, mode = 'create-local') {
   const root = path.join(os.tmpdir(), 'styx-migration-' + randomUUID()); ensurePrivateDirectory(root);
@@ -34,7 +36,8 @@ function fixture(t, mode = 'create-local') {
       fs.writeFileSync(path.join(gateway, name), 'EXISTING_GATEWAY_' + name, {mode: 0o600});
   }
   const configFile = path.join(d, 'deployment.json'), stateFile = path.join(d, 'state.json'), serviceFile = path.join(baseDir, 'service.json');
-  const config = {schema: 1, mode, gateway: {url: 'https://127.0.0.1:8795'}, host: {baseDir, computer: false, label: 'Existing host'}};
+  const config = {schema: 1, mode, gateway: {url: 'https://127.0.0.1:8795', ...(mode === 'create-local' ? {openssl: process.execPath} : {})},
+    host: {baseDir, bundle: path.join(root, 'bundle'), publisherKeyFile: path.join(baseDir, 'publisher.pem'), publisherSha256: 'a'.repeat(64), computer: false, label: 'Existing host'}};
   const service = {label: 'app.styx.connector', installRoot: path.join(baseDir, 'install'), hostConfigFile: path.join(deviceDir, 'host.json'),
     trustPublicKeyFile: path.join(baseDir, 'publisher.pem'), nodeBinary: path.join(baseDir, 'install', 'releases', 'v1', 'bin', 'node'), logDir: path.join(baseDir, 'logs')};
   write(configFile, config); write(serviceFile, service);
@@ -122,7 +125,7 @@ test('configuration/evidence drift and identity/credential changes invalidate a 
 
 test('team changes, preview apps, foreign service bindings and uncertain Core work are never silently adopted', t => {
   const f = fixture(t);
-  f.config.host.macTeamID = 'DIFFERENT1'; write(f.configFile, f.config); f.state.configSha256 = sha(fs.readFileSync(f.configFile)); write(f.stateFile, f.state);
+  f.config.host.macTeamID = 'ZYXWVUTSRQ'; write(f.configFile, f.config); f.state.configSha256 = sha(fs.readFileSync(f.configFile)); write(f.stateFile, f.state);
   assert.throws(f.plan, /existing_team_identity_mismatch/);
   delete f.config.host.macTeamID; f.config.host.macPreviewApp = {path: '/tmp/Styx.app'}; write(f.configFile, f.config);
   f.state.configSha256 = sha(fs.readFileSync(f.configFile)); write(f.stateFile, f.state);
@@ -270,4 +273,94 @@ test('an interrupted rollback retains ownership and can finish only on another e
   await rollbackNativeSupervisorMigration(f.d, {transactionId: plan.planId, authorize: true}, adapters());
   assert.deepEqual([f.configFile, f.stateFile, f.serviceFile].map(file => fs.readFileSync(file)), original);
   for (const name of lockNames) assert.equal(fs.existsSync(path.join(f.d, name)), false);
+});
+
+test('shared Core desired-config validation rejects unsupported schema and unknown Host fields', t => {
+  for (const mutate of [config => { config.schema = 2; }, config => { config.host.unreviewedRole = true; }, config => { delete config.host.bundle; }]) {
+    const f = fixture(t); mutate(f.config); write(f.configFile, f.config);
+    f.state.configSha256 = sha(fs.readFileSync(f.configFile)); write(f.stateFile, f.state);
+    assert.throws(f.plan, /unsupported_deployment_schema_or_mode|invalid_configuration_fields|absolute_host_paths_required/);
+  }
+});
+
+test('missing new App never blocks rollback when exact native job and plist are definitively absent', async t => {
+  const f = fixture(t), plan = f.plan();
+  const applied = await applyNativeSupervisorMigration(f.d, {plan, authorize: true}, adapters());
+  const native = {platform: 'darwin', home: f.root, statusAgent: label => {
+    assert.equal(label, 'app.styx.connector'); return {status: 'not_loaded', loaded: false};
+  }, verifyLauncher() { throw Error('MISSING_NEW_APP_MUST_NOT_BE_REQUIRED_FOR_ROLLBACK'); }};
+  assert.equal(observeNativeSupervisorServiceAbsence(f.serviceFile, native).installed, false);
+  const result = await rollbackNativeSupervisorMigration(f.d, {transactionId: applied.transactionId, authorize: true}, native);
+  assert.equal(result.status, 'rolled_back');
+});
+
+test('absence-only native observer still refuses installed plist and unknown or loaded launchd job', async t => {
+  for (const state of ['installed', 'unknown', 'loaded']) {
+    const f = fixture(t), plan = f.plan();
+    const applied = await applyNativeSupervisorMigration(f.d, {plan, authorize: true}, adapters());
+    if (state === 'installed') {
+      const folder = path.join(f.root, 'Library', 'LaunchAgents'); fs.mkdirSync(folder, {recursive: true, mode: 0o700});
+      fs.writeFileSync(path.join(folder, 'app.styx.connector.plist'), 'fixture owned plist', {mode: 0o600});
+    }
+    await assert.rejects(rollbackNativeSupervisorMigration(f.d, {transactionId: applied.transactionId, authorize: true}, {
+      platform: 'darwin', home: f.root, statusAgent: () => state === 'unknown' ? {status: 'unavailable', loaded: null} :
+        state === 'loaded' ? {status: 'reported', loaded: true, pid: 123} : {status: 'not_loaded', loaded: false}
+    }), /must_be_observed_absent/);
+  }
+});
+
+function childWorker(t, f, operation, transactionId = '') {
+  const script = path.join(f.root, 'migration-worker.mjs');
+  if (!fs.existsSync(script)) fs.writeFileSync(script, `
+import fs from 'node:fs';
+import {once} from 'node:events';
+import {planNativeSupervisorMigration,applyNativeSupervisorMigration,rollbackNativeSupervisorMigration} from ${JSON.stringify(new URL('../migration.mjs', import.meta.url).href)};
+const [d,op,id]=process.argv.slice(2);
+const absent={status:'reported',installed:false,state:'stopped',role:'host',action:'status',manager:'launchd-user'};
+const adapters={platform:'darwin',observeService:async()=>absent,verifyLauncher(){}};
+const send=message=>new Promise(resolve=>process.send(message,resolve));
+if(op==='apply-live'){
+ const plan=planNativeSupervisorMigration(d,{nativeApp:{path:'/Applications/Styx.app',teamID:'ABCDEFGHIJ'}},adapters);
+ try{await applyNativeSupervisorMigration(d,{plan,authorize:true},{...adapters,replaceManagedFile(file,bytes){fs.writeFileSync(file,bytes);throw Error('simulate crash after first replace')}})}catch(error){await send({stage:'uncertain',transactionId:plan.planId,error:error.message})}
+ setInterval(()=>{},1000);
+}else{
+ if(op==='rollback-hold')adapters.observeService=async()=>{await send({stage:'observing'});await once(process,'message');return absent};
+ try{const result=await rollbackNativeSupervisorMigration(d,{transactionId:id,authorize:true},adapters);await send({stage:'done',status:result.status});process.exit(0)}
+ catch(error){await send({stage:'refused',error:error.message});process.exit(2)}
+}
+`, {mode: 0o600});
+  const child = spawn(process.execPath, [script, f.d, operation, transactionId], {stdio: ['ignore', 'ignore', 'pipe', 'ipc']});
+  let stderr = ''; child.stderr.on('data', value => { stderr += value; });
+  child.on('error', () => {});
+  t.after(() => { if (child.exitCode === null && child.signalCode === null) child.kill('SIGKILL'); });
+  return {child, async message() {
+    try { return (await once(child, 'message', {signal: AbortSignal.timeout(10000)}))[0]; }
+    catch (error) { throw Error('child_message_failed:' + error.message + ':' + stderr); }
+  }};
+}
+
+test('actual live child owner blocks rollback; after SIGKILL the same exact dead-owner locks recover', {timeout: 20000}, async t => {
+  const f = fixture(t), original = [f.configFile, f.stateFile, f.serviceFile].map(file => fs.readFileSync(file));
+  const worker = childWorker(t, f, 'apply-live'), message = await worker.message();
+  assert.equal(message.stage, 'uncertain');
+  const real = {platform: 'darwin', observeService: async () => observedAbsent, verifyLauncher() {}};
+  await assert.rejects(rollbackNativeSupervisorMigration(f.d, {transactionId: message.transactionId, authorize: true}, real), /live_or_unknown_lock_owner/);
+  for (const name of lockNames) assert.equal(read(path.join(f.d, name)).ownerPid, worker.child.pid);
+  const exited = once(worker.child, 'exit'); worker.child.kill('SIGKILL'); await exited;
+  const result = await rollbackNativeSupervisorMigration(f.d, {transactionId: message.transactionId, authorize: true}, real);
+  assert.equal(result.status, 'rolled_back');
+  assert.deepEqual([f.configFile, f.stateFile, f.serviceFile].map(file => fs.readFileSync(file)), original);
+});
+
+test('actual simultaneous recovery processes admit one owner and reject the competing recovery guard', {timeout: 25000}, async t => {
+  const f = fixture(t), original = [f.configFile, f.stateFile, f.serviceFile].map(file => fs.readFileSync(file));
+  const writer = childWorker(t, f, 'apply-live'), interrupted = await writer.message();
+  const exited = once(writer.child, 'exit'); writer.child.kill('SIGKILL'); await exited;
+  const winner = childWorker(t, f, 'rollback-hold', interrupted.transactionId);
+  assert.equal((await winner.message()).stage, 'observing');
+  for (const name of lockNames) assert.equal(read(path.join(f.d, name)).ownerPid, winner.child.pid);
+  const competing = childWorker(t, f, 'rollback', interrupted.transactionId), refused = await competing.message();
+  assert.equal(refused.stage, 'refused'); assert.match(refused.error, /recovery_in_progress_or_guard_requires_inspection/);
+  const done = winner.message(); winner.child.send({release: true}); assert.equal((await done).status, 'rolled_back');
+  assert.deepEqual([f.configFile, f.stateFile, f.serviceFile].map(file => fs.readFileSync(file)), original);
 });

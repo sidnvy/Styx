@@ -135,7 +135,7 @@ try{const result=recoverGatewayRuntimeChange({stateDir,transactionId,authorize:t
  assert.equal(JSON.parse(results.find(result=>result.code===0).stdout).status,'recovered');
  assert.equal(fs.existsSync(advance),false);assert.equal(fs.existsSync(guard),false);assert.equal(readGatewayRuntime(f.runtime).version,'1.0.0');f.preserved();
 });
-test('foreign or interrupted recovery guard is preserved and exposed even without a pending journal',t=>{
+test('foreign or interrupted recovery guard is preserved and exposed after recovery completion',t=>{
  const f=interruptedFixture(t),guard=path.join(f.stateDir,'gateway-runtime-recovery.lock');
  fs.writeFileSync(guard,'foreign or interrupted owner\n',{mode:0o600});
  assert.throws(()=>recoverGatewayRuntimeChange({stateDir:f.stateDir,transactionId:f.transactionId,authorize:true},quiet),/busy_or_interrupted_lock/);
@@ -158,4 +158,13 @@ test('update release preserves a foreign replacement instead of unlinking anothe
   fs.unlinkSync(file);fs.writeFileSync(file,'foreign owner\n',{mode:0o600});throw Error('stop fixture');
  }}}),/lock_ownership_changed/);
  assert.equal(fs.readFileSync(file,'utf8'),'foreign owner\n');f.preserved();
+});
+
+test('an unexplained recovery guard without any journal never projects clean state or permits a fresh update',t=>{
+ const f=fixture(t),plan=planGatewayRuntimeChange({stateDir:f.stateDir,bundle:f.second.bundle}),guard=path.join(f.stateDir,'gateway-runtime-recovery.lock');
+ fs.writeFileSync(guard,'unknown owner\n',{mode:0o600});
+ const status=readGatewayRuntimeChange({stateDir:f.stateDir});assert.equal(status.status,'recovery_required');assert.equal(status.recoveryGuard,'present_requires_owner_inspection');
+ assert.throws(()=>applyGatewayRuntimeChange({stateDir:f.stateDir,plan,authorize:true},quiet),/busy_or_interrupted_lock/);
+ assert.equal(fs.readFileSync(guard,'utf8'),'unknown owner\n');assert.equal(fs.existsSync(path.join(f.stateDir,'advance.lock')),false);
+ assert.equal(readGatewayRuntime(f.runtime).version,'1.0.0');f.preserved();
 });

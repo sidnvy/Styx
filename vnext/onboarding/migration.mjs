@@ -3,10 +3,12 @@
 // journaled: interrupted work requires explicit rollback, never automatic replay.
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import {createHash, randomBytes} from 'node:crypto';
 import {requirePrivateDirectory, requirePrivateFile, ensurePrivateDirectory} from '../host/private-storage.mjs';
 import {macNativeAppRequirement, verifiedMacNativeLauncher} from '../host/macos-native-launcher.mjs';
-import {observeHostService} from './service-lifecycle.mjs';
+import {statusMacLaunchAgent} from '../host/macos-launchagent.mjs';
+import {validateDeployment} from './deployment-config.mjs';
 
 const kind = 'mac-native-supervisor-v1';
 const fail = code => { throw Error(code); };
@@ -15,6 +17,7 @@ const encode = value => Buffer.from(JSON.stringify(value, null, 2) + '\n');
 const absolute = value => typeof value === 'string' && path.isAbsolute(value) && path.normalize(value) === value;
 const object = value => value && typeof value === 'object' && !Array.isArray(value);
 const lockNames = ['advance.lock', 'background.lock', 'capabilities.lock'];
+const processOwnerToken = randomBytes(32).toString('hex');
 function keys(value, allowed) {
   if (!object(value) || Object.keys(value).some(key => !allowed.includes(key))) fail('migration_invalid_options');
 }
@@ -56,6 +59,7 @@ function snapshot(stateDir, nativeApp) {
   const configFile = path.join(stateDir, 'deployment.json'), stateFile = path.join(stateDir, 'state.json');
   const configBytes = bytes(configFile), stateBytes = bytes(stateFile);
   const config = JSON.parse(configBytes), state = JSON.parse(stateBytes);
+  validateDeployment(config, {checkNetwork: false});
   if (config.schema !== 1 || !['create-local', 'join-existing'].includes(config.mode) ||
       state.schema !== 1 || state.mode !== config.mode || state.configSha256 !== sha(configBytes) ||
       !Array.isArray(state.steps)) fail('migration_deployment_binding_changed');
@@ -153,7 +157,11 @@ function transactionDirectory(stateDir, transactionId) {
   if (!/^[a-f0-9]{64}$/.test(transactionId ?? '')) fail('migration_invalid_transaction_id');
   return path.join(stateDir, 'migrations', transactionId);
 }
-function lock(stateDir, transactionId, existing, name) {
+function ownerAlive(pid) {
+  if (!Number.isSafeInteger(pid) || pid < 1) return true;
+  try { process.kill(pid, 0); return true; } catch (error) { return error.code !== 'ESRCH'; }
+}
+function lock(stateDir, transactionId, existing, name, adapters) {
   const file = path.join(stateDir, name);
   let fd, value;
   if (existing && fs.existsSync(file)) {
@@ -165,13 +173,21 @@ function lock(stateDir, transactionId, existing, name) {
     if (String(info.ino) !== existing.ino || String(info.dev) !== existing.dev) {
       fs.closeSync(fd); fail('migration_lock_identity_changed');
     }
+    if (!Number.isSafeInteger(value.ownerPid) || !/^[a-f0-9]{64}$/.test(value.ownerToken ?? '') ||
+        (adapters.ownerAlive ?? ownerAlive)(value.ownerPid)) {
+      fs.closeSync(fd); fail('migration_live_or_unknown_lock_owner');
+    }
+    // The exclusive recovery guard spans all three adoptions and every await.
+    // Keep the creation token/inode, but identify the new process before writes.
+    value.ownerPid = process.pid; value.ownerToken = processOwnerToken;
+    fs.ftruncateSync(fd, 0); fs.writeFileSync(fd, encode(value)); fs.fsyncSync(fd);
   } else {
     try { fd = fs.openSync(file, 'wx', 0o600); } catch { fail('onboarding_busy_or_interrupted_lock'); }
-    value = {kind, transactionId, token: randomBytes(32).toString('hex')};
+    value = {kind, transactionId, token: randomBytes(32).toString('hex'), ownerPid: process.pid, ownerToken: processOwnerToken};
     try { fs.writeFileSync(fd, encode(value)); fs.fsyncSync(fd); } catch (error) { fs.closeSync(fd); throw error; }
   }
   const info = fs.fstatSync(fd);
-  const identity = {token: value.token, ino: String(info.ino), dev: String(info.dev)};
+  const identity = {token: value.token, ino: String(info.ino), dev: String(info.dev), ownerPid: value.ownerPid, ownerToken: value.ownerToken};
   let closed = false;
   return {identity, close(retain = false) {
     if (closed) return; closed = true;
@@ -182,14 +198,14 @@ function lock(stateDir, transactionId, existing, name) {
     } finally { fs.closeSync(fd); }
   }};
 }
-function locks(stateDir, transactionId, existing = {}) {
+function locks(stateDir, transactionId, existing = {}, adapters = {}) {
   const acquired = [];
   try {
     // All acquisitions are nonblocking. Existing background/capability flows
     // may acquire their lock before advance.lock; a conflict releases ours.
     for (const name of lockNames) {
       const wasPresent = fs.existsSync(path.join(stateDir, name));
-      const handle = lock(stateDir, transactionId, existing[name], name);
+      const handle = lock(stateDir, transactionId, existing[name], name, adapters);
       acquired.push({name, handle, wasPresent});
     }
     syncDirectory(stateDir);
@@ -200,9 +216,43 @@ function locks(stateDir, transactionId, existing = {}) {
   return {identity: Object.fromEntries(acquired.map(item => [item.name, item.handle.identity])),
     close(retain = false) { for (const item of acquired.reverse()) item.handle.close(retain); }};
 }
+function recoveryGuard(directory) {
+  const file = path.join(directory, 'recovery.lock'); let fd;
+  // Never steal a recovery guard. A process crash here requires explicit owner
+  // inspection of this private transaction; automatic stale-guard removal has
+  // a read/unlink race and could admit two recoveries.
+  try { fd = fs.openSync(file, 'wx', 0o600); } catch { fail('migration_recovery_in_progress_or_guard_requires_inspection'); }
+  const token = randomBytes(32).toString('hex');
+  fs.writeFileSync(fd, encode({ownerPid: process.pid, ownerToken: processOwnerToken, token})); fs.fsyncSync(fd); syncDirectory(directory);
+  const info = fs.fstatSync(fd);
+  return {close() {
+    try {
+      const actual = fs.lstatSync(file);
+      if (actual.ino === info.ino && actual.dev === info.dev && read(file).token === token) {
+        fs.unlinkSync(file); syncDirectory(directory);
+      }
+    } finally { fs.closeSync(fd); }
+  }};
+}
+export function observeNativeSupervisorServiceAbsence(serviceFile, adapters = {}) {
+  // Absence depends on launchd and the exact plist path, not whether a newly
+  // selected App exists or passes codesign. This keeps offline rollback usable.
+  const service = read(serviceFile), label = service.label;
+  if (!/^app\.styx\.(?:connector|host(?:-pilot)?(?:\.[a-z0-9][a-z0-9-]{0,32})?)$/.test(label ?? ''))
+    fail('migration_invalid_service_label');
+  const home = adapters.home ?? os.homedir();
+  if (!absolute(home)) fail('migration_absolute_native_home_required');
+  const plist = path.join(home, 'Library', 'LaunchAgents', label + '.plist');
+  let installed;
+  try { fs.lstatSync(plist); installed = true; } catch (error) { if (error.code !== 'ENOENT') throw error; installed = false; }
+  const native = (adapters.statusAgent ?? statusMacLaunchAgent)(label);
+  return {status: native.status === 'not_loaded' && native.loaded === false ? 'reported' : 'unavailable',
+    installed, state: native.status === 'not_loaded' && native.loaded === false ? 'stopped' : 'unknown',
+    role: 'host', action: 'status', manager: 'launchd-user'};
+}
 async function absent(serviceFile, adapters) {
   if ((adapters.platform ?? process.platform) !== 'darwin') fail('migration_native_mac_observation_required');
-  const result = await (adapters.observeService ?? (file => observeHostService({serviceConfigFile: file})))(serviceFile);
+  const result = await (adapters.observeService ?? (file => observeNativeSupervisorServiceAbsence(file, adapters)))(serviceFile);
   if (result?.status !== 'reported' || result.installed !== false || !['stopped', 'not_installed'].includes(result.state) ||
       result.role !== 'host' || result.action !== 'status' || result.manager !== 'launchd-user')
     fail('migration_host_service_must_be_observed_absent_and_stopped');
@@ -225,7 +275,7 @@ export async function applyNativeSupervisorMigration(stateDir, options = {}, ada
   if (JSON.stringify(expected.plan) !== JSON.stringify(reviewed)) fail('migration_reviewed_plan_changed');
   if (expected.plan.blockers.length) fail('migration_plan_blocked');
   const transactionId = expected.plan.planId, directory = transactionDirectory(stateDir, transactionId);
-  const ownership = locks(stateDir, transactionId);
+  const ownership = locks(stateDir, transactionId, {}, adapters);
   let attempted = false, journal;
   try {
     if (fs.existsSync(directory)) fail('migration_transaction_exists_no_replay');
@@ -284,6 +334,7 @@ function rollbackJournal(stateDir, transactionId) {
   macNativeAppRequirement(journal.nativeApp);
   if (!/^[a-f0-9]{32}$/.test(journal.reviewNonce ?? '')) fail('migration_invalid_rollback_scope');
   const original = JSON.parse(bytes(path.join(directory, 'deployment.before')));
+  validateDeployment(original, {checkNetwork: false});
   const expected = {deployment: path.join(stateDir, 'deployment.json'), state: path.join(stateDir, 'state.json'),
     service: path.join(original.host?.baseDir ?? '', 'service.json'), background: path.join(stateDir, 'background.json'), capabilities: path.join(stateDir, 'capabilities.json')};
   const names = journal.files.map(file => file.name);
@@ -315,10 +366,12 @@ export async function rollbackNativeSupervisorMigration(stateDir, options = {}, 
   keys(options, ['transactionId', 'authorize']);
   if (options.authorize !== true || !absolute(stateDir)) fail('migration_explicit_rollback_authorization_required');
   let {directory, journal} = rollbackJournal(stateDir, options.transactionId);
+  const guard = recoveryGuard(directory);
+  let ownership;
   const recoveringInterruptedLock = lockNames.some(name => fs.existsSync(path.join(stateDir, name)));
-  const ownership = locks(stateDir, options.transactionId, journal.lock);
   let attempted = false;
   try {
+    ownership = locks(stateDir, options.transactionId, journal.lock, adapters);
     await absent(journal.files.find(file => file.name === 'service').path, adapters);
     ({directory, journal} = rollbackJournal(stateDir, options.transactionId));
     checkPreserved(journal.preserved);
@@ -342,5 +395,8 @@ export async function rollbackNativeSupervisorMigration(stateDir, options = {}, 
       fail('migration_rollback_uncertain_preserve_state');
     }
     throw error;
-  } finally { ownership.close((attempted || recoveringInterruptedLock) && journal.status !== 'rolled_back'); }
+  } finally {
+    try { ownership?.close((attempted || recoveringInterruptedLock) && journal.status !== 'rolled_back'); }
+    finally { guard.close(); }
+  }
 }

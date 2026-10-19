@@ -220,3 +220,10 @@ CONFIG is a private JSON file with absolute `appPath`, `logDir`, and optional
 never reads or prints tunnel secrets, replaces credentials, or edits the App bundle.
 Keep the exact config for later status/stop/uninstall; foreign definitions fail closed.
 Neither a running job nor a tunnel health response establishes account-side acceptance.
+
+Recovery ownership is deliberately conservative. Both runtime and configuration
+recovery hold an exclusive guard and verify PID, token and file identity before
+adopting an abandoned transaction. A still-live owner is never displaced. If the
+recovery process itself dies while holding its guard, status remains recovery
+required and that guard needs explicit owner inspection; there is no blind
+stale-lock deletion or guarantee of automatic recovery from every interruption.
