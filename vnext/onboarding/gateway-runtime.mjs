@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {createHash,createPublicKey,createPrivateKey,randomBytes,sign} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
-import {ensurePrivateDirectory,requirePrivateDirectory,requirePrivateFile} from '../host/private-storage.mjs';
+import {ensurePrivateDirectory,requirePrivateDirectory,requirePrivateFile,writePrivateFile} from '../host/private-storage.mjs';
 import {verifySignedRelease,stageSignedRelease,activateRelease,activeRelease,verifiedServiceNode} from '../host/installer.mjs';
 import {GATEWAY_SOURCE_FILES,GATEWAY_ENTRYPOINT,gatewayApplicationFile} from './gateway-release-contract.mjs';
 
@@ -12,7 +12,7 @@ const fail=code=>{throw Error(code)};
 const sum=bytes=>createHash('sha256').update(bytes).digest('hex');
 const abs=value=>typeof value==='string'&&path.isAbsolute(value)&&path.normalize(value)===value;
 const nodeName=()=>process.platform==='win32'?'node.exe':'node';
-const write=(file,value)=>fs.writeFileSync(file,typeof value==='string'?value:JSON.stringify(value,null,2)+'\n',{mode:0o600,flag:'wx'});
+const write=(file,value)=>writePrivateFile(file,typeof value==='string'?value:JSON.stringify(value,null,2)+'\n');
 function trust(config,{installed=false}={}){
  if(!config||Object.keys(config).some(k=>!['bundle','publisherKeyFile','publisherSha256','baseDir'].includes(k)))fail('invalid_gateway_runtime_configuration');
  for(const k of ['bundle','publisherKeyFile','baseDir'])if(!abs(config[k]))fail('absolute_gateway_runtime_paths_required');
@@ -45,7 +45,7 @@ export function prepareGatewayRuntime(config){
  const {pem}=trust(config),verified=runtimeOnly(verifySignedRelease(config.bundle,pem));
  requirePrivateDirectory(path.dirname(config.baseDir));
  if(fs.existsSync(config.baseDir))fail('gateway_runtime_directory_already_exists');
- ensurePrivateDirectory(config.baseDir);
+ ensurePrivateDirectory(config.baseDir,{exclusive:true});
  // Interrupted setup remains inspectable and cannot be replayed as a new
  // install. Core owns the transaction journal and explicit reconciliation.
  write(path.join(config.baseDir,'runtime-state.json'),{schema:1,status:'preparing',version:verified.version});
@@ -54,7 +54,7 @@ export function prepareGatewayRuntime(config){
  stageSignedRelease({sourceDir:config.bundle,installRoot,publicKeyPem:pem});
  const source=path.join(installRoot,'releases',verified.version,'bin',nodeName());
  const destination=path.join(installRoot,nodeName());
- fs.copyFileSync(source,destination,fs.constants.COPYFILE_EXCL);fs.chmodSync(destination,0o700);
+ writePrivateFile(destination,fs.readFileSync(source),{mode:0o700});
  activateRelease(installRoot,verified.version,pem);
  const result=readGatewayRuntime(config);
  write(path.join(config.baseDir,'runtime-receipt.json'),{schema:1,...result,exec:'NOT INSTALLED',cua:'NOT INSTALLED',service:'NOT INSTALLED'});
@@ -81,11 +81,11 @@ export function buildGatewayRuntimeRelease({destination,version,privateKeyFile,n
  requirePrivateFile(privateKeyFile);
  const key=createPrivateKey(fs.readFileSync(privateKeyFile,'utf8'));if(key.asymmetricKeyType!=='ed25519')fail('ed25519_signing_key_required');
  for(const file of [nodeBinary,nodeLicenseFile]){const st=fs.lstatSync(file);if(!st.isFile()||st.isSymbolicLink())fail('nonregular_release_source');}
- fs.mkdirSync(destination,{mode:0o700});
+ ensurePrivateDirectory(destination,{exclusive:true});
  try{
   const payloads=[['bin/'+nodeName(),nodeBinary,true],['licenses/node-LICENSE',nodeLicenseFile,false]];
   const files=payloads.map(([name,source,executable])=>{
-   const dest=path.join(destination,name);fs.mkdirSync(path.dirname(dest),{mode:0o700,recursive:true});fs.copyFileSync(source,dest,fs.constants.COPYFILE_EXCL);fs.chmodSync(dest,executable?0o700:0o600);
+   const dest=path.join(destination,name);let parent=destination;for(const part of path.dirname(name).split(path.sep)){if(part==='.')continue;parent=path.join(parent,part);ensurePrivateDirectory(parent);}writePrivateFile(dest,fs.readFileSync(source),{mode:executable?0o700:0o600});
    const bytes=fs.readFileSync(dest);return {path:name,sha256:sum(bytes),size:bytes.length,executable};
   });
   const manifest={schema:1,version,platform:process.platform,arch:process.arch,files};

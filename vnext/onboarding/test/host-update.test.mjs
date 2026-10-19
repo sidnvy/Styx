@@ -76,3 +76,14 @@ test('changed publisher pin, device identity or service path binding fail before
   const before=snapshot(f.root);assert.throws(()=>api.planHostUpdate({stateDir:f.stateDir,bundle:f.releases['2.0.0'].source}),/publisher_fingerprint_mismatch|device_identity_changed|service_binding_changed/);assert.deepEqual(snapshot(f.root),before);
  }
 });
+
+ test('orphan operation and recovery guards remain visible and block a new Host update plan',t=>{
+  for(const name of ['.health-operation-lock','.health-recovery-guard']){
+   const f=fixture(t),file=path.join(f.installRoot,name);
+   fs.writeFileSync(file,'unknown-or-interrupted-owner',{mode:0o600});const before=snapshot(f.root);
+   const status=api.readHostUpdate({stateDir:f.stateDir});assert.equal(status.status,'needs_recovery');
+   assert.ok(Object.values(status.operation).includes('present_requires_owner_inspection'));
+   assert.ok(api.planHostUpdate({stateDir:f.stateDir,bundle:f.releases['2.0.0'].source}).blockers.includes('existing_host_update_requires_receipt_inspection_and_reconciliation'));
+   assert.deepEqual(snapshot(f.root),before);
+  }
+ });

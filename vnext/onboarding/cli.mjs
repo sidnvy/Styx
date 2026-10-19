@@ -1,5 +1,5 @@
 import fs from 'node:fs';
-import {requirePrivateFile,requirePrivateDirectory} from '../host/private-storage.mjs';
+import {requirePrivateFile,requirePrivateDirectory,writePrivateFile} from '../host/private-storage.mjs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {createDeployment,readDeployment,planDeployment,advanceDeployment,startDeploymentGateway,stopDeploymentGateway,controlDeploymentHostService,controlDeploymentService,inspectDeployment} from './core.mjs';
@@ -13,7 +13,7 @@ export async function main(args){
  if(cmd==='approve'&&rest.length===3&&rest[2]==='--authorize'){const api=await import('./core.mjs');return api.approveDeploymentPending(rest[0],{...privateJson(rest[1]),authorize:true});}
  if(cmd==='pairing-link'&&rest.length===3&&rest[2]==='--authorize'){
   const output=rest[1];if(!path.isAbsolute(output)||path.normalize(output)!==output||fs.existsSync(output))throw Error('fresh_private_output_required');requirePrivateDirectory(path.dirname(output));
-  const api=await import('./core.mjs');const {link,...summary}=await api.createDeploymentPairingLink(rest[0],{authorize:true});fs.writeFileSync(output,link+'\n',{flag:'wx',mode:0o600});requirePrivateFile(output);return {...summary,privateLinkFile:output};
+  const api=await import('./core.mjs');const {link,...summary}=await api.createDeploymentPairingLink(rest[0],{authorize:true});writePrivateFile(output,link+'\n');requirePrivateFile(output);return {...summary,privateLinkFile:output};
  }
  if(cmd==='inspect-link'&&rest.length===1){requirePrivateFile(rest[0]);if(fs.statSync(rest[0]).size>32768)throw Error('pairing_link_size_invalid');const {inspectPairingLink}=await import('./core.mjs');return inspectPairingLink(fs.readFileSync(rest[0],'utf8').trim());}
  if(cmd==='accept-link'&&rest.length===3&&rest[2]==='--authorize'){requirePrivateFile(rest[0]);if(fs.statSync(rest[0]).size>32768)throw Error('pairing_link_size_invalid');const {acceptPairingLink}=await import('./core.mjs');return acceptPairingLink(fs.readFileSync(rest[0],'utf8').trim(),privateJson(rest[1]));}

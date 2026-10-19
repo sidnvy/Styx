@@ -6,6 +6,57 @@ import {execFileSync} from 'node:child_process';
 // seconds. Keep ACL operations bounded without retrying a partially applied ACL.
 const WINDOWS_ACL_TIMEOUT_MS = 30_000;
 
+// The caller's wx handle remains open. A second handle permits existing
+// read/write handles but denies deletion/rename while ownership is assigned.
+// Check native file IDs before touching the security descriptor: paths alone
+// cannot authorize changing a file that another actor replaced meanwhile.
+const WINDOWS_NEW_FILE_ACL = String.raw`$ErrorActionPreference='Stop'
+$ProgressPreference='SilentlyContinue'
+Add-Type -TypeDefinition @'
+using System;
+using System.ComponentModel;
+using System.Runtime.InteropServices;
+using Microsoft.Win32.SafeHandles;
+public static class StyxNewFileIdentity {
+ [StructLayout(LayoutKind.Sequential)] struct Info {
+  public uint Attributes; public System.Runtime.InteropServices.ComTypes.FILETIME Created,Accessed,Written;
+  public uint Volume,SizeHigh,SizeLow,Links,IndexHigh,IndexLow;
+ }
+ [DllImport("kernel32.dll", SetLastError=true)] static extern bool GetFileInformationByHandle(SafeFileHandle handle,out Info info);
+ [DllImport("kernel32.dll", CharSet=CharSet.Unicode,SetLastError=true)] static extern SafeFileHandle CreateFileW(string path,uint access,uint share,IntPtr security,uint creation,uint flags,IntPtr template);
+ public static SafeFileHandle Parent(string path) {
+  var h=CreateFileW(path,0x80,3,IntPtr.Zero,3,0x02200000,IntPtr.Zero);
+  if(h.IsInvalid)throw new Win32Exception();return h;
+ }
+ public static void Check(SafeFileHandle handle,ulong expected,bool directory) {
+  Info value;if(!GetFileInformationByHandle(handle,out value))throw new Win32Exception();
+  var id=((ulong)value.IndexHigh<<32)|value.IndexLow;
+  if(id!=expected||(value.Attributes&0x400)!=0||((value.Attributes&0x10)!=0)!=directory)throw new InvalidOperationException();
+ }
+}
+'@
+$parent=$null;$stream=$null
+try {
+ $parent=[StyxNewFileIdentity]::Parent($env:STYX_NEW_FILE_PARENT)
+ [StyxNewFileIdentity]::Check($parent,[UInt64]::Parse($env:STYX_NEW_FILE_PARENT_ID),$true)
+ # The access-rights overload includes WRITE_DAC/WRITE_OWNER. ReadWrite-only
+ # handles can verify file IDs but cannot assign their own security descriptor.
+ $stream=New-Object IO.FileStream($env:STYX_NEW_PRIVATE_FILE,[IO.FileMode]::Open,[Security.AccessControl.FileSystemRights]::FullControl,[IO.FileShare]::ReadWrite,4096,[IO.FileOptions]::None)
+ [StyxNewFileIdentity]::Check($stream.SafeFileHandle,[UInt64]::Parse($env:STYX_NEW_FILE_ID),$false)
+ if($stream.Length -ne 0){throw 'new_private_file_not_empty'}
+ $current=[Security.Principal.WindowsIdentity]::GetCurrent().User
+ $acl=New-Object Security.AccessControl.FileSecurity
+ $acl.SetOwner($current);$acl.SetAccessRuleProtection($true,$false)
+ foreach($sid in @($current.Value,'S-1-5-18','S-1-5-32-544')){
+  $identity=New-Object Security.Principal.SecurityIdentifier($sid)
+  $rule=New-Object Security.AccessControl.FileSystemAccessRule($identity,'FullControl','Allow')
+  $acl.AddAccessRule($rule)
+ }
+ $stream.SetAccessControl($acl);$stream.Flush($true)
+ [StyxNewFileIdentity]::Check($stream.SafeFileHandle,[UInt64]::Parse($env:STYX_NEW_FILE_ID),$false)
+}finally{if($null -ne $stream){$stream.Dispose()};if($null -ne $parent){$parent.Dispose()}}
+`;
+
 // POSIX mode bits do not represent NTFS ACLs. Validate the actual Windows
 // DACL and reject any Allow rule for a different OS user or generic group.
 const WINDOWS_ACL_CHECK = [
@@ -72,6 +123,40 @@ function requirePrivatePath(filename,kind) {
 export function requirePrivateFile(filename) {return requirePrivatePath(filename,'file')}
 export function requirePrivateDirectory(folder) {return requirePrivatePath(folder,'directory')}
 
+const sameFile=(a,b)=>a.dev===b.dev&&a.ino===b.ino;
+// Never repairs existing files. Windows elevated tokens commonly create files
+// owned by Administrators even inside a user-owned private directory. Establish
+// the caller's ownership/DACL on this empty, exclusive file before any secret.
+export function openPrivateFile(filename,mode=0o600){
+ if(typeof filename!=='string'||!path.isAbsolute(filename)||path.normalize(filename)!==filename)throw Error('private_file_absolute_path_required');
+ if(![0o600,0o700].includes(mode))throw Error('private_file_creation_mode_invalid');
+ const parent=path.dirname(filename);requirePrivateDirectory(parent);const parentInfo=fs.lstatSync(parent,{bigint:true});
+ const fd=fs.openSync(filename,'wx',mode),created=fs.fstatSync(fd,{bigint:true});
+ try{
+  if(process.platform==='win32'){
+   execFileSync('powershell.exe',['-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(WINDOWS_NEW_FILE_ACL,'utf16le').toString('base64')],{
+    env:{...process.env,STYX_NEW_PRIVATE_FILE:filename,STYX_NEW_FILE_ID:created.ino.toString(),STYX_NEW_FILE_PARENT:parent,STYX_NEW_FILE_PARENT_ID:parentInfo.ino.toString()},
+    windowsHide:true,timeout:WINDOWS_ACL_TIMEOUT_MS,stdio:['ignore','ignore','ignore']});
+  }
+  requirePrivateDirectory(parent);requirePrivateFile(filename);
+  if(!sameFile(parentInfo,fs.lstatSync(parent,{bigint:true}))||!sameFile(created,fs.lstatSync(filename,{bigint:true}))||!sameFile(created,fs.fstatSync(fd,{bigint:true})))throw Error('private_file_creation_binding_changed');
+  return fd;
+ }catch(e){
+  fs.closeSync(fd);
+  // Delete only our own still-empty inode. A replaced path is never removed.
+  try{const current=fs.lstatSync(filename,{bigint:true});if(current.isFile()&&current.size===0n&&sameFile(created,current))fs.unlinkSync(filename);}catch{}
+  throw Error(e.code==='ETIMEDOUT'?'private_file_creation_timed_out':'private_file_creation_failed');
+ }
+}
+export function writePrivateFile(filename,data,{mode=0o600,encoding='utf8'}={}){
+ const fd=openPrivateFile(filename,mode),created=fs.fstatSync(fd,{bigint:true});let complete=false;
+ try{fs.writeFileSync(fd,data,{encoding});fs.fsyncSync(fd);complete=true;}
+ finally{
+  fs.closeSync(fd);
+  if(!complete)try{if(sameFile(created,fs.lstatSync(filename,{bigint:true})))fs.unlinkSync(filename);}catch{}
+ }
+}
+
 // One synchronous boundary, not a cache. Every path is freshly lstatted and
 // every actual Windows DACL is checked on each invocation. Never carry this
 // result across an await, callback or mutation as authorization for later use.
@@ -89,11 +174,12 @@ export function requirePrivatePaths(entries) {
 
 // Apply ACLs only to a directory created by this invocation, before placing
 // any secret in it. Existing directories are inspected without modification.
-export function ensurePrivateDirectory(folder) {
+export function ensurePrivateDirectory(folder,{exclusive=false}={}) {
   if(typeof folder!=='string'||!path.isAbsolute(folder))
     throw Error('private_directory_absolute_path_required');
-  try{fs.lstatSync(folder);return requirePrivateDirectory(folder)}
-  catch(e){if(e.code!=='ENOENT')throw e}
+  if(typeof exclusive!=='boolean')throw Error('private_directory_exclusive_invalid');
+  if(!exclusive){try{fs.lstatSync(folder);return requirePrivateDirectory(folder)}
+  catch(e){if(e.code!=='ENOENT')throw e}}
   // Non-recursive: callers must explicitly choose an existing parent. Never
   // create or change ACLs on arbitrary ancestor directories.
   fs.mkdirSync(folder,{mode:0o700});

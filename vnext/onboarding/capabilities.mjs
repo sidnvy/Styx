@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {createHash,createPublicKey,sign,constants,randomBytes} from 'node:crypto';
 import {execFileSync} from 'node:child_process';
-import {requirePrivateDirectory,requirePrivateFile} from '../host/private-storage.mjs';
+import {requirePrivateDirectory,requirePrivateFile,openPrivateFile} from '../host/private-storage.mjs';
 import {activeRelease} from '../host/installer.mjs';
 import {verifyMacPreviewApp} from '../host/macos-preview-trust.mjs';
 import {capabilityPayload} from '../shared/enrollment-protocol.mjs';
@@ -14,7 +14,7 @@ const assert=(ok,code)=>{if(!ok)throw Error(code)};
 const hash=b=>createHash('sha256').update(b).digest('hex');
 function read(file){requirePrivateFile(file);assert(fs.statSync(file).size<=1048576,'capability_file_too_large');return JSON.parse(fs.readFileSync(file,'utf8'))}
 function write(file,data){
- const temp=file+'.'+randomBytes(8).toString('hex')+'.tmp',fd=fs.openSync(temp,'wx',0o600);
+ const temp=file+'.'+randomBytes(8).toString('hex')+'.tmp',fd=openPrivateFile(temp,0o600);
  try{fs.writeFileSync(fd,JSON.stringify(data,null,2)+'\n');fs.fsyncSync(fd)}finally{fs.closeSync(fd)}
  try{fs.renameSync(temp,file)}finally{if(fs.existsSync(temp))fs.unlinkSync(temp)}
  if(process.platform!=='win32'){const dir=fs.openSync(path.dirname(file),'r');try{fs.fsyncSync(dir)}finally{fs.closeSync(dir)}}
@@ -64,7 +64,7 @@ export async function changeDeploymentCapabilities(d,{authorize=false,computer}=
  requirePrivateDirectory(d);
  const ops={prepare:(dir,enabled)=>prepare(dir,enabled,operations.trustedMacPreviewApp),owner:ownerCommand,hostStatus:observeHostService,hostControl:controlDeploymentHostService,...operations};
  const lock=path.join(d,'capabilities.lock');let fd;
- try{fd=fs.openSync(lock,'wx',0o600)}catch{throw Error('capability_busy_or_interrupted_lock')}
+ try{fd=openPrivateFile(lock,0o600)}catch{throw Error('capability_busy_or_interrupted_lock')}
  const file=path.join(d,'capabilities.json');let journal,scope,observed,wasRunning=false;
  try{
   const digest=hash(fs.readFileSync(path.join(d,'deployment.json')));

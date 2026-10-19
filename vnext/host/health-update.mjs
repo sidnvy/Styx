@@ -1,7 +1,7 @@
 // Local staged-release activation only. Never starts/restarts services, runs
 // shell commands, refreshes bootstrap, retries probes or steals stale locks.
 import fs from 'node:fs';
-import {requirePrivateDirectory} from './private-storage.mjs';
+import {requirePrivateDirectory,writePrivateFile,ensurePrivateDirectory} from './private-storage.mjs';
 import path from 'node:path';
 import {createHash,randomBytes} from 'node:crypto';
 import {activeRelease,activateRelease,verifySignedRelease} from './installer.mjs';
@@ -50,13 +50,13 @@ export async function activateHealthyRelease({installRoot,version,publicKeyPem,
   // Invalid publishers cannot cause a health callback or acquire a local lock.
   let checked=verifySignedRelease(releaseRoot,publicKeyPem,options);
   const lock=path.join(installRoot,'.health-update-lock');
-  try{fs.mkdirSync(lock,{mode:0o700})}
+  try{ensurePrivateDirectory(lock,{exclusive:true})}
   catch(e){if(e.code==='EEXIST')throw Error('health_update_in_progress');throw e}
   const owner=randomBytes(16).toString('hex');
   let timer,keepLock=false,ownerWritten=false;
   const controller=new AbortController();
   try{
-    fs.writeFileSync(path.join(lock,'owner'),owner,{flag:'wx',mode:0o600});
+    writePrivateFile(path.join(lock,'owner'),owner);
     ownerWritten=true;
     const pointer=path.join(installRoot,'active.json');
     const before=snapshot(pointer);

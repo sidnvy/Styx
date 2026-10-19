@@ -1,5 +1,5 @@
 import fs from 'node:fs';
-import {requirePrivateFile,ensurePrivateDirectory} from '../shared/private-file.mjs';
+import {requirePrivateFile,ensurePrivateDirectory,openPrivateFile} from '../shared/private-file.mjs';
 import path from 'node:path';
 import {joinPayload,capabilityPayload} from '../shared/enrollment-protocol.mjs';
 export {joinPayload};
@@ -33,7 +33,7 @@ function secretFile(filename){
 }
 function commitFile(filename,content,mode=0o600){
   const tmp=filename+'.pending-'+randomBytes(8).toString('hex');
-  const fd=fs.openSync(tmp,'wx',mode);
+  const fd=openPrivateFile(tmp,mode);
   try {fs.writeFileSync(fd,content);fs.fsyncSync(fd);}
   finally {fs.closeSync(fd);}
   try {fs.renameSync(tmp,filename)}

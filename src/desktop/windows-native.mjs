@@ -1,6 +1,4 @@
-import {mkdtemp,writeFile,rm} from 'node:fs/promises';
-import {tmpdir} from 'node:os';
-import {join} from 'node:path';
+import {powershellCommand} from './exec.mjs';
 import {createHash} from 'node:crypto';
 import {DesktopError} from './primitives.mjs';
 const script=__STYX_WINDOWS_NATIVE_SCRIPT__;
@@ -18,10 +16,8 @@ export function createWindowsNativeProbe(run){
  async function query(operation,hwnd=''){
   if(process.platform!=='win32')throw new DesktopError('driver_unavailable','Windows required');
   if(!['session','window','capture'].includes(operation)||(operation!=='session'&&!/^[1-9][0-9]{0,18}$/.test(hwnd)))throw new DesktopError('invalid_window','Invalid HWND');
-  const directory=await mkdtemp(join(tmpdir(),'styx-native-'));
   try{
-   const file=join(directory,'probe.ps1');await writeFile(file,script,{mode:0o600});
-   const raw=JSON.parse(await run('powershell.exe',['-NoProfile','-NonInteractive','-File',file,operation,hwnd]));
+   const raw=JSON.parse(await run('powershell.exe',powershellCommand(script,[operation,hwnd])));
    const session=sessionFromEvidence(raw?.sessions);
    if(!session.ready)throw new DesktopError('no_interactive_desktop','Session unavailable');
    if(operation==='session')return session;
@@ -31,7 +27,6 @@ export function createWindowsNativeProbe(run){
    const p=raw.before;
    return {identity:{hwnd:p.hwnd,pid:p.pid,start_time:p.start_time,session_id:p.session_id,session_generation:session.session_id,user_sid:p.user_sid,thread_desktop:p.thread_desktop,thread_receiving:p.thread_receiving,title_digest:hash(p.title)},image:{mimeType:'image/png',data:raw.png}};
   }catch(e){throw new DesktopError(e instanceof DesktopError?e.code:'stale_target','Native evidence unavailable');}
-  finally{await rm(directory,{recursive:true,force:true});}
  }
  return {session:()=>query('session'),window:hwnd=>query('window',hwnd),capture:hwnd=>query('capture',hwnd)};
 }

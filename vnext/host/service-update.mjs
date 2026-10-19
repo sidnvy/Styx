@@ -2,7 +2,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {randomBytes,createHash} from 'node:crypto';
-import {requirePrivateDirectory,ensurePrivateDirectory,requirePrivateFile,requirePrivatePaths} from './private-storage.mjs';
+import {requirePrivateDirectory,ensurePrivateDirectory,requirePrivateFile,requirePrivatePaths,openPrivateFile} from './private-storage.mjs';
 import {verifySignedRelease,activeRelease} from './installer.mjs';
 
 const assert=(ok,code)=>{if(!ok)throw Error(code)};
@@ -18,7 +18,7 @@ function syncDirectory(folder){
 }
 function atomic(file,bytes,mode=0o600){
   const temp=file+'.transaction-'+randomBytes(8).toString('hex');
-  const fd=fs.openSync(temp,'wx',mode);
+  const fd=openPrivateFile(temp,mode);
   try{fs.writeFileSync(fd,bytes);fs.fsyncSync(fd)}finally{fs.closeSync(fd)}
   try{fs.renameSync(temp,file);syncDirectory(path.dirname(file))}
   catch(e){try{fs.unlinkSync(temp)}catch{};throw e}
@@ -31,6 +31,64 @@ function roots(installRoot){
   return {lock:path.join(installRoot,'.health-update-lock'),
     records:path.join(installRoot,'update-transactions'),pointer:path.join(installRoot,'active.json')};
 }
+// Serialize live update/recovery operations separately from the durable update
+// receipt lock. A matching transaction id alone cannot authorize concurrent
+// recovery while an updater or another observer is still running.
+async function guardedOperation({installRoot,transactionId,recover=false},operation){
+  requirePrivateDirectory(installRoot);
+  const operator=path.join(installRoot,'.health-operation-lock');
+  const recovery=path.join(installRoot,'.health-recovery-guard');
+  const held=[];
+  const acquire=file=>{
+    let fd;try{fd=openPrivateFile(file,0o600)}catch{throw Error('health_update_operation_busy')}
+    const identity=fs.fstatSync(fd),value=JSON.stringify({schema:1,pid:process.pid,
+      transactionId,token:randomBytes(32).toString('hex')})+'\n';
+    // An incompletely initialized guard is deliberately retained for review.
+    try{fs.writeFileSync(fd,value);fs.fsyncSync(fd);syncDirectory(installRoot)}
+    catch(error){fs.closeSync(fd);throw error}
+    held.push({file,fd,identity,value});
+  };
+  const absent=file=>{try{fs.lstatSync(file);throw Error('health_update_operation_busy')}
+    catch(error){if(error.code!=='ENOENT')throw error}};
+  try{
+    if(recover){
+      // Never steal an interrupted recovery guard: two recoverers could both
+      // observe a dead updater and otherwise remove one another's new lock.
+      acquire(recovery);
+      let info;try{info=requirePrivateFile(operator)}catch(error){if(error.code!=='ENOENT')throw error}
+      if(info){
+        const value=fs.readFileSync(operator,'utf8');let owner;
+        try{owner=JSON.parse(value)}catch{throw Error('health_update_operation_busy')}
+        assert(owner.schema===1&&owner.transactionId===transactionId&&
+          Number.isSafeInteger(owner.pid)&&owner.pid>0&&/^[a-f0-9]{64}$/.test(owner.token??''),
+          'health_update_operation_busy');
+        let dead=false;try{process.kill(owner.pid,0)}catch(error){dead=error.code==='ESRCH'}
+        assert(dead,'health_update_operation_busy');
+        const current=requirePrivateFile(operator);
+        assert(current.ino===info.ino&&current.dev===info.dev&&fs.readFileSync(operator,'utf8')===value,
+          'health_update_operation_ownership_changed');
+        fs.unlinkSync(operator);syncDirectory(installRoot);
+      }
+    }else absent(recovery);
+    acquire(operator);
+    // Close the check/create race with a recoverer that acquired its guard
+    // immediately after a new update checked it. Neither may mutate then.
+    if(!recover)absent(recovery);
+    return await operation();
+  }finally{
+    let changed=false;
+    for(const item of held.reverse()){
+      try{
+        const current=requirePrivateFile(item.file);
+        assert(current.ino===item.identity.ino&&current.dev===item.identity.dev&&
+          fs.readFileSync(item.file,'utf8')===item.value,'health_update_operation_ownership_changed');
+        fs.unlinkSync(item.file);syncDirectory(installRoot);
+      }catch{changed=true}finally{fs.closeSync(item.fd)}
+    }
+    if(changed)throw Error('health_update_operation_ownership_changed');
+  }
+}
+
 function receiptFile(records,id){assert(idPattern.test(id??''),'invalid_transaction_id');return path.join(records,id+'.json')}
 function save(ctx,phase,extra={}){
   ctx.record={...ctx.record,...extra,phase,updatedAt:new Date().toISOString()};
@@ -128,7 +186,7 @@ function failure(ctx,error){
   return {...result(ctx),status:'needs_recovery',reason};
 }
 
-export async function updateServiceRelease({installRoot,version,publicKeyPem,
+async function runServiceUpdate({installRoot,version,publicKeyPem,transactionId,
   stopService,startService,checkHealth,timeoutMs=10000,
   platform=process.platform,arch=process.arch}={}){
   for(const fn of [stopService,startService,checkHealth])assert(typeof fn==='function','trusted_service_callbacks_required');
@@ -139,9 +197,8 @@ export async function updateServiceRelease({installRoot,version,publicKeyPem,
   const previous=checked(installRoot,current.version,publicKeyPem,options);
   const candidate=checked(installRoot,version,publicKeyPem,options);
   ensurePrivateDirectory(locations.records);
-  try{fs.mkdirSync(locations.lock,{mode:0o700})}
+  try{ensurePrivateDirectory(locations.lock,{exclusive:true})}
   catch(e){if(e.code==='EEXIST')throw Error('health_update_in_progress');throw e}
-  const transactionId=randomBytes(16).toString('hex');
   const ctx={...locations,installRoot,record:{schema:1,transactionId,
     previousVersion:previous.version,candidateVersion:version,
     previousManifest:previous.sha256,candidateManifest:candidate.sha256,
@@ -215,7 +272,7 @@ export function inspectServiceUpdate({installRoot,transactionId}={}){
   return record;
 }
 
-export async function recoverServiceUpdate({installRoot,publicKeyPem,transactionId,
+async function runServiceRecovery({installRoot,publicKeyPem,transactionId,
   confirmStopped,timeoutMs=10000,platform=process.platform,arch=process.arch}={}){
   assert(typeof confirmStopped==='function','trusted_stopped_observer_required');timeout(timeoutMs);
   const locations=roots(installRoot),record=inspectServiceUpdate({installRoot,transactionId});
@@ -240,4 +297,15 @@ export async function recoverServiceUpdate({installRoot,publicKeyPem,transaction
     switchFiles(ctx,previous);atomic(ctx.pointer,record.originalPointer);
     save(ctx,'recovered_stopped',{expectedPointer:record.originalPointer});releaseLock(ctx);return result(ctx);
   }catch(error){return failure(ctx,error)}
+}
+
+export async function updateServiceRelease(options={}){
+  const transactionId=randomBytes(16).toString('hex');
+  return guardedOperation({installRoot:options.installRoot,transactionId},
+    ()=>runServiceUpdate({...options,transactionId}));
+}
+export async function recoverServiceUpdate(options={}){
+  assert(idPattern.test(options.transactionId??''),'invalid_transaction_id');
+  return guardedOperation({installRoot:options.installRoot,transactionId:options.transactionId,recover:true},
+    ()=>runServiceRecovery(options));
 }

@@ -11,7 +11,7 @@ import {readGatewayRuntime,verifyGatewayRuntimeRelease} from './gateway-runtime.
 import {gatewayServiceIdentity} from './gateway-service.mjs';
 import {platformGatewayService} from './gateway-platform-services.mjs';
 import {stageSignedRelease,activateRelease} from '../host/installer.mjs';
-import {ensurePrivateDirectory,requirePrivateDirectory,requirePrivateFile} from '../host/private-storage.mjs';
+import {ensurePrivateDirectory,requirePrivateDirectory,requirePrivateFile,openPrivateFile,writePrivateFile} from '../host/private-storage.mjs';
 
 const fail=code=>{throw Error(code)};
 const sum=bytes=>createHash('sha256').update(bytes).digest('hex');
@@ -36,7 +36,7 @@ function syncRelease(root,verified){
  syncDirectory(path.dirname(root));
 }
 function atomic(file,value){
- const tmp=file+'.'+randomBytes(8).toString('hex')+'.tmp',fd=fs.openSync(tmp,'wx',0o600);
+ const tmp=file+'.'+randomBytes(8).toString('hex')+'.tmp',fd=openPrivateFile(tmp,0o600);
  try{fs.writeFileSync(fd,typeof value==='string'||Buffer.isBuffer(value)?value:JSON.stringify(value,null,2)+'\n');fs.fsyncSync(fd);}finally{fs.closeSync(fd);}
  try{fs.renameSync(tmp,file);syncDirectory(path.dirname(file));}finally{fs.rmSync(tmp,{force:true});}
 }
@@ -87,7 +87,7 @@ function lock(stateDir,{transactionId,recover=false}={}){
  const file=path.join(stateDir,'advance.lock'),guardFile=path.join(stateDir,'gateway-runtime-recovery.lock');
  const held=[];
  const acquire=target=>{
-  let fd;try{fd=fs.openSync(target,'wx',0o600);}catch{fail('onboarding_busy_or_interrupted_lock');}
+  let fd;try{fd=openPrivateFile(target,0o600);}catch{fail('onboarding_busy_or_interrupted_lock');}
   const identity=fs.fstatSync(fd),token=randomBytes(32).toString('hex');
   const value=JSON.stringify({schema:1,kind:'gateway-runtime-change',pid:process.pid,transactionId,token})+'\n';
   const handle={target,fd,identity,value};
@@ -215,7 +215,7 @@ export function applyGatewayRuntimeChange({stateDir,plan,authorize=false}={}, {o
   if(JSON.stringify(reviewed)!==JSON.stringify(plan))fail('gateway_runtime_change_review_stale');
   const scope=deployment(stateDir),observation=quiet(scope,stateDir,observeQuiescence),active=readGatewayRuntime(scope.config),target=targetRelease(scope,{bundle:plan.target.bundle});
   const backup=path.join(scope.config.baseDir,'runtime-node-backup-'+id);
-  fs.copyFileSync(active.nodeBinary,backup,fs.constants.COPYFILE_EXCL);fs.chmodSync(backup,0o700);syncFile(backup);syncDirectory(scope.config.baseDir);
+  writePrivateFile(backup,fs.readFileSync(active.nodeBinary),{mode:0o700});syncFile(backup);syncDirectory(scope.config.baseDir);
   const record={schema:1,id,status:'prepared',plan,configSha256:scope.configSha256,backupNode:backup,backupNodeSha256:hash(backup),backupPointer:fs.readFileSync(path.join(scope.installRoot,'active.json')).toString('base64'),quiescence:observation,startedAt:new Date().toISOString()};
   checkpoint(scope,record,'prepared',afterCheckpoint);
   stageSignedRelease({sourceDir:target.source,installRoot:scope.installRoot,publicKeyPem:target.pem});
@@ -226,7 +226,7 @@ export function applyGatewayRuntimeChange({stateDir,plan,authorize=false}={}, {o
   if(hash(path.join(scope.installRoot,'active.json'))!==plan.current.pointerSha256||hash(active.nodeBinary)!==plan.current.nodeSha256)fail('gateway_runtime_change_review_stale');
   checkpoint(scope,record,'committing',afterCheckpoint);
   const tmp=active.nodeBinary+'.switch-'+id;
-  fs.copyFileSync(path.join(scope.installRoot,'releases',plan.target.version,'bin',nodeName()),tmp,fs.constants.COPYFILE_EXCL);fs.chmodSync(tmp,0o700);syncFile(tmp);fs.renameSync(tmp,active.nodeBinary);syncDirectory(scope.installRoot);
+  writePrivateFile(tmp,fs.readFileSync(path.join(scope.installRoot,'releases',plan.target.version,'bin',nodeName())),{mode:0o700});syncFile(tmp);fs.renameSync(tmp,active.nodeBinary);syncDirectory(scope.installRoot);
   afterCheckpoint?.('node_switched');
   activateRelease(scope.installRoot,plan.target.version,target.pem);
   syncFile(path.join(scope.installRoot,'active.json'));syncDirectory(scope.installRoot);
@@ -257,7 +257,7 @@ export function recoverGatewayRuntimeChange({stateDir,transactionId,authorize=fa
   if(currentPointer.manifest_sha256!==(currentPointer.version===record.plan.current.version?record.plan.current.manifestSha256:record.plan.target.manifestSha256))fail('runtime_change_active_generation_changed');
   const currentNode=path.join(scope.installRoot,nodeName()),tmp=currentNode+'.recover-'+record.id;
   if(fs.existsSync(tmp))fail('runtime_change_recovery_file_requires_inspection');
-  fs.copyFileSync(record.backupNode,tmp,fs.constants.COPYFILE_EXCL);fs.chmodSync(tmp,0o700);syncFile(tmp);fs.renameSync(tmp,currentNode);syncDirectory(scope.installRoot);atomic(path.join(scope.installRoot,'active.json'),pointer);
+  writePrivateFile(tmp,fs.readFileSync(record.backupNode),{mode:0o700});syncFile(tmp);fs.renameSync(tmp,currentNode);syncDirectory(scope.installRoot);atomic(path.join(scope.installRoot,'active.json'),pointer);
   const result=readGatewayRuntime(scope.config);if(result.manifestSha256!==record.plan.current.manifestSha256)fail('runtime_change_recovery_verification_failed');
   receipt(scope,result);
   checkpoint(scope,record,'recovered');archive(scope,record);fs.rmSync(record.backupNode,{force:true});

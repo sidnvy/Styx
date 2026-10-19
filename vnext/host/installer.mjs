@@ -1,5 +1,5 @@
 import fs from 'node:fs';
-import {requirePrivateDirectory,ensurePrivateDirectory} from './private-storage.mjs';
+import {requirePrivateDirectory,requirePrivateFile,ensurePrivateDirectory,openPrivateFile,writePrivateFile} from './private-storage.mjs';
 import path from 'node:path';
 import {
   createHash,createPublicKey,verify,randomBytes
@@ -17,6 +17,7 @@ const hash=file=>{
   return h.digest('hex');
 };
 function assert(yes,reason){if(!yes)throw Error(reason)}
+function existingInfo(file){try{return fs.lstatSync(file)}catch(error){if(error.code==='ENOENT')return null;throw error}}
 function privateRoot(root,{create=false}={}) {
   assert(typeof root==='string'&&path.isAbsolute(root),'absolute_install_root_required');
   if(create)ensurePrivateDirectory(root);
@@ -24,9 +25,35 @@ function privateRoot(root,{create=false}={}) {
 }
 function fileAtomic(dest,content){
   const temp=dest+'.new-'+randomBytes(8).toString('hex');
-  fs.writeFileSync(temp,content,{flag:'wx',mode:0o600});
+  try{requirePrivateFile(dest)}catch(error){if(error.code!=='ENOENT')throw error}
+  writePrivateFile(temp,content);
   try{fs.renameSync(temp,dest)}
   catch(e){fs.rmSync(temp,{force:true});throw e}
+}
+// New files receive native private ownership before signed bytes are written.
+// Copy through the exclusively created descriptor: COPYFILE_EXCL alone does
+// not establish the current SID as Owner for an elevated Windows process.
+function copyPrivate(source,destination,mode=0o600){
+  const input=fs.openSync(source,'r');let output;
+  try{
+    output=openPrivateFile(destination,mode);
+    const block=Buffer.allocUnsafe(1024*1024);
+    let count;
+    while((count=fs.readSync(input,block,0,block.length,null))>0){
+      let written=0;
+      while(written<count)written+=fs.writeSync(output,block,written,count-written);
+    }
+    fs.fsyncSync(output);
+  }finally{fs.closeSync(input);if(output!==undefined)fs.closeSync(output)}
+}
+function privateSubdirectory(root,directory){
+  const relative=path.relative(root,directory);
+  assert(relative===''||!relative.startsWith('..'+path.sep)&&relative!=='..'&&!path.isAbsolute(relative),'invalid_private_release_directory');
+  requirePrivateDirectory(root);
+  let current=root;
+  for(const part of relative.split(path.sep).filter(Boolean)){
+    current=path.join(current,part);ensurePrivateDirectory(current);
+  }
 }
 const list=(root)=>{
   const names=[];
@@ -91,36 +118,36 @@ export function stageSignedRelease({sourceDir,installRoot,publicKeyPem,
   // contents. They are not an alternative unsigned update path.
   for(const filename of ['private-storage.mjs','installer.mjs','launch.mjs']) {
     const destShim=path.join(installRoot,filename);
-    if(!fs.existsSync(destShim)){
+    const existing=existingInfo(destShim);
+    if(!existing){
       const sourceShim=fileURLToPath(new URL('./'+filename,import.meta.url));
-      fs.copyFileSync(sourceShim,destShim,fs.constants.COPYFILE_EXCL);
-      if(process.platform!=='win32')fs.chmodSync(destShim,0o600);
+      copyPrivate(sourceShim,destShim);
     } else {
-      const stat=fs.lstatSync(destShim);
-      assert(stat.isFile()&&!stat.isSymbolicLink(),
+      assert(existing.isFile()&&!existing.isSymbolicLink(),
         'invalid_installer_shim');
+      requirePrivateFile(destShim);
     }
   }
   const releases=path.join(installRoot,'releases');
-  fs.mkdirSync(releases,{mode:0o700,recursive:true});
+  ensurePrivateDirectory(releases);
   const dest=path.join(releases,receipt.version);
-  if(fs.existsSync(dest)){
+  if(existingInfo(dest)){
+    requirePrivateDirectory(dest);
     const existing=verifySignedRelease(dest,publicKeyPem,{platform,arch});
     assert(existing.sha256===receipt.sha256,'existing_release_conflict');
     return {status:'already_staged',version:receipt.version};
   }
   const temp=path.join(releases,'.stage-'+randomBytes(8).toString('hex'));
-  fs.mkdirSync(temp,{mode:0o700});
+  ensurePrivateDirectory(temp,{exclusive:true});
   try{
     for(const entry of receipt.manifest.files){
       const from=path.join(sourceDir,...entry.path.split('/'));
       const to=path.join(temp,...entry.path.split('/'));
-      fs.mkdirSync(path.dirname(to),{mode:0o700,recursive:true});
-      fs.copyFileSync(from,to,fs.constants.COPYFILE_EXCL);
-      fs.chmodSync(to,entry.executable?0o700:0o600);
+      privateSubdirectory(temp,path.dirname(to));
+      copyPrivate(from,to,entry.executable?0o700:0o600);
     }
-    fs.copyFileSync(path.join(sourceDir,'manifest.json'),path.join(temp,'manifest.json'));
-    fs.copyFileSync(path.join(sourceDir,'manifest.sig'),path.join(temp,'manifest.sig'));
+    copyPrivate(path.join(sourceDir,'manifest.json'),path.join(temp,'manifest.json'));
+    copyPrivate(path.join(sourceDir,'manifest.sig'),path.join(temp,'manifest.sig'));
     verifySignedRelease(temp,publicKeyPem,{platform,arch});
     fs.renameSync(temp,dest);
   }catch(e){fs.rmSync(temp,{recursive:true,force:true});throw e}
@@ -128,7 +155,12 @@ export function stageSignedRelease({sourceDir,installRoot,publicKeyPem,
 }
 function readPointer(installRoot) {
   const activeFile=path.join(installRoot,'active.json');
-  if(!fs.existsSync(activeFile))return null;
+  if(!fs.existsSync(activeFile)){
+    // A dangling link is an existing foreign destination, never a fresh pointer.
+    try{fs.lstatSync(activeFile);throw Error('invalid_active_pointer')}catch(error){if(error.code!=='ENOENT')throw error}
+    return null;
+  }
+  requirePrivateFile(activeFile);
   const data=JSON.parse(fs.readFileSync(activeFile,'utf8'));
   assert(data.schema===1&&VERSION.test(data.version??'')&&
     (data.previous===null||data.previous===undefined||
@@ -159,9 +191,10 @@ export function refreshVerifiedBootstrap(installRoot,publicKeyPem,version,
   // running executable; runtime changes require a stopped-service/offline switch.
   if(verified.platform==='win32' && signed.has(runtime)){
     const dest=path.join(installRoot,'node.exe');
-    if(fs.existsSync(dest)){
-      const st=fs.lstatSync(dest);
+    const st=existingInfo(dest);
+    if(st){
       assert(st.isFile()&&!st.isSymbolicLink(),'untrusted_bootstrap_destination');
+      requirePrivateFile(dest);
       assert(hash(dest)===hash(path.join(releaseRoot,runtime)),
         'windows_node_runtime_requires_offline_switch');
     }
@@ -170,15 +203,15 @@ export function refreshVerifiedBootstrap(installRoot,publicKeyPem,version,
   try {
     for(const name of bootstrap){
       const dest=path.join(installRoot,path.basename(name));
-      if(fs.existsSync(dest)){
-        const st=fs.lstatSync(dest);
+      const st=existingInfo(dest);
+      if(st){
         assert(st.isFile()&&!st.isSymbolicLink(),
           'untrusted_bootstrap_destination');
+        requirePrivateFile(dest);
       }
-      if(name===runtime && verified.platform==='win32' && fs.existsSync(dest))continue;
+      if(name===runtime && verified.platform==='win32' && st)continue;
       const tmp=dest+'.signed-'+randomBytes(8).toString('hex');
-      fs.copyFileSync(path.join(releaseRoot,name),tmp,fs.constants.COPYFILE_EXCL);
-      fs.chmodSync(tmp,name===runtime?0o700:0o600);
+      copyPrivate(path.join(releaseRoot,name),tmp,name===runtime?0o700:0o600);
       staged.push([tmp,dest]);
     }
     // Update verifier first: the older launch shim can safely import the

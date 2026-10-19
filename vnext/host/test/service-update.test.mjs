@@ -157,21 +157,21 @@ test('killed updater leaves durable start intent; recovery never invokes an old 
   {timeout:90000},async t=>{
   const f=fixture(t);
   const moduleURL=new URL('../service-update.mjs',import.meta.url).href;
-  const code=`import {updateServiceRelease} from ${JSON.stringify(moduleURL)};
+  const ready=path.join(f.root,'updater-started');
+  const code=`import fs from 'node:fs';import {updateServiceRelease} from ${JSON.stringify(moduleURL)};
     await updateServiceRelease({...${JSON.stringify(f.args)},
       stopService:async()=>true,
-      startService:async()=>{process.stdout.write('awaiting-owner\\n');await new Promise(()=>{})},
+      startService:async()=>{fs.writeFileSync(${JSON.stringify(ready)},'started',{mode:0o600});await new Promise(()=>{})},
       checkHealth:async()=>true});`;
-  const child=spawn(process.execPath,['--input-type=module','-e',code],{stdio:['ignore','pipe','pipe']});
+  const child=spawn(process.execPath,['--input-type=module','-e',code],{stdio:'ignore'});
   t.after(()=>{if(child.exitCode===null)child.kill('SIGKILL')});
   const exited=once(child,'exit');
-  await new Promise((resolve,reject)=>{
-    const timer=setTimeout(()=>reject(Error('child_start_intent_not_observed')),60000);
-    let output='';
-    child.stdout.on('data',bytes=>{output+=bytes;if(output.includes('awaiting-owner')){clearTimeout(timer);resolve()}});
-    child.once('error',e=>{clearTimeout(timer);reject(e)});
-    child.once('exit',()=>{clearTimeout(timer);if(!output.includes('awaiting-owner'))reject(Error('child_exited_before_intent'))});
-  });
+  const deadline=Date.now()+60000;
+  while(!fs.existsSync(ready)){
+    assert.equal(child.exitCode,null,'child_exited_before_intent');
+    assert.ok(Date.now()<deadline,'child_start_intent_not_observed');
+    await new Promise(resolve=>setTimeout(resolve,20));
+  }
   child.kill('SIGKILL');await exited;
   const transactionId=fs.readdirSync(path.join(f.installRoot,'update-transactions'))[0].replace('.json','');
   assert.equal(inspectServiceUpdate({...f.args,transactionId}).phase,'start_intent');
@@ -223,4 +223,59 @@ test('permissions modified across awaited health callback fail fresh transaction
   assert.equal(result.status,'needs_recovery');assert.equal(starts,1);
   assert.equal(activeRelease(f.installRoot,f.publicKeyPem).version,'candidate');
   assert.equal(fs.existsSync(path.join(f.installRoot,'.health-update-lock')),true);
+});
+
+test('recovery refuses a live updater before invoking its observer',async t=>{
+  const f=fixture(t);let entered,finish;
+  const started=new Promise(resolve=>{entered=resolve});
+  const update=updateServiceRelease({...f.args,...callbacks([]),timeoutMs:1000,
+    startService:()=>{entered();return new Promise(resolve=>{finish=resolve})}});
+  await started;
+  const transactionId=fs.readdirSync(path.join(f.installRoot,'update-transactions'))[0].replace('.json','');
+  let observed=false;
+  await assert.rejects(recoverServiceUpdate({...f.args,transactionId,confirmStopped:()=>{observed=true;return true}}),
+    /health_update_operation_busy/);
+  assert.equal(observed,false);
+  finish(true);assert.equal((await update).status,'activated');
+});
+
+test('only one recovery observer may run and an interrupted recovery guard blocks new work',async t=>{
+  const f=fixture(t),pending=await updateServiceRelease({...f.args,...callbacks([]),stopService:()=>false});
+  let entered,finish;const observing=new Promise(resolve=>{entered=resolve});
+  const recovery=recoverServiceUpdate({...f.args,transactionId:pending.transactionId,
+    confirmStopped:()=>{entered();return new Promise(resolve=>{finish=resolve})},timeoutMs:1000});
+  await observing;
+  let observed=false;
+  await assert.rejects(recoverServiceUpdate({...f.args,transactionId:pending.transactionId,
+    confirmStopped:()=>{observed=true;return true}}),/health_update_operation_busy/);
+  assert.equal(observed,false);finish(true);
+  assert.equal((await recovery).status,'recovered_stopped');
+  const guard=path.join(f.installRoot,'.health-recovery-guard');
+  fs.writeFileSync(guard,'interrupted-or-unknown-owner',{mode:0o600});
+  await assert.rejects(updateServiceRelease({...f.args,...callbacks([])}),/health_update_operation_busy/);
+  await assert.rejects(recoverServiceUpdate({...f.args,transactionId:pending.transactionId,
+    confirmStopped:()=>true}),/health_update_operation_busy/);
+  assert.equal(fs.readFileSync(guard,'utf8'),'interrupted-or-unknown-owner');
+});
+
+test('killed recovery retains its guard and cannot be automatically replayed', {timeout:90000},async t=>{
+  const f=fixture(t),pending=await updateServiceRelease({...f.args,...callbacks([]),stopService:()=>false});
+  const ready=path.join(f.root,'recovery-observing'),moduleURL=new URL('../service-update.mjs',import.meta.url).href;
+  const code=`import fs from 'node:fs';import {recoverServiceUpdate} from ${JSON.stringify(moduleURL)};
+    await recoverServiceUpdate({...${JSON.stringify(f.args)},transactionId:${JSON.stringify(pending.transactionId)},
+      confirmStopped:async()=>{fs.writeFileSync(${JSON.stringify(ready)},'observing',{mode:0o600});await new Promise(()=>{})}});`;
+  const child=spawn(process.execPath,['--input-type=module','-e',code],{stdio:'ignore'});
+  t.after(()=>{if(child.exitCode===null)child.kill('SIGKILL')});const exited=once(child,'exit');
+  const deadline=Date.now()+60000;
+  while(!fs.existsSync(ready)){
+    assert.equal(child.exitCode,null,'recovery_child_exited_before_observation');
+    assert.ok(Date.now()<deadline,'recovery_child_not_observed');await new Promise(resolve=>setTimeout(resolve,20));
+  }
+  child.kill('SIGKILL');await exited;
+  const guard=path.join(f.installRoot,'.health-recovery-guard'),before=fs.readFileSync(guard,'utf8');
+  let observed=false;
+  await assert.rejects(recoverServiceUpdate({...f.args,transactionId:pending.transactionId,
+    confirmStopped:()=>{observed=true;return true}}),/health_update_operation_busy/);
+  assert.equal(observed,false);assert.equal(fs.readFileSync(guard,'utf8'),before);
+  assert.equal(fs.readFileSync(f.pointer,'utf8'),f.before);
 });

@@ -1,6 +1,6 @@
-import {fileURLToPath} from 'node:url';
-import {localDesktopExec} from '../../src/desktop/exec.mjs';
-const probe=fileURLToPath(new URL('../windows-session-probe.ps1',import.meta.url));
+import {readFileSync} from 'node:fs';
+import {localDesktopExec,powershellCommand} from '../../src/desktop/exec.mjs';
+const probe=new URL('../windows-session-probe.ps1',import.meta.url);
 // Accept only the complete native evidence conjunction, never truthy/partial status.
 export function sessionFromEvidence(value){
  const valid=e=>e?.supported===true&&e.same_user===true&&e.input_receiving===true&&e.thread_receiving===true&&
@@ -15,7 +15,7 @@ export function sessionFromEvidence(value){
 export function createWindowsSessionProbe(run=localDesktopExec,{platform=process.platform}={}){
  return async()=>{
   if(platform!=='win32')return {ready:false};
-  try{return sessionFromEvidence(JSON.parse(await run('powershell.exe',['-NoProfile','-NonInteractive','-File',probe],{timeout_ms:10000})));}
+  try{return sessionFromEvidence(JSON.parse(await run('powershell.exe',powershellCommand(readFileSync(probe,'utf8')),{timeout_ms:10000})));}
   catch{return {ready:false};}
  };
 }

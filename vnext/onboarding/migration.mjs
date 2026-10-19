@@ -5,7 +5,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import {createHash, randomBytes} from 'node:crypto';
-import {requirePrivateDirectory, requirePrivateFile, ensurePrivateDirectory} from '../host/private-storage.mjs';
+import {requirePrivateDirectory, requirePrivateFile, ensurePrivateDirectory,openPrivateFile,writePrivateFile} from '../host/private-storage.mjs';
 import {macNativeAppRequirement, verifiedMacNativeLauncher} from '../host/macos-native-launcher.mjs';
 import {statusMacLaunchAgent} from '../host/macos-launchagent.mjs';
 import {validateDeployment} from './deployment-config.mjs';
@@ -33,7 +33,7 @@ function syncDirectory(directory) {
 }
 function atomic(file, data) {
   const temp = file + '.' + randomBytes(8).toString('hex') + '.tmp';
-  const fd = fs.openSync(temp, 'wx', 0o600);
+  const fd = openPrivateFile(temp,0o600);
   try { fs.writeFileSync(fd, data); fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
   try {
     requirePrivateFile(temp); fs.renameSync(temp, file);
@@ -182,7 +182,7 @@ function lock(stateDir, transactionId, existing, name, adapters) {
     value.ownerPid = process.pid; value.ownerToken = processOwnerToken;
     fs.ftruncateSync(fd, 0); fs.writeFileSync(fd, encode(value)); fs.fsyncSync(fd);
   } else {
-    try { fd = fs.openSync(file, 'wx', 0o600); } catch { fail('onboarding_busy_or_interrupted_lock'); }
+    try { fd = openPrivateFile(file,0o600); } catch { fail('onboarding_busy_or_interrupted_lock'); }
     value = {kind, transactionId, token: randomBytes(32).toString('hex'), ownerPid: process.pid, ownerToken: processOwnerToken};
     try { fs.writeFileSync(fd, encode(value)); fs.fsyncSync(fd); } catch (error) { fs.closeSync(fd); throw error; }
   }
@@ -221,7 +221,7 @@ function recoveryGuard(directory) {
   // Never steal a recovery guard. A process crash here requires explicit owner
   // inspection of this private transaction; automatic stale-guard removal has
   // a read/unlink race and could admit two recoveries.
-  try { fd = fs.openSync(file, 'wx', 0o600); } catch { fail('migration_recovery_in_progress_or_guard_requires_inspection'); }
+  try { fd = openPrivateFile(file,0o600); } catch { fail('migration_recovery_in_progress_or_guard_requires_inspection'); }
   const token = randomBytes(32).toString('hex');
   fs.writeFileSync(fd, encode({ownerPid: process.pid, ownerToken: processOwnerToken, token})); fs.fsyncSync(fd); syncDirectory(directory);
   const info = fs.fstatSync(fd);
@@ -292,8 +292,8 @@ export async function applyNativeSupervisorMigration(stateDir, options = {}, ada
     const files = current.snapshot.files.map((file, i) => ({...current.plan.changes[i],
       beforeFile: file.name + '.before', afterFile: file.name + '.after'}));
     for (let i = 0; i < files.length; i++) {
-      fs.writeFileSync(path.join(directory, files[i].beforeFile), current.snapshot.files[i].before, {flag: 'wx', mode: 0o600});
-      fs.writeFileSync(path.join(directory, files[i].afterFile), current.after[i], {flag: 'wx', mode: 0o600});
+      writePrivateFile(path.join(directory, files[i].beforeFile), current.snapshot.files[i].before);
+      writePrivateFile(path.join(directory, files[i].afterFile), current.after[i]);
       for (const name of [files[i].beforeFile, files[i].afterFile]) {
         const fd = fs.openSync(path.join(directory, name), 'r'); try { fs.fsyncSync(fd); } finally { fs.closeSync(fd); }
       }

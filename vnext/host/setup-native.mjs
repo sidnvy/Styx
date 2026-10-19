@@ -4,12 +4,12 @@ import path from 'node:path';
 import {createHash,createPublicKey} from 'node:crypto';
 import {execFileSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
-import {requirePrivateDirectory,requirePrivateFile,ensurePrivateDirectory} from './private-storage.mjs';
+import {requirePrivateDirectory,requirePrivateFile,ensurePrivateDirectory,writePrivateFile} from './private-storage.mjs';
 import {verifyMacPreviewApp} from './macos-preview-trust.mjs';
 import {verifySignedRelease,stageSignedRelease,activateRelease,refreshVerifiedBootstrap} from './installer.mjs';
 const assert=(ok,code)=>{if(!ok)throw Error(code)};
 const absolute=p=>typeof p==='string'&&path.isAbsolute(p)&&path.normalize(p)===p;
-const write=(p,value)=>fs.writeFileSync(p,typeof value==='string'?value:JSON.stringify(value,null,2)+'\n',{flag:'wx',mode:0o600});
+const write=(p,value)=>writePrivateFile(p,typeof value==='string'?value:JSON.stringify(value,null,2)+'\n');
 export function prepareNativeSetup(config){
   const {bundle,publisherKeyFile,publisherSha256,baseDir,gatewayUrl,label,computer=false,gatewayCaFile}=config;
   for(const p of [bundle,publisherKeyFile,baseDir])assert(absolute(p),'absolute_setup_paths_required');
@@ -42,7 +42,7 @@ export function prepareNativeSetup(config){
   // Reject existing state before any mutation; interrupted preparation is never replayed.
   requirePrivateDirectory(path.dirname(baseDir));
   assert(!fs.existsSync(baseDir),'setup_directory_already_exists');
-  fs.mkdirSync(baseDir,{mode:0o700});requirePrivateDirectory(baseDir);
+  ensurePrivateDirectory(baseDir,{exclusive:true});
   write(path.join(baseDir,'setup-state.json'),{schema:1,status:'preparing',version:verified.version});
   const installRoot=path.join(baseDir,'install'),device=path.join(baseDir,'device');
   for(const p of [device,path.join(baseDir,'work'),path.join(baseDir,'codex-home'),path.join(baseDir,'logs')])ensurePrivateDirectory(p);

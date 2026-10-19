@@ -20,8 +20,8 @@ test('Windows probe is platform-gated, bounded, uses fixed script and fails clos
  for(const value of ['bad','null','true','[]'])assert.equal((await createWindowsSessionProbe(async()=>value,{platform:'win32'})()).ready,false);
  assert.equal((await createWindowsSessionProbe(never,{platform:'win32'})()).ready,false);
  const proof=await createWindowsSessionProbe(async(command,args,options)=>{
-  assert.equal(command,'powershell.exe');assert.deepEqual(args.slice(0,3),['-NoProfile','-NonInteractive','-File']);
-  assert.ok(args[3].endsWith('windows-session-probe.ps1'));assert.equal(options.timeout_ms,10000);
+  assert.equal(command,'powershell.exe');assert.deepEqual(args.slice(0,4),['-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand']);
+  const source=Buffer.from(args[4],'base64').toString('utf16le');assert.ok(source.includes('[StyxConsoleProbe]::Read()'));assert.ok(args[4].length<32000);assert.equal(options.timeout_ms,10000);
   assert.ok(!args.includes('-ExecutionPolicy'));return JSON.stringify([evidence(),evidence()]);
  },{platform:'win32'})();assert.equal(proof.ready,true);
 });

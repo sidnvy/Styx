@@ -3,7 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {createHash,randomBytes} from 'node:crypto';
-import {requirePrivateDirectory,requirePrivateFile} from '../host/private-storage.mjs';
+import {requirePrivateDirectory,requirePrivateFile,openPrivateFile} from '../host/private-storage.mjs';
 import {readDeployment,planDeployment,controlDeploymentHostService,controlDeploymentService,stopDeploymentGateway,verifyDeploymentGateway} from './core.mjs';
 import {observeHostService} from './service-lifecycle.mjs';
 import {ownerCommand} from '../gateway/enroll-admin.mjs';
@@ -49,7 +49,7 @@ function readJournal(d,digest){
 }
 function save(d,journal){
  const file=path.join(d,'background.json'),temp=file+'.'+randomBytes(8).toString('hex')+'.tmp';
- const fd=fs.openSync(temp,'wx',0o600);
+ const fd=openPrivateFile(temp,0o600);
  try{fs.writeFileSync(fd,JSON.stringify(journal)+'\n');fs.fsyncSync(fd);}finally{fs.closeSync(fd)}
  try{fs.renameSync(temp,file)}finally{if(fs.existsSync(temp))fs.unlinkSync(temp)}
  if(process.platform!=='win32'){const dir=fs.openSync(d,'r');try{fs.fsyncSync(dir)}finally{fs.closeSync(dir)}}
@@ -65,7 +65,7 @@ export function readDeploymentBackground(d){return projection(readJournal(d,scop
 export async function enableDeploymentBackground(d,{authorize=false}={},operations={}){
  if(authorize!==true)fail('background_start_and_login_authorization_required');
  const ops={...defaults,...operations},digest=scope(d),lock=path.join(d,'background.lock');
- let fd;try{fd=fs.openSync(lock,'wx',0o600)}catch{fail('background_busy_or_interrupted_lock')}
+ let fd;try{fd=openPrivateFile(lock,0o600)}catch{fail('background_busy_or_interrupted_lock')}
  let journal;
  try{
   journal=readJournal(d,digest);

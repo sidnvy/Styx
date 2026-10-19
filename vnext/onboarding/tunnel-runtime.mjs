@@ -5,16 +5,16 @@ import path from 'node:path';
 import {createHash,randomBytes} from 'node:crypto';
 import {spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
-import {ensurePrivateDirectory,requirePrivateFile} from '../host/private-storage.mjs';
+import {ensurePrivateDirectory,requirePrivateFile,openPrivateFile,writePrivateFile} from '../host/private-storage.mjs';
 import {readDeployment} from './core.mjs';
 const fail=code=>{throw Error(code)};
 const hash=file=>createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 function read(file){requirePrivateFile(file);if(fs.statSync(file).size>65536)fail('tunnel_state_too_large');return fs.readFileSync(file,'utf8');}
-function write(file,value){const tmp=file+'.'+randomBytes(8).toString('hex');try{fs.writeFileSync(tmp,value,{flag:'wx',mode:0o600});fs.renameSync(tmp,file);}finally{if(fs.existsSync(tmp))fs.unlinkSync(tmp);}}
+function write(file,value){const tmp=file+'.'+randomBytes(8).toString('hex');try{writePrivateFile(tmp,value);fs.renameSync(tmp,file);}finally{if(fs.existsSync(tmp))fs.unlinkSync(tmp);}}
 function locations(stateDir){readDeployment(stateDir);const root=path.join(stateDir,'tunnel');ensurePrivateDirectory(root);return {root,config:path.join(root,'connection.json'),lock:path.join(root,'owner.lock'),header:path.join(root,'gateway-header'),health:path.join(root,'health.url')};}
 function configAt(p){if(!fs.existsSync(p.config))return null;const c=JSON.parse(read(p.config));if(c.schema!==1||typeof c.autoStart!=='boolean'||!/^tunnel_[A-Za-z0-9_-]{8,128}$/.test(c.tunnelId)||!/^key-[a-f0-9]{32}$/.test(c.keyFile))fail('invalid_tunnel_configuration');read(path.join(p.root,c.keyFile));return c;}
 function acquireOwnerLock(p){
- let fd;try{fd=fs.openSync(p.lock,'wx',0o600)}catch{fail('tunnel_running_or_interrupted')}
+ let fd;try{fd=openPrivateFile(p.lock,0o600)}catch{fail('tunnel_running_or_interrupted')}
  const token=randomBytes(24).toString('hex');
  try{fs.writeFileSync(fd,token)}catch(error){fs.closeSync(fd);fs.unlinkSync(p.lock);throw error}
  fs.closeSync(fd);return token;
@@ -39,7 +39,7 @@ export function configureTunnel(stateDir,{tunnelId,apiKey,autoStart=false,author
   // Configuration and process startup share the same cross-process lock. Read
   // after acquisition so key rotation cannot delete a starting client's key.
   const old=configAt(p),keyFile='key-'+randomBytes(16).toString('hex');
-  fs.writeFileSync(path.join(p.root,keyFile),apiKey,{flag:'wx',mode:0o600});
+  writePrivateFile(path.join(p.root,keyFile),apiKey);
   try{write(p.config,JSON.stringify({schema:1,tunnelId,keyFile,autoStart})+'\n');}catch(e){fs.unlinkSync(path.join(p.root,keyFile));throw e;}
   if(old)fs.unlinkSync(path.join(p.root,old.keyFile));
   return {status:'configured',tunnelId,autoStart,accountAcceptance:'NOT RUN'};

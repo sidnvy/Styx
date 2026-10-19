@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {execFileSync} from 'node:child_process';
-import {ensurePrivateDirectory} from '../private-storage.mjs';
+import {ensurePrivateDirectory,writePrivateFile} from '../private-storage.mjs';
 
 // Parse/extract only the file checker; do not invoke task/session lifecycle code.
 test('Windows task setup refuses broad native config ACL before task operations',
@@ -13,7 +13,7 @@ test('Windows task setup refuses broad native config ACL before task operations'
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'styx-task-config-'));
   t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
   const dir=path.join(root,'private');ensurePrivateDirectory(dir);
-  const config=path.join(dir,'setup.json');fs.writeFileSync(config,'{}');
+  const config=path.join(dir,'setup.json');writePrivateFile(config,'{}');
   const script=[
     "$ErrorActionPreference='Stop'",
     '$tokens=$null;$errors=$null',

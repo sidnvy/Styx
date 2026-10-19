@@ -44,6 +44,11 @@ function lockObservation(ctx){
  try{requirePrivateDirectory(lock);const owner=path.join(lock,'owner');if(requirePrivateFile(owner).size>128)fail('invalid_update_owner');const value=fs.readFileSync(owner,'utf8');return id(value)?{status:'present',transactionId:value}:{status:'unknown',transactionId:null};}
  catch{return {status:'unknown',transactionId:null};}
 }
+function operationObservation(ctx){
+ const present=name=>{try{fs.lstatSync(path.join(ctx.installRoot,name));return 'present_requires_owner_inspection'}
+   catch(error){return error.code==='ENOENT'?'absent':'unavailable'}};
+ return {update:present('.health-operation-lock'),recovery:present('.health-recovery-guard')};
+}
 function transaction(ctx,transactionId){
  if(!id(transactionId))fail('invalid_transaction_id');
  const file=path.join(ctx.installRoot,'update-transactions',transactionId+'.json');if(requirePrivateFile(file).size>1024*1024)fail('host_update_file_too_large');
@@ -57,7 +62,7 @@ function transaction(ctx,transactionId){
   restartInhibition:'required_not_observed',service:'not_observed',candidateHealth:'not_observed',receiptEvidence:'signed_generations_verified',accountAcceptance:'NOT RUN'};
 }
 export function readHostUpdate({stateDir,transactionId}={}){
- const ctx=scope(stateDir,{allowInvalidCurrent:true}),lock=lockObservation(ctx),folder=path.join(ctx.installRoot,'update-transactions');let transactions=[];
+ const ctx=scope(stateDir,{allowInvalidCurrent:true}),lock=lockObservation(ctx),operation=operationObservation(ctx),folder=path.join(ctx.installRoot,'update-transactions');let transactions=[];
  if(transactionId!==undefined)transactions=[transaction(ctx,transactionId)];
  else if(fs.existsSync(folder)){
   requirePrivateDirectory(folder);const names=fs.readdirSync(folder);if(names.length>1024)fail('host_update_transaction_limit');
@@ -65,7 +70,7 @@ export function readHostUpdate({stateDir,transactionId}={}){
    const selected=name.slice(0,-5);try{return transaction(ctx,selected);}catch{return {transactionId:selected,status:'unverified',reason:'receipt_or_signed_generation_unavailable_or_changed',candidateHealth:'not_observed',service:'not_observed'};}
   });
  }
- return {schema:1,role:'host',status:!ctx.current||lock.status!=='absent'||transactions.some(row=>['needs_recovery','unverified'].includes(row.status))?'needs_recovery':'reported',current:{version:ctx.current?.version??null,manifestSha256:ctx.current?.sha256??null,signature:ctx.current?'verified':'unverified',...(!ctx.current?{reason:'active_release_unavailable_or_changed'}:{}),runtimeHealth:'not_observed'},lock,transactions,
+ return {schema:1,role:'host',status:!ctx.current||lock.status!=='absent'||Object.values(operation).some(value=>value!=='absent')||transactions.some(row=>['needs_recovery','unverified'].includes(row.status))?'needs_recovery':'reported',current:{version:ctx.current?.version??null,manifestSha256:ctx.current?.sha256??null,signature:ctx.current?'verified':'unverified',...(!ctx.current?{reason:'active_release_unavailable_or_changed'}:{}),runtimeHealth:'not_observed'},lock,operation,transactions,
   recovery:{status:'not_implemented',requires:['observe_owned_service_stopped_and_durably_restart_inhibited','verify_previous_signed_generation_and_transaction_ownership','restore_signed_bootstrap_without_replaying_uncertain_start']},accountAcceptance:'NOT RUN'};
 }
 export function planHostUpdate({stateDir,bundle,rollback=false}={}){
@@ -80,7 +85,7 @@ export function planHostUpdate({stateDir,bundle,rollback=false}={}){
  if(ctx.service.nodeBinary!==stableNode)blockers.push('service_generation_node_pin_migration_required');
  const executable=fs.realpathSync(process.execPath),realInstall=fs.realpathSync(ctx.installRoot);
  if(executable===realInstall||executable.startsWith(realInstall+path.sep))blockers.push('independent_updater_runtime_required');
- const lock=lockObservation(ctx);if(lock.status!=='absent')blockers.push('existing_host_update_requires_receipt_inspection_and_reconciliation');
+ const lock=lockObservation(ctx);if(lock.status!=='absent'||Object.values(operationObservation(ctx)).some(value=>value!=='absent'))blockers.push('existing_host_update_requires_receipt_inspection_and_reconciliation');
  if(ctx.state.steps.some(step=>['running','uncertain'].includes(step.status))||ctx.state.hostServiceMaintenance?.hasUncertainMutation)blockers.push('uncertain_deployment_action_requires_reconciliation');
  const plan={schema:1,role:'host',status:'blocked',action:rollback?'rollback':'update',stateDir,configurationSha256:ctx.configurationSha256,serviceConfigurationSha256:ctx.serviceConfigurationSha256,
   current:{version:ctx.current.version,manifestSha256:ctx.current.sha256},target:{version:candidate.version,manifestSha256:candidate.sha256,bundle:source},preservedEvidence:ctx.preserved,

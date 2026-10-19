@@ -6,7 +6,7 @@ import {deploymentRoles} from './roles.mjs';
 import path from 'node:path';
 import {randomBytes,createHash} from 'node:crypto';
 import {execFileSync} from 'node:child_process';
-import {ensurePrivateDirectory,requirePrivateDirectory,requirePrivateFile} from '../host/private-storage.mjs';
+import {ensurePrivateDirectory,requirePrivateDirectory,requirePrivateFile,openPrivateFile,writePrivateFile} from '../host/private-storage.mjs';
 import {prepareNativeSetup} from '../host/setup-native.mjs';
 import {requestEnrollment,claimEnrollment} from '../host/enroll.mjs';
 import {ownerCommand} from '../gateway/enroll-admin.mjs';
@@ -21,7 +21,7 @@ const abs=x=>typeof x==='string'&&path.isAbsolute(x)&&path.normalize(x)===x;
 const exact=(x,keys)=>{if(!obj(x)||Object.keys(x).some(k=>!keys.includes(k)))fail('invalid_configuration_fields')};
 const filename=(d,n)=>path.join(d,n);
 function read(file){requirePrivateFile(file);if(fs.statSync(file).size>1024*1024)fail('state_file_too_large');return JSON.parse(fs.readFileSync(file,'utf8'));}
-function write(file,value){const tmp=file+'.'+randomBytes(8).toString('hex')+'.tmp',fd=fs.openSync(tmp,'wx',0o600);try{fs.writeFileSync(fd,JSON.stringify(value,null,2)+'\n');fs.fsyncSync(fd);}finally{fs.closeSync(fd);}try{requirePrivateFile(tmp);fs.renameSync(tmp,file);if(process.platform!=='win32'){const dir=fs.openSync(path.dirname(file),'r');try{fs.fsyncSync(dir);}finally{fs.closeSync(dir);}}}finally{if(fs.existsSync(tmp))fs.unlinkSync(tmp);}}
+function write(file,value){const tmp=file+'.'+randomBytes(8).toString('hex')+'.tmp',fd=openPrivateFile(tmp,0o600);try{fs.writeFileSync(fd,JSON.stringify(value,null,2)+'\n');fs.fsyncSync(fd);}finally{fs.closeSync(fd);}try{requirePrivateFile(tmp);fs.renameSync(tmp,file);if(process.platform!=='win32'){const dir=fs.openSync(path.dirname(file),'r');try{fs.fsyncSync(dir);}finally{fs.closeSync(dir);}}}finally{if(fs.existsSync(tmp))fs.unlinkSync(tmp);}}
 const hash=file=>createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 const evidenceFile=file=>({path:file,sha256:hash(file)});
 
@@ -33,14 +33,14 @@ function publicState(d,state,config){
 export function createDeployment(configFile,{stateDir}={}){
  if(!abs(configFile)||!abs(stateDir))fail('absolute_paths_required');
  const config=validateDeployment(read(configFile));requirePrivateDirectory(path.dirname(stateDir));if(fs.existsSync(stateDir))fail('deployment_directory_already_exists');
- ensurePrivateDirectory(stateDir);write(filename(stateDir,'deployment.json'),config);
+ ensurePrivateDirectory(stateDir,{exclusive:true});write(filename(stateDir,'deployment.json'),config);
  const localPair=!!config.host&&config.mode==='create-local'&&config.pairingMode!=='manual';
  const ids=[...(config.gateway.runtime?['gateway.runtime.prepare']:[]),...(config.mode==='create-local'?['gateway.prepare','gateway.start','gateway.verify']:[]),...(config.host?['host.prepare',...(localPair?['host.pair']:[...(config.mode==='create-local'?['host.invite']:[]),'host.request','host.claim']),'host.doctor','host.service.install','host.service.start','host.service.status']:[])];
  const state={schema:1,mode:config.mode,configSha256:hash(filename(stateDir,'deployment.json')),steps:ids.map(id=>({id,status:'pending'}))};write(filename(stateDir,'state.json'),state);return publicState(stateDir,state,config);
 }
 export function readDeployment(stateDir){const {config,state}=load(stateDir);return publicState(stateDir,state,config);}
 export function planDeployment(stateDir){const {config,state}=load(stateDir);return {schema:1,mode:config.mode,roles:deploymentRoles(config),steps:state.steps.map((s,i)=>({id:s.id,status:s.status,requires:state.steps.slice(0,i).map(x=>x.id),authorizationRequired:true})),ownerPairingScope:config.host&&config.mode==='create-local'?{gatewayUrl:config.gateway.url,label:config.host.label,enableComputer:config.host.computer}:null,service:{status:'not_checked',lastObservation:publicState(stateDir,state,config).hostServiceMaintenance.lastObservation,configFile:config.host?path.join(config.host.baseDir,'service.json'):null,platform:process.platform},accountAcceptance:'NOT RUN'};}
-function lock(d){const file=filename(d,'advance.lock');let fd;try{fd=fs.openSync(file,'wx',0o600);}catch{fail('onboarding_busy_or_interrupted_lock');}return ()=>{fs.closeSync(fd);fs.unlinkSync(file)};}
+function lock(d){const file=filename(d,'advance.lock');let fd;try{fd=openPrivateFile(file,0o600);}catch{fail('onboarding_busy_or_interrupted_lock');}return ()=>{fs.closeSync(fd);fs.unlinkSync(file)};}
 function serviceScope(c,action){
  const serviceConfigFile=path.join(c.host.baseDir,'service.json'),raw=read(serviceConfigFile),windows=process.platform==='win32';
  return {approved:true,action,role:'host',serviceConfigFile,serviceId:windows?raw.task_name:process.platform==='darwin'?raw.label:raw.unitName,installRoot:windows?raw.install_root:raw.installRoot,hostConfigFile:windows?raw.host_config_file:raw.hostConfigFile,trustPublicKeyFile:windows?raw.publisher_key_file:raw.trustPublicKeyFile,nodeBinary:windows?raw.node_binary:raw.nodeBinary,...(raw.logDir!==undefined?{logDir:raw.logDir}:{}),...(raw.restartSec!==undefined?{restartSec:raw.restartSec}:{}),...(raw.nativeApp!==undefined?{nativeApp:raw.nativeApp}:{})};
@@ -98,8 +98,9 @@ export async function inspectDeployment(d){
 }
 function gatewayPaths(d){const root=filename(d,'gateway');return {root,cert:filename(root,'certificate.pem'),key:filename(root,'private-key.pem'),model:filename(root,'model.token'),admin:filename(root,'admin.token'),owner:filename(root,'owner.json'),runtime:filename(root,'runtime.json'),catalog:filename(root,'targets.json')};}
 function prepareGateway(d,c){
- const p=gatewayPaths(d);if(fs.existsSync(p.root))fail('gateway_directory_already_exists');ensurePrivateDirectory(p.root);
- for(const f of [p.model,p.admin])fs.writeFileSync(f,randomBytes(48).toString('base64url')+'\n',{flag:'wx',mode:0o600});
+ const p=gatewayPaths(d);if(fs.existsSync(p.root))fail('gateway_directory_already_exists');ensurePrivateDirectory(p.root,{exclusive:true});
+ for(const f of [p.model,p.admin])writePrivateFile(f,randomBytes(48).toString('base64url')+'\n');
+ writePrivateFile(p.key,'');writePrivateFile(p.cert,'');
  execFileSync(c.gateway.openssl,['req','-x509','-newkey','rsa:2048','-nodes','-sha256','-days','30','-keyout',p.key,'-out',p.cert,'-subj','/CN=Styx local Gateway','-addext','subjectAltName=IP:'+(c.gateway.listenHost??'127.0.0.1')],{stdio:'ignore',timeout:20000});
  fs.chmodSync(p.key,0o600);fs.chmodSync(p.cert,0o600);requirePrivateFile(p.key);requirePrivateFile(p.cert);
  write(p.catalog,{version:1,targets:[]});write(p.owner,{gateway_url:c.gateway.url,gateway_ca_file:p.cert,admin_token_file:p.admin});
@@ -191,7 +192,7 @@ async function execute(d,c,id,ownerApproval){
   const cfg=enrollment();return pairDevice({controller:live.get(d).controller,transport:createLocalPairingTransport(cfg),authorization:{...cfg,platform:process.platform,approve:true,enable_computer:ownerApproval.enableComputer},ttlSeconds:600});
  }
  if(id==='host.invite'){
-  const r=await ownerCommand(read(p.owner),'invite',['600']);const file=filename(d,'invitation');fs.writeFileSync(file,r.invitation+'\n',{mode:0o600,flag:'wx'});requirePrivateFile(file);return {invitationFile:file,oneUse:true};
+  const r=await ownerCommand(read(p.owner),'invite',['600']);const file=filename(d,'invitation');writePrivateFile(file,r.invitation+'\n');requirePrivateFile(file);return {invitationFile:file,oneUse:true};
  }
  if(id==='host.request'){
   const file=c.mode==='create-local'?filename(d,'invitation'):c.invitationFile;if(!file)fail('private_invitation_file_required');requirePrivateFile(file);

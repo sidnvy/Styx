@@ -8,7 +8,7 @@ import {completeLocalSetup} from './local-setup.mjs';
 import {enableDeploymentBackground,observeDeploymentBackground} from './background.mjs';
 import {configureTunnel,TunnelRuntime} from './tunnel-runtime.mjs';
 import {changeDeploymentCapabilities,readDeploymentCapabilities} from './capabilities.mjs';
-import {requirePrivateFile} from '../host/private-storage.mjs';
+import {requirePrivateFile,writePrivateFile,ensurePrivateDirectory} from '../host/private-storage.mjs';
 import {randomBytes,timingSafeEqual} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
 const UI=fileURLToPath(new URL('./ui/',import.meta.url));
@@ -161,8 +161,8 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
     if(macPreviewApp&&config.host)config.host={...config.host,macPreviewApp:{path:macPreviewApp.path,cdhash:macPreviewApp.cdhash}};
     if(config.mode==='create-local'&&new URL(config.gateway.url).hostname!=='127.0.0.1'&&config.gateway.allowRemoteHosts!==true)fail('explicit_network_exposure_required');
     if(config.gateway.allowRemoteHosts){const addresses=typeof api.localGatewayAddresses==='function'?api.localGatewayAddresses():[];if(!addresses.includes(config.gateway.listenHost)||new URL(config.gateway.url).hostname!==config.gateway.listenHost)fail('explicit_owned_network_interface_required')}
-    const temp=fs.mkdtempSync(path.join(os.tmpdir(),'styx-ui-config-'));fs.chmodSync(temp,0o700);
-    try{const file=path.join(temp,'config.json');fs.writeFileSync(file,JSON.stringify(config),{mode:0o600});await api.createDeployment(file,{stateDir})}
+    const temp=path.join(os.tmpdir(),'styx-ui-config-'+randomBytes(16).toString('hex'));ensurePrivateDirectory(temp,{exclusive:true});
+    try{const file=path.join(temp,'config.json');writePrivateFile(file,JSON.stringify(config));await api.createDeployment(file,{stateDir})}
     finally{fs.rmSync(temp,{recursive:true,force:true})}
    }else if(url.pathname==='/api/devices'){
     keys(data,[]);if(typeof api.readDeploymentDevices!=='function')fail('device_settings_unavailable');send(200,{devices:await api.readDeploymentDevices(stateDir)});return;

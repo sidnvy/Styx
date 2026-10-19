@@ -1,5 +1,5 @@
 import fs from 'node:fs';
-import {requirePrivateFile,ensurePrivateDirectory} from '../shared/private-file.mjs';
+import {requirePrivateFile,ensurePrivateDirectory,writePrivateFile} from '../shared/private-file.mjs';
 import path from 'node:path';
 import {
   randomBytes,generateKeyPairSync,createPublicKey,createPrivateKey,createHash,
@@ -21,7 +21,7 @@ function protectedRead(p) {
   return fs.readFileSync(p,'utf8');
 }
 function privateWrite(p,content){
-  fs.writeFileSync(p,content,{flag:'wx',mode:0o600});
+  writePrivateFile(p,content);
 }
 function configOf(raw){
   const config=raw;

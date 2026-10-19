@@ -5,6 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import {createHash,generateKeyPairSync,sign} from 'node:crypto';
 import {stageSignedRelease,refreshVerifiedBootstrap,activateRelease,verifiedServiceNode} from '../installer.mjs';
+import {writePrivateFile} from '../private-storage.mjs';
 const hash=b=>createHash('sha256').update(b).digest('hex');
 test('Windows runtime preflight refuses change before any bootstrap replacement',t=>{
   const root=fs.mkdtempSync(path.join(os.tmpdir(),'styx-node-'));
@@ -23,10 +24,10 @@ test('Windows runtime preflight refuses change before any bootstrap replacement'
   const options={platform:'win32',arch:'x64'};
   stageSignedRelease({sourceDir:source,installRoot,publicKeyPem:pem,...options});
   const before=fs.readFileSync(path.join(installRoot,'installer.mjs'));
-  fs.writeFileSync(path.join(installRoot,'node.exe'),'old locked runtime');
+  writePrivateFile(path.join(installRoot,'node.exe'),'old locked runtime');
   assert.throws(()=>refreshVerifiedBootstrap(installRoot,pem,'node-test',options),/requires_offline_switch/);
   assert.deepEqual(fs.readFileSync(path.join(installRoot,'installer.mjs')),before);
-  fs.copyFileSync(path.join(source,'bin/node.exe'),path.join(installRoot,'node.exe'));
+  fs.writeFileSync(path.join(installRoot,'node.exe'),fs.readFileSync(path.join(source,'bin/node.exe')));
   assert.equal(refreshVerifiedBootstrap(installRoot,pem,'node-test',options).status,'bootstrap_refreshed');
   assert.equal(fs.readFileSync(path.join(installRoot,'node.exe'),'utf8'),'signed bin/node.exe');
   fs.rmSync(path.join(installRoot,'node.exe'));

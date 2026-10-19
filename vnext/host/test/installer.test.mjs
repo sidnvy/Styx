@@ -12,6 +12,7 @@ import {
   rollbackRelease,servicePlan,refreshVerifiedBootstrap,pruneVerifiedReleases
 } from '../installer.mjs';
 import {launchActive} from '../launch.mjs';
+import {requirePrivateFile,requirePrivateDirectory} from '../private-storage.mjs';
 
 function sha(data){return createHash('sha256').update(data).digest('hex')}
 async function fixture(t) {
@@ -280,4 +281,54 @@ test('an unknown unsigned release blocks deletion of any old release',
   assert.equal((await fs.readdir(path.join(f.installRoot,'releases')))
     .includes('safe-a'),true);
   assert.equal((await fs.readFile(path.join(extra,'unknown'),'utf8')),'do-not-touch');
+});
+
+
+test('installed signed bytes and bootstrap files are created private with executable bits preserved',async t=>{
+  const f=await fixture(t),bundle=await f.make('0.1.0-private-create',{bootstrap:true});
+  stageSignedRelease({sourceDir:bundle.source,installRoot:f.installRoot,publicKeyPem:f.publicKey});
+  activateRelease(f.installRoot,bundle.manifest.version,f.publicKey);
+  refreshVerifiedBootstrap(f.installRoot,f.publicKey,bundle.manifest.version);
+  const visit=async folder=>{
+    requirePrivateDirectory(folder);
+    for(const entry of await fs.readdir(folder,{withFileTypes:true})){
+      const file=path.join(folder,entry.name);
+      if(entry.isDirectory())await visit(file);else requirePrivateFile(file);
+    }
+  };
+  await visit(f.installRoot);
+  for(const entry of bundle.manifest.files){
+    const file=path.join(f.installRoot,'releases',bundle.manifest.version,...entry.path.split('/'));
+    assert.equal(sha(await fs.readFile(file)),entry.sha256);
+    if(process.platform!=='win32')assert.equal((await fs.stat(file)).mode&0o777,entry.executable?0o700:0o600);
+  }
+  if(process.platform!=='win32')assert.equal((await fs.stat(path.join(f.installRoot,'active.json'))).mode&0o777,0o600);
+  assert.equal(stageSignedRelease({sourceDir:bundle.source,installRoot:f.installRoot,publicKeyPem:f.publicKey}).status,'already_staged');
+});
+
+test('installer rejects existing broad runtime paths without hardening or overwriting them',{skip:process.platform==='win32'},async t=>{
+  for(const target of ['releases','launch.mjs','active.json']){
+    const f=await fixture(t),one=await f.make('0.1.0-private-old'),two=await f.make('0.2.0-private-next');
+    stageSignedRelease({sourceDir:one.source,installRoot:f.installRoot,publicKeyPem:f.publicKey});
+    activateRelease(f.installRoot,one.manifest.version,f.publicKey);
+    const file=path.join(f.installRoot,target),mode=target==='releases'?0o755:0o644;
+    const before=target==='releases'?await fs.readdir(file):await fs.readFile(file);
+    await fs.chmod(file,mode);
+    const mutate=target==='active.json'?()=>activateRelease(f.installRoot,one.manifest.version,f.publicKey)
+      :()=>stageSignedRelease({sourceDir:two.source,installRoot:f.installRoot,publicKeyPem:f.publicKey});
+    assert.throws(mutate,/private_(?:file|directory)_permissions/);
+    assert.equal((await fs.stat(file)).mode&0o777,mode);
+    if(target==='releases')assert.deepEqual(await fs.readdir(file),before);else assert.deepEqual(await fs.readFile(file),before);
+  }
+});
+
+
+test('signed bootstrap refresh cannot replace a dangling existing destination',{skip:process.platform==='win32'},async t=>{
+  const f=await fixture(t),bundle=await f.make('0.1.0-symlink-private',{bootstrap:true});
+  stageSignedRelease({sourceDir:bundle.source,installRoot:f.installRoot,publicKeyPem:f.publicKey});
+  const launcher=path.join(f.installRoot,'launch.mjs'),outside=path.join(f.tmp,'foreign-launcher.mjs');
+  await fs.unlink(launcher);await fs.symlink(outside,launcher);
+  assert.throws(()=>refreshVerifiedBootstrap(f.installRoot,f.publicKey,bundle.manifest.version),/untrusted_bootstrap_destination/);
+  assert.equal(await fs.readlink(launcher),outside);await assert.rejects(fs.stat(outside),{code:'ENOENT'});
+  assert.ok(!(await fs.readdir(f.installRoot)).some(name=>name.includes('.signed-')));
 });

@@ -3,7 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {X509Certificate,createHash} from 'node:crypto';
-import {requirePrivateDirectory,requirePrivateFile} from '../host/private-storage.mjs';
+import {requirePrivateDirectory,requirePrivateFile,writePrivateFile,ensurePrivateDirectory} from '../host/private-storage.mjs';
 const assert=(v,c)=>{if(!v)throw Error(c)};
 const MAX_LINK=32768,MAX_CA=12000;
 function origin(value){let u;try{u=new URL(value)}catch{throw Error('pairing_gateway_origin_invalid')};assert(u.protocol==='https:'&&!u.username&&!u.password&&!u.search&&!u.hash&&['','/'].includes(u.pathname),'pairing_gateway_origin_invalid');return u.origin}
@@ -50,15 +50,15 @@ export function acceptPairingLink(link,{stateDir,approvedGatewayOrigin,approvedC
  assert(typeof stateDir==='string'&&path.isAbsolute(stateDir)&&path.normalize(stateDir)===stateDir,'pairing_private_state_required');
  requirePrivateDirectory(path.dirname(stateDir));assert(!fs.existsSync(stateDir),'pairing_state_already_exists');
  // Claim a fresh directory atomically. Existing state is never reused/hardened.
- try{fs.mkdirSync(stateDir,{mode:0o700})}catch{throw Error('pairing_state_creation_refused')}
+ try{ensurePrivateDirectory(stateDir,{exclusive:true})}catch{throw Error('pairing_state_creation_refused')}
  try{
   // Inspect actual native ownership/DACL before writing any invitation. A
-  // non-inheriting Windows parent may yield a broad leaf; reject, never harden.
+  // newly created Windows leaf has its own native owner and protected DACL.
   requirePrivateDirectory(stateDir);
-  const invitationFile=path.join(stateDir,'invitation');fs.writeFileSync(invitationFile,data.invitation+'\n',{flag:'wx',mode:0o600});requirePrivateFile(invitationFile);
+  const invitationFile=path.join(stateDir,'invitation');writePrivateFile(invitationFile,data.invitation+'\n');requirePrivateFile(invitationFile);
   let gatewayCaFile;
-  if(data.caPem){gatewayCaFile=path.join(stateDir,'gateway-ca.pem');fs.writeFileSync(gatewayCaFile,data.caPem,{flag:'wx',mode:0o600});requirePrivateFile(gatewayCaFile)}
-  const configFile=path.join(stateDir,'pairing.json');fs.writeFileSync(configFile,JSON.stringify({schema:1,gatewayOrigin:data.origin,expiresAt:data.expiresAt,invitationFile,...(gatewayCaFile?{gatewayCaFile,caSha256}:{})},null,2)+'\n',{flag:'wx',mode:0o600});requirePrivateFile(configFile);
+  if(data.caPem){gatewayCaFile=path.join(stateDir,'gateway-ca.pem');writePrivateFile(gatewayCaFile,data.caPem);requirePrivateFile(gatewayCaFile)}
+  const configFile=path.join(stateDir,'pairing.json');writePrivateFile(configFile,JSON.stringify({schema:1,gatewayOrigin:data.origin,expiresAt:data.expiresAt,invitationFile,...(gatewayCaFile?{gatewayCaFile,caSha256}:{})},null,2)+'\n');requirePrivateFile(configFile);
  }catch{
   // A failed/uncertain import is not replayed and never erases unexpected files.
   throw Error('pairing_material_write_failed_inspect_private_state');
