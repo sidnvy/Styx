@@ -16,7 +16,7 @@ jobs:
       - name: Install locked VNext dependencies
         run: npm --prefix vnext ci --ignore-scripts --no-audit --no-fund
       - name: Packaging contract tests
-        run: node --test vnext/host/test/macos-app.test.mjs
+        run: node --test vnext/host/test/macos-app.test.mjs vnext/host/macos/test/*.test.mjs
       - name: Compile native owner (no driver or signing credentials)
         run: xcrun swiftc -D STYX_TESTING -warnings-as-errors vnext/host/macos/Styx.swift -o "$RUNNER_TEMP/Styx" -framework AppKit -framework ApplicationServices -framework CoreGraphics
       - name: Native ownership self-test
