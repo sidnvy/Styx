@@ -22,7 +22,8 @@ try{
  const {readGatewayDeployment}=await import('./gateway-deployment-reader.mjs');
  const {runtime,catalog}=readGatewayDeployment(stateDir);
  const [{createStyxGateway},{createGatewayHttp},{EnrollmentController}]=await Promise.all([import('../gateway/index.mjs'),import('../gateway/http.mjs'),import('../gateway/enrollment.mjs')]);
- const gateway=createStyxGateway({catalog});
+ const {createAcceptanceObserver}=await import('../shared/onboarding-evidence.mjs');
+ const gateway=createStyxGateway({catalog,onToolResult:createAcceptanceObserver(stateDir)});
  const enrollment=new EnrollmentController({rootDir:runtime.enrollmentDir,adminTokenFile:runtime.adminTokenFile,registry:gateway.registry,relay:gateway.relay});
  let handle;try{handle=await createGatewayHttp(gateway,{token:fs.readFileSync(runtime.modelTokenFile,'utf8').trim(),host:runtime.listenHost,port:Number(new URL(runtime.url).port),allowedHosts:[new URL(runtime.url).host],tlsCertificateFile:runtime.tlsCertificateFile,tlsPrivateKeyFile:runtime.tlsPrivateKeyFile,enrollment});}catch(e){await gateway.close();throw e;}
  let stopping=false;const stop=()=>{if(stopping)return;stopping=true;handle.close().then(()=>process.exit(0),()=>process.exit(2));};

@@ -32,6 +32,17 @@ test('one authorization hands off Gateway then starts Host without claiming acco
  const first=f.calls.length;await enableDeploymentBackground(f.dir,{authorize:true},f.ops);
  assert.ok(!f.calls.slice(first).some(x=>/\.(start|install|stop)$/.test(x)));
 });
+test('owned foreground handoff is journaled before stop and is never replayed if settlement is uncertain',async t=>{
+ const f=fixture(t);f.ops.readForeground=()=>({status:'connected'});let stopped=0;
+ f.ops.stopOwnedForeground=async()=>{stopped++;const j=JSON.parse(fs.readFileSync(path.join(f.dir,'background.json')));assert.equal(j.operations.at(-1).id,'foreground.stop_owned');assert.equal(j.operations.at(-1).status,'running');throw Error('unconfirmed')};
+ await assert.rejects(enableDeploymentBackground(f.dir,{authorize:true},f.ops),/uncertain_no_replay/);assert.equal(stopped,1);assert.ok(!f.calls.some(c=>/\.(start|install|stop)$/.test(c)));
+ await assert.rejects(enableDeploymentBackground(f.dir,{authorize:true},f.ops),/uncertain_requires_reconciliation/);assert.equal(stopped,1);
+});
+test('static doctor refusal and unknown external foreground never stop the existing process',async t=>{
+ const f=fixture(t);let stopped=0;f.ops.stopOwnedForeground=async()=>{stopped++;return {status:'stopped'}};f.ops.readForeground=()=>({status:'needs_attention'});
+ await assert.rejects(enableDeploymentBackground(f.dir,{authorize:true},f.ops),/foreground_owned_or_interrupted/);assert.equal(stopped,0);
+ f.ops.read=()=>({steps:[]});await assert.rejects(enableDeploymentBackground(f.dir,{authorize:true},f.ops),/doctor_required/);assert.equal(stopped,0);
+});
 test('remote Host mode never installs or controls an external Gateway',async t=>{
  const f=fixture(t,{mode:'join-existing'});const result=await enableDeploymentBackground(f.dir,{authorize:true},f.ops);
  assert.equal(result.gateway,'external');assert.ok(!f.calls.some(x=>x.startsWith('gateway.')||x==='foreground.stop'));
@@ -86,7 +97,7 @@ test('existing connected foreground Host blocks all service mutations and Gatewa
  const f=fixture(t);f.ops.hostConnection=async()=>({status:'observed',online:true});
  const result=await enableDeploymentBackground(f.dir,{authorize:true},f.ops);
  assert.equal(result.status,'needs_attention');assert.equal(result.reason,'foreground_host_handoff_required');
- assert.deepEqual(f.calls,['host.status']);assert.deepEqual(result.operations,[]);
+ assert.deepEqual(f.calls,['host.status','gateway.status']);assert.deepEqual(result.operations,[]);
 });
 test('OS process running without an Exec relay connection does not pass background readiness',async t=>{
  const f=fixture(t);f.ops.hostConnection=async()=>({status:'observed',online:false});
@@ -95,7 +106,7 @@ test('OS process running without an Exec relay connection does not pass backgrou
 });
 test('unknown owner connection status cannot trigger background mutations',async t=>{
  const f=fixture(t);f.ops.hostConnection=async()=>{throw Error('host_connection_observation_unavailable')};
- await assert.rejects(enableDeploymentBackground(f.dir,{authorize:true},f.ops),/host_connection_observation_unavailable/);assert.deepEqual(f.calls,['host.status']);
+ await assert.rejects(enableDeploymentBackground(f.dir,{authorize:true},f.ops),/host_connection_observation_unavailable/);assert.deepEqual(f.calls,['host.status','gateway.status']);
 });
 test('Gateway-only handoff and observation never call Host adapters or connection probes',async t=>{
  const f=fixture(t);f.ops.read=()=>({mode:'create-local',roles:{host:'disabled'},steps:[],gatewayRuntime:{status:'not_owned_by_current_process'}});

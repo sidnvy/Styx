@@ -3,10 +3,37 @@ import {requirePrivateFile,requirePrivateDirectory,writePrivateFile} from '../ho
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
 import {createDeployment,readDeployment,planDeployment,advanceDeployment,startDeploymentGateway,stopDeploymentGateway,controlDeploymentHostService,controlDeploymentService,inspectDeployment} from './core.mjs';
+import {readOnboardingJourney,readOnboardingDiagnostics,publicAcceptance} from './journey.mjs';
 function privateJson(file){if(!path.isAbsolute(file)||requirePrivateFile(file).size>1024*1024)throw Error('invalid_private_cli_input');return JSON.parse(fs.readFileSync(file,'utf8'));}
 export async function main(args){
  const [cmd,...rest]=args;
- if(cmd==='help'&&rest.length===0)return {schema:1,commands:['create CONFIG STATE','plan STATE','status STATE','inspect STATE','advance STATE STEP...','resume STATE STEP...','local-setup STATE --approve-local-device','background STATE --authorize','host-service STATE ACTION [--authorize]','gateway-service STATE ACTION [--authorize]','device-ingress STATE','verify-ingress STATE HTTPS_ORIGIN','devices STATE','set-default STATE DEVICE --authorize','pending STATE --authorize','approve STATE PRIVATE_JSON --authorize','pairing-link STATE PRIVATE_OUTPUT --authorize','inspect-link PRIVATE_LINK','accept-link PRIVATE_LINK PRIVATE_APPROVAL_JSON --authorize','capabilities STATE [computer-on|computer-off --authorize]','host-update-plan STATE BUNDLE','host-rollback-plan STATE','host-update-status STATE [TRANSACTION]','runtime-plan STATE BUNDLE','runtime-rollback-plan STATE','runtime-apply STATE PRIVATE_PLAN --authorize','runtime-change-status STATE','runtime-recover STATE TRANSACTION --authorize','native-migration-plan STATE TEAM_ID','native-migration-apply STATE PRIVATE_PLAN --authorize','native-migration-rollback STATE TRANSACTION --authorize','serve STATE']};
+ if(cmd==='foreground'&&rest.length===2&&rest[1]==='--authorize'){
+  const api=await import('./core.mjs');let finish,requested=false;
+  const done=new Promise(resolve=>{finish=resolve}),stop=()=>{requested=true;finish()},keepAlive=setInterval(()=>{},5000);
+  process.once('SIGINT',stop);process.once('SIGTERM',stop);
+  try{
+   await api.startDeploymentForeground(rest[0],{authorize:true});
+   process.stderr.write('Styx foreground connection started. Keep this terminal open; Ctrl-C stops this process-owned connection.\n');
+   if(!requested)await done;
+  }finally{clearInterval(keepAlive);process.off('SIGINT',stop);process.off('SIGTERM',stop);await api.stopDeploymentForeground(rest[0]);await api.stopDeploymentGateway(rest[0]);}
+  return {schema:1,status:'stopped',identityMutation:'NOT RUN',serviceMutation:'NOT RUN'};
+ }
+ if(cmd==='journey'&&rest.length===1)return readOnboardingJourney(rest[0]);
+ if(cmd==='diagnostics'&&rest.length===1)return readOnboardingDiagnostics(rest[0]);
+ if(cmd==='acceptance'&&rest.length===1){const api=await import('./core.mjs');return publicAcceptance(await api.readDeploymentAcceptance(rest[0]),{includeChallenge:true});}
+ if(cmd==='acceptance-begin'&&rest.length===2&&rest[1]==='--authorize'){const api=await import('./core.mjs');return publicAcceptance(await api.beginDeploymentAcceptance(rest[0],{authorize:true}),{includeChallenge:true});}
+ if(cmd==='acceptance-confirm'&&rest.length===3&&rest[2]==='--authorize'){
+  const input=privateJson(rest[1]);if(!input||Object.keys(input).some(k=>!['challengeId','observedInTargetChat'].includes(k))||input.observedInTargetChat!==true)throw Error('explicit_target_chat_confirmation_required');
+  const api=await import('./core.mjs');return publicAcceptance(await api.confirmDeploymentAcceptance(rest[0],{...input,authorize:true}),{includeChallenge:true});
+ }
+ if(cmd==='onboarding-background-choice'&&rest.length===3&&['foreground','login'].includes(rest[1])&&rest[2]==='--authorize'){const api=await import('./core.mjs');return api.setDeploymentOnboardingPreference(rest[0],{background:rest[1],authorize:true});}
+ if(cmd==='handoff'&&rest.length===3&&rest[2]==='--authorize'){
+  const output=rest[1];if(!path.isAbsolute(output)||path.normalize(output)!==output||fs.existsSync(output))throw Error('fresh_private_output_required');requirePrivateDirectory(path.dirname(output));
+  const api=await import('./core.mjs'),handoff=await api.prepareDeploymentConnectionHandoff(rest[0],{authorize:true});
+  writePrivateFile(output,JSON.stringify(handoff)+'\n');requirePrivateFile(output);
+  return {schema:1,status:'prepared',privateHandoffFile:output,expiresAt:handoff.expiresAt,requiresTargetAccountAction:true};
+ }
+ if(cmd==='help'&&rest.length===0)return {schema:1,commands:['create CONFIG STATE','plan STATE','status STATE','inspect STATE','journey STATE','diagnostics STATE','onboarding-background-choice STATE foreground|login --authorize','handoff STATE PRIVATE_OUTPUT --authorize','acceptance STATE','acceptance-begin STATE --authorize','acceptance-confirm STATE PRIVATE_APPROVAL_JSON --authorize','advance STATE STEP...','resume STATE STEP...','local-setup STATE --approve-local-device','background STATE --authorize','foreground STATE --authorize','host-service STATE ACTION [--authorize]','gateway-service STATE ACTION [--authorize]','device-ingress STATE','verify-ingress STATE HTTPS_ORIGIN','devices STATE','set-default STATE DEVICE --authorize','pending STATE --authorize','approve STATE PRIVATE_JSON --authorize','pairing-link STATE PRIVATE_OUTPUT --authorize','inspect-link PRIVATE_LINK','accept-link PRIVATE_LINK PRIVATE_APPROVAL_JSON --authorize','capabilities STATE [computer-on|computer-off --authorize]','host-update-plan STATE BUNDLE','host-rollback-plan STATE','host-update-status STATE [TRANSACTION]','runtime-plan STATE BUNDLE','runtime-rollback-plan STATE','runtime-apply STATE PRIVATE_PLAN --authorize','runtime-change-status STATE','runtime-recover STATE TRANSACTION --authorize','native-migration-plan STATE TEAM_ID','native-migration-apply STATE PRIVATE_PLAN --authorize','native-migration-rollback STATE TRANSACTION --authorize','serve STATE']};
  if(cmd==='devices'&&rest.length===1){const api=await import('./core.mjs');return api.readDeploymentDevices(rest[0]);}
  if(cmd==='set-default'&&rest.length===3&&rest[2]==='--authorize'){const api=await import('./core.mjs');return api.setDeploymentDefault(rest[0],{deviceId:rest[1],authorize:true});}
  if(cmd==='pending'&&rest.length===2&&rest[1]==='--authorize'){const api=await import('./core.mjs');return api.listDeploymentPending(rest[0],{authorize:true});}

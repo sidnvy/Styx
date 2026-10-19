@@ -71,7 +71,18 @@ export function macAdhocSigningPlan({app,files=[],sealApp=true}={}){
   if(sealApp)steps.push(['/usr/bin/codesign',['--force','--timestamp=none','--sign','-',app]],['/usr/bin/codesign',['--verify','--deep','--strict','--verbose=2',app]]);
   return steps;
 }
-export function buildMacApp({app,cuaBinary,version,identity,teamID,notaryProfile,signingMode='distribution'}={}){
+export function macSwiftBuildArguments({source,output,arch=process.arch,sdkPath,moduleCachePath}={}){
+  const absolute=p=>typeof p==='string'&&path.posix.isAbsolute(p)&&path.posix.normalize(p)===p&&!/[\x00-\x1f\x7f]/.test(p);
+  assert(absolute(source)&&absolute(output),'absolute_swift_build_paths_required');
+  assert(['arm64','x64'].includes(arch),'unsupported_swift_build_arch');
+  assert(sdkPath===undefined||absolute(sdkPath),'absolute_macos_sdk_required');
+  assert(moduleCachePath===undefined||absolute(moduleCachePath),'absolute_swift_module_cache_required');
+  assert(sdkPath===undefined||moduleCachePath!==undefined,'explicit_sdk_requires_isolated_module_cache');
+  return ['swiftc','-O','-warnings-as-errors','-target',`${arch==='arm64'?'arm64':'x86_64'}-apple-macosx13.0`,
+    ...(sdkPath===undefined?[]:['-sdk',sdkPath]),...(moduleCachePath===undefined?[]:['-module-cache-path',moduleCachePath]),
+    source,'-o',output,'-framework','AppKit','-framework','ApplicationServices','-framework','CoreGraphics'];
+}
+export function buildMacApp({app,cuaBinary,version,identity,teamID,notaryProfile,signingMode='distribution',sdkPath,moduleCachePath}={}){
   assert(process.platform==='darwin','native_macos_build_required');
   const plist=appInfoPlist(version);
   assert(['distribution','local-development'].includes(signingMode),'invalid_macos_signing_mode');
@@ -80,6 +91,9 @@ export function buildMacApp({app,cuaBinary,version,identity,teamID,notaryProfile
   assert(typeof app==='string'&&path.isAbsolute(app)&&path.basename(app)==='Styx.app','invalid_styx_app_path');
   assert(typeof cuaBinary==='string'&&path.isAbsolute(cuaBinary),'absolute_cua_binary_required');
   assert(!fs.existsSync(app)&&!fs.existsSync(app+'.notarization.zip'),'app_destination_exists');
+  const swiftArgs=macSwiftBuildArguments({source:SOURCE,output:path.join(app,'Contents/MacOS/Styx'),sdkPath,moduleCachePath});
+  if(sdkPath!==undefined)assert(fs.statSync(sdkPath).isDirectory()&&fs.statSync(path.join(sdkPath,'SDKSettings.json')).isFile(),'macos_sdk_directory_required');
+  if(moduleCachePath!==undefined)assert(!fs.existsSync(moduleCachePath),'fresh_swift_module_cache_required');
   const stat=fs.lstatSync(cuaBinary);
   assert(stat.isFile()&&!stat.isSymbolicLink(),'regular_cua_binary_required');
   const observed=execFileSync(cuaBinary,['--version'],{encoding:'utf8',timeout:10000}).trim();
@@ -92,6 +106,7 @@ export function buildMacApp({app,cuaBinary,version,identity,teamID,notaryProfile
   fs.mkdirSync(path.dirname(app),{recursive:true});
   fs.mkdirSync(app);
   try{
+    if(moduleCachePath!==undefined)fs.mkdirSync(moduleCachePath,{mode:0o700});
     const notices=path.join(app,'Contents/Resources/licenses');
     fs.mkdirSync(notices,{recursive:true});
     for(const name of ['cua-LICENSE','styx-LICENSE','provenance.json'])
@@ -102,7 +117,7 @@ export function buildMacApp({app,cuaBinary,version,identity,teamID,notaryProfile
     const driver=path.join(macos,'cua-driver');
     fs.copyFileSync(cuaBinary,driver,fs.constants.COPYFILE_EXCL);fs.chmodSync(driver,0o755);
     const inputHash=createHash('sha256').update(fs.readFileSync(cuaBinary)).digest('hex');
-    execFileSync('/usr/bin/xcrun',['swiftc','-O','-target',`${process.arch==='arm64'?'arm64':'x86_64'}-apple-macosx13.0`,SOURCE,'-o',path.join(macos,'Styx'),'-framework','AppKit','-framework','ApplicationServices','-framework','CoreGraphics'],{stdio:'inherit',timeout:180000});
+    execFileSync('/usr/bin/xcrun',swiftArgs,{stdio:'inherit',timeout:180000});
     execFileSync('/usr/bin/plutil',['-lint',path.join(app,'Contents/Info.plist')],{stdio:'inherit'});
     for(const [command,args] of steps){
       // A local keychain approval must not turn into an unattended long wait.
@@ -114,6 +129,7 @@ export function buildMacApp({app,cuaBinary,version,identity,teamID,notaryProfile
       signing:identity?'PASS':'NOT RUN',
       signing_detail:identity?(signingMode==='local-development'?'apple_development_local_only':'developer_id_verified'):'unsigned_development_bundle',
       signing_mode:signingMode,external_distribution:'NOT RUN',
+      compiler:{sdk_path:sdkPath??'xcrun_default',module_cache_path:moduleCachePath??'compiler_default',warnings_as_errors:true,target:swiftArgs[swiftArgs.indexOf('-target')+1]},
       notarization:notaryProfile?'PASS':'NOT RUN',
       notarization_detail:notaryProfile?'accepted_stapled_assessed':'not_submitted',
       native_gui_acceptance:'NOT RUN',tcc_attribution:'NOT RUN'};

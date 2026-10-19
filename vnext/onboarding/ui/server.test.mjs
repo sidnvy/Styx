@@ -38,6 +38,60 @@ test('loopback bootstrap serves real static UI but no unauthenticated state or m
  }finally{await f.cleanup()}
 });
 
+test('shared journey and diagnostics are authenticated read-only whitelists, not account or permission shortcuts',async()=>{
+ let mutations=0;
+ const f=await fixture({core:{readDeployment:()=>({mode:'create-local',roles:{gateway:'local',host:'local',exec:'enabled',computer:'requested'},gatewayRuntime:{status:'running'},accountAcceptance:'NOT RUN',steps:[{id:'host.doctor',status:'succeeded',evidence:{token:'SECRET_JOURNAL'}}],config:{apiKey:'SECRET_CONFIG'}}),readDeploymentAcceptance:()=>({status:'request_observed',requestProof:{status:'verified'},targetChatConfirmation:{status:'pending'},desktop:{status:'pending'},complete:false,challenge:{prompt:'PRIVATE_CHALLENGE'}}),readDeploymentConnectionHandoff:()=>({status:'available',credentialAvailable:true,authentication:{modelCredential:'SECRET_CREDENTIAL'}}),readDeploymentOnboardingPreference:()=>({background:'foreground',configurationBound:true}),setDeploymentOnboardingPreference:()=>{mutations++}},backgroundRead:async()=>({observation:'last_recorded',status:'running',hostConnection:'exec_connected',raw:'SECRET_COOKIE'})});
+ try{
+  assert.equal(f.session.journeySupported,true);assert.equal(f.session.diagnosticsSupported,true);
+  assert.equal((await fetch(f.origin+'/api/journey')).status,401);
+  for(const route of ['/api/journey','/api/diagnostics']){const r=await f.get(route);assert.equal(r.status,200);assert.equal(r.headers.get('cache-control'),'no-store');const text=await r.text();assert.doesNotMatch(text,/SECRET|PRIVATE_CHALLENGE|modelCredential|"config"/)}
+  const j=(await(await f.get('/api/journey')).json()).journey;assert.equal(j.readiness.exec.status,'preflight_passed');assert.equal(j.readiness.desktop.status,'not_verified');assert.equal(j.account.status,'not_verified');assert.equal(j.background.status,'not_observed');assert.equal(mutations,0);assert.equal(fs.existsSync(path.join(f.root,'deployment')),false);
+ }finally{await f.cleanup()}
+});
+
+test('connection handoff is an explicit owner CSRF-protected response and absent from all observation endpoints',async()=>{
+ const secret='SECRET_LOCAL_MODEL_CREDENTIAL';let prepared=0;
+ const f=await fixture({core:{readDeployment:()=>({mode:'create-local',roles:{gateway:'local',host:'local'},steps:[]}),readDeploymentConnectionHandoff:()=>({status:'available',credentialAvailable:true,modelCredential:secret}),prepareDeploymentConnectionHandoff:(_dir,options)=>{assert.deepEqual(options,{authorize:true});prepared++;return {status:'prepared',authentication:{type:'bearer',modelCredential:secret},connection:{tunnelId:'tunnel_abcdefgh'},expiresAt:Date.now()+60000}}},backgroundRead:async()=>null});
+ try{
+  assert.equal(f.session.connectionHandoffSupported,true);
+  assert.equal((await f.get('/api/connection-handoff')).status,405);
+  assert.equal((await f.post('/api/connection-handoff',{authorize:true},{'X-Styx-CSRF':''})).status,403);
+  assert.equal((await f.post('/api/connection-handoff',{})).status,409);
+  assert.equal((await f.post('/api/connection-handoff',{authorize:true,output:'/tmp/anything'})).status,409);assert.equal(prepared,0);
+  const response=await f.post('/api/connection-handoff',{authorize:true});assert.equal(response.status,200);assert.equal((await response.json()).handoff.authentication.modelCredential,secret);assert.equal(prepared,1);
+  for(const route of ['/api/session','/api/status','/api/journey','/api/diagnostics'])assert.doesNotMatch(await(await f.get(route)).text(),/SECRET_LOCAL_MODEL_CREDENTIAL/);
+ }finally{await f.cleanup()}
+});
+
+test('acceptance and background choices call scoped Core hooks; browser cannot inject proof or mark account accepted',async()=>{
+ const calls=[],challenge={id:'a'.repeat(32),expiresAt:Date.now()+60000,prompt:'Core fixed prompt',command:'Core fixed command',environmentId:'host_1',desktopValue:'STYX_GUI_'+'b'.repeat(32)};
+ const pending={schema:1,status:'awaiting_chat_request',challenge,requestProof:{status:'pending'},targetChatConfirmation:{status:'pending'},desktop:{status:'pending'},complete:false};
+ const hook=name=>(_dir,options)=>{calls.push({name,options});return pending};
+ const f=await fixture({core:{readDeploymentAcceptance:()=>pending,beginDeploymentAcceptance:hook('begin'),confirmDeploymentAcceptance:hook('confirm'),recordDeploymentDesktopReadback:hook('readback'),setDeploymentOnboardingPreference:(_dir,options)=>{calls.push({name:'preference',options});return {background:options.background,configurationBound:true,raw:'SECRET'}}}});
+ try{
+  assert.equal(f.session.acceptanceSupported,true);
+  assert.equal((await f.post('/api/acceptance/begin',{authorize:true},{'X-Styx-CSRF':''})).status,403);
+  assert.equal((await f.post('/api/acceptance/begin',{authorize:true,requestProof:{status:'verified'}})).status,409);assert.equal(calls.length,0);
+  const result=await(await f.post('/api/acceptance/begin',{authorize:true})).json();assert.deepEqual(result.acceptance.challenge,challenge);assert.equal(result.acceptance.complete,false);
+  assert.equal((await f.post('/api/acceptance/confirm',{authorize:true,challengeId:challenge.id,observedInTargetChat:true})).status,200);
+  assert.equal((await f.post('/api/acceptance/desktop-readback',{authorize:true,challengeId:challenge.id,value:challenge.desktopValue})).status,200);
+  assert.equal((await f.post('/api/journey/background-preference',{background:'foreground',authorize:true,stopService:true})).status,409);
+  assert.equal((await f.post('/api/journey/background-preference',{background:'foreground',authorize:false})).status,409);
+  const preference=await(await f.post('/api/journey/background-preference',{background:'foreground',authorize:true})).json();assert.deepEqual(preference,{preference:{background:'foreground',configurationBound:true}});
+  assert.deepEqual(calls.map(c=>c.name),['begin','confirm','readback','preference']);assert.equal(f.calls,0);
+ }finally{await f.cleanup()}
+});
+test('foreground start is explicit and scoped; App shutdown settles Host before its owned Gateway',async()=>{
+ const calls=[];
+ const f=await fixture({core:{startDeploymentForeground:async(_dir,options)=>{assert.deepEqual(options,{authorize:true});calls.push('start');return {schema:1,status:'started',execConnection:'connecting',toolHealth:'not_verified'}},stopDeploymentForeground:async()=>{calls.push('host.stop')},stopDeploymentGateway:async()=>{calls.push('gateway.stop')}}});
+ try{
+  assert.equal(f.session.foregroundSupported,true);assert.equal((await f.get('/api/foreground')).status,405);
+  assert.equal((await f.post('/api/foreground',{authorize:true},{'X-Styx-CSRF':''})).status,403);assert.equal((await f.post('/api/foreground',{})).status,409);assert.equal((await f.post('/api/foreground',{authorize:true,binary:'/arbitrary'})).status,409);assert.deepEqual(calls,[]);
+  const result=await(await f.post('/api/foreground',{authorize:true})).json();assert.equal(result.foreground.status,'started');assert.equal(result.foreground.execConnection,'connecting');assert.equal(result.foreground.toolHealth,'not_verified');
+  await f.close();assert.deepEqual(calls,['start','host.stop','gateway.stop']);
+ }finally{await f.cleanup()}
+});
+
 test('authenticated mutation requires exact Origin plus separate CSRF; GET never mutates',async()=>{
  const f=await fixture();try{
   assert.equal((await f.post('/api/create',config(),{'X-Styx-CSRF':''})).status,403);

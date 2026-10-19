@@ -7,7 +7,7 @@ export const GATEWAY_SOURCE_FILES=Object.freeze([
  'packages/styx-exec-adapter/rpc.mjs','packages/styx-exec-adapter/errors.mjs',
  'packages/styx-exec-adapter/adapter.mjs','packages/styx-exec-adapter/schema.mjs',
  'packages/styx-gui-broker/mcp.mjs','shared/private-file.mjs','shared/enrollment-protocol.mjs',
- 'host/private-storage.mjs','onboarding/deployment-config.mjs',
+ 'host/private-storage.mjs','shared/onboarding-evidence.mjs','onboarding/deployment-config.mjs',
  'onboarding/gateway-deployment-reader.mjs','onboarding/gateway-signed-runner.mjs'
 ]);
 export const GATEWAY_ENTRYPOINT='app/onboarding/gateway-signed-runner.mjs';

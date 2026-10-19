@@ -55,14 +55,25 @@ export async function connectComputerOnce(config,{signal,onReady}={}) {
   if(!c)throw Error('computer_not_configured');
   if(signal?.aborted)throw Error('connector_cancelled');
   const auth=hostAuthentication(c);
-  let ws,child;
+  let ws,child,childClosed,cleanup;
+  let childExited=false;
   let closed=false;
   const stop=()=>{
-    if(closed)return;
+    if(cleanup)return cleanup;
     closed=true;
     try{ws?.terminate()}catch{}
     try{child?.stdin.end()}catch{}
-    try{child?.kill('SIGTERM')}catch{}
+    // Only this ChildProcess is ours. An attached App-owned embedded daemon is
+    // outside this lifetime. Wait for actual exit, escalating only this child.
+    cleanup=(async()=>{
+      if(!child||childExited)return;
+      try{child.kill('SIGTERM')}catch{}
+      let timer;
+      await Promise.race([childClosed,new Promise(resolve=>{timer=setTimeout(resolve,2000)})]);
+      clearTimeout(timer);
+      if(!childExited){try{child.kill('SIGKILL')}catch{}await childClosed;}
+    })();
+    return cleanup;
   };
   const abort=()=>stop();
   signal?.addEventListener('abort',abort,{once:true});
@@ -75,6 +86,7 @@ export async function connectComputerOnce(config,{signal,onReady}={}) {
         ...(c.computer.env??{})},
       stdio:['pipe','pipe','pipe']
     });
+    childClosed=new Promise(resolve=>child.once('close',()=>{childExited=true;resolve()}));
     child.stderr.resume();
     child.on('error',stop);
     child.on('close',stop);
@@ -141,7 +153,7 @@ export async function connectComputerOnce(config,{signal,onReady}={}) {
       if(closed) resolve();
     });
   }finally{
-    stop();
+    await stop();
     signal?.removeEventListener('abort',abort);
     // Termination of a tool server does not establish that an in-flight GUI
     // click was rolled back. Gateway presents unknown mutation outcome.

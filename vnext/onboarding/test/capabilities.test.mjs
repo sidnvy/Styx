@@ -48,3 +48,13 @@ test('no permission means no state or native mutation',async t=>{
  const f=fixture(t);await assert.rejects(changeDeploymentCapabilities(f.dir,{computer:true},f.ops),/authorization_required/);
  assert.equal(f.calls.length,0);assert.equal(fs.existsSync(path.join(f.dir,'capabilities.json')),false);
 });
+test('capability scope is checked before owned foreground stops and explicit resume is recorded',async t=>{
+ const f=fixture(t);f.ops.readForeground=()=>({status:'connected'});
+ f.ops.stopOwnedForeground=async()=>{const j=JSON.parse(fs.readFileSync(path.join(f.dir,'capabilities.json')));assert.equal(j.phase,'stop_owned_foreground');assert.equal(j.status,'running');f.calls.push('owned.stop');return {status:'stopped',foregroundRestartRequired:true}};
+ const result=await changeDeploymentCapabilities(f.dir,{authorize:true,computer:true},f.ops);assert.equal(result.foregroundRestartRequired,true);assert.equal(f.calls[0],'owned.stop');assert.equal(f.calls.filter(x=>x==='owned.stop').length,1);
+});
+test('unknown external owner or failed scope cannot stop foreground or mutate capabilities',async t=>{
+ const f=fixture(t);let stopped=0;f.ops.stopOwnedForeground=async()=>{stopped++;return {status:'stopped'}};f.ops.readForeground=()=>({status:'needs_attention'});
+ await assert.rejects(changeDeploymentCapabilities(f.dir,{authorize:true,computer:true},f.ops),/foreground_owned_or_interrupted/);assert.equal(stopped,0);assert.equal(f.calls.length,0);
+ f.ops.readForeground=()=>({status:'connected'});f.ops.prepare=()=>{throw Error('scope_refused')};await assert.rejects(changeDeploymentCapabilities(f.dir,{authorize:true,computer:true},f.ops),/scope_refused/);assert.equal(stopped,0);assert.equal(f.calls.length,0);
+});

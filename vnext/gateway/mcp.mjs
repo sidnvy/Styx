@@ -1,4 +1,5 @@
 import {Server} from '@modelcontextprotocol/sdk/server/index.js';
+import {randomUUID} from 'node:crypto';
 import {ListToolsRequestSchema, CallToolRequestSchema,
   ListResourcesRequestSchema, ReadResourceRequestSchema} from '@modelcontextprotocol/sdk/types.js';
 import {tools as execTools} from '../packages/styx-exec-adapter/schema.mjs';
@@ -24,7 +25,7 @@ const statusTool = {
   annotations: {readOnlyHint: true, destructiveHint: false, idempotentHint: true}
 };
 
-export function createGatewayMcp({exec, computer, gui, registry, owner, relay = null, cas = null, casOnly = false}) {
+export function createGatewayMcp({exec, computer, gui, registry, owner, relay = null, cas = null, casOnly = false, onToolResult = null}) {
   if (typeof owner !== 'string' || !owner) throw new TypeError('Authenticated session required');
   if (casOnly && !cas) throw Error('cas_lab_requires_explicit_experiment_ledger');
   const server = new Server({name: 'styx-vnext', version: '0.1.0'},
@@ -47,6 +48,16 @@ export function createGatewayMcp({exec, computer, gui, registry, owner, relay = 
     });
   }
   server.setRequestHandler(ListToolsRequestSchema, async () => ({tools: await definitions()}));
+  async function observed(name,args,operation){
+    let target=null;
+    try{const execution=name==='write_stdin'?exec.sessions?.get(args.session_id):null;target=registry.resolve(execution?.environment??args.environment_id);}catch{}
+    const operationId=randomUUID();
+    if(target&&typeof onToolResult?.before==='function')try{await onToolResult.before({name,args,owner,target,operationId})}catch{}
+    const result=await operation();
+    if(onToolResult&&target)try{const current=registry.resolve(target.id);if(current.generation===target.generation)await onToolResult({name,args,result,owner,target:current,operationId});}catch{/* Observation never changes/replays an executed request. */}
+    return result;
+  }
+
   server.setRequestHandler(CallToolRequestSchema, async ({params}) => {
     const {name, arguments: args = {}} = params;
     if (cas && CAS_TOOLS.some(tool => tool.name === name))
@@ -80,10 +91,10 @@ export function createGatewayMcp({exec, computer, gui, registry, owner, relay = 
       };
       return {structuredContent: result, content: [{type: 'text', text: JSON.stringify(result)}]};
     }
-    if (execTools.some(t => t.name === name)) return exec.callTool(name, args, owner);
+    if (execTools.some(t => t.name === name)) return observed(name,args,()=>exec.callTool(name, args, owner));
     if (computer && computerAllowed() &&
       (await computer.listTools()).some(t => t.name === name)) {
-      return computer.callTool(name,args,owner);
+      return observed(name,args,()=>computer.callTool(name,args,owner));
     }
     if (gui && !computer && computerAllowed() && guiTools.some(t => t.name === name)) {
       return gui.callTool(name, args, owner);

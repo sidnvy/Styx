@@ -5,7 +5,16 @@ import path from 'node:path';
 import os from 'node:os';
 import {fileURLToPath} from 'node:url';
 import {spawnSync} from 'node:child_process';
-import {appInfoPlist,macSigningPlan,macDevelopmentSigningPlan,buildMacApp,MAC_BUNDLE_ID} from '../build-macos-app.mjs';
+import {appInfoPlist,macSigningPlan,macDevelopmentSigningPlan,buildMacApp,macSwiftBuildArguments,MAC_BUNDLE_ID} from '../build-macos-app.mjs';
+
+test('per-build SDK and module cache are passed as fixed Swift argv without changing the system toolchain',()=>{
+  const input={source:'/source with spaces/Styx.swift',output:'/build/Styx.app/Contents/MacOS/Styx',arch:'arm64',sdkPath:'/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk',moduleCachePath:'/build/Module Cache'};
+  const args=macSwiftBuildArguments(input);
+  assert.equal(args[args.indexOf('-sdk')+1],input.sdkPath);assert.equal(args[args.indexOf('-module-cache-path')+1],input.moduleCachePath);
+  assert.equal(args[args.indexOf('-target')+1],'arm64-apple-macosx13.0');assert.ok(args.includes(input.source));assert.ok(args.includes('-warnings-as-errors'));assert.ok(!args.includes('-D'));
+  assert.equal(macSwiftBuildArguments({...input,arch:'x64'})[args.indexOf('-target')+1],'x86_64-apple-macosx13.0');
+  for(const patch of [{sdkPath:'relative'},{sdkPath:'/sdk/../other'},{sdkPath:'/sdk\nother'},{moduleCachePath:'relative'},{moduleCachePath:undefined},{arch:'unsupported'}])assert.throws(()=>macSwiftBuildArguments({...input,...patch}));
+});
 
 test('stable macOS bundle identity and version reject injected plist values',()=>{
   const plist=appInfoPlist('0.1.0');

@@ -13,6 +13,7 @@ import {ownerCommand} from '../gateway/enroll-admin.mjs';
 import {verifyGatewayConnection} from './connection.mjs';
 import {pairDevice,createLocalPairingTransport} from './pairing.mjs';
 import {doctor} from '../host/doctor.mjs';
+import {readDeploymentAcceptance} from './account-acceptance.mjs';
 
 const live=new Map();
 const fail=code=>{throw Error(code)};
@@ -29,7 +30,7 @@ function load(d){if(!abs(d))fail('absolute_state_directory_required');requirePri
 function publicState(d,state,config){
  const observations=[...state.steps.filter(s=>s.id.startsWith('host.service.')&&s.evidence).map(s=>({at:s.updatedAt,evidence:s.evidence})),...(state.maintenance??[])].filter(x=>x.evidence).sort((a,b)=>String(a.at??'').localeCompare(String(b.at??'')));
  const hostServiceMaintenance={lastObservation:observations.at(-1)?.evidence??null,hasUncertainMutation:hasUncertainServiceMutation(state),history:(state.maintenance??[]).map(x=>({action:x.action,status:x.status,at:x.at}))};
- return {schema:1,mode:state.mode,roles:deploymentRoles(config),stateDir:d,hostServiceMaintenance,gatewayServiceMaintenance:{lastObservation:state.gatewayMaintenance?.at(-1)?.evidence??null,hasUncertainMutation:(state.gatewayMaintenance??[]).some(x=>['running','uncertain'].includes(x.status))},gatewayRuntime:{status:live.has(d)?'running':'not_owned_by_current_process',ownership:live.has(d)?'current_process':'none',persistentService:'NOT OBSERVED'},activeStep:state.steps.find(s=>s.status==='running')?.id??null,steps:state.steps.map(s=>({...s,...(s.status==='running'?{status:'uncertain',error:'interrupted_or_in_progress_do_not_replay'}:{})})),accountAcceptance:'NOT RUN'};}
+ return {schema:1,mode:state.mode,roles:deploymentRoles(config),stateDir:d,hostServiceMaintenance,gatewayServiceMaintenance:{lastObservation:state.gatewayMaintenance?.at(-1)?.evidence??null,hasUncertainMutation:(state.gatewayMaintenance??[]).some(x=>['running','uncertain'].includes(x.status))},gatewayRuntime:{status:live.has(d)?'running':'not_owned_by_current_process',ownership:live.has(d)?'current_process':'none',persistentService:'NOT OBSERVED'},activeStep:state.steps.find(s=>s.status==='running')?.id??null,steps:state.steps.map(s=>({...s,...(s.status==='running'?{status:'uncertain',error:'interrupted_or_in_progress_do_not_replay'}:{})})),accountAcceptance:readDeploymentAcceptance(d).complete?'user_confirmed_with_mcp_evidence':'NOT RUN'};}
 export function createDeployment(configFile,{stateDir}={}){
  if(!abs(configFile)||!abs(stateDir))fail('absolute_paths_required');
  const config=validateDeployment(read(configFile));requirePrivateDirectory(path.dirname(stateDir));if(fs.existsSync(stateDir))fail('deployment_directory_already_exists');
@@ -39,7 +40,7 @@ export function createDeployment(configFile,{stateDir}={}){
  const state={schema:1,mode:config.mode,configSha256:hash(filename(stateDir,'deployment.json')),steps:ids.map(id=>({id,status:'pending'}))};write(filename(stateDir,'state.json'),state);return publicState(stateDir,state,config);
 }
 export function readDeployment(stateDir){const {config,state}=load(stateDir);return publicState(stateDir,state,config);}
-export function planDeployment(stateDir){const {config,state}=load(stateDir);return {schema:1,mode:config.mode,roles:deploymentRoles(config),steps:state.steps.map((s,i)=>({id:s.id,status:s.status,requires:state.steps.slice(0,i).map(x=>x.id),authorizationRequired:true})),ownerPairingScope:config.host&&config.mode==='create-local'?{gatewayUrl:config.gateway.url,label:config.host.label,enableComputer:config.host.computer}:null,service:{status:'not_checked',lastObservation:publicState(stateDir,state,config).hostServiceMaintenance.lastObservation,configFile:config.host?path.join(config.host.baseDir,'service.json'):null,platform:process.platform},accountAcceptance:'NOT RUN'};}
+export function planDeployment(stateDir){const {config,state}=load(stateDir);return {schema:1,mode:config.mode,roles:deploymentRoles(config),steps:state.steps.map((s,i)=>({id:s.id,status:s.status,requires:state.steps.slice(0,i).map(x=>x.id),authorizationRequired:true})),ownerPairingScope:config.host&&config.mode==='create-local'?{gatewayUrl:config.gateway.url,label:config.host.label,enableComputer:config.host.computer}:null,service:{status:'not_checked',lastObservation:publicState(stateDir,state,config).hostServiceMaintenance.lastObservation,configFile:config.host?path.join(config.host.baseDir,'service.json'):null,platform:process.platform},accountAcceptance:readDeploymentAcceptance(stateDir).complete?'user_confirmed_with_mcp_evidence':'NOT RUN'};}
 function lock(d){const file=filename(d,'advance.lock');let fd;try{fd=openPrivateFile(file,0o600);}catch{fail('onboarding_busy_or_interrupted_lock');}return ()=>{fs.closeSync(fd);fs.unlinkSync(file)};}
 function serviceScope(c,action){
  const serviceConfigFile=path.join(c.host.baseDir,'service.json'),raw=read(serviceConfigFile),windows=process.platform==='win32';
@@ -94,7 +95,7 @@ export async function controlDeploymentService(d,{role,action,authorize=false}={
 export async function inspectDeployment(d){
  const deployment=readDeployment(d);
  const {observeDeploymentBackground}=await import('./background.mjs');
- return {deployment,observations:await observeDeploymentBackground(d),accountAcceptance:'NOT RUN'};
+ return {deployment,observations:await observeDeploymentBackground(d),accountAcceptance:readDeploymentAcceptance(d).complete?'user_confirmed_with_mcp_evidence':'NOT RUN'};
 }
 function gatewayPaths(d){const root=filename(d,'gateway');return {root,cert:filename(root,'certificate.pem'),key:filename(root,'private-key.pem'),model:filename(root,'model.token'),admin:filename(root,'admin.token'),owner:filename(root,'owner.json'),runtime:filename(root,'runtime.json'),catalog:filename(root,'targets.json')};}
 function prepareGateway(d,c){
@@ -113,7 +114,8 @@ export async function startDeploymentGateway(d){
  if(state.steps.find(s=>s.id==='gateway.prepare')?.status!=='succeeded')fail('gateway_prepare_required');
  const {runtime:cfg,catalog}=readGatewayDeployment(d);
  const {createStyxGateway}=await import('../gateway/index.mjs');const {createGatewayHttp}=await import('../gateway/http.mjs');const {EnrollmentController}=await import('../gateway/enrollment.mjs');
- const gateway=createStyxGateway({catalog});
+ const {createAcceptanceObserver}=await import('../shared/onboarding-evidence.mjs');
+ const gateway=createStyxGateway({catalog,onToolResult:createAcceptanceObserver(d)});
  const enrollment=new EnrollmentController({rootDir:cfg.enrollmentDir,adminTokenFile:cfg.adminTokenFile,registry:gateway.registry,relay:gateway.relay});
  let handle;try{handle=await createGatewayHttp(gateway,{token:fs.readFileSync(cfg.modelTokenFile,'utf8').trim(),host:cfg.listenHost,port:Number(new URL(cfg.url).port),allowedHosts:[new URL(cfg.url).host],tlsCertificateFile:cfg.tlsCertificateFile,tlsPrivateKeyFile:cfg.tlsPrivateKeyFile,enrollment});}catch(e){await gateway.close();throw e;}
  live.set(d,{http:handle,gateway,controller:enrollment});return {status:'running',url:cfg.url,ownership:'current_process',persistentService:'NOT OBSERVED'};
@@ -256,3 +258,15 @@ export {planNativeSupervisorMigration,applyNativeSupervisorMigration,rollbackNat
 export {inspectPairingLink,acceptPairingLink} from './pairing-links.mjs';
 
 export {planHostUpdate,readHostUpdate} from './host-update.mjs';
+
+export {readDeploymentAcceptance,beginDeploymentAcceptance,confirmDeploymentAcceptance,recordDeploymentDesktopReadback,readDeploymentConnectionHandoff,prepareDeploymentConnectionHandoff} from './account-acceptance.mjs';
+export {readDeploymentPermissions} from './permissions.mjs';
+export {startDeploymentForeground,stopDeploymentForeground,readDeploymentForeground} from './foreground.mjs';
+export function readDeploymentOnboardingPreference(stateDir){
+ const {state}=load(stateDir),decision=state.onboardingDecisions?.background;
+ return {background:decision?.configSha256===state.configSha256&&['foreground','login'].includes(decision.choice)?decision.choice:'not_decided',configurationBound:decision?.configSha256===state.configSha256};
+}
+export function setDeploymentOnboardingPreference(stateDir,options={}){
+ exact(options,['background','authorize']);if(options.authorize!==true||!['foreground','login'].includes(options.background))fail('explicit_onboarding_background_choice_required');
+ const release=lock(stateDir);try{const {state}=load(stateDir);state.onboardingDecisions={...state.onboardingDecisions,background:{choice:options.background,configSha256:state.configSha256,at:new Date().toISOString()}};write(filename(stateDir,'state.json'),state);return {...readDeploymentOnboardingPreference(stateDir),serviceMutation:'NOT RUN'};}finally{release()}
+}

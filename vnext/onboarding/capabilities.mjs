@@ -10,6 +10,7 @@ import {capabilityPayload} from '../shared/enrollment-protocol.mjs';
 import {ownerCommand} from '../gateway/enroll-admin.mjs';
 import {readDeployment,controlDeploymentHostService} from './core.mjs';
 import {observeHostService} from './service-lifecycle.mjs';
+import {stopDeploymentForeground,readDeploymentForeground} from './foreground.mjs';
 const assert=(ok,code)=>{if(!ok)throw Error(code)};
 const hash=b=>createHash('sha256').update(b).digest('hex');
 function read(file){requirePrivateFile(file);assert(fs.statSync(file).size<=1048576,'capability_file_too_large');return JSON.parse(fs.readFileSync(file,'utf8'))}
@@ -53,25 +54,28 @@ function prepare(d,enable,trustedMacPreviewApp){
  return {identity,key,publicKey:pub.export({type:'spki',format:'pem'}),host,hostFile,computer,owner,serviceConfigFile:path.join(base,'service.json')};
 }
 function publicStatus(j){return {status:j.status,observation:'last_recorded',computer:j.computer??null,requestedComputer:j.requestedComputer,
- phase:j.phase,observedAt:j.updatedAt,nativePermissions:'not_checked',accountAcceptance:'NOT RUN',...(j.reason?{reason:j.reason}:{})}}
+ phase:j.phase,observedAt:j.updatedAt,foregroundRestartRequired:j.foregroundRestartRequired===true,nativePermissions:'not_checked',accountAcceptance:'NOT RUN',...(j.reason?{reason:j.reason}:{})}}
 export function readDeploymentCapabilities(d){
  requirePrivateDirectory(d);const file=path.join(d,'capabilities.json');
  if(!fs.existsSync(file))return {status:'not_changed',computer:null};
- return publicStatus(read(file));
+ const journal=read(file);assert(journal.schema===1&&journal.configSha256===hash(fs.readFileSync(path.join(d,'deployment.json'))),'capability_scope_changed');
+ return publicStatus(journal);
 }
 export async function changeDeploymentCapabilities(d,{authorize=false,computer}={},operations={}){
  assert(authorize===true&&typeof computer==='boolean','explicit_desktop_capability_authorization_required');
  requirePrivateDirectory(d);
- const ops={prepare:(dir,enabled)=>prepare(dir,enabled,operations.trustedMacPreviewApp),owner:ownerCommand,hostStatus:observeHostService,hostControl:controlDeploymentHostService,...operations};
+ const ops={prepare:(dir,enabled)=>prepare(dir,enabled,operations.trustedMacPreviewApp),owner:ownerCommand,hostStatus:observeHostService,hostControl:controlDeploymentHostService,stopOwnedForeground:stopDeploymentForeground,readForeground:readDeploymentForeground,...operations};
  const lock=path.join(d,'capabilities.lock');let fd;
  try{fd=openPrivateFile(lock,0o600)}catch{throw Error('capability_busy_or_interrupted_lock')}
- const file=path.join(d,'capabilities.json');let journal,scope,observed,wasRunning=false;
+ const file=path.join(d,'capabilities.json');let journal,scope,observed,wasRunning=false,foregroundRestartRequired=false;
  try{
   const digest=hash(fs.readFileSync(path.join(d,'deployment.json')));
   if(fs.existsSync(file)){
    const previous=read(file);assert(previous.configSha256===digest,'capability_scope_changed');
    assert(previous.status!=='running'&&previous.status!=='uncertain','capability_uncertain_requires_reconciliation');
   }
+  const foreground=await ops.readForeground(d);
+  assert(!['needs_attention','stopping'].includes(foreground.status),'foreground_owned_or_interrupted_do_not_take_over');
   scope=ops.prepare(d,computer);
   const host=await ops.hostStatus({serviceConfigFile:scope.serviceConfigFile});
   assert(host.status==='reported'&&['running','stopped','not_installed'].includes(host.state),'host_state_not_safe_for_capability_change');
@@ -79,7 +83,7 @@ export async function changeDeploymentCapabilities(d,{authorize=false,computer}=
   const devices=await ops.owner(scope.owner,'devices');
   observed=devices.find(x=>x.device_id===scope.identity.device_id&&x.fingerprint===scope.identity.fingerprint&&x.status==='approved');
   assert(observed,'capability_device_not_approved');
-  journal={schema:1,configSha256:digest,status:'running',phase:'deny_computer',requestedComputer:computer,computer:observed.capabilities.computer};
+  journal={schema:1,configSha256:digest,status:'running',phase:'prepared',requestedComputer:computer,computer:observed.capabilities.computer,foregroundRestartRequired};
   const persist=()=>{journal.updatedAt=new Date().toISOString();write(file,journal)};
   const update=async(enabled)=>{
    const body={device_id:scope.identity.device_id,fingerprint:scope.identity.fingerprint,generation:observed.generation,enable_computer:enabled,public_key_pem:scope.publicKey};
@@ -88,7 +92,12 @@ export async function changeDeploymentCapabilities(d,{authorize=false,computer}=
    assert(result.status==='updated'&&result.device_id===body.device_id&&result.fingerprint===body.fingerprint&&result.capabilities.computer===enabled&&typeof result.generation==='string','capability_reply_invalid');
    observed=result;journal.computer=enabled;persist();
   };
-  persist();await update(false);
+  if(foreground.status!=='not_running'){
+   journal.phase='stop_owned_foreground';persist();
+   const stopped=await ops.stopOwnedForeground(d);assert(['stopped','not_running'].includes(stopped.status),'foreground_stop_unconfirmed');
+   journal.foregroundRestartRequired=stopped.foregroundRestartRequired===true;persist();
+  }
+  journal.phase='deny_computer';persist();await update(false);
   journal.phase='stop_host';persist();
   if(wasRunning){const stopped=await ops.hostControl(d,{action:'stop',authorize:true});assert(stopped.status==='reported'&&stopped.state==='stopped','host_stop_unconfirmed')}
   journal.phase='write_host';persist();
@@ -100,6 +109,10 @@ export async function changeDeploymentCapabilities(d,{authorize=false,computer}=
   journal.status='updated';journal.phase='complete';persist();return publicStatus(journal);
  }catch(error){
   if(journal){
+   if(journal.phase==='stop_owned_foreground'){
+    journal.status='uncertain';journal.reason='foreground_stop_unconfirmed_requires_reconciliation';journal.foregroundRestartRequired=true;
+    journal.updatedAt=new Date().toISOString();write(file,journal);throw Error(journal.reason);
+   }
    // Fail closed locally even when a Gateway response was lost: no automatic
    // restart and no replay of a signed remote mutation with unknown outcome.
    let localStopped=!wasRunning;

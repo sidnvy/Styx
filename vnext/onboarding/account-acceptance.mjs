@@ -1,0 +1,64 @@
+import fs from 'node:fs';
+import path from 'node:path';
+import {randomBytes} from 'node:crypto';
+import {requirePrivateFile} from '../host/private-storage.mjs';
+import {readDeploymentPermissions} from './permissions.mjs';
+import {acceptanceBinding,acceptanceFile,currentAcceptanceEvidence,writeAcceptanceEvidence,withAcceptanceLock,privateEvidenceRead} from '../shared/onboarding-evidence.mjs';
+const fail=code=>{throw Error(code)};
+const exact=(value,names)=>{if(!value||typeof value!=='object'||Array.isArray(value)||Object.keys(value).some(key=>!names.includes(key)))fail('invalid_acceptance_options')};
+function authorized(value,names){exact(value,names);if(value.authorize!==true)fail('explicit_acceptance_authorization_required')}
+const desktopVerified=record=>!record.desktopRequired||record.desktop?.after===true&&record.desktop?.readback===true&&record.desktop?.actionVerified===true&&!!record.desktop.actionOwner;
+function projection(record){
+ const proof=record.requestProof?.status==='verified',desktop=desktopVerified(record),confirmed=record.targetChatConfirmation?.status==='user_confirmed';
+ return {schema:1,status:proof&&desktop&&confirmed?'user_confirmed_with_mcp_evidence':proof?'request_observed':'awaiting_chat_request',
+  challenge:{id:record.id,expiresAt:record.expiresAt,prompt:record.prompt,command:record.command,environmentId:record.environmentId,...(record.desktopRequired?{desktopValue:record.desktopValue}:{})},
+  requestProof:{status:proof?'verified':'pending',...(proof?{observedAt:record.requestProof.at,source:'authenticated_mcp_exec_result'}:{})},
+  targetChatConfirmation:{status:confirmed?'user_confirmed':'pending',providerIdentity:'not_verified',source:confirmed?'user_attested':'not_recorded'},
+  desktop:{status:!record.desktopRequired?'not_required':desktop?'verified':'pending'},complete:proof&&desktop&&confirmed};
+}
+export function readDeploymentAcceptance(stateDir){
+ try{return projection(currentAcceptanceEvidence(stateDir).record)}catch(error){return {schema:1,status:['acceptance_expired','acceptance_context_changed'].includes(error.message)?error.message:'not_started',challenge:null,requestProof:{status:'pending'},targetChatConfirmation:{status:'pending',providerIdentity:'not_verified'},desktop:{status:'pending'},complete:false};}
+}
+export function beginDeploymentAcceptance(stateDir,options={}){
+ authorized(options,['authorize']);return withAcceptanceLock(stateDir,()=>{
+  const {target,binding}=acceptanceBinding(stateDir),nonce=randomBytes(16).toString('hex'),id=randomBytes(16).toString('hex');
+  const marker='STYX_EXEC_'+nonce,desktopValue='STYX_GUI_'+nonce;
+  const command=target.platform==='win32'?"Write-Output '"+marker+"'":"printf '%s\\n' '"+marker+"'";
+  const desktopRequired=target.computer?.enabled===true;
+  const native=desktopRequired?readDeploymentPermissions(stateDir):null;
+  const appPid=native?.source==='current_native_app_preflight'?native.nativeAppPid:null;
+  const prompt='请通过当前 Styx 插件验收设备 '+target.id+'。先用 exec_command 执行 '+JSON.stringify({cmd:command,environment_id:target.id,login:false,yield_time_ms:1000})+'，若返回 session_id，仅用 write_stdin 空输入轮询到退出，核对输出标记及退出码0。'+(desktopRequired?'然后仅使用 Styx Cua 桌面工具，用 get_window_state 观察 Styx 原生设置窗口'+(appPid?'（pid '+appPid+'）':'')+'，找到“桌面验收输入框”，通过该快照的 element_token 或同一 pid/window_id 输入 '+desktopValue+'，再次用 get_window_state 观察同一窗口核对读回值；禁止用终端、JavaScript、AppleScript 或系统脚本替代桌面操作。':'')+'不要请求、读取或输出任何密钥。完成后告诉我实际结果；若失败请说明具体环节，不要宣称通过。';
+  const record={schema:1,id,nonce,binding,environmentId:target.id,createdAt:Date.now(),expiresAt:Date.now()+30*60*1000,marker,command,prompt,desktopRequired,desktopValue,desktopAppPid:appPid,requestProof:{status:'pending'},targetChatConfirmation:{status:'pending'}};
+  writeAcceptanceEvidence(stateDir,record);return projection(record);
+ });
+}
+export function recordDeploymentDesktopReadback(stateDir,options={}){
+ authorized(options,['authorize','challengeId','value']);return withAcceptanceLock(stateDir,()=>{
+  const {record}=currentAcceptanceEvidence(stateDir);
+  if(record.id!==options.challengeId||!record.desktopRequired||typeof options.value!=='string'||options.value.length>256)fail('desktop_acceptance_scope_mismatch');
+  record.desktop={...record.desktop,readback:options.value===record.desktopValue};writeAcceptanceEvidence(stateDir,record);return projection(record);
+ });
+}
+export function confirmDeploymentAcceptance(stateDir,options={}){
+ authorized(options,['authorize','challengeId','observedInTargetChat']);return withAcceptanceLock(stateDir,()=>{
+  const {record}=currentAcceptanceEvidence(stateDir);
+  if(record.id!==options.challengeId||options.observedInTargetChat!==true)fail('target_chat_confirmation_required');
+  if(record.requestProof?.status!=='verified'||!desktopVerified(record))fail('actual_mcp_acceptance_evidence_required');
+  record.targetChatConfirmation={status:'user_confirmed',at:Date.now(),source:'user_attested'};writeAcceptanceEvidence(stateDir,record);return projection(record);
+ });
+}
+function modelCredential(stateDir){
+ const file=path.join(stateDir,'gateway/model.token');if(requirePrivateFile(file).size>65536)fail('invalid_model_credential');const value=fs.readFileSync(file,'utf8').trim();if(value.length<32||/\s/.test(value))fail('invalid_model_credential');
+ const admin=path.join(stateDir,'gateway/admin.token');if(requirePrivateFile(admin).size>65536||value===fs.readFileSync(admin,'utf8').trim())fail('model_credential_separation_required');
+ return value;
+}
+export function readDeploymentConnectionHandoff(stateDir){
+ try{acceptanceBinding(stateDir);modelCredential(stateDir);const tunnelFile=path.join(stateDir,'tunnel/connection.json');const tunnel=fs.existsSync(tunnelFile)?privateEvidenceRead(tunnelFile):null;
+  const available=tunnel?.schema===1&&/^tunnel_[A-Za-z0-9_-]{8,128}$/.test(tunnel.tunnelId??'');
+  return {status:available?'available':'unavailable',authentication:'bearer',credentialAvailable:true,requiresTargetAccountAction:true,connection:available?{tunnelId:tunnel.tunnelId}:null,reason:available?null:'configure_tunnel_or_verified_external_entry_first'};
+ }catch{return {status:'unavailable',authentication:'bearer',credentialAvailable:false,requiresTargetAccountAction:true,connection:null,reason:'owned_gateway_and_approved_host_required'}}
+}
+export function prepareDeploymentConnectionHandoff(stateDir,options={}){
+ authorized(options,['authorize']);const value=modelCredential(stateDir),status=readDeploymentConnectionHandoff(stateDir);if(status.status!=='available')fail('connection_handoff_not_ready');
+ return {status:'prepared',connection:status.connection,authentication:{type:'bearer',modelCredential:value},expiresAt:Date.now()+60000,credentialValidity:'existing_gateway_credential_not_rotated; expiresAt_is_display_only',targetAccountAuthorization:'required'};
+}

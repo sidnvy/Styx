@@ -8,6 +8,7 @@ import {readDeployment,planDeployment,controlDeploymentHostService,controlDeploy
 import {observeHostService} from './service-lifecycle.mjs';
 import {ownerCommand} from '../gateway/enroll-admin.mjs';
 import {controlMacLoginRecovery} from './macos-login-recovery.mjs';
+import {stopDeploymentForeground,readDeploymentForeground} from './foreground.mjs';
 function desktopRecovery(d,action){
  if(process.platform!=='darwin')return {status:'not_applicable'};
  const file=path.join(d,'deployment.json');requirePrivateFile(file);
@@ -19,7 +20,7 @@ function desktopRecovery(d,action){
 const fail=code=>{throw Error(code)};
 const defaults={desktopRecovery,read:readDeployment,host:controlDeploymentHostService,gateway:(d,o)=>controlDeploymentService(d,{role:'gateway',...o}),
  stopForeground:stopDeploymentGateway,verifyGateway:verifyDeploymentGateway,hostConnection:observeLocalHostConnection,
- sleep:ms=>new Promise(resolve=>setTimeout(resolve,ms))};
+ sleep:ms=>new Promise(resolve=>setTimeout(resolve,ms)),stopOwnedForeground:stopDeploymentForeground,readForeground:readDeploymentForeground};
 // Owner-authenticated, identity-bound Exec relay observation. This is not tool
 // execution readiness: connected() only confirms an open authenticated Exec lane.
 export async function observeLocalHostConnection(d){
@@ -93,6 +94,15 @@ export async function enableDeploymentBackground(d,{authorize=false}={},operatio
   // Inspect both roles before stopping the working foreground Gateway.
   let host=hasHost?await ops.host(d,{action:'status',authorize:true}):null;
   if(hasHost&&(host.status!=='reported'||typeof host.installed!=='boolean'))fail('host_service_observation_unavailable');
+  if(hasHost&&!['running','stopped','not_installed'].includes(host.state))fail(state.mode==='join-existing'?'host_service_not_running':'host_service_observation_unavailable');
+  let gateway=state.mode==='create-local'?await ops.gateway(d,{action:'status'}):null;
+  if(gateway&&gateway.status!=='not_installed'&&!['active','inactive'].includes(gateway.active))fail('gateway_service_observation_unavailable');
+  if(gateway?.active==='active'&&state.gatewayRuntime.status==='running')fail('conflicting_gateway_ownership');
+  const foreground=await ops.readForeground(d);
+  if(foreground.status==='needs_attention'||foreground.status==='stopping')fail('foreground_owned_or_interrupted_do_not_take_over');
+  if(foreground.status!=='not_running')await mutate('foreground.stop_owned',async()=>{
+   const stopped=await ops.stopOwnedForeground(d);if(!['stopped','not_running'].includes(stopped.status))fail('foreground_stop_unconfirmed');return stopped;
+  });
   if(state.mode==='create-local'){
    if(hasHost){
    const connection=await ops.hostConnection(d);
@@ -103,7 +113,6 @@ export async function enableDeploymentBackground(d,{authorize=false}={},operatio
    }
    if(!['running','stopped','not_installed'].includes(host.state))fail('host_service_observation_unavailable');
    }
-   let gateway=await ops.gateway(d,{action:'status'});
    if(gateway.status==='not_installed')gateway=await mutate('gateway.install',()=>ops.gateway(d,{action:'install',authorize:true}));
    if(state.gatewayRuntime.status==='running'){
     if(gateway.active==='active')fail('conflicting_gateway_ownership');

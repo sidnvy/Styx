@@ -1,10 +1,35 @@
-# Local browser setup UI
+# Styx 本机设置引导
 
-This is a working local browser control plane over `onboarding/core.mjs`, not a
-shipped native graphical installer. It supports editable create-local or
-join-existing configuration, terminal/desktop capability selection, explicit
-one-step authorization, persisted progress/resume, manual account prerequisites,
-fixed Host doctor checks, and start/stop of the current process-owned Gateway.
+普通用户按七个步骤完成本机准备、系统权限、后台偏好、账号平台入口、ChatGPT 添加与认证、真实工具请求、目标聊天来源确认。侧栏和顶部位置来自共享 Core 的 journey 投影；本机运行、系统授权、MCP 请求证明和用户来源确认分别显示。
+
+完整 App 自动带入软件包、公钥、发布者信息和本机连接默认值。设备名、能力选择和明确同意构成普通路径；目录、Team ID、端口及网络开放选项放在默认折叠的高级详情中。缺少内置组件会说明原因，不能把任意路径视为已验证的安装包。
+
+“加入已有 Styx”要求独立核对邀请中的 Gateway 与证书。保存后只依次授权既有 Core 的 Host prepare/request/claim/doctor 步骤；等待主台独立审批，再由用户检查审批并继续。不会创建 Gateway、自动信任网络发现、创建第二条账号隧道或要求新设备取得主台管理凭据。新设备的账号验收回到已有主台的聊天完成。
+
+## 生命周期与权限
+
+前台按钮先将偏好保存到同一 Core，再明确调用 `/api/foreground` 启动或恢复本次连接。Core 负责复用已有身份和已运行的系统服务，避免重复启动；设置服务关闭时清理自己拥有的前台进程。登录后台另行选择和授权。偏好保存本身不显示为连接已运行。
+
+系统权限由用户亲自完成。辅助功能、屏幕录制和显式应用脚本的 Automation 分开说明。macOS 设置链接仅在用户点击时由原生设置窗口转交系统处理；页面不授予权限、不改系统数据库。终端连接可以先使用，桌面能力保留独立的授权、观察和实际操作验收。
+
+## 账号连接与真实验收
+
+官方账号平台和 ChatGPT 链接在系统浏览器打开，用户完成登录后手动返回。没有伪造的 OAuth callback，也不把本机设置会话附加到外部 URL。
+
+隧道运行密钥只提交到本机受保护 API；发送前清空输入框，失败不会回显。专用 Bearer 工具凭据只在用户明确请求后显示为只读密码字段，可由用户复制到 ChatGPT 认证字段。显示最多保留 60 秒，在页面隐藏、离开、手动清除或配置不可用时清空。这个期限只限制显示，不宣称服务凭据已过期或轮换。它不会进入通知、聊天验证 prompt、浏览器存储或正常状态投影。
+
+真实聊天验收由 Core 提供带时限的固定请求。页面不能通过 SDK 发现、点击按钮或手动填写标记使其通过。桌面验收输入框向受保护 API 读回当前 DOM 值；真实截图、输入与后续观察仍由生产 MCP 调用证据判断，并绑定生成请求时观察到的原生 Styx App PID、同一窗口与 snapshot。必须通过 get_window_state 观察当前设置窗口；单独 get_desktop_state 不替代这项验收。若当前 App 尚未被观察到，先完成权限、重新打开 Styx，再生成新的请求。相同 challenge 的常规刷新保留输入值；替换或过期时清除。
+
+只有真实终端请求和所选桌面证据满足条件后，才能记录用户“已在目标聊天看到结果”的确认。页面明确该来源是用户确认，`providerIdentity` 仍未认证，不能冒充平台身份认证。
+
+## Technical operation and security reference
+
+This local browser control plane uses `onboarding/core.mjs` and can be hosted by
+the native App. The page itself is not evidence of native package acceptance.
+It supports guided create-local or join-existing configuration, terminal/desktop
+capability selection, authorized Core workflows, persisted progress/resume, account
+prerequisites, fixed Host doctor checks, and process-owned foreground lifecycle.
+Advanced controls retain separately authorized one-step maintenance operations.
 System service changes are offered only when a fixed supported core adapter
 is available and require separate authorization. Login startup is shown from
 observed backend state, never inferred from browser preferences. The actual Gateway runtime is shown separately from successful
@@ -38,8 +63,10 @@ local launcher, never selected by the browser. macOS/Linux default to
 regular executable using `STYX_ONBOARDING_OPENSSL`; the core checks it before
 use. Windows requires this explicit helper configuration for create-local.
 Join-existing can use a trusted administrator's Gateway and a local invitation
-file; the UI does not accept pasted invitation secrets. Software bundle/public
-key paths and the trusted public-key fingerprint remain explicit local inputs.
+file, or import a private pairing link after independent inspection and confirmation
+(described below). It does not accept raw invitation JSON. In a complete packaged
+App, trusted launcher defaults supply software bundle/public key paths and the publisher fingerprint; advanced deployments can inspect these
+public trust inputs in the collapsed installation details.
 This interface does not download unverified bundles.
 
 ## Headless host with explicit trusted forwarding
@@ -71,7 +98,7 @@ forwarding, mutation serialization and supported local start/pause dispatch.
 ```sh
 STYX_ONBOARDING_BROWSER_TEST=1 \
 STYX_ONBOARDING_BROWSER_BINARY=/absolute/path/to/chrome \
-node --test vnext/onboarding/ui/browser.test.mjs
+node --test vnext/onboarding/ui/browser.test.mjs vnext/onboarding/ui/journey.browser.test.mjs
 ```
 
 The browser test uses a fresh isolated profile, real core, private TLS Gateway,
@@ -85,21 +112,30 @@ installation are NOT RUN by these tests. Initial security-test failures in test
 mock cleanup and a fetch-normalized Host-header test were corrected; final HTTP
 suite passes. Desktop/mobile layout were rendered with isolated headless Chrome.
 
+`journey.browser.test.mjs` uses real isolated Chrome with explicit API fixtures.
+It verifies ordinary packaged defaults, foreground preference-before-start ordering,
+joiner approval waiting without a second Gateway/account entry, runtime key failure
+clearing, timed and hidden-page credential clearing, independent proof and user
+confirmation states, desktop DOM readback and mobile layout. Fixture proof changes
+verify rendering only; they are not native or real-account acceptance.
+
 ## Guided defaults and local pairing
 
 The session now suggests a device label, an unused-at-check loopback Gateway
 port and a fresh Host directory beneath the explicitly configured private parent.
 It does not create that Host directory or reserve the port until authorized
 execution. Existing files/ports are never silently replaced. Host package, public
-key and publisher fingerprint remain explicit trust inputs. A local trusted
+key and publisher fingerprint remain verified trust inputs supplied by a complete
+App, with manual review available in advanced installation details. A local trusted
 launcher may prefill only those three public artifact fields using an owner-private
 `STYX_ONBOARDING_ARTIFACTS` JSON file with keys `bundle`, `publisherKeyFile`,
-`publisherSha256`; unknown fields, including credentials, are rejected. The UI
-still requires publisher/path review and the signed package is verified by core.
+`publisherSha256`; unknown fields, including credentials, are rejected. The Core verifies the signed package; ordinary packaged users are not required
+to type or select publisher paths.
 
-For create-local, the core's `host.pair` button shows the exact Gateway, device
-label and requested desktop scope for explicit owner approval. The approval is
-sent as a structured scope and the core checks it against the saved plan. No
+For create-local, the ordinary local-setup workflow derives its explicit owner
+approval from the saved device label and requested capabilities. Advanced
+`host.pair` maintenance still displays the exact Gateway, device label and scope.
+Approval is sent as a structured scope and the Core checks it against the saved plan. No
 invitation/admin credential is copied through the browser. Join-existing keeps
 the separate administrator approval flow. `gateway.verify` is transport/tool
 verification, not account verification.
@@ -124,7 +160,7 @@ owner pairing, `doctor: ready_for_exec`, pause and reload/resume. Every test
 state, browser profile, local Gateway and ephemeral key was cleaned. No system
 service was installed and desktop capability was disabled. This stronger opt-in
 mode supersedes the earlier Gateway-only test's narrower coverage; the default
-browser mode still does not prepare a Host. Current security suite:10PASS.
+browser mode still does not prepare a Host. The recorded historical security run had 10 PASS; this count is not a claim about the current full suite.
 
 
 ## Fixed service controls
@@ -186,7 +222,7 @@ wildcard bind, tunnel, router or firewall changes are performed. A configured
 interface/link does not establish remote reachability; unverified reachability
 is displayed honestly.
 
-Final observed tests:13HTTP/security PASS, plus a real browser test with two
+Historical observed tests: 13 HTTP/security PASS, plus a real browser test with two
 native signed Host installations on the same machine. The browser created the
 owner's private link, inspected/confirmed it in a second local setup session,
 prepared the second Host, requested enrollment, separately approved the typed

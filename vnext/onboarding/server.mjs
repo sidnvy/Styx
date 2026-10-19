@@ -8,6 +8,7 @@ import {completeLocalSetup} from './local-setup.mjs';
 import {enableDeploymentBackground,observeDeploymentBackground} from './background.mjs';
 import {configureTunnel,TunnelRuntime} from './tunnel-runtime.mjs';
 import {changeDeploymentCapabilities,readDeploymentCapabilities} from './capabilities.mjs';
+import {readOnboardingJourney,readOnboardingDiagnostics,readOnboardingTunnel,publicAcceptance} from './journey.mjs';
 import {requirePrivateFile,writePrivateFile,ensurePrivateDirectory} from '../host/private-storage.mjs';
 import {randomBytes,timingSafeEqual} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
@@ -46,6 +47,7 @@ export function publicDeployment(value){
   hostServiceMaintenance:{lastObservation:publicService(value.hostServiceMaintenance?.lastObservation),hasUncertainMutation:value.hostServiceMaintenance?.hasUncertainMutation===true},
   gatewayServiceMaintenance:{lastObservation:publicService(value.gatewayServiceMaintenance?.lastObservation),hasUncertainMutation:value.gatewayServiceMaintenance?.hasUncertainMutation===true},
   gatewayRuntime:typeof value.gatewayRuntime?.status==='string'&&['running','stopped','not_owned_by_current_process'].includes(value.gatewayRuntime.status)?value.gatewayRuntime.status:'unknown',
+  accountAcceptance:value.accountAcceptance==='user_confirmed_with_mcp_evidence'?'user_confirmed_with_mcp_evidence':'NOT RUN',providerIdentity:'not_verified',
   steps:steps.filter(s=>s&&STEPS.has(s.id)).map(s=>({id:s.id,status:STATES.has(s.status)?s.status:'uncertain',
    ...(s.id.startsWith('host.service.')?{service:publicService(s.evidence)}:{}),
    ...(s.evidence?.ownerApproval==='REQUIRED'?{ownerApproval:'REQUIRED'}:{}),
@@ -81,6 +83,9 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
  const forwarded=trustedForwardOrigin?browserOrigin(trustedForwardOrigin):null;
  const tunnel=trustedTunnelClient?new TunnelRuntime({stateDir,...trustedTunnelClient}):null;
  const api=core??await import('./core.mjs');
+ // Do not create the tunnel directory merely by opening a read-only status API.
+ const tunnelRead=async()=>tunnel&&fs.existsSync(path.join(stateDir,'tunnel'))?tunnel.health():readOnboardingTunnel(stateDir);
+ const journeyOptions={core:api,backgroundRead,tunnelRead};
  let macPreviewApp;
  if(trustedMacPreviewApp!==undefined){const {verifyMacPreviewApp}=await import('../host/macos-preview-trust.mjs');macPreviewApp=verifyMacPreviewApp(trustedMacPreviewApp);}
  let artifacts={};
@@ -112,7 +117,7 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
   if(req.headers.origin!==undefined&&req.headers.origin!==origin){send(403,{error:'origin_refused'});return}
   if(req.method==='POST'&&(req.headers.origin!==origin||!equal(req.headers['x-styx-csrf'],csrf))){send(403,{error:'mutation_refused'});return}
   if(req.method==='GET'&&url.pathname==='/api/session'){
-   send(200,{csrf,platform:process.platform,packagedPreviewTrusted:!!macPreviewApp,backgroundSupported:true,capabilityChangeSupported:true,deviceSettingsSupported:typeof api.readDeploymentDevices==='function',tunnelSupported:!!tunnel,localGatewayAvailable:!!trustedOpenSSL,pauseSupported:typeof api.stopDeploymentGateway==='function',startSupported:typeof api.startDeploymentGateway==='function',
+   send(200,{csrf,platform:process.platform,journeySupported:true,diagnosticsSupported:true,foregroundSupported:typeof api.startDeploymentForeground==='function'&&typeof api.stopDeploymentForeground==='function',acceptanceSupported:['readDeploymentAcceptance','beginDeploymentAcceptance','confirmDeploymentAcceptance','recordDeploymentDesktopReadback'].every(k=>typeof api[k]==='function'),connectionHandoffSupported:typeof api.prepareDeploymentConnectionHandoff==='function',packagedPreviewTrusted:!!macPreviewApp,backgroundSupported:true,capabilityChangeSupported:true,deviceSettingsSupported:typeof api.readDeploymentDevices==='function',tunnelSupported:!!tunnel,localGatewayAvailable:!!trustedOpenSSL,pauseSupported:typeof api.stopDeploymentGateway==='function',startSupported:typeof api.startDeploymentGateway==='function',
     deviceIngressSupported:typeof api.planDeviceIngress==='function'&&typeof api.verifyDeviceIngress==='function',pairingLinkImportSupported:linkImportAvailable,pairingLinkCreateSupported:typeof api.createDeploymentPairingLink==='function',pendingApprovalSupported:typeof api.listDeploymentPending==='function'&&typeof api.approveDeploymentPending==='function',hostServiceSupported:typeof api.controlDeploymentHostService==='function',gatewayServiceSupported:gatewayServiceAvailable,gatewayService:gatewayServiceCapability,localGatewayAddresses:typeof api.localGatewayAddresses==='function'?api.localGatewayAddresses():[],defaults,accountAcceptance:'NOT RUN',nativeInstaller:'NOT RUN',trustedForwarding:!!forwarded});return;
   }
   if(req.method==='GET'&&url.pathname==='/api/status'){
@@ -122,17 +127,41 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
     const scope=plan?.ownerPairingScope;
     const ownerPairingScope=scope&&typeof scope.gatewayUrl==='string'&&typeof scope.label==='string'&&typeof scope.enableComputer==='boolean'?{gatewayUrl:scope.gatewayUrl,label:scope.label,enableComputer:scope.enableComputer}:null;
     let background=null;try{background=await backgroundRead(stateDir)}catch{}
-    let tunnelStatus=null;try{tunnelStatus=tunnel?await tunnel.health():null}catch{}
+    let tunnelStatus=null;try{tunnelStatus=tunnel?await tunnelRead():null}catch{}
     let deviceCapabilities=null;try{deviceCapabilities=readDeploymentCapabilities(stateDir)}catch{}
-    send(200,{deployment,dependencies,ownerPairingScope,services,background,deviceCapabilities,tunnel:tunnelStatus,busy});
+    let foreground=null;try{foreground=await api.readDeploymentForeground?.(stateDir)}catch{}
+    send(200,{deployment,dependencies,ownerPairingScope,services,background,foreground,deviceCapabilities,tunnel:tunnelStatus,busy});
    }catch{if(!fs.existsSync(stateDir))send(200,{deployment:null,dependencies:[],busy});else send(409,{error:'deployment_unavailable'})}return;
   }
+  if(req.method==='GET'&&['/api/journey','/api/diagnostics','/api/acceptance'].includes(url.pathname)){
+   try{
+    if(url.pathname==='/api/journey')send(200,{journey:await readOnboardingJourney(stateDir,journeyOptions)});
+    else if(url.pathname==='/api/diagnostics')send(200,{diagnostics:await readOnboardingDiagnostics(stateDir,journeyOptions)});
+    else send(200,{acceptance:publicAcceptance(typeof api.readDeploymentAcceptance==='function'?await api.readDeploymentAcceptance(stateDir):null,{includeChallenge:true})});
+   }catch{send(409,{error:'observation_unavailable'})}return;
+  }
   if(req.method!=='POST'){send(405,{error:'method_refused'});return}
-  if(!['/api/host-update/plan','/api/host-update/status','/api/runtime-change/status','/api/runtime-change/plan','/api/runtime-change/apply','/api/runtime-change/recover','/api/native-migration/plan','/api/native-migration/apply','/api/native-migration/rollback','/api/device-ingress/plan','/api/device-ingress/verify','/api/create','/api/devices','/api/default-device','/api/capabilities','/api/tunnel/configure','/api/tunnel/start','/api/tunnel/stop','/api/background','/api/local-setup','/api/advance','/api/pause','/api/start','/api/verify-gateway','/api/service','/api/pairing-link/inspect','/api/pairing-link/accept','/api/pairing-link/create','/api/pending/list','/api/pending/approve'].includes(url.pathname)){send(404,{error:'not_found'});return}
+  if(!['/api/foreground','/api/journey/background-preference','/api/connection-handoff','/api/acceptance/begin','/api/acceptance/confirm','/api/acceptance/desktop-readback','/api/host-update/plan','/api/host-update/status','/api/runtime-change/status','/api/runtime-change/plan','/api/runtime-change/apply','/api/runtime-change/recover','/api/native-migration/plan','/api/native-migration/apply','/api/native-migration/rollback','/api/device-ingress/plan','/api/device-ingress/verify','/api/create','/api/devices','/api/default-device','/api/capabilities','/api/tunnel/configure','/api/tunnel/start','/api/tunnel/stop','/api/background','/api/local-setup','/api/advance','/api/pause','/api/start','/api/verify-gateway','/api/service','/api/pairing-link/inspect','/api/pairing-link/accept','/api/pairing-link/create','/api/pending/list','/api/pending/approve'].includes(url.pathname)){send(404,{error:'not_found'});return}
   if(busy){send(409,{error:'operation_in_progress'});return}busy=true;
   try{
    const data=await body(req);
-   if(url.pathname==='/api/host-update/plan'){
+   if(url.pathname==='/api/foreground'){
+    keys(data,['authorize']);if(data.authorize!==true||typeof api.startDeploymentForeground!=='function')fail('foreground_authorization_required');send(200,{foreground:await api.startDeploymentForeground(stateDir,{authorize:true})});return;
+   }else if(url.pathname==='/api/journey/background-preference'){
+    keys(data,['background','authorize']);if(data.authorize!==true||!['foreground','login'].includes(data.background)||typeof api.setDeploymentOnboardingPreference!=='function')fail('background_preference_authorization_required');
+    const result=await api.setDeploymentOnboardingPreference(stateDir,data);send(200,{preference:{background:['foreground','login'].includes(result?.background)?result.background:'not_decided',configurationBound:result?.configurationBound===true}});return;
+   }else if(url.pathname==='/api/connection-handoff'){
+    keys(data,['authorize']);if(data.authorize!==true||typeof api.prepareDeploymentConnectionHandoff!=='function')fail('connection_handoff_authorization_required');
+    const result=await api.prepareDeploymentConnectionHandoff(stateDir,{authorize:true});
+    // This is the only authenticated local UI response that carries the model
+    // credential. It is never retained in the generic status/diagnostic cache.
+    send(200,{handoff:result});return;
+   }else if(['/api/acceptance/begin','/api/acceptance/confirm','/api/acceptance/desktop-readback'].includes(url.pathname)){
+    const which=url.pathname.split('/').at(-1),name=which==='begin'?'beginDeploymentAcceptance':which==='confirm'?'confirmDeploymentAcceptance':'recordDeploymentDesktopReadback';
+    keys(data,which==='begin'?['authorize']:which==='confirm'?['authorize','challengeId','observedInTargetChat']:['authorize','challengeId','value']);
+    if(data.authorize!==true||typeof api[name]!=='function')fail('acceptance_authorization_required');
+    send(200,{acceptance:publicAcceptance(await api[name](stateDir,data),{includeChallenge:true})});return;
+   }else if(url.pathname==='/api/host-update/plan'){
     keys(data,['bundle','rollback']);send(200,{plan:await api.planHostUpdate({stateDir,...data})});return;
    }else if(url.pathname==='/api/host-update/status'){
     keys(data,['transactionId']);send(200,{update:await api.readHostUpdate({stateDir,...data})});return;
@@ -232,7 +261,7 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
  // Only a previously recorded user opt-in can resume this App-owned connection.
  if(tunnel&&fs.existsSync(stateDir))await tunnel.resume().catch(()=>{});
  return {server,origin,url:origin+'/#session='+session,
-  async close(){if(closed)return;closed=true;pendingLink=null;await tunnel?.stop();await new Promise(resolve=>server.close(resolve));await Promise.resolve().then(()=>api.stopDeploymentGateway?.(stateDir)).catch(()=>{})}};
+  async close(){if(closed)return;closed=true;pendingLink=null;await tunnel?.stop();await new Promise(resolve=>server.close(resolve));try{await api.stopDeploymentForeground?.(stateDir)}finally{await Promise.resolve().then(()=>api.stopDeploymentGateway?.(stateDir)).catch(()=>{})}}};
 }
 if(process.argv[1]&&fs.realpathSync(process.argv[1])===fs.realpathSync(fileURLToPath(import.meta.url))){
  try{

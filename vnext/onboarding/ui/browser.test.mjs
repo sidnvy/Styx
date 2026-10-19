@@ -80,14 +80,15 @@ test(native?'real browser prepares native Hosts, verifies Gateway, pairs locally
    const joinFields={label:'Owned linked Host',baseDir:path.join(root,'linked-host')};
    await evaluate(`(()=>{const f=document.querySelector('#setup');for(const[k,v]of Object.entries(${JSON.stringify(joinFields)}))f.elements[k].value=v;f.elements.reviewed.checked=true;f.requestSubmit();return true})()`);
    await until(()=>evaluate("document.querySelector('#progress')?.hidden===false"),'linked_config_not_saved');
-   await clickStep('验证并准备 Host','已记录成功');await clickStep('提交设备加入请求','已记录成功');
+   await until(()=>evaluate("(()=>{const step=[...document.querySelectorAll('.step')].find(s=>s.querySelector('strong').textContent==='提交设备加入请求');return step?.querySelector('.status').textContent==='已记录成功'})()"),'ordinary_join_request_not_submitted');
    const independentFingerprint=core.readDeployment(path.join(root,'join-state')).steps.find(s=>s.id==='host.request').evidence.fingerprint;
    await command('Page.navigate',{url:instance.origin});await until(()=>evaluate("document.querySelector('#progress')?.hidden===false"),'owner_resume_not_ready');
    await evaluate("document.querySelector('#list-pending').click();true");await until(()=>evaluate("document.querySelector('#pending-devices').textContent.includes('Owned linked Host')"),'pending_device_not_listed');
    await evaluate(`(()=>{const card=[...document.querySelectorAll('#pending-devices>.prerequisite')].find(c=>c.querySelector('strong').textContent.includes('Owned linked Host'));card.querySelector('input:not([type=checkbox])').value=${JSON.stringify(independentFingerprint.slice(0,16))};card.querySelector('button').click();return true})()`);
    await until(()=>evaluate("document.querySelector('#pending-devices').textContent.includes('设备已批准')"),'explicit_linked_approval_not_completed');
    await command('Page.navigate',{url:joinInstance.origin});await until(()=>evaluate("document.querySelector('#progress')?.hidden===false"),'linked_resume_not_ready');
-   await clickStep('领取管理员审批结果','已记录成功');await clickStep('检查 Host','已记录成功');
+   await evaluate("document.querySelector('#continue-join').click();true");
+   await until(()=>evaluate("(()=>{const step=[...document.querySelectorAll('.step')].find(s=>s.querySelector('strong').textContent==='检查 Host');return step?.querySelector('.status').textContent==='已记录成功'})()"),'ordinary_join_approval_not_completed');
    assert.equal(core.readDeployment(path.join(root,'join-state')).steps.find(s=>s.id==='host.doctor').evidence.status,'ready_for_exec');
    assert.equal(await evaluate('location.hash'),'');
    await command('Page.navigate',{url:instance.origin});await until(()=>evaluate("document.querySelector('#progress')?.hidden===false"),'owner_final_resume_not_ready');
