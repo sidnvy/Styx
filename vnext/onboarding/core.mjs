@@ -52,7 +52,7 @@ export function validateDeployment(config,{checkNetwork=true}={}){
 function load(d){if(!abs(d))fail('absolute_state_directory_required');requirePrivateDirectory(d);const config=read(filename(d,'deployment.json')),state=read(filename(d,'state.json'));validateDeployment(config,{checkNetwork:false});if(state.schema!==1||state.mode!==config.mode||state.configSha256!==hash(filename(d,'deployment.json'))||!Array.isArray(state.steps))fail('invalid_onboarding_state');return {config,state};}
 function publicState(d,state){
  const observations=[...state.steps.filter(s=>s.id.startsWith('host.service.')&&s.evidence).map(s=>({at:s.updatedAt,evidence:s.evidence})),...(state.maintenance??[])].filter(x=>x.evidence).sort((a,b)=>String(a.at??'').localeCompare(String(b.at??'')));
- const hostServiceMaintenance={lastObservation:observations.at(-1)?.evidence??null,hasUncertainMutation:(state.maintenance??[]).some(x=>['uncertain','running'].includes(x.status))||state.steps.some(x=>x.id.startsWith('host.service.')&&['uncertain','running'].includes(x.status)),history:(state.maintenance??[]).map(x=>({action:x.action,status:x.status,at:x.at}))};
+ const hostServiceMaintenance={lastObservation:observations.at(-1)?.evidence??null,hasUncertainMutation:hasUncertainServiceMutation(state),history:(state.maintenance??[]).map(x=>({action:x.action,status:x.status,at:x.at}))};
  return {schema:1,mode:state.mode,stateDir:d,hostServiceMaintenance,gatewayRuntime:{status:live.has(d)?'running':'not_owned_by_current_process',ownership:live.has(d)?'current_process':'none',persistentService:'NOT INSTALLED'},activeStep:state.steps.find(s=>s.status==='running')?.id??null,steps:state.steps.map(s=>({...s,...(s.status==='running'?{status:'uncertain',error:'interrupted_or_in_progress_do_not_replay'}:{})})),accountAcceptance:'NOT RUN'};}
 export function createDeployment(configFile,{stateDir}={}){
  if(!abs(configFile)||!abs(stateDir))fail('absolute_paths_required');
@@ -74,13 +74,17 @@ function verifyEvidence(state){
   if(obj(value)&&typeof value.path==='string'&&typeof value.sha256==='string'&&hash(value.path)!==value.sha256)fail('completed_step_evidence_changed');
  }
 }
+function hasUncertainServiceMutation(state){
+ return (state.maintenance??[]).some(x=>x.action!=='status'&&['uncertain','running'].includes(x.status))||state.steps.some(x=>x.id.startsWith('host.service.')&&x.id!=='host.service.status'&&['uncertain','running'].includes(x.status));
+}
+function guardServiceMutation(state,action){if(['install','start'].includes(action)&&hasUncertainServiceMutation(state))fail('uncertain_service_action_requires_manual_reconciliation');}
 export async function controlDeploymentHostService(d,{action,authorize=false}={}){
  if(authorize!==true||!['install','start','stop','status'].includes(action))fail('explicit_fixed_host_service_authorization_required');
  load(d);const release=lock(d);
  try{
   const {config,state}=load(d);verifyEvidence(state);
   if(['install','start'].includes(action)&&state.steps.find(s=>s.id==='host.doctor')?.status!=='succeeded')fail('successful_host_doctor_required');
-  if(['install','start'].includes(action)&&state.maintenance?.some(x=>['uncertain','running'].includes(x.status)))fail('uncertain_service_action_requires_manual_reconciliation');
+  guardServiceMutation(state,action);
   const authorization=serviceScope(config,action),entry={action,status:'running',at:new Date().toISOString()};
   state.maintenance=[...(state.maintenance??[]).slice(-49),entry];write(filename(d,'state.json'),state);
   let result;try{const {hostServiceAction}=await import('./service-lifecycle.mjs');result=await hostServiceAction({action,role:'host',serviceConfigFile:authorization.serviceConfigFile,authorization});}
@@ -203,6 +207,7 @@ export async function advanceDeployment(d,{authorize=[],ownerApproval}={}){
    if(step.status==='succeeded')continue;
    if(!authorize.includes(step.id))break;
    if(['running','uncertain'].includes(step.status))fail('uncertain_step_requires_manual_reconciliation');
+   if(step.id.startsWith('host.service.'))guardServiceMutation(state,step.id.slice('host.service.'.length));
    step.status='running';delete step.error;write(filename(d,'state.json'),state);
    try{
     step.updatedAt=new Date().toISOString();

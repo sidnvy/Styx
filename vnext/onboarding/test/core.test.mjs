@@ -182,3 +182,31 @@ test('network exposure requires explicit authorization and an exact owned IPv4 i
  // Configuration validation is the only operation: no LAN listener or deployment is created.
  assert.equal(fs.existsSync(f.stateDir),false);
 });
+
+test('uncertain workflow and maintenance service mutations share one guard while status and stop remain available',{skip:process.platform!=='linux',timeout:15000},async t=>{
+ const f=await fixture(t);createDeployment(f.configFile,{stateDir:f.stateDir});
+ await advanceDeployment(f.stateDir,{authorize:['gateway.prepare','gateway.start','gateway.verify','host.prepare']});
+ const stateFile=path.join(f.stateDir,'state.json');
+ // Explicit journal fixtures model already-completed preconditions; this test
+ // never claims native Doctor success and never reaches a native mutation.
+ const original=JSON.parse(fs.readFileSync(stateFile));
+ for(const step of original.steps)if(!step.id.startsWith('host.service.'))step.status='succeeded';
+ const workflow=structuredClone(original);workflow.steps.find(s=>s.id==='host.service.install').status='succeeded';workflow.steps.find(s=>s.id==='host.service.start').status='uncertain';
+ fs.writeFileSync(stateFile,JSON.stringify(workflow),{mode:0o600});
+ for(const action of ['install','start'])await assert.rejects(controlDeploymentHostService(f.stateDir,{action,authorize:true}),/uncertain_service_action_requires_manual_reconciliation/);
+ assert.equal(readDeployment(f.stateDir).hostServiceMaintenance.hasUncertainMutation,true);
+ for(const action of ['status','stop']){const result=await controlDeploymentHostService(f.stateDir,{action,authorize:true});assert.equal(result.status,'blocked');}
+ // The adapter rejects the absent Host config before native commands; reaching
+ // this bounded result confirms recovery reads/stops were not guard-blocked.
+ for(const action of ['install','start']){
+  const maintenance=structuredClone(original);maintenance.maintenance=[{action:'start',status:'uncertain',at:new Date().toISOString()}];
+  if(action==='start')maintenance.steps.find(s=>s.id==='host.service.install').status='succeeded';
+  fs.writeFileSync(stateFile,JSON.stringify(maintenance),{mode:0o600});
+  await assert.rejects(advanceDeployment(f.stateDir,{authorize:['host.service.'+action]}),/uncertain_service_action_requires_manual_reconciliation/);
+  assert.equal(steps(readDeployment(f.stateDir))['host.service.'+action].status,'pending');
+ }
+ // An interrupted read-only status is not an uncertain native mutation.
+ const readOnly=structuredClone(original);readOnly.maintenance=[{action:'status',status:'running',at:new Date().toISOString()}];readOnly.steps.find(s=>s.id==='host.service.status').status='running';
+ fs.writeFileSync(stateFile,JSON.stringify(readOnly),{mode:0o600});
+ assert.equal(readDeployment(f.stateDir).hostServiceMaintenance.hasUncertainMutation,false);
+});
