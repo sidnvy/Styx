@@ -178,9 +178,17 @@ PR #26 的 CAS 已有持久 Run/Wake 账本及真实模型自动回合证据，�
 详见会话与任务生命周期文档，不能把“未作为普通产品接入”写成“没有实现”。
 
 
-## Command and GUI routing
+## Agent 选择工具，本地执行契约
 
-Command-line work defaults to the Host's Exec Server: repository clone/pull, CLI downloads, file/search operations, package management, builds and tests. An interactive PTY is still an Exec session managed through write_stdin. Cua is for required GUI observation/interaction and explicitly requested GUI workflows. Do not open a desktop Terminal through Cua merely to paste an executable command; do not use it to bypass an Exec connection, authentication or policy failure. Resolve or report the original failure, and do not replay uncertain effects. Mixed tasks use the applicable channel for each step. Genuine GUI operations retain the no-AppleScript/System Events fallback rule. Gateway MCP initialization instructions, Exec/Cua descriptions and plugin guidance carry the same priorities. This is model routing guidance rather than a keyword-based execution firewall; actual account selection behavior needs a fresh real chat check after metadata refresh.
+2026-10-20 用户明确产品边界：Exec/Cua 的选择由 Agent 负责，本地 Core、Gateway、Host 不负责识别任务语义或替 Agent 路由。不新增 Terminal 应用黑名单、命令关键词分类器、模型自报任务类型的路由开关，或仅为选择 Cua 增加一套本地任务审批。
+
+Agent 指引与评测应明确：命令行工作（clone、下载、文件处理、构建、测试及交互式 PTY）通常直接使用 Exec；必要的 GUI 观察和操作使用 Cua。此前提出的任务级本地硬路由方案已撤回；模型工具选择的低效通过指引、技能、能力发现和真实行为回归处理，不能再把增加本地路由门禁作为本次产品目标。
+
+本地仍强制设备身份、配对、已批准能力、凭据与会话归属、参数契约、原生权限，以及确定性执行与结果不确定时不自动重放。这些是已有执行边界，不负责判断该选哪种工具。普通 GUI 的 Agent 指引保留 Cua 与应用脚本独立授权的区别，不把提示词当作原生权限修复。
+
+下一轮首要验收是普通用户的插件创建／关联闭环。Pilot Mac 当前 dev.2（d8555ea）缺少该流程；f67cc64 已补本机插件资料、ZIP 导出、复用分支及手动账号操作确认，但尚未进入用户安装包，账号创建／安装／连接未完成真实验收。不能把导出 ZIP 或手动勾选确认等同用户已成功接入。先完成受支持的创建／关联操作及真实聊天验证，再交付下一安装包；原生界面视觉重写后置。
+
+
 2026-10-20 再次出现的 session_capacity 已通过真实 MCP 定位到 ExecAdapter，
 HTTP initialize 成功且仍加载前次无 MCP 连接上限的源码。ExecAdapter 将所有尚未轮询
 结束的命令句柄计入 64 上限；已经退出的进程也可能因输出尚未 drain 保留句柄。
