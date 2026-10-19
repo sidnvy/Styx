@@ -1,6 +1,6 @@
 # Styx VNext Windows user-scoped Scheduled Task pilot.
 # Run with native interactive user. No SYSTEM, Session 0 or elevated task.
-# Only StyxPilot- prefixed tasks are accepted and owner verified.
+# Only the canonical Styx-Host or scoped StyxPilot- tasks are accepted and owner verified.
 [CmdletBinding()]
 param(
     [Parameter(Mandatory=$true)]
@@ -12,7 +12,7 @@ param(
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
 $marker='Styx-VNext-Windows-Interactive-User-v1'
-if ($TaskName -notmatch '^StyxPilot-[A-Za-z0-9-]{1,30}$') {
+if ($TaskName -ne 'Styx-Host' -and $TaskName -notmatch '^StyxPilot-[A-Za-z0-9-]{1,30}$') {
     throw 'invalid_styx_task_name'
 }
 $current=[Security.Principal.WindowsIdentity]::GetCurrent()
@@ -121,7 +121,7 @@ if ($Action -eq 'install') {
     $taskPrincipal=New-ScheduledTaskPrincipal -UserId $sid -LogonType Interactive -RunLevel Limited
     # Native Task Scheduler restarts an unexpectedly terminated Host process.
     # The signed launcher exits normally on a deliberate stop/restart.
-    $taskSettings=New-ScheduledTaskSettingsSet -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Seconds 0) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
+    $taskSettings=New-ScheduledTaskSettingsSet -Disable -MultipleInstances IgnoreNew -ExecutionTimeLimit (New-TimeSpan -Seconds 0) -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -RestartCount 3 -RestartInterval (New-TimeSpan -Minutes 1)
     Register-ScheduledTask -TaskName $TaskName -Action $taskAction -Trigger $taskTrigger -Principal $taskPrincipal -Settings $taskSettings -Description $marker -ErrorAction Stop | Out-Null
     @{task=$TaskName;status='installed_not_started';logonType='InteractiveToken';session=$session} | ConvertTo-Json -Compress
     exit 0

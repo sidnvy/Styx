@@ -7,6 +7,24 @@ description: Onboard a fresh native Linux, macOS, or Windows device to an indepe
 
 Use only this standalone Styx connection and native Styx release. This is a CLI bootstrap workflow, not a graphical installer. Do not depend on a previous conversation, pilot state, another plugin, or an execution backend. If required tools or artifacts are missing, name the exact missing prerequisite; never silently substitute another connection.
 
+## Choose the workflow from the actual pinned source
+
+Read the source/release revision first. The developer preview tag
+`v0.1.0-dev.20261019` does not contain the newer `vnext/onboarding` controller;
+use the commands actually shipped by that tag. When the selected source does
+contain `vnext/onboarding/README.md`, use its fixed CLI/UI workflow and persisted
+status/plan instead of inventing shell steps or editing its journal/config.
+A user-approved device scope can authorize the bounded installation sequence;
+do not request the same permission at every mechanical substep. Owner pairing
+approval and service startup must remain within that exact scope. Never pass an
+approval flag merely because it makes a blocked step continue.
+
+A prior succeeded journal entry is not live service health. An uncertain outcome
+requires observation and reconciliation, not replay or lock deletion. SDK
+Gateway verification does not prove the account plugin connection. No model tool
+may receive owner credentials or device private keys. The local browser owner UI
+is distinct from the account plugin and must not be publicly exposed.
+
 ## Establish the independent connection
 
 A fresh account connection needs a newly provisioned Styx Gateway with its own state, model Bearer credential, and separate owner/admin credential. Use a verified HTTPS MCP endpoint or a newly created Secure MCP Tunnel ID belonging to this Gateway. Never borrow an existing tunnel, endpoint, token, plugin, device registration, or admin configuration. A Secure MCP Tunnel connects the account to MCP; it does not replace the Host's trusted HTTPS/WSS connection to the Gateway.

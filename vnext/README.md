@@ -13,6 +13,13 @@ are implemented. A fresh plugin/account connection is an explicit acceptance
 step; historical native/SDK pilots do not establish it. There is no graphical
 installer or browser automation provider in this candidate.
 
+## Onboarding development
+
+The next deterministic CLI and authenticated local setup UI are documented in
+[onboarding/README.md](onboarding/README.md). This development work is separate
+from the pinned `v0.1.0-dev.20261019` source preview and does not imply a shipped
+graphical installer or completed account-side onboarding.
+
 ## Optional CAS continuation experiment (not production)
 
 An opt-in native MCP App controller can test bounded ordinary-Chat turn continuation

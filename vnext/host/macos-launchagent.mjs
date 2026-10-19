@@ -9,7 +9,7 @@ import {fileURLToPath} from 'node:url';
 import {verifiedServiceNode} from './installer.mjs';
 import {requirePrivateFile} from './private-storage.mjs';
 
-const LABEL=/^app\.styx\.host(?:-pilot)?(?:\.[a-z0-9][a-z0-9-]{0,32})?$/;
+const LABEL=/^app\.styx\.(?:connector|host(?:-pilot)?(?:\.[a-z0-9][a-z0-9-]{0,32})?)$/;
 const PATH_SAFE=/^\/[A-Za-z0-9._+@/-]+$/;
 const MARKER='Managed-by: Styx-VNext-user-launchagent-v1';
 const esc=s=>s.replaceAll('&','&amp;').replaceAll('<','&lt;')

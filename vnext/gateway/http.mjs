@@ -135,8 +135,9 @@ export async function createGatewayHttp(gateway, {
         await transport.close(); await server.close();
       }));
       sessions.clear();
-      await new Promise(resolve => http.close(resolve));
+      // Upgraded Host sockets keep HTTP close pending. Stop owned relays first.
       await gateway.close();
+      await new Promise(resolve => http.close(resolve));
     }
   };
 }
