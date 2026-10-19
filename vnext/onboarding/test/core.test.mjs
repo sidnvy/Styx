@@ -10,7 +10,7 @@ import {createHash,createPublicKey,generateKeyPairSync,sign,randomUUID} from 'no
 import {ensurePrivateDirectory} from '../../host/private-storage.mjs';
 import {main} from '../cli.mjs';
 import {ownerCommand} from '../../gateway/enroll-admin.mjs';
-import {createDeployment,readDeployment,planDeployment,advanceDeployment,stopDeploymentGateway,validateDeployment} from '../core.mjs';
+import {createDeployment,readDeployment,planDeployment,advanceDeployment,stopDeploymentGateway,validateDeployment,controlDeploymentHostService} from '../core.mjs';
 const sha=b=>createHash('sha256').update(b).digest('hex');
 async function fixture(t){
  const root=path.join(os.tmpdir(),'styx-onboarding-'+randomUUID());ensurePrivateDirectory(root);t.after(async()=>{const d=path.join(root,'deployment');if(fs.existsSync(d))await stopDeploymentGateway(d);fs.rmSync(root,{recursive:true,force:true});});
@@ -31,7 +31,7 @@ async function fixture(t){
 const steps=s=>Object.fromEntries(s.steps.map(x=>[x.id,x]));
 test('unified workflow uses actual TLS enrollment and separate explicit owner approval', {skip:process.platform!=='linux',timeout:30000},async t=>{
  const f=await fixture(t);createDeployment(f.configFile,{stateDir:f.stateDir});
- assert.equal(planDeployment(f.stateDir).service.status,'not_installed');
+ assert.equal(planDeployment(f.stateDir).service.status,'not_checked');
  let s=await advanceDeployment(f.stateDir,{authorize:['gateway.prepare','gateway.start','gateway.verify','host.prepare','host.invite','host.request','host.claim']});
  assert.equal(steps(s)['host.request'].status,'succeeded');assert.equal(steps(s)['host.claim'].status,'awaiting_approval');
  const pending=steps(s)['host.request'].evidence;assert.match(pending.fingerprint,/^[a-f0-9]{64}$/);
@@ -116,7 +116,33 @@ test('explicit owner-local pairing avoids invitation shuttle and bounded shutdow
 test('CLI scoped local approval flag performs real pairing and verification evidence stays SDK scoped',{skip:process.platform!=='linux',timeout:20000},async t=>{
  const f=await fixture(t);delete f.config.pairingMode;fs.writeFileSync(f.configFile,JSON.stringify(f.config));await main(['create',f.configFile,f.stateDir]);
  const setup=await main(['advance',f.stateDir,'gateway.prepare','gateway.start','gateway.verify','host.prepare']);
+ assert.equal((await main(['gateway-service',f.stateDir,'status'])).status,'not_installed');
  assert.equal(steps(setup)['gateway.verify'].evidence.scope,'sdk_gateway');assert.equal(steps(setup)['gateway.verify'].evidence.account_acceptance,'NOT RUN');
  await assert.rejects(main(['advance',f.stateDir,'host.doctor','--approve-local-device']),/owner_approval_requires/);
  const paired=await main(['advance',f.stateDir,'host.pair','--approve-local-device']);assert.equal(steps(paired)['host.pair'].status,'succeeded');
+});
+
+test('Host service actions require explicit fixed authorization and a successful recorded doctor before mutation',{skip:process.platform!=='linux'},async t=>{
+ const f=await fixture(t);createDeployment(f.configFile,{stateDir:f.stateDir});
+ const plan=planDeployment(f.stateDir);assert.deepEqual(plan.steps.slice(-3).map(s=>s.id),['host.service.install','host.service.start','host.service.status']);
+ await assert.rejects(controlDeploymentHostService(f.stateDir,{action:'install'}),/explicit_fixed_host_service_authorization_required/);
+ await assert.rejects(controlDeploymentHostService(f.stateDir,{action:'exec',authorize:true}),/explicit_fixed_host_service_authorization_required/);
+ await assert.rejects(controlDeploymentHostService(f.stateDir,{action:'install',authorize:true}),/successful_host_doctor_required/);
+ assert.equal(fs.existsSync(path.join(f.stateDir,'advance.lock')),false);
+ assert.equal(JSON.parse(fs.readFileSync(path.join(f.stateDir,'state.json'))).maintenance,undefined);
+});
+test('generated service configuration is journal-bound before any service action',{skip:process.platform!=='linux',timeout:15000},async t=>{
+ const f=await fixture(t);createDeployment(f.configFile,{stateDir:f.stateDir});
+ const s=await advanceDeployment(f.stateDir,{authorize:['gateway.prepare','gateway.start','gateway.verify','host.prepare']});
+ assert.match(steps(s)['host.prepare'].evidence.serviceConfiguration.sha256,/^[a-f0-9]{64}$/);
+ fs.appendFileSync(path.join(f.config.host.baseDir,'service.json'),' ');
+ await assert.rejects(controlDeploymentHostService(f.stateDir,{action:'status',authorize:true}),/completed_step_evidence_changed/);
+});
+
+test('CLI fixed Host and Gateway service verbs refuse missing mutation authority before adapters run',async()=>{
+ for(const kind of ['host-service','gateway-service']){
+  await assert.rejects(main([kind,'/not-a-deployment','start']),/explicit_fixed_service_authorization_required/);
+  await assert.rejects(main([kind,'/not-a-deployment','exec','--authorize']),/explicit_fixed_service_authorization_required/);
+  await assert.rejects(main([kind,'/not-a-deployment','status','--shell']),/explicit_fixed_service_authorization_required/);
+ }
 });

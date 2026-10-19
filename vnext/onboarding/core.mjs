@@ -43,18 +43,44 @@ export function validateDeployment(config){
  return config;
 }
 function load(d){if(!abs(d))fail('absolute_state_directory_required');requirePrivateDirectory(d);const config=read(filename(d,'deployment.json')),state=read(filename(d,'state.json'));validateDeployment(config);if(state.schema!==1||state.mode!==config.mode||state.configSha256!==hash(filename(d,'deployment.json'))||!Array.isArray(state.steps))fail('invalid_onboarding_state');return {config,state};}
-function publicState(d,state){return {schema:1,mode:state.mode,stateDir:d,gatewayRuntime:{status:live.has(d)?'running':'not_owned_by_current_process',ownership:live.has(d)?'current_process':'none',persistentService:'NOT INSTALLED'},activeStep:state.steps.find(s=>s.status==='running')?.id??null,steps:state.steps.map(s=>({...s,...(s.status==='running'?{status:'uncertain',error:'interrupted_or_in_progress_do_not_replay'}:{})})),accountAcceptance:'NOT RUN'};}
+function publicState(d,state){
+ const observations=[...state.steps.filter(s=>s.id.startsWith('host.service.')&&s.evidence).map(s=>({at:s.updatedAt,evidence:s.evidence})),...(state.maintenance??[])].filter(x=>x.evidence).sort((a,b)=>String(a.at??'').localeCompare(String(b.at??'')));
+ const hostServiceMaintenance={lastObservation:observations.at(-1)?.evidence??null,hasUncertainMutation:(state.maintenance??[]).some(x=>['uncertain','running'].includes(x.status))||state.steps.some(x=>x.id.startsWith('host.service.')&&['uncertain','running'].includes(x.status)),history:(state.maintenance??[]).map(x=>({action:x.action,status:x.status,at:x.at}))};
+ return {schema:1,mode:state.mode,stateDir:d,hostServiceMaintenance,gatewayRuntime:{status:live.has(d)?'running':'not_owned_by_current_process',ownership:live.has(d)?'current_process':'none',persistentService:'NOT INSTALLED'},activeStep:state.steps.find(s=>s.status==='running')?.id??null,steps:state.steps.map(s=>({...s,...(s.status==='running'?{status:'uncertain',error:'interrupted_or_in_progress_do_not_replay'}:{})})),accountAcceptance:'NOT RUN'};}
 export function createDeployment(configFile,{stateDir}={}){
  if(!abs(configFile)||!abs(stateDir))fail('absolute_paths_required');
  const config=validateDeployment(read(configFile));requirePrivateDirectory(path.dirname(stateDir));if(fs.existsSync(stateDir))fail('deployment_directory_already_exists');
  ensurePrivateDirectory(stateDir);write(filename(stateDir,'deployment.json'),config);
  const localPair=config.mode==='create-local'&&config.pairingMode!=='manual';
- const ids=[...(config.mode==='create-local'?['gateway.prepare','gateway.start','gateway.verify']:[]),'host.prepare',...(localPair?['host.pair']:[...(config.mode==='create-local'?['host.invite']:[]),'host.request','host.claim']),'host.doctor'];
+ const ids=[...(config.mode==='create-local'?['gateway.prepare','gateway.start','gateway.verify']:[]),'host.prepare',...(localPair?['host.pair']:[...(config.mode==='create-local'?['host.invite']:[]),'host.request','host.claim']),'host.doctor','host.service.install','host.service.start','host.service.status'];
  const state={schema:1,mode:config.mode,configSha256:hash(filename(stateDir,'deployment.json')),steps:ids.map(id=>({id,status:'pending'}))};write(filename(stateDir,'state.json'),state);return publicState(stateDir,state);
 }
 export function readDeployment(stateDir){const {state}=load(stateDir);return publicState(stateDir,state);}
-export function planDeployment(stateDir){const {config,state}=load(stateDir);return {schema:1,mode:config.mode,steps:state.steps.map((s,i)=>({id:s.id,status:s.status,requires:state.steps.slice(0,i).map(x=>x.id),authorizationRequired:true})),ownerPairingScope:config.mode==='create-local'?{gatewayUrl:config.gateway.url,label:config.host.label,enableComputer:config.host.computer}:null,service:{status:'not_installed',configFile:path.join(config.host.baseDir,'service.json'),platform:process.platform},accountAcceptance:'NOT RUN'};}
+export function planDeployment(stateDir){const {config,state}=load(stateDir);return {schema:1,mode:config.mode,steps:state.steps.map((s,i)=>({id:s.id,status:s.status,requires:state.steps.slice(0,i).map(x=>x.id),authorizationRequired:true})),ownerPairingScope:config.mode==='create-local'?{gatewayUrl:config.gateway.url,label:config.host.label,enableComputer:config.host.computer}:null,service:{status:'not_checked',lastObservation:publicState(stateDir,state).hostServiceMaintenance.lastObservation,configFile:path.join(config.host.baseDir,'service.json'),platform:process.platform},accountAcceptance:'NOT RUN'};}
 function lock(d){const file=filename(d,'advance.lock');let fd;try{fd=fs.openSync(file,'wx',0o600);}catch{fail('onboarding_busy_or_interrupted_lock');}return ()=>{fs.closeSync(fd);fs.unlinkSync(file)};}
+function serviceScope(c,action){
+ const serviceConfigFile=path.join(c.host.baseDir,'service.json'),raw=read(serviceConfigFile),windows=process.platform==='win32';
+ return {approved:true,action,role:'host',serviceConfigFile,serviceId:windows?raw.task_name:process.platform==='darwin'?raw.label:raw.unitName,installRoot:windows?raw.install_root:raw.installRoot,hostConfigFile:windows?raw.host_config_file:raw.hostConfigFile,trustPublicKeyFile:windows?raw.publisher_key_file:raw.trustPublicKeyFile,nodeBinary:windows?raw.node_binary:raw.nodeBinary,...(raw.logDir!==undefined?{logDir:raw.logDir}:{}),...(raw.restartSec!==undefined?{restartSec:raw.restartSec}:{})};
+}
+function verifyEvidence(state){
+ for(const done of state.steps.filter(s=>s.status==='succeeded'))for(const value of Object.values(done.evidence??{})){
+  if(obj(value)&&typeof value.path==='string'&&typeof value.sha256==='string'&&hash(value.path)!==value.sha256)fail('completed_step_evidence_changed');
+ }
+}
+export async function controlDeploymentHostService(d,{action,authorize=false}={}){
+ if(authorize!==true||!['install','start','stop','status'].includes(action))fail('explicit_fixed_host_service_authorization_required');
+ load(d);const release=lock(d);
+ try{
+  const {config,state}=load(d);verifyEvidence(state);
+  if(['install','start'].includes(action)&&state.steps.find(s=>s.id==='host.doctor')?.status!=='succeeded')fail('successful_host_doctor_required');
+  if(['install','start'].includes(action)&&state.maintenance?.some(x=>['uncertain','running'].includes(x.status)))fail('uncertain_service_action_requires_manual_reconciliation');
+  const authorization=serviceScope(config,action),entry={action,status:'running',at:new Date().toISOString()};
+  state.maintenance=[...(state.maintenance??[]).slice(-49),entry];write(filename(d,'state.json'),state);
+  let result;try{const {hostServiceAction}=await import('./service-lifecycle.mjs');result=await hostServiceAction({action,role:'host',serviceConfigFile:authorization.serviceConfigFile,authorization});}
+  catch{result={status:'uncertain',action,role:'host',reason:'service_adapter_failed_no_replay'};}
+  entry.status=result.status==='needs_attention'&&action!=='status'?'uncertain':result.status;entry.evidence=result;write(filename(d,'state.json'),state);return result;
+ }finally{release();}
+}
 function gatewayPaths(d){const root=filename(d,'gateway');return {root,cert:filename(root,'certificate.pem'),key:filename(root,'private-key.pem'),model:filename(root,'model.token'),admin:filename(root,'admin.token'),owner:filename(root,'owner.json'),runtime:filename(root,'runtime.json'),catalog:filename(root,'targets.json')};}
 function prepareGateway(d,c){
  const p=gatewayPaths(d);if(fs.existsSync(p.root))fail('gateway_directory_already_exists');ensurePrivateDirectory(p.root);
@@ -79,7 +105,7 @@ export async function startDeploymentGateway(d){
 export async function stopDeploymentGateway(d){if(!abs(d))fail('absolute_state_directory_required');const h=live.get(d);if(!h)return {status:'not_owned_by_current_process'};let timer;try{await Promise.race([(async()=>{await h.gateway.relay.close();await h.http.close();})(),new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('gateway_shutdown_timed_out')),5000);})]);live.delete(d);}finally{clearTimeout(timer);}return {status:'stopped',ownership:'current_process'};}
 export async function verifyDeploymentGateway(d){
  const {config}=load(d);if(config.mode!=='create-local')fail('join_connection_verification_requires_explicit_model_credential');
- const p=gatewayPaths(d);return verifyGatewayConnection({url:config.gateway.url+'/mcp',tokenFile:p.model,caFile:p.cert,independentStyx:true,freshConnection:true});
+ const p=gatewayPaths(d);return verifyGatewayConnection({url:new URL('/mcp',config.gateway.url).href,tokenFile:p.model,caFile:p.cert,independentStyx:true,freshConnection:true});
 }
 async function execute(d,c,id,ownerApproval){
  const p=gatewayPaths(d),base=c.host.baseDir;
@@ -89,7 +115,7 @@ async function execute(d,c,id,ownerApproval){
  if(id==='gateway.verify')return verifyDeploymentGateway(d);
  if(id==='host.prepare'){
   const r=prepareNativeSetup({...c.host,gatewayUrl:c.gateway.url,...(c.mode==='create-local'?{gatewayCaFile:p.cert}:c.gateway.caFile?{gatewayCaFile:c.gateway.caFile}:{})});
-  return {status:r.status,version:r.version,receipt:evidenceFile(path.join(base,'setup-receipt.json')),node:r.node,release_root:r.release_root};
+  return {status:r.status,version:r.version,receipt:evidenceFile(path.join(base,'setup-receipt.json')),serviceConfiguration:evidenceFile(path.join(base,'service.json')),enrollmentConfiguration:evidenceFile(path.join(base,'enrollment.json')),node:r.node,release_root:r.release_root};
  }
  if(id==='host.pair'){
   const cfg=enrollment();return pairDevice({controller:live.get(d).controller,transport:createLocalPairingTransport(cfg),authorization:{...cfg,platform:process.platform,approve:true,enable_computer:ownerApproval.enableComputer},ttlSeconds:600});
@@ -103,6 +129,11 @@ async function execute(d,c,id,ownerApproval){
  }
  if(id==='host.claim'){
   const r=await claimEnrollment(enrollment());return {status:r.status,...(r.device_id?{device_id:r.device_id}:{}),...(r.status==='ready_to_connect'?{hostConfigFile:r.local_host_config}:{ownerApproval:'REQUIRED'})};
+ }
+ if(id.startsWith('host.service.')){
+  const action=id.slice('host.service.'.length),authorization=serviceScope(c,action);
+  const {hostServiceAction}=await import('./service-lifecycle.mjs');
+  return hostServiceAction({action,role:'host',serviceConfigFile:authorization.serviceConfigFile,authorization});
  }
  if(id==='host.doctor'){
   const r=await doctor(read(path.join(base,'device','host.json')),{installRoot:path.join(base,'install'),trustPublicKeyFile:path.join(base,'publisher.pem')});
@@ -124,23 +155,20 @@ export async function advanceDeployment(d,{authorize=[],ownerApproval}={}){
    if(ownerApproval.approve!==true||ownerApproval.gatewayUrl!==config.gateway.url||ownerApproval.label!==config.host.label||typeof ownerApproval.enableComputer!=='boolean'||ownerApproval.enableComputer&&!config.host.computer)fail('explicit_scoped_owner_approval_required');
    if(!live.has(d))fail('local_gateway_must_be_running');
   }
-  for(const done of state.steps.filter(s=>s.status==='succeeded')){
-   for(const value of Object.values(done.evidence??{})){
-    if(obj(value)&&typeof value.path==='string'&&typeof value.sha256==='string'&&hash(value.path)!==value.sha256)fail('completed_step_evidence_changed');
-   }
-  }
+  verifyEvidence(state);
   for(const step of state.steps){
    if(step.status==='succeeded')continue;
    if(!authorize.includes(step.id))break;
    if(['running','uncertain'].includes(step.status))fail('uncertain_step_requires_manual_reconciliation');
    step.status='running';delete step.error;write(filename(d,'state.json'),state);
    try{
+    step.updatedAt=new Date().toISOString();
     step.evidence=await execute(d,config,step.id,ownerApproval);
-    step.status=step.evidence.status==='needs_owner_attention'?'uncertain':step.id==='host.claim'&&step.evidence.status==='pending'?'awaiting_approval':step.id==='host.doctor'&&step.evidence.status!=='ready_for_exec'?'blocked':'succeeded';
+    step.status=['needs_owner_attention','uncertain'].includes(step.evidence.status)||(step.id.startsWith('host.service.')&&step.id!=='host.service.status'&&step.evidence.status==='needs_attention')?'uncertain':['blocked','needs_attention','not_implemented'].includes(step.evidence.status)?'blocked':step.id==='host.claim'&&step.evidence.status==='pending'?'awaiting_approval':step.id==='host.doctor'&&step.evidence.status!=='ready_for_exec'?'blocked':'succeeded';
     write(filename(d,'state.json'),state);
     if(step.status!=='succeeded')break;
    }catch{
-    step.status=['host.doctor','host.claim','gateway.start','gateway.verify'].includes(step.id)?'blocked':'uncertain';step.error='step_failed_inspect_local_evidence_no_automatic_replay';write(filename(d,'state.json'),state);break;
+    step.status=['host.doctor','host.claim','gateway.start','gateway.verify','host.service.status'].includes(step.id)?'blocked':'uncertain';step.error='step_failed_inspect_local_evidence_no_automatic_replay';write(filename(d,'state.json'),state);break;
    }
   }
   return publicState(d,state);

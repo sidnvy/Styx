@@ -1,6 +1,6 @@
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {createDeployment,readDeployment,planDeployment,advanceDeployment,startDeploymentGateway,stopDeploymentGateway} from './core.mjs';
+import {createDeployment,readDeployment,planDeployment,advanceDeployment,startDeploymentGateway,stopDeploymentGateway,controlDeploymentHostService} from './core.mjs';
 export async function main(args){
  const [cmd,...rest]=args;
  if(cmd==='create'&&rest.length===2)return createDeployment(rest[0],{stateDir:rest[1]});
@@ -14,10 +14,17 @@ export async function main(args){
   const ownerApproval=approve?{approve:true,...planDeployment(rest[0]).ownerPairingScope}:undefined;
   return advanceDeployment(rest[0],{authorize,ownerApproval});
  }
+ if(['host-service','gateway-service'].includes(cmd)&&[2,3].includes(rest.length)){
+  const [stateDir,action,flag]=rest;
+  const allowed=cmd==='host-service'?['install','status','start','stop']:['install','status','start','stop','enable','disable','uninstall'];
+  if(!allowed.includes(action)||(flag!==undefined&&flag!=='--authorize')||(action!=='status'&&flag!=='--authorize'))throw Error('explicit_fixed_service_authorization_required');
+  if(cmd==='host-service')return controlDeploymentHostService(stateDir,{action,authorize:true});
+  const {controlGatewayService}=await import('./gateway-service.mjs');return controlGatewayService(stateDir,{action,authorize:flag==='--authorize'});
+ }
  if(cmd==='serve'&&rest.length===1){const r=await startDeploymentGateway(rest[0]);for(const signal of ['SIGINT','SIGTERM'])process.once(signal,()=>stopDeploymentGateway(rest[0]).then(()=>process.exit(0)));return r;}
  throw Error('usage_create_CONFIG_STATE_or_status_plan_STATE_or_advance_resume_STATE_STEP_or_serve_STATE');
 }
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){
- try{const result=await main(process.argv.slice(2));console.log(JSON.stringify(result,null,2));if(result.steps?.some(s=>['blocked','uncertain'].includes(s.status)))process.exitCode=2;}
+ try{const result=await main(process.argv.slice(2));console.log(JSON.stringify(result,null,2));if(['blocked','uncertain','needs_attention','not_implemented'].includes(result.status)||result.steps?.some(s=>['blocked','uncertain'].includes(s.status)))process.exitCode=2;}
  catch{console.error('Styx onboarding failed. Inspect private state locally; no secret or raw command output is printed.');process.exitCode=2;}
 }
