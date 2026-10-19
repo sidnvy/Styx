@@ -1,11 +1,11 @@
 const $=selector=>document.querySelector(selector);
 const form=$('#setup'),notice=$('#notice');
-const LABELS={'gateway.prepare':'准备本机 Gateway','gateway.start':'启动前台 Gateway','host.prepare':'验证并准备 Host','host.invite':'生成一次性设备邀请','host.request':'提交设备加入请求','host.claim':'领取管理员审批结果','host.doctor':'检查 Host'};
+const LABELS={'gateway.prepare':'准备本机 Gateway','gateway.start':'启动前台 Gateway','gateway.verify':'验证 Gateway 认证与工具发现','host.prepare':'验证并准备 Host','host.invite':'生成一次性设备邀请','host.request':'提交设备加入请求','host.claim':'领取管理员审批结果','host.doctor':'检查 Host','host.pair':'批准并配对这台 Host'};
 const STATUS={pending:'待执行',running:'执行中',succeeded:'已记录成功',failed:'执行失败',uncertain:'结果不确定 · 不可重放',blocked:'前置条件未就绪',awaiting_approval:'等待管理员审批',skipped:'已跳过'};
 const fragment=new URLSearchParams(location.hash.slice(1)),bootstrap=fragment.get('session');
 if(bootstrap){sessionStorage.setItem('styx.local.session',bootstrap);history.replaceState(null,'',location.pathname)}
 const session=sessionStorage.getItem('styx.local.session');
-let csrf,capabilities,deployment=null,dependencies=[],locked=false;
+let csrf,capabilities,deployment=null,dependencies=[],ownerPairingScope=null,locked=false;
 function message(text){notice.textContent=text;notice.hidden=false}
 async function api(route,{method='GET',data}={}){
  const response=await fetch('/api/'+route,{method,credentials:'omit',cache:'no-store',headers:{Authorization:'Bearer '+session,...(method==='POST'?{'Content-Type':'application/json','X-Styx-CSRF':csrf}:{})},...(data!==undefined?{body:JSON.stringify(data)}:{})});
@@ -40,12 +40,19 @@ function render(){
   const required=dependencies.find(p=>p.id===step.id)?.requires??[];
   const ready=required.every(id=>deployment.steps.some(s=>s.id===id&&s.status==='succeeded'));
   execute.disabled=locked||!ready||!['pending','failed','blocked','awaiting_approval'].includes(step.status);
-  execute.addEventListener('click',()=>mutate('advance',{authorize:[step.id]},'该步骤已结束，请检查更新后的状态。'));
+  execute.addEventListener('click',()=>{
+   if(step.id==='host.pair'){
+    if(!ownerPairingScope)return;
+    const scope=ownerPairingScope;
+    if(!confirm('批准这台设备加入 Gateway？\nGateway：'+scope.gatewayUrl+'\n设备：'+scope.label+'\n桌面能力：'+(scope.enableComputer?'启用':'不启用')+'\n此操作将实际批准设备身份。'))return;
+    void mutate('advance',{authorize:[step.id],ownerApproval:{approve:true,...scope}},'配对操作已结束，请检查设备状态。');
+   }else void mutate('advance',{authorize:[step.id]},'该步骤已结束，请检查更新后的状态。');
+  });
   item.append(detail,execute);$('#steps').append(item);
  }
 }
 async function refresh(){
- try{const state=await api('status');deployment=state.deployment;dependencies=state.dependencies??[];locked=!!state.busy;render()}
+ try{const state=await api('status');deployment=state.deployment;dependencies=state.dependencies??[];ownerPairingScope=state.ownerPairingScope??null;locked=!!state.busy;render()}
  catch{message('无法读取本地部署状态。请保留状态目录，查看本机诊断；不要删除状态后盲目重试。')}
 }
 async function mutate(route,data,success){
@@ -69,11 +76,19 @@ form.addEventListener('submit',async event=>{
 $('#refresh').addEventListener('click',refresh);
 $('#start-gateway').addEventListener('click',()=>mutate('start',{},'前台 Gateway 启动请求已完成，请检查当前运行状态。'));
 $('#pause').addEventListener('click',()=>mutate('pause',{},'停止请求已提交。请检查 Gateway 当前运行状态；部署步骤记录会保留。'));
+$('#discovery-form').addEventListener('submit',async event=>{
+ event.preventDefault();const f=event.currentTarget;if(!f.reportValidity()||locked)return;const values=new FormData(f);
+ const config={url:values.get('url').trim(),tokenFile:values.get('tokenFile').trim(),independentStyx:values.has('independentStyx'),freshConnection:values.has('freshConnection')};if(values.get('caFile').trim())config.caFile=values.get('caFile').trim();
+ locked=true;$('#discovery-result').textContent='正在检查独立 Gateway…';render();
+ try{await api('verify-gateway',{method:'POST',data:config});$('#discovery-result').textContent='Gateway 认证与 SDK 工具发现已验证。ChatGPT 账号连接：尚未验收。'}catch{$('#discovery-result').textContent='连接验证失败。请核对独立 Gateway 地址、私有凭据文件权限和 CA；页面不会显示凭据或服务端错误。'}finally{f.elements.tokenFile.value='';locked=false;await refresh()}
+});
 if(!session){$('#access').hidden=false}
 else{
  try{
   capabilities=await api('session');csrf=capabilities.csrf;
   $('#platform').textContent=({darwin:'macOS',win32:'Windows',linux:'Linux'})[capabilities.platform]??'本地设备';
+  const d=capabilities.defaults??{};for(const name of ['label','baseDir','bundle','publisherKeyFile','publisherSha256'])if(d[name])form.elements[name].value=d[name];if(d.gatewayUrl)form.elements.gatewayUrl.value=d.gatewayUrl;
+  $('#artifacts').open=!d.bundle;$('#discovery').hidden=false;
   form.hidden=false;fields();await refresh();
   $('#startup-note').textContent=localStorage.getItem('styx.local.startupPreference')==='requested'?'你的偏好：希望登录后自动启动。系统服务安装尚未执行。':'当前为手动启动偏好。系统服务安装尚未执行。';
   if(!capabilities.localGatewayAvailable)message('本机尚未配置可信的 TLS 准备工具，创建本机 Gateway 暂不可用。可先加入现有环境，或由本地启动器配置可信工具后重新打开设置。');

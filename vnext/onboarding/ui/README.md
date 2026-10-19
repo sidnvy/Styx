@@ -83,3 +83,44 @@ ChatGPT connection/account acceptance, native installers and system service
 installation are NOT RUN by these tests. Initial security-test failures in test
 mock cleanup and a fetch-normalized Host-header test were corrected; final HTTP
 suite passes. Desktop/mobile layout were rendered with isolated headless Chrome.
+
+## Guided defaults and local pairing
+
+The session now suggests a device label, an unused-at-check loopback Gateway
+port and a fresh Host directory beneath the explicitly configured private parent.
+It does not create that Host directory or reserve the port until authorized
+execution. Existing files/ports are never silently replaced. Host package, public
+key and publisher fingerprint remain explicit trust inputs. A local trusted
+launcher may prefill only those three public artifact fields using an owner-private
+`STYX_ONBOARDING_ARTIFACTS` JSON file with keys `bundle`, `publisherKeyFile`,
+`publisherSha256`; unknown fields, including credentials, are rejected. The UI
+still requires publisher/path review and the signed package is verified by core.
+
+For create-local, the core's `host.pair` button shows the exact Gateway, device
+label and requested desktop scope for explicit owner approval. The approval is
+sent as a structured scope and the core checks it against the saved plan. No
+invitation/admin credential is copied through the browser. Join-existing keeps
+the separate administrator approval flow. `gateway.verify` is transport/tool
+verification, not account verification.
+
+The additional Gateway check accepts only a local credential **file path**, a
+Gateway MCP URL and optional CA file path, with both explicit independent/fresh
+connection attestations. The verifier reads private files locally. The response
+contains only SDK verification status and `accountAcceptance: NOT RUN`; neither
+credential contents nor paths are returned. The credential path field is cleared
+after each attempt. Exceptions are fixed redacted errors. Actual browser testing
+verified that the generated model credential never appears in page text.
+
+To exercise the complete native preparation/pairing flow in an isolated browser,
+add `STYX_ONBOARDING_NATIVE_BUNDLE=1` plus absolute
+`STYX_ONBOARDING_NODE_BINARY`, `STYX_ONBOARDING_CODEX_BINARY`, and
+`STYX_ONBOARDING_CUA_BINARY` to the browser-test command. This builds a fresh
+pilot-signed bundle with the fixed Node22.23.3 provenance and existing pinned
+Codex0.163.0/Cua0.36.0, using an ephemeral publisher key. The observed Linux run
+passed real TLS Gateway preparation/start, authenticated discovery (both the
+core step and browser check), signed native Host preparation, explicit scoped
+owner pairing, `doctor: ready_for_exec`, pause and reload/resume. Every test
+state, browser profile, local Gateway and ephemeral key was cleaned. No system
+service was installed and desktop capability was disabled. This stronger opt-in
+mode supersedes the earlier Gateway-only test's narrower coverage; the default
+browser mode still does not prepare a Host. Current security suite:10PASS.

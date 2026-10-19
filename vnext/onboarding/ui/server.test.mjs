@@ -104,3 +104,43 @@ test('one mutation at a time prevents duplicate execution while status remains r
   release();assert.equal((await first).status,200);
  }finally{release();await f.cleanup()}
 });
+
+test('Gateway verification never echoes credential paths, tokens or verifier errors and remains CSRF protected',async()=>{
+ let observed;
+ const f=await fixture({verifyConnection:async config=>{observed=config;return{status:'gateway_verified',scope:'sdk_gateway',receipt:{token:'SECRET_VALUE',tokenFile:config.tokenFile},account_acceptance:'NOT RUN'}}});
+ try{
+  const request={url:'https://independent.invalid/mcp',tokenFile:'/private/SECRET_CREDENTIAL_PATH',independentStyx:true,freshConnection:true};
+  assert.equal((await f.post('/api/verify-gateway',request,{'X-Styx-CSRF':''})).status,403);assert.equal(observed,undefined);
+  const result=await f.post('/api/verify-gateway',request);assert.equal(result.status,200);const text=await result.text();assert.doesNotMatch(text,/SECRET|private|tokenFile/);assert.match(text,/sdk_gateway/);assert.match(text,/NOT RUN/);
+  assert.equal((await f.post('/api/verify-gateway',{...request,command:'arbitrary'})).status,409);
+ }finally{await f.cleanup()}
+ const failed=await fixture({verifyConnection:async()=>{throw Error('SECRET_VALUE /private/SECRET_CREDENTIAL_PATH')}});
+ try{const response=await failed.post('/api/verify-gateway',{url:'https://independent.invalid/mcp',tokenFile:'/private/secret',independentStyx:true,freshConnection:true});assert.equal(response.status,409);assert.doesNotMatch(await response.text(),/SECRET|\/private|tokenFile/)}finally{await failed.cleanup()}
+});
+
+test('safe defaults are fresh local suggestions; trusted artifact file cannot smuggle credentials',async()=>{
+ const f=await fixture();try{
+  assert.match(f.session.defaults.gatewayUrl,/^https:\/\/127\.0\.0\.1:\d+$/);
+  assert.equal(path.dirname(f.session.defaults.baseDir),f.root);assert.equal(fs.existsSync(f.session.defaults.baseDir),false);
+  assert.equal(f.session.defaults.bundle,undefined);
+ }finally{await f.cleanup()}
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'styx-artifact-defaults-'));
+ try{
+  const defaults=path.join(root,'artifacts.json');fs.writeFileSync(defaults,JSON.stringify({bundle:'/trusted/bundle',publisherKeyFile:'/trusted/key.pem',publisherSha256:'a'.repeat(64),token:'SECRET_VALUE'}),{mode:0o600});
+  await assert.rejects(createOnboardingServer({stateDir:path.join(root,'state'),core:{},artifactDefaultsFile:defaults}),/invalid_configuration_fields/);
+ }finally{fs.rmSync(root,{recursive:true,force:true})}
+});
+
+test('local device pairing requires explicit structured owner approval; ordinary steps cannot carry approval',async()=>{
+ let seen;
+ const f=await fixture({core:{async advanceDeployment(_dir,options){seen=options}}});
+ try{
+  await f.post('/api/create',config());
+  assert.equal((await f.post('/api/advance',{authorize:['host.pair']})).status,409);assert.equal(seen,undefined);
+  const approval={approve:true,gatewayUrl:'https://127.0.0.1:8795',label:'Owned test',enableComputer:false};
+  assert.equal((await f.post('/api/advance',{authorize:['host.pair'],ownerApproval:approval})).status,200);assert.deepEqual(seen,{authorize:['host.pair'],ownerApproval:approval});
+  seen=undefined;assert.equal((await f.post('/api/advance',{authorize:['host.doctor'],ownerApproval:approval})).status,409);assert.equal(seen,undefined);
+  assert.equal((await f.post('/api/advance',{authorize:['host.pair'],ownerApproval:{...approval,approve:false}})).status,409);
+  assert.equal((await f.post('/api/verify-gateway',{url:'https://independent.invalid/mcp',tokenFile:'/private/token',independentStyx:false,freshConnection:true})).status,409);
+ }finally{await f.cleanup()}
+});

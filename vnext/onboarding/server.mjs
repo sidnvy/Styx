@@ -3,10 +3,12 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
+import net from 'node:net';
+import {requirePrivateFile} from '../host/private-storage.mjs';
 import {randomBytes,timingSafeEqual} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
 const UI=fileURLToPath(new URL('./ui/',import.meta.url));
-const STEPS=new Set(['gateway.prepare','gateway.start','host.prepare','host.invite','host.request','host.claim','host.doctor']);
+const STEPS=new Set(['gateway.prepare','gateway.start','host.prepare','host.invite','host.request','host.claim','host.doctor','host.pair','gateway.verify']);
 const STATES=new Set(['pending','running','succeeded','failed','uncertain','blocked','skipped','awaiting_approval']);
 const ERRORS=new Set(['interrupted_or_in_progress_do_not_replay','step_failed_inspect_local_evidence_no_automatic_replay']);
 const MODES=new Set(['create-local','join-existing']);
@@ -51,11 +53,15 @@ async function body(req){
  req.setEncoding('utf8');let data='';for await(const chunk of req){data+=chunk;if(Buffer.byteLength(data)>65536)fail('body_too_large')}
  try{return JSON.parse(data)}catch{fail('invalid_json')}
 }
-export async function createOnboardingServer({stateDir,port=0,trustedForwardOrigin,trustedOpenSSL=process.platform==='win32'?undefined:'/usr/bin/openssl',core}={}){
+export async function createOnboardingServer({stateDir,port=0,trustedForwardOrigin,trustedOpenSSL=process.platform==='win32'?undefined:'/usr/bin/openssl',core,artifactDefaultsFile,verifyConnection}={}){
  if(typeof stateDir!=='string'||!path.isAbsolute(stateDir))fail('absolute_state_directory_required');
  if(!Number.isInteger(port)||port<0||port>65535)fail('invalid_port');
  const forwarded=trustedForwardOrigin?browserOrigin(trustedForwardOrigin):null;
  const api=core??await import('./core.mjs');
+ let artifacts={};
+ if(artifactDefaultsFile){requirePrivateFile(artifactDefaultsFile);if(fs.statSync(artifactDefaultsFile).size>65536)fail('artifact_defaults_too_large');const value=JSON.parse(fs.readFileSync(artifactDefaultsFile,'utf8'));keys(value,['bundle','publisherKeyFile','publisherSha256']);if(!['bundle','publisherKeyFile'].every(k=>typeof value[k]==='string'&&path.isAbsolute(value[k]))||!/^[a-f0-9]{64}$/.test(value.publisherSha256??''))fail('invalid_trusted_artifact_defaults');artifacts=value;}
+ const probe=net.createServer();await new Promise((resolve,reject)=>{probe.once('error',reject);probe.listen(0,'127.0.0.1',resolve)});const suggestedPort=probe.address().port;await new Promise(resolve=>probe.close(resolve));
+ const defaults={label:os.hostname().slice(0,72),baseDir:path.join(path.dirname(stateDir),'styx-host-'+randomBytes(5).toString('hex')),gatewayUrl:'https://127.0.0.1:'+suggestedPort,...artifacts};
  const session=randomBytes(32).toString('base64url'),csrf=randomBytes(32).toString('base64url');
  let origin,closed=false,busy=false;
  const assets=new Map([['/',['index.html','text/html; charset=utf-8']],['/ui/app.mjs',['app.mjs','text/javascript; charset=utf-8']],['/ui/style.css',['style.css','text/css; charset=utf-8']]]);
@@ -76,17 +82,19 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
   if(req.method==='POST'&&(req.headers.origin!==origin||!equal(req.headers['x-styx-csrf'],csrf))){send(403,{error:'mutation_refused'});return}
   if(req.method==='GET'&&url.pathname==='/api/session'){
    send(200,{csrf,platform:process.platform,localGatewayAvailable:!!trustedOpenSSL,pauseSupported:typeof api.stopDeploymentGateway==='function',startSupported:typeof api.startDeploymentGateway==='function',
-    accountAcceptance:'NOT RUN',nativeInstaller:'NOT RUN',trustedForwarding:!!forwarded});return;
+    defaults,accountAcceptance:'NOT RUN',nativeInstaller:'NOT RUN',trustedForwarding:!!forwarded});return;
   }
   if(req.method==='GET'&&url.pathname==='/api/status'){
    try{
     const deployment=publicDeployment(await api.readDeployment(stateDir)),plan=await api.planDeployment(stateDir);
     const dependencies=Array.isArray(plan?.steps)?plan.steps.filter(s=>STEPS.has(s.id)).map(s=>({id:s.id,requires:Array.isArray(s.requires)?s.requires.filter(id=>STEPS.has(id)):[]})):[];
-    send(200,{deployment,dependencies,busy});
+    const scope=plan?.ownerPairingScope;
+    const ownerPairingScope=scope&&typeof scope.gatewayUrl==='string'&&typeof scope.label==='string'&&typeof scope.enableComputer==='boolean'?{gatewayUrl:scope.gatewayUrl,label:scope.label,enableComputer:scope.enableComputer}:null;
+    send(200,{deployment,dependencies,ownerPairingScope,busy});
    }catch{if(!fs.existsSync(stateDir))send(200,{deployment:null,dependencies:[],busy});else send(409,{error:'deployment_unavailable'})}return;
   }
   if(req.method!=='POST'){send(405,{error:'method_refused'});return}
-  if(!['/api/create','/api/advance','/api/pause','/api/start'].includes(url.pathname)){send(404,{error:'not_found'});return}
+  if(!['/api/create','/api/advance','/api/pause','/api/start','/api/verify-gateway'].includes(url.pathname)){send(404,{error:'not_found'});return}
   if(busy){send(409,{error:'operation_in_progress'});return}busy=true;
   try{
    const data=await body(req);
@@ -96,8 +104,15 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
     try{const file=path.join(temp,'config.json');fs.writeFileSync(file,JSON.stringify(config),{mode:0o600});await api.createDeployment(file,{stateDir})}
     finally{fs.rmSync(temp,{recursive:true,force:true})}
    }else if(url.pathname==='/api/advance'){
-    keys(data,['authorize']);if(!Array.isArray(data.authorize)||data.authorize.length!==1||!STEPS.has(data.authorize[0]))fail('one_known_step_required');
-    await api.advanceDeployment(stateDir,{authorize:data.authorize});
+    keys(data,['authorize','ownerApproval']);if(!Array.isArray(data.authorize)||data.authorize.length!==1||!STEPS.has(data.authorize[0]))fail('one_known_step_required');
+    if(data.authorize[0]==='host.pair'){keys(data.ownerApproval,['approve','gatewayUrl','label','enableComputer']);if(data.ownerApproval.approve!==true||typeof data.ownerApproval.gatewayUrl!=='string'||typeof data.ownerApproval.label!=='string'||typeof data.ownerApproval.enableComputer!=='boolean')fail('explicit_owner_pairing_scope_required')}else if(data.ownerApproval!==undefined)fail('unexpected_owner_approval');
+    await api.advanceDeployment(stateDir,{authorize:data.authorize,...(data.ownerApproval?{ownerApproval:data.ownerApproval}:{})});
+   }else if(url.pathname==='/api/verify-gateway'){
+    keys(data,['url','tokenFile','caFile','independentStyx','freshConnection']);
+    if(data.independentStyx!==true||data.freshConnection!==true||typeof data.url!=='string'||data.url.length>4096||typeof data.tokenFile!=='string'||!path.isAbsolute(data.tokenFile)||(data.caFile!==undefined&&(typeof data.caFile!=='string'||!path.isAbsolute(data.caFile))))fail('explicit_gateway_verification_required');
+    const verify=verifyConnection??(await import('./connection.mjs')).verifyGatewayConnection;
+    const result=await verify(data);if(result.status!=='gateway_verified'||result.scope!=='sdk_gateway')fail('gateway_not_verified');
+    send(200,{status:'gateway_verified',scope:'sdk_gateway',accountAcceptance:'NOT RUN'});return;
    }else if(url.pathname==='/api/start'){
     keys(data,[]);if(typeof api.startDeploymentGateway!=='function'){send(409,{error:'start_not_supported'});return}
     await api.startDeploymentGateway(stateDir);
@@ -117,7 +132,7 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
 if(process.argv[1]&&fs.realpathSync(process.argv[1])===fs.realpathSync(fileURLToPath(import.meta.url))){
  try{
   const[flag,stateDir]=process.argv.slice(2);if(flag!=='--state')fail('usage_server_state_absolute_directory');
-  const instance=await createOnboardingServer({stateDir,port:Number(process.env.STYX_ONBOARDING_PORT??0),trustedForwardOrigin:process.env.STYX_ONBOARDING_BROWSER_ORIGIN,trustedOpenSSL:process.env.STYX_ONBOARDING_OPENSSL??(process.platform==='win32'?undefined:'/usr/bin/openssl')});
+  const instance=await createOnboardingServer({stateDir,port:Number(process.env.STYX_ONBOARDING_PORT??0),trustedForwardOrigin:process.env.STYX_ONBOARDING_BROWSER_ORIGIN,artifactDefaultsFile:process.env.STYX_ONBOARDING_ARTIFACTS,trustedOpenSSL:process.env.STYX_ONBOARDING_OPENSSL??(process.platform==='win32'?undefined:'/usr/bin/openssl')});
   // Local terminal bootstrap only: URL fragment never travels in HTTP requests.
   process.stdout.write('Open this private local setup URL in your browser:\n'+instance.url+'\n');
   for(const sig of['SIGINT','SIGTERM'])process.once(sig,()=>void instance.close().then(()=>process.exit(0)));
