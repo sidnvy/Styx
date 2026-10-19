@@ -181,3 +181,11 @@ PR #26 的 CAS 已有持久 Run/Wake 账本及真实模型自动回合证据，�
 ## Command and GUI routing
 
 Command-line work defaults to the Host's Exec Server: repository clone/pull, CLI downloads, file/search operations, package management, builds and tests. An interactive PTY is still an Exec session managed through write_stdin. Cua is for required GUI observation/interaction and explicitly requested GUI workflows. Do not open a desktop Terminal through Cua merely to paste an executable command; do not use it to bypass an Exec connection, authentication or policy failure. Resolve or report the original failure, and do not replay uncertain effects. Mixed tasks use the applicable channel for each step. Genuine GUI operations retain the no-AppleScript/System Events fallback rule. Gateway MCP initialization instructions, Exec/Cua descriptions and plugin guidance carry the same priorities. This is model routing guidance rather than a keyword-based execution firewall; actual account selection behavior needs a fresh real chat check after metadata refresh.
+2026-10-20 再次出现的 session_capacity 已通过真实 MCP 定位到 ExecAdapter，
+HTTP initialize 成功且仍加载前次无 MCP 连接上限的源码。ExecAdapter 将所有尚未轮询
+结束的命令句柄计入 64 上限；已经退出的进程也可能因输出尚未 drain 保留句柄。
+本次删除该数量上限，以及 usedIds 达到 100000 后拒绝执行的累计上限。
+句柄与历史 ID 不等于正在执行的 OS 进程数，不再据此拒绝其他会话的新命令。
+保留句柄所属 MCP 会话校验、随机 ID 不复用、输出游标与排空后移除，不驱逐运行命令。
+测试覆盖 96 个未轮询句柄、其他会话继续执行、原句柄输出仍可正确读取和 ID 累计。
+前次 96 个 MCP 连接验收不能替代这项连续命令句柄验收。

@@ -139,12 +139,36 @@ test('terminal result drains paginated output before removing session', async ()
   const last = await f.adapter.writeStdin({session_id: r.session_id, yield_time_ms: 0}, owner);
   assert.equal(last.exit_code, 0); assert.equal(f.adapter.sessions.size, 0);
 });
-test('output budget is bounded and capacity does not evict active sessions', async () => {
-  const f = fixture({adapter: {maxSessions: 1}}), r = await f.start();
-  f.push([...f.processes.values()][0], 'abcdefghij');
-  const poll = await f.adapter.writeStdin({session_id: r.session_id, yield_time_ms: 0, max_output_tokens: 4}, owner);
-  assert.equal(poll.output, 'abcd'); assert.equal(poll.original_token_count, 10);
-  await assert.rejects(f.start(), /session_capacity/);
+test('output budget stays bounded without evicting earlier command handles', async () => {
+  const f=fixture(),r=await f.start();
+  f.push([...f.processes.values()][0],'abcdefghij');
+  const poll=await f.adapter.writeStdin({session_id:r.session_id,yield_time_ms:0,max_output_tokens:4},owner);
+  assert.equal(poll.output,'abcd');assert.equal(poll.original_token_count,10);
+  const later=await f.start();assert.notEqual(later.session_id,r.session_id);
+  assert.ok(f.adapter.sessions.has(r.session_id));
+});
+test('more than 64 unpolled command handles do not block another conversation', async () => {
+  const f=fixture(),handles=[];
+  for(let i=0;i<96;i++){
+    const r=await f.start();handles.push(r.session_id);
+    const p=[...f.processes.values()].at(-1);f.push(p,'completed-'+i);p.exited=true;p.exitCode=0;
+  }
+  assert.equal(new Set(handles).size,96);assert.equal(f.adapter.sessions.size,96);
+  const other=await f.adapter.execCommand({cmd:'cat',yield_time_ms:0},'bob:chat-1');
+  assert.ok(other.session_id);assert.equal(f.adapter.sessions.size,97);
+  const wrong=await f.adapter.callTool('write_stdin',{session_id:handles[0],chars:'',yield_time_ms:0},'bob:chat-1');
+  assert.equal(wrong.structuredContent.error,'unknown_session');
+  const first=await f.adapter.writeStdin({session_id:handles[0],chars:'',yield_time_ms:100},owner);
+  assert.equal(first.output,'completed-0');assert.equal(first.exit_code,0);
+  assert.ok(f.adapter.sessions.has(handles[95]));
+  for(const id of handles.slice(1))await f.adapter.writeStdin({session_id:id,chars:'',yield_time_ms:100},owner);
+  assert.equal(f.adapter.sessions.size,1);
+});
+test('retired command IDs do not impose a lifetime command-count ceiling', async () => {
+  const f=fixture();
+  // IDs remain non-reusable, but their accumulated count cannot reject work.
+  for(let id=1;id<=100000;id++)f.adapter.usedIds.add(id);
+  const r=await f.start();assert.ok(r.session_id);assert.ok(r.session_id>100000);
 });
 test('malformed executor output and execution failure are not success', async () => {
   const f = fixture(), r = await f.start();

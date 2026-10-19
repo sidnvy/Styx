@@ -75,9 +75,9 @@ function commandArgs(platform, shell, command, login) {
 
 
 export class ExecAdapter {
-  constructor({resolve, maxSessions = 64, maxRetainedIds = 100000}) {
+  constructor({resolve}) {
     if (typeof resolve !== 'function') throw new TypeError('Trusted resolver required');
-    this.resolve = resolve; this.maxSessions = maxSessions; this.maxRetainedIds = maxRetainedIds;
+    this.resolve = resolve;
     this.sessions = new Map(); this.usedIds = new Set();
   }
   async binding(environment_id, owner) {
@@ -91,7 +91,9 @@ export class ExecAdapter {
     return b;
   }
   allocate() {
-    if (this.sessions.size >= this.maxSessions || this.usedIds.size >= this.maxRetainedIds) fail('session_capacity');
+    // A yielded handle can outlive its OS process until its owner drains output.
+    // Neither retained handles nor previously used IDs are a running-process
+    // count, and neither may block unrelated conversations from starting work.
     let id; do { id = randomInt(1, 2 ** 48); } while (this.usedIds.has(id));
     this.usedIds.add(id); return id;
   }
