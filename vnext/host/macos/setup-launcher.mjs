@@ -48,11 +48,18 @@ function privateJson(file,value){
  if(fs.existsSync(file)){const s=fs.lstatSync(file);assert(s.isFile()&&!s.isSymbolicLink()&&s.uid===process.getuid()&&!(s.mode&0o077),'bundled_setup_private_artifacts_required')}
  const tmp=file+'.'+process.pid+'.new';fs.writeFileSync(tmp,JSON.stringify(value)+'\n',{flag:'wx',mode:0o600});try{fs.renameSync(tmp,file)}finally{if(fs.existsSync(tmp))fs.unlinkSync(tmp)}
 }
-export async function startBundledSetup(resourceRoot){
+export async function startBundledSetup(resourceRoot,{setupRoot}={}){
  assert(process.platform==='darwin','bundled_setup_macos_required');
  const layout=previewLayout(resourceRoot);
  assert(fs.realpathSync(process.execPath)===fs.realpathSync(layout.node),'bundled_setup_runtime_required');
- const trustedMacPreviewApp=previewSigningIdentity(layout),storage=setupStorage(os.homedir());
+ const trustedMacPreviewApp=previewSigningIdentity(layout);
+ let storage;
+ if(setupRoot!==undefined){
+  // Trusted native acceptance only: production CLI never accepts this option.
+  assert(typeof setupRoot==='string'&&path.isAbsolute(setupRoot)&&!fs.existsSync(setupRoot),'fresh_explicit_preview_setup_root_required');
+  const parent=fs.lstatSync(path.dirname(setupRoot));assert(parent.isDirectory()&&!parent.isSymbolicLink()&&parent.uid===process.getuid()&&!(parent.mode&0o077),'private_preview_test_parent_required');
+  privateDirectory(setupRoot);storage={root:setupRoot,stateDir:path.join(setupRoot,'deployment'),artifactDefaultsFile:path.join(setupRoot,'artifacts.json')};
+ }else storage=setupStorage(os.homedir());
  privateJson(storage.artifactDefaultsFile,layout.artifacts);
  const{createOnboardingServer}=await import(pathToFileURL(layout.server));
  const instance=await createOnboardingServer({stateDir:storage.stateDir,artifactDefaultsFile:storage.artifactDefaultsFile,trustedMacPreviewApp,trustedOpenSSL:'/usr/bin/openssl'});
