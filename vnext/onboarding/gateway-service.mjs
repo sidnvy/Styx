@@ -52,6 +52,7 @@ export function controlGatewayService(stateDir,{action,authorize=false}={}){
  if(process.platform!=='linux')fail('persistent_gateway_service_platform_not_supported');
  if(action!=='status'&&authorize!==true)fail('gateway_service_authorization_required');
  const plan=gatewayServicePlan(stateDir);
+ if(action==='start'&&readDeployment(stateDir).gatewayRuntime.status==='running')fail('stop_foreground_gateway_before_service_start');
  // Read-only status must not create directories or write units.
  const file=path.join(os.homedir(),'.config/systemd/user',plan.name);
  if(action==='status'&&!fs.existsSync(file))return {status:'not_installed',name:plan.name};

@@ -32,7 +32,9 @@ test('owned persistent Gateway survives installer exit boundary and uninstalls w
  const listener=net.createServer();await new Promise(r=>listener.listen(0,'127.0.0.1',r));const port=listener.address().port;await new Promise(r=>listener.close(r));
  const input=path.join(dir,'input.json');fs.writeFileSync(input,JSON.stringify({schema:1,mode:'create-local',gateway:{url:'https://127.0.0.1:'+port,openssl:'/usr/bin/openssl'},host:{bundle,publisherKeyFile:pub,publisherSha256:createHash('sha256').update(createPublicKey(publicKey).export({type:'spki',format:'der'})).digest('hex'),baseDir:path.join(dir,'host'),label:'owned-service',computer:false}}),{mode:0o600});
  createDeployment(input,{stateDir:state});const prepared=await advanceDeployment(state,{authorize:['gateway.prepare','gateway.start','gateway.verify','host.prepare']});
- assert.equal(prepared.steps.find(s=>s.id==='host.prepare').status,'succeeded');await stopDeploymentGateway(state);
+ assert.equal(prepared.steps.find(s=>s.id==='host.prepare').status,'succeeded');
+ assert.throws(()=>controlGatewayService(state,{action:'start',authorize:true}),/stop_foreground_gateway_before_service_start/);
+ await stopDeploymentGateway(state);
  const plan=gatewayServicePlan(state);assert.ok(plan.unit.includes('gateway-runner.mjs'));assert.ok(!plan.unit.includes('admin.token'));
  assert.equal(controlGatewayService(state,{action:'status'}).status,'not_installed');
  controlGatewayService(state,{action:'install',authorize:true});installed=true;controlGatewayService(state,{action:'start',authorize:true});
