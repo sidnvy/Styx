@@ -1,6 +1,6 @@
 const $=selector=>document.querySelector(selector);
 const form=$('#setup'),notice=$('#notice');
-const LABELS={'gateway.prepare':'准备本机 Gateway','gateway.start':'启动前台 Gateway','gateway.verify':'验证 Gateway 认证与工具发现','host.prepare':'验证并准备 Host','host.invite':'生成一次性设备邀请','host.request':'提交设备加入请求','host.claim':'领取管理员审批结果','host.doctor':'检查 Host','host.pair':'批准并配对这台 Host','host.service.install':'安装 Host 系统服务','host.service.start':'启动 Host 系统服务','host.service.status':'检查 Host 系统服务状态'};
+const LABELS={'gateway.prepare':'准备本机 Gateway','gateway.start':'启动前台 Gateway','gateway.verify':'验证 Gateway 认证与工具发现','host.prepare':'验证并准备 Host','host.invite':'生成一次性设备邀请','host.request':'提交设备加入请求','host.claim':'领取管理员审批结果','host.doctor':'检查 Host','host.pair':'批准并配对这台 Host','host.service.install':'安装 Host 系统服务','host.service.start':'启动 Host 并启用登录后自动运行','host.service.status':'检查 Host 系统服务状态'};
 const STATUS={pending:'待执行',running:'执行中',succeeded:'已记录成功',failed:'执行失败',uncertain:'结果不确定 · 不可重放',blocked:'前置条件未就绪',awaiting_approval:'等待管理员审批',skipped:'已跳过'};
 const fragment=new URLSearchParams(location.hash.slice(1)),bootstrap=fragment.get('session');
 if(bootstrap){sessionStorage.setItem('styx.local.session',bootstrap);history.replaceState(null,'',location.pathname)}
@@ -81,7 +81,8 @@ $('#start-gateway').addEventListener('click',()=>mutate('start',{},'前台 Gatew
 $('#pause').addEventListener('click',()=>mutate('pause',{},'停止请求已提交。请检查 Gateway 当前运行状态；部署步骤记录会保留。'));
 for(const button of document.querySelectorAll('[data-service]'))button.addEventListener('click',async()=>{
  if(locked)return;const role=button.dataset.service,action=button.dataset.action;
- if(action!=='status'&&!confirm('明确授权 '+role+' 系统服务操作：'+action+'？这将修改当前设备上受范围绑定保护的服务。'))return;
+ const description=role==='host'&&action==='start'?'启动 Host 并启用登录后自动运行':role==='host'&&action==='stop'?'停止 Host 并关闭自动运行':role+' 系统服务操作：'+action;
+ if(action!=='status'&&!confirm('明确授权：'+description+'？这将修改当前设备上受范围绑定保护的服务。'))return;
  locked=true;render();message('正在执行固定系统服务操作…');
  try{const result=await api('service',{method:'POST',data:{role,action,authorize:true}});serviceObservations[role]=result.service;message('服务操作已返回。请查看本机观察结果；进程运行不等于账号或工具链验收通过。')}catch{message('服务操作被拒绝或未完成。保留本地状态，先读取状态；不要重复结果不确定的变更。')}finally{locked=false;await refresh()}
 });
