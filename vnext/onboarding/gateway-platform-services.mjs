@@ -36,6 +36,11 @@ function userLaunchDir(home){
  return path.join(home,'Library','LaunchAgents');
 }
 const escapeRegex=s=>s.replace(/[.*+?^${}()|[\]\\]/g,'\\$&');
+export function launchdEnablement(text,name){
+ const row=new RegExp('"'+escapeRegex(name)+'"\\s*=>\\s*([^\\s]+)').exec(text);
+ if(!row)return 'default';
+ return ['true','disabled'].includes(row[1])?'disabled':['false','enabled'].includes(row[1])?'enabled':'unknown';
+}
 function macService(action,d,p,{run,home}){
  const uid=process.getuid();assert(uid>0,'gateway_user_domain_required');
  const domain='gui/'+uid,target=domain+'/'+p.name,file=path.join(home,'Library','LaunchAgents',p.name+'.plist'),expected=macPlist(d,p);
@@ -48,7 +53,7 @@ function macService(action,d,p,{run,home}){
   assert(program===d.nodeBinary&&JSON.stringify(argv)===JSON.stringify([d.nodeBinary,d.runner,d.stateDir]),'gateway_loaded_definition_mismatch');
   return {loaded:true,pid:Number(/^\s*pid = (\d+)$/m.exec(text)?.[1])||null,state:/^\s*state = (.+)$/m.exec(text)?.[1]?.trim()??'unknown'};
  };
- const preference=()=>{const text=String(ctl('print-disabled',[domain]));const match=new RegExp('"'+escapeRegex(p.name)+'"\\s*=>\\s*(true|false)').exec(text);return match?.[1]==='true'?'disabled':match?.[1]==='false'?'enabled':'default'};
+ const preference=()=>launchdEnablement(String(ctl('print-disabled',[domain])),p.name);
  const bind=()=>{requirePrivateFile(file);assert(fs.readFileSync(file,'utf8')===expected,'gateway_plist_definition_mismatch')};
  if(action==='install'){
   if(fs.existsSync(file)){bind();return {...result(observe(),preference()),status:'already_installed'}}

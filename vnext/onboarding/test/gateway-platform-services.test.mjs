@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {createHash} from 'node:crypto';
-import {platformGatewayPlan,platformGatewayDefinition,platformGatewayService} from '../gateway-platform-services.mjs';
+import {platformGatewayPlan,platformGatewayDefinition,platformGatewayService,launchdEnablement} from '../gateway-platform-services.mjs';
 const descriptor=platform=>{const stateDir=platform==='win32'?'C:\\Users\\Owner\\Styx State':'/Users/owner/Styx State';return {stateDir,nodeBinary:platform==='win32'?'C:\\Styx Runtime\\node.exe':'/Users/owner/Styx Runtime/node',runner:platform==='win32'?'C:\\Styx Source\\gateway-runner.mjs':'/Users/owner/Styx Source/gateway-runner.mjs',identityHash:createHash('sha256').update(stateDir).digest('hex')}};
 test('fixed per-user identity is bound to the full verified state path hash',()=>{
  for(const platform of ['darwin','win32']){const d=descriptor(platform),p=platformGatewayPlan(d,{platform});assert.ok(p.name.endsWith(d.identityHash.slice(0,12)));assert.ok(p.marker.endsWith(d.identityHash));assert.equal(p.systemBootWithoutLogin,'NOT CONFIGURED');assert.equal(p.startEnablesStartup,true);assert.throws(()=>platformGatewayPlan({...d,identityHash:'0'.repeat(64)},{platform}),/identity_mismatch/)}
@@ -22,4 +22,9 @@ test('Windows script enforces owner, exact one action, interactive limited logon
 });
 test('invalid verbs or absent user authorization never execute a native command',()=>{
  let calls=0;for(const request of [{action:'restart',authorize:true},{action:'install'},{action:'start',authorize:false},{action:'uninstall',authorize:'yes'}])assert.throws(()=>platformGatewayService({...request,descriptor:descriptor('darwin')},{run(){calls++}}));assert.equal(calls,0);
+});
+
+test('launchd enablement accepts actual current macOS words and older Boolean rows',()=>{
+ const name='app.styx.gateway.123';for(const [native,expected] of [['disabled','disabled'],['enabled','enabled'],['true','disabled'],['false','enabled'],['unrecognized','unknown']])assert.equal(launchdEnablement('\t"'+name+'" => '+native+'\n',name),expected);
+ assert.equal(launchdEnablement('"other" => disabled',name),'default');
 });
