@@ -4,6 +4,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
+import WebSocket from 'ws';
+import {once} from 'node:events';
 import {createHash,createPublicKey,generateKeyPairSync,sign,randomUUID} from 'node:crypto';
 import {ensurePrivateDirectory} from '../../host/private-storage.mjs';
 import {main} from '../cli.mjs';
@@ -22,7 +24,7 @@ async function fixture(t){
  const manifest={schema:1,version:'0.1.0-test',platform:process.platform,arch:process.arch,files:Object.entries(contents).map(([name,b])=>{fs.writeFileSync(path.join(bundle,name),b);return {path:name,sha256:sha(b),size:b.length,executable:name.startsWith('bin/')};})};
  const raw=JSON.stringify(manifest);fs.writeFileSync(path.join(bundle,'manifest.json'),raw);fs.writeFileSync(path.join(bundle,'manifest.sig'),sign(null,Buffer.from(raw),privateKey).toString('base64url'));
  const publisherKeyFile=path.join(root,'publisher.pem');fs.writeFileSync(publisherKeyFile,publicKey);
- const config={schema:1,mode:'create-local',gateway:{url:'https://127.0.0.1:'+port,openssl:'/usr/bin/openssl'},host:{bundle,publisherKeyFile,publisherSha256:sha(createPublicKey(publicKey).export({type:'spki',format:'der'})),baseDir:path.join(root,'host'),label:'Onboarding test',computer:false}};
+ const config={schema:1,mode:'create-local',pairingMode:'manual',gateway:{url:'https://127.0.0.1:'+port,openssl:'/usr/bin/openssl'},host:{bundle,publisherKeyFile,publisherSha256:sha(createPublicKey(publicKey).export({type:'spki',format:'der'})),baseDir:path.join(root,'host'),label:'Onboarding test',computer:false}};
  const configFile=path.join(root,'input.json');fs.writeFileSync(configFile,JSON.stringify(config),{mode:0o600});const stateDir=path.join(root,'deployment');
  return {root,config,configFile,stateDir};
 }
@@ -91,4 +93,22 @@ test('CLI accepts only fixed workflow commands and returns persisted redacted st
  const f=await fixture(t);const created=await main(['create',f.configFile,f.stateDir]);assert.equal(created.mode,'create-local');
  assert.deepEqual(await main(['status',f.stateDir]),created);
  await assert.rejects(main(['exec',f.stateDir,'whoami']),/usage_/);
+});
+
+test('explicit owner-local pairing avoids invitation shuttle and bounded shutdown closes a live Host websocket',{skip:process.platform!=='linux',timeout:20000},async t=>{
+ const f=await fixture(t);delete f.config.pairingMode;fs.writeFileSync(f.configFile,JSON.stringify(f.config));createDeployment(f.configFile,{stateDir:f.stateDir});
+ await advanceDeployment(f.stateDir,{authorize:['gateway.prepare','gateway.start','host.prepare']});
+ assert.equal(readDeployment(f.stateDir).steps.some(x=>x.id==='host.pair'),true);
+ await assert.rejects(advanceDeployment(f.stateDir,{authorize:['host.pair']}),/invalid_configuration_fields/);
+ assert.equal(steps(readDeployment(f.stateDir))['host.pair'].status,'pending');
+ const ownerApproval={approve:true,...planDeployment(f.stateDir).ownerPairingScope};
+ const s=await advanceDeployment(f.stateDir,{authorize:['host.pair'],ownerApproval});
+ assert.equal(steps(s)['host.pair'].status,'succeeded');assert.equal(steps(s)['host.pair'].evidence.status,'ready_to_connect');
+ assert.equal(fs.existsSync(path.join(f.stateDir,'invitation')),false);
+ const host=JSON.parse(fs.readFileSync(path.join(f.config.host.baseDir,'device/host.json')));
+ const token=fs.readFileSync(host.token_file,'utf8').trim();
+ const ws=new WebSocket(host.gateway_ws_url+'styx/hosts/'+host.host_id+'/exec',{ca:fs.readFileSync(path.join(f.stateDir,'gateway/certificate.pem')),headers:{Authorization:'Bearer '+token}});
+ await once(ws,'open');const closed=once(ws,'close');const started=Date.now();
+ await stopDeploymentGateway(f.stateDir);await closed;assert.ok(Date.now()-started<5000);assert.equal(ws.readyState,WebSocket.CLOSED);
+ assert.equal(readDeployment(f.stateDir).gatewayRuntime.status,'not_owned_by_current_process');
 });

@@ -6,6 +6,7 @@ import {ensurePrivateDirectory,requirePrivateDirectory,requirePrivateFile} from 
 import {prepareNativeSetup} from '../host/setup-native.mjs';
 import {requestEnrollment,claimEnrollment} from '../host/enroll.mjs';
 import {ownerCommand} from '../gateway/enroll-admin.mjs';
+import {pairDevice,createLocalPairingTransport} from './pairing.mjs';
 import {doctor} from '../host/doctor.mjs';
 
 const live=new Map();
@@ -19,8 +20,10 @@ function write(file,value){const tmp=file+'.'+randomBytes(8).toString('hex')+'.t
 const hash=file=>createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 const evidenceFile=file=>({path:file,sha256:hash(file)});
 export function validateDeployment(config){
- exact(config,['schema','mode','gateway','host','invitationFile']);
+ exact(config,['schema','mode','gateway','host','invitationFile','pairingMode']);
  if(config.schema!==1||!['create-local','join-existing'].includes(config.mode))fail('unsupported_deployment_schema_or_mode');
+ if(config.pairingMode!==undefined&&!['manual','owner-local'].includes(config.pairingMode))fail('invalid_pairing_mode');
+ if(config.mode==='join-existing'&&config.pairingMode==='owner-local')fail('join_requires_external_owner_approval');
  exact(config.gateway,['url','openssl','caFile']);
  let u;try{u=new URL(config.gateway.url)}catch{fail('gateway_https_origin_required')}
  if(u.protocol!=='https:'||u.username||u.password||u.search||u.hash||u.pathname!=='/')fail('gateway_https_origin_required');
@@ -44,11 +47,12 @@ export function createDeployment(configFile,{stateDir}={}){
  if(!abs(configFile)||!abs(stateDir))fail('absolute_paths_required');
  const config=validateDeployment(read(configFile));requirePrivateDirectory(path.dirname(stateDir));if(fs.existsSync(stateDir))fail('deployment_directory_already_exists');
  ensurePrivateDirectory(stateDir);write(filename(stateDir,'deployment.json'),config);
- const ids=[...(config.mode==='create-local'?['gateway.prepare','gateway.start']:[]),'host.prepare',...(config.mode==='create-local'?['host.invite']:[]),'host.request','host.claim','host.doctor'];
+ const localPair=config.mode==='create-local'&&config.pairingMode!=='manual';
+ const ids=[...(config.mode==='create-local'?['gateway.prepare','gateway.start']:[]),'host.prepare',...(localPair?['host.pair']:[...(config.mode==='create-local'?['host.invite']:[]),'host.request','host.claim']),'host.doctor'];
  const state={schema:1,mode:config.mode,configSha256:hash(filename(stateDir,'deployment.json')),steps:ids.map(id=>({id,status:'pending'}))};write(filename(stateDir,'state.json'),state);return publicState(stateDir,state);
 }
 export function readDeployment(stateDir){const {state}=load(stateDir);return publicState(stateDir,state);}
-export function planDeployment(stateDir){const {config,state}=load(stateDir);return {schema:1,mode:config.mode,steps:state.steps.map((s,i)=>({id:s.id,status:s.status,requires:state.steps.slice(0,i).map(x=>x.id),authorizationRequired:true})),service:{status:'not_installed',configFile:path.join(config.host.baseDir,'service.json'),platform:process.platform},accountAcceptance:'NOT RUN'};}
+export function planDeployment(stateDir){const {config,state}=load(stateDir);return {schema:1,mode:config.mode,steps:state.steps.map((s,i)=>({id:s.id,status:s.status,requires:state.steps.slice(0,i).map(x=>x.id),authorizationRequired:true})),ownerPairingScope:config.mode==='create-local'?{gatewayUrl:config.gateway.url,label:config.host.label,enableComputer:config.host.computer}:null,service:{status:'not_installed',configFile:path.join(config.host.baseDir,'service.json'),platform:process.platform},accountAcceptance:'NOT RUN'};}
 function lock(d){const file=filename(d,'advance.lock');let fd;try{fd=fs.openSync(file,'wx',0o600);}catch{fail('onboarding_busy_or_interrupted_lock');}return ()=>{fs.closeSync(fd);fs.unlinkSync(file)};}
 function gatewayPaths(d){const root=filename(d,'gateway');return {root,cert:filename(root,'certificate.pem'),key:filename(root,'private-key.pem'),model:filename(root,'model.token'),admin:filename(root,'admin.token'),owner:filename(root,'owner.json'),runtime:filename(root,'runtime.json'),catalog:filename(root,'targets.json')};}
 function prepareGateway(d,c){
@@ -69,10 +73,10 @@ export async function startDeploymentGateway(d){
  const gateway=createStyxGateway({catalog:read(cfg.catalogFile)});
  const enrollment=new EnrollmentController({rootDir:cfg.enrollmentDir,adminTokenFile:cfg.adminTokenFile,registry:gateway.registry,relay:gateway.relay});
  let handle;try{handle=await createGatewayHttp(gateway,{token:fs.readFileSync(cfg.modelTokenFile,'utf8').trim(),host:'127.0.0.1',port:Number(new URL(cfg.url).port),allowedHosts:[new URL(cfg.url).host],tlsCertificateFile:cfg.tlsCertificateFile,tlsPrivateKeyFile:cfg.tlsPrivateKeyFile,enrollment});}catch(e){await gateway.close();throw e;}
- live.set(d,handle);return {status:'running',url:cfg.url,ownership:'current_process',persistentService:'NOT INSTALLED'};
+ live.set(d,{http:handle,gateway,controller:enrollment});return {status:'running',url:cfg.url,ownership:'current_process',persistentService:'NOT INSTALLED'};
 }
-export async function stopDeploymentGateway(d){if(!abs(d))fail('absolute_state_directory_required');const h=live.get(d);if(!h)return {status:'not_owned_by_current_process'};await h.close();live.delete(d);return {status:'stopped',ownership:'current_process'};}
-async function execute(d,c,id){
+export async function stopDeploymentGateway(d){if(!abs(d))fail('absolute_state_directory_required');const h=live.get(d);if(!h)return {status:'not_owned_by_current_process'};let timer;try{await Promise.race([(async()=>{await h.gateway.relay.close();await h.http.close();})(),new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('gateway_shutdown_timed_out')),5000);})]);live.delete(d);}finally{clearTimeout(timer);}return {status:'stopped',ownership:'current_process'};}
+async function execute(d,c,id,ownerApproval){
  const p=gatewayPaths(d),base=c.host.baseDir;
  const enrollment=()=>read(path.join(base,'enrollment.json'));
  if(id==='gateway.prepare')return prepareGateway(d,c);
@@ -80,6 +84,9 @@ async function execute(d,c,id){
  if(id==='host.prepare'){
   const r=prepareNativeSetup({...c.host,gatewayUrl:c.gateway.url,...(c.mode==='create-local'?{gatewayCaFile:p.cert}:c.gateway.caFile?{gatewayCaFile:c.gateway.caFile}:{})});
   return {status:r.status,version:r.version,receipt:evidenceFile(path.join(base,'setup-receipt.json')),node:r.node,release_root:r.release_root};
+ }
+ if(id==='host.pair'){
+  const cfg=enrollment();return pairDevice({controller:live.get(d).controller,transport:createLocalPairingTransport(cfg),authorization:{...cfg,platform:process.platform,approve:true,enable_computer:ownerApproval.enableComputer},ttlSeconds:600});
  }
  if(id==='host.invite'){
   const r=await ownerCommand(read(p.owner),'invite',['600']);const file=filename(d,'invitation');fs.writeFileSync(file,r.invitation+'\n',{mode:0o600,flag:'wx'});requirePrivateFile(file);return {invitationFile:file,oneUse:true};
@@ -99,13 +106,18 @@ async function execute(d,c,id){
 }
 // Resume advances only explicitly authorized pending/read-only-blocked steps.
 // A lock left by a crash is intentionally retained for owner inspection; never steal it.
-export async function advanceDeployment(d,{authorize=[]}={}){
+export async function advanceDeployment(d,{authorize=[],ownerApproval}={}){
  if(!Array.isArray(authorize)||authorize.some(x=>typeof x!=='string')||new Set(authorize).size!==authorize.length)fail('explicit_step_authorization_required');
  load(d);
  const release=lock(d);
  try{
   const {config,state}=load(d);
   if(authorize.some(id=>!state.steps.some(s=>s.id===id)))fail('unknown_authorized_step');
+  if(authorize.includes('host.pair')){
+   exact(ownerApproval,['approve','gatewayUrl','label','enableComputer']);
+   if(ownerApproval.approve!==true||ownerApproval.gatewayUrl!==config.gateway.url||ownerApproval.label!==config.host.label||typeof ownerApproval.enableComputer!=='boolean'||ownerApproval.enableComputer&&!config.host.computer)fail('explicit_scoped_owner_approval_required');
+   if(!live.has(d))fail('local_gateway_must_be_running');
+  }
   for(const done of state.steps.filter(s=>s.status==='succeeded')){
    for(const value of Object.values(done.evidence??{})){
     if(obj(value)&&typeof value.path==='string'&&typeof value.sha256==='string'&&hash(value.path)!==value.sha256)fail('completed_step_evidence_changed');
@@ -117,8 +129,8 @@ export async function advanceDeployment(d,{authorize=[]}={}){
    if(['running','uncertain'].includes(step.status))fail('uncertain_step_requires_manual_reconciliation');
    step.status='running';delete step.error;write(filename(d,'state.json'),state);
    try{
-    step.evidence=await execute(d,config,step.id);
-    step.status=step.id==='host.claim'&&step.evidence.status==='pending'?'awaiting_approval':step.id==='host.doctor'&&step.evidence.status!=='ready_for_exec'?'blocked':'succeeded';
+    step.evidence=await execute(d,config,step.id,ownerApproval);
+    step.status=step.evidence.status==='needs_owner_attention'?'uncertain':step.id==='host.claim'&&step.evidence.status==='pending'?'awaiting_approval':step.id==='host.doctor'&&step.evidence.status!=='ready_for_exec'?'blocked':'succeeded';
     write(filename(d,'state.json'),state);
     if(step.status!=='succeeded')break;
    }catch{
