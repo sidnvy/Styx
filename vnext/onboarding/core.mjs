@@ -17,7 +17,7 @@ const abs=x=>typeof x==='string'&&path.isAbsolute(x)&&path.normalize(x)===x;
 const exact=(x,keys)=>{if(!obj(x)||Object.keys(x).some(k=>!keys.includes(k)))fail('invalid_configuration_fields')};
 const filename=(d,n)=>path.join(d,n);
 function read(file){requirePrivateFile(file);if(fs.statSync(file).size>1024*1024)fail('state_file_too_large');return JSON.parse(fs.readFileSync(file,'utf8'));}
-function write(file,value){const tmp=file+'.'+randomBytes(8).toString('hex')+'.tmp';fs.writeFileSync(tmp,JSON.stringify(value,null,2)+'\n',{mode:0o600,flag:'wx'});try{requirePrivateFile(tmp);fs.renameSync(tmp,file);}finally{if(fs.existsSync(tmp))fs.unlinkSync(tmp);}}
+function write(file,value){const tmp=file+'.'+randomBytes(8).toString('hex')+'.tmp',fd=fs.openSync(tmp,'wx',0o600);try{fs.writeFileSync(fd,JSON.stringify(value,null,2)+'\n');fs.fsyncSync(fd);}finally{fs.closeSync(fd);}try{requirePrivateFile(tmp);fs.renameSync(tmp,file);if(process.platform!=='win32'){const dir=fs.openSync(path.dirname(file),'r');try{fs.fsyncSync(dir);}finally{fs.closeSync(dir);}}}finally{if(fs.existsSync(tmp))fs.unlinkSync(tmp);}}
 const hash=file=>createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 const evidenceFile=file=>({path:file,sha256:hash(file)});
 export function validateDeployment(config){
@@ -89,7 +89,7 @@ function prepareGateway(d,c){
  fs.chmodSync(p.key,0o600);fs.chmodSync(p.cert,0o600);requirePrivateFile(p.key);requirePrivateFile(p.cert);
  write(p.catalog,{version:1,targets:[]});write(p.owner,{gateway_url:c.gateway.url,gateway_ca_file:p.cert,admin_token_file:p.admin});
  write(p.runtime,{schema:1,url:c.gateway.url,listenHost:'127.0.0.1',tlsCertificateFile:p.cert,tlsPrivateKeyFile:p.key,modelTokenFile:p.model,adminTokenFile:p.admin,enrollmentDir:filename(p.root,'enrollment'),catalogFile:p.catalog});
- return {runtime:evidenceFile(p.runtime),certificate:evidenceFile(p.cert),ownerConfig:p.owner,modelCredentialFile:p.model,tlsTrust:'dedicated_self_signed_ca_local_only',publicIngress:'NOT CONFIGURED'};
+ return {runtime:evidenceFile(p.runtime),certificate:evidenceFile(p.cert),ownerConfig:p.owner,ownerConfiguration:evidenceFile(p.owner),modelCredentialFile:p.model,tlsTrust:'dedicated_self_signed_ca_local_only',publicIngress:'NOT CONFIGURED'};
 }
 export async function startDeploymentGateway(d){
  const {config,state}=load(d);if(config.mode!=='create-local')fail('not_local_gateway');
@@ -103,6 +103,42 @@ export async function startDeploymentGateway(d){
  live.set(d,{http:handle,gateway,controller:enrollment});return {status:'running',url:cfg.url,ownership:'current_process',persistentService:'NOT INSTALLED'};
 }
 export async function stopDeploymentGateway(d){if(!abs(d))fail('absolute_state_directory_required');const h=live.get(d);if(!h)return {status:'not_owned_by_current_process'};let timer;try{await Promise.race([(async()=>{await h.gateway.relay.close();await h.http.close();})(),new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('gateway_shutdown_timed_out')),5000);})]);live.delete(d);}finally{clearTimeout(timer);}return {status:'stopped',ownership:'current_process'};}
+function ownedGateway(d){
+ const {config,state}=load(d);if(config.mode!=='create-local')fail('owned_local_gateway_required');verifyEvidence(state);
+ const p=gatewayPaths(d),owner=read(p.owner);
+ if(new URL(owner.gateway_url).origin!==new URL(config.gateway.url).origin||owner.gateway_ca_file!==p.cert||owner.admin_token_file!==p.admin)fail('owner_gateway_binding_changed');
+ return {config,controller:live.get(d)?.controller,owner};
+}
+async function pendingOwned(g){return g.controller?g.controller.listPending():ownerCommand(g.owner,'pending');}
+// Owner-only return value contains a short-lived invitation secret. Never expose
+// this operation as MCP or include its result in public status/diagnostic logs.
+export async function createDeploymentPairingLink(d,options={}){
+ exact(options,['authorize']);if(options.authorize!==true)fail('explicit_owner_link_authorization_required');
+ const g=ownedGateway(d),release=lock(d);
+ try{const {createPairingLink}=await import('./pairing-links.mjs');
+  const invitation=g.controller?g.controller.invite({ttl_seconds:600}):await ownerCommand(g.owner,'invite',['600']);
+  return {...createPairingLink({controller:{invite:()=>invitation},gatewayOrigin:g.config.gateway.url,approved:true,caPem:fs.readFileSync(gatewayPaths(d).cert,'utf8'),ttlSeconds:600}),reachability:'loopback_only',remoteUsable:false};
+ }catch{throw Error('owner_pairing_link_failed_inspect_private_gateway');}finally{release();}
+}
+function pendingPublic(items){
+ if(!Array.isArray(items))fail('invalid_pending_response');
+ return items.map(x=>{if(!/^[a-f0-9]{32}$/.test(x.request_id??'')||!/^styx-[a-f0-9]{24}$/.test(x.device_id??'')||!/^([a-f0-9]{64})$/.test(x.fingerprint??''))fail('invalid_pending_response');return {request_id:x.request_id,device_id:x.device_id,label:x.label,platform:x.platform,cwd:x.cwd,shell:x.shell,fingerprint:x.fingerprint,computer_requested:x.computer_requested,expires_at:x.expires_at};});
+}
+export async function listDeploymentPending(d,options={}){
+ exact(options,['authorize']);if(options.authorize!==true)fail('explicit_owner_pending_authorization_required');
+ try{return pendingPublic(await pendingOwned(ownedGateway(d)));}catch{throw Error('owner_pending_read_failed');}
+}
+export async function approveDeploymentPending(d,options={}){
+ exact(options,['authorize','requestId','fingerprint','enableComputer']);
+ if(options.authorize!==true||!/^([a-f0-9]{32})$/.test(options.requestId??'')||!/^([a-f0-9]{64})$/.test(options.fingerprint??'')||typeof options.enableComputer!=='boolean')fail('explicit_scoped_pending_approval_required');
+ const g=ownedGateway(d),release=lock(d);
+ try{
+  const request=pendingPublic(await pendingOwned(g)).find(x=>x.request_id===options.requestId);
+  if(!request||request.fingerprint!==options.fingerprint||options.enableComputer&&!request.computer_requested)fail('pending_identity_or_capability_mismatch');
+  const result=g.controller?g.controller.approve({request_id:options.requestId,fingerprint:options.fingerprint,enable_computer:options.enableComputer}):await ownerCommand(g.owner,'approve',[options.requestId,options.fingerprint,...(options.enableComputer?['computer']:[])]);
+  return {status:result.status,device_id:result.device_id,fingerprint:result.fingerprint,approved_capabilities:result.approved_capabilities};
+ }catch(e){if(e.message==='pending_identity_or_capability_mismatch')throw e;throw Error('owner_approval_failed_inspect_private_gateway');}finally{release();}
+}
 export async function verifyDeploymentGateway(d){
  const {config}=load(d);if(config.mode!=='create-local')fail('join_connection_verification_requires_explicit_model_credential');
  const p=gatewayPaths(d);return verifyGatewayConnection({url:new URL('/mcp',config.gateway.url).href,tokenFile:p.model,caFile:p.cert,independentStyx:true,freshConnection:true});

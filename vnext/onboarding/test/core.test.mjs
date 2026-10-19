@@ -10,7 +10,7 @@ import {createHash,createPublicKey,generateKeyPairSync,sign,randomUUID} from 'no
 import {ensurePrivateDirectory} from '../../host/private-storage.mjs';
 import {main} from '../cli.mjs';
 import {ownerCommand} from '../../gateway/enroll-admin.mjs';
-import {createDeployment,readDeployment,planDeployment,advanceDeployment,stopDeploymentGateway,validateDeployment,controlDeploymentHostService} from '../core.mjs';
+import {createDeployment,readDeployment,planDeployment,advanceDeployment,stopDeploymentGateway,validateDeployment,controlDeploymentHostService,createDeploymentPairingLink,listDeploymentPending,approveDeploymentPending} from '../core.mjs';
 const sha=b=>createHash('sha256').update(b).digest('hex');
 async function fixture(t){
  const root=path.join(os.tmpdir(),'styx-onboarding-'+randomUUID());ensurePrivateDirectory(root);t.after(async()=>{const d=path.join(root,'deployment');if(fs.existsSync(d))await stopDeploymentGateway(d);fs.rmSync(root,{recursive:true,force:true});});
@@ -145,4 +145,27 @@ test('CLI fixed Host and Gateway service verbs refuse missing mutation authority
   await assert.rejects(main([kind,'/not-a-deployment','exec','--authorize']),/explicit_fixed_service_authorization_required/);
   await assert.rejects(main([kind,'/not-a-deployment','status','--shell']),/explicit_fixed_service_authorization_required/);
  }
+});
+
+test('owner pairing link joins a fresh second deployment with explicit origin, CA and fingerprint approval',{skip:process.platform!=='linux',timeout:25000},async t=>{
+ const f=await fixture(t);createDeployment(f.configFile,{stateDir:f.stateDir});
+ await advanceDeployment(f.stateDir,{authorize:['gateway.prepare','gateway.start','gateway.verify']});
+ await assert.rejects(createDeploymentPairingLink(f.stateDir,{authorize:false}),/explicit_owner_link_authorization_required/);
+ const reopened=await import('../core.mjs?reopened-owner-ui');
+ const issued=await reopened.createDeploymentPairingLink(f.stateDir,{authorize:true});assert.equal(issued.remoteUsable,false);assert.equal(issued.reachability,'loopback_only');
+ const {inspectPairingLink,acceptPairingLink}=await import('../pairing-links.mjs');
+ const preview=inspectPairingLink(issued.link),privateJoin=path.join(f.root,'join-material');
+ acceptPairingLink(issued.link,{stateDir:privateJoin,approvedGatewayOrigin:preview.origin,approvedCaSha256:preview.caSha256});
+ const material=JSON.parse(fs.readFileSync(path.join(privateJoin,'pairing.json')));
+ const joinConfig={...f.config,mode:'join-existing',gateway:{url:material.gatewayOrigin,caFile:material.gatewayCaFile},host:{...f.config.host,baseDir:path.join(f.root,'second-host'),label:'Second device'},invitationFile:material.invitationFile};
+ const joinInput=path.join(f.root,'join-input.json'),joinState=path.join(f.root,'join-deployment');fs.writeFileSync(joinInput,JSON.stringify(joinConfig),{mode:0o600});createDeployment(joinInput,{stateDir:joinState});
+ let joined=await advanceDeployment(joinState,{authorize:['host.prepare','host.request','host.claim']});assert.equal(steps(joined)['host.claim'].status,'awaiting_approval');
+ await assert.rejects(listDeploymentPending(f.stateDir,{authorize:false}),/explicit_owner_pending_authorization_required/);
+ const pending=await reopened.listDeploymentPending(f.stateDir,{authorize:true});assert.equal(pending.length,1);assert.equal(pending[0].label,'Second device');
+ const approved={authorize:true,requestId:pending[0].request_id,fingerprint:pending[0].fingerprint,enableComputer:false};
+ await assert.rejects(approveDeploymentPending(f.stateDir,{...approved,fingerprint:'0'.repeat(64)}),/pending_identity_or_capability_mismatch/);
+ await assert.rejects(approveDeploymentPending(f.stateDir,{...approved,enableComputer:true}),/pending_identity_or_capability_mismatch/);
+ assert.equal((await reopened.approveDeploymentPending(f.stateDir,approved)).status,'approved');
+ joined=await advanceDeployment(joinState,{authorize:['host.claim']});assert.equal(steps(joined)['host.claim'].status,'succeeded');
+ const secret=fs.readFileSync(material.invitationFile,'utf8').trim();for(const state of [readDeployment(f.stateDir),joined]){assert.equal(JSON.stringify(state).includes(secret),false);assert.equal(JSON.stringify(state).includes(issued.link),false);}
 });
