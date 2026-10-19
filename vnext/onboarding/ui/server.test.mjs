@@ -190,7 +190,7 @@ test('human comparison code is resolved to current full fingerprint before appro
 
 
 test('Gateway service UI capabilities reflect native platform coupling without asserting installation',()=>{
- assert.deepEqual(gatewayServiceUiCapabilities('linux',true),{supported:true,startEnablesStartup:false,enableCanTriggerRecovery:false});
+ assert.deepEqual(gatewayServiceUiCapabilities('linux',true),{supported:true,startEnablesStartup:true,enableCanTriggerRecovery:false});
  for(const platform of ['darwin','win32'])assert.deepEqual(gatewayServiceUiCapabilities(platform,true),{supported:true,startEnablesStartup:true,enableCanTriggerRecovery:platform==='win32'});
  assert.equal(gatewayServiceUiCapabilities('freebsd',true).supported,false);assert.equal(gatewayServiceUiCapabilities('darwin',false).supported,false);
  const state=publicDeployment({mode:'create-local',gatewayRuntime:{status:'running',persistentService:'NOT OBSERVED'},steps:[]});assert.equal(state.gatewayRuntime,'running');assert.equal(JSON.stringify(state).includes('NOT INSTALLED'),false);
@@ -227,5 +227,18 @@ test('account runtime endpoints cannot accept executable paths or reveal credent
    const r=await f.post('/api/tunnel/configure',data);assert.equal(r.status,409);assert.doesNotMatch(await r.text(),/sk-secret|arbitrary/);
   }
   assert.equal((await f.post('/api/capabilities',{authorize:true,computer:true,trustedMacPreviewApp:{path:'/tmp/evil'}})).status,409);
+ }finally{await f.cleanup()}
+});
+test('reviewed runtime and migration routes stay owner authenticated and bound to server state',async()=>{
+ const calls=[];const core={};
+ for(const name of ['planGatewayRuntimeChange','applyGatewayRuntimeChange','recoverGatewayRuntimeChange','readGatewayRuntimeChange'])core[name]=options=>{assert.equal(options.stateDir,path.join(f.root,'deployment'));calls.push([name,options]);return {status:'reviewable'}};
+ for(const name of ['planNativeSupervisorMigration','applyNativeSupervisorMigration','rollbackNativeSupervisorMigration'])core[name]=(dir,options)=>{assert.equal(dir,path.join(f.root,'deployment'));calls.push([name,options]);return {status:'reviewable'}};
+ const f=await fixture({core});try{
+  for(const [route,data]of [['runtime-change/plan',{bundle:'/owned/bundle'}],['runtime-change/apply',{plan:{},authorize:true}],['runtime-change/recover',{transactionId:'a'.repeat(32),authorize:true}],['runtime-change/status',{}],['native-migration/plan',{nativeApp:{path:'/Applications/Styx.app',teamID:'ABCDEFGHIJ'}}],['native-migration/apply',{plan:{},authorize:true}],['native-migration/rollback',{transactionId:'a'.repeat(64),authorize:true}]]){
+   assert.equal((await f.post('/api/'+route,data,{'X-Styx-CSRF':''})).status,403);
+   assert.equal((await f.post('/api/'+route,{...data,stateDir:'/other'})).status,409);
+   assert.equal((await f.post('/api/'+route,data)).status,200);
+  }
+  assert.equal(calls.length,7);
  }finally{await f.cleanup()}
 });

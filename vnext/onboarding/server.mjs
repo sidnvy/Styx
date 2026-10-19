@@ -12,7 +12,7 @@ import {requirePrivateFile} from '../host/private-storage.mjs';
 import {randomBytes,timingSafeEqual} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
 const UI=fileURLToPath(new URL('./ui/',import.meta.url));
-const STEPS=new Set(['gateway.prepare','gateway.start','host.prepare','host.invite','host.request','host.claim','host.doctor','host.pair','gateway.verify','host.service.install','host.service.start','host.service.status']);
+const STEPS=new Set(['gateway.runtime.prepare','gateway.prepare','gateway.start','host.prepare','host.invite','host.request','host.claim','host.doctor','host.pair','gateway.verify','host.service.install','host.service.start','host.service.status']);
 const STATES=new Set(['pending','running','succeeded','failed','uncertain','blocked','skipped','awaiting_approval']);
 const ERRORS=new Set(['interrupted_or_in_progress_do_not_replay','step_failed_inspect_local_evidence_no_automatic_replay']);
 const MODES=new Set(['create-local','join-existing']);
@@ -23,10 +23,11 @@ export function browserOrigin(value){
  if(url.protocol!=='http:'||!['127.0.0.1','localhost','[::1]'].includes(url.hostname)||url.username||url.password||url.pathname!=='/'||url.search||url.hash)fail('trusted_loopback_browser_origin_required');
  return url.origin;
 }
-export function gatewayServiceUiCapabilities(platform,available){return {supported:available===true&&['linux','darwin','win32'].includes(platform),startEnablesStartup:['darwin','win32'].includes(platform),enableCanTriggerRecovery:platform==='win32'}}
+export function gatewayServiceUiCapabilities(platform,available){return {supported:available===true&&['linux','darwin','win32'].includes(platform),startEnablesStartup:['linux','darwin','win32'].includes(platform),enableCanTriggerRecovery:platform==='win32'}}
 export function publicService(value){
  if(!value||typeof value!=='object')return null;const out={};
  for(const key of ['status','action','role','manager','serviceId','name','state','persistence','health','active','substate','enabled'])if(typeof value[key]==='string'&&/^[A-Za-z0-9_.-]{1,120}$/.test(value[key]))out[key]=value[key];
+ if(value.executionIdentity){const identity=value.executionIdentity;if(['legacy_node','signed_native_supervisor'].includes(identity.launcher))out.executionIdentity={launcher:identity.launcher,nativeResponsibility:identity.launcher==='legacy_node'?'not_established':'configured_unverified',tccAttribution:'NOT RUN'};}
  if(Number.isSafeInteger(value.pid)&&value.pid>=0)out.pid=value.pid;return out;
 }
 export function publicDeployment(value){
@@ -35,14 +36,15 @@ export function publicDeployment(value){
  return {schema:1,mode:MODES.has(value.mode)?value.mode:null,
   roles: value.roles ? {
    gateway:['local','external'].includes(value.roles.gateway)?value.roles.gateway:'unknown',
-   host:value.roles.host==='local'?'local':'unknown',
-   exec:value.roles.exec==='enabled'?'enabled':'unknown',
+   host:['local','disabled'].includes(value.roles.host)?value.roles.host:'unknown',
+   exec:['enabled','disabled'].includes(value.roles.exec)?value.roles.exec:'unknown',
    computer:['requested','disabled'].includes(value.roles.computer)?value.roles.computer:'unknown',
    deviceIngress:['loopback_only','configured_unverified','not_hosted'].includes(value.roles.deviceIngress)?value.roles.deviceIngress:'unknown',
    readiness:'not_inferred'
   } : null,
   activeStep:STEPS.has(value.activeStep)?value.activeStep:null,
   hostServiceMaintenance:{lastObservation:publicService(value.hostServiceMaintenance?.lastObservation),hasUncertainMutation:value.hostServiceMaintenance?.hasUncertainMutation===true},
+  gatewayServiceMaintenance:{lastObservation:publicService(value.gatewayServiceMaintenance?.lastObservation),hasUncertainMutation:value.gatewayServiceMaintenance?.hasUncertainMutation===true},
   gatewayRuntime:typeof value.gatewayRuntime?.status==='string'&&['running','stopped','not_owned_by_current_process'].includes(value.gatewayRuntime.status)?value.gatewayRuntime.status:'unknown',
   steps:steps.filter(s=>s&&STEPS.has(s.id)).map(s=>({id:s.id,status:STATES.has(s.status)?s.status:'uncertain',
    ...(s.id.startsWith('host.service.')?{service:publicService(s.evidence)}:{}),
@@ -55,14 +57,14 @@ function keys(value,allowed){if(!object(value)||Object.keys(value).some(k=>!allo
 export function validateUiConfig(config,{trustedOpenSSL}={}){
  keys(config,['schema','mode','gateway','host','invitationFile']);
  if(config.schema!==1||!MODES.has(config.mode))fail('invalid_configuration');
- keys(config.gateway,['url','caFile','listenHost','allowRemoteHosts']);keys(config.host,['bundle','publisherKeyFile','publisherSha256','baseDir','label','computer','macTeamID','wayland']);
- for(const [name,value]of Object.entries(config.gateway)){if(name==='allowRemoteHosts'){if(value!==true)fail('explicit_network_exposure_required')}else if(typeof value!=='string'||!value||value.length>4096)fail('invalid_gateway_field');}
- for(const [name,value]of Object.entries(config.host)){
+ keys(config.gateway,['url','caFile','listenHost','allowRemoteHosts','runtime']);if(config.host!==undefined)keys(config.host,['bundle','publisherKeyFile','publisherSha256','baseDir','label','computer','macTeamID','wayland']);
+ for(const [name,value]of Object.entries(config.gateway)){if(name==='runtime'){keys(value,['bundle','publisherKeyFile','publisherSha256','baseDir']);for(const v of Object.values(value))if(typeof v!=='string'||!v||v.length>4096)fail('invalid_runtime_field')}else if(name==='allowRemoteHosts'){if(value!==true)fail('explicit_network_exposure_required')}else if(typeof value!=='string'||!value||value.length>4096)fail('invalid_gateway_field');}
+ for(const [name,value]of Object.entries(config.host??{})){
   if(['computer','wayland'].includes(name)){if(typeof value!=='boolean')fail('invalid_capability_selection')}
   else if(typeof value!=='string'||!value||value.length>4096)fail('invalid_host_field');
  }
- for(const name of ['bundle','publisherKeyFile','publisherSha256','baseDir','label'])if(typeof config.host[name]!=='string')fail('required_host_field');
- if(typeof config.host.computer!=='boolean')fail('required_capability_selection');
+ if(config.host!==undefined)for(const name of ['bundle','publisherKeyFile','publisherSha256','baseDir','label'])if(typeof config.host[name]!=='string')fail('required_host_field');
+ if(config.host!==undefined&&typeof config.host.computer!=='boolean')fail('required_capability_selection');
  if(config.invitationFile!==undefined&&(typeof config.invitationFile!=='string'||!config.invitationFile||config.invitationFile.length>4096))fail('invalid_invitation_file');
  if(config.mode==='join-existing'&&!config.invitationFile)fail('invitation_file_required');
  if(config.mode==='create-local'&&(!trustedOpenSSL||!path.isAbsolute(trustedOpenSSL)))fail('local_tls_helper_not_configured');
@@ -111,7 +113,7 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
   if(req.method==='POST'&&(req.headers.origin!==origin||!equal(req.headers['x-styx-csrf'],csrf))){send(403,{error:'mutation_refused'});return}
   if(req.method==='GET'&&url.pathname==='/api/session'){
    send(200,{csrf,platform:process.platform,packagedPreviewTrusted:!!macPreviewApp,backgroundSupported:true,capabilityChangeSupported:true,deviceSettingsSupported:typeof api.readDeploymentDevices==='function',tunnelSupported:!!tunnel,localGatewayAvailable:!!trustedOpenSSL,pauseSupported:typeof api.stopDeploymentGateway==='function',startSupported:typeof api.startDeploymentGateway==='function',
-    pairingLinkImportSupported:linkImportAvailable,pairingLinkCreateSupported:typeof api.createDeploymentPairingLink==='function',pendingApprovalSupported:typeof api.listDeploymentPending==='function'&&typeof api.approveDeploymentPending==='function',hostServiceSupported:typeof api.controlDeploymentHostService==='function',gatewayServiceSupported:gatewayServiceAvailable,gatewayService:gatewayServiceCapability,localGatewayAddresses:typeof api.localGatewayAddresses==='function'?api.localGatewayAddresses():[],defaults,accountAcceptance:'NOT RUN',nativeInstaller:'NOT RUN',trustedForwarding:!!forwarded});return;
+    deviceIngressSupported:typeof api.planDeviceIngress==='function'&&typeof api.verifyDeviceIngress==='function',pairingLinkImportSupported:linkImportAvailable,pairingLinkCreateSupported:typeof api.createDeploymentPairingLink==='function',pendingApprovalSupported:typeof api.listDeploymentPending==='function'&&typeof api.approveDeploymentPending==='function',hostServiceSupported:typeof api.controlDeploymentHostService==='function',gatewayServiceSupported:gatewayServiceAvailable,gatewayService:gatewayServiceCapability,localGatewayAddresses:typeof api.localGatewayAddresses==='function'?api.localGatewayAddresses():[],defaults,accountAcceptance:'NOT RUN',nativeInstaller:'NOT RUN',trustedForwarding:!!forwarded});return;
   }
   if(req.method==='GET'&&url.pathname==='/api/status'){
    try{
@@ -126,15 +128,37 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
    }catch{if(!fs.existsSync(stateDir))send(200,{deployment:null,dependencies:[],busy});else send(409,{error:'deployment_unavailable'})}return;
   }
   if(req.method!=='POST'){send(405,{error:'method_refused'});return}
-  if(!['/api/create','/api/devices','/api/default-device','/api/capabilities','/api/tunnel/configure','/api/tunnel/start','/api/tunnel/stop','/api/background','/api/local-setup','/api/advance','/api/pause','/api/start','/api/verify-gateway','/api/service','/api/pairing-link/inspect','/api/pairing-link/accept','/api/pairing-link/create','/api/pending/list','/api/pending/approve'].includes(url.pathname)){send(404,{error:'not_found'});return}
+  if(!['/api/host-update/plan','/api/host-update/status','/api/runtime-change/status','/api/runtime-change/plan','/api/runtime-change/apply','/api/runtime-change/recover','/api/native-migration/plan','/api/native-migration/apply','/api/native-migration/rollback','/api/device-ingress/plan','/api/device-ingress/verify','/api/create','/api/devices','/api/default-device','/api/capabilities','/api/tunnel/configure','/api/tunnel/start','/api/tunnel/stop','/api/background','/api/local-setup','/api/advance','/api/pause','/api/start','/api/verify-gateway','/api/service','/api/pairing-link/inspect','/api/pairing-link/accept','/api/pairing-link/create','/api/pending/list','/api/pending/approve'].includes(url.pathname)){send(404,{error:'not_found'});return}
   if(busy){send(409,{error:'operation_in_progress'});return}busy=true;
   try{
    const data=await body(req);
-   if(url.pathname==='/api/create'){
+   if(url.pathname==='/api/host-update/plan'){
+    keys(data,['bundle','rollback']);send(200,{plan:await api.planHostUpdate({stateDir,...data})});return;
+   }else if(url.pathname==='/api/host-update/status'){
+    keys(data,['transactionId']);send(200,{update:await api.readHostUpdate({stateDir,...data})});return;
+   }else if(url.pathname==='/api/runtime-change/status'){
+    keys(data,[]);send(200,{change:await api.readGatewayRuntimeChange({stateDir})});return;
+   }else if(url.pathname==='/api/runtime-change/plan'){
+    keys(data,['bundle','rollback']);send(200,{plan:await api.planGatewayRuntimeChange({stateDir,...data})});return;
+   }else if(url.pathname==='/api/runtime-change/apply'){
+    keys(data,['plan','authorize']);send(200,{change:await api.applyGatewayRuntimeChange({stateDir,...data})});return;
+   }else if(url.pathname==='/api/runtime-change/recover'){
+    keys(data,['transactionId','authorize']);send(200,{change:await api.recoverGatewayRuntimeChange({stateDir,...data})});return;
+   }else if(url.pathname==='/api/native-migration/plan'){
+    keys(data,['nativeApp']);send(200,{plan:await api.planNativeSupervisorMigration(stateDir,data)});return;
+   }else if(url.pathname==='/api/native-migration/apply'){
+    keys(data,['plan','authorize']);send(200,{migration:await api.applyNativeSupervisorMigration(stateDir,data)});return;
+   }else if(url.pathname==='/api/native-migration/rollback'){
+    keys(data,['transactionId','authorize']);send(200,{migration:await api.rollbackNativeSupervisorMigration(stateDir,data)});return;
+   }else if(url.pathname==='/api/device-ingress/plan'){
+    keys(data,[]);send(200,{ingress:await api.planDeviceIngress(stateDir)});return;
+   }else if(url.pathname==='/api/device-ingress/verify'){
+    keys(data,['url']);if(typeof data.url!=='string'||data.url.length>4096)fail('exact_ingress_url_required');send(200,{ingress:await api.verifyDeviceIngress(stateDir,{url:data.url})});return;
+   }else if(url.pathname==='/api/create'){
     const{joinLinkId,...input}=data;
     if(joinLinkId!==undefined){if(!acceptedLink||acceptedLink.id!==joinLinkId||input.mode!=='join-existing'||input.gateway?.url!==acceptedLink.refs.gatewayOrigin||(!Number.isSafeInteger(acceptedLink.refs.expiresAt)||acceptedLink.refs.expiresAt<=Date.now())||input.invitationFile||input.gateway.caFile)fail('accepted_pairing_scope_required');input.invitationFile=acceptedLink.refs.invitationFile;input.gateway={...input.gateway,...(acceptedLink.refs.gatewayCaFile?{caFile:acceptedLink.refs.gatewayCaFile}:{})}}
     const config=validateUiConfig(input,{trustedOpenSSL});
-    if(macPreviewApp)config.host={...config.host,macPreviewApp:{path:macPreviewApp.path,cdhash:macPreviewApp.cdhash}};
+    if(macPreviewApp&&config.host)config.host={...config.host,macPreviewApp:{path:macPreviewApp.path,cdhash:macPreviewApp.cdhash}};
     if(config.mode==='create-local'&&new URL(config.gateway.url).hostname!=='127.0.0.1'&&config.gateway.allowRemoteHosts!==true)fail('explicit_network_exposure_required');
     if(config.gateway.allowRemoteHosts){const addresses=typeof api.localGatewayAddresses==='function'?api.localGatewayAddresses():[];if(!addresses.includes(config.gateway.listenHost)||new URL(config.gateway.url).hostname!==config.gateway.listenHost)fail('explicit_owned_network_interface_required')}
     const temp=fs.mkdtempSync(path.join(os.tmpdir(),'styx-ui-config-'));fs.chmodSync(temp,0o700);
@@ -183,7 +207,7 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
     keys(data,['role','action','authorize']);if(data.authorize!==true||!['host','gateway'].includes(data.role))fail('explicit_service_authorization_required');
     let result;
     if(data.role==='host'){if(typeof api.controlDeploymentHostService!=='function'||!['install','start','stop','status'].includes(data.action))fail('host_service_not_supported');result=await api.controlDeploymentHostService(stateDir,{action:data.action,authorize:true});}
-    else{if(!gatewayServiceAvailable||!['install','start','stop','status','enable','disable','uninstall'].includes(data.action))fail('gateway_service_not_supported');if(data.action==='start'&&(await api.readDeployment(stateDir)).gatewayRuntime?.status==='running')fail('stop_owned_foreground_gateway_first');const control=gatewayService??(await import('./gateway-service.mjs')).controlGatewayService;result=await control(stateDir,{action:data.action,authorize:true});}
+    else{if(!gatewayServiceAvailable||!['install','start','stop','status','enable','disable','uninstall'].includes(data.action))fail('gateway_service_not_supported');if(data.action==='start'&&(await api.readDeployment(stateDir)).gatewayRuntime?.status==='running')fail('stop_owned_foreground_gateway_first');const control=gatewayService??(typeof api.controlDeploymentService==='function'?((d,o)=>api.controlDeploymentService(d,{role:'gateway',...o})):(await import('./gateway-service.mjs')).controlGatewayService);result=await control(stateDir,{action:data.action,authorize:true});}
     services[data.role]={...publicService(result),observedAt:new Date().toISOString()};
     send(200,{service:services[data.role]});return;
    }else if(url.pathname==='/api/verify-gateway'){

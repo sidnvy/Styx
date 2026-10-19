@@ -10,7 +10,7 @@ import {createHash,createPublicKey,generateKeyPairSync,sign,randomUUID} from 'no
 import {ensurePrivateDirectory} from '../../host/private-storage.mjs';
 import {main} from '../cli.mjs';
 import {ownerCommand} from '../../gateway/enroll-admin.mjs';
-import {createDeployment,readDeployment,planDeployment,advanceDeployment,stopDeploymentGateway,validateDeployment,controlDeploymentHostService,createDeploymentPairingLink,listDeploymentPending,approveDeploymentPending,localGatewayAddresses,readDeploymentDevices,setLocalDeploymentDefault,setDeploymentDefault} from '../core.mjs';
+import {createDeployment,readDeployment,planDeployment,advanceDeployment,startDeploymentGateway,stopDeploymentGateway,validateDeployment,controlDeploymentHostService,createDeploymentPairingLink,listDeploymentPending,approveDeploymentPending,localGatewayAddresses,readDeploymentDevices,setLocalDeploymentDefault,setDeploymentDefault} from '../core.mjs';
 const sha=b=>createHash('sha256').update(b).digest('hex');
 async function fixture(t){
  const root=path.join(os.tmpdir(),'styx-onboarding-'+randomUUID());ensurePrivateDirectory(root);t.after(async()=>{const d=path.join(root,'deployment');if(fs.existsSync(d))await stopDeploymentGateway(d);fs.rmSync(root,{recursive:true,force:true});});
@@ -19,7 +19,7 @@ async function fixture(t){
  const {publicKey,privateKey}=generateKeyPairSync('ed25519',{publicKeyEncoding:{type:'spki',format:'pem'},privateKeyEncoding:{type:'pkcs8',format:'pem'}});
  const exe=process.platform==='win32'?'.exe':'';const contents={};
  for(const f of ['private-storage.mjs','installer.mjs','launch.mjs'])contents['host/'+f]=fs.readFileSync(new URL('../../host/'+f,import.meta.url));
- for(const f of ['enroll.mjs','doctor.mjs','setup-native.mjs','linux-service.mjs','macos-launchagent.mjs','windows-task.ps1'])contents['host/'+f]=Buffer.from('// signed test payload; never executed');
+ for(const f of ['enroll.mjs','doctor.mjs','setup-native.mjs','linux-service.mjs','macos-launchagent.mjs','macos-native-launcher.mjs','windows-task.ps1'])contents['host/'+f]=Buffer.from('// signed test payload; never executed');
  contents['bin/node'+exe]=fs.readFileSync(process.execPath);for(const f of ['codex','cua-driver'])contents['bin/'+f+exe]=Buffer.from('test bytes never executed');
  const manifest={schema:1,version:'0.1.0-test',platform:process.platform,arch:process.arch,files:Object.entries(contents).map(([name,b])=>{fs.writeFileSync(path.join(bundle,name),b);return {path:name,sha256:sha(b),size:b.length,executable:name.startsWith('bin/')};})};
  const raw=JSON.stringify(manifest);fs.writeFileSync(path.join(bundle,'manifest.json'),raw);fs.writeFileSync(path.join(bundle,'manifest.sig'),sign(null,Buffer.from(raw),privateKey).toString('base64url'));
@@ -216,4 +216,23 @@ test('uncertain workflow and maintenance service mutations share one guard while
  const readOnly=structuredClone(original);readOnly.maintenance=[{action:'status',status:'running',at:new Date().toISOString()}];readOnly.steps.find(s=>s.id==='host.service.status').status='running';
  fs.writeFileSync(stateFile,JSON.stringify(readOnly),{mode:0o600});
  assert.equal(readDeployment(f.stateDir).hostServiceMaintenance.hasUncertainMutation,false);
+});
+test('CLI owner pairing workflow stores invitation privately and never prints its secret',async t=>{
+ const f=await fixture(t);delete f.config.pairingMode;fs.writeFileSync(f.configFile,JSON.stringify(f.config));createDeployment(f.configFile,{stateDir:f.stateDir});
+ await advanceDeployment(f.stateDir,{authorize:['gateway.prepare','gateway.start','gateway.verify']});
+ const output=path.join(f.root,'join-link');const summary=await main(['pairing-link',f.stateDir,output,'--authorize']);
+ const link=fs.readFileSync(output,'utf8').trim();assert.match(link,/^styx:\/\/join#/);assert.equal(summary.link,undefined);assert.equal(JSON.stringify(summary).includes(link),false);assert.equal(fs.statSync(output).mode&0o077,0);
+ const preview=await main(['inspect-link',output]);const approval=path.join(f.root,'link-approval.json'),importDir=path.join(f.root,'imported');fs.writeFileSync(approval,JSON.stringify({stateDir:importDir,approvedGatewayOrigin:preview.origin,approvedCaSha256:preview.caSha256}),{mode:0o600});
+ const accepted=await main(['accept-link',output,approval,'--authorize']);assert.equal(accepted.status,'pairing_material_saved');assert.equal(fs.existsSync(path.join(importDir,'invitation')),true);
+ assert.deepEqual(await main(['pending',f.stateDir,'--authorize']),[]);assert.deepEqual(await main(['devices',f.stateDir]),[]);
+ await assert.rejects(main(['pairing-link',f.stateDir,output,'--authorize']),/fresh_private_output_required/);
+});
+
+test('Host evidence damage cannot block independent Gateway startup or owner operations',async t=>{
+ const f=await fixture(t);createDeployment(f.configFile,{stateDir:f.stateDir});
+ await advanceDeployment(f.stateDir,{authorize:['gateway.prepare','gateway.start','gateway.verify','host.prepare']});
+ await stopDeploymentGateway(f.stateDir);fs.appendFileSync(path.join(f.config.host.baseDir,'service.json'),'unsigned local drift');
+ assert.equal((await startDeploymentGateway(f.stateDir)).status,'running');
+ assert.deepEqual(await listDeploymentPending(f.stateDir,{authorize:true}),[]);
+ await assert.rejects(controlDeploymentHostService(f.stateDir,{action:'status',authorize:true}),/completed_step_evidence_changed/);
 });

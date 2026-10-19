@@ -97,3 +97,11 @@ test('unknown owner connection status cannot trigger background mutations',async
  const f=fixture(t);f.ops.hostConnection=async()=>{throw Error('host_connection_observation_unavailable')};
  await assert.rejects(enableDeploymentBackground(f.dir,{authorize:true},f.ops),/host_connection_observation_unavailable/);assert.deepEqual(f.calls,['host.status']);
 });
+test('Gateway-only handoff and observation never call Host adapters or connection probes',async t=>{
+ const f=fixture(t);f.ops.read=()=>({mode:'create-local',roles:{host:'disabled'},steps:[],gatewayRuntime:{status:'not_owned_by_current_process'}});
+ const forbidden=async()=>{throw Error('Host adapter must not be reached')};f.ops.host=forbidden;f.ops.hostConnection=forbidden;
+ const result=await enableDeploymentBackground(f.dir,{authorize:true},f.ops);assert.equal(result.status,'running');assert.equal(result.host,'disabled');assert.equal(result.hostConnection,'not_applicable');
+ assert.ok(f.calls.every(x=>x.startsWith('gateway.')));
+ const observation=await observeDeploymentBackground(f.dir,{read:f.ops.read,hostStatus:forbidden,hostConnection:forbidden,gateway:f.ops.gateway});
+ assert.equal(observation.status,'running');assert.equal(observation.host,'disabled');assert.equal(observation.hostConnection,'not_applicable');
+});

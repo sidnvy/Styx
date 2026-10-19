@@ -4,12 +4,12 @@ import fs from 'node:fs';
 import path from 'node:path';
 import {createHash,randomBytes} from 'node:crypto';
 import {requirePrivateDirectory,requirePrivateFile} from '../host/private-storage.mjs';
-import {readDeployment,planDeployment,controlDeploymentHostService,stopDeploymentGateway,verifyDeploymentGateway} from './core.mjs';
+import {readDeployment,planDeployment,controlDeploymentHostService,controlDeploymentService,stopDeploymentGateway,verifyDeploymentGateway} from './core.mjs';
 import {observeHostService} from './service-lifecycle.mjs';
 import {ownerCommand} from '../gateway/enroll-admin.mjs';
 import {controlGatewayService} from './gateway-service.mjs';
 const fail=code=>{throw Error(code)};
-const defaults={read:readDeployment,host:controlDeploymentHostService,gateway:controlGatewayService,
+const defaults={read:readDeployment,host:controlDeploymentHostService,gateway:(d,o)=>controlDeploymentService(d,{role:'gateway',...o}),
  stopForeground:stopDeploymentGateway,verifyGateway:verifyDeploymentGateway,hostConnection:observeLocalHostConnection,
  sleep:ms=>new Promise(resolve=>setTimeout(resolve,ms))};
 // Owner-authenticated, identity-bound Exec relay observation. This is not tool
@@ -63,7 +63,8 @@ export async function enableDeploymentBackground(d,{authorize=false}={},operatio
   journal=readJournal(d,digest);
   if(journal.operations.some(x=>['running','uncertain'].includes(x.status)))fail('background_uncertain_requires_reconciliation');
   const state=ops.read(d);
-  if(state.steps.find(x=>x.id==='host.doctor')?.status!=='succeeded')fail('successful_host_doctor_required');
+  const hasHost=state.roles?.host!=='disabled';
+  if(hasHost&&state.steps.find(x=>x.id==='host.doctor')?.status!=='succeeded')fail('successful_host_doctor_required');
   if(state.steps.some(x=>['uncertain','running'].includes(x.status)))fail('onboarding_uncertain_requires_reconciliation');
   journal.status='configuring';delete journal.reason;
   const persist=()=>{journal.updatedAt=new Date().toISOString();save(d,journal)};
@@ -82,9 +83,10 @@ export async function enableDeploymentBackground(d,{authorize=false}={},operatio
   };
   persist();
   // Inspect both roles before stopping the working foreground Gateway.
-  let host=await ops.host(d,{action:'status',authorize:true});
-  if(host.status!=='reported'||typeof host.installed!=='boolean')fail('host_service_observation_unavailable');
+  let host=hasHost?await ops.host(d,{action:'status',authorize:true}):null;
+  if(hasHost&&(host.status!=='reported'||typeof host.installed!=='boolean'))fail('host_service_observation_unavailable');
   if(state.mode==='create-local'){
+   if(hasHost){
    const connection=await ops.hostConnection(d);
    if(connection?.status!=='observed'||typeof connection.online!=='boolean')fail('host_connection_observation_unavailable');
    if(host.state!=='running'&&connection.online){
@@ -92,6 +94,7 @@ export async function enableDeploymentBackground(d,{authorize=false}={},operatio
     journal.reason='foreground_host_handoff_required';persist();return projection(journal);
    }
    if(!['running','stopped','not_installed'].includes(host.state))fail('host_service_observation_unavailable');
+   }
    let gateway=await ops.gateway(d,{action:'status'});
    if(gateway.status==='not_installed')gateway=await mutate('gateway.install',()=>ops.gateway(d,{action:'install',authorize:true}));
    if(state.gatewayRuntime.status==='running'){
@@ -117,6 +120,7 @@ export async function enableDeploymentBackground(d,{authorize=false}={},operatio
    if(gateway.active!=='active'||!(gateway.pid>0)||!['enabled','default'].includes(gateway.enabled))fail('persistent_gateway_state_unconfirmed');
    journal.gateway='running';journal.gatewayConnection='verified';persist();
   }else journal.gateway='external';
+  if(hasHost){
   if(!host.installed)await mutate('host.install',()=>ops.host(d,{action:'install',authorize:true}));
   host=await ops.host(d,{action:'status',authorize:true});
   if(host.status!=='reported'||!host.installed)fail('host_service_observation_unavailable');
@@ -127,12 +131,13 @@ export async function enableDeploymentBackground(d,{authorize=false}={},operatio
   if(state.mode==='create-local'){
    let connected=false;
    for(let attempt=0;attempt<20;attempt++){
-    try{const connection=await ops.hostConnection(d);if(connection.status==='observed'&&connection.online===true){connected=true;break}}catch{}
+    if(hasHost)try{const connection=await ops.hostConnection(d);if(connection.status==='observed'&&connection.online===true){connected=true;break}}catch{}
     await ops.sleep(250);
    }
    journal.hostConnection=connected?'exec_connected':'not_connected';persist();
    if(!connected)fail('host_exec_connection_not_ready');
   }
+  }else{journal.host='disabled';journal.hostConnection='not_applicable';}
   journal.status='running';persist();return projection(journal);
  }catch(error){
   if(journal&&journal.status==='configuring'){
@@ -146,25 +151,25 @@ export async function enableDeploymentBackground(d,{authorize=false}={},operatio
 // Refresh actual OS process observations without changing either service or journals.
 export async function observeDeploymentBackground(d,operations={}){
  scope(d);
- const ops={read:readDeployment,plan:planDeployment,hostStatus:observeHostService,gateway:controlGatewayService,hostConnection:observeLocalHostConnection,...operations};
- const state=ops.read(d);
+ const ops={read:readDeployment,plan:planDeployment,hostStatus:observeHostService,gateway:(d,o)=>controlDeploymentService(d,{role:'gateway',...o}),hostConnection:observeLocalHostConnection,...operations};
+ const state=ops.read(d),hasHost=state.roles?.host!=='disabled';
  const result={schema:1,observation:'current',observedAt:new Date().toISOString(),
   startup:'current_user_login',systemBootWithoutLogin:'NOT CONFIGURED',
   host:'not_observed',gateway:state.mode==='create-local'?'not_observed':'external',
   gatewayConnection:'not_checked',hostConnection:'not_checked',hostHealth:'not_checked',accountAcceptance:'NOT RUN'};
- try{
+ if(hasHost)try{
   const host=await ops.hostStatus({serviceConfigFile:ops.plan(d).service.configFile});
   result.host=host.status!=='reported'?'unknown':host.state==='running'?'running':host.installed===false?'not_installed':'not_running';
   result.hostPersistence=host.persistence??'unknown';
- }catch{result.host='unknown'}
+ }catch{result.host='unknown'}else{result.host='disabled';result.hostConnection='not_applicable'}
  if(state.mode==='create-local'){
   try{
    const gateway=await ops.gateway(d,{action:'status'});
    result.gateway=gateway.status==='not_installed'?'not_installed':gateway.active==='active'&&gateway.pid>0?'running':gateway.active==='inactive'?'not_running':'unknown';
    result.gatewayPersistence=gateway.enabled??'unknown';
   }catch{result.gateway='unknown'}
-  try{const connection=await ops.hostConnection(d);result.hostConnection=connection.status==='observed'?(connection.online?'exec_connected':'not_connected'):'unknown'}catch{result.hostConnection='unknown'}
+  if(hasHost)try{const connection=await ops.hostConnection(d);result.hostConnection=connection.status==='observed'?(connection.online?'exec_connected':'not_connected'):'unknown'}catch{result.hostConnection='unknown'}
  }
- result.status=result.host==='running'&&['running','external'].includes(result.gateway)&&(state.mode!=='create-local'||result.hostConnection==='exec_connected')?'running':'needs_attention';
+ result.status=(!hasHost||result.host==='running')&&['running','external'].includes(result.gateway)&&(!hasHost||state.mode!=='create-local'||result.hostConnection==='exec_connected')?'running':'needs_attention';
  return result;
 }

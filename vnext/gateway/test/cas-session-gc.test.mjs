@@ -73,9 +73,26 @@ test('production defaults reclaim abandoned discovery but preserve owned Exec wo
   const server=await createGatewayHttp(gateway,{token,port:0,allowedHosts:hosts,maxSessions:1});
   hosts.push('127.0.0.1:'+server.address.port);t.after(()=>server.close());
   async function connect(){
-    const transport=new StreamableHTTPClientTransport(new URL('http://'+hosts[0]+'/mcp'),{requestInit:{headers:{Authorization:'Bearer '+token}}});
+    let opened;
+    const sseOpened=new Promise(resolve=>{opened=resolve});
+    const transport=new StreamableHTTPClientTransport(new URL('http://'+hosts[0]+'/mcp'),{
+      requestInit:{headers:{Authorization:'Bearer '+token}},
+      async fetch(input,init){
+        const response=await fetch(input,init);
+        if(init?.method==='GET'&&response.ok)opened();
+        return response;
+      }
+    });
     const client=new Client({name:'production-gc',version:'1'});
-    t.after(()=>client.close().catch(()=>{}));await client.connect(transport);return client;
+    t.after(()=>client.close().catch(()=>{}));await client.connect(transport);
+    // The SDK opens passive GET SSE after its initialized notification without
+    // awaiting it. Its arrival is legitimate session activity. Observe the real
+    // response headers before this test advances the session's idle clock, so a
+    // delayed GET cannot make the deliberately abandoned session recent again.
+    let timer;
+    try{await Promise.race([sseOpened,new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('passive SSE setup did not complete')),5000)})]);}
+    finally{clearTimeout(timer)}
+    return client;
   }
   const a=await connect();await a.listTools();
   const previous=[...server.sessions.values()][0];

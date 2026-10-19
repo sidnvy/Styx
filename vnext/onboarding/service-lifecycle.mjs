@@ -7,6 +7,7 @@ import {execFileSync} from 'node:child_process';
 import {requirePrivateFile,requirePrivateDirectory,ensurePrivateDirectory} from '../host/private-storage.mjs';
 import {activeRelease,verifySignedRelease,verifiedServiceNode} from '../host/installer.mjs';
 import {linuxUserUnit,installLinuxService,systemdUser,statusUserService} from '../host/linux-service.mjs';
+import {macHostExecutionIdentity} from '../host/macos-native-launcher.mjs';
 import {macLaunchAgent,writeMacLaunchAgent,controlMacLaunchAgent,statusMacLaunchAgent} from '../host/macos-launchagent.mjs';
 const assert=(v,c)=>{if(!v)throw Error(c)};
 const hash=file=>createHash('sha256').update(fs.readFileSync(file)).digest('hex');
@@ -17,9 +18,9 @@ function readConfig(file){assert(absolute(file),'invalid_service_config');requir
 function descriptor(raw){
  assert(raw&&typeof raw==='object'&&!Array.isArray(raw),'invalid_service_config');
  const windows=process.platform==='win32';
- const allowed=windows?['task_name','install_root','host_config_file','publisher_key_file','node_binary']:['unitName','label','installRoot','hostConfigFile','trustPublicKeyFile','nodeBinary','logDir','restartSec'];
+ const allowed=windows?['task_name','install_root','host_config_file','publisher_key_file','node_binary']:['unitName','label','installRoot','hostConfigFile','trustPublicKeyFile','nodeBinary','logDir','restartSec','nativeApp'];
  assert(!Object.keys(raw).some(k=>!allowed.includes(k)),'invalid_service_config');
- return windows?{id:raw.task_name,installRoot:raw.install_root,hostConfigFile:raw.host_config_file,trustPublicKeyFile:raw.publisher_key_file,nodeBinary:raw.node_binary}:{id:process.platform==='darwin'?raw.label:raw.unitName,installRoot:raw.installRoot,hostConfigFile:raw.hostConfigFile,trustPublicKeyFile:raw.trustPublicKeyFile,nodeBinary:raw.nodeBinary,...(raw.logDir!==undefined?{logDir:raw.logDir}:{}),...(raw.restartSec!==undefined?{restartSec:raw.restartSec}:{})};
+ return windows?{id:raw.task_name,installRoot:raw.install_root,hostConfigFile:raw.host_config_file,trustPublicKeyFile:raw.publisher_key_file,nodeBinary:raw.node_binary}:{id:process.platform==='darwin'?raw.label:raw.unitName,installRoot:raw.installRoot,hostConfigFile:raw.hostConfigFile,trustPublicKeyFile:raw.trustPublicKeyFile,nodeBinary:raw.nodeBinary,...(raw.logDir!==undefined?{logDir:raw.logDir}:{}),...(raw.restartSec!==undefined?{restartSec:raw.restartSec}:{}),...(raw.nativeApp!==undefined?{nativeApp:raw.nativeApp}:{})};
 }
 function verified(d){
  for(const key of ['installRoot','hostConfigFile','trustPublicKeyFile','nodeBinary'])assert(absolute(d[key]),'invalid_service_path');
@@ -59,6 +60,7 @@ export async function hostServiceAction({action,role='host',serviceConfigFile,au
   assert(authorization.serviceConfigFile===serviceConfigFile&&absolute(serviceConfigFile),'service_authorization_scope_mismatch');
   d=descriptor(readConfig(serviceConfigFile));assert(typeof d.id==='string'&&d.id.length>0,'invalid_service_identity');assert(d.id===authorization.serviceId,'service_authorization_scope_mismatch');
   for(const key of ['installRoot','hostConfigFile','trustPublicKeyFile','nodeBinary','logDir','restartSec'])assert(d[key]===authorization[key],'service_authorization_scope_mismatch');
+  assert(JSON.stringify(d.nativeApp??null)===JSON.stringify(authorization.nativeApp??null),'service_authorization_scope_mismatch');
   if(platform==='darwin'){assert(absolute(d.logDir),'invalid_service_log_directory');if(fs.existsSync(d.logDir))requirePrivateDirectory(d.logDir);else requirePrivateDirectory(path.dirname(d.logDir))}
   const release=verified(d),options={...d,unitName:d.id,label:d.id};delete options.id;
   let file,expected,observe,control;
@@ -88,7 +90,7 @@ export async function hostServiceAction({action,role='host',serviceConfigFile,au
   if(['start','stop'].includes(action)){
    const deadline=Date.now()+10000;while(Date.now()<deadline&&state.state!==(action==='start'?'running':'stopped')){if(platform==='darwin'&&state.state==='unknown')break;await new Promise(r=>setTimeout(r,100));native=observe();state=sanitized(platform,native)}
   }
-  return {status:['start','stop'].includes(action)&&state.state!==(action==='start'?'running':'stopped')?'needs_attention':'reported',role,action,manager:managers[platform],serviceId:d.id,installed,...state,health:'not_checked'};
+  return {status:['start','stop'].includes(action)&&state.state!==(action==='start'?'running':'stopped')?'needs_attention':'reported',role,action,manager:managers[platform],serviceId:d.id,installed,...state,health:'not_checked',...(platform==='darwin'?{executionIdentity:macHostExecutionIdentity(d)}:{})};
  }catch{return {status:attempted?'uncertain':'blocked',role:role==='host'?'host':'unknown',action:['install','status','start','stop'].includes(action)?action:'unsupported',reason:'service_scope_or_native_operation_refused'}}
 }
 
@@ -100,7 +102,7 @@ export async function observeHostService({serviceConfigFile}={},options={}){
    approved:true,action:'status',role:'host',serviceConfigFile,serviceId:d.id,
    installRoot:d.installRoot,hostConfigFile:d.hostConfigFile,trustPublicKeyFile:d.trustPublicKeyFile,
    nodeBinary:d.nodeBinary,...(d.logDir!==undefined?{logDir:d.logDir}:{}),
-   ...(d.restartSec!==undefined?{restartSec:d.restartSec}:{})
+   ...(d.restartSec!==undefined?{restartSec:d.restartSec}:{}),...(d.nativeApp!==undefined?{nativeApp:d.nativeApp}:{})
   }},options);
  }catch{return {status:'blocked',action:'status',role:'host',reason:'service_scope_or_native_operation_refused'}}
 }

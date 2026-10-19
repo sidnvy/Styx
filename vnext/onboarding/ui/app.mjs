@@ -1,6 +1,6 @@
 const $=selector=>document.querySelector(selector);
 const form=$('#setup'),notice=$('#notice');
-const LABELS={'gateway.prepare':'准备本机 Gateway','gateway.start':'启动前台 Gateway','gateway.verify':'验证 Gateway 认证与工具发现','host.prepare':'验证并准备 Host','host.invite':'生成一次性设备邀请','host.request':'提交设备加入请求','host.claim':'领取管理员审批结果','host.doctor':'检查 Host','host.pair':'批准并配对这台 Host','host.service.install':'安装 Host 系统服务','host.service.start':'启动 Host 并启用登录后自动运行','host.service.status':'检查 Host 系统服务状态'};
+const LABELS={'gateway.runtime.prepare':'准备独立签名 Gateway 运行时','gateway.prepare':'准备本机 Gateway','gateway.start':'启动前台 Gateway','gateway.verify':'验证 Gateway 认证与工具发现','host.prepare':'验证并准备 Host','host.invite':'生成一次性设备邀请','host.request':'提交设备加入请求','host.claim':'领取管理员审批结果','host.doctor':'检查 Host','host.pair':'批准并配对这台 Host','host.service.install':'安装 Host 系统服务','host.service.start':'启动 Host 并启用登录后自动运行','host.service.status':'检查 Host 系统服务状态'};
 const comparisonCode=fp=>fp.slice(0,16).match(/.{1,4}/g).join(' ');
 const STATUS={pending:'待执行',running:'执行中',succeeded:'已记录成功',failed:'执行失败',uncertain:'结果不确定 · 不可重放',blocked:'前置条件未就绪',awaiting_approval:'等待管理员审批',skipped:'已跳过'};
 const fragment=new URLSearchParams(location.hash.slice(1)),bootstrap=fragment.get('session');
@@ -34,21 +34,23 @@ function render(){
  $('#gateway-service-policy').textContent=gatewayStartup?'这是持久服务，与本设置进程的前台 Gateway 不同。启动会同时启用登录后自动运行，停止会禁用；先停止前台 Gateway 再启动持久服务。实际状态以本机观察为准，未知不推断为已启用。':'这是持久服务，与本设置进程的前台 Gateway 不同。先停止前台 Gateway，再启动持久服务。启动与登录启用是分别授权的操作；实际状态以本机观察为准。';
  for(const button of document.querySelectorAll('[data-service="gateway"]')){if(button.dataset.action==='start')button.textContent=gatewayStartup?'启动并启用登录后自动运行':'启动 Gateway 服务';if(button.dataset.action==='stop')button.textContent=gatewayStartup?'停止并关闭自动运行':'停止 Gateway 服务';if(button.dataset.action==='enable')button.textContent=capabilities?.gatewayService?.enableCanTriggerRecovery?'启用登录启动与每分钟恢复':'启用登录启动'}
  if(capabilities?.gatewayService?.enableCanTriggerRecovery)$('#gateway-service-policy').textContent+=' Windows 任务启用后，每分钟后台恢复可能在下一分钟自动启动任务。';
- $('#host-service').hidden=!capabilities?.hostServiceSupported;$('#gateway-service').hidden=!capabilities?.gatewayServiceSupported||deployment?.mode!=='create-local';
+ $('#host-service').hidden=!capabilities?.hostServiceSupported||deployment?.roles?.host==='disabled';$('#gateway-service').hidden=!capabilities?.gatewayServiceSupported||deployment?.mode!=='create-local';
  for(const button of document.querySelectorAll('[data-service]'))button.disabled=locked||(button.dataset.service==='host'&&['install','start'].includes(button.dataset.action)&&deployment?.hostServiceMaintenance?.hasUncertainMutation)||(button.dataset.service==='gateway'&&button.dataset.action==='start'&&deployment?.gatewayRuntime==='running');
- for(const role of ['host','gateway']){const observation=serviceObservations[role]??(role==='host'?deployment?.hostServiceMaintenance?.lastObservation:null);if(observation)$('#'+role+'-service-status').textContent='本机观察：'+['status','state','active','enabled','persistence'].filter(k=>observation[k]).map(k=>k+' = '+observation[k]).join(' · ')+'（'+(observation.observedAt??'持久记录，需重新读取状态确认')+'）';}
+ for(const role of ['host','gateway']){const observation=serviceObservations[role]??(role==='host'?deployment?.hostServiceMaintenance?.lastObservation:deployment?.gatewayServiceMaintenance?.lastObservation);if(observation)$('#'+role+'-service-status').textContent='本机观察：'+['status','state','active','enabled','persistence'].filter(k=>observation[k]).map(k=>k+' = '+observation[k]).join(' · ')+'（'+(observation.observedAt??'持久记录，需重新读取状态确认')+'）';}
  $('#pairing-owner').hidden=!deployment||deployment.mode!=='create-local'||!capabilities?.pairingLinkCreateSupported;
  $('#create-link').disabled=locked;$('#list-pending').disabled=locked||!capabilities?.pendingApprovalSupported;
  $('#steps').replaceChildren();
  if(!deployment)return;
- const prepared=deployment.steps.some(s=>s.id==='host.doctor'&&s.status==='succeeded');
+ const hasHost=deployment.roles?.host!=='disabled';
+ const prepared=deployment.steps.some(s=>s.id===(hasHost?'host.doctor':'gateway.verify')&&s.status==='succeeded');
  const needsAttention=deployment.steps.some(s=>['uncertain','blocked','failed'].includes(s.status));
  $('#setup-summary').textContent=prepared?'本机准备完成。后台运行、桌面权限和聊天连接将分别检查。':needsAttention?'设置需要处理一个问题，已保留进度。请查看技术详情或让 Codex 协助诊断。':'正在准备这台电脑。';
- $('#continue-setup').hidden=deployment.mode!=='create-local'||prepared;
+ $('#continue-setup').hidden=!hasHost||deployment.mode!=='create-local'||prepared;
  $('#continue-setup').disabled=locked||needsAttention;
  $('#enable-background').hidden=deployment.mode!=='create-local'||!prepared||!capabilities?.backgroundSupported;
  $('#enable-background').disabled=locked;
  $('#device-settings').hidden=!prepared||deployment.mode!=='create-local';
+ $('#local-desktop-settings').hidden=!hasHost;
  for(const id of ['desktop-enable','desktop-disable','load-devices'])$('#'+id).disabled=locked;
  if(needsAttention)$('#technical-progress').open=true;
  const running=deployment.gatewayRuntime==='running';
@@ -147,6 +149,19 @@ $('#inspect-link').addEventListener('click',async()=>{
 $('#accept-link').addEventListener('click',async()=>{
  if(locked||!linkInspection)return;const p=linkInspection.preview;if(!confirm('已通过可信渠道核对 Gateway '+p.origin+' 及显示的证书指纹？接受链接仅保存私有配对材料，不自动批准设备。'))return;
  locked=true;render();try{const result=await api('pairing-link/accept',{method:'POST',data:{inspectionId:linkInspection.inspectionId,approvedGatewayOrigin:p.origin,...(p.caSha256?{approvedCaSha256:p.caSha256}:{})}});joinLinkId=result.joinLinkId;form.elements.gatewayUrl.value=result.origin;form.elements.invitationFile.value='';form.elements.caFile.value='';$('#link-preview').hidden=true;$('#link-import-result').textContent='私有配对材料已保存。填写或确认软件包信息后保存配置；设备身份仍需 Gateway 所有者单独审批。';fields()}catch{$('#link-import-result').textContent='配对材料未保存。请保留本地状态并重新检查链接。'}finally{locked=false;render();fields()}
+});
+let ingressOrigin;
+$('#inspect-ingress').addEventListener('click',async()=>{
+ if(locked||!capabilities?.deviceIngressSupported)return;locked=true;render();
+ try{const {ingress}=await api('device-ingress/plan',{method:'POST',data:{}});ingressOrigin=ingress.configuredOrigin;
+  const notes={gateway_not_prepared:'Gateway 尚未准备',gateway_certificate_not_prepared:'TLS 证书尚未准备',loopback_cannot_accept_other_computers:'当前仅限本机，其他电脑不能直接连接',network_exposure_not_authorized:'尚未授权开放网络入口',gateway_certificate_not_currently_valid:'证书已过期或尚未生效'};
+  $('#ingress-status').textContent='入口：'+ingress.configuredOrigin+'。'+ingress.blockers.map(x=>notes[x]??x).join('；')+'。新电脑仍需独立验证 TLS、核对身份并获批；本机检查不证明跨设备可达。'+(ingress.tls.gatewayCertificate?.renewalDue?'证书即将到期，需要安排续期。':'');
+  $('#verify-ingress').disabled=ingress.blockers.some(x=>x==='gateway_not_prepared'||x==='gateway_certificate_not_prepared');
+ }catch{ingressOrigin=null;$('#verify-ingress').disabled=true;$('#ingress-status').textContent='无法读取入口条件，请保留部署状态并检查配置。'}finally{locked=false;render()}
+});
+$('#verify-ingress').addEventListener('click',async()=>{
+ if(locked||!ingressOrigin)return;locked=true;render();
+ try{await api('device-ingress/verify',{method:'POST',data:{url:ingressOrigin}});$('#ingress-status').textContent='本机 TLS 与入口认证边界检查通过。远端可达性、Host 连接和聊天账号仍未验收。'}catch{$('#ingress-status').textContent='入口验证未通过，请检查地址、网络和证书。不会自动更改监听地址或信任。'}finally{locked=false;render()}
 });
 $('#create-link').addEventListener('click',async()=>{
  if(locked||!confirm('创建一次性私有配对链接？该链接不自动批准设备，请核对生成结果中的网络可达性。'))return;locked=true;render();

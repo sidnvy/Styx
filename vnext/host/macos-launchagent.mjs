@@ -8,6 +8,7 @@ import {execFileSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {verifiedServiceNode} from './installer.mjs';
 import {requirePrivateFile} from './private-storage.mjs';
+import {verifiedMacNativeLauncher,macNativeHostArguments,macHostExecutionIdentity} from './macos-native-launcher.mjs';
 
 const LABEL=/^app\.styx\.(?:connector|host(?:-pilot)?(?:\.[a-z0-9][a-z0-9-]{0,32})?)$/;
 // Paths become XML strings and argv entries, never shell source. Accept normal
@@ -40,7 +41,7 @@ function owned(p){
 }
 export function macLaunchAgent({label='app.styx.host-pilot',
   installRoot,hostConfigFile,trustPublicKeyFile,nodeBinary,
-  logDir}={}){
+  logDir,nativeApp}={}){
   isDarwin();safeLabel(label);
   for(const [name,p] of [['install_root',installRoot],
     ['config',hostConfigFile],['publisher',trustPublicKeyFile],
@@ -50,8 +51,12 @@ export function macLaunchAgent({label='app.styx.host-pilot',
   assert(keyInfo.isFile()&&!keyInfo.isSymbolicLink(),'invalid_publisher_file');
   nodeBinary=verifiedServiceNode({installRoot,publicKeyPem:fs.readFileSync(trustPublicKeyFile,'utf8'),nodeBinary});
   safePath(nodeBinary,'node');
-  const args=[nodeBinary,path.join(installRoot,'launch.mjs'),
-    installRoot,hostConfigFile,trustPublicKeyFile];
+  // Preserve legacy service argv unless a reviewed, stable signed native App
+  // identity was explicitly selected. An ad-hoc preview cannot opt in.
+  const args=nativeApp===undefined?[nodeBinary,path.join(installRoot,'launch.mjs'),
+    installRoot,hostConfigFile,trustPublicKeyFile]:macNativeHostArguments({
+      executable:verifiedMacNativeLauncher(nativeApp),teamID:nativeApp.teamID,
+      nodeBinary,installRoot,hostConfigFile,trustPublicKeyFile});
   const body=[
     '<?xml version="1.0" encoding="UTF-8"?>',
     '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">',
@@ -65,6 +70,9 @@ export function macLaunchAgent({label='app.styx.host-pilot',
     '<key>RunAtLoad</key><true/>',
     '<key>KeepAlive</key><dict><key>SuccessfulExit</key><false/></dict>',
     '<key>ProcessType</key><string>Background</string>',
+    // launchd owns the same-job process group after supervisor exit. Detached
+    // PTY descendants need separate native lifecycle verification.
+    ...(nativeApp===undefined?[]:['<key>AbandonProcessGroup</key><false/>','<key>ExitTimeOut</key><integer>10</integer>']),
     '<key>WorkingDirectory</key><string>'+esc(installRoot)+'</string>',
     '<key>StandardOutPath</key><string>'+esc(path.join(logDir,'host.stdout.log'))+'</string>',
     '<key>StandardErrorPath</key><string>'+esc(path.join(logDir,'host.stderr.log'))+'</string>',
@@ -87,7 +95,7 @@ export function writeMacLaunchAgent(options,{home=os.homedir()}={}){
   }
   assert(!fs.existsSync(dest),'launchagent_already_installed');
   fs.writeFileSync(dest,xml,{mode:0o600,flag:'wx'});
-  return {status:'installed_not_loaded',label,plist:dest};
+  return {status:'installed_not_loaded',label,plist:dest,executionIdentity:macHostExecutionIdentity(options)};
 }
 function launchctl(verb,args,{run=execFileSync}={}){
   const res=run('/bin/launchctl',[verb,...args],

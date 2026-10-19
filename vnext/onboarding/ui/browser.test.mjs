@@ -52,6 +52,10 @@ test(native?'real browser prepares native Hosts, verifies Gateway, pairs locally
   async function clickStep(label,status){await evaluate(`(()=>{const s=[...document.querySelectorAll('.step')].find(s=>s.querySelector('strong').textContent===${JSON.stringify(label)});if(!s||s.querySelector('button').disabled)throw Error('step_not_ready');s.querySelector('button').click();return true})()`);await until(()=>evaluate(`(()=>{const s=[...document.querySelectorAll('.step')].find(s=>s.querySelector('strong').textContent===${JSON.stringify(label)});return s?.querySelector('.status').textContent===${JSON.stringify(status)}})()`),'step_not_completed')}
   await until(()=>evaluate("document.querySelectorAll('.step .status.succeeded').length>=3"),'automatic_gateway_setup_not_completed');
   await until(()=>evaluate("document.querySelector('#runtime').textContent.includes('正在运行')"),'actual_gateway_not_running');
+  await evaluate("document.querySelector('#inspect-ingress').click();true");
+  await until(()=>evaluate("document.querySelector('#ingress-status').textContent.includes('当前仅限本机')"),'device_ingress_plan_missing');
+  await evaluate("document.querySelector('#verify-ingress').click();true");
+  await until(()=>evaluate("document.querySelector('#ingress-status').textContent.includes('远端可达性、Host 连接和聊天账号仍未验收')"),'device_ingress_probe_claim_incorrect');
   if(native){
    await until(()=>evaluate("document.querySelectorAll('.step .status.succeeded').length>=6"),'automatic_local_pairing_not_completed');
    const discovery={url:'https://127.0.0.1:'+gatewayPort+'/mcp',tokenFile:path.join(root,'state/gateway/model.token'),caFile:path.join(root,'state/gateway/certificate.pem')};

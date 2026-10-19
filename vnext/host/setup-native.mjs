@@ -25,7 +25,7 @@ export function prepareNativeSetup(config){
   const verified=verifySignedRelease(bundle,pub);
   const exe=process.platform==='win32'?'.exe':'';
   const serviceHelper=process.platform==='win32'?'windows-task.ps1':process.platform==='darwin'?'macos-launchagent.mjs':'linux-service.mjs';
-  const required=['host/private-storage.mjs','host/installer.mjs','host/launch.mjs','host/enroll.mjs','host/setup-native.mjs','host/doctor.mjs','host/'+serviceHelper,`bin/node${exe}`,`bin/codex${exe}`,`bin/cua-driver${exe}`];
+  const required=['host/private-storage.mjs','host/installer.mjs','host/launch.mjs','host/enroll.mjs','host/setup-native.mjs','host/doctor.mjs','host/'+serviceHelper,...(process.platform==='darwin'?['host/macos-native-launcher.mjs']:[]),`bin/node${exe}`,`bin/codex${exe}`,`bin/cua-driver${exe}`];
   const files=new Map(verified.manifest.files.map(f=>[f.path,f]));
   for(const name of required)assert(files.has(name)&&(!name.startsWith('bin/')||files.get(name).executable),'complete_native_release_required');
   const shell=config.shell??(process.platform==='win32'?path.join(process.env.SystemRoot??'C:\\Windows','System32','WindowsPowerShell','v1.0','powershell.exe'):'/bin/sh');
@@ -60,7 +60,7 @@ export function prepareNativeSetup(config){
   const node=process.platform==='win32'?path.join(installRoot,'node.exe'):path.join(release,'bin','node');
   const common={installRoot,hostConfigFile:path.join(device,'host.json'),trustPublicKeyFile:trust,nodeBinary:node};
   const service=process.platform==='win32'?{task_name:'Styx-Host',install_root:installRoot,host_config_file:common.hostConfigFile,publisher_key_file:trust,node_binary:node}
-    :process.platform==='darwin'?{...common,label:'app.styx.connector',logDir:path.join(baseDir,'logs')}:{...common,unitName:'styx-host.service'};
+    :process.platform==='darwin'?{...common,label:'app.styx.connector',logDir:path.join(baseDir,'logs'),...(config.macTeamID?{nativeApp:{path:'/Applications/Styx.app',teamID:config.macTeamID}}:{})}:{...common,unitName:'styx-host.service'};
   write(path.join(baseDir,'service.json'),service);
   const receipt={schema:1,status:'prepared_not_paired',version:verified.version,publisher_sha256:digest,
     node,release_root:release,enrollment_config:path.join(baseDir,'enrollment.json'),service_config:path.join(baseDir,'service.json'),

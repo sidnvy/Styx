@@ -35,7 +35,7 @@ test('portable signed Host bundle builds on the native macOS or Linux publisher'
     'host/launch.mjs','shared/private-file.mjs','node_modules/ws/package.json',
     'licenses/cua-LICENSE','licenses/codex-LICENSE','licenses/codex-NOTICE',
     'licenses/styx-LICENSE','licenses/provenance.json','host/enroll.mjs',
-    'host/doctor.mjs','host/setup-native.mjs','host/service-update.mjs','host/linux-service.mjs','host/macos-launchagent.mjs',
+    'host/doctor.mjs','host/setup-native.mjs','host/service-update.mjs','host/linux-service.mjs','host/macos-launchagent.mjs','host/macos-native-launcher.mjs',
     'host/windows-task.ps1','shared/enrollment-protocol.mjs']){
     assert.ok(verified.manifest.files.some(x=>x.path===file),file);
   }

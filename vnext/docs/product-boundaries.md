@@ -34,15 +34,15 @@ App与CLI是管理入口，能力由角色和环境决定。CLI可以管理GUI�
 
 | 领域 | 现有源码依据 | 缺口 |
 | --- | --- | --- |
-| 单机/加入 | onboarding/core.mjs的create-local和join-existing；加入无Gateway准备步骤 | 两种模式都要求Host配置，缺统一Gateway-only |
-| 共用核心 | onboarding/cli.mjs与server.mjs共用core.mjs | CLI未覆盖全部App工作流 |
-| 配置 | deployment.json、state.json、派生gateway/runtime.json、Host配置、service.json | 缺完整迁移和统一对账；能力设置与初始安装意图须区分 |
-| 生命周期 | onboarding/background.mjs与平台服务适配器 | 前台/后台交接、App退出行为与权限责任链未统一 |
-| macOS | host/macos/Styx.swift启动嵌入Cua和权限界面 | macos-launchagent.mjs直接启动Node，Exec子进程可能归Node |
+| 单机/加入 | onboarding/core.mjs的create-local和join-existing；加入无Gateway准备步骤 | 已支持省略Host的Gateway-only，要求独立签名Gateway包；六种配置组合已测，原生组合待验收 |
+| 共用核心 | onboarding/cli.mjs与server.mjs共用core.mjs | App/CLI共用服务、后台、配对、入口预检、迁移及Gateway更新接口；Host更新管理仍待完整接入 |
+| 配置 | deployment.json、state.json、派生gateway/runtime.json、Host配置、service.json | 新增保留身份的原生监督器离线配置迁移及回滚；在线迁移和统一Host更新仍有缺口 |
+| 生命周期 | onboarding/background.mjs与平台服务适配器 | Gateway服务已独立；App关闭不等于服务停止，登录/重启及权限链仍需原生验收 |
+| macOS | host/macos/Styx.swift启动嵌入Cua和权限界面 | 新增Team-ID绑定的Styx --host-service监督链，旧服务默认保留Node路径；TCC责任归属尚未验收 |
 | Windows | windows-task.ps1与Host安装/测试基础 | 尚无与Mac同等完整且验收通过的App配对体验 |
-| Headless | gateway/cli.mjs可以单独运行Gateway | onboarding/gateway-service.mjs依赖已准备的Host及其签名Node |
-| 配对 | enrollment.mjs、pairing-links.mjs具备一次性邀请、独立审批、公钥加密凭据及撤销 | 两端易读确认及完整产品流程待补 |
-| 网络入口 | 默认127.0.0.1，可明确配置本机IPv4接口 | 缺既有部署入口迁移、远端可达性验收、防火墙指导、证书续期 |
+| Headless | gateway/cli.mjs可以单独运行Gateway | 独立签名应用包可脱离Host及源码运行；原生服务、无人登录启动和真实重启仍需验收 |
+| 配对 | enrollment.mjs、pairing-links.mjs具备一次性邀请、独立审批、公钥加密凭据及撤销 | 已有两端指纹人工核对；已接入口预检，尚无经评审的双端短码握手及完整产品流程 |
+| 网络入口 | 默认127.0.0.1，可明确配置本机IPv4接口 | 已增加精确TLS/证书到期预检；既有入口迁移、远端可达性、防火墙及证书续期待完成 |
 | 聊天连接 | 已有私有MCP和隧道 | 聊天端可达不代表配对/Host反向连接入口可达 |
 | 桌面并发 | cua.mjs共享连接、排队和引用归属检查 | 同一桌面仍有状态干扰，必须重新观察 |
 
@@ -73,5 +73,22 @@ emoji/短码是绑定双方身份和当前握手的确认界面，不是连接�
 
 本次先落地角色状态投影onboarding/roles.mjs：从现有配置派生，未新增角色配置文件，
 Core plan/status及App后端返回一致字段。computer=requested仅代表安装意图，
-deviceIngress=configured_unverified不代表远程可达；不将Gateway-only伪装成已支持模式。
+deviceIngress=configured_unverified不代表远程可达。Gateway-only已有签名安装/运行/离线更新链，
+配置测试与真实原生平台、聊天账号验收仍分别记录。
 本次不修改piermini运行配置，后续迁移必须保留身份、设备配对和回滚点。
+
+
+## 本轮开发的验收界限
+
+新增Gateway-only与App/CLI共用Core配置/管理链已通过隔离Linux回归；实际Codex 0.163.0
+命令/PTY以及真实TLS MCP可运行。签名Gateway应用包包含Node和生产依赖，不含Exec/Cua
+二进制，可在删除发布源码后运行。更新/回滚保留Gateway身份和凭据，要求服务不存在且进程
+已独立确认停止；进程崩溃恢复有测试，不等于断电或机器重启验收。
+
+Mac原生监督器仅为签名身份配置和可编译测试入口，未在本环境完成编译、TCC或升级验收。
+原生配置迁移只在已确认无Host服务时执行，不更改TCC、现有身份、配对或权限。已安装服务
+不自动重写。Windows仍只有既有任务/Host基础，没有因此获得已验收的完整桌面App。
+
+待完成：Host更新/恢复完整管理链、无人登录启动策略、既有Gateway安全入口迁移与续证、
+双端握手确认交互、Mac主台+Windows Host、headless主台+桌面Host、Cua实际操作、新用户
+聊天端验收，以及登录/重启/App退出/升级/回滚后的真实原生证据。开发预览不称正式产品。
