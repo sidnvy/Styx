@@ -59,26 +59,32 @@ test('macOS Linux and Windows use the same Cua tool surface',async()=>{
   const f=fixture();
   for(const id of ['mac','linux','windows']){
     const r=await f.provider.callTool('click',{environment_id:id,
-      target:{kind:'window',pid:123,window_id:456},element_token:'s1:1'},'alice');
+      target:{kind:'window',pid:123,window_id:456}},'alice');
     assert.equal(r.structuredContent.target,id);
   }
   assert.deepEqual(f.calls.map(c=>c.target),['mac','linux','windows']);
-  for(const c of f.calls) assert.deepEqual(c.input.arguments,
-    {target:{kind:'window',pid:123,window_id:456},element_token:'s1:1'});
+  for(const c of f.calls) {
+    const {session,...args}=c.input.arguments;
+    assert.match(session,/^styx-/);
+    assert.deepEqual(args,{target:{kind:'window',pid:123,window_id:456}});
+  }
   assert.equal(f.instances.length,3);
   await f.provider.close();
 });
-test('Cua native implicit sessions do not cross MCP owners',async()=>{
+test('Cua owners share transport with private native session names',async()=>{
   const f=fixture();
-  await f.provider.callTool('click',{element_token:'x',target:{kind:'window'}},'alice');
-  await f.provider.callTool('click',{element_token:'x',target:{kind:'window'}},'bob');
-  assert.equal(f.instances.length,2);
-  await f.provider.closeOwner('alice');
-  assert.deepEqual(f.closed.map(x=>x.owner),['alice']);
+  await f.provider.callTool('list_apps',{},'alice');
   await f.provider.callTool('list_apps',{},'bob');
-  assert.equal(f.instances.length,2);
+  assert.equal(f.instances.length,1);
+  const [alice,bob]=f.calls.map(c=>c.input.arguments.session);
+  assert.notEqual(alice,bob);
+  await f.provider.closeOwner('alice');
+  assert.equal(f.closed.length,0);
+  await f.provider.callTool('list_apps',{},'bob');
+  assert.equal(f.calls.at(-1).input.arguments.session,bob);
+  assert.equal(f.instances.length,1);
   await f.provider.close();
-  assert.deepEqual(f.closed.map(x=>x.owner),['alice','bob']);
+  assert.equal(f.closed.length,1);
 });
 test('unknown tools and unauthorized targets are rejected before native calls',async()=>{
   const f=fixture();
@@ -103,7 +109,7 @@ test('Gateway advertises Codex and dynamically discovered official Cua tool name
   assert.deepEqual(list.tools.map(x=>x.name),
     ['exec_command','write_stdin','list_apps','click','list_execution_environments', 'get_execution_environment_status']);
   const r=await client.callTool({name:'click',arguments:{
-    environment_id:'linux',target:{kind:'window'},element_token:'x'}});
+    environment_id:'linux',target:{kind:'window'}}});
   assert.equal(r.structuredContent.target,'linux');
   await client.close();await server.close();await gateway.close();
 });
@@ -156,7 +162,7 @@ test('an active native Cua action is never released by idle transport reaper',as
     }),idleMs:300000,reapIntervalMs:30000,clock:()=>clock
   });
   try{
-    const call=broker.callTool('click',{element_token:'test'},'owner');
+    const call=broker.callTool('click',{target:{kind:'window'}},'owner');
     for(let i=0;broker.sessions.size===0&&i<20;i++)
       await new Promise(resolve=>setImmediate(resolve));
     assert.equal(broker.sessions.size,1);
@@ -207,7 +213,7 @@ test('missing default and busy desktop return actionable categories without raw 
  f.provider.connect=async()=>{throw Error('computer_slots_busy')};
  const busy=await f.provider.callTool('list_apps',{environment_id:'mac'},'alice');
  assert.equal(busy.structuredContent.error,'computer_slots_busy');
- assert.match(busy.structuredContent.recovery,/another conversation/);
+ assert.match(busy.structuredContent.recovery,/current operation/);
  f.provider.connect=async()=>{throw Error('PRIVATE_RAW_DRIVER_MESSAGE')};
  const unknown=await f.provider.callTool('list_apps',{environment_id:'mac'},'alice');
  assert.equal(unknown.structuredContent.error,'computer_transport_unavailable');

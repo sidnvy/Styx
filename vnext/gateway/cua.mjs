@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import {randomUUID} from 'node:crypto';
 import {requirePrivateFile} from '../shared/private-file.mjs';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StdioClientTransport} from '@modelcontextprotocol/sdk/client/stdio.js';
@@ -15,7 +16,9 @@ const READ_TOOLS = new Set([
 const plain = x => x !== null && typeof x === 'object' && !Array.isArray(x);
 const RECOVERY = Object.freeze({
   default_environment_required: 'Call list_execution_environments and pass the selected environment_id, or choose a default device in Styx Settings.',
-  computer_slots_busy: 'This desktop is reserved by another conversation. Finish that conversation or wait for its idle lease to expire, then take a fresh snapshot. Do not reuse element tokens from another conversation.',
+  computer_slots_busy: 'The desktop connection is temporarily unavailable. Retry after the current operation finishes.',
+  computer_snapshot_required: 'Take a fresh get_window_state or get_desktop_state snapshot in this conversation before acting. Desktop observations from another connection cannot be reused.',
+  computer_queue_full: 'The desktop has too many pending operations. Wait for the current operations to finish, then retry.',
   computer_host_offline: 'Open Styx on the selected device and check its connection in Settings.'
 });
 const failure = (code,uncertain=false) => {
@@ -23,7 +26,6 @@ const failure = (code,uncertain=false) => {
   return {isError:true,structuredContent:data,
     content:[{type:'text',text:JSON.stringify(data)}]};
 };
-const sessionKey = (owner, id) => JSON.stringify([owner, id]);
 
 function requireToken(path) {
   requirePrivateFile(path);
@@ -73,9 +75,10 @@ function wrapTool(tool) {
   const schema = structuredClone(tool.inputSchema);
   if (!plain(schema) || schema.type !== 'object' || !plain(schema.properties) ||
       Object.hasOwn(schema.properties, 'environment_id')) throw Error('invalid_cua_schema');
-  // Every model-facing MCP connection receives a separate Cua transport
-  // lease; the user cannot override its implicit native session name.
+  // Each authenticated owner receives a private native session name on the
+  // shared device transport. The model cannot choose or override that name.
   delete schema.properties.session;
+  if (schema.required) schema.required=schema.required.filter(name=>name!=='session');
   schema.properties.environment_id = {type:'string', description:
     'Device from list_execution_environments. Pass its environment_id unless a default device has been configured.'};
   return {
@@ -86,13 +89,14 @@ function wrapTool(tool) {
   };
 }
 
-// The native Cua MCP server is the schema authority. Each MCP session has its
-// own Cua MCP Client, so Cua's implicit session and element token cache cannot
-// be shared across unrelated ChatGPT sessions.
+// A device has one transport, but each authenticated MCP owner has a separate
+// native Cua session label plus gateway-enforced snapshot ownership. Operations
+// queue briefly; connections do
+// not reserve the desktop for the lifetime of a conversation.
 export class CuaProvider {
   constructor({registry, relay, connect, toolNames=COMMON_CUA_TOOLS,
     manifest=CONTRACT, idleMs=5*60*1000, reapIntervalMs=30*1000,
-    clock=()=>Date.now()} = {}) {
+    clock=()=>Date.now(), maxQueue=64} = {}) {
     if (!registry || typeof registry.resolve !== 'function' ||
         (connect!==undefined && typeof connect !== 'function'))
       throw TypeError('Cua registry and connector required');
@@ -104,11 +108,10 @@ export class CuaProvider {
       .map(t=>wrapTool(t));
     if (!Number.isSafeInteger(idleMs) || idleMs<1000 ||
       !Number.isSafeInteger(reapIntervalMs) || reapIntervalMs<100 ||
-      typeof clock !== 'function') throw TypeError('Invalid native Cua lease policy');
-    // Cua v0.36.0 defaults to five idle minutes per implicit session.
-    // Styx releases unclaimed WebSocket *resources* after that same window;
-    // it never sends a new GUI action on behalf of the model.
-    this.idleMs=idleMs;this.clock=clock;
+      typeof clock !== 'function' || !Number.isSafeInteger(maxQueue) || maxQueue<1) throw TypeError('Invalid native Cua lease policy');
+    // Retire idle shared transport resources without reserving the desktop
+    // for any owner. Active and queued operations prevent idle retirement.
+    this.idleMs=idleMs;this.clock=clock;this.maxQueue=maxQueue;
     this.sessions = new Map(); this.pending = new Map();
     this.ownerStates = new Map();
     this.stopped = false;
@@ -122,53 +125,56 @@ export class CuaProvider {
     return target;
   }
 
-  async #get(owner, target, ownerState) {
+  async #get(target) {
     if (this.stopped) throw Error('computer_provider_closed');
-    if (typeof owner !== 'string' || !owner) throw Error('invalid_owner');
-    const key=sessionKey(owner, target.id);
-    const current = this.sessions.get(key);
+    const key=target.id;
+    const current=this.sessions.get(key);
     if (current) {
-      if(current.client.styxTransport?.closed){
+      if (current.client.styxTransport?.closed || current.generation!==target.generation) {
         this.sessions.delete(key);
         await current.client.close().catch(()=>{});
-        throw Error('computer_session_lost');
+        throw Error(current.generation!==target.generation ?
+          'computer_generation_changed':'computer_session_lost');
       }
-      if (current.generation !== target.generation) {
-        this.sessions.delete(key);
-        await current.client.close().catch(() => {});
-        throw Error('computer_generation_changed');
-      }
-      current.lastUsed=this.clock();
-      return current.client;
+      return current;
     }
-    const opening = this.pending.get(key);
-    if (opening) return opening;
-    const promise = (async () => {
-      const client = await this.connect(target,owner);
-      if (this.stopped || ownerState.closed) {
-        await client.close();throw Error(this.stopped?'computer_provider_closed':'computer_owner_closed');
-      }
-      const identity=client.getServerVersion?.();
-      if (!identity || identity.name!==this.manifest.driver ||
-        identity.version!==this.manifest.version) {
-        await client.close();
-        throw Error('computer_version_mismatch');
-      }
-      // Re-read admission after an asynchronous connection handshake.
+    const opening=this.pending.get(key);
+    if(opening) return opening;
+    const promise=(async()=>{
+      const client=await this.connect(target);
       try {
-        const now = this.#target(target.id);
-        if (now.generation !== target.generation) throw Error('computer_generation_changed');
+        if(this.stopped) throw Error('computer_provider_closed');
+        if(![...this.ownerStates.values()].some(state=>!state.closed && state.targets.has(target.id)))
+          throw Error('computer_owner_closed');
+        const identity=client.getServerVersion?.();
+        if(!identity || identity.name!==this.manifest.driver ||
+          identity.version!==this.manifest.version) throw Error('computer_version_mismatch');
+        if(this.#target(target.id).generation!==target.generation)
+          throw Error('computer_generation_changed');
+        const item={generation:target.generation,client,active:0,queued:0,
+          tail:Promise.resolve(),snapshots:new Map(),capture:null,lastUsed:this.clock()};
+        this.sessions.set(key,item);
+        return item;
       } catch(error) {
         await client.close().catch(()=>{});throw error;
       }
-      const snapshot = {generation:target.generation,client,active:0,
-        lastUsed:this.clock()};
-      this.sessions.set(key,snapshot);
-      return client;
     })();
     this.pending.set(key,promise);
-    try {return await promise;} finally {
-      if (this.pending.get(key) === promise) this.pending.delete(key);
+    try{return await promise;}finally{
+      if(this.pending.get(key)===promise)this.pending.delete(key);
+    }
+  }
+
+  async #enqueue(item, operation) {
+    if(item.active+item.queued>=this.maxQueue)throw Error('computer_queue_full');
+    item.queued++;
+    const previous=item.tail;
+    let release;
+    item.tail=new Promise(resolve=>{release=resolve;});
+    await previous;
+    item.queued--;item.active++;
+    try{return await operation();}finally{
+      item.active--;item.lastUsed=this.clock();release();
     }
   }
 
@@ -190,32 +196,74 @@ export class CuaProvider {
       return failure('invalid_arguments');
     let dispatched=false;
     try {
+      if(typeof owner!=='string' || !owner)throw Error('invalid_owner');
       const target=this.#target(environment_id);
       let ownerState=this.ownerStates.get(owner);
-      if(!ownerState){ownerState={closed:false};this.ownerStates.set(owner,ownerState);}
-      const client=await this.#get(owner,target,ownerState);
-      if(ownerState.closed)throw Error('computer_owner_closed');
-      const admitted=this.#target(target.id);
-      if(admitted.generation!==target.generation)throw Error('computer_generation_changed');
-      const current=this.sessions.get(sessionKey(owner,target.id));
-      if(!current || current.client!==client) throw Error('computer_session_lost');
-      current.active++;
-      current.lastUsed=this.clock();
-      try {
-        // The Cua server validates the official native input schema.
-        // Model arguments cannot override the transport lease or Host identity.
-        dispatched=true;
-        return await client.callTool({name,arguments:nativeArgs});
-      } finally {
-        current.active--;
-        current.lastUsed=this.clock();
+      if(!ownerState){
+        ownerState={closed:false,contexts:new Map(),targets:new Set()};this.ownerStates.set(owner,ownerState);
       }
+      ownerState.targets.add(target.id);
+      const current=await this.#get(target);
+      return await this.#enqueue(current,async()=>{
+        if(this.stopped)throw Error('computer_provider_closed');
+        if(ownerState.closed)throw Error('computer_owner_closed');
+        if(this.#target(target.id).generation!==target.generation ||
+          current.generation!==target.generation)throw Error('computer_generation_changed');
+        if(this.sessions.get(target.id)!==current || current.client.styxTransport?.closed)
+          throw Error('computer_session_lost');
+        let context=ownerState.contexts.get(target.id);
+        if(!context || context.transport!==current){
+          context={transport:current,session:'styx-'+randomUUID()};
+          ownerState.contexts.set(target.id,context);
+        }
+        // Cua 0.36 native session labels do NOT isolate element tokens. Bind
+        // snapshots to authenticated owners here, before any action dispatch.
+        const token=nativeArgs.element_token;
+        if(token!==undefined) {
+          const match=typeof token==='string' && /^(s[0-9a-f]{8}):[0-9]+$/.exec(token);
+          if(!match || current.snapshots.get(match[1])!==context)
+            throw Error('computer_snapshot_required');
+        }
+        const coordinates=nativeArgs.x!==undefined || nativeArgs.y!==undefined;
+        const captureTarget=nativeArgs.target?.kind==='desktop' || nativeArgs.scope==='desktop'
+          ? 'desktop' : JSON.stringify([nativeArgs.target?.pid??nativeArgs.pid,
+            nativeArgs.target?.window_id??nativeArgs.window_id]);
+        if(coordinates && (current.capture?.context!==context || current.capture.target!==captureTarget || nativeArgs.from_zoom))
+          throw Error('computer_snapshot_required');
+        const observes=name==='get_window_state' || name==='get_desktop_state';
+        if(observes || name==='verify_state')current.capture=null;
+        // A different owner's mutation may change any previously observed UI.
+        if(!READ_TOOLS.has(name)) {
+          for(const [id,holder] of current.snapshots)if(holder!==context)current.snapshots.delete(id);
+          if(current.capture?.context!==context)current.capture=null;
+        }
+        // Never replay an action after an ambiguous transport failure.
+        dispatched=true;
+        const result=await current.client.callTool({name,arguments:{...nativeArgs,session:context.session}});
+        if(observes && !result.isError) {
+          const data=result.structuredContent;
+          if(plain(data)) {
+            for(const id of Array.isArray(data.invalidated_snapshot_ids)?data.invalidated_snapshot_ids:[])
+              current.snapshots.delete(id);
+            if(typeof data.snapshot_id==='string' && /^s[0-9a-f]{8}$/.test(data.snapshot_id)) {
+              current.snapshots.set(data.snapshot_id,context);
+              while(current.snapshots.size>64)current.snapshots.delete(current.snapshots.keys().next().value);
+            }
+          }
+          // Implicit screenshot selection is global in some native backends.
+          // Permit pixels only from this owner's latest matching observation.
+          current.capture=null;
+          if(nativeArgs.display_only!==true && plain(data) && typeof data.capture_id==='string' && data.screenshot_frame_valid!==false && (name==='get_desktop_state' || nativeArgs.include_screenshot!==false))
+            current.capture={context,target:name==='get_desktop_state'?'desktop':JSON.stringify([nativeArgs.pid,nativeArgs.window_id])};
+        }
+        return result;
+      });
     } catch (e) {
       const code=e?.message;
       if (['default_environment_required','environment_not_found','environment_access_denied','computer_not_available',
         'computer_generation_changed','computer_version_mismatch',
         'computer_session_lost','invalid_owner','computer_provider_closed','computer_owner_closed',
-        'computer_slots_busy','computer_host_offline'].includes(code))
+        'computer_slots_busy','computer_queue_full','computer_snapshot_required','computer_host_offline'].includes(code))
         return failure(code);
       // Before dispatch, nothing could have mutated. After dispatch an
       // action transport failure is ambiguous; never replay automatically.
@@ -227,8 +275,11 @@ export class CuaProvider {
     if (this.stopped)return;
     const stale=[];
     for (const [key,item] of this.sessions) {
-      if(item.active===0 && this.clock()-item.lastUsed>=this.idleMs) {
+      if(item.active===0 && item.queued===0 && this.clock()-item.lastUsed>=this.idleMs) {
         this.sessions.delete(key);
+        for(const owner of this.ownerStates.values()) {
+          if(owner.contexts.get(key)?.transport===item) owner.contexts.delete(key);
+        }
         stale.push(item.client);
       }
     }
@@ -239,9 +290,9 @@ export class CuaProvider {
     const state=this.ownerStates.get(owner);
     if(state)state.closed=true;
     this.ownerStates.delete(owner);
-    const prefix=JSON.stringify([owner]).slice(0,-1)+',';
-    await Promise.allSettled([...this.sessions.entries()].filter(([k])=>k.startsWith(prefix))
-      .map(async ([key,item])=>{this.sessions.delete(key);await item.client.close();}));
+    // Retire this owner's native namespace. Native Cua expires its cache;
+    // closing the shared transport here would interrupt unrelated owners.
+    state?.contexts.clear();
   }
   async close() {
     this.stopped=true;

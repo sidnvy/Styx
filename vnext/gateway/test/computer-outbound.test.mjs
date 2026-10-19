@@ -96,21 +96,21 @@ test('native computer lane requires an admitted, enabled target',{skip:!canRun},
   const list=await c.callTool({name:'list_execution_environments',arguments:{}});
   assert.ok(list.structuredContent.environments[0].capabilities.includes('computer'));
 });
-test('dedicated Cua MCP connection per owner; cannot reuse another lease',
+test('one Cua transport serves multiple MCP owners without a slot reservation',
   {skip:!canRun},async t=>{
-  const {gateway,newClient}=await setup(t);
+  const {gateway,newClient}=await setup(t,{slots:1});
   const a=await newClient(), b=await newClient(), c=await newClient();
   const call=client=>client.callTool({name:'list_apps',arguments:{}});
   const one=await call(a),two=await call(b);
   assert.equal(one.isError,false);
   assert.equal(two.isError,false);
   const leaseA=one.structuredContent.lease, leaseB=two.structuredContent.lease;
-  assert.notEqual(leaseA,leaseB,'separate model sessions must own distinct MCP workers');
-  assert.deepEqual(one.structuredContent.args,{});
-  const denied=await call(c);
-  assert.equal(denied.isError,true);
-  assert.equal(denied.structuredContent.error,'computer_slots_busy');
-  assert.equal(gateway.relay.computerConnected('cua-pilot'),2);
+  assert.equal(leaseA,leaseB,'model sessions share one MCP worker');
+  assert.notEqual(one.structuredContent.args.session,two.structuredContent.args.session);
+  const third=await call(c);
+  assert.equal(third.isError,false);
+  assert.equal(third.structuredContent.lease,leaseA);
+  assert.equal(gateway.relay.computerConnected('cua-pilot'),1);
   const still=await call(b);
   assert.equal(still.structuredContent.lease,leaseB);
 });
@@ -123,7 +123,7 @@ test('unseen native session labels refused; loss of GUI action transport is unce
   assert.equal(unseen.structuredContent.error,'invalid_arguments');
   const known=await a.callTool({name:'list_apps',arguments:{}});
   assert.equal(known.isError,false);
-  const dispatch=a.callTool({name:'click',arguments:{element_token:'simulate-unknown'}});
+  const dispatch=a.callTool({name:'press_key',arguments:{key:'STYX_TEST_DISCONNECT'}});
   await wait(130);
   const entry=[...gateway.relay.computerPeers.get('cua-pilot')][0];
   entry.ws.terminate();
@@ -196,7 +196,7 @@ test('real Cua on owned Wayland scratch: list window, screenshot, AX and action 
 });
 
 
-test('after closing a model MCP lease, the Host recycles its one native Cua worker',
+test('closing one model session preserves the shared native Cua worker',
   {skip:!canRun,timeout:16000},async t=>{
   const {newClient,gateway}=await setup(t,{slots:1});
   const first=await newClient();
@@ -206,16 +206,15 @@ test('after closing a model MCP lease, the Host recycles its one native Cua work
   assert.equal(gateway.computer.sessions.size,1);
   assert.equal(gateway.relay.computerConnected('cua-pilot'),1);
   // The MCP SDK exposes session DELETE separately from Client.close().
-  // An explicitly terminated transport lease must release its Cua worker.
+  // Terminating the owner must not close the shared Cua worker.
   await first.testTransport.terminateSession();
   await first.close();
-  await until(()=>gateway.computer.sessions.size===0);
-  await until(()=>gateway.relay.computerConnected('cua-pilot')===1 &&
-    [...gateway.relay.computerPeers.get('cua-pilot')].every(e=>!e.claimed));
+  assert.equal(gateway.computer.sessions.size,1);
   const second=await newClient();
   const b=await second.callTool({name:'list_apps',arguments:{}});
   assert.equal(b.isError,false);
-  assert.notEqual(b.structuredContent.lease,leaseA);
+  assert.equal(b.structuredContent.lease,leaseA);
+  assert.notEqual(a.structuredContent.args.session,b.structuredContent.args.session);
 });
 
 test('Gateway five-minute abandoned lease cleanup frees the Cua Host worker',

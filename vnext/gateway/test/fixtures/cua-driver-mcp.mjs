@@ -24,7 +24,7 @@ input.on('line',line=>{
   if(r.method==='tools/list') {send({id:r.id,result:{tools}});return}
   if(r.method==='tools/call') {
     const {name,arguments:args={}}=r.params||{};
-    if(name==='click' && args.element_token==='simulate-unknown')return;
+    if(name==='press_key' && args.key==='STYX_TEST_DISCONNECT')return;
     if(name==='list_apps' || name==='click') {
       const result={lease,name,args};
       send({id:r.id,result:{isError:false,structuredContent:result,
