@@ -21,6 +21,13 @@ export async function main(args){
   if(cmd==='host-service')return controlDeploymentHostService(stateDir,{action,authorize:true});
   const {controlGatewayService}=await import('./gateway-service.mjs');return controlGatewayService(stateDir,{action,authorize:flag==='--authorize'});
  }
+ if(cmd==='mac-login-recovery'&&[2,3].includes(rest.length)){
+  const [configFile,action,flag]=rest;
+  if(flag!==undefined&&flag!=='--authorize')throw Error('invalid_authorization_flag');
+  const fs=await import('node:fs');const {requirePrivateFile}=await import('../host/private-storage.mjs');requirePrivateFile(configFile);
+  const {controlMacLoginRecovery}=await import('./macos-login-recovery.mjs');
+  return controlMacLoginRecovery(JSON.parse(fs.readFileSync(configFile,'utf8')),{action,authorize:flag==='--authorize'});
+ }
  if(cmd==='serve'&&rest.length===1){const r=await startDeploymentGateway(rest[0]);for(const signal of ['SIGINT','SIGTERM'])process.once(signal,()=>stopDeploymentGateway(rest[0]).then(()=>process.exit(0)));return r;}
  throw Error('usage_create_CONFIG_STATE_or_status_plan_STATE_or_advance_resume_STATE_STEP_or_serve_STATE');
 }

@@ -112,3 +112,21 @@ test('startup rereads the credential selected before it acquires ownership',asyn
   assert.equal(fs.readFileSync(keyFile,'utf8'),key+'r');
  }finally{await runtime.stop()}
 });
+
+test('unexpected exit retries after login delay, explicit stop cancels recovery',async t=>{
+ t.mock.timers.enable({apis:['setTimeout']});
+ const f=fixture(t);configureTunnel(f.stateDir,{tunnelId,apiKey:key,authorize:true,autoStart:true});
+ const runtime=new TunnelRuntime(f);await runtime.resume();
+ f.children[0].emit('exit',1,null);assert.equal(runtime.status().status,'configured');
+ t.mock.timers.tick(14999);assert.equal(f.calls.length,1);
+ t.mock.timers.tick(1);await new Promise(resolve=>setImmediate(resolve));assert.equal(f.calls.length,2);assert.equal(runtime.status().status,'running');
+ await runtime.stop();t.mock.timers.tick(30000);await new Promise(resolve=>setImmediate(resolve));assert.equal(f.calls.length,2);
+});
+test('temporary startup failure retries, then stop suppresses the next attempt',async t=>{
+ t.mock.timers.enable({apis:['setTimeout']});
+ const f=fixture(t),spawnGood=f.spawnProcess;let attempts=0;
+ f.spawnProcess=(...args)=>{attempts++;if(attempts>1)return spawnGood(...args);const child=new EventEmitter();queueMicrotask(()=>child.emit('error',Error('offline')));return child;};
+ configureTunnel(f.stateDir,{tunnelId,apiKey:key,authorize:true,autoStart:true});const runtime=new TunnelRuntime(f);
+ await assert.rejects(runtime.resume(),/start_failed/);t.mock.timers.tick(15000);await new Promise(resolve=>setImmediate(resolve));assert.equal(runtime.status().status,'running');
+ await runtime.stop();t.mock.timers.tick(30000);assert.equal(attempts,2);
+});

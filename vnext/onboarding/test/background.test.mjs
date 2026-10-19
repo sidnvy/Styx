@@ -97,3 +97,13 @@ test('unknown owner connection status cannot trigger background mutations',async
  const f=fixture(t);f.ops.hostConnection=async()=>{throw Error('host_connection_observation_unavailable')};
  await assert.rejects(enableDeploymentBackground(f.dir,{authorize:true},f.ops),/host_connection_observation_unavailable/);assert.deepEqual(f.calls,['host.status']);
 });
+
+
+test('desktop login recovery is included in the authorized background transaction',async t=>{
+ const f=fixture(t);f.ops.desktopRecovery=async(d,action)=>{assert.equal(d,f.dir);assert.equal(action,'install');f.calls.push('desktop.install');return {status:'running'}};
+ const result=await enableDeploymentBackground(f.dir,{authorize:true},f.ops);assert.equal(result.desktop,'running');assert.ok(f.calls.indexOf('desktop.install')>f.calls.indexOf('host.start'));
+});
+test('desktop recovery failure cannot be reported as successful background setup',async t=>{
+ const f=fixture(t);f.ops.desktopRecovery=async()=>({status:'needs_attention'});
+ await assert.rejects(enableDeploymentBackground(f.dir,{authorize:true},f.ops),/background_operation_uncertain_no_replay/);assert.equal(readDeploymentBackground(f.dir).status,'needs_attention');
+});

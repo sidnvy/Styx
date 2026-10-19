@@ -123,3 +123,18 @@ Opt-in browser and native-service tests require explicit environment flags and
 actual trusted binaries. Their defaults skip mutations. CI fixture receipts count
 skips separately; an optional test is not reported as passed merely because it
 was skipped. See ui/README.md and test files for the exact opt-in configuration.
+
+### Existing macOS login recovery
+
+For an existing signed Styx App, the authorized background transaction also installs
+an Aqua-only LaunchServices waiter. It restarts the App after exit and leaves Cua
+creation to that App. Headless Gateway/Host operation does not require it. Stop
+login recovery before intentionally quitting the App for maintenance.
+
+The owner-local CLI also supports `mac-login-recovery CONFIG ACTION [--authorize]`.
+CONFIG is a private JSON file with absolute `appPath`, `logDir`, and optional
+`tunnelRoot` for an existing external Bieber profile (`profiles/bieber.yaml` and
+`bin/tunnel-client`). Actions: install, status, start, stop, uninstall. This command
+never reads or prints tunnel secrets, replaces credentials, or edits the App bundle.
+Keep the exact config for later status/stop/uninstall; foreign definitions fail closed.
+Neither a running job nor a tunnel health response establishes account-side acceptance.
