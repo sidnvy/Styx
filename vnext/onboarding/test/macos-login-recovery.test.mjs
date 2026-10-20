@@ -140,3 +140,26 @@ test('a foreign tunnel definition refuses the whole explicit plan before unloadi
  assert.equal(f.loaded.size,2);
  assert.equal(f.calls.some(x=>x[1][0]!=='print'),false);
 });
+
+
+test('fresh login install creates only the missing private LaunchAgents directory',t=>{
+ const f=fixture(t),dir=path.join(f.home,'Library/LaunchAgents');fs.rmdirSync(dir);
+ assert.equal(controlMacLoginRecovery(f.config,{...f.opts,action:'status'}).services[0].installed,false);
+ assert.equal(fs.existsSync(dir),false); // Read-only observation must not create it.
+ const result=controlMacLoginRecovery(f.config,{...f.opts,action:'install'});
+ assert.equal(result.services[0].running,true);
+ assert.equal(fs.lstatSync(dir).mode&0o777,0o700);
+ assert.equal(fs.lstatSync(path.join(dir,'app.styx.desktop-login.plist')).mode&0o777,0o600);
+});
+test('login install refuses unsafe existing Library or LaunchAgents instead of repairing them',t=>{
+ for(const unsafe of ['writable-library','symlink-library','writable-launch-agents','symlink-launch-agents']){
+  const f=fixture(t),library=path.join(f.home,'Library'),dir=path.join(library,'LaunchAgents');
+  const target=unsafe.endsWith('library')?library:dir;
+  if(unsafe.startsWith('writable'))fs.chmodSync(target,0o777);
+  else{fs.renameSync(target,target+'.original');fs.symlinkSync(target+'.original',target);}
+  assert.throws(()=>controlMacLoginRecovery(f.config,{...f.opts,action:'install'}),/untrusted_launch_directory/);
+  assert.equal(f.calls.some(x=>['disable','enable','bootstrap'].includes(x[1][0])),false);
+  assert.equal(fs.existsSync(path.join(dir,'app.styx.desktop-login.plist')),false);
+  assert.equal(fs.existsSync(f.config.logDir),false);
+ }
+});

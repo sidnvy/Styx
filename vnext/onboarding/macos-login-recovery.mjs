@@ -61,7 +61,13 @@ export function controlMacLoginRecovery(config,{action='status',authorize=false,
   const app=fs.lstatSync(config.appPath??'/Applications/Styx.app');check(app.isDirectory()&&!app.isSymbolicLink(),'login_recovery_app_missing');
   run('/usr/bin/codesign',['--verify','--deep','--strict',config.appPath??'/Applications/Styx.app'],{stdio:'pipe',timeout:20000});
   if(config.tunnelRoot){requirePrivateFile(path.join(config.tunnelRoot,'profiles/bieber.yaml'));fs.accessSync(path.join(config.tunnelRoot,'bin/tunnel-client'),fs.constants.X_OK);}
-  for(const parent of [path.dirname(dir),dir]){const s=fs.lstatSync(parent);check(s.isDirectory()&&!s.isSymbolicLink()&&s.uid===uid&&!(s.mode&0o022),'login_recovery_untrusted_launch_directory');}
+  const assertLaunchDirectory=folder=>{const s=fs.lstatSync(folder);check(s.isDirectory()&&!s.isSymbolicLink()&&s.uid===uid&&!(s.mode&0o022),'login_recovery_untrusted_launch_directory');};
+  // A fresh user's Library need not contain LaunchAgents yet. Create only this
+  // child after checking its existing parent; never recursively repair a home,
+  // follow a link, or change the permissions of an existing directory.
+  assertLaunchDirectory(path.dirname(dir));
+  try{fs.mkdirSync(dir,{mode:0o700});}catch(error){if(error.code!=='EEXIST')throw error;}
+  assertLaunchDirectory(dir);
   ensurePrivateDirectory(config.logDir);
  }
  const results=[];

@@ -159,12 +159,15 @@ enum ProductPage: String, CaseIterable { case welcome, invitation, capabilities,
     }
     private func prepare() async throws {
         if joined {
-            // Only advance documented safe pending steps. A failed/uncertain
-            // mutation is never replayed; remote approval remains independent.
+            // Retry only the claim/doctor checks that Core marks safely blocked.
+            // Uncertain preparation/request mutations are never replayed.
             let safe: Set<String> = ["host.prepare", "host.request", "host.claim", "host.doctor"]
+            let retryableChecks: Set<String> = ["host.claim", "host.doctor"]
             for _ in 0..<4 {
                 guard let next = deployment?.steps.first(where: { $0.status != "succeeded" && $0.status != "skipped" }),
-                      safe.contains(next.id), ["pending", "awaiting_approval"].contains(next.status) else { break }
+                      safe.contains(next.id),
+                      ["pending", "awaiting_approval"].contains(next.status) ||
+                        (next.status == "blocked" && retryableChecks.contains(next.id)) else { break }
                 _ = try await client.write("advance", ["authorize": .array([.string(next.id)])])
                 try await reload()
                 guard deployment?.steps.first(where: { $0.id == next.id })?.status == "succeeded" else { break }
