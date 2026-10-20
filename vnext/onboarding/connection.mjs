@@ -24,7 +24,8 @@ export function gatewayFetch(endpoint,{ca}={}) {
     if(init.body!=null&&typeof init.body!=='string'&&!(init.body instanceof Uint8Array))throw Error('unsupported_request_body');
     return new Promise((resolve,reject)=>{
       const req=https.request(u,{method:init.method??'GET',headers:Object.fromEntries(new Headers(init.headers)),
-        ca,rejectUnauthorized:true,signal:init.signal},res=>{
+        // A verifier must neither consume nor leave shared onboarding sockets.
+        agent:false,ca,rejectUnauthorized:true,signal:init.signal},res=>{
         if(res.statusCode>=300&&res.statusCode<400){res.resume();reject(Error('gateway_redirect_refused'));return;}
         const headers=new Headers();for(const [k,v] of Object.entries(res.headers))if(v!==undefined)headers.set(k,Array.isArray(v)?v.join(', '):v);
         const body=[204,205,304].includes(res.statusCode)?null:Readable.toWeb(res);

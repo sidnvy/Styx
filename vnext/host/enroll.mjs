@@ -67,6 +67,9 @@ export async function enrollmentHttpRequest({gateway_url,gateway_ca_file},
   return await new Promise((resolve,reject)=>{
     const req=https.request(url,{
       method:reqBody===null?'GET':'POST',
+      // Synchronous bundle preparation can leave peer-closed sockets in the
+      // global keep-alive pool. Use a fresh TLS connection, never retry a join.
+      agent:false,
       rejectUnauthorized:true,
       ...(ca?{ca}:{}),
       headers:{
