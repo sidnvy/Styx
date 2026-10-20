@@ -414,6 +414,32 @@ final class SetupWindowController: NSWindowController, WKNavigationDelegate, WKU
     }
 }
 
+@MainActor func styxApplicationMenu(actionTarget: StyxDelegate? = nil) -> NSMenu {
+    let chinese = (Locale.preferredLanguages.first ?? "en").hasPrefix("zh")
+    func text(_ zh: String, _ en: String) -> String { chinese ? zh : en }
+    let main = NSMenu()
+    let appItem = NSMenuItem(title: "Styx", action: nil, keyEquivalent: ""); main.addItem(appItem)
+    let appMenu = NSMenu(title: "Styx"); appItem.submenu = appMenu
+    appMenu.addItem(withTitle: text("打开 Styx…", "Open Styx…"), action: #selector(StyxDelegate.openSettings), keyEquivalent: "o").target = actionTarget
+    #if STYX_PRODUCT_UI
+    appMenu.addItem(withTitle: text("设置…", "Settings…"), action: #selector(StyxDelegate.openProductPreferences), keyEquivalent: ",").target = actionTarget
+    #endif
+    appMenu.addItem(NSMenuItem.separator())
+    appMenu.addItem(withTitle: text("退出 Styx", "Quit Styx"), action: #selector(StyxDelegate.quit), keyEquivalent: "q").target = actionTarget
+    let editItem = NSMenuItem(title: text("编辑", "Edit"), action: nil, keyEquivalent: ""); main.addItem(editItem)
+    let edit = NSMenu(title: text("编辑", "Edit")); editItem.submenu = edit
+    edit.addItem(withTitle: text("撤销", "Undo"), action: Selector(("undo:")), keyEquivalent: "z")
+    edit.addItem(withTitle: text("重做", "Redo"), action: Selector(("redo:")), keyEquivalent: "z").keyEquivalentModifierMask = [.command, .shift]
+    edit.addItem(NSMenuItem.separator())
+    // Nil targets deliberately use AppKit's responder chain. Secure fields keep
+    // their native copy/cut restrictions; Styx never handles clipboard contents.
+    edit.addItem(withTitle: text("剪切", "Cut"), action: #selector(NSText.cut(_:)), keyEquivalent: "x")
+    edit.addItem(withTitle: text("复制", "Copy"), action: #selector(NSText.copy(_:)), keyEquivalent: "c")
+    edit.addItem(withTitle: text("粘贴", "Paste"), action: #selector(NSText.paste(_:)), keyEquivalent: "v")
+    edit.addItem(withTitle: text("全选", "Select All"), action: #selector(NSText.selectAll(_:)), keyEquivalent: "a")
+    return main
+}
+
 // Build the menu-bar template from the supplied light artwork's actual dark
 // glyph. Its white card and rounded border are not part of the alpha mask.
 func styxStatusItemImage(source: NSImage) -> NSImage? {
@@ -518,6 +544,7 @@ func productSystemQuitReason(_ reason: OSType?) -> Bool {
     var signalSources: [DispatchSourceSignal] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        NSApp.mainMenu = styxApplicationMenu(actionTarget: self)
         for number in [SIGTERM, SIGINT] {
             signal(number, SIG_IGN)
             let source = DispatchSource.makeSignalSource(signal: number, queue: .main)
@@ -836,6 +863,12 @@ func productSystemQuitReason(_ reason: OSType?) -> Bool {
 
 #if STYX_TESTING
 #if STYX_PRODUCT_UI
+if CommandLine.arguments.count >= 2 && CommandLine.arguments[1] == "--edit-menu-self-test" {
+    MainActor.assumeIsolated {
+        do { try productEditMenuSelfTest(withMenu: !CommandLine.arguments.contains("--without-menu")); exit(0) }
+        catch { fputs("Styx isolated edit-menu self-test failed\n", stderr); exit(1) }
+    }
+}
 if CommandLine.arguments.count == 4 && CommandLine.arguments[1] == "--product-window-fixture" {
     let input = URL(fileURLWithPath: CommandLine.arguments[2])
     let snapshot = URL(fileURLWithPath: CommandLine.arguments[3])
