@@ -5,6 +5,7 @@ import os from 'node:os';
 import {execFileSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
+import {crc32,normalizePresentation} from '../plugin/package.mjs';
 
 export const MAC_BUNDLE_ID='app.styx.host';
 const SOURCE=fileURLToPath(new URL('./macos/Styx.swift',import.meta.url));
@@ -13,6 +14,22 @@ const BRAND=fileURLToPath(new URL('../assets/brand/',import.meta.url));
 const LICENSES=fileURLToPath(new URL('../licenses/',import.meta.url));
 const assert=(condition,message)=>{if(!condition)throw Error(message)};
 const xml=value=>value.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');
+// sips preserves source ICC/EXIF metadata. The exported plugin image uses the
+// same bounded, metadata-free PNG contract as the Core profile API.
+export function prepareMacPluginIcon(bytes){
+  assert(Buffer.isBuffer(bytes)&&bytes.length>=8&&bytes.length<=256*1024&&bytes.subarray(0,8).equals(Buffer.from([137,80,78,71,13,10,26,10])),'invalid_packaged_plugin_png');
+  const parts=[bytes.subarray(0,8)],metadata=new Set(['iCCP','eXIf','tEXt','zTXt','iTXt']);
+  for(let offset=8;offset<bytes.length;){
+    assert(offset+12<=bytes.length,'invalid_packaged_plugin_png');
+    const size=bytes.readUInt32BE(offset),end=offset+12+size;
+    assert(end<=bytes.length&&bytes.readUInt32BE(end-4)===crc32(bytes.subarray(offset+4,end-4)),'invalid_packaged_plugin_png');
+    if(!metadata.has(bytes.toString('latin1',offset+4,offset+8)))parts.push(bytes.subarray(offset,end));
+    offset=end;
+  }
+  const result=Buffer.concat(parts);
+  normalizePresentation({icon:{mimeType:'image/png',dataBase64:result.toString('base64')}});
+  return result;
+}
 export function appInfoPlist(version){
   assert(/^\d+\.\d+\.\d+$/.test(version??''),'invalid_app_version');
   return `<?xml version="1.0" encoding="UTF-8"?>
@@ -124,7 +141,8 @@ export function buildMacApp({app,cuaBinary,version,identity,teamID,notaryProfile
     const brand=path.join(app,'Contents/Resources/brand');fs.mkdirSync(brand);
     for(const name of ['styx-icon-dark-source.jpg','styx-icon-light-source.jpg'])fs.copyFileSync(path.join(BRAND,name),path.join(brand,name));
     execFileSync('/usr/bin/sips',['-s','format','png','-z','512','512',path.join(BRAND,'styx-icon-dark-source.jpg'),'--out',path.join(brand,'styx-plugin-icon.png')],{stdio:'pipe'});
-    assert(fs.statSync(path.join(brand,'styx-plugin-icon.png')).size<=256*1024,'plugin_icon_size_exceeded');
+    const pluginIcon=path.join(brand,'styx-plugin-icon.png');
+    fs.writeFileSync(pluginIcon,prepareMacPluginIcon(fs.readFileSync(pluginIcon)));
     const iconset=path.join(buildRoot,'Styx.iconset');fs.mkdirSync(iconset);
     for(const size of [16,32,128,256,512])for(const scale of [1,2]){
       const pixels=String(size*scale),name=`icon_${size}x${size}${scale===2?'@2x':''}.png`;

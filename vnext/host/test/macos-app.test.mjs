@@ -5,7 +5,22 @@ import path from 'node:path';
 import os from 'node:os';
 import {fileURLToPath} from 'node:url';
 import {spawnSync} from 'node:child_process';
-import {appInfoPlist,macSigningPlan,macDevelopmentSigningPlan,buildMacApp,macSwiftBuildArguments,MAC_BUNDLE_ID} from '../build-macos-app.mjs';
+import {deflateSync} from 'node:zlib';
+import {crc32,normalizePresentation} from '../../plugin/package.mjs';
+import {appInfoPlist,macSigningPlan,macDevelopmentSigningPlan,buildMacApp,macSwiftBuildArguments,prepareMacPluginIcon,MAC_BUNDLE_ID} from '../build-macos-app.mjs';
+
+test('packaged sips PNG metadata is removed before the real Core plugin profile validates it',()=>{
+  const chunk=(type,data)=>{const head=Buffer.alloc(8);head.writeUInt32BE(data.length);head.write(type,4);const sum=Buffer.alloc(4);sum.writeUInt32BE(crc32(Buffer.concat([Buffer.from(type),data])));return Buffer.concat([head,data,sum])};
+  const header=Buffer.alloc(13);header.writeUInt32BE(48);header.writeUInt32BE(48,4);header[8]=8;header[9]=6;
+  const image=[Buffer.from([137,80,78,71,13,10,26,10]),chunk('IHDR',header),chunk('IDAT',deflateSync(Buffer.alloc(48*(48*4+1)))),chunk('IEND',Buffer.alloc(0))];
+  const plain=Buffer.concat(image),withMetadata=Buffer.concat([image[0],image[1],chunk('iCCP',Buffer.from('source profile')),chunk('eXIf',Buffer.from('source metadata')),image[2],image[3]]);
+  assert.throws(()=>normalizePresentation({icon:{mimeType:'image/png',dataBase64:withMetadata.toString('base64')}}),/unsupported_png_chunk/);
+  assert.deepEqual(prepareMacPluginIcon(withMetadata),plain);
+  assert.equal(normalizePresentation({icon:{mimeType:'image/png',dataBase64:prepareMacPluginIcon(withMetadata).toString('base64')}}).icon.mimeType,'image/png');
+  const damaged=Buffer.from(withMetadata);damaged[45]^=1;
+  assert.throws(()=>prepareMacPluginIcon(damaged),/invalid_packaged_plugin_png/);
+  assert.throws(()=>prepareMacPluginIcon(withMetadata.subarray(0,-1)),/invalid_packaged_plugin_png/);
+});
 
 test('per-build SDK and module cache are passed as fixed Swift argv without changing the system toolchain',()=>{
   const input={source:'/source with spaces/Styx.swift',output:'/build/Styx.app/Contents/MacOS/Styx',arch:'arm64',sdkPath:'/Library/Developer/CommandLineTools/SDKs/MacOSX26.5.sdk',moduleCachePath:'/build/Module Cache'};
