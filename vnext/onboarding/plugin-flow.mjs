@@ -16,7 +16,8 @@ function context(stateDir){
  const config=read(path.join(stateDir,'deployment.json'));
  if(!['create-local','join-existing'].includes(config.mode))fail('invalid_deployment');
  if(config.mode==='join-existing')return {required:false};
- // The profile can be entered before local setup finishes. Export cannot.
+ // The profile and user attestation can be entered before local setup finishes.
+ // Neither asserts local readiness or account acceptance; export requires verification.
  let target=null;
  const tunnel=path.join(stateDir,'tunnel','connection.json');
  if(fs.existsSync(tunnel)){requirePrivateDirectory(path.dirname(tunnel));target=connection({tunnelId:read(tunnel).tunnelId})}
@@ -33,10 +34,10 @@ function context(stateDir){
 function selection(value){
  exact(value,['mode','accountLabel','pluginUrl']);
  if(!['create','reuse'].includes(value.mode)||typeof value.accountLabel!=='string'||[...value.accountLabel.trim()].length>160||/[\u0000-\u001f\u007f]/.test(value.accountLabel))fail('invalid_plugin_selection');
- const url=value.pluginUrl===''?'':pluginUrl(value.pluginUrl);
- if(value.mode==='reuse'&&!url)fail('existing_plugin_url_required');
+ const url=optionalPluginUrl(value.pluginUrl);
  return {mode:value.mode,accountLabel:value.accountLabel.trim(),pluginUrl:url};
 }
+const optionalPluginUrl=value=>value===undefined||value===''?'':pluginUrl(value);
 export function pluginUrl(value){
  let u;try{u=new URL(value)}catch{fail('invalid_plugin_url')}
  if(typeof value!=='string'||value.length>2048||u.protocol!=='https:'||u.hostname!=='chatgpt.com'||u.port||u.username||u.password||u.search||u.hash||!u.pathname.startsWith('/plugins/')||u.pathname==='/plugins/')fail('specific_chatgpt_plugin_url_required');
@@ -51,7 +52,14 @@ function load(stateDir){
  exact(value.export,['sha256','binding','profileHash','filename','verificationSource','at']);
  if(value.export.sha256!==undefined&&(!/^[a-f0-9]{64}$/.test(value.export.sha256)||value.export.filename!=='styx-native.zip'||value.export.verificationSource!=='authenticated_local_gateway_discovery'))fail('invalid_plugin_export_receipt');
  exact(value.accountActions,['upload','installation']);
- for(const record of Object.values(value.accountActions)){exact(record,['at','binding','profileHash','pluginUrl','source']);if(record.source!=='user_attested'||!Number.isSafeInteger(record.at))fail('invalid_plugin_account_receipt');pluginUrl(record.pluginUrl)}
+ for(const [stage,record] of Object.entries(value.accountActions)){
+  exact(record,['at','binding','profileHash','pluginUrl','source','method']);
+  if(record.source!=='user_attested'||!Number.isSafeInteger(record.at)||record.at<0||typeof record.binding!=='string'||typeof record.profileHash!=='string')fail('invalid_plugin_account_receipt');
+  if(record.method!==undefined&&!['official_page','archive_upload'].includes(record.method)||stage==='upload'&&record.method==='official_page')fail('invalid_plugin_account_receipt');
+  // Schema 1 archive receipts remain valid. Only the direct official path can
+  // omit a management URL, which is never treated as provider identity proof.
+  if(record.method==='official_page')optionalPluginUrl(record.pluginUrl);else pluginUrl(record.pluginUrl);
+ }
  return value;
 }
 const profileHash=value=>hash(JSON.stringify({presentation:value.presentation,selection:value.selection}));
@@ -102,24 +110,35 @@ export async function exportDeploymentPlugin(stateDir,options={}){
   const result=buildPackageArchive({connection:ctx.target,presentation:value.presentation},receipt);
   if(context(stateDir).binding!==ctx.binding||profileHash(load(stateDir))!==before)fail('plugin_context_changed_during_export');
   const sha256=hash(result.archive),sameArchive=value.export.sha256===sha256&&value.export.binding===ctx.binding&&value.export.profileHash===before;
-  value.binding=ctx.binding;value.export={sha256,binding:ctx.binding,profileHash:before,filename:'styx-native.zip',verificationSource:'authenticated_local_gateway_discovery',at:Date.now()};if(!sameArchive)value.accountActions={};write(stateDir,value);
+  value.binding=ctx.binding;value.export={sha256,binding:ctx.binding,profileHash:before,filename:'styx-native.zip',verificationSource:'authenticated_local_gateway_discovery',at:Date.now()};
+  if(!sameArchive){
+   // Replacing an optional archive invalidates only archive-specific receipts.
+   // Direct official-page confirmation is bound to the profile and connection.
+   const direct=value.accountActions.installation?.method==='official_page'?value.accountActions.installation:null;
+   value.accountActions=direct?{installation:direct}:{};
+  }
+  write(stateDir,value);
   return {...result,sha256:value.export.sha256,verificationSource:value.export.verificationSource,accountUpload:'NOT RUN',accountInstallation:'NOT RUN',accountConnection:'NOT RUN'};
  });
 }
 export async function recordDeploymentPluginAction(stateDir,options={}){
  exact(options,['authorize','stage','pluginUrl']);if(options.authorize!==true)fail('explicit_plugin_authorization_required');
- if(!['upload','installation'].includes(options.stage))fail('invalid_plugin_account_stage');const url=pluginUrl(options.pluginUrl);
+ if(!['upload','installation'].includes(options.stage))fail('invalid_plugin_account_stage');
+ const suppliedUrl=optionalPluginUrl(options.pluginUrl);
  return locked(stateDir,()=>{
   const ctx=context(stateDir),value=load(stateDir);if(!ctx.required)fail('plugin_managed_by_gateway_owner');if(!value)fail('plugin_profile_required');
   if(value.binding!==ctx.binding)fail('plugin_context_changed');
-  if(value.selection.mode==='create'&&(!value.export.sha256||value.export.binding!==ctx.binding||value.export.profileHash!==profileHash(value)))fail('current_plugin_export_required');
+  const url=suppliedUrl||value.selection.pluginUrl;
   if(value.selection.pluginUrl&&value.selection.pluginUrl!==url)fail('plugin_url_mismatch');
-  if(options.stage==='upload'&&value.selection.mode!=='create')fail('existing_plugin_does_not_require_upload');
-  if(options.stage==='installation'&&value.selection.mode==='create'&&!value.accountActions.upload)fail('plugin_upload_confirmation_required');
+  if(options.stage==='upload'){
+   if(value.selection.mode!=='create')fail('existing_plugin_does_not_require_upload');
+   if(!value.export.sha256||value.export.binding!==ctx.binding||value.export.profileHash!==profileHash(value))fail('current_plugin_export_required');
+   pluginUrl(url);
+  }
   // URL receipt updates the selection and consistently rebinds earlier receipts.
   value.selection.pluginUrl=url;const ph=profileHash(value);if(value.export.sha256)value.export.profileHash=ph;
   for(const entry of Object.values(value.accountActions))entry.profileHash=ph;
-  value.accountActions[options.stage]={at:Date.now(),binding:ctx.binding,profileHash:ph,pluginUrl:url,source:'user_attested'};
+  value.accountActions[options.stage]={at:Date.now(),binding:ctx.binding,profileHash:ph,pluginUrl:url,source:'user_attested',method:options.stage==='upload'?'archive_upload':'official_page'};
   write(stateDir,value);return readDeploymentPlugin(stateDir);
  });
 }

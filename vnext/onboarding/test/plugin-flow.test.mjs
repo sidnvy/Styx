@@ -62,7 +62,8 @@ with zipfile.ZipFile(sys.argv[1]) as z:
  const combined=result.archive.toString('latin1');for(const secret of ['model.token','admin.token',fs.readFileSync(path.join(f.stateDir,'gateway/model.token'),'utf8').trim(),fs.readFileSync(path.join(f.stateDir,'gateway/admin.token'),'utf8').trim()])assert.ok(!combined.includes(secret));
  assert.equal(readDeploymentPlugin(f.stateDir).accountActions.installation,'not_observed');
  const url='https://chatgpt.com/plugins/styx-my-private';
- await assert.rejects(recordDeploymentPluginAction(f.stateDir,{authorize:true,stage:'installation',pluginUrl:url}),/upload_confirmation_required/);
+ const direct=await recordDeploymentPluginAction(f.stateDir,{authorize:true,stage:'installation',pluginUrl:url});
+ assert.equal(direct.accountActions.installation,'user_confirmed');assert.equal(direct.accountActions.upload,'not_observed');
  await recordDeploymentPluginAction(f.stateDir,{authorize:true,stage:'upload',pluginUrl:url});
   const saved=await recordDeploymentPluginAction(f.stateDir,{authorize:true,stage:'installation',pluginUrl:url});
   assert.equal(saved.accountActions.installation,'user_confirmed');assert.equal(saved.accountActions.connection,'not_verified');
@@ -94,4 +95,87 @@ test('real local HTTP plugin routes require session, CSRF and explicit authoriza
  const observed=(await(await fetch(instance.origin+'/api/plugin',{headers})).json()).plugin;assert.deepEqual(observed,await main(['plugin',f.stateDir]));
  assert.equal((await post('/api/plugin/export',{authorize:true,token:'invalid'})).status,409);
  assert.equal((await post('/api/plugin/record',{authorize:true,stage:'connection',pluginUrl:'https://chatgpt.com/plugins/x'})).status,409);
+});
+
+test('official create and reuse work without an archive or a plugin management URL',async t=>{
+ for(const mode of ['create','reuse']){
+  const f=await fixture(t),before=fs.readFileSync(path.join(f.stateDir,'deployment.json'));
+  await setDeploymentPluginProfile(f.stateDir,{...options,selection:{mode,accountLabel:'Target workspace'}});
+  const state=await recordDeploymentPluginAction(f.stateDir,{authorize:true,stage:'installation'});
+  assert.equal(state.selection.pluginUrl,'');assert.equal(state.export.status,'not_exported');
+  assert.equal(state.accountActions.upload,'not_observed');assert.equal(state.accountActions.installation,'user_confirmed');
+  assert.equal(state.accountActions.connection,'not_verified');assert.equal(state.accountActions.providerIdentity,'not_verified');
+  assert.equal(state.externalDiscovery,'not_performed');assert.equal(state.requiresAccountAction,true);
+  const receipt=JSON.parse(fs.readFileSync(path.join(f.stateDir,'onboarding-plugin.json'))).accountActions.installation;
+  assert.equal(receipt.method,'official_page');assert.equal(receipt.source,'user_attested');
+  assert.equal(fs.existsSync(path.join(f.stateDir,'gateway')),false);
+  assert.deepEqual(fs.readFileSync(path.join(f.stateDir,'deployment.json')),before);
+  // An unchanged save and restart/read preserve the attestation; another account
+  // or profile must get its own confirmation.
+  await setDeploymentPluginProfile(f.stateDir,{...options,selection:{mode,accountLabel:'Target workspace'}});
+  assert.equal(readDeploymentPlugin(f.stateDir).accountActions.installation,'user_confirmed');
+  await setDeploymentPluginProfile(f.stateDir,{...options,selection:{mode,accountLabel:'Another workspace'}});
+  assert.equal(readDeploymentPlugin(f.stateDir).accountActions.installation,'not_observed');
+ }
+});
+test('direct attestation rejects forged evidence, unauthorized changes and wrong management URLs',async t=>{
+ const f=await fixture(t);await setDeploymentPluginProfile(f.stateDir,options);
+ for(const action of [
+  {authorize:false,stage:'installation'},
+  {authorize:true,stage:'connection'},
+  {authorize:true,stage:'installation',source:'provider_verified'},
+  {authorize:true,stage:'installation',method:'official_page'},
+  {authorize:true,stage:'installation',pluginUrl:null},
+  {authorize:true,stage:'installation',pluginUrl:'https://chatgpt.com/plugins/x?key=secret'},
+  {authorize:true,stage:'upload',pluginUrl:'https://chatgpt.com/plugins/x'}
+ ])await assert.rejects(recordDeploymentPluginAction(f.stateDir,action));
+ assert.equal(readDeploymentPlugin(f.stateDir).accountActions.installation,'not_observed');
+ const url='https://chatgpt.com/plugins/original';
+ await recordDeploymentPluginAction(f.stateDir,{authorize:true,stage:'installation',pluginUrl:url});
+ await assert.rejects(recordDeploymentPluginAction(f.stateDir,{authorize:true,stage:'installation',pluginUrl:'https://chatgpt.com/plugins/other'}),/plugin_url_mismatch/);
+ assert.equal((await recordDeploymentPluginAction(f.stateDir,{authorize:true,stage:'installation'})).selection.pluginUrl,url);
+ const joined=await fixture(t,{joined:true});
+ await assert.rejects(recordDeploymentPluginAction(joined.stateDir,{authorize:true,stage:'installation'}),/plugin_managed_by_gateway_owner/);
+});
+test('legacy schema 1 URL receipts survive unchanged and remain user assertions',async t=>{
+ const f=await fixture(t),url='https://chatgpt.com/plugins/legacy';
+ await setDeploymentPluginProfile(f.stateDir,{...options,selection:{...options.selection,pluginUrl:url}});
+ await recordDeploymentPluginAction(f.stateDir,{authorize:true,stage:'installation',pluginUrl:url});
+ const file=path.join(f.stateDir,'onboarding-plugin.json'),legacy=JSON.parse(fs.readFileSync(file));
+ delete legacy.accountActions.installation.method;
+ legacy.accountActions.upload={...legacy.accountActions.installation};
+ legacy.export={sha256:'a'.repeat(64),binding:legacy.binding,profileHash:legacy.accountActions.installation.profileHash,filename:'styx-native.zip',verificationSource:'authenticated_local_gateway_discovery',at:Date.now()};
+ fs.writeFileSync(file,JSON.stringify(legacy),{mode:0o600});
+ const state=readDeploymentPlugin(f.stateDir);
+ assert.equal(state.export.status,'exported');assert.equal(state.accountActions.upload,'user_confirmed');assert.equal(state.accountActions.installation,'user_confirmed');assert.equal(state.accountActions.providerIdentity,'not_verified');
+ await setDeploymentPluginProfile(f.stateDir,{...options,selection:{...options.selection,pluginUrl:url}});
+ assert.deepEqual(JSON.parse(fs.readFileSync(file)),legacy);
+ // A connection identity change invalidates old archive and account receipts.
+ fs.mkdirSync(path.join(f.stateDir,'tunnel'),{mode:0o700});
+ fs.writeFileSync(path.join(f.stateDir,'tunnel','connection.json'),JSON.stringify({tunnelId:'tunnel_'+'b'.repeat(32)}),{mode:0o600});
+ assert.equal(readDeploymentPlugin(f.stateDir).contextChanged,true);
+ assert.equal(readDeploymentPlugin(f.stateDir).accountActions.installation,'not_observed');
+ assert.equal(readDeploymentPlugin(f.stateDir).export.status,'stale');
+ await assert.rejects(recordDeploymentPluginAction(f.stateDir,{authorize:true,stage:'installation'}),/plugin_context_changed/);
+});
+test('official no-URL confirmation crosses the real App and CLI routes with authorization intact',async t=>{
+ const f=await fixture(t),instance=await createOnboardingServer({stateDir:f.stateDir});t.after(()=>instance.close());
+ const token=new URLSearchParams(new URL(instance.url).hash.slice(1)).get('session'),headers={Authorization:'Bearer '+token};
+ const session=await(await fetch(instance.origin+'/api/session',{headers})).json();
+ const post=(route,body)=>fetch(instance.origin+route,{method:'POST',headers:{...headers,Origin:instance.origin,'X-Styx-CSRF':session.csrf,'Content-Type':'application/json'},body:JSON.stringify(body)});
+ assert.equal((await post('/api/plugin/profile',{...options,selection:{mode:'reuse',accountLabel:'Selected account'}})).status,200);
+ const response=await post('/api/plugin/record',{authorize:true,stage:'installation'});
+ assert.equal(response.status,200);assert.equal((await response.json()).plugin.accountActions.installation,'user_confirmed');
+ const file=path.join(f.root,'action.json');fs.writeFileSync(file,JSON.stringify({stage:'installation'}),{mode:0o600});
+ const cli=await main(['plugin-record',f.stateDir,file,'--authorize']);
+ assert.equal(cli.accountActions.installation,'user_confirmed');assert.equal(cli.accountActions.connection,'not_verified');
+});
+test('optional first archive export does not invalidate direct official-page confirmation',{skip:process.platform==='win32',timeout:30000},async t=>{
+ const f=await fixture(t);t.after(()=>stopDeploymentGateway(f.stateDir));
+ await advanceDeployment(f.stateDir,{authorize:['gateway.prepare','gateway.start','gateway.verify']});
+ fs.mkdirSync(path.join(f.stateDir,'tunnel'),{mode:0o700});fs.writeFileSync(path.join(f.stateDir,'tunnel','connection.json'),JSON.stringify({schema:1,tunnelId:'tunnel_'+'c'.repeat(32),keyFile:'key-'+'c'.repeat(32),autoStart:false}),{mode:0o600});
+ await setDeploymentPluginProfile(f.stateDir,options);
+ await recordDeploymentPluginAction(f.stateDir,{authorize:true,stage:'installation'});
+ await exportDeploymentPlugin(f.stateDir,{authorize:true});
+ const state=readDeploymentPlugin(f.stateDir);assert.equal(state.export.status,'exported');assert.equal(state.accountActions.upload,'not_observed');assert.equal(state.accountActions.installation,'user_confirmed');assert.equal(state.accountActions.connection,'not_verified');
 });
