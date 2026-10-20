@@ -1,0 +1,130 @@
+import test from 'node:test';
+import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {readDeploymentAppLifecycle,controlDeploymentAppLifecycle} from '../app-lifecycle.mjs';
+import {macLoginRecoveryPlan} from '../macos-login-recovery.mjs';
+const label='app.styx.desktop-login';
+function fixture(t,{registered=true,missingState=false}={}){
+ const home=fs.mkdtempSync(path.join(os.tmpdir(),'styx-app-lifecycle-'));
+ t.after(()=>fs.rmSync(home,{recursive:true,force:true}));
+ const stateDir=path.join(home,'state'),appPath=path.join(home,'Styx.app'),cdhash='a'.repeat(40),calls=[],verified=[],jobs=new Map(),disabled=new Map();
+ fs.mkdirSync(appPath);fs.mkdirSync(path.join(home,'Library/LaunchAgents'),{recursive:true});
+ if(!missingState){
+  fs.mkdirSync(stateDir,{mode:0o700});
+  if(registered)fs.writeFileSync(path.join(stateDir,'deployment.json'),JSON.stringify({host:{macPreviewApp:{path:appPath,cdhash}},preserveIdentity:'original'}),{mode:0o600});
+ }
+ const uid=process.getuid(),gui='gui/'+uid;
+ const run=(bin,args)=>{
+  calls.push([bin,args]);if(bin==='/usr/bin/codesign')return '';
+  const [op,target]=args;
+  if(op==='print'&&target===gui)return 'session = Aqua';
+  if(op==='print'){
+   if(jobs.has(target))return jobs.get(target);
+   const error=Error();error.stderr='Could not find specified service';throw error;
+  }
+  if(op==='print-disabled')return 'disabled services = {\n'+[...disabled].map(([name,value])=>' "'+name+'" => '+value).join('\n')+'\n}';
+  if(op==='enable'||op==='disable')disabled.set(path.basename(target),op==='disable');
+  if(op==='bootstrap'){
+   const expected=macLoginRecoveryPlan({appPath,logDir:path.join(stateDir,'login-recovery-logs')})[0];
+   jobs.set(gui+'/'+label,'state = running\n pid = 42\n path = '+args[2]+'\n arguments = {\n'+expected.args.map(arg=>' '+arg).join('\n')+'\n }\n');
+  }
+  if(op==='bootout')jobs.delete(target);
+  return '';
+ };
+ const operations={platform:'darwin',home,uid,run,verifyApp:value=>{
+  verified.push(value);
+  if(value.path!==appPath||value.cdhash!==cdhash)throw Error('adhoc_preview_identity_mismatch');
+  return {...value,trust:'test_fixture'};
+ }};
+ const trusted={trustedAppPath:appPath,operations},cli={operations};
+ const mutate=(action,enabled,context=trusted)=>controlDeploymentAppLifecycle(stateDir,{action,authorize:true,...(enabled===undefined?{}:{enabled})},context);
+ return {stateDir,appPath,cdhash,home,calls,verified,jobs,disabled,gui,operations,trusted,cli,mutate};
+}
+const mutationCalls=f=>f.calls.filter(([bin,args])=>bin==='/bin/launchctl'&&!['print','print-disabled'].includes(args[0]));
+
+test('fresh trusted App status is read-only, without creating deployment or service state',t=>{
+ const f=fixture(t,{missingState:true});
+ const state=readDeploymentAppLifecycle(f.stateDir,f.trusted);
+ assert.equal(state.status,'not_installed');assert.equal(state.loginAtStartup,'not_installed');
+ assert.equal(fs.existsSync(f.stateDir),false);assert.deepEqual(mutationCalls(f),[]);
+});
+test('CLI re-verifies authoritative registered identity; native path must match registration',t=>{
+ const f=fixture(t);
+ assert.equal(readDeploymentAppLifecycle(f.stateDir,f.cli).source,'verified_deployment_identity');
+ assert.equal(f.verified.length,1);
+ assert.throws(()=>readDeploymentAppLifecycle(f.stateDir,{...f.trusted,trustedAppPath:'/other/Styx.app'}),/registered_path_changed/);
+ const file=path.join(f.stateDir,'deployment.json');
+ fs.writeFileSync(file,JSON.stringify({host:{macPreviewApp:{path:f.appPath,cdhash:'b'.repeat(40)}}}));
+ assert.throws(()=>readDeploymentAppLifecycle(f.stateDir,f.cli),/identity_mismatch/);
+ assert.deepEqual(mutationCalls(f),[]);
+});
+test('login preference uses observed launchd override, not plist existence',t=>{
+ const f=fixture(t),file=path.join(f.stateDir,'deployment.json'),original=fs.readFileSync(file);
+ let state=f.mutate('login',true);
+ assert.equal(state.loginAtStartup,'enabled');assert.equal(state.running,true);
+ state=f.mutate('login',false);
+ assert.equal(state.installed,true);assert.equal(state.running,false);assert.equal(state.loginAtStartup,'disabled');
+ f.disabled.delete(label);
+ assert.equal(readDeploymentAppLifecycle(f.stateDir,f.trusted).loginAtStartup,'enabled');
+ assert.deepEqual(fs.readFileSync(file),original);
+});
+test('unobservable or malformed startup overrides remain unknown',t=>{
+ const f=fixture(t);f.mutate('login',true);
+ for(const output of ['not a launchctl disabled-services response','disabled services = {\n "'+label+'" => perhaps\n}']){
+  const operations={...f.operations,run:(bin,args)=>args[0]==='print-disabled'?output:f.operations.run(bin,args)};
+  assert.equal(readDeploymentAppLifecycle(f.stateDir,{...f.trusted,operations}).loginAtStartup,'unknown');
+ }
+ const operations={...f.operations,run:(bin,args)=>{if(args[0]==='print-disabled')throw Error('transport error');return f.operations.run(bin,args)}};
+ assert.equal(readDeploymentAppLifecycle(f.stateDir,{...f.trusted,operations}).loginAtStartup,'unknown');
+});
+test('Quit suspends App recovery, keeps enabled login intent and independent jobs',t=>{
+ const f=fixture(t);f.mutate('login',true);
+ for(const other of ['app.styx.gateway','app.styx.host','app.styx.bieber-tunnel'])f.jobs.set(f.gui+'/'+other,'independently owned');
+ f.calls.length=0;
+ const state=f.mutate('quit');
+ assert.equal(state.currentSessionRecovery,'suspended');assert.equal(state.loginAtStartup,'enabled');
+ assert.equal(state.running,false);assert.equal(f.jobs.size,3);
+ assert.deepEqual(mutationCalls(f).map(x=>x[1]),[['bootout',f.gui+'/'+label]]);
+ assert.equal(f.mutate('login',true).running,true);
+});
+test('fresh unregistered Quit proves absence and never silently skips an orphan loaded App',t=>{
+ const f=fixture(t,{missingState:true});
+ const result=f.mutate('quit',undefined,f.cli);
+ assert.equal(result.currentSessionRecovery,'absent');assert.equal(result.status,'not_running');
+ assert.equal(fs.existsSync(f.stateDir),false);assert.deepEqual(mutationCalls(f),[]);
+ f.jobs.set(f.gui+'/'+label,'state = running\n pid = 42');
+ assert.throws(()=>f.mutate('quit',undefined,f.cli),/loaded_app_not_owned/);
+ assert.throws(()=>f.mutate('quit'),/loaded_app_not_owned/);
+ assert.deepEqual(mutationCalls(f),[]);
+});
+test('matching private plist does not authorize changing a foreign loaded job',t=>{
+ const f=fixture(t);f.mutate('login',true);
+ f.jobs.set(f.gui+'/'+label,f.jobs.get(f.gui+'/'+label).replace(' /usr/bin/open',' /usr/bin/other'));
+ f.calls.length=0;
+ for(const [action,enabled] of [['quit',undefined],['login',true],['login',false]])assert.throws(()=>f.mutate(action,enabled),/loaded_app_not_owned/);
+ assert.deepEqual(mutationCalls(f),[]);
+});
+test('CLI cannot manufacture App registration; mutations reject user-supplied trust or operations',t=>{
+ const f=fixture(t,{registered:false});
+ assert.throws(()=>f.mutate('login',true,f.cli),/verified_app_required/);
+ for(const options of [{action:'quit'},{authorize:true,action:'quit',trustedAppPath:f.appPath},{authorize:true,action:'quit',operations:{}},{authorize:true,action:'login',enabled:'true'},{authorize:true,action:'quit',enabled:false}]){
+  assert.throws(()=>controlDeploymentAppLifecycle(f.stateDir,options,f.trusted),/authorization_required|action_invalid/);
+ }
+ assert.deepEqual(mutationCalls(f),[]);
+});
+test('symlinked or public deployment registration is rejected without native mutations',t=>{
+ const f=fixture(t),file=path.join(f.stateDir,'deployment.json');
+ fs.chmodSync(file,0o644);assert.throws(()=>f.mutate('quit'),/private_file_permissions/);
+ fs.chmodSync(file,0o600);fs.renameSync(file,file+'.original');fs.symlinkSync(file+'.original',file);
+ assert.throws(()=>f.mutate('quit'),/private_file_not_regular/);
+ assert.deepEqual(mutationCalls(f),[]);
+});
+test('missing GUI or unknown job observation is never treated as stopped',t=>{
+ const f=fixture(t,{missingState:true});
+ for(const run of [()=>{throw Error('no GUI session')},(bin,args)=>{if(args[0]==='print'&&args[1]!==f.gui)throw Error('unknown transport');return f.operations.run(bin,args)}]){
+  assert.throws(()=>f.mutate('quit',undefined,{operations:{...f.operations,run}}),/no GUI session|observation_unknown/);
+ }
+ assert.deepEqual(mutationCalls(f),[]);
+});
