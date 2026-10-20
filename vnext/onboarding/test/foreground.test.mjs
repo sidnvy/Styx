@@ -4,11 +4,12 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
+import {spawn} from 'node:child_process';
 import {createHash,createPublicKey,generateKeyPairSync,sign} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StreamableHTTPClientTransport} from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import {startDeploymentForeground,stopDeploymentForeground,readDeploymentForeground} from '../foreground.mjs';
+import {startDeploymentForeground,stopDeploymentForeground,readDeploymentForeground,observeDeploymentForeground} from '../foreground.mjs';
 import {createDeployment,advanceDeployment,planDeployment,readDeployment,stopDeploymentGateway} from '../core.mjs';
 import {stageSignedRelease,activateRelease} from '../../host/installer.mjs';
 import {ensurePrivateDirectory,writePrivateFile} from '../../host/private-storage.mjs';
@@ -66,7 +67,7 @@ test('unknown service, uncertain journal, foreign lock, changed publisher or sig
 });
 test('an observed running service is reused; headless foreground never starts a Cua connector',{skip:process.platform!=='linux'},async t=>{
  const f=await fixture(t,{computer:true});
- const reused=await startDeploymentForeground(f.stateDir,{authorize:true},{...f.ops,hostStatus:async()=>({status:'reported',state:'running',installed:true})});assert.equal(reused.status,'using_service');assert.equal(reused.execConnection,'not_observed');assert.equal(f.runCalls.length,0);await stopDeploymentForeground(f.stateDir);
+ const reused=await startDeploymentForeground(f.stateDir,{authorize:true},{...f.ops,hostStatus:async()=>({status:'reported',state:'running',installed:true})});assert.equal(reused.status,'using_service');assert.equal(reused.execConnection,'not_observed');assert.equal(f.runCalls.length,0);const observed=await observeDeploymentForeground(f.stateDir);assert.equal(observed.status,'using_service');assert.equal(observed.execConnection,'not_observed');await stopDeploymentForeground(f.stateDir);
  const result=await startDeploymentForeground(f.stateDir,{authorize:true},f.ops);assert.equal(result.computerRequested,true);assert.equal(result.desktopConnection,'session_unavailable_or_unobserved');assert.equal(f.runCalls.length,1);
 });
 test('stop during deferred GUI startup retains ownership until startup and child settlement finish',{skip:process.platform!=='linux'},async t=>{
@@ -91,4 +92,41 @@ test('real signed-generation Codex Exec over paired TLS foreground survives stop
  assert.equal(result.structuredContent.exit_code,7);assert.match(output,/foreground-real-exec/);assert.equal(readDeployment(f.stateDir).accountAcceptance,'NOT RUN');
  await transport.terminateSession();await client.close();await stopDeploymentForeground(f.stateDir);assert.equal(readDeploymentForeground(f.stateDir).status,'not_running');
  await startDeploymentForeground(f.stateDir,{authorize:true},ops);await until(()=>readDeploymentForeground(f.stateDir).execConnection==='connected');assert.deepEqual(fs.readFileSync(path.join(f.base,'device/identity.json')),identity);assert.deepEqual(fs.readFileSync(path.join(f.base,'device/host.token')),credential);
+});
+
+function childMessage(child,expected){return new Promise((resolve,reject)=>{
+ const timer=setTimeout(()=>{cleanup();reject(Error('foreground_child_timeout'))},10000);
+ const cleanup=()=>{clearTimeout(timer);child.off('message',message);child.off('error',error);child.off('exit',exit)};
+ const message=value=>{if(value?.type===expected){cleanup();resolve(value)}else if(value?.type==='error'){cleanup();reject(Error(value.message))}};
+ const error=value=>{cleanup();reject(value)},exit=code=>{cleanup();reject(Error('foreground_child_exited_'+code))};
+ child.on('message',message);child.on('error',error);child.on('exit',exit);
+})}
+test('another process observes live authenticated owner; config drift and stop withdraw readiness',{skip:process.platform!=='linux'},async t=>{
+ let child;t.after(async()=>{if(child?.connected){const stopped=childMessage(child,'stopped');child.send('stop');await stopped.catch(()=>child.kill())}else if(child&&child.exitCode===null)child.kill()});
+ const f=await fixture(t),module=new URL('../foreground.mjs',import.meta.url).href;
+ const script=`import {startDeploymentForeground,stopDeploymentForeground} from ${JSON.stringify(module)};
+ const d=process.argv[1];const runner=async(c,{signal,onReady})=>{onReady();await new Promise(resolve=>{if(signal.aborted)return resolve();signal.addEventListener('abort',resolve,{once:true})})};
+ process.on('message',async value=>{if(value==='stop'){try{await stopDeploymentForeground(d);process.send({type:'stopped'});process.disconnect()}catch(e){process.send({type:'error',message:e.message})}}});
+ try{await startDeploymentForeground(d,{authorize:true},{hostStatus:async()=>({status:'reported',state:'not_installed'}),runHost:runner,guiAvailable:async()=>false});process.send({type:'ready'})}catch(e){process.send({type:'error',message:e.message})}`;
+ child=spawn(process.execPath,['--input-type=module','-e',script,f.stateDir],{stdio:['ignore','ignore','pipe','ipc']});child.stderr.resume();await childMessage(child,'ready');
+ assert.equal(readDeploymentForeground(f.stateDir).status,'needs_attention');
+ const live=await observeDeploymentForeground(f.stateDir);assert.equal(live.status,'connected');assert.equal(live.observation,'authenticated_foreground_owner');assert.equal(live.toolHealth,'not_verified');assert.equal(live.accountAcceptance,'NOT RUN');assert.match(live.ownerGeneration,/^[a-f0-9]{64}$/);
+ assert.doesNotMatch(JSON.stringify(live),/secret|configurationHash|127\.0\.0\.1|Authorization/);
+ const configFile=path.join(f.stateDir,'deployment.json'),before=fs.readFileSync(configFile);fs.appendFileSync(configFile,' ');
+ assert.equal((await observeDeploymentForeground(f.stateDir)).reason,'foreground_scope_changed');assert.equal(fs.existsSync(path.join(f.stateDir,'foreground.lock')),true);
+ fs.writeFileSync(configFile,before);
+ const stopped=childMessage(child,'stopped');child.send('stop');await stopped;
+ assert.equal((await observeDeploymentForeground(f.stateDir)).status,'not_running');assert.equal(fs.existsSync(path.join(f.stateDir,'foreground-observer.json')),false);
+});
+test('killed owner leaves a stale receipt and lock without PID-based adoption or cleanup',{skip:process.platform!=='linux'},async t=>{
+ let child;t.after(()=>{if(child&&child.exitCode===null)child.kill('SIGKILL')});
+ const f=await fixture(t),module=new URL('../foreground.mjs',import.meta.url).href;
+ const script=`import {startDeploymentForeground} from ${JSON.stringify(module)};await startDeploymentForeground(process.argv[1],{authorize:true},{hostStatus:async()=>({status:'reported',state:'not_installed'}),runHost:async(c,{onReady})=>{onReady();await new Promise(()=>{})}});process.send({type:'ready'})`;
+ child=spawn(process.execPath,['--input-type=module','-e',script,f.stateDir],{stdio:['ignore','ignore','pipe','ipc']});child.stderr.resume();await childMessage(child,'ready');
+ const file=path.join(f.stateDir,'foreground-observer.json'),lock=path.join(f.stateDir,'foreground.lock'),receipt=fs.readFileSync(file),lockBefore=fs.readFileSync(lock);
+ const exited=new Promise(resolve=>child.once('exit',resolve));child.kill('SIGKILL');await exited;
+ const status=await observeDeploymentForeground(f.stateDir);assert.equal(status.status,'needs_attention');assert.equal(status.execConnection,'not_observed');assert.deepEqual(fs.readFileSync(file),receipt);assert.deepEqual(fs.readFileSync(lock),lockBefore);
+ const reused=JSON.parse(receipt);reused.pid=process.pid;fs.writeFileSync(file,JSON.stringify(reused));
+ assert.equal((await observeDeploymentForeground(f.stateDir)).status,'needs_attention');
+ await assert.rejects(startDeploymentForeground(f.stateDir,{authorize:true},f.ops),/owned_or_interrupted/);
 });

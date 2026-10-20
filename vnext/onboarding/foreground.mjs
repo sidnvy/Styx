@@ -9,6 +9,7 @@ import {activeHostConfig} from '../host/launch.mjs';
 import {normalizeConnector,runHostConnector} from '../host/connect.mjs';
 import {computerConfig,runComputerConnectors} from '../host/computer.mjs';
 import {observeHostService} from './service-lifecycle.mjs';
+import {startForegroundObservation,observeForegroundOwner} from './foreground-observation.mjs';
 
 const owners=new Map(),starting=new Map();
 const fail=code=>{throw Error(code)};
@@ -37,6 +38,8 @@ export function readDeploymentForeground(d){
  absolute(d);const entry=owners.get(d);if(entry){try{if(!entry.scopeValid())return {...projection(entry),status:'needs_attention',execConnection:'not_observed',desktopConnection:'not_observed',browserConnection:'not_observed',reason:'foreground_scope_changed'}}catch{return {...projection(entry),status:'needs_attention',execConnection:'not_observed',desktopConnection:'not_observed',browserConnection:'not_observed',reason:'foreground_scope_changed'}}return projection(entry)}
  return {schema:1,status:fs.existsSync(lockFile(d))?'needs_attention':'not_running',observation:'current_process',host:'not_owned',gateway:'not_owned',execConnection:'not_observed',desktopConnection:'not_observed',browserConnection:'not_observed',toolHealth:'not_verified',accountAcceptance:'NOT RUN',...(fs.existsSync(lockFile(d))?{reason:'foreground_owned_or_interrupted_do_not_take_over'}:{})};
 }
+// Public status may observe another process; it never adopts that process.
+export async function observeDeploymentForeground(d){absolute(d);return observeForegroundOwner(d)}
 async function guiAvailable(api,d){
  if(process.platform==='darwin')return (await api.readDeploymentPermissions?.(d))?.source==='current_native_app_preflight';
  if(process.platform==='linux')return !!(process.env.DISPLAY||process.env.WAYLAND_DISPLAY);
@@ -91,6 +94,7 @@ async function start(d,operations,abort){
  const entry={abort,release,host:selected.host?hostStatus.state==='running'?'service':'foreground':'disabled',gateway:config.mode==='join-existing'?'external':gatewayServiceRunning?'service':'foreground',execConnection:selected.host?'connecting':'not_required',desktopConnection:'not_requested',browserConnection:selected.host?.browser?.enabled?'connecting':'not_requested',browserRequested:selected.host?.browser?.enabled===true,computerRequested:selected.host?.computer?.enabled===true,startedGateway:false,stopping:false,failed:false,tasks:[],api,scopeValid:()=>sha(fs.readFileSync(path.join(d,'deployment.json')))===configurationHash&&(!selected.unchanged||selected.unchanged())};
  owners.set(d,entry);
  try{
+  entry.observer=await startForegroundObservation({stateDir:d,configurationHash,projection:()=>readDeploymentForeground(d)});
   if(config.mode==='create-local'&&!gatewayServiceRunning){await api.startDeploymentGateway(d);entry.startedGateway=state.gatewayRuntime?.status!=='running';}
   if(abort.signal.aborted)fail('foreground_start_cancelled');
   if(config.mode==='create-local'){
@@ -141,7 +145,7 @@ async function stopEntry(d,entry){
   await Promise.all(entry.tasks);
   // Gateway has an independent Core lifetime: background/capability handoff
   // still needs it after Host settlement. App/CLI shutdown closes it next.
-  entry.release();owners.delete(d);
+  await entry.observer?.close();entry.release();owners.delete(d);
   return {schema:1,status:'stopped',observation:'current_process',host:'not_owned',gateway:'not_owned',foregroundRestartRequired:entry.host==='foreground',serviceMutation:'NOT RUN',identityMutation:'NOT RUN'};
  })();return entry.stop;
 }
