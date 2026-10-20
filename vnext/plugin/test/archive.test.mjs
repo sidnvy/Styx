@@ -24,9 +24,9 @@ test('archive has one stable root, only package members, stored UTF8 records and
   const length=header.readUInt16LE(26);assert.equal(built.archive.toString('utf8',offset+30,offset+30+length),'styx-native/'+file.path);assert.deepEqual(built.archive.subarray(offset+30+length,offset+30+length+file.data.length),file.data);offset+=30+length+file.data.length;
  }
  assert.equal(end.readUInt32LE(16),offset);assert.equal(offset+end.readUInt32LE(12)+22,built.archive.length);
- const text=built.archive.toString('utf8');assert.doesNotMatch(text,/verificationFile|verifiedAt|independentStyx|freshConnection|consume_token|modelCredential/);assert.match(text,/"headerScheme": "bearer"/);
+ const text=built.archive.toString('utf8');assert.doesNotMatch(text,/verificationFile|verifiedAt|independentStyx|freshConnection|consume_token|modelCredential/);assert.doesNotMatch(text,/"headerScheme"/);
 });
-test('Python standard ZIP reader validates all CRCs, central directory, icon bytes and bearer manifest',{skip:process.platform==='win32'},()=>{
+test('Python standard ZIP reader validates all CRCs, central directory, icon bytes and App-owned tunnel authentication',{skip:process.platform==='win32'},()=>{
  const image=icon(),config={connection,presentation:{displayName:'我的设备',shortDescription:'我的 Styx',icon:image}},built=buildPackageArchive(config,receipt(),{now});
  const script=`import sys,io,zipfile,json,hashlib,stat
 z=zipfile.ZipFile(io.BytesIO(sys.stdin.buffer.read()))
@@ -37,7 +37,7 @@ assert all(i.compress_type == zipfile.ZIP_STORED and stat.S_ISREG(i.external_att
 m=json.loads(z.read('styx-native/plugin.json'))
 s=json.loads(z.read('styx-native/mcp.json'))['mcpServers']['styx']
 assert m['name']=='styx-native'
-assert s['extensions']['com.openai']['auth']=={'type':'api_key','headerScheme':'bearer'}
+assert s['extensions']['com.openai']['auth']=={'type':'none'}
 print(json.dumps({'displayName':m['extensions']['com.openai']['interface']['displayName'],'iconSha256':hashlib.sha256(z.read('styx-native/assets/icon.png')).hexdigest()}))`;
  const check=spawnSync('python3',['-c',script],{input:built.archive,maxBuffer:65536});assert.equal(check.status,0,String(check.stderr));const summary=JSON.parse(String(check.stdout));assert.equal(summary.displayName,'我的设备');assert.equal(summary.iconSha256,createHash('sha256').update(Buffer.from(image.dataBase64,'base64')).digest('hex'));
 });

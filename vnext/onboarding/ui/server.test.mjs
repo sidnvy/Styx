@@ -5,7 +5,7 @@ import os from 'node:os';
 import http from 'node:http';
 import path from 'node:path';
 import {createHash} from 'node:crypto';
-import {createOnboardingServer,publicDeployment,validateUiConfig,browserOrigin,gatewayServiceUiCapabilities,nativeBrowserPrepared} from '../server.mjs';
+import {createOnboardingServer,publicDeployment,validateUiConfig,browserOrigin,gatewayServiceUiCapabilities,nativeBrowserPrepared,nativeLocalPrepared,nativeForegroundOwnsConnections} from '../server.mjs';
 const config=()=>({schema:1,mode:'create-local',gateway:{url:'https://127.0.0.1:8795'},host:{bundle:'/private/bundle',publisherKeyFile:'/private/publisher.pem',publisherSha256:'a'.repeat(64),baseDir:'/private/new-host',label:'Owned test',computer:false}});
 test('native reopen never starts an unprepared requested Browser alongside Exec',()=>{
  const deployment={roles:{browser:'requested'}};
@@ -13,6 +13,12 @@ test('native reopen never starts an unprepared requested Browser alongside Exec'
  assert.equal(nativeBrowserPrepared(deployment,{configured:true,status:'prepared',approved:true}),true);
  assert.equal(nativeBrowserPrepared(deployment,{configured:true,status:'not_approved',approved:false}),true);
  assert.equal(nativeBrowserPrepared({roles:{browser:'disabled'}},null),true);
+});
+test('native reopen preparation uses the same journal criteria without diagnostic scans',()=>{
+ const prepared={steps:[{id:'host.prepare',status:'succeeded'},{id:'host.claim',status:'succeeded'},{id:'host.doctor',status:'succeeded'},{id:'host.service.install',status:'pending'}]};
+ assert.equal(nativeLocalPrepared(prepared),true);
+ for(const status of ['pending','blocked','running','uncertain','failed','awaiting_approval','skipped'])assert.equal(nativeLocalPrepared({...prepared,steps:prepared.steps.map(s=>s.id==='host.doctor'?{...s,status}:s)}),false);
+ assert.equal(nativeLocalPrepared(null),false);assert.equal(nativeLocalPrepared({steps:[]}),false);
 });
 async function fixture(options={}){
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'styx-ui-test-'));let state=null,calls=0;
@@ -31,6 +37,73 @@ async function fixture(options={}){
  const post=(route,data,headers={})=>fetch(instance.origin+route,{method:'POST',headers:{Authorization:'Bearer '+token,Origin:instance.origin,'X-Styx-CSRF':session.csrf,'Content-Type':'application/json',...headers},body:JSON.stringify(data)});
  return{...instance,root,get,post,session,token,get calls(){return calls},async cleanup(){await instance.close();fs.rmSync(root,{recursive:true,force:true})}};
 }
+
+test('native snapshot shares fresh observations for one response without promoting skipped service checks',async()=>{
+ let generation=1;const reads={};const counted=(name,value)=>()=>{reads[name]=(reads[name]??0)+1;return typeof value==='function'?value():value};
+ const foreground=()=>({schema:1,status:'connected',observation:'authenticated_foreground_owner',host:'foreground',gateway:'foreground',execConnection:generation===1?'connected':'disconnected',desktopConnection:'not_requested',toolHealth:'not_verified',ownerGeneration:String(generation)});
+ const f=await fixture({core:{
+  readDeployment:counted('deployment',{mode:'create-local',roles:{host:'local',gateway:'local',exec:'enabled',computer:'disabled',browser:'disabled'},steps:[{id:'host.doctor',status:'succeeded'}]}),
+  readDeploymentForeground:counted('foreground',foreground),
+  readDeploymentAcceptance:counted('acceptance',{status:'not_started',complete:false}),
+  readDeploymentConnectionHandoff:counted('handoff',{status:'unavailable'}),
+  readDeploymentPlugin:counted('plugin',{required:true,profileSaved:false,accountActions:{installation:'not_observed'}}),
+ },backgroundRead:counted('background',{observation:'current',status:'running',host:'running',gateway:'running',hostConnection:'exec_connected'})});
+ try{
+  assert.equal((await fetch(f.origin+'/api/snapshot')).status,401);
+  assert.equal((await f.get('/api/snapshot',{Origin:'https://foreign.invalid'})).status,403);
+  const firstResponse=await f.get('/api/snapshot');assert.equal(firstResponse.status,200);assert.equal(firstResponse.headers.get('cache-control'),'no-store');
+  const first=await firstResponse.json();
+  assert.equal(first.status.foreground.ownerGeneration,'1');assert.equal(first.status.foreground.toolHealth,'not_verified');assert.equal(first.status.background,null);
+  assert.equal(first.journey.background.observation,'not_observed');assert.equal(first.journey.readiness.exec.status,'connected');assert.equal(first.acceptance.complete,false);
+  assert.deepEqual(reads,{foreground:1,deployment:1,acceptance:1,handoff:1,plugin:1});
+  generation=2;const second=await(await f.get('/api/snapshot')).json();
+  assert.equal(second.status.foreground.ownerGeneration,'2');assert.equal(second.journey.foreground.execConnection,'disconnected');assert.equal(second.acceptance.complete,false);
+  assert.deepEqual(reads,{foreground:2,deployment:2,acceptance:2,handoff:2,plugin:2});
+  // The detailed endpoint still observes services even for this live owner.
+  assert.equal((await f.get('/api/status')).status,200);assert.equal(reads.background,1);
+  assert.equal(f.calls,0);assert.equal(fs.existsSync(path.join(f.root,'deployment')),false);
+ }finally{await f.cleanup()}
+});
+
+test('native snapshot keeps full service observations for reused, unobserved or uncertain owners',async()=>{
+ const current={status:'connected',observation:'authenticated_foreground_owner',host:'foreground',gateway:'foreground'};
+ for(const observation of ['current_process','authenticated_foreground_owner'])assert.equal(nativeForegroundOwnsConnections({...current,observation}),true);
+ for(const foreground of [null,{}, {...current,observation:'cross_process'},{...current,host:'service'},{...current,gateway:'service'},{...current,status:'needs_attention'},{...current,status:'stopping'},{...current,status:'not_running'}]){
+  assert.equal(nativeForegroundOwnsConnections(foreground),false);
+  let reads=0;const f=await fixture({core:{readDeployment:()=>({mode:'create-local',roles:{host:'local'},steps:[]}),readDeploymentForeground:()=>foreground},backgroundRead:()=>{reads++;return {observation:'current',status:'needs_attention',host:'unknown',gateway:'unknown'}}});
+  try{const response=await f.get('/api/snapshot');assert.equal(response.status,200);const snapshot=await response.json();assert.equal(reads,1);assert.equal(snapshot.status.background.status,'needs_attention');assert.equal(snapshot.journey.readiness.exec.status,'not_ready');assert.equal(snapshot.acceptance.complete,false)}finally{await f.cleanup()}
+ }
+});
+
+test('native lifecycle observations stay fresh and authenticated when plugin page data is damaged',async()=>{
+ let generation=1,computer=true,pluginReads=0,backgroundReads=0,foregroundReads=0;
+ const f=await fixture({core:{
+  readDeployment:()=>({mode:'create-local',roles:{host:'local',gateway:'local',computer:'requested'},steps:[]}),
+  readDeploymentForeground:()=>{foregroundReads++;return {status:'connected',observation:'authenticated_foreground_owner',host:'foreground',gateway:'foreground',computerRequested:computer,ownerGeneration:String(generation),toolHealth:'not_verified'}},
+  readDeploymentPlugin:()=>{pluginReads++;throw Error('SECRET_DAMAGED_PROFILE')},
+  readDeploymentBrowser:()=>{throw Error('unrelated_browser_must_not_be_read')},
+  readDeploymentConnectionHandoff:()=>{throw Error('unrelated_handoff_must_not_be_read')},
+ },backgroundRead:()=>{backgroundReads++;return {status:'needs_attention',observation:'current'}}});
+ try{
+  assert.equal((await fetch(f.origin+'/api/native-status')).status,401);
+  assert.equal((await f.get('/api/native-status',{Origin:'https://foreign.invalid'})).status,403);
+  assert.equal(pluginReads,0);assert.equal(foregroundReads,0);
+  const broken=await f.get('/api/snapshot');assert.equal(broken.status,409);assert.doesNotMatch(await broken.text(),/SECRET_DAMAGED_PROFILE/);assert.equal(pluginReads,1);
+  for(const expectedComputer of [true,false]){
+   computer=expectedComputer;generation++;
+   const before=foregroundReads,response=await f.get('/api/native-status');assert.equal(response.status,200);assert.equal(response.headers.get('cache-control'),'no-store');
+   const status=await response.json();assert.equal(status.foreground.computerRequested,expectedComputer);assert.equal(status.foreground.ownerGeneration,String(generation));assert.equal(status.foreground.toolHealth,'not_verified');assert.equal(status.background,null);assert.equal(foregroundReads,before+1);assert.equal(pluginReads,1);
+  }
+  assert.equal(backgroundReads,0);assert.equal(f.calls,0);
+ }finally{await f.cleanup()}
+});
+
+test('native lifecycle status retains full background observation for services and uncertain owners',async()=>{
+ for(const foreground of [{status:'using_service',observation:'authenticated_foreground_owner',host:'service',gateway:'service'},{status:'needs_attention',observation:'cross_process',host:'not_owned',gateway:'not_owned'},null]){
+  let backgroundReads=0;const f=await fixture({core:{readDeployment:()=>({mode:'create-local',roles:{host:'local'},steps:[]}),readDeploymentForeground:()=>foreground,readDeploymentPlugin:()=>{throw Error('plugin_must_not_be_read')}},backgroundRead:()=>{backgroundReads++;return {status:'needs_attention',observation:'current',host:'unknown'}}});
+  try{const response=await f.get('/api/native-status');assert.equal(response.status,200);assert.equal((await response.json()).background.host,'unknown');assert.equal(backgroundReads,1)}finally{await f.cleanup()}
+ }
+});
 
 test('loopback bootstrap serves real static UI but no unauthenticated state or mutation',async()=>{
  const f=await fixture();try{

@@ -1,13 +1,21 @@
 import AppKit
 import SwiftUI
 
+@MainActor private enum ProductBrandAsset {
+    // Bundle artwork is immutable. Decode/extract once, not on every view update.
+    static let glyph: NSImage? = {
+        guard let root = Bundle.main.resourceURL else { return nil }
+        if let prepared = NSImage(contentsOf: root.appendingPathComponent("brand/styx-plugin-icon.png")) { return prepared }
+        guard let source = NSImage(contentsOf: root.appendingPathComponent("brand/styx-icon-light-source.jpg")) else { return nil }
+        return styxBrandGlyph(source: source)
+    }()
+}
 struct ProductBrand: View {
-    @Environment(\.colorScheme) private var scheme
     var size: CGFloat = 68
     var body: some View {
-        let filename = scheme == .dark ? "styx-icon-dark-source.jpg" : "styx-icon-light-source.jpg"
-        if let root = Bundle.main.resourceURL, let image = NSImage(contentsOf: root.appendingPathComponent("brand/" + filename)) {
-            Image(nsImage: image).resizable().scaledToFill().frame(width: size, height: size).clipped().clipShape(RoundedRectangle(cornerRadius: size * 0.2)).accessibilityLabel("Styx")
+        if let image = ProductBrandAsset.glyph {
+            Image(nsImage: image).renderingMode(.template).resizable().scaledToFit()
+                .foregroundStyle(Color.primary).frame(width: size, height: size).accessibilityLabel("Styx")
         }
     }
 }
@@ -42,7 +50,8 @@ struct ProductView: View {
             ScrollView {
                 VStack(alignment: .leading, spacing: 22) {
                     if !model.loaded {
-                        ProgressView(productText("正在读取 Styx…", "Reading Styx…")).frame(maxWidth: .infinity)
+                        ProductBrand(size: 56).frame(maxWidth: .infinity)
+                        ProgressView(model.loadingMessage).frame(maxWidth: .infinity)
                         if model.error != nil { Button(productText("重试读取", "Retry reading")) { Task { await model.bootstrap() } } }
                     } else {
                         switch model.page {
@@ -266,9 +275,10 @@ struct ProductView: View {
     private var officialPanel: some View {
         ProductPanel(title: productText("3. 在 ChatGPT 完成连接", "3. Finish connecting in ChatGPT")) {
             Text(productText("① 打开 ChatGPT 插件页面，确认目标账号和工作区。", "① Open ChatGPT plugins and confirm the intended account and workspace."))
-            Text(model.pluginMode == "reuse" ? productText("② 选择已有的 Styx 插件，核对其名称与连接。", "② Select your existing Styx plugin and review its name and connection.") : productText("② 创建私有插件，填写上面的名称、描述与图标。", "② Create a private plugin using the name, description and icon above."))
-            Text(productText("③ 连接方式选择 Tunnel，填写同一个 Tunnel ID。若页面要求 Bearer Token，再从下方读取 Styx 专用凭据。", "③ Choose a Tunnel connection and enter the same Tunnel ID. If the form requests a Bearer Token, reveal the dedicated Styx credential below."))
-            Text(productText("④ 按页面提示保存、安装并启用连接，再回到这里确认。平台登录、MFA 和工作区审批需要你完成。", "④ Save, install and enable the connection as prompted, then return here. Complete any sign-in, MFA and workspace approval yourself."))
+            Text(model.pluginMode == "reuse" ? productText("② 打开已有的 Styx 插件，检查它连接的是下面这个 Tunnel。", "② Open your existing Styx plugin and check that it uses the Tunnel below.") : productText("② 点击“＋”→“添加自建 MCP 服务器”（Add custom MCP server），填写上面的名称和描述。", "② Select + → Add custom MCP server, then enter the name and description above."))
+            Text(productText("③ Connection 选择 Tunnel，选择或粘贴下面的 Tunnel ID；Authentication 选择 No authentication。运行 Key 只填在 Styx App 中。", "③ Under Connection, choose Tunnel and select or paste the Tunnel ID below. For Authentication choose No authentication. Enter the runtime key only in the Styx App."))
+            Text(model.pluginMode == "reuse" ? productText("④ 保存已有插件的连接设置，确认已安装，然后在新聊天中用 @ 选择这个 Styx 插件。", "④ Save the existing plugin's connection settings, confirm it is installed, then select that Styx plugin with @ in a new chat.") : productText("④ 核对后点击“创建为插件”（Create as a plugin），打开生成的插件并安装。然后在新聊天中用 @ 选择 Styx。", "④ Review the details and select Create as a plugin. Open the resulting plugin and install it, then select Styx with @ in a new chat."))
+            Text(productText("登录、MFA 和工作区审批需要你亲自完成。", "Complete any sign-in, MFA and workspace approval yourself.")).font(.caption).foregroundStyle(.secondary)
             HStack {
                 Button(productText("复制名称", "Copy name")) { model.copy(model.pluginName) }
                 Button(productText("复制描述", "Copy description")) { model.copy(model.pluginDescription) }
@@ -277,17 +287,12 @@ struct ProductView: View {
             if !model.connectionTunnelID.isEmpty {
                 HStack { Text(model.connectionTunnelID).font(.system(.caption, design: .monospaced)).textSelection(.enabled); Button(productText("复制 Tunnel ID", "Copy Tunnel ID")) { model.copy(model.connectionTunnelID) } }
             } else {
-                Button(productText("读取本次连接填写信息", "Read connection details")) { model.revealHandoff() }
+                Button(productText("刷新连接信息", "Refresh connection details")) { Task { await model.refresh() } }
             }
             Button(productText("打开 ChatGPT 插件", "Open ChatGPT plugins")) { model.openOfficial("https://chatgpt.com/plugins") }
-            DisclosureGroup(productText("页面要求 Bearer Token？", "Does the form request a Bearer Token?")) {
-                Button(productText("显示 Styx 专用凭据（60 秒）", "Reveal Styx credential (60 seconds)")) { model.revealHandoff() }
-                if !model.handoffCredential.isEmpty {
-                    Text(model.handoffTarget).textSelection(.enabled)
-                    SecureField("Bearer Token", text: .constant(model.handoffCredential))
-                    HStack { Button(productText("复制 Token", "Copy token")) { model.copy(model.handoffCredential, secret: true) }; Button(productText("清除", "Clear")) { model.clearSecrets() } }
-                }
-                Text(productText("这是 Styx→ChatGPT 的认证信息，与平台→Styx 的运行 Key 不同。不要发送到聊天。", "This Styx→ChatGPT credential is different from the platform→Styx runtime key. Never send it in chat.")).font(.caption).foregroundStyle(.secondary)
+            DisclosureGroup(productText("另外两个入口是做什么的？", "What are the other two options for?")) {
+                Text(productText("“创建插件”用于从需求编写技能或组合功能；“上传插件压缩包”用于导入已打包的插件与技能。连接这台 Styx 电脑，先选“添加自建 MCP 服务器”，它会创建可安装的插件。", "Create a plugin helps author skills and combined workflows. Upload plugin ZIP imports an existing package with its skills. To connect this Styx computer, start with Add custom MCP server; it creates an installable plugin.")).font(.callout).foregroundStyle(.secondary)
+                Text(productText("ZIP 可作为包含 Styx 引导技能的可选完整包，仍需完成账号侧连接与真实调用验证。", "A ZIP can optionally include the Styx onboarding skill. Account connection and a real tool-call check are still required.")).font(.caption).foregroundStyle(.secondary)
             }
             Button(productText("我已完成安装和连接", "I finished installation and connection")) { model.confirmPluginInstallation() }.disabled(model.pluginDraftEdited)
             Text(productText("这只记录你的确认；下一步会检查真实工具调用。", "This records your confirmation. The next step verifies real tool calls.")).font(.caption).foregroundStyle(.secondary)

@@ -83,7 +83,7 @@ export function readDeploymentPlugin(stateDir){
   contextChanged:!!value&&value.binding!==ctx.binding,
   export:{status:!value?.export?.sha256?'not_exported':current(value.export)?'exported':'stale',...(value?.export?.sha256?{sha256:value.export.sha256,filename:value.export.filename,verificationSource:value.export.verificationSource}:{})},
   accountActions:{upload:current(value?.accountActions?.upload)?'user_confirmed':'not_observed',installation:current(value?.accountActions?.installation)?'user_confirmed':'not_observed',connection:'not_verified',providerIdentity:'not_verified'},
-  requiresAccountAction:ctx.required,externalDiscovery:'not_performed',authentication:{declared:'bearer',tunnelWithoutManualCredential:'not_verified'}};
+  requiresAccountAction:ctx.required,externalDiscovery:'not_performed',authentication:{declared:ctx.target?'none':'not_configured',gateway:'bearer',credentialForwarding:ctx.target?'app_owned_tunnel':'not_configured',tunnelWithoutManualCredential:'not_verified'}};
 }
 export async function setDeploymentPluginProfile(stateDir,options={}){
  exact(options,['authorize','presentation','selection']);if(options.authorize!==true)fail('explicit_plugin_authorization_required');

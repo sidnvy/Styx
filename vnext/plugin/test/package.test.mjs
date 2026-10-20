@@ -110,10 +110,10 @@ test('PNG validates CRC, bounded square dimensions, chunks and bounded inflated 
  const palette=Buffer.from([255,0,0]);assert.equal(normalizePresentation({icon:icon(png({color:3,palette}))}).icon.mimeType,'image/png');
  const indexed=Buffer.alloc(49*48);indexed[1]=1;assert.throws(()=>normalizePresentation({icon:icon(png({color:3,palette,raw:indexed}))}),/palette_index/);
 });
-test('local authenticated receipt scope is explicit, retains bearer and does not claim remote tunnel verification',()=>{
+test('App-owned tunnel omits a second remote credential without claiming remote verification',()=>{
  const c={tunnelId:'tunnel_'+'a'.repeat(32)},local={...receipt(c),method:'authenticated-local-mcp-discovery'};
  const built=buildPackageFiles({connection:c,presentation:normalizePresentation()},local,{now});assert.equal(built.verificationScope,'local_gateway_only');
- const server=JSON.parse(built.files.find(f=>f.path==='mcp.json').data).mcpServers.styx;assert.equal(server.extensions['com.openai'].tunnelId,c.tunnelId);assert.equal(server.extensions['com.openai'].auth.headerScheme,'bearer');
+ const server=JSON.parse(built.files.find(f=>f.path==='mcp.json').data).mcpServers.styx;assert.equal(server.extensions['com.openai'].tunnelId,c.tunnelId);assert.deepEqual(server.extensions['com.openai'].auth,{type:'none'});
  assert.equal(buildPackageFiles({connection:{url}},receipt(),{now}).verificationScope,'supplied_discovery_receipt');
  for(const method of ['unauthenticated-discovery','tunnel-configured','authenticated-mcp-discovery-and-readonly-call'])assert.throws(()=>buildPackageFiles({connection:c},{...local,method},{now}));
  assert.throws(()=>buildPackageFiles({connection:c,token:'SECRET'},local,{now}));assert.throws(()=>buildPackageFiles({connection:c},{...local,adminToken:'SECRET'},{now}));

@@ -134,6 +134,7 @@ enum ProductRestorationPolicy {
     @Published var page: ProductPage = .welcome
     @Published var busy = false
     @Published var loaded = false
+    @Published var loadingMessage = productText("正在连接本机 Styx…", "Connecting to Styx on this Mac…")
     @Published var error: String?
     @Published var status: ProductJSON = .null
     @Published var journey: ProductJSON = .null
@@ -217,6 +218,7 @@ enum ProductRestorationPolicy {
         busy = true
         defer { busy = false }
         do {
+            loadingMessage = productText("正在连接本机 Styx…", "Connecting to Styx on this Mac…")
             session = try await client.read("session")
             label = session["defaults"]["label"].string ?? Host.current().localizedName ?? "Mac"
             try await reload()
@@ -232,19 +234,21 @@ enum ProductRestorationPolicy {
     private func reload() async throws {
         // Native permission observation must not depend on a successful Core read.
         observePermissions()
-        status = try await client.read("status")
-        journey = try await client.read("journey")["journey"]
+        loadingMessage = productText("正在核对连接状态…", "Checking current connections…")
+        let snapshot = try await client.read("snapshot")
+        status = snapshot["status"]
+        journey = snapshot["journey"]
         if deployment != nil {
             if localPrepared && deployment?.browserRequested == true {
                 // A Browser observation failure does not hide Exec or the rest
                 // of the App. Preparation takes a fresh authoritative reading.
-                browserObservation = (try? await client.read("browser")["browser"]) ?? .null
+                browserObservation = snapshot["browser"]
             } else { browserObservation = .null }
-            let latest = try await client.read("acceptance")["acceptance"]
+            let latest = snapshot["acceptance"]
             if latest["challenge"]["id"] != acceptance["challenge"]["id"] { desktopValue = "" }
             acceptance = latest
             if !joined {
-                plugin = try await client.read("plugin")["plugin"]
+                plugin = snapshot["plugin"]
                 if !pluginDraftEdited {
                     pluginMode = plugin["selection"]["mode"].string ?? "create"
                     pluginName = plugin["presentation"]["displayName"].string ?? "Styx"
@@ -259,11 +263,8 @@ enum ProductRestorationPolicy {
             // Startup observation is independent of setup readiness. A legacy
             // recovery definition or temporarily unavailable launchd must not
             // prevent opening the rest of the App to inspect and recover it.
-            do {
-                let lifecycle = try await client.read("app/lifecycle")["lifecycle"]
-                let observed = lifecycle["loginAtStartup"].string ?? "unknown"
-                loginStartup = ["enabled", "disabled", "not_installed"].contains(observed) ? observed : "unknown"
-            } catch { loginStartup = "unknown" }
+            let observed = snapshot["lifecycle"]["loginAtStartup"].string ?? "unknown"
+            loginStartup = ["enabled", "disabled", "not_installed"].contains(observed) ? observed : "unknown"
         } else { loginStartup = "unknown" }
         observePermissions()
         if !restoredPage {

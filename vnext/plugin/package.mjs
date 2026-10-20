@@ -129,7 +129,9 @@ export function buildPackageFiles(config,receipt,{now=Date.now()}={}){
  for(const key of ['displayName','shortDescription','longDescription'])ui[key]=presentation[key];
  if(presentation.icon){ui.logo='./assets/icon.png';ui.composerIcon='./assets/icon.png';}
  const server={type:'streamable-http',...('url'in selected?selected:{}),extensions:{'com.openai':{
-  ...('tunnelId'in selected?selected:{}),auth:{type:'api_key',headerScheme:'bearer'}
+  // The App-owned tunnel adds the Gateway credential for discovery and calls.
+  // A direct HTTPS connection still needs its own remote bearer contract.
+  ...('tunnelId'in selected?selected:{}),auth:'tunnelId'in selected?{type:'none'}:{type:'api_key',headerScheme:'bearer'}
  }}};
  const mcp={$schema:'https://agent-plugins.org/schemas/1.0.0/mcp.schema.json',mcpServers:{styx:server}};
  const json=data=>Buffer.from(JSON.stringify(data,null,2)+'\n');

@@ -2,6 +2,57 @@
 
 This is a development integration checkpoint, not a production release or complete first-install acceptance.
 
+## Branding, read latency and ChatGPT entry correction
+
+The macOS bundle previously resized the complete dark JPEG, preserving both the
+outer white presentation area and black tile around the glyph. A shared native
+glyph extractor now supplies the App/menu-bar artwork and a build-time renderer
+for transparent black glyph PNGs and the ICNS size set. The supplied source JPEGs
+remain unchanged. Isolated rendering/ICNS conversion and visual inspection passed;
+the 512px icon has a transparent perimeter and only the sphere/wave mark.
+
+Native bootstrap previously read session/status/journey/browser/acceptance/plugin
+serially, repeatedly scanning background services and verifying installed runtimes.
+The new authenticated snapshot deduplicates observations within one response.
+Only a fresh, authenticated, scope-checked App foreground owner can omit unused
+service scans; omitted services remain `not_observed`. Services and uncertain
+owners retain full observations. Independent `native-status` keeps component
+lifecycle and permission recovery available if plugin presentation is corrupt.
+Writes retain their existing validation. The App shows its current loading stage
+and bounded read failures instead of an indefinite generic spinner.
+
+Read-only PilotMac comparison against the existing deployment measured the old
+read chain at **6940/7746ms** and the new snapshot at **224/223ms**, with unchanged
+installed executable/configuration/identity/certificate hashes. These times exclude
+cold App/Node startup, signature verification, foreground restoration, tunnel
+resume and native window layout. They are not whole-App launch measurements.
+
+ChatGPT guidance now names the actual default entry: **Add custom MCP server →
+Tunnel → same Tunnel ID → No authentication → Create as a plugin → Install**.
+Reuse preserves the existing plugin rather than directing a second creation.
+The App-owned tunnel already injects the model credential for discovery and calls;
+the Gateway continues to require its Bearer, while the runtime API key stays in
+Styx. A Tunnel ZIP now declares `auth.type: none`; direct HTTPS ZIPs keep their
+separate Bearer contract. ZIP import remains optional for the packaged onboarding
+skill, and does not replace actual account connection. Official sources are linked
+in `plugin/README.md`; no account plugin was created or installed by this work.
+
+Integrated onboarding regression: **343 passed, 10 skipped, zero failures** before
+the independent-lifecycle follow-up; the final server-focused suite is **38/38 passed**.
+Plugin/Tunnel/macOS packaging tests: **47 passed, one native-platform skip**.
+Production and testing native variants compile with warnings as errors. The first
+integrated native editing run passed; a later repeat could not become key/active,
+and a read-only console observation confirmed PilotMac was locked. The final
+interactive editing/window rerun remains pending an unlocked desktop. Injected
+permission-state tests are not actual TCC or Cua acceptance.
+
+These changes are **source/resource validation only**: no new full installer was
+created and the installed dev6 App was not replaced. Existing permission grants,
+identity and pairing remain intact. Full cold launch, installed appearance, actual
+Cua actions and target ChatGPT account acceptance remain unverified. Evidence:
+parent task `outputs/logo-startup-plugin-20261020/` and
+`outputs/v6-startup-read-20261020/read-timing-receipt.json`.
+
 ## PilotMac permission recognition — same dev6 App
 
 The user's enabled System Settings switches did not match the running development

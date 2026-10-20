@@ -9,6 +9,8 @@ import {crc32,normalizePresentation} from '../plugin/package.mjs';
 
 export const MAC_BUNDLE_ID='app.styx.host';
 const SOURCE=fileURLToPath(new URL('./macos/Styx.swift',import.meta.url));
+const GLYPH=fileURLToPath(new URL('./macos/BrandGlyph.swift',import.meta.url));
+const ICON_RENDERER=fileURLToPath(new URL('./macos/render-brand-icons.swift',import.meta.url));
 const PRODUCT_UI=fileURLToPath(new URL('./macos/product-ui/',import.meta.url));
 const BRAND=fileURLToPath(new URL('../assets/brand/',import.meta.url));
 const LICENSES=fileURLToPath(new URL('../licenses/',import.meta.url));
@@ -114,7 +116,7 @@ export function buildMacApp({app,cuaBinary,version,identity,teamID,notaryProfile
   assert(typeof app==='string'&&path.isAbsolute(app)&&path.basename(app)==='Styx.app','invalid_styx_app_path');
   assert(typeof cuaBinary==='string'&&path.isAbsolute(cuaBinary),'absolute_cua_binary_required');
   assert(!fs.existsSync(app)&&!fs.existsSync(app+'.notarization.zip'),'app_destination_exists');
-  const productSources=fs.readdirSync(PRODUCT_UI).filter(n=>n.endsWith('.swift')).sort().map(n=>path.join(PRODUCT_UI,n));
+  const productSources=[GLYPH,...fs.readdirSync(PRODUCT_UI).filter(n=>n.endsWith('.swift')).sort().map(n=>path.join(PRODUCT_UI,n))];
   assert(productSources.length>0,'native_product_sources_required');
   const buildRoot=fs.mkdtempSync(path.join(os.tmpdir(),'styx-native-build-'));
   const entry=path.join(buildRoot,'main.swift');fs.copyFileSync(SOURCE,entry);
@@ -140,14 +142,15 @@ export function buildMacApp({app,cuaBinary,version,identity,teamID,notaryProfile
       fs.copyFileSync(path.join(LICENSES,name),path.join(notices,name),fs.constants.COPYFILE_EXCL);
     const brand=path.join(app,'Contents/Resources/brand');fs.mkdirSync(brand);
     for(const name of ['styx-icon-dark-source.jpg','styx-icon-light-source.jpg'])fs.copyFileSync(path.join(BRAND,name),path.join(brand,name));
-    execFileSync('/usr/bin/sips',['-s','format','png','-z','512','512',path.join(BRAND,'styx-icon-dark-source.jpg'),'--out',path.join(brand,'styx-plugin-icon.png')],{stdio:'pipe'});
+    const iconset=path.join(buildRoot,'Styx.iconset');fs.mkdirSync(iconset);
+    const iconSource=path.join(buildRoot,'icon-renderer');fs.mkdirSync(iconSource);
+    const iconEntry=path.join(iconSource,'main.swift'),iconBinary=path.join(iconSource,'render-icons');
+    fs.copyFileSync(ICON_RENDERER,iconEntry);
+    execFileSync('/usr/bin/xcrun',macSwiftBuildArguments({source:iconEntry,additionalSources:[GLYPH],output:iconBinary,sdkPath,
+      ...(sdkPath?{moduleCachePath:path.join(buildRoot,'icon-module-cache')}:{})}),{stdio:'inherit',timeout:180000});
+    execFileSync(iconBinary,[path.join(BRAND,'styx-icon-light-source.jpg'),brand,iconset],{stdio:'pipe',timeout:30000});
     const pluginIcon=path.join(brand,'styx-plugin-icon.png');
     fs.writeFileSync(pluginIcon,prepareMacPluginIcon(fs.readFileSync(pluginIcon)));
-    const iconset=path.join(buildRoot,'Styx.iconset');fs.mkdirSync(iconset);
-    for(const size of [16,32,128,256,512])for(const scale of [1,2]){
-      const pixels=String(size*scale),name=`icon_${size}x${size}${scale===2?'@2x':''}.png`;
-      execFileSync('/usr/bin/sips',['-s','format','png','-z',pixels,pixels,path.join(BRAND,'styx-icon-dark-source.jpg'),'--out',path.join(iconset,name)],{stdio:'pipe'});
-    }
     execFileSync('/usr/bin/iconutil',['-c','icns',iconset,'-o',path.join(app,'Contents/Resources/Styx.icns')],{stdio:'pipe'});
     const macos=path.join(app,'Contents/MacOS');
     fs.mkdirSync(macos,{recursive:true});

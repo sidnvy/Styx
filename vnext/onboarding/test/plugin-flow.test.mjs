@@ -44,6 +44,7 @@ test('real TLS MCP discovery exports only customized plugin files; account uploa
  fs.mkdirSync(path.join(f.stateDir,'tunnel'),{mode:0o700});fs.writeFileSync(path.join(f.stateDir,'tunnel','connection.json'),JSON.stringify({schema:1,tunnelId:'tunnel_'+'a'.repeat(32),keyFile:'key-'+'a'.repeat(32),autoStart:false}),{mode:0o600});
  await setDeploymentPluginProfile(f.stateDir,options);
  const result=await exportDeploymentPlugin(f.stateDir,{authorize:true});
+ assert.deepEqual(readDeploymentPlugin(f.stateDir).authentication,{declared:'none',gateway:'bearer',credentialForwarding:'app_owned_tunnel',tunnelWithoutManualCredential:'not_verified'});
  assert.equal(result.accountConnection,'NOT RUN');assert.equal(result.verificationSource,'authenticated_local_gateway_discovery');
   const zip=path.join(f.root,'styx-native.zip');fs.writeFileSync(zip,result.archive);
   const ui=await createOnboardingServer({stateDir:f.stateDir});t.after(()=>ui.close());
@@ -60,6 +61,7 @@ with zipfile.ZipFile(sys.argv[1]) as z:
  print(json.dumps({'names':z.namelist(),'manifest':json.loads(z.read('styx-native/plugin.json')),'mcp':json.loads(z.read('styx-native/mcp.json'))}))`,zip],{encoding:'utf8'}));
  assert.equal(inspected.manifest.extensions['com.openai'].interface.displayName,'我的 Styx');assert.ok(inspected.names.every(n=>n.startsWith('styx-native/')));
  const combined=result.archive.toString('latin1');for(const secret of ['model.token','admin.token',fs.readFileSync(path.join(f.stateDir,'gateway/model.token'),'utf8').trim(),fs.readFileSync(path.join(f.stateDir,'gateway/admin.token'),'utf8').trim()])assert.ok(!combined.includes(secret));
+ assert.deepEqual(inspected.mcp.mcpServers.styx.extensions['com.openai'].auth,{type:'none'});
  assert.equal(readDeploymentPlugin(f.stateDir).accountActions.installation,'not_observed');
  const url='https://chatgpt.com/plugins/styx-my-private';
  const direct=await recordDeploymentPluginAction(f.stateDir,{authorize:true,stage:'installation',pluginUrl:url});

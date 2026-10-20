@@ -18,6 +18,7 @@ const STATES=new Set(['pending','running','succeeded','failed','uncertain','bloc
 const ERRORS=new Set(['interrupted_or_in_progress_do_not_replay','step_failed_inspect_local_evidence_no_automatic_replay']);
 const DOCTOR_BLOCKERS=new Set(['signed_install_unavailable','invalid_host_configuration','host_credential_unavailable','codex_executor_unavailable','signed_computer_runtime_unavailable','macos_requires_embedded_cua_socket']);
 const MODES=new Set(['create-local','join-existing']);
+const LOCAL_SETUP_STEPS=new Set([...STEPS].filter(id=>!id.startsWith('host.service.')));
 const equal=(a,b)=>typeof a==='string'&&Buffer.byteLength(a)===Buffer.byteLength(b)&&timingSafeEqual(Buffer.from(a),Buffer.from(b));
 const fail=code=>{throw Error(code)};
 export function browserOrigin(value){
@@ -29,6 +30,18 @@ export function gatewayServiceUiCapabilities(platform,available){return {support
 export function nativeBrowserPrepared(deployment,browser){
  if(deployment?.roles?.browser!=='requested')return true;
  return browser?.configured===true&&(browser.status==='prepared'&&browser.approved===true||browser.status==='not_approved'&&browser.approved===false);
+}
+// Reopening needs the preparation journal, not a complete diagnostics scan of
+// services, the tunnel and account evidence. Actual start still performs its
+// own signature, ownership, identity and connection checks.
+export function nativeLocalPrepared(deployment){
+ const steps=(deployment?.steps??[]).filter(step=>LOCAL_SETUP_STEPS.has(step.id));
+ return steps.length>0&&steps.every(step=>step.status==='succeeded');
+}
+export function nativeForegroundOwnsConnections(foreground){
+ return ['current_process','authenticated_foreground_owner'].includes(foreground?.observation)
+  &&['started','connected'].includes(foreground?.status)
+  &&foreground.host==='foreground'&&['foreground','external'].includes(foreground.gateway);
 }
 export function publicService(value){
  if(!value||typeof value!=='object')return null;const out={};
@@ -109,6 +122,56 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
  const linkApi=async()=>pairingLinks??await import('./pairing-links.mjs');
  const gatewayServiceCapability=gatewayServiceUiCapabilities(process.platform,typeof gatewayService==='function'||fs.existsSync(new URL('./gateway-service.mjs',import.meta.url)));
  const gatewayServiceAvailable=gatewayServiceCapability.supported;
+ const readStatus=async(observedApi=api,observeBackground=backgroundRead,observeTunnel=tunnelRead)=>{
+  try{
+   const deployment=publicDeployment(await observedApi.readDeployment(stateDir)),plan=await observedApi.planDeployment(stateDir);
+   const dependencies=Array.isArray(plan?.steps)?plan.steps.filter(s=>STEPS.has(s.id)).map(s=>({id:s.id,requires:Array.isArray(s.requires)?s.requires.filter(id=>STEPS.has(id)):[]})):[];
+   const scope=plan?.ownerPairingScope;
+   const ownerPairingScope=scope&&typeof scope.gatewayUrl==='string'&&typeof scope.label==='string'&&typeof scope.enableComputer==='boolean'?{gatewayUrl:scope.gatewayUrl,label:scope.label,enableComputer:scope.enableComputer,enableBrowser:scope.enableBrowser===true}:null;
+   let background=null;try{background=await observeBackground(stateDir)}catch{}
+   let tunnelStatus=null;try{tunnelStatus=tunnel?await observeTunnel():null}catch{}
+   let deviceCapabilities=null;try{deviceCapabilities=readDeploymentCapabilities(stateDir)}catch{}
+   let foreground=null;try{foreground=await observedApi.readDeploymentForeground?.(stateDir)}catch{}
+   let ownedForeground=null;try{ownedForeground=observedApi.readOwnedDeploymentForeground?.(stateDir)}catch{}
+   return {deployment,dependencies,ownerPairingScope,services,background,foreground,ownedForeground,deviceCapabilities,tunnel:tunnelStatus,nativeStartup,busy};
+  }catch(error){if(!fs.existsSync(stateDir))return {deployment:null,dependencies:[],busy};throw error}
+ };
+ const readNativeStatus=async()=>{
+  // Component lifetime and permission recovery must remain observable even
+  // when unrelated page data (such as a damaged plugin profile) cannot load.
+  // Use a fresh, authenticated foreground observation on every request.
+  let foreground=null;try{foreground=await api.readDeploymentForeground?.(stateDir)}catch{}
+  return readStatus({...api,readDeploymentForeground:()=>foreground},()=>nativeForegroundOwnsConnections(foreground)?null:backgroundRead(stateDir));
+ };
+ const readSnapshot=async()=>{
+  // Deduplication lasts for this one response only. Every refresh reads fresh
+  // Core evidence; no running state, grant or account proof is cached.
+  const reads=new Map(),once=(name,fn)=>{
+   if(!reads.has(name))reads.set(name,Promise.resolve().then(fn));
+   return reads.get(name);
+  };
+  const observedApi={...api};
+  for(const name of ['readDeployment','planDeployment','readDeploymentForeground','readDeploymentAcceptance','readDeploymentConnectionHandoff','readDeploymentOnboardingPreference','readDeploymentPermissions','readDeploymentPlugin']){
+   if(typeof api[name]==='function')observedApi[name]=()=>once(name,()=>api[name](stateDir));
+  }
+  let foreground=null;try{foreground=await observedApi.readDeploymentForeground?.(stateDir)}catch{}
+  // Current foreground ownership is already authenticated and scope-checked
+  // by Core. Scanning unused services cannot make these App-owned connections
+  // more current. Service reuse or uncertain owners retain full observation.
+  // Omission stays not_observed; it never becomes background-service readiness.
+  const observeBackground=()=>once('background',()=>nativeForegroundOwnsConnections(foreground)?null:backgroundRead(stateDir));
+  const observeTunnel=()=>once('tunnel',()=>tunnelRead());
+  const status=await readStatus(observedApi,observeBackground,observeTunnel);
+  const journey=await readOnboardingJourney(stateDir,{core:observedApi,backgroundRead:observeBackground,tunnelRead:observeTunnel});
+  let browser=null,plugin=null,acceptance=null,lifecycle=null;
+  if(status.deployment){
+   if(nativeLocalPrepared(status.deployment)&&status.deployment.roles?.browser==='requested')try{browser=await api.readDeploymentBrowser?.(stateDir)}catch{}
+   acceptance=publicAcceptance(typeof observedApi.readDeploymentAcceptance==='function'?await observedApi.readDeploymentAcceptance(stateDir):null,{includeChallenge:true});
+   if(status.deployment.mode!=='join-existing'&&typeof observedApi.readDeploymentPlugin==='function')plugin=await observedApi.readDeploymentPlugin(stateDir);
+  }
+  if(macPreviewApp&&typeof api.readDeploymentAppLifecycle==='function')try{lifecycle=await api.readDeploymentAppLifecycle(stateDir,{trustedAppPath:macPreviewApp.path})}catch{}
+  return {status,journey,browser,acceptance,plugin,lifecycle};
+ };
  const assets=new Map([['/',['index.html','text/html; charset=utf-8']],['/ui/app.mjs',['app.mjs','text/javascript; charset=utf-8']],['/ui/style.css',['style.css','text/css; charset=utf-8']]]);
  const server=http.createServer(async(req,res)=>{
   const send=(status,value)=>{res.writeHead(status,{'Content-Type':'application/json; charset=utf-8'});res.end(JSON.stringify(value))};
@@ -138,18 +201,13 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
    try{send(200,{plugin:await api.readDeploymentPlugin(stateDir)})}catch{send(409,{error:'plugin_state_unavailable'})}return;
   }
   if(req.method==='GET'&&url.pathname==='/api/status'){
-   try{
-    const deployment=publicDeployment(await api.readDeployment(stateDir)),plan=await api.planDeployment(stateDir);
-    const dependencies=Array.isArray(plan?.steps)?plan.steps.filter(s=>STEPS.has(s.id)).map(s=>({id:s.id,requires:Array.isArray(s.requires)?s.requires.filter(id=>STEPS.has(id)):[]})):[];
-    const scope=plan?.ownerPairingScope;
-    const ownerPairingScope=scope&&typeof scope.gatewayUrl==='string'&&typeof scope.label==='string'&&typeof scope.enableComputer==='boolean'?{gatewayUrl:scope.gatewayUrl,label:scope.label,enableComputer:scope.enableComputer,enableBrowser:scope.enableBrowser===true}:null;
-    let background=null;try{background=await backgroundRead(stateDir)}catch{}
-    let tunnelStatus=null;try{tunnelStatus=tunnel?await tunnelRead():null}catch{}
-    let deviceCapabilities=null;try{deviceCapabilities=readDeploymentCapabilities(stateDir)}catch{}
-    let foreground=null;try{foreground=await api.readDeploymentForeground?.(stateDir)}catch{}
-    let ownedForeground=null;try{ownedForeground=api.readOwnedDeploymentForeground?.(stateDir)}catch{}
-    send(200,{deployment,dependencies,ownerPairingScope,services,background,foreground,ownedForeground,deviceCapabilities,tunnel:tunnelStatus,nativeStartup,busy});
-   }catch{if(!fs.existsSync(stateDir))send(200,{deployment:null,dependencies:[],busy});else send(409,{error:'deployment_unavailable'})}return;
+   try{send(200,await readStatus())}catch{send(409,{error:'deployment_unavailable'})}return;
+  }
+  if(req.method==='GET'&&url.pathname==='/api/native-status'){
+   try{send(200,await readNativeStatus())}catch{send(409,{error:'deployment_unavailable'})}return;
+  }
+  if(req.method==='GET'&&url.pathname==='/api/snapshot'){
+   try{send(200,await readSnapshot())}catch{send(409,{error:'observation_unavailable'})}return;
   }
   if(req.method==='GET'&&url.pathname==='/api/browser'){try{if(typeof api.readDeploymentBrowser!=='function')fail('browser_preparation_unavailable');send(200,{browser:await api.readDeploymentBrowser(stateDir)});}catch{send(409,{error:'browser_preparation_unavailable'})}return;}
   if(req.method==='GET'&&['/api/journey','/api/diagnostics','/api/acceptance'].includes(url.pathname)){
@@ -314,10 +372,9 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
  // uncertain owners; it never regenerates pairing identities on reconnect.
  if(macPreviewApp&&fs.existsSync(path.join(stateDir,'deployment.json'))&&typeof api.startDeploymentForeground==='function'){
   try{
-   const j=await readOnboardingJourney(stateDir,journeyOptions);
    const deployment=await api.readDeployment(stateDir);
    const browser=deployment.roles?.browser==='requested'?await api.readDeploymentBrowser?.(stateDir):null;
-   if(j.steps.some(step=>step.id==='local_setup'&&step.status==='completed')&&nativeBrowserPrepared(deployment,browser)){
+   if(nativeLocalPrepared(deployment)&&nativeBrowserPrepared(deployment,browser)){
     await api.startDeploymentForeground(stateDir,{authorize:true});nativeStartup={status:'started',observation:'current_process'};
    }else nativeStartup={status:'preparation_required',observation:'current_process'};
   }catch{nativeStartup={status:'reconciliation_required',observation:'current_process'};}
