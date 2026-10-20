@@ -218,6 +218,15 @@ export async function readDeploymentDevices(d){
  const rows=g.controller?g.controller.devices():await ownerCommand(g.owner,'devices');
  return rows.filter(r=>r.status==='approved').map(r=>({device_id:r.device_id,label:r.label,platform:r.platform,is_default:r.is_default===true,computer:r.capabilities?.computer===true,browser:r.capabilities?.browser===true}));
 }
+// Revocation uses the existing owner controller and durable tombstone. It does
+// not delete the Host identity or silently enroll replacement credentials.
+export async function revokeDeploymentDevice(d,options={}){
+ exact(options,['authorize','deviceId']);
+ if(options.authorize!==true||!/^styx-[a-f0-9]{24}$/.test(options.deviceId??''))fail('explicit_device_revocation_required');
+ const g=ownedGateway(d),release=lock(d);
+ try{return g.controller?g.controller.revoke({device_id:options.deviceId}):await ownerCommand(g.owner,'revoke',[options.deviceId]);}
+ finally{release();}
+}
 export async function setDeploymentDefault(d,{authorize=false,deviceId}={}){
  if(authorize!==true||!/^styx-[a-f0-9]{24}$/.test(deviceId??''))fail('explicit_default_device_selection_required');
  const g=ownedGateway(d),release=lock(d);
@@ -312,7 +321,7 @@ export {planNativeSupervisorMigration,applyNativeSupervisorMigration,rollbackNat
 
 export {inspectPairingLink,acceptPairingLink} from './pairing-links.mjs';
 
-export {planHostUpdate,readHostUpdate} from './host-update.mjs';
+export {planHostUpdate,readHostUpdate,applyHostUpdate,recoverHostUpdate} from './host-update.mjs';
 
 export {readDeploymentAcceptance,beginDeploymentAcceptance,confirmDeploymentAcceptance,recordDeploymentDesktopReadback,readDeploymentConnectionHandoff,prepareDeploymentConnectionHandoff} from './account-acceptance.mjs';
 export {readDeploymentPlugin,setDeploymentPluginProfile,exportDeploymentPlugin,recordDeploymentPluginAction} from './plugin-flow.mjs';
@@ -326,3 +335,5 @@ export function setDeploymentOnboardingPreference(stateDir,options={}){
  exact(options,['background','authorize']);if(options.authorize!==true||!['foreground','login'].includes(options.background))fail('explicit_onboarding_background_choice_required');
  const release=lock(stateDir);try{const {state}=load(stateDir);state.onboardingDecisions={...state.onboardingDecisions,background:{choice:options.background,configSha256:state.configSha256,at:new Date().toISOString()}};write(filename(stateDir,'state.json'),state);return {...readDeploymentOnboardingPreference(stateDir),serviceMutation:'NOT RUN'};}finally{release()}
 }
+
+export {readDeploymentAppLifecycle,controlDeploymentAppLifecycle} from './app-lifecycle.mjs';

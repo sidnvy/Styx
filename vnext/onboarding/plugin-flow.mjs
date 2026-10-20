@@ -79,7 +79,7 @@ export function readDeploymentPlugin(stateDir){
  const ctx=context(stateDir),value=ctx.required?load(stateDir):null;
  const presentation=value?.presentation??normalizePresentation(),chosen=value?.selection??{mode:'create',accountLabel:'',pluginUrl:''};
  const current=record=>!!value&&record?.binding===ctx.binding&&record?.profileHash===profileHash(value);
- return {schema:1,required:ctx.required,presentation,selection:chosen,profileSaved:!!value,
+ return {schema:1,required:ctx.required,presentation,selection:chosen,profileSaved:!!value,connection:ctx.target??null,
   contextChanged:!!value&&value.binding!==ctx.binding,
   export:{status:!value?.export?.sha256?'not_exported':current(value.export)?'exported':'stale',...(value?.export?.sha256?{sha256:value.export.sha256,filename:value.export.filename,verificationSource:value.export.verificationSource}:{})},
   accountActions:{upload:current(value?.accountActions?.upload)?'user_confirmed':'not_observed',installation:current(value?.accountActions?.installation)?'user_confirmed':'not_observed',connection:'not_verified',providerIdentity:'not_verified'},

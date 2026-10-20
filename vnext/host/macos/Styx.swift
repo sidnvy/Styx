@@ -414,12 +414,17 @@ final class SetupWindowController: NSWindowController, WKNavigationDelegate, WKU
     }
 }
 
-final class StyxDelegate: NSObject, NSApplicationDelegate {
+@MainActor final class StyxDelegate: NSObject, NSApplicationDelegate {
     var setupProcess: Process?
     var setupInput: Pipe?
     var setupOutput: Pipe?
     var setupURL: URL?
+    #if STYX_PRODUCT_UI
+    var setupWindow: ProductWindowController?
+    #else
     var setupWindow: SetupWindowController?
+    #endif
+    var terminationApproved = false
     var setupBuffer = ""
     var setupOpenRequested = false
     var setupStatusLine: NSMenuItem?
@@ -447,7 +452,10 @@ final class StyxDelegate: NSObject, NSApplicationDelegate {
         item.button?.title = "Styx"
         let menu = NSMenu()
         statusLine = menu.addItem(withTitle: "Starting…", action: nil, keyEquivalent: "")
-        menu.addItem(withTitle: "Setup / Settings…", action: #selector(openSettings), keyEquivalent: ",")
+        menu.addItem(withTitle: "Open Styx…", action: #selector(openSettings), keyEquivalent: "o")
+        #if STYX_PRODUCT_UI
+        menu.addItem(withTitle: "Settings…", action: #selector(openProductPreferences), keyEquivalent: ",")
+        #endif
         setupStatusLine = menu.addItem(withTitle: "Local setup is not running", action: nil, keyEquivalent: "")
         menu.addItem(NSMenuItem.separator())
         menu.addItem(withTitle: "Request macOS permissions…", action: #selector(requestPermissions), keyEquivalent: "")
@@ -523,7 +531,13 @@ final class StyxDelegate: NSObject, NSApplicationDelegate {
         try? input.fileHandleForReading.close(); try? output.fileHandleForWriting.close()
     }
     func showSetup(_ url: URL) {
-        if setupWindow == nil { setupWindow = SetupWindowController(sessionURL: url) }
+        if setupWindow == nil {
+            #if STYX_PRODUCT_UI
+            setupWindow = ProductWindowController(sessionURL: url)
+            #else
+            setupWindow = SetupWindowController(sessionURL: url)
+            #endif
+        }
         setupWindow?.present()
         setupOpenRequested = false
         UserDefaults.standard.set(true, forKey: setupPreference)
@@ -536,6 +550,13 @@ final class StyxDelegate: NSObject, NSApplicationDelegate {
             alert.runModal()
         }
     }
+    #if STYX_PRODUCT_UI
+    @objc func openProductPreferences() {
+        openSettings()
+        setupWindow?.showPreferences()
+    }
+    #endif
+    func applicationShouldTerminateAfterLastWindowClosed(_ sender: NSApplication) -> Bool { false }
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         openSettings(); return true
     }
@@ -587,7 +608,7 @@ final class StyxDelegate: NSObject, NSApplicationDelegate {
         lifetimeWriter = lifetime.fileHandleForWriting
         daemon = child; phase = "starting"
         deadline = Date().addingTimeInterval(15)
-        timer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in self?.poll() }
+        timer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in Task { @MainActor in self?.poll() } }
     }
     func poll() {
         guard let runtime = runtime, let daemon = daemon, daemon.isRunning else { return }
@@ -655,11 +676,32 @@ final class StyxDelegate: NSObject, NSApplicationDelegate {
     }
     @objc func quit() { NSApp.terminate(nil) }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        #if STYX_PRODUCT_UI
+        if !terminationApproved, let url = setupURL {
+            if setupWindow == nil { setupWindow = ProductWindowController(sessionURL: url) }
+            setupWindow?.prepareToQuit { [weak self] approved in
+                guard let owner = self else { sender.reply(toApplicationShouldTerminate: false); return }
+                owner.terminationApproved = approved
+                if approved { owner.stopSetup(); owner.stop() }
+                sender.reply(toApplicationShouldTerminate: approved)
+            }
+            return .terminateLater
+        }
+        #endif
         stopSetup(); stop(); return .terminateNow
     }
 }
 
 #if STYX_TESTING
+#if STYX_PRODUCT_UI
+if CommandLine.arguments.count == 4 && CommandLine.arguments[1] == "--product-window-fixture" {
+    let input = URL(fileURLWithPath: CommandLine.arguments[2])
+    let snapshot = URL(fileURLWithPath: CommandLine.arguments[3])
+    guard let line = try? String(contentsOf: input, encoding: .utf8),
+          let sessionURL = setupSessionURL("STYX_SETUP_URL\t" + line.trimmingCharacters(in: .whitespacesAndNewlines)) else { exit(2) }
+    MainActor.assumeIsolated { ProductWindowController.runIsolatedSmoke(sessionURL: sessionURL, snapshot: snapshot) }
+}
+#endif
 // Opt-in native WebKit acceptance against a fresh private test server only.
 if CommandLine.arguments.count == 4 && CommandLine.arguments[1] == "--setup-window-fixture" {
     let input = URL(fileURLWithPath: CommandLine.arguments[2])
@@ -709,6 +751,9 @@ if CommandLine.arguments.count == 4 && CommandLine.arguments[1] == "--liveness-o
 
 // Runs without starting NSApplication, a daemon, or permission prompts in CI.
 if CommandLine.arguments.contains("--self-test") {
+    #if STYX_PRODUCT_UI
+    try productCoreSelfTest()
+    #endif
     // Parser-only assertions: no code signature checks, files, Host child,
     // NSApplication, Cua, or OS permission APIs are reached by these cases.
     let service = ["Styx", "--host-service", "ABCDEFGHIJ", "/private/styx/node", "/private/styx", "/private/host.json", "/private/publisher.pem"]
@@ -875,8 +920,10 @@ do {
     fputs("Styx native Host supervisor refused its signed runtime configuration.\n", stderr)
     exit(2)
 }
-let app = NSApplication.shared
-let delegate = StyxDelegate()
-app.delegate = delegate
-app.setActivationPolicy(.accessory)
-app.run()
+MainActor.assumeIsolated {
+    let app = NSApplication.shared
+    let delegate = StyxDelegate()
+    app.delegate = delegate
+    app.setActivationPolicy(.accessory)
+    withExtendedLifetime(delegate) { app.run() }
+}

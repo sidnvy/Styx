@@ -10,7 +10,7 @@ import {createHash,createPublicKey,generateKeyPairSync,sign,randomUUID} from 'no
 import {ensurePrivateDirectory} from '../../host/private-storage.mjs';
 import {main} from '../cli.mjs';
 import {ownerCommand} from '../../gateway/enroll-admin.mjs';
-import {createDeployment,readDeployment,planDeployment,advanceDeployment,startDeploymentGateway,stopDeploymentGateway,validateDeployment,controlDeploymentHostService,createDeploymentPairingLink,listDeploymentPending,approveDeploymentPending,localGatewayAddresses,readDeploymentDevices,setLocalDeploymentDefault,setDeploymentDefault,readDeploymentBrowser,prepareDeploymentBrowser} from '../core.mjs';
+import {createDeployment,readDeployment,planDeployment,advanceDeployment,startDeploymentGateway,stopDeploymentGateway,validateDeployment,controlDeploymentHostService,createDeploymentPairingLink,listDeploymentPending,approveDeploymentPending,localGatewayAddresses,readDeploymentDevices,revokeDeploymentDevice,setLocalDeploymentDefault,setDeploymentDefault,readDeploymentBrowser,prepareDeploymentBrowser} from '../core.mjs';
 const sha=b=>createHash('sha256').update(b).digest('hex');
 async function fixture(t,{browserPreparationModule}={}){
  const root=path.join(os.tmpdir(),'styx-onboarding-'+randomUUID());ensurePrivateDirectory(root);t.after(async()=>{const d=path.join(root,'deployment');if(fs.existsSync(d))await stopDeploymentGateway(d);fs.rmSync(root,{recursive:true,force:true});});
@@ -315,4 +315,21 @@ test('Linux headless Host preparation and Browser pairing do not require Cua rea
  const prepared=await main(['advance',f.stateDir,'gateway.prepare','gateway.start','gateway.verify','host.prepare']);assert.equal(steps(prepared)['host.prepare'].status,'succeeded');assert.equal(prepared.roles.browser,'requested');assert.equal(prepared.roles.computer,'requested');assert.equal(prepared.roles.readiness,'not_inferred');
  const paired=await main(['advance',f.stateDir,'host.pair','--approve-local-device']);assert.equal(steps(paired)['host.pair'].status,'succeeded');assert.equal(steps(paired)['host.doctor'].status,'pending');
  const base=f.config.host.baseDir,host=JSON.parse(fs.readFileSync(path.join(base,'device/host.json'))),receipt=JSON.parse(fs.readFileSync(path.join(base,'setup-receipt.json')));assert.equal(host.browser.enabled,true);assert.equal(host.browser.headless,true);assert.equal(host.computer.enabled,true);assert.equal(receipt.native_permissions,'NOT RUN');assert.equal(paired.accountAcceptance,'NOT RUN');
+});
+
+test('Core and CLI revoke approved identity and persist denial across Gateway restart',{skip:process.platform!=='linux'},async t=>{
+ const f=await fixture(t);createDeployment(f.configFile,{stateDir:f.stateDir});
+ const s=await advanceDeployment(f.stateDir,{authorize:['gateway.prepare','gateway.start','gateway.verify','host.prepare','host.invite','host.request','host.claim']});
+ const pending=steps(s)['host.request'].evidence;
+ await approveDeploymentPending(f.stateDir,{authorize:true,requestId:pending.request_id,fingerprint:pending.fingerprint,enableComputer:false});
+ await advanceDeployment(f.stateDir,{authorize:['host.claim']});
+ const devices=await readDeploymentDevices(f.stateDir),id=devices[0].device_id;
+ await assert.rejects(revokeDeploymentDevice(f.stateDir,{deviceId:id}),/explicit_device_revocation_required/);
+ assert.equal((await main(['revoke-device',f.stateDir,id,'--authorize'])).status,'revoked');
+ assert.equal((await readDeploymentDevices(f.stateDir)).length,0);
+ await stopDeploymentGateway(f.stateDir);await startDeploymentGateway(f.stateDir);
+ assert.equal((await readDeploymentDevices(f.stateDir)).length,0);
+ await assert.rejects(revokeDeploymentDevice(f.stateDir,{authorize:true,deviceId:id}));
+ const hostIdentity=JSON.parse(fs.readFileSync(path.join(f.config.host.baseDir,'device/identity.json')));
+ assert.equal(hostIdentity.device_id,id,'revocation preserves local identity for explicit recovery review');
 });

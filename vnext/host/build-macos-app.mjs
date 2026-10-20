@@ -1,12 +1,15 @@
 // Native AppKit owner packaging. Signing/notarization are explicit publisher actions.
 import fs from 'node:fs';
 import path from 'node:path';
+import os from 'node:os';
 import {execFileSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
 
 export const MAC_BUNDLE_ID='app.styx.host';
 const SOURCE=fileURLToPath(new URL('./macos/Styx.swift',import.meta.url));
+const PRODUCT_UI=fileURLToPath(new URL('./macos/product-ui/',import.meta.url));
+const BRAND=fileURLToPath(new URL('../assets/brand/',import.meta.url));
 const LICENSES=fileURLToPath(new URL('../licenses/',import.meta.url));
 const assert=(condition,message)=>{if(!condition)throw Error(message)};
 const xml=value=>value.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');
@@ -19,6 +22,8 @@ export function appInfoPlist(version){
 <key>CFBundleName</key><string>Styx</string>
 <key>CFBundleDisplayName</key><string>Styx</string>
 <key>CFBundleExecutable</key><string>Styx</string>
+<key>CFBundleIconFile</key><string>Styx.icns</string>
+<key>CFBundleLocalizations</key><array><string>en</string><string>zh-Hans</string></array>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>${xml(version)}</string>
 <key>CFBundleVersion</key><string>${xml(version)}</string>
@@ -71,16 +76,17 @@ export function macAdhocSigningPlan({app,files=[],sealApp=true}={}){
   if(sealApp)steps.push(['/usr/bin/codesign',['--force','--timestamp=none','--sign','-',app]],['/usr/bin/codesign',['--verify','--deep','--strict','--verbose=2',app]]);
   return steps;
 }
-export function macSwiftBuildArguments({source,output,arch=process.arch,sdkPath,moduleCachePath}={}){
+export function macSwiftBuildArguments({source,output,arch=process.arch,sdkPath,moduleCachePath,additionalSources=[]}={}){
   const absolute=p=>typeof p==='string'&&path.posix.isAbsolute(p)&&path.posix.normalize(p)===p&&!/[\x00-\x1f\x7f]/.test(p);
   assert(absolute(source)&&absolute(output),'absolute_swift_build_paths_required');
+  assert(Array.isArray(additionalSources)&&additionalSources.every(absolute),'absolute_additional_swift_sources_required');
   assert(['arm64','x64'].includes(arch),'unsupported_swift_build_arch');
   assert(sdkPath===undefined||absolute(sdkPath),'absolute_macos_sdk_required');
   assert(moduleCachePath===undefined||absolute(moduleCachePath),'absolute_swift_module_cache_required');
   assert(sdkPath===undefined||moduleCachePath!==undefined,'explicit_sdk_requires_isolated_module_cache');
   return ['swiftc','-O','-warnings-as-errors','-target',`${arch==='arm64'?'arm64':'x86_64'}-apple-macosx13.0`,
     ...(sdkPath===undefined?[]:['-sdk',sdkPath]),...(moduleCachePath===undefined?[]:['-module-cache-path',moduleCachePath]),
-    source,'-o',output,'-framework','AppKit','-framework','ApplicationServices','-framework','CoreGraphics'];
+    ...(additionalSources.length?['-D','STYX_PRODUCT_UI']:[]),source,...additionalSources,'-o',output,'-framework','AppKit','-framework','ApplicationServices','-framework','CoreGraphics','-framework','SwiftUI','-framework','WebKit'];
 }
 export function buildMacApp({app,cuaBinary,version,identity,teamID,notaryProfile,signingMode='distribution',sdkPath,moduleCachePath}={}){
   assert(process.platform==='darwin','native_macos_build_required');
@@ -91,7 +97,11 @@ export function buildMacApp({app,cuaBinary,version,identity,teamID,notaryProfile
   assert(typeof app==='string'&&path.isAbsolute(app)&&path.basename(app)==='Styx.app','invalid_styx_app_path');
   assert(typeof cuaBinary==='string'&&path.isAbsolute(cuaBinary),'absolute_cua_binary_required');
   assert(!fs.existsSync(app)&&!fs.existsSync(app+'.notarization.zip'),'app_destination_exists');
-  const swiftArgs=macSwiftBuildArguments({source:SOURCE,output:path.join(app,'Contents/MacOS/Styx'),sdkPath,moduleCachePath});
+  const productSources=fs.readdirSync(PRODUCT_UI).filter(n=>n.endsWith('.swift')).sort().map(n=>path.join(PRODUCT_UI,n));
+  assert(productSources.length>0,'native_product_sources_required');
+  const buildRoot=fs.mkdtempSync(path.join(os.tmpdir(),'styx-native-build-'));
+  const entry=path.join(buildRoot,'main.swift');fs.copyFileSync(SOURCE,entry);
+  const swiftArgs=macSwiftBuildArguments({source:entry,additionalSources:productSources,output:path.join(app,'Contents/MacOS/Styx'),sdkPath,moduleCachePath});
   if(sdkPath!==undefined)assert(fs.statSync(sdkPath).isDirectory()&&fs.statSync(path.join(sdkPath,'SDKSettings.json')).isFile(),'macos_sdk_directory_required');
   if(moduleCachePath!==undefined)assert(!fs.existsSync(moduleCachePath),'fresh_swift_module_cache_required');
   const stat=fs.lstatSync(cuaBinary);
@@ -111,6 +121,16 @@ export function buildMacApp({app,cuaBinary,version,identity,teamID,notaryProfile
     fs.mkdirSync(notices,{recursive:true});
     for(const name of ['cua-LICENSE','styx-LICENSE','provenance.json'])
       fs.copyFileSync(path.join(LICENSES,name),path.join(notices,name),fs.constants.COPYFILE_EXCL);
+    const brand=path.join(app,'Contents/Resources/brand');fs.mkdirSync(brand);
+    for(const name of ['styx-icon-dark-source.jpg','styx-icon-light-source.jpg'])fs.copyFileSync(path.join(BRAND,name),path.join(brand,name));
+    execFileSync('/usr/bin/sips',['-s','format','png','-z','512','512',path.join(BRAND,'styx-icon-dark-source.jpg'),'--out',path.join(brand,'styx-plugin-icon.png')],{stdio:'pipe'});
+    assert(fs.statSync(path.join(brand,'styx-plugin-icon.png')).size<=256*1024,'plugin_icon_size_exceeded');
+    const iconset=path.join(buildRoot,'Styx.iconset');fs.mkdirSync(iconset);
+    for(const size of [16,32,128,256,512])for(const scale of [1,2]){
+      const pixels=String(size*scale),name=`icon_${size}x${size}${scale===2?'@2x':''}.png`;
+      execFileSync('/usr/bin/sips',['-s','format','png','-z',pixels,pixels,path.join(BRAND,'styx-icon-dark-source.jpg'),'--out',path.join(iconset,name)],{stdio:'pipe'});
+    }
+    execFileSync('/usr/bin/iconutil',['-c','icns',iconset,'-o',path.join(app,'Contents/Resources/Styx.icns')],{stdio:'pipe'});
     const macos=path.join(app,'Contents/MacOS');
     fs.mkdirSync(macos,{recursive:true});
     fs.writeFileSync(path.join(app,'Contents/Info.plist'),plist,{flag:'wx'});
@@ -136,7 +156,7 @@ export function buildMacApp({app,cuaBinary,version,identity,teamID,notaryProfile
   }catch(error){
     // Preserve failed output for diagnostics; never identify it as a release.
     throw Error('macos_app_build_failed: '+error.message,{cause:error});
-  }
+  }finally{fs.rmSync(buildRoot,{recursive:true,force:true})}
 }
 if(process.argv[1]&&fs.realpathSync(process.argv[1])===fs.realpathSync(fileURLToPath(import.meta.url))){
   const [configFile]=process.argv.slice(2);

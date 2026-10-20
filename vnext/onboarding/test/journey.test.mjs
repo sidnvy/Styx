@@ -48,7 +48,7 @@ test('foreground choice records no service mutation; login completion requires c
  preference.background='login';j=projectOnboardingJourney({deployment,preference,background:{status:'running',observation:'last_recorded'}});assert.equal(row(j,'background').status,'needs_attention');
  j=projectOnboardingJourney({deployment,preference,background:{status:'running',observation:'current',gateway:'running',host:'running',hostConnection:'not_connected'}});assert.equal(row(j,'background').status,'needs_attention');
  j=projectOnboardingJourney({deployment,preference,background:{status:'running',observation:'current',gateway:'running',host:'running',hostConnection:'exec_connected'}});assert.equal(row(j,'background').status,'completed');assert.equal(j.readiness.exec.status,'connected');
- preference.configurationBound=false;j=projectOnboardingJourney({deployment,preference});assert.equal(j.background.preference,'not_decided');
+ preference.configurationBound=false;j=projectOnboardingJourney({deployment,preference});assert.equal(j.background.preference,'foreground');assert.equal(row(j,'background').nextAction,'start_deployment_foreground');
 });
 test('post-install capability selection changes requested desktop intent without granting permissions or readiness',()=>{
  const deployment=ready();deployment.roles.computer='disabled';
@@ -130,4 +130,9 @@ test('Browser challenge projection accepts only the exact credential-free genera
  const diagnostics=publicAcceptance(value);assert.equal(diagnostics.challenge,undefined);assert.equal(diagnostics.browser.source,'authenticated_mcp_browser_result');assert.doesNotMatch(JSON.stringify(diagnostics),/STYX_BROWSER_|PRIVATE_OWNER_HASH/);
  for(const url of ['https://example.invalid/private','data:text/html,<script>secret</script>'])assert.equal(publicAcceptance({...value,challenge:{...value.challenge,browser:{...browser,url}}},{includeChallenge:true}).challenge.browser,undefined);
  assert.equal(publicAcceptance({...value,browser:{status:'verified',required:true,source:'process_ready'}}).browser.status,'pending');
+});
+
+test('v6 defaults to App-owned running without a background choice or service installation',()=>{
+ const j=projectOnboardingJourney({deployment:ready(),foreground:{status:'connected',execConnection:'connected'}});
+ assert.equal(j.background.preference,'foreground');assert.equal(row(j,'background').status,'completed');assert.equal(j.steps.some(s=>s.nextAction==='choose_background_preference'),false);assert.equal(j.account.status,'not_verified');
 });

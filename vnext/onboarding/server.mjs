@@ -96,6 +96,7 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
  const defaults={label:os.hostname().slice(0,72),baseDir:path.join(path.dirname(stateDir),'styx-host-'+randomBytes(5).toString('hex')),gatewayUrl:'https://127.0.0.1:'+suggestedPort,...artifacts};
  const session=randomBytes(32).toString('base64url'),csrf=randomBytes(32).toString('base64url');
  let origin,closing=null,busy=false;
+ let nativeStartup={status:'not_requested',observation:'current_process'};
  const services={host:null,gateway:null};
  let pendingLink,acceptedLink;
  const linkImportAvailable=!!pairingLinks||fs.existsSync(new URL('./pairing-links.mjs',import.meta.url));
@@ -119,8 +120,12 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
   if(req.headers.origin!==undefined&&req.headers.origin!==origin){send(403,{error:'origin_refused'});return}
   if(req.method==='POST'&&(req.headers.origin!==origin||!equal(req.headers['x-styx-csrf'],csrf))){send(403,{error:'mutation_refused'});return}
   if(req.method==='GET'&&url.pathname==='/api/session'){
-   send(200,{csrf,platform:process.platform,journeySupported:true,diagnosticsSupported:true,browserPreparationSupported:typeof api.readDeploymentBrowser==='function'&&typeof api.prepareDeploymentBrowser==='function',foregroundSupported:typeof api.startDeploymentForeground==='function'&&typeof api.stopDeploymentForeground==='function',acceptanceSupported:['readDeploymentAcceptance','beginDeploymentAcceptance','confirmDeploymentAcceptance','recordDeploymentDesktopReadback'].every(k=>typeof api[k]==='function'),connectionHandoffSupported:typeof api.prepareDeploymentConnectionHandoff==='function',packagedPreviewTrusted:!!macPreviewApp,backgroundSupported:true,capabilityChangeSupported:true,deviceSettingsSupported:typeof api.readDeploymentDevices==='function',tunnelSupported:!!tunnel,localGatewayAvailable:!!trustedOpenSSL,pauseSupported:typeof api.stopDeploymentGateway==='function',startSupported:typeof api.startDeploymentGateway==='function',
+   send(200,{csrf,platform:process.platform,journeySupported:true,nativeAppLifecycleSupported:!!macPreviewApp,diagnosticsSupported:true,browserPreparationSupported:typeof api.readDeploymentBrowser==='function'&&typeof api.prepareDeploymentBrowser==='function',foregroundSupported:typeof api.startDeploymentForeground==='function'&&typeof api.stopDeploymentForeground==='function',acceptanceSupported:['readDeploymentAcceptance','beginDeploymentAcceptance','confirmDeploymentAcceptance','recordDeploymentDesktopReadback'].every(k=>typeof api[k]==='function'),connectionHandoffSupported:typeof api.prepareDeploymentConnectionHandoff==='function',packagedPreviewTrusted:!!macPreviewApp,backgroundSupported:true,capabilityChangeSupported:true,deviceSettingsSupported:typeof api.readDeploymentDevices==='function',tunnelSupported:!!tunnel,localGatewayAvailable:!!trustedOpenSSL,pauseSupported:typeof api.stopDeploymentGateway==='function',startSupported:typeof api.startDeploymentGateway==='function',
     deviceIngressSupported:typeof api.planDeviceIngress==='function'&&typeof api.verifyDeviceIngress==='function',pairingLinkImportSupported:linkImportAvailable,pairingLinkCreateSupported:typeof api.createDeploymentPairingLink==='function',pendingApprovalSupported:typeof api.listDeploymentPending==='function'&&typeof api.approveDeploymentPending==='function',hostServiceSupported:typeof api.controlDeploymentHostService==='function',gatewayServiceSupported:gatewayServiceAvailable,gatewayService:gatewayServiceCapability,localGatewayAddresses:typeof api.localGatewayAddresses==='function'?api.localGatewayAddresses():[],defaults,accountAcceptance:'NOT RUN',nativeInstaller:'NOT RUN',trustedForwarding:!!forwarded});return;
+  }
+  if(req.method==='GET'&&url.pathname==='/api/app/lifecycle'){
+   if(!macPreviewApp||typeof api.readDeploymentAppLifecycle!=='function'){send(409,{error:'native_app_lifecycle_unavailable'});return}
+   try{send(200,{lifecycle:await api.readDeploymentAppLifecycle(stateDir,{trustedAppPath:macPreviewApp.path})})}catch{send(409,{error:'native_app_lifecycle_observation_failed'})}return;
   }
   if(req.method==='GET'&&url.pathname==='/api/plugin'){
    if(typeof api.readDeploymentPlugin!=='function'){send(404,{error:'plugin_workflow_unavailable'});return}
@@ -136,7 +141,7 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
     let tunnelStatus=null;try{tunnelStatus=tunnel?await tunnelRead():null}catch{}
     let deviceCapabilities=null;try{deviceCapabilities=readDeploymentCapabilities(stateDir)}catch{}
     let foreground=null;try{foreground=await api.readDeploymentForeground?.(stateDir)}catch{}
-    send(200,{deployment,dependencies,ownerPairingScope,services,background,foreground,deviceCapabilities,tunnel:tunnelStatus,busy});
+    send(200,{deployment,dependencies,ownerPairingScope,services,background,foreground,deviceCapabilities,tunnel:tunnelStatus,nativeStartup,busy});
    }catch{if(!fs.existsSync(stateDir))send(200,{deployment:null,dependencies:[],busy});else send(409,{error:'deployment_unavailable'})}return;
   }
   if(req.method==='GET'&&url.pathname==='/api/browser'){try{if(typeof api.readDeploymentBrowser!=='function')fail('browser_preparation_unavailable');send(200,{browser:await api.readDeploymentBrowser(stateDir)});}catch{send(409,{error:'browser_preparation_unavailable'})}return;}
@@ -148,11 +153,16 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
    }catch{send(409,{error:'observation_unavailable'})}return;
   }
   if(req.method!=='POST'){send(405,{error:'method_refused'});return}
-  if(!['/api/plugin/profile','/api/plugin/export','/api/plugin/record','/api/foreground','/api/browser/prepare','/api/journey/background-preference','/api/connection-handoff','/api/acceptance/begin','/api/acceptance/confirm','/api/acceptance/desktop-readback','/api/host-update/plan','/api/host-update/status','/api/runtime-change/status','/api/runtime-change/plan','/api/runtime-change/apply','/api/runtime-change/recover','/api/native-migration/plan','/api/native-migration/apply','/api/native-migration/rollback','/api/device-ingress/plan','/api/device-ingress/verify','/api/create','/api/devices','/api/default-device','/api/capabilities','/api/tunnel/configure','/api/tunnel/start','/api/tunnel/stop','/api/background','/api/local-setup','/api/advance','/api/pause','/api/start','/api/verify-gateway','/api/service','/api/pairing-link/inspect','/api/pairing-link/accept','/api/pairing-link/create','/api/pending/list','/api/pending/approve'].includes(url.pathname)){send(404,{error:'not_found'});return}
+  if(!['/api/app/quit','/api/app/login','/api/plugin/profile','/api/plugin/export','/api/plugin/record','/api/foreground','/api/browser/prepare','/api/journey/background-preference','/api/connection-handoff','/api/acceptance/begin','/api/acceptance/confirm','/api/acceptance/desktop-readback','/api/host-update/plan','/api/host-update/status','/api/host-update/apply','/api/host-update/recover','/api/runtime-change/status','/api/runtime-change/plan','/api/runtime-change/apply','/api/runtime-change/recover','/api/native-migration/plan','/api/native-migration/apply','/api/native-migration/rollback','/api/device-ingress/plan','/api/device-ingress/verify','/api/create','/api/devices','/api/default-device','/api/device/revoke','/api/capabilities','/api/tunnel/configure','/api/tunnel/start','/api/tunnel/stop','/api/background','/api/local-setup','/api/advance','/api/pause','/api/start','/api/verify-gateway','/api/service','/api/pairing-link/inspect','/api/pairing-link/accept','/api/pairing-link/create','/api/pending/list','/api/pending/approve'].includes(url.pathname)){send(404,{error:'not_found'});return}
   if(busy){send(409,{error:'operation_in_progress'});return}busy=true;
   try{
    const data=await body(req,url.pathname==='/api/plugin/profile'?400*1024:65536);
-   if(url.pathname==='/api/plugin/profile'){
+   if(['/api/app/quit','/api/app/login'].includes(url.pathname)){
+    const action=url.pathname.endsWith('/quit')?'quit':'login';
+    keys(data,action==='quit'?['authorize']:['authorize','enabled']);
+    if(!macPreviewApp||data.authorize!==true||typeof api.controlDeploymentAppLifecycle!=='function')fail('native_app_lifecycle_unavailable');
+    send(200,{lifecycle:await api.controlDeploymentAppLifecycle(stateDir,{...data,action},{trustedAppPath:macPreviewApp.path})});return;
+   }else if(url.pathname==='/api/plugin/profile'){
     keys(data,['authorize','presentation','selection']);if(data.authorize!==true||typeof api.setDeploymentPluginProfile!=='function')fail('plugin_authorization_required');send(200,{plugin:await api.setDeploymentPluginProfile(stateDir,data)});return;
    }else if(url.pathname==='/api/plugin/record'){
     keys(data,['authorize','stage','pluginUrl']);if(data.authorize!==true||typeof api.recordDeploymentPluginAction!=='function')fail('plugin_authorization_required');send(200,{plugin:await api.recordDeploymentPluginAction(stateDir,data)});return;
@@ -179,6 +189,10 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
     send(200,{acceptance:publicAcceptance(await api[name](stateDir,data),{includeChallenge:true})});return;
    }else if(url.pathname==='/api/host-update/plan'){
     keys(data,['bundle','rollback']);send(200,{plan:await api.planHostUpdate({stateDir,...data})});return;
+   }else if(url.pathname==='/api/host-update/apply'){
+    keys(data,['authorize','plan']);if(data.authorize!==true||typeof api.applyHostUpdate!=='function')fail('host_update_unavailable');send(200,{update:await api.applyHostUpdate({stateDir,plan:data.plan,authorize:true})});return;
+   }else if(url.pathname==='/api/host-update/recover'){
+    keys(data,['authorize','transactionId']);if(data.authorize!==true||typeof api.recoverHostUpdate!=='function')fail('host_update_unavailable');send(200,{update:await api.recoverHostUpdate({stateDir,transactionId:data.transactionId,authorize:true})});return;
    }else if(url.pathname==='/api/host-update/status'){
     keys(data,['transactionId']);send(200,{update:await api.readHostUpdate({stateDir,...data})});return;
    }else if(url.pathname==='/api/runtime-change/status'){
@@ -211,6 +225,9 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
     finally{fs.rmSync(temp,{recursive:true,force:true})}
    }else if(url.pathname==='/api/devices'){
     keys(data,[]);if(typeof api.readDeploymentDevices!=='function')fail('device_settings_unavailable');send(200,{devices:await api.readDeploymentDevices(stateDir)});return;
+   }else if(url.pathname==='/api/device/revoke'){
+    keys(data,['authorize','deviceId']);if(data.authorize!==true||typeof api.revokeDeploymentDevice!=='function')fail('explicit_device_revocation_required');
+    const result=await api.revokeDeploymentDevice(stateDir,data);send(200,{device:result});return;
    }else if(url.pathname==='/api/default-device'){
     keys(data,['authorize','deviceId']);if(typeof api.setDeploymentDefault!=='function')fail('device_settings_unavailable');await api.setDeploymentDefault(stateDir,data);send(200,{status:'updated'});return;
    }else if(url.pathname==='/api/browser/prepare'){
@@ -276,6 +293,18 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
  server.requestTimeout=30000;server.headersTimeout=10000;server.maxHeadersCount=30;
  await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(port,'127.0.0.1',resolve)});
  origin=forwarded??`http://127.0.0.1:${server.address().port}`;
+ // A verified native App reopens the same prepared deployment. This is an
+ // explicit lifecycle boundary, never a side effect of a GET/status request.
+ // Foreground Core verifies native service ownership and refuses duplicate or
+ // uncertain owners; it never regenerates pairing identities on reconnect.
+ if(macPreviewApp&&fs.existsSync(path.join(stateDir,'deployment.json'))&&typeof api.startDeploymentForeground==='function'){
+  try{
+   const j=await readOnboardingJourney(stateDir,journeyOptions);
+   if(j.steps.some(step=>step.id==='local_setup'&&step.status==='completed')){
+    await api.startDeploymentForeground(stateDir,{authorize:true});nativeStartup={status:'started',observation:'current_process'};
+   }else nativeStartup={status:'preparation_required',observation:'current_process'};
+  }catch{nativeStartup={status:'reconciliation_required',observation:'current_process'};}
+ }
  // Only a previously recorded user opt-in can resume this App-owned connection.
  if(tunnel&&fs.existsSync(stateDir))await tunnel.resume().catch(()=>{});
  return {server,origin,url:origin+'/#session='+session,

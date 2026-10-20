@@ -23,7 +23,7 @@ export function previewSourceFiles(sourceRoot,{revision}={}){
  assert(execFileSync('/usr/bin/git',['-C',sourceRoot,'rev-parse','HEAD'],{encoding:'utf8'}).trim()===revision,'source_revision_mismatch');
  execFileSync('/usr/bin/git',['-C',sourceRoot,'diff','--quiet','HEAD','--','.'],{stdio:'pipe'});
  const files=execFileSync('/usr/bin/git',['-C',sourceRoot,'ls-files','-z','--','.'],{encoding:'utf8'}).split('\0').filter(Boolean);
- const tops=new Set(['onboarding','gateway','host','shared','packages','licenses','plugin']);
+ const tops=new Set(['onboarding','gateway','host','shared','packages','licenses','plugin','assets']);
  return files.filter(name=>{const parts=name.split('/');assert(parts.every(x=>x&&x!=='.'&&x!=='..')&&!name.includes('\\'),'invalid_source_snapshot_path');return (tops.has(parts[0])||['package.json','package-lock.json'].includes(name))&&!name.endsWith('.test.mjs')&&!parts.some(p=>p.startsWith('.')||SKIP.has(p));}).sort();
 }
 function scanPrivateMaterial(root){
@@ -96,7 +96,7 @@ export function buildMacPreview(config){
   const dependencies=copyOfflineDependencies({lockFile:path.join(sourceRoot,'package-lock.json'),dependenciesDir,destination:source});
   const runtime=path.join(resources,'runtime');fs.mkdirSync(runtime);fs.copyFileSync(nodeBinary,path.join(runtime,'node'));fs.chmodSync(path.join(runtime,'node'),0o755);
   fs.copyFileSync(path.join(path.dirname(nodeBinary),'LICENSE'),path.join(runtime,'LICENSE'));fs.copyFileSync(path.join(path.dirname(nodeBinary),'node-provenance.json'),path.join(runtime,'node-upstream.json'));
-  const bundle=path.join(resources,'host-bundle');buildHostRelease({destination:bundle,version:releaseVersion,privateKeyFile:privateFile,codexBinary,cuaBinary,nodeBinary,sourceRoot});
+  const bundle=path.join(resources,'host-bundle');buildHostRelease({destination:bundle,version:releaseVersion,privateKeyFile:privateFile,codexBinary,cuaBinary,nodeBinary,sourceRoot,browserRuntime:true});
   const publicPem=publicKey.export({type:'spki',format:'pem'}),fingerprint=createHash('sha256').update(createPublicKey(publicPem).export({type:'spki',format:'der'})).digest('hex');
   fs.writeFileSync(path.join(resources,'publisher.pem'),publicPem);fs.writeFileSync(path.join(resources,'artifact-defaults.json'),JSON.stringify({bundle:'host-bundle',publisherKeyFile:'publisher.pem',publisherSha256:fingerprint},null,2)+'\n');
   for(const name of sourceFiles.filter(n=>n.startsWith('licenses/')))tree(path.join(sourceRoot,...name.split('/')),path.join(resources,...name.split('/')));
