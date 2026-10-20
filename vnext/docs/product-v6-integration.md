@@ -2,6 +2,38 @@
 
 This is a development integration checkpoint, not a production release or complete first-install acceptance.
 
+## PilotMac permission recognition — same dev6 App
+
+The user's enabled System Settings switches did not match the running development
+App. A controlled restart retained the exact dev6 CDHash
+`f4f0e7053b51369cdcbcd686507e44e735a700fa`, configuration, identity and credentials;
+both native permission APIs still returned false. Read-only unified TCC logs at
+18:44 on 2026-10-20 show Accessibility and ScreenCapture checking the old CDHash
+`cf13d26ccc481087e320ec88d0923da6abf1e31c` with validity result `-67050`.
+The privately backed-up dev5 App has exactly that old designated requirement.
+The same logs attribute the Cua child to `/Applications/Styx.app`, rather than
+Node or sshd. This establishes the observed development-update identity mismatch;
+it does not establish stable signed upgrade/rollback permission acceptance.
+
+The source now refreshes permission observations when the App becomes active,
+the window is presented, and the page changes, independently of Core-read success.
+Continue rechecks native grants and the current Core approval/GUI session. It
+explicitly restores only the owned Cua stop caused by a permission change; other
+crash/unknown states remain blocked, and no tool operation is replayed. The
+permission page includes collapsed guidance for an enabled but unmatched old
+development grant. Actual system permission changes remain the user's action.
+
+Both production and testing variants compiled with warnings as errors in the
+isolated PilotMac directory `/private/tmp/styx-permission-ui-20261020-qqLNXDMN`.
+The hosted permission-view regression passed (App activation, partial/revoked
+grants, explicit recovery, unavailable Core), as did existing native self-tests.
+The regression injects permission observations; it is not real TCC/Cua acceptance.
+These changes have **not been packaged or installed**. PilotMac retains dev6 to
+avoid changing its development identity again while the user updates its grants.
+Real permission recognition, Cua observation/actions and account acceptance remain
+pending. No TCC database was read or modified. Evidence: parent task
+`outputs/v6-permission-recognition-20261020/`.
+
 ## PilotMac native editing correction — dev6
 
 Current installed App: `0.3.0-v6-dev.20261020.6`, source `1a45128`. The manual AppKit owner created a status-item menu but omitted `NSApplication.mainMenu`, so normal Command-V editing was unavailable in the hosted Tunnel/Runtime Key controls. Startup now installs a localized application/Edit menu with nil-target standard AppKit paste/copy/cut/select-all/undo/redo actions. Secure-field restrictions and production menu auto-validation remain under AppKit; Styx adds no clipboard-reading path.

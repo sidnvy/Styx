@@ -72,6 +72,8 @@ struct ProductView: View {
             .frame(minWidth: 620, minHeight: 560)
             .disabled(model.busy)
             .task { await model.bootstrap() }
+            .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in model.observePermissions() }
+            .onChange(of: model.page) { _ in model.observePermissions() }
     }
     private func nav(_ page: ProductPage, _ text: String) -> some View {
         Button(text) { model.page = page; if page == .computers { model.loadDevices() } }
@@ -178,8 +180,13 @@ struct ProductView: View {
                 permissionRow(productText("屏幕录制", "Screen Recording"), granted: model.screenGranted, screen: true)
                 Text(productText("修改权限后可能需要退出并重新打开 Styx。应用脚本可能另外请求 Automation 授权。", "After changing permissions, you may need to quit and reopen Styx. Application scripts can separately require Automation permission.")).font(.caption).foregroundStyle(.secondary)
             }
+            if !model.axGranted || !model.screenGranted {
+                DisclosureGroup(productText("开关已开启，但这里仍未识别？", "Enabled in System Settings but still not recognized?")) {
+                    Text(productText("请确认授权的是“应用程序”中的 Styx。开发预览版更新后，旧授权可能仍显示开启：在对应权限列表中移除旧 Styx，再添加 /Applications/Styx.app 并开启，然后退出并重新打开。已有设置和电脑连接会保留。", "Confirm the permission belongs to Styx in Applications. After a development preview update, an old grant may still look enabled: remove the old Styx entry, add /Applications/Styx.app and enable it, then quit and reopen. Existing settings and computer connections are retained.")).font(.callout).foregroundStyle(.secondary).textSelection(.enabled)
+                }
+            }
             Button(productText("重新检查权限", "Check permissions again")) { model.observePermissions() }
-            Button(productText("继续", "Continue")) { model.page = model.joined ? .overview : .chat }.buttonStyle(.borderedProminent).disabled(!model.axGranted || !model.screenGranted)
+            Button(productText("继续", "Continue")) { model.continueAfterPermissions() }.buttonStyle(.borderedProminent).disabled(!model.axGranted || !model.screenGranted)
         }
     }
     private func permissionRow(_ title: String, granted: Bool, screen: Bool) -> some View {
@@ -488,7 +495,7 @@ struct ProductAcceptanceField: NSViewRepresentable {
         }
     }
     required init?(coder: NSCoder) { nil }
-    func present() { window?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
+    func present() { model.observePermissions(); window?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
     func showPreferences() { model.page = .settings; present() }
     func windowWillClose(_ notification: Notification) { model.clearSecrets() }
     func currentDesktopReadback(challengeID: String) -> String? {

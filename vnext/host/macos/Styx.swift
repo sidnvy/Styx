@@ -652,7 +652,7 @@ func productSystemQuitReason(_ reason: OSType?) -> Bool {
     func showSetup(_ url: URL) {
         if setupWindow == nil {
             #if STYX_PRODUCT_UI
-            setupWindow = ProductWindowController(sessionURL: url)
+            setupWindow = makeProductWindow(url)
             #else
             setupWindow = SetupWindowController(sessionURL: url)
             #endif
@@ -670,6 +670,31 @@ func productSystemQuitReason(_ reason: OSType?) -> Bool {
         }
     }
     #if STYX_PRODUCT_UI
+    func makeProductWindow(_ url: URL) -> ProductWindowController {
+        let controller = ProductWindowController(sessionURL: url)
+        controller.model.recoverComputerUse = { [weak self] in
+            guard let owner = self else { throw ProductWorkflowError.computerPermissionRecoveryRequired }
+            try await owner.recoverComputerUseAfterPermissions(url)
+        }
+        return controller
+    }
+    func recoverComputerUseAfterPermissions(_ url: URL) async throws {
+        guard setupURL == url, !terminationPending else { throw ProductWorkflowError.computerPermissionRecoveryRequired }
+        let status = try await ProductCoreClient(sessionURL: url).read("status")
+        let session = CGSessionCopyCurrentDictionary() as? [String: Any]
+        guard setupURL == url, !terminationPending,
+              productComputerUseRequested(status, guiAvailable: session?[kCGSessionOnConsoleKey as String] as? Bool == true),
+              AXIsProcessTrusted(), CGPreflightScreenCaptureAccess() else { throw ProductWorkflowError.computerPermissionRecoveryRequired }
+        // Observe a change before accepting Continue, even if the 200ms poll
+        // has not run yet. Only this explicit action may restore this stop cause.
+        poll()
+        if phase == "permissions_changed" {
+            guard computerUseRequested, daemon == nil else { throw ProductWorkflowError.computerPermissionRecoveryRequired }
+            try start()
+        }
+        guard daemon?.isRunning == true else { throw ProductWorkflowError.computerPermissionRecoveryRequired }
+        // A live owned child is not native GUI or chat-account acceptance.
+    }
     @objc func openProductPreferences() {
         openSettings()
         setupWindow?.showPreferences()
@@ -772,7 +797,8 @@ func productSystemQuitReason(_ reason: OSType?) -> Bool {
         let ax = AXIsProcessTrusted(), screen = CGPreflightScreenCaptureAccess()
         let grants = "\(ax):\(screen)"
         if let previous = lastGrants, previous != grants {
-            stop(); statusLine?.title = "Permissions changed; quit and reopen Styx"; return
+            stop(); phase = "permissions_changed"
+            statusLine?.title = "Permissions changed; review Computer Use permissions in Styx"; return
         }
         lastGrants = grants
         if socketAccepts(runtime.socket) {
@@ -845,7 +871,7 @@ func productSystemQuitReason(_ reason: OSType?) -> Bool {
             return .terminateCancel
         }
         if userQuit && !terminationApproved, let url = setupURL {
-            if setupWindow == nil { setupWindow = ProductWindowController(sessionURL: url) }
+            if setupWindow == nil { setupWindow = makeProductWindow(url) }
             terminationPending = true
             setupWindow?.prepareToQuit { [weak self] approved in
                 guard let owner = self else { sender.reply(toApplicationShouldTerminate: false); return }
@@ -863,6 +889,17 @@ func productSystemQuitReason(_ reason: OSType?) -> Bool {
 
 #if STYX_TESTING
 #if STYX_PRODUCT_UI
+if CommandLine.arguments.count == 2 && CommandLine.arguments[1] == "--permission-state-self-test" {
+    MainActor.assumeIsolated {
+        let application = NSApplication.shared
+        application.setActivationPolicy(.accessory)
+        Task { @MainActor in
+            do { try await productPermissionStateSelfTest(); exit(0) }
+            catch { fputs("Styx isolated permission-state self-test failed: \(error)\n", stderr); exit(1) }
+        }
+        application.run()
+    }
+}
 if CommandLine.arguments.count >= 2 && CommandLine.arguments[1] == "--edit-menu-self-test" {
     MainActor.assumeIsolated {
         do { try productEditMenuSelfTest(withMenu: !CommandLine.arguments.contains("--without-menu")); exit(0) }

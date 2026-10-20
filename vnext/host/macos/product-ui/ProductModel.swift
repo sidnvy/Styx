@@ -87,7 +87,7 @@ enum ProductPreparationPolicy {
 
 enum ProductBrowserPreparation: Equatable { case notRequired, prepare, needsReview }
 enum ProductForegroundTransition: Equatable { case stopped, owned, needsReview }
-enum ProductWorkflowError: Error { case browserPreparationNeedsReview, capabilityNeedsOfflineReview, foregroundStopUnconfirmed, capabilityChangeInterrupted, foregroundRecoveryRequired }
+enum ProductWorkflowError: Error { case browserPreparationNeedsReview, capabilityNeedsOfflineReview, foregroundStopUnconfirmed, capabilityChangeInterrupted, foregroundRecoveryRequired, computerPermissionRecoveryRequired }
 
 // Desired selection does not grant a capability. These decisions use Core's
 // current approved Host projection and refuse absent or uncertain observations.
@@ -179,6 +179,8 @@ enum ProductRestorationPolicy {
     private var copiedCredential: String?
     private var copiedCredentialChangeCount: Int?
     private var restoredPage = false
+    private let permissionReader: () -> (accessibility: Bool, screenRecording: Bool)
+    var recoverComputerUse: (() async throws -> Void)?
 
     var deployment: ProductDeployment? { ProductDeployment(status["deployment"]) }
     var localPrepared: Bool { journey["steps"].array.contains { $0["id"].string == "local_setup" && $0["status"].string == "completed" } }
@@ -202,9 +204,15 @@ enum ProductRestorationPolicy {
         && ["verified", "not_required"].contains(acceptance["desktop"]["status"].string ?? "")
         && ["verified", "not_required"].contains(acceptance["browser"]["status"].string ?? "")
     }
-    init(sessionURL: URL) throws { client = try ProductCoreClient(sessionURL: sessionURL) }
+    init(sessionURL: URL, permissionReader: @escaping () -> (accessibility: Bool, screenRecording: Bool) = {
+        (AXIsProcessTrusted(), CGPreflightScreenCaptureAccess())
+    }) throws {
+        client = try ProductCoreClient(sessionURL: sessionURL)
+        self.permissionReader = permissionReader
+    }
 
     func bootstrap() async {
+        observePermissions()
         guard !loaded && !busy else { return }
         busy = true
         defer { busy = false }
@@ -216,11 +224,14 @@ enum ProductRestorationPolicy {
         } catch { reportFailure() }
     }
     func refresh() async {
+        observePermissions()
         guard !busy else { return }
         busy = true; defer { busy = false }
         do { try await reload(); error = nil } catch { reportFailure() }
     }
     private func reload() async throws {
+        // Native permission observation must not depend on a successful Core read.
+        observePermissions()
         status = try await client.read("status")
         journey = try await client.read("journey")["journey"]
         if deployment != nil {
@@ -278,6 +289,8 @@ enum ProductRestorationPolicy {
             error = productText("能力更改未能确认完成。请先检查组件状态并恢复事务，再选择恢复连接；不会自动重试更改。", "Capability changes could not be confirmed. Inspect component state and recover the transaction before resuming. Changes will not be replayed.")
         case .foregroundRecoveryRequired:
             error = productText("能力更改已完成，但连接恢复尚未确认。请刷新状态后选择“恢复本次连接”。", "Capabilities were updated, but connection recovery is unconfirmed. Refresh, then choose Resume this connection.")
+        case .computerPermissionRecoveryRequired:
+            error = productText("Computer Use 尚未恢复。请确认系统权限已开启；若刚修改权限，请退出并重新打开 Styx 后重试。", "Computer Use has not resumed. Confirm the system permissions; if you just changed them, quit and reopen Styx, then try again.")
         default:
             error = productText("操作未完成。请刷新状态后检查；结果不确定的操作不会自动重试。", "The operation did not complete. Refresh to inspect its state; uncertain operations are not replayed.")
         }
@@ -358,7 +371,23 @@ enum ProductRestorationPolicy {
         perform { [self] in try await prepare() }
     }
     func observePermissions() {
-        axGranted = AXIsProcessTrusted(); screenGranted = CGPreflightScreenCaptureAccess()
+        let observation = permissionReader()
+        axGranted = observation.accessibility; screenGranted = observation.screenRecording
+    }
+    func verifyPermissionsAndRecover() async throws {
+        observePermissions()
+        guard axGranted && screenGranted, let recover = recoverComputerUse else {
+            throw ProductWorkflowError.computerPermissionRecoveryRequired
+        }
+        try await recover()
+        observePermissions()
+        guard axGranted && screenGranted else { throw ProductWorkflowError.computerPermissionRecoveryRequired }
+    }
+    func continueAfterPermissions() {
+        perform { [self] in
+            try await verifyPermissionsAndRecover()
+            page = joined ? .overview : .chat
+        }
     }
     func openPermission(_ screen: Bool) {
         // Separate OS-owned prompts, only after the matching explicit action.
