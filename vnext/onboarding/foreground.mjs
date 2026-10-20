@@ -3,6 +3,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {createHash,createPublicKey,randomBytes} from 'node:crypto';
+import {setTimeout as delay} from 'node:timers/promises';
 import {requirePrivateDirectory,requirePrivateFile,openPrivateFile} from '../host/private-storage.mjs';
 import {activeRelease} from '../host/installer.mjs';
 import {activeHostConfig} from '../host/launch.mjs';
@@ -113,16 +114,41 @@ async function start(d,operations,abort){
    track(operations.runHost??runHostConnector,selected.host,{signal,retryMinMs,retryMaxMs,onReady:()=>{entry.execConnection='connected'},onStatus:()=>{entry.execConnection='disconnected'}});
    if(entry.browserRequested){const runner=operations.runBrowser??(await import('../host/browser.mjs')).runBrowserConnector;track(runner,selected.host,{signal,onReady:()=>{entry.browserConnection='connected'},onStatus:state=>{entry.browserConnection=state}});}
    if(entry.computerRequested){
+    const currentScope=()=>{try{return entry.scopeValid()}catch{return false}};
     entry.resumeComputer=async()=>{
+     if(entry.computerStarted)return;
      if(entry.computerStarting)return entry.computerStarting;
      const attempt=(async()=>{
+      if(!currentScope())fail('foreground_scope_changed');
       const gui=await (operations.guiAvailable??guiAvailable)(api,d);
       if(abort.signal.aborted)fail('foreground_start_cancelled');
+      if(!currentScope())fail('foreground_scope_changed');
       entry.desktopConnection=gui?'connecting':'session_unavailable_or_unobserved';
-      if(gui)track(operations.runComputer??runComputerConnectors,selected.host,{signal,retryMinMs,retryMaxMs,onReady:()=>{entry.desktopConnection='connected'},onStatus:()=>{entry.desktopConnection='disconnected'}});
+      if(gui){
+       entry.computerStarted=true;
+       track(operations.runComputer??runComputerConnectors,selected.host,{signal,retryMinMs,retryMaxMs,onReady:()=>{entry.desktopConnection='connected'},onStatus:()=>{entry.desktopConnection='disconnected'}});
+      }
      })();entry.computerStarting=attempt;try{await attempt}finally{entry.computerStarting=null}
     };
     await entry.resumeComputer();
+    if(entry.desktopConnection==='session_unavailable_or_unobserved'){
+     const interval=operations.guiObservationIntervalMs??1000;
+     if(!Number.isSafeInteger(interval)||interval<1||interval>60000)fail('foreground_gui_observation_interval_invalid');
+     // The App can publish its approved Cua descriptor after foreground starts.
+     // Observe that boundary without replaying any tool or restarting a child.
+     // This task is separate from connector failures: a changed/unknown GUI
+     // observation must not abort a healthy Exec connection.
+     entry.computerObservation=(async()=>{
+      while(!signal.aborted&&!entry.computerStarted){
+       try{await delay(interval,undefined,{signal})}catch{if(signal.aborted)return;throw Error('foreground_gui_observation_wait_failed')}
+       if(signal.aborted||!currentScope())return;
+       try{await entry.resumeComputer()}catch{
+        if(signal.aborted||!currentScope())return;
+        entry.desktopConnection='session_unavailable_or_unobserved';
+       }
+      }
+     })().catch(()=>{if(!signal.aborted)entry.desktopConnection='session_unavailable_or_unobserved'});
+    }
    }
   }else{if(entry.computerRequested)entry.desktopConnection='not_observed';if(entry.browserRequested)entry.browserConnection='not_observed';}
   return projection(entry);
@@ -150,6 +176,7 @@ async function stopEntry(d,entry){
  entry.stop=(async()=>{
   // Settlement includes the actual stdio child close path. A timeout must not
   // manufacture a stopped result or release another generation's ownership.
+  await entry.computerObservation;
   await entry.computerStarting?.catch(()=>{});
   await Promise.all(entry.tasks);
   // Gateway has an independent Core lifetime: background/capability handoff

@@ -77,6 +77,49 @@ test('stop during deferred GUI startup retains ownership until startup and child
  const stop=stopDeploymentForeground(f.stateDir).then(v=>{settled=true;return v});await wait(30);assert.equal(settled,false);assert.equal(fs.existsSync(path.join(f.stateDir,'foreground.lock')),true);
  release(true);await cancelled;await stop;assert.equal(readDeploymentForeground(f.stateDir).status,'not_running');assert.equal(f.runCalls.length,1);assert.equal(fs.existsSync(path.join(f.stateDir,'foreground.lock')),false);
 });
+test('approved Computer connector observes a later GUI automatically without a second start or duplicate child',{skip:process.platform!=='linux'},async t=>{
+ const f=await fixture(t,{computer:true});let gui=false,observations=0;
+ const ops={...f.ops,guiObservationIntervalMs:15,guiAvailable:async()=>{observations++;return gui}};
+ const first=await startDeploymentForeground(f.stateDir,{authorize:true},ops);
+ assert.equal(first.desktopConnection,'session_unavailable_or_unobserved');assert.equal(first.computerRequested,true);assert.equal(f.runCalls.length,1);
+ await until(()=>observations>=2);assert.equal(readDeploymentForeground(f.stateDir).execConnection,'connected');assert.equal(f.runCalls.length,1);
+ gui=true;await until(()=>readDeploymentForeground(f.stateDir).desktopConnection==='connected');assert.equal(f.runCalls.length,2);
+ const completedObservations=observations;await wait(60);await startDeploymentForeground(f.stateDir,{authorize:true},ops);
+ assert.equal(f.runCalls.length,2);assert.equal(observations,completedObservations);assert.equal(readDeploymentForeground(f.stateDir).toolHealth,'not_verified');
+});
+test('stop waits for a deferred GUI recheck and never starts a late Computer child',{skip:process.platform!=='linux'},async t=>{
+ const f=await fixture(t,{computer:true});let observations=0,release;
+ await startDeploymentForeground(f.stateDir,{authorize:true},{...f.ops,guiObservationIntervalMs:15,guiAvailable:async()=>++observations===1?false:new Promise(resolve=>{release=resolve})});
+ await until(()=>typeof release==='function');let settled=false;
+ const stop=stopDeploymentForeground(f.stateDir).then(value=>{settled=true;return value});
+ await wait(25);assert.equal(settled,false);assert.equal(readDeploymentForeground(f.stateDir).status,'stopping');assert.equal(fs.existsSync(path.join(f.stateDir,'foreground.lock')),true);
+ release(true);await stop;assert.equal(readDeploymentForeground(f.stateDir).status,'not_running');assert.equal(f.runCalls.length,1);
+ await wait(50);assert.equal(observations,2);assert.equal(f.runCalls.length,1);assert.equal(fs.existsSync(path.join(f.stateDir,'foreground.lock')),false);
+});
+test('configuration drift ends delayed GUI startup without aborting the existing Exec child',{skip:process.platform!=='linux'},async t=>{
+ const f=await fixture(t,{computer:true});let gui=false,observations=0,execAborted=false;
+ const runHost=async(config,{signal,onReady})=>{f.runCalls.push(config);onReady();await new Promise(resolve=>signal.addEventListener('abort',()=>{execAborted=true;resolve()},{once:true}))};
+ await startDeploymentForeground(f.stateDir,{authorize:true},{...f.ops,runHost,guiObservationIntervalMs:15,guiAvailable:async()=>{observations++;return gui}});
+ await until(()=>readDeploymentForeground(f.stateDir).execConnection==='connected');
+ fs.appendFileSync(path.join(f.stateDir,'deployment.json'),' ');gui=true;
+ await wait(75);assert.equal(f.runCalls.length,1);assert.equal(execAborted,false);assert.equal(observations,1);
+ assert.equal(readDeploymentForeground(f.stateDir).status,'needs_attention');assert.equal(readDeploymentForeground(f.stateDir).desktopConnection,'not_observed');assert.equal(fs.existsSync(path.join(f.stateDir,'foreground.lock')),true);
+ await stopDeploymentForeground(f.stateDir);assert.equal(execAborted,true);assert.equal(f.runCalls.length,1);
+});
+test('a GUI observation begun before scope drift cannot authorize a late Computer connector',{skip:process.platform!=='linux'},async t=>{
+ const f=await fixture(t,{computer:true});let observations=0,release,execAborted=false;
+ const runHost=async(config,{signal,onReady})=>{f.runCalls.push(config);onReady();await new Promise(resolve=>signal.addEventListener('abort',()=>{execAborted=true;resolve()},{once:true}))};
+ await startDeploymentForeground(f.stateDir,{authorize:true},{...f.ops,runHost,guiObservationIntervalMs:15,guiAvailable:async()=>++observations===1?false:new Promise(resolve=>{release=resolve})});
+ await until(()=>typeof release==='function');fs.appendFileSync(path.join(f.base,'device/host.json'),' ');release(true);
+ await wait(60);assert.equal(f.runCalls.length,1);assert.equal(execAborted,false);assert.equal(observations,2);assert.equal(readDeploymentForeground(f.stateDir).status,'needs_attention');
+ await stopDeploymentForeground(f.stateDir);assert.equal(execAborted,true);assert.equal(f.runCalls.length,1);
+});
+test('a transient deferred GUI observation error leaves Exec alive and a later valid observation connects once',{skip:process.platform!=='linux'},async t=>{
+ const f=await fixture(t,{computer:true});let observations=0;
+ await startDeploymentForeground(f.stateDir,{authorize:true},{...f.ops,guiObservationIntervalMs:15,guiAvailable:async()=>{observations++;if(observations===2)throw Error('temporary native observation unavailable');return observations>=3}});
+ await until(()=>readDeploymentForeground(f.stateDir).desktopConnection==='connected');
+ assert.equal(readDeploymentForeground(f.stateDir).status,'connected');assert.equal(readDeploymentForeground(f.stateDir).execConnection,'connected');assert.equal(f.runCalls.length,2);assert.equal(observations,3);
+});
 test('current configuration drift withdraws connected status and repeated start cannot duplicate its connector',{skip:process.platform!=='linux'},async t=>{
  const f=await fixture(t);await startDeploymentForeground(f.stateDir,{authorize:true},f.ops);await until(()=>readDeploymentForeground(f.stateDir).execConnection==='connected');await startDeploymentForeground(f.stateDir,{authorize:true},f.ops);assert.equal(f.runCalls.length,1);
  fs.appendFileSync(path.join(f.stateDir,'deployment.json'),' ');assert.equal(readDeploymentForeground(f.stateDir).status,'needs_attention');assert.equal(readDeploymentForeground(f.stateDir).execConnection,'not_observed');await assert.rejects(startDeploymentForeground(f.stateDir,{authorize:true},f.ops),/foreground_scope_changed/);
