@@ -40,17 +40,27 @@ in `plugin/README.md`; no account plugin was created or installed by this work.
 Integrated onboarding regression: **343 passed, 10 skipped, zero failures** before
 the independent-lifecycle follow-up; the final server-focused suite is **38/38 passed**.
 Plugin/Tunnel/macOS packaging tests: **47 passed, one native-platform skip**.
-Production and testing native variants compile with warnings as errors. The first
-integrated native editing run passed; a later repeat could not become key/active,
-and a read-only console observation confirmed PilotMac was locked. The final
-interactive editing/window rerun remains pending an unlocked desktop. Injected
-permission-state tests are not actual TCC or Cua acceptance.
+Production and testing native variants compile with warnings as errors. An
+editing repeat could not become key/active, and a read-only console observation
+confirmed PilotMac was locked. After the user unlocked it, the final frozen test
+binary passed the real hosted TextField/SecureField, Command-V menu and private
+pasteboard checks through LaunchServices; the permission-state and existing
+self-tests also passed. Injected permission-state tests and private-pasteboard
+checks are not actual TCC, user-clipboard or Cua acceptance.
 
-These changes are **source/resource validation only**: no new full installer was
-created and the installed dev6 App was not replaced. Existing permission grants,
-identity and pairing remain intact. Full cold launch, installed appearance, actual
-Cua actions and target ChatGPT account acceptance remain unverified. Evidence:
-parent task `outputs/logo-startup-plugin-20261020/` and
+A full **dev7** ZIP/DMG was built from `ab14cc1`. The DMG was mounted read-only:
+ad-hoc signature and all **167** packaged source hashes passed. A new temporary
+Core using the actual packaged runtime rendered the testing-only native welcome
+window successfully with the new artwork. Its Core bootstrap took 5492ms and its
+subsequent native fixture 407ms; these still do not measure a full production App
+cold launch. The DMG was copied, with matching SHA-256, to PilotMac Desktop as
+`Styx-0.3.0-v6-dev.20261020.7-macos-arm64.dmg`.
+
+**Not installed:** dev6 remains in `/Applications/Styx.app`; its permissions,
+identity and pairing were not changed. Dev7 is ad-hoc signed, not notarized or a
+stable release. Full production launch, installed appearance, actual Cua actions
+and target ChatGPT account acceptance remain unverified. Evidence: parent task
+`outputs/v6-candidate-dev7/`, `outputs/logo-startup-plugin-20261020/` and
 `outputs/v6-startup-read-20261020/read-timing-receipt.json`.
 
 ## PilotMac permission recognition — same dev6 App
