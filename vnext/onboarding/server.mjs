@@ -4,7 +4,7 @@ import os from 'node:os';
 import path from 'node:path';
 import http from 'node:http';
 import net from 'node:net';
-import {completeLocalSetup} from './local-setup.mjs';
+import {completeLocalSetup,isRetryableLocalCheck} from './local-setup.mjs';
 import {enableDeploymentBackground,observeDeploymentBackground} from './background.mjs';
 import {configureTunnel,TunnelRuntime} from './tunnel-runtime.mjs';
 import {changeDeploymentCapabilities,readDeploymentCapabilities} from './capabilities.mjs';
@@ -16,6 +16,7 @@ const UI=fileURLToPath(new URL('./ui/',import.meta.url));
 const STEPS=new Set(['gateway.runtime.prepare','gateway.prepare','gateway.start','host.prepare','host.invite','host.request','host.claim','host.doctor','host.pair','gateway.verify','host.service.install','host.service.start','host.service.status']);
 const STATES=new Set(['pending','running','succeeded','failed','uncertain','blocked','skipped','awaiting_approval']);
 const ERRORS=new Set(['interrupted_or_in_progress_do_not_replay','step_failed_inspect_local_evidence_no_automatic_replay']);
+const DOCTOR_BLOCKERS=new Set(['signed_install_unavailable','invalid_host_configuration','host_credential_unavailable','codex_executor_unavailable','signed_computer_runtime_unavailable','macos_requires_embedded_cua_socket']);
 const MODES=new Set(['create-local','join-existing']);
 const equal=(a,b)=>typeof a==='string'&&Buffer.byteLength(a)===Buffer.byteLength(b)&&timingSafeEqual(Buffer.from(a),Buffer.from(b));
 const fail=code=>{throw Error(code)};
@@ -25,6 +26,10 @@ export function browserOrigin(value){
  return url.origin;
 }
 export function gatewayServiceUiCapabilities(platform,available){return {supported:available===true&&['linux','darwin','win32'].includes(platform),startEnablesStartup:['linux','darwin','win32'].includes(platform),enableCanTriggerRecovery:platform==='win32'}}
+export function nativeBrowserPrepared(deployment,browser){
+ if(deployment?.roles?.browser!=='requested')return true;
+ return browser?.configured===true&&(browser.status==='prepared'&&browser.approved===true||browser.status==='not_approved'&&browser.approved===false);
+}
 export function publicService(value){
  if(!value||typeof value!=='object')return null;const out={};
  for(const key of ['status','action','role','manager','serviceId','name','state','persistence','health','active','substate','enabled'])if(typeof value[key]==='string'&&/^[A-Za-z0-9_.-]{1,120}$/.test(value[key]))out[key]=value[key];
@@ -50,6 +55,7 @@ export function publicDeployment(value){
   gatewayRuntime:typeof value.gatewayRuntime?.status==='string'&&['running','stopped','not_owned_by_current_process'].includes(value.gatewayRuntime.status)?value.gatewayRuntime.status:'unknown',
   accountAcceptance:value.accountAcceptance==='user_confirmed_with_mcp_evidence'?'user_confirmed_with_mcp_evidence':'NOT RUN',providerIdentity:'not_verified',
   steps:steps.filter(s=>s&&STEPS.has(s.id)).map(s=>({id:s.id,status:STATES.has(s.status)?s.status:'uncertain',
+   ...(isRetryableLocalCheck(s)?{retryable:true,blockers:[...new Set((Array.isArray(s.evidence?.blockers)?s.evidence.blockers:[]).filter(code=>DOCTOR_BLOCKERS.has(code)))]}:{}),
    ...(s.id.startsWith('host.service.')?{service:publicService(s.evidence)}:{}),
    ...(s.evidence?.ownerApproval==='REQUIRED'?{ownerApproval:'REQUIRED'}:{}),
    ...(/^[a-f0-9]{64}$/.test(s.evidence?.fingerprint??'')?{fingerprint:s.evidence.fingerprint}:{}),
@@ -309,7 +315,9 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
  if(macPreviewApp&&fs.existsSync(path.join(stateDir,'deployment.json'))&&typeof api.startDeploymentForeground==='function'){
   try{
    const j=await readOnboardingJourney(stateDir,journeyOptions);
-   if(j.steps.some(step=>step.id==='local_setup'&&step.status==='completed')){
+   const deployment=await api.readDeployment(stateDir);
+   const browser=deployment.roles?.browser==='requested'?await api.readDeploymentBrowser?.(stateDir):null;
+   if(j.steps.some(step=>step.id==='local_setup'&&step.status==='completed')&&nativeBrowserPrepared(deployment,browser)){
     await api.startDeploymentForeground(stateDir,{authorize:true});nativeStartup={status:'started',observation:'current_process'};
    }else nativeStartup={status:'preparation_required',observation:'current_process'};
   }catch{nativeStartup={status:'reconciliation_required',observation:'current_process'};}

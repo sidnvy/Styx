@@ -5,8 +5,15 @@ import os from 'node:os';
 import http from 'node:http';
 import path from 'node:path';
 import {createHash} from 'node:crypto';
-import {createOnboardingServer,publicDeployment,validateUiConfig,browserOrigin,gatewayServiceUiCapabilities} from '../server.mjs';
+import {createOnboardingServer,publicDeployment,validateUiConfig,browserOrigin,gatewayServiceUiCapabilities,nativeBrowserPrepared} from '../server.mjs';
 const config=()=>({schema:1,mode:'create-local',gateway:{url:'https://127.0.0.1:8795'},host:{bundle:'/private/bundle',publisherKeyFile:'/private/publisher.pem',publisherSha256:'a'.repeat(64),baseDir:'/private/new-host',label:'Owned test',computer:false}});
+test('native reopen never starts an unprepared requested Browser alongside Exec',()=>{
+ const deployment={roles:{browser:'requested'}};
+ for(const browser of [null,{}, {configured:true,status:'not_prepared',approved:true},{configured:true,status:'preparation_blocked',approved:true},{configured:true,status:'prepared'},{configured:true,status:'prepared',approved:false},{configured:true,status:'not_approved',approved:true}])assert.equal(nativeBrowserPrepared(deployment,browser),false);
+ assert.equal(nativeBrowserPrepared(deployment,{configured:true,status:'prepared',approved:true}),true);
+ assert.equal(nativeBrowserPrepared(deployment,{configured:true,status:'not_approved',approved:false}),true);
+ assert.equal(nativeBrowserPrepared({roles:{browser:'disabled'}},null),true);
+});
 async function fixture(options={}){
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'styx-ui-test-'));let state=null,calls=0;
  const core={
@@ -132,6 +139,12 @@ test('browser cannot choose executable helpers or request arbitrary routes, and 
 test('state projection maps known journal states, owner approval and live Gateway without leaking evidence/config',()=>{
  const value=publicDeployment({mode:'join-existing',activeStep:'host.request',gatewayRuntime:{status:'running'},config:{token:'secret'},steps:[{id:'host.request',status:'succeeded',evidence:{fingerprint:'b'.repeat(64),ownerApproval:'REQUIRED',invitation:'secret',token:'secret'}},{id:'host.claim',status:'awaiting_approval',error:'SECRET_TOKEN_VALUE'},{id:'host.doctor',status:'uncertain'},{id:'evil',status:'succeeded'}]});
  assert.equal(value.steps.length,3);assert.equal(value.steps[0].ownerApproval,'REQUIRED');assert.equal(value.steps[0].fingerprint,'b'.repeat(64));assert.equal(value.steps[1].status,'awaiting_approval');assert.equal(value.steps[2].status,'uncertain');assert.doesNotMatch(JSON.stringify(value),/secret|SECRET|invitation|"config"/);
+});
+
+test('blocked doctor exposes only known reasons and explicit safe recheck without leaking raw evidence',()=>{
+ const out=publicDeployment({mode:'create-local',steps:[{id:'host.doctor',status:'blocked',evidence:{blockers:['codex_executor_unavailable','Bearer SECRET','/private/credential','codex_executor_unavailable'],stderr:'SECRET'}},{id:'host.pair',status:'blocked',evidence:{blockers:['codex_executor_unavailable']}},{id:'host.doctor',status:'uncertain',evidence:{blockers:['codex_executor_unavailable']}}]});
+ assert.equal(out.steps[0].retryable,true);assert.deepEqual(out.steps[0].blockers,['codex_executor_unavailable']);assert.equal(out.steps[1].retryable,undefined);assert.equal(out.steps[2].retryable,undefined);
+ assert.doesNotMatch(JSON.stringify(out),/SECRET|Bearer|private|stderr/);
 });
 
 test('trusted forwarding is explicit loopback only, configuration selection preserves safe capability types',()=>{

@@ -43,3 +43,29 @@ test('aggregate local setup cannot omit or change its requested Browser approval
  assert.equal((await completeLocalSetup(f.api,'unused',{...approval,enableBrowser:true})).status,'local_preparation_complete');
  assert.equal(f.calls[4].ownerApproval.enableBrowser,true);
 });
+
+test('explicit continue retries only a blocked read-only doctor after successful pairing',async()=>{
+ const f=fixture();for(const s of f.state.steps.slice(0,5))s.status='succeeded';f.state.steps[5].status='blocked';
+ f.state.gatewayRuntime={status:'running'};
+ let defaults=0;f.api.setLocalDeploymentDefault=()=>{defaults++};
+ const r=await completeLocalSetup(f.api,'unused',approval);
+ assert.equal(r.status,'local_preparation_complete');assert.deepEqual(f.calls,[{authorize:['host.doctor']}]);assert.equal(defaults,1);
+ assert.equal(f.state.steps[6].status,'pending');
+});
+test('a repeated blocked doctor remains honest and does not loop or start background work',async()=>{
+ const f=fixture();for(const s of f.state.steps.slice(0,5))s.status='succeeded';f.state.steps[5].status='blocked';f.state.gatewayRuntime={status:'running'};
+ f.api.advanceDeployment=(_d,args)=>{f.calls.push(args)};
+ assert.deepEqual(await completeLocalSetup(f.api,'unused',approval),{status:'needs_attention',step:'host.doctor'});
+ assert.deepEqual(f.calls,[{authorize:['host.doctor']}]);assert.equal(f.state.steps[6].status,'pending');
+});
+test('a reopened App starts the same prepared Gateway before explicitly rechecking a blocked doctor',async()=>{
+ const f=fixture();for(const s of f.state.steps.slice(0,5))s.status='succeeded';f.state.steps[5].status='blocked';
+ let started=0;f.api.startDeploymentGateway=()=>{started++;f.state.gatewayRuntime={status:'running'}};
+ assert.equal((await completeLocalSetup(f.api,'unused',approval)).status,'local_preparation_complete');assert.equal(started,1);assert.deepEqual(f.calls,[{authorize:['host.doctor']}]);
+});
+test('a retryable doctor cannot bypass an earlier uncertain mutation or replay an uncertain doctor',async()=>{
+ for(const id of ['gateway.prepare','host.prepare','host.pair','host.doctor']){
+  const f=fixture();for(const s of f.state.steps.slice(0,5))s.status='succeeded';f.state.steps[5].status='blocked';f.state.steps.find(s=>s.id===id).status='uncertain';
+  assert.deepEqual(await completeLocalSetup(f.api,'unused',approval),{status:'needs_attention',step:id});assert.equal(f.calls.length,0);
+ }
+});

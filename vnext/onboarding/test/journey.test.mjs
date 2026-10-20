@@ -13,6 +13,12 @@ import {browserAcceptanceChallenge} from '../../shared/onboarding-evidence.mjs';
 const ready=()=>({mode:'create-local',roles:{gateway:'local',host:'local',exec:'enabled',computer:'requested'},gatewayRuntime:{status:'running'},steps:['gateway.prepare','gateway.start','gateway.verify','host.prepare','host.pair','host.doctor'].map(id=>({id,status:'succeeded',evidence:{secret:'SECRET_TOKEN',config:'/private/SECRET_PATH'}}))});
 const row=(j,id)=>j.steps.find(s=>s.id===id);
 const accepted=()=>({status:'user_confirmed_with_mcp_evidence',requestProof:{status:'verified'},targetChatConfirmation:{status:'user_confirmed'},desktop:{status:'verified'},complete:true});
+test('a blocked read-only doctor offers explicit continue while uncertain mutations still require reconciliation',()=>{
+ const deployment=ready();deployment.steps.find(s=>s.id==='host.doctor').status='blocked';
+ let j=projectOnboardingJourney({deployment});
+ assert.equal(row(j,'local_setup').status,'needs_attention');assert.equal(row(j,'local_setup').reason,'local_readonly_check_failed');assert.equal(row(j,'local_setup').nextAction,'complete_local_setup');assert.equal(j.diagnostics.canRetry,true);assert.equal(j.readiness.exec.status,'not_ready');
+ deployment.steps.find(s=>s.id==='host.pair').status='uncertain';j=projectOnboardingJourney({deployment});assert.equal(row(j,'local_setup').nextAction,'inspect_local_state');assert.equal(j.diagnostics.canRetry,false);
+});
 function temp(t){const root=fs.mkdtempSync(path.join(os.tmpdir(),'styx-journey-'));ensurePrivateDirectory(root);t.after(()=>fs.rmSync(root,{recursive:true,force:true}));return root;}
 function snapshot(root){return Object.fromEntries(fs.readdirSync(root,{recursive:true}).filter(n=>fs.lstatSync(path.join(root,n)).isFile()).map(n=>[n,createHash('sha256').update(fs.readFileSync(path.join(root,n))).digest('hex')]))}
 
