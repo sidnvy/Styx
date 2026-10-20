@@ -9,7 +9,7 @@ import {createHash,createPublicKey,generateKeyPairSync,sign} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StreamableHTTPClientTransport} from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import {startDeploymentForeground,stopDeploymentForeground,readDeploymentForeground,observeDeploymentForeground} from '../foreground.mjs';
+import {startDeploymentForeground,stopDeploymentForeground,stopOwnedDeploymentForeground,readDeploymentForeground,observeDeploymentForeground} from '../foreground.mjs';
 import {createDeployment,advanceDeployment,planDeployment,readDeployment,stopDeploymentGateway} from '../core.mjs';
 import {stageSignedRelease,activateRelease} from '../../host/installer.mjs';
 import {ensurePrivateDirectory,writePrivateFile} from '../../host/private-storage.mjs';
@@ -129,4 +129,28 @@ test('killed owner leaves a stale receipt and lock without PID-based adoption or
  const reused=JSON.parse(receipt);reused.pid=process.pid;fs.writeFileSync(file,JSON.stringify(reused));
  assert.equal((await observeDeploymentForeground(f.stateDir)).status,'needs_attention');
  await assert.rejects(startDeploymentForeground(f.stateDir,{authorize:true},f.ops),/owned_or_interrupted/);
+});
+
+
+test('capability editing stops only its own confirmed foreground and preserves independent or changed owners',{skip:process.platform!=='linux'},async t=>{
+ const f=await fixture(t);
+ await assert.rejects(stopOwnedDeploymentForeground(f.stateDir,{authorize:true}),/foreground_not_owned_or_unsafe/);
+ await startDeploymentForeground(f.stateDir,{authorize:true},f.ops);
+ await assert.rejects(stopOwnedDeploymentForeground(f.stateDir,{}),/explicit_foreground_authorization_required/);
+ await assert.rejects(stopOwnedDeploymentForeground(f.stateDir,{authorize:true,stopService:true}),/explicit_foreground_authorization_required/);
+ const stopped=await stopOwnedDeploymentForeground(f.stateDir,{authorize:true});
+ assert.equal(stopped.status,'stopped');assert.equal(stopped.observation,'current_process');assert.equal(stopped.foregroundRestartRequired,true);
+ assert.equal(readDeploymentForeground(f.stateDir).status,'not_running');
+ await startDeploymentForeground(f.stateDir,{authorize:true},{...f.ops,hostStatus:async()=>({status:'reported',state:'running',installed:true})});
+ await assert.rejects(stopOwnedDeploymentForeground(f.stateDir,{authorize:true}),/foreground_not_owned_or_unsafe/);
+ assert.equal(readDeploymentForeground(f.stateDir).host,'service');await stopDeploymentForeground(f.stateDir);
+ await startDeploymentForeground(f.stateDir,{authorize:true},f.ops);
+ const cfg=path.join(f.stateDir,'deployment.json');fs.appendFileSync(cfg,' ');
+ await assert.rejects(stopOwnedDeploymentForeground(f.stateDir,{authorize:true}),/foreground_not_owned_or_unsafe/);
+ assert.equal(fs.existsSync(path.join(f.stateDir,'foreground.lock')),true);
+ await stopDeploymentForeground(f.stateDir);
+ fs.writeFileSync(path.join(f.stateDir,'foreground.lock'),'foreign-owner',{mode:0o600});
+ await assert.rejects(stopOwnedDeploymentForeground(f.stateDir,{authorize:true}),/foreground_not_owned_or_unsafe/);
+ assert.equal(fs.readFileSync(path.join(f.stateDir,'foreground.lock'),'utf8'),'foreign-owner');
+ fs.unlinkSync(path.join(f.stateDir,'foreground.lock'));
 });

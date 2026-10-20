@@ -130,6 +130,15 @@ async function start(d,operations,abort){
   await stopEntry(d,entry);if(entry.startedGateway)await api.stopDeploymentGateway(d);throw error;
  }
 }
+// A capability edit may suspend only this manager's known, healthy connector.
+// Independent CLI managers, native services and uncertain owners are never adopted.
+export async function stopOwnedDeploymentForeground(d,options={}){
+ absolute(d);
+ if(!options||Object.keys(options).some(k=>k!=='authorize')||options.authorize!==true)fail('explicit_foreground_authorization_required');
+ const entry=owners.get(d),observed=readDeploymentForeground(d);
+ if(!entry||starting.has(d)||observed.host!=='foreground'||!['started','connected'].includes(observed.status))fail('foreground_not_owned_or_unsafe_for_capability_change');
+ return stopEntry(d,entry);
+}
 export async function stopDeploymentForeground(d){
  absolute(d);const pending=starting.get(d);if(pending){pending.abort.abort();await pending.promise.catch(()=>{})}
  const entry=owners.get(d);if(!entry)return readDeploymentForeground(d);

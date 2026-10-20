@@ -117,6 +117,7 @@ struct ProductView: View {
     private var preparation: some View {
         VStack(alignment: .leading, spacing: 20) {
             heading(productText("准备电脑", "Prepare your computer"), model.joined ? productText("请在主台核对并批准这台电脑。", "Review and approve this computer on the main computer.") : productText("Styx 会准备所选能力，并保留已有设置。", "Styx prepares your selected capabilities and preserves existing settings."))
+            approvalNotice
             ProductPanel(title: productText("设置进度", "Setup progress")) {
                 ForEach(model.deployment?.steps.filter { !$0.id.contains("service") } ?? []) { step in
                     HStack { Text(stepTitle(step.id)); Spacer(); Text(stateTitle(step.status)).foregroundStyle(.secondary) }
@@ -171,6 +172,7 @@ struct ProductView: View {
             if model.joined {
                 ProductPanel(title: productText("由主台管理", "Managed on the main computer")) {
                     Text(productText("回到原来的聊天，选择这台电脑进行实际调用。此处无需新建插件或聊天入口。", "Return to the existing chat and select this computer for a real tool call. Its plugin and chat connection are managed on the main computer."))
+                    approvalNotice
                 }
             } else if !model.localPrepared {
                 Button(productText("先完成电脑准备", "Finish computer setup")) { model.page = .preparation }
@@ -267,10 +269,12 @@ struct ProductView: View {
             heading("Styx", model.accepted ? productText("聊天验证已完成。", "Chat verification completed.") : productText("各项状态来自本次实际检查。", "These states come from observed checks."))
             ProductPanel(title: productText("这台电脑", "This computer")) {
                 statusRow("CLI", model.journey["readiness"]["exec"]["status"].string)
-                statusRow("Browser Automation", model.journey["readiness"]["browser"]["status"].string)
-                statusRow("Computer Use", model.journey["readiness"]["desktop"]["status"].string)
+                statusRow("Browser Automation", model.browserNotApproved ? "not_approved" : model.journey["readiness"]["browser"]["status"].string)
+                statusRow("Computer Use", model.computerNotApproved ? "not_approved" : model.journey["readiness"]["desktop"]["status"].string)
+                approvalNotice
                 if !model.localPrepared { Button(productText("继续设置", "Continue setup")) { model.page = .preparation } }
-                if model.deployment?.computerRequested == true && (!model.axGranted || !model.screenGranted) { Button(productText("检查系统权限", "Review system permissions")) { model.page = .permissions } }
+                if model.computerApproved && (!model.axGranted || !model.screenGranted) { Button(productText("检查系统权限", "Review system permissions")) { model.page = .permissions } }
+                if model.foregroundRecoveryNeeded { Button(productText("恢复本次连接", "Resume this connection")) { model.resumeForeground() } }
             }
             ProductPanel(title: productText("聊天连接", "Chat connection")) {
                 Text(model.joined ? productText("由主台管理", "Managed on the main computer") : model.accepted ? productText("已收到真实工具结果与目标聊天确认", "Real tool results and target-chat confirmation received") : productText("尚未完成目标聊天验证", "Target-chat verification is incomplete"))
@@ -346,10 +350,16 @@ struct ProductView: View {
             if model.deployment != nil {
                 ProductPanel(title: productText("这台电脑的能力", "This computer's capabilities")) {
                     Label("CLI", systemImage: "terminal")
-                    Toggle("Computer Use", isOn: $model.computer)
-                    Toggle("Browser Automation", isOn: $model.browser)
-                    Text(productText("更改能力可能短暂重启连接，请先完成正在进行的操作。", "Changing capabilities may briefly restart the connection. Finish active operations first.")).font(.caption).foregroundStyle(.secondary)
-                    Button(productText("应用更改", "Apply changes")) { model.updateCapabilities() }
+                    if model.joined {
+                        Text(productText("可选能力由主台审批。请在主台核对当前授权；这里不会自行扩大权限。", "Optional capabilities are approved on the main computer. Review authorization there; this computer cannot expand it itself.")).font(.callout).foregroundStyle(.secondary)
+                        approvalNotice
+                    } else {
+                        Toggle("Computer Use", isOn: $model.computer)
+                        Toggle("Browser Automation", isOn: $model.browser)
+                        Text(productText("更改能力会暂停本次 App 管理的连接，请先完成正在进行的操作。其他服务或管理入口的连接需要先停止并对账。", "Changes pause connections managed by this App. Finish active work first. Stop and reconcile connections owned by other services or managers separately.")).font(.caption).foregroundStyle(.secondary)
+                        Button(productText("应用更改", "Apply changes")) { model.updateCapabilities() }
+                    }
+                    if model.foregroundRecoveryNeeded { Button(productText("恢复本次连接", "Resume this connection")) { model.resumeForeground() } }
                 }
             }
         }
@@ -357,12 +367,21 @@ struct ProductView: View {
     private func statusRow(_ title: String, _ status: String?) -> some View {
         HStack { Text(title); Spacer(); Text(stateTitle(status ?? "not_observed")).foregroundStyle(.secondary) }
     }
+    @ViewBuilder private var approvalNotice: some View {
+        if model.browserNotApproved {
+            Text(productText("Browser Automation 尚未获主台批准；已批准的 CLI 等能力仍可连接。", "Browser Automation was not approved on the main computer. Approved capabilities, including CLI, can still connect.")).font(.callout).foregroundStyle(.secondary)
+        }
+        if model.computerNotApproved {
+            Text(productText("Computer Use 尚未获主台批准；此处无需为它开启系统权限。", "Computer Use was not approved on the main computer. System permissions for it are not needed here.")).font(.callout).foregroundStyle(.secondary)
+        }
+    }
     private func stateTitle(_ status: String) -> String {
         switch status {
         case "succeeded", "completed": return productText("已完成", "Completed")
         case "connected", "ready": return productText("已连接，待实际验证", "Connected; verification separate")
         case "verified": return productText("实际验证通过", "Verified by execution")
         case "not_requested", "not_required", "skipped": return productText("未启用或无需检查", "Not enabled or not required")
+        case "not_approved": return productText("尚未获主台批准", "Not approved by the owner")
         case "running", "starting", "connecting": return productText("正在处理", "In progress")
         case "awaiting_approval": return productText("等待主台批准", "Awaiting approval")
         case "preflight_passed": return productText("基础检查通过", "Preflight passed")

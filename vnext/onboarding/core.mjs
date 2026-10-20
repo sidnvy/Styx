@@ -55,21 +55,21 @@ function browserPreparationScope(d,{ownsAdvance=false}={}){
  const pem=fs.readFileSync(publisher,'utf8'),key=createPublicKey(pem);
  if(key.asymmetricKeyType!=='ed25519'||createHash('sha256').update(key.export({type:'spki',format:'der'})).digest('hex')!==config.host.publisherSha256)fail('browser_publisher_binding_changed');
  const active=activeRelease(install,pem);if(!active)fail('browser_enabled_host_bundle_required');
- const moduleFile=path.join(active.release_root,'packages/styx-browser-provider/prepare.mjs');
- if(!fs.existsSync(moduleFile))fail('browser_enabled_host_bundle_required');
  const hostFile=path.join(base,'device/host.json'),identityFile=path.join(base,'device/identity.json'),privateFile=path.join(base,'device/identity.pem'),host=read(hostFile),identity=read(identityFile);requirePrivateFile(privateFile);
  if(identity.device_id!==host.host_id||createHash('sha256').update(createPublicKey(fs.readFileSync(privateFile)).export({type:'spki',format:'der'})).digest('hex')!==identity.fingerprint||host.token_file!==path.join(base,'device/host.token'))fail('browser_identity_binding_changed');
  requirePrivateFile(host.token_file);
  const profileRoot=path.join(base,'browser');
- if(host.browser?.enabled!==true)fail('approved_browser_host_required');
+ if(host.browser?.enabled!==true)return {configured:true,approved:false};
+ const moduleFile=path.join(active.release_root,'packages/styx-browser-provider/prepare.mjs');
+ if(!fs.existsSync(moduleFile))fail('browser_enabled_host_bundle_required');
  if(host.browser.profileRoot!==profileRoot)fail('browser_profile_binding_changed');
  requirePrivateDirectory(profileRoot);
  const preserved=[path.join(d,'deployment.json'),path.join(d,'state.json'),hostFile,identityFile,privateFile,host.token_file,publisher,path.join(install,'active.json')].map(file=>[file,hash(file)]);
- return {configured:true,moduleFile,profileRoot,unchanged:()=>preserved.every(([file,digest])=>hash(file)===digest)};
+ return {configured:true,approved:true,moduleFile,profileRoot,unchanged:()=>preserved.every(([file,digest])=>hash(file)===digest)};
 }
 function browserPreparationProjection(result){
  if(!['prepared','not_prepared','preparation_blocked'].includes(result?.status))fail('browser_preparation_result_invalid');
- return {schema:1,configured:true,status:result.status,observation:result.status==='prepared'?'verified_private_runtime_receipt':result.status==='preparation_blocked'?'private_preparation_ownership':'private_runtime_receipt_absent',...(result.status==='preparation_blocked'?{reason:/^[a-z][a-z0-9_]{1,100}$/.test(result.reason??'')?result.reason:'browser_preparation_reconciliation_required'}:{}),...(typeof result.playwright==='string'?{playwrightVersion:result.playwright}:{}),readiness:'not_verified',accountAcceptance:'NOT RUN'};
+ return {schema:1,configured:true,approved:true,status:result.status,observation:result.status==='prepared'?'verified_private_runtime_receipt':result.status==='preparation_blocked'?'private_preparation_ownership':'private_runtime_receipt_absent',...(result.status==='preparation_blocked'?{reason:/^[a-z][a-z0-9_]{1,100}$/.test(result.reason??'')?result.reason:'browser_preparation_reconciliation_required'}:{}),...(typeof result.playwright==='string'?{playwrightVersion:result.playwright}:{}),readiness:'not_verified',accountAcceptance:'NOT RUN'};
 }
 async function browserPreparationModule(scope){
  const api=await import(pathToFileURL(scope.moduleFile).href+'?sha256='+hash(scope.moduleFile));
@@ -80,16 +80,19 @@ export async function readDeploymentBrowser(d){
  const scope=browserPreparationScope(d);
  if(!scope.configured)return {schema:1,configured:false,status:'not_configured',readiness:'not_verified',accountAcceptance:'NOT RUN'};
  if(scope.pending)return {schema:1,configured:true,status:'awaiting_host_approval',readiness:'not_verified',accountAcceptance:'NOT RUN'};
+ if(scope.approved===false)return {schema:1,configured:true,approved:false,status:'not_approved',observation:'approved_host_configuration',readiness:'not_verified',accountAcceptance:'NOT RUN'};
  const api=await browserPreparationModule(scope);if(!scope.unchanged())fail('browser_preparation_scope_changed');
  const result=api.readManagedBrowser(scope.profileRoot);if(!scope.unchanged())fail('browser_preparation_scope_changed');
  return browserPreparationProjection(result);
 }
 export async function prepareDeploymentBrowser(d,options={}){
  exact(options,['authorize','signal','recover']);if(options.authorize!==true||options.recover!==undefined&&typeof options.recover!=='boolean'||options.signal!==undefined&&!(options.signal instanceof AbortSignal))fail('explicit_browser_preparation_authorization_required');
- const first=browserPreparationScope(d);if(!first.configured)fail('browser_not_configured');if(first.pending)fail('approved_browser_host_required');
+ const first=browserPreparationScope(d);if(!first.configured)fail('browser_not_configured');if(first.pending||first.approved===false)fail('approved_browser_host_required');
  const release=lock(d);
  try{
-  const scope=browserPreparationScope(d,{ownsAdvance:true}),api=await browserPreparationModule(scope);
+  const scope=browserPreparationScope(d,{ownsAdvance:true});
+  if(scope.approved!==true)fail('approved_browser_host_required');
+  const api=await browserPreparationModule(scope);
   if(!scope.unchanged())fail('browser_preparation_scope_changed');
   const result=await api.prepareManagedBrowser({profileRoot:scope.profileRoot,authorize:true,...(options.recover!==undefined?{recover:options.recover}:{}),...(options.signal?{signal:options.signal}:{})});
   if(!scope.unchanged())fail('browser_preparation_scope_changed');
@@ -326,7 +329,7 @@ export {planHostUpdate,readHostUpdate,applyHostUpdate,recoverHostUpdate} from '.
 export {readDeploymentAcceptance,beginDeploymentAcceptance,confirmDeploymentAcceptance,recordDeploymentDesktopReadback,readDeploymentConnectionHandoff,prepareDeploymentConnectionHandoff} from './account-acceptance.mjs';
 export {readDeploymentPlugin,setDeploymentPluginProfile,exportDeploymentPlugin,recordDeploymentPluginAction} from './plugin-flow.mjs';
 export {readDeploymentPermissions} from './permissions.mjs';
-export {startDeploymentForeground,stopDeploymentForeground,observeDeploymentForeground as readDeploymentForeground} from './foreground.mjs';
+export {startDeploymentForeground,stopDeploymentForeground,stopOwnedDeploymentForeground,readDeploymentForeground as readOwnedDeploymentForeground,observeDeploymentForeground as readDeploymentForeground} from './foreground.mjs';
 export function readDeploymentOnboardingPreference(stateDir){
  const {state}=load(stateDir),decision=state.onboardingDecisions?.background;
  return {background:decision?.configSha256===state.configSha256&&['foreground','login'].includes(decision.choice)?decision.choice:'not_decided',configurationBound:decision?.configSha256===state.configSha256};

@@ -355,3 +355,21 @@ test('capability rollback uses the same Core and rejects foreign state or unauth
   assert.equal((await f.post('/api/capabilities/rollback',data)).status,200);assert.equal(calls,1);
  }finally{await f.cleanup()}
 });
+
+
+test('a web manager cannot suspend an App foreground even with valid session and CSRF',async()=>{
+ let called=0;const f=await fixture({core:{stopOwnedDeploymentForeground:async()=>{called++;return {status:'stopped',observation:'current_process',foregroundRestartRequired:true}}}});
+ try{
+  assert.equal((await f.post('/api/foreground/stop',{authorize:true},{'X-Styx-CSRF':''})).status,403);
+  assert.equal((await f.post('/api/foreground/stop',{authorize:true})).status,409);
+  assert.equal(called,0);
+ }finally{await f.cleanup()}
+});
+
+test('status distinguishes the authenticated public foreground from the current manager owner',async()=>{
+ const f=await fixture({core:{readDeployment:()=>({mode:'join-existing',steps:[]}),readDeploymentForeground:async()=>({status:'connected',observation:'authenticated_foreground_owner',host:'foreground'}),readOwnedDeploymentForeground:()=>({status:'needs_attention',observation:'current_process',host:'not_owned'})}});
+ try{
+  const {foreground,ownedForeground}=await(await f.get('/api/status')).json();
+  assert.equal(foreground.observation,'authenticated_foreground_owner');assert.equal(ownedForeground.host,'not_owned');
+ }finally{await f.cleanup()}
+});

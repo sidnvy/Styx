@@ -4,7 +4,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {createHash,generateKeyPairSync,X509Certificate,createPrivateKey} from 'node:crypto';
-import {execFileSync} from 'node:child_process';
+import {execFileSync,spawnSync} from 'node:child_process';
+import {acquireRecoveryGuard} from '../recovery-guard.mjs';
 import {planDeviceIngressChange,applyDeviceIngressChange,rollbackDeviceIngressChange} from '../device-ingress-change.mjs';
 import {readGatewayDeployment} from '../gateway-deployment-reader.mjs';
 const sha=value=>createHash('sha256').update(value).digest('hex');
@@ -129,4 +130,34 @@ test('Gateway-only change does not create or configure a Host',async t=>{
  const originalHost=fs.readFileSync(path.join(f.base,'device/host.json')),plan=f.plan();assert.equal(plan.changes.some(file=>file.name.startsWith('host')),false);
  await applyDeviceIngressChange(f.d,{plan,authorize:true},f.adapters);assert.equal(read(configFile).host,undefined);assert.deepEqual(fs.readFileSync(path.join(f.base,'device/host.json')),originalHost);
  await rollbackDeviceIngressChange(f.d,{transactionId:plan.reviewSha256,authorize:true},f.adapters);
+});
+
+test('explicit ingress rollback resumes after its recovery process dies during a partial rollback',async t=>{
+ const f=fixture(t),plan=f.plan(),before=plan.changes.map(file=>[file.path,fs.readFileSync(file.path)]);
+ await applyDeviceIngressChange(f.d,{plan,authorize:true},f.adapters);
+ // The child really owns the guard and management locks, restores one file,
+ // then exits without any finally block. OS/service observations remain fixtures.
+ const script=`import fs from 'node:fs';import {rollbackDeviceIngressChange} from ${JSON.stringify(new URL('../device-ingress-change.mjs',import.meta.url).href)};
+ await rollbackDeviceIngressChange(${JSON.stringify(f.d)},{transactionId:${JSON.stringify(plan.reviewSha256)},authorize:true},{observeGateway:async()=>({service:'not_installed',processes:'none'}),observeHost:async()=>({status:'reported',installed:false,state:'stopped'}),reservePorts:async()=>async()=>{},replaceManagedFile:(file,bytes)=>{fs.writeFileSync(file,bytes);process.kill(process.pid,'SIGKILL')}});`;
+ const child=spawnSync(process.execPath,['--input-type=module','-e',script],{encoding:'utf8',timeout:10000});
+ assert.equal(child.error,undefined);assert.notEqual(child.status,0);
+ const guard=path.join(f.d,'ingress-changes',plan.reviewSha256,'recovery.lock');assert.equal(fs.existsSync(guard),true);
+ assert.equal(read(path.join(path.dirname(guard),'journal.json')).status,'rolling_back');
+ const result=await rollbackDeviceIngressChange(f.d,{transactionId:plan.reviewSha256,authorize:true},f.adapters);
+ assert.equal(result.status,'rolled_back');assert.equal(fs.existsSync(guard),false);
+ for(const [file,value]of before)assert.deepEqual(fs.readFileSync(file),value);
+ for(const lock of locks)assert.equal(fs.existsSync(path.join(f.d,lock)),false);
+});
+
+test('ingress rollback retains live, unknown and foreign-transaction recovery guards',async t=>{
+ for(const scenario of ['live','unknown','foreign']){
+  const f=fixture(t),plan=f.plan();await applyDeviceIngressChange(f.d,{plan,authorize:true},f.adapters);
+  const guard=path.join(f.d,'ingress-changes',plan.reviewSha256,'recovery.lock');
+  const held=scenario==='unknown'?null:acquireRecoveryGuard(guard,{kind:'device-ingress-rollback',transactionId:scenario==='foreign'?'a'.repeat(64):plan.reviewSha256});
+  if(!held)write(guard,'old guard without provable owner identity');
+  const before=fs.readFileSync(guard),config=fs.readFileSync(path.join(f.d,'deployment.json'));
+  await assert.rejects(rollbackDeviceIngressChange(f.d,{transactionId:plan.reviewSha256,authorize:true},f.adapters),/recovery_guard_owner_alive_or_unknown|recovery_guard_owner_unknown/);
+  assert.deepEqual(fs.readFileSync(guard),before);assert.deepEqual(fs.readFileSync(path.join(f.d,'deployment.json')),config);
+  held?.close();
+ }
 });

@@ -9,6 +9,7 @@ import {inspectServiceUpdate,updateServiceRelease,recoverServiceUpdate} from '..
 import {requirePrivateDirectory,requirePrivateFile,openPrivateFile} from '../host/private-storage.mjs';
 import {createHostUpdateRuntime} from './host-update-runtime.mjs';
 import {normalizeConnector} from '../host/connect.mjs';
+import {acquireRecoveryGuard} from './recovery-guard.mjs';
 const fail=code=>{throw Error(code)};
 const sha=value=>createHash('sha256').update(value).digest('hex');
 const hash=file=>sha(fs.readFileSync(file));
@@ -117,17 +118,20 @@ function managedRecord(ctx){
  return value;
 }
 function managedProjection(value){return value?{transactionId:value.transactionId,phase:value.phase,status:['completed','recovered'].includes(value.phase)?value.phase:'needs_recovery',engineTransactionId:value.engineTransactionId??null,outcome:value.outcome??null,nativeHealth:value.health??'not_observed',accountAcceptance:'NOT RUN'}:null}
-function managementLock(stateDir,{recover=false}={}){
+function managementLock(stateDir,{recover=false,transactionId}={}){
+ let recoveryGuard;
  const held=[],acquire=file=>{
   let fd;try{fd=openPrivateFile(file)}catch{fail('host_update_management_busy')}
   const stat=fs.fstatSync(fd),data=JSON.stringify({schema:1,kind:'managed-host-update',pid:process.pid,nonce:randomBytes(32).toString('hex')});
   try{fs.writeFileSync(fd,data);fs.fsyncSync(fd)}catch(error){fs.closeSync(fd);throw error}held.push({file,fd,stat,data});
  };
- const release=()=>{for(const h of held.reverse()){try{const s=requirePrivateFile(h.file);if(s.ino!==h.stat.ino||s.dev!==h.stat.dev||fs.readFileSync(h.file,'utf8')!==h.data)fail('host_update_management_lock_changed');fs.unlinkSync(h.file)}finally{fs.closeSync(h.fd)}}};
+ const verify=h=>{const s=requirePrivateFile(h.file);if(s.ino!==h.stat.ino||s.dev!==h.stat.dev||fs.readFileSync(h.file,'utf8')!==h.data)fail('host_update_management_lock_changed')};
+ const release=()=>{try{for(const h of held.reverse()){try{verify(h);fs.unlinkSync(h.file)}finally{fs.closeSync(h.fd)}}}finally{recoveryGuard?.close()}};
+ release.assertOwned=()=>{recoveryGuard?.assertOwned();for(const h of held)verify(h)};
  try{
   const guard=path.join(stateDir,'host-update-recovery.lock'),file=path.join(stateDir,'advance.lock');
   if(recover){
-   acquire(guard);
+   recoveryGuard=acquireRecoveryGuard(guard,{kind:'managed-host-update-recovery',transactionId});
    if(fs.existsSync(file)){
     const previous=read(file),stat=requirePrivateFile(file),bytes=fs.readFileSync(file,'utf8');
     if(previous.kind!=='managed-host-update'||!Number.isSafeInteger(previous.pid)||previous.pid<1)fail('host_update_management_busy');
@@ -173,27 +177,27 @@ export async function applyHostUpdate({stateDir,plan,authorize=false}={}, {runti
 }
 export async function recoverHostUpdate({stateDir,transactionId,authorize=false}={}, {runtimeFactory=createHostUpdateRuntime,timeoutMs=30000}={}){
  if(authorize!==true)fail('explicit_host_update_authorization_required');if(!id(transactionId))fail('invalid_transaction_id');
- const release=managementLock(stateDir,{recover:true});let ctx,record;
+ const release=managementLock(stateDir,{recover:true,transactionId});let ctx,record;
  try{
   ctx=scope(stateDir,{allowInvalidCurrent:true});record=managedRecord(ctx);
   if(!record||record.transactionId!==transactionId||['completed','recovered'].includes(record.phase))fail('host_update_recovery_binding_mismatch');
   requireOwnerOffline(stateDir);unchanged(ctx,record.plan);
   if(!record.native)fail('host_update_native_receipt_missing');
   const runtime=runtimeFactory(ctx),saveNative=native=>{record.native=native;saveManaged(ctx,record,record.phase)};
-  await runtime.prepare(saveNative,record.native);saveManaged(ctx,record,'recovering');
+  release.assertOwned();await runtime.prepare(saveNative,record.native);release.assertOwned();saveManaged(ctx,record,'recovering');
   // Recovery explicitly stops/inhibits; it never replays uncertain starts or commands.
   const abort=new AbortController(),timer=setTimeout(()=>abort.abort(),timeoutMs);
-  try{await runtime.stop({signal:abort.signal},saveNative)}finally{clearTimeout(timer);abort.abort()}
+  try{release.assertOwned();await runtime.stop({signal:abort.signal},saveNative);release.assertOwned()}finally{clearTimeout(timer);abort.abort()}
   let outcome='recovered_stopped';
   if(record.engineTransactionId){
    const engine=inspectServiceUpdate({installRoot:ctx.installRoot,transactionId:record.engineTransactionId});
    if(!['activated','rolled_back','recovered_stopped'].includes(engine.phase)){
-    const result=await recoverServiceUpdate({installRoot:ctx.installRoot,publicKeyPem:ctx.pem,transactionId:record.engineTransactionId,timeoutMs,confirmStopped:()=>runtime.confirmStopped()});outcome=result.status;
+    const result=await recoverServiceUpdate({installRoot:ctx.installRoot,publicKeyPem:ctx.pem,transactionId:record.engineTransactionId,timeoutMs,confirmStopped:()=>{release.assertOwned();return runtime.confirmStopped()}});outcome=result.status;
    }
   }
-  unchanged(scope(stateDir,{allowInvalidCurrent:true}),record.plan);
+  release.assertOwned();unchanged(scope(stateDir,{allowInvalidCurrent:true}),record.plan);
   if(outcome==='recovered_stopped'){
-   record.persistence=await runtime.finish(saveNative,{restoreEnabled:false});record.outcome=outcome;saveManaged(ctx,record,'recovered');
+   record.persistence=await runtime.finish(saveNative,{restoreEnabled:false});release.assertOwned();record.outcome=outcome;saveManaged(ctx,record,'recovered');
   }else saveManaged(ctx,record,'needs_recovery');
   return {...managedProjection(record),status:outcome};
  }finally{release()}

@@ -33,6 +33,7 @@ still the exact pasteboard content/version; it never destroys unrelated newer cl
 - Welcome → create or join; no language picker or technical role selection.
 - Capabilities → trusted packaged Host defaults and real create/local-setup or join advance.
 - Browser preparation → existing `browser/prepare`, then owned foreground connection.
+- Browser requested but not approved → Core's `not_approved` observation skips Browser preparation and leaves approved Exec available. Computer Use permission routing uses the actual approved foreground Host configuration, never deployment intent.
 - Computer Use permission panels read AX/screen preflight separately and open OS settings on click.
 - Platform Tunnel ID/runtime key → `tunnel/configure`, then `tunnel/start`.
 - Plugin presentation/reuse → `plugin/profile`; official direct installation → `plugin/record`.
@@ -40,12 +41,14 @@ still the exact pasteboard content/version; it never destroys unrelated newer cl
 - Overview/Computers/Chat → observed Core projections; no fabricated success events or activity page.
 - Revocation → explicit NSAlert then `device/revoke`; never removes local identity files.
 - Login preference → `app/lifecycle` observation, `app/login` mutation, gated by session capability.
+- Capability changes → inspect fresh public and current-process owner observations. Browser changes explicitly confirm pausing this App's owned connection through `foreground/stop`, retain Core's offline checks, and resume only after a confirmed complete transaction. Computer Use-only changes honor `foregroundRestartRequired`. Unconfirmed mutations are not replayed; explicit recovery remains available. Foreign, service-owned or uncertain connections require separate reconciliation and are never stopped by the UI.
 
 ## Boundaries awaiting integration/validation
 
-The initial native settings view includes CLI as the current Host's built-in capability because
-Core has no independent Exec disable flag. A change to Browser selection still requires Core's
-capability migration implementation; unchanged Browser is omitted when saving Computer Use.
+The native settings view includes CLI as the current Host's built-in capability because
+Core has no independent Exec disable flag. Browser changes use Core's offline capability
+transaction; unchanged Browser is omitted when saving Computer Use. Joined Hosts show
+owner-managed optional capabilities and cannot expand their own grants through settings.
 Local-only ingress displays a prerequisite and cannot generate a misleading remote invitation.
 A controlled ingress preparation UI must be attached when its transaction API is available.
 

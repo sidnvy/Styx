@@ -9,6 +9,8 @@ import {stageSignedRelease,activateRelease} from '../../host/installer.mjs';
 import * as api from '../host-update.mjs';
 import {createHostUpdateRuntime} from '../host-update-runtime.mjs';
 import {linuxUserUnit} from '../../host/linux-service.mjs';
+import {spawnSync} from 'node:child_process';
+import {acquireRecoveryGuard} from '../recovery-guard.mjs';
 const sha=bytes=>createHash('sha256').update(bytes).digest('hex');
 const hash=file=>sha(fs.readFileSync(file));
 function fixture(t){
@@ -221,4 +223,46 @@ test('active Linux Host update requires an atomic work-drain contract before any
  const f=nativeAdapterFixture(t);f.state.active='active';f.state.pid=12345;
  await assert.rejects(f.runtime.prepare(()=>{}),/active_work_drain_required/);
  assert.ok(f.state.commands.every(x=>x[0]==='show'));assert.equal(fs.existsSync(f.dropFile),false);
+});
+
+test('explicit Host recovery resumes after its recovery process dies with both locks held',{skip:process.platform!=='linux'},async t=>{
+ const f=managedFixture(t),ops=controlledRuntime({hang:true}),plan=api.planHostUpdate({stateDir:f.stateDir,bundle:f.releases['2.0.0'].source});
+ const pending=await api.applyHostUpdate({stateDir:f.stateDir,plan,authorize:true},{...ops,timeoutMs:20});assert.equal(pending.status,'needs_recovery');ops.state.finishLateHealth(true);
+ // Real process death verifies durable lock ownership; injected callbacks do
+ // not count as Linux service or Exec acceptance.
+ const script=`import {recoverHostUpdate} from ${JSON.stringify(new URL('../host-update.mjs',import.meta.url).href)};
+ await recoverHostUpdate({stateDir:${JSON.stringify(f.stateDir)},transactionId:${JSON.stringify(pending.transactionId)},authorize:true},{runtimeFactory:()=>({async prepare(){},async stop(){process.kill(process.pid,'SIGKILL')}})});`;
+ const child=spawnSync(process.execPath,['--input-type=module','-e',script],{encoding:'utf8',timeout:10000});assert.equal(child.error,undefined);assert.notEqual(child.status,0);
+ const guard=path.join(f.stateDir,'host-update-recovery.lock');assert.equal(fs.existsSync(guard),true);assert.equal(fs.existsSync(path.join(f.stateDir,'advance.lock')),true);
+ assert.equal(JSON.parse(fs.readFileSync(path.join(f.stateDir,'host-update.json'))).phase,'recovering');
+ const result=await api.recoverHostUpdate({stateDir:f.stateDir,transactionId:pending.transactionId,authorize:true},ops);
+ assert.equal(result.status,'recovered_stopped');assert.equal(fs.existsSync(guard),false);assert.equal(fs.existsSync(path.join(f.stateDir,'advance.lock')),false);assert.equal(ops.state.enabled,false);
+});
+
+test('Host recovery retains live, unknown and foreign-transaction recovery guards',{skip:process.platform!=='linux'},async t=>{
+ for(const scenario of ['live','unknown','foreign']){
+  const f=managedFixture(t),guard=path.join(f.stateDir,'host-update-recovery.lock'),transactionId='a'.repeat(32),ops=controlledRuntime();
+  const held=scenario==='unknown'?null:acquireRecoveryGuard(guard,{kind:'managed-host-update-recovery',transactionId:scenario==='foreign'?'b'.repeat(32):transactionId});
+  if(!held)fs.writeFileSync(guard,JSON.stringify({schema:1,kind:'managed-host-update',pid:2147483647,nonce:'old-format'}),{mode:0o600});
+  const before=fs.readFileSync(guard);
+  await assert.rejects(api.recoverHostUpdate({stateDir:f.stateDir,transactionId,authorize:true},ops),/recovery_guard_owner_alive_or_unknown|recovery_guard_owner_unknown/);
+  assert.deepEqual(fs.readFileSync(guard),before);assert.deepEqual(ops.calls,[]);assert.equal(fs.existsSync(path.join(f.stateDir,'advance.lock')),false);held?.close();
+ }
+});
+
+test('recovery guard preserves a changed inode and an owner whose PID cannot be observed',t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'styx-recovery-guard-'));fs.chmodSync(root,0o700);t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
+ const file=path.join(root,'recovery.lock'),binding={kind:'fixture-explicit-recovery',transactionId:'a'.repeat(32)};
+ const make=()=>Buffer.from(JSON.stringify({schema:1,...binding,pid:2147483647,ownerToken:'b'.repeat(64),token:'c'.repeat(64)}));
+ fs.writeFileSync(file,make(),{mode:0o600});const before=fs.readFileSync(file);
+ assert.throws(()=>acquireRecoveryGuard(file,binding,{probePid(){const error=Error('unobservable PID');error.code='EPERM';throw error}}),/owner_alive_or_unknown/);assert.deepEqual(fs.readFileSync(file),before);
+ assert.throws(()=>acquireRecoveryGuard(file,binding,{probePid(){fs.renameSync(file,file+'.prior');fs.writeFileSync(file,before,{mode:0o600});const error=Error('dead PID');error.code='ESRCH';throw error}}),/identity_changed/);
+ assert.deepEqual(fs.readFileSync(file),before);assert.equal(fs.existsSync(file+'.prior'),true);
+});
+
+test('recovery guard release refuses to erase a replacement lock',t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'styx-recovery-guard-replaced-'));fs.chmodSync(root,0o700);t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
+ const file=path.join(root,'recovery.lock'),guard=acquireRecoveryGuard(file,{kind:'fixture-explicit-recovery',transactionId:'a'.repeat(32)});
+ fs.renameSync(file,file+'.prior');fs.writeFileSync(file,'foreign replacement',{mode:0o600});
+ assert.throws(()=>guard.assertOwned(),/identity_changed/);assert.throws(()=>guard.close(),/identity_changed/);assert.equal(fs.readFileSync(file,'utf8'),'foreign replacement');
 });

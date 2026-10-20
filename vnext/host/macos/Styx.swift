@@ -419,8 +419,13 @@ func productComputerUseRequested(_ status: ProductJSON, guiAvailable: Bool) -> B
     guard guiAvailable, status["deployment"]["roles"]["host"].string == "local" else { return false }
     let change = status["deviceCapabilities"]
     if ["running", "uncertain"].contains(change["status"].string ?? "") { return false }
-    if change["status"].string == "updated", change["phase"].string == "complete", case .bool(let computer) = change["computer"] { return computer }
-    return status["deployment"]["roles"]["computer"].string == "requested"
+    if change["status"].string == "updated", change["phase"].string == "complete", change["computer"] == .bool(false) { return false }
+    // The deployment expresses intent; only the approved Host configuration
+    // reported by its authenticated owner can enable an App-owned component.
+    let foreground = status["foreground"]
+    return ["authenticated_foreground_owner", "current_process"].contains(foreground["observation"].string ?? "") &&
+        ["started", "connected", "using_service"].contains(foreground["status"].string ?? "") &&
+        ["foreground", "service"].contains(foreground["host"].string ?? "") && foreground["computerRequested"] == .bool(true)
 }
 func productSystemQuitReason(_ reason: OSType?) -> Bool {
     guard let reason = reason else { return false }
@@ -836,10 +841,17 @@ if CommandLine.arguments.contains("--self-test") {
     #if STYX_PRODUCT_UI
     try productCoreSelfTest()
     let requestedStatus: ProductJSON = .object(["deployment": .object(["roles": .object(["host": .string("local"), "computer": .string("requested")])])])
-    precondition(productComputerUseRequested(requestedStatus, guiAvailable: true))
-    precondition(!productComputerUseRequested(requestedStatus, guiAvailable: false))
+    precondition(!productComputerUseRequested(requestedStatus, guiAvailable: true))
+    let approvedForeground: ProductJSON = .object(["status": .string("connected"), "observation": .string("authenticated_foreground_owner"), "host": .string("foreground"), "computerRequested": .bool(true)])
+    let approvedStatus: ProductJSON = .object(["deployment": requestedStatus["deployment"], "foreground": approvedForeground])
+    precondition(productComputerUseRequested(approvedStatus, guiAvailable: true))
+    precondition(!productComputerUseRequested(approvedStatus, guiAvailable: false))
+    let deniedStatus: ProductJSON = .object(["deployment": requestedStatus["deployment"], "foreground": .object(["status": .string("connected"), "observation": .string("authenticated_foreground_owner"), "host": .string("foreground"), "computerRequested": .bool(false)])])
+    precondition(!productComputerUseRequested(deniedStatus, guiAvailable: true))
+    let uncertainStatus: ProductJSON = .object(["deployment": requestedStatus["deployment"], "foreground": .object(["status": .string("needs_attention"), "observation": .string("authenticated_foreground_owner"), "host": .string("foreground"), "computerRequested": .bool(true)])])
+    precondition(!productComputerUseRequested(uncertainStatus, guiAvailable: true))
     precondition(!productComputerUseRequested(.object([:]), guiAvailable: true))
-    let disabledStatus: ProductJSON = .object(["deployment": requestedStatus["deployment"], "deviceCapabilities": .object(["status": .string("updated"), "phase": .string("complete"), "computer": .bool(false)])])
+    let disabledStatus: ProductJSON = .object(["deployment": requestedStatus["deployment"], "foreground": approvedForeground, "deviceCapabilities": .object(["status": .string("updated"), "phase": .string("complete"), "computer": .bool(false)])])
     precondition(!productComputerUseRequested(disabledStatus, guiAvailable: true))
     precondition(!productSystemQuitReason(nil))
     precondition(productSystemQuitReason(OSType(kAEReallyLogOut)))

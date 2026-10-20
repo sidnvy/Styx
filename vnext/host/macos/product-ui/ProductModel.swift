@@ -9,6 +9,34 @@ func productText(_ chinese: String, _ english: String) -> String {
 
 enum ProductPage: String, CaseIterable { case welcome, invitation, capabilities, preparation, permissions, chat, overview, computers, settings }
 
+enum ProductBrowserPreparation: Equatable { case notRequired, prepare, needsReview }
+enum ProductForegroundTransition: Equatable { case stopped, owned, needsReview }
+enum ProductWorkflowError: Error { case browserPreparationNeedsReview, capabilityNeedsOfflineReview, foregroundStopUnconfirmed, capabilityChangeInterrupted, foregroundRecoveryRequired }
+
+// Desired selection does not grant a capability. These decisions use Core's
+// current approved Host projection and refuse absent or uncertain observations.
+enum ProductCapabilityPolicy {
+    static func browserPreparation(requested: Bool, observation: ProductJSON) -> ProductBrowserPreparation {
+        guard requested else { return .notRequired }
+        switch observation["status"].string {
+        case "not_approved": return observation["approved"] == .bool(false) ? .notRequired : .needsReview
+        case "prepared": return observation["approved"] == .bool(true) ? .notRequired : .needsReview
+        case "not_prepared": return observation["approved"] == .bool(true) ? .prepare : .needsReview
+        default: return .needsReview
+        }
+    }
+    static func foregroundTransition(owner: ProductJSON, observed: ProductJSON) -> ProductForegroundTransition {
+        guard owner["observation"].string == "current_process" else { return .needsReview }
+        if owner["status"].string == "not_running", observed["status"].string == "not_running" { return .stopped }
+        if owner["host"].string == "foreground", ["started", "connected"].contains(owner["status"].string ?? ""),
+           ["started", "connected"].contains(observed["status"].string ?? "") { return .owned }
+        return .needsReview
+    }
+    static func computerApproved(_ foreground: ProductJSON) -> Bool {
+        foreground["computerRequested"] == .bool(true)
+    }
+}
+
 @MainActor final class ProductModel: ObservableObject {
     let client: ProductCoreClient
     @Published var page: ProductPage = .welcome
@@ -20,6 +48,8 @@ enum ProductPage: String, CaseIterable { case welcome, invitation, capabilities,
     @Published var acceptance: ProductJSON = .null
     @Published var session: ProductJSON = .null
     @Published var plugin: ProductJSON = .null
+    @Published var browserObservation: ProductJSON = .null
+    @Published var foregroundRecoveryNeeded = false
     @Published var devices: [ProductDevice] = []
     @Published var computer = true
     @Published var browser = true
@@ -61,6 +91,9 @@ enum ProductPage: String, CaseIterable { case welcome, invitation, capabilities,
     var localPrepared: Bool { journey["steps"].array.contains { $0["id"].string == "local_setup" && $0["status"].string == "completed" } }
     var joined: Bool { deployment?.joined ?? joining }
     var accepted: Bool { acceptance["complete"].bool }
+    var browserNotApproved: Bool { browserObservation["status"].string == "not_approved" && browserObservation["approved"] == .bool(false) }
+    var computerNotApproved: Bool { joined && deployment?.computerRequested == true && status["foreground"]["computerRequested"] == .bool(false) }
+    var computerApproved: Bool { ProductCapabilityPolicy.computerApproved(status["foreground"]) }
     var connectionTunnelID: String { plugin["connection"]["tunnelId"].string ?? (!tunnelID.isEmpty ? tunnelID : handoffTarget) }
     var challengeID: String? { acceptance["challenge"]["id"].string }
     var targetProofReady: Bool {
@@ -90,6 +123,11 @@ enum ProductPage: String, CaseIterable { case welcome, invitation, capabilities,
         status = try await client.read("status")
         journey = try await client.read("journey")["journey"]
         if deployment != nil {
+            if localPrepared && deployment?.browserRequested == true {
+                // A Browser observation failure does not hide Exec or the rest
+                // of the App. Preparation takes a fresh authoritative reading.
+                browserObservation = (try? await client.read("browser")["browser"]) ?? .null
+            } else { browserObservation = .null }
             let latest = try await client.read("acceptance")["acceptance"]
             if latest["challenge"]["id"] != acceptance["challenge"]["id"] { desktopValue = "" }
             acceptance = latest
@@ -124,16 +162,29 @@ enum ProductPage: String, CaseIterable { case welcome, invitation, capabilities,
             }
         }
     }
-    private func reportFailure() {
+    private func reportFailure(_ failure: Error? = nil) {
         // Never interpolate raw transport errors, response bodies or secrets.
-        error = productText("操作未完成。请刷新状态后检查；结果不确定的操作不会自动重试。", "The operation did not complete. Refresh to inspect its state; uncertain operations are not replayed.")
+        switch failure as? ProductWorkflowError {
+        case .browserPreparationNeedsReview:
+            error = productText("Browser 准备状态需要检查。请刷新状态，确认主台审批及浏览器准备记录后继续。", "Browser preparation needs review. Refresh and check owner approval and browser preparation before continuing.")
+        case .capabilityNeedsOfflineReview:
+            error = productText("更改 Browser 前，需要先停止并核对现有 Host 服务或其他管理入口的连接。Styx 不会替你停止这些组件；请完成对账后重试。", "Before changing Browser, stop and reconcile Host services or connections owned by another manager. Styx will not stop those components. Retry after reconciliation.")
+        case .foregroundStopUnconfirmed:
+            error = productText("本次连接是否停止尚未确认，能力尚未更改。请刷新并核对组件状态，避免重复操作。", "Connection shutdown is unconfirmed; capabilities have not been changed. Refresh and reconcile component state before trying again.")
+        case .capabilityChangeInterrupted:
+            error = productText("能力更改未能确认完成。请先检查组件状态并恢复事务，再选择恢复连接；不会自动重试更改。", "Capability changes could not be confirmed. Inspect component state and recover the transaction before resuming. Changes will not be replayed.")
+        case .foregroundRecoveryRequired:
+            error = productText("能力更改已完成，但连接恢复尚未确认。请刷新状态后选择“恢复本次连接”。", "Capabilities were updated, but connection recovery is unconfirmed. Refresh, then choose Resume this connection.")
+        default:
+            error = productText("操作未完成。请刷新状态后检查；结果不确定的操作不会自动重试。", "The operation did not complete. Refresh to inspect its state; uncertain operations are not replayed.")
+        }
     }
     func perform(_ operation: @escaping () async throws -> Void) {
         guard !busy else { return }
         busy = true; error = nil
         Task {
             do { try await operation(); try await reload() }
-            catch { reportFailure(); try? await reload() }
+            catch { reportFailure(error); try? await reload() }
             busy = false
         }
     }
@@ -181,10 +232,16 @@ enum ProductPage: String, CaseIterable { case welcome, invitation, capabilities,
         }
         guard localPrepared else { return }
         if deployment?.browserRequested == true {
-            _ = try await client.write("browser/prepare", ["authorize": .bool(true)])
+            browserObservation = try await client.read("browser")["browser"]
+            switch ProductCapabilityPolicy.browserPreparation(requested: true, observation: browserObservation) {
+            case .prepare: browserObservation = try await client.write("browser/prepare", ["authorize": .bool(true)])["browser"]
+            case .notRequired: break
+            case .needsReview: throw ProductWorkflowError.browserPreparationNeedsReview
+            }
         }
-        _ = try await client.write("foreground", ["authorize": .bool(true)])
-        page = deployment?.computerRequested == true ? .permissions : joined ? .overview : .chat
+        let foreground = try await client.write("foreground", ["authorize": .bool(true)])["foreground"]
+        foregroundRecoveryNeeded = false
+        page = ProductCapabilityPolicy.computerApproved(foreground) ? .permissions : joined ? .overview : .chat
     }
     func continuePreparation() { perform { [self] in try await prepare() } }
     func observePermissions() {
@@ -318,10 +375,56 @@ enum ProductPage: String, CaseIterable { case welcome, invitation, capabilities,
     }
     func updateCapabilities() {
         perform { [self] in
+            guard !joined else { throw ProductCoreError.rejected }
+            status = try await client.read("status")
             var payload: [String: ProductJSON] = ["authorize": .bool(true), "computer": .bool(computer)]
             let currentBrowser = status["deviceCapabilities"]["browser"] == .null ? deployment?.browserRequested == true : status["deviceCapabilities"]["browser"].bool
-            if browser != currentBrowser { payload["browser"] = .bool(browser) }
-            _ = try await client.write("capabilities", payload)
+            var stoppedOwnedForeground = false
+            if browser != currentBrowser {
+                payload["browser"] = .bool(browser)
+                switch ProductCapabilityPolicy.foregroundTransition(owner: status["ownedForeground"], observed: status["foreground"]) {
+                case .stopped: break
+                case .needsReview: throw ProductWorkflowError.capabilityNeedsOfflineReview
+                case .owned:
+                    let alert = NSAlert()
+                    alert.messageText = productText("暂停本次连接并更改能力？", "Pause this connection and change capabilities?")
+                    alert.informativeText = productText("这会停止本次 Styx App 管理的 CLI、Browser 和 Computer Use 连接。请先完成正在进行的操作。更改成功后会恢复连接。", "This pauses CLI, Browser and Computer Use connections managed by this Styx App. Finish active work first. Connections resume after successful changes.")
+                    alert.addButton(withTitle: productText("暂停并更改", "Pause and change"))
+                    alert.addButton(withTitle: productText("取消", "Cancel"))
+                    guard alert.runModal() == .alertFirstButtonReturn else { return }
+                    let stopped: ProductJSON
+                    do { stopped = try await client.write("foreground/stop", ["authorize": .bool(true)])["foreground"] }
+                    catch { throw ProductWorkflowError.foregroundStopUnconfirmed }
+                    guard stopped["status"].string == "stopped", stopped["observation"].string == "current_process", stopped["foregroundRestartRequired"] == .bool(true) else { throw ProductWorkflowError.foregroundStopUnconfirmed }
+                    stoppedOwnedForeground = true; foregroundRecoveryNeeded = true
+                }
+            }
+            let result: ProductJSON
+            do { result = try await client.write("capabilities", payload)["capabilities"] }
+            catch {
+                if stoppedOwnedForeground { throw ProductWorkflowError.capabilityChangeInterrupted }
+                // Computer-only updates can also stop the owned connection
+                // before a lost response. Observe and recover; never replay.
+                foregroundRecoveryNeeded = true
+                throw ProductWorkflowError.capabilityChangeInterrupted
+            }
+            guard result["status"].string == "updated", result["phase"].string == "complete" else {
+                foregroundRecoveryNeeded = stoppedOwnedForeground || result["foregroundRestartRequired"].bool
+                throw ProductWorkflowError.capabilityChangeInterrupted
+            }
+            if stoppedOwnedForeground || result["foregroundRestartRequired"] == .bool(true) {
+                foregroundRecoveryNeeded = true
+                do {
+                    _ = try await client.write("foreground", ["authorize": .bool(true)])
+                    foregroundRecoveryNeeded = false
+                } catch { throw ProductWorkflowError.foregroundRecoveryRequired }
+            }
+        }
+    }
+    func resumeForeground() {
+        perform { [self] in
+            _ = try await client.write("foreground", ["authorize": .bool(true)])
+            foregroundRecoveryNeeded = false
         }
     }
     func openOfficial(_ value: String) {

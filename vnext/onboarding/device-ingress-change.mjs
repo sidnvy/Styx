@@ -11,6 +11,7 @@ import {validateDeployment,localGatewayAddresses} from './deployment-config.mjs'
 import {readGatewayDeployment} from './gateway-deployment-reader.mjs';
 import {observeGatewayRuntimeQuiescence} from './gateway-runtime-update.mjs';
 import {observeHostService} from './service-lifecycle.mjs';
+import {acquireRecoveryGuard} from './recovery-guard.mjs';
 
 const kind='first-device-ipv4-ingress-v1',sha=value=>createHash('sha256').update(value).digest('hex');
 const fail=code=>{throw Error(code)},encode=value=>Buffer.from(JSON.stringify(value,null,2)+'\n');
@@ -233,18 +234,19 @@ export async function rollbackDeviceIngressChange(d,options={},adapters={}){
  keys(options,['transactionId','authorize']);if(options.authorize!==true)fail('ingress_change_explicit_rollback_authorization_required');
  const id=options.transactionId;if(active.has(id))fail('ingress_change_transaction_active');
  let {dir,journal,config}=rollbackSnapshot(d,id);
- const guard=path.join(dir,'recovery.lock'),guardFd=openPrivateFile(guard,0o600),guardInfo=fs.fstatSync(guardFd);fs.writeFileSync(guardFd,ownerToken);fs.fsyncSync(guardFd);
+ const guard=acquireRecoveryGuard(path.join(dir,'recovery.lock'),{kind:'device-ingress-rollback',transactionId:id});
  let ownership,releasePorts,attempted=false;const retainedPrior=lockNames.some(name=>exists(path.join(d,name)));active.add(id);
  try{
   ownership=locks(d,id,journal.locks);journal.locks=ownership.identity;atomic(path.join(dir,'journal.json'),encode(journal));await quiet(d,config,adapters);releasePorts=await (adapters.reservePorts??reserve)(config,journal.plan.listenHost);
-  ({journal}=rollbackSnapshot(d,id));journal.locks=ownership.identity;journal.status='rolling_back';atomic(path.join(dir,'journal.json'),encode(journal));
+  guard.assertOwned();({journal}=rollbackSnapshot(d,id));journal.locks=ownership.identity;journal.status='rolling_back';atomic(path.join(dir,'journal.json'),encode(journal));
   for(const file of [...journal.plan.changes].reverse()){
+   guard.assertOwned();
    if(sha(bytes(file.path))===file.beforeSha256)continue;
    journal.activeFile=file.name;atomic(path.join(dir,'journal.json'),encode(journal));attempted=true;
    (adapters.replaceManagedFile??atomic)(file.path,bytes(path.join(dir,file.name+'.before')));
    if(sha(bytes(file.path))!==file.beforeSha256)fail('ingress_change_rollback_write_verification_failed');
   }
-  checkPreserved(journal.plan.preserved);readGatewayDeployment(d);journal.status='rolled_back';delete journal.activeFile;atomic(path.join(dir,'journal.json'),encode(journal));return publicResult(journal);
+  guard.assertOwned();checkPreserved(journal.plan.preserved);readGatewayDeployment(d);journal.status='rolled_back';delete journal.activeFile;atomic(path.join(dir,'journal.json'),encode(journal));return publicResult(journal);
  }catch(error){if(attempted){journal.status='uncertain';try{atomic(path.join(dir,'journal.json'),encode(journal))}catch{}fail('ingress_change_rollback_uncertain_preserve_state')}throw error}
- finally{try{await releasePorts?.()}finally{try{ownership?.close((retainedPrior||attempted)&&journal.status!=='rolled_back')}finally{try{const now=requirePrivateFile(guard);if(now.ino===guardInfo.ino&&now.dev===guardInfo.dev&&bytes(guard).toString()===ownerToken)fs.unlinkSync(guard)}finally{fs.closeSync(guardFd);active.delete(id)}}}}
+ finally{try{await releasePorts?.()}finally{try{ownership?.close((retainedPrior||attempted)&&journal.status!=='rolled_back')}finally{try{guard.close()}finally{active.delete(id)}}}}
 }

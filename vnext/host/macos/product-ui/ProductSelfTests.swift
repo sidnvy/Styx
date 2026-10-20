@@ -39,6 +39,28 @@ func productCoreSelfTest() throws {
     try require(decoded == roundTrip, "JSON protocol roundtrip failed")
     try require(!ProductCoreClient.writes.contains("../status"), "Traversal route allowed")
     try require(!ProductCoreClient.reads.contains("connection-handoff"), "Secret handoff exposed as ordinary read")
+    // A denied optional capability must not trap an approved Exec-only join.
+    let deniedBrowser: ProductJSON = .object(["status": .string("not_approved"), "approved": .bool(false)])
+    try require(ProductCapabilityPolicy.browserPreparation(requested: true, observation: deniedBrowser) == .notRequired, "Denied Browser blocked the approved Host")
+    try require(ProductCapabilityPolicy.browserPreparation(requested: true, observation: .object(["status": .string("not_prepared"), "approved": .bool(true)])) == .prepare, "Approved Browser preparation was omitted")
+    let unverifiedApproval: [ProductJSON] = [.null, .object(["status": .string("not_prepared")]), .object(["status": .string("not_approved"), "approved": .bool(true)]), .object(["status": .string("preparation_blocked"), "approved": .bool(true)])]
+    for observation in unverifiedApproval {
+        try require(ProductCapabilityPolicy.browserPreparation(requested: true, observation: observation) == .needsReview, "Unknown or inconsistent approval became preparation authority")
+    }
+    try require(!ProductCapabilityPolicy.computerApproved(.object(["computerRequested": .string("true")])), "Untrusted requested text became Computer Use permission authority")
+    try require(!ProductCapabilityPolicy.computerApproved(.object(["computerRequested": .bool(false)])), "Denied Computer Use led to a permission prompt")
+    try require(ProductCapabilityPolicy.computerApproved(.object(["computerRequested": .bool(true)])), "Approved Computer Use lost its permission step")
+    let owned: ProductJSON = .object(["status": .string("connected"), "observation": .string("current_process"), "host": .string("foreground")])
+    let live: ProductJSON = .object(["status": .string("connected"), "observation": .string("authenticated_foreground_owner")])
+    let stopped: ProductJSON = .object(["status": .string("not_running"), "observation": .string("current_process")])
+    try require(ProductCapabilityPolicy.foregroundTransition(owner: owned, observed: live) == .owned, "App-owned connection cannot enter reviewed capability change")
+    try require(ProductCapabilityPolicy.foregroundTransition(owner: stopped, observed: stopped) == .stopped, "Verified offline state requires an unrelated stop")
+    try require(ProductCapabilityPolicy.foregroundTransition(owner: stopped, observed: live) == .needsReview, "Foreign live owner was treated as stopped")
+    let foreignOwners: [ProductJSON] = [.null, live, .object(["status": .string("connected"), "observation": .string("current_process"), "host": .string("service")]), .object(["status": .string("needs_attention"), "observation": .string("current_process"), "host": .string("foreground")])]
+    for foreign in foreignOwners {
+        try require(ProductCapabilityPolicy.foregroundTransition(owner: foreign, observed: live) == .needsReview, "Unknown, foreign or service owner became App stop authority")
+    }
+    try require(ProductCapabilityPolicy.foregroundTransition(owner: owned, observed: .object(["status": .string("needs_attention")])) == .needsReview, "Failed owner observation permitted a stop")
     print("Styx native product protocol self-test passed; GUI, TCC and account acceptance NOT RUN")
 }
 

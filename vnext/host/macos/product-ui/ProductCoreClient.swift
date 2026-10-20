@@ -52,7 +52,7 @@ final class ProductCoreClient {
     private let transport: URLSession
     private let redirectBlocker = ProductRedirectBlocker()
     static let reads: Set<String> = ["app/lifecycle", "session", "status", "journey", "acceptance", "plugin", "browser", "diagnostics"]
-    static let writes: Set<String> = ["app/quit", "app/login", "device/revoke", "create", "local-setup", "advance", "foreground", "browser/prepare", "capabilities", "tunnel/configure", "tunnel/start", "tunnel/stop", "plugin/profile", "plugin/record", "connection-handoff", "acceptance/begin", "acceptance/confirm", "acceptance/desktop-readback", "devices", "default-device", "device-ingress/plan", "device-ingress/verify", "pairing-link/inspect", "pairing-link/accept", "pairing-link/create", "pending/list", "pending/approve"]
+    static let writes: Set<String> = ["app/quit", "app/login", "device/revoke", "create", "local-setup", "advance", "foreground", "foreground/stop", "browser/prepare", "capabilities", "tunnel/configure", "tunnel/start", "tunnel/stop", "plugin/profile", "plugin/record", "connection-handoff", "acceptance/begin", "acceptance/confirm", "acceptance/desktop-readback", "devices", "default-device", "device-ingress/plan", "device-ingress/verify", "pairing-link/inspect", "pairing-link/accept", "pairing-link/create", "pending/list", "pending/approve"]
 
     static func bootstrap(_ url: URL) -> (origin: URL, token: String)? {
         guard var c = URLComponents(url: url, resolvingAgainstBaseURL: false),

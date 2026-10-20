@@ -333,3 +333,26 @@ test('Core and CLI revoke approved identity and persist denial across Gateway re
  const hostIdentity=JSON.parse(fs.readFileSync(path.join(f.config.host.baseDir,'device/identity.json')));
  assert.equal(hostIdentity.device_id,id,'revocation preserves local identity for explicit recovery review');
 });
+
+
+test('join keeps Exec available when the owner declines requested Browser and Computer Use',{skip:process.platform!=='linux',timeout:20000},async t=>{
+ const owner=await fixture(t);createDeployment(owner.configFile,{stateDir:owner.stateDir});
+ await advanceDeployment(owner.stateDir,{authorize:['gateway.prepare','gateway.start','gateway.verify']});
+ const f=await fixture(t),ownerConfig=JSON.parse(fs.readFileSync(path.join(owner.stateDir,'gateway/owner.json')));
+ const invitation=await ownerCommand(ownerConfig,'invite',['600']);f.config.invitationFile=path.join(f.root,'invitation');fs.writeFileSync(f.config.invitationFile,invitation.invitation+'\n',{mode:0o600});
+ f.config.mode='join-existing';f.config.gateway={url:owner.config.gateway.url,caFile:path.join(owner.stateDir,'gateway/certificate.pem')};
+ f.config.host.browser={enabled:true};f.config.host.computer=true;
+ fs.writeFileSync(f.configFile,JSON.stringify(f.config));createDeployment(f.configFile,{stateDir:f.stateDir});
+ let state=await advanceDeployment(f.stateDir,{authorize:['host.prepare','host.request','host.claim']});
+ assert.equal(steps(state)['host.request'].status,'succeeded');const request=steps(state)['host.request'].evidence;
+ await ownerCommand(ownerConfig,'approve',[request.request_id,request.fingerprint]);
+ state=await advanceDeployment(f.stateDir,{authorize:['host.claim']});assert.equal(steps(state)['host.claim'].status,'succeeded');
+ const base=f.config.host.baseDir,hostFile=path.join(base,'device/host.json'),before=fs.readFileSync(hostFile),host=JSON.parse(before);
+ assert.equal(host.browser,undefined);assert.equal(host.computer,undefined);
+ assert.deepEqual(await readDeploymentBrowser(f.stateDir),{schema:1,configured:true,approved:false,status:'not_approved',observation:'approved_host_configuration',readiness:'not_verified',accountAcceptance:'NOT RUN'});
+ assert.equal((await main(['browser',f.stateDir])).status,'not_approved');
+ await assert.rejects(prepareDeploymentBrowser(f.stateDir,{authorize:true}),/approved_browser_host_required/);
+ assert.deepEqual(fs.readFileSync(hostFile),before);assert.equal(fs.existsSync(path.join(base,'browser/test-runtime-receipt.json')),false);
+ assert.equal(state.roles.browser,'requested');assert.equal(state.steps.some(step=>step.id.startsWith('gateway.')),false);
+ assert.equal(fs.existsSync(path.join(f.stateDir,'gateway')),false);
+});
