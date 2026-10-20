@@ -414,6 +414,20 @@ final class SetupWindowController: NSWindowController, WKNavigationDelegate, WKU
     }
 }
 
+#if STYX_PRODUCT_UI
+func productComputerUseRequested(_ status: ProductJSON, guiAvailable: Bool) -> Bool {
+    guard guiAvailable, status["deployment"]["roles"]["host"].string == "local" else { return false }
+    let change = status["deviceCapabilities"]
+    if ["running", "uncertain"].contains(change["status"].string ?? "") { return false }
+    if change["status"].string == "updated", change["phase"].string == "complete", case .bool(let computer) = change["computer"] { return computer }
+    return status["deployment"]["roles"]["computer"].string == "requested"
+}
+func productSystemQuitReason(_ reason: OSType?) -> Bool {
+    guard let reason = reason else { return false }
+    return [OSType(kAEQuitAll), OSType(kAEShutDown), OSType(kAERestart), OSType(kAEReallyLogOut)].contains(reason)
+}
+#endif
+
 @MainActor final class StyxDelegate: NSObject, NSApplicationDelegate {
     var setupProcess: Process?
     var setupInput: Pipe?
@@ -424,7 +438,12 @@ final class SetupWindowController: NSWindowController, WKNavigationDelegate, WKU
     #else
     var setupWindow: SetupWindowController?
     #endif
-    var explicitQuitRequested = false
+    #if STYX_PRODUCT_UI
+    var componentTimer: Timer?
+    var componentObservationPending = false
+    var computerUseRequested = false
+    #endif
+    var terminationPreservesRecovery = false
     var terminationPending = false
     var terminationApproved = false
     var setupBuffer = ""
@@ -447,7 +466,7 @@ final class SetupWindowController: NSWindowController, WKNavigationDelegate, WKU
         for number in [SIGTERM, SIGINT] {
             signal(number, SIG_IGN)
             let source = DispatchSource.makeSignalSource(signal: number, queue: .main)
-            source.setEventHandler { NSApp.terminate(nil) }
+            source.setEventHandler { [weak self] in self?.terminationPreservesRecovery = true; NSApp.terminate(nil) }
             source.resume(); signalSources.append(source)
         }
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -471,10 +490,14 @@ final class SetupWindowController: NSWindowController, WKNavigationDelegate, WKU
            Bundle.main.bundleURL.standardizedFileURL.path != "/Applications/Styx.app" {
             let alert = NSAlert(); alert.messageText = "Move Styx to Applications first"
             alert.informativeText = "Drag the complete Styx.app to /Applications, then open it there. Do not replace an existing Styx installation without reviewing it first. Settings and permissions need a stable app location."
-            alert.runModal(); NSApp.terminate(nil); return
+            alert.runModal(); terminationPreservesRecovery = true; NSApp.terminate(nil); return
         }
+        #if STYX_PRODUCT_UI
+        statusLine?.title = "Computer Use is not enabled"
+        #else
         do { runtime = try RuntimeDirectory(); try start() }
         catch { phase = "blocked"; statusLine?.title = "Blocked: \(error)" }
+        #endif
         // A competing Cua owner does not prevent opening this app's setup UI.
         if let resources = Bundle.main.resourceURL,
            FileManager.default.isExecutableFile(atPath: resources.appendingPathComponent("runtime/node").path) {
@@ -513,6 +536,9 @@ final class SetupWindowController: NSWindowController, WKNavigationDelegate, WKU
                         owner.stopSetup(); owner.setupStatusLine?.title = "Local setup protocol unavailable"; return
                     }
                     owner.setupURL = url; owner.setupStatusLine?.title = "Local setup ready"
+                    #if STYX_PRODUCT_UI
+                    owner.observeProductComponents(url)
+                    #endif
                     if owner.setupOpenRequested { owner.showSetup(url) }
                 }
             }
@@ -524,6 +550,10 @@ final class SetupWindowController: NSWindowController, WKNavigationDelegate, WKU
                 try? owner.setupInput?.fileHandleForWriting.close()
                 owner.setupProcess = nil; owner.setupInput = nil; owner.setupOutput = nil; owner.setupURL = nil
                 owner.setupWindow?.close(); owner.setupWindow = nil
+                #if STYX_PRODUCT_UI
+                owner.componentTimer?.invalidate(); owner.componentTimer = nil
+                owner.computerUseRequested = false; owner.stop()
+                #endif
                 owner.setupStatusLine?.title = "Local setup stopped; reopen Settings"
             }
         }
@@ -562,7 +592,41 @@ final class SetupWindowController: NSWindowController, WKNavigationDelegate, WKU
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows flag: Bool) -> Bool {
         openSettings(); return true
     }
+    #if STYX_PRODUCT_UI
+    func observeProductComponents(_ url: URL) {
+        componentTimer?.invalidate()
+        componentTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
+            Task { @MainActor in await self?.refreshProductComponents(url) }
+        }
+        Task { @MainActor in await refreshProductComponents(url) }
+    }
+    func refreshProductComponents(_ url: URL) async {
+        guard setupURL == url, !componentObservationPending, !terminationPending else { return }
+        componentObservationPending = true
+        defer { componentObservationPending = false }
+        do {
+            let client = try ProductCoreClient(sessionURL: url)
+            let status = try await client.read("status")
+            guard setupURL == url, !terminationPending else { return }
+            let session = CGSessionCopyCurrentDictionary() as? [String: Any]
+            let requested = productComputerUseRequested(status, guiAvailable: session?[kCGSessionOnConsoleKey as String] as? Bool == true)
+            guard requested != computerUseRequested else { return }
+            computerUseRequested = requested
+            if requested {
+                if runtime == nil { runtime = try RuntimeDirectory() }
+                try start()
+            } else { stop(); statusLine?.title = "Computer Use is not enabled in this session" }
+        } catch {
+            // A failed read is not a new capability decision. Keep the last
+            // scoped state; a terminated Core separately withdraws its child.
+            setupStatusLine?.title = "Component status unavailable; reopen Settings"
+        }
+    }
+    #endif
     func stopSetup() {
+        #if STYX_PRODUCT_UI
+        componentTimer?.invalidate(); componentTimer = nil; computerUseRequested = false
+        #endif
         setupWindow?.close(); setupWindow = nil
         setupOutput?.fileHandleForReading.readabilityHandler = nil
         try? setupInput?.fileHandleForWriting.close()
@@ -581,6 +645,10 @@ final class SetupWindowController: NSWindowController, WKNavigationDelegate, WKU
         setupProcess = nil; setupInput = nil; setupOutput = nil; setupURL = nil; setupBuffer = ""
     }
     func start() throws {
+        #if STYX_PRODUCT_UI
+        let session = CGSessionCopyCurrentDictionary() as? [String: Any]
+        guard computerUseRequested, session?[kCGSessionOnConsoleKey as String] as? Bool == true else { throw HostError.daemonUnavailable }
+        #endif
         guard let runtime = runtime, daemon == nil else { return }
         // A released owner lock does not prove a prior crashed owner's child
         // exited. Never unlink an existing endpoint to replace a live daemon.
@@ -676,18 +744,20 @@ final class SetupWindowController: NSWindowController, WKNavigationDelegate, WKU
         stop()
         do { try start() } catch { statusLine?.title = "Restart blocked: \(error)" }
     }
-    @objc func quit() { explicitQuitRequested = true; NSApp.terminate(nil) }
+    @objc func quit() { terminationPreservesRecovery = false; NSApp.terminate(nil) }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         #if STYX_PRODUCT_UI
         if terminationPending { return .terminateLater }
-        if explicitQuitRequested && !terminationApproved && setupURL == nil {
+        let reason = NSAppleEventManager.shared().currentAppleEvent?.paramDescriptor(forKeyword: AEKeyword(kAEQuitReason))?.enumCodeValue
+        let userQuit = !terminationPreservesRecovery && !productSystemQuitReason(reason)
+        if userQuit && !terminationApproved && setupURL == nil {
             let alert = NSAlert()
             alert.messageText = "Styx could not finish quitting"
             alert.informativeText = "The local control connection is unavailable, so login recovery cannot yet be checked. Reopen Styx settings and retry Quit."
             alert.runModal()
             return .terminateCancel
         }
-        if explicitQuitRequested && !terminationApproved, let url = setupURL {
+        if userQuit && !terminationApproved, let url = setupURL {
             if setupWindow == nil { setupWindow = ProductWindowController(sessionURL: url) }
             terminationPending = true
             setupWindow?.prepareToQuit { [weak self] approved in
@@ -765,6 +835,15 @@ if CommandLine.arguments.count == 4 && CommandLine.arguments[1] == "--liveness-o
 if CommandLine.arguments.contains("--self-test") {
     #if STYX_PRODUCT_UI
     try productCoreSelfTest()
+    let requestedStatus: ProductJSON = .object(["deployment": .object(["roles": .object(["host": .string("local"), "computer": .string("requested")])])])
+    precondition(productComputerUseRequested(requestedStatus, guiAvailable: true))
+    precondition(!productComputerUseRequested(requestedStatus, guiAvailable: false))
+    precondition(!productComputerUseRequested(.object([:]), guiAvailable: true))
+    let disabledStatus: ProductJSON = .object(["deployment": requestedStatus["deployment"], "deviceCapabilities": .object(["status": .string("updated"), "phase": .string("complete"), "computer": .bool(false)])])
+    precondition(!productComputerUseRequested(disabledStatus, guiAvailable: true))
+    precondition(!productSystemQuitReason(nil))
+    precondition(productSystemQuitReason(OSType(kAEReallyLogOut)))
+    precondition(productSystemQuitReason(OSType(kAERestart)))
     #endif
     // Parser-only assertions: no code signature checks, files, Host child,
     // NSApplication, Cua, or OS permission APIs are reached by these cases.
