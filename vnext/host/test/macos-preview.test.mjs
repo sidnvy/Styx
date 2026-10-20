@@ -7,7 +7,7 @@ import {execFileSync,spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {createHash,generateKeyPairSync} from 'node:crypto';
 import {macAdhocSigningPlan,macSigningPlan} from '../build-macos-app.mjs';
-import {copyOfflineDependencies,finalizePreviewHostBundle,machOFiles,previewSourceFiles,verifyPreviewTunnelInput} from '../build-macos-preview.mjs';
+import {copyOfflineDependencies,copyPreviewDependencies,finalizePreviewHostBundle,machOFiles,previewSourceFiles,verifyPreviewTunnelInput} from '../build-macos-preview.mjs';
 import {verifySignedRelease} from '../installer.mjs';
 import {verifyMacPreviewApp} from '../macos-preview-trust.mjs';
 const hash=b=>createHash('sha256').update(b).digest('hex');
@@ -50,4 +50,36 @@ test('tunnel packaging rejects unpinned binaries before distribution',t=>{
  const root=scratch(t),binary=path.join(root,'tunnel-client');fs.writeFileSync(binary,'untrusted binary');
  assert.throws(()=>verifyPreviewTunnelInput(binary),/verified_original_tunnel_input_required/);
  assert.throws(()=>verifyPreviewTunnelInput('relative'),/absolute_tunnel_binary_required/);
+});
+
+
+test('preview includes the independently locked foreground Browser dependency closure',t=>{
+ const root=scratch(t),sourceRoot=fileURLToPath(new URL('../../',import.meta.url)),destination=path.join(root,'onboarding/vnext');
+ const provider='packages/styx-browser-provider';
+ // Copy the real production provider, without workspace ancestors or installed
+ // Host resources: Node must resolve every import within the packaged tree.
+ for(const name of ['host/private-storage.mjs',...['host.mjs','prepare.mjs','config.mjs','contract.mjs','playwright-contract-0.0.83.json'].map(name=>provider+'/'+name)]){
+  const target=path.join(destination,name);fs.mkdirSync(path.dirname(target),{recursive:true});fs.copyFileSync(path.join(sourceRoot,name),target);
+ }
+ copyOfflineDependencies({lockFile:path.join(sourceRoot,'package-lock.json'),dependenciesDir:path.join(sourceRoot,'node_modules'),destination});
+ const command=['--input-type=module','-e',"const api=await import('./packages/styx-browser-provider/host.mjs');if(typeof api.HostBrowserSupervisor!=='function')process.exit(3);"];
+ const options={cwd:destination,encoding:'utf8',timeout:15000,env:{PATH:path.dirname(process.execPath)}};
+ const before=spawnSync(process.execPath,command,options);assert.notEqual(before.status,0);assert.match(before.stderr,/ERR_MODULE_NOT_FOUND/);
+ const records=copyPreviewDependencies({sourceRoot,destination});
+ const after=spawnSync(process.execPath,command,options);assert.equal(after.status,0,after.stderr);
+ const lock=JSON.parse(fs.readFileSync(path.join(sourceRoot,provider,'package-lock.json'),'utf8'));
+ for(const name of ['@playwright/mcp','playwright','playwright-core']){
+  const record=records.find(record=>record.path===provider+'/node_modules/'+name);
+  assert.equal(record?.lockFile,provider+'/package-lock.json');assert.equal(record?.version,lock.packages['node_modules/'+name].version);
+  assert.equal(record?.integrity,lock.packages['node_modules/'+name].integrity);
+ }
+ assert.equal(records.find(record=>record.path==='node_modules/ws')?.lockFile,'package-lock.json');
+ assert.equal(fs.existsSync(path.join(destination,provider,'node_modules/.bin')),false);
+ // A missing required nested package must fail the same build helper, even
+ // when the top-level MCP/ws dependencies are fully available.
+ const incomplete=path.join(root,'incomplete');fs.mkdirSync(incomplete);
+ fs.copyFileSync(path.join(sourceRoot,'package-lock.json'),path.join(incomplete,'package-lock.json'));
+ fs.mkdirSync(path.join(incomplete,provider),{recursive:true});
+ fs.copyFileSync(path.join(sourceRoot,provider,'package-lock.json'),path.join(incomplete,provider,'package-lock.json'));
+ assert.throws(()=>copyPreviewDependencies({sourceRoot:incomplete,dependenciesDir:path.join(sourceRoot,'node_modules'),destination:path.join(root,'failed')}),/required_production_dependency_missing/);
 });

@@ -29,7 +29,7 @@ export function previewSourceFiles(sourceRoot,{revision}={}){
 function scanPrivateMaterial(root){
  function walk(dir){for(const e of fs.readdirSync(dir,{withFileTypes:true})){const file=path.join(dir,e.name);assert(!e.isSymbolicLink(),'distribution_symlink_forbidden');if(e.isDirectory())walk(file);else{assert(!['admin.token','model.token','device.token','identity.pem','publisher-private.pem'].includes(e.name),'private_material_filename_in_distribution');const bytes=fs.readFileSync(file);assert(!/-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----[\r\n]/.test(bytes.toString('utf8')),'private_key_in_distribution');}}}walk(root);
 }
-export function copyOfflineDependencies({lockFile,dependenciesDir,destination}){
+export function copyOfflineDependencies({lockFile,dependenciesDir,destination,requiredPackages=['@modelcontextprotocol/sdk','ws']}){
  const lock=JSON.parse(fs.readFileSync(lockFile,'utf8'));assert(lock.lockfileVersion===3&&lock.packages,'locked_npm_graph_required');
  const selected=Object.entries(lock.packages).filter(([name,p])=>name&&name.startsWith('node_modules/')&&!p.dev).sort(([a],[b])=>a.localeCompare(b));
  const records=[];
@@ -42,9 +42,20 @@ export function copyOfflineDependencies({lockFile,dependenciesDir,destination}){
   tree(source,path.join(destination,...name.split('/')),{skip:n=>n==='node_modules'||n.startsWith('.')||['test','tests','__tests__','fixtures','examples','benchmarks'].includes(n)});
   records.push({path:name,version:pin.version,integrity:pin.integrity});
  }
- for(const name of ['@modelcontextprotocol/sdk','ws'])assert(records.some(r=>r.path==='node_modules/'+name),'onboarding_production_dependency_missing');
+ for(const name of requiredPackages)assert(records.some(r=>r.path==='node_modules/'+name),'onboarding_production_dependency_missing');
  return records;
 }
+// Foreground Browser runs in the onboarding process, independently of the
+// installed Host bundle. Each module tree needs its own locked closure.
+export function copyPreviewDependencies({sourceRoot,dependenciesDir=path.join(sourceRoot,'node_modules'),destination}){
+ const roots=[{relative:'',dependenciesDir},{relative:'packages/styx-browser-provider',dependenciesDir:path.join(sourceRoot,'packages/styx-browser-provider/node_modules')}];
+ return roots.flatMap(({relative,dependenciesDir})=>{
+  const lockFile=path.posix.join(relative,'package-lock.json');
+  const records=copyOfflineDependencies({lockFile:path.join(sourceRoot,lockFile),dependenciesDir,destination:path.join(destination,relative),...(relative?{requiredPackages:['@modelcontextprotocol/sdk','@playwright/mcp','playwright','playwright-core']}:{})});
+  return records.map(record=>({...record,path:path.posix.join(relative,record.path),lockFile}));
+ });
+}
+
 export function machOFiles(root){
  const files=[];
  function walk(dir){for(const e of fs.readdirSync(dir,{withFileTypes:true})){const file=path.join(dir,e.name);assert(!e.isSymbolicLink(),'distribution_symlink_forbidden');if(e.isDirectory())walk(file);else{assert(e.isFile(),'distribution_regular_files_required');const fd=fs.openSync(file,'r'),head=Buffer.alloc(8);let n;try{n=fs.readSync(fd,head,0,8,0)}finally{fs.closeSync(fd)}if(n>=4&&['feedface','cefaedfe','feedfacf','cffaedfe','cafebabe','bebafeca','cafebabf','bfbafeca'].includes(head.subarray(0,4).toString('hex')))files.push(file);}}}
@@ -93,7 +104,7 @@ export function buildMacPreview(config){
   const source=path.join(resources,'onboarding/vnext');fs.mkdirSync(source,{recursive:true});
   for(const name of sourceFiles)tree(path.join(sourceRoot,...name.split('/')),path.join(source,...name.split('/')));
   fs.writeFileSync(path.join(resources,'source-files.json'),JSON.stringify({schema:1,revision:sourceRevision,files:sourceFiles.map(name=>({path:name,sha256:sha(path.join(sourceRoot,...name.split('/')))}))},null,2)+'\n');
-  const dependencies=copyOfflineDependencies({lockFile:path.join(sourceRoot,'package-lock.json'),dependenciesDir,destination:source});
+  const dependencies=copyPreviewDependencies({sourceRoot,dependenciesDir,destination:source});
   const runtime=path.join(resources,'runtime');fs.mkdirSync(runtime);fs.copyFileSync(nodeBinary,path.join(runtime,'node'));fs.chmodSync(path.join(runtime,'node'),0o755);
   fs.copyFileSync(path.join(path.dirname(nodeBinary),'LICENSE'),path.join(runtime,'LICENSE'));fs.copyFileSync(path.join(path.dirname(nodeBinary),'node-provenance.json'),path.join(runtime,'node-upstream.json'));
   const bundle=path.join(resources,'host-bundle');buildHostRelease({destination:bundle,version:releaseVersion,privateKeyFile:privateFile,codexBinary,cuaBinary,nodeBinary,sourceRoot,browserRuntime:true});
@@ -118,7 +129,7 @@ export function buildMacPreview(config){
   fs.symlinkSync('/Applications',path.join(image,'Applications'));
   const zip='Styx-'+releaseVersion+'-macos-arm64.zip';execFileSync('/usr/bin/ditto',['-c','-k','--keepParent',app,path.join(destination,zip)],{stdio:'pipe',timeout:180000});
   const artifacts=[zip];if(createDmg){const dmg='Styx-'+releaseVersion+'-macos-arm64.dmg';execFileSync('/usr/bin/hdiutil',['create','-volname','Styx Developer Preview','-srcfolder',image,'-format','UDZO',path.join(destination,dmg)],{stdio:'pipe',timeout:300000});artifacts.push(dmg);}
-  const receipt={schema:1,kind:'precompiled_developer_preview',sourceRevision,version,releaseVersion,platform:'darwin',arch:'arm64',signing:'adhoc_preview',compiler:appBuild.compiler,notarization:'NOT RUN',external_publisher_identity:'NOT ESTABLISHED',private_key_in_artifact:false,publisher_spki_sha256:fingerprint,production_packages:dependencies.length,tunnel_client:tunnelRecord?{version:tunnelRecord.version,archive_sha256:tunnelRecord.archive_sha256}:null,native_code_files:native.map(p=>path.relative(app,p).split(path.sep).join('/')),artifacts:artifacts.map(name=>({name,sha256:sha(path.join(destination,name)),bytes:fs.statSync(path.join(destination,name)).size})),native_ui_acceptance:'NOT RUN',cold_install:'NOT RUN'};
+  const receipt={schema:1,kind:'precompiled_developer_preview',sourceRevision,version,releaseVersion,platform:'darwin',arch:'arm64',signing:'adhoc_preview',compiler:appBuild.compiler,notarization:'NOT RUN',external_publisher_identity:'NOT ESTABLISHED',private_key_in_artifact:false,publisher_spki_sha256:fingerprint,production_packages:dependencies.length,browser_production_packages:dependencies.filter(record=>record.lockFile==='packages/styx-browser-provider/package-lock.json').length,tunnel_client:tunnelRecord?{version:tunnelRecord.version,archive_sha256:tunnelRecord.archive_sha256}:null,native_code_files:native.map(p=>path.relative(app,p).split(path.sep).join('/')),artifacts:artifacts.map(name=>({name,sha256:sha(path.join(destination,name)),bytes:fs.statSync(path.join(destination,name)).size})),native_ui_acceptance:'NOT RUN',cold_install:'NOT RUN'};
   fs.writeFileSync(path.join(destination,'preview-receipt.json'),JSON.stringify(receipt,null,2)+'\n');return receipt;
  }finally{fs.rmSync(privateRoot,{recursive:true,force:true});}
 }
