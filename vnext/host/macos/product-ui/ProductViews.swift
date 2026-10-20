@@ -336,6 +336,10 @@ struct ProductView: View {
             if model.session["nativeAppLifecycleSupported"].bool {
                 ProductPanel(title: productText("启动", "Startup")) {
                     Toggle(productText("登录时启动 Styx", "Open Styx at login"), isOn: Binding(get: { model.loginEnabled }, set: { model.setLoginEnabled($0) }))
+                        .disabled(!model.loginPreferenceKnown)
+                    if !model.loginPreferenceKnown {
+                        Text(productText("登录启动状态尚未确认。请刷新状态后重试。", "Startup status could not be confirmed. Refresh status to check again.")).font(.caption).foregroundStyle(.secondary)
+                    }
                     Text(productText("关闭窗口后继续运行；选择“退出 Styx”才结束本次运行。", "Closing the window keeps Styx running. Choose Quit Styx to end this run.")).font(.caption).foregroundStyle(.secondary)
                 }
             }
@@ -437,13 +441,14 @@ struct ProductAcceptanceField: NSViewRepresentable {
     }
     private func observeDesktopReadback() async {
         guard !model.busy, let id = model.challengeID,
+              let window = window, window.windowNumber > 0,
               let actual = currentDesktopReadback(challengeID: id),
               let expected = model.acceptance["challenge"]["desktopValue"].string,
               actual == expected, model.acceptance["desktop"]["status"].string != "verified" else { return }
         // The Core still requires authenticated Cua before/action/after evidence
         // bound to this App. Typed text alone can never produce acceptance.
         do {
-            _ = try await model.client.write("acceptance/desktop-readback", ["authorize": .bool(true), "challengeId": .string(id), "value": .string(actual)])
+            _ = try await model.client.write("acceptance/desktop-readback", ["authorize": .bool(true), "challengeId": .string(id), "value": .string(actual), "pid": .number(Double(ownerAppPID)), "windowId": .number(Double(window.windowNumber))])
             await model.refresh()
         } catch { /* No untrusted error text or fabricated success. Refresh remains available. */ }
     }

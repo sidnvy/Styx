@@ -49,7 +49,9 @@ enum ProductPage: String, CaseIterable { case welcome, invitation, capabilities,
     @Published var fingerprintConfirmation = ""
     @Published var approveComputer = false
     @Published var approveBrowser = false
-    @Published var loginEnabled = false
+    @Published var loginStartup = "unknown"
+    var loginEnabled: Bool { loginStartup == "enabled" }
+    var loginPreferenceKnown: Bool { ["enabled", "disabled", "not_installed"].contains(loginStartup) }
     private var handoffTimer: Timer?
     private var copiedCredential: String?
     private var copiedCredentialChangeCount: Int?
@@ -104,9 +106,15 @@ enum ProductPage: String, CaseIterable { case welcome, invitation, capabilities,
             }
         }
         if session["nativeAppLifecycleSupported"].bool {
-            let lifecycle = try await client.read("app/lifecycle")["lifecycle"]
-            loginEnabled = lifecycle["loginAtStartup"].string == "enabled"
-        }
+            // Startup observation is independent of setup readiness. A legacy
+            // recovery definition or temporarily unavailable launchd must not
+            // prevent opening the rest of the App to inspect and recover it.
+            do {
+                let lifecycle = try await client.read("app/lifecycle")["lifecycle"]
+                let observed = lifecycle["loginAtStartup"].string ?? "unknown"
+                loginStartup = ["enabled", "disabled", "not_installed"].contains(observed) ? observed : "unknown"
+            } catch { loginStartup = "unknown" }
+        } else { loginStartup = "unknown" }
         observePermissions()
         if !restoredPage {
             restoredPage = true
