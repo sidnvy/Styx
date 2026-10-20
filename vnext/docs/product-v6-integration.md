@@ -2,6 +2,16 @@
 
 This is a development integration checkpoint, not a production release or complete first-install acceptance.
 
+## PilotMac native editing correction — dev6
+
+Current installed App: `0.3.0-v6-dev.20261020.6`, source `1a45128`. The manual AppKit owner created a status-item menu but omitted `NSApplication.mainMenu`, so normal Command-V editing was unavailable in the hosted Tunnel/Runtime Key controls. Startup now installs a localized application/Edit menu with nil-target standard AppKit paste/copy/cut/select-all/undo/redo actions. Secure-field restrictions and production menu auto-validation remain under AppKit; Styx adds no clipboard-reading path.
+
+The separate `STYX_TESTING` App compiled without warnings. Its actual hosted product TextField/SecureField controls resolved to the active native field editors, the Command-V menu event dispatched to a test probe, and those editors independently consumed a uniquely named private test pasteboard and updated the real model bindings. This is layered native evidence, not physical Command-V with the user's general clipboard. The absent-menu case is a structural negative. No test read or modified the user's general clipboard or actual keys. Existing native self-tests also passed; unchanged JS/lockfiles retain dev5 Core evidence.
+
+DMG signature and all 164 packaged source hashes passed. PilotMac's App was updated after a private backup at `/Users/it-bootstrap/Library/Application Support/Styx-Test-Backups/20261020-183439-dev6-fyyclhe8`; persisted configuration/identity/credentials and the installed Host release remain unchanged. The DMG is on Desktop, and the actual production App has one visible product window. The window diagnostic was corrected to distinguish the main executable from Cua, which macOS also associates with the App bundle.
+
+The new App's own current descriptor reports **Accessibility and Screen Recording false**. User reconfirmation is required; neither was changed by the agent. This ad-hoc developer update does not establish stable signing/permission responsibility. Physical user paste, native Cua and target-account acceptance remain pending. Evidence: parent task `outputs/v6-candidate-dev6/acceptance-receipt.json` and hash-bound logs.
+
 ## PilotMac onboarding correction — dev5
 
 Current installed App: `0.3.0-v6-dev.20261020.5`, source `bff132d`. The user's first setup had successfully prepared and paired the Host, then recorded `host.doctor: blocked / codex_executor_unavailable`. The initial probe's precise failure cause was not recorded. A later real version read succeeded, but aggregate local setup refused to repeat even this read-only blocked check, making Continue ineffective.
