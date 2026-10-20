@@ -129,10 +129,16 @@ struct ProductDeployment {
 }
 struct ProductStep: Identifiable {
     let id: String; let status: String
+    let blockers: [String]
+    let retryable: Bool
     init?(_ value: ProductJSON) {
         guard let id = value["id"].string, let status = value["status"].string else { return nil }
         self.id = id; self.status = status
+        let allowed: Set<String> = ["signed_install_unavailable", "invalid_host_configuration", "host_credential_unavailable", "codex_executor_unavailable", "signed_computer_runtime_unavailable", "macos_requires_embedded_cua_socket", "host_doctor_failed"]
+        blockers = id == "host.doctor" ? value["blockers"].array.compactMap(\.string).filter { allowed.contains($0) } : []
+        retryable = id == "host.doctor" && status == "blocked" && value["retryable"] == .bool(true)
     }
+    var complete: Bool { ["succeeded", "skipped"].contains(status) }
 }
 struct ProductDevice: Identifiable {
     let id: String; let label: String; let isDefault: Bool

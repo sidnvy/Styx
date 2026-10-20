@@ -116,17 +116,57 @@ struct ProductView: View {
     }
     private var preparation: some View {
         VStack(alignment: .leading, spacing: 20) {
-            heading(productText("准备电脑", "Prepare your computer"), model.joined ? productText("请在主台核对并批准这台电脑。", "Review and approve this computer on the main computer.") : productText("Styx 会准备所选能力，并保留已有设置。", "Styx prepares your selected capabilities and preserves existing settings."))
+            heading(productText("准备电脑", "Prepare your computer"), productText("Styx 会自动完成以下步骤。需要你操作时，会在这里说明。", "Styx completes these steps automatically and lets you know when you need to act."))
             approvalNotice
             ProductPanel(title: productText("设置进度", "Setup progress")) {
-                ForEach(model.deployment?.steps.filter { !$0.id.contains("service") } ?? []) { step in
-                    HStack { Text(stepTitle(step.id)); Spacer(); Text(stateTitle(step.status)).foregroundStyle(.secondary) }
-                    if let fingerprint = model.status["deployment"]["steps"].array.first(where: { $0["id"].string == step.id })?["fingerprint"].string {
-                        Text(fingerprint).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
-                    }
+                ForEach(model.preparationStages) { stage in
+                    HStack(spacing: 12) {
+                        if stage.state == .working { ProgressView().controlSize(.small).frame(width: 20) }
+                        else { Image(systemName: stage.state == .completed ? "checkmark.circle.fill" : stage.state == .blocked || stage.state == .needsReview ? "exclamationmark.circle" : "circle").frame(width: 20).foregroundStyle(stage.state == .completed ? Color.accentColor : Color.secondary) }
+                        Text(stage.title)
+                        Spacer()
+                        Text(preparationStateTitle(stage.state)).font(.callout).foregroundStyle(.secondary)
+                    }.padding(.vertical, 4)
                 }
             }
-            Button(model.localPrepared ? productText("启动所选能力", "Start selected capabilities") : productText("继续准备", "Continue setup")) { model.continuePreparation() }.buttonStyle(.borderedProminent)
+            if let check = model.retryableCommandCheck {
+                Text(ProductPreparationPolicy.commandCheckMessage(check)).foregroundStyle(.secondary)
+                Button(productText("重新检查命令组件", "Check command component again")) { model.recheckCommandComponent() }.buttonStyle(.borderedProminent)
+            } else if let blocked = model.preparationBlocker {
+                if blocked.status == "awaiting_approval" || ProductPreparationPolicy.canCheckOwnerApproval(model.deployment) {
+                    Text(productText("请在主台核对并批准这台电脑，然后检查连接。", "Review and approve this computer on the main computer, then check the connection.")).foregroundStyle(.secondary)
+                    Button(productText("检查主台批准", "Check owner approval")) { model.continuePreparation() }.buttonStyle(.borderedProminent)
+                } else {
+                    Text(blocked.status == "uncertain" ? productText("上次准备的结果尚未确认。请刷新并核对详细信息；安装和配对不会自动重试。", "The previous setup result is unconfirmed. Refresh and review details; installation and pairing will not be retried automatically.") : productText("准备暂时停止。请刷新状态并核对详细信息，再继续处理。", "Setup has paused. Refresh the status and review details before continuing.")).foregroundStyle(.secondary)
+                    Button(productText("刷新并检查状态", "Refresh and inspect status")) { Task { await model.refresh() } }
+                }
+            } else if model.preparationConnectionNeedsReview {
+                Text(productText("现有连接状态尚未确认。请刷新并核对详细信息；不会重复启动或接管其他连接。", "The existing connection needs review. Refresh and inspect details; Styx will not start duplicates or take over other connections.")).foregroundStyle(.secondary)
+                Button(productText("刷新并检查连接", "Refresh and inspect connection")) { Task { await model.refresh() } }
+            } else if !model.busy {
+                Button(productText("继续准备", "Continue setup")) { model.continuePreparation() }.buttonStyle(.borderedProminent)
+            }
+            DisclosureGroup(productText("详细信息", "Details")) {
+                VStack(alignment: .leading, spacing: 10) {
+                    ForEach(model.deployment?.steps.filter { !$0.id.contains("service") } ?? []) { step in
+                        HStack { Text(step.id).font(.system(.caption, design: .monospaced)); Spacer(); Text(stateTitle(step.status)).font(.caption).foregroundStyle(.secondary) }
+                        if let fingerprint = model.status["deployment"]["steps"].array.first(where: { $0["id"].string == step.id })?["fingerprint"].string {
+                            Text(fingerprint).font(.system(.caption, design: .monospaced)).textSelection(.enabled)
+                        }
+                    }
+                }.padding(.top, 10)
+            }.font(.callout).foregroundStyle(.secondary)
+        }
+    }
+    private func preparationStateTitle(_ state: ProductPreparationStage.State) -> String {
+        switch state {
+        case .pending: return productText("等待准备", "Waiting")
+        case .working: return productText("正在准备", "Preparing")
+        case .completed: return productText("已准备", "Prepared")
+        case .blocked: return productText("需要检查", "Needs checking")
+        case .awaitingApproval: return productText("等待主台批准", "Awaiting owner approval")
+        case .needsReview: return productText("需要核对", "Needs review")
+        case .notApproved: return productText("尚未获主台批准", "Not approved by the owner")
         }
     }
     private var permissions: some View {

@@ -9,6 +9,82 @@ func productText(_ chinese: String, _ english: String) -> String {
 
 enum ProductPage: String, CaseIterable { case welcome, invitation, capabilities, preparation, permissions, chat, overview, computers, settings }
 
+enum ProductPreparationPhase: String { case components, connection, browser }
+struct ProductPreparationStage: Identifiable {
+    enum State: Equatable { case pending, working, completed, blocked, awaitingApproval, needsReview, notApproved }
+    let id: ProductPreparationPhase
+    let state: State
+    var title: String {
+        switch id {
+        case .components: return productText("安装组件", "Install components")
+        case .connection: return productText("连接本机", "Connect this computer")
+        case .browser: return productText("准备 Browser", "Prepare Browser")
+        }
+    }
+}
+enum ProductPreparationPolicy {
+    static func stages(_ deployment: ProductDeployment?, browser: ProductJSON, foreground: ProductJSON = .null, activity: ProductPreparationPhase?) -> [ProductPreparationStage] {
+        guard let deployment = deployment else { return [] }
+        func state(_ ids: Set<String>, phase: ProductPreparationPhase) -> ProductPreparationStage.State {
+            let steps = deployment.steps.filter { ids.contains($0.id) }
+            if steps.contains(where: { ["uncertain", "failed"].contains($0.status) }) { return .needsReview }
+            if activity == phase && steps.contains(where: { $0.retryable }) { return .working }
+            if steps.contains(where: { $0.status == "blocked" }) { return .blocked }
+            if steps.contains(where: { $0.status == "awaiting_approval" }) { return .awaitingApproval }
+            if !steps.isEmpty && steps.allSatisfy(\.complete) { return .completed }
+            return activity == phase || steps.contains(where: { $0.status == "running" }) ? .working : .pending
+        }
+        var connection = state(["host.invite", "host.pair", "host.request", "host.claim", "host.doctor"], phase: .connection)
+        if connection == .completed && foreground != .null {
+            switch foreground["status"].string {
+            case "needs_attention": connection = .needsReview
+            case "started", "stopping": connection = .working
+            case "connected", "using_service": break
+            default: connection = activity == .connection ? .working : .pending
+            }
+        }
+        var result = [ProductPreparationStage(id: .components, state: state(["gateway.runtime.prepare", "gateway.prepare", "gateway.start", "gateway.verify", "host.prepare"], phase: .components)),
+                      ProductPreparationStage(id: .connection, state: connection)]
+        if deployment.browserRequested {
+            let browserState: ProductPreparationStage.State
+            switch browser["status"].string {
+            case "prepared": browserState = browser["approved"] == .bool(true) ? .completed : .needsReview
+            case "not_approved": browserState = browser["approved"] == .bool(false) ? .notApproved : .needsReview
+            case "preparation_blocked": browserState = .needsReview
+            default: browserState = activity == .browser ? .working : .pending
+            }
+            result.append(ProductPreparationStage(id: .browser, state: browserState))
+        }
+        return result
+    }
+    static func retryableCommandCheck(_ deployment: ProductDeployment?) -> ProductStep? {
+        guard let next = deployment?.steps.first(where: { !$0.complete }), next.retryable else { return nil }
+        return next
+    }
+    static func blockingStep(_ deployment: ProductDeployment?) -> ProductStep? {
+        deployment?.steps.first { ["blocked", "uncertain", "failed", "awaiting_approval"].contains($0.status) }
+    }
+    static func canCheckOwnerApproval(_ deployment: ProductDeployment?) -> Bool {
+        guard deployment?.joined == true, let next = deployment?.steps.first(where: { !$0.complete }) else { return false }
+        return next.id == "host.claim" && ["blocked", "awaiting_approval"].contains(next.status)
+    }
+    static func commandCheckMessage(_ step: ProductStep) -> String {
+        if step.blockers.contains("codex_executor_unavailable") {
+            return productText("命令组件暂未能启动。请再次检查。", "The command component could not start. Check again.")
+        }
+        if step.blockers.contains("host_credential_unavailable") {
+            return productText("电脑连接凭据暂不可用。请重新检查现有配置；不要删除身份或重新配对。", "The computer's connection credential is unavailable. Recheck the existing configuration; preserve its identity and pairing.")
+        }
+        if step.blockers.contains("signed_install_unavailable") || step.blockers.contains("signed_computer_runtime_unavailable") {
+            return productText("尚未能确认已安装组件的完整性。请重新检查；仍有问题时需要检查安装记录。", "Installed components could not be verified. Check again; if it persists, review the installation record.")
+        }
+        if step.blockers.contains("invalid_host_configuration") || step.blockers.contains("macos_requires_embedded_cua_socket") {
+            return productText("电脑组件配置尚未通过检查。请重新检查现有设置；无需重新配对。", "The computer's component configuration has not passed its check. Recheck the existing settings; pairing does not need to be repeated.")
+        }
+        return productText("命令组件检查尚未通过。请重新检查；已有的安装和配对会保留。", "The command component check did not pass. Check again; existing installation and pairing will be preserved.")
+    }
+}
+
 enum ProductBrowserPreparation: Equatable { case notRequired, prepare, needsReview }
 enum ProductForegroundTransition: Equatable { case stopped, owned, needsReview }
 enum ProductWorkflowError: Error { case browserPreparationNeedsReview, capabilityNeedsOfflineReview, foregroundStopUnconfirmed, capabilityChangeInterrupted, foregroundRecoveryRequired }
@@ -37,6 +113,22 @@ enum ProductCapabilityPolicy {
     }
 }
 
+enum ProductRestorationPolicy {
+    static func page(deployment: ProductDeployment?, localPrepared: Bool, browser: ProductJSON, foreground: ProductJSON,
+                     accepted: Bool, accessibility: Bool, screenRecording: Bool) -> ProductPage {
+        guard let deployment = deployment else { return .welcome }
+        guard localPrepared else { return .preparation }
+        if deployment.browserRequested {
+            guard ProductCapabilityPolicy.browserPreparation(requested: true, observation: browser) == .notRequired else { return .preparation }
+        }
+        guard ["current_process", "authenticated_foreground_owner"].contains(foreground["observation"].string ?? ""),
+              ["started", "connected", "using_service"].contains(foreground["status"].string ?? ""),
+              ["foreground", "service"].contains(foreground["host"].string ?? "") else { return .preparation }
+        if ProductCapabilityPolicy.computerApproved(foreground) && (!accessibility || !screenRecording) { return .permissions }
+        return accepted || deployment.joined ? .overview : .chat
+    }
+}
+
 @MainActor final class ProductModel: ObservableObject {
     let client: ProductCoreClient
     @Published var page: ProductPage = .welcome
@@ -50,6 +142,7 @@ enum ProductCapabilityPolicy {
     @Published var plugin: ProductJSON = .null
     @Published var browserObservation: ProductJSON = .null
     @Published var foregroundRecoveryNeeded = false
+    @Published var preparationActivity: ProductPreparationPhase?
     @Published var devices: [ProductDevice] = []
     @Published var computer = true
     @Published var browser = true
@@ -94,6 +187,14 @@ enum ProductCapabilityPolicy {
     var browserNotApproved: Bool { browserObservation["status"].string == "not_approved" && browserObservation["approved"] == .bool(false) }
     var computerNotApproved: Bool { joined && deployment?.computerRequested == true && status["foreground"]["computerRequested"] == .bool(false) }
     var computerApproved: Bool { ProductCapabilityPolicy.computerApproved(status["foreground"]) }
+    var preparationStages: [ProductPreparationStage] { ProductPreparationPolicy.stages(deployment, browser: browserObservation, foreground: status["foreground"], activity: preparationActivity) }
+    var retryableCommandCheck: ProductStep? { ProductPreparationPolicy.retryableCommandCheck(deployment) }
+    var preparationBlocker: ProductStep? { ProductPreparationPolicy.blockingStep(deployment) }
+    var preparationConnectionNeedsReview: Bool {
+        guard localPrepared else { return false }
+        let observed = status["foreground"]["status"].string ?? "unknown"
+        return ["needs_attention", "stopping"].contains(observed) || observed == "not_running" && status["nativeStartup"]["status"].string == "reconciliation_required"
+    }
     var connectionTunnelID: String { plugin["connection"]["tunnelId"].string ?? (!tunnelID.isEmpty ? tunnelID : handoffTarget) }
     var challengeID: String? { acceptance["challenge"]["id"].string }
     var targetProofReady: Bool {
@@ -158,7 +259,9 @@ enum ProductCapabilityPolicy {
             restoredPage = true
             if let deployment = deployment {
                 computer = deployment.computerRequested; browser = deployment.browserRequested
-                page = !localPrepared ? .preparation : accepted || deployment.joined ? .overview : .chat
+                page = ProductRestorationPolicy.page(deployment: deployment, localPrepared: localPrepared,
+                                                     browser: browserObservation, foreground: status["foreground"],
+                                                     accepted: accepted, accessibility: axGranted, screenRecording: screenGranted)
             }
         }
     }
@@ -209,6 +312,8 @@ enum ProductCapabilityPolicy {
         }
     }
     private func prepare() async throws {
+        defer { preparationActivity = nil }
+        preparationActivity = retryableCommandCheck == nil ? .components : .connection
         if joined {
             // Retry only the claim/doctor checks that Core marks safely blocked.
             // Uncertain preparation/request mutations are never replayed.
@@ -232,6 +337,7 @@ enum ProductCapabilityPolicy {
         }
         guard localPrepared else { return }
         if deployment?.browserRequested == true {
+            preparationActivity = .browser
             browserObservation = try await client.read("browser")["browser"]
             switch ProductCapabilityPolicy.browserPreparation(requested: true, observation: browserObservation) {
             case .prepare: browserObservation = try await client.write("browser/prepare", ["authorize": .bool(true)])["browser"]
@@ -239,11 +345,18 @@ enum ProductCapabilityPolicy {
             case .needsReview: throw ProductWorkflowError.browserPreparationNeedsReview
             }
         }
+        preparationActivity = .connection
         let foreground = try await client.write("foreground", ["authorize": .bool(true)])["foreground"]
         foregroundRecoveryNeeded = false
         page = ProductCapabilityPolicy.computerApproved(foreground) ? .permissions : joined ? .overview : .chat
     }
     func continuePreparation() { perform { [self] in try await prepare() } }
+    func recheckCommandComponent() {
+        guard retryableCommandCheck != nil else { return }
+        // Core admits only this explicit read-only blocked doctor retry. It
+        // retains completed installation/pairing and refuses uncertain steps.
+        perform { [self] in try await prepare() }
+    }
     func observePermissions() {
         axGranted = AXIsProcessTrusted(); screenGranted = CGPreflightScreenCaptureAccess()
     }

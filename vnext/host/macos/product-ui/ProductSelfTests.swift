@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 
 // Called by the signed executable's existing --self-test path. These are
 // protocol/decoding checks, not native permission or account acceptance claims.
@@ -61,11 +62,71 @@ func productCoreSelfTest() throws {
         try require(ProductCapabilityPolicy.foregroundTransition(owner: foreign, observed: live) == .needsReview, "Unknown, foreign or service owner became App stop authority")
     }
     try require(ProductCapabilityPolicy.foregroundTransition(owner: owned, observed: .object(["status": .string("needs_attention")])) == .needsReview, "Failed owner observation permitted a stop")
+    let stalledJSON = Data(#"{"mode":"create-local","roles":{"computer":"requested","browser":"requested"},"steps":[{"id":"gateway.prepare","status":"succeeded"},{"id":"gateway.start","status":"succeeded"},{"id":"gateway.verify","status":"succeeded"},{"id":"host.prepare","status":"succeeded"},{"id":"host.pair","status":"succeeded"},{"id":"host.doctor","status":"blocked","blockers":["codex_executor_unavailable","https://private.invalid/secret"],"retryable":true}]}"#.utf8)
+    let stalled = ProductDeployment(try JSONDecoder().decode(ProductJSON.self, from: stalledJSON))
+    let stages = ProductPreparationPolicy.stages(stalled, browser: .null, activity: nil)
+    try require(stages.map(\.id) == [.components, .connection, .browser], "Preparation exposed implementation steps instead of the selected user stages")
+    try require(stages[0].state == .completed && stages[1].state == .blocked && stages[2].state == .pending, "A failed command check lost the already completed installation")
+    guard let retry = ProductPreparationPolicy.retryableCommandCheck(stalled) else { throw ProductCoreError.invalidResponse }
+    try require(retry.blockers == ["codex_executor_unavailable"], "Untrusted doctor details reached the user projection")
+    let commandMessage = ProductPreparationPolicy.commandCheckMessage(retry).lowercased()
+    try require(!commandMessage.contains("permission") && !commandMessage.contains("权限"), "A command startup failure was presented as an OS permission requirement")
+    let checking = ProductPreparationPolicy.stages(stalled, browser: .null, activity: .connection)
+    try require(checking[1].state == .working, "Explicit read-only recheck still appeared idle and blocked")
+    for unsafe in [#"{"id":"host.pair","status":"blocked","retryable":true}"#, #"{"id":"host.doctor","status":"uncertain","retryable":true}"#, #"{"id":"host.doctor","status":"blocked","retryable":"true"}"#] {
+        let step = ProductStep(try JSONDecoder().decode(ProductJSON.self, from: Data(unsafe.utf8)))
+        try require(step?.retryable == false, "An unsafe or unconfirmed step was admitted as a read-only retry")
+    }
+    for (id, state, allowed) in [("host.claim", "blocked", true), ("host.claim", "awaiting_approval", true), ("host.claim", "uncertain", false), ("host.request", "blocked", false), ("host.pair", "blocked", false)] {
+        let joinedCheck: ProductJSON = .object(["mode": .string("join-existing"), "steps": .array([.object(["id": .string("host.prepare"), "status": .string("succeeded")]), .object(["id": .string(id), "status": .string(state)])])])
+        try require(ProductPreparationPolicy.canCheckOwnerApproval(ProductDeployment(joinedCheck)) == allowed, "Approval recheck either trapped a read-only claim or replayed an unsafe pairing step")
+    }
+    let noBrowser = ProductDeployment(try JSONDecoder().decode(ProductJSON.self, from: Data(#"{"mode":"create-local","roles":{"computer":"requested","browser":"disabled"},"steps":[{"id":"host.prepare","status":"succeeded"},{"id":"host.pair","status":"succeeded"},{"id":"host.doctor","status":"succeeded"}]}"#.utf8)))
+    try require(ProductPreparationPolicy.stages(noBrowser, browser: .null, activity: nil).map(\.id) == [.components, .connection], "An unselected Browser stage reached onboarding")
+    let preparedBrowser: ProductJSON = .object(["status": .string("prepared"), "approved": .bool(true)])
+    let approvedForeground: ProductJSON = .object(["status": .string("connected"), "observation": .string("authenticated_foreground_owner"), "host": .string("foreground"), "computerRequested": .bool(true)])
+    try require(ProductRestorationPolicy.page(deployment: stalled, localPrepared: true, browser: .object(["status": .string("not_prepared"), "approved": .bool(true)]), foreground: approvedForeground, accepted: false, accessibility: true, screenRecording: true) == .preparation, "Recovery skipped the unprepared selected Browser")
+    try require(ProductRestorationPolicy.page(deployment: stalled, localPrepared: true, browser: preparedBrowser, foreground: stopped, accepted: true, accessibility: true, screenRecording: true) == .preparation, "Past account acceptance hid a stopped connection")
+    try require(ProductRestorationPolicy.page(deployment: stalled, localPrepared: true, browser: preparedBrowser, foreground: approvedForeground, accepted: true, accessibility: true, screenRecording: false) == .permissions, "Recovery skipped revoked Screen Recording permission")
+    try require(ProductRestorationPolicy.page(deployment: stalled, localPrepared: true, browser: preparedBrowser, foreground: approvedForeground, accepted: false, accessibility: true, screenRecording: true) == .chat, "Prepared authorized recovery incorrectly restarted registration")
+    let noLiveConnection = ProductPreparationPolicy.stages(noBrowser, browser: .null, foreground: stopped, activity: nil)
+    try require(noLiveConnection[1].state == .pending, "Completed pairing was presented as an observed live connection")
+    try require(ProductRestorationPolicy.page(deployment: stalled, localPrepared: true, browser: preparedBrowser, foreground: .object(["status": .string("needs_attention")]), accepted: true, accessibility: true, screenRecording: true) == .preparation, "Uncertain connection recovery skipped review")
+    try productStatusImageSelfTest()
     print("Styx native product protocol self-test passed; GUI, TCC and account acceptance NOT RUN")
 }
 
+private func productStatusImageSelfTest() throws {
+    // Deterministic alpha-mask fixture: outer card border must be ignored, and
+    // an interior white gap must survive. This never replaces the bundled art.
+    guard let source = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 64, pixelsHigh: 64,
+                                        bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+                                        isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 256, bitsPerPixel: 32),
+          let bytes = source.bitmapData else { throw ProductCoreError.invalidResponse }
+    for y in 0..<64 {
+        for x in 0..<64 {
+            let disk = (x - 32) * (x - 32) + (y - 32) * (y - 32) < 18 * 18 && abs(y - 32) > 2
+            let card = x == 2 || x == 61 || y == 2 || y == 61
+            let offset = y * 256 + x * 4, value: UInt8 = disk || card ? 0 : 255
+            bytes[offset] = value; bytes[offset + 1] = value; bytes[offset + 2] = value; bytes[offset + 3] = 255
+        }
+    }
+    let fixture = NSImage(size: NSSize(width: 64, height: 64)); fixture.addRepresentation(source)
+    guard let icon = styxStatusItemImage(source: fixture), icon.isTemplate, icon.size == NSSize(width: 18, height: 18),
+          let mask = icon.representations.first as? NSBitmapImageRep, mask.hasAlpha,
+          let corner = mask.colorAt(x: 0, y: 0),
+          let gap = mask.colorAt(x: mask.pixelsWide / 2, y: mask.pixelsHigh / 2),
+          let glyph = mask.colorAt(x: mask.pixelsWide / 2, y: mask.pixelsHigh / 4),
+          corner.alphaComponent < 0.05, gap.alphaComponent < 0.05, glyph.alphaComponent > 0.95 else { throw ProductCoreError.invalidResponse }
+    if let root = Bundle.main.resourceURL {
+        let url = root.appendingPathComponent("brand/styx-icon-light-source.jpg")
+        if FileManager.default.fileExists(atPath: url.path) {
+            guard let artwork = NSImage(contentsOf: url), let icon = styxStatusItemImage(source: artwork), icon.isTemplate else { throw ProductCoreError.invalidResponse }
+        }
+    }
+}
+
 #if STYX_TESTING
-import AppKit
 
 extension ProductWindowController {
     // Window rendering only. The harness has no StyxDelegate, Cua child, system
@@ -90,7 +151,10 @@ extension ProductWindowController {
                 }
                 view.cacheDisplay(in: view.bounds, to: bitmap)
                 guard let png = bitmap.representation(using: .png, properties: [:]) else { exit(2) }
-                do { try png.write(to: snapshot, options: .atomic) }
+                do {
+                    try png.write(to: snapshot, options: .atomic)
+                    try exportStatusIconSnapshot(beside: snapshot)
+                }
                 catch { fputs("Styx native window snapshot write failed\n", stderr); exit(2) }
                 print("PASS: native welcome window rendered through authenticated Core reads; UI-only evidence. Cua, permissions, install and account acceptance NOT RUN")
                 exit(0)
@@ -98,6 +162,24 @@ extension ProductWindowController {
         }
         withExtendedLifetime((controller, timer)) { application.run() }
         exit(2)
+    }
+    @MainActor private static func exportStatusIconSnapshot(beside snapshot: URL) throws {
+        guard let root = Bundle.main.resourceURL,
+              let artwork = NSImage(contentsOf: root.appendingPathComponent("brand/styx-icon-light-source.jpg")),
+              let icon = styxStatusItemImage(source: artwork) else { throw ProductCoreError.invalidResponse }
+        var rect = NSRect(origin: .zero, size: icon.size)
+        guard let image = icon.cgImage(forProposedRect: &rect, context: nil, hints: nil),
+              let bitmap = NSBitmapImageRep(bitmapDataPlanes: nil, pixelsWide: 36, pixelsHigh: 36,
+                                           bitsPerSample: 8, samplesPerPixel: 4, hasAlpha: true,
+                                           isPlanar: false, colorSpaceName: .deviceRGB, bytesPerRow: 144, bitsPerPixel: 32),
+              let context = CGContext(data: bitmap.bitmapData, width: 36, height: 36, bitsPerComponent: 8,
+                                      bytesPerRow: 144, space: CGColorSpaceCreateDeviceRGB(),
+                                      bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue) else { throw ProductCoreError.invalidResponse }
+        context.clear(CGRect(x: 0, y: 0, width: 36, height: 36)); context.interpolationQuality = .high
+        context.draw(image, in: CGRect(x: 0, y: 0, width: 36, height: 36))
+        bitmap.size = NSSize(width: 18, height: 18)
+        guard let png = bitmap.representation(using: .png, properties: [:]) else { throw ProductCoreError.invalidResponse }
+        try png.write(to: URL(fileURLWithPath: snapshot.path + ".status-icon.png"), options: .atomic)
     }
 }
 #endif
