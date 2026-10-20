@@ -272,7 +272,7 @@ struct ProductView: View {
             if model.pluginMode == "reuse" {
                 Text(productText("这份设置关联了已有插件，请在 ChatGPT 中编辑它的名称和图标。已有连接无需再上传一个新包。", "These settings refer to an existing plugin. Edit its name and icon in ChatGPT; the existing connection needs no new ZIP upload."))
             } else {
-                Text(productText("名称、描述、图标和 Styx 引导技能会一起写入 ZIP。它们用于 ChatGPT 插件，不会更改 macOS App 图标。", "The ZIP includes the name, description, icon and Styx onboarding skill. These describe your ChatGPT plugin; they do not change the macOS App icon.")).font(.callout).foregroundStyle(.secondary)
+                Text(productText("① 在 Styx 填写下面的名称和描述，按需更换图标。当前 Tunnel 和引导技能会自动随包携带。", "① Enter the name and description below in Styx, and optionally change the icon. The current Tunnel and onboarding skill are included automatically.")).font(.callout).foregroundStyle(.secondary)
                 TextField(productText("插件名称", "Plugin name"), text: $model.pluginName).onChange(of: model.pluginName) { _ in model.observePluginDraftEdit() }
                 TextField(productText("简短描述（最多 30 字）", "Short description (up to 30 characters)"), text: $model.pluginDescription).onChange(of: model.pluginDescription) { _ in model.observePluginDraftEdit() }
                 HStack {
@@ -287,7 +287,8 @@ struct ProductView: View {
                     Label(productText("已保存：", "Saved: ") + location.lastPathComponent, systemImage: "checkmark.circle")
                     Button(productText("在 Finder 中显示", "Show in Finder")) { NSWorkspace.shared.activateFileViewerSelecting([location]) }
                 }
-                Text(productText("导出后，在 ChatGPT 点“＋”→“上传插件压缩包”，选择保存的 ZIP。资料随包携带，上传后请核对平台读取的名称、图标及 Tunnel，再完成安装。", "After export, select + → Upload plugin ZIP in ChatGPT and choose the saved ZIP. The package carries your details. Check the imported name, icon and Tunnel, then install it."))
+                Text(productText("② 点“保存并导出插件包”，选择保存位置。得到的是一个 .zip 文件，不需要解压。", "② Select Save and export plugin ZIP and choose a location. You get a .zip file; do not extract it."))
+                Text(productText("③ 打开 ChatGPT 插件页面，点“＋”→“上传插件压缩包”，选择刚保存的 ZIP。核对导入的资料和 Tunnel，然后完成安装。无需再走“添加自建 MCP 服务器”或重复填写同一份资料。", "③ Open ChatGPT Plugins, select + → Upload plugin ZIP, and choose that file. Review the imported details and Tunnel, then install. You do not also need Add custom MCP server or to enter the same details again."))
                 Text(productText("插件包导入目前为预览流程，尚需在你的 ChatGPT 账号中验证兼容性。", "Plugin ZIP import is a preview flow; compatibility still needs verification in your ChatGPT account.")).font(.caption).foregroundStyle(.secondary)
                 Text(productText("上传、登录和安装仍由你在 ChatGPT 完成；以后修改本地资料，需要重新导出并更新插件，才会在 ChatGPT 生效。", "Upload, sign-in and installation take place in ChatGPT. Later local edits need a new export and plugin update to appear in ChatGPT.")).font(.caption).foregroundStyle(.secondary)
             }
@@ -295,18 +296,19 @@ struct ProductView: View {
     }
     private var officialPanel: some View {
         ProductPanel(title: productText("2. 在 ChatGPT 完成连接", "2. Connect in ChatGPT")) {
-            Text(productText("打开 ChatGPT 插件页面，确认目标账号和工作区。", "Open ChatGPT plugins and confirm the intended account and workspace."))
+            Text(productText("下面两种方式任选一种，都用于在 ChatGPT 安装 Styx。先确认登录的是你要使用的账号和工作区。", "Choose one of these two ways to install Styx in ChatGPT. First confirm the account and workspace you intend to use."))
             HStack {
-                Text(usePluginPackage ? productText("导入自定义插件包（预览）", "Import a custom plugin ZIP (preview)") : productText("直接连接 Styx", "Connect Styx directly")).font(.subheadline.weight(.semibold))
+                Text(usePluginPackage ? productText("方式二：导入 ZIP（预览）", "Option 2: Import ZIP (preview)") : productText("方式一：手动添加连接（推荐）", "Option 1: Add the connection manually (recommended)")).font(.subheadline.weight(.semibold))
                 Spacer()
                 Button(usePluginPackage ? productText("使用直接连接", "Use direct connection") : productText("自定义资料并导出 ZIP…", "Customize and export ZIP…")) { usePluginPackage.toggle(); if usePluginPackage { model.preparePluginDraft() } }.buttonStyle(.link)
             }
             if usePluginPackage {
                 pluginPackageContent
             } else {
-                Text(productText("① 点“＋”→“添加自建 MCP 服务器”（Add custom MCP server），名称填 Styx；描述可留空。", "① Select + → Add custom MCP server. Enter Styx as the name; the description is optional."))
-                Text(productText("② Connection 选择 Tunnel，选择或粘贴下方的 Tunnel ID；Authentication 选择 No authentication。运行 Key 只保存在 Styx App。", "② Under Connection, choose Tunnel and select or paste the Tunnel ID below. For Authentication choose No authentication. The runtime key stays in Styx."))
-                Text(productText("③ 核对风险提示，点“创建为插件”（Create as a plugin），再打开生成的 Styx 插件并安装。", "③ Review the risk notice and select Create as a plugin. Open the resulting Styx plugin and install it."))
+                Text(productText("① 打开下方 ChatGPT 插件页面，点“＋”→“添加自建 MCP 服务器”（Add custom MCP server）。此处不用选择单独的“创建插件”或“上传插件压缩包”。", "① Open ChatGPT Plugins below. Select + → Add custom MCP server. You do not need the separate Create plugin or Upload plugin ZIP entry for this path."))
+                Text(productText("② 在 ChatGPT 表单中：名称填 Styx；描述可留空。Connection 选 Tunnel，粘贴下方 Tunnel ID；Authentication 选 No authentication。运行 Key 已保存在 Styx，不填进这个表单。", "② In the ChatGPT form: name Styx; description optional. Set Connection to Tunnel and paste the Tunnel ID below. Set Authentication to No authentication. The runtime key is already stored in Styx; do not enter it here."))
+                Text(productText("③ 核对风险提示后点“创建为插件”（Create as a plugin）。工具会从 Styx 自动读取，不用手写工具名称、特征或描述；若平台提供工具开关，请核对需要开放的能力。", "③ Review the risk notice and select Create as a plugin. Tools are discovered from Styx; do not write tool names, features or descriptions yourself. If tool switches are offered, review the capabilities you want available."))
+                Text(productText("④ 打开生成的 Styx 插件并安装。看到它已安装后，回到此 App 点“我已完成安装和连接”。此路径不用在 Styx 填插件名称、描述或图标，也不用导出 ZIP。", "④ Open the resulting Styx plugin and install it. Once installed, return here and select I finished installation and connection. This path needs no plugin name, description or icon entry in Styx and no ZIP export."))
                 DisclosureGroup(productText("已经有 Styx 插件？", "Already have a Styx plugin?")) {
                     Text(productText("打开已有插件，核对它使用的是下面的 Tunnel，确认已安装。相同连接无需再创建；换到新的 Tunnel 时，在 ChatGPT 更新连接设置。", "Open the existing plugin, check it uses the Tunnel below and confirm it is installed. The same connection needs no second plugin. If you switch Tunnels, update the connection in ChatGPT.")).font(.callout).foregroundStyle(.secondary)
                 }
@@ -321,7 +323,7 @@ struct ProductView: View {
                 Button(productText("重新核对当前连接…", "Review current connection…")) { model.rebindPluginConnection() }
             }
             Button(productText("打开 ChatGPT 插件", "Open ChatGPT plugins")) { model.openOfficial("https://chatgpt.com/plugins") }
-            Text(productText("安装后，在新聊天中用 @ 选择 Styx。登录、MFA 和工作区审批需要你亲自完成。", "After installation, select Styx with @ in a new chat. Complete any sign-in, MFA and workspace approval yourself.")).font(.caption).foregroundStyle(.secondary)
+            Text(productText("任一方式安装完成后，都回到 Styx 继续下一步。无需从 ChatGPT 复制新的 Token 回来；验证时在新聊天中用 @ 选择已安装的 Styx。登录、MFA 和工作区审批由你亲自完成。", "After installing by either route, return to Styx for the next step. No new token needs to be copied back from ChatGPT. For verification, select the installed Styx with @ in a new chat. Complete sign-in, MFA and workspace approval yourself.")).font(.caption).foregroundStyle(.secondary)
             Button(productText("我已完成安装和连接", "I finished installation and connection")) { model.confirmPluginInstallation() }
                 .disabled(model.plugin["contextChanged"].bool || usePluginPackage && (model.pluginDraftEdited || model.plugin["export"]["status"].string != "exported"))
             Text(productText("这只记录你的确认；下一步会检查真实工具调用。", "This records your confirmation. The next step verifies real tool calls.")).font(.caption).foregroundStyle(.secondary)
