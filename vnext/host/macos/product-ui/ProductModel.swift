@@ -49,7 +49,7 @@ struct ProductPreparationStage: Identifiable {
     }
 }
 enum ProductPreparationPolicy {
-    static func stages(_ deployment: ProductDeployment?, browser: ProductJSON, foreground: ProductJSON = .null, activity: ProductPreparationPhase?) -> [ProductPreparationStage] {
+    static func stages(_ deployment: ProductDeployment?, browser: ProductJSON, foreground: ProductJSON = .null, nativeStartup: ProductJSON = .null, activity: ProductPreparationPhase?) -> [ProductPreparationStage] {
         guard let deployment = deployment else { return [] }
         func state(_ ids: Set<String>, phase: ProductPreparationPhase) -> ProductPreparationStage.State {
             let steps = deployment.steps.filter { ids.contains($0.id) }
@@ -69,6 +69,7 @@ enum ProductPreparationPolicy {
             default: connection = activity == .connection ? .working : .pending
             }
         }
+        if nativeStartup["status"].string == "reconciliation_required" { connection = .needsReview }
         var result = [ProductPreparationStage(id: .components, state: state(["gateway.runtime.prepare", "gateway.prepare", "gateway.start", "gateway.verify", "host.prepare"], phase: .components)),
                       ProductPreparationStage(id: .connection, state: connection)]
         if deployment.browserRequested {
@@ -218,7 +219,8 @@ enum ProductRestorationPolicy {
     var browserNotApproved: Bool { browserObservation["status"].string == "not_approved" && browserObservation["approved"] == .bool(false) }
     var computerNotApproved: Bool { joined && deployment?.computerRequested == true && status["foreground"]["computerRequested"] == .bool(false) }
     var computerApproved: Bool { ProductCapabilityPolicy.computerApproved(status["foreground"]) }
-    var preparationStages: [ProductPreparationStage] { ProductPreparationPolicy.stages(deployment, browser: browserObservation, foreground: status["foreground"], activity: preparationActivity) }
+    var preparationStages: [ProductPreparationStage] { ProductPreparationPolicy.stages(deployment, browser: browserObservation, foreground: status["foreground"], nativeStartup: status["nativeStartup"], activity: preparationActivity) }
+    var signingUpgradeIncomplete: Bool { status["nativeStartup"]["reason"].string == "native_signing_registration_required" }
     var retryableCommandCheck: ProductStep? { ProductPreparationPolicy.retryableCommandCheck(deployment) }
     var preparationBlocker: ProductStep? { ProductPreparationPolicy.blockingStep(deployment) }
     var preparationConnectionNeedsReview: Bool {

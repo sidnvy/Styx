@@ -76,7 +76,11 @@ struct ProductView: View {
             HStack {
                 if model.busy { ProgressView().controlSize(.small); Text(productText("正在处理…", "Working…")).font(.caption).foregroundStyle(.secondary) }
                 Spacer()
-                if model.loaded { Button(productText("刷新状态", "Refresh status")) { Task { await model.refresh() } }.disabled(model.busy) }
+                if model.loaded {
+                    Button(productText("检查当前状态", "Check current status")) { Task { await model.refresh() } }
+                        .help(productText("读取准备进度和当前连接状态；不会重新安装、配对或完成升级修复。", "Read setup progress and current connections; this does not reinstall, pair or repair an upgrade."))
+                        .disabled(model.busy)
+                }
             }.padding(12)
         }.background(Color(nsColor: .windowBackgroundColor))
             .frame(minWidth: 620, minHeight: 560)
@@ -141,7 +145,9 @@ struct ProductView: View {
                     }.padding(.vertical, 4)
                 }
             }
-            if let check = model.retryableCommandCheck {
+            if model.signingUpgradeIncomplete {
+                Text(productText("此次升级尚未完成，Styx 已暂停本机连接。需要完成升级修复后重新打开 App；检查状态不会继续准备。已有设置和配对会保留。", "This upgrade is incomplete, so Styx has paused this computer's connection. Finish the upgrade repair, then reopen the App. Checking status will not resume setup. Your settings and pairing are preserved.")).foregroundStyle(.secondary)
+            } else if let check = model.retryableCommandCheck {
                 Text(ProductPreparationPolicy.commandCheckMessage(check)).foregroundStyle(.secondary)
                 Button(productText("重新检查命令组件", "Check command component again")) { model.recheckCommandComponent() }.buttonStyle(.borderedProminent)
             } else if let blocked = model.preparationBlocker {
@@ -150,11 +156,9 @@ struct ProductView: View {
                     Button(productText("检查主台批准", "Check owner approval")) { model.continuePreparation() }.buttonStyle(.borderedProminent)
                 } else {
                     Text(blocked.status == "uncertain" ? productText("上次准备的结果尚未确认。请刷新并核对详细信息；安装和配对不会自动重试。", "The previous setup result is unconfirmed. Refresh and review details; installation and pairing will not be retried automatically.") : productText("准备暂时停止。请刷新状态并核对详细信息，再继续处理。", "Setup has paused. Refresh the status and review details before continuing.")).foregroundStyle(.secondary)
-                    Button(productText("刷新并检查状态", "Refresh and inspect status")) { Task { await model.refresh() } }
                 }
             } else if model.preparationConnectionNeedsReview {
                 Text(productText("现有连接状态尚未确认。请刷新并核对详细信息；不会重复启动或接管其他连接。", "The existing connection needs review. Refresh and inspect details; Styx will not start duplicates or take over other connections.")).foregroundStyle(.secondary)
-                Button(productText("刷新并检查连接", "Refresh and inspect connection")) { Task { await model.refresh() } }
             } else if !model.busy {
                 Button(productText("继续准备", "Continue setup")) { model.continuePreparation() }.buttonStyle(.borderedProminent)
             }
