@@ -176,7 +176,7 @@ function nativeAdapterFixture(t){
   if(cmd==='enable'){assert.equal(state.drop,false);state.enabled='enabled';return ''}
   assert.fail('unexpected native operation '+cmd);
  };
- const runtime=createHostUpdateRuntime(ctx,{home,run,observeProcess:(pid,ctx,version)=>({pid,connectorPid:12346}),observeConnection:async()=>state.active==='active'});
+ const runtime=createHostUpdateRuntime(ctx,{home,run,observeProcess:(pid,ctx,version)=>({pid,connectorPid:12346}),observeQuiescence:()=>true,observeConnection:async()=>state.active==='active'});
  return {...f,home,unitFile,dropFile,state,runtime,ctx,run};
 }
 test('Linux adapter disables startup and Restart before candidate start, restores only at finish',{skip:process.platform!=='linux'},async t=>{
@@ -211,8 +211,14 @@ test('recovery refuses changed credentials and wrong transaction IDs before any 
 test('Linux recovery cleanup keeps startup disabled and never starts the unit',{skip:process.platform!=='linux'},async t=>{
  const f=nativeAdapterFixture(t);let saved;const save=x=>{saved=structuredClone(x)};
  await f.runtime.prepare(save);await f.runtime.stop({signal:new AbortController().signal},save);
- const recovering=createHostUpdateRuntime(f.ctx,{home:f.home,run:f.run,observeConnection:async()=>false});
+ const recovering=createHostUpdateRuntime(f.ctx,{home:f.home,run:f.run,observeQuiescence:()=>true,observeConnection:async()=>false});
  await recovering.prepare(save,saved);assert.equal(await recovering.confirmStopped(),true);
  await recovering.finish(save,{restoreEnabled:false});
  assert.equal(f.state.enabled,'disabled');assert.equal(f.state.commands.some(x=>['enable','start'].includes(x[0])),false);assert.equal(fs.existsSync(f.dropFile),false);
+});
+
+test('active Linux Host update requires an atomic work-drain contract before any mutation',{skip:process.platform!=='linux'},async t=>{
+ const f=nativeAdapterFixture(t);f.state.active='active';f.state.pid=12345;
+ await assert.rejects(f.runtime.prepare(()=>{}),/active_work_drain_required/);
+ assert.ok(f.state.commands.every(x=>x[0]==='show'));assert.equal(fs.existsSync(f.dropFile),false);
 });

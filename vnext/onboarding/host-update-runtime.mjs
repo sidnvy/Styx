@@ -32,7 +32,7 @@ function processIdentity(pid,ctx,version){
  if(candidates.length!==1)fail('host_update_candidate_generation_unobserved');
  return {pid,connectorPid:candidates[0]};
 }
-export function createHostUpdateRuntime(ctx,{home=os.homedir(),run=execFileSync,observeProcess=processIdentity,observeConnection}={}){
+export function createHostUpdateRuntime(ctx,{home=os.homedir(),run=execFileSync,observeProcess=processIdentity,observeConnection,observeQuiescence}={}){
  if(process.platform!=='linux'||ctx.config.mode!=='create-local')fail('host_update_native_adapter_not_supported');
  const unit=ctx.service.id,unitFile=path.join(home,'.config/systemd/user',unit),dropDir=unitFile+'.d',dropFile=path.join(dropDir,'90-styx-reviewed-update.conf');
  let receipt;
@@ -65,12 +65,14 @@ export function createHostUpdateRuntime(ctx,{home=os.homedir(),run=execFileSync,
   fail('host_update_native_observation_timeout');
  }
  function noOtherHostProcesses(allowedPid=0){
+  if(observeQuiescence){if(observeQuiescence()!==true)fail('host_update_process_quiescence_unknown');return;}
   for(const item of fs.readdirSync('/proc').filter(x=>/^\d+$/.test(x))){
    const pid=Number(item);if(pid===process.pid||pid===allowedPid)continue;
    try{
     if(fs.statSync('/proc/'+pid).uid!==process.getuid())continue;
     const args=fs.readFileSync('/proc/'+pid+'/cmdline','utf8').split('\0');
-    if(args.includes(ctx.service.hostConfigFile)||args.some(x=>x.startsWith(ctx.installRoot+'/releases/')&&x.endsWith('/host/connect.mjs')))fail('host_update_unowned_host_process');
+    const executable=fs.readlinkSync('/proc/'+pid+'/exe').replace(/ \(deleted\)$/,'');
+    if(executable.startsWith(ctx.installRoot+path.sep)||args.includes(ctx.service.hostConfigFile)||args.some(x=>x.startsWith(ctx.installRoot+'/releases/')&&x.endsWith('/host/connect.mjs')))fail('host_update_unowned_host_process');
    }catch(error){if(['ENOENT','ESRCH'].includes(error.code))continue;throw error}
   }
  }
@@ -92,7 +94,11 @@ export function createHostUpdateRuntime(ctx,{home=os.homedir(),run=execFileSync,
    const expected=linuxUserUnit({unitName:unit,installRoot:ctx.installRoot,hostConfigFile:ctx.service.hostConfigFile,trustPublicKeyFile:ctx.service.publisherKeyFile,nodeBinary:ctx.service.nodeBinary,...(ctx.service.restartSec!==undefined?{restartSec:ctx.service.restartSec}:{})});
    if(fileHash(unitFile)!==hash(expected)||fs.existsSync(dropDir))fail('host_update_service_definition_changed');
    const state=observe();if(!['active','inactive','failed'].includes(state.state))fail('host_update_service_transitioning');
-   if(state.state==='active')observeProcess(state.pid,ctx,ctx.current.version);else noOtherHostProcesses();
+   // Admission/drain must be atomic with the Gateway before live tasks may be
+   // interrupted. Until that contract exists, only an already stopped Host is
+   // admitted; explicit update permission alone is not a task-drain receipt.
+   if(state.state==='active')fail('host_update_active_work_drain_required');
+   noOtherHostProcesses();
    receipt={schema:1,unitFile,dropFile,unitSha256:hash(expected),initialEnabled:state.enabled,initialActive:state.state==='active',dropInstalled:false};
    await save(receipt);
   },
