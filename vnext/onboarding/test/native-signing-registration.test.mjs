@@ -8,7 +8,7 @@ import {spawnSync} from 'node:child_process';
 import {ensurePrivateDirectory,writePrivateFile,requirePrivateFile} from '../../host/private-storage.mjs';
 import {createDeployment,readDeployment,setDeploymentOnboardingPreference,readDeploymentOnboardingPreference,
  planDeploymentMacSigningRegistration as plan,applyDeploymentMacSigningRegistration as apply,
- rollbackDeploymentMacSigningRegistration as rollback} from '../core.mjs';
+ rollbackDeploymentMacSigningRegistration as rollback,readDeploymentMacSigningRegistration as registrationStatus} from '../core.mjs';
 import {main} from '../cli.mjs';
 const sha=bytes=>createHash('sha256').update(bytes).digest('hex');
 const oldApp={path:'/Applications/Styx.app',cdhash:'a'.repeat(40)};
@@ -111,5 +111,16 @@ test('CLI exposes only fixed explicit registration verbs and default native veri
  await assert.rejects(main(['mac-signing-apply',f.d,appFile]),/usage_/);await assert.rejects(main(['mac-signing-rollback',f.d]),/usage_/);
  if(process.platform!=='darwin')await assert.rejects(main(['mac-signing-plan',f.d,appFile]),/invalid_adhoc_preview_trust/);
  const p=plan(f.d,{app},{verifyApp});apply(f.d,{authorize:true,plan:p},{verifyApp});assert.equal((await main(['mac-signing-rollback',f.d,'--authorize'])).status,'rolled_back');
+ assertPreserved(f);
+});
+
+test('interrupted signing status remains readable without replaying or disclosing journal ownership',async t=>{
+ const f=fixture(t);assert.equal(registrationStatus(f.d).status,'not_started');
+ const p=plan(f.d,{app},{verifyApp});
+ assert.throws(()=>apply(f.d,{authorize:true,plan:p},{verifyApp,onPhase(phase){if(phase==='prepared')throw Error('interruption')}}),/interruption/);
+ assert.throws(()=>readDeployment(f.d),/requires_rollback/);
+ const status=registrationStatus(f.d);assert.equal(status.status,'prepared');assert.deepEqual(Object.keys(status).sort(),['schema','status','transactionId']);
+ assert.deepEqual(await main(['mac-signing-status',f.d]),status);
+ assert.equal(rollback(f.d,{authorize:true}).status,'rolled_back');assert.equal(registrationStatus(f.d).status,'rolled_back');
  assertPreserved(f);
 });

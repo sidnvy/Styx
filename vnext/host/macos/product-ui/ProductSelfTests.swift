@@ -1,5 +1,6 @@
 import Foundation
 import AppKit
+import SwiftUI
 
 // Called by the signed executable's existing --self-test path. These are
 // protocol/decoding checks, not native permission or account acceptance claims.
@@ -150,20 +151,33 @@ private func productStatusImageSelfTest() throws {
 extension ProductWindowController {
     // Window rendering only. The harness has no StyxDelegate, Cua child, system
     // permission prompts, installed services or deployment mutation path.
-    @MainActor static func runIsolatedSmoke(sessionURL: URL, snapshot: URL) -> Never {
+    @MainActor static func runIsolatedSmoke(sessionURL: URL, snapshot: URL, pluginZIP: Bool = false) -> Never {
         guard ProductCoreClient.bootstrap(sessionURL) != nil, snapshot.isFileURL else { exit(2) }
         let application = NSApplication.shared
         application.setActivationPolicy(.accessory)
         let controller = ProductWindowController(sessionURL: sessionURL)
         controller.present()
         var attempts = 0
+        var projectedZIP = false
         let timer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { _ in
             Task { @MainActor in
                 attempts += 1
                 guard attempts <= 100 else { fputs("Styx native product window smoke timed out\n", stderr); exit(2) }
                 guard controller.model.loaded, !controller.model.busy else { return }
-                guard controller.model.error == nil, controller.model.deployment == nil,
-                      controller.model.page == .welcome,
+                if pluginZIP && !projectedZIP {
+                    guard controller.model.deployment == nil else { exit(2) }
+                    // UI-only projection over a fresh authenticated fixture.
+                    // No real deployment, credentials, export or account action.
+                    controller.model.status = .object(["deployment": .object(["mode": .string("create-local"), "steps": .array([])])])
+                    controller.model.journey = .object(["steps": .array([.object(["id": .string("local_setup"), "status": .string("completed")])]), "tunnel": .object(["status": .string("not_configured")])])
+                    controller.model.page = .chat
+                    controller.window?.setContentSize(NSSize(width: 880, height: 1500))
+                    controller.window?.contentView = NSHostingView(rootView: ProductView(model: controller.model, controller: controller, showPluginPackage: true))
+                    projectedZIP = true
+                    return
+                }
+                guard controller.model.error == nil,
+                      (pluginZIP ? controller.model.page == .chat : controller.model.deployment == nil && controller.model.page == .welcome),
                       let view = controller.window?.contentView,
                       let bitmap = view.bitmapImageRepForCachingDisplay(in: view.bounds) else {
                     fputs("Styx native window smoke requires a fresh isolated configuration\n", stderr); exit(2)
@@ -175,7 +189,7 @@ extension ProductWindowController {
                     try exportStatusIconSnapshot(beside: snapshot)
                 }
                 catch { fputs("Styx native window snapshot write failed\n", stderr); exit(2) }
-                print("PASS: native welcome window rendered through authenticated Core reads; UI-only evidence. Cua, permissions, install and account acceptance NOT RUN")
+                print(pluginZIP ? "PASS: isolated native ZIP setup view rendered with synthetic page data; export and account acceptance NOT RUN" : "PASS: native welcome window rendered through authenticated Core reads; UI-only evidence. Cua, permissions, install and account acceptance NOT RUN")
                 exit(0)
             }
         }

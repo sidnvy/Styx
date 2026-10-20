@@ -877,12 +877,12 @@ if CommandLine.arguments.count >= 2 && CommandLine.arguments[1] == "--edit-menu-
         catch { fputs("Styx isolated edit-menu self-test failed\n", stderr); exit(1) }
     }
 }
-if CommandLine.arguments.count == 4 && CommandLine.arguments[1] == "--product-window-fixture" {
+if CommandLine.arguments.count == 4 && ["--product-window-fixture", "--product-zip-window-fixture"].contains(CommandLine.arguments[1]) {
     let input = URL(fileURLWithPath: CommandLine.arguments[2])
     let snapshot = URL(fileURLWithPath: CommandLine.arguments[3])
     guard let line = try? String(contentsOf: input, encoding: .utf8),
           let sessionURL = setupSessionURL("STYX_SETUP_URL\t" + line.trimmingCharacters(in: .whitespacesAndNewlines)) else { exit(2) }
-    MainActor.assumeIsolated { ProductWindowController.runIsolatedSmoke(sessionURL: sessionURL, snapshot: snapshot) }
+    MainActor.assumeIsolated { ProductWindowController.runIsolatedSmoke(sessionURL: sessionURL, snapshot: snapshot, pluginZIP: CommandLine.arguments[1] == "--product-zip-window-fixture") }
 }
 #endif
 // Opt-in native WebKit acceptance against a fresh private test server only.

@@ -160,6 +160,8 @@ enum ProductRestorationPolicy {
     let client: ProductCoreClient
     @Published var page: ProductPage = .welcome
     @Published var busy = false
+    @Published var signingUpgrade: ProductJSON = .null
+    @Published var signingUpgradeState: ProductJSON = .null
     @Published var loaded = false
     @Published var loadingMessage = productText("正在连接本机 Styx…", "Connecting to Styx on this Mac…")
     @Published var error: String?
@@ -220,7 +222,16 @@ enum ProductRestorationPolicy {
     var computerNotApproved: Bool { joined && deployment?.computerRequested == true && status["foreground"]["computerRequested"] == .bool(false) }
     var computerApproved: Bool { ProductCapabilityPolicy.computerApproved(status["foreground"]) }
     var preparationStages: [ProductPreparationStage] { ProductPreparationPolicy.stages(deployment, browser: browserObservation, foreground: status["foreground"], nativeStartup: status["nativeStartup"], activity: preparationActivity) }
-    var signingUpgradeIncomplete: Bool { status["nativeStartup"]["reason"].string == "native_signing_registration_required" }
+    var signingUpgradeIncomplete: Bool { !signingUpgradeNeedsReview && (signingUpgradeState["status"].string == "required" || status["nativeStartup"]["reason"].string == "native_signing_registration_required") }
+    var signingUpgradeNeedsReview: Bool { signingUpgradeState["status"].string == "needs_review" || status["nativeStartup"]["reason"].string == "native_signing_upgrade_requires_review" }
+    var connectionReviewMessage: String {
+        switch status["nativeStartup"]["reason"].string {
+        case "existing_service_requires_review": return productText("检测到已有后台服务，但尚未确认可安全复用。请核对旧服务的安装与运行状态；Styx 不会自动停止或替换它。", "Existing background services could not be verified for safe reuse. Review their installation and running state; Styx will not stop or replace them automatically.")
+        case "connection_owned_elsewhere": return productText("已有其他进程连接这台电脑。请先确认该连接的用途；Styx 不会重复连接或接管它。", "Another process already owns this computer's connection. Review that connection before continuing; Styx will not duplicate or take it over.")
+        case "interrupted_operation_requires_review": return productText("上次操作尚未确认完成。请先核对执行记录，再恢复连接；不会自动重试安装或配对。", "A previous operation is unconfirmed. Review its record before resuming; installation and pairing are not replayed automatically.")
+        default: return productText("本机连接未能恢复。可以重试连接；若仍失败，请保留现有设置并检查诊断记录。", "This computer's connection could not resume. Retry the connection; if it still fails, preserve your settings and inspect diagnostics.")
+        }
+    }
     var retryableCommandCheck: ProductStep? { ProductPreparationPolicy.retryableCommandCheck(deployment) }
     var preparationBlocker: ProductStep? { ProductPreparationPolicy.blockingStep(deployment) }
     var preparationConnectionNeedsReview: Bool {
@@ -262,11 +273,28 @@ enum ProductRestorationPolicy {
         busy = true; defer { busy = false }
         do { try await reload(); error = nil } catch { reportFailure() }
     }
+    func reviewSigningUpgrade() {
+        signingUpgrade = .null
+        perform { [self] in signingUpgrade = try await client.write("native-signing/plan", [:])["upgrade"] }
+    }
+    func completeSigningUpgrade() {
+        guard signingUpgrade["status"].string == "reviewable", let planID = signingUpgrade["planId"].string else { return }
+        signingUpgrade = .null
+        perform { [self] in
+            _ = try await client.write("native-signing/apply", ["authorize": .bool(true), "planId": .string(planID)])
+        }
+    }
     private func reload() async throws {
         // Native permission observation must not depend on a successful Core read.
         observePermissions()
         loadingMessage = productText("正在核对连接状态…", "Checking current connections…")
-        let snapshot = try await client.read("snapshot")
+        if session["nativeSigningUpgradeSupported"].bool { signingUpgradeState = try await client.read("native-signing/status")["upgrade"] }
+        let snapshot: ProductJSON
+        do { snapshot = try await client.read("snapshot") }
+        catch {
+            if signingUpgradeNeedsReview { page = .preparation; loaded = true; return }
+            throw error
+        }
         status = snapshot["status"]
         journey = snapshot["journey"]
         if deployment != nil {

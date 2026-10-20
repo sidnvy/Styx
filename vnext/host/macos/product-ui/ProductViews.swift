@@ -35,6 +35,10 @@ struct ProductView: View {
     @ObservedObject var model: ProductModel
     weak var controller: ProductWindowController?
     @State private var usePluginPackage = false
+    init(model: ProductModel, controller: ProductWindowController?, showPluginPackage: Bool = false) {
+        self.model = model; self.controller = controller
+        _usePluginPackage = State(initialValue: showPluginPackage)
+    }
     var body: some View {
         VStack(spacing: 0) {
             if model.deployment != nil && (model.accepted || model.joined && model.localPrepared || [.overview, .computers, .settings].contains(model.page)) {
@@ -146,10 +150,21 @@ struct ProductView: View {
                 }
             }
             if model.signingUpgradeIncomplete {
-                Text(productText("此次升级尚未完成，Styx 已暂停本机连接。需要完成升级修复后重新打开 App；检查状态不会继续准备。已有设置和配对会保留。", "This upgrade is incomplete, so Styx has paused this computer's connection. Finish the upgrade repair, then reopen the App. Checking status will not resume setup. Your settings and pairing are preserved.")).foregroundStyle(.secondary)
+                Text(productText("发现旧版设置。先核对本次升级，再保留设置并恢复连接。", "Settings from an earlier version were found. Review this upgrade, then preserve your settings and resume the connection.")).foregroundStyle(.secondary)
+                if model.signingUpgrade["status"].string == "reviewable" {
+                    Text(productText("本次只更新 App 的签名登记，并保存回滚记录。电脑身份、配对、聊天凭据和系统权限保持不变；不会替换或停止已有后台服务。", "This updates only the App signing registration and saves a rollback record. Computer identity, pairing, chat credentials and system permissions are preserved. Existing background services are not replaced or stopped.")).font(.callout)
+                    Button(productText("保留设置并完成升级", "Keep settings and finish upgrade")) { model.completeSigningUpgrade() }.buttonStyle(.borderedProminent)
+                } else {
+                    Button(productText("核对本次升级", "Review this upgrade")) { model.reviewSigningUpgrade() }.buttonStyle(.borderedProminent)
+                }
+            } else if model.signingUpgradeNeedsReview {
+                Text(productText("升级未能确认完成，执行记录已保留。请先检查并恢复这次事务；不要清空设置或反复点击升级。", "Upgrade completion is unconfirmed and its execution record is retained. Inspect and recover this transaction before continuing; do not reset settings or repeatedly apply the upgrade.")).foregroundStyle(.secondary)
             } else if let check = model.retryableCommandCheck {
                 Text(ProductPreparationPolicy.commandCheckMessage(check)).foregroundStyle(.secondary)
                 Button(productText("重新检查命令组件", "Check command component again")) { model.recheckCommandComponent() }.buttonStyle(.borderedProminent)
+            } else if model.preparationConnectionNeedsReview {
+                Text(model.connectionReviewMessage).foregroundStyle(.secondary)
+                Button(productText("重试本机连接", "Retry this computer's connection")) { model.resumeForeground() }
             } else if let blocked = model.preparationBlocker {
                 if blocked.status == "awaiting_approval" || ProductPreparationPolicy.canCheckOwnerApproval(model.deployment) {
                     Text(productText("请在主台核对并批准这台电脑，然后检查连接。", "Review and approve this computer on the main computer, then check the connection.")).foregroundStyle(.secondary)
@@ -157,8 +172,6 @@ struct ProductView: View {
                 } else {
                     Text(blocked.status == "uncertain" ? productText("上次准备的结果尚未确认。请刷新并核对详细信息；安装和配对不会自动重试。", "The previous setup result is unconfirmed. Refresh and review details; installation and pairing will not be retried automatically.") : productText("准备暂时停止。请刷新状态并核对详细信息，再继续处理。", "Setup has paused. Refresh the status and review details before continuing.")).foregroundStyle(.secondary)
                 }
-            } else if model.preparationConnectionNeedsReview {
-                Text(productText("现有连接状态尚未确认。请刷新并核对详细信息；不会重复启动或接管其他连接。", "The existing connection needs review. Refresh and inspect details; Styx will not start duplicates or take over other connections.")).foregroundStyle(.secondary)
             } else if !model.busy {
                 Button(productText("继续准备", "Continue setup")) { model.continuePreparation() }.buttonStyle(.borderedProminent)
             }
@@ -243,7 +256,7 @@ struct ProductView: View {
                 Button(productText("先完成电脑准备", "Finish computer setup")) { model.page = .preparation }
             } else {
                 tunnelPanel
-                if ["configured", "running", "interrupted"].contains(model.journey["tunnel"]["status"].string ?? "") { officialPanel }
+                officialPanel
                 if model.plugin["accountActions"]["installation"].string == "user_confirmed" { acceptancePanel }
             }
         }
@@ -272,6 +285,7 @@ struct ProductView: View {
             if model.pluginMode == "reuse" {
                 Text(productText("这份设置关联了已有插件，请在 ChatGPT 中编辑它的名称和图标。已有连接无需再上传一个新包。", "These settings refer to an existing plugin. Edit its name and icon in ChatGPT; the existing connection needs no new ZIP upload."))
             } else {
+                Text(productText("先在这里生成 ZIP，再去 ChatGPT 上传。这个文件不是 Styx 安装包，不会随 DMG 自动提供。", "Generate the ZIP here first, then upload it in ChatGPT. This is not the Styx installer and is not included automatically with the DMG.")).font(.callout)
                 Text(productText("① 在 Styx 填写下面的名称和描述，按需更换图标。当前 Tunnel 和引导技能会自动随包携带。", "① Enter the name and description below in Styx, and optionally change the icon. The current Tunnel and onboarding skill are included automatically.")).font(.callout).foregroundStyle(.secondary)
                 TextField(productText("插件名称", "Plugin name"), text: $model.pluginName).onChange(of: model.pluginName) { _ in model.observePluginDraftEdit() }
                 TextField(productText("简短描述（最多 30 字）", "Short description (up to 30 characters)"), text: $model.pluginDescription).onChange(of: model.pluginDescription) { _ in model.observePluginDraftEdit() }
@@ -281,13 +295,13 @@ struct ProductView: View {
                     } else { ProductBrand(size: 40) }
                     Button(productText("更换插件图标…", "Choose plugin icon…")) { model.selectIcon() }
                 }
-                Button(productText("保存并导出插件包…", "Save and export plugin ZIP…")) { model.exportPluginPackage() }
-                    .disabled(model.plugin["contextChanged"].bool || model.pluginName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.pluginName.count > 64 || model.pluginDescription.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.pluginDescription.count > 30)
+                Button(productText("生成供 ChatGPT 上传的 ZIP…", "Generate ZIP for ChatGPT…")) { model.exportPluginPackage() }.buttonStyle(.borderedProminent)
+                    .disabled(model.connectionTunnelID.isEmpty || model.plugin["contextChanged"].bool || model.pluginName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.pluginName.count > 64 || model.pluginDescription.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.pluginDescription.count > 30)
                 if let location = model.exportedPluginURL, !model.pluginDraftEdited {
-                    Label(productText("已保存：", "Saved: ") + location.lastPathComponent, systemImage: "checkmark.circle")
+                    Label(productText("已保存：", "Saved: ") + location.path, systemImage: "checkmark.circle").textSelection(.enabled)
                     Button(productText("在 Finder 中显示", "Show in Finder")) { NSWorkspace.shared.activateFileViewerSelecting([location]) }
                 }
-                Text(productText("② 点“保存并导出插件包”，选择保存位置。得到的是一个 .zip 文件，不需要解压。", "② Select Save and export plugin ZIP and choose a location. You get a .zip file; do not extract it."))
+                Text(productText("② 点上方“生成供 ChatGPT 上传的 ZIP”，确认保存位置（默认桌面）。保存成功后点“在 Finder 中显示”，找到 styx-native.zip；不需要解压。", "② Select Generate ZIP for ChatGPT above and confirm the location (Desktop by default). After saving, select Show in Finder to locate styx-native.zip; do not extract it."))
                 Text(productText("③ 打开 ChatGPT 插件页面，点“＋”→“上传插件压缩包”，选择刚保存的 ZIP。核对导入的资料和 Tunnel，然后完成安装。无需再走“添加自建 MCP 服务器”或重复填写同一份资料。", "③ Open ChatGPT Plugins, select + → Upload plugin ZIP, and choose that file. Review the imported details and Tunnel, then install. You do not also need Add custom MCP server or to enter the same details again."))
                 Text(productText("插件包导入目前为预览流程，尚需在你的 ChatGPT 账号中验证兼容性。", "Plugin ZIP import is a preview flow; compatibility still needs verification in your ChatGPT account.")).font(.caption).foregroundStyle(.secondary)
                 Text(productText("上传、登录和安装仍由你在 ChatGPT 完成；以后修改本地资料，需要重新导出并更新插件，才会在 ChatGPT 生效。", "Upload, sign-in and installation take place in ChatGPT. Later local edits need a new export and plugin update to appear in ChatGPT.")).font(.caption).foregroundStyle(.secondary)
@@ -297,10 +311,12 @@ struct ProductView: View {
     private var officialPanel: some View {
         ProductPanel(title: productText("2. 在 ChatGPT 完成连接", "2. Connect in ChatGPT")) {
             Text(productText("下面两种方式任选一种，都用于在 ChatGPT 安装 Styx。先确认登录的是你要使用的账号和工作区。", "Choose one of these two ways to install Styx in ChatGPT. First confirm the account and workspace you intend to use."))
-            HStack {
-                Text(usePluginPackage ? productText("方式二：导入 ZIP（预览）", "Option 2: Import ZIP (preview)") : productText("方式一：手动添加连接（推荐）", "Option 1: Add the connection manually (recommended)")).font(.subheadline.weight(.semibold))
-                Spacer()
-                Button(usePluginPackage ? productText("使用直接连接", "Use direct connection") : productText("自定义资料并导出 ZIP…", "Customize and export ZIP…")) { usePluginPackage.toggle(); if usePluginPackage { model.preparePluginDraft() } }.buttonStyle(.link)
+            Picker(productText("连接方式", "Connection method"), selection: $usePluginPackage) {
+                Text(productText("手动添加（推荐）", "Add manually (recommended)")).tag(false)
+                Text(productText("导入 ZIP（预览）", "Import ZIP (preview)")).tag(true)
+            }.pickerStyle(.segmented).onChange(of: usePluginPackage) { selected in if selected { model.preparePluginDraft() } }
+            if model.connectionTunnelID.isEmpty {
+                Text(productText("请先完成上方的安全连接，才能生成当前连接的插件 ZIP。入口会保留在这里。", "Complete the secure connection above before generating its plugin ZIP. This option stays visible here.")).font(.callout).foregroundStyle(.secondary)
             }
             if usePluginPackage {
                 pluginPackageContent

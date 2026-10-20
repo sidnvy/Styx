@@ -389,6 +389,11 @@ export function planDeploymentMacSigningRegistration(d,options={},adapters={}){
  const previous=registrationJournal(d);if(previous&&!['applied','rolled_back'].includes(previous.status))fail('mac_signing_registration_requires_rollback');
  return registrationPlan(registrationSnapshot(d,options.app,adapters.verifyApp??verifyMacPreviewApp));
 }
+export function readDeploymentMacSigningRegistration(d){
+ if(!abs(d))fail('absolute_state_directory_required');requirePrivateDirectory(d);
+ const journal=registrationJournal(d);
+ return journal?{schema:1,status:journal.status,transactionId:journal.transactionId}: {schema:1,status:'not_started'};
+}
 export function applyDeploymentMacSigningRegistration(d,options={},adapters={}){
  exact(options,['authorize','plan']);if(options.authorize!==true)fail('explicit_mac_signing_registration_authorization_required');
  const transactionId=randomBytes(16).toString('hex'),owner={schema:1,kind:registrationKind,transactionId,pid:process.pid,token:randomBytes(32).toString('hex')};

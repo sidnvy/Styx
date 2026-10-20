@@ -56,6 +56,7 @@ extension ProductModel {
         panel.title = productText("导出 Styx 插件包", "Export Styx plugin package")
         panel.allowedContentTypes = [.zip]; panel.allowsOtherFileTypes = false
         panel.nameFieldStringValue = "styx-native.zip"
+        panel.directoryURL = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first
         guard panel.runModal() == .OK, let destination = panel.url,
               destination.isFileURL, destination.pathExtension.lowercased() == "zip" else { return }
         exportedPluginURL = nil
