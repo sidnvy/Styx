@@ -95,6 +95,8 @@ func productCoreSelfTest() throws {
     let signingPaused: ProductJSON = .object(["status": .string("reconciliation_required"), "reason": .string("native_signing_registration_required")])
     let upgradePaused = ProductPreparationPolicy.stages(noBrowser, browser: .null, foreground: stopped, nativeStartup: signingPaused, activity: nil)
     try require(upgradePaused[1].state == .needsReview, "An incomplete signing upgrade was shown as pending setup")
+    let oldServiceOnly = ProductDeployment(try JSONDecoder().decode(ProductJSON.self, from: Data(#"{"mode":"create-local","steps":[{"id":"host.service.install","status":"blocked"}]}"#.utf8)))
+    try require(ProductPreparationPolicy.blockingStep(oldServiceOnly) == nil, "A legacy optional service blocked the App-owned local setup")
     try require(ProductRestorationPolicy.page(deployment: stalled, localPrepared: true, browser: preparedBrowser, foreground: .object(["status": .string("needs_attention")]), accepted: true, accessibility: true, screenRecording: true) == .preparation, "Uncertain connection recovery skipped review")
     let defaultPlugin: ProductJSON = .object(["required": .bool(true), "profileSaved": .bool(false), "contextChanged": .bool(false), "presentation": .object(["displayName": .string("Styx")]), "selection": .object(["mode": .string("create"), "accountLabel": .string(""), "pluginUrl": .string("")])])
     let defaultProfile = try ProductPluginWorkflow.defaultProfileIfMissing(defaultPlugin)

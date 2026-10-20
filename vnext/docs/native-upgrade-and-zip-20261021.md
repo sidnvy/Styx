@@ -13,6 +13,10 @@ It still refuses unverified services or a connection owned by another process.
 The App shows a bounded reason and offers a connection retry; it does not stop,
 replace or take over legacy services. Registration success is distinct from
 connection success, tool health, system permissions and account acceptance.
+After upgrade or an explicit connection retry, the App reevaluates the next
+onboarding page. Legacy optional Host-service installation records do not block
+the App-owned local setup; actual service ownership checks are still enforced
+by Core before a connection is started or reused.
 
 Interrupted registration status is readable through Core and CLI
 `mac-signing-status` without loading or replaying an incomplete deployment.

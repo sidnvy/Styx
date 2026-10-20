@@ -89,7 +89,7 @@ enum ProductPreparationPolicy {
         return next
     }
     static func blockingStep(_ deployment: ProductDeployment?) -> ProductStep? {
-        deployment?.steps.first { ["blocked", "uncertain", "failed", "awaiting_approval"].contains($0.status) }
+        deployment?.steps.first { !$0.id.hasPrefix("host.service.") && ["blocked", "uncertain", "failed", "awaiting_approval"].contains($0.status) }
     }
     static func canCheckOwnerApproval(_ deployment: ProductDeployment?) -> Bool {
         guard deployment?.joined == true, let next = deployment?.steps.first(where: { !$0.complete }) else { return false }
@@ -282,6 +282,7 @@ enum ProductRestorationPolicy {
         signingUpgrade = .null
         perform { [self] in
             _ = try await client.write("native-signing/apply", ["authorize": .bool(true), "planId": .string(planID)])
+            restoredPage = false
         }
     }
     private func reload() async throws {
@@ -602,6 +603,7 @@ enum ProductRestorationPolicy {
         perform { [self] in
             _ = try await client.write("foreground", ["authorize": .bool(true)])
             foregroundRecoveryNeeded = false
+            if page == .preparation { restoredPage = false }
         }
     }
     func openOfficial(_ value: String) {
