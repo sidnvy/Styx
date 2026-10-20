@@ -100,7 +100,7 @@ export async function exportDeploymentPlugin(stateDir,options={}){
  return locked(stateDir,async()=>{
   const ctx=context(stateDir),value=load(stateDir);
   if(!ctx.required)fail('plugin_managed_by_gateway_owner');
-  if(!value||value.selection.mode!=='create')fail('new_plugin_profile_required');
+  if(!value)fail('plugin_profile_required');
   if(value.binding!==ctx.binding)fail('plugin_context_changed');
   if(!ctx.target||!ctx.identity)fail('configured_owned_gateway_and_tunnel_required');
   const before=profileHash(value),{verifyDeploymentGateway}=await import('./core.mjs');

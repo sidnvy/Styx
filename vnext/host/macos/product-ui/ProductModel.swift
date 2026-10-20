@@ -8,6 +8,19 @@ func productText(_ chinese: String, _ english: String) -> String {
 }
 
 enum ProductPage: String, CaseIterable { case welcome, invitation, capabilities, preparation, permissions, chat, overview, computers, settings }
+enum ProductTunnelConnection: Equatable {
+    case notConfigured, connected, connecting, stopped, unavailable, unknown
+    static func observed(_ tunnel: ProductJSON) -> Self {
+        if tunnel["status"].string == "not_configured" { return .notConfigured }
+        switch tunnel["transport"].string {
+        case "ready": return tunnel["status"].string == "running" ? .connected : .unknown
+        case "starting": return .connecting
+        case "not_running": return .stopped
+        case "unavailable": return .unavailable
+        default: return .unknown
+        }
+    }
+}
 
 // A request is only a local UI event, never evidence of an OS grant. Keep the
 // history in this process so declining a prompt cannot cause a prompt loop,
@@ -240,6 +253,7 @@ enum ProductRestorationPolicy {
         return ["needs_attention", "stopping"].contains(observed) || observed == "not_running" && status["nativeStartup"]["status"].string == "reconciliation_required"
     }
     var connectionTunnelID: String { plugin["connection"]["tunnelId"].string ?? (!tunnelID.isEmpty ? tunnelID : handoffTarget) }
+    var tunnelConnection: ProductTunnelConnection { ProductTunnelConnection.observed(journey["tunnel"]) }
     var challengeID: String? { acceptance["challenge"]["id"].string }
     var targetProofReady: Bool {
         acceptance["requestProof"]["status"].string == "verified"

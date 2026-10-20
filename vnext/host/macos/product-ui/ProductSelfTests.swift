@@ -97,6 +97,9 @@ func productCoreSelfTest() throws {
     try require(upgradePaused[1].state == .needsReview, "An incomplete signing upgrade was shown as pending setup")
     let oldServiceOnly = ProductDeployment(try JSONDecoder().decode(ProductJSON.self, from: Data(#"{"mode":"create-local","steps":[{"id":"host.service.install","status":"blocked"}]}"#.utf8)))
     try require(ProductPreparationPolicy.blockingStep(oldServiceOnly) == nil, "A legacy optional service blocked the App-owned local setup")
+    for (status, transport, expected) in [("configured", "not_observed", ProductTunnelConnection.unknown), ("configured", "not_running", .stopped), ("running", "starting", .connecting), ("running", "ready", .connected), ("configured", "ready", .unknown), ("not_configured", "not_observed", .notConfigured)] {
+        try require(ProductTunnelConnection.observed(.object(["status": .string(status), "transport": .string(transport)])) == expected, "Tunnel configuration or a missing observation was presented as an active connection")
+    }
     try require(ProductRestorationPolicy.page(deployment: stalled, localPrepared: true, browser: preparedBrowser, foreground: .object(["status": .string("needs_attention")]), accepted: true, accessibility: true, screenRecording: true) == .preparation, "Uncertain connection recovery skipped review")
     let defaultPlugin: ProductJSON = .object(["required": .bool(true), "profileSaved": .bool(false), "contextChanged": .bool(false), "presentation": .object(["displayName": .string("Styx")]), "selection": .object(["mode": .string("create"), "accountLabel": .string(""), "pluginUrl": .string("")])])
     let defaultProfile = try ProductPluginWorkflow.defaultProfileIfMissing(defaultPlugin)
@@ -171,7 +174,9 @@ extension ProductWindowController {
                     // UI-only projection over a fresh authenticated fixture.
                     // No real deployment, credentials, export or account action.
                     controller.model.status = .object(["deployment": .object(["mode": .string("create-local"), "steps": .array([])])])
-                    controller.model.journey = .object(["steps": .array([.object(["id": .string("local_setup"), "status": .string("completed")])]), "tunnel": .object(["status": .string("not_configured")])])
+                    controller.model.journey = .object(["steps": .array([.object(["id": .string("local_setup"), "status": .string("completed")])]), "tunnel": .object(["status": .string("configured"), "transport": .string("not_running")])])
+                    controller.model.pluginMode = "reuse"
+                    controller.model.plugin = .object(["selection": .object(["mode": .string("reuse")]), "connection": .object(["tunnelId": .string("tunnel_" + String(repeating: "a", count: 32))])])
                     controller.model.page = .chat
                     controller.window?.setContentSize(NSSize(width: 880, height: 1500))
                     controller.window?.contentView = NSHostingView(rootView: ProductView(model: controller.model, controller: controller, showPluginPackage: true))

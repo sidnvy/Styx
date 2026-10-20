@@ -26,7 +26,7 @@ test('App and CLI share persisted presentation and explicit reuse without new Ga
  await main(['plugin-profile',f.stateDir,input,'--authorize']);
  const saved=readDeploymentPlugin(f.stateDir);assert.equal(saved.selection.mode,'reuse');assert.equal(saved.presentation.displayName,'我的 Styx');
  assert.deepEqual(await main(['plugin',f.stateDir]),saved);
- await assert.rejects(exportDeploymentPlugin(f.stateDir,{authorize:true}),/new_plugin_profile_required/);
+ await assert.rejects(exportDeploymentPlugin(f.stateDir,{authorize:true}),/configured_owned_gateway_and_tunnel_required/);
  const a=await recordDeploymentPluginAction(f.stateDir,{authorize:true,stage:'installation',pluginUrl:reuse.selection.pluginUrl});
  assert.equal(a.accountActions.installation,'user_confirmed');assert.equal(a.accountActions.connection,'not_verified');assert.equal(a.accountActions.providerIdentity,'not_verified');
  await assert.rejects(recordDeploymentPluginAction(f.stateDir,{authorize:true,stage:'upload',pluginUrl:reuse.selection.pluginUrl}),/does_not_require_upload/);
@@ -70,6 +70,16 @@ with zipfile.ZipFile(sys.argv[1]) as z:
   const saved=await recordDeploymentPluginAction(f.stateDir,{authorize:true,stage:'installation',pluginUrl:url});
   assert.equal(saved.accountActions.installation,'user_confirmed');assert.equal(saved.accountActions.connection,'not_verified');
   await exportDeploymentPlugin(f.stateDir,{authorize:true});assert.equal(readDeploymentPlugin(f.stateDir).accountActions.installation,'user_confirmed');
+ const selected={mode:'reuse',accountLabel:'Existing workspace',pluginUrl:url};
+ await setDeploymentPluginProfile(f.stateDir,{...options,selection:selected});
+ await recordDeploymentPluginAction(f.stateDir,{authorize:true,stage:'installation'});
+ const configBeforeReuse=fs.readFileSync(path.join(f.stateDir,'deployment.json'));
+ const reusedZip=await exportDeploymentPlugin(f.stateDir,{authorize:true});
+ assert.deepEqual(reusedZip.archive,result.archive,'The existing-plugin association must not change packaged connection metadata');
+ assert.deepEqual(readDeploymentPlugin(f.stateDir).selection,selected);
+ assert.equal(readDeploymentPlugin(f.stateDir).accountActions.installation,'user_confirmed');
+ assert.equal(readDeploymentPlugin(f.stateDir).accountActions.upload,'not_observed');
+ assert.deepEqual(fs.readFileSync(path.join(f.stateDir,'deployment.json')),configBeforeReuse);
  await setDeploymentPluginProfile(f.stateDir,{...options,presentation:{...options.presentation,displayName:'Changed'}});
  assert.equal(readDeploymentPlugin(f.stateDir).accountActions.installation,'not_observed');assert.equal(readDeploymentPlugin(f.stateDir).export.status,'not_exported');
  const previous=fs.readFileSync(path.join(f.stateDir,'onboarding-plugin.json'));await stopDeploymentGateway(f.stateDir);

@@ -34,8 +34,8 @@ struct ProductPanel<Content: View>: View {
 struct ProductView: View {
     @ObservedObject var model: ProductModel
     weak var controller: ProductWindowController?
-    @State private var usePluginPackage = false
-    init(model: ProductModel, controller: ProductWindowController?, showPluginPackage: Bool = false) {
+    @State private var usePluginPackage = true
+    init(model: ProductModel, controller: ProductWindowController?, showPluginPackage: Bool = true) {
         self.model = model; self.controller = controller
         _usePluginPackage = State(initialValue: showPluginPackage)
     }
@@ -257,97 +257,106 @@ struct ProductView: View {
             } else {
                 tunnelPanel
                 officialPanel
+                if usePluginPackage { pluginUploadPanel }
                 if model.plugin["accountActions"]["installation"].string == "user_confirmed" { acceptancePanel }
             }
         }
     }
     private var tunnelPanel: some View {
-        ProductPanel(title: productText("1. 准备安全连接", "1. Prepare a secure connection")) {
-            Text(productText("前往官方平台，确认账号与工作区，创建专用 Tunnel 和具有 Read/Use 权限的运行 Key。", "Open the official platform, confirm your account and workspace, then create a dedicated Tunnel and a runtime key with Read/Use permissions."))
-            Button(productText("前往官方平台", "Open the official platform")) { model.openOfficial("https://platform.openai.com/settings/organization/tunnels") }
-            if model.journey["tunnel"]["status"].string == "not_configured" {
+        ProductPanel(title: productText("1. 连接到 OpenAI", "1. Connect to OpenAI")) {
+            switch model.tunnelConnection {
+            case .notConfigured:
+                Text(productText("在 OpenAI 平台创建 Tunnel 和运行 Key，将这两项填到这里。", "Create a Tunnel and runtime key on the OpenAI platform, then enter both here."))
+                Button(productText("打开 OpenAI 平台", "Open OpenAI platform")) { model.openOfficial("https://platform.openai.com/settings/organization/tunnels") }
                 TextField("Tunnel ID", text: $model.tunnelID)
                 SecureField(productText("运行 Key", "Runtime key"), text: $model.runtimeKey)
-                Text(productText("将平台生成的这两项填回 Styx。运行 Key 不要粘贴到聊天或插件认证字段。", "Paste these two values from the platform into Styx. Do not paste the runtime key into chat or plugin authentication.")).font(.caption).foregroundStyle(.secondary)
-                Button(productText("保存并连接", "Save and connect")) { model.configureTunnel() }.disabled(model.tunnelID.isEmpty || model.runtimeKey.isEmpty || !model.session["tunnelSupported"].bool)
-            } else {
-                statusRow(productText("安全通道", "Secure channel"), model.journey["tunnel"]["transport"].string)
-                Text(productText("这是 Styx 连向聊天平台的加密通道，保存后自动启动。它就绪后，继续下方的 ChatGPT 设置。", "This encrypted channel connects Styx to the chat platform and starts when you save. Once ready, continue with ChatGPT below.")).font(.caption).foregroundStyle(.secondary)
-                if model.journey["tunnel"]["status"].string == "configured" {
-                    Button(productText("重试安全连接", "Retry secure connection")) { model.startTunnel() }
-                }
-                Text(productText("通道就绪只说明电脑端已连通；聊天账号是否可用，由最后的实际调用确认。", "A ready channel confirms the computer's connection. The final tool-call check verifies your chat account.")).font(.caption).foregroundStyle(.secondary)
+                Button(productText("保存并连接", "Save and connect")) { model.configureTunnel() }
+                    .disabled(model.tunnelID.isEmpty || model.runtimeKey.isEmpty || !model.session["tunnelSupported"].bool)
+            case .connected:
+                Label(productText("已连接到 OpenAI", "Connected to OpenAI"), systemImage: "checkmark.circle.fill")
+                Text(productText("继续下一步，把 Styx 添加到 ChatGPT。", "Continue below to add Styx to ChatGPT.")).foregroundStyle(.secondary)
+            case .connecting:
+                ProgressView(productText("正在连接…", "Connecting…"))
+                Button(productText("检查连接结果", "Check connection")) { Task { await model.refresh() } }
+            case .stopped:
+                Text(productText("连接资料已保存，尚未连接到 OpenAI。", "Connection details are saved. Not connected to OpenAI yet."))
+                Button(productText("连接", "Connect")) { model.startTunnel() }.buttonStyle(.borderedProminent)
+            case .unavailable:
+                Text(productText("连接失败。请检查网络，以及 Tunnel ID 和运行 Key 是否有效。", "Connection failed. Check your network and that the Tunnel ID and runtime key are valid."))
+                Button(productText("重新连接", "Reconnect")) { model.startTunnel() }
+                Button(productText("检查连接结果", "Check connection")) { Task { await model.refresh() } }
+            case .unknown:
+                Text(productText("暂时无法读取连接结果。", "The connection result could not be read."))
+                Button(productText("重新检查", "Check again")) { Task { await model.refresh() } }
             }
         }
     }
     private var pluginPackageContent: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            if model.pluginMode == "reuse" {
-                Text(productText("这份设置关联了已有插件，请在 ChatGPT 中编辑它的名称和图标。已有连接无需再上传一个新包。", "These settings refer to an existing plugin. Edit its name and icon in ChatGPT; the existing connection needs no new ZIP upload."))
-            } else {
-                Text(productText("先在这里生成 ZIP，再去 ChatGPT 上传。这个文件不是 Styx 安装包，不会随 DMG 自动提供。", "Generate the ZIP here first, then upload it in ChatGPT. This is not the Styx installer and is not included automatically with the DMG.")).font(.callout)
-                Text(productText("① 在 Styx 填写下面的名称和描述，按需更换图标。当前 Tunnel 和引导技能会自动随包携带。", "① Enter the name and description below in Styx, and optionally change the icon. The current Tunnel and onboarding skill are included automatically.")).font(.callout).foregroundStyle(.secondary)
+        VStack(alignment: .leading, spacing: 12) {
+            Text(productText("点击下方按钮，把 styx-native.zip 保存到电脑。", "Use the button below to save styx-native.zip to your computer."))
+            Button(productText("导出插件 ZIP…", "Export plugin ZIP…")) { model.exportPluginPackage() }.buttonStyle(.borderedProminent)
+                .disabled(model.connectionTunnelID.isEmpty || model.plugin["contextChanged"].bool || model.pluginName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.pluginName.count > 64 || model.pluginDescription.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.pluginDescription.count > 30)
+            if model.connectionTunnelID.isEmpty {
+                Text(productText("先完成上方的第 1 步，再导出插件 ZIP。", "Complete step 1 above before exporting the plugin ZIP.")).foregroundStyle(.secondary)
+            }
+            if let location = model.exportedPluginURL, !model.pluginDraftEdited {
+                Label(productText("文件已保存", "File saved"), systemImage: "checkmark.circle.fill")
+                Text(location.path).font(.caption).textSelection(.enabled)
+                Button(productText("在 Finder 中显示 ZIP", "Show ZIP in Finder")) { NSWorkspace.shared.activateFileViewerSelecting([location]) }
+            }
+            DisclosureGroup(productText("修改插件名称、描述和图标", "Edit plugin name, description and icon")) {
                 TextField(productText("插件名称", "Plugin name"), text: $model.pluginName).onChange(of: model.pluginName) { _ in model.observePluginDraftEdit() }
                 TextField(productText("简短描述（最多 30 字）", "Short description (up to 30 characters)"), text: $model.pluginDescription).onChange(of: model.pluginDescription) { _ in model.observePluginDraftEdit() }
                 HStack {
                     if let encoded = model.pluginIcon["dataBase64"].string, let bytes = Data(base64Encoded: encoded), let image = NSImage(data: bytes) {
-                        Image(nsImage: image).resizable().scaledToFit().frame(width: 40, height: 40).accessibilityLabel(productText("插件图标预览", "Plugin icon preview"))
+                        Image(nsImage: image).resizable().scaledToFit().frame(width: 40, height: 40)
                     } else { ProductBrand(size: 40) }
                     Button(productText("更换插件图标…", "Choose plugin icon…")) { model.selectIcon() }
                 }
-                Button(productText("生成供 ChatGPT 上传的 ZIP…", "Generate ZIP for ChatGPT…")) { model.exportPluginPackage() }.buttonStyle(.borderedProminent)
-                    .disabled(model.connectionTunnelID.isEmpty || model.plugin["contextChanged"].bool || model.pluginName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.pluginName.count > 64 || model.pluginDescription.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.pluginDescription.count > 30)
-                if let location = model.exportedPluginURL, !model.pluginDraftEdited {
-                    Label(productText("已保存：", "Saved: ") + location.path, systemImage: "checkmark.circle").textSelection(.enabled)
-                    Button(productText("在 Finder 中显示", "Show in Finder")) { NSWorkspace.shared.activateFileViewerSelecting([location]) }
-                }
-                Text(productText("② 点上方“生成供 ChatGPT 上传的 ZIP”，确认保存位置（默认桌面）。保存成功后点“在 Finder 中显示”，找到 styx-native.zip；不需要解压。", "② Select Generate ZIP for ChatGPT above and confirm the location (Desktop by default). After saving, select Show in Finder to locate styx-native.zip; do not extract it."))
-                Text(productText("③ 打开 ChatGPT 插件页面，点“＋”→“上传插件压缩包”，选择刚保存的 ZIP。核对导入的资料和 Tunnel，然后完成安装。无需再走“添加自建 MCP 服务器”或重复填写同一份资料。", "③ Open ChatGPT Plugins, select + → Upload plugin ZIP, and choose that file. Review the imported details and Tunnel, then install. You do not also need Add custom MCP server or to enter the same details again."))
-                Text(productText("插件包导入目前为预览流程，尚需在你的 ChatGPT 账号中验证兼容性。", "Plugin ZIP import is a preview flow; compatibility still needs verification in your ChatGPT account.")).font(.caption).foregroundStyle(.secondary)
-                Text(productText("上传、登录和安装仍由你在 ChatGPT 完成；以后修改本地资料，需要重新导出并更新插件，才会在 ChatGPT 生效。", "Upload, sign-in and installation take place in ChatGPT. Later local edits need a new export and plugin update to appear in ChatGPT.")).font(.caption).foregroundStyle(.secondary)
             }
         }
     }
     private var officialPanel: some View {
-        ProductPanel(title: productText("2. 在 ChatGPT 完成连接", "2. Connect in ChatGPT")) {
-            Text(productText("下面两种方式任选一种，都用于在 ChatGPT 安装 Styx。先确认登录的是你要使用的账号和工作区。", "Choose one of these two ways to install Styx in ChatGPT. First confirm the account and workspace you intend to use."))
-            Picker(productText("连接方式", "Connection method"), selection: $usePluginPackage) {
-                Text(productText("手动添加（推荐）", "Add manually (recommended)")).tag(false)
-                Text(productText("导入 ZIP（预览）", "Import ZIP (preview)")).tag(true)
+        ProductPanel(title: usePluginPackage ? productText("2. 保存插件 ZIP", "2. Save the plugin ZIP") : productText("2. 在 ChatGPT 添加 Styx", "2. Add Styx in ChatGPT")) {
+            Picker(productText("添加方式", "Setup method"), selection: $usePluginPackage) {
+                Text(productText("导出 ZIP 后上传", "Export ZIP, then upload")).tag(true)
+                Text(productText("在 ChatGPT 手动填写", "Enter details in ChatGPT")).tag(false)
             }.pickerStyle(.segmented).onChange(of: usePluginPackage) { selected in if selected { model.preparePluginDraft() } }
-            if model.connectionTunnelID.isEmpty {
-                Text(productText("请先完成上方的安全连接，才能生成当前连接的插件 ZIP。入口会保留在这里。", "Complete the secure connection above before generating its plugin ZIP. This option stays visible here.")).font(.callout).foregroundStyle(.secondary)
-            }
             if usePluginPackage {
                 pluginPackageContent
             } else {
-                Text(productText("① 打开下方 ChatGPT 插件页面，点“＋”→“添加自建 MCP 服务器”（Add custom MCP server）。此处不用选择单独的“创建插件”或“上传插件压缩包”。", "① Open ChatGPT Plugins below. Select + → Add custom MCP server. You do not need the separate Create plugin or Upload plugin ZIP entry for this path."))
-                Text(productText("② 在 ChatGPT 表单中：名称填 Styx；描述可留空。Connection 选 Tunnel，粘贴下方 Tunnel ID；Authentication 选 No authentication。运行 Key 已保存在 Styx，不填进这个表单。", "② In the ChatGPT form: name Styx; description optional. Set Connection to Tunnel and paste the Tunnel ID below. Set Authentication to No authentication. The runtime key is already stored in Styx; do not enter it here."))
-                Text(productText("③ 核对风险提示后点“创建为插件”（Create as a plugin）。工具会从 Styx 自动读取，不用手写工具名称、特征或描述；若平台提供工具开关，请核对需要开放的能力。", "③ Review the risk notice and select Create as a plugin. Tools are discovered from Styx; do not write tool names, features or descriptions yourself. If tool switches are offered, review the capabilities you want available."))
-                Text(productText("④ 打开生成的 Styx 插件并安装。看到它已安装后，回到此 App 点“我已完成安装和连接”。此路径不用在 Styx 填插件名称、描述或图标，也不用导出 ZIP。", "④ Open the resulting Styx plugin and install it. Once installed, return here and select I finished installation and connection. This path needs no plugin name, description or icon entry in Styx and no ZIP export."))
-                DisclosureGroup(productText("已经有 Styx 插件？", "Already have a Styx plugin?")) {
-                    Text(productText("打开已有插件，核对它使用的是下面的 Tunnel，确认已安装。相同连接无需再创建；换到新的 Tunnel 时，在 ChatGPT 更新连接设置。", "Open the existing plugin, check it uses the Tunnel below and confirm it is installed. The same connection needs no second plugin. If you switch Tunnels, update the connection in ChatGPT.")).font(.callout).foregroundStyle(.secondary)
+                Text(productText("打开 ChatGPT 插件页 → ＋ → 添加自建 MCP 服务器。", "Open ChatGPT Plugins → + → Add custom MCP server."))
+                Text(productText("名称填 Styx；Connection 选 Tunnel，粘贴下方 ID；Authentication 选 No authentication。", "Name: Styx. Connection: Tunnel, then paste the ID below. Authentication: No authentication."))
+                if !model.connectionTunnelID.isEmpty {
+                    HStack { Text(model.connectionTunnelID).font(.caption).textSelection(.enabled); Button(productText("复制 Tunnel ID", "Copy Tunnel ID")) { model.copy(model.connectionTunnelID) } }
                 }
-            }
-            if !model.connectionTunnelID.isEmpty {
-                HStack { Text(model.connectionTunnelID).font(.system(.caption, design: .monospaced)).textSelection(.enabled); Button(productText("复制 Tunnel ID", "Copy Tunnel ID")) { model.copy(model.connectionTunnelID) } }
-            } else {
-                Button(productText("刷新连接信息", "Refresh connection details")) { Task { await model.refresh() } }
+                Text(productText("确认提示，点“创建为插件”，然后安装 Styx。", "Confirm the notice, select Create as a plugin, then install Styx."))
+                Button(productText("打开 ChatGPT 添加 Styx", "Open ChatGPT to add Styx")) { model.openOfficial("https://chatgpt.com/plugins") }
+                Button(productText("我已添加并安装 Styx", "I added and installed Styx")) { model.confirmPluginInstallation() }.disabled(model.plugin["contextChanged"].bool || model.connectionTunnelID.isEmpty)
             }
             if model.plugin["contextChanged"].bool {
-                Text(productText("电脑端连接已变化。请在 ChatGPT 核对当前 Tunnel，再更新本地确认记录并重新验证。", "The computer's connection has changed. Check the current Tunnel in ChatGPT, then update the local confirmation record and verify again.")).font(.callout).foregroundStyle(.secondary)
-                Button(productText("重新核对当前连接…", "Review current connection…")) { model.rebindPluginConnection() }
+                Text(productText("连接信息已变化，请先核对当前连接。", "Connection details changed. Review the current connection first."))
+                Button(productText("核对当前连接…", "Review current connection…")) { model.rebindPluginConnection() }
             }
-            Button(productText("打开 ChatGPT 插件", "Open ChatGPT plugins")) { model.openOfficial("https://chatgpt.com/plugins") }
-            Text(productText("任一方式安装完成后，都回到 Styx 继续下一步。无需从 ChatGPT 复制新的 Token 回来；验证时在新聊天中用 @ 选择已安装的 Styx。登录、MFA 和工作区审批由你亲自完成。", "After installing by either route, return to Styx for the next step. No new token needs to be copied back from ChatGPT. For verification, select the installed Styx with @ in a new chat. Complete sign-in, MFA and workspace approval yourself.")).font(.caption).foregroundStyle(.secondary)
-            Button(productText("我已完成安装和连接", "I finished installation and connection")) { model.confirmPluginInstallation() }
-                .disabled(model.plugin["contextChanged"].bool || usePluginPackage && (model.pluginDraftEdited || model.plugin["export"]["status"].string != "exported"))
-            Text(productText("这只记录你的确认；下一步会检查真实工具调用。", "This records your confirmation. The next step verifies real tool calls.")).font(.caption).foregroundStyle(.secondary)
         }
     }
+    private var pluginUploadPanel: some View {
+        ProductPanel(title: productText("3. 上传到 ChatGPT", "3. Upload to ChatGPT")) {
+            if model.exportedPluginURL != nil && !model.pluginDraftEdited {
+                Text(productText("在 ChatGPT 插件页点“＋”→“上传插件压缩包”，选择刚保存的 styx-native.zip，然后安装。", "In ChatGPT Plugins, select + → Upload plugin ZIP, choose the styx-native.zip you just saved, then install it."))
+                Button(productText("打开 ChatGPT 上传 ZIP", "Open ChatGPT to upload ZIP")) { model.openOfficial("https://chatgpt.com/plugins") }.buttonStyle(.borderedProminent)
+                Button(productText("我已上传并安装 Styx", "I uploaded and installed Styx")) { model.confirmPluginInstallation() }
+                    .disabled(model.plugin["contextChanged"].bool || model.plugin["export"]["status"].string != "exported")
+            } else {
+                Text(productText("先保存上方的插件 ZIP，然后到 ChatGPT 插件页 → ＋ → 上传插件压缩包。", "First save the plugin ZIP above. Then go to ChatGPT Plugins → + → Upload plugin ZIP.")).foregroundStyle(.secondary)
+            }
+        }
+    }
+
     private var acceptancePanel: some View {
-        ProductPanel(title: productText("3. 在真实聊天中验证", "3. Verify in your real chat")) {
-            Button(productText("生成验证请求", "Generate verification request")) { model.beginAcceptance() }
+        ProductPanel(title: productText("最后，试用 Styx", "Finally, try Styx")) {
+            Text(productText("在 ChatGPT 新聊天中用 @ 选择 Styx，发送下方的测试请求。", "In a new ChatGPT conversation, select Styx with @ and send the test request below."))
+            Button(productText("生成测试请求", "Generate test request")) { model.beginAcceptance() }
             if let prompt = model.acceptance["challenge"]["prompt"].string {
                 Text(prompt).font(.system(.callout, design: .monospaced)).textSelection(.enabled)
                 Button(productText("复制到目标聊天", "Copy for your target chat")) { model.copy(prompt) }

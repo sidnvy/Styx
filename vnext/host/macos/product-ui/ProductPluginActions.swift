@@ -28,7 +28,7 @@ extension ProductModel {
     // Entering the optional editor creates an unsaved draft. Only Save and
     // export persists it; direct connection never changes a saved profile.
     func preparePluginDraft(defaultIcon: ProductJSON? = nil) {
-        guard pluginMode == "create", pluginIcon == .null else { return }
+        guard pluginIcon == .null else { return }
         var icon = defaultIcon ?? .null
         if icon == .null, let path = Bundle.main.resourceURL?.appendingPathComponent("brand/styx-plugin-icon.png"),
            let bytes = try? Data(contentsOf: path), bytes.count <= 256 * 1024 {
@@ -62,16 +62,16 @@ extension ProductModel {
         exportedPluginURL = nil
         perform { [self] in
             let current = try await client.read("plugin")["plugin"]
-            guard current["required"] == .bool(true), current["contextChanged"] == .bool(false), current["selection"]["mode"].string == "create" else { throw ProductCoreError.rejected }
-            if pluginDraftEdited || !current["profileSaved"].bool {
+            guard current["required"] == .bool(true), current["contextChanged"] == .bool(false) else { throw ProductCoreError.rejected }
+            if pluginDraftEdited || !current["profileSaved"].bool || current["presentation"]["icon"] == .null {
                 var icon = pluginIcon
                 if icon == .null, let path = Bundle.main.resourceURL?.appendingPathComponent("brand/styx-plugin-icon.png"),
                    let bytes = try? Data(contentsOf: path), bytes.count <= 256 * 1024 {
                     icon = .object(["mimeType": .string("image/png"), "dataBase64": .string(bytes.base64EncodedString())])
                 }
                 let long = plugin["presentation"]["longDescription"].string ?? productText("通过 Styx 连接你的电脑，使用 CLI、Browser Automation 和 Computer Use。", "Connect your computers with Styx for CLI, Browser Automation and Computer Use.")
-                plugin = try await client.write("plugin/profile", ["authorize": .bool(true), "presentation": .object(["displayName": .string(pluginName), "shortDescription": .string(pluginDescription), "longDescription": .string(long), "icon": icon]), "selection": .object(["mode": .string("create"), "accountLabel": .string(accountLabel), "pluginUrl": .string(pluginURL)])])["plugin"]
-                pluginMode = "create"; pluginDraftEdited = false
+                plugin = try await client.write("plugin/profile", ["authorize": .bool(true), "presentation": .object(["displayName": .string(pluginName), "shortDescription": .string(pluginDescription), "longDescription": .string(long), "icon": icon]), "selection": current["selection"]])["plugin"]
+                pluginMode = current["selection"]["mode"].string ?? "create"; pluginDraftEdited = false
             }
             let archive = try await client.exportPlugin()
             var info = stat()
