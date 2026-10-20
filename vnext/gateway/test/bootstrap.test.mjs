@@ -131,12 +131,13 @@ test('MCP initialize and tools/list deliver Exec-first guidance with both comput
     await server.connect(st);
     await client.connect(ct); // Actual MCP initialize, not an instructions constant assertion.
     const instructions=client.getInstructions();
+    assert.match(instructions,/Use browser_\* for webpage and tab automation/);
     assert.match(instructions,/Default to exec_command for Git\/GitHub clone/);
     assert.match(instructions,/downloads \(curl\/wget\), file operations, builds, tests/);
     assert.match(instructions,/TTY sessions managed by exec_command\/write_stdin are Exec sessions/);
     assert.match(instructions,/Do not open Terminal.*Spotlight/);
     assert.match(instructions,/authentication, permission or sandbox errors.*get_execution_environment_status/);
-    assert.match(instructions,/For genuine GUI tasks, use Styx computer tools first/);
+    assert.match(instructions,/For native desktop tasks, use Styx computer tools/);
     assert.match(instructions,/explicitly requested GUI workflow may use computer tools/);
     assert.match(instructions,/Do not replace desktop tools with osascript/);
     assert.match(instructions,/separate Automation permission/);

@@ -502,3 +502,57 @@ test('owner-selected default persists across restart and revocation clears it wi
  new EnrollmentController({rootDir:f.enrollDir,adminTokenFile:path.join(f.tmp,'admin.token'),registry:after});
  assert.throws(()=>after.resolve(),/default_environment_required/);
 });
+
+
+test('Browser request is signed and only its approved capability crosses the Gateway',async t=>{
+ const f=await fixture(t),cfg={...f.config('browser',false),browser_requested:true,browser_config:{enabled:true,headless:true,profileRoot:path.join(f.tmp,'private-browser-profile'),executablePath:'/trusted/browser'}};
+ const identity=initLocalIdentity(cfg),invitation=(await f.admin('invitations',{})).body.invitation;
+ const {joinPayload}=await import('../../shared/enrollment-protocol.mjs');
+ const legacy={invitation,device_id:identity.device_id,label:cfg.label,platform:process.platform,cwd:cfg.cwd,shell:cfg.shell,computer_requested:false,public_key_pem:identity.public_key_pem};
+ assert.equal(joinPayload(legacy),JSON.stringify(legacy));
+ const body={...legacy,browser_requested:true};
+ body.signature=sign('sha256',Buffer.from(joinPayload(body)),{key:await fs.readFile(path.join(cfg.storage_dir,'identity.pem'),'utf8'),padding:constants.RSA_PKCS1_PSS_PADDING,saltLength:32}).toString('base64url');
+ await assert.rejects(enrollmentRequest(cfg,'join',{...body,browser_requested:false}),/invalid_identity_proof/);
+ const pending=await requestEnrollment(cfg,invitation);
+ assert.equal(f.controller.listPending()[0].browser_requested,true);
+ assert.equal((await claimEnrollment(cfg)).status,'pending');
+ const owner={gateway_url:cfg.gateway_url,gateway_ca_file:cfg.gateway_ca_file,admin_token_file:path.join(f.tmp,'admin.token')};
+ const {ownerCommand}=await import('../enroll-admin.mjs');
+ await ownerCommand(owner,'approve',[pending.request_id,pending.fingerprint,'browser']);
+ const claim=await claimEnrollment(cfg),host=JSON.parse(await fs.readFile(claim.local_host_config,'utf8'));
+ assert.deepEqual(host.browser,cfg.browser_config);assert.equal(host.computer,undefined);
+ assert.deepEqual(f.gateway.registry.resolve(identity.device_id).browser,{enabled:true,transport:'outbound'});
+ const publicDevices=JSON.stringify(f.controller.devices()),database=await fs.readFile(path.join(f.enrollDir,'state.json'),'utf8');
+ for(const text of [publicDevices,database])assert.doesNotMatch(text,/profileRoot|executablePath|private-browser-profile|trusted\/browser/);
+ assert.equal(f.controller.devices()[0].capabilities.browser,true);
+});
+test('unrequested or denied Browser never creates a Host browser configuration',async t=>{
+ const f=await fixture(t),cfg=f.config('unrequested-browser',false),pending=await requestEnrollment(cfg,(await f.admin('invitations',{})).body.invitation);
+ await assert.rejects(f.admin('approve',{request_id:pending.request_id,fingerprint:pending.fingerprint,enable_browser:true}),/browser_capability_not_requested/);
+ await f.admin('approve',{request_id:pending.request_id,fingerprint:pending.fingerprint,enable_browser:false});
+ const claim=await claimEnrollment(cfg);assert.equal(claim.capabilities.browser,false);assert.equal(JSON.parse(await fs.readFile(claim.local_host_config,'utf8')).browser,undefined);
+ const denied={...f.config('denied-browser',false),browser_requested:true,browser_config:{enabled:true,headless:true,profileRoot:path.join(f.tmp,'denied-profile')}};
+ const request=await requestEnrollment(denied,(await f.admin('invitations',{})).body.invitation);
+ await f.admin('approve',{request_id:request.request_id,fingerprint:request.fingerprint,enable_browser:false});
+ assert.equal(JSON.parse(await fs.readFile((await claimEnrollment(denied)).local_host_config,'utf8')).browser,undefined);
+});
+test('Browser-only v2 grant preserves desktop grant, identity and credentials; v1 preserves Browser',async t=>{
+ const f=await fixture(t),cfg=f.config('browser-capability',true),identity=initLocalIdentity(cfg);
+ const pending=await requestEnrollment(cfg,(await f.admin('invitations',{})).body.invitation);
+ await f.admin('approve',{request_id:pending.request_id,fingerprint:pending.fingerprint,enable_computer:true});await claimEnrollment(cfg);
+ const initial=f.gateway.registry.resolve(identity.device_id),credential=await fs.readFile(initial.exec.token_file,'utf8'),key=await fs.readFile(path.join(cfg.storage_dir,'identity.pem'),'utf8');
+ const request=change=>{const body={device_id:identity.device_id,fingerprint:identity.fingerprint,generation:f.gateway.registry.resolve(identity.device_id).generation,...change,public_key_pem:identity.public_key_pem};body.signature=sign('sha256',Buffer.from(capabilityPayload(body)),{key,padding:constants.RSA_PKCS1_PSS_PADDING,saltLength:32}).toString('base64url');return body};
+ const browser=request({enable_browser:true});assert.match(capabilityPayload(browser),/styx-device-capabilities-v2/);
+ await assert.rejects(f.admin('capabilities',{...browser,enable_computer:false}),/invalid_identity_proof/);
+ const enabled=(await f.admin('capabilities',browser)).body;assert.equal(enabled.capabilities.browser,true);assert.equal(enabled.capabilities.computer,true);
+ let target=f.gateway.registry.resolve(identity.device_id);assert.deepEqual(target.computer,initial.computer);assert.deepEqual(target.exec,initial.exec);
+ await assert.rejects(f.admin('capabilities',browser),/revision_mismatch/);
+ const old=request({enable_computer:false});assert.match(capabilityPayload(old),/styx-device-capabilities-v1/);
+ await f.admin('capabilities',old);target=f.gateway.registry.resolve(identity.device_id);assert.equal(target.browser.enabled,true);assert.equal(target.computer.enabled,false);
+ const before=target,save=f.controller.save;f.controller.save=()=>{throw Error('disk failed')};
+ await assert.rejects(f.admin('capabilities',request({enable_browser:false})),/enrollment_internal_error/);f.controller.save=save;
+ assert.deepEqual(f.gateway.registry.resolve(identity.device_id),before);
+ assert.equal(await fs.readFile(initial.exec.token_file,'utf8'),credential);assert.equal(await fs.readFile(path.join(cfg.storage_dir,'identity.pem'),'utf8'),key);
+ const restored=new EnrollmentController({rootDir:f.enrollDir,adminTokenFile:path.join(f.tmp,'admin.token'),registry:new TargetRegistry({version:1,targets:[]})});
+ assert.equal(restored.devices()[0].capabilities.browser,true);assert.equal(restored.devices()[0].capabilities.computer,false);
+});

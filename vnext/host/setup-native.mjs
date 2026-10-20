@@ -14,6 +14,8 @@ export function prepareNativeSetup(config){
   const {bundle,publisherKeyFile,publisherSha256,baseDir,gatewayUrl,label,computer=false,gatewayCaFile}=config;
   for(const p of [bundle,publisherKeyFile,baseDir])assert(absolute(p),'absolute_setup_paths_required');
   assert(typeof computer==='boolean','invalid_computer_selection');
+  const browser=config.browser;
+  if(browser!==undefined)assert(browser&&typeof browser==='object'&&!Array.isArray(browser)&&!Object.keys(browser).some(k=>!['enabled','headless','executablePath'].includes(k))&&typeof browser.enabled==='boolean'&&(browser.headless===undefined||typeof browser.headless==='boolean')&&(browser.executablePath===undefined||absolute(browser.executablePath)),'invalid_browser_selection');
   assert(typeof label==='string'&&label.length>0&&label.length<=72,'invalid_host_label');
   const gateway=new URL(gatewayUrl);
   assert(gateway.protocol==='https:'&&!gateway.username&&!gateway.password&&!gateway.search&&!gateway.hash&&gateway.pathname==='/','gateway_https_origin_required');
@@ -45,14 +47,15 @@ export function prepareNativeSetup(config){
   ensurePrivateDirectory(baseDir,{exclusive:true});
   write(path.join(baseDir,'setup-state.json'),{schema:1,status:'preparing',version:verified.version});
   const installRoot=path.join(baseDir,'install'),device=path.join(baseDir,'device');
-  for(const p of [device,path.join(baseDir,'work'),path.join(baseDir,'codex-home'),path.join(baseDir,'logs')])ensurePrivateDirectory(p);
+  for(const p of [device,path.join(baseDir,'work'),path.join(baseDir,'codex-home'),path.join(baseDir,'logs'),...(browser?.enabled?[path.join(baseDir,'browser')]:[])])ensurePrivateDirectory(p);
   const trust=path.join(baseDir,'publisher.pem');write(trust,pub);
   const caFile=ca?path.join(baseDir,'gateway-ca.pem'):undefined;if(ca)write(caFile,ca.toString());
   stageSignedRelease({sourceDir:bundle,installRoot,publicKeyPem:pub});
   activateRelease(installRoot,verified.version,pub);refreshVerifiedBootstrap(installRoot,pub,verified.version);
   const release=path.join(installRoot,'releases',verified.version);
   const enrollment={gateway_url:gateway.origin,...(caFile?{gateway_ca_file:caFile}:{}),storage_dir:device,label,
-    cwd:path.join(baseDir,'work'),shell,codex_home:path.join(baseDir,'codex-home'),exec_binary:path.join(release,'bin','codex'+exe),computer_requested:computer,
+    cwd:path.join(baseDir,'work'),shell,codex_home:path.join(baseDir,'codex-home'),exec_binary:path.join(release,'bin','codex'+exe),computer_requested:computer,browser_requested:browser?.enabled===true,
+    ...(browser?.enabled?{browser_config:{enabled:true,headless:browser.headless??true,profileRoot:path.join(baseDir,'browser'),...(browser.executablePath?{executablePath:browser.executablePath}:{})}}:{}),
     ...(computer?{computer_binary:process.platform==='darwin'?path.join(previewApp?.path??'/Applications/Styx.app','Contents/MacOS/cua-driver'):path.join(release,'bin','cua-driver'+exe),
       ...(process.platform==='darwin'?{computer_socket:`/tmp/styx-cua-${process.getuid()}/cua.sock`}:{}),
       ...(process.platform==='linux'&&config.wayland===true?{computer_env:{CUA_DRIVER_RS_ENABLE_WAYLAND:'1'}}:{})}:{})};

@@ -1,0 +1,12 @@
+{
+  "name": "@styx/browser-provider",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {"node": ">=22"},
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.1",
+    "@playwright/mcp": "0.0.83",
+    "playwright": "1.64.0-alpha-1790635538000"
+  }
+}

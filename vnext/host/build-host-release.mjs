@@ -61,7 +61,8 @@ function version(binary,prefix) {
 }
 export function buildHostRelease({destination,version,privateKeyFile,
   codexBinary,cuaBinary,nodeBinary,sourceRoot=ROOT,platform=process.platform,
-  arch=process.arch}={}){
+  arch=process.arch,browserRuntime=false}={}){
+  assert(typeof browserRuntime==='boolean','invalid_browser_runtime_selection');
   assert(['linux','darwin','win32'].includes(platform) &&
     platform===process.platform && arch===process.arch,'native_build_platform_required');
   assert(ID.test(version??''),'invalid_release_version');
@@ -95,6 +96,14 @@ export function buildHostRelease({destination,version,privateKeyFile,
   try{
     for(const name of STATIC)
       copy(path.join(sourceRoot,name),path.join(destination,name));
+    if(browserRuntime){
+      const browserRoot=path.join(sourceRoot,'packages/styx-browser-provider'),browserLock=JSON.parse(fs.readFileSync(path.join(browserRoot,'package-lock.json'),'utf8'));
+      for(const [locator,locked]of Object.entries(browserLock.packages??{})){if(!locator)continue;const folder=path.join(browserRoot,...locator.split('/'));if(!fs.existsSync(folder)){if(locked.optional)continue;throw Error('browser_locked_dependency_missing');}const pkg=JSON.parse(fs.readFileSync(path.join(folder,'package.json'),'utf8'));assert(pkg.version===locked.version&&typeof locked.integrity==='string','browser_dependency_lock_mismatch');}
+      for(const name of ['host/browser.mjs',...['host.mjs','config.mjs','contract.mjs','prepare.mjs','package.json','package-lock.json','playwright-contract-0.0.83.json'].map(name=>'packages/styx-browser-provider/'+name)])copy(path.join(sourceRoot,name),path.join(destination,name));
+      const dependencyRoot=path.join(browserRoot,'node_modules');
+      const members=(root,prefix='')=>fs.readdirSync(root,{withFileTypes:true}).flatMap(entry=>{if(entry.name==='.bin'||entry.name==='.package-lock.json')return [];const rel=prefix?prefix+'/'+entry.name:entry.name;if(entry.isDirectory())return members(path.join(root,entry.name),rel);if(!entry.isFile())throw Error('unsupported_browser_dependency');return /\.(map|ts)$/.test(entry.name)?[]:[rel];});
+      for(const name of members(dependencyRoot))copy(path.join(dependencyRoot,name),path.join(destination,'packages/styx-browser-provider/node_modules',name));
+    }
     const dependencies=path.join(sourceRoot,'node_modules/ws');
     for(const name of walk(dependencies))
       copy(path.join(dependencies,name),path.join(destination,'node_modules/ws',name));
@@ -112,7 +121,7 @@ export function buildHostRelease({destination,version,privateKeyFile,
       return {path:name,sha256:sha256(abs),size:fs.statSync(abs).size,executable};
     });
     const manifest={schema:1,version,platform,arch,
-      upstream:{codex:codexVer,cua:cuaVer,...(nodeProvenance?{node:nodeProvenance.version}:{}),
+      upstream:{codex:codexVer,cua:cuaVer,...(browserRuntime?{browserMcp:'0.0.83',playwright:'1.64.0-alpha-1790635538000'}:{}),...(nodeProvenance?{node:nodeProvenance.version}:{}),
         ws:JSON.parse(fs.readFileSync(path.join(dependencies,'package.json'),'utf8')).version},
       files
     };
@@ -128,9 +137,11 @@ export function buildHostRelease({destination,version,privateKeyFile,
 }
 const versionBinary=version;
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){
-  const [destination,version,privateKeyFile,codexBinary,cuaBinary,nodeBinary]=process.argv.slice(2);
+  const args=process.argv.slice(2),browserRuntime=args.at(-1)==='--browser-runtime';if(browserRuntime)args.pop();
+  const [destination,version,privateKeyFile,codexBinary,cuaBinary,nodeBinary]=args;
   try{
-    const result=buildHostRelease({destination,version,privateKeyFile,codexBinary,cuaBinary,nodeBinary});
+    assert(args.length===5||args.length===6,'usage_host_release_requires_paths_and_optional_browser_runtime');
+    const result=buildHostRelease({destination,version,privateKeyFile,codexBinary,cuaBinary,nodeBinary,browserRuntime});
     process.stdout.write(JSON.stringify(result)+'\n');
   }catch(e){
     process.stderr.write('Styx Host bundle: '+e.message+'\n');process.exitCode=2;

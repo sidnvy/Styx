@@ -31,11 +31,11 @@ function claim(d){
 }
 function projection(entry){
  const connected=entry.execConnection==='connected';
- return {schema:1,status:entry.stopping?'stopping':entry.failed?'needs_attention':connected?'connected':entry.host==='service'?'using_service':'started',observation:'current_process',host:entry.host,gateway:entry.gateway,execConnection:entry.execConnection,desktopConnection:entry.desktopConnection,computerRequested:entry.computerRequested,toolHealth:'not_verified',accountAcceptance:'NOT RUN',appExit:'owned_foreground_connections_stop',serviceMutation:'NOT RUN'};
+ return {schema:1,status:entry.stopping?'stopping':entry.failed?'needs_attention':connected?'connected':entry.host==='service'?'using_service':'started',observation:'current_process',host:entry.host,gateway:entry.gateway,execConnection:entry.execConnection,desktopConnection:entry.desktopConnection,browserConnection:entry.browserConnection,browserRequested:entry.browserRequested,computerRequested:entry.computerRequested,toolHealth:'not_verified',accountAcceptance:'NOT RUN',appExit:'owned_foreground_connections_stop',serviceMutation:'NOT RUN'};
 }
 export function readDeploymentForeground(d){
- absolute(d);const entry=owners.get(d);if(entry){try{if(!entry.scopeValid())return {...projection(entry),status:'needs_attention',execConnection:'not_observed',desktopConnection:'not_observed',reason:'foreground_scope_changed'}}catch{return {...projection(entry),status:'needs_attention',execConnection:'not_observed',desktopConnection:'not_observed',reason:'foreground_scope_changed'}}return projection(entry)}
- return {schema:1,status:fs.existsSync(lockFile(d))?'needs_attention':'not_running',observation:'current_process',host:'not_owned',gateway:'not_owned',execConnection:'not_observed',desktopConnection:'not_observed',toolHealth:'not_verified',accountAcceptance:'NOT RUN',...(fs.existsSync(lockFile(d))?{reason:'foreground_owned_or_interrupted_do_not_take_over'}:{})};
+ absolute(d);const entry=owners.get(d);if(entry){try{if(!entry.scopeValid())return {...projection(entry),status:'needs_attention',execConnection:'not_observed',desktopConnection:'not_observed',browserConnection:'not_observed',reason:'foreground_scope_changed'}}catch{return {...projection(entry),status:'needs_attention',execConnection:'not_observed',desktopConnection:'not_observed',browserConnection:'not_observed',reason:'foreground_scope_changed'}}return projection(entry)}
+ return {schema:1,status:fs.existsSync(lockFile(d))?'needs_attention':'not_running',observation:'current_process',host:'not_owned',gateway:'not_owned',execConnection:'not_observed',desktopConnection:'not_observed',browserConnection:'not_observed',toolHealth:'not_verified',accountAcceptance:'NOT RUN',...(fs.existsSync(lockFile(d))?{reason:'foreground_owned_or_interrupted_do_not_take_over'}:{})};
 }
 async function guiAvailable(api,d){
  if(process.platform==='darwin')return (await api.readDeploymentPermissions?.(d))?.source==='current_native_app_preflight';
@@ -88,7 +88,7 @@ async function start(d,operations,abort){
  if(selected.unchanged&&!selected.unchanged()||sha(fs.readFileSync(path.join(d,'deployment.json')))!==configurationHash)fail('foreground_scope_changed');
  if(abort.signal.aborted)fail('foreground_start_cancelled');
  const release=claim(d);
- const entry={abort,release,host:selected.host?hostStatus.state==='running'?'service':'foreground':'disabled',gateway:config.mode==='join-existing'?'external':gatewayServiceRunning?'service':'foreground',execConnection:selected.host?'connecting':'not_required',desktopConnection:'not_requested',computerRequested:selected.host?.computer?.enabled===true,startedGateway:false,stopping:false,failed:false,tasks:[],api,scopeValid:()=>sha(fs.readFileSync(path.join(d,'deployment.json')))===configurationHash&&(!selected.unchanged||selected.unchanged())};
+ const entry={abort,release,host:selected.host?hostStatus.state==='running'?'service':'foreground':'disabled',gateway:config.mode==='join-existing'?'external':gatewayServiceRunning?'service':'foreground',execConnection:selected.host?'connecting':'not_required',desktopConnection:'not_requested',browserConnection:selected.host?.browser?.enabled?'connecting':'not_requested',browserRequested:selected.host?.browser?.enabled===true,computerRequested:selected.host?.computer?.enabled===true,startedGateway:false,stopping:false,failed:false,tasks:[],api,scopeValid:()=>sha(fs.readFileSync(path.join(d,'deployment.json')))===configurationHash&&(!selected.unchanged||selected.unchanged())};
  owners.set(d,entry);
  try{
   if(config.mode==='create-local'&&!gatewayServiceRunning){await api.startDeploymentGateway(d);entry.startedGateway=state.gatewayRuntime?.status!=='running';}
@@ -107,6 +107,7 @@ async function start(d,operations,abort){
    };
    const signal=abort.signal,retryMinMs=500,retryMaxMs=1500;
    track(operations.runHost??runHostConnector,selected.host,{signal,retryMinMs,retryMaxMs,onReady:()=>{entry.execConnection='connected'},onStatus:()=>{entry.execConnection='disconnected'}});
+   if(entry.browserRequested){const runner=operations.runBrowser??(await import('../host/browser.mjs')).runBrowserConnector;track(runner,selected.host,{signal,onReady:()=>{entry.browserConnection='connected'},onStatus:state=>{entry.browserConnection=state}});}
    if(entry.computerRequested){
     entry.resumeComputer=async()=>{
      if(entry.computerStarting)return entry.computerStarting;
@@ -119,7 +120,7 @@ async function start(d,operations,abort){
     };
     await entry.resumeComputer();
    }
-  }else if(entry.computerRequested)entry.desktopConnection='not_observed';
+  }else{if(entry.computerRequested)entry.desktopConnection='not_observed';if(entry.browserRequested)entry.browserConnection='not_observed';}
   return projection(entry);
  }catch(error){
   await stopEntry(d,entry);if(entry.startedGateway)await api.stopDeploymentGateway(d);throw error;

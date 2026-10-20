@@ -166,8 +166,9 @@ if (process.argv[1] && path.resolve(process.argv[1])===fileURLToPath(import.meta
     runHostConnector(config,{signal:abort.signal,
       onStatus:state=>status(state),
       onReady:info=>status('connected',{lane:'exec'})}),
-    runComputerConnectors(config,{signal:abort.signal,
+    ...(config.browser?.enabled?[import('./browser.mjs').then(({runBrowserConnector})=>runBrowserConnector(config,{signal:abort.signal,onStatus:(state,meta)=>status(state,meta),onReady:()=>status('connected',{lane:'browser'})}))]:[]),
+    ...(process.platform==='linux'&&!process.env.DISPLAY&&!process.env.WAYLAND_DISPLAY&&!config.computer?.socket&&!config.computer?.env?.DISPLAY&&!config.computer?.env?.WAYLAND_DISPLAY?[]:[runComputerConnectors(config,{signal:abort.signal,
       onStatus:(state,meta)=>status(state,meta),
-      onReady:()=>status('connected',{lane:'computer'})})
+      onReady:()=>status('connected',{lane:'computer'})})])
   ]);
 }

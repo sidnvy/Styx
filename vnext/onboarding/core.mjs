@@ -4,7 +4,9 @@ export {localGatewayAddresses,validateDeployment} from './deployment-config.mjs'
 import {readGatewayDeployment} from './gateway-deployment-reader.mjs';
 import {deploymentRoles} from './roles.mjs';
 import path from 'node:path';
-import {randomBytes,createHash} from 'node:crypto';
+import {randomBytes,createHash,createPublicKey} from 'node:crypto';
+import {pathToFileURL} from 'node:url';
+import {activeRelease} from '../host/installer.mjs';
 import {execFileSync} from 'node:child_process';
 import {ensurePrivateDirectory,requirePrivateDirectory,requirePrivateFile,openPrivateFile,writePrivateFile} from '../host/private-storage.mjs';
 import {prepareNativeSetup} from '../host/setup-native.mjs';
@@ -40,7 +42,61 @@ export function createDeployment(configFile,{stateDir}={}){
  const state={schema:1,mode:config.mode,configSha256:hash(filename(stateDir,'deployment.json')),steps:ids.map(id=>({id,status:'pending'}))};write(filename(stateDir,'state.json'),state);return publicState(stateDir,state,config);
 }
 export function readDeployment(stateDir){const {config,state}=load(stateDir);return publicState(stateDir,state,config);}
-export function planDeployment(stateDir){const {config,state}=load(stateDir);return {schema:1,mode:config.mode,roles:deploymentRoles(config),steps:state.steps.map((s,i)=>({id:s.id,status:s.status,requires:state.steps.slice(0,i).map(x=>x.id),authorizationRequired:true})),ownerPairingScope:config.host&&config.mode==='create-local'?{gatewayUrl:config.gateway.url,label:config.host.label,enableComputer:config.host.computer}:null,service:{status:'not_checked',lastObservation:publicState(stateDir,state,config).hostServiceMaintenance.lastObservation,configFile:config.host?path.join(config.host.baseDir,'service.json'):null,platform:process.platform},accountAcceptance:readDeploymentAcceptance(stateDir).complete?'user_confirmed_with_mcp_evidence':'NOT RUN'};}
+// Browser installation is optional, Host-local preparation. Only an already
+// approved local configuration and a verified active release can select code.
+function browserPreparationScope(d,{ownsAdvance=false}={}){
+ const {config,state}=load(d);
+ if(!config.host?.browser?.enabled)return {configured:false};
+ if(!state.steps.some(s=>s.id==='host.prepare'&&s.status==='succeeded')||!state.steps.some(s=>['host.pair','host.claim'].includes(s.id)&&s.status==='succeeded'))return {configured:true,pending:true};
+ if(state.steps.some(s=>['running','uncertain'].includes(s.status))||hasUncertainServiceMutation(state)||(state.gatewayMaintenance??[]).some(s=>['running','uncertain'].includes(s.status)))fail('browser_preparation_management_operation_in_progress');
+ for(const name of [...(ownsAdvance?[]:['advance.lock']),'capabilities.lock','background.lock'])if(fs.existsSync(path.join(d,name)))fail('browser_preparation_management_operation_in_progress');
+ const base=config.host.baseDir,install=path.join(base,'install'),publisher=path.join(base,'publisher.pem');requirePrivateDirectory(base);requirePrivateDirectory(install);requirePrivateFile(publisher);
+ for(const name of ['.health-update-lock','.health-operation-lock','.health-recovery-guard'])if(fs.existsSync(path.join(install,name)))fail('browser_preparation_management_operation_in_progress');
+ const pem=fs.readFileSync(publisher,'utf8'),key=createPublicKey(pem);
+ if(key.asymmetricKeyType!=='ed25519'||createHash('sha256').update(key.export({type:'spki',format:'der'})).digest('hex')!==config.host.publisherSha256)fail('browser_publisher_binding_changed');
+ const active=activeRelease(install,pem);if(!active)fail('browser_enabled_host_bundle_required');
+ const moduleFile=path.join(active.release_root,'packages/styx-browser-provider/prepare.mjs');
+ if(!fs.existsSync(moduleFile))fail('browser_enabled_host_bundle_required');
+ const hostFile=path.join(base,'device/host.json'),identityFile=path.join(base,'device/identity.json'),privateFile=path.join(base,'device/identity.pem'),host=read(hostFile),identity=read(identityFile);requirePrivateFile(privateFile);
+ if(identity.device_id!==host.host_id||createHash('sha256').update(createPublicKey(fs.readFileSync(privateFile)).export({type:'spki',format:'der'})).digest('hex')!==identity.fingerprint||host.token_file!==path.join(base,'device/host.token'))fail('browser_identity_binding_changed');
+ requirePrivateFile(host.token_file);
+ const profileRoot=path.join(base,'browser');
+ if(host.browser?.enabled!==true)fail('approved_browser_host_required');
+ if(host.browser.profileRoot!==profileRoot)fail('browser_profile_binding_changed');
+ requirePrivateDirectory(profileRoot);
+ const preserved=[path.join(d,'deployment.json'),path.join(d,'state.json'),hostFile,identityFile,privateFile,host.token_file,publisher,path.join(install,'active.json')].map(file=>[file,hash(file)]);
+ return {configured:true,moduleFile,profileRoot,unchanged:()=>preserved.every(([file,digest])=>hash(file)===digest)};
+}
+function browserPreparationProjection(result){
+ if(!['prepared','not_prepared','preparation_blocked'].includes(result?.status))fail('browser_preparation_result_invalid');
+ return {schema:1,configured:true,status:result.status,observation:result.status==='prepared'?'verified_private_runtime_receipt':result.status==='preparation_blocked'?'private_preparation_ownership':'private_runtime_receipt_absent',...(result.status==='preparation_blocked'?{reason:/^[a-z][a-z0-9_]{1,100}$/.test(result.reason??'')?result.reason:'browser_preparation_reconciliation_required'}:{}),...(typeof result.playwright==='string'?{playwrightVersion:result.playwright}:{}),readiness:'not_verified',accountAcceptance:'NOT RUN'};
+}
+async function browserPreparationModule(scope){
+ const api=await import(pathToFileURL(scope.moduleFile).href+'?sha256='+hash(scope.moduleFile));
+ if(typeof api.readManagedBrowser!=='function'||typeof api.prepareManagedBrowser!=='function')fail('browser_enabled_host_bundle_required');
+ return api;
+}
+export async function readDeploymentBrowser(d){
+ const scope=browserPreparationScope(d);
+ if(!scope.configured)return {schema:1,configured:false,status:'not_configured',readiness:'not_verified',accountAcceptance:'NOT RUN'};
+ if(scope.pending)return {schema:1,configured:true,status:'awaiting_host_approval',readiness:'not_verified',accountAcceptance:'NOT RUN'};
+ const api=await browserPreparationModule(scope);if(!scope.unchanged())fail('browser_preparation_scope_changed');
+ const result=api.readManagedBrowser(scope.profileRoot);if(!scope.unchanged())fail('browser_preparation_scope_changed');
+ return browserPreparationProjection(result);
+}
+export async function prepareDeploymentBrowser(d,options={}){
+ exact(options,['authorize','signal','recover']);if(options.authorize!==true||options.recover!==undefined&&typeof options.recover!=='boolean'||options.signal!==undefined&&!(options.signal instanceof AbortSignal))fail('explicit_browser_preparation_authorization_required');
+ const first=browserPreparationScope(d);if(!first.configured)fail('browser_not_configured');if(first.pending)fail('approved_browser_host_required');
+ const release=lock(d);
+ try{
+  const scope=browserPreparationScope(d,{ownsAdvance:true}),api=await browserPreparationModule(scope);
+  if(!scope.unchanged())fail('browser_preparation_scope_changed');
+  const result=await api.prepareManagedBrowser({profileRoot:scope.profileRoot,authorize:true,...(options.recover!==undefined?{recover:options.recover}:{}),...(options.signal?{signal:options.signal}:{})});
+  if(!scope.unchanged())fail('browser_preparation_scope_changed');
+  return browserPreparationProjection(result);
+ }finally{release();}
+}
+export function planDeployment(stateDir){const {config,state}=load(stateDir);return {schema:1,mode:config.mode,roles:deploymentRoles(config),steps:state.steps.map((s,i)=>({id:s.id,status:s.status,requires:state.steps.slice(0,i).map(x=>x.id),authorizationRequired:true})),ownerPairingScope:config.host&&config.mode==='create-local'?{gatewayUrl:config.gateway.url,label:config.host.label,enableComputer:config.host.computer,enableBrowser:config.host.browser?.enabled===true}:null,service:{status:'not_checked',lastObservation:publicState(stateDir,state,config).hostServiceMaintenance.lastObservation,configFile:config.host?path.join(config.host.baseDir,'service.json'):null,platform:process.platform},accountAcceptance:readDeploymentAcceptance(stateDir).complete?'user_confirmed_with_mcp_evidence':'NOT RUN'};}
 function lock(d){const file=filename(d,'advance.lock');let fd;try{fd=openPrivateFile(file,0o600);}catch{fail('onboarding_busy_or_interrupted_lock');}return ()=>{fs.closeSync(fd);fs.unlinkSync(file)};}
 function serviceScope(c,action){
  const serviceConfigFile=path.join(c.host.baseDir,'service.json'),raw=read(serviceConfigFile),windows=process.platform==='win32';
@@ -140,27 +196,27 @@ export async function createDeploymentPairingLink(d,options={}){
 }
 function pendingPublic(items){
  if(!Array.isArray(items))fail('invalid_pending_response');
- return items.map(x=>{if(!/^[a-f0-9]{32}$/.test(x.request_id??'')||!/^styx-[a-f0-9]{24}$/.test(x.device_id??'')||!/^([a-f0-9]{64})$/.test(x.fingerprint??''))fail('invalid_pending_response');return {request_id:x.request_id,device_id:x.device_id,label:x.label,platform:x.platform,cwd:x.cwd,shell:x.shell,fingerprint:x.fingerprint,computer_requested:x.computer_requested,expires_at:x.expires_at};});
+ return items.map(x=>{if(!/^[a-f0-9]{32}$/.test(x.request_id??'')||!/^styx-[a-f0-9]{24}$/.test(x.device_id??'')||!/^([a-f0-9]{64})$/.test(x.fingerprint??''))fail('invalid_pending_response');return {request_id:x.request_id,device_id:x.device_id,label:x.label,platform:x.platform,cwd:x.cwd,shell:x.shell,fingerprint:x.fingerprint,computer_requested:x.computer_requested,browser_requested:x.browser_requested===true,expires_at:x.expires_at};});
 }
 export async function listDeploymentPending(d,options={}){
  exact(options,['authorize']);if(options.authorize!==true)fail('explicit_owner_pending_authorization_required');
  try{return pendingPublic(await pendingOwned(ownedGateway(d)));}catch{throw Error('owner_pending_read_failed');}
 }
 export async function approveDeploymentPending(d,options={}){
- exact(options,['authorize','requestId','fingerprint','enableComputer']);
- if(options.authorize!==true||!/^([a-f0-9]{32})$/.test(options.requestId??'')||!/^([a-f0-9]{64})$/.test(options.fingerprint??'')||typeof options.enableComputer!=='boolean')fail('explicit_scoped_pending_approval_required');
+ exact(options,['authorize','requestId','fingerprint','enableComputer','enableBrowser']);
+ if(options.authorize!==true||!/^([a-f0-9]{32})$/.test(options.requestId??'')||!/^([a-f0-9]{64})$/.test(options.fingerprint??'')||typeof options.enableComputer!=='boolean'||options.enableBrowser!==undefined&&typeof options.enableBrowser!=='boolean')fail('explicit_scoped_pending_approval_required');
  const g=ownedGateway(d),release=lock(d);
  try{
   const request=pendingPublic(await pendingOwned(g)).find(x=>x.request_id===options.requestId);
-  if(!request||request.fingerprint!==options.fingerprint||options.enableComputer&&!request.computer_requested)fail('pending_identity_or_capability_mismatch');
-  const result=g.controller?g.controller.approve({request_id:options.requestId,fingerprint:options.fingerprint,enable_computer:options.enableComputer}):await ownerCommand(g.owner,'approve',[options.requestId,options.fingerprint,...(options.enableComputer?['computer']:[])]);
+  if(!request||request.fingerprint!==options.fingerprint||options.enableComputer&&!request.computer_requested||options.enableBrowser===true&&!request.browser_requested||request.browser_requested&&typeof options.enableBrowser!=='boolean')fail('pending_identity_or_capability_mismatch');
+  const result=g.controller?g.controller.approve({request_id:options.requestId,fingerprint:options.fingerprint,enable_computer:options.enableComputer,enable_browser:options.enableBrowser===true}):await ownerCommand(g.owner,'approve',[options.requestId,options.fingerprint,...(options.enableComputer?['computer']:[]),...(options.enableBrowser?['browser']:[])]);
   return {status:result.status,device_id:result.device_id,fingerprint:result.fingerprint,approved_capabilities:result.approved_capabilities};
  }catch(e){if(e.message==='pending_identity_or_capability_mismatch')throw e;throw Error('owner_approval_failed_inspect_private_gateway');}finally{release();}
 }
 export async function readDeploymentDevices(d){
  const g=ownedGateway(d);
  const rows=g.controller?g.controller.devices():await ownerCommand(g.owner,'devices');
- return rows.filter(r=>r.status==='approved').map(r=>({device_id:r.device_id,label:r.label,platform:r.platform,is_default:r.is_default===true,computer:r.capabilities?.computer===true}));
+ return rows.filter(r=>r.status==='approved').map(r=>({device_id:r.device_id,label:r.label,platform:r.platform,is_default:r.is_default===true,computer:r.capabilities?.computer===true,browser:r.capabilities?.browser===true}));
 }
 export async function setDeploymentDefault(d,{authorize=false,deviceId}={}){
  if(authorize!==true||!/^styx-[a-f0-9]{24}$/.test(deviceId??''))fail('explicit_default_device_selection_required');
@@ -186,12 +242,11 @@ async function execute(d,c,id,ownerApproval){
  if(id==='gateway.start')return startDeploymentGateway(d);
  if(id==='gateway.verify')return verifyDeploymentGateway(d);
  if(id==='host.prepare'){
-  if(c.host.computer&&process.platform==='linux'&&!process.env.DISPLAY&&!process.env.WAYLAND_DISPLAY)return {status:'blocked',reason:'interactive_desktop_session_required',desktop:'unavailable',permissions:'NOT OBSERVED'};
   const r=prepareNativeSetup({...c.host,gatewayUrl:c.gateway.url,...(c.mode==='create-local'?{gatewayCaFile:p.cert}:c.gateway.caFile?{gatewayCaFile:c.gateway.caFile}:{})});
   return {status:r.status,version:r.version,receipt:evidenceFile(path.join(base,'setup-receipt.json')),serviceConfiguration:evidenceFile(path.join(base,'service.json')),enrollmentConfiguration:evidenceFile(path.join(base,'enrollment.json')),node:r.node,release_root:r.release_root};
  }
  if(id==='host.pair'){
-  const cfg=enrollment();return pairDevice({controller:live.get(d).controller,transport:createLocalPairingTransport(cfg),authorization:{...cfg,platform:process.platform,approve:true,enable_computer:ownerApproval.enableComputer},ttlSeconds:600});
+  const cfg=enrollment();return pairDevice({controller:live.get(d).controller,transport:createLocalPairingTransport(cfg),authorization:{...cfg,platform:process.platform,approve:true,enable_computer:ownerApproval.enableComputer,enable_browser:ownerApproval.enableBrowser===true},ttlSeconds:600});
  }
  if(id==='host.invite'){
   const r=await ownerCommand(read(p.owner),'invite',['600']);const file=filename(d,'invitation');writePrivateFile(file,r.invitation+'\n');requirePrivateFile(file);return {invitationFile:file,oneUse:true};
@@ -224,8 +279,8 @@ export async function advanceDeployment(d,{authorize=[],ownerApproval}={}){
   const {config,state}=load(d);
   if(authorize.some(id=>!state.steps.some(s=>s.id===id)))fail('unknown_authorized_step');
   if(authorize.includes('host.pair')){
-   exact(ownerApproval,['approve','gatewayUrl','label','enableComputer']);
-   if(ownerApproval.approve!==true||ownerApproval.gatewayUrl!==config.gateway.url||ownerApproval.label!==config.host.label||typeof ownerApproval.enableComputer!=='boolean'||ownerApproval.enableComputer&&!config.host.computer)fail('explicit_scoped_owner_approval_required');
+   exact(ownerApproval,['approve','gatewayUrl','label','enableComputer','enableBrowser']);
+   if(ownerApproval.approve!==true||ownerApproval.gatewayUrl!==config.gateway.url||ownerApproval.label!==config.host.label||typeof ownerApproval.enableComputer!=='boolean'||ownerApproval.enableComputer&&!config.host.computer||ownerApproval.enableBrowser!==undefined&&typeof ownerApproval.enableBrowser!=='boolean'||config.host.browser?.enabled===true&&typeof ownerApproval.enableBrowser!=='boolean'||ownerApproval.enableBrowser===true&&config.host.browser?.enabled!==true)fail('explicit_scoped_owner_approval_required');
    if(!live.has(d))fail('local_gateway_must_be_running');
   }
   verifyEvidence(state);

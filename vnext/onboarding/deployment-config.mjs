@@ -35,9 +35,13 @@ export function validateDeployment(config,{checkNetwork=true}={}){
   if(config.invitationFile!==undefined||config.pairingMode!==undefined)fail('host_pairing_requires_host');
   return config;
  }
- exact(config.host,['bundle','publisherKeyFile','publisherSha256','baseDir','label','computer','macTeamID','wayland','shell','macPreviewApp']);
+ exact(config.host,['bundle','publisherKeyFile','publisherSha256','baseDir','label','computer','browser','macTeamID','wayland','shell','macPreviewApp']);
  for(const k of ['bundle','publisherKeyFile','baseDir'])if(!abs(config.host[k]))fail('absolute_host_paths_required');
  if(!/^[a-f0-9]{64}$/.test(config.host.publisherSha256??'')||typeof config.host.label!=='string'||!config.host.label||config.host.label.length>72||typeof config.host.computer!=='boolean')fail('invalid_host_setup');
+ if(config.host.browser!==undefined){
+  exact(config.host.browser,['enabled','headless','executablePath']);
+  if(typeof config.host.browser.enabled!=='boolean'||config.host.browser.headless!==undefined&&typeof config.host.browser.headless!=='boolean'||config.host.browser.executablePath!==undefined&&!abs(config.host.browser.executablePath))fail('invalid_browser_selection');
+ }
  if(config.host.wayland!==undefined&&typeof config.host.wayland!=='boolean')fail('invalid_wayland_selection');
  if(config.host.shell!==undefined&&!abs(config.host.shell))fail('absolute_native_shell_required');
  if(config.host.macTeamID!==undefined&&!/^[A-Z0-9]{10}$/.test(config.host.macTeamID))fail('invalid_mac_team_identity');

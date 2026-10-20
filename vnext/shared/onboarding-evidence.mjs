@@ -7,6 +7,29 @@ const fail=code=>{throw Error(code)};
 export const evidenceHash=value=>createHash('sha256').update(value).digest('hex');
 export function privateEvidenceRead(file,maximumBytes=1024*1024){if(requirePrivateFile(file).size>maximumBytes)fail('acceptance_evidence_size_limit');return JSON.parse(fs.readFileSync(file,'utf8'));}
 export function acceptanceFile(stateDir){return path.join(stateDir,'account-acceptance.json');}
+// A network-independent, credential-free challenge. Reconstruct this exact URL
+// when projecting it; no caller HTML, scripts, paths or remote URLs are accepted.
+export function browserAcceptanceChallenge(nonce){
+ if(!/^[a-f0-9]{32}$/.test(nonce??''))fail('invalid_browser_acceptance_nonce');
+ const marker='STYX_BROWSER_'+nonce;
+ const html='<!doctype html><html><head><title>Styx Browser acceptance</title></head><body><h1>'+marker+'</h1></body></html>';
+ return {marker,url:'data:text/html;charset=utf-8,'+encodeURIComponent(html)};
+}
+export function browserAcceptanceVerified(record){return !record.browserRequired||record.browser?.navigated===true&&record.browser?.observed===true&&/^[a-f0-9]{64}$/.test(record.browser?.ownerHash??'');}
+function browserResponseSections(result){
+ const blocks=(result?.content??[]).filter(item=>item.type==='text'&&typeof item.text==='string');
+ if(blocks.reduce((n,item)=>n+item.text.length,0)>131072)return new Map();
+ const sections=new Map();
+ for(const part of blocks.map(item=>item.text).join('\n').split(/^### /m).slice(1)){const i=part.indexOf('\n');if(i>0)sections.set(part.slice(0,i),part.slice(i+1).trim());}
+ return sections;
+}
+function browserPageMatches(sections,record){return sections.get('Page')?.split('\n').includes('- Page URL: '+record.browserUrl)===true;}
+function browserSnapshotMatches(sections,record){
+ const snapshot=/^```yaml\n([\s\S]*)\n```$/.exec(sections.get('Snapshot')??'')?.[1];
+ // The URL and generated code both contain the marker. Only the actual inline
+ // accessibility snapshot heading proves it was read from page content.
+ return snapshot?.split('\n').some(line=>line.startsWith('- heading "'+record.browserMarker+'" ')&&line.includes('[level=1]')&&/\[ref=(?:styx-[a-f0-9]{32}|(?:f\d+)?e\d+)\]/.test(line))===true;
+}
 export function acceptanceBinding(stateDir){
  requirePrivateDirectory(stateDir);
  const deploymentFile=path.join(stateDir,'deployment.json'),config=privateEvidenceRead(deploymentFile);
@@ -18,7 +41,7 @@ export function acceptanceBinding(stateDir){
  if(!record||record.target?.id!==host.host_id||record.target.allowed!==true)fail('acceptance_device_not_approved');
  const certificate=path.join(stateDir,'gateway/certificate.pem');requirePrivateFile(certificate);
  const model=path.join(stateDir,'gateway/model.token');requirePrivateFile(model);
- return {config,host,target:record.target,binding:evidenceHash(JSON.stringify({configuration:evidenceHash(fs.readFileSync(deploymentFile)),certificate:evidenceHash(fs.readFileSync(certificate)),modelCredential:evidenceHash(fs.readFileSync(model)),device:identity.device_id,fingerprint:identity.fingerprint,generation:record.target.generation,desktop:record.target.computer?.enabled===true}))};
+ return {config,host,target:record.target,binding:evidenceHash(JSON.stringify({configuration:evidenceHash(fs.readFileSync(deploymentFile)),certificate:evidenceHash(fs.readFileSync(certificate)),modelCredential:evidenceHash(fs.readFileSync(model)),device:identity.device_id,fingerprint:identity.fingerprint,generation:record.target.generation,desktop:record.target.computer?.enabled===true,...(record.target.browser?.enabled===true?{browser:true}:{})}))};
 }
 export function writeAcceptanceEvidence(stateDir,record){
  const file=acceptanceFile(stateDir),temp=file+'.'+randomBytes(8).toString('hex')+'.tmp';
@@ -57,6 +80,25 @@ export function createAcceptanceObserver(stateDir){
   try{withAcceptanceLock(stateDir,()=>{
    const {ctx,record}=currentAcceptanceEvidence(stateDir),{name,args,result,owner,target}=event;
    if(!target||target.id!==ctx.target.id||target.generation!==ctx.target.generation||typeof owner!=='string'||!owner)return;
+   if(record.browserRequired&&['browser_navigate','browser_snapshot'].includes(name)){
+    const who=evidenceHash(owner),sameDevice=args.environment_id===undefined||args.environment_id===ctx.target.id;
+    if(!sameDevice||typeof event.operationId!=='string'||!event.operationId)return;
+    if(event.phase==='before'){
+     if(name==='browser_navigate'&&args.url===record.browserUrl&&Object.keys(args).every(key=>['url','environment_id'].includes(key))){
+      record.browser={ownerHash:who,navigationAttempt:{id:event.operationId,ownerHash:who},navigated:false,observed:false};
+     }else if(name==='browser_snapshot'&&Object.keys(args).every(key=>key==='environment_id')&&record.browser?.navigated===true&&record.browser.ownerHash===who){
+      record.browser.snapshotAttempt={id:event.operationId,navigationId:record.browser.navigationAttempt.id,ownerHash:who};
+     }else return;
+    }else{
+     if(result?.isError)return;
+     const sections=browserResponseSections(result),browser=record.browser;
+     if(!browser||browser.ownerHash!==who||!browserPageMatches(sections,record))return;
+     if(name==='browser_navigate'&&args.url===record.browserUrl&&browser.navigationAttempt?.id===event.operationId){browser.navigated=true;browser.navigatedAt=Date.now();}
+     else if(name==='browser_snapshot'&&Object.keys(args).every(key=>key==='environment_id')&&browser.navigated===true&&browser.snapshotAttempt?.id===event.operationId&&browser.snapshotAttempt.ownerHash===who&&browser.snapshotAttempt.navigationId===browser.navigationAttempt.id&&browserSnapshotMatches(sections,record)){browser.observed=true;browser.observedAt=Date.now();browser.source='authenticated_mcp_browser_result';}
+     else return;
+    }
+    writeAcceptanceEvidence(stateDir,record);return;
+   }
    if(event.phase==='before'){
     if(!record.desktopRequired||!['set_value','type_text'].includes(name)||!(args.value===record.desktopValue||args.text===record.desktopValue)||typeof event.operationId!=='string')return;
     const scope=desktopActionScope(record,args,owner);if(!scope)return;

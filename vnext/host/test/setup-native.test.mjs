@@ -85,3 +85,21 @@ test('native preparation refuses existing broad state and keeps its bytes and pe
  assert.equal(fs.statSync(sentinel).mode&0o777,0o644);assert.equal(fs.readFileSync(sentinel,'utf8'),'existing identity must survive\n');
  assert.deepEqual(fs.readdirSync(f.config.baseDir),['identity.pem']);
 });
+
+
+test('Browser setup derives a private profile without desktop grants or browser startup',t=>{
+ const f=fixture(t);
+ const r=prepareNativeSetup({...f.config,browser:{enabled:true,executablePath:process.execPath}});
+ const cfg=JSON.parse(fs.readFileSync(r.enrollment_config));
+ assert.equal(cfg.computer_requested,false);assert.equal(cfg.browser_requested,true);
+ assert.deepEqual(cfg.browser_config,{enabled:true,headless:true,profileRoot:path.join(f.config.baseDir,'browser'),executablePath:process.execPath});
+ requirePrivateDirectory(cfg.browser_config.profileRoot);assert.deepEqual(fs.readdirSync(cfg.browser_config.profileRoot),[]);
+ assert.equal(fs.existsSync(path.join(cfg.storage_dir,'host.json')),false);assert.equal(r.native_permissions,'NOT RUN');
+});
+test('Browser setup rejects arbitrary profile and launch fields before creating state',t=>{
+ const f=fixture(t);
+ for(const browser of [{enabled:'yes'},{enabled:true,profileRoot:'/foreign'},{enabled:true,args:['--injected']},{enabled:true,headless:'yes'},{enabled:true,executablePath:'relative'}])assert.throws(()=>prepareNativeSetup({...f.config,browser}),/invalid_browser_selection/);
+ assert.equal(fs.existsSync(f.config.baseDir),false);
+ const r=prepareNativeSetup({...f.config,browser:{enabled:false}}),cfg=JSON.parse(fs.readFileSync(r.enrollment_config));
+ assert.equal(cfg.browser_requested,false);assert.equal(cfg.browser_config,undefined);assert.equal(fs.existsSync(path.join(f.config.baseDir,'browser')),false);
+});

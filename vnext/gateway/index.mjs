@@ -3,10 +3,11 @@ import {ExecAdapter} from '../packages/styx-exec-adapter/adapter.mjs';
 import {TargetRegistry} from './registry.mjs';
 import {RuntimePool} from './runtime.mjs';
 import {createGatewayMcp} from './mcp.mjs';
+import {BrowserProvider} from './browser.mjs';
 import {CuaProvider} from './cua.mjs';
 import {OutboundHostRelay} from './outbound.mjs';
 
-export function createStyxGateway({catalog, connect, computer, gui = null, cas = null, casOnly = false, onToolResult = null}) {
+export function createStyxGateway({catalog, connect, computer, browser, gui = null, cas = null, casOnly = false, onToolResult = null}) {
   const registry = catalog instanceof TargetRegistry ? catalog : new TargetRegistry(catalog);
   const relay=new OutboundHostRelay({registry});
   const pool = new RuntimePool(registry, {connect,relay});
@@ -24,17 +25,18 @@ export function createStyxGateway({catalog, connect, computer, gui = null, cas =
   const cua = computer === undefined
     ? (gui ? null : new CuaProvider({registry,relay}))
     : computer;
+  const browserProvider=browser===undefined?new BrowserProvider({registry,relay}):browser;
   return {
-    registry, pool, exec, computer: cua, gui, relay,
+    registry, pool, exec, computer: cua, browser:browserProvider, gui, relay,
     serverForOwner(owner) {
-      return createGatewayMcp({exec, computer:cua, gui, registry, owner, relay, cas, casOnly, onToolResult});
+      return createGatewayMcp({exec, computer:cua, browser:browserProvider, gui, registry, owner, relay, cas, casOnly, onToolResult});
     },
     hasOwnerWork(owner) {
-      return [...exec.sessions.values()].some(record => record.owner === owner && record.state !== 'lost' && !record.runtime?.lost);
+      return browserProvider?.hasOwnerWork?.(owner)||[...exec.sessions.values()].some(record => record.owner === owner && record.state !== 'lost' && !record.runtime?.lost);
     },
-    async closeOwner(owner) { await cua?.closeOwner?.(owner); },
+    async closeOwner(owner) { await cua?.closeOwner?.(owner);await browserProvider?.closeOwner?.(owner); },
     async close() {
-      await cua?.close?.(); await gui?.close?.();
+      await cua?.close?.();await browserProvider?.close?.(); await gui?.close?.();
       await exec.cleanup(); await pool.close();await relay.close();
     }
   };

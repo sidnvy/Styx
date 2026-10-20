@@ -27,7 +27,7 @@ async function fixture(t){
 }
 test('Gateway-only prepares signed Node, serves actual MCP TLS and never creates Host/Exec/Cua state',async t=>{
  const f=await fixture(t);const created=await main(['create',f.configFile,f.stateDir]);
- assert.deepEqual(created.roles,{gateway:'local',host:'disabled',exec:'disabled',computer:'disabled',deviceIngress:'loopback_only',readiness:'not_inferred'});
+ assert.deepEqual(created.roles,{gateway:'local',host:'disabled',exec:'disabled',computer:'disabled',browser:'disabled',deviceIngress:'loopback_only',readiness:'not_inferred'});
  assert.deepEqual(publicDeployment(created).roles,created.roles);
  assert.equal(planDeployment(f.stateDir).ownerPairingScope,null);assert.equal(planDeployment(f.stateDir).service.configFile,null);
  assert.deepEqual(created.steps.map(s=>s.id),['gateway.runtime.prepare','gateway.prepare','gateway.start','gateway.verify']);
@@ -59,7 +59,7 @@ test('role combinations share config projection; joining cannot specify a local 
  const ui=structuredClone(f.config);delete ui.gateway.openssl;
  assert.deepEqual(validateUiConfig(ui,{trustedOpenSSL:'/usr/bin/openssl'}),f.config);
 });
-test('headless computer request blocks Host preparation while Gateway stays independent', {skip:process.platform!=='linux'},async t=>{
+test('headless computer intent keeps Gateway independent and still requires a complete signed Host bundle', {skip:process.platform!=='linux'},async t=>{
  const f=await fixture(t),saved={DISPLAY:process.env.DISPLAY,WAYLAND_DISPLAY:process.env.WAYLAND_DISPLAY};
  delete process.env.DISPLAY;delete process.env.WAYLAND_DISPLAY;
  t.after(()=>{for(const [k,v]of Object.entries(saved))if(v===undefined)delete process.env[k];else process.env[k]=v});
@@ -67,7 +67,7 @@ test('headless computer request blocks Host preparation while Gateway stays inde
  fs.writeFileSync(f.configFile,JSON.stringify(f.config),{mode:0o600});createDeployment(f.configFile,{stateDir:f.stateDir});
  const result=await advanceDeployment(f.stateDir,{authorize:['gateway.runtime.prepare','gateway.prepare','gateway.start','gateway.verify','host.prepare']});
  assert.equal(result.gatewayRuntime.status,'running');assert.equal(result.roles.computer,'requested');
- const host=result.steps.find(s=>s.id==='host.prepare');assert.equal(host.status,'blocked');assert.equal(host.evidence.desktop,'unavailable');
+ const host=result.steps.find(s=>s.id==='host.prepare');assert.equal(host.status,'uncertain');assert.equal(host.error,'step_failed_inspect_local_evidence_no_automatic_replay');
  assert.equal(fs.existsSync(f.config.host.baseDir),false);
 });
 test('read-only service observation preserves journal; uncertain mutation cannot be replayed',async t=>{

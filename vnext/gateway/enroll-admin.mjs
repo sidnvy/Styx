@@ -29,11 +29,11 @@ export async function ownerCommand(config,cmd,args=[]) {
     case 'devices':route='devices';break;
     case 'approve':
       if(!args[0]||!args[1])throw Error('approve_requires_request_id_and_fingerprint');
-      if(args.length>3|| (args[2]!==undefined&&args[2]!=='computer'))
+      if(args.length>4||args.slice(2).some(x=>!['computer','browser'].includes(x))||new Set(args.slice(2)).size!==args.slice(2).length)
         throw Error('invalid_approval_capability');
       route='approve';
       data={request_id:args[0],fingerprint:args[1],
-        enable_computer:args[2]==='computer'};
+        enable_computer:args.slice(2).includes('computer'),enable_browser:args.slice(2).includes('browser')};
       break;
     case 'set-default':
       if(args.length!==1||typeof args[0]!=='string')throw Error('default_device_id_required');

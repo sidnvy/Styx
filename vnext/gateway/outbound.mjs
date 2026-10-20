@@ -7,7 +7,7 @@ import {RpcClient} from '../packages/styx-exec-adapter/rpc.mjs';
 
 const MAX_FRAME = 2 * 1024 * 1024;
 const MAX_COMPUTER_FRAME = 8 * 1024 * 1024;
-const HOST_PATH = /^\/styx\/hosts\/([A-Za-z0-9][A-Za-z0-9._-]{0,127})\/(exec|computer)$/;
+const HOST_PATH = /^\/styx\/hosts\/([A-Za-z0-9][A-Za-z0-9._-]{0,127})\/(exec|computer|browser)$/;
 const TOKEN = /^Bearer ([A-Za-z0-9_-]{32,})$/;
 function readToken(filename) {
   if (typeof filename !== 'string') throw Error('outbound_token_not_configured');
@@ -36,7 +36,7 @@ export class OutboundHostRelay {
       throw TypeError('Invalid Computer acquisition wait');
     this.registry=registry;this.heartbeatMs=heartbeatMs;
     this.computerAcquireWaitMs=computerAcquireWaitMs;
-    this.sessions=new Map();this.computerPeers=new Map();
+    this.sessions=new Map();this.computerPeers=new Map();this.browserPeers=new Map();
     this.stopped=false;this.attached=false;
     this.wss=new WebSocketServer({noServer:true,maxPayload:MAX_COMPUTER_FRAME,perMessageDeflate:false});
   }
@@ -55,7 +55,8 @@ export class OutboundHostRelay {
       catch {reject(socket,403);return}
       if (this.stopped || target.kind!=='host' || target.exec?.transport!=='outbound' ||
           (lane==='computer' && (target.computer?.enabled!==true ||
-            target.computer?.transport!=='outbound'))) {
+            target.computer?.transport!=='outbound')) ||
+          (lane==='browser'&&(target.browser?.enabled!==true||target.browser?.transport!=='outbound'))) {
         reject(socket,403);return;
       }
       if (req.headers.origin!==undefined) {reject(socket,401);return}
@@ -82,14 +83,16 @@ export class OutboundHostRelay {
         if (!timingSafeEqual(digest,supplied)) {reject(socket,401);return}
       }
       const peers=this.computerPeers.get(hostId)??new Set();
+      if(lane==='browser'&&this.browserPeers.has(hostId)){reject(socket,409);return;}
       if (lane==='exec' && this.sessions.has(hostId)) {reject(socket,409);return}
       if (lane==='computer' && peers.size >= (target.computer.max_connections??4)) {
         reject(socket,409);return;
       }
       // Reserve identity synchronously before handling the upgrade.
       const entry={id:hostId,lane,generation:target.generation,ws:null,
-        closed:false,claimed:false,channel:null,computerTransport:null,alive:true};
+        closed:false,claimed:false,channel:null,computerTransport:null,browserTransport:null,alive:true};
       if (lane==='exec') this.sessions.set(hostId,entry);
+      else if(lane==='browser')this.browserPeers.set(hostId,entry);
       else {peers.add(entry);this.computerPeers.set(hostId,peers)};
       try {
         this.wss.handleUpgrade(req,socket,head,ws=>{
@@ -106,12 +109,13 @@ export class OutboundHostRelay {
               if (!entry.channel) {ws.terminate();return}
               entry.channel.emit('message',data);return;
             }
-            if (!entry.computerTransport) {ws.terminate();return}
+            const mcpTransport=lane==='browser'?entry.browserTransport:entry.computerTransport;
+            if (!mcpTransport) {ws.terminate();return}
             try {
               const message=JSON.parse(String(data));
               if (!message || Array.isArray(message) || typeof message!=='object')
                 throw Error('invalid_computer_jsonrpc');
-              entry.computerTransport.onmessage?.(message);
+              mcpTransport.onmessage?.(message);
             } catch {ws.terminate()}
           });
         });
@@ -120,7 +124,7 @@ export class OutboundHostRelay {
       }
     });
     this.timer=setInterval(()=>{
-      const all=[...this.sessions.values(),
+      const all=[...this.sessions.values(),...this.browserPeers.values(),
         ...[...this.computerPeers.values()].flatMap(peers=>[...peers])];
       for(const entry of all) {
         if (!entry.ws) continue;
@@ -130,6 +134,7 @@ export class OutboundHostRelay {
         if (target.generation!==entry.generation || target.exec?.transport!=='outbound' ||
             (entry.lane==='computer' && (target.computer?.enabled!==true ||
              target.computer?.transport!=='outbound')) ||
+            (entry.lane==='browser'&&(target.browser?.enabled!==true||target.browser?.transport!=='outbound')) ||
             !entry.alive) {entry.ws.terminate();continue}
         entry.alive=false;
         try {entry.ws.ping()} catch {entry.ws.terminate()}
@@ -151,6 +156,7 @@ export class OutboundHostRelay {
         entry.computerTransport.onclose?.();
       }
     }
+    if(entry.lane==='browser'){if(this.browserPeers.get(entry.id)===entry)this.browserPeers.delete(entry.id);if(entry.browserTransport){entry.browserTransport.closed=true;entry.browserTransport.onclose?.();}}
     entry.channel?.emit('closed');
   }
   async acquire(target) {
@@ -227,6 +233,17 @@ export class OutboundHostRelay {
     entry.computerTransport=transport;
     return transport;
   }
+  async acquireBrowser(target){
+    if(this.stopped||target.browser?.transport!=='outbound')throw Error('browser_host_offline');
+    this.registry.resolve(target.id);
+    const entry=this.browserPeers.get(target.id);
+    if(!entry||entry.closed||entry.generation!==target.generation||entry.ws?.readyState!==WebSocket.OPEN||entry.claimed)throw Error('browser_host_offline');
+    entry.claimed=true;const relay=this;
+    const transport={closed:false,onmessage:null,onclose:null,onerror:null,async start(){if(entry.closed)throw Error('browser_host_offline');},
+      async send(message){if(entry.closed||entry.ws?.readyState!==WebSocket.OPEN)throw Error('browser_host_offline');const data=JSON.stringify(message);if(Buffer.byteLength(data)>MAX_COMPUTER_FRAME)throw Error('browser_frame_limit');await new Promise((resolve,reject)=>entry.ws.send(data,{binary:false},error=>error?reject(error):resolve()));},
+      async close(){if(transport.closed)return;entry.ws?.terminate();relay.drop(entry);}};
+    entry.browserTransport=transport;return transport;
+  }
   // Passive snapshot only: never claims a slot, probes a native process, or
   // trusts a connection from a previous catalog generation.
   status(target) {
@@ -235,6 +252,7 @@ export class OutboundHostRelay {
       entry?.generation === current.generation && !entry.closed &&
       entry.ws?.readyState === WebSocket.OPEN;
     return {
+      browser: target.browser?.transport==='outbound'?(valid(this.browserPeers.get(target.id))?'connected':'offline'):'unknown',
       exec: target.exec.transport === 'outbound'
         ? (valid(this.sessions.get(target.id)) ? 'connected' : 'offline') : 'unknown',
       computer: target.computer?.transport === 'outbound'
@@ -249,6 +267,7 @@ export class OutboundHostRelay {
   // Explicit owner-approved device revocation terminates both reverse
   // lanes. Connection closure makes old Codex/Cua identities unusable.
   disconnectHost(id) {
+    const browser=this.browserPeers.get(id);if(browser){browser.ws?.terminate();this.drop(browser);}
     const exec = this.sessions.get(id);
     if (exec) {exec.ws?.terminate();this.drop(exec)}
     for (const peer of [...(this.computerPeers.get(id)??[])]) {
@@ -261,10 +280,10 @@ export class OutboundHostRelay {
   }
   async close() {
     this.stopped=true;clearInterval(this.timer);
-    for(const entry of [...this.sessions.values(),
+    for(const entry of [...this.sessions.values(),...this.browserPeers.values(),
       ...[...this.computerPeers.values()].flatMap(peers=>[...peers])]) {
       entry.ws?.terminate();this.drop(entry);
     }
-    this.sessions.clear();this.computerPeers.clear();this.wss.close();
+    this.sessions.clear();this.computerPeers.clear();this.browserPeers.clear();this.wss.close();
   }
 }

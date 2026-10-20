@@ -9,6 +9,7 @@ import {projectOnboardingJourney,readOnboardingJourney,readOnboardingDiagnostics
 import {ensurePrivateDirectory,writePrivateFile,requirePrivateFile} from '../../host/private-storage.mjs';
 import {createDeployment,readDeployment} from '../core.mjs';
 import {main} from '../cli.mjs';
+import {browserAcceptanceChallenge} from '../../shared/onboarding-evidence.mjs';
 const ready=()=>({mode:'create-local',roles:{gateway:'local',host:'local',exec:'enabled',computer:'requested'},gatewayRuntime:{status:'running'},steps:['gateway.prepare','gateway.start','gateway.verify','host.prepare','host.pair','host.doctor'].map(id=>({id,status:'succeeded',evidence:{secret:'SECRET_TOKEN',config:'/private/SECRET_PATH'}}))});
 const row=(j,id)=>j.steps.find(s=>s.id===id);
 const accepted=()=>({status:'user_confirmed_with_mcp_evidence',requestProof:{status:'verified'},targetChatConfirmation:{status:'user_confirmed'},desktop:{status:'verified'},complete:true});
@@ -110,4 +111,23 @@ test('actual CLI handoff writes credentials only to a fresh private file and std
  const output=path.join(root,'handoff.json'),result=spawnSync(process.execPath,[new URL('../cli.mjs',import.meta.url).pathname,'handoff',stateDir,output,'--authorize'],{encoding:'utf8'});
  assert.equal(result.status,0,result.stderr);assert.doesNotMatch(result.stdout+result.stderr,/SECRET_MODEL_CREDENTIAL/);assert.equal(JSON.parse(result.stdout).privateHandoffFile,output);assert.equal(JSON.parse(fs.readFileSync(output)).authentication.modelCredential,secret);assert.equal(requirePrivateFile(output).mode&0o077,0);
  await assert.rejects(main(['handoff',stateDir,output,'--authorize']),/fresh_private_output_required/);assert.equal(JSON.parse(fs.readFileSync(output)).authentication.modelCredential,secret);
+});
+
+
+test('Browser process readiness cannot complete its independent acceptance or the combined chat gate',()=>{
+ const deployment=ready();deployment.roles.browser='requested';deployment.roles.computer='disabled';
+ const proof={...accepted(),desktop:{status:'not_required'},browser:{status:'pending',required:true,source:'not_observed'}};
+ let j=projectOnboardingJourney({deployment,acceptance:proof,foreground:{status:'connected',execConnection:'connected',browserConnection:'connected'},background:{observation:'current',browser:{readiness:'ready_observed'}}});
+ assert.equal(j.acceptance.browser.status,'pending');assert.equal(j.acceptance.complete,false);assert.equal(row(j,'chat_request_proof').status,'pending');assert.equal(row(j,'target_chat_confirmation').nextAction,'run_acceptance_in_target_chat');assert.equal(j.readiness.browser.status,'not_verified');assert.equal(j.permissions[0].status,'not_required');
+ proof.browser={status:'verified',required:true,source:'authenticated_mcp_browser_result'};j=projectOnboardingJourney({deployment,acceptance:proof});
+ assert.equal(j.acceptance.browser.status,'verified');assert.equal(j.acceptance.requestProof.source,'authenticated_mcp_exec_result');assert.equal(j.acceptance.complete,true);assert.equal(j.account.providerIdentity,'not_verified');assert.equal(j.acceptance.targetChatConfirmation.source,'user_attested');assert.equal(row(j,'chat_request_proof').status,'completed');assert.equal(j.readiness.browser.reason,'historical_browser_proof_not_current_readiness');
+ const browserOnly=projectOnboardingJourney({deployment,acceptance:{...proof,requestProof:{status:'pending'},complete:false}});assert.equal(row(browserOnly,'chat_connection').status,'completed');assert.equal(row(browserOnly,'chat_request_proof').status,'pending');assert.equal(browserOnly.account.status,'not_verified');
+ const missing=projectOnboardingJourney({deployment,acceptance:accepted()});assert.equal(missing.acceptance.browser.status,'pending');assert.equal(missing.acceptance.complete,false);
+});
+test('Browser challenge projection accepts only the exact credential-free generated data URL',()=>{
+ const browser=browserAcceptanceChallenge('c'.repeat(32)),value={...accepted(),browser:{status:'verified',required:true,source:'authenticated_mcp_browser_result',ownerHash:'PRIVATE_OWNER_HASH'},challenge:{id:'a'.repeat(32),expiresAt:Date.now()+5000,prompt:'fixed prompt',command:'fixed command',environmentId:'device_123',browser}};
+ assert.deepEqual(publicAcceptance(value,{includeChallenge:true}).challenge.browser,browser);
+ const diagnostics=publicAcceptance(value);assert.equal(diagnostics.challenge,undefined);assert.equal(diagnostics.browser.source,'authenticated_mcp_browser_result');assert.doesNotMatch(JSON.stringify(diagnostics),/STYX_BROWSER_|PRIVATE_OWNER_HASH/);
+ for(const url of ['https://example.invalid/private','data:text/html,<script>secret</script>'])assert.equal(publicAcceptance({...value,challenge:{...value.challenge,browser:{...browser,url}}},{includeChallenge:true}).challenge.browser,undefined);
+ assert.equal(publicAcceptance({...value,browser:{status:'verified',required:true,source:'process_ready'}}).browser.status,'pending');
 });

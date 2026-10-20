@@ -72,6 +72,7 @@ export class TargetRegistry {
           }
         }
       }
+      if(target.browser!==undefined){requireValue(plain(target.browser)&&typeof target.browser.enabled==='boolean'&&Object.keys(target.browser).every(k=>['enabled','transport'].includes(k)),'Invalid browser capability');if(target.browser.enabled)requireValue(target.kind==='host'&&transport.transport==='outbound'&&target.browser.transport==='outbound','Invalid Browser transport');}
       this.targets.set(target.id, Object.freeze({...target}));
     }
     requireValue(config.default_environment_id === undefined ||
@@ -119,7 +120,7 @@ export class TargetRegistry {
   list() {
     return [...this.targets.values()].filter(t => t.allowed).map(t => ({
       environment_id: t.id, kind: t.kind, platform: t.platform,
-      capabilities: ['exec', ...(t.computer?.enabled ? ['computer'] : [])]
+      capabilities: ['exec', ...(t.computer?.enabled ? ['computer'] : []),...(t.browser?.enabled?['browser']:[])]
     }));
   }
 }

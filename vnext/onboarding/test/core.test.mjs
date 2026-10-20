@@ -10,9 +10,9 @@ import {createHash,createPublicKey,generateKeyPairSync,sign,randomUUID} from 'no
 import {ensurePrivateDirectory} from '../../host/private-storage.mjs';
 import {main} from '../cli.mjs';
 import {ownerCommand} from '../../gateway/enroll-admin.mjs';
-import {createDeployment,readDeployment,planDeployment,advanceDeployment,startDeploymentGateway,stopDeploymentGateway,validateDeployment,controlDeploymentHostService,createDeploymentPairingLink,listDeploymentPending,approveDeploymentPending,localGatewayAddresses,readDeploymentDevices,setLocalDeploymentDefault,setDeploymentDefault} from '../core.mjs';
+import {createDeployment,readDeployment,planDeployment,advanceDeployment,startDeploymentGateway,stopDeploymentGateway,validateDeployment,controlDeploymentHostService,createDeploymentPairingLink,listDeploymentPending,approveDeploymentPending,localGatewayAddresses,readDeploymentDevices,setLocalDeploymentDefault,setDeploymentDefault,readDeploymentBrowser,prepareDeploymentBrowser} from '../core.mjs';
 const sha=b=>createHash('sha256').update(b).digest('hex');
-async function fixture(t){
+async function fixture(t,{browserPreparationModule}={}){
  const root=path.join(os.tmpdir(),'styx-onboarding-'+randomUUID());ensurePrivateDirectory(root);t.after(async()=>{const d=path.join(root,'deployment');if(fs.existsSync(d))await stopDeploymentGateway(d);fs.rmSync(root,{recursive:true,force:true});});
  const server=net.createServer();await new Promise(r=>server.listen(0,'127.0.0.1',r));const port=server.address().port;await new Promise(r=>server.close(r));
  const bundle=path.join(root,'bundle');fs.mkdirSync(bundle);fs.mkdirSync(path.join(bundle,'host'));fs.mkdirSync(path.join(bundle,'bin'));
@@ -21,6 +21,7 @@ async function fixture(t){
  for(const f of ['private-storage.mjs','installer.mjs','launch.mjs'])contents['host/'+f]=fs.readFileSync(new URL('../../host/'+f,import.meta.url));
  for(const f of ['enroll.mjs','doctor.mjs','setup-native.mjs','linux-service.mjs','macos-launchagent.mjs','macos-native-launcher.mjs','windows-task.ps1'])contents['host/'+f]=Buffer.from('// signed test payload; never executed');
  contents['bin/node'+exe]=fs.readFileSync(process.execPath);for(const f of ['codex','cua-driver'])contents['bin/'+f+exe]=Buffer.from('test bytes never executed');
+ if(browserPreparationModule){fs.mkdirSync(path.join(bundle,'packages/styx-browser-provider'),{recursive:true});contents['packages/styx-browser-provider/prepare.mjs']=Buffer.from(browserPreparationModule);}
  const manifest={schema:1,version:'0.1.0-test',platform:process.platform,arch:process.arch,files:Object.entries(contents).map(([name,b])=>{fs.writeFileSync(path.join(bundle,name),b);return {path:name,sha256:sha(b),size:b.length,executable:name.startsWith('bin/')};})};
  const raw=JSON.stringify(manifest);fs.writeFileSync(path.join(bundle,'manifest.json'),raw);fs.writeFileSync(path.join(bundle,'manifest.sig'),sign(null,Buffer.from(raw),privateKey).toString('base64url'));
  const publisherKeyFile=path.join(root,'publisher.pem');fs.writeFileSync(publisherKeyFile,publicKey);
@@ -235,4 +236,83 @@ test('Host evidence damage cannot block independent Gateway startup or owner ope
  assert.equal((await startDeploymentGateway(f.stateDir)).status,'running');
  assert.deepEqual(await listDeploymentPending(f.stateDir,{authorize:true}),[]);
  await assert.rejects(controlDeploymentHostService(f.stateDir,{action:'status',authorize:true}),/completed_step_evidence_changed/);
+});
+
+
+test('CLI Browser intent reaches explicit owner approval and local Host config without desktop setup',{skip:process.platform!=='linux',timeout:20000},async t=>{
+ const f=await fixture(t);delete f.config.pairingMode;f.config.host.browser={enabled:true};fs.writeFileSync(f.configFile,JSON.stringify(f.config));
+ const created=await main(['create',f.configFile,f.stateDir]);assert.equal(created.roles.browser,'requested');assert.equal(created.roles.computer,'disabled');assert.equal(created.roles.readiness,'not_inferred');
+ const plan=await main(['plan',f.stateDir]);assert.equal(plan.ownerPairingScope.enableBrowser,true);
+ await main(['advance',f.stateDir,'gateway.prepare','gateway.start','gateway.verify','host.prepare']);
+ const enrollment=JSON.parse(fs.readFileSync(path.join(f.config.host.baseDir,'enrollment.json')));assert.equal(enrollment.browser_requested,true);assert.equal(enrollment.browser_config.headless,true);assert.equal(enrollment.browser_config.profileRoot,path.join(f.config.host.baseDir,'browser'));
+ const ownerApproval={approve:true,...plan.ownerPairingScope};delete ownerApproval.enableBrowser;
+ await assert.rejects(advanceDeployment(f.stateDir,{authorize:['host.pair'],ownerApproval}),/explicit_scoped_owner_approval_required/);
+ const paired=await main(['advance',f.stateDir,'host.pair','--approve-local-device']);assert.equal(steps(paired)['host.pair'].status,'succeeded');
+ const host=JSON.parse(fs.readFileSync(path.join(f.config.host.baseDir,'device/host.json')));assert.deepEqual(host.browser,enrollment.browser_config);assert.equal(host.computer,undefined);
+ assert.equal((await readDeploymentDevices(f.stateDir))[0].browser,true);assert.equal((await main(['status',f.stateDir])).roles.readiness,'not_inferred');
+});
+test('Core validates the bounded Browser intent and does not accept caller-supplied profiles',async t=>{
+ const f=await fixture(t);
+ for(const browser of [{enabled:true,profileRoot:'/foreign'},{enabled:true,binary:'/foreign'},{enabled:true,headless:'yes'},{enabled:true,executablePath:'relative'}])assert.throws(()=>validateDeployment({...f.config,host:{...f.config.host,browser}}));
+ assert.equal(validateDeployment({...f.config,host:{...f.config.host,browser:{enabled:false}}}).host.browser.enabled,false);
+ assert.equal(validateDeployment({...f.config,host:{...f.config.host,browser:{enabled:true,headless:false,executablePath:process.execPath}}}).host.browser.headless,false);
+});
+
+
+test('manual Core pending approval requires a separate explicit Browser decision',{skip:process.platform!=='linux',timeout:20000},async t=>{
+ const f=await fixture(t);f.config.host.browser={enabled:true,headless:true};fs.writeFileSync(f.configFile,JSON.stringify(f.config));await main(['create',f.configFile,f.stateDir]);
+ await main(['advance',f.stateDir,'gateway.prepare','gateway.start','gateway.verify','host.prepare','host.invite','host.request','host.claim']);
+ const [pending]=await listDeploymentPending(f.stateDir,{authorize:true});assert.equal(pending.browser_requested,true);assert.equal(pending.computer_requested,false);
+ const approval={authorize:true,requestId:pending.request_id,fingerprint:pending.fingerprint,enableComputer:false};
+ await assert.rejects(approveDeploymentPending(f.stateDir,approval),/pending_identity_or_capability_mismatch/);
+ const file=path.join(f.root,'browser-approval.json');fs.writeFileSync(file,JSON.stringify({...approval,enableBrowser:true}),{mode:0o600});
+ const approved=await main(['approve',f.stateDir,file,'--authorize']);assert.equal(approved.approved_capabilities.browser,true);
+ const state=await main(['advance',f.stateDir,'host.claim']);assert.equal(steps(state)['host.claim'].status,'succeeded');
+ assert.equal(JSON.parse(fs.readFileSync(path.join(f.config.host.baseDir,'device/host.json'))).browser.enabled,true);
+});
+
+
+const signedBrowserPreparationFixture=`import fs from 'node:fs';import path from 'node:path';
+export function readManagedBrowser(profileRoot){const file=path.join(profileRoot,'test-runtime-receipt.json');return fs.existsSync(file)?JSON.parse(fs.readFileSync(file,'utf8')):{status:'not_prepared'};}
+export async function prepareManagedBrowser({profileRoot,authorize,signal,recover}){if(authorize!==true)throw Error('not_authorized');if(signal?.aborted)throw Error('browser_prepare_cancelled');const result={status:'prepared',playwright:recover?'signed-test-recovered':'signed-test-version',executablePath:path.join(profileRoot,'private-runtime')};fs.writeFileSync(path.join(profileRoot,'test-runtime-receipt.json'),JSON.stringify(result),{mode:0o600});return result;}`;
+async function pairedBrowserPreparation(t,{module=true}={}){
+ const f=await fixture(t,{browserPreparationModule:module?signedBrowserPreparationFixture:undefined});delete f.config.pairingMode;f.config.host.browser={enabled:true};fs.writeFileSync(f.configFile,JSON.stringify(f.config));createDeployment(f.configFile,{stateDir:f.stateDir});
+ await main(['advance',f.stateDir,'gateway.prepare','gateway.start','gateway.verify','host.prepare']);await main(['advance',f.stateDir,'host.pair','--approve-local-device']);return f;
+}
+test('Core Browser preparation imports only the signed active Host module and preserves enrolled state',{skip:process.platform!=='linux',timeout:20000},async t=>{
+ const f=await pairedBrowserPreparation(t),base=f.config.host.baseDir;
+ const files=[path.join(f.stateDir,'deployment.json'),path.join(f.stateDir,'state.json'),...['identity.json','identity.pem','host.token','host.json'].map(name=>path.join(base,'device',name))],before=files.map(file=>fs.readFileSync(file));
+ assert.equal((await readDeploymentBrowser(f.stateDir)).status,'not_prepared');
+ await assert.rejects(prepareDeploymentBrowser(f.stateDir),/explicit_browser_preparation_authorization_required/);
+ await assert.rejects(prepareDeploymentBrowser(f.stateDir,{authorize:true,module:'/foreign'}),/invalid_configuration_fields/);
+ const prepared=await prepareDeploymentBrowser(f.stateDir,{authorize:true});assert.equal(prepared.status,'prepared');assert.equal(prepared.playwrightVersion,'signed-test-version');assert.equal(prepared.readiness,'not_verified');assert.equal(prepared.accountAcceptance,'NOT RUN');assert.doesNotMatch(JSON.stringify(prepared),/executablePath|profileRoot|private-runtime/);
+ assert.equal((await readDeploymentBrowser(f.stateDir)).status,'prepared');
+ fs.writeFileSync(path.join(base,'browser/test-runtime-receipt.json'),JSON.stringify({status:'preparation_blocked',reason:'browser_prepare_owner_alive',ownerPid:12345,profileRoot:'/private-not-for-api'}));
+ const blocked=await main(['browser',f.stateDir]);assert.equal(blocked.status,'preparation_blocked');assert.equal(blocked.reason,'browser_prepare_owner_alive');assert.doesNotMatch(JSON.stringify(blocked),/ownerPid|profileRoot|12345/);
+ assert.equal((await main(['browser-prepare',f.stateDir,'--recover','--authorize'])).playwrightVersion,'signed-test-recovered');for(let i=0;i<files.length;i++)assert.deepEqual(fs.readFileSync(files[i]),before[i]);
+ assert.equal(fs.existsSync(path.join(f.stateDir,'advance.lock')),false);assert.equal(fs.existsSync(path.join(base,'browser/test-runtime-receipt.json')),true);
+});
+test('Core refuses missing Browser bundle, altered profiles, signed bytes or management ownership before preparation',{skip:process.platform!=='linux',timeout:20000},async t=>{
+ for(const invalid of ['missing_bundle','profile','signed_bytes','management_lock']){
+  const f=await pairedBrowserPreparation(t,{module:invalid!=='missing_bundle'}),base=f.config.host.baseDir;
+  if(invalid==='profile'){const file=path.join(base,'device/host.json'),host=JSON.parse(fs.readFileSync(file));host.browser.profileRoot=path.join(f.root,'foreign-profile');fs.writeFileSync(file,JSON.stringify(host));}
+  if(invalid==='signed_bytes')fs.appendFileSync(path.join(base,'install/releases/0.1.0-test/packages/styx-browser-provider/prepare.mjs'),'\nthrow Error("must_not_execute")');
+  if(invalid==='management_lock')fs.writeFileSync(path.join(f.stateDir,'capabilities.lock'),'foreign',{mode:0o600});
+  await assert.rejects(prepareDeploymentBrowser(f.stateDir,{authorize:true}));assert.equal(fs.existsSync(path.join(base,'browser/test-runtime-receipt.json')),false,invalid);
+  if(invalid==='management_lock')assert.equal(fs.readFileSync(path.join(f.stateDir,'capabilities.lock'),'utf8'),'foreign');
+ }
+});
+test('Browser preparation remains optional and never installs an unapproved Host',{skip:process.platform!=='linux'},async t=>{
+ const f=await fixture(t);createDeployment(f.configFile,{stateDir:f.stateDir});assert.equal((await readDeploymentBrowser(f.stateDir)).status,'not_configured');await assert.rejects(prepareDeploymentBrowser(f.stateDir,{authorize:true}),/browser_not_configured/);assert.equal(fs.existsSync(f.config.host.baseDir),false);
+ const other=await fixture(t);other.config.host.browser={enabled:true};fs.writeFileSync(other.configFile,JSON.stringify(other.config));createDeployment(other.configFile,{stateDir:other.stateDir});assert.equal((await readDeploymentBrowser(other.stateDir)).status,'awaiting_host_approval');await assert.rejects(prepareDeploymentBrowser(other.stateDir,{authorize:true}),/approved_browser_host_required/);assert.equal(fs.existsSync(other.config.host.baseDir),false);
+});
+
+
+test('Linux headless Host preparation and Browser pairing do not require Cua readiness',{skip:process.platform!=='linux',timeout:20000},async t=>{
+ const saved={DISPLAY:process.env.DISPLAY,WAYLAND_DISPLAY:process.env.WAYLAND_DISPLAY};delete process.env.DISPLAY;delete process.env.WAYLAND_DISPLAY;
+ t.after(()=>{for(const [name,value]of Object.entries(saved))if(value===undefined)delete process.env[name];else process.env[name]=value});
+ const f=await fixture(t);delete f.config.pairingMode;f.config.host.computer=true;f.config.host.browser={enabled:true,headless:true};fs.writeFileSync(f.configFile,JSON.stringify(f.config));await main(['create',f.configFile,f.stateDir]);
+ const prepared=await main(['advance',f.stateDir,'gateway.prepare','gateway.start','gateway.verify','host.prepare']);assert.equal(steps(prepared)['host.prepare'].status,'succeeded');assert.equal(prepared.roles.browser,'requested');assert.equal(prepared.roles.computer,'requested');assert.equal(prepared.roles.readiness,'not_inferred');
+ const paired=await main(['advance',f.stateDir,'host.pair','--approve-local-device']);assert.equal(steps(paired)['host.pair'].status,'succeeded');assert.equal(steps(paired)['host.doctor'].status,'pending');
+ const base=f.config.host.baseDir,host=JSON.parse(fs.readFileSync(path.join(base,'device/host.json'))),receipt=JSON.parse(fs.readFileSync(path.join(base,'setup-receipt.json')));assert.equal(host.browser.enabled,true);assert.equal(host.browser.headless,true);assert.equal(host.computer.enabled,true);assert.equal(receipt.native_permissions,'NOT RUN');assert.equal(paired.accountAcceptance,'NOT RUN');
 });

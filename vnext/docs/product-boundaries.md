@@ -210,6 +210,8 @@ HTTP initialize 成功且仍加载前次无 MCP 连接上限的源码。ExecAdap
 
 2026-10-20 用户重申此前讨论的三类工具：Exec（进程／命令行）、Browser（浏览器会话／标签页／网页内容与交互）、Cua（原生桌面观察和操作）。Browser 不因 Cua 可以点击浏览器窗口而被视为已实现或已覆盖。三类工具由 Agent 选择，本地不做任务语义路由。
 
-当前 VNext Gateway 的实际工具目录仅接入 Exec 与十个通用 Cua 工具及设备发现／状态；没有独立 Browser provider、浏览器会话契约或 DOM/标签页工具。onboarding 的官方浏览器跳转和 Chrome/CDP UI 测试是引导／测试基础设施，不是面向用户的 Browser 能力。现有 acceptance.md 已把 Browser Playwright/CDP 标为 separate component / NOT RUN；该项不能从后续范围中遗漏，也不据此否认项目外既有浏览器方案。
+截至独立 Browser 开发前的基线，VNext Gateway 的实际工具目录仅接入 Exec 与十个通用 Cua 工具及设备发现／状态；没有独立 Browser provider、浏览器会话契约或 DOM/标签页工具。onboarding 的官方浏览器跳转和 Chrome/CDP UI 测试是引导／测试基础设施，不是面向用户的 Browser 能力。现有 acceptance.md 已把 Browser Playwright/CDP 标为 separate component / NOT RUN；该项不能从后续范围中遗漏，也不据此否认项目外既有浏览器方案。
 
 后续应先核对并复用已讨论／已存在的浏览器接入方案，再补同一 Core 下的能力配置、连接／授权、状态和生命周期，并单独验收真实网页观察与操作、标签页／会话归属和恢复。具体 Browser 实现尚未在此定型；不得把 Cua 的浏览器窗口点击或测试专用 CDP 连通当成 Browser provider 验收。
+
+2026-10-20 独立 Browser 分支已接入锁定 Playwright MCP、Host Browser lane、Core 配置/准备与独立验收证据。实现范围、隔离测试及仍未完成的迁移/原生打包/真实账号验收见 [Browser provider 开发验收](browser-provider.md)。这不表示现有已安装 App 自动具有 Browser。

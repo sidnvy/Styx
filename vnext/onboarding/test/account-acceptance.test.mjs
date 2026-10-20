@@ -11,19 +11,25 @@ import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StreamableHTTPClientTransport} from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import {createStyxGateway} from '../../gateway/index.mjs';
 import {createGatewayHttp} from '../../gateway/http.mjs';
-function fixture(t,{desktop=false,platform='linux'}={}){
+function fixture(t,{desktop=false,browser=false,platform='linux'}={}){
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'styx-account-acceptance-'));t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
  const stateDir=path.join(root,'state'),base=path.join(root,'host');
  for(const dir of [stateDir,base,path.join(base,'device'),path.join(stateDir,'gateway'),path.join(stateDir,'gateway/enrollment'),path.join(stateDir,'tunnel')])fs.mkdirSync(dir,{mode:0o700});
  const put=(file,value)=>fs.writeFileSync(file,typeof value==='string'?value:JSON.stringify(value),{mode:0o600});
  const config={schema:1,mode:'create-local',gateway:{url:'https://127.0.0.1:8795'},host:{baseDir:base}},identity={device_id:'styx-'+'a'.repeat(24),fingerprint:'b'.repeat(64)};
- const target={id:identity.device_id,kind:'host',platform,generation:'paired-test',allowed:true,computer:{enabled:desktop}};
+ const target={id:identity.device_id,kind:'host',platform,generation:'paired-test',allowed:true,computer:{enabled:desktop},...(browser?{browser:{enabled:true,transport:'outbound'}}:{})};
  put(path.join(stateDir,'deployment.json'),config);put(path.join(base,'device/identity.json'),identity);put(path.join(base,'device/host.json'),{host_id:target.id});
  put(path.join(stateDir,'gateway/enrollment/state.json'),{version:1,devices:[{id:target.id,fingerprint:identity.fingerprint,status:'approved',target}]});
  put(path.join(stateDir,'gateway/certificate.pem'),'test-only-certificate');put(path.join(stateDir,'gateway/model.token'),'MODEL_ONLY_'+'m'.repeat(48));put(path.join(stateDir,'gateway/admin.token'),'ADMIN_NEVER_EXPORT_'+'a'.repeat(48));
  const observer=createAcceptanceObserver(stateDir),begin=()=>beginDeploymentAcceptance(stateDir,{authorize:true});
  function event(challenge,patch={}){return {name:'exec_command',args:{cmd:challenge.command,environment_id:target.id,login:false},result:{structuredContent:{output:'STYX_EXEC_'+JSON.parse(fs.readFileSync(path.join(stateDir,'account-acceptance.json'))).nonce+'\n',exit_code:0}},owner:'mcp-session:actual-test',target,...patch};}
- return {root,stateDir,base,target,put,begin,event,observer};
+ let browserOperation=0;
+ function browserEvent(challenge,name='browser_navigate',patch={}){
+  const page='### Page\n- Page URL: '+challenge.browser.url+'\n- Page Title: Styx Browser acceptance';
+  const snapshot='\n### Snapshot\n```yaml\n- heading "'+challenge.browser.marker+'" [level=1] [ref=styx-'+ 'c'.repeat(32)+']\n```';
+  return event(challenge,{name,args:{environment_id:target.id,...(name==='browser_navigate'?{url:challenge.browser.url}:{})},operationId:'browser-test-'+(++browserOperation),result:{content:[{type:'text',text:page+(name==='browser_snapshot'?snapshot:'')}]},...patch});
+ }
+ return {root,stateDir,base,target,put,begin,event,browserEvent,observer};
 }
 test('real authenticated HTTP MCP dispatch and real Codex output record execution proof, never account identity',{
  skip:process.env.STYX_LIVE_EXEC_TEST!=='1'||process.platform!=='linux'||process.arch!=='x64'
@@ -142,4 +148,73 @@ test('production MCP dispatcher clears old DOM readback before a synthetic Cua a
  assert.equal(readDeploymentAcceptance(f.stateDir).desktop.status,'pending');
  await client.callTool({name:'get_window_state',arguments:{environment_id:target.id,pid:123,window_id:45}});
  assert.equal(actions,1);assert.equal(readDeploymentAcceptance(f.stateDir).desktop.status,'verified');assert.equal(readDeploymentAcceptance(f.stateDir).complete,false);
+});
+
+
+test('Browser navigation and snapshot are independent actual evidence without desktop grants',t=>{
+ const f=fixture(t,{browser:true}),a=f.begin();
+ assert.equal(a.browser.status,'pending');assert.equal(a.desktop.status,'not_required');assert.equal(a.requestProof.status,'pending');assert.match(a.challenge.browser.url,/^data:text\/html;charset=utf-8,/);
+ assert.match(a.challenge.prompt,/browser_navigate/);assert.match(a.challenge.prompt,/browser_snapshot/);assert.doesNotMatch(a.challenge.prompt,/get_window_state|https?:\/\//);
+ const navigate=f.browserEvent(a.challenge);f.observer.before(navigate);f.observer(navigate);
+ assert.equal(readDeploymentAcceptance(f.stateDir).browser.status,'pending');
+ const snapshot=f.browserEvent(a.challenge,'browser_snapshot');f.observer.before(snapshot);f.observer(snapshot);
+ const browser=readDeploymentAcceptance(f.stateDir);assert.equal(browser.browser.status,'verified');assert.equal(browser.status,'request_observed');assert.equal(browser.browser.source,'authenticated_mcp_browser_result');assert.equal(browser.requestProof.status,'pending');assert.equal(browser.complete,false);
+ assert.throws(()=>confirmDeploymentAcceptance(f.stateDir,{authorize:true,challengeId:a.challenge.id,observedInTargetChat:true}),/actual_mcp_acceptance_evidence_required/);
+ f.observer(f.event(a.challenge));assert.equal(readDeploymentAcceptance(f.stateDir).complete,false);
+ const complete=confirmDeploymentAcceptance(f.stateDir,{authorize:true,challengeId:a.challenge.id,observedInTargetChat:true});assert.equal(complete.complete,true);assert.equal(complete.requestProof.source,'authenticated_mcp_exec_result');assert.equal(complete.targetChatConfirmation.source,'user_attested');assert.equal(complete.targetChatConfirmation.providerIdentity,'not_verified');
+});
+test('Browser readiness, echoed URL, stale attempts, other owners and failed results cannot prove page readback',t=>{
+ for(const invalid of ['ready','no_navigation','navigation_error','wrong_navigation_url','echoed_url_only','foreign_owner','foreign_generation','snapshot_file','old_snapshot_attempt']){
+  const f=fixture(t,{browser:true}),a=f.begin(),navigate=f.browserEvent(a.challenge),snapshot=f.browserEvent(a.challenge,'browser_snapshot');
+  if(invalid==='ready'){f.observer(f.event(a.challenge,{name:'get_execution_environment_status',args:{environment_id:f.target.id},result:{structuredContent:{browser:{configured:true,readiness:'ready_observed'}}}}));}
+  else{
+   if(invalid==='old_snapshot_attempt')f.observer.before(snapshot);
+   if(invalid==='navigation_error')navigate.result.isError=true;
+   if(invalid==='wrong_navigation_url')navigate.args.url='about:blank';
+   if(invalid!=='no_navigation'){f.observer.before(navigate);f.observer(navigate);}
+   if(invalid==='echoed_url_only')snapshot.result={content:[{type:'text',text:'### Page\n- Page URL: '+a.challenge.browser.url+'\n### Snapshot\n```yaml\n- heading "unrelated" [level=1] [ref=styx-'+ 'd'.repeat(32)+']\n```'}]};
+   if(invalid==='foreign_owner')snapshot.owner='different-owner';
+   if(invalid==='foreign_generation')snapshot.target={...f.target,generation:'different'};
+   if(invalid==='snapshot_file')snapshot.args.filename='snapshot.yml';
+   if(invalid!=='old_snapshot_attempt')f.observer.before(snapshot);f.observer(snapshot);
+  }
+  assert.equal(readDeploymentAcceptance(f.stateDir).browser.status,'pending',invalid);assert.equal(readDeploymentAcceptance(f.stateDir).complete,false,invalid);
+ }
+});
+test('Browser evidence stays separate when desktop acceptance is still pending and old challenges expire',t=>{
+ const f=fixture(t,{browser:true,desktop:true}),a=f.begin();
+ for(const name of ['browser_navigate','browser_snapshot']){const event=f.browserEvent(a.challenge,name);f.observer.before(event);f.observer(event);}
+ f.observer(f.event(a.challenge));const state=readDeploymentAcceptance(f.stateDir);assert.equal(state.browser.status,'verified');assert.equal(state.desktop.status,'pending');
+ assert.throws(()=>confirmDeploymentAcceptance(f.stateDir,{authorize:true,challengeId:a.challenge.id,observedInTargetChat:true}),/actual_mcp_acceptance_evidence_required/);
+ const next=f.begin();assert.notEqual(next.challenge.browser.marker,a.challenge.browser.marker);
+ const old=f.browserEvent(a.challenge,'browser_snapshot');f.observer.before(old);f.observer(old);assert.equal(readDeploymentAcceptance(f.stateDir).browser.status,'pending');
+ const file=path.join(f.stateDir,'account-acceptance.json'),record=JSON.parse(fs.readFileSync(file));record.expiresAt=Date.now()-1;f.put(file,record);
+ const event=f.browserEvent(next.challenge);f.observer.before(event);f.observer(event);assert.equal(readDeploymentAcceptance(f.stateDir).status,'acceptance_expired');
+});
+test('legacy Exec and desktop acceptance records retain their original binding and meaning',t=>{
+ const f=fixture(t),a=f.begin(),file=path.join(f.stateDir,'account-acceptance.json'),record=JSON.parse(fs.readFileSync(file));
+ delete record.browserRequired;delete record.browser;f.put(file,record);f.observer(f.event(a.challenge));
+ assert.equal(readDeploymentAcceptance(f.stateDir).requestProof.status,'verified');assert.equal(readDeploymentAcceptance(f.stateDir).browser.status,'not_required');
+ assert.equal(confirmDeploymentAcceptance(f.stateDir,{authorize:true,challengeId:a.challenge.id,observedInTargetChat:true}).complete,true);
+});
+test('real native Browser data URL and snapshot reach the production MCP acceptance observer',{skip:process.env.STYX_LIVE_BROWSER_TEST!=='1',timeout:30000},async t=>{
+ const f=fixture(t,{browser:true});
+ const {HostBrowserSupervisor}=await import('../../packages/styx-browser-provider/host.mjs');
+ const {InMemoryTransport}=await import('@modelcontextprotocol/sdk/inMemory.js');
+ const browserWork=path.join(f.root,'browser-work');fs.mkdirSync(browserWork,{mode:0o700});
+ const supervisor=new HostBrowserSupervisor({browser:{enabled:true,headless:true,profileRoot:path.join(f.root,'browser-profiles'),...(process.env.STYX_TEST_BROWSER_BINARY?{executablePath:process.env.STYX_TEST_BROWSER_BINARY}:{})},cwd:browserWork});
+ const target={...f.target,cwd:f.root,shell:'/bin/sh',shells:['/bin/sh'],exec:{transport:'outbound',token_file:path.join(f.stateDir,'gateway/model.token')}};
+ const gateway=createStyxGateway({catalog:{version:1,default_environment_id:target.id,targets:[target]},computer:null,onToolResult:f.observer});
+ gateway.browser.connect=async()=>{const native=supervisor.createServer(),client=new Client({name:'native-browser-acceptance-transport',version:'1'}),[a,b]=InMemoryTransport.createLinkedPair();await native.connect(a);await client.connect(b);return client};
+ const hosts=[],token='browser_acceptance_'+'x'.repeat(48),http=await createGatewayHttp(gateway,{token,port:0,allowedHosts:hosts});hosts.push('127.0.0.1:'+http.address.port);
+ const client=new Client({name:'native-browser-acceptance-http',version:'1'});
+ try{
+  await client.connect(new StreamableHTTPClientTransport(new URL('http://127.0.0.1:'+http.address.port+'/mcp'),{requestInit:{headers:{Authorization:'Bearer '+token}}}));
+  const a=f.begin();
+  const navigate=await client.callTool({name:'browser_navigate',arguments:{url:a.challenge.browser.url,environment_id:target.id}});assert.notEqual(navigate.isError,true,JSON.stringify(navigate));
+  assert.equal(readDeploymentAcceptance(f.stateDir).browser.status,'pending');
+  const snapshot=await client.callTool({name:'browser_snapshot',arguments:{environment_id:target.id}});assert.notEqual(snapshot.isError,true,JSON.stringify(snapshot));
+  assert.match(snapshot.content.filter(item=>item.type==='text').map(item=>item.text).join('\n'),/\[ref=styx-[a-f0-9]{32}\]/);
+  const proof=readDeploymentAcceptance(f.stateDir);assert.equal(proof.browser.status,'verified');assert.equal(proof.browser.source,'authenticated_mcp_browser_result');assert.equal(proof.desktop.status,'not_required');assert.equal(proof.requestProof.status,'pending');assert.equal(proof.complete,false);assert.equal(proof.targetChatConfirmation.providerIdentity,'not_verified');
+ }finally{await client.close();await http.close();await supervisor.close();}
 });

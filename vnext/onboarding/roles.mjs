@@ -9,6 +9,7 @@ export function deploymentRoles(config) {
     host: config.host ? 'local' : 'disabled',
     exec: config.host ? 'enabled' : 'disabled',
     computer: config.host?.computer ? 'requested' : 'disabled',
+    browser: config.host?.browser?.enabled === true ? 'requested' : 'disabled',
     deviceIngress: local ? ((config.gateway?.listenHost ?? '127.0.0.1') === '127.0.0.1'
       ? 'loopback_only' : 'configured_unverified') : 'not_hosted',
     readiness: 'not_inferred'

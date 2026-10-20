@@ -5,10 +5,14 @@ const JOIN_FIELDS = Object.freeze([
   'computer_requested','public_key_pem'
 ]);
 export function joinPayload(body) {
-  return JSON.stringify(Object.fromEntries(JOIN_FIELDS.map(k=>[k,body[k]])));
+  // Append only when present: legacy devices retain their exact v1 payload.
+  const fields=Object.hasOwn(body,'browser_requested')?[...JOIN_FIELDS,'browser_requested']:JOIN_FIELDS;
+  return JSON.stringify(Object.fromEntries(fields.map(k=>[k,body[k]])));
 }
 
 // Separate domain and exact revision prevent reusing enrollment or stale consent.
 export function capabilityPayload(body){
+ if(Object.hasOwn(body,'enable_browser'))return JSON.stringify(['styx-device-capabilities-v2',body.device_id,body.fingerprint,body.generation,
+  {browser:body.enable_browser,...(Object.hasOwn(body,'enable_computer')?{computer:body.enable_computer}:{})}]);
  return JSON.stringify(['styx-device-capabilities-v1',body.device_id,body.fingerprint,body.generation,body.enable_computer]);
 }

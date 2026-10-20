@@ -104,3 +104,13 @@ test('Gateway pending scope is checked independently of transport descriptor',as
  await assert.rejects(pairDevice({controller:f.controller,transport:{...trusted,request:changed.request},authorization:authorize(cfg)}),/pending_scope_mismatch/);
  assert.equal(f.gateway.registry.list().length,0);
 });
+
+
+test('Browser owner scope is independently authorized before issuing an invitation',async()=>{
+ let invites=0;const controller={invite(){invites++;throw Error('unexpected')}};
+ const cfg={gateway_url:'https://127.0.0.1:1',storage_dir:path.join(os.tmpdir(),'unused-browser'),label:'browser',cwd:os.tmpdir(),shell:process.execPath,exec_binary:process.execPath,browser_requested:true,browser_config:{enabled:true,headless:true,profileRoot:path.join(os.tmpdir(),'unused-browser-profile')}};
+ const transport=createLocalPairingTransport(cfg);
+ await assert.rejects(pairDevice({controller,transport,authorization:authorize(cfg)}),/explicit_browser_authorization_required/);
+ await assert.rejects(pairDevice({controller,transport,authorization:{...authorize(cfg),enable_browser:true,browser_requested:false}}),/scope_mismatch/);
+ assert.equal(invites,0);
+});

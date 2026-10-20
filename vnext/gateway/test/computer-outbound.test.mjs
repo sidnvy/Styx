@@ -59,7 +59,7 @@ async function setup(t,{slots=2,native=false}={}){
     exec:{binary:path.resolve('packages/styx-exec-adapter/.runtime/codex'),cwd:tmp,
       env:{CODEX_HOME:path.join(tmp,'codex-home')}},
     computer:{enabled:true,binary:computerBinary,connections:slots,
-      ...(native?{env:{CUA_DRIVER_RS_ENABLE_WAYLAND:'1'}}:{})}};
+      ...(native?{env:{CUA_DRIVER_RS_ENABLE_WAYLAND:'1'}}:{env:{DISPLAY:':styx-protocol-fixture'}})}};
   await fs.mkdir(cfg.exec.env.CODEX_HOME);
   const cfgPath=path.join(tmp,'host.json');
   await fs.writeFile(cfgPath,JSON.stringify(cfg),{mode:0o600});

@@ -10,13 +10,14 @@
     "test": "node --test --test-concurrency=1 gateway/test/*.test.mjs",
     "test:exec": "node --test --test-concurrency=1 packages/styx-exec-adapter/test/*.test.mjs",
     "test:gui": "node --test --test-concurrency=1 packages/styx-gui-broker/test/*.test.mjs",
-    "test:all": "npm run test && npm run test:exec && npm run test:gui && npm run test:host && npm run test:plugin && npm run test:onboarding",
+    "test:all": "npm run test && npm run test:exec && npm run test:gui && npm run test:host && npm run test:plugin && npm run test:onboarding && npm run test:browser",
     "test:native:cua": "node host/run-native-cua.mjs",
     "test:physical:cua": "node host/physical-cua-acceptance.mjs",
     "test:host": "node --test --test-concurrency=1 host/test/*.test.mjs",
     "test:linux-installer": "node --test --test-concurrency=1 host/test/linux-build.test.mjs host/test/linux-service.test.mjs host/test/installer.test.mjs",
     "test:plugin": "node --test --test-concurrency=1 plugin/test/*.test.mjs",
-    "test:onboarding": "node --test --test-concurrency=1 onboarding/test/*.test.mjs onboarding/ui/server.test.mjs"
+    "test:onboarding": "node --test --test-concurrency=1 onboarding/test/*.test.mjs onboarding/ui/server.test.mjs",
+    "test:browser": "node --test --test-concurrency=1 packages/styx-browser-provider/test/*.test.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.1",

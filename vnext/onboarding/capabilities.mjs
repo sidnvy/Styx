@@ -53,15 +53,19 @@ function prepare(d,enable,trustedMacPreviewApp){
  }
  return {identity,key,publicKey:pub.export({type:'spki',format:'pem'}),host,hostFile,computer,owner,serviceConfigFile:path.join(base,'service.json')};
 }
-function publicStatus(j){return {status:j.status,observation:'last_recorded',computer:j.computer??null,requestedComputer:j.requestedComputer,
+function publicStatus(j){return {status:j.status,observation:'last_recorded',computer:j.computer??null,browser:j.browser??null,requestedComputer:j.requestedComputer,
  phase:j.phase,observedAt:j.updatedAt,foregroundRestartRequired:j.foregroundRestartRequired===true,nativePermissions:'not_checked',accountAcceptance:'NOT RUN',...(j.reason?{reason:j.reason}:{})}}
 export function readDeploymentCapabilities(d){
  requirePrivateDirectory(d);const file=path.join(d,'capabilities.json');
- if(!fs.existsSync(file))return {status:'not_changed',computer:null};
+ if(!fs.existsSync(file))return {status:'not_changed',computer:null,browser:null};
  const journal=read(file);assert(journal.schema===1&&journal.configSha256===hash(fs.readFileSync(path.join(d,'deployment.json'))),'capability_scope_changed');
  return publicStatus(journal);
 }
-export async function changeDeploymentCapabilities(d,{authorize=false,computer}={},operations={}){
+export async function changeDeploymentCapabilities(d,{authorize=false,computer,browser}={},operations={}){
+ if(browser!==undefined){
+  assert(authorize===true&&typeof browser==='boolean','explicit_browser_capability_authorization_required');
+  throw Error('browser_capability_migration_not_implemented_preserve_existing_identity');
+ }
  assert(authorize===true&&typeof computer==='boolean','explicit_desktop_capability_authorization_required');
  requirePrivateDirectory(d);
  const ops={prepare:(dir,enabled)=>prepare(dir,enabled,operations.trustedMacPreviewApp),owner:ownerCommand,hostStatus:observeHostService,hostControl:controlDeploymentHostService,stopOwnedForeground:stopDeploymentForeground,readForeground:readDeploymentForeground,...operations};

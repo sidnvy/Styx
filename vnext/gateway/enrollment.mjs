@@ -41,7 +41,7 @@ function commitFile(filename,content,mode=0o600){
 }
 function validateJoin(body){
   exact(body,['invitation','device_id','label','platform','cwd','shell',
-    'computer_requested','public_key_pem','signature']);
+    'computer_requested','browser_requested','public_key_pem','signature']);
   assert(typeof body.invitation==='string'&&B64URL.test(body.invitation),'invalid_invitation');
   assert(typeof body.device_id==='string'&&ID.test(body.device_id),'invalid_device_id');
   assert(typeof body.label==='string'&&FRIENDLY.test(body.label),'invalid_label');
@@ -55,6 +55,7 @@ function validateJoin(body){
     ? ['powershell.exe','pwsh.exe','pwsh'].includes(shellName)
     : ['sh','bash','zsh'].includes(shellName)),'unsupported_shell');
   assert(typeof body.computer_requested==='boolean','invalid_computer_flag');
+  assert(body.browser_requested===undefined||typeof body.browser_requested==='boolean','invalid_browser_flag');
   assert(typeof body.public_key_pem==='string'&&body.public_key_pem.length<=2400,
     'invalid_public_key');
   assert(typeof body.signature==='string'&&body.signature.length<=2048,
@@ -153,7 +154,7 @@ export class EnrollmentController {
     this.db.pending.push({
       request_id:requestId,device_id:body.device_id,label:body.label,
       platform:body.platform,cwd:body.cwd,shell:body.shell,
-      computer_requested:body.computer_requested,
+      computer_requested:body.computer_requested,browser_requested:body.browser_requested===true,
       public_key_pem:publicKey.export({format:'pem',type:'spki'}),
       fingerprint,claim_hash:sha(claimSecret),
       exp:this.now()+JOIN_MS,status:'pending'
@@ -167,18 +168,19 @@ export class EnrollmentController {
       .map(x=>({
         request_id:x.request_id,device_id:x.device_id,label:x.label,
         platform:x.platform,cwd:x.cwd,shell:x.shell,
-        fingerprint:x.fingerprint,computer_requested:x.computer_requested,
+        fingerprint:x.fingerprint,computer_requested:x.computer_requested,browser_requested:x.browser_requested===true,
         expires_at:x.exp
       }));
   }
   approve(body={}){
-    exact(body,['request_id','fingerprint','enable_computer']);
-    const {request_id,fingerprint,enable_computer=false}=body;
+    exact(body,['request_id','fingerprint','enable_computer','enable_browser']);
+    const {request_id,fingerprint,enable_computer=false,enable_browser=false}=body;
     assert(typeof request_id==='string'&&/^[a-f0-9]{32}$/.test(request_id),
       'invalid_request_id');
     assert(typeof fingerprint==='string'&&/^[a-f0-9]{64}$/.test(fingerprint),
       'invalid_fingerprint');
     assert(typeof enable_computer==='boolean','invalid_computer_approval');
+    assert(typeof enable_browser==='boolean','invalid_browser_approval');
     const pending=this.db.pending.find(x=>x.request_id===request_id);
     assert(pending&&pending.status==='pending'&&pending.exp>this.now(),
       'request_not_pending',409);
@@ -188,6 +190,7 @@ export class EnrollmentController {
       Buffer.from(pending.fingerprint,'hex')),'fingerprint_mismatch',403);
     assert(!enable_computer||pending.computer_requested,
       'computer_capability_not_requested',403);
+    assert(!enable_browser||pending.browser_requested===true,'browser_capability_not_requested',403);
     const tokenFile=path.join(this.root,'tokens',pending.device_id+'.token');
     assert(!fs.existsSync(tokenFile),'device_identity_conflict',409);
     const capability=randomBytes(48).toString('base64url');
@@ -199,6 +202,7 @@ export class EnrollmentController {
       generation:'paired-'+randomBytes(8).toString('hex'),
       allowed:true,cwd:pending.cwd,shell:pending.shell,shells:[pending.shell],
       exec:{transport:'outbound',token_file:tokenFile},
+      browser:{enabled:enable_browser,...(enable_browser?{transport:'outbound'}:{})},
       computer:{enabled:enable_computer,
         ...(enable_computer?{transport:'outbound',max_connections:2}:{})}
     };
@@ -221,7 +225,7 @@ export class EnrollmentController {
     }
     return {device_id:target.id,status:'approved',
       fingerprint:pending.fingerprint,
-      approved_capabilities:{exec:true,computer:enable_computer}};
+      approved_capabilities:{exec:true,computer:enable_computer,browser:enable_browser}};
   }
   claim(body={}){
     exact(body,['request_id','claim_secret']);
@@ -242,7 +246,7 @@ export class EnrollmentController {
       encrypted_credential:req.sealed_token,
       crypto:'RSA-OAEP-SHA256',
       approved_capabilities:{
-        exec:true,computer:device.target.computer.enabled
+        exec:true,computer:device.target.computer.enabled,browser:device.target.browser?.enabled===true
       }
     };
   }
@@ -274,7 +278,7 @@ export class EnrollmentController {
       device_id:x.id,label:x.label,platform:x.target.platform,
       is_default:this.db.default_environment_id===x.id,
       capabilities:{exec:x.status==='approved',
-        computer:x.status==='approved'&&x.target.computer.enabled},
+        computer:x.status==='approved'&&x.target.computer.enabled,browser:x.status==='approved'&&x.target.browser?.enabled===true},
       status:x.status,generation:x.target.generation,
       online:x.status==='approved'&&Boolean(this.relay?.connected(x.id)),
       fingerprint:x.fingerprint
@@ -292,11 +296,13 @@ export class EnrollmentController {
     return {status:'updated',default_environment_id:body.device_id};
   }
   capabilities(body={}){
-    exact(body,['device_id','fingerprint','generation','enable_computer','public_key_pem','signature']);
+    exact(body,['device_id','fingerprint','generation','enable_computer','enable_browser','public_key_pem','signature']);
     assert(typeof body.device_id==='string'&&ID.test(body.device_id),'invalid_device_id');
     assert(typeof body.fingerprint==='string'&&/^[a-f0-9]{64}$/.test(body.fingerprint),'invalid_fingerprint');
     assert(typeof body.generation==='string'&&body.generation.length<=128,'invalid_generation');
-    assert(typeof body.enable_computer==='boolean','invalid_computer_approval');
+    const computerChanged=Object.hasOwn(body,'enable_computer'),browserChanged=Object.hasOwn(body,'enable_browser');
+    assert((computerChanged||browserChanged)&&(!computerChanged||typeof body.enable_computer==='boolean'),'invalid_computer_approval');
+    assert(!browserChanged||typeof body.enable_browser==='boolean','invalid_browser_approval');
     assert(typeof body.public_key_pem==='string'&&body.public_key_pem.length<=2400&&typeof body.signature==='string'&&body.signature.length<=2048,'invalid_identity_proof');
     const record=this.db.devices.find(x=>x.id===body.device_id);
     assert(record&&record.status==='approved','device_not_found',404);
@@ -308,14 +314,15 @@ export class EnrollmentController {
     assert(valid,'invalid_identity_proof',403);
     const previous=record.target;
     const target={...previous,generation:'capability-'+randomBytes(8).toString('hex'),
-      computer:{enabled:body.enable_computer,...(body.enable_computer?{transport:'outbound',max_connections:2}:{})}};
+      ...(computerChanged?{computer:{enabled:body.enable_computer,...(body.enable_computer?{transport:'outbound',max_connections:2}:{})}}:{}),
+      ...(browserChanged?{browser:{enabled:body.enable_browser,...(body.enable_browser?{transport:'outbound'}:{})}}:{})};
     // Synchronous validation/update/save prevents requests interleaving with intent.
     this.registry.replaceApprovedHost(target,previous.generation);
     record.target=target;
     try{this.save()}catch(error){record.target=previous;this.registry.replaceApprovedHost(previous,target.generation);throw error}
     this.relay?.disconnectHost(record.id);
     return {status:'updated',device_id:record.id,fingerprint:record.fingerprint,
-      generation:target.generation,capabilities:{exec:true,computer:body.enable_computer}};
+      generation:target.generation,capabilities:{exec:true,computer:target.computer?.enabled===true,browser:target.browser?.enabled===true}};
   }
   recover(body={}){
     exact(body,['device_id','fingerprint','generation']);

@@ -2,11 +2,11 @@
 // remote enrollment, background startup or account actions can be added by UI.
 const LOCAL_STEPS = Object.freeze(['gateway.prepare','gateway.start','gateway.verify','host.prepare','host.pair','host.doctor']);
 export async function completeLocalSetup(api, stateDir, approval) {
-  if (!approval || Object.keys(approval).some(k=>!['approve','gatewayUrl','label','enableComputer'].includes(k)) || approval.approve !== true)
+  if (!approval || Object.keys(approval).some(k=>!['approve','gatewayUrl','label','enableComputer','enableBrowser'].includes(k)) || approval.approve !== true)
     throw Error('explicit_local_setup_approval_required');
   const plan = await api.planDeployment(stateDir);
   const scope = plan.ownerPairingScope;
-  if (!scope || ['gatewayUrl','label','enableComputer'].some(k=>approval[k]!==scope[k]))
+  if (!scope || ['gatewayUrl','label','enableComputer'].some(k=>approval[k]!==scope[k]) || (scope.enableBrowser===true&&typeof approval.enableBrowser!=='boolean') || approval.enableBrowser!==undefined&&typeof approval.enableBrowser!=='boolean' || (approval.enableBrowser===true)!==(scope.enableBrowser===true))
     throw Error('local_setup_scope_changed');
   const localSteps=[...((plan.steps??[]).some(s=>s.id==='gateway.runtime.prepare')?['gateway.runtime.prepare']:[]),...LOCAL_STEPS];
   let state = await api.readDeployment(stateDir);

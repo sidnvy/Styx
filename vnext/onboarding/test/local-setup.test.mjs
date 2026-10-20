@@ -34,3 +34,12 @@ test('reopen resumes same prepared Gateway without replaying identity creation',
  assert.equal((await completeLocalSetup(f.api,'unused',approval)).status,'local_preparation_complete');
  assert.equal(restarted,1);assert.equal(f.calls.length,3);assert.equal(f.calls[0].authorize[0],'host.prepare');
 });
+
+
+test('aggregate local setup cannot omit or change its requested Browser approval',async()=>{
+ const f=fixture();f.api.planDeployment=()=>({ownerPairingScope:{...scope,enableBrowser:true}});
+ for(const change of [{},{enableBrowser:false},{enableBrowser:'yes'}])await assert.rejects(completeLocalSetup(f.api,'unused',{...approval,...change}),/local_setup_scope_changed/);
+ assert.equal(f.calls.length,0);
+ assert.equal((await completeLocalSetup(f.api,'unused',{...approval,enableBrowser:true})).status,'local_preparation_complete');
+ assert.equal(f.calls[4].ownerApproval.enableBrowser,true);
+});

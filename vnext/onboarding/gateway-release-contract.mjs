@@ -2,8 +2,9 @@
 // Host binaries, enrollment, test fixtures and mutable source globs are absent.
 export const GATEWAY_SOURCE_FILES=Object.freeze([
  'gateway/index.mjs','gateway/runtime.mjs','gateway/registry.mjs','gateway/mcp.mjs',
- 'gateway/cua.mjs','gateway/outbound.mjs','gateway/http.mjs','gateway/enrollment.mjs',
+ 'gateway/cua.mjs','gateway/browser.mjs','gateway/outbound.mjs','gateway/http.mjs','gateway/enrollment.mjs',
  'gateway/cua-portable-0.36.0.json','gateway/cas/mcp.mjs','gateway/cas/controller.html',
+ 'packages/styx-browser-provider/contract.mjs','packages/styx-browser-provider/playwright-contract-0.0.83.json',
  'packages/styx-exec-adapter/rpc.mjs','packages/styx-exec-adapter/errors.mjs',
  'packages/styx-exec-adapter/adapter.mjs','packages/styx-exec-adapter/schema.mjs',
  'packages/styx-gui-broker/mcp.mjs','shared/private-file.mjs','shared/enrollment-protocol.mjs',

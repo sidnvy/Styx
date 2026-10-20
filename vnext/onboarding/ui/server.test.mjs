@@ -306,3 +306,39 @@ test('reviewed runtime and migration routes stay owner authenticated and bound t
   assert.equal(calls.length,7);
  }finally{await f.cleanup()}
 });
+
+
+test('local API accepts bounded Browser intent and exposes only its requested role',async()=>{
+ const browser={enabled:true,headless:true,executablePath:process.execPath};
+ assert.deepEqual(validateUiConfig({...config(),host:{...config().host,browser}},{trustedOpenSSL:'/usr/bin/openssl'}).host.browser,browser);
+ for(const value of [{enabled:true,profileRoot:'/foreign'},{enabled:true,command:'/foreign'},{enabled:true,headless:'yes'},{enabled:true,executablePath:'relative'}])assert.throws(()=>validateUiConfig({...config(),host:{...config().host,browser:value}},{trustedOpenSSL:'/usr/bin/openssl'}));
+ const projected=publicDeployment({mode:'create-local',roles:{gateway:'local',host:'local',exec:'enabled',computer:'disabled',browser:'requested'},browser:{profileRoot:'/private/profile'},steps:[]});
+ assert.equal(projected.roles.browser,'requested');assert.equal(projected.roles.readiness,'not_inferred');assert.doesNotMatch(JSON.stringify(projected),/profileRoot|private\/profile/);
+});
+test('HTTP pending approval requires explicit Browser scope and existing Browser migration is honestly blocked',async()=>{
+ const id='a'.repeat(32),fingerprint='b'.repeat(64);let approved;
+ const f=await fixture({core:{listDeploymentPending:()=>[{request_id:id,fingerprint,browser_requested:true,computer_requested:false}],approveDeploymentPending:(_dir,options)=>{approved=options;return {status:'approved'}}}});
+ try{
+  const data={authorize:true,requestId:id,fingerprint,enableComputer:false};
+  assert.equal((await f.post('/api/pending/approve',data)).status,409);assert.equal(approved,undefined);
+  assert.equal((await f.post('/api/pending/approve',{...data,enableBrowser:true})).status,200);assert.equal(approved.enableBrowser,true);assert.equal(approved.enableComputer,false);
+  const blocked=await f.post('/api/capabilities',{authorize:true,browser:true});assert.equal(blocked.status,409);assert.equal((await blocked.json()).error,'browser_capability_migration_not_implemented_preserve_existing_identity');
+ }finally{await f.cleanup()}
+});
+
+
+test('Browser preparation routes are passive for status and accept only explicit fixed Core preparation',async()=>{
+ let reads=0,prepares=0;const f=await fixture({core:{readDeploymentBrowser:()=>{reads++;return {schema:1,configured:true,status:'not_prepared',readiness:'not_verified',accountAcceptance:'NOT RUN'}},prepareDeploymentBrowser:(_dir,options)=>{assert.deepEqual(options,prepares===0?{authorize:true}:{authorize:true,recover:true});prepares++;return {schema:1,configured:true,status:'prepared',readiness:'not_verified',accountAcceptance:'NOT RUN'}}}});
+ try{
+  assert.equal(f.session.browserPreparationSupported,true);assert.equal((await(await f.get('/api/browser')).json()).browser.status,'not_prepared');assert.equal(reads,1);assert.equal(prepares,0);
+  assert.equal((await f.post('/api/browser/prepare',{})).status,409);assert.equal((await f.post('/api/browser/prepare',{authorize:true,profileRoot:'/foreign'})).status,409);assert.equal((await f.post('/api/browser/prepare',{authorize:true},{'X-Styx-CSRF':''})).status,403);assert.equal(prepares,0);
+  const result=await f.post('/api/browser/prepare',{authorize:true});assert.equal(result.status,200);assert.equal((await result.json()).browser.accountAcceptance,'NOT RUN');assert.equal(prepares,1);
+  assert.equal((await f.post('/api/browser/prepare',{authorize:true,recover:'yes'})).status,409);assert.equal(prepares,1);
+  assert.equal((await f.post('/api/browser/prepare',{authorize:true,recover:true})).status,200);assert.equal(prepares,2);
+ }finally{await f.cleanup()}
+});
+test('acceptance HTTP projection preserves the independent Browser source and fixed data challenge',async()=>{
+ const {browserAcceptanceChallenge}=await import('../../shared/onboarding-evidence.mjs'),browser=browserAcceptanceChallenge('e'.repeat(32));
+ const f=await fixture({core:{readDeploymentAcceptance:()=>({status:'request_observed',requestProof:{status:'pending'},targetChatConfirmation:{status:'pending'},desktop:{status:'not_required'},browser:{status:'verified',required:true,source:'authenticated_mcp_browser_result'},complete:false,challenge:{id:'a'.repeat(32),expiresAt:Date.now()+5000,prompt:'fixed generated challenge',command:'fixed exec command',environmentId:'device_123',browser},ownerHash:'PRIVATE_OWNER_HASH'})}});
+ try{const value=(await(await f.get('/api/acceptance')).json()).acceptance;assert.equal(value.browser.status,'verified');assert.equal(value.requestProof.status,'pending');assert.deepEqual(value.challenge.browser,browser);assert.equal(value.complete,false);assert.equal(value.targetChatConfirmation.providerIdentity,'not_verified');assert.doesNotMatch(JSON.stringify(value),/PRIVATE_OWNER_HASH/);}finally{await f.cleanup()}
+});

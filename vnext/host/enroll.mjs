@@ -40,6 +40,11 @@ function configOf(raw){
     'host_shell_required');
   assert(typeof config.exec_binary==='string'&&path.isAbsolute(config.exec_binary),
     'codex_binary_required');
+  if(config.browser_requested!==undefined)assert(typeof config.browser_requested==='boolean','invalid_browser_selection');
+  if(config.browser_requested){
+    const b=config.browser_config;
+    assert(b&&typeof b==='object'&&!Array.isArray(b)&&!Object.keys(b).some(k=>!['enabled','headless','profileRoot','executablePath'].includes(k))&&b.enabled===true&&typeof b.headless==='boolean'&&typeof b.profileRoot==='string'&&path.isAbsolute(b.profileRoot)&&(b.executablePath===undefined||typeof b.executablePath==='string'&&path.isAbsolute(b.executablePath)),'invalid_local_browser_configuration');
+  }
   if(config.computer_requested) {
     assert(typeof config.computer_binary==='string'&&path.isAbsolute(config.computer_binary),
       'cua_binary_required');
@@ -142,7 +147,8 @@ export async function requestEnrollment(config,invitation){
     invitation,device_id:identity.device_id,label:cfg.label,
     platform:process.platform,cwd:cfg.cwd,shell:cfg.shell,
     computer_requested:cfg.computer_requested===true,
-    public_key_pem:identity.public_key_pem
+    public_key_pem:identity.public_key_pem,
+    ...(cfg.browser_requested!==undefined?{browser_requested:cfg.browser_requested}:{})
   };
   const privateKey=protectedRead(path.join(cfg.storage_dir,'identity.pem'));
   body.signature=sign('sha256',Buffer.from(joinPayload(body)),{
@@ -166,6 +172,7 @@ export async function claimEnrollment(config){
   assert(answer.body.status==='approved'&&
     answer.body.device_id===record.device_id&&
     answer.body.crypto==='RSA-OAEP-SHA256','invalid_claim_identity');
+  assert(answer.body.approved_capabilities?.exec===true&&typeof answer.body.approved_capabilities.computer==='boolean'&&(answer.body.approved_capabilities.browser===undefined||typeof answer.body.approved_capabilities.browser==='boolean')&&(!answer.body.approved_capabilities.browser||cfg.browser_requested===true),'invalid_claim_capabilities');
   const privateKey=protectedRead(path.join(cfg.storage_dir,'identity.pem'));
   const token=privateDecrypt({key:privateKey,padding:constants.RSA_PKCS1_OAEP_PADDING,
     oaepHash:'sha256'},Buffer.from(answer.body.encrypted_credential,'base64url'))
@@ -193,6 +200,7 @@ export async function claimEnrollment(config){
     ...(cfg.gateway_ca_file?{gateway_ca_file:cfg.gateway_ca_file}:{}),
     exec:{binary:cfg.exec_binary,cwd:cfg.cwd,
       ...(cfg.codex_home?{env:{CODEX_HOME:cfg.codex_home}}:{})},
+    ...(answer.body.approved_capabilities.browser?{browser:{...cfg.browser_config}}:{}),
     ...(answer.body.approved_capabilities.computer?{
       computer:{
         enabled:true,binary:cfg.computer_binary,

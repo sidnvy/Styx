@@ -58,3 +58,12 @@ test('unknown external owner or failed scope cannot stop foreground or mutate ca
  await assert.rejects(changeDeploymentCapabilities(f.dir,{authorize:true,computer:true},f.ops),/foreground_owned_or_interrupted/);assert.equal(stopped,0);assert.equal(f.calls.length,0);
  f.ops.readForeground=()=>({status:'connected'});f.ops.prepare=()=>{throw Error('scope_refused')};await assert.rejects(changeDeploymentCapabilities(f.dir,{authorize:true,computer:true},f.ops),/scope_refused/);assert.equal(stopped,0);assert.equal(f.calls.length,0);
 });
+
+
+test('existing deployment Browser changes stop before state, identity, desktop or service mutation',async t=>{
+ const f=fixture(t),before=fs.readFileSync(f.hostFile);
+ await assert.rejects(changeDeploymentCapabilities(f.dir,{authorize:true,browser:true},f.ops),/browser_capability_migration_not_implemented_preserve_existing_identity/);
+ await assert.rejects(changeDeploymentCapabilities(f.dir,{authorize:true,browser:false,computer:false},f.ops),/browser_capability_migration_not_implemented/);
+ await assert.rejects(changeDeploymentCapabilities(f.dir,{browser:true},f.ops),/explicit_browser_capability_authorization_required/);
+ assert.equal(f.calls.length,0);assert.deepEqual(fs.readFileSync(f.hostFile),before);assert.equal(fs.existsSync(path.join(f.dir,'capabilities.json')),false);
+});
