@@ -90,7 +90,8 @@ test('desktop acceptance needs real observed action sequence plus controlled pag
  // Synthetic native identity for this contract test only. Production derives
  // the PID from the installed App's fresh owner-private native descriptor.
  const file=path.join(f.stateDir,'account-acceptance.json'),r=JSON.parse(fs.readFileSync(file));r.desktopAppPid=123;f.put(file,r);
- recordDeploymentDesktopReadback(f.stateDir,{authorize:true,challengeId:a.challenge.id,value:a.challenge.desktopValue});
+ assert.throws(()=>recordDeploymentDesktopReadback(f.stateDir,{authorize:true,challengeId:a.challenge.id,value:a.challenge.desktopValue}),/scope_mismatch/);
+ recordDeploymentDesktopReadback(f.stateDir,{authorize:true,challengeId:a.challenge.id,value:a.challenge.desktopValue,pid:123,windowId:45});
  assert.equal(readDeploymentAcceptance(f.stateDir).desktop.status,'pending');
  const image={content:[{type:'image',data:'synthetic-test-only',mimeType:'image/png'}],structuredContent:{snapshot_id:'s00000001',screenshot_frame_valid:true}};
  const observation={name:'get_window_state',args:{environment_id:f.target.id,pid:123,window_id:45},result:image};
@@ -107,12 +108,15 @@ test('desktop acceptance needs real observed action sequence plus controlled pag
  // clears old readback first, then both its successful result and new DOM
  // readback plus a subsequent image of that same window are required.
  action.operationId='real-dispatch-test-2';f.observer.before(f.event(a.challenge,action));
- recordDeploymentDesktopReadback(f.stateDir,{authorize:true,challengeId:a.challenge.id,value:a.challenge.desktopValue});
+ recordDeploymentDesktopReadback(f.stateDir,{authorize:true,challengeId:a.challenge.id,value:a.challenge.desktopValue,pid:123,windowId:45});
  f.observer(f.event(a.challenge,action));
  assert.equal(readDeploymentAcceptance(f.stateDir).desktop.status,'pending');
  f.observer(f.event(a.challenge,{...observation,owner:'other-owner'}));assert.equal(readDeploymentAcceptance(f.stateDir).desktop.status,'pending');
  f.observer(f.event(a.challenge,{...observation,args:{...observation.args,window_id:99}}));assert.equal(readDeploymentAcceptance(f.stateDir).desktop.status,'pending');
  f.observer(f.event(a.challenge,observation));assert.equal(readDeploymentAcceptance(f.stateDir).desktop.status,'verified');
+ recordDeploymentDesktopReadback(f.stateDir,{authorize:true,challengeId:a.challenge.id,value:a.challenge.desktopValue,pid:123,windowId:99});
+ assert.equal(readDeploymentAcceptance(f.stateDir).desktop.status,'pending','same-PID different window must not complete the native proof');
+ recordDeploymentDesktopReadback(f.stateDir,{authorize:true,challengeId:a.challenge.id,value:a.challenge.desktopValue,pid:123,windowId:45});
  assert.equal(confirmDeploymentAcceptance(f.stateDir,{authorize:true,challengeId:a.challenge.id,observedInTargetChat:true}).complete,true);
 });
 test('expired, revoked, replaced and interrupted evidence never becomes accepted',t=>{
@@ -127,13 +131,13 @@ test('expired, revoked, replaced and interrupted evidence never becomes accepted
 test('production MCP dispatcher clears old DOM readback before a synthetic Cua action and records its result afterward',async t=>{
  const f=fixture(t,{desktop:true}),a=f.begin(),recordFile=path.join(f.stateDir,'account-acceptance.json');
  const initial=JSON.parse(fs.readFileSync(recordFile));initial.desktopAppPid=123;f.put(recordFile,initial);
- recordDeploymentDesktopReadback(f.stateDir,{authorize:true,challengeId:a.challenge.id,value:a.challenge.desktopValue});
+ recordDeploymentDesktopReadback(f.stateDir,{authorize:true,challengeId:a.challenge.id,value:a.challenge.desktopValue,pid:123,windowId:45});
  const target={...f.target,cwd:f.root,shell:'/bin/sh',shells:['/bin/sh'],exec:{transport:'stdio',binary:'/bin/false'},computer:{enabled:true,transport:'stdio',binary:'/bin/false'}};
  let actions=0;
  const computer={async listTools(){return ['get_window_state','type_text'].map(name=>({name,inputSchema:{type:'object',properties:{},additionalProperties:true}}))},async callTool(name){
   if(name==='type_text'){
    actions++;assert.equal(JSON.parse(fs.readFileSync(recordFile)).desktop.readback,false,'the dispatcher must clear an old manual value before dispatch');
-   recordDeploymentDesktopReadback(f.stateDir,{authorize:true,challengeId:a.challenge.id,value:a.challenge.desktopValue});
+   recordDeploymentDesktopReadback(f.stateDir,{authorize:true,challengeId:a.challenge.id,value:a.challenge.desktopValue,pid:123,windowId:45});
    assert.equal(readDeploymentAcceptance(f.stateDir).desktop.status,'pending','DOM input before a successful tool result is insufficient');
    return {content:[]};
   }

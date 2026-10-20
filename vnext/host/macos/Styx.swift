@@ -424,6 +424,8 @@ final class SetupWindowController: NSWindowController, WKNavigationDelegate, WKU
     #else
     var setupWindow: SetupWindowController?
     #endif
+    var explicitQuitRequested = false
+    var terminationPending = false
     var terminationApproved = false
     var setupBuffer = ""
     var setupOpenRequested = false
@@ -674,13 +676,23 @@ final class SetupWindowController: NSWindowController, WKNavigationDelegate, WKU
         stop()
         do { try start() } catch { statusLine?.title = "Restart blocked: \(error)" }
     }
-    @objc func quit() { NSApp.terminate(nil) }
+    @objc func quit() { explicitQuitRequested = true; NSApp.terminate(nil) }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         #if STYX_PRODUCT_UI
-        if !terminationApproved, let url = setupURL {
+        if terminationPending { return .terminateLater }
+        if explicitQuitRequested && !terminationApproved && setupURL == nil {
+            let alert = NSAlert()
+            alert.messageText = "Styx could not finish quitting"
+            alert.informativeText = "The local control connection is unavailable, so login recovery cannot yet be checked. Reopen Styx settings and retry Quit."
+            alert.runModal()
+            return .terminateCancel
+        }
+        if explicitQuitRequested && !terminationApproved, let url = setupURL {
             if setupWindow == nil { setupWindow = ProductWindowController(sessionURL: url) }
+            terminationPending = true
             setupWindow?.prepareToQuit { [weak self] approved in
                 guard let owner = self else { sender.reply(toApplicationShouldTerminate: false); return }
+                owner.terminationPending = false
                 owner.terminationApproved = approved
                 if approved { owner.stopSetup(); owner.stop() }
                 sender.reply(toApplicationShouldTerminate: approved)

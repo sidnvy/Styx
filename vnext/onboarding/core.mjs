@@ -326,7 +326,7 @@ export {planHostUpdate,readHostUpdate,applyHostUpdate,recoverHostUpdate} from '.
 export {readDeploymentAcceptance,beginDeploymentAcceptance,confirmDeploymentAcceptance,recordDeploymentDesktopReadback,readDeploymentConnectionHandoff,prepareDeploymentConnectionHandoff} from './account-acceptance.mjs';
 export {readDeploymentPlugin,setDeploymentPluginProfile,exportDeploymentPlugin,recordDeploymentPluginAction} from './plugin-flow.mjs';
 export {readDeploymentPermissions} from './permissions.mjs';
-export {startDeploymentForeground,stopDeploymentForeground,readDeploymentForeground} from './foreground.mjs';
+export {startDeploymentForeground,stopDeploymentForeground,observeDeploymentForeground as readDeploymentForeground} from './foreground.mjs';
 export function readDeploymentOnboardingPreference(stateDir){
  const {state}=load(stateDir),decision=state.onboardingDecisions?.background;
  return {background:decision?.configSha256===state.configSha256&&['foreground','login'].includes(decision.choice)?decision.choice:'not_decided',configurationBound:decision?.configSha256===state.configSha256};
@@ -337,3 +337,7 @@ export function setDeploymentOnboardingPreference(stateDir,options={}){
 }
 
 export {readDeploymentAppLifecycle,controlDeploymentAppLifecycle} from './app-lifecycle.mjs';
+
+export {planDeviceIngressChange,applyDeviceIngressChange,rollbackDeviceIngressChange} from './device-ingress-change.mjs';
+
+export {changeDeploymentCapabilities,readDeploymentCapabilities,rollbackDeploymentCapabilities} from './capabilities.mjs';

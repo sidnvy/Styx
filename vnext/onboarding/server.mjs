@@ -153,7 +153,7 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
    }catch{send(409,{error:'observation_unavailable'})}return;
   }
   if(req.method!=='POST'){send(405,{error:'method_refused'});return}
-  if(!['/api/app/quit','/api/app/login','/api/plugin/profile','/api/plugin/export','/api/plugin/record','/api/foreground','/api/browser/prepare','/api/journey/background-preference','/api/connection-handoff','/api/acceptance/begin','/api/acceptance/confirm','/api/acceptance/desktop-readback','/api/host-update/plan','/api/host-update/status','/api/host-update/apply','/api/host-update/recover','/api/runtime-change/status','/api/runtime-change/plan','/api/runtime-change/apply','/api/runtime-change/recover','/api/native-migration/plan','/api/native-migration/apply','/api/native-migration/rollback','/api/device-ingress/plan','/api/device-ingress/verify','/api/create','/api/devices','/api/default-device','/api/device/revoke','/api/capabilities','/api/tunnel/configure','/api/tunnel/start','/api/tunnel/stop','/api/background','/api/local-setup','/api/advance','/api/pause','/api/start','/api/verify-gateway','/api/service','/api/pairing-link/inspect','/api/pairing-link/accept','/api/pairing-link/create','/api/pending/list','/api/pending/approve'].includes(url.pathname)){send(404,{error:'not_found'});return}
+  if(!['/api/app/quit','/api/app/login','/api/plugin/profile','/api/plugin/export','/api/plugin/record','/api/foreground','/api/browser/prepare','/api/journey/background-preference','/api/connection-handoff','/api/acceptance/begin','/api/acceptance/confirm','/api/acceptance/desktop-readback','/api/host-update/plan','/api/host-update/status','/api/host-update/apply','/api/host-update/recover','/api/runtime-change/status','/api/runtime-change/plan','/api/runtime-change/apply','/api/runtime-change/recover','/api/native-migration/plan','/api/native-migration/apply','/api/native-migration/rollback','/api/device-ingress/plan','/api/device-ingress/verify','/api/create','/api/devices','/api/default-device','/api/device/revoke','/api/capabilities','/api/capabilities/rollback','/api/tunnel/configure','/api/tunnel/start','/api/tunnel/stop','/api/background','/api/local-setup','/api/advance','/api/pause','/api/start','/api/verify-gateway','/api/service','/api/pairing-link/inspect','/api/pairing-link/accept','/api/pairing-link/create','/api/pending/list','/api/pending/approve'].includes(url.pathname)){send(404,{error:'not_found'});return}
   if(busy){send(409,{error:'operation_in_progress'});return}busy=true;
   try{
    const data=await body(req,url.pathname==='/api/plugin/profile'?400*1024:65536);
@@ -184,7 +184,7 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
     send(200,{handoff:result});return;
    }else if(['/api/acceptance/begin','/api/acceptance/confirm','/api/acceptance/desktop-readback'].includes(url.pathname)){
     const which=url.pathname.split('/').at(-1),name=which==='begin'?'beginDeploymentAcceptance':which==='confirm'?'confirmDeploymentAcceptance':'recordDeploymentDesktopReadback';
-    keys(data,which==='begin'?['authorize']:which==='confirm'?['authorize','challengeId','observedInTargetChat']:['authorize','challengeId','value']);
+    keys(data,which==='begin'?['authorize']:which==='confirm'?['authorize','challengeId','observedInTargetChat']:['authorize','challengeId','value','pid','windowId']);
     if(data.authorize!==true||typeof api[name]!=='function')fail('acceptance_authorization_required');
     send(200,{acceptance:publicAcceptance(await api[name](stateDir,data),{includeChallenge:true})});return;
    }else if(url.pathname==='/api/host-update/plan'){
@@ -232,6 +232,8 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
     keys(data,['authorize','deviceId']);if(typeof api.setDeploymentDefault!=='function')fail('device_settings_unavailable');await api.setDeploymentDefault(stateDir,data);send(200,{status:'updated'});return;
    }else if(url.pathname==='/api/browser/prepare'){
     keys(data,['authorize','recover']);if(data.authorize!==true||data.recover!==undefined&&typeof data.recover!=='boolean'||typeof api.prepareDeploymentBrowser!=='function')fail('explicit_browser_preparation_authorization_required');send(200,{browser:await api.prepareDeploymentBrowser(stateDir,{authorize:true,...(data.recover!==undefined?{recover:data.recover}:{})})});return;
+   }else if(url.pathname==='/api/capabilities/rollback'){
+    keys(data,['authorize','transactionId']);const result=await api.rollbackDeploymentCapabilities(stateDir,data);send(200,{capabilities:result});return;
    }else if(url.pathname==='/api/capabilities'){
     keys(data,['authorize','computer','browser']);const result=await changeDeploymentCapabilities(stateDir,data,{trustedMacPreviewApp:macPreviewApp});send(200,{capabilities:result});return;
    }else if(url.pathname==='/api/tunnel/configure'){
@@ -288,7 +290,7 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
     await api.stopDeploymentGateway(stateDir);
    }
    send(200,{deployment:publicDeployment(await api.readDeployment(stateDir))});
-  }catch(error){const safe=['browser_enabled_host_bundle_required','approved_browser_host_required','browser_profile_binding_changed','browser_preparation_scope_changed','browser_preparation_management_operation_in_progress','browser_capability_migration_not_implemented_preserve_existing_identity','foreground_host_handoff_required','tunnel_running_or_interrupted','tunnel_client_integrity_failed','background_uncertain_requires_reconciliation','capability_uncertain_requires_reconciliation','local_owner_capability_change_only','host_state_not_safe_for_capability_change'];send(409,{error:safe.includes(error?.message)?error.message:'operation_failed_check_status'})}finally{busy=false}
+  }catch(error){const safe=['browser_enabled_host_bundle_required','approved_browser_host_required','browser_profile_binding_changed','browser_preparation_scope_changed','browser_preparation_management_operation_in_progress','browser_capability_foreground_must_be_stopped','browser_capability_host_must_be_stopped','browser_capability_all_connections_must_be_offline','browser_enabled_host_update_required','foreground_host_handoff_required','tunnel_running_or_interrupted','tunnel_client_integrity_failed','background_uncertain_requires_reconciliation','capability_uncertain_requires_reconciliation','local_owner_capability_change_only','host_state_not_safe_for_capability_change'];send(409,{error:safe.includes(error?.message)?error.message:'operation_failed_check_status'})}finally{busy=false}
  });
  server.requestTimeout=30000;server.headersTimeout=10000;server.maxHeadersCount=30;
  await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(port,'127.0.0.1',resolve)});

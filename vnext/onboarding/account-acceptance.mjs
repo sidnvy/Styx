@@ -7,7 +7,7 @@ import {browserAcceptanceChallenge,browserAcceptanceVerified,acceptanceBinding,a
 const fail=code=>{throw Error(code)};
 const exact=(value,names)=>{if(!value||typeof value!=='object'||Array.isArray(value)||Object.keys(value).some(key=>!names.includes(key)))fail('invalid_acceptance_options')};
 function authorized(value,names){exact(value,names);if(value.authorize!==true)fail('explicit_acceptance_authorization_required')}
-const desktopVerified=record=>!record.desktopRequired||record.desktop?.after===true&&record.desktop?.readback===true&&record.desktop?.actionVerified===true&&!!record.desktop.actionOwner;
+const desktopVerified=record=>!record.desktopRequired||record.desktop?.after===true&&record.desktop?.readback===true&&record.desktop?.actionVerified===true&&!!record.desktop.actionOwner&&record.desktop.readbackPid===record.desktopAppPid&&record.desktop.readbackWindow===record.desktop.actionAttempt?.window;
 function projection(record){
  const proof=record.requestProof?.status==='verified',desktop=desktopVerified(record),browser=browserAcceptanceVerified(record),confirmed=record.targetChatConfirmation?.status==='user_confirmed';
  return {schema:1,status:proof&&desktop&&browser&&confirmed?'user_confirmed_with_mcp_evidence':proof||record.browserRequired&&browser?'request_observed':'awaiting_chat_request',
@@ -35,10 +35,10 @@ export function beginDeploymentAcceptance(stateDir,options={}){
  });
 }
 export function recordDeploymentDesktopReadback(stateDir,options={}){
- authorized(options,['authorize','challengeId','value']);return withAcceptanceLock(stateDir,()=>{
+ authorized(options,['authorize','challengeId','value','pid','windowId']);return withAcceptanceLock(stateDir,()=>{
   const {record}=currentAcceptanceEvidence(stateDir);
-  if(record.id!==options.challengeId||!record.desktopRequired||typeof options.value!=='string'||options.value.length>256)fail('desktop_acceptance_scope_mismatch');
-  record.desktop={...record.desktop,readback:options.value===record.desktopValue};writeAcceptanceEvidence(stateDir,record);return projection(record);
+  if(record.id!==options.challengeId||!record.desktopRequired||typeof options.value!=='string'||options.value.length>256||!Number.isSafeInteger(options.pid)||options.pid!==record.desktopAppPid||!Number.isSafeInteger(options.windowId)||options.windowId<1)fail('desktop_acceptance_scope_mismatch');
+  record.desktop={...record.desktop,readback:options.value===record.desktopValue,readbackPid:options.pid,readbackWindow:options.windowId};writeAcceptanceEvidence(stateDir,record);return projection(record);
  });
 }
 export function confirmDeploymentAcceptance(stateDir,options={}){

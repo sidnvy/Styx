@@ -544,6 +544,18 @@ test('Browser-only v2 grant preserves desktop grant, identity and credentials; v
  const request=change=>{const body={device_id:identity.device_id,fingerprint:identity.fingerprint,generation:f.gateway.registry.resolve(identity.device_id).generation,...change,public_key_pem:identity.public_key_pem};body.signature=sign('sha256',Buffer.from(capabilityPayload(body)),{key,padding:constants.RSA_PKCS1_PSS_PADDING,saltLength:32}).toString('base64url');return body};
  const browser=request({enable_browser:true});assert.match(capabilityPayload(browser),/styx-device-capabilities-v2/);
  await assert.rejects(f.admin('capabilities',{...browser,enable_computer:false}),/invalid_identity_proof/);
+ const originalStatus=f.gateway.relay.status.bind(f.gateway.relay);
+ assert.deepEqual(f.controller.devices()[0].connections,{exec:false,computer:false,browser:false});
+ for(const lane of ['exec','computer','browser']){
+  f.gateway.relay.status=()=>({...originalStatus(initial),[lane]:'connected'});
+  assert.equal(f.controller.devices()[0].connections[lane],true);
+  await assert.rejects(f.admin('capabilities',browser),/browser_capability_all_connections_must_be_offline/);
+  assert.equal(f.gateway.registry.resolve(identity.device_id).generation,initial.generation);
+ }
+ f.gateway.relay.status=()=>({exec:'unknown',computer:'offline',browser:'unknown'});
+ assert.equal(f.controller.devices()[0].connections.exec,null);
+ await assert.rejects(f.admin('capabilities',browser),/browser_capability_all_connections_must_be_offline/);
+ f.gateway.relay.status=originalStatus;
  const enabled=(await f.admin('capabilities',browser)).body;assert.equal(enabled.capabilities.browser,true);assert.equal(enabled.capabilities.computer,true);
  let target=f.gateway.registry.resolve(identity.device_id);assert.deepEqual(target.computer,initial.computer);assert.deepEqual(target.exec,initial.exec);
  await assert.rejects(f.admin('capabilities',browser),/revision_mismatch/);

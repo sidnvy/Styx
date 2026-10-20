@@ -315,14 +315,14 @@ test('local API accepts bounded Browser intent and exposes only its requested ro
  const projected=publicDeployment({mode:'create-local',roles:{gateway:'local',host:'local',exec:'enabled',computer:'disabled',browser:'requested'},browser:{profileRoot:'/private/profile'},steps:[]});
  assert.equal(projected.roles.browser,'requested');assert.equal(projected.roles.readiness,'not_inferred');assert.doesNotMatch(JSON.stringify(projected),/profileRoot|private\/profile/);
 });
-test('HTTP pending approval requires explicit Browser scope and existing Browser migration is honestly blocked',async()=>{
+test('HTTP pending approval requires explicit Browser scope and unprepared Browser changes are refused',async()=>{
  const id='a'.repeat(32),fingerprint='b'.repeat(64);let approved;
  const f=await fixture({core:{listDeploymentPending:()=>[{request_id:id,fingerprint,browser_requested:true,computer_requested:false}],approveDeploymentPending:(_dir,options)=>{approved=options;return {status:'approved'}}}});
  try{
   const data={authorize:true,requestId:id,fingerprint,enableComputer:false};
   assert.equal((await f.post('/api/pending/approve',data)).status,409);assert.equal(approved,undefined);
   assert.equal((await f.post('/api/pending/approve',{...data,enableBrowser:true})).status,200);assert.equal(approved.enableBrowser,true);assert.equal(approved.enableComputer,false);
-  const blocked=await f.post('/api/capabilities',{authorize:true,browser:true});assert.equal(blocked.status,409);assert.equal((await blocked.json()).error,'browser_capability_migration_not_implemented_preserve_existing_identity');
+  const blocked=await f.post('/api/capabilities',{authorize:true,browser:true});assert.equal(blocked.status,409);assert.equal((await blocked.json()).error,'operation_failed_check_status');
  }finally{await f.cleanup()}
 });
 
@@ -341,4 +341,17 @@ test('acceptance HTTP projection preserves the independent Browser source and fi
  const {browserAcceptanceChallenge}=await import('../../shared/onboarding-evidence.mjs'),browser=browserAcceptanceChallenge('e'.repeat(32));
  const f=await fixture({core:{readDeploymentAcceptance:()=>({status:'request_observed',requestProof:{status:'pending'},targetChatConfirmation:{status:'pending'},desktop:{status:'not_required'},browser:{status:'verified',required:true,source:'authenticated_mcp_browser_result'},complete:false,challenge:{id:'a'.repeat(32),expiresAt:Date.now()+5000,prompt:'fixed generated challenge',command:'fixed exec command',environmentId:'device_123',browser},ownerHash:'PRIVATE_OWNER_HASH'})}});
  try{const value=(await(await f.get('/api/acceptance')).json()).acceptance;assert.equal(value.browser.status,'verified');assert.equal(value.requestProof.status,'pending');assert.deepEqual(value.challenge.browser,browser);assert.equal(value.complete,false);assert.equal(value.targetChatConfirmation.providerIdentity,'not_verified');assert.doesNotMatch(JSON.stringify(value),/PRIVATE_OWNER_HASH/);}finally{await f.cleanup()}
+});
+
+
+test('capability rollback uses the same Core and rejects foreign state or unauthenticated writes',async()=>{
+ let calls=0;
+ const f=await fixture({core:{rollbackDeploymentCapabilities:(dir,options)=>{calls++;assert.equal(dir,path.join(f.root,'deployment'));assert.deepEqual(options,{authorize:true,transactionId:'a'.repeat(32)});return {status:'rolled_back'}}}});
+ try{
+  const data={authorize:true,transactionId:'a'.repeat(32)};
+  assert.equal((await f.post('/api/capabilities/rollback',data,{'X-Styx-CSRF':''})).status,403);
+  assert.equal((await f.post('/api/capabilities/rollback',{...data,stateDir:'/other'})).status,409);
+  assert.equal(calls,0);
+  assert.equal((await f.post('/api/capabilities/rollback',data)).status,200);assert.equal(calls,1);
+ }finally{await f.cleanup()}
 });

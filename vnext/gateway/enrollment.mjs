@@ -281,6 +281,7 @@ export class EnrollmentController {
         computer:x.status==='approved'&&x.target.computer.enabled,browser:x.status==='approved'&&x.target.browser?.enabled===true},
       status:x.status,generation:x.target.generation,
       online:x.status==='approved'&&Boolean(this.relay?.connected(x.id)),
+      connections:Object.fromEntries(['exec','computer','browser'].map(lane=>{const observed=x.status==='approved'?this.relay?.status?.(x.target)?.[lane]:'offline';return [lane,observed==='connected'?true:observed==='offline'?false:lane!=='exec'&&x.target[lane]?.enabled!==true?false:null]})),
       fingerprint:x.fingerprint
     }));
   }
@@ -313,6 +314,14 @@ export class EnrollmentController {
       verify('sha256',Buffer.from(capabilityPayload(body)),{key:pub,padding:constants.RSA_PKCS1_PSS_PADDING,saltLength:32},Buffer.from(body.signature,'base64url'));}catch{}
     assert(valid,'invalid_identity_proof',403);
     const previous=record.target;
+    if(browserChanged){
+      // Recheck in this synchronous mutation turn: an offline preflight in Core
+      // cannot fence a Host that connects before the signed approval arrives.
+      const lanes=this.relay?.status?.(previous);
+      assert(lanes?.exec==='offline'&&['computer','browser'].every(lane=>
+        lanes?.[lane]==='offline'||previous[lane]?.enabled!==true&&lanes?.[lane]!=='connected'),
+        'browser_capability_all_connections_must_be_offline',409);
+    }
     const target={...previous,generation:'capability-'+randomBytes(8).toString('hex'),
       ...(computerChanged?{computer:{enabled:body.enable_computer,...(body.enable_computer?{transport:'outbound',max_connections:2}:{})}}:{}),
       ...(browserChanged?{browser:{enabled:body.enable_browser,...(body.enable_browser?{transport:'outbound'}:{})}}:{})};
