@@ -2,6 +2,19 @@
 
 This is a development integration checkpoint, not a production release or complete first-install acceptance.
 
+## PilotMac onboarding correction — dev5
+
+Current installed App: `0.3.0-v6-dev.20261020.5`, source `bff132d`. The user's first setup had successfully prepared and paired the Host, then recorded `host.doctor: blocked / codex_executor_unavailable`. The initial probe's precise failure cause was not recorded. A later real version read succeeded, but aggregate local setup refused to repeat even this read-only blocked check, making Continue ineffective.
+
+- The existing Core explicitly rechecked that doctor successfully and selected the same local default device. Configuration, identity, Host credential and Gateway certificate bytes were verified unchanged; no pairing replay or permission changes occurred.
+- `c3a2e28` allows a new explicit local-setup call to repeat only a blocked read-only doctor. Completed installation/pairing and uncertain steps remain protected. Public status and journey share this retry policy and expose only whitelisted failure reasons. Native startup defers a selected but unprepared Browser.
+- `bff132d` uses an 18pt transparent menu-bar template derived from the supplied logo. Preparation shows three user stages, with implementation details collapsed. Safe rechecks have clear explanations/buttons. Restoring the App reviews Browser preparation, foreground ownership and separate native permissions before selecting the next page.
+- Related onboarding regression: 346 tests, 340 passed, 6 environment skips, zero failures. Native production and separate `STYX_TESTING` builds compiled with warnings as errors; only the test App ran self-tests. The real supplied-artwork template was exported and checked visually and for alpha.
+- The final packaged Mac flow passed real TLS pairing, reopen-before-Browser deferral with retained identity, real headed Chromium/Exec, explicit reconnect and plugin-profile saving. Read-only DMG signature/source checks and native window fixture passed. These are isolated local checks, not target-account or native Cua acceptance.
+- Updated only the installed App after a private rollback backup at `/Users/it-bootstrap/Library/Application Support/Styx-Test-Backups/20261020-175834-dev5-_kkvzzl0`. Kept the existing configuration, identities, credentials, signed Host release and its publisher trust. The dev5 DMG is on Desktop. Normal production startup/reopen has one visible native product window.
+
+Evidence: parent task `outputs/v6-candidate-dev5/acceptance-receipt.json`. Manual user onboarding, actual Cua operations, target chat/plugin calls, signing/permission responsibility and the other platform/lifecycle gates below remain pending. This same-user development update does not establish fresh-user permissions or a signed release migration.
+
 ## PilotMac development installation — later checkpoint
 
 The tested/packaged revision is `1dbccf8`, release `0.3.0-v6-dev.20261020.4`. The earlier sections below retain the initial integration evidence.
