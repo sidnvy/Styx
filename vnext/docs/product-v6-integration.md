@@ -2,6 +2,22 @@
 
 This is a development integration checkpoint, not a production release or complete first-install acceptance.
 
+## PilotMac development installation — later checkpoint
+
+The tested/packaged revision is `1dbccf8`, release `0.3.0-v6-dev.20261020.4`. The earlier sections below retain the initial integration evidence.
+
+- `922aad8` prevents stale shared HTTPS socket reuse during onboarding verification/enrollment by using a fresh validated TLS connection; no enrollment replay or trust relaxation. Real packaged macOS setup reproduced the failure before this fix.
+- `0c76e58` observes the later App-owned GUI descriptor and connects an approved Computer lane without a second Core start. Scope changes, stopping and deferred observations are covered; this is not native Cua action acceptance.
+- `1dbccf8` removes source image metadata from the generated plugin PNG and validates it with the existing Core image contract before sealing the App. The original supplied brand artwork is retained. The real package previously failed plugin-profile saving at this boundary.
+- Final Node 22.23.2 regression: **686 tests, 659 passed, 27 skipped, zero failures/cancellations**. Native/environment skips remain unverified. Raw failed test-runner and package attempts are retained separately.
+- Final packaged macOS Node 22.23.3 flow used a new temporary Gateway and Host on **the same PilotMac**, with real TLS pairing, signed Host preparation, matching App/CLI role status, real Exec output/exit, real managed Chromium navigation/snapshot, explicit stop/reconnect with unchanged identity/credentials, and plugin presentation saving. It did not use piermini, NAB, an existing deployment identity or a real chat account.
+- The final DMG was mounted read-only: ad-hoc signature and all 163 packaged source hashes passed. Both Browser production dependency closures imported, and a read-only native welcome-window fixture against the packaged authenticated Core passed.
+- Under the user's explicit authorization to clear the old installation on the existing `it-bootstrap` account, old App/config/preferences/runtime were privately backed up on PilotMac before replacing `/Applications/Styx.app`. The DMG is on that user's Desktop. Normal LaunchServices startup now runs the new App and bundled Core; setup was presented, and no new deployment, Host identity or Cua process had been created at handoff.
+
+Backup: `/Users/it-bootstrap/Library/Application Support/Styx-Test-Backups/20261020-172157-m8ulu3j7`. It contains the old App, support directory, preferences, Cua runtime and a receipt; credentials remain on PilotMac. TCC and Keychain were not reset. Because this is the same macOS user, inherited permission history cannot establish a fresh-user permission flow. Production signing, notarization, manual native onboarding, Cua actions, target-account plugin/chat calls, multi-machine pairing and restart/login/logout/crash/network acceptance remain pending.
+
+Evidence: parent task `outputs/v6-candidate-dev4/acceptance-receipt.json` and its hash-bound logs. No GitHub main merge or production deployment occurred; piermini and NAB were unchanged. The remaining-work list below still applies, with the rebuild and preparatory isolated Core tests now complete.
+
 ## Inputs and integration
 
 - Architecture contract: `13bf0af`.
@@ -31,10 +47,10 @@ Raw logs and source hashes are retained in the parent task's `outputs/v6-integra
 
 ## Remaining work, in order
 
-1. Rebuild the macOS developer candidate from the integrated revision. In an isolated fresh user/environment, verify the complete native onboarding, platform Tunnel credentials, plugin create/reuse, and actual Exec/Browser/Cua calls from the intended chat account. Login, MFA and system permission grants are user actions.
+1. Use the installed macOS developer candidate for complete manual native onboarding, platform Tunnel credentials, plugin create/reuse, and actual Exec/Browser/Cua calls from the intended chat account. Separately verify system permission behavior in a fresh macOS user. Login, MFA and system permission grants are user actions.
 2. Verify close-window versus Quit, login/logout/reboot, separate App/Cua/Core crashes, stale sockets/locks and network recovery. Stable permission responsibility across upgrade/rollback still requires a real signing identity; ad-hoc builds do not establish it.
 3. Complete the Add Computer secure entry transaction and native UI while preserving the existing loopback chat endpoint. Existing chat tunnel/plugin ingress migration remains blocked. Verify TLS renewal, address/identity changes, expiration, confirmation, revocation and old credential rejection. The chat tunnel is not a Host/pairing relay.
 4. Finish Mac/Windows managed Host updates and active-work admission/draining. The current product update execution is restricted to supported stopped Linux deployments. Verify migration and rollback without replacing identity, credentials or browser profiles.
 5. Verify Mac primary + Windows Host and headless primary + desktop Host. A complete Windows native App is still absent. Existing CAS Run/Wake is retained; ordinary App autonomous-task integration, long-duration resource cleanup and cross-chat Browser login behavior need separate product/acceptance work.
 
-No GitHub main merge, production deployment, installed App replacement or system permission change is part of this checkpoint. No piermini/NAB online services were changed.
+The initial checkpoint did not replace an installed App. The later PilotMac development installation is recorded above. No GitHub main merge, production deployment or system permission change occurred. No piermini/NAB online services were changed.
