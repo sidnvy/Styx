@@ -62,7 +62,10 @@ export function projectOnboardingJourney({deployment,background,foreground,capab
  const prepared=!!deployment&&localSteps.length>0&&localSteps.every(s=>s.status==='succeeded');
  const uncertain=localSteps.some(s=>['failed','uncertain','blocked'].includes(s.status));
  const current=background?.observation==='current';
- const f={status:choose(foreground?.status,['started','connected','using_service','stopping','needs_attention','not_running'],'not_running'),observation:'current_process',execConnection:choose(foreground?.execConnection,['connected','connecting','disconnected','not_connected','not_observed','not_required'],'not_observed'),desktopConnection:choose(foreground?.desktopConnection,['connected','connecting','disconnected','not_observed','not_requested','session_unavailable_or_unobserved'],'not_observed'),toolHealth:'not_verified'};
+ // Keep the observer's provenance: an authenticated owner response may come
+ // from another process. Connector transport is distinct from tool execution
+ // evidence, and absent observations must not become current-process claims.
+ const f={status:choose(foreground?.status,['started','connected','using_service','stopping','needs_attention','not_running'],'not_running'),observation:choose(foreground?.observation,['current_process','authenticated_foreground_owner','cross_process'],'not_observed'),execConnection:choose(foreground?.execConnection,['connected','connecting','disconnected','not_connected','not_observed','not_required'],'not_observed'),desktopConnection:choose(foreground?.desktopConnection,['connected','connecting','disconnected','not_observed','not_requested','session_unavailable_or_unobserved'],'not_observed'),browserConnection:choose(foreground?.browserConnection,['connected','connecting','preparing','disconnected','connection_failed','preparation_failed','not_observed','not_requested'],'not_observed'),toolHealth:'not_verified'};
  const foregroundReady=f.status==='connected'&&f.execConnection==='connected'||!hasHost&&f.status==='started';
  const exec=current&&background.hostConnection==='exec_connected'||foregroundReady&&hasHost?'connected':localSteps.some(s=>s.id==='host.doctor'&&s.status==='succeeded')?'preflight_passed':hasHost?'not_ready':'not_requested';
  const a=publicAcceptance(acceptance),handoff=publicConnectionHandoff(connectionHandoff);

@@ -136,3 +136,42 @@ test('v6 defaults to App-owned running without a background choice or service in
  const j=projectOnboardingJourney({deployment:ready(),foreground:{status:'connected',execConnection:'connected'}});
  assert.equal(j.background.preference,'foreground');assert.equal(row(j,'background').status,'completed');assert.equal(j.steps.some(s=>s.nextAction==='choose_background_preference'),false);assert.equal(j.account.status,'not_verified');
 });
+
+
+test('foreground projection preserves authenticated owner provenance and each browser transport state without claiming tool health',()=>{
+ const deployment=ready();deployment.roles.browser='requested';
+ for(const browserConnection of ['connected','connecting','preparing','disconnected','connection_failed','preparation_failed','not_observed','not_requested']){
+  const j=projectOnboardingJourney({deployment,foreground:{status:'connected',observation:'authenticated_foreground_owner',execConnection:'connected',desktopConnection:'connected',browserConnection,toolHealth:'verified'},permissionObservation:{source:'current_native_app_preflight',accessibility:'granted',screenRecording:'granted'}});
+  assert.equal(j.foreground.observation,'authenticated_foreground_owner');
+  assert.equal(j.foreground.browserConnection,browserConnection);
+  assert.equal(j.foreground.toolHealth,'not_verified');
+  assert.equal(j.readiness.exec.status,'connected');
+  assert.equal(j.readiness.exec.reason,'authenticated_exec_lane_observed_not_command_health');
+  assert.equal(j.readiness.browser.status,'not_verified');
+  assert.equal(j.readiness.desktop.status,'not_verified');
+  assert.equal(j.acceptance.complete,false);assert.equal(j.account.status,'not_verified');
+ }
+});
+test('missing and failed foreground observations are never labeled current process or granted browser readiness',()=>{
+ for(const observation of ['current_process','cross_process']){
+  const j=projectOnboardingJourney({deployment:ready(),foreground:{status:'needs_attention',observation,execConnection:'not_observed',browserConnection:'not_observed'}});
+  assert.equal(j.foreground.observation,observation);assert.equal(j.foreground.browserConnection,'not_observed');
+  assert.equal(j.readiness.exec.status,'preflight_passed');assert.equal(j.account.status,'not_verified');
+ }
+ for(const foreground of [undefined,{observation:'SECRET_PATH',browserConnection:'SECRET_TOKEN'}]){
+  const j=projectOnboardingJourney({deployment:ready(),foreground});
+  assert.equal(j.foreground.observation,'not_observed');assert.equal(j.foreground.browserConnection,'not_observed');
+  assert.doesNotMatch(JSON.stringify(j),/SECRET_PATH|SECRET_TOKEN/);
+ }
+});
+test('journey and diagnostics retain authenticated cross-process browser transport read-only',async t=>{
+ const root=temp(t),stateDir=path.join(root,'state');ensurePrivateDirectory(stateDir);writePrivateFile(path.join(stateDir,'sentinel'),'unchanged');
+ const deployment=ready();deployment.roles.browser='requested';
+ const foreground={schema:1,status:'connected',observation:'authenticated_foreground_owner',execConnection:'connected',desktopConnection:'not_requested',browserConnection:'connected',secret:'SECRET_OWNER_TOKEN',port:12345,ownerGeneration:'a'.repeat(64)};
+ const options={core:{readDeployment:()=>deployment,readDeploymentForeground:()=>foreground},backgroundRead:()=>null,tunnelRead:()=>null};
+ const before=snapshot(root),j=await readOnboardingJourney(stateDir,options),d=await readOnboardingDiagnostics(stateDir,options);
+ assert.deepEqual(j.foreground,{status:'connected',observation:'authenticated_foreground_owner',execConnection:'connected',desktopConnection:'not_requested',browserConnection:'connected',toolHealth:'not_verified'});
+ assert.deepEqual(d.foreground,j.foreground);assert.equal(d.readOnly,true);assert.equal(d.readiness.browser.status,'not_verified');
+ assert.equal(j.acceptance.browser.status,'pending');assert.equal(j.acceptance.complete,false);
+ assert.doesNotMatch(JSON.stringify({j,d}),/SECRET_OWNER_TOKEN|ownerGeneration|12345/);assert.deepEqual(snapshot(root),before);
+});
