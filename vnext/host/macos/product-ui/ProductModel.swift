@@ -9,6 +9,32 @@ func productText(_ chinese: String, _ english: String) -> String {
 
 enum ProductPage: String, CaseIterable { case welcome, invitation, capabilities, preparation, permissions, chat, overview, computers, settings }
 
+// A request is only a local UI event, never evidence of an OS grant. Keep the
+// history in this process so declining a prompt cannot cause a prompt loop,
+// including if the product window is recreated. Nothing is persisted to Core.
+@MainActor final class ProductPermissionActions {
+    static let system = ProductPermissionActions(request: { screen in
+        if screen { _ = CGRequestScreenCaptureAccess() }
+        else { _ = AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": true] as CFDictionary) }
+    }, openSettings: { screen in
+        let value = screen ? "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture" : "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility"
+        if let url = URL(string: value) { NSWorkspace.shared.open(url) }
+    })
+    private var requested: Set<Bool> = []
+    private let request: (Bool) -> Void
+    private let openSettings: (Bool) -> Void
+
+    init(request: @escaping (Bool) -> Void, openSettings: @escaping (Bool) -> Void) {
+        self.request = request; self.openSettings = openSettings
+    }
+    func wasRequested(_ screen: Bool) -> Bool { requested.contains(screen) }
+    func requestOnce(_ screen: Bool) {
+        guard requested.insert(screen).inserted else { return }
+        request(screen)
+    }
+    func open(_ screen: Bool) { openSettings(screen) }
+}
+
 enum ProductPreparationPhase: String { case components, connection, browser }
 struct ProductPreparationStage: Identifiable {
     enum State: Equatable { case pending, working, completed, blocked, awaitingApproval, needsReview, notApproved }
@@ -161,6 +187,7 @@ enum ProductRestorationPolicy {
     @Published var pluginURL = ""
     @Published var pluginIcon: ProductJSON = .null
     @Published var pluginDraftEdited = false
+    @Published var exportedPluginURL: URL?
     @Published var handoffCredential = ""
     @Published var handoffTarget = ""
     @Published var desktopValue = ""
@@ -181,6 +208,7 @@ enum ProductRestorationPolicy {
     private var copiedCredentialChangeCount: Int?
     private var restoredPage = false
     private let permissionReader: () -> (accessibility: Bool, screenRecording: Bool)
+    private let permissionActions: ProductPermissionActions
     var recoverComputerUse: (() async throws -> Void)?
 
     var deployment: ProductDeployment? { ProductDeployment(status["deployment"]) }
@@ -207,9 +235,10 @@ enum ProductRestorationPolicy {
     }
     init(sessionURL: URL, permissionReader: @escaping () -> (accessibility: Bool, screenRecording: Bool) = {
         (AXIsProcessTrusted(), CGPreflightScreenCaptureAccess())
-    }) throws {
+    }, permissionActions: ProductPermissionActions? = nil) throws {
         client = try ProductCoreClient(sessionURL: sessionURL)
         self.permissionReader = permissionReader
+        self.permissionActions = permissionActions ?? .system
     }
 
     func bootstrap() async {
@@ -390,12 +419,16 @@ enum ProductRestorationPolicy {
             page = joined ? .overview : .chat
         }
     }
-    func openPermission(_ screen: Bool) {
-        // Separate OS-owned prompts, only after the matching explicit action.
-        if screen { _ = CGRequestScreenCaptureAccess() }
-        else { _ = AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": true] as CFDictionary) }
-        openOfficial(screen ? "x-apple.systempreferences:com.apple.preference.security?Privacy_ScreenCapture" : "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility")
+    func permissionWasRequested(_ screen: Bool) -> Bool { permissionActions.wasRequested(screen) }
+    func requestPermission(_ screen: Bool) {
+        observePermissions()
+        guard !(screen ? screenGranted : axGranted) else { return }
+        // Only the matching explicit action requests permission. macOS owns
+        // this prompt and any navigation from its Open System Settings button.
+        permissionActions.requestOnce(screen)
+        observePermissions()
     }
+    func openPermission(_ screen: Bool) { permissionActions.open(screen) }
     func inspectInvitation() {
         let input = invite; invite = ""; inspection = .null; joinAcceptance = .null
         perform { [self] in inspection = try await client.write("pairing-link/inspect", ["link": .string(input)]) }
@@ -417,18 +450,6 @@ enum ProductRestorationPolicy {
         }
     }
     func startTunnel() { perform { [self] in _ = try await client.write("tunnel/start", ["authorize": .bool(true)]) } }
-    func savePlugin() {
-        perform { [self] in
-            var icon = pluginIcon
-            if icon == .null, let path = Bundle.main.resourceURL?.appendingPathComponent("brand/styx-plugin-icon.png"),
-               let bytes = try? Data(contentsOf: path), bytes.count <= 256 * 1024 {
-                icon = .object(["mimeType": .string("image/png"), "dataBase64": .string(bytes.base64EncodedString())])
-            }
-            let long = plugin["presentation"]["longDescription"].string ?? productText("通过 Styx 连接你的电脑，使用 CLI、Browser Automation 和 Computer Use。", "Connect your computers with Styx for CLI, Browser Automation and Computer Use.")
-            _ = try await client.write("plugin/profile", ["authorize": .bool(true), "presentation": .object(["displayName": .string(pluginName), "shortDescription": .string(pluginDescription), "longDescription": .string(long), "icon": icon]), "selection": .object(["mode": .string(pluginMode), "accountLabel": .string(accountLabel), "pluginUrl": .string(pluginURL)])])
-            pluginDraftEdited = false
-        }
-    }
     func selectIcon() {
         let panel = NSOpenPanel(); panel.allowedContentTypes = [.png]; panel.allowsMultipleSelection = false; panel.canChooseDirectories = false
         guard panel.runModal() == .OK, let url = panel.url else { return }
@@ -437,23 +458,6 @@ enum ProductRestorationPolicy {
             guard bytes.count <= 256 * 1024 else { throw ProductCoreError.rejected }
             pluginIcon = .object(["mimeType": .string("image/png"), "dataBase64": .string(bytes.base64EncodedString())]); pluginDraftEdited = true
         } catch { self.error = productText("请选择不超过 256 KB 的方形 PNG 图片（48–1024 像素）。", "Choose a square PNG, 48–1024 pixels and no larger than 256 KB.") }
-    }
-    func exportPluginIcon() {
-        let bytes: Data?
-        if let encoded = pluginIcon["dataBase64"].string { bytes = Data(base64Encoded: encoded) }
-        else if let url = Bundle.main.resourceURL?.appendingPathComponent("brand/styx-plugin-icon.png") { bytes = try? Data(contentsOf: url) }
-        else { bytes = nil }
-        guard let bytes = bytes, bytes.count <= 256 * 1024 else { reportFailure(); return }
-        let panel = NSSavePanel(); panel.allowedContentTypes = [.png]; panel.nameFieldStringValue = "styx-icon.png"
-        guard panel.runModal() == .OK, let destination = panel.url else { return }
-        do { try bytes.write(to: destination, options: .atomic) } catch { reportFailure() }
-    }
-    func confirmPluginInstallation() {
-        perform { [self] in
-            var payload: [String: ProductJSON] = ["authorize": .bool(true), "stage": .string("installation")]
-            if !pluginURL.isEmpty { payload["pluginUrl"] = .string(pluginURL) }
-            _ = try await client.write("plugin/record", payload)
-        }
     }
     func revealHandoff() {
         clearSecrets()

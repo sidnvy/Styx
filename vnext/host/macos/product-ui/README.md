@@ -2,7 +2,7 @@
 
 The AppKit owner embeds `ProductView` in `ProductWindowController` with `NSHostingView`.
 All configuration, mutations, execution and receipts remain in the existing Node Core.
-Compile the four Swift files with `Styx.swift`; copy the supplied brand JPEGs and the
+Compile all `product-ui/*.swift`, `BrandGlyph.swift` and `Styx.swift`; copy the supplied brand JPEGs and the
 validated default plugin PNG to `Resources/brand/`.
 
 ## Integration contract
@@ -22,8 +22,10 @@ validated default plugin PNG to `Resources/brand/`.
 
 `ProductCoreClient` is an ephemeral URLSession client with cookies, URL credentials, caches and
 proxies disabled; it rejects redirects. It obtains CSRF through the existing authenticated session
-endpoint and supplies the exact Origin on every request. Route allowlists prevent arbitrary URL
-requests. Raw transport/response error text and secret responses never appear in the status UI.
+endpoint and supplies the exact Origin on every request. Route allowlists and a fixed binary export route prevent arbitrary URL
+requests. ZIP and JSON share the same private session, Origin and CSRF checks; responses
+must match the exact requested URL and MIME type. The archive obeys Core’s existing 2 MiB
+bound and is written without extraction to a native save-panel destination. Raw transport/response error text and secret responses never appear in the status UI.
 The model credential is available only through an explicit handoff action, expires on screen after
 at most 60 seconds and is cleared on close. The clipboard is cleared only if the copied secret is
 still the exact pasteboard content/version; it never destroys unrelated newer clipboard content.
@@ -34,9 +36,12 @@ still the exact pasteboard content/version; it never destroys unrelated newer cl
 - Capabilities → trusted packaged Host defaults and real create/local-setup or join advance.
 - Browser preparation → existing `browser/prepare`, then owned foreground connection.
 - Browser requested but not approved → Core's `not_approved` observation skips Browser preparation and leaves approved Exec available. Computer Use permission routing uses the actual approved foreground Host configuration, never deployment intent.
-- Computer Use permission panels read AX/screen preflight separately and open OS settings on click.
+- Computer Use panels read AX/screen preflight separately. Allow requests only that permission, once per process; the OS owns its prompt and any navigation from it. A separate Settings action only opens the matching pane. The menu navigates to the App permission page without prompting.
 - Platform Tunnel ID/runtime key → `tunnel/configure`, then `tunnel/start`.
-- Plugin presentation/reuse → `plugin/profile`; official direct installation → `plugin/record`.
+- Default ChatGPT connection → official Add custom MCP server → Tunnel → Create as a plugin → install. No mandatory local create/reuse picker or presentation form. Explicit user confirmation creates a missing default local receipt profile, then uses `plugin/record`; saved custom/reused profiles are retained unchanged.
+- Optional plugin ZIP editor → name/description/icon → native save panel → `plugin/profile` only when edited/missing → authenticated binary `plugin/export`. The existing Core performs real local Gateway verification and builds the archive. Metadata and onboarding skill travel in the ZIP; the user uploads and installs in ChatGPT. No automatic platform synchronization or account success is claimed. ZIP Tunnel import compatibility still needs actual target-account validation; the optional route is labelled preview.
+- Entering the optional ZIP editor fills only a missing icon in an unsaved draft using the real packaged brand. Custom icons are retained. Saved-file feedback appears only after atomic writing succeeds; cancelling the native save panel does not mutate Core. Existing reuse profiles stay on their official management path.
+- Connection context changes block ordinary confirmation/export. A separate explicit review action preserves the saved presentation/selection and rebinds the local receipt profile after confirmation; previous account/export receipts become invalid. Computer identity and credentials are not regenerated.
 - Target-chat challenge/results → existing acceptance APIs; independent human target-chat confirmation.
 - Overview/Computers/Chat → observed Core projections; no fabricated success events or activity page.
 - Revocation → explicit NSAlert then `device/revoke`; never removes local identity files.

@@ -92,6 +92,22 @@ func productCoreSelfTest() throws {
     let noLiveConnection = ProductPreparationPolicy.stages(noBrowser, browser: .null, foreground: stopped, activity: nil)
     try require(noLiveConnection[1].state == .pending, "Completed pairing was presented as an observed live connection")
     try require(ProductRestorationPolicy.page(deployment: stalled, localPrepared: true, browser: preparedBrowser, foreground: .object(["status": .string("needs_attention")]), accepted: true, accessibility: true, screenRecording: true) == .preparation, "Uncertain connection recovery skipped review")
+    let defaultPlugin: ProductJSON = .object(["required": .bool(true), "profileSaved": .bool(false), "contextChanged": .bool(false), "presentation": .object(["displayName": .string("Styx")]), "selection": .object(["mode": .string("create"), "accountLabel": .string(""), "pluginUrl": .string("")])])
+    let defaultProfile = try ProductPluginWorkflow.defaultProfileIfMissing(defaultPlugin)
+    try require(defaultProfile?["presentation"] == defaultPlugin["presentation"] && defaultProfile?["selection"] == defaultPlugin["selection"], "Direct connection changed the authoritative default profile")
+    var customized = defaultPlugin.object
+    customized["profileSaved"] = .bool(true)
+    customized["presentation"] = .object(["displayName": .string("Existing custom name"), "icon": .string("retained")])
+    customized["selection"] = .object(["mode": .string("reuse"), "pluginUrl": .string("https://chatgpt.com/plugins/existing"), "accountLabel": .string("Existing account")])
+    let existingProfile = try ProductPluginWorkflow.defaultProfileIfMissing(.object(customized))
+    try require(existingProfile == nil, "Direct confirmation overwrote an existing custom/reused plugin profile")
+    customized["contextChanged"] = .bool(true)
+    let rebound = try ProductPluginWorkflow.reboundProfile(.object(customized))
+    try require(rebound["presentation"] == customized["presentation"] && rebound["selection"] == customized["selection"], "Explicit connection review discarded the existing plugin metadata")
+    for current in [ProductJSON.null, .object(["required": .bool(false)]), .object(["required": .bool(true), "contextChanged": .bool(true)])] {
+        do { _ = try ProductPluginWorkflow.defaultProfileIfMissing(current); throw ProductCoreError.invalidResponse }
+        catch ProductCoreError.rejected { }
+    }
     try productStatusImageSelfTest()
     print("Styx native product protocol self-test passed; GUI, TCC and account acceptance NOT RUN")
 }

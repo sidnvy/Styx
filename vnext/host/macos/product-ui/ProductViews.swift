@@ -34,6 +34,7 @@ struct ProductPanel<Content: View>: View {
 struct ProductView: View {
     @ObservedObject var model: ProductModel
     weak var controller: ProductWindowController?
+    @State private var usePluginPackage = false
     var body: some View {
         VStack(spacing: 0) {
             if model.deployment != nil && (model.accepted || model.joined && model.localPrepared || [.overview, .computers, .settings].contains(model.page)) {
@@ -203,7 +204,11 @@ struct ProductView: View {
             Label(title, systemImage: granted ? "checkmark.circle.fill" : "circle")
             Spacer()
             Text(granted ? productText("已允许", "Allowed") : productText("需要允许", "Permission needed")).foregroundStyle(.secondary)
-            Button(productText("打开系统设置", "Open System Settings")) { model.openPermission(screen) }
+            if granted || model.permissionWasRequested(screen) {
+                Button(productText("打开系统设置", "Open System Settings")) { model.openPermission(screen) }
+            } else {
+                Button(productText("允许…", "Allow…")) { model.requestPermission(screen) }
+            }
         }
     }
     private var invitation: some View {
@@ -234,8 +239,7 @@ struct ProductView: View {
                 Button(productText("先完成电脑准备", "Finish computer setup")) { model.page = .preparation }
             } else {
                 tunnelPanel
-                if ["configured", "running", "interrupted"].contains(model.journey["tunnel"]["status"].string ?? "") { pluginPanel }
-                if model.plugin["profileSaved"].bool { officialPanel }
+                if ["configured", "running", "interrupted"].contains(model.journey["tunnel"]["status"].string ?? "") { officialPanel }
                 if model.plugin["accountActions"]["installation"].string == "user_confirmed" { acceptancePanel }
             }
         }
@@ -250,56 +254,77 @@ struct ProductView: View {
                 Text(productText("将平台生成的这两项填回 Styx。运行 Key 不要粘贴到聊天或插件认证字段。", "Paste these two values from the platform into Styx. Do not paste the runtime key into chat or plugin authentication.")).font(.caption).foregroundStyle(.secondary)
                 Button(productText("保存并连接", "Save and connect")) { model.configureTunnel() }.disabled(model.tunnelID.isEmpty || model.runtimeKey.isEmpty || !model.session["tunnelSupported"].bool)
             } else {
-                statusRow(productText("本机连接", "Local connection"), model.journey["tunnel"]["transport"].string)
-                if model.journey["tunnel"]["status"].string == "configured" { Button(productText("启动连接", "Start connection")) { model.startTunnel() } }
-                Text(productText("本机连接正常后，还需在目标聊天完成验证。", "A local connection still needs verification in your target chat.")).font(.caption).foregroundStyle(.secondary)
+                statusRow(productText("安全通道", "Secure channel"), model.journey["tunnel"]["transport"].string)
+                Text(productText("这是 Styx 连向聊天平台的加密通道，保存后自动启动。它就绪后，继续下方的 ChatGPT 设置。", "This encrypted channel connects Styx to the chat platform and starts when you save. Once ready, continue with ChatGPT below.")).font(.caption).foregroundStyle(.secondary)
+                if model.journey["tunnel"]["status"].string == "configured" {
+                    Button(productText("重试安全连接", "Retry secure connection")) { model.startTunnel() }
+                }
+                Text(productText("通道就绪只说明电脑端已连通；聊天账号是否可用，由最后的实际调用确认。", "A ready channel confirms the computer's connection. The final tool-call check verifies your chat account.")).font(.caption).foregroundStyle(.secondary)
             }
         }
     }
-    private var pluginPanel: some View {
-        ProductPanel(title: productText("2. 你的 Styx 插件", "2. Your Styx plugin")) {
-            Picker(productText("插件", "Plugin"), selection: $model.pluginMode) {
-                Text(productText("创建新插件", "Create a plugin")).tag("create")
-                Text(productText("关联已有插件", "Use an existing plugin")).tag("reuse")
-            }.pickerStyle(.segmented).onChange(of: model.pluginMode) { _ in model.pluginDraftEdited = true }
-            TextField(productText("插件名称", "Plugin name"), text: $model.pluginName).onChange(of: model.pluginName) { _ in model.pluginDraftEdited = true }
-            TextField(productText("简短描述（最多 30 字）", "Short description (up to 30 characters)"), text: $model.pluginDescription).onChange(of: model.pluginDescription) { _ in model.pluginDraftEdited = true }
-            HStack { ProductBrand(size: 32); Button(productText("更换图标…", "Choose icon…")) { model.selectIcon() }; if model.pluginIcon != .null { Text(productText("已选择图标", "Icon selected")).font(.caption) } }
-            DisclosureGroup(productText("账号备注和插件链接（可选）", "Account note and plugin link (optional)")) {
-                TextField(productText("账号／工作区备注", "Account / workspace note"), text: $model.accountLabel).onChange(of: model.accountLabel) { _ in model.pluginDraftEdited = true }
-                TextField(productText("官方插件链接", "Official plugin link"), text: $model.pluginURL).onChange(of: model.pluginURL) { _ in model.pluginDraftEdited = true }
+    private var pluginPackageContent: some View {
+        VStack(alignment: .leading, spacing: 14) {
+            if model.pluginMode == "reuse" {
+                Text(productText("这份设置关联了已有插件，请在 ChatGPT 中编辑它的名称和图标。已有连接无需再上传一个新包。", "These settings refer to an existing plugin. Edit its name and icon in ChatGPT; the existing connection needs no new ZIP upload."))
+            } else {
+                Text(productText("名称、描述、图标和 Styx 引导技能会一起写入 ZIP。它们用于 ChatGPT 插件，不会更改 macOS App 图标。", "The ZIP includes the name, description, icon and Styx onboarding skill. These describe your ChatGPT plugin; they do not change the macOS App icon.")).font(.callout).foregroundStyle(.secondary)
+                TextField(productText("插件名称", "Plugin name"), text: $model.pluginName).onChange(of: model.pluginName) { _ in model.observePluginDraftEdit() }
+                TextField(productText("简短描述（最多 30 字）", "Short description (up to 30 characters)"), text: $model.pluginDescription).onChange(of: model.pluginDescription) { _ in model.observePluginDraftEdit() }
+                HStack {
+                    if let encoded = model.pluginIcon["dataBase64"].string, let bytes = Data(base64Encoded: encoded), let image = NSImage(data: bytes) {
+                        Image(nsImage: image).resizable().scaledToFit().frame(width: 40, height: 40).accessibilityLabel(productText("插件图标预览", "Plugin icon preview"))
+                    } else { ProductBrand(size: 40) }
+                    Button(productText("更换插件图标…", "Choose plugin icon…")) { model.selectIcon() }
+                }
+                Button(productText("保存并导出插件包…", "Save and export plugin ZIP…")) { model.exportPluginPackage() }
+                    .disabled(model.plugin["contextChanged"].bool || model.pluginName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.pluginName.count > 64 || model.pluginDescription.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.pluginDescription.count > 30)
+                if let location = model.exportedPluginURL, !model.pluginDraftEdited {
+                    Label(productText("已保存：", "Saved: ") + location.lastPathComponent, systemImage: "checkmark.circle")
+                    Button(productText("在 Finder 中显示", "Show in Finder")) { NSWorkspace.shared.activateFileViewerSelecting([location]) }
+                }
+                Text(productText("导出后，在 ChatGPT 点“＋”→“上传插件压缩包”，选择保存的 ZIP。资料随包携带，上传后请核对平台读取的名称、图标及 Tunnel，再完成安装。", "After export, select + → Upload plugin ZIP in ChatGPT and choose the saved ZIP. The package carries your details. Check the imported name, icon and Tunnel, then install it."))
+                Text(productText("插件包导入目前为预览流程，尚需在你的 ChatGPT 账号中验证兼容性。", "Plugin ZIP import is a preview flow; compatibility still needs verification in your ChatGPT account.")).font(.caption).foregroundStyle(.secondary)
+                Text(productText("上传、登录和安装仍由你在 ChatGPT 完成；以后修改本地资料，需要重新导出并更新插件，才会在 ChatGPT 生效。", "Upload, sign-in and installation take place in ChatGPT. Later local edits need a new export and plugin update to appear in ChatGPT.")).font(.caption).foregroundStyle(.secondary)
             }
-            Button(productText("保存插件资料", "Save plugin details")) { model.savePlugin() }.disabled(model.pluginName.isEmpty || model.pluginName.count > 64 || model.pluginDescription.isEmpty || model.pluginDescription.count > 30)
         }
     }
     private var officialPanel: some View {
-        ProductPanel(title: productText("3. 在 ChatGPT 完成连接", "3. Finish connecting in ChatGPT")) {
-            Text(productText("① 打开 ChatGPT 插件页面，确认目标账号和工作区。", "① Open ChatGPT plugins and confirm the intended account and workspace."))
-            Text(model.pluginMode == "reuse" ? productText("② 打开已有的 Styx 插件，检查它连接的是下面这个 Tunnel。", "② Open your existing Styx plugin and check that it uses the Tunnel below.") : productText("② 点击“＋”→“添加自建 MCP 服务器”（Add custom MCP server），填写上面的名称和描述。", "② Select + → Add custom MCP server, then enter the name and description above."))
-            Text(productText("③ Connection 选择 Tunnel，选择或粘贴下面的 Tunnel ID；Authentication 选择 No authentication。运行 Key 只填在 Styx App 中。", "③ Under Connection, choose Tunnel and select or paste the Tunnel ID below. For Authentication choose No authentication. Enter the runtime key only in the Styx App."))
-            Text(model.pluginMode == "reuse" ? productText("④ 保存已有插件的连接设置，确认已安装，然后在新聊天中用 @ 选择这个 Styx 插件。", "④ Save the existing plugin's connection settings, confirm it is installed, then select that Styx plugin with @ in a new chat.") : productText("④ 核对后点击“创建为插件”（Create as a plugin），打开生成的插件并安装。然后在新聊天中用 @ 选择 Styx。", "④ Review the details and select Create as a plugin. Open the resulting plugin and install it, then select Styx with @ in a new chat."))
-            Text(productText("登录、MFA 和工作区审批需要你亲自完成。", "Complete any sign-in, MFA and workspace approval yourself.")).font(.caption).foregroundStyle(.secondary)
+        ProductPanel(title: productText("2. 在 ChatGPT 完成连接", "2. Connect in ChatGPT")) {
+            Text(productText("打开 ChatGPT 插件页面，确认目标账号和工作区。", "Open ChatGPT plugins and confirm the intended account and workspace."))
             HStack {
-                Button(productText("复制名称", "Copy name")) { model.copy(model.pluginName) }
-                Button(productText("复制描述", "Copy description")) { model.copy(model.pluginDescription) }
-                Button(productText("保存图标…", "Save icon…")) { model.exportPluginIcon() }
+                Text(usePluginPackage ? productText("导入自定义插件包（预览）", "Import a custom plugin ZIP (preview)") : productText("直接连接 Styx", "Connect Styx directly")).font(.subheadline.weight(.semibold))
+                Spacer()
+                Button(usePluginPackage ? productText("使用直接连接", "Use direct connection") : productText("自定义资料并导出 ZIP…", "Customize and export ZIP…")) { usePluginPackage.toggle(); if usePluginPackage { model.preparePluginDraft() } }.buttonStyle(.link)
+            }
+            if usePluginPackage {
+                pluginPackageContent
+            } else {
+                Text(productText("① 点“＋”→“添加自建 MCP 服务器”（Add custom MCP server），名称填 Styx；描述可留空。", "① Select + → Add custom MCP server. Enter Styx as the name; the description is optional."))
+                Text(productText("② Connection 选择 Tunnel，选择或粘贴下方的 Tunnel ID；Authentication 选择 No authentication。运行 Key 只保存在 Styx App。", "② Under Connection, choose Tunnel and select or paste the Tunnel ID below. For Authentication choose No authentication. The runtime key stays in Styx."))
+                Text(productText("③ 核对风险提示，点“创建为插件”（Create as a plugin），再打开生成的 Styx 插件并安装。", "③ Review the risk notice and select Create as a plugin. Open the resulting Styx plugin and install it."))
+                DisclosureGroup(productText("已经有 Styx 插件？", "Already have a Styx plugin?")) {
+                    Text(productText("打开已有插件，核对它使用的是下面的 Tunnel，确认已安装。相同连接无需再创建；换到新的 Tunnel 时，在 ChatGPT 更新连接设置。", "Open the existing plugin, check it uses the Tunnel below and confirm it is installed. The same connection needs no second plugin. If you switch Tunnels, update the connection in ChatGPT.")).font(.callout).foregroundStyle(.secondary)
+                }
             }
             if !model.connectionTunnelID.isEmpty {
                 HStack { Text(model.connectionTunnelID).font(.system(.caption, design: .monospaced)).textSelection(.enabled); Button(productText("复制 Tunnel ID", "Copy Tunnel ID")) { model.copy(model.connectionTunnelID) } }
             } else {
                 Button(productText("刷新连接信息", "Refresh connection details")) { Task { await model.refresh() } }
             }
-            Button(productText("打开 ChatGPT 插件", "Open ChatGPT plugins")) { model.openOfficial("https://chatgpt.com/plugins") }
-            DisclosureGroup(productText("另外两个入口是做什么的？", "What are the other two options for?")) {
-                Text(productText("“创建插件”用于从需求编写技能或组合功能；“上传插件压缩包”用于导入已打包的插件与技能。连接这台 Styx 电脑，先选“添加自建 MCP 服务器”，它会创建可安装的插件。", "Create a plugin helps author skills and combined workflows. Upload plugin ZIP imports an existing package with its skills. To connect this Styx computer, start with Add custom MCP server; it creates an installable plugin.")).font(.callout).foregroundStyle(.secondary)
-                Text(productText("ZIP 可作为包含 Styx 引导技能的可选完整包，仍需完成账号侧连接与真实调用验证。", "A ZIP can optionally include the Styx onboarding skill. Account connection and a real tool-call check are still required.")).font(.caption).foregroundStyle(.secondary)
+            if model.plugin["contextChanged"].bool {
+                Text(productText("电脑端连接已变化。请在 ChatGPT 核对当前 Tunnel，再更新本地确认记录并重新验证。", "The computer's connection has changed. Check the current Tunnel in ChatGPT, then update the local confirmation record and verify again.")).font(.callout).foregroundStyle(.secondary)
+                Button(productText("重新核对当前连接…", "Review current connection…")) { model.rebindPluginConnection() }
             }
-            Button(productText("我已完成安装和连接", "I finished installation and connection")) { model.confirmPluginInstallation() }.disabled(model.pluginDraftEdited)
+            Button(productText("打开 ChatGPT 插件", "Open ChatGPT plugins")) { model.openOfficial("https://chatgpt.com/plugins") }
+            Text(productText("安装后，在新聊天中用 @ 选择 Styx。登录、MFA 和工作区审批需要你亲自完成。", "After installation, select Styx with @ in a new chat. Complete any sign-in, MFA and workspace approval yourself.")).font(.caption).foregroundStyle(.secondary)
+            Button(productText("我已完成安装和连接", "I finished installation and connection")) { model.confirmPluginInstallation() }
+                .disabled(model.plugin["contextChanged"].bool || usePluginPackage && (model.pluginDraftEdited || model.plugin["export"]["status"].string != "exported"))
             Text(productText("这只记录你的确认；下一步会检查真实工具调用。", "This records your confirmation. The next step verifies real tool calls.")).font(.caption).foregroundStyle(.secondary)
         }
     }
     private var acceptancePanel: some View {
-        ProductPanel(title: productText("4. 在真实聊天中验证", "4. Verify in your real chat")) {
+        ProductPanel(title: productText("3. 在真实聊天中验证", "3. Verify in your real chat")) {
             Button(productText("生成验证请求", "Generate verification request")) { model.beginAcceptance() }
             if let prompt = model.acceptance["challenge"]["prompt"].string {
                 Text(prompt).font(.system(.callout, design: .monospaced)).textSelection(.enabled)

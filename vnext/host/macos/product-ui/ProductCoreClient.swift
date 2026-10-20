@@ -86,7 +86,24 @@ final class ProductCoreClient {
         guard Self.writes.contains(route), csrf != nil else { throw ProductCoreError.rejected }
         return try await request(route, body: .object(body))
     }
+    // ZIP export shares the owning App's loopback session and CSRF boundary.
+    // The route and filename are fixed; no URL/path comes from web content.
+    func exportPlugin() async throws -> Data {
+        guard csrf != nil else { throw ProductCoreError.rejected }
+        let data = try await response("plugin/export", body: .object(["authorize": .bool(true)]), mimeType: "application/zip")
+        guard data.starts(with: [0x50, 0x4b, 0x03, 0x04]) else { throw ProductCoreError.invalidResponse }
+        return data
+    }
     private func request(_ route: String, body: ProductJSON?) async throws -> ProductJSON {
+        let data = try await response(route, body: body, mimeType: "application/json")
+        let value = try JSONDecoder().decode(ProductJSON.self, from: data)
+        if route == "session" {
+            guard let challenge = value["csrf"].string, challenge.count == 43 else { throw ProductCoreError.invalidResponse }
+            csrf = challenge
+        }
+        return value
+    }
+    private func response(_ route: String, body: ProductJSON?, mimeType: String) async throws -> Data {
         let url = origin.appendingPathComponent("api/" + route)
         var request = URLRequest(url: url)
         request.httpMethod = body == nil ? "GET" : "POST"
@@ -103,16 +120,12 @@ final class ProductCoreClient {
         }
         let (data, response) = try await transport.data(for: request)
         guard let response = response as? HTTPURLResponse,
-              response.url?.host == origin.host, response.url?.port == origin.port,
+              response.url == url,
               response.statusCode == 200 else { throw ProductCoreError.rejected }
-        guard data.count < 2 * 1024 * 1024,
-              response.mimeType == "application/json" else { throw ProductCoreError.invalidResponse }
-        let value = try JSONDecoder().decode(ProductJSON.self, from: data)
-        if route == "session" {
-            guard let challenge = value["csrf"].string, challenge.count == 43 else { throw ProductCoreError.invalidResponse }
-            csrf = challenge
-        }
-        return value
+        // Match Core's existing 2 MiB response/archive contract.
+        guard data.count <= 2 * 1024 * 1024,
+              response.mimeType == mimeType else { throw ProductCoreError.invalidResponse }
+        return data
     }
 }
 

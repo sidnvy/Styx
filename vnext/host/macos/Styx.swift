@@ -523,7 +523,11 @@ func productSystemQuitReason(_ reason: OSType?) -> Bool {
         #endif
         setupStatusLine = menu.addItem(withTitle: "Local setup is not running", action: nil, keyEquivalent: "")
         menu.addItem(NSMenuItem.separator())
+        #if STYX_PRODUCT_UI
+        menu.addItem(withTitle: productText("Computer Use 权限…", "Computer Use permissions…"), action: #selector(requestPermissions), keyEquivalent: "")
+        #else
         menu.addItem(withTitle: "Request macOS permissions…", action: #selector(requestPermissions), keyEquivalent: "")
+        #endif
         menu.addItem(withTitle: "Restart embedded Cua", action: #selector(restart), keyEquivalent: "r")
         menu.addItem(NSMenuItem.separator())
         menu.addItem(withTitle: "Quit Styx", action: #selector(quit), keyEquivalent: "q")
@@ -802,6 +806,15 @@ func productSystemQuitReason(_ reason: OSType?) -> Bool {
         phase = "stopped"
     }
     @objc func requestPermissions() {
+        #if STYX_PRODUCT_UI
+        // The product view owns each explicit permission action. A menu click
+        // only opens that view; it must not raise two OS prompts and an alert.
+        openSettings()
+        if let model = setupWindow?.model {
+            model.observePermissions()
+            model.page = model.computerApproved ? .permissions : .settings
+        }
+        #else
         // Only an explicit local menu action can trigger OS-owned permission UI.
         _ = AXIsProcessTrustedWithOptions(["AXTrustedCheckOptionPrompt": true] as CFDictionary)
         _ = CGRequestScreenCaptureAccess()
@@ -809,6 +822,7 @@ func productSystemQuitReason(_ reason: OSType?) -> Bool {
         alert.messageText = "Allow Styx in macOS Privacy & Security"
         alert.informativeText = "Enable Accessibility and Screen Recording for Styx. Quit and reopen Styx after changing grants; reconnect clients to the new generation. A grant alone does not verify capture or actions. Explicit application scripts may separately request Automation approval for the target application."
         alert.runModal()
+        #endif
     }
     @objc func restart() {
         stop()
