@@ -6,8 +6,8 @@ import path from 'node:path';
 import {execFileSync,spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {createHash,generateKeyPairSync} from 'node:crypto';
-import {macAdhocSigningPlan,macSigningPlan} from '../build-macos-app.mjs';
-import {copyOfflineDependencies,copyPreviewDependencies,finalizePreviewHostBundle,machOFiles,previewSourceFiles,verifyPreviewTunnelInput} from '../build-macos-preview.mjs';
+import {macAdhocSigningPlan,macSigningPlan,macLocalSigningPlan,publicMacLocalSigning} from '../build-macos-app.mjs';
+import {copyOfflineDependencies,copyPreviewDependencies,finalizePreviewHostBundle,machOFiles,previewSourceFiles,verifyPreviewTunnelInput,previewSigningReceipt} from '../build-macos-preview.mjs';
 import {verifySignedRelease} from '../installer.mjs';
 import {verifyMacPreviewApp} from '../macos-preview-trust.mjs';
 const hash=b=>createHash('sha256').update(b).digest('hex');
@@ -18,6 +18,17 @@ test('ad-hoc preview signs all contained nested code before final app, separate 
  assert.equal(steps.some(s=>s[1].includes('--options')||s[1].includes('--timestamp')),false);
  assert.throws(()=>macAdhocSigningPlan({app,files:['/outside/node']}));assert.throws(()=>macAdhocSigningPlan({app,files:[files[0],files[0]]}));
  assert.throws(()=>macSigningPlan({app,identity:'-',teamID:'ABCDEFGHIJ'}),/developer_id_application_required/);
+});
+test('local certificate plan covers every detected Mach-O payload including nested native dependencies',t=>{
+ const root=scratch(t),app=path.join(root,'Styx.app'),localSigning={identitySha1:'c'.repeat(40),certificateSha256:'d'.repeat(64),keychain:'/private/build/local.keychain-db'};
+ const members=['Contents/MacOS/Styx','Contents/MacOS/cua-driver','Contents/Resources/runtime/node','Contents/Resources/host-bundle/bin/codex','Contents/Resources/onboarding/vnext/node_modules/addon/build/addon.node'];
+ for(const name of members){const file=path.join(app,name);fs.mkdirSync(path.dirname(file),{recursive:true});fs.writeFileSync(file,Buffer.from('cffaedfe00000000','hex'));}
+ fs.writeFileSync(path.join(app,'Contents/Resources/public.json'),'{}');
+ const files=machOFiles(app);assert.deepEqual(files,members.map(name=>path.join(app,name)).sort());
+ const plan=macLocalSigningPlan({app,files,localSigning,sealApp:false}),signed=plan.filter(([,args])=>args.includes('--sign'));
+ assert.deepEqual(signed.map(([,args])=>args.at(-1)).sort(),files);
+ assert.ok(signed.every(([,args])=>args[args.indexOf('--sign')+1]===localSigning.identitySha1&&args[args.indexOf('--keychain')+1]===localSigning.keychain));
+ assert.ok(signed.every(([,args])=>args[args.indexOf('--requirements')+1].includes('certificate leaf = H"'+localSigning.identitySha1+'"')));
 });
 test('offline production dependency copy is lock-bound, excludes dev/local material and rejects symlinks',t=>{
  const root=scratch(t),deps=path.join(root,'deps'),lock=path.join(root,'lock.json');fs.mkdirSync(deps);
@@ -32,6 +43,32 @@ test('source snapshot uses clean tracked files only and excludes tests and runti
 });
 test('final Host manifest signs transformed native bytes and retains original Node provenance',t=>{
  const root=scratch(t),{publicKey,privateKey}=generateKeyPairSync('ed25519');fs.mkdirSync(path.join(root,'bin'));fs.mkdirSync(path.join(root,'provenance'));const bytes=Buffer.from('transformed-native-fixture');fs.writeFileSync(path.join(root,'bin/node'),bytes);const upstream={schema:1,version:'22.23.3',binary_sha256:'a'.repeat(64)};fs.writeFileSync(path.join(root,'provenance/node.json'),JSON.stringify(upstream));fs.writeFileSync(path.join(root,'manifest.json'),JSON.stringify({schema:1,version:'0.1.0-test',platform:process.platform,arch:process.arch,files:[{path:'bin/node',executable:true}]}));finalizePreviewHostBundle(root,privateKey);verifySignedRelease(root,publicKey.export({type:'spki',format:'pem'}));const transformed=JSON.parse(fs.readFileSync(path.join(root,'provenance/node.json')));assert.equal(transformed.binary_sha256,hash(bytes));assert.equal(transformed.upstream_binary_sha256,upstream.binary_sha256);assert.deepEqual(JSON.parse(fs.readFileSync(path.join(root,'provenance/node-upstream.json'))),upstream);fs.appendFileSync(path.join(root,'bin/node'),'tamper');assert.throws(()=>verifySignedRelease(root,publicKey.export({type:'spki',format:'pem'})));
+});
+test('local certificate Host manifest binds transformed code and public provenance without keychain disclosure',t=>{
+ const root=scratch(t),localSigning={identitySha1:'c'.repeat(40),certificateSha256:'d'.repeat(64),keychain:'/private/builder/persistent.keychain-db'};
+ const app=path.join(root,'Styx.app'),bundle=path.join(app,'Contents/Resources/host-bundle');fs.mkdirSync(path.join(bundle,'bin'),{recursive:true});fs.mkdirSync(path.join(bundle,'provenance'));
+ const originalNode=Buffer.from('upstream native bytes'),signedNode=Buffer.from('certificate transformed bytes');
+ const upstream={schema:1,version:'22.23.3',binary_sha256:hash(originalNode)};
+ fs.writeFileSync(path.join(bundle,'bin/node'),originalNode);fs.writeFileSync(path.join(bundle,'provenance/node.json'),JSON.stringify(upstream));
+ fs.writeFileSync(path.join(bundle,'manifest.json'),JSON.stringify({schema:1,version:'0.1.0-test',platform:process.platform,arch:process.arch,files:[{path:'bin/node',executable:true}]}));
+ const plan=macLocalSigningPlan({app,files:[path.join(bundle,'bin/node')],localSigning,sealApp:false});
+ assert.ok(plan.some(([,args])=>args.includes('--sign')));assert.ok(!plan.some(([,args])=>args.at(-1)===app));
+ // Model codesign's byte transformation only; no native signing success claim.
+ fs.writeFileSync(path.join(bundle,'bin/node'),signedNode);
+ const {publicKey,privateKey}=generateKeyPairSync('ed25519');finalizePreviewHostBundle(bundle,privateKey,{localSigning});
+ const pem=publicKey.export({type:'spki',format:'pem'});verifySignedRelease(bundle,pem);
+ const provenance=JSON.parse(fs.readFileSync(path.join(bundle,'provenance/macos-preview.json'))),node=JSON.parse(fs.readFileSync(path.join(bundle,'provenance/node.json')));
+ assert.equal(node.binary_sha256,hash(signedNode));assert.equal(node.upstream_binary_sha256,hash(originalNode));
+ assert.equal(node.transformation,'macos_local_certificate_codesign_after_verified_upstream_input');
+ assert.equal(provenance.signing,'local_certificate_preview');assert.equal(provenance.notarization,'NOT RUN');
+ assert.deepEqual(provenance.local_signing,publicMacLocalSigning(localSigning));
+ const receipt=previewSigningReceipt(localSigning);
+ assert.deepEqual(receipt,{signing:'local_certificate_preview',notarization:'NOT RUN',external_publisher_identity:'NOT ESTABLISHED',private_key_in_artifact:false,local_signing:publicMacLocalSigning(localSigning)});
+ assert.doesNotMatch(JSON.stringify({provenance,receipt}),/keychain|persistent|PRIVATE KEY|developer_id_verified/);
+ assert.equal(macLocalSigningPlan({app,files:[],sealApp:true,localSigning})[0][1].at(-1),app);
+ fs.appendFileSync(path.join(bundle,'provenance/macos-preview.json'),'tamper');assert.throws(()=>verifySignedRelease(bundle,pem));
+ assert.throws(()=>previewSigningReceipt({...localSigning,notaryProfile:'unsafe'}));
+ assert.equal(previewSigningReceipt().signing,'adhoc_preview');
 });
 test('explicit preview trust checks whole app, exact ad-hoc CDHash and app identifier',t=>{
  const root=scratch(t),app=path.join(root,'Styx.app');fs.mkdirSync(app);const cdhash='a'.repeat(40),calls=[];

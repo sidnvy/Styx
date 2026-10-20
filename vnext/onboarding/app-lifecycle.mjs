@@ -5,7 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import {execFileSync} from 'node:child_process';
 import {requirePrivateDirectory,requirePrivateFile} from '../host/private-storage.mjs';
-import {verifyMacPreviewApp} from '../host/macos-preview-trust.mjs';
+import {assertMacPreviewContinuity,verifyMacPreviewApp} from '../host/macos-preview-trust.mjs';
 import {controlMacLoginRecovery,macLoginRecoveryPlan} from './macos-login-recovery.mjs';
 
 const label='app.styx.desktop-login';
@@ -35,6 +35,11 @@ function context(stateDir,{trustedAppPath,operations={}}={}){
   appPath=absolute(trustedAppPath,'app_lifecycle_trusted_app_invalid');
   if(path.basename(appPath)!=='Styx.app')fail('app_lifecycle_trusted_app_invalid');
   if(registered&&registered.path!==appPath)fail('app_lifecycle_registered_path_changed');
+  if(registered&&('certificateSha1' in registered||'certificateSha256' in registered)){
+   // A trusted launch path permits new bytes, never a different registered
+   // signer. Verify the actual bundle against the persisted certificate pins.
+   assertMacPreviewContinuity(registered,ops.verifyApp(registered));
+  }
   source='verified_native_launch';
  }else if(registered){
   // CLI uses authoritative registration plus a fresh native signature/hash

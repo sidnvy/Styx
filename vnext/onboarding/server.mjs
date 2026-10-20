@@ -107,8 +107,15 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
  // Do not create the tunnel directory merely by opening a read-only status API.
  const tunnelRead=async()=>tunnel&&fs.existsSync(path.join(stateDir,'tunnel'))?tunnel.health():readOnboardingTunnel(stateDir);
  const journeyOptions={core:api,backgroundRead,tunnelRead};
- let macPreviewApp;
- if(trustedMacPreviewApp!==undefined){const {verifyMacPreviewApp}=await import('../host/macos-preview-trust.mjs');macPreviewApp=verifyMacPreviewApp(trustedMacPreviewApp);}
+ let macPreviewApp,nativeSigningMigrationRequired=false;
+ if(trustedMacPreviewApp!==undefined){
+  const {verifyMacPreviewApp,assertMacPreviewContinuity}=await import('../host/macos-preview-trust.mjs');macPreviewApp=verifyMacPreviewApp(trustedMacPreviewApp);
+  const file=path.join(stateDir,'deployment.json');
+  if(fs.existsSync(file)){
+   if(requirePrivateFile(file).size>1024*1024)fail('native_signing_configuration_too_large');
+   nativeSigningMigrationRequired=assertMacPreviewContinuity(JSON.parse(fs.readFileSync(file,'utf8')).host?.macPreviewApp,macPreviewApp).migrationRequired;
+  }
+ }
  let artifacts={};
  if(artifactDefaultsFile){requirePrivateFile(artifactDefaultsFile);if(fs.statSync(artifactDefaultsFile).size>65536)fail('artifact_defaults_too_large');const value=JSON.parse(fs.readFileSync(artifactDefaultsFile,'utf8'));keys(value,['bundle','publisherKeyFile','publisherSha256']);if(!['bundle','publisherKeyFile'].every(k=>typeof value[k]==='string'&&path.isAbsolute(value[k]))||!/^[a-f0-9]{64}$/.test(value.publisherSha256??''))fail('invalid_trusted_artifact_defaults');artifacts=value;}
  const probe=net.createServer();await new Promise((resolve,reject)=>{probe.once('error',reject);probe.listen(0,'127.0.0.1',resolve)});const suggestedPort=probe.address().port;await new Promise(resolve=>probe.close(resolve));
@@ -188,6 +195,9 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
   if(!equal(req.headers.authorization,'Bearer '+session)){send(401,{error:'session_required'});return}
   if(req.headers.origin!==undefined&&req.headers.origin!==origin){send(403,{error:'origin_refused'});return}
   if(req.method==='POST'&&(req.headers.origin!==origin||!equal(req.headers['x-styx-csrf'],csrf))){send(403,{error:'mutation_refused'});return}
+  // A first transition from byte-pinned ad-hoc code to a persistent signer is
+  // a reviewed Core migration, never an incidental status/startup side effect.
+  if(nativeSigningMigrationRequired&&req.method==='POST'&&url.pathname!=='/api/app/quit'){send(409,{error:'native_signing_registration_required'});return}
   if(req.method==='GET'&&url.pathname==='/api/session'){
    send(200,{csrf,platform:process.platform,journeySupported:true,nativeAppLifecycleSupported:!!macPreviewApp,diagnosticsSupported:true,browserPreparationSupported:typeof api.readDeploymentBrowser==='function'&&typeof api.prepareDeploymentBrowser==='function',foregroundSupported:typeof api.startDeploymentForeground==='function'&&typeof api.stopDeploymentForeground==='function',acceptanceSupported:['readDeploymentAcceptance','beginDeploymentAcceptance','confirmDeploymentAcceptance','recordDeploymentDesktopReadback'].every(k=>typeof api[k]==='function'),connectionHandoffSupported:typeof api.prepareDeploymentConnectionHandoff==='function',packagedPreviewTrusted:!!macPreviewApp,backgroundSupported:true,capabilityChangeSupported:true,deviceSettingsSupported:typeof api.readDeploymentDevices==='function',tunnelSupported:!!tunnel,localGatewayAvailable:!!trustedOpenSSL,pauseSupported:typeof api.stopDeploymentGateway==='function',startSupported:typeof api.startDeploymentGateway==='function',
     deviceIngressSupported:typeof api.planDeviceIngress==='function'&&typeof api.verifyDeviceIngress==='function',pairingLinkImportSupported:linkImportAvailable,pairingLinkCreateSupported:typeof api.createDeploymentPairingLink==='function',pendingApprovalSupported:typeof api.listDeploymentPending==='function'&&typeof api.approveDeploymentPending==='function',hostServiceSupported:typeof api.controlDeploymentHostService==='function',gatewayServiceSupported:gatewayServiceAvailable,gatewayService:gatewayServiceCapability,localGatewayAddresses:typeof api.localGatewayAddresses==='function'?api.localGatewayAddresses():[],defaults,accountAcceptance:'NOT RUN',nativeInstaller:'NOT RUN',trustedForwarding:!!forwarded});return;
@@ -288,7 +298,7 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
     const{joinLinkId,...input}=data;
     if(joinLinkId!==undefined){if(!acceptedLink||acceptedLink.id!==joinLinkId||input.mode!=='join-existing'||input.gateway?.url!==acceptedLink.refs.gatewayOrigin||(!Number.isSafeInteger(acceptedLink.refs.expiresAt)||acceptedLink.refs.expiresAt<=Date.now())||input.invitationFile||input.gateway.caFile)fail('accepted_pairing_scope_required');input.invitationFile=acceptedLink.refs.invitationFile;input.gateway={...input.gateway,...(acceptedLink.refs.gatewayCaFile?{caFile:acceptedLink.refs.gatewayCaFile}:{})}}
     const config=validateUiConfig(input,{trustedOpenSSL});
-    if(macPreviewApp&&config.host)config.host={...config.host,macPreviewApp:{path:macPreviewApp.path,cdhash:macPreviewApp.cdhash}};
+    if(macPreviewApp&&config.host)config.host={...config.host,macPreviewApp:{path:macPreviewApp.path,cdhash:macPreviewApp.cdhash,...(macPreviewApp.certificateSha1?{certificateSha1:macPreviewApp.certificateSha1,certificateSha256:macPreviewApp.certificateSha256}:{})}};
     if(config.mode==='create-local'&&new URL(config.gateway.url).hostname!=='127.0.0.1'&&config.gateway.allowRemoteHosts!==true)fail('explicit_network_exposure_required');
     if(config.gateway.allowRemoteHosts){const addresses=typeof api.localGatewayAddresses==='function'?api.localGatewayAddresses():[];if(!addresses.includes(config.gateway.listenHost)||new URL(config.gateway.url).hostname!==config.gateway.listenHost)fail('explicit_owned_network_interface_required')}
     const temp=path.join(os.tmpdir(),'styx-ui-config-'+randomBytes(16).toString('hex'));ensurePrivateDirectory(temp,{exclusive:true});
@@ -370,7 +380,8 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
  // explicit lifecycle boundary, never a side effect of a GET/status request.
  // Foreground Core verifies native service ownership and refuses duplicate or
  // uncertain owners; it never regenerates pairing identities on reconnect.
- if(macPreviewApp&&fs.existsSync(path.join(stateDir,'deployment.json'))&&typeof api.startDeploymentForeground==='function'){
+ if(nativeSigningMigrationRequired)nativeStartup={status:'reconciliation_required',observation:'current_process',reason:'native_signing_registration_required'};
+ if(macPreviewApp&&!nativeSigningMigrationRequired&&fs.existsSync(path.join(stateDir,'deployment.json'))&&typeof api.startDeploymentForeground==='function'){
   try{
    const deployment=await api.readDeployment(stateDir);
    const browser=deployment.roles?.browser==='requested'?await api.readDeploymentBrowser?.(stateDir):null;
@@ -380,7 +391,7 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
   }catch{nativeStartup={status:'reconciliation_required',observation:'current_process'};}
  }
  // Only a previously recorded user opt-in can resume this App-owned connection.
- if(tunnel&&fs.existsSync(stateDir))await tunnel.resume().catch(()=>{});
+ if(tunnel&&!nativeSigningMigrationRequired&&fs.existsSync(stateDir))await tunnel.resume().catch(()=>{});
  return {server,origin,url:origin+'/#session='+session,
   close(){if(closing)return closing;pendingLink=null;
    closing=(async()=>{

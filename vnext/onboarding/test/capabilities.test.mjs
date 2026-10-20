@@ -108,6 +108,17 @@ function browserFixture(t,{withBrowser=true,headless=true}={}){
  return {root,dir,base,hostFile,config,ops,calls,snapshot,identity,profile:path.join(base,'browser/profiles/existing-login')};
 }
 
+test('real Browser capability scope rejects changed native signer before capability or profile mutations',async t=>{
+ const f=browserFixture(t),app={path:'/Applications/Styx.app',cdhash:'a'.repeat(40)},local={...app,certificateSha1:'b'.repeat(40),certificateSha256:'c'.repeat(64)};
+ const configFile=path.join(f.dir,'deployment.json'),hostBefore=fs.readFileSync(f.hostFile),profileBefore=fs.readFileSync(f.profile);
+ for(const [registered,current,error]of [[local,app,/registered_certificate_changed/],[local,{...local,certificateSha256:'d'.repeat(64)},/registered_certificate_changed/],[app,local,/certificate_migration_required/]]){
+  f.config.host.macPreviewApp=registered;writeJSON(configFile,f.config);const before=fs.readFileSync(configFile);
+  await assert.rejects(changeDeploymentCapabilities(f.dir,{authorize:true,browser:true},{...f.ops,trustedMacPreviewApp:current}),error);
+  assert.deepEqual(f.calls,[]);assert.deepEqual(fs.readFileSync(configFile),before);assert.deepEqual(fs.readFileSync(f.hostFile),hostBefore);assert.deepEqual(fs.readFileSync(f.profile),profileBefore);
+  assert.equal(fs.existsSync(path.join(f.dir,'capabilities.json')),false);assert.equal(fs.existsSync(path.join(f.dir,'capability-transactions')),false);
+ }
+});
+
 test('Browser enable/disable migrates one authoritative config and retains signed identity and profile',async t=>{
  const f=browserFixture(t),kept=['identity.json','identity.pem','host.token'].map(n=>[path.join(f.base,'device',n),fs.readFileSync(path.join(f.base,'device',n))]);
  const result=await changeDeploymentCapabilities(f.dir,{authorize:true,browser:true},f.ops);

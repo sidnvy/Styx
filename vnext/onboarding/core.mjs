@@ -16,6 +16,7 @@ import {verifyGatewayConnection} from './connection.mjs';
 import {pairDevice,createLocalPairingTransport} from './pairing.mjs';
 import {doctor} from '../host/doctor.mjs';
 import {readDeploymentAcceptance} from './account-acceptance.mjs';
+import {verifyMacPreviewApp,assertMacPreviewContinuity} from '../host/macos-preview-trust.mjs';
 
 const live=new Map();
 const fail=code=>{throw Error(code)};
@@ -24,11 +25,12 @@ const abs=x=>typeof x==='string'&&path.isAbsolute(x)&&path.normalize(x)===x;
 const exact=(x,keys)=>{if(!obj(x)||Object.keys(x).some(k=>!keys.includes(k)))fail('invalid_configuration_fields')};
 const filename=(d,n)=>path.join(d,n);
 function read(file){requirePrivateFile(file);if(fs.statSync(file).size>1024*1024)fail('state_file_too_large');return JSON.parse(fs.readFileSync(file,'utf8'));}
-function write(file,value){const tmp=file+'.'+randomBytes(8).toString('hex')+'.tmp',fd=openPrivateFile(tmp,0o600);try{fs.writeFileSync(fd,JSON.stringify(value,null,2)+'\n');fs.fsyncSync(fd);}finally{fs.closeSync(fd);}try{requirePrivateFile(tmp);fs.renameSync(tmp,file);if(process.platform!=='win32'){const dir=fs.openSync(path.dirname(file),'r');try{fs.fsyncSync(dir);}finally{fs.closeSync(dir);}}}finally{if(fs.existsSync(tmp))fs.unlinkSync(tmp);}}
+function writeBytes(file,bytes){const tmp=file+'.'+randomBytes(8).toString('hex')+'.tmp',fd=openPrivateFile(tmp,0o600);try{fs.writeFileSync(fd,bytes);fs.fsyncSync(fd);}finally{fs.closeSync(fd);}try{requirePrivateFile(tmp);fs.renameSync(tmp,file);if(process.platform!=='win32'){const dir=fs.openSync(path.dirname(file),'r');try{fs.fsyncSync(dir);}finally{fs.closeSync(dir);}}}finally{if(fs.existsSync(tmp))fs.unlinkSync(tmp);}}
+function write(file,value){writeBytes(file,Buffer.from(JSON.stringify(value,null,2)+'\n'));}
 const hash=file=>createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 const evidenceFile=file=>({path:file,sha256:hash(file)});
 
-function load(d){if(!abs(d))fail('absolute_state_directory_required');requirePrivateDirectory(d);const config=read(filename(d,'deployment.json')),state=read(filename(d,'state.json'));validateDeployment(config,{checkNetwork:false});if(state.schema!==1||state.mode!==config.mode||state.configSha256!==hash(filename(d,'deployment.json'))||!Array.isArray(state.steps))fail('invalid_onboarding_state');return {config,state};}
+function load(d){if(!abs(d))fail('absolute_state_directory_required');requirePrivateDirectory(d);const journal=registrationJournal(d);if(journal&&!['applied','rolled_back'].includes(journal.status))fail('mac_signing_registration_requires_rollback');const config=read(filename(d,'deployment.json')),state=read(filename(d,'state.json'));validateDeployment(config,{checkNetwork:false});if(state.schema!==1||state.mode!==config.mode||state.configSha256!==hash(filename(d,'deployment.json'))||!Array.isArray(state.steps))fail('invalid_onboarding_state');return {config,state};}
 function publicState(d,state,config){
  const observations=[...state.steps.filter(s=>s.id.startsWith('host.service.')&&s.evidence).map(s=>({at:s.updatedAt,evidence:s.evidence})),...(state.maintenance??[])].filter(x=>x.evidence).sort((a,b)=>String(a.at??'').localeCompare(String(b.at??'')));
  const hostServiceMaintenance={lastObservation:observations.at(-1)?.evidence??null,hasUncertainMutation:hasUncertainServiceMutation(state),history:(state.maintenance??[]).map(x=>({action:x.action,status:x.status,at:x.at}))};
@@ -100,7 +102,7 @@ export async function prepareDeploymentBrowser(d,options={}){
  }finally{release();}
 }
 export function planDeployment(stateDir){const {config,state}=load(stateDir);return {schema:1,mode:config.mode,roles:deploymentRoles(config),steps:state.steps.map((s,i)=>({id:s.id,status:s.status,requires:state.steps.slice(0,i).map(x=>x.id),authorizationRequired:true})),ownerPairingScope:config.host&&config.mode==='create-local'?{gatewayUrl:config.gateway.url,label:config.host.label,enableComputer:config.host.computer,enableBrowser:config.host.browser?.enabled===true}:null,service:{status:'not_checked',lastObservation:publicState(stateDir,state,config).hostServiceMaintenance.lastObservation,configFile:config.host?path.join(config.host.baseDir,'service.json'):null,platform:process.platform},accountAcceptance:readDeploymentAcceptance(stateDir).complete?'user_confirmed_with_mcp_evidence':'NOT RUN'};}
-function lock(d){const file=filename(d,'advance.lock');let fd;try{fd=openPrivateFile(file,0o600);}catch{fail('onboarding_busy_or_interrupted_lock');}return ()=>{fs.closeSync(fd);fs.unlinkSync(file)};}
+function lock(d,record,{recovering=false}={}){const file=filename(d,'advance.lock');let fd;try{if(!recovering&&fs.existsSync(filename(d,'mac-signing-registration-recovery.lock')))fail('onboarding_busy_or_interrupted_lock');fd=openPrivateFile(file,0o600);}catch{fail('onboarding_busy_or_interrupted_lock');}const stamp=fs.fstatSync(fd);try{if(record){fs.writeFileSync(fd,JSON.stringify(record));fs.fsyncSync(fd);}}catch(error){fs.closeSync(fd);fs.unlinkSync(file);throw error;}return (retain=false)=>{fs.closeSync(fd);if(!retain&&fs.existsSync(file)){const current=fs.lstatSync(file);if(current.ino!==stamp.ino||current.dev!==stamp.dev)fail('onboarding_lock_identity_changed');fs.unlinkSync(file);}};}
 function serviceScope(c,action){
  const serviceConfigFile=path.join(c.host.baseDir,'service.json'),raw=read(serviceConfigFile),windows=process.platform==='win32';
  return {approved:true,action,role:'host',serviceConfigFile,serviceId:windows?raw.task_name:process.platform==='darwin'?raw.label:raw.unitName,installRoot:windows?raw.install_root:raw.installRoot,hostConfigFile:windows?raw.host_config_file:raw.hostConfigFile,trustPublicKeyFile:windows?raw.publisher_key_file:raw.trustPublicKeyFile,nodeBinary:windows?raw.node_binary:raw.nodeBinary,...(raw.logDir!==undefined?{logDir:raw.logDir}:{}),...(raw.restartSec!==undefined?{restartSec:raw.restartSec}:{}),...(raw.nativeApp!==undefined?{nativeApp:raw.nativeApp}:{})};
@@ -337,6 +339,119 @@ export function readDeploymentOnboardingPreference(stateDir){
 export function setDeploymentOnboardingPreference(stateDir,options={}){
  exact(options,['background','authorize']);if(options.authorize!==true||!['foreground','login'].includes(options.background))fail('explicit_onboarding_background_choice_required');
  const release=lock(stateDir);try{const {state}=load(stateDir);state.onboardingDecisions={...state.onboardingDecisions,background:{choice:options.background,configSha256:state.configSha256,at:new Date().toISOString()}};write(filename(stateDir,'state.json'),state);return {...readDeploymentOnboardingPreference(stateDir),serviceMutation:'NOT RUN'};}finally{release()}
+}
+
+// Explicit registration of a persistent local signer. This transaction changes
+// management configuration only; native jobs, TCC and enrolled identities are
+// never installed, stopped, re-paired or granted permissions here.
+const registrationKind='mac-local-signing-registration-v1';
+const abandonedRegistrationLocks=new Set();
+const registrationEncode=value=>Buffer.from(JSON.stringify(value,null,2)+'\n');
+const registrationSha=bytes=>createHash('sha256').update(bytes).digest('hex');
+function registrationJournal(d){
+ const file=filename(d,'mac-signing-registration.json');if(!fs.existsSync(file))return null;
+ const j=read(file);if(j.schema!==1||j.kind!==registrationKind||!/^[a-f0-9]{32}$/.test(j.transactionId??'')||!Array.isArray(j.changes)||!Array.isArray(j.phases)||!['prepared','writing','applied','rolling_back','rolled_back'].includes(j.status))fail('mac_signing_registration_journal_invalid');
+ return j;
+}
+function registrationSnapshot(d,app,verify){
+ const {config,state}=load(d),prior=config.host?.macPreviewApp,sourceStateSha=hash(filename(d,'state.json'));
+ exact(app,['path','cdhash','certificateSha1','certificateSha256']);
+ if(!prior||prior.path!=='/Applications/Styx.app'||!/^[a-f0-9]{40}$/.test(prior.cdhash??'')||app.path!==prior.path||!/^[a-f0-9]{40}$/.test(app.cdhash??'')||!/^[a-f0-9]{40}$/.test(app.certificateSha1??'')||!/^[a-f0-9]{64}$/.test(app.certificateSha256??''))fail('fixed_registered_mac_certificate_app_required');
+ assertMacPreviewContinuity(prior,app);
+ if(state.steps.some(s=>['running','uncertain'].includes(s.status))||[...(state.maintenance??[]),...(state.gatewayMaintenance??[])].some(s=>['running','uncertain'].includes(s.status)))fail('mac_signing_registration_uncertain_operation');
+ for(const name of ['background.lock','capabilities.lock'])if(fs.existsSync(filename(d,name)))fail('mac_signing_registration_management_busy');
+ const checked=verify(app);
+ if(checked?.trust!=='local_certificate_preview_not_notarized'||checked.path!==app.path||checked.cdhash!==app.cdhash||checked.certificateSha1!==app.certificateSha1||checked.certificateSha256!==app.certificateSha256)fail('mac_signing_registration_app_verification_changed');
+ const files=['deployment','state'].map(name=>({name,file:filename(d,name+'.json')}));
+ for(const name of ['background','capabilities'])if(fs.existsSync(filename(d,name+'.json'))){
+  const value=read(filename(d,name+'.json'));
+  if(value.schema!==1||value.configSha256!==state.configSha256||['running','uncertain','configuring','rolling_back'].includes(value.status)||value.operations?.some(s=>['running','uncertain'].includes(s.status)))fail('mac_signing_registration_auxiliary_requires_reconciliation');
+  files.push({name,file:filename(d,name+'.json')});
+ }
+ for(const entry of files){requirePrivateFile(entry.file);entry.before=fs.readFileSync(entry.file);}
+ // Verification can invoke native processes; bind all subsequent writes to the
+ // exact authoritative bytes observed after that verification as well.
+ if(registrationSha(files[0].before)!==state.configSha256||registrationSha(files[1].before)!==sourceStateSha)fail('mac_signing_registration_scope_changed');
+ const nextConfig=structuredClone(config);nextConfig.host.macPreviewApp={...app};validateDeployment(nextConfig,{checkNetwork:false});
+ files[0].after=registrationEncode(nextConfig);const nextSha=registrationSha(files[0].after),nextState=structuredClone(state);nextState.configSha256=nextSha;
+ if(nextState.onboardingDecisions?.background?.configSha256===state.configSha256)nextState.onboardingDecisions.background.configSha256=nextSha;
+ files[1].after=registrationEncode(nextState);
+ for(const entry of files.slice(2))entry.after=registrationEncode({...JSON.parse(entry.before),configSha256:nextSha});
+ return {prior,app:{...app},files,configSha256:state.configSha256};
+}
+function registrationPlan(snapshot){
+ const changes=snapshot.files.map(({name,before,after})=>({name,beforeSha256:registrationSha(before),afterSha256:registrationSha(after)}));
+ const body={schema:1,kind:registrationKind,configSha256:snapshot.configSha256,previousRegistration:snapshot.prior,app:snapshot.app,changes};
+ return {...body,planId:registrationSha(JSON.stringify(body)),status:'reviewable',scope:'host.macPreviewApp_only',serviceMutation:'NONE',identityMutation:'NONE',systemPermissions:'UNCHANGED',nativeAcceptance:'NOT RUN',notarization:'NOT RUN'};
+}
+export function planDeploymentMacSigningRegistration(d,options={},adapters={}){
+ exact(options,['app']);if(fs.existsSync(filename(d,'advance.lock')))fail('onboarding_busy_or_interrupted_lock');
+ const previous=registrationJournal(d);if(previous&&!['applied','rolled_back'].includes(previous.status))fail('mac_signing_registration_requires_rollback');
+ return registrationPlan(registrationSnapshot(d,options.app,adapters.verifyApp??verifyMacPreviewApp));
+}
+export function applyDeploymentMacSigningRegistration(d,options={},adapters={}){
+ exact(options,['authorize','plan']);if(options.authorize!==true)fail('explicit_mac_signing_registration_authorization_required');
+ const transactionId=randomBytes(16).toString('hex'),owner={schema:1,kind:registrationKind,transactionId,pid:process.pid,token:randomBytes(32).toString('hex')};
+ const release=lock(d,owner);let pending=false;
+ try{
+  const before=registrationJournal(d);if(before&&!['applied','rolled_back'].includes(before.status))fail('mac_signing_registration_requires_rollback');
+  const snapshot=registrationSnapshot(d,options.plan?.app,adapters.verifyApp??verifyMacPreviewApp),plan=registrationPlan(snapshot);
+  if(JSON.stringify(options.plan)!==JSON.stringify(plan))fail('mac_signing_registration_plan_changed');
+  const root=filename(d,'mac-signing-registration-snapshots');ensurePrivateDirectory(root);
+  const dir=filename(root,transactionId);ensurePrivateDirectory(dir,{exclusive:true});
+  for(const entry of snapshot.files){writeBytes(filename(dir,entry.name+'.before'),entry.before);writeBytes(filename(dir,entry.name+'.after'),entry.after);}
+  if(process.platform!=='win32'){const fd=fs.openSync(root,'r');try{fs.fsyncSync(fd);}finally{fs.closeSync(fd);}}
+  const journal={schema:1,kind:registrationKind,transactionId,status:'prepared',plan,changes:plan.changes,owner,phases:[{phase:'prepared',at:new Date().toISOString()}]};
+  // Retain each completed journal before replacing the latest operation record.
+  if(before)write(filename(dir,'previous-journal.json'),before);
+  write(filename(d,'mac-signing-registration.json'),journal);pending=true;adapters.onPhase?.('prepared');
+  for(const entry of snapshot.files){
+   if(hash(entry.file)!==registrationSha(entry.before))fail('mac_signing_registration_scope_changed');
+   journal.status='writing';journal.phases.push({phase:'writing_'+entry.name,at:new Date().toISOString()});write(filename(d,'mac-signing-registration.json'),journal);
+   writeBytes(entry.file,entry.after);adapters.onPhase?.('written_'+entry.name);
+  }
+  if(snapshot.files.some(entry=>hash(entry.file)!==registrationSha(entry.after)))fail('mac_signing_registration_scope_changed');
+  journal.status='applied';journal.phases.push({phase:'applied',at:new Date().toISOString()});write(filename(d,'mac-signing-registration.json'),journal);pending=false;
+  return {schema:1,status:'applied',transactionId,registration:snapshot.app,scope:plan.scope,serviceMutation:'NONE',identityMutation:'NONE',systemPermissions:'UNCHANGED',notarization:'NOT RUN'};
+ }finally{if(pending)abandonedRegistrationLocks.add(owner.token);release(pending);}
+}
+export function rollbackDeploymentMacSigningRegistration(d,options={}){
+ exact(options,['authorize']);if(options.authorize!==true)fail('explicit_mac_signing_registration_authorization_required');
+ if(!abs(d))fail('absolute_state_directory_required');requirePrivateDirectory(d);
+ const guard=filename(d,'mac-signing-registration-recovery.lock'),guardFd=openPrivateFile(guard,0o600),guardStamp=fs.fstatSync(guardFd);let release,pending=false,recoveryOwner;
+ try{
+  const journal=registrationJournal(d);if(!journal||journal.status==='rolled_back')fail('mac_signing_registration_rollback_not_available');
+  const advance=filename(d,'advance.lock');
+  if(fs.existsSync(advance)){
+   const record=read(advance),stamp=fs.lstatSync(advance);
+   if(record.kind!==registrationKind||record.transactionId!==journal.transactionId||record.token!==journal.owner?.token)fail('mac_signing_registration_foreign_lock');
+   let alive=true;try{process.kill(record.pid,0)}catch(error){alive=error.code!=='ESRCH';}
+   if(alive&&!(record.pid===process.pid&&abandonedRegistrationLocks.has(record.token)))fail('mac_signing_registration_owner_still_running');
+   const current=fs.lstatSync(advance);if(current.ino!==stamp.ino||current.dev!==stamp.dev||read(advance).token!==record.token)fail('mac_signing_registration_lock_changed');
+   fs.unlinkSync(advance);
+  }
+  const owner={schema:1,kind:registrationKind,transactionId:journal.transactionId,pid:process.pid,token:randomBytes(32).toString('hex')};
+  recoveryOwner=owner;
+  release=lock(d,owner,{recovering:true});
+  for(const name of ['background.lock','capabilities.lock'])if(fs.existsSync(filename(d,name)))fail('mac_signing_registration_management_busy');
+  const dir=filename(filename(d,'mac-signing-registration-snapshots'),journal.transactionId);requirePrivateDirectory(dir);
+  if(!journal.changes.length||new Set(journal.changes.map(x=>x.name)).size!==journal.changes.length||!['deployment','state'].every(name=>journal.changes.some(x=>x.name===name)))fail('mac_signing_registration_journal_invalid');
+  const files=journal.changes.map(entry=>{
+   if(!['deployment','state','background','capabilities'].includes(entry.name))fail('mac_signing_registration_journal_invalid');
+   const beforeFile=filename(dir,entry.name+'.before'),afterFile=filename(dir,entry.name+'.after');requirePrivateFile(beforeFile);requirePrivateFile(afterFile);
+   const before=fs.readFileSync(beforeFile),after=fs.readFileSync(afterFile),file=filename(d,entry.name+'.json');requirePrivateFile(file);
+   if(registrationSha(before)!==entry.beforeSha256||registrationSha(after)!==entry.afterSha256||![entry.beforeSha256,entry.afterSha256].includes(hash(file)))fail('mac_signing_registration_rollback_scope_changed');
+   return {file,before};
+  });
+  const config=JSON.parse(files.find(x=>x.file===filename(d,'deployment.json')).before),state=JSON.parse(files.find(x=>x.file===filename(d,'state.json')).before);
+  validateDeployment(config,{checkNetwork:false});if(state.configSha256!==registrationSha(files.find(x=>x.file===filename(d,'deployment.json')).before)||state.mode!==config.mode)fail('mac_signing_registration_snapshot_invalid');
+  journal.owner=owner;journal.status='rolling_back';journal.phases.push({phase:'rolling_back',at:new Date().toISOString()});write(filename(d,'mac-signing-registration.json'),journal);pending=true;
+  for(const entry of files)writeBytes(entry.file,entry.before);
+  journal.status='rolled_back';journal.phases.push({phase:'rolled_back',at:new Date().toISOString()});write(filename(d,'mac-signing-registration.json'),journal);pending=false;
+  return {schema:1,status:'rolled_back',transactionId:journal.transactionId,restored:'exact_original_configuration_and_state',serviceMutation:'NONE',identityMutation:'NONE',systemPermissions:'UNCHANGED'};
+ }finally{
+  try{if(pending&&recoveryOwner)abandonedRegistrationLocks.add(recoveryOwner.token);if(release)release(pending);}finally{fs.closeSync(guardFd);const current=fs.lstatSync(guard);if(current.ino!==guardStamp.ino||current.dev!==guardStamp.dev)fail('mac_signing_registration_recovery_guard_changed');fs.unlinkSync(guard);}
+ }
 }
 
 export {readDeploymentAppLifecycle,controlDeploymentAppLifecycle} from './app-lifecycle.mjs';

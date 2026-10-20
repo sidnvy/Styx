@@ -60,6 +60,23 @@ test('CLI re-verifies authoritative registered identity; native path must match 
  assert.throws(()=>readDeploymentAppLifecycle(f.stateDir,f.cli),/identity_mismatch/);
  assert.deepEqual(mutationCalls(f),[]);
 });
+test('trusted native path still verifies the persisted certificate before launchd changes',t=>{
+ const f=fixture(t),file=path.join(f.stateDir,'deployment.json');
+ const registration={path:f.appPath,cdhash:f.cdhash,certificateSha1:'b'.repeat(40),certificateSha256:'c'.repeat(64)};
+ fs.writeFileSync(file,JSON.stringify({host:{macPreviewApp:registration}}));
+ let observed={...registration,cdhash:'d'.repeat(40)};
+ const verified=[],operations={...f.operations,verifyApp:value=>{verified.push(value);return observed}};
+ const trusted={...f.trusted,operations};
+ assert.equal(readDeploymentAppLifecycle(f.stateDir,trusted).source,'verified_native_launch');
+ assert.deepEqual(verified,[registration]);
+ for(const value of [{path:f.appPath,cdhash:'d'.repeat(40)},{...observed,certificateSha256:'e'.repeat(64)}]){
+  observed=value;assert.throws(()=>f.mutate('login',true,trusted),/registered_certificate_changed/);
+ }
+ const throwing={...trusted,operations:{...operations,verifyApp:()=>{throw Error('actual_certificate_mismatch')}}};
+ assert.throws(()=>f.mutate('quit',undefined,throwing),/actual_certificate_mismatch/);
+ assert.deepEqual(mutationCalls(f),[]);
+ assert.deepEqual(JSON.parse(fs.readFileSync(file)).host.macPreviewApp,registration);
+});
 test('login preference uses observed launchd override, not plist existence',t=>{
  const f=fixture(t),file=path.join(f.stateDir,'deployment.json'),original=fs.readFileSync(file);
  let state=f.mutate('login',true);

@@ -8,7 +8,7 @@ import {requirePrivateDirectory,requirePrivateFile,openPrivateFile,ensurePrivate
 import {activeRelease} from '../host/installer.mjs';
 import {activeHostConfig} from '../host/launch.mjs';
 import {validateDeployment} from './deployment-config.mjs';
-import {verifyMacPreviewApp} from '../host/macos-preview-trust.mjs';
+import {assertMacPreviewContinuity,verifyMacPreviewApp} from '../host/macos-preview-trust.mjs';
 import {capabilityPayload} from '../shared/enrollment-protocol.mjs';
 import {ownerCommand} from '../gateway/enroll-admin.mjs';
 import {readDeployment,controlDeploymentHostService} from './core.mjs';
@@ -16,6 +16,11 @@ import {observeHostService} from './service-lifecycle.mjs';
 import {stopDeploymentForeground,readDeploymentForeground} from './foreground.mjs';
 const assert=(ok,code)=>{if(!ok)throw Error(code)};
 const hash=b=>createHash('sha256').update(b).digest('hex');
+export function selectMacPreviewForCapabilities(registered,trustedOverride){
+ const current=trustedOverride??registered;
+ if(assertMacPreviewContinuity(registered,current).migrationRequired)throw Error('mac_preview_certificate_migration_required');
+ return current;
+}
 function read(file){requirePrivateFile(file);assert(fs.statSync(file).size<=1048576,'capability_file_too_large');return JSON.parse(fs.readFileSync(file,'utf8'))}
 function write(file,data){
  const temp=file+'.'+randomBytes(8).toString('hex')+'.tmp',fd=openPrivateFile(temp,0o600);
@@ -25,6 +30,7 @@ function write(file,data){
 }
 function prepare(d,enable,trustedMacPreviewApp){
  const state=readDeployment(d),config=read(path.join(d,'deployment.json'));
+ const selectedPreview=selectMacPreviewForCapabilities(config.host?.macPreviewApp,trustedMacPreviewApp);
  assert(state.mode==='create-local'&&config.mode==='create-local','local_owner_capability_change_only');
  assert(state.steps.some(s=>['host.pair','host.claim'].includes(s.id)&&s.status==='succeeded'),'paired_host_required');
  assert(!state.steps.some(s=>['running','uncertain'].includes(s.status)),'onboarding_uncertain_requires_reconciliation');
@@ -41,7 +47,7 @@ function prepare(d,enable,trustedMacPreviewApp){
   const active=activeRelease(path.join(base,'install'),fs.readFileSync(publisher,'utf8'));assert(active,'signed_release_required');
   let binary=path.join(active.release_root,'bin',process.platform==='win32'?'cua-driver.exe':'cua-driver');
   if(process.platform==='darwin'){
-   const preview=trustedMacPreviewApp??config.host.macPreviewApp;
+   const preview=selectedPreview;
    if(trustedMacPreviewApp)assert(trustedMacPreviewApp.path==='/Applications/Styx.app','fixed_macos_preview_path_required');
    if(preview)verifyMacPreviewApp(preview);
    else{
@@ -188,6 +194,7 @@ function browserIdentity(d,config){
 }
 function browserSnapshot(d,selection,ops){
  const configFile=path.join(d,'deployment.json'),stateFile=path.join(d,'state.json'),configBytes=privateBytes(configFile),config=JSON.parse(configBytes),state=read(stateFile);
+ selectMacPreviewForCapabilities(config.host?.macPreviewApp,ops.trustedMacPreviewApp);
  validateDeployment(config,{checkNetwork:false});
  assert(state.schema===1&&state.mode===config.mode&&state.configSha256===hash(configBytes),'capability_scope_changed');
  assert(state.steps.some(s=>['host.pair','host.claim'].includes(s.id)&&s.status==='succeeded'),'paired_host_required');

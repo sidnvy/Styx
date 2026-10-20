@@ -6,8 +6,64 @@ import os from 'node:os';
 import {fileURLToPath} from 'node:url';
 import {spawnSync} from 'node:child_process';
 import {deflateSync} from 'node:zlib';
+import {createHash,X509Certificate} from 'node:crypto';
+import {rootCertificates} from 'node:tls';
 import {crc32,normalizePresentation} from '../../plugin/package.mjs';
-import {appInfoPlist,macSigningPlan,macDevelopmentSigningPlan,buildMacApp,macSwiftBuildArguments,prepareMacPluginIcon,MAC_BUNDLE_ID} from '../build-macos-app.mjs';
+import {appInfoPlist,macSigningPlan,macDevelopmentSigningPlan,macLocalSigningPlan,normalizeMacLocalSigning,publicMacLocalSigning,verifyMacLocalSigning,buildMacApp,macSwiftBuildArguments,prepareMacPluginIcon,MAC_BUNDLE_ID} from '../build-macos-app.mjs';
+
+const localSigning={identitySha1:'a'.repeat(40),certificateSha256:'b'.repeat(64),keychain:'/private/build/signing.keychain-db'};
+test('persistent local signing rejects weak, ambiguous or injected configuration and publishes no keychain path',()=>{
+  assert.deepEqual(normalizeMacLocalSigning(localSigning),localSigning);
+  assert.deepEqual(publicMacLocalSigning(localSigning),{schema:1,certificateSha1:localSigning.identitySha1,certificateSha256:localSigning.certificateSha256});
+  for(const bad of [undefined,null,[],{},Object.assign(Object.create(null),localSigning),
+    {...localSigning,identitySha1:'-'},{...localSigning,identitySha1:'A'.repeat(40)},
+    {...localSigning,identitySha1:'a'.repeat(39)},{...localSigning,identitySha1:'a'.repeat(40)+'\n'},
+    {...localSigning,certificateSha256:'B'.repeat(64)},{...localSigning,certificateSha256:'b'.repeat(63)},
+    {...localSigning,keychain:'relative.keychain-db'},{...localSigning,keychain:'/private/build/../other.keychain-db'},
+    {...localSigning,keychain:'/private/build/keychain\n--sign'},{...localSigning,identity:'-'},
+    {...localSigning,notaryProfile:'local'},{...localSigning,teamID:'A123456789'}])
+    assert.throws(()=>normalizeMacLocalSigning(bad));
+});
+test('local certificate plan pins the exact leaf and stable code identifiers before outer seal',()=>{
+  const app='/build/Styx.app',files=[app+'/Contents/MacOS/Styx',app+'/Contents/MacOS/cua-driver',app+'/Contents/Resources/host-bundle/bin/node',app+'/Contents/Resources/runtime/node'];
+  const plan=macLocalSigningPlan({app,files,localSigning});
+  const signed=plan.filter(([,args])=>args.includes('--sign'));
+  assert.equal(signed.length,files.length+1);
+  assert.equal(signed[0][1].at(-1),files[2]);
+  assert.equal(signed.at(-1)[1].at(-1),app);
+  for(const [,args]of signed){
+    const identifier=args[args.indexOf('--identifier')+1],requirement=args[args.indexOf('--requirements')+1];
+    assert.equal(args[args.indexOf('--keychain')+1],localSigning.keychain);
+    assert.equal(args[args.indexOf('--sign')+1],localSigning.identitySha1);
+    assert.equal(requirement,`=designated => identifier "${identifier}" and certificate leaf = H"${localSigning.identitySha1}"`);
+    assert.ok(args.includes('--timestamp=none'));assert.ok(!args.includes('--deep'));
+    assert.ok(!args.includes('-'));assert.ok(!args.includes('--options'));
+    const verification=plan.find(([,a])=>a.includes('-R')&&a.at(-1)===args.at(-1));
+    assert.equal(verification[1][verification[1].indexOf('-R')+1],requirement.replace('designated => ',''));
+  }
+  for(const file of [app,files[0]])assert.equal(signed.find(([,args])=>args.at(-1)===file)[1].find((_,i,a)=>a[i-1]==='--identifier'),MAC_BUNDLE_ID);
+  const identifiers=signed.filter(([,a])=>a.at(-1)!==app&&a.at(-1)!==files[0]).map(([,a])=>a[a.indexOf('--identifier')+1]);
+  assert.equal(new Set(identifiers).size,identifiers.length); // Runtime and Host Node stay distinct.
+  const relocated=macLocalSigningPlan({app:'/next/Styx.app',files:files.map(f=>f.replace('/build/','/next/')),localSigning});
+  assert.deepEqual(relocated.filter(([,a])=>a.includes('--sign')).map(([,a])=>a[a.indexOf('--identifier')+1]),signed.map(([,a])=>a[a.indexOf('--identifier')+1]));
+  assert.equal(macLocalSigningPlan({app,files,localSigning,sealApp:false}).some(([,a])=>a.at(-1)===app),false);
+  assert.equal(plan.at(-1)[1].includes('--deep'),true);
+  for(const patch of [{app:'/build/../Styx.app'},{app:'/build/Other.app'},{files:['/outside/node']},{files:[files[0],files[0]]},{files:[app+'/Contents/../escape']},{files:[app+'/Contents/file\n']},{sealApp:'true'},{localSigning:undefined}])
+    assert.throws(()=>macLocalSigningPlan({app,files,localSigning,...patch}));
+});
+test('selected local keychain certificate must match both fingerprints before any signing',t=>{
+  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'styx-keychain-input-'));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+  const keychain=path.join(dir,'local.keychain-db');fs.writeFileSync(keychain,'fixture, not a real keychain');
+  const certificate=new X509Certificate(rootCertificates[0]),input={keychain,identitySha1:createHash('sha1').update(certificate.raw).digest('hex'),certificateSha256:createHash('sha256').update(certificate.raw).digest('hex')},calls=[];
+  const run=(command,args,options)=>{calls.push({command,args,options});return rootCertificates[0]};
+  assert.deepEqual(verifyMacLocalSigning(input,{run}),publicMacLocalSigning(input));
+  assert.equal(calls[0].command,'/usr/bin/security');assert.deepEqual(calls[0].args,['find-certificate','-a','-p',keychain]);
+  assert.throws(()=>verifyMacLocalSigning({...input,certificateSha256:'0'.repeat(64)},{run}),/fingerprint_mismatch/);
+  assert.throws(()=>verifyMacLocalSigning({...input,identitySha1:'0'.repeat(40)},{run}),/fingerprint_mismatch/);
+  assert.throws(()=>verifyMacLocalSigning(input,{run(){return ''}}),/fingerprint_mismatch/);
+  assert.throws(()=>verifyMacLocalSigning(input,{run(){throw Error('locked_keychain')}}),/locked_keychain/);
+  fs.unlinkSync(keychain);fs.mkdirSync(keychain);assert.throws(()=>verifyMacLocalSigning(input,{run}),/regular_local_signing_keychain/);
+});
 
 test('packaged sips PNG metadata is removed before the real Core plugin profile validates it',()=>{
   const chunk=(type,data)=>{const head=Buffer.alloc(8);head.writeUInt32BE(data.length);head.write(type,4);const sum=Buffer.alloc(4);sum.writeUInt32BE(crc32(Buffer.concat([Buffer.from(type),data])));return Buffer.concat([head,data,sum])};

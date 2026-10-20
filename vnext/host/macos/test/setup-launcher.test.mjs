@@ -22,8 +22,9 @@ test('bundle redirects and extra credential-bearing defaults are rejected',()=>{
   fs.unlinkSync(publisher);fs.writeFileSync(publisher,'public');fs.writeFileSync(path.join(f.resources,'artifact-defaults.json'),JSON.stringify({bundle:'host-bundle',publisherKeyFile:'publisher.pem',publisherSha256:'a'.repeat(64),token:'must-not-copy'}));assert.throws(()=>previewLayout(f.resources),/defaults_invalid/);
  }finally{f.close()}
 });
-test('native signature verification precedes preview identity acceptance and requires exact ad-hoc bundle CDHash',()=>{
- const layout={app:'/Applications/Styx.app'};let calls=[];
+test('native signature verification precedes preview identity acceptance and requires exact ad-hoc bundle CDHash',t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'styx-launch-signature-'));t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
+ const layout={app:path.join(root,'Styx.app')};fs.mkdirSync(path.join(layout.app,'Contents/Resources'),{recursive:true});let calls=[];
  const run=(_command,args)=>{calls.push(args);return{status:0,stderr:'Identifier=app.styx.host\nSignature=adhoc\nCDHash='+ 'b'.repeat(40)+'\n'}};
  assert.deepEqual(previewSigningIdentity(layout,{run}),{path:layout.app,cdhash:'b'.repeat(40)});assert.deepEqual(calls[0],['--verify','--deep','--strict',layout.app]);
  assert.throws(()=>previewSigningIdentity(layout,{run:()=>({status:1})}),/signature_invalid/);

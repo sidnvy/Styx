@@ -6,6 +6,7 @@ import path from 'node:path';
 import {spawnSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
 import {fileURLToPath,pathToFileURL} from 'node:url';
+import {readLocalCertificatePin,verifyLocalCertificate} from '../macos-local-signing.mjs';
 const assert=(ok,code)=>{if(!ok)throw Error(code)};
 function regular(file){const s=fs.lstatSync(file);assert(s.isFile()&&!s.isSymbolicLink(),'bundled_setup_regular_file_required');return file}
 function within(root,relative){
@@ -38,7 +39,14 @@ export function previewSigningIdentity(layout,{run=spawnSync}={}){
  const verified=run('/usr/bin/codesign',['--verify','--deep','--strict',layout.app],opts);assert(verified.status===0,'bundled_preview_signature_invalid');
  const inspected=run('/usr/bin/codesign',['-d','--verbose=4',layout.app],opts);assert(inspected.status===0,'bundled_preview_signature_unavailable');
  const text=String(inspected.stderr??''),match=/^CDHash=([a-f0-9]{40})$/m.exec(text);
- assert(/^Identifier=app\.styx\.host$/m.test(text)&&/^Signature=adhoc$/m.test(text)&&match,'bundled_preview_ad_hoc_identity_required');
+ if(!/^Signature=adhoc$/m.test(text)){
+  assert(/^Identifier=app\.styx\.host$/m.test(text)&&match,'bundled_preview_ad_hoc_identity_required');
+  const pin=readLocalCertificatePin(layout.app);assert(pin,'bundled_preview_ad_hoc_identity_required');
+  verifyLocalCertificate(layout.app,pin,{run});
+  return {path:layout.app,cdhash:match[1],certificateSha1:pin.certificateSha1,certificateSha256:pin.certificateSha256};
+ }
+ assert(!readLocalCertificatePin(layout.app),'bundled_preview_local_certificate_required');
+ assert(/^Identifier=app\.styx\.host$/m.test(text)&&match,'bundled_preview_ad_hoc_identity_required');
  return{path:layout.app,cdhash:match[1]};
 }
 function privateDirectory(directory){

@@ -3,7 +3,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import {execFileSync} from 'node:child_process';
-import {createHash} from 'node:crypto';
+import {createHash,X509Certificate} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
 import {crc32,normalizePresentation} from '../plugin/package.mjs';
 
@@ -95,6 +95,50 @@ export function macAdhocSigningPlan({app,files=[],sealApp=true}={}){
   if(sealApp)steps.push(['/usr/bin/codesign',['--force','--timestamp=none','--sign','-',app]],['/usr/bin/codesign',['--verify','--deep','--strict','--verbose=2',app]]);
   return steps;
 }
+// A persistent local certificate is an explicit preview identity, never an
+// Apple publisher identity. The keychain is build input, not public metadata.
+export function normalizeMacLocalSigning(value){
+  assert(value&&Object.getPrototypeOf(value)===Object.prototype&&Object.keys(value).length===3&&
+    Object.keys(value).every(k=>['identitySha1','certificateSha256','keychain'].includes(k)), 'invalid_local_signing_configuration');
+  assert(typeof value.identitySha1==='string'&&/^[a-f0-9]{40}$/.test(value.identitySha1),'invalid_local_signing_identity_sha1');
+  assert(typeof value.certificateSha256==='string'&&/^[a-f0-9]{64}$/.test(value.certificateSha256),'invalid_local_signing_certificate_sha256');
+  assert(typeof value.keychain==='string'&&path.posix.isAbsolute(value.keychain)&&path.posix.normalize(value.keychain)===value.keychain&&
+    !/[\x00-\x1f\x7f]/.test(value.keychain),'absolute_local_signing_keychain_required');
+  return {identitySha1:value.identitySha1,certificateSha256:value.certificateSha256,keychain:value.keychain};
+}
+export function publicMacLocalSigning(value){
+  const local=normalizeMacLocalSigning(value);
+  return {schema:1,certificateSha1:local.identitySha1,certificateSha256:local.certificateSha256};
+}
+export function verifyMacLocalSigning(value,{run=execFileSync}={}){
+  const local=normalizeMacLocalSigning(value),stat=fs.lstatSync(local.keychain);
+  assert(stat.isFile()&&!stat.isSymbolicLink(),'regular_local_signing_keychain_required');
+  const pem=run('/usr/bin/security',['find-certificate','-a','-p',local.keychain],{encoding:'utf8',timeout:15000,maxBuffer:1024*1024});
+  const matching=String(pem).match(/-----BEGIN CERTIFICATE-----[\s\S]*?-----END CERTIFICATE-----/g)?.map(p=>new X509Certificate(p)).find(cert=>
+    createHash('sha1').update(cert.raw).digest('hex')===local.identitySha1);
+  assert(matching&&createHash('sha256').update(matching.raw).digest('hex')===local.certificateSha256,'local_signing_certificate_fingerprint_mismatch');
+  return publicMacLocalSigning(local);
+}
+export function macLocalSigningPlan({app,localSigning,files=[],sealApp=true}={}){
+  const local=normalizeMacLocalSigning(localSigning);
+  assert(typeof app==='string'&&path.posix.isAbsolute(app)&&path.posix.normalize(app)===app&&path.posix.basename(app)==='Styx.app'&&!/[\x00-\x1f\x7f]/.test(app),'invalid_styx_app_path');
+  assert(typeof sealApp==='boolean'&&Array.isArray(files)&&new Set(files).size===files.length&&files.every(f=>typeof f==='string'&&
+    path.posix.isAbsolute(f)&&path.posix.normalize(f)===f&&f.startsWith(app+'/')&&!/[\x00-\x1f\x7f]/.test(f)),'local_nested_code_paths_required');
+  const ordered=[...files].sort((a,b)=>b.split('/').length-a.split('/').length||a.localeCompare(b));
+  const steps=[];
+  const add=file=>{
+    const relative=path.posix.relative(app,file);
+    const identifier=file===app||relative==='Contents/MacOS/Styx'?MAC_BUNDLE_ID:
+      MAC_BUNDLE_ID+'.code.'+createHash('sha256').update(relative).digest('hex').slice(0,32);
+    const requirement=`identifier "${identifier}" and certificate leaf = H"${local.identitySha1}"`;
+    steps.push(['/usr/bin/codesign',['--force','--timestamp=none','--keychain',local.keychain,'--sign',local.identitySha1,
+      '--identifier',identifier,'--requirements','=designated => '+requirement,file]],
+      ['/usr/bin/codesign',['--verify','--strict','-R','='+requirement,file]]);
+  };
+  for(const file of ordered)add(file);
+  if(sealApp){add(app);steps.push(['/usr/bin/codesign',['--verify','--deep','--strict','--verbose=2',app]]);}
+  return steps;
+}
 export function macSwiftBuildArguments({source,output,arch=process.arch,sdkPath,moduleCachePath,additionalSources=[]}={}){
   const absolute=p=>typeof p==='string'&&path.posix.isAbsolute(p)&&path.posix.normalize(p)===p&&!/[\x00-\x1f\x7f]/.test(p);
   assert(absolute(source)&&absolute(output),'absolute_swift_build_paths_required');
@@ -107,10 +151,11 @@ export function macSwiftBuildArguments({source,output,arch=process.arch,sdkPath,
     ...(sdkPath===undefined?[]:['-sdk',sdkPath]),...(moduleCachePath===undefined?[]:['-module-cache-path',moduleCachePath]),
     ...(additionalSources.length?['-D','STYX_PRODUCT_UI']:[]),source,...additionalSources,'-o',output,'-framework','AppKit','-framework','ApplicationServices','-framework','CoreGraphics','-framework','SwiftUI','-framework','WebKit'];
 }
-export function buildMacApp({app,cuaBinary,version,identity,teamID,notaryProfile,signingMode='distribution',sdkPath,moduleCachePath}={}){
+export function buildMacApp({app,cuaBinary,version,identity,teamID,notaryProfile,signingMode='distribution',localSigning,sdkPath,moduleCachePath}={}){
   assert(process.platform==='darwin','native_macos_build_required');
   const plist=appInfoPlist(version);
   assert(['distribution','local-development'].includes(signingMode),'invalid_macos_signing_mode');
+  if(localSigning!==undefined){normalizeMacLocalSigning(localSigning);assert(identity===undefined&&teamID===undefined&&notaryProfile===undefined&&signingMode==='distribution','local_signing_modes_mutually_exclusive');}
   assert(signingMode!=='local-development'||identity,'local_development_identity_required');
   assert(signingMode!=='local-development'||!notaryProfile,'local_development_notarization_not_supported');
   assert(typeof app==='string'&&path.isAbsolute(app)&&path.basename(app)==='Styx.app','invalid_styx_app_path');
@@ -129,7 +174,7 @@ export function buildMacApp({app,cuaBinary,version,identity,teamID,notaryProfile
   assert(/^cua-driver 0\.36\.0(?:\s|$)/.test(observed),'pinned_cua_036_required');
   assert(!notaryProfile||identity,'notarization_requires_signing');
   assert(!teamID||identity,'team_requires_signing');
-  const steps=identity?(signingMode==='local-development'
+  const steps=localSigning!==undefined?macLocalSigningPlan({app,localSigning,files:[path.posix.join(app,'Contents/MacOS/cua-driver'),path.posix.join(app,'Contents/MacOS/Styx')]}):identity?(signingMode==='local-development'
     ?macDevelopmentSigningPlan({app,identity,teamID})
     :macSigningPlan({app,identity,teamID,notaryProfile})):[];
   fs.mkdirSync(path.dirname(app),{recursive:true});
@@ -138,6 +183,10 @@ export function buildMacApp({app,cuaBinary,version,identity,teamID,notaryProfile
     if(moduleCachePath!==undefined)fs.mkdirSync(moduleCachePath,{mode:0o700});
     const notices=path.join(app,'Contents/Resources/licenses');
     fs.mkdirSync(notices,{recursive:true});
+    if(localSigning!==undefined){
+      const descriptor=verifyMacLocalSigning(localSigning);
+      fs.writeFileSync(path.join(app,'Contents/Resources/local-signing.json'),JSON.stringify(descriptor,null,2)+'\n',{flag:'wx'});
+    }
     for(const name of ['cua-LICENSE','styx-LICENSE','provenance.json'])
       fs.copyFileSync(path.join(LICENSES,name),path.join(notices,name),fs.constants.COPYFILE_EXCL);
     const brand=path.join(app,'Contents/Resources/brand');fs.mkdirSync(brand);
@@ -162,14 +211,14 @@ export function buildMacApp({app,cuaBinary,version,identity,teamID,notaryProfile
     execFileSync('/usr/bin/plutil',['-lint',path.join(app,'Contents/Info.plist')],{stdio:'inherit'});
     for(const [command,args] of steps){
       // A local keychain approval must not turn into an unattended long wait.
-      const output=execFileSync(command,args,{encoding:'utf8',timeout:signingMode==='local-development'?15000:1800000});
+      const output=execFileSync(command,args,{encoding:'utf8',timeout:localSigning!==undefined||signingMode==='local-development'?15000:1800000});
       if(args[0]==='notarytool')assert(JSON.parse(output).status==='Accepted','notarization_not_accepted');
     }
     return {schema:1,bundle_id:MAC_BUNDLE_ID,version,arch:process.arch,
       cua_version:observed,cua_input_sha256:inputHash,app,
-      signing:identity?'PASS':'NOT RUN',
-      signing_detail:identity?(signingMode==='local-development'?'apple_development_local_only':'developer_id_verified'):'unsigned_development_bundle',
-      signing_mode:signingMode,external_distribution:'NOT RUN',
+      signing:localSigning!==undefined||identity?'PASS':'NOT RUN',
+      signing_detail:localSigning!==undefined?'local_certificate_preview':identity?(signingMode==='local-development'?'apple_development_local_only':'developer_id_verified'):'unsigned_development_bundle',
+      signing_mode:localSigning!==undefined?'local_certificate_preview':signingMode,...(localSigning!==undefined?{local_signing:publicMacLocalSigning(localSigning)}:{}),external_distribution:'NOT RUN',
       compiler:{sdk_path:sdkPath??'xcrun_default',module_cache_path:moduleCachePath??'compiler_default',warnings_as_errors:true,target:swiftArgs[swiftArgs.indexOf('-target')+1]},
       notarization:notaryProfile?'PASS':'NOT RUN',
       notarization_detail:notaryProfile?'accepted_stapled_assessed':'not_submitted',

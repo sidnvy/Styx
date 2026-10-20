@@ -11,7 +11,7 @@ const ROOT=fileURLToPath(new URL('../',import.meta.url));
 const STATIC=Object.freeze([
   'host/connect.mjs','host/computer.mjs',
   'host/launch.mjs','host/installer.mjs','host/health-update.mjs','host/service-update.mjs',
-  'host/enroll.mjs','host/setup-native.mjs','host/macos-preview-trust.mjs','host/doctor.mjs','host/linux-service.mjs',
+  'host/enroll.mjs','host/setup-native.mjs','host/macos-preview-trust.mjs','host/macos-local-signing.mjs','host/doctor.mjs','host/linux-service.mjs',
   'host/macos-launchagent.mjs','host/macos-native-launcher.mjs','host/windows-task.ps1',
   'shared/enrollment-protocol.mjs',
   'host/private-storage.mjs','shared/private-file.mjs',
