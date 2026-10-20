@@ -30,8 +30,13 @@ grants, explicit recovery, unavailable Core), as did existing native self-tests.
 The regression injects permission observations; it is not real TCC/Cua acceptance.
 These changes have **not been packaged or installed**. PilotMac retains dev6 to
 avoid changing its development identity again while the user updates its grants.
-Real permission recognition, Cua observation/actions and account acceptance remain
-pending. No TCC database was read or modified. Evidence: parent task
+At 20:00 on the same day, after the user removed the old permission entries and
+added the current App in System Settings, the unchanged dev6 App's fresh native
+descriptor reports **Accessibility true and Screen Recording true**. The
+authenticated foreground-owner observation reports Exec, desktop and Browser
+connections connected. This verifies current permission recognition and connection
+recovery; Cua observation/actions and target-account acceptance remain pending.
+No TCC database was read or modified. Evidence: parent task
 `outputs/v6-permission-recognition-20261020/`.
 
 ## PilotMac native editing correction — dev6
