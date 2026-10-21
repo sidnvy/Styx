@@ -577,14 +577,16 @@ struct ProductAcceptanceField: NSViewRepresentable {
     }
     func currentDesktopReadback(challengeID: String) -> String? {
         guard model.challengeID == challengeID, let field = acceptanceField,
-              field.window === window, window?.isVisible == true, !field.isHiddenOrHasHiddenAncestor,
+              let fieldWindow = field.window,
+              fieldWindow === window || fieldWindow === settingsWindow || (settingsWindow != nil && fieldWindow.sheetParent === settingsWindow),
+              fieldWindow.isVisible, !field.isHiddenOrHasHiddenAncestor,
               let expires = model.acceptance["challenge"]["expiresAt"].number,
               expires > Date().timeIntervalSince1970 * 1000 else { return nil }
         return field.stringValue
     }
     private func observeDesktopReadback() async {
         guard !model.busy, let id = model.challengeID,
-              let window = window, window.windowNumber > 0,
+              let window = acceptanceField?.window, window.windowNumber > 0,
               let actual = currentDesktopReadback(challengeID: id),
               let expected = model.acceptance["challenge"]["desktopValue"].string,
               actual == expected, model.acceptance["desktop"]["status"].string != "verified" else { return }

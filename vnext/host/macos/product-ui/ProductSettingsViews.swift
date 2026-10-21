@@ -141,6 +141,12 @@ struct ProductSettingsView: View {
                     Button(model.tunnelConnection != .connected ? productText("修复连接", "Fix connection") : model.accepted ? productText("重新验证", "Verify again") : productText("继续连接 ChatGPT", "Continue ChatGPT setup")) { model.page = .chat; setupChat = true }
                     Button(productText("在 ChatGPT 中管理", "Manage in ChatGPT")) { model.openOfficial("https://chatgpt.com/plugins") }
                 }
+                if model.acceptance["challenge"]["desktopValue"].string != nil && !setupChat {
+                    VStack(alignment: .leading, spacing: 8) {
+                        Text(productText("桌面验证输入框（由聊天里的 Computer Use 操作）", "Desktop verification field (operated by Computer Use from chat)")).font(.caption)
+                        ProductAcceptanceField(model: model, owner: controller).frame(height: 30)
+                    }
+                }
                 Divider()
                 Text(productText("连接资料", "Connection details")).font(.headline)
                 if !model.connectionTunnelID.isEmpty {
