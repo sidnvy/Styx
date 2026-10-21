@@ -32,9 +32,9 @@ struct ProductPanel<Content: View>: View {
 struct ProductView: View {
     @ObservedObject var model: ProductModel
     weak var controller: ProductWindowController?
-    @State private var usePluginPackage = false
+    @State private var usePluginPackage = true
     @State private var editTunnel = false
-    init(model: ProductModel, controller: ProductWindowController?, showPluginPackage: Bool = false) {
+    init(model: ProductModel, controller: ProductWindowController?, showPluginPackage: Bool = true) {
         self.model = model; self.controller = controller
         _usePluginPackage = State(initialValue: showPluginPackage)
     }
@@ -237,7 +237,7 @@ struct ProductView: View {
                 Button(productText("先完成电脑准备", "Finish computer setup")) { model.page = .preparation }
             } else {
                 tunnelPanel
-                officialPanel.disabled(model.tunnelConnection != .connected)
+                officialPanel
                 if usePluginPackage { pluginUploadPanel }
                 if model.plugin["accountActions"]["installation"].string == "user_confirmed" { acceptancePanel }
             }
@@ -254,9 +254,9 @@ struct ProductView: View {
     }
     private var pluginPackageContent: some View {
         VStack(alignment: .leading, spacing: 12) {
-            Text(productText("点击下方按钮，把 styx-native.zip 保存到电脑。", "Use the button below to save styx-native.zip to your computer."))
+            Text(productText("插件包含连接配置、内置技能及下方设置的名称、描述和图标。保存 ZIP 后到 ChatGPT 安装。", "The plugin includes connection settings, built-in skills, and the name, description and icon below. Save the ZIP, then install it in ChatGPT."))
             Button(productText("导出插件 ZIP…", "Export plugin ZIP…")) { model.exportPluginPackage() }.buttonStyle(.borderedProminent)
-                .disabled(model.connectionTunnelID.isEmpty || model.plugin["contextChanged"].bool || model.pluginName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.pluginName.count > 64 || model.pluginDescription.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.pluginDescription.count > 30)
+                .disabled(model.tunnelConnection != .connected || model.connectionTunnelID.isEmpty || model.plugin["contextChanged"].bool || model.pluginName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.pluginName.count > 64 || model.pluginDescription.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.pluginDescription.count > 30)
             if model.connectionTunnelID.isEmpty {
                 Text(productText("先完成上方的第 1 步，再导出插件 ZIP。", "Complete step 1 above before exporting the plugin ZIP.")).foregroundStyle(.secondary)
             }
@@ -265,7 +265,8 @@ struct ProductView: View {
                 Text(location.path).font(.caption).textSelection(.enabled)
                 Button(productText("在 Finder 中显示 ZIP", "Show ZIP in Finder")) { NSWorkspace.shared.activateFileViewerSelecting([location]) }
             }
-            DisclosureGroup(productText("修改插件名称、描述和图标", "Edit plugin name, description and icon")) {
+            GroupBox(productText("插件名称、描述和图标", "Plugin name, description and icon")) {
+                VStack(alignment: .leading, spacing: 12) {
                 TextField(productText("插件名称", "Plugin name"), text: $model.pluginName).onChange(of: model.pluginName) { _ in model.observePluginDraftEdit() }
                 TextField(productText("简短描述（最多 30 字）", "Short description (up to 30 characters)"), text: $model.pluginDescription).onChange(of: model.pluginDescription) { _ in model.observePluginDraftEdit() }
                 HStack {
@@ -274,6 +275,7 @@ struct ProductView: View {
                     } else { ProductBrand(size: 40) }
                     Button(productText("更换插件图标…", "Choose plugin icon…")) { model.selectIcon() }
                 }
+                }.frame(maxWidth: .infinity, alignment: .leading)
             }
         }
     }
@@ -301,12 +303,12 @@ struct ProductView: View {
     private var pluginUploadPanel: some View {
         ProductPanel(title: productText("3. 上传到 ChatGPT", "3. Upload to ChatGPT")) {
             if model.exportedPluginURL != nil && !model.pluginDraftEdited {
-                Text(productText("在 ChatGPT 插件页点“＋”→“上传插件压缩包”，选择刚保存的 styx-native.zip，然后安装。", "In ChatGPT Plugins, select + → Upload plugin ZIP, choose the styx-native.zip you just saved, then install it."))
+                Text(productText("在 ChatGPT 的插件管理中选择“上传插件”，导入刚保存的 styx-native.zip 后安装。已有 Styx 时优先上传新版本。上传入口是否可用取决于账号或工作区权限。", "In ChatGPT plugin management, choose Upload plugin, import the saved styx-native.zip, then install it. For an existing Styx plugin, prefer Upload new version. Upload availability depends on account or workspace permissions."))
                 Button(productText("打开 ChatGPT 上传 ZIP", "Open ChatGPT to upload ZIP")) { model.openOfficial("https://chatgpt.com/plugins") }.buttonStyle(.borderedProminent)
                 Button(productText("我已上传并安装 Styx", "I uploaded and installed Styx")) { model.confirmPluginInstallation() }
                     .disabled(model.plugin["contextChanged"].bool || model.plugin["export"]["status"].string != "exported")
             } else {
-                Text(productText("先保存上方的插件 ZIP，然后到 ChatGPT 插件页 → ＋ → 上传插件压缩包。", "First save the plugin ZIP above. Then go to ChatGPT Plugins → + → Upload plugin ZIP.")).foregroundStyle(.secondary)
+                Text(productText("先保存上方的插件 ZIP，再到 ChatGPT 插件管理中上传并安装。", "First save the plugin ZIP above, then upload and install it in ChatGPT plugin management.")).foregroundStyle(.secondary)
             }
         }
     }
