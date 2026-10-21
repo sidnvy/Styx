@@ -101,3 +101,32 @@ mocked success, permission change, process-security policy change, or unrelated
 process termination was used. The next implementation decision is how Core can
 prove its own runtime is offline on ordinary desktops with inaccessible same-user
 processes, without weakening unknown observations into a false clean state.
+
+## Additional PID namespace attempt — also blocked
+
+The existing host permits the unprivileged preflight
+`unshare --user --map-root-user --pid --fork --mount-proc /usr/bin/true` (exit 0).
+No system setting, sudo access, or process-security policy was changed.
+
+A second complete fixture invocation used that existing user/PID isolation and
+a fresh `linux-update-20261021-pid-isolated` directory. Its fresh signed runtime
+and deployment were created exclusively inside the namespace, and its own
+signed runner again passed authenticated TLS MCP. However, the original user
+systemd manager could not be queried from that namespace: `systemctl --user`
+reported `Failed to connect to user scope bus via local transport: No data
+available`. This invocation exited 2 before applying an update. Its receipt,
+execution context and independent cleanup observation remain in that output
+directory (Charon session `9accb1a639de81ab61d8455a`). Namespace-local process IDs
+in that receipt must not be interpreted as host process IDs. The outer owned
+namespace process exited; private state and keys were removed. An outside,
+read-only query still found the fixture's unit absent/inactive/PID 0.
+
+A subsequent lightweight `--map-current-user` preflight preserved UID 1000
+inside the namespace but produced the same real user-bus error (exit 1). The
+full fixture was **not** started for this mapping. Evidence is
+`linux-update-20261021-current-user-preflight.json` in task outputs.
+
+No alternative bus, observer injection, authorization bypass, or policy change
+was attempted. These failed isolation attempts neither pass generation
+transactions nor resolve the ordinary workstation's `EACCES` blocker. Native
+successful update, rollback and interruption recovery remain unaccepted.
