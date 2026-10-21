@@ -133,12 +133,15 @@ struct ProductSettingsView: View {
             } else {
                 GroupBox {
                     VStack(alignment: .leading, spacing: 12) {
-                        HStack { Text(productText("聊天验证", "Chat verification")); Spacer(); ProductConnectionDot(state: model.chatIndicator); Text(model.chatIndicator == .connected ? productText("已验证", "Verified") : productText("待验证", "Verification needed")).foregroundStyle(.secondary) }
+                        HStack { Text(productText("聊天验证", "Chat verification")); Spacer(); ProductConnectionDot(state: model.chatIndicator); Text(model.chatVerification.label).foregroundStyle(.secondary) }
                         ProductTunnelStatus(model: model)
+                        if model.chatVerification == .verified {
+                            Button(productText("我在目标聊天看到了结果", "I saw the results in the target chat")) { model.confirmChat() }.disabled(model.busy)
+                        }
                     }.padding(8)
                 }
                 HStack {
-                    Button(model.tunnelConnection != .connected ? productText("修复连接", "Fix connection") : model.accepted ? productText("重新验证", "Verify again") : productText("继续连接 ChatGPT", "Continue ChatGPT setup")) { model.page = .chat; setupChat = true }
+                    Button(model.tunnelConnection != .connected ? productText("查看连接", "View connection") : model.chatVerification.hasRequest ? productText("查看验证结果", "View verification results") : productText("验证真实调用", "Verify real calls")) { model.page = .chat; setupChat = true }
                     Button(productText("在 ChatGPT 中管理", "Manage in ChatGPT")) { model.openOfficial("https://chatgpt.com/plugins") }
                 }
                 if model.acceptance["challenge"]["desktopValue"].string != nil && !setupChat {

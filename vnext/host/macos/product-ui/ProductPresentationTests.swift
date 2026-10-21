@@ -19,7 +19,9 @@ import SwiftUI
                             "foreground": .object(["status": .string("connected"), "computerRequested": .bool(true)])])
     model.journey = .object(["steps": .array([.object(["id": .string("local_setup"), "status": .string("completed")])]),
                              "tunnel": .object(["status": .string("running"), "transport": .string("ready")])])
-    model.acceptance = .object(["complete": .bool(true)])
+    // Real tool proof without manual installation/target-chat checkboxes:
+    // this must be visibly verified while retaining the separate confirmation.
+    model.acceptance = .object(["complete": .bool(false), "requestProof": .object(["status": .string("verified")]), "browser": .object(["status": .string("verified")]), "desktop": .object(["status": .string("verified")])])
     model.devices = [
         ProductDevice(.object(["device_id": .string("online"), "label": .string("MacBook Air"), "online": .bool(true)]))!,
         ProductDevice(.object(["device_id": .string("offline"), "label": .string("Windows PC"), "platform": .string("win32"), "online": .bool(false)]))!
@@ -100,6 +102,11 @@ import SwiftUI
             }
             try await Task.sleep(nanoseconds: 300_000_000)
             try capture(panel, "panel")
+            try require(model.chatIndicator == .connected && model.chatMenuTitle == "ChatGPT", "Menu mistakes missing manual confirmation for connection failure")
+            try require(model.chatVerification == .verified && !model.accepted, "Settings proof and account confirmation were conflated")
+            model.journey = .object(["steps": model.journey["steps"], "tunnel": .object(["status": .string("interrupted"), "transport": .string("unavailable")])])
+            try require(model.chatIndicator != .connected && model.chatVerification == .verified, "Past successful calls hid a currently broken transport")
+            model.journey = .object(["steps": model.journey["steps"], "tunnel": .object(["status": .string("running"), "transport": .string("ready")])])
             // Reproduce the recorded menu jitter: a blocked invitation must not
             // be replaced by a smaller spinner during unrelated busy changes.
             let savedInvitation = model.createdInvitation
