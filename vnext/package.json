@@ -20,7 +20,8 @@
     "test:browser": "node --test --test-concurrency=1 packages/styx-browser-provider/test/*.test.mjs",
     "test:windows": "node --test --test-concurrency=1 host/windows/*.test.mjs",
     "test:ci": "node --test --test-concurrency=1 ci/test/*.test.mjs",
-    "quality": "node ci/quality.mjs"
+    "quality": "node ci/quality.mjs",
+    "build:checked": "node ci/build-checked.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.1",
