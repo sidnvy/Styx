@@ -11,10 +11,10 @@ test('CLI source closure excludes mutable user state, native apps and test fixtu
  for(const n of ['deployment.json','host.json','publisher-key.pem','host/test/fixture.mjs','packages/styx-exec-adapter/.runtime/codex','host/windows/Styx.cs','onboarding/test/keys.json','.git/config'])assert.equal(cliProductSource(n),false,n);
 });
 test('CLI builder rejects implicit paths without side effects',()=>{
- assert.throws(()=>buildLinuxCli({destination:'relative'}),/absolute_cli_paths_required/);
+ assert.throws(()=>buildLinuxCli({destination:'relative'}),process.platform==='linux'&&process.arch==='x64'?/absolute_cli_paths_required/:/linux_x64_native_build_required/);
 });
 test('portable CLI boots same Core and an independent signed Gateway without Host artifacts',{
- skip:process.platform!=='linux'||!process.env.STYX_TEST_LINUX_NODE,timeout:60000
+ skip:process.platform!=='linux'||process.arch!=='x64'||!process.env.STYX_TEST_LINUX_NODE,timeout:60000
 },async t=>{
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'styx-cli-build-'));fs.chmodSync(root,0o700);t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
  const {privateKey}=generateKeyPairSync('ed25519');const key=path.join(root,'key.pem');fs.writeFileSync(key,privateKey.export({type:'pkcs8',format:'pem'}),{mode:0o600});
