@@ -53,5 +53,22 @@ recovery remain unverified. A machine without logind can use headless roles but
 does not advertise Computer readiness through this implementation.
 
 Neither platform has passed new-user ChatGPT account acceptance. No production
-deployment was performed. The preceding macOS follow-up also still requires its
-native build and regression; passing a packaging fixture is not a Mac build.
+deployment was performed.
+
+## macOS follow-up
+
+PilotMac became reachable at its updated address. Real native compilation caught
+and fixed two earlier Swift errors: a field assigned to the wrong decoded model
+and duplicate brand-asset type declarations. Native protocol/async self-tests,
+Foundation ZIP transport and actual Command-V in ordinary and secure input fields
+passed. The `0.3.0-platform-integration.20261021.1` arm64 preview was built using
+the existing persistent local signing identity. Its App and Cua identifiers and
+designated requirements match the installed version; seven Mach-O signatures and
+the signed Host payload verified. New Browser modules load with bundled Node.
+
+The built runtime source tree is `4a687c7a79feff8c1f388e03b92a98850adb630a`
+(integration branch `fefc162`, build branch `5a302a1`). This is a locally signed
+development preview. Existing installation/configuration were not replaced.
+Upgrade permission retention, real reboot and ChatGPT acceptance remain untested;
+matching signatures alone do not establish those results. No Chrome/Edge binary
+was available on this Mac for a new native Browser website test.
