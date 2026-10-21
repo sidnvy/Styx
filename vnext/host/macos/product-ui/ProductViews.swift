@@ -490,14 +490,13 @@ struct ProductAcceptanceField: NSViewRepresentable {
         field.setAccessibilityIdentifier("styx-acceptance-target")
         field.setAccessibilityLabel(productText("桌面验收输入框", "Desktop acceptance field"))
         field.delegate = context.coordinator
-        owner?.acceptanceField = field
         return field
     }
     func updateNSView(_ field: NSTextField, context: Context) {
         if context.coordinator.challengeID != model.challengeID {
             field.stringValue = ""; context.coordinator.challengeID = model.challengeID
         }
-        owner?.acceptanceField = field
+        owner?.acceptanceFields.register(field, challengeID: model.challengeID)
     }
     func makeCoordinator() -> Coordinator { Coordinator() }
     final class Coordinator: NSObject, NSTextFieldDelegate {
@@ -505,9 +504,33 @@ struct ProductAcceptanceField: NSViewRepresentable {
     }
 }
 
+// SwiftUI keeps the onboarding and Settings trees alive together. A weak
+// registry prevents an offscreen tree's update from replacing the active field.
+@MainActor final class ProductAcceptanceFields {
+    private let fields = NSMapTable<NSTextField, NSString>.weakToStrongObjects()
+    func register(_ field: NSTextField, challengeID: String?) {
+        if let id = challengeID { fields.setObject(id as NSString, forKey: field) }
+        else { fields.removeObject(forKey: field) }
+    }
+    func readback(challengeID: String, expected: String, roots: [NSWindow]) -> (value: String, window: NSWindow)? {
+        var matches: [(value: String, window: NSWindow)] = []
+        for field in fields.keyEnumerator().allObjects.compactMap({ $0 as? NSTextField }) {
+            guard fields.object(forKey: field) as String? == challengeID,
+                  let window = field.window, window.isVisible,
+                  !field.isHiddenOrHasHiddenAncestor, field.stringValue == expected,
+                  let root = roots.first(where: { window === $0 || window.sheetParent === $0 }),
+                  root.isVisible, root.windowNumber > 0 else { continue }
+            // Cua observes the parent's AXSheet subtree. Bind the local readback
+            // to that same root, never an unrelated window with the same PID.
+            matches.append((field.stringValue, root))
+        }
+        return matches.count == 1 ? matches[0] : nil
+    }
+}
+
 @MainActor final class ProductWindowController: NSWindowController, NSWindowDelegate, NSPopoverDelegate {
     let model: ProductModel
-    weak var acceptanceField: NSTextField?
+    let acceptanceFields = ProductAcceptanceFields()
     let ownerAppPID = Int(ProcessInfo.processInfo.processIdentifier)
     private var observationTimer: Timer?
     private var settingsWindow: NSWindow?
@@ -584,25 +607,21 @@ struct ProductAcceptanceField: NSViewRepresentable {
         }
         if !model.settingsVisible && !model.onboardingVisible { model.clearSecrets() }
     }
-    func currentDesktopReadback(challengeID: String) -> String? {
-        guard model.challengeID == challengeID, let field = acceptanceField,
-              let fieldWindow = field.window,
-              fieldWindow === window || fieldWindow === settingsWindow || (settingsWindow != nil && fieldWindow.sheetParent === settingsWindow),
-              fieldWindow.isVisible, !field.isHiddenOrHasHiddenAncestor,
+    func currentDesktopReadback(challengeID: String) -> (value: String, window: NSWindow)? {
+        guard model.challengeID == challengeID,
+              let expected = model.acceptance["challenge"]["desktopValue"].string,
               let expires = model.acceptance["challenge"]["expiresAt"].number,
               expires > Date().timeIntervalSince1970 * 1000 else { return nil }
-        return field.stringValue
+        return acceptanceFields.readback(challengeID: challengeID, expected: expected, roots: [window, settingsWindow].compactMap { $0 })
     }
     private func observeDesktopReadback() async {
         guard !model.busy, let id = model.challengeID,
-              let window = acceptanceField?.window, window.windowNumber > 0,
-              let actual = currentDesktopReadback(challengeID: id),
-              let expected = model.acceptance["challenge"]["desktopValue"].string,
-              actual == expected, model.acceptance["desktop"]["status"].string != "verified" else { return }
+              let readback = currentDesktopReadback(challengeID: id),
+              model.acceptance["desktop"]["status"].string != "verified" else { return }
         // The Core still requires authenticated Cua before/action/after evidence
         // bound to this App. Typed text alone can never produce acceptance.
         do {
-            _ = try await model.client.write("acceptance/desktop-readback", ["authorize": .bool(true), "challengeId": .string(id), "value": .string(actual), "pid": .number(Double(ownerAppPID)), "windowId": .number(Double(window.windowNumber))])
+            _ = try await model.client.write("acceptance/desktop-readback", ["authorize": .bool(true), "challengeId": .string(id), "value": .string(readback.value), "pid": .number(Double(ownerAppPID)), "windowId": .number(Double(readback.window.windowNumber))])
             await model.refresh()
         } catch { /* No untrusted error text or fabricated success. Refresh remains available. */ }
     }
