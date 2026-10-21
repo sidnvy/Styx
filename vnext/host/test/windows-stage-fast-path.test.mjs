@@ -101,7 +101,7 @@ test('native redirected child directory is not traversed or recursively removed'
  const f=fixture(t),outside=path.join(f.root,'foreign-directory');fs.mkdirSync(outside);fs.writeFileSync(path.join(outside,'sentinel'),'FOREIGN DIRECTORY');let redirected;
  withFsPatch('lstatSync',(original,file,...args)=>{if(!redirected&&String(file).includes('.stage-')&&path.basename(String(file))==='data'){
   try{fs.renameSync(file,file+'.own-moved');fs.symlinkSync(outside,file,'junction');redirected=file;}catch{}
- }return original(file,...args);},()=>assert.throws(()=>stage(f),/private_directory_not_regular|stage_path_(not_regular|identity_changed)/));
+ }return original(file,...args);},()=>assert.throws(()=>stage(f),/private_directory_not_regular|private_payload_directory_creation_failed|stage_path_(not_regular|identity_changed)/));
  assert(redirected);assert.equal(fs.readFileSync(path.join(outside,'sentinel'),'utf8'),'FOREIGN DIRECTORY');assert.equal(fs.readdirSync(outside).length,1);assert(fs.lstatSync(redirected).isSymbolicLink());assert(!published(f));
 });
 
