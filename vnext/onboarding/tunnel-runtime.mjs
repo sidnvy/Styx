@@ -99,7 +99,7 @@ export class TunnelRuntime {
   try{
    const c=configAt(p);if(!c)fail('tunnel_configuration_required');
    write(p.header,g.header);if(fs.existsSync(p.health)){const st=fs.lstatSync(p.health);if(!st.isFile()||st.isSymbolicLink())fail('invalid_health_url');fs.unlinkSync(p.health);}
-   const args=['run','--control-plane.tunnel-id',c.tunnelId,'--control-plane.api-key','file:'+path.join(p.root,c.keyFile),'--mcp.server-url',g.url,'--ca-bundle',g.certificate,'--mcp.extra-headers','Authorization: file:'+p.header,'--mcp.discovery-extra-headers','Authorization: file:'+p.header,'--health.listen-addr','127.0.0.1:0','--health.url-file',p.health,'--log.level','warn'];
+   const args=['run','--control-plane.tunnel-id',c.tunnelId,'--control-plane.api-key','file:'+path.join(p.root,c.keyFile),'--mcp.server-url',g.url,'--ca-bundle',g.certificate,'--mcp.extra-headers','Authorization: file:'+p.header,'--mcp.discovery-extra-headers','Authorization: file:'+p.header,'--health.listen-addr','127.0.0.1:0','--health.url-file',p.health,'--log.format','json','--log.level','warn'];
    // No inherited proxy, profile, NODE_OPTIONS or credential environment; no raw logs.
    const child=this.#spawn(process.execPath,[fileURLToPath(new URL('./tunnel-runner.mjs',import.meta.url)),this.#binary,this.#sha,JSON.stringify(args),this.#lockToken],{cwd:p.root,env:{PATH:'/usr/bin:/bin',HOME:p.root,XDG_CONFIG_HOME:p.root},stdio:['pipe','ignore','ignore'],windowsHide:true});
    this.#child=child;this.#exit=null;
