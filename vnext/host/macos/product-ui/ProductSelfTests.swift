@@ -21,6 +21,7 @@ func productCoreSelfTest() throws {
         let device = ProductDevice(.object(["device_id": .string("test"), "label": .string("Mac"), "online": .bool(connected)]))
         try require(device?.indicator == (connected ? .connected : .offline), "Observed connection state was lost")
     }
+    try require(ProductSettingsSection.allCases.count == 3, "Local and other computers split into overlapping settings")
     let token = String(repeating: "a", count: 43)
     let valid = URL(string: "http://127.0.0.1:12345/#session=" + token)!
     let parsed = ProductCoreClient.bootstrap(valid)

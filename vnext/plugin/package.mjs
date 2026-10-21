@@ -125,6 +125,8 @@ export function normalizePresentation(value={}){
 export function buildPackageFiles(config,receipt,{now=Date.now()}={}){
  exact(config,['connection','presentation'],'invalid_package_config');
  const selected=verifiedConnection(connection(config.connection),receipt,{now}),presentation=normalizePresentation(config.presentation);
+ // The same approved borderless orb is used by the native App and default plugin.
+ if(!presentation.icon)presentation.icon=pngIcon({mimeType:'image/png',dataBase64:fs.readFileSync(path.join(root,'../assets/brand/styx-logo.png')).toString('base64')});
  const manifest=structuredClone(template),ui=manifest.extensions['com.openai'].interface;
  for(const key of ['displayName','shortDescription','longDescription'])ui[key]=presentation[key];
  if(presentation.icon){ui.logo='./assets/icon.png';ui.composerIcon='./assets/icon.png';}

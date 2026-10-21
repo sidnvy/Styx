@@ -20,3 +20,11 @@ Connection details use a sheet with persistent labels, inline validation, a secu
 - ChatGPT ZIP import compatibility, actual account tools, real Exec/Cua, reboot/login/network recovery and upgrade permission continuity have not been accepted by this UI test pass.
 
 Packaging and signature receipts are kept with the task artifacts. This is a developer preview, not a complete production release. No existing App installation, identity, pairing, credentials or system permissions are changed by generating this package.
+
+## Follow-up candidate: connection feedback and unified brand
+
+The next candidate merges local capabilities/permissions and paired-device management into Computers. The Core labels the enrolled local identity, allowing the UI to omit its duplicate paired-device row. The default plugin now includes the same approved transparent, borderless orb as the native App; custom plugin art is preserved. Direct MCP setup offers a native PNG Save action for manual upload.
+
+Normal setup now exposes only Add custom MCP server → Tunnel. Experimental ZIP export remains under Advanced, with its unverified account compatibility stated explicitly. Reconnect displays immediate progress, discards stale transport observations, polls read-only state for delayed readiness, and reports an unconfirmed result after bounded checks. It never promotes tunnel readiness to chat verification. The editor remains available after failure.
+
+Core/plugin tests: 50 passed; full onboarding: 369 tests, 363 passed and 6 environment-dependent skips. Native async checks were added for delayed readiness and timeout. Those new native checks, compilation and packaging are pending: PilotMac SSH became unreachable during source transfer. No replacement installer has been produced or deployed for this follow-up yet.

@@ -9,7 +9,9 @@ enum ProductPluginWorkflow {
         guard current["required"] == .bool(true), current["contextChanged"] == .bool(false) else { throw ProductCoreError.rejected }
         if current["profileSaved"].bool { return nil }
         guard current["profileSaved"] == .bool(false), !current["presentation"].object.isEmpty, !current["selection"].object.isEmpty else { throw ProductCoreError.invalidResponse }
-        return ["authorize": .bool(true), "presentation": current["presentation"], "selection": current["selection"]]
+        var presentation = current["presentation"].object
+        if presentation["icon"] == nil || presentation["icon"] == .null, let icon = ProductBrandAsset.icon { presentation["icon"] = icon }
+        return ["authorize": .bool(true), "presentation": .object(presentation), "selection": current["selection"]]
     }
     static func reboundProfile(_ current: ProductJSON) throws -> [String: ProductJSON] {
         guard current["required"] == .bool(true), current["profileSaved"].bool,
@@ -91,5 +93,26 @@ extension ProductModel {
             // Leave existing profile metadata, URLs and archive receipts intact.
             _ = try await client.write("plugin/record", ["authorize": .bool(true), "stage": .string("installation")])
         }
+    }
+}
+
+enum ProductBrandAsset {
+    static var data: Data? {
+        guard let url = Bundle.main.resourceURL?.appendingPathComponent("brand/styx-plugin-icon.png"),
+              let bytes = try? Data(contentsOf: url), bytes.count <= 256 * 1024 else { return nil }
+        return bytes
+    }
+    static var icon: ProductJSON? {
+        data.map { .object(["mimeType": .string("image/png"), "dataBase64": .string($0.base64EncodedString())]) }
+    }
+}
+extension ProductModel {
+    func saveBrandIcon() {
+        guard let bytes = ProductBrandAsset.data else { return }
+        let panel = NSSavePanel(); panel.allowedContentTypes = [.png]; panel.nameFieldStringValue = "Styx.png"
+        panel.title = productText("保存 Styx 图标", "Save Styx icon")
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do { try bytes.write(to: url, options: .atomic); NSWorkspace.shared.activateFileViewerSelecting([url]) }
+        catch { self.error = productText("图标未能保存，请选择其他位置。", "The icon could not be saved. Choose another location.") }
     }
 }

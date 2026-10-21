@@ -37,7 +37,9 @@ test('HTTPS package is allowlisted and declares bearer without embedding receipt
  for(const key of ['skills','mcpServers','apps','interface'])assert.equal(Object.hasOwn(m,key),false);
  const s=JSON.parse(fs.readFileSync(path.join(f.output,'mcp.json'))).mcpServers.styx;
  assert.equal(s.url,url);assert.deepEqual(s.extensions['com.openai'],{auth:{type:'api_key',headerScheme:'bearer'}});
- assert.deepEqual(fs.readdirSync(f.output).sort(),['mcp.json','plugin.json','skills']);
+ assert.deepEqual(fs.readdirSync(f.output).sort(),['assets','mcp.json','plugin.json','skills']);
+ assert.deepEqual(fs.readFileSync(path.join(f.output,'assets/icon.png')),fs.readFileSync(new URL('../../assets/brand/styx-logo.png',import.meta.url)));
+ assert.equal(m.extensions['com.openai'].interface.logo,'./assets/icon.png');
  const skill=fs.readFileSync(path.join(f.output,'skills/styx-native-onboarding/SKILL.md'),'utf8');
  assert.match(skill,/^---\nname: styx-native-onboarding\ndescription: [^\n]+\n---\n/);
  assert.match(skill,/setup-native\.mjs prepare/);assert.match(skill,/owner\/admin keys/);

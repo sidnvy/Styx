@@ -118,7 +118,7 @@ test('explicit owner-local pairing avoids invitation shuttle and bounded shutdow
  const ws=new WebSocket(host.gateway_ws_url+'styx/hosts/'+host.host_id+'/exec',{ca:fs.readFileSync(path.join(f.stateDir,'gateway/certificate.pem')),headers:{Authorization:'Bearer '+token}});
  await once(ws,'open');
  const observed=await readDeploymentDevices(f.stateDir);
- assert.equal(observed[0].online,true);assert.equal(observed[0].connections.exec,true);
+ assert.equal(observed[0].is_local,true);assert.equal(observed[0].online,true);assert.equal(observed[0].connections.exec,true);
  const closed=once(ws,'close');const started=Date.now();
  await stopDeploymentGateway(f.stateDir);await closed;assert.ok(Date.now()-started<5000);assert.equal(ws.readyState,WebSocket.CLOSED);
  assert.equal(readDeployment(f.stateDir).gatewayRuntime.status,'not_owned_by_current_process');

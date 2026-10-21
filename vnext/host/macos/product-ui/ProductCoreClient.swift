@@ -149,6 +149,7 @@ struct ProductStep: Identifiable {
     let retryable: Bool
     init?(_ value: ProductJSON) {
         guard let id = value["id"].string, let status = value["status"].string else { return nil }
+        isLocal = value["is_local"] == .bool(true)
         self.id = id; self.status = status
         let allowed: Set<String> = ["signed_install_unavailable", "invalid_host_configuration", "host_credential_unavailable", "codex_executor_unavailable", "signed_computer_runtime_unavailable", "macos_requires_embedded_cua_socket", "host_doctor_failed"]
         blockers = id == "host.doctor" ? value["blockers"].array.compactMap(\.string).filter { allowed.contains($0) } : []
@@ -162,8 +163,10 @@ struct ProductDevice: Identifiable {
     let isDefault: Bool
     let platform: String
     let online: Bool?
+    let isLocal: Bool
     init?(_ value: ProductJSON) {
         guard let id = value["device_id"].string, let label = value["label"].string else { return nil }
+        isLocal = value["is_local"] == .bool(true)
         self.id = id; self.label = label; isDefault = value["is_default"].bool
         platform = value["platform"].string ?? ""
         online = value["online"] == .bool(true) ? true : value["online"] == .bool(false) ? false : nil

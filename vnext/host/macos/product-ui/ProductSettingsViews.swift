@@ -18,7 +18,6 @@ struct ProductSettingsView: View {
                     Text(model.settingsSection.title).font(.title2.weight(.semibold))
                     switch model.settingsSection {
                     case .general: general
-                    case .local: local
                     case .computers: computers
                     case .chat: chat
                     }
@@ -41,7 +40,13 @@ struct ProductSettingsView: View {
                       window.identifier?.rawValue == "Styx.SettingsWindow" else { return }
                 editTunnel = false; editPackage = false; setupChat = false
             }
-            .task { await model.bootstrap(); await model.refreshMenu() }
+            .task {
+                await model.bootstrap(); await model.refreshMenu()
+                while !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 3_000_000_000)
+                    if !Task.isCancelled { await model.refreshMenu() }
+                }
+            }
     }
     private var general: some View {
         Form {
@@ -88,10 +93,11 @@ struct ProductSettingsView: View {
         }
     }
     @ViewBuilder private var computers: some View {
+        GroupBox(productText("这台 Mac", "This Mac")) { local.padding(8) }
         if model.joined {
             Label(productText("由主台管理电脑连接", "Computer connections are managed on the main computer"), systemImage: "link")
         } else {
-            ForEach(model.devices) { device in
+            ForEach(model.devices.filter { !$0.isLocal }) { device in
                 GroupBox {
                     VStack(alignment: .leading, spacing: 12) {
                         HStack { Label(device.label, systemImage: device.platform == "win32" ? "desktopcomputer" : "laptopcomputer"); Spacer(); ProductConnectionDot(state: device.indicator) }
@@ -117,16 +123,16 @@ struct ProductSettingsView: View {
             } else {
                 GroupBox {
                     VStack(spacing: 12) {
-                        HStack { Text(productText("聊天验证", "Chat verification")); Spacer(); ProductConnectionDot(state: model.chatIndicator); Text(model.accepted ? productText("已验证", "Verified") : productText("尚未验证", "Not verified")).foregroundStyle(.secondary) }
-                        HStack { Text(productText("OpenAI 通道", "OpenAI tunnel")); Spacer(); Text(tunnelTitle).foregroundStyle(.secondary) }
+                        HStack { Text(productText("聊天验证", "Chat verification")); Spacer(); ProductConnectionDot(state: model.chatIndicator); Text(model.chatIndicator == .connected ? productText("已验证", "Verified") : productText("待验证", "Verification needed")).foregroundStyle(.secondary) }
+                        ProductTunnelStatus(model: model)
                     }.padding(8)
                 }
                 HStack {
-                    Button(model.accepted ? productText("重新验证", "Verify again") : productText("完成连接", "Finish connection")) { model.page = .chat; setupChat = true }
+                    Button(model.tunnelConnection != .connected ? productText("修复连接", "Fix connection") : model.accepted ? productText("重新验证", "Verify again") : productText("继续连接 ChatGPT", "Continue ChatGPT setup")) { model.page = .chat; setupChat = true }
                     Button(productText("在 ChatGPT 中管理", "Manage in ChatGPT")) { model.openOfficial("https://chatgpt.com/plugins") }
                 }
                 Divider()
-                Text(productText("电脑端连接", "Connection on this computer")).font(.headline)
+                Text(productText("连接资料", "Connection details")).font(.headline)
                 if !model.connectionTunnelID.isEmpty {
                     HStack {
                         Text("Tunnel ID").foregroundStyle(.secondary)
@@ -136,8 +142,10 @@ struct ProductSettingsView: View {
                 }
                 Button(productText("编辑连接信息", "Edit connection details")) { editTunnel = true }
                 Divider()
-                HStack { Text(productText("插件包", "Plugin package")).font(.headline); Spacer(); Button(productText("编辑并导出", "Edit and export")) { editPackage = true } }
-                Text(productText("仅在使用自定义插件包时修改名称、介绍和图标。", "Customize the name, description and icon only when using a plugin package.")).font(.caption).foregroundStyle(.secondary)
+                DisclosureGroup(productText("高级", "Advanced")) {
+                    Text(productText("ZIP 导入尚未完成账号兼容性验收。日常连接请使用“添加自建 MCP 服务器”。", "ZIP import compatibility is unverified. Use Add custom MCP server for normal setup.")).font(.caption).foregroundStyle(.secondary)
+                    Button(productText("导出实验性插件包…", "Export experimental plugin package…")) { editPackage = true }
+                }
             }
         }
     }
@@ -202,7 +210,7 @@ struct ProductTunnelEditor: View {
             Text(productText("更换 Tunnel ID 后，需要在 ChatGPT 中选择同一通道。", "After changing the Tunnel ID, select the same tunnel in ChatGPT.")).font(.caption).foregroundStyle(.secondary)
             if let failure = failure { Text(failure).font(.callout).foregroundStyle(.red) }
             HStack {
-                Button(productText("取消", "Cancel")) { key = ""; dismiss() }.keyboardShortcut(.cancelAction)
+                Button(productText("取消", "Cancel")) { key = ""; dismiss() }.keyboardShortcut(.cancelAction).disabled(saving)
                 Spacer()
                 if saving { ProgressView().controlSize(.small) }
                 Button(productText("保存并连接", "Save and connect")) { save() }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)
@@ -222,7 +230,7 @@ struct ProductTunnelEditor: View {
                 try await model.saveTunnel(id: tunnel, newKey: replaceKey || !model.hasSavedRuntimeKey ? key : nil)
                 key = ""; saving = false; dismiss()
             } catch {
-                saving = false
+                saving = false; model.tunnelAttempt = .failed
                 failure = productText("连接未能完成。检查网络、密钥和通道权限后重试；输入仍保留。", "The connection did not complete. Check the network, key and tunnel permissions, then retry. Your entries are retained.")
             }
         }

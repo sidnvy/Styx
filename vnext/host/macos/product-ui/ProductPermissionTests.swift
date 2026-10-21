@@ -16,6 +16,20 @@ import SwiftUI
     let model = try ProductModel(sessionURL: sessionURL, permissionReader: {
         checks += 1; return observation
     }, permissionActions: actions)
+    model.tunnelAttempt = .connecting
+    var polls = 0
+    await model.monitorTunnel(check: {
+        polls += 1
+        model.journey = .object(["tunnel": .object(["status": .string("running"), "transport": .string(polls == 3 ? "ready" : "unavailable")])])
+    }, pause: {}).value
+    try require(polls == 3 && model.tunnelConnection == .connected && model.tunnelAttempt == .idle, "Delayed readiness did not finish reconnect feedback")
+    try require(!model.accepted, "A ready tunnel became chat account verification")
+    model.tunnelAttempt = .connecting; polls = 0
+    await model.monitorTunnel(check: {
+        polls += 1; model.journey = .object(["tunnel": .object(["status": .string("running"), "transport": .string("unavailable")])])
+    }, pause: {}).value
+    try require(polls == 20 && model.tunnelAttempt == .timedOut, "Unready connection remained an indefinite spinner or false success")
+    model.tunnelAttempt = .idle
     let brand: ProductJSON = .object(["mimeType": .string("image/png"), "dataBase64": .string("test-only-brand")])
     model.preparePluginDraft(defaultIcon: brand)
     try require(model.pluginIcon == brand && model.pluginDraftEdited, "Opening the optional ZIP editor omitted its displayed default icon")

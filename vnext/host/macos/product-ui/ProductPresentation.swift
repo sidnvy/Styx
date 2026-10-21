@@ -2,12 +2,11 @@ import AppKit
 import SwiftUI
 
 enum ProductSettingsSection: String, CaseIterable, Identifiable {
-    case general, local, computers, chat
+    case general, computers, chat
     var id: String { rawValue }
     var title: String {
         switch self {
         case .general: return productText("通用", "General")
-        case .local: return productText("这台 Mac", "This Mac")
         case .computers: return productText("电脑", "Computers")
         case .chat: return "ChatGPT"
         }
@@ -15,7 +14,6 @@ enum ProductSettingsSection: String, CaseIterable, Identifiable {
     var symbol: String {
         switch self {
         case .general: return "gearshape"
-        case .local: return "laptopcomputer"
         case .computers: return "desktopcomputer"
         case .chat: return "globe"
         }
@@ -77,6 +75,7 @@ extension ProductModel {
     }
     var chatIndicator: ProductConnectionIndicator {
         if error != nil { return .unknown }
+        if tunnelAttempt == .connecting { return .attention }
         if tunnelConnection == .connected && accepted && !plugin["contextChanged"].bool { return .connected }
         if tunnelConnection == .notConfigured { return .offline }
         return .attention
@@ -146,13 +145,13 @@ struct ProductDailyPanel: View {
                     model.joining = true; model.page = .invitation; controller?.showOnboarding()
                 }
             } else {
-                ProductMenuRow(title: productText("这台 Mac", "This Mac"), symbol: "laptopcomputer", state: model.localIndicator, disclosure: true) { controller?.showSettings(.local) }
+                ProductMenuRow(title: productText("这台 Mac", "This Mac"), symbol: "laptopcomputer", state: model.localIndicator, disclosure: true) { controller?.showSettings(.computers) }
                 Divider().padding(.vertical, 5)
                 if model.joined {
                     ProductMenuRow(title: productText("主台连接", "Main computer"), symbol: "link", state: model.localIndicator, disclosure: true) { controller?.showSettings(.computers) }
                 } else {
                     Text(productText("电脑", "Computers")).font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 10).padding(.vertical, 5)
-                    ForEach(model.devices) { device in
+                    ForEach(model.devices.filter { !$0.isLocal }) { device in
                         ProductMenuRow(title: device.label, symbol: device.platform == "win32" ? "desktopcomputer" : "laptopcomputer", state: model.menuObservationFailed ? .unknown : device.indicator, disclosure: true) {
                             model.selectedDeviceID = device.id; controller?.showSettings(.computers)
                         }
@@ -219,5 +218,44 @@ extension ProductModel {
             if invitationExpanded { pending = try await client.write("pending/list", ["authorize": .bool(true)])["pending"].array }
         } catch { menuObservationFailed = true; return }
         menuObservationFailed = false
+    }
+}
+
+// Attempt feedback is separate from observed transport and account acceptance.
+enum ProductTunnelAttempt: Equatable { case idle, connecting, failed, timedOut }
+struct ProductTunnelStatus: View {
+    @ObservedObject var model: ProductModel
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                if model.tunnelAttempt == .connecting { ProgressView().controlSize(.small) }
+                else { Image(systemName: model.tunnelConnection == .connected ? "globe" : "exclamationmark.circle").foregroundStyle(model.tunnelConnection == .connected ? Color.green : Color.secondary) }
+                Text(model.tunnelFeedback).font(.callout)
+            }.accessibilityElement(children: .combine)
+            if model.tunnelConnection == .connected {
+                Text(productText("下一步，在 ChatGPT 添加 Styx。", "Next, add Styx in ChatGPT.")).font(.caption).foregroundStyle(.secondary)
+            } else if model.tunnelAttempt == .failed || model.tunnelAttempt == .timedOut || model.tunnelConnection == .unavailable {
+                Text(productText("请检查网络；也可以编辑 Tunnel ID 和运行密钥后再试。", "Check the network, or edit the Tunnel ID and runtime key, then retry.")).font(.caption).foregroundStyle(.secondary)
+            }
+        }
+    }
+}
+extension ProductModel {
+    var tunnelFeedback: String {
+        if tunnelAttempt == .connecting { return productText("正在连接到 OpenAI…", "Connecting to OpenAI…") }
+        if tunnelConnection == .connected { return productText("已连接到 OpenAI", "Connected to OpenAI") }
+        switch tunnelAttempt {
+        case .connecting: return productText("正在连接到 OpenAI…", "Connecting to OpenAI…")
+        case .failed: return productText("连接未能完成", "Connection did not complete")
+        case .timedOut: return productText("未能确认连接，请检查后重试", "Connection could not be confirmed. Check and retry")
+        case .idle:
+            switch tunnelConnection {
+            case .notConfigured: return productText("尚未设置 OpenAI 连接", "OpenAI connection is not configured")
+            case .connecting: return productText("正在连接到 OpenAI…", "Connecting to OpenAI…")
+            case .stopped: return productText("OpenAI 连接已停止", "OpenAI connection is stopped")
+            case .unavailable: return productText("OpenAI 连接尚未就绪", "OpenAI connection is not ready")
+            default: return productText("暂时无法确认连接状态", "Connection status could not be confirmed")
+            }
+        }
     }
 }

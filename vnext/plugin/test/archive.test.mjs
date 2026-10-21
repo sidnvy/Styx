@@ -15,9 +15,9 @@ function icon(){
 test('archive has one stable root, only package members, stored UTF8 records and deterministic bytes',()=>{
  const config={connection},built=buildPackageArchive(config,receipt(),{now}),files=buildPackageFiles(config,receipt(),{now});
  assert.equal(built.fileName,'styx-native.zip');assert.equal(built.contentType,'application/zip');assert.equal(built.status,'archive_created_not_installed');assert.equal(built.verificationScope,'local_gateway_only');
- assert.deepEqual(built.entries,['styx-native/plugin.json','styx-native/mcp.json','styx-native/skills/styx-native-onboarding/SKILL.md']);
+ assert.deepEqual(built.entries,['styx-native/plugin.json','styx-native/mcp.json','styx-native/skills/styx-native-onboarding/SKILL.md','styx-native/assets/icon.png']);
  assert.deepEqual(built.archive,buildPackageArchive(config,receipt(),{now}).archive);
- const end=built.archive.subarray(-22);assert.equal(end.readUInt32LE(0),0x06054b50);assert.equal(end.readUInt16LE(8),3);assert.equal(end.readUInt16LE(10),3);assert.equal(end.readUInt16LE(20),0);
+ const end=built.archive.subarray(-22);assert.equal(end.readUInt32LE(0),0x06054b50);assert.equal(end.readUInt16LE(8),4);assert.equal(end.readUInt16LE(10),4);assert.equal(end.readUInt16LE(20),0);
  let offset=0;
  for(const file of files.files){
   const header=built.archive.subarray(offset,offset+30);assert.equal(header.readUInt32LE(0),0x04034b50);assert.equal(header.readUInt16LE(6),0x0800);assert.equal(header.readUInt16LE(8),0);assert.equal(header.readUInt32LE(18),file.data.length);assert.equal(header.readUInt32LE(22),file.data.length);

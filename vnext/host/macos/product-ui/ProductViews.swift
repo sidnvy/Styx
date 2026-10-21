@@ -70,6 +70,13 @@ struct ProductView: View {
             .disabled(model.busy)
             .sheet(isPresented: $editTunnel) { ProductTunnelEditor(model: model) }
             .task { await model.bootstrap() }
+            .task(id: model.page) {
+                guard model.page == .chat else { return }
+                while !Task.isCancelled {
+                    try? await Task.sleep(nanoseconds: 3_000_000_000)
+                    if !Task.isCancelled { await model.refresh() }
+                }
+            }
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in model.observePermissions() }
             .onChange(of: model.page) { _ in model.observePermissions() }
     }
@@ -236,7 +243,7 @@ struct ProductView: View {
                 Button(productText("先完成电脑准备", "Finish computer setup")) { model.page = .preparation }
             } else {
                 tunnelPanel
-                officialPanel
+                officialPanel.disabled(model.tunnelConnection != .connected)
                 if usePluginPackage { pluginUploadPanel }
                 if model.plugin["accountActions"]["installation"].string == "user_confirmed" { acceptancePanel }
             }
@@ -244,18 +251,10 @@ struct ProductView: View {
     }
     private var tunnelPanel: some View {
         ProductPanel(title: productText("1. 电脑端连接", "1. Connection on this computer")) {
-            HStack {
-                Image(systemName: "globe")
-                Text(model.tunnelConnection == .connected ? productText("已连接到 OpenAI", "Connected to OpenAI") : productText("准备 OpenAI 通道", "Prepare OpenAI connection"))
-                Spacer()
-                if model.tunnelConnection == .connecting { ProgressView().controlSize(.small) }
-            }
-            if model.tunnelConnection == .connected {
-                Text(productText("接下来在 ChatGPT 中添加并安装 Styx。", "Next, add and install Styx in ChatGPT.")).foregroundStyle(.secondary)
-            }
+            ProductTunnelStatus(model: model)
             Button(model.tunnelConnection == .notConfigured ? productText("填写连接信息", "Enter connection details") : productText("编辑连接信息", "Edit connection details")) { editTunnel = true }
-            if model.tunnelConnection == .stopped || model.tunnelConnection == .unavailable {
-                Button(productText("重新连接", "Reconnect")) { model.startTunnel() }
+            if model.tunnelConnection != .connected && model.tunnelConnection != .notConfigured {
+                Button(productText("重新连接", "Reconnect")) { model.startTunnel() }.disabled(model.tunnelAttempt == .connecting)
             }
         }
     }
@@ -286,10 +285,6 @@ struct ProductView: View {
     }
     private var officialPanel: some View {
         ProductPanel(title: usePluginPackage ? productText("2. 保存插件 ZIP", "2. Save the plugin ZIP") : productText("2. 在 ChatGPT 添加 Styx", "2. Add Styx in ChatGPT")) {
-            Picker(productText("添加方式", "Setup method"), selection: $usePluginPackage) {
-                Text(productText("导出 ZIP 后上传", "Export ZIP, then upload")).tag(true)
-                Text(productText("在 ChatGPT 手动填写", "Enter details in ChatGPT")).tag(false)
-            }.pickerStyle(.segmented).onChange(of: usePluginPackage) { selected in if selected { model.preparePluginDraft() } }
             if usePluginPackage {
                 pluginPackageContent
             } else {
@@ -299,6 +294,7 @@ struct ProductView: View {
                     HStack { Text(model.connectionTunnelID).font(.caption).textSelection(.enabled); Button(productText("复制 Tunnel ID", "Copy Tunnel ID")) { model.copy(model.connectionTunnelID) } }
                 }
                 Text(productText("确认提示，点“创建为插件”，然后安装 Styx。", "Confirm the notice, select Create as a plugin, then install Styx."))
+                Button(productText("保存 Styx 图标…", "Save Styx icon…")) { model.saveBrandIcon() }
                 Button(productText("打开 ChatGPT 添加 Styx", "Open ChatGPT to add Styx")) { model.openOfficial("https://chatgpt.com/plugins") }
                 Button(productText("我已添加并安装 Styx", "I added and installed Styx")) { model.confirmPluginInstallation() }.disabled(model.plugin["contextChanged"].bool || model.connectionTunnelID.isEmpty)
             }

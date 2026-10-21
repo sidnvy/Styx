@@ -216,6 +216,9 @@ enum ProductRestorationPolicy {
     @Published var ingress: ProductJSON = .null
     @Published var createdInvitation: ProductJSON = .null
     @Published var pending: [ProductJSON] = []
+    @Published var tunnelObservationStale = false
+    @Published var tunnelAttempt: ProductTunnelAttempt = .idle
+    private var tunnelMonitor: Task<Void, Never>?
     @Published var settingsSection: ProductSettingsSection = .general
     @Published var selectedDeviceID: String?
     @Published var menuVisible = false
@@ -262,7 +265,7 @@ enum ProductRestorationPolicy {
         return ["needs_attention", "stopping"].contains(observed) || observed == "not_running" && status["nativeStartup"]["status"].string == "reconciliation_required"
     }
     var connectionTunnelID: String { plugin["connection"]["tunnelId"].string ?? (!tunnelID.isEmpty ? tunnelID : handoffTarget) }
-    var tunnelConnection: ProductTunnelConnection { ProductTunnelConnection.observed(journey["tunnel"]) }
+    var tunnelConnection: ProductTunnelConnection { tunnelObservationStale ? .unknown : ProductTunnelConnection.observed(journey["tunnel"]) }
     var challengeID: String? { acceptance["challenge"]["id"].string }
     var targetProofReady: Bool {
         acceptance["requestProof"]["status"].string == "verified"
@@ -320,7 +323,7 @@ enum ProductRestorationPolicy {
             throw error
         }
         status = snapshot["status"]
-        journey = snapshot["journey"]
+        journey = snapshot["journey"]; tunnelObservationStale = false
         if deployment != nil {
             if localPrepared && deployment?.browserRequested == true {
                 // A Browser observation failure does not hide Exec or the rest
@@ -501,7 +504,7 @@ enum ProductRestorationPolicy {
         guard !busy else { return }
         Task {
             do { try await saveTunnel(id: tunnelID, newKey: key); runtimeKey = "" }
-            catch { reportFailure(error); try? await reload() }
+            catch { tunnelAttempt = .failed; reportFailure(error); try? await reload() }
         }
     }
     func saveTunnel(id: String, newKey: String?) async throws {
@@ -511,6 +514,7 @@ enum ProductRestorationPolicy {
               ProductTunnelInputPolicy.keyError(newKey ?? "", saved: hasSavedRuntimeKey) == nil else {
             throw ProductCoreError.rejected
         }
+        tunnelMonitor?.cancel(); tunnelObservationStale = true; tunnelAttempt = .connecting
         busy = true; error = nil
         defer { busy = false }
         // The Core keeps the stored key private. Omitting apiKey deliberately
@@ -524,8 +528,34 @@ enum ProductRestorationPolicy {
         _ = try await client.write("tunnel/start", ["authorize": .bool(true)])
         tunnelID = normalized
         try await reload()
+        monitorTunnel()
     }
-    func startTunnel() { perform { [self] in _ = try await client.write("tunnel/start", ["authorize": .bool(true)]) } }
+    func startTunnel() {
+        guard !busy, tunnelAttempt != .connecting else { return }
+        tunnelMonitor?.cancel(); tunnelObservationStale = true; tunnelAttempt = .connecting
+        busy = true; error = nil
+        Task {
+            do {
+                _ = try await client.write("tunnel/start", ["authorize": .bool(true)])
+                busy = false; monitorTunnel()
+            } catch { busy = false; tunnelAttempt = .failed; reportFailure(error) }
+        }
+    }
+    @discardableResult func monitorTunnel(check: (() async -> Void)? = nil, pause: (() async throws -> Void)? = nil) -> Task<Void, Never> {
+        tunnelMonitor?.cancel()
+        tunnelMonitor = Task { [weak self] in
+            for _ in 0..<20 {
+                guard !Task.isCancelled, let self = self else { return }
+                if let check = check { await check() } else { await self.refresh() }
+                guard !Task.isCancelled else { return }
+                if self.tunnelConnection == .connected { self.tunnelAttempt = .idle; return }
+                do { if let pause = pause { try await pause() } else { try await Task.sleep(nanoseconds: 1_000_000_000) } } catch { return }
+            }
+            guard !Task.isCancelled else { return }
+            self?.tunnelAttempt = .timedOut
+        }
+        return tunnelMonitor!
+    }
     func selectIcon() {
         let panel = NSOpenPanel(); panel.allowedContentTypes = [.png]; panel.allowsMultipleSelection = false; panel.canChooseDirectories = false
         guard panel.runModal() == .OK, let url = panel.url else { return }
