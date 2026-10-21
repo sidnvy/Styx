@@ -39,7 +39,9 @@ export function copyOfflineDependencies({lockFile,dependenciesDir,destination,re
   if(!fs.existsSync(source)){assert(pin.optional,'required_production_dependency_missing');continue;}
   assert(!pin.link&&typeof pin.integrity==='string'&&typeof pin.version==='string','registry_locked_dependency_required');
   const pkg=JSON.parse(fs.readFileSync(path.join(source,'package.json'),'utf8'));assert(pkg.version===pin.version,'installed_dependency_version_mismatch');
-  tree(source,path.join(destination,...name.split('/')),{skip:n=>n==='node_modules'||n.startsWith('.')||['test','tests','__tests__','fixtures','examples','benchmarks'].includes(n)});
+  // Registry packages may import runtime files from directories named test.
+  // The lock selects production packages; directory names cannot classify code.
+  tree(source,path.join(destination,...name.split('/')),{skip:n=>n==='node_modules'||n.startsWith('.')});
   records.push({path:name,version:pin.version,integrity:pin.integrity});
  }
  for(const name of requiredPackages)assert(records.some(r=>r.path==='node_modules/'+name),'onboarding_production_dependency_missing');

@@ -104,6 +104,10 @@ test('preview includes the independently locked foreground Browser dependency cl
  const before=spawnSync(process.execPath,command,options);assert.notEqual(before.status,0);assert.match(before.stderr,/ERR_MODULE_NOT_FOUND/);
  const records=copyPreviewDependencies({sourceRoot,destination});
  const after=spawnSync(process.execPath,command,options);assert.equal(after.status,0,after.stderr);
+ // Exercise the shipped preparation entry point, not only the provider import.
+ // --dry-run resolves the CLI closure without downloading or launching a browser.
+ const cli=spawnSync(process.execPath,[path.join(destination,provider,'node_modules/playwright/cli.js'),'install','--dry-run','--no-shell','chromium'],options);
+ assert.equal(cli.status,0,cli.stderr);assert.match(cli.stdout,/chromium/i);
  const lock=JSON.parse(fs.readFileSync(path.join(sourceRoot,provider,'package-lock.json'),'utf8'));
  for(const name of ['@playwright/mcp','playwright','playwright-core']){
   const record=records.find(record=>record.path===provider+'/node_modules/'+name);
