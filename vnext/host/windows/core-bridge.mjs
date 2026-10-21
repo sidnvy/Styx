@@ -4,6 +4,7 @@ import path from 'node:path';
 import readline from 'node:readline';
 import {fileURLToPath} from 'node:url';
 import {createHash} from 'node:crypto';
+import {execFileSync} from 'node:child_process';
 import {ensurePrivateDirectory,writePrivateFile,requirePrivateDirectory} from '../private-storage.mjs';
 export const OPERATIONS=Object.freeze(['status','create','inspectJoin','join','prepare','connect','disconnect','setCapabilities','tunnelSave','tunnelStart','tunnelStop','acceptanceBegin','acceptanceConfirm','devices','setDefault','revokeDevice']);
 export function bootstrap(url){const u=new URL(url);if(u.protocol!=='http:'||u.hostname!=='127.0.0.1'||!u.port||u.pathname!=='/'||u.search||u.username||u.password||!/^#session=[A-Za-z0-9_-]{43}$/.test(u.hash))throw Error('invalid_bootstrap');const token=u.hash.slice(9);u.hash='';return {origin:u.origin,token};}
@@ -46,6 +47,18 @@ export async function createClient(instance,{fetchImpl=fetch}={}){
   return call(routes[op],body);
  }};
 }
+// Package input only: HTTP/pipe callers cannot choose a probe or executable.
+export function nativeDesktopAvailable(resourceRoot,pin,{run=execFileSync,platform=process.platform}={}){
+ try{
+  if(platform!=='win32'||pin?.path!=='StyxSessionProbe.exe'||!/^[a-f0-9]{64}$/.test(pin?.sha256??''))return false;
+  const file=path.join(resourceRoot,pin.path),stat=fs.lstatSync(file);
+  if(!stat.isFile()||stat.isSymbolicLink()||!fs.realpathSync(file).startsWith(fs.realpathSync(resourceRoot)+path.sep)||createHash('sha256').update(fs.readFileSync(file)).digest('hex')!==pin.sha256)return false;
+  const env=Object.fromEntries(['SystemRoot','WINDIR','TEMP','TMP'].filter(k=>process.env[k]!==undefined).map(k=>[k,process.env[k]]));
+  const text=run(file,[],{encoding:'utf8',timeout:5000,maxBuffer:4096,windowsHide:true,stdio:['ignore','pipe','ignore'],env});
+  if(typeof text!=='string'||Buffer.byteLength(text)>4096)return false;
+  const value=JSON.parse(text);return value?.schema===1&&value.status==='available'&&Number.isInteger(value.sessionId)&&value.sessionId>0&&value.interactive===true&&value.windowStation==='WinSta0'&&value.inputDesktop==='Default';
+ }catch{return false;}
+}
 export async function startWindowsCore(resourceRoot,stateRoot){
  if(!path.isAbsolute(stateRoot)||!path.isAbsolute(resourceRoot))throw Error('absolute_native_paths_required');
  ensurePrivateDirectory(stateRoot);requirePrivateDirectory(stateRoot);
@@ -54,6 +67,7 @@ export async function startWindowsCore(resourceRoot,stateRoot){
  if(fs.existsSync(manifest)){
   const cfg=JSON.parse(fs.readFileSync(manifest,'utf8'));
   const member=(relative,sha)=>{if(typeof relative!=='string'||path.isAbsolute(relative)||relative.split(/[\\/]/).some(x=>['','..','.'].includes(x)))throw Error('invalid_resource');const file=path.join(resourceRoot,relative);if(!fs.realpathSync(file).startsWith(fs.realpathSync(resourceRoot)+path.sep))throw Error('redirected_resource');if(sha&&createHash('sha256').update(fs.readFileSync(file)).digest('hex')!==sha)throw Error('resource_integrity_failed');return file;};
+  if(process.platform==='win32'){const core=await import('../../onboarding/core.mjs');options.core={...core,startDeploymentForeground:(directory,authorization)=>core.startDeploymentForeground(directory,authorization,{guiAvailable:()=>nativeDesktopAvailable(resourceRoot,cfg.desktopProbe)})};}
   if(cfg.artifacts){const artifacts={bundle:member(cfg.artifacts.bundle),publisherKeyFile:member(cfg.artifacts.publisherKeyFile),publisherSha256:cfg.artifacts.publisherSha256};const file=path.join(stateRoot,'artifacts.json');if(fs.existsSync(file))fs.unlinkSync(file);writePrivateFile(file,JSON.stringify(artifacts));options.artifactDefaultsFile=file;}
   if(cfg.openssl)options.trustedOpenSSL=member(cfg.openssl.path,cfg.openssl.sha256);
   if(cfg.tunnel)options.trustedTunnelClient={binary:member(cfg.tunnel.path,cfg.tunnel.sha256),sha256:cfg.tunnel.sha256};

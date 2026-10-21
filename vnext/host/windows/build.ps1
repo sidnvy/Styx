@@ -10,3 +10,11 @@ if($LASTEXITCODE -ne 0){throw 'native_build_failed'}
 
 & $csc /nologo /target:exe /platform:anycpu /optimize+ /out:"$OutputDirectory\StyxSessionProbe.exe" "$PSScriptRoot\SessionProbe.cs"
 if($LASTEXITCODE -ne 0){throw 'native_probe_build_failed'}
+
+$manifestFile=Join-Path $OutputDirectory 'windows-runtime.json'
+if(Test-Path -LiteralPath $manifestFile){
+    $manifest=Get-Content -LiteralPath $manifestFile -Raw | ConvertFrom-Json
+    $pin=@{path='StyxSessionProbe.exe';sha256=(Get-FileHash -LiteralPath (Join-Path $OutputDirectory 'StyxSessionProbe.exe') -Algorithm SHA256).Hash.ToLowerInvariant()}
+    $manifest | Add-Member -NotePropertyName desktopProbe -NotePropertyValue $pin -Force
+    [IO.File]::WriteAllText($manifestFile,($manifest | ConvertTo-Json -Depth 20),[Text.UTF8Encoding]::new($false))
+}
