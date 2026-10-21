@@ -31,6 +31,9 @@ export function runAcceptance(tier,directory) {
       'packages/styx-exec-adapter/test/windows.test.mjs']],
     ['gui-broker',files('packages/styx-gui-broker/test')],
     ['host',files('host/test')],
+    ['windows-bridge',files('host/windows')],
+    ['browser-contract',files('packages/styx-browser-provider/test')],
+    ['quality-runner',files('ci/test')],
     ['plugin',files('plugin/test')],
     ['onboarding',[...files('onboarding/test'),'onboarding/ui/server.test.mjs']]
   ]:[['native-exec',[
