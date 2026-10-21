@@ -1,7 +1,7 @@
 import AppKit
 import SwiftUI
 
-@MainActor private enum ProductBrandAsset {
+@MainActor private enum ProductBrandGlyphAsset {
     // Bundle artwork is immutable. Decode/extract once, not on every view update.
     static let glyph: NSImage? = {
         guard let root = Bundle.main.resourceURL else { return nil }
@@ -13,7 +13,7 @@ import SwiftUI
 struct ProductBrand: View {
     var size: CGFloat = 68
     var body: some View {
-        if let image = ProductBrandAsset.glyph {
+        if let image = ProductBrandGlyphAsset.glyph {
             Image(nsImage: image).renderingMode(.template).resizable().scaledToFit()
                 .foregroundStyle(Color.primary).frame(width: size, height: size).accessibilityLabel("Styx")
         }
