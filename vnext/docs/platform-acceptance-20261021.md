@@ -121,3 +121,25 @@ SBOMs completed. Skipped platform tests do not establish native acceptance. The
 receipt is `outputs/platform-third-20261021/quality-final-stage/receipt.json` in
 the parent task directory. Cross-physical Core join/Exec/Edge/reconnect and the
 final Windows preview remain pending their own receipts.
+
+
+### Headless Windows status correction
+
+The first cross-physical Core run reached verified TLS, invitation request,
+identity approval, credential claim and doctor. Foreground startup then correctly
+refused an unknown service state. Native diagnosis found two causes in the
+status adapter: a signed `.ps1` file was blocked by the current script-file
+policy, and its unconditional interactive-session check also rejected read-only
+status from SSH Session 0. That run was BLOCKED, its own state/processes were
+removed, and its receipt is retained.
+
+Revision 6d4413e permits only status outside an interactive session. The Core
+reads the fixed helper bytes, checks them against its verified release manifest,
+and passes those exact bytes through a fixed encoded command; parameters remain
+data. It changes no execution policy. Service installation/control retain the
+interactive-session requirement. Three actual NAB tests passed with zero skips,
+including Session 0 status, control refusal and unchanged execution policies.
+The final shared check at ea99b75 passed fourteen gates: 751 tests passed, zero
+failed and 40 skipped. The native status tests are additional evidence, not
+inferred from those skips. Final re-pairing and package rebuild use fresh signed
+payloads; earlier signed installations are not patched in place.
