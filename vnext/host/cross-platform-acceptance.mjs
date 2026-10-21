@@ -50,7 +50,7 @@ async function commandLoop(directory,handlers,onAttempt=()=>{}){
    if(!/^[a-f0-9]{32}\.json$/.test(name)||fs.existsSync(path.join(directory,'responses',name)))continue;
    const file=path.join(directory,'requests',name);assert(fs.statSync(file).size<65536,'cross_command_too_large');const {operation,payload={}}=JSON.parse(fs.readFileSync(file,'utf8'));
    let answer;try{assert(typeof handlers[operation]==='function','cross_command_not_allowed');answer={status:'PASS',...await handlers[operation](payload)};}catch(e){answer={status:'BLOCKED',reason:/^[A-Za-z0-9_]+$/.test(e.message??'')?e.message:'cross_operation_failed'};}
-   onAttempt({operation,status:answer.status,...(answer.reason?{reason:answer.reason}:{}),at:new Date().toISOString()});
+   onAttempt({operation,requestId:name,status:answer.status,...(answer.reason?{reason:answer.reason}:{}),at:new Date().toISOString()});
    publishCrossFile(path.join(directory,'responses',name),JSON.stringify(answer)+'\n');
    if(operation==='abort'||operation==='stop'&&answer.status==='PASS')return answer;
   }
@@ -61,7 +61,7 @@ export async function sendCrossCommand({directory,operation,payload={},responseF
  requirePrivateDirectory(directory);assert(typeof operation==='string'&&/^[a-z-]+$/.test(operation),'fixed_cross_operation_required');assert(path.isAbsolute(responseFile)&&!fs.existsSync(responseFile),'fresh_cross_response_file_required');
  const nonce=randomBytes(16).toString('hex')+'.json',request=JSON.stringify({operation,payload});assert(Buffer.byteLength(request)<65536,'cross_command_too_large');
  publishCrossFile(path.join(directory,'requests',nonce),request);
- for(let n=0;n<2400;n++){const file=path.join(directory,'responses',nonce);if(fs.existsSync(file)){publishCrossFile(responseFile,fs.readFileSync(file));const result=JSON.parse(fs.readFileSync(file));return {status:result.status,responseFile,...(result.reason?{reason:result.reason}:{})};}await pause(100);}
+ for(let n=0;n<2400;n++){const file=path.join(directory,'responses',nonce);if(fs.existsSync(file)){publishCrossFile(responseFile,fs.readFileSync(file));const result=JSON.parse(fs.readFileSync(file));return {status:result.status,responseFile,...(result.reason?{reason:result.reason}:{})};}if(['stop','abort'].includes(operation)){try{const final=JSON.parse(fs.readFileSync(path.join(directory,'receipt.json')));if(final.completedAt&&final.attempts?.some(x=>x.requestId===nonce&&x.status==='PASS')){const result={status:final.status,cleanup:final.cleanup};publishCrossFile(responseFile,JSON.stringify(result)+'\n');return {...result,responseFile};}}catch{}}await pause(100);}
  throw Error('cross_actor_response_timeout');
 }
 export async function runCrossGateway(options){
