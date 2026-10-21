@@ -185,7 +185,7 @@ function render(){
  const joinPending=deployment.mode==='join-existing'&&!prepared;
  $('#join-approval').hidden=!joinPending;
  const request=deployment.steps.find(s=>s.id==='host.request'),claim=deployment.steps.find(s=>s.id==='host.claim');
- $('#join-comparison').textContent=request?.fingerprint?'本机设备比较码：'+comparisonCode(request.fingerprint)+'。请通过独立可信渠道与主台显示值核对。':'配对请求提交后，这里会显示本机设备比较码。';
+ $('#join-comparison').textContent=request?.comparison_code?'本次核对码：'+request.comparison_code+'。请在主台确认两端显示相同的码。':request?.fingerprint?'这是旧版加入请求，请使用完整设备指纹核对，或让 Codex 协助继续。':'配对请求提交后，这里会显示本次核对码。';
  $('#continue-join').disabled=locked||needsAttention;
  $('#continue-join').textContent=claim?.status==='awaiting_approval'?'重新检查主台审批':'继续加入已有环境';
  const running=deployment.gatewayRuntime==='running';
@@ -196,7 +196,8 @@ function render(){
   title.textContent=LABELS[step.id]??step.id;status.className='status '+step.status;status.textContent=STATUS[step.status]??'状态待核实';detail.append(title,status);
   if(step.error){const error=document.createElement('p');error.textContent='本地诊断代码：'+step.error;detail.append(error)}
   if(step.ownerApproval==='REQUIRED'){const approval=document.createElement('p');approval.textContent='请管理员在受信任的管理端核对设备指纹并审批。';detail.append(approval)}
-  if(step.fingerprint){const fingerprint=document.createElement('p');fingerprint.textContent='设备比较码：'+comparisonCode(step.fingerprint)+'（人工核对用）';const full=document.createElement('details'),summary=document.createElement('summary'),value=document.createElement('p');summary.textContent='展开完整设备指纹';value.textContent=step.fingerprint;full.append(summary,value);detail.append(fingerprint,full)}
+  if(step.comparison_code){const comparison=document.createElement('p');comparison.textContent='本次核对码：'+step.comparison_code;detail.append(comparison)}
+  if(step.fingerprint){const full=document.createElement('details'),summary=document.createElement('summary'),value=document.createElement('p');summary.textContent='展开完整设备指纹';value.textContent=step.fingerprint;full.append(summary,value);detail.append(full)}
   const execute=document.createElement('button');execute.type='button';execute.className='secondary';
   execute.textContent=step.status==='awaiting_approval'?'重新检查审批':['failed','blocked'].includes(step.status)?'检查后重试':step.id==='host.doctor'?'运行检查':'授权并执行';
   const required=dependencies.find(p=>p.id===step.id)?.requires??[];
@@ -458,10 +459,11 @@ $('#create-link').addEventListener('click',async()=>{
 $('#copy-link').addEventListener('click',async()=>{try{await navigator.clipboard.writeText($('#created-link-value').value);message('私有链接已复制。只通过可信渠道提供，不要发送到聊天。')}catch{message('浏览器未允许复制。请使用受信任浏览器的本机复制功能。')}});
 $('#list-pending').addEventListener('click',async()=>{
  if(locked)return;locked=true;render();try{const result=await api('pending/list',{method:'POST',data:{authorize:true}});$('#pending-devices').replaceChildren();
- for(const row of result.pending){const card=document.createElement('div');card.className='prerequisite';const title=document.createElement('strong');title.textContent=row.label+' · '+row.platform;const scope=document.createElement('p');scope.textContent='工作目录：'+row.cwd+'\nShell：'+row.shell+'\n请求桌面能力：'+(row.computer_requested?'是':'否')+'\n设备比较码：'+comparisonCode(row.fingerprint)+'（人工核对用，不替代完整身份绑定）';
- const field=document.createElement('label');field.textContent='输入从设备侧独立核对的 16 位比较码（也接受完整指纹）';const fingerprint=document.createElement('input');fingerprint.maxLength=80;fingerprint.autocomplete='off';field.append(fingerprint);
- const gui=document.createElement('input');gui.type='checkbox';gui.disabled=!row.computer_requested;const guiLabel=document.createElement('label');guiLabel.className='check';guiLabel.append(gui,document.createTextNode('明确允许此设备请求的桌面能力'));
- const approve=document.createElement('button');approve.type='button';approve.textContent='核对指纹并批准此设备';approve.addEventListener('click',async()=>{const typed=fingerprint.value.replace(/[\s-]/g,'').toLowerCase();if(locked||!(typed===row.fingerprint||typed===row.fingerprint.slice(0,16))){message('输入的独立指纹与该设备不匹配，不批准。');return}if(!confirm('批准设备 '+row.label+'，已核对指纹，并且桌面能力选择为 '+(gui.checked?'允许':'不允许')+'？'))return;locked=true;render();try{await api('pending/approve',{method:'POST',data:{authorize:true,requestId:row.request_id,fingerprintConfirmation:fingerprint.value.trim(),enableComputer:gui.checked}});card.replaceChildren(document.createTextNode('设备已批准；请设备侧领取结果并重新检查状态。'))}catch{message('审批未完成，请重新读取待审批状态，不要盲目重试。')}finally{locked=false;render()}});const full=document.createElement('details'),summary=document.createElement('summary'),hash=document.createElement('p');summary.textContent='展开完整设备指纹';hash.textContent=row.fingerprint;full.append(summary,hash);card.append(title,scope,full,field,guiLabel,approve);$('#pending-devices').append(card)}
+ for(const row of result.pending){const card=document.createElement('div');card.className='prerequisite';const title=document.createElement('strong');title.textContent=row.label+' · '+row.platform;
+ const scope=document.createElement('p');scope.textContent='在另一台电脑上查看核对码，确认是同一台电脑。';
+ const code=document.createElement('strong');code.textContent=row.comparison_code??comparisonCode(row.fingerprint);
+ const field=document.createElement('label');field.textContent='输入另一台电脑显示的核对码';const fingerprint=document.createElement('input');fingerprint.maxLength=80;fingerprint.autocomplete='off';field.append(fingerprint);
+ const approve=document.createElement('button');approve.type='button';approve.textContent='确认加入';approve.addEventListener('click',async()=>{if(locked)return;locked=true;render();try{await api('pending/approve',{method:'POST',data:{authorize:true,requestId:row.request_id,...(row.comparison_code?{comparisonCodeConfirmation:fingerprint.value.trim()}:{fingerprintConfirmation:fingerprint.value.trim()})}});card.replaceChildren(document.createTextNode('已确认，等待这台电脑连接…'))}catch{message('核对未通过。请检查另一台电脑上的核对码，或重新读取加入申请。')}finally{locked=false;render()}});card.append(title,scope,code,field,approve);$('#pending-devices').append(card)}
  if(!result.pending.length)$('#pending-devices').textContent='当前没有待审批设备。';
  }catch{message('无法读取待审批列表。请确认该部署的 Gateway 运行且本机所有者凭据有效。')}finally{locked=false;render()}
 });

@@ -72,6 +72,7 @@ export function publicDeployment(value){
    ...(s.id.startsWith('host.service.')?{service:publicService(s.evidence)}:{}),
    ...(s.evidence?.ownerApproval==='REQUIRED'?{ownerApproval:'REQUIRED'}:{}),
    ...(/^[a-f0-9]{64}$/.test(s.evidence?.fingerprint??'')?{fingerprint:s.evidence.fingerprint}:{}),
+   ...(/^[A-F0-9]{4}(?:-[A-F0-9]{4}){3}$/.test(s.evidence?.comparison_code??'')?{comparison_code:s.evidence.comparison_code}:{}),
    ...(s.error?{error:ERRORS.has(s.error)?s.error:'step_failed_inspect_local_state'}:{})}))};
 }
 const object=value=>value&&typeof value==='object'&&!Array.isArray(value);
@@ -394,9 +395,20 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
     keys(data,['authorize']);if(data.authorize!==true||typeof api.createDeploymentPairingLink!=='function')fail('owner_link_not_supported');const result=await api.createDeploymentPairingLink(stateDir,{authorize:true});send(200,{link:result.link,origin:result.origin,expiresAt:result.expiresAt,...(result.caSha256?{caSha256:result.caSha256}:{}),reachability:result.reachability,remoteUsable:result.remoteUsable===true});return;
    }else if(url.pathname==='/api/pending/list'){
     keys(data,['authorize']);if(data.authorize!==true||typeof api.listDeploymentPending!=='function')fail('owner_list_not_supported');const rows=await api.listDeploymentPending(stateDir,{authorize:true});
-    const pending=rows.filter(r=>/^[a-f0-9]{32}$/.test(r.request_id??'')&&/^[a-f0-9]{64}$/.test(r.fingerprint??'')).map(r=>({request_id:r.request_id,fingerprint:r.fingerprint,label:String(r.label??'').slice(0,72),platform:['linux','darwin','win32'].includes(r.platform)?r.platform:'unknown',cwd:String(r.cwd??'').slice(0,4096),shell:String(r.shell??'').slice(0,4096),computer_requested:r.computer_requested===true,browser_requested:r.browser_requested===true,expires_at:r.expires_at}));send(200,{pending});return;
+    const pending=rows.filter(r=>/^[a-f0-9]{32}$/.test(r.request_id??'')&&/^[a-f0-9]{64}$/.test(r.fingerprint??'')).map(r=>({request_id:r.request_id,fingerprint:r.fingerprint,label:String(r.label??'').slice(0,72),platform:['linux','darwin','win32'].includes(r.platform)?r.platform:'unknown',cwd:String(r.cwd??'').slice(0,4096),shell:String(r.shell??'').slice(0,4096),computer_requested:r.computer_requested===true,browser_requested:r.browser_requested===true,comparison_code:r.comparison_code,expires_at:r.expires_at}));send(200,{pending});return;
    }else if(url.pathname==='/api/pending/approve'){
-    keys(data,['authorize','requestId','fingerprint','fingerprintConfirmation','enableComputer','enableBrowser']);if(data.authorize!==true||typeof api.approveDeploymentPending!=='function'||typeof api.listDeploymentPending!=='function'||!/^[a-f0-9]{32}$/.test(data.requestId??'')||typeof data.enableComputer!=='boolean'||data.enableBrowser!==undefined&&typeof data.enableBrowser!=='boolean')fail('explicit_device_approval_required');const typed=data.fingerprintConfirmation??data.fingerprint;if(typeof typed!=='string'||typed.length>80)fail('fingerprint_confirmation_required');const confirmation=typed.replace(/[\s-]/g,'').toLowerCase();if(!/^(?:[a-f0-9]{16}|[a-f0-9]{64})$/.test(confirmation))fail('fingerprint_confirmation_required');const requests=await api.listDeploymentPending(stateDir,{authorize:true}),selected=requests.find(r=>r.request_id===data.requestId);if(!selected||!/^[a-f0-9]{64}$/.test(selected.fingerprint??'')||(confirmation.length===64?selected.fingerprint!==confirmation:selected.fingerprint.slice(0,16)!==confirmation))fail('fingerprint_confirmation_mismatch');if(selected.browser_requested===true&&typeof data.enableBrowser!=='boolean')fail('explicit_browser_approval_required');const result=await api.approveDeploymentPending(stateDir,{authorize:true,requestId:data.requestId,fingerprint:selected.fingerprint,enableComputer:data.enableComputer,...(data.enableBrowser!==undefined?{enableBrowser:data.enableBrowser}:{})});send(200,{status:result.status??'approved'});return;
+    keys(data,['authorize','requestId','fingerprint','fingerprintConfirmation','comparisonCodeConfirmation','enableComputer','enableBrowser']);
+    if(data.authorize!==true||typeof api.approveDeploymentPending!=='function'||typeof api.listDeploymentPending!=='function'||!/^[a-f0-9]{32}$/.test(data.requestId??''))fail('explicit_device_approval_required');
+    const requests=await api.listDeploymentPending(stateDir,{authorize:true}),selected=requests.find(r=>r.request_id===data.requestId);
+    if(!selected||!/^[a-f0-9]{64}$/.test(selected.fingerprint??''))fail('pending_device_not_found');
+    const typed=data.comparisonCodeConfirmation??data.fingerprintConfirmation??data.fingerprint;
+    if(typeof typed!=='string'||typed.length>80)fail('fingerprint_confirmation_required');
+    const confirmation=typed.replace(/[\s-]/g,'').toLowerCase();
+    if(data.comparisonCodeConfirmation!==undefined){
+     if(typeof selected.comparison_code!=='string'||confirmation!==selected.comparison_code.replace(/-/g,'').toLowerCase())fail('pairing_comparison_mismatch');
+    }else if(!/^(?:[a-f0-9]{16}|[a-f0-9]{64})$/.test(confirmation)||(confirmation.length===64?selected.fingerprint!==confirmation:!!selected.comparison_code||selected.fingerprint.slice(0,16)!==confirmation))fail('fingerprint_confirmation_mismatch');
+    for(const [key,requested]of [['enableComputer','computer_requested'],['enableBrowser','browser_requested']])if(data[key]!==undefined&&(typeof data[key]!=='boolean'||data[key]!== (selected[requested]===true)))fail('pending_identity_or_capability_mismatch');
+    const result=await api.approveDeploymentPending(stateDir,{authorize:true,requestId:data.requestId,fingerprint:selected.fingerprint});send(200,{status:result.status??'approved'});return;
    }else if(url.pathname==='/api/service'){
     keys(data,['role','action','authorize']);if(data.authorize!==true||!['host','gateway'].includes(data.role))fail('explicit_service_authorization_required');
     let result;

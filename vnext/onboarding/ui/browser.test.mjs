@@ -15,7 +15,7 @@ const native=process.env.STYX_ONBOARDING_NATIVE_BUNDLE==='1';
 const enabled=process.env.STYX_ONBOARDING_BROWSER_TEST==='1';
 const sleep=ms=>new Promise(r=>setTimeout(r,ms));
 async function until(fn,code,ms=12000){const end=Date.now()+ms;while(Date.now()<end){if(await fn())return;await sleep(100)}throw Error(code)}
-test(native?'real browser prepares native Hosts, verifies Gateway, pairs locally and joins by private link with separate approval':'real browser automatically prepares Gateway, preserves blocked Host setup and resumes status',{skip:!enabled,timeout:120000},async()=>{
+test(native?'real browser prepares native Hosts, verifies Gateway, pairs locally and joins by private link with separate approval':'real browser automatically prepares Gateway, preserves blocked Host setup and resumes status',{skip:!enabled,timeout:120000},async t=>{
  const binary=process.env.STYX_ONBOARDING_BROWSER_BINARY;assert.ok(binary&&path.isAbsolute(binary));
  const coreUrl=process.env.STYX_ONBOARDING_CORE_MODULE?pathToFileURL(process.env.STYX_ONBOARDING_CORE_MODULE):new URL('../core.mjs',import.meta.url);
  const core=await import(coreUrl);const pairingLinks=native?await import(new URL('./pairing-links.mjs',coreUrl)):undefined;
@@ -50,7 +50,7 @@ test(native?'real browser prepares native Hosts, verifies Gateway, pairs locally
   await until(()=>evaluate("document.querySelector('#progress')?.hidden===false"),'config_not_saved');
   if(!native)assert.equal(fs.existsSync(path.join(root,'host-not-created')),false);
   async function clickStep(label,status){await evaluate(`(()=>{const s=[...document.querySelectorAll('.step')].find(s=>s.querySelector('strong').textContent===${JSON.stringify(label)});if(!s||s.querySelector('button').disabled)throw Error('step_not_ready');s.querySelector('button').click();return true})()`);await until(()=>evaluate(`(()=>{const s=[...document.querySelectorAll('.step')].find(s=>s.querySelector('strong').textContent===${JSON.stringify(label)});return s?.querySelector('.status').textContent===${JSON.stringify(status)}})()`),'step_not_completed')}
-  await until(()=>evaluate("document.querySelectorAll('.step .status.succeeded').length>=3"),'automatic_gateway_setup_not_completed');
+  await until(()=>evaluate("document.querySelectorAll('.step .status.succeeded').length>=3"),'automatic_gateway_setup_not_completed',native?90000:12000);
   await until(()=>evaluate("document.querySelector('#runtime').textContent.includes('正在运行')"),'actual_gateway_not_running');
   await evaluate("document.querySelector('#inspect-ingress').click();true");
   await until(()=>evaluate("document.querySelector('#ingress-status').textContent.includes('当前仅限本机')"),'device_ingress_plan_missing');
@@ -88,11 +88,13 @@ test(native?'real browser prepares native Hosts, verifies Gateway, pairs locally
    await evaluate(`(()=>{const f=document.querySelector('#setup');for(const[k,v]of Object.entries(${JSON.stringify(joinFields)}))f.elements[k].value=v;f.elements.reviewed.checked=true;f.requestSubmit();return true})()`);
    await until(()=>evaluate("document.querySelector('#progress')?.hidden===false"),'linked_config_not_saved');
    await until(()=>evaluate("(()=>{const step=[...document.querySelectorAll('.step')].find(s=>s.querySelector('strong').textContent==='提交设备加入请求');return step?.querySelector('.status').textContent==='已记录成功'})()"),'ordinary_join_request_not_submitted');
-   const independentFingerprint=core.readDeployment(path.join(root,'join-state')).steps.find(s=>s.id==='host.request').evidence.fingerprint;
+   const independentComparisonCode=core.readDeployment(path.join(root,'join-state')).steps.find(s=>s.id==='host.request').evidence.comparison_code;
+   assert.match(independentComparisonCode,/^[A-F0-9]{4}(?:-[A-F0-9]{4}){3}$/);
+   assert.ok((await evaluate("document.querySelector('#join-comparison').textContent")).includes(independentComparisonCode));
    await command('Page.navigate',{url:instance.origin});await until(()=>evaluate("document.querySelector('#progress')?.hidden===false"),'owner_resume_not_ready');
    await evaluate("document.querySelector('#list-pending').click();true");await until(()=>evaluate("document.querySelector('#pending-devices').textContent.includes('Owned linked Host')"),'pending_device_not_listed');
-   await evaluate(`(()=>{const card=[...document.querySelectorAll('#pending-devices>.prerequisite')].find(c=>c.querySelector('strong').textContent.includes('Owned linked Host'));card.querySelector('input:not([type=checkbox])').value=${JSON.stringify(independentFingerprint.slice(0,16))};card.querySelector('button').click();return true})()`);
-   await until(()=>evaluate("document.querySelector('#pending-devices').textContent.includes('设备已批准')"),'explicit_linked_approval_not_completed');
+   await evaluate(`(()=>{const card=[...document.querySelectorAll('#pending-devices>.prerequisite')].find(c=>c.querySelector('strong').textContent.includes('Owned linked Host'));card.querySelector('input:not([type=checkbox])').value=${JSON.stringify(independentComparisonCode)};card.querySelector('button').click();return true})()`);
+   await until(()=>evaluate("document.querySelector('#pending-devices').textContent.includes('已确认')"),'explicit_linked_approval_not_completed');
    await command('Page.navigate',{url:joinInstance.origin});await until(()=>evaluate("document.querySelector('#progress')?.hidden===false"),'linked_resume_not_ready');
    await evaluate("document.querySelector('#continue-join').click();true");
    await until(()=>evaluate("(()=>{const step=[...document.querySelectorAll('.step')].find(s=>s.querySelector('strong').textContent==='检查 Host');return step?.querySelector('.status').textContent==='已记录成功'})()"),'ordinary_join_approval_not_completed');
@@ -116,7 +118,10 @@ test(native?'real browser prepares native Hosts, verifies Gateway, pairs locally
    image=await command('Page.captureScreenshot',{format:'png',captureBeyondViewport:false});fs.writeFileSync(path.join(directory,'onboarding-mobile.png'),Buffer.from(image.data,'base64'));
   }
 
- }catch(error){primaryFailure=error;throw error}
+ }catch(error){primaryFailure=error;
+  try{t.diagnostic(JSON.stringify({steps:core.readDeployment(path.join(root,'state')).steps.map(({id,status})=>({id,status}))}))}catch{}
+  try{t.diagnostic(JSON.stringify(await evaluate("({message:document.querySelector('#notice')?.textContent,profileStatus:document.querySelector('#plugin-profile-status')?.textContent,invalidFields:[...document.querySelector('#plugin-profile-form').elements].filter(e=>e.willValidate&&!e.validity.valid).map(e=>e.name)})")))}catch{}
+  throw error}
  finally{
   try{
    // Ask this isolated browser to close its own children/profile first. Retain

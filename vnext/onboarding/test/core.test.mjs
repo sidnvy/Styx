@@ -173,7 +173,8 @@ test('owner pairing link joins a fresh second deployment with explicit origin, C
  let joined=await advanceDeployment(joinState,{authorize:['host.prepare','host.request','host.claim']});assert.equal(steps(joined)['host.claim'].status,'awaiting_approval');
  await assert.rejects(listDeploymentPending(f.stateDir,{authorize:false}),/explicit_owner_pending_authorization_required/);
  const pending=await reopened.listDeploymentPending(f.stateDir,{authorize:true});assert.equal(pending.length,1);assert.equal(pending[0].label,'Second device');
- const approved={authorize:true,requestId:pending[0].request_id,fingerprint:pending[0].fingerprint,enableComputer:false};
+ assert.equal(pending[0].comparison_code,steps(joined)['host.request'].evidence.comparison_code);assert.match(pending[0].comparison_code,/^[A-F0-9]{4}(?:-[A-F0-9]{4}){3}$/);
+ const approved={authorize:true,requestId:pending[0].request_id,fingerprint:pending[0].fingerprint};
  await assert.rejects(approveDeploymentPending(f.stateDir,{...approved,fingerprint:'0'.repeat(64)}),/pending_identity_or_capability_mismatch/);
  await assert.rejects(approveDeploymentPending(f.stateDir,{...approved,enableComputer:true}),/pending_identity_or_capability_mismatch/);
  assert.equal((await reopened.approveDeploymentPending(f.stateDir,approved)).status,'approved');
@@ -262,13 +263,13 @@ test('Core validates the bounded Browser intent and does not accept caller-suppl
 });
 
 
-test('manual Core pending approval requires a separate explicit Browser decision',{skip:process.platform!=='linux',timeout:20000},async t=>{
+test('owner identity approval preserves the Browser capability selected on the joining computer',{skip:process.platform!=='linux',timeout:20000},async t=>{
  const f=await fixture(t);f.config.host.browser={enabled:true,headless:true};fs.writeFileSync(f.configFile,JSON.stringify(f.config));await main(['create',f.configFile,f.stateDir]);
  await main(['advance',f.stateDir,'gateway.prepare','gateway.start','gateway.verify','host.prepare','host.invite','host.request','host.claim']);
  const [pending]=await listDeploymentPending(f.stateDir,{authorize:true});assert.equal(pending.browser_requested,true);assert.equal(pending.computer_requested,false);
  const approval={authorize:true,requestId:pending.request_id,fingerprint:pending.fingerprint,enableComputer:false};
- await assert.rejects(approveDeploymentPending(f.stateDir,approval),/pending_identity_or_capability_mismatch/);
- const file=path.join(f.root,'browser-approval.json');fs.writeFileSync(file,JSON.stringify({...approval,enableBrowser:true}),{mode:0o600});
+ await assert.rejects(approveDeploymentPending(f.stateDir,{...approval,enableBrowser:false}),/pending_identity_or_capability_mismatch/);
+ const file=path.join(f.root,'browser-approval.json');fs.writeFileSync(file,JSON.stringify(approval),{mode:0o600});
  const approved=await main(['approve',f.stateDir,file,'--authorize']);assert.equal(approved.approved_capabilities.browser,true);
  const state=await main(['advance',f.stateDir,'host.claim']);assert.equal(steps(state)['host.claim'].status,'succeeded');
  assert.equal(JSON.parse(fs.readFileSync(path.join(f.config.host.baseDir,'device/host.json'))).browser.enabled,true);

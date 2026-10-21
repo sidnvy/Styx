@@ -4,7 +4,7 @@ export {localGatewayAddresses,validateDeployment} from './deployment-config.mjs'
 import {readGatewayDeployment} from './gateway-deployment-reader.mjs';
 import {deploymentRoles} from './roles.mjs';
 import path from 'node:path';
-import {randomBytes,createHash,createPublicKey} from 'node:crypto';
+import {randomBytes,createHash,createPublicKey,X509Certificate} from 'node:crypto';
 import {pathToFileURL} from 'node:url';
 import {activeRelease} from '../host/installer.mjs';
 import {execFileSync} from 'node:child_process';
@@ -13,6 +13,7 @@ import {prepareNativeSetup} from '../host/setup-native.mjs';
 import {requestEnrollment,claimEnrollment} from '../host/enroll.mjs';
 import {ownerCommand} from '../gateway/enroll-admin.mjs';
 import {verifyGatewayConnection} from './connection.mjs';
+import {pairingComparisonCode} from '../shared/enrollment-protocol.mjs';
 import {pairDevice,createLocalPairingTransport} from './pairing.mjs';
 import {doctor} from '../host/doctor.mjs';
 import {readDeploymentAcceptance} from './account-acceptance.mjs';
@@ -215,16 +216,19 @@ function pendingPublic(items){
 }
 export async function listDeploymentPending(d,options={}){
  exact(options,['authorize']);if(options.authorize!==true)fail('explicit_owner_pending_authorization_required');
- try{return pendingPublic(await pendingOwned(ownedGateway(d)));}catch{throw Error('owner_pending_read_failed');}
+ try{const g=ownedGateway(d),certificateSha256=createHash('sha256').update(new X509Certificate(fs.readFileSync(gatewayPaths(d).cert)).raw).digest('hex');return pendingPublic(await pendingOwned(g)).map(request=>({...request,comparison_code:pairingComparisonCode({gatewayOrigin:new URL(g.config.gateway.url).origin,certificateSha256,requestId:request.request_id,deviceFingerprint:request.fingerprint})}));}catch{throw Error('owner_pending_read_failed');}
 }
 export async function approveDeploymentPending(d,options={}){
  exact(options,['authorize','requestId','fingerprint','enableComputer','enableBrowser']);
- if(options.authorize!==true||!/^([a-f0-9]{32})$/.test(options.requestId??'')||!/^([a-f0-9]{64})$/.test(options.fingerprint??'')||typeof options.enableComputer!=='boolean'||options.enableBrowser!==undefined&&typeof options.enableBrowser!=='boolean')fail('explicit_scoped_pending_approval_required');
+ if(options.authorize!==true||!/^([a-f0-9]{32})$/.test(options.requestId??'')||!/^([a-f0-9]{64})$/.test(options.fingerprint??'')||options.enableComputer!==undefined&&typeof options.enableComputer!=='boolean'||options.enableBrowser!==undefined&&typeof options.enableBrowser!=='boolean')fail('explicit_scoped_pending_approval_required');
  const g=ownedGateway(d),release=lock(d);
  try{
   const request=pendingPublic(await pendingOwned(g)).find(x=>x.request_id===options.requestId);
-  if(!request||request.fingerprint!==options.fingerprint||options.enableComputer&&!request.computer_requested||options.enableBrowser===true&&!request.browser_requested||request.browser_requested&&typeof options.enableBrowser!=='boolean')fail('pending_identity_or_capability_mismatch');
-  const result=g.controller?g.controller.approve({request_id:options.requestId,fingerprint:options.fingerprint,enable_computer:options.enableComputer,enable_browser:options.enableBrowser===true}):await ownerCommand(g.owner,'approve',[options.requestId,options.fingerprint,...(options.enableComputer?['computer']:[]),...(options.enableBrowser?['browser']:[])]);
+  if(!request||request.fingerprint!==options.fingerprint||options.enableComputer!==undefined&&options.enableComputer!==request.computer_requested||options.enableBrowser!==undefined&&options.enableBrowser!==request.browser_requested)fail('pending_identity_or_capability_mismatch');
+  // Approving this device accepts its locally chosen signed request. Legacy
+  // callers may repeat that scope, but cannot silently change it.
+  const enableComputer=request.computer_requested===true,enableBrowser=request.browser_requested===true;
+  const result=g.controller?g.controller.approve({request_id:options.requestId,fingerprint:options.fingerprint,enable_computer:enableComputer,enable_browser:enableBrowser}):await ownerCommand(g.owner,'approve',[options.requestId,options.fingerprint,...(enableComputer?['computer']:[]),...(enableBrowser?['browser']:[])]);
   return {status:result.status,device_id:result.device_id,fingerprint:result.fingerprint,approved_capabilities:result.approved_capabilities};
  }catch(e){if(e.message==='pending_identity_or_capability_mismatch')throw e;throw Error('owner_approval_failed_inspect_private_gateway');}finally{release();}
 }
@@ -279,7 +283,7 @@ async function execute(d,c,id,ownerApproval){
  }
  if(id==='host.request'){
   const file=c.mode==='create-local'?filename(d,'invitation'):c.invitationFile;if(!file)fail('private_invitation_file_required');requirePrivateFile(file);
-  const r=await requestEnrollment(enrollment(),fs.readFileSync(file,'utf8').trim());return {status:r.status,request_id:r.request_id,device_id:r.device_id,fingerprint:r.fingerprint,ownerApproval:'REQUIRED'};
+  const r=await requestEnrollment(enrollment(),fs.readFileSync(file,'utf8').trim());return {status:r.status,request_id:r.request_id,device_id:r.device_id,fingerprint:r.fingerprint,comparison_code:r.comparison_code,ownerApproval:'REQUIRED'};
  }
  if(id==='host.claim'){
   const r=await claimEnrollment(enrollment());return {status:r.status,...(r.device_id?{device_id:r.device_id}:{}),...(r.status==='ready_to_connect'?{hostConfigFile:r.local_host_config}:{ownerApproval:'REQUIRED'})};

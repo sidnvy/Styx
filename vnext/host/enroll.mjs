@@ -7,7 +7,7 @@ import {
 } from 'node:crypto';
 import https from 'node:https';
 import {fileURLToPath} from 'node:url';
-import {joinPayload} from '../shared/enrollment-protocol.mjs';
+import {joinPayload,pairingComparisonCode} from '../shared/enrollment-protocol.mjs';
 
 const ID=/^styx-[a-f0-9]{24}$/;
 const TOKEN=/^[A-Za-z0-9_-]{32,}$/;
@@ -79,6 +79,8 @@ export async function enrollmentHttpRequest({gateway_url,gateway_ca_file},
       },
       timeout:10000
     },res=>{
+      const peer=res.socket.getPeerCertificate();
+      const tlsCertificateSha256=peer.raw?sha(peer.raw):undefined;
       const chunks=[];let bytes=0;
       res.on('data',data=>{
         bytes+=data.length;
@@ -93,7 +95,7 @@ export async function enrollmentHttpRequest({gateway_url,gateway_ca_file},
           const e=new Error(body.error||'enrollment_denied');e.status=res.statusCode;
           reject(e);return;
         }
-        resolve({status:res.statusCode,body});
+        resolve({status:res.statusCode,body,tlsCertificateSha256});
       });
     });
     req.on('timeout',()=>req.destroy(Error('gateway_timeout')));
@@ -162,7 +164,8 @@ export async function requestEnrollment(config,invitation){
     'gateway_public_key_binding_failed');
   privateWrite(pendingFile,JSON.stringify(response.body,null,2)+'\n');
   return {device_id:identity.device_id,request_id:response.body.request_id,
-    fingerprint:identity.fingerprint,status:'pending',expires_at:response.body.expires_at};
+    fingerprint:identity.fingerprint,status:'pending',expires_at:response.body.expires_at,
+    comparison_code:pairingComparisonCode({gatewayOrigin:new URL(cfg.gateway_url).origin,certificateSha256:response.tlsCertificateSha256,requestId:response.body.request_id,deviceFingerprint:identity.fingerprint})};
 }
 export async function claimEnrollment(config){
   const cfg=configOf(config);

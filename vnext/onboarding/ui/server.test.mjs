@@ -209,9 +209,12 @@ test('browser cannot choose executable helpers or request arbitrary routes, and 
  }finally{await f.cleanup()}
 });
 
-test('state projection maps known journal states, owner approval and live Gateway without leaking evidence/config',()=>{
- const value=publicDeployment({mode:'join-existing',activeStep:'host.request',gatewayRuntime:{status:'running'},config:{token:'secret'},steps:[{id:'host.request',status:'succeeded',evidence:{fingerprint:'b'.repeat(64),ownerApproval:'REQUIRED',invitation:'secret',token:'secret'}},{id:'host.claim',status:'awaiting_approval',error:'SECRET_TOKEN_VALUE'},{id:'host.doctor',status:'uncertain'},{id:'evil',status:'succeeded'}]});
- assert.equal(value.steps.length,3);assert.equal(value.steps[0].ownerApproval,'REQUIRED');assert.equal(value.steps[0].fingerprint,'b'.repeat(64));assert.equal(value.steps[1].status,'awaiting_approval');assert.equal(value.steps[2].status,'uncertain');assert.doesNotMatch(JSON.stringify(value),/secret|SECRET|invitation|"config"/);
+test('joining snapshot exposes the request comparison code without private enrollment evidence',async()=>{
+ const deployment={mode:'join-existing',activeStep:'host.request',gatewayRuntime:{status:'running'},config:{token:'secret'},steps:[{id:'host.request',status:'succeeded',evidence:{fingerprint:'b'.repeat(64),comparison_code:'0123-4567-89AB-CDEF',ownerApproval:'REQUIRED',invitation:'secret',token:'secret'}},{id:'host.claim',status:'awaiting_approval',error:'SECRET_TOKEN_VALUE'},{id:'host.doctor',status:'uncertain'},{id:'evil',status:'succeeded'}]};
+ const value=publicDeployment(deployment);
+ assert.equal(value.steps.length,3);assert.equal(value.steps[0].ownerApproval,'REQUIRED');assert.equal(value.steps[0].fingerprint,'b'.repeat(64));assert.equal(value.steps[0].comparison_code,'0123-4567-89AB-CDEF');assert.equal(value.steps[1].status,'awaiting_approval');assert.equal(value.steps[2].status,'uncertain');assert.doesNotMatch(JSON.stringify(value),/secret|SECRET|invitation|"config"|"evidence"/);
+ const f=await fixture({core:{readDeployment:()=>deployment}});
+ try{const response=await f.get('/api/status');assert.equal(response.status,200);const state=await response.json();assert.equal(state.deployment.steps[0].comparison_code,'0123-4567-89AB-CDEF');assert.doesNotMatch(JSON.stringify(state.deployment),/secret|SECRET|"evidence"/)}finally{await f.cleanup()}
 });
 
 test('blocked doctor exposes only known reasons and explicit safe recheck without leaking raw evidence',()=>{
@@ -325,14 +328,15 @@ test('pairing-link inspection/acceptance isolates secrets from public responses 
  }finally{await f.cleanup();assert.equal(fs.existsSync(saved),false)}
 });
 
-test('human comparison code is resolved to current full fingerprint before approval; network exposure is never implicit',async()=>{
+test('current request comparison code confirms identity without repeating capability selection',async()=>{
  let approved;
- const id='c'.repeat(32),fingerprint='0123456789abcdef'+'b'.repeat(48);
- const f=await fixture({core:{listDeploymentPending:async()=>[{request_id:id,fingerprint}],approveDeploymentPending:async(_dir,request)=>{approved=request;return{status:'approved'}}}});
+ const id='c'.repeat(32),fingerprint='0123456789abcdef'+'b'.repeat(48),comparison_code='ABCD-0123-EF45-6789';
+ const f=await fixture({core:{listDeploymentPending:async()=>[{request_id:id,fingerprint,comparison_code,computer_requested:true,browser_requested:true}],approveDeploymentPending:async(_dir,request)=>{approved=request;return{status:'approved'}}}});
  try{
   await f.post('/api/create',config());
-  assert.equal((await f.post('/api/pending/approve',{authorize:true,requestId:id,fingerprintConfirmation:'ffff ffff ffff ffff',enableComputer:false})).status,409);assert.equal(approved,undefined);
-  assert.equal((await f.post('/api/pending/approve',{authorize:true,requestId:id,fingerprintConfirmation:'0123 4567 89ab cdef',enableComputer:false})).status,200);assert.equal(approved.fingerprint,fingerprint);
+  assert.equal((await f.post('/api/pending/approve',{authorize:true,requestId:id,comparisonCodeConfirmation:'FFFF-FFFF-FFFF-FFFF'})).status,409);assert.equal(approved,undefined);
+  assert.equal((await f.post('/api/pending/approve',{authorize:true,requestId:id,fingerprintConfirmation:fingerprint.slice(0,16)})).status,409);assert.equal(approved,undefined);
+  assert.equal((await f.post('/api/pending/approve',{authorize:true,requestId:id,comparisonCodeConfirmation:'abcd 0123 ef45 6789'})).status,200);assert.deepEqual(approved,{authorize:true,requestId:id,fingerprint});
   const lan=config();lan.gateway.url='https://192.0.2.10:8795';lan.gateway.listenHost='192.0.2.10';assert.equal((await f.post('/api/create',lan)).status,409);
   lan.gateway.allowRemoteHosts=true;assert.equal((await f.post('/api/create',lan)).status,409);
  }finally{await f.cleanup()}
@@ -401,13 +405,13 @@ test('local API accepts bounded Browser intent and exposes only its requested ro
  const projected=publicDeployment({mode:'create-local',roles:{gateway:'local',host:'local',exec:'enabled',computer:'disabled',browser:'requested'},browser:{profileRoot:'/private/profile'},steps:[]});
  assert.equal(projected.roles.browser,'requested');assert.equal(projected.roles.readiness,'not_inferred');assert.doesNotMatch(JSON.stringify(projected),/profileRoot|private\/profile/);
 });
-test('HTTP pending approval requires explicit Browser scope and unprepared Browser changes are refused',async()=>{
+test('HTTP owner confirms identity without reselecting capabilities; unprepared local changes stay refused',async()=>{
  const id='a'.repeat(32),fingerprint='b'.repeat(64);let approved;
  const f=await fixture({core:{listDeploymentPending:()=>[{request_id:id,fingerprint,browser_requested:true,computer_requested:false}],approveDeploymentPending:(_dir,options)=>{approved=options;return {status:'approved'}}}});
  try{
   const data={authorize:true,requestId:id,fingerprint,enableComputer:false};
-  assert.equal((await f.post('/api/pending/approve',data)).status,409);assert.equal(approved,undefined);
-  assert.equal((await f.post('/api/pending/approve',{...data,enableBrowser:true})).status,200);assert.equal(approved.enableBrowser,true);assert.equal(approved.enableComputer,false);
+  assert.equal((await f.post('/api/pending/approve',{...data,enableBrowser:false})).status,409);assert.equal(approved,undefined);
+  assert.equal((await f.post('/api/pending/approve',{authorize:true,requestId:id,fingerprint})).status,200);assert.equal(approved.enableBrowser,undefined);assert.equal(approved.enableComputer,undefined);
   const blocked=await f.post('/api/capabilities',{authorize:true,browser:true});assert.equal(blocked.status,409);assert.equal((await blocked.json()).error,'operation_failed_check_status');
  }finally{await f.cleanup()}
 });

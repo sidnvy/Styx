@@ -6,16 +6,23 @@ import {fileURLToPath} from 'node:url';
 import {createHash} from 'node:crypto';
 import {execFileSync} from 'node:child_process';
 import {ensurePrivateDirectory,writePrivateFile,requirePrivateDirectory} from '../private-storage.mjs';
-export const OPERATIONS=Object.freeze(['status','create','inspectJoin','join','prepare','connect','disconnect','setCapabilities','tunnelSave','tunnelStart','tunnelStop','acceptanceBegin','acceptanceConfirm','devices','setDefault','revokeDevice']);
+export const OPERATIONS=Object.freeze(['status','create','inspectJoin','join','prepare','connect','disconnect','setCapabilities','tunnelSave','tunnelStart','tunnelStop','acceptanceBegin','acceptanceConfirm','devices','setDefault','revokeDevice','inviteComputer','pendingComputers','approveComputer']);
 export function bootstrap(url){const u=new URL(url);if(u.protocol!=='http:'||u.hostname!=='127.0.0.1'||!u.port||u.pathname!=='/'||u.search||u.username||u.password||!/^#session=[A-Za-z0-9_-]{43}$/.test(u.hash))throw Error('invalid_bootstrap');const token=u.hash.slice(9);u.hash='';return {origin:u.origin,token};}
 export async function createClient(instance,{fetchImpl=fetch}={}){
  const {origin,token}=bootstrap(instance.url);let csrf;
- const call=async(route,body)=>{const response=await fetchImpl(origin+'/api/'+route,{method:body?'POST':'GET',redirect:'error',headers:{Authorization:'Bearer '+token,Origin:origin,...(body?{'Content-Type':'application/json','X-Styx-CSRF':csrf}:{})},...(body?{body:JSON.stringify(body)}:{}),signal:AbortSignal.timeout(body?120000:20000)});if(!response.ok||!response.headers.get('content-type')?.startsWith('application/json'))throw Error('core_rejected');const text=await response.text();if(Buffer.byteLength(text)>2*1024*1024)throw Error('core_response_too_large');return JSON.parse(text);};
+ const call=async(route,body)=>{const response=await fetchImpl(origin+'/api/'+route,{method:body?'POST':'GET',redirect:'error',headers:{Authorization:'Bearer '+token,Origin:origin,...(body?{'Content-Type':'application/json','X-Styx-CSRF':csrf}:{})},...(body?{body:JSON.stringify(body)}:{}),...(['advance','local-setup','browser/prepare'].includes(route)?{}:{signal:AbortSignal.timeout(body?120000:20000)})});if(!response.ok||!response.headers.get('content-type')?.startsWith('application/json'))throw Error('core_rejected');const text=await response.text();if(Buffer.byteLength(text)>2*1024*1024)throw Error('core_response_too_large');return JSON.parse(text);};
  const session=await call('session');csrf=session.csrf;if(!/^[A-Za-z0-9_-]{43}$/.test(csrf??''))throw Error('invalid_csrf');let inspected,accepted;
  return {async dispatch(request){
   if(!request||request.schema!==1||!Number.isSafeInteger(request.id)||!OPERATIONS.includes(request.operation)||!request.input||typeof request.input!=='object'||Array.isArray(request.input))throw Error('invalid_native_request');
   const i=request.input,op=request.operation;
   if(op==='devices')return call('devices',{});
+  if(op==='pendingComputers')return call('pending/list',{authorize:true});
+  if(op==='approveComputer')return call('pending/approve',{authorize:true,requestId:i.requestId,comparisonCodeConfirmation:i.comparisonCode});
+  if(op==='inviteComputer'){
+   const {ingress}=await call('device-ingress/plan',{});
+   if(!ingress||ingress.gateway!=='local'||ingress.blockers?.length)return {status:'network_setup_required'};
+   return {status:'waiting_for_computer',invitation:await call('pairing-link/create',{authorize:true})};
+  }
   if(op==='setDefault'||op==='revokeDevice')return call(op==='setDefault'?'default-device':'device/revoke',{authorize:true,deviceId:i.deviceId});
   if(op==='status')return {session:{localGatewayAvailable:session.localGatewayAvailable,tunnelSupported:session.tunnelSupported,artifactsAvailable:!!session.defaults?.bundle},...await call('snapshot')};
   if(op==='inspectJoin'){inspected=await call('pairing-link/inspect',{link:i.link});return inspected;}
@@ -33,7 +40,7 @@ export async function createClient(instance,{fetchImpl=fetch}={}){
    if(status.deployment?.mode==='join-existing'){
     for(let n=0;n<4;n++){
      const step=status.deployment.steps.find(s=>!['succeeded','skipped'].includes(s.status));
-     if(!step||!['host.prepare','host.request','host.claim','host.doctor'].includes(step.id)||!(['pending','awaiting_approval'].includes(step.status)||step.status==='blocked'&&['host.claim','host.doctor'].includes(step.id)))break;
+     if(!step||!['host.prepare','host.request','host.claim','host.doctor'].includes(step.id)||!(['pending','awaiting_approval'].includes(step.status)||step.status==='blocked'&&(step.id==='host.claim'||step.id==='host.doctor'&&step.retryable===true)))break;
      await call('advance',{authorize:[step.id]});status=await call('status');if(status.deployment.steps.find(s=>s.id===step.id)?.status!=='succeeded')break;
     }
    }else{if(!status.ownerPairingScope)throw Error('owner_scope_required');await call('local-setup',{ownerApproval:{...status.ownerPairingScope,approve:true}});}
