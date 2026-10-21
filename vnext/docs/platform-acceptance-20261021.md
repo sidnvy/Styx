@@ -47,6 +47,8 @@ passes. Separate real Exec adapter acceptance passed 19 cases. After integrating
 the Linux runner and Windows desktop harness, 14 targeted runner/build protection
 tests passed with no skips. Four independently locked dependency trees passed
 audits and emitted CycloneDX SBOMs. Both prototype SDK locks use 1.32.1.
+The final Host-inclusive checked build at 05b6312 also passed: 730 passed,
+0 failed, 29 skipped, including the two new Linux runner protection tests.
 
 Evidence directories under this task's `outputs/`:
 
@@ -54,6 +56,7 @@ Evidence directories under this task's `outputs/`:
 - `linux-second-20261021-checked/checked-build/quality/receipt.json`
 - `linux-second-20261021-checked/runtime-comparison-and-acceptance.json`
 - `linux-host-second-20261021/native-run2/receipt.json`
+- `linux-host-second-20261021/run3/checked-build/quality/receipt.json`
 - `windows-native-second-20261021/receipt.json`
 - `windows-native-second-20261021/desktop/desktop-receipt.json`
 - `windows-native-second-20261021/desktop/cleanup-receipt.json`
