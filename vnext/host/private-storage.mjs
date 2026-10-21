@@ -252,6 +252,7 @@ export function ensurePrivateDirectory(folder,{exclusive=false,bigint=false}={})
   if(bigint&&(!parentInfo.isDirectory()||parentInfo.isSymbolicLink()))throw Error('private_directory_parent_not_regular');
   fs.mkdirSync(folder,{mode:0o700});
   const created=bigint?fs.lstatSync(folder,{bigint:true}):undefined;
+  if(bigint&&(!created.isDirectory()||created.isSymbolicLink()))throw Error('private_directory_created_not_regular');
   try{
     if(process.platform==='win32'){
       let script=[
@@ -295,7 +296,10 @@ try {
     return verifiedIdentity(created);
   }catch(e){
     // rmdir cannot delete files an external process may have placed here.
-    try{if(!bigint||sameFile(created,fs.lstatSync(folder,{bigint:true}))&&sameFile(parentInfo,fs.lstatSync(parent,{bigint:true})))fs.rmdirSync(folder)}catch{}
+    try{
+      if(!bigint)fs.rmdirSync(folder);
+      else {const current=fs.lstatSync(folder,{bigint:true}),currentParent=fs.lstatSync(parent,{bigint:true});if(created.isDirectory()&&!created.isSymbolicLink()&&current.isDirectory()&&!current.isSymbolicLink()&&currentParent.isDirectory()&&!currentParent.isSymbolicLink()&&sameFile(created,current)&&sameFile(parentInfo,currentParent))fs.rmdirSync(folder);}
+    }catch{}
     throw Error(e.code==='ETIMEDOUT'
       ?'private_directory_creation_timed_out':'private_directory_creation_failed');
   }
