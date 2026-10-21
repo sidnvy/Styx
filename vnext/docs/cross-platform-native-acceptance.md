@@ -80,7 +80,7 @@ After terminating only owned Codex PID **20444**, supervision created PID
 **12892**. Exec then succeeded in **264 ms**, Edge observations succeeded, and
 identity/configuration/credential hashes remained unchanged.
 
-A request deliberately overlapping the executor crash failed. Its original
+A request overlapping the deliberate executor crash failed. Its original
 `BLOCKED` attempt remains in the Gateway receipt; an explicit probe after crash
 completion succeeded. This is recovery of the connection and executor, not
 transparent replay of failed requests or durable task resumption.

@@ -4,6 +4,25 @@ This is development-preview evidence, not formal product acceptance. macOS UI
 development belongs to the separate Mac-local thread. No piermini mutation or
 production deployment was performed in this work.
 
+## Latest engineering result — 2026-10-22
+
+Shared candidate 0bd097f: fourteen quality checks passed, 751 tests passed,
+zero failed, 41 skipped. Physical Linux Gateway + NAB Windows Host passed all
+thirteen required cross-device gates; a during-crash tool failure is retained,
+followed by successful explicit recovery probes. Windows final3 passed thirteen
+native package/install checks and independent 9912-file ZIP/signature verification.
+Temporary actors, listeners, credentials and test installations were removed.
+No production deployment occurred. Linux distributions were not rebuilt in this
+round; their source scope is recorded in cross-device evidence.
+
+These engineering results do not close the App pairing product gaps. The Core
+invitation API still reports remote reachability unverified until a separate
+probe; automatic App entry preparation and readable two-end confirmation remain
+unaccepted. Main-device approval still accepts separate capability flags, which
+must be reconciled with the agreed rule that capabilities are chosen locally on
+the joining computer and the main device confirms identity only. Product-flow
+alignment is the next priority, ahead of expanding the test matrix.
+
 ## Implemented and integrated
 
 - Portable Linux x64 CLI distribution uses the same Core, signed independent
