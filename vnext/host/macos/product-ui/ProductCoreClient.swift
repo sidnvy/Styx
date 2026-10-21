@@ -149,7 +149,6 @@ struct ProductStep: Identifiable {
     let retryable: Bool
     init?(_ value: ProductJSON) {
         guard let id = value["id"].string, let status = value["status"].string else { return nil }
-        isLocal = value["is_local"] == .bool(true)
         self.id = id; self.status = status
         let allowed: Set<String> = ["signed_install_unavailable", "invalid_host_configuration", "host_credential_unavailable", "codex_executor_unavailable", "signed_computer_runtime_unavailable", "macos_requires_embedded_cua_socket", "host_doctor_failed"]
         blockers = id == "host.doctor" ? value["blockers"].array.compactMap(\.string).filter { allowed.contains($0) } : []
