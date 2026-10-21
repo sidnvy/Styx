@@ -7,27 +7,34 @@ struct ProductSettingsView: View {
     @State private var editTunnel = false
     @State private var editPackage = false
     @State private var setupChat = false
+    @State private var addComputer = false
     var body: some View {
-        NavigationSplitView {
-            List(ProductSettingsSection.allCases, selection: Binding<ProductSettingsSection?>(get: { model.settingsSection }, set: { if let section = $0 { model.settingsSection = section } })) { item in
-                Label(item.title, systemImage: item.symbol).tag(item)
-            }.navigationSplitViewColumnWidth(min: 140, ideal: 156, max: 180)
-        } detail: {
+        GeometryReader { viewport in
+        ScrollViewReader { proxy in
             ScrollView {
-                VStack(alignment: .leading, spacing: 20) {
-                    Text(model.settingsSection.title).font(.title2.weight(.semibold))
-                    switch model.settingsSection {
-                    case .general: general
-                    case .computers: computers
-                    case .chat: chat
-                    }
-                    if let error = model.error {
+                VStack(alignment: .leading, spacing: 24) {
+                    settingsGroup(.computers) { computers }
+                    settingsGroup(.chat) { chat }
+                    settingsGroup(.general) { general }
+                        .frame(minHeight: max(0, viewport.size.height - 48), alignment: .top)
+                    if let error = model.error ?? model.observationError {
                         Text(error).font(.callout).foregroundStyle(.red).textSelection(.enabled)
                         Button(productText("重新检查", "Check again")) { Task { await model.refresh() } }
                     }
                 }.padding(24).frame(maxWidth: .infinity, alignment: .leading)
             }.background(Color(nsColor: .windowBackgroundColor))
+                .onAppear { proxy.scrollTo(model.settingsSection, anchor: .top) }
+                .onChange(of: model.settingsNavigationID) { _ in proxy.scrollTo(model.settingsSection, anchor: .top) }
+        }
         }.frame(minWidth: 640, minHeight: 500)
+            .sheet(isPresented: $addComputer) {
+                VStack(alignment: .leading, spacing: 16) {
+                    Text(productText("添加电脑", "Add computer")).font(.title2.weight(.semibold))
+                    ProductInvitationView(model: model)
+                    ProductPendingIdentities(model: model)
+                    HStack { Spacer(); Button(productText("完成", "Done")) { addComputer = false }.accessibilityIdentifier("styx-invitation-done").keyboardShortcut(.cancelAction) }
+                }.padding(24).frame(width: 460)
+            }
             .sheet(isPresented: $editTunnel) { ProductTunnelEditor(model: model) }
             .sheet(isPresented: $editPackage) { ProductPackageEditor(model: model) }
             .sheet(isPresented: $setupChat) {
@@ -38,18 +45,20 @@ struct ProductSettingsView: View {
             .onReceive(NotificationCenter.default.publisher(for: NSWindow.willCloseNotification)) { notification in
                 guard let window = notification.object as? NSWindow,
                       window.identifier?.rawValue == "Styx.SettingsWindow" else { return }
-                editTunnel = false; editPackage = false; setupChat = false
+                editTunnel = false; editPackage = false; setupChat = false; addComputer = false
             }
-            .task {
-                await model.bootstrap(); await model.refreshMenu()
-                while !Task.isCancelled {
-                    try? await Task.sleep(nanoseconds: 3_000_000_000)
-                    if !Task.isCancelled { await model.refreshMenu() }
-                }
+            .task(id: model.settingsVisible) {
+                if model.settingsVisible { await model.observePresentation() }
             }
     }
+    private func settingsGroup<Content: View>(_ section: ProductSettingsSection, @ViewBuilder content: () -> Content) -> some View {
+        VStack(alignment: .leading, spacing: 14) {
+            Label(section.title, systemImage: section.symbol).font(.title2.weight(.semibold))
+            content()
+        }.padding(.top, 12).frame(maxWidth: .infinity, alignment: .leading).id(section)
+    }
     private var general: some View {
-        Form {
+        VStack(alignment: .leading, spacing: 16) {
             Section {
                 LabeledContent(productText("语言", "Language"), value: productText("跟随系统", "System default"))
                 Button(productText("语言与地区", "Language & Region")) { model.openOfficial("x-apple.systempreferences:com.apple.Localization-Settings.extension") }
@@ -60,14 +69,14 @@ struct ProductSettingsView: View {
                 Text(productText("关闭窗口后继续运行；选择“退出 Styx”才结束本次运行。", "Closing a window keeps Styx running. Choose Quit Styx to end this run.")).font(.caption).foregroundStyle(.secondary)
             }
             Section { LabeledContent(productText("版本", "Version"), value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—") }
-        }.formStyle(.grouped)
+        }.frame(maxWidth: .infinity, alignment: .leading)
     }
     private var local: some View {
-        Form {
+        VStack(alignment: .leading, spacing: 16) {
             Section(productText("能力", "Capabilities")) {
                 Label("CLI", systemImage: "terminal")
-                Toggle("Computer Use", isOn: $model.computer).disabled(model.joined)
-                Toggle("Browser Automation", isOn: $model.browser).disabled(model.joined)
+                Toggle(isOn: $model.computer) { Label("Computer Use", systemImage: "hand.point.up.left") }.disabled(model.joined)
+                Toggle(isOn: $model.browser) { Label("Browser Automation", systemImage: "globe") }.disabled(model.joined)
                 if !model.joined {
                     Button(productText("应用更改", "Apply changes")) { model.updateCapabilities() }.disabled(model.busy)
                 } else {
@@ -83,11 +92,11 @@ struct ProductSettingsView: View {
             if !model.localPrepared || model.foregroundRecoveryNeeded {
                 Button(productText("继续设置", "Continue setup")) { controller?.showOnboarding() }
             }
-        }.formStyle(.grouped)
+        }.frame(maxWidth: .infinity, alignment: .leading)
     }
     private func permission(_ label: String, _ granted: Bool, _ screen: Bool) -> some View {
         HStack {
-            Text(label); Spacer()
+            Label(label, systemImage: screen ? "record.circle" : "accessibility"); Spacer()
             Text(granted ? productText("已允许", "Allowed") : productText("未允许", "Not allowed")).foregroundStyle(.secondary)
             Button(productText("管理", "Manage")) { granted || model.permissionWasRequested(screen) ? model.openPermission(screen) : model.requestPermission(screen) }
         }
@@ -97,20 +106,21 @@ struct ProductSettingsView: View {
         if model.joined {
             Label(productText("由主台管理电脑连接", "Computer connections are managed on the main computer"), systemImage: "link")
         } else {
+            Button(productText("添加电脑", "Add computer")) { addComputer = true; model.beginDeviceInvitation() }
+                .accessibilityIdentifier("styx-settings-add-computer").disabled(model.busy)
             ForEach(model.devices.filter { !$0.isLocal }) { device in
                 GroupBox {
                     VStack(alignment: .leading, spacing: 12) {
                         HStack { Label(device.label, systemImage: device.platform == "win32" ? "desktopcomputer" : "laptopcomputer"); Spacer(); ProductConnectionDot(state: device.indicator) }
                         Text(device.indicator.label).font(.caption).foregroundStyle(.secondary)
                         HStack {
-                            if !device.isDefault { Button(productText("设为默认", "Set as default")) { model.setDefault(device.id) } }
+                            if !device.isDefault { Button(productText("设为默认", "Set as default")) { model.setDefault(device.id) }.disabled(model.busy) }
                             Spacer()
-                            Button(productText("移除这台电脑", "Remove computer"), role: .destructive) { model.revokeDevice(device) }
+                            Button(productText("移除这台电脑", "Remove computer"), role: .destructive) { model.revokeDevice(device) }.disabled(model.busy)
                         }
                     }.padding(8)
                 }
             }
-            Button(productText("添加电脑", "Add computer")) { controller?.showMenuInvitation?() }
             if !model.ingress["blockers"].array.isEmpty {
                 Text(productText("当前入口仅能由本机访问。局域网入口的自动配置尚未接入此预览版；已有可达入口可继续邀请。", "The current entry is local-only. Automatic LAN entry preparation is not integrated in this preview. Invitations work with an existing reachable entry.")).font(.callout).foregroundStyle(.secondary)
             }
@@ -122,7 +132,7 @@ struct ProductSettingsView: View {
                 Label(productText("聊天连接由主台管理", "Chat is managed on the main computer"), systemImage: "globe")
             } else {
                 GroupBox {
-                    VStack(spacing: 12) {
+                    VStack(alignment: .leading, spacing: 12) {
                         HStack { Text(productText("聊天验证", "Chat verification")); Spacer(); ProductConnectionDot(state: model.chatIndicator); Text(model.chatIndicator == .connected ? productText("已验证", "Verified") : productText("待验证", "Verification needed")).foregroundStyle(.secondary) }
                         ProductTunnelStatus(model: model)
                     }.padding(8)
@@ -140,7 +150,7 @@ struct ProductSettingsView: View {
                         Button { model.copy(model.connectionTunnelID) } label: { Image(systemName: "doc.on.doc") }.help(productText("复制 Tunnel ID", "Copy Tunnel ID"))
                     }
                 }
-                Button(productText("编辑连接信息", "Edit connection details")) { editTunnel = true }
+                Button(productText("编辑连接信息", "Edit connection details")) { editTunnel = true }.accessibilityIdentifier("styx-settings-edit-tunnel")
                 Divider()
                 DisclosureGroup(productText("高级", "Advanced")) {
                     Text(productText("ZIP 导入尚未完成账号兼容性验收。日常连接请使用“添加自建 MCP 服务器”。", "ZIP import compatibility is unverified. Use Add custom MCP server for normal setup.")).font(.caption).foregroundStyle(.secondary)
@@ -210,7 +220,7 @@ struct ProductTunnelEditor: View {
             Text(productText("更换 Tunnel ID 后，需要在 ChatGPT 中选择同一通道。", "After changing the Tunnel ID, select the same tunnel in ChatGPT.")).font(.caption).foregroundStyle(.secondary)
             if let failure = failure { Text(failure).font(.callout).foregroundStyle(.red) }
             HStack {
-                Button(productText("取消", "Cancel")) { key = ""; dismiss() }.keyboardShortcut(.cancelAction).disabled(saving)
+                Button(productText("取消", "Cancel")) { key = ""; dismiss() }.accessibilityIdentifier("styx-tunnel-cancel").keyboardShortcut(.cancelAction).disabled(saving)
                 Spacer()
                 if saving { ProgressView().controlSize(.small) }
                 Button(productText("保存并连接", "Save and connect")) { save() }.buttonStyle(.borderedProminent).keyboardShortcut(.defaultAction)

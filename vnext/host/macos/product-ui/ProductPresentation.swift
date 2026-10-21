@@ -64,7 +64,7 @@ enum ProductTunnelInputPolicy {
 }
 extension ProductModel {
     var localIndicator: ProductConnectionIndicator {
-        guard loaded, error == nil else { return .unknown }
+        guard loaded, observationError == nil else { return .unknown }
         guard localPrepared else { return .attention }
         switch status["foreground"]["status"].string {
         case "connected", "using_service": return .connected
@@ -74,7 +74,7 @@ extension ProductModel {
         }
     }
     var chatIndicator: ProductConnectionIndicator {
-        if error != nil { return .unknown }
+        if observationError != nil { return .unknown }
         if tunnelAttempt == .connecting { return .attention }
         if tunnelConnection == .connected && accepted && !plugin["contextChanged"].bool { return .connected }
         if tunnelConnection == .notConfigured { return .offline }
@@ -93,6 +93,8 @@ extension ProductModel {
         invitationExpanded = true
         guard createdInvitation == .null else { return }
         perform { [self] in
+            invitationInFlight = true
+            defer { invitationInFlight = false }
             ingress = try await client.write("device-ingress/plan", [:])["ingress"]
             guard ingress["blockers"].array.isEmpty else { return }
             createdInvitation = try await client.write("pairing-link/create", ["authorize": .bool(true)])
@@ -134,6 +136,10 @@ struct ProductDailyPanel: View {
     @ObservedObject var model: ProductModel
     weak var controller: ProductWindowController?
     let quit: () -> Void
+    private func showSettings(_ section: ProductSettingsSection) {
+        if let controller = controller { controller.showSettings(section) }
+        else { model.requestSettings(section) }
+    }
     var body: some View {
         VStack(spacing: 0) {
             if !model.loaded {
@@ -145,62 +151,78 @@ struct ProductDailyPanel: View {
                     model.joining = true; model.page = .invitation; controller?.showOnboarding()
                 }
             } else {
-                ProductMenuRow(title: productText("这台 Mac", "This Mac"), symbol: "laptopcomputer", state: model.localIndicator, disclosure: true) { controller?.showSettings(.computers) }
+                ProductMenuRow(title: productText("这台 Mac", "This Mac"), symbol: "laptopcomputer", state: model.localIndicator, disclosure: true) { showSettings(.computers) }
                 Divider().padding(.vertical, 5)
                 if model.joined {
-                    ProductMenuRow(title: productText("主台连接", "Main computer"), symbol: "link", state: model.localIndicator, disclosure: true) { controller?.showSettings(.computers) }
+                    ProductMenuRow(title: productText("主台连接", "Main computer"), symbol: "link", state: model.localIndicator, disclosure: true) { showSettings(.computers) }
                 } else {
                     Text(productText("电脑", "Computers")).font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 10).padding(.vertical, 5)
                     ForEach(model.devices.filter { !$0.isLocal }) { device in
                         ProductMenuRow(title: device.label, symbol: device.platform == "win32" ? "desktopcomputer" : "laptopcomputer", state: model.menuObservationFailed ? .unknown : device.indicator, disclosure: true) {
-                            model.selectedDeviceID = device.id; controller?.showSettings(.computers)
+                            model.selectedDeviceID = device.id; showSettings(.computers)
                         }
                     }
                     ProductMenuRow(title: productText("添加电脑", "Add computer"), symbol: "plus") {
                         if model.invitationExpanded { model.invitationExpanded = false }
                         else { model.beginDeviceInvitation() }
                     }.foregroundStyle(Color.accentColor)
-                    if model.invitationExpanded { invitation }
-                    ForEach(Array(model.pending.enumerated()), id: \.offset) { _, request in
-                        VStack(alignment: .leading, spacing: 8) {
-                            Text(productText("连接", "Connect") + " " + (request["label"].string ?? productText("新电脑", "New computer")) + "?").font(.headline)
-                            Text(productText("请确认这是你刚刚邀请的电脑。", "Confirm this is the computer you just invited.")).font(.caption).foregroundStyle(.secondary)
-                            DisclosureGroup(productText("设备身份", "Device identity")) { Text(request["fingerprint"].string ?? "").font(.system(.caption2, design: .monospaced)).textSelection(.enabled) }
-                            Button(productText("连接", "Connect")) { model.selectedPending = request; model.approveSelectedIdentity() }.buttonStyle(.borderedProminent)
-                        }.padding(10)
-                    }
+                    if model.invitationExpanded { ProductInvitationView(model: model); ProductPendingIdentities(model: model) }
                     Divider().padding(.vertical, 5)
-                    ProductMenuRow(title: model.chatMenuTitle, symbol: "globe", state: model.chatIndicator, disclosure: true) { controller?.showSettings(.chat) }
+                    ProductMenuRow(title: model.chatMenuTitle, symbol: "globe", state: model.chatIndicator, disclosure: true) { showSettings(.chat) }
                 }
                 if model.localIndicator != .connected && !model.localPrepared {
                     ProductMenuRow(title: productText("继续设置", "Continue setup"), symbol: "arrow.right") { controller?.showOnboarding() }
                 }
             }
             Divider().padding(.vertical, 5)
-            ProductMenuRow(title: productText("设置", "Settings"), shortcut: "⌘,") { controller?.showSettings(.general) }.keyboardShortcut(",", modifiers: .command)
+            ProductMenuRow(title: productText("设置", "Settings"), shortcut: "⌘,") { showSettings(.general) }.keyboardShortcut(",", modifiers: .command)
             Divider().padding(.vertical, 3)
             ProductMenuRow(title: productText("退出 Styx", "Quit Styx"), shortcut: "⌘Q", action: quit).keyboardShortcut("q", modifiers: .command)
         }.padding(8).frame(width: 332)
-            .task { await model.bootstrap(); await model.refreshMenu() }
-            .task(id: model.menuVisible) { guard model.menuVisible else { return }; while !Task.isCancelled { try? await Task.sleep(nanoseconds: 5_000_000_000); if !Task.isCancelled { await model.refreshMenu() } } }
+            .task(id: model.menuVisible) { if model.menuVisible { await model.observePresentation() } }
     }
-    @ViewBuilder private var invitation: some View {
+}
+struct ProductInvitationView: View {
+    @ObservedObject var model: ProductModel
+    var body: some View {
         VStack(alignment: .leading, spacing: 10) {
             if let value = model.createdInvitation["link"].string {
                 Text(productText("在另一台电脑打开邀请链接", "Open the invitation on the other computer")).font(.caption)
-                Button { model.copy(value, secret: true); copied = true } label: { Label(copied ? productText("邀请已复制", "Invitation copied") : productText("复制邀请链接", "Copy invitation link"), systemImage: "doc.on.doc").frame(maxWidth: .infinity) }
+                Button { model.copy(value, secret: true); model.invitationCopied = true } label: { Label(model.invitationCopied ? productText("邀请已复制", "Invitation copied") : productText("复制邀请链接", "Copy invitation link"), systemImage: "doc.on.doc").frame(maxWidth: .infinity) }
                 Text(productText("邀请将在 10 分钟后过期", "Invitation expires in 10 minutes")).font(.caption2).foregroundStyle(.secondary)
-            } else if model.busy { ProgressView().controlSize(.small) }
-            else if !model.ingress["blockers"].array.isEmpty {
+            } else if !model.ingress["blockers"].array.isEmpty {
                 Text(productText("当前连接入口还不能供另一台电脑访问。", "The current connection entry is not reachable from another computer.")).font(.caption)
-                Button(productText("查看连接设置", "Review connection settings")) { controller?.showSettings(.computers) }
+                Text(productText("请先在连接设置中准备可达入口。", "Prepare a reachable entry in connection settings first.")).font(.caption).foregroundStyle(.secondary)
+            } else if model.invitationInFlight {
+                ProgressView().controlSize(.small)
             } else if model.error != nil {
                 Text(productText("邀请未能生成。请重试。", "The invitation could not be created. Try again.")).font(.caption)
                 Button(productText("重试", "Retry")) { model.beginDeviceInvitation() }
             }
-        }.padding(10)
+        }.padding(10).accessibilityIdentifier("styx-invitation-content")
     }
-    @State private var copied = false
+}
+struct ProductPendingIdentities: View {
+    @ObservedObject var model: ProductModel
+    var body: some View {
+        ForEach(model.pending.compactMap(ProductPendingIdentity.init)) { identity in
+            let request = identity.value
+            VStack(alignment: .leading, spacing: 8) {
+                Text(productText("连接", "Connect") + " " + (request["label"].string ?? productText("新电脑", "New computer")) + "?").font(.headline)
+                Text(productText("请确认这是你刚刚邀请的电脑。", "Confirm this is the computer you just invited.")).font(.caption).foregroundStyle(.secondary)
+                DisclosureGroup(productText("设备身份", "Device identity")) { Text(request["fingerprint"].string ?? "").font(.system(.caption2, design: .monospaced)).textSelection(.enabled) }
+                Button(productText("连接", "Connect")) { model.selectedPending = request; model.approveSelectedIdentity() }.buttonStyle(.borderedProminent).disabled(model.busy)
+            }.padding(10)
+        }
+    }
+}
+struct ProductPendingIdentity: Identifiable {
+    let id: String
+    let value: ProductJSON
+    init?(_ value: ProductJSON) {
+        guard let request = value["request_id"].string, let fingerprint = value["fingerprint"].string else { return nil }
+        id = request + ":" + fingerprint; self.value = value
+    }
 }
 extension ProductModel {
     func refreshMenu() async {
@@ -208,16 +230,22 @@ extension ProductModel {
         if testSuppressObservations { return }
         #endif
         guard !busy, loaded, deployment != nil else { return }
+        guard !observationInFlight else { return }
         await refresh()
-        guard error == nil else { menuObservationFailed = true; return }
+        guard !busy, !observationInFlight else { return }
+        let revision = mutationRevision
+        observationInFlight = true; defer { observationInFlight = false }
+        guard observationError == nil else { publish(\.menuObservationFailed, true); return }
         guard !busy, !joined else { return }
         // A read operation against the current owner; never creates pairing or
         // infers online from desired configuration.
         do {
-            devices = try await client.write("devices", [:])["devices"].array.compactMap(ProductDevice.init)
-            if invitationExpanded { pending = try await client.write("pending/list", ["authorize": .bool(true)])["pending"].array }
-        } catch { menuObservationFailed = true; return }
-        menuObservationFailed = false
+            let observedDevices = try await client.write("devices", [:])["devices"].array.compactMap(ProductDevice.init)
+            let observedPending = invitationExpanded ? try await client.write("pending/list", ["authorize": .bool(true)])["pending"].array : pending
+            guard revision == mutationRevision, !Task.isCancelled else { return }
+            publish(\.devices, observedDevices); publish(\.pending, observedPending)
+        } catch { publish(\.menuObservationFailed, true); return }
+        publish(\.menuObservationFailed, false)
     }
 }
 

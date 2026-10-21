@@ -88,7 +88,7 @@ import SwiftUI
     catch ProductCoreError.unavailable { }
     observation = (false, false)
     await model.refresh() // Intentionally unavailable loopback Core, no deployment.
-    try require(!model.axGranted && !model.screenGranted && model.error != nil, "Core failure hid fresh native permission observations")
+    try require(!model.axGranted && !model.screenGranted && model.observationError != nil, "Core failure hid fresh native permission observations")
     model.recoverComputerUse = { recoveries += 1 }
     do { try await model.verifyPermissionsAndRecover(); throw ProductCoreError.invalidResponse }
     catch ProductWorkflowError.computerPermissionRecoveryRequired { }

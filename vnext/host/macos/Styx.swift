@@ -884,6 +884,26 @@ func productSystemQuitReason(_ reason: OSType?) -> Bool {
 
 #if STYX_TESTING
 #if STYX_PRODUCT_UI
+if CommandLine.arguments.count == 3 && CommandLine.arguments[1] == "--observation-self-test" {
+    MainActor.assumeIsolated {
+        let application = NSApplication.shared
+        application.setActivationPolicy(.accessory)
+        Task { @MainActor in
+            do {
+                let value = try String(contentsOfFile: CommandLine.arguments[2], encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+                guard let url = URL(string: value) else { throw ProductCoreError.invalidBootstrap }
+                try await productObservationSelfTest(sessionURL: url); exit(0)
+            } catch { fputs("Styx observation self-test failed: \(error)\n", stderr); exit(1) }
+        }
+        application.run()
+    }
+}
+if CommandLine.arguments.count == 2 && CommandLine.arguments[1] == "--ui-preview" {
+    MainActor.assumeIsolated {
+        do { try productPresentationSnapshots(directory: nil); exit(0) }
+        catch { fputs("Styx UI preview failed\n", stderr); exit(1) }
+    }
+}
 if CommandLine.arguments.count == 3 && CommandLine.arguments[1] == "--presentation-snapshots" {
     MainActor.assumeIsolated {
         do { try productPresentationSnapshots(directory: URL(fileURLWithPath: CommandLine.arguments[2])); exit(0) }
