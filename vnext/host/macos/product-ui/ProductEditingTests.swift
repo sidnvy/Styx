@@ -32,7 +32,7 @@ import SwiftUI
     model.session = .object(["tunnelSupported": .bool(true)])
     let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 820, height: 720), styleMask: [.titled, .closable], backing: .buffered, defer: false)
     window.isReleasedWhenClosed = false
-    let host = NSHostingView(rootView: ProductView(model: model, controller: nil))
+    let host = NSHostingView(rootView: ProductTunnelEditor(model: model))
     window.contentView = host; window.makeKeyAndOrderFront(nil); app.activate(ignoringOtherApps: true)
     let board = NSPasteboard.withUniqueName()
     defer { model.runtimeKey = ""; model.tunnelID = ""; window.close(); app.mainMenu = prior; board.releaseGlobally() }
@@ -72,7 +72,8 @@ import SwiftUI
             print("EDIT_TEST: private pasteboard read")
             _ = window.makeFirstResponder(nil)
             RunLoop.current.run(until: Date().addingTimeInterval(0.05))
-            try require(field === normal ? model.tunnelID == sample : model.runtimeKey == sample)
+            try require(field.stringValue == sample)
+            try require(model.runtimeKey.isEmpty)
         }
         try require(secure is NSSecureTextField)
         print("PASS: hosted Tunnel and secure Runtime Key fields accept private-pasteboard input; Command-V routes through the standard edit menu. General clipboard, credentials, permissions and network untouched.")

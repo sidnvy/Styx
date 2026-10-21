@@ -138,3 +138,15 @@ test('temporary startup failure retries, then stop suppresses the next attempt',
  await assert.rejects(runtime.resume(),/start_failed/);t.mock.timers.tick(15000);await new Promise(resolve=>setImmediate(resolve));assert.equal(runtime.status().status,'running');
  await runtime.stop();t.mock.timers.tick(30000);assert.equal(attempts,2);
 });
+
+test('editing connection can retain the server-owned key without disclosing it',t=>{
+ const f=fixture(t);
+ assert.throws(()=>configureTunnel(f.stateDir,{tunnelId,authorize:true}),/runtime_key/);
+ configureTunnel(f.stateDir,{tunnelId,apiKey:key,authorize:true});
+ const result=configureTunnel(f.stateDir,{tunnelId:'tunnel_changed123',authorize:true,autoStart:true});
+ assert.equal(result.tunnelId,'tunnel_changed123');
+ assert.equal(JSON.stringify(result).includes(key),false);
+ const dir=path.join(f.stateDir,'tunnel'),current=JSON.parse(fs.readFileSync(path.join(dir,'connection.json')));
+ assert.equal(fs.readFileSync(path.join(dir,current.keyFile),'utf8'),key);
+ assert.equal(fs.readdirSync(dir).filter(n=>n.startsWith('key-')).length,1);
+});

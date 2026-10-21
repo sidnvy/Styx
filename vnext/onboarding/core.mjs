@@ -221,7 +221,7 @@ export async function approveDeploymentPending(d,options={}){
 export async function readDeploymentDevices(d){
  const g=ownedGateway(d);
  const rows=g.controller?g.controller.devices():await ownerCommand(g.owner,'devices');
- return rows.filter(r=>r.status==='approved').map(r=>({device_id:r.device_id,label:r.label,platform:r.platform,is_default:r.is_default===true,computer:r.capabilities?.computer===true,browser:r.capabilities?.browser===true}));
+ return rows.filter(r=>r.status==='approved').map(r=>({device_id:r.device_id,label:r.label,platform:r.platform,is_default:r.is_default===true,online:typeof r.online==='boolean'?r.online:null,connections:Object.fromEntries(['exec','computer','browser'].map(lane=>[lane,typeof r.connections?.[lane]==='boolean'?r.connections[lane]:null])),computer:r.capabilities?.computer===true,browser:r.capabilities?.browser===true}));
 }
 // Revocation uses the existing owner controller and durable tombstone. It does
 // not delete the Host identity or silently enroll replacement credentials.

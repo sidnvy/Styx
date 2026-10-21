@@ -171,6 +171,9 @@ enum ProductRestorationPolicy {
 
 @MainActor final class ProductModel: ObservableObject {
     let client: ProductCoreClient
+    #if STYX_TESTING
+    var testSuppressObservations = false
+    #endif
     @Published var page: ProductPage = .welcome
     @Published var busy = false
     @Published var signingUpgrade: ProductJSON = .null
@@ -204,6 +207,7 @@ enum ProductRestorationPolicy {
     @Published var pluginIcon: ProductJSON = .null
     @Published var pluginDraftEdited = false
     @Published var exportedPluginURL: URL?
+    @Published var exportCompletionID: UUID?
     @Published var handoffCredential = ""
     @Published var handoffTarget = ""
     @Published var desktopValue = ""
@@ -212,6 +216,11 @@ enum ProductRestorationPolicy {
     @Published var ingress: ProductJSON = .null
     @Published var createdInvitation: ProductJSON = .null
     @Published var pending: [ProductJSON] = []
+    @Published var settingsSection: ProductSettingsSection = .general
+    @Published var selectedDeviceID: String?
+    @Published var menuVisible = false
+    @Published var invitationExpanded = false
+    @Published var menuObservationFailed = false
     @Published var selectedPending: ProductJSON = .null
     @Published var fingerprintConfirmation = ""
     @Published var approveComputer = false
@@ -488,11 +497,33 @@ enum ProductRestorationPolicy {
         }
     }
     func configureTunnel() {
-        let key = runtimeKey; runtimeKey = ""
-        perform { [self] in
-            _ = try await client.write("tunnel/configure", ["authorize": .bool(true), "autoStart": .bool(true), "tunnelId": .string(tunnelID.trimmingCharacters(in: .whitespacesAndNewlines)), "apiKey": .string(key)])
-            _ = try await client.write("tunnel/start", ["authorize": .bool(true)])
+        let key = runtimeKey
+        guard !busy else { return }
+        Task {
+            do { try await saveTunnel(id: tunnelID, newKey: key); runtimeKey = "" }
+            catch { reportFailure(error); try? await reload() }
         }
+    }
+    func saveTunnel(id: String, newKey: String?) async throws {
+        guard !busy else { throw ProductCoreError.unavailable }
+        let normalized = id.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard ProductTunnelInputPolicy.tunnelError(normalized) == nil,
+              ProductTunnelInputPolicy.keyError(newKey ?? "", saved: hasSavedRuntimeKey) == nil else {
+            throw ProductCoreError.rejected
+        }
+        busy = true; error = nil
+        defer { busy = false }
+        // The Core keeps the stored key private. Omitting apiKey deliberately
+        // retains it; the App never reads it back into a password field.
+        if journey["tunnel"]["status"].string == "running" {
+            _ = try await client.write("tunnel/stop", ["authorize": .bool(true)])
+        }
+        var payload: [String: ProductJSON] = ["authorize": .bool(true), "autoStart": .bool(true), "tunnelId": .string(normalized)]
+        if let newKey = newKey { payload["apiKey"] = .string(newKey) }
+        _ = try await client.write("tunnel/configure", payload)
+        _ = try await client.write("tunnel/start", ["authorize": .bool(true)])
+        tunnelID = normalized
+        try await reload()
     }
     func startTunnel() { perform { [self] in _ = try await client.write("tunnel/start", ["authorize": .bool(true)]) } }
     func selectIcon() {

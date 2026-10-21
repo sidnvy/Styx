@@ -23,35 +23,23 @@ struct ProductPanel<Content: View>: View {
     let title: String
     @ViewBuilder let content: () -> Content
     var body: some View {
-        VStack(alignment: .leading, spacing: 14) {
-            Text(title).font(.headline)
-            content()
-        }.padding(20).frame(maxWidth: .infinity, alignment: .leading)
-            .background(Color(nsColor: .controlBackgroundColor), in: RoundedRectangle(cornerRadius: 14))
-            .overlay(RoundedRectangle(cornerRadius: 14).stroke(Color.primary.opacity(0.07)))
+        GroupBox {
+            VStack(alignment: .leading, spacing: 14, content: content)
+                .padding(8).frame(maxWidth: .infinity, alignment: .leading)
+        } label: { Text(title).font(.headline) }
     }
 }
 struct ProductView: View {
     @ObservedObject var model: ProductModel
     weak var controller: ProductWindowController?
-    @State private var usePluginPackage = true
-    init(model: ProductModel, controller: ProductWindowController?, showPluginPackage: Bool = true) {
+    @State private var usePluginPackage = false
+    @State private var editTunnel = false
+    init(model: ProductModel, controller: ProductWindowController?, showPluginPackage: Bool = false) {
         self.model = model; self.controller = controller
         _usePluginPackage = State(initialValue: showPluginPackage)
     }
     var body: some View {
         VStack(spacing: 0) {
-            if model.deployment != nil && (model.accepted || model.joined && model.localPrepared || [.overview, .computers, .settings].contains(model.page)) {
-                HStack(spacing: 18) {
-                    ProductBrand(size: 27)
-                    nav(.overview, productText("概览", "Overview"))
-                    nav(.computers, productText("电脑", "Computers"))
-                    nav(.chat, productText("聊天连接", "Chat connections"))
-                    Spacer()
-                    Button { model.page = .settings } label: { Image(systemName: "gearshape") }.help(productText("设置", "Settings"))
-                }.padding(.horizontal, 28).padding(.vertical, 16)
-                Divider()
-            }
             ScrollView {
                 VStack(alignment: .leading, spacing: 22) {
                     if !model.loaded {
@@ -73,22 +61,14 @@ struct ProductView: View {
                     }
                     if let error = model.error {
                         Text(error).foregroundStyle(.red).font(.callout).textSelection(.enabled)
+                        Button(productText("重新检查", "Check again")) { Task { await model.refresh() } }
                     }
-                }.frame(maxWidth: 680, alignment: .leading).padding(36).frame(maxWidth: .infinity)
+                }.frame(maxWidth: 560, alignment: .leading).padding(28).frame(maxWidth: .infinity)
             }
-            Divider()
-            HStack {
-                if model.busy { ProgressView().controlSize(.small); Text(productText("正在处理…", "Working…")).font(.caption).foregroundStyle(.secondary) }
-                Spacer()
-                if model.loaded {
-                    Button(productText("检查当前状态", "Check current status")) { Task { await model.refresh() } }
-                        .help(productText("读取准备进度和当前连接状态；不会重新安装、配对或完成升级修复。", "Read setup progress and current connections; this does not reinstall, pair or repair an upgrade."))
-                        .disabled(model.busy)
-                }
-            }.padding(12)
         }.background(Color(nsColor: .windowBackgroundColor))
-            .frame(minWidth: 620, minHeight: 560)
+            .frame(minWidth: 580, minHeight: 500)
             .disabled(model.busy)
+            .sheet(isPresented: $editTunnel) { ProductTunnelEditor(model: model) }
             .task { await model.bootstrap() }
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in model.observePermissions() }
             .onChange(of: model.page) { _ in model.observePermissions() }
@@ -100,7 +80,7 @@ struct ProductView: View {
     }
     private func heading(_ title: String, _ subtitle: String = "") -> some View {
         VStack(alignment: .leading, spacing: 9) {
-            Text(title).font(.system(size: 28, weight: .semibold))
+            Text(title).font(.system(size: 23, weight: .semibold))
             if !subtitle.isEmpty { Text(subtitle).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true) }
         }
     }
@@ -129,7 +109,7 @@ struct ProductView: View {
             HStack {
                 Button(productText("返回", "Back")) { model.page = model.joining ? .invitation : .welcome }
                 Spacer()
-                Button(productText("准备这台电脑", "Prepare this computer")) { model.createAndPrepare() }.buttonStyle(.borderedProminent)
+                Button(productText("继续", "Continue")) { model.createAndPrepare() }.buttonStyle(.borderedProminent)
                     .disabled(model.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.session["defaults"]["bundle"].string == nil)
             }
         }
@@ -263,31 +243,19 @@ struct ProductView: View {
         }
     }
     private var tunnelPanel: some View {
-        ProductPanel(title: productText("1. 连接到 OpenAI", "1. Connect to OpenAI")) {
-            switch model.tunnelConnection {
-            case .notConfigured:
-                Text(productText("在 OpenAI 平台创建 Tunnel 和运行 Key，将这两项填到这里。", "Create a Tunnel and runtime key on the OpenAI platform, then enter both here."))
-                Button(productText("打开 OpenAI 平台", "Open OpenAI platform")) { model.openOfficial("https://platform.openai.com/settings/organization/tunnels") }
-                TextField("Tunnel ID", text: $model.tunnelID)
-                SecureField(productText("运行 Key", "Runtime key"), text: $model.runtimeKey)
-                Button(productText("保存并连接", "Save and connect")) { model.configureTunnel() }
-                    .disabled(model.tunnelID.isEmpty || model.runtimeKey.isEmpty || !model.session["tunnelSupported"].bool)
-            case .connected:
-                Label(productText("已连接到 OpenAI", "Connected to OpenAI"), systemImage: "checkmark.circle.fill")
-                Text(productText("继续下一步，把 Styx 添加到 ChatGPT。", "Continue below to add Styx to ChatGPT.")).foregroundStyle(.secondary)
-            case .connecting:
-                ProgressView(productText("正在连接…", "Connecting…"))
-                Button(productText("检查连接结果", "Check connection")) { Task { await model.refresh() } }
-            case .stopped:
-                Text(productText("连接资料已保存，尚未连接到 OpenAI。", "Connection details are saved. Not connected to OpenAI yet."))
-                Button(productText("连接", "Connect")) { model.startTunnel() }.buttonStyle(.borderedProminent)
-            case .unavailable:
-                Text(productText("连接失败。请检查网络，以及 Tunnel ID 和运行 Key 是否有效。", "Connection failed. Check your network and that the Tunnel ID and runtime key are valid."))
+        ProductPanel(title: productText("1. 电脑端连接", "1. Connection on this computer")) {
+            HStack {
+                Image(systemName: "globe")
+                Text(model.tunnelConnection == .connected ? productText("已连接到 OpenAI", "Connected to OpenAI") : productText("准备 OpenAI 通道", "Prepare OpenAI connection"))
+                Spacer()
+                if model.tunnelConnection == .connecting { ProgressView().controlSize(.small) }
+            }
+            if model.tunnelConnection == .connected {
+                Text(productText("接下来在 ChatGPT 中添加并安装 Styx。", "Next, add and install Styx in ChatGPT.")).foregroundStyle(.secondary)
+            }
+            Button(model.tunnelConnection == .notConfigured ? productText("填写连接信息", "Enter connection details") : productText("编辑连接信息", "Edit connection details")) { editTunnel = true }
+            if model.tunnelConnection == .stopped || model.tunnelConnection == .unavailable {
                 Button(productText("重新连接", "Reconnect")) { model.startTunnel() }
-                Button(productText("检查连接结果", "Check connection")) { Task { await model.refresh() } }
-            case .unknown:
-                Text(productText("暂时无法读取连接结果。", "The connection result could not be read."))
-                Button(productText("重新检查", "Check again")) { Task { await model.refresh() } }
             }
         }
     }
@@ -536,18 +504,23 @@ struct ProductAcceptanceField: NSViewRepresentable {
     }
 }
 
-@MainActor final class ProductWindowController: NSWindowController, NSWindowDelegate {
+@MainActor final class ProductWindowController: NSWindowController, NSWindowDelegate, NSPopoverDelegate {
     let model: ProductModel
     weak var acceptanceField: NSTextField?
     let ownerAppPID = Int(ProcessInfo.processInfo.processIdentifier)
     private var observationTimer: Timer?
+    private var settingsWindow: NSWindow?
+    private var menuPopover: NSPopover?
+    private var menuSizeTimer: Timer?
+    var showMenuInvitation: (() -> Void)?
+
     init(sessionURL: URL) {
         // Bootstrap was already checked by the App's child-pipe parser; keep a
         // failable client construction here so tests can cover its own boundary.
         do { model = try ProductModel(sessionURL: sessionURL) }
         catch { preconditionFailure("Invalid owned Styx bootstrap") }
-        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 820, height: 720), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
-        window.title = "Styx"; window.minSize = NSSize(width: 650, height: 600)
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 680, height: 640), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+        window.title = "Styx"; window.minSize = NSSize(width: 620, height: 560)
         super.init(window: window)
         window.delegate = self; window.contentView = NSHostingView(rootView: ProductView(model: model, controller: self))
         window.center(); window.setFrameAutosaveName("Styx.ProductWindow.v6")
@@ -557,7 +530,52 @@ struct ProductAcceptanceField: NSViewRepresentable {
     }
     required init?(coder: NSCoder) { nil }
     func present() { model.observePermissions(); window?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
-    func showPreferences() { model.page = .settings; present() }
+    func showPreferences() { showSettings(.general) }
+    func showOnboarding() {
+        menuPopover?.performClose(nil)
+        if model.page == .overview { model.page = model.localPrepared ? (model.accepted ? .overview : .chat) : .preparation }
+        present()
+    }
+    func showSettings(_ section: ProductSettingsSection) {
+        menuPopover?.performClose(nil)
+        model.settingsSection = section; model.observePermissions()
+        if settingsWindow == nil {
+            let preferences = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 680, height: 560), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
+            preferences.title = productText("Styx 设置", "Styx Settings")
+            preferences.isReleasedWhenClosed = false
+            preferences.identifier = NSUserInterfaceItemIdentifier("Styx.SettingsWindow")
+            preferences.delegate = self
+            preferences.contentView = NSHostingView(rootView: ProductSettingsView(model: model, controller: self))
+            preferences.minSize = NSSize(width: 640, height: 500)
+            preferences.center(); preferences.setFrameAutosaveName("Styx.SettingsWindow.v1")
+            settingsWindow = preferences
+        }
+        settingsWindow?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true)
+    }
+    func toggleMenu(relativeTo button: NSStatusBarButton, quit: @escaping () -> Void) {
+        if menuPopover?.isShown == true { menuPopover?.performClose(nil); return }
+        let popover = NSPopover()
+        popover.behavior = .transient; popover.animates = true; popover.delegate = self
+        let host = NSHostingController(rootView: ProductDailyPanel(model: model, controller: self, quit: quit))
+        popover.contentViewController = host
+        popover.contentSize = NSSize(width: 332, height: 300)
+        menuPopover = popover; model.menuVisible = true
+        popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
+        menuSizeTimer?.invalidate()
+        menuSizeTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self, weak popover] _ in
+            Task { @MainActor in
+                guard let self = self, let popover = popover, popover.isShown else { return }
+                let size = host.view.fittingSize
+                let target = NSSize(width: 332, height: min(720, max(120, size.height)))
+                if abs(popover.contentSize.height - target.height) > 1 { popover.contentSize = target }
+                _ = self
+            }
+        }
+    }
+    func popoverDidClose(_ notification: Notification) {
+        model.menuVisible = false; menuSizeTimer?.invalidate(); menuSizeTimer = nil
+    }
+
     func windowWillClose(_ notification: Notification) { model.clearSecrets() }
     func currentDesktopReadback(challengeID: String) -> String? {
         guard model.challengeID == challengeID, let field = acceptanceField,
@@ -587,6 +605,7 @@ struct ProductAcceptanceField: NSViewRepresentable {
                 guard model.session["nativeAppLifecycleSupported"].bool else { throw ProductCoreError.unavailable }
                 _ = try await model.client.write("app/quit", ["authorize": .bool(true)])
                 observationTimer?.invalidate(); observationTimer = nil
+                menuSizeTimer?.invalidate(); menuSizeTimer = nil; menuPopover?.performClose(nil); settingsWindow?.close()
                 completion(true)
             } catch {
                 let alert = NSAlert()

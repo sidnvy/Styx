@@ -8,6 +8,19 @@ func productCoreSelfTest() throws {
     func require(_ condition: @autoclosure () -> Bool, _ message: String) throws {
         if !condition() { throw NSError(domain: "Styx.ProductSelfTest", code: 1, userInfo: [NSLocalizedDescriptionKey: message]) }
     }
+    try require(ProductTunnelInputPolicy.tunnelError("https://example.com") != nil, "A server URL became a Tunnel ID")
+    try require(ProductTunnelInputPolicy.tunnelError(" tunnel_12345678 ") == nil, "Valid pasted Tunnel ID rejected")
+    try require(ProductTunnelInputPolicy.keyError("", saved: true) == nil, "Saved key required secret readback")
+    try require(ProductTunnelInputPolicy.keyError("", saved: false) != nil, "Missing runtime key allowed on first setup")
+    try require(ProductTunnelInputPolicy.keyError("sk-valid_" + String(repeating: "a", count: 32), saved: false) == nil, "Valid runtime key rejected")
+    for observed in [ProductJSON.null, .string("true")] {
+        let device = ProductDevice(.object(["device_id": .string("test"), "label": .string("Mac"), "online": observed]))
+        try require(device?.indicator == .unknown, "Absent or mistyped observation became online")
+    }
+    for connected in [true, false] {
+        let device = ProductDevice(.object(["device_id": .string("test"), "label": .string("Mac"), "online": .bool(connected)]))
+        try require(device?.indicator == (connected ? .connected : .offline), "Observed connection state was lost")
+    }
     let token = String(repeating: "a", count: 43)
     let valid = URL(string: "http://127.0.0.1:12345/#session=" + token)!
     let parsed = ProductCoreClient.bootstrap(valid)

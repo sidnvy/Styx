@@ -493,6 +493,9 @@ func productSystemQuitReason(_ reason: OSType?) -> Bool {
     var lifetimeWriter: FileHandle?
     var timer: Timer?
     var statusItem: NSStatusItem?
+    #if STYX_PRODUCT_UI
+    var menuOpenRequested = false
+    #endif
     var statusLine: NSMenuItem?
     var phase = "stopped"
     var generation = UUID().uuidString
@@ -532,7 +535,13 @@ func productSystemQuitReason(_ reason: OSType?) -> Bool {
         menu.addItem(NSMenuItem.separator())
         menu.addItem(withTitle: "Quit Styx", action: #selector(quit), keyEquivalent: "q")
         for entry in menu.items { entry.target = self }
-        item.menu = menu; statusItem = item
+        #if STYX_PRODUCT_UI
+        item.button?.target = self
+        item.button?.action = #selector(toggleProductPanel)
+        #else
+        item.menu = menu
+        #endif
+        statusItem = item
         if let resources = Bundle.main.resourceURL,
            FileManager.default.isExecutableFile(atPath: resources.appendingPathComponent("runtime/node").path),
            Bundle.main.bundleURL.standardizedFileURL.path != "/Applications/Styx.app" {
@@ -586,6 +595,7 @@ func productSystemQuitReason(_ reason: OSType?) -> Bool {
                     owner.setupURL = url; owner.setupStatusLine?.title = "Local setup ready"
                     #if STYX_PRODUCT_UI
                     owner.observeProductComponents(url)
+                    if owner.menuOpenRequested { owner.toggleProductPanel() }
                     #endif
                     if owner.setupOpenRequested { owner.showSetup(url) }
                 }
@@ -631,11 +641,25 @@ func productSystemQuitReason(_ reason: OSType?) -> Bool {
         }
     }
     #if STYX_PRODUCT_UI
+    @objc func toggleProductPanel() {
+        menuOpenRequested = true
+        do {
+            try startSetup(openWindow: false)
+            guard let url = setupURL, let button = statusItem?.button else { return }
+            menuOpenRequested = false
+            if setupWindow == nil { setupWindow = makeProductWindow(url) }
+            setupWindow?.toggleMenu(relativeTo: button, quit: { [weak self] in self?.quit() })
+        } catch { openSettings() }
+    }
     func makeProductWindow(_ url: URL) -> ProductWindowController {
         let controller = ProductWindowController(sessionURL: url)
         controller.model.recoverComputerUse = { [weak self] in
             guard let owner = self else { throw ProductWorkflowError.computerPermissionRecoveryRequired }
             try await owner.recoverComputerUseAfterPermissions(url)
+        }
+        controller.showMenuInvitation = { [weak self] in
+            self?.toggleProductPanel()
+            self?.setupWindow?.model.beginDeviceInvitation()
         }
         return controller
     }
@@ -860,6 +884,12 @@ func productSystemQuitReason(_ reason: OSType?) -> Bool {
 
 #if STYX_TESTING
 #if STYX_PRODUCT_UI
+if CommandLine.arguments.count == 3 && CommandLine.arguments[1] == "--presentation-snapshots" {
+    MainActor.assumeIsolated {
+        do { try productPresentationSnapshots(directory: URL(fileURLWithPath: CommandLine.arguments[2])); exit(0) }
+        catch { fputs("Styx presentation render failed\n", stderr); exit(1) }
+    }
+}
 if CommandLine.arguments.count == 2 && CommandLine.arguments[1] == "--permission-state-self-test" {
     MainActor.assumeIsolated {
         let application = NSApplication.shared

@@ -32,13 +32,15 @@ export function configureTunnel(stateDir,{tunnelId,apiKey,autoStart=false,author
  if(authorize!==true)fail('explicit_tunnel_authorization_required');
  if(typeof autoStart!=='boolean')fail('invalid_tunnel_autostart');
  if(!/^tunnel_[A-Za-z0-9_-]{8,128}$/.test(tunnelId??''))fail('invalid_tunnel_id');
- if(typeof apiKey!=='string'||!/^sk-[A-Za-z0-9_-]{16,512}$/.test(apiKey))fail('invalid_tunnel_runtime_key');
+ if(apiKey!==undefined&&(typeof apiKey!=='string'||!/^sk-[A-Za-z0-9_-]{16,512}$/.test(apiKey)))fail('invalid_tunnel_runtime_key');
  const p=locations(stateDir,{create:true});gatewayAt(stateDir);
  const lockToken=acquireOwnerLock(p);
  try{
   // Configuration and process startup share the same cross-process lock. Read
   // after acquisition so key rotation cannot delete a starting client's key.
   const old=configAt(p),keyFile='key-'+randomBytes(16).toString('hex');
+  if(apiKey===undefined){if(!old)fail('invalid_tunnel_runtime_key');apiKey=read(path.join(p.root,old.keyFile));}
+
   writePrivateFile(path.join(p.root,keyFile),apiKey);
   try{write(p.config,JSON.stringify({schema:1,tunnelId,keyFile,autoStart})+'\n');}catch(e){fs.unlinkSync(path.join(p.root,keyFile));throw e;}
   if(old)fs.unlinkSync(path.join(p.root,old.keyFile));

@@ -157,9 +157,15 @@ struct ProductStep: Identifiable {
     var complete: Bool { ["succeeded", "skipped"].contains(status) }
 }
 struct ProductDevice: Identifiable {
-    let id: String; let label: String; let isDefault: Bool
+    let id: String
+    let label: String
+    let isDefault: Bool
+    let platform: String
+    let online: Bool?
     init?(_ value: ProductJSON) {
         guard let id = value["device_id"].string, let label = value["label"].string else { return nil }
         self.id = id; self.label = label; isDefault = value["is_default"].bool
+        platform = value["platform"].string ?? ""
+        online = value["online"] == .bool(true) ? true : value["online"] == .bool(false) ? false : nil
     }
 }
