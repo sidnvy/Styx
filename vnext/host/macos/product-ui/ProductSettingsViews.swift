@@ -38,7 +38,7 @@ struct ProductSettingsView: View {
             .sheet(isPresented: $editTunnel) { ProductTunnelEditor(model: model) }
             .sheet(isPresented: $editPackage) { ProductPackageEditor(model: model) }
             .sheet(isPresented: $setupChat) {
-                ProductView(model: model, controller: controller, showPluginPackage: false)
+                ProductView(model: model, controller: controller)
                     .frame(width: 660, height: 640)
                     .toolbar { Button(productText("完成", "Done")) { setupChat = false } }
             }
