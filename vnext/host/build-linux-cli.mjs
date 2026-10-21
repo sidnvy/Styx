@@ -15,6 +15,7 @@ function copy(from,to){regular(from);fs.mkdirSync(path.dirname(to),{recursive:tr
 function tree(from,to){const s=fs.lstatSync(from);if(s.isSymbolicLink())fail('cli_symlink_forbidden');if(s.isDirectory()){fs.mkdirSync(to,{mode:0o700});for(const n of fs.readdirSync(from))tree(path.join(from,n),path.join(to,n));}else copy(from,to);}
 function tracked(sourceRoot){const repo=execFileSync('git',['-C',sourceRoot,'rev-parse','--show-toplevel'],{encoding:'utf8'}).trim();return execFileSync('git',['-C',sourceRoot,'ls-files','--full-name','-z'],{encoding:'utf8',maxBuffer:8*1024*1024}).split('\0').filter(Boolean).map(n=>path.relative(sourceRoot,path.join(repo,n)).split(path.sep).join('/'));}
 export function cliProductSource(name){
+ if(name==='docs/linux-cli-preview.md')return true;
  if(name.split('/').some(p=>['test','tests','fixtures','node_modules','.runtime','windows','macos'].includes(p)))return false;
  return /^(onboarding|gateway|host|shared|packages\/styx-(exec-adapter|gui-broker|browser-provider))\/.+\.mjs$/.test(name)||
  /^(onboarding\/ui\/.+\.(js|html|css)|gateway\/.+\.(json|html)|packages\/styx-[^/]+\/(package(?:-lock)?\.json|playwright-contract-0\.0\.83\.json)|plugin\/(package\.mjs|archive\.mjs|plugin\.json|skills\/.+\.md)|assets\/brand\/styx-logo\.png|licenses\/.+|package(?:-lock)?\.json)$/.test(name);
@@ -34,6 +35,8 @@ export function buildLinuxCli({destination,version,privateKeyFile,nodeBinary,sou
   const app=path.join(destination,'app');fs.mkdirSync(app,{mode:0o700});
   const sources=tracked(sourceRoot).filter(cliProductSource).sort();
   for(const name of sources)copy(path.join(sourceRoot,name),path.join(app,name));
+  if(!sources.includes('docs/linux-cli-preview.md'))fail('tracked_cli_instructions_required');
+  copy(path.join(sourceRoot,'docs/linux-cli-preview.md'),path.join(destination,'README.md'));
   tree(path.join(destination,'gateway-bundle/app/node_modules'),path.join(app,'node_modules'));
   // Browser runtime remains optional. Its independently signed Host closure is
   // authoritative; copy only that already verified closure for foreground Core.
