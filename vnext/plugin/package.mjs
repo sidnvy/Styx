@@ -108,7 +108,8 @@ function pngIcon(value){
  return {mimeType:'image/png',dataBase64:bytes.toString('base64')};
 }
 const template=JSON.parse(fs.readFileSync(path.join(root,'plugin.json'),'utf8'));
-const skill=fs.readFileSync(path.join(root,'skills/styx-native-onboarding/SKILL.md'));
+export const PACKAGED_SKILLS = Object.freeze(['styx-native-onboarding', 'styx-cli', 'styx-browser', 'styx-computer-use']);
+const skills=PACKAGED_SKILLS.map(name=>({path:`skills/${name}/SKILL.md`,data:fs.readFileSync(path.join(root,`skills/${name}/SKILL.md`))}));
 export function normalizePresentation(value={}){
  exact(value,['displayName','shortDescription','longDescription','icon'],'invalid_plugin_presentation');
  const defaults=template.extensions['com.openai'].interface,out={};
@@ -137,7 +138,7 @@ export function buildPackageFiles(config,receipt,{now=Date.now()}={}){
  }}};
  const mcp={$schema:'https://agent-plugins.org/schemas/1.0.0/mcp.schema.json',mcpServers:{styx:server}};
  const json=data=>Buffer.from(JSON.stringify(data,null,2)+'\n');
- const files=[{path:'plugin.json',data:json(manifest)},{path:'mcp.json',data:json(mcp)},{path:'skills/styx-native-onboarding/SKILL.md',data:Buffer.from(skill)},...(presentation.icon?[{path:'assets/icon.png',data:Buffer.from(presentation.icon.dataBase64,'base64')}]:[])];
+ const files=[{path:'plugin.json',data:json(manifest)},{path:'mcp.json',data:json(mcp)},...skills.map(file=>({path:file.path,data:Buffer.from(file.data)})),...(presentation.icon?[{path:'assets/icon.png',data:Buffer.from(presentation.icon.dataBase64,'base64')}]:[])];
  return {files,connection:selected,verificationScope:receipt.method==='authenticated-local-mcp-discovery'?'local_gateway_only':'supplied_discovery_receipt',status:'package_files_ready_not_installed'};
 }
 function regularJson(file,{withBytes=false}={}) {

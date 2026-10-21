@@ -37,8 +37,24 @@ Every installation checks whether the owner is creating a plugin or reusing one 
 
 The App exports via authenticated POST with CSRF. Browser downloads are requested as a ZIP; the macOS shell uses a main-frame same-origin byte bridge with a fixed ZIP filename and a user-controlled native save panel. Cancelling save is not a successful save. A local export receipt means archive bytes were generated, not that a file was saved or uploaded.
 
-The default account flow is ChatGPT Plugins → + → Add custom MCP server → Tunnel → the same Tunnel ID → No authentication → Create as a plugin, followed by installation and a real tool call. It creates the plugin without requiring ZIP import. A ZIP additionally packages the optional Styx onboarding skill; import it only through a supported account import workflow. Neither a ZIP nor the separate Create a plugin authoring entry replaces the live MCP connection. Do not invent an account upload API. Record user confirmations for creation/upload and installation separately. The local receipts say `user_confirmed`; they do not attest remote state. A reused plugin skips new export/upload. A changed Gateway/tunnel or profile invalidates these receipts and requires review. Actual connection is established only by subsequent real chat requests and separately recorded target-chat confirmation; provider identity remains unverified.
+The default native account flow is to edit presentation in Styx, export the verified
+ZIP, upload it through the supported ChatGPT plugin import/update workflow, install,
+and make a real tool call. The ZIP includes onboarding, CLI, Browser Automation
+and Computer Use skills. Prefer updating the existing plugin over duplicating it.
+Account/workspace permissions and web compatibility must be checked in the target
+account. Neither ZIP creation nor installation proves a live connection. Do not
+invent an upload API or record confirmations without the corresponding user action.
+Changed connection or presentation requires review and fresh acceptance evidence.
+Manual MCP setup is a fallback only and does not include the packaged skills.
+
 
 Official references checked 2026-10-20: [custom MCP connection](https://developers.openai.com/api/docs/guides/custom-mcp-server), [Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels), [package format and authentication](https://developers.openai.com/plugins/build/plugins). Personal connection does not imply public-directory submission readiness.
 
 Images are optional: bounded PNG only (256 KiB, square 48–1024, 8-bit noninterlaced with validated chunks, CRCs and bounded IDAT). SVG, external assets, embedded text/profiles, EXIF and animation are refused. Use a plain PNG export if an image is rejected.
+
+## ZIP-first native flow
+
+The native App defaults to ZIP export with editable display name, description and icon.
+The archive includes onboarding, CLI, Browser Automation and Computer Use skills.
+Use the supported upload/update workflow, preserve existing plugin identity, and verify
+web availability plus actual chat calls. Local export does not attest account installation.

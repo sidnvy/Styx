@@ -15,9 +15,9 @@ function icon(){
 test('archive has one stable root, only package members, stored UTF8 records and deterministic bytes',()=>{
  const config={connection},built=buildPackageArchive(config,receipt(),{now}),files=buildPackageFiles(config,receipt(),{now});
  assert.equal(built.fileName,'styx-native.zip');assert.equal(built.contentType,'application/zip');assert.equal(built.status,'archive_created_not_installed');assert.equal(built.verificationScope,'local_gateway_only');
- assert.deepEqual(built.entries,['styx-native/plugin.json','styx-native/mcp.json','styx-native/skills/styx-native-onboarding/SKILL.md','styx-native/assets/icon.png']);
+ assert.deepEqual(built.entries,['styx-native/plugin.json','styx-native/mcp.json','styx-native/skills/styx-native-onboarding/SKILL.md','styx-native/skills/styx-cli/SKILL.md','styx-native/skills/styx-browser/SKILL.md','styx-native/skills/styx-computer-use/SKILL.md','styx-native/assets/icon.png']);
  assert.deepEqual(built.archive,buildPackageArchive(config,receipt(),{now}).archive);
- const end=built.archive.subarray(-22);assert.equal(end.readUInt32LE(0),0x06054b50);assert.equal(end.readUInt16LE(8),4);assert.equal(end.readUInt16LE(10),4);assert.equal(end.readUInt16LE(20),0);
+ const end=built.archive.subarray(-22);assert.equal(end.readUInt32LE(0),0x06054b50);assert.equal(end.readUInt16LE(8),7);assert.equal(end.readUInt16LE(10),7);assert.equal(end.readUInt16LE(20),0);
  let offset=0;
  for(const file of files.files){
   const header=built.archive.subarray(offset,offset+30);assert.equal(header.readUInt32LE(0),0x04034b50);assert.equal(header.readUInt16LE(6),0x0800);assert.equal(header.readUInt16LE(8),0);assert.equal(header.readUInt32LE(18),file.data.length);assert.equal(header.readUInt32LE(22),file.data.length);
@@ -31,7 +31,7 @@ test('Python standard ZIP reader validates all CRCs, central directory, icon byt
  const script=`import sys,io,zipfile,json,hashlib,stat
 z=zipfile.ZipFile(io.BytesIO(sys.stdin.buffer.read()))
 assert z.testzip() is None
-assert len(z.namelist()) == 4
+assert len(z.namelist()) == 7
 assert all(x.startswith('styx-native/') and '..' not in x and '\\\\' not in x for x in z.namelist())
 assert all(i.compress_type == zipfile.ZIP_STORED and stat.S_ISREG(i.external_attr >> 16) for i in z.infolist())
 m=json.loads(z.read('styx-native/plugin.json'))
