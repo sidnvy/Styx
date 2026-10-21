@@ -130,3 +130,37 @@ test('existing servicePlan remains non-mutating, including Linux path',
     assert.equal(p.status,'NOT_INSTALLED');
     assert.equal((await fs.readdir(f.home)).length,0);
 });
+
+test('Linux user service remains independent of graphical login targets', {skip:!linux},async t=>{
+  const f=await fixture(t),unit=linuxUserUnit(f.options);
+  assert.doesNotMatch(unit,/graphical-session|DISPLAY|WAYLAND_DISPLAY|PartOf=|BindsTo=/);
+});
+test('installation rejects redirected user service parent directories',{skip:!linux},async t=>{
+  const f=await fixture(t),redirect=path.join(f.root,'redirect');await fs.mkdir(redirect);
+  await fs.symlink(redirect,path.join(f.home,'.config'));
+  assert.throws(()=>writeUserService(f.options,{home:f.home}),/user_unit_dir_not_regular/);
+  assert.deepEqual(await fs.readdir(redirect),[]);
+});
+test('read-only user manager diagnostics report headless persistence honestly',{skip:!linux},async()=>{
+  const {linuxUserManagerStatus}=await import('../linux-service.mjs');
+  const calls=[];
+  for(const [value,expected] of [['yes','configured'],['no','not_configured'],['','unknown']]){
+    const state=linuxUserManagerStatus({run:(bin,args)=>{calls.push([bin,...args]);return `Linger=${value}\nState=active\n`}});
+    assert.equal(state.systemBootWithoutLogin,expected);assert.equal(state.graphicalSessionRequired,false);
+  }
+  assert.ok(calls.every(c=>c[1]==='show-user'));
+});
+test('recovery restarts only an enabled owned service and preserves identity',{skip:!linux},async t=>{
+  const {recoverLinuxService}=await import('../linux-service.mjs');
+  const f=await fixture(t);writeUserService(f.options,{home:f.home});
+  const before=await fs.readFile(f.options.hostConfigFile);let active='failed',enabled='enabled';const calls=[];
+  const run=(bin,args)=>{calls.push(args[1]);if(args[1]==='start')active='active';
+    return `LoadState=loaded\nActiveState=${active}\nUnitFileState=${enabled}\nMainPID=${active==='active'?42:0}\n`};
+  const recovered=recoverLinuxService(f.unitName,{home:f.home,run});
+  assert.equal(recovered.active,'active');assert.equal(recovered.identityMutation,'NOT RUN');
+  assert.deepEqual(calls,['show','reset-failed','start','show']);
+  assert.deepEqual(await fs.readFile(f.options.hostConfigFile),before);
+  enabled='disabled';calls.length=0;
+  assert.throws(()=>recoverLinuxService(f.unitName,{home:f.home,run}),/requires_enabled/);
+  assert.deepEqual(calls,['show']);
+});

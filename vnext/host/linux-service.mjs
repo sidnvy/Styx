@@ -26,6 +26,18 @@ function userUnitDir(home=os.homedir()) {
   requireValue(absoluteSafe(dir,'unit_dir')===dir,'invalid_unit_directory');
   return dir;
 }
+function ensureUserUnitDirectory(home){
+  // Reject symlinked parents as well as the final directory: mkdir(recursive)
+  // otherwise follows a redirected ~/.config or systemd directory.
+  const dir=userUnitDir(home);
+  for(const item of [home,path.join(home,'.config'),path.join(home,'.config/systemd'),dir]){
+    if(!fs.existsSync(item))fs.mkdirSync(item,{mode:0o700});
+    const st=fs.lstatSync(item);
+    requireValue(st.isDirectory()&&!st.isSymbolicLink()&&st.uid===process.getuid(),
+      'user_unit_dir_not_regular');
+  }
+  return dir;
+}
 function verifyConfigFile(file){
   absoluteSafe(file,'host_config');
   try{requirePrivateFile(file)}
@@ -104,9 +116,7 @@ export function writeUserService(options,{home=os.homedir(),overwrite=false}={})
   requireLinux();
   const unitText=linuxUserUnit(options);
   const {dir,unit}=localUnit({unitName:options.unitName??'styx-vnext-pilot.service',home});
-  fs.mkdirSync(dir,{recursive:true,mode:0o700});
-  const stat=fs.lstatSync(dir);
-  requireValue(stat.isDirectory()&&!stat.isSymbolicLink(),'user_unit_dir_not_regular');
+  ensureUserUnitDirectory(home);
   if(fs.existsSync(unit)){
     ownedService(unit);
     requireValue(overwrite,'service_already_installed');
@@ -150,6 +160,38 @@ export function statusUserService(unitName,{run=execFileSync}={}){
     pid:Number(fields.MainPID||0),
     restarts:Number(fields.NRestarts||0)};
 }
+// Read-only diagnostics. Never enable linger or infer boot persistence from a
+// running desktop. Without linger, the OS may stop this user's manager after
+// the final login ends; a Styx user service cannot override that policy.
+export function linuxUserManagerStatus({uid=process.getuid(),run=execFileSync}={}){
+  requireLinux();
+  requireValue(Number.isInteger(uid)&&uid>=0,'invalid_user_id');
+  try{
+    const text=run('/usr/bin/loginctl',['show-user',String(uid),'-p','Linger',
+      '-p','State','-p','RuntimePath','--no-pager'],{encoding:'utf8',timeout:5000,
+      maxBuffer:8192,stdio:['ignore','pipe','pipe']});
+    const values=Object.fromEntries(String(text).split('\n').filter(x=>x.includes('='))
+      .map(x=>{const i=x.indexOf('=');return [x.slice(0,i),x.slice(i+1)]}));
+    return {status:'reported',state:values.State??'unknown',
+      systemBootWithoutLogin:values.Linger==='yes'?'configured':values.Linger==='no'?'not_configured':'unknown',
+      graphicalSessionRequired:false,identityMutation:'NOT RUN'};
+  }catch{return {status:'unavailable',systemBootWithoutLogin:'unknown',
+    graphicalSessionRequired:false,identityMutation:'NOT RUN'}}
+}
+export function recoverLinuxService(unitName,{home=os.homedir(),run=execFileSync}={}){
+  requireLinux();
+  const {unit}=localUnit({unitName,home});ownedService(unit);
+  const before=statusUserService(unitName,{run});
+  requireValue(before.status==='reported'&&before.load==='loaded','service_recovery_state_unknown');
+  // A deliberate durable stop must not be undone by generic recovery.
+  requireValue(before.enabled==='enabled','service_recovery_requires_enabled_unit');
+  if(before.active!=='active'){
+    systemdUser(unitName,'reset-failed',{run});
+    systemdUser(unitName,'start',{run});
+  }
+  return {...statusUserService(unitName,{run}),identityMutation:'NOT RUN',
+    preservedInstallRoot:true};
+}
 export function installLinuxService(options,{home=os.homedir(),run=execFileSync}={}){
   const result=writeUserService(options,{home});
   systemdUser(result.unitName,'daemon-reload',{run});
@@ -183,6 +225,7 @@ export function serviceCtl({command,unitName='styx-vnext-pilot.service',
   if(command==='install')return installLinuxService({...options,unitName},{home});
   if(command==='uninstall')return removeLinuxService(unitName,{home});
   if(command==='status')return statusUserService(unitName);
+  if(command==='recover')return recoverLinuxService(unitName,{home});
   const {unit}=localUnit({unitName,home});
   ownedService(unit);
   if(['enable','disable','start','stop','restart','reset-failed'].includes(command)){
