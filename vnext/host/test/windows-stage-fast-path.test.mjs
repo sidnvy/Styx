@@ -111,12 +111,16 @@ test('native redirected child directory is not traversed or recursively removed'
  assert(redirected);assert.equal(fs.readFileSync(path.join(outside,'sentinel'),'utf8'),'FOREIGN DIRECTORY');assert.equal(fs.readdirSync(outside).length,1);assert(fs.lstatSync(redirected).isSymbolicLink());assert(!published(f));
 });
 
-test('native failed empty-file batch preserves original inode linked inside a replaced foreign parent',{skip:!windows},t=>{
- const f=fixture(t),original=cp.execFileSync;let foreignFile,sentinel;
+test('native live-file parent rebinding is OS-protected or preserves a foreign-parent hardlink on refusal',{skip:!windows},t=>{
+ const f=fixture(t),original=cp.execFileSync;let foreignFile,sentinel,osProtected;
  cp.execFileSync=(program,args,options)=>{
   if(program==='powershell.exe'&&options?.env?.STYX_NEW_PAYLOAD_FILES&&!foreignFile){
-   const first=JSON.parse(options.env.STYX_NEW_PAYLOAD_FILES)[0],moved=first.parent+'.own-moved';
-   fs.renameSync(first.parent,moved);fs.mkdirSync(first.parent);
+   const rows=JSON.parse(options.env.STYX_NEW_PAYLOAD_FILES),first=rows[0],moved=first.parent+'.own-moved';
+   try{fs.renameSync(first.parent,moved);}catch(error){
+    if(!['EPERM','EBUSY'].includes(error.code))throw error;
+    for(const row of rows){const parent=fs.lstatSync(row.parent,{bigint:true}),file=fs.lstatSync(row.file,{bigint:true});assert(parent.isDirectory()&&!parent.isSymbolicLink());assert.equal(parent.ino,BigInt(row.parentId));assert(file.isFile()&&!file.isSymbolicLink());assert.equal(file.ino,BigInt(row.fileId));assert.equal(file.size,0n);}
+    assert(!fs.existsSync(moved));osProtected={operation:'rename_parent_with_live_wx_handles',code:error.code,status:'OS_PROTECTED',originalParentAndAllEmptyFileIdsUnchanged:true,foreignTreeCreated:false,reboundParentCleanupBranch:'NOT EXERCISED'};evidence('parent-rebind-injection',osProtected);throw Error('controlled_os_protected_batch_interruption');
+   }fs.mkdirSync(first.parent);
    foreignFile=path.join(first.parent,path.basename(first.file));fs.linkSync(path.join(moved,path.basename(first.file)),foreignFile);
    sentinel=path.join(first.parent,'foreign-sentinel');fs.writeFileSync(sentinel,'FOREIGN PARENT SENTINEL');
    throw Error('controlled_empty_batch_failure');
@@ -124,7 +128,7 @@ test('native failed empty-file batch preserves original inode linked inside a re
   return original(program,args,options);
  };syncBuiltinESMExports();
  try{assert.throws(()=>stage(f),/private_payload_creation_failed/);}finally{cp.execFileSync=original;syncBuiltinESMExports();}
- assert(foreignFile);assert(fs.existsSync(foreignFile));assert.equal(fs.statSync(foreignFile).size,0);assert.equal(fs.readFileSync(sentinel,'utf8'),'FOREIGN PARENT SENTINEL');assert(!published(f));
+ if(osProtected){assert(!foreignFile);assert(!sentinel);}else{assert(foreignFile);assert(fs.existsSync(foreignFile));assert.equal(fs.statSync(foreignFile).size,0);assert.equal(fs.readFileSync(sentinel,'utf8'),'FOREIGN PARENT SENTINEL');evidence('parent-rebind-injection',{status:'INJECTED_REBIND_REFUSED',foreignSentinelPreserved:true});}assert(!published(f));
 });
 
 test('native actual installer process death cannot publish a partially copied generation',{skip:!windows,timeout:120000},async t=>{
