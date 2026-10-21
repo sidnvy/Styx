@@ -3,6 +3,9 @@
 From a source checkout, install the four checked-in dependency locks with
 `npm ci --ignore-scripts` in `vnext` and each Exec, GUI and Browser provider.
 No global dependency install or npm lifecycle scripts are required.
+Prepare the pinned Codex fixture runtime with
+`python3 packages/styx-exec-adapter/prepare-runtime.py` before the full suite;
+the real GUI/Exec integration tests require that input and fail if it is absent.
 
 `npm run quality -- /absolute/fresh/evidence-directory` is the shared local/CI
 entrypoint. It checks every installed dependency tree, scans every lock for

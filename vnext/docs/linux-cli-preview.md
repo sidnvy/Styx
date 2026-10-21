@@ -14,7 +14,7 @@ Build an optional Host bundle with `buildHostRelease` using the same publisher
 key and actual pinned Codex/Cua binaries. Then run:
 
 ```sh
-node host/build-linux-cli.mjs /absolute/private/build.json
+npm run build:checked -- linux /absolute/private/build.json /absolute/fresh/build-evidence
 ```
 
 The private build file contains `destination`, `version`, `privateKeyFile`,
