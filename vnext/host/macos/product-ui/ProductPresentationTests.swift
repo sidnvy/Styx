@@ -2,6 +2,38 @@
 import AppKit
 import SwiftUI
 
+@MainActor private func productAcceptanceFieldsSelfTest() async throws {
+    func require(_ value: Bool, _ message: String) throws {
+        if !value { throw NSError(domain: "Styx.AcceptanceFieldsTest", code: 1, userInfo: [NSLocalizedDescriptionKey: message]) }
+    }
+    func makeWindow() -> NSWindow {
+        let window = NSWindow(contentRect: NSRect(x: 100, y: 100, width: 360, height: 160), styleMask: [.titled], backing: .buffered, defer: false)
+        window.isReleasedWhenClosed = false
+        return window
+    }
+    let root = makeWindow(), hidden = makeWindow(), unrelated = makeWindow(), sheet = makeWindow()
+    defer { if sheet.sheetParent != nil { root.endSheet(sheet) }; sheet.close(); unrelated.close(); hidden.close(); root.close() }
+    let registry = ProductAcceptanceFields(), marker = "isolated-native-readback"
+    let active = NSTextField(string: marker), inactive = NSTextField(string: ""), other = NSTextField(string: marker), sheetField = NSTextField(string: marker)
+    root.contentView = active; hidden.contentView = inactive; unrelated.contentView = other; sheet.contentView = sheetField
+    root.orderFront(nil); unrelated.orderFront(nil)
+    registry.register(active, challengeID: "current")
+    registry.register(inactive, challengeID: "current")
+    registry.register(other, challengeID: "current")
+    try require(registry.readback(challengeID: "current", expected: marker, roots: [root, hidden])?.window === root, "A hidden or unrelated window replaced the active readback")
+    active.isHidden = true
+    try require(registry.readback(challengeID: "current", expected: marker, roots: [root, hidden]) == nil, "A hidden field or unrelated same-process window produced readback")
+    active.isHidden = false; registry.register(active, challengeID: "old")
+    try require(registry.readback(challengeID: "current", expected: marker, roots: [root]) == nil, "An old challenge field produced readback")
+    registry.register(active, challengeID: "current"); active.stringValue = ""
+    registry.register(sheetField, challengeID: "current"); root.beginSheet(sheet, completionHandler: nil)
+    try await Task.sleep(nanoseconds: 200_000_000)
+    try require(registry.readback(challengeID: "current", expected: marker, roots: [root])?.window === root, "Sheet readback did not bind to its observed AX root")
+    active.stringValue = marker
+    try require(registry.readback(challengeID: "current", expected: marker, roots: [root]) == nil, "Ambiguous visible proof fields did not fail closed")
+    print("PASS: native readback survives hidden-window updates; sheets bind to their AX parent; old challenges, hidden/unrelated fields and ambiguous matches are rejected.")
+}
+
 // Actual AppKit/SwiftUI rendering with synthetic state. This deliberately has no
 // delegate, permission requests, running Core, stored identities or account.
 @MainActor func productPresentationSnapshots(directory: URL?) throws {
@@ -60,6 +92,7 @@ import SwiftUI
     Task { @MainActor in
         do {
             try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            try await productAcceptanceFieldsSelfTest()
             func require(_ value: Bool, _ message: String) throws {
                 if !value { throw NSError(domain: "Styx.PresentationTest", code: 1, userInfo: [NSLocalizedDescriptionKey: message]) }
             }
