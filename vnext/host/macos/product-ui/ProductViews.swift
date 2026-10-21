@@ -237,9 +237,11 @@ struct ProductView: View {
                 Button(productText("先完成电脑准备", "Finish computer setup")) { model.page = .preparation }
             } else {
                 tunnelPanel
-                officialPanel
-                if usePluginPackage { pluginUploadPanel }
-                if model.plugin["accountActions"]["installation"].string == "user_confirmed" { acceptancePanel }
+                if !model.chatVerification.hasRequest {
+                    officialPanel
+                    if usePluginPackage { pluginUploadPanel }
+                }
+                acceptancePanel
             }
         }
     }
@@ -315,11 +317,18 @@ struct ProductView: View {
 
     private var acceptancePanel: some View {
         ProductPanel(title: productText("最后，试用 Styx", "Finally, try Styx")) {
-            Text(productText("在 ChatGPT 新聊天中用 @ 选择 Styx，发送下方的测试请求。", "In a new ChatGPT conversation, select Styx with @ and send the test request below."))
-            Button(productText("生成测试请求", "Generate test request")) { model.beginAcceptance() }
+            Text(model.chatVerification.label).font(.headline)
+            if !model.chatVerification.proofComplete {
+                Text(productText("在 ChatGPT 新聊天中用 @ 选择 Styx，发送下方的测试请求。", "In a new ChatGPT conversation, select Styx with @ and send the test request below."))
+                Button(productText("生成测试请求", "Generate test request")) { model.beginAcceptance() }
+            }
             if let prompt = model.acceptance["challenge"]["prompt"].string {
-                Text(prompt).font(.system(.callout, design: .monospaced)).textSelection(.enabled)
-                Button(productText("复制到目标聊天", "Copy for your target chat")) { model.copy(prompt) }
+                if !model.chatVerification.proofComplete {
+                    Text(prompt).font(.system(.callout, design: .monospaced)).textSelection(.enabled)
+                    Button(productText("复制到目标聊天", "Copy for your target chat")) { model.copy(prompt) }
+                }
+                // Keep the field mounted after native proof arrives: the chat
+                // still needs an independent observation of the entered value.
                 if model.acceptance["challenge"]["desktopValue"].string != nil {
                     Text(productText("桌面验证输入框（由聊天里的 Computer Use 操作）", "Desktop verification field (operated by Computer Use from chat)")).font(.caption)
                     ProductAcceptanceField(model: model, owner: controller).frame(height: 30)
@@ -327,7 +336,7 @@ struct ProductView: View {
                 statusRow("CLI", model.acceptance["requestProof"]["status"].string)
                 statusRow("Browser Automation", model.acceptance["browser"]["status"].string)
                 statusRow("Computer Use", model.acceptance["desktop"]["status"].string)
-                Button(productText("我在目标聊天看到了结果", "I saw the results in the target chat")) { model.confirmChat() }.disabled(!model.targetProofReady)
+                if !model.accepted { Button(productText("我在目标聊天看到了结果", "I saw the results in the target chat")) { model.confirmChat() }.disabled(!model.targetProofReady) }
             }
             if model.accepted { Button(productText("完成设置", "Finish setup")) { model.page = .overview }.buttonStyle(.borderedProminent) }
         }
@@ -345,7 +354,7 @@ struct ProductView: View {
                 if model.foregroundRecoveryNeeded { Button(productText("恢复本次连接", "Resume this connection")) { model.resumeForeground() } }
             }
             ProductPanel(title: productText("聊天连接", "Chat connection")) {
-                Text(model.joined ? productText("由主台管理", "Managed on the main computer") : model.accepted ? productText("已收到真实工具结果与目标聊天确认", "Real tool results and target-chat confirmation received") : productText("尚未完成目标聊天验证", "Target-chat verification is incomplete"))
+                Text(model.joined ? productText("由主台管理", "Managed on the main computer") : model.chatVerification.label)
                 Button(productText("查看聊天连接", "View chat connection")) { model.page = .chat }
             }
         }

@@ -62,7 +62,45 @@ enum ProductTunnelInputPolicy {
         return nil
     }
 }
+enum ProductChatVerification: Equatable {
+    case pending, partial, verified, confirmed, expired, contextChanged
+    static func observed(_ acceptance: ProductJSON, contextChanged: Bool) -> Self {
+        if contextChanged || acceptance["status"].string == "acceptance_context_changed" { return .contextChanged }
+        if acceptance["complete"].bool { return .confirmed }
+        if acceptance["status"].string == "acceptance_expired" { return .expired }
+        let exec = acceptance["requestProof"]["status"].string == "verified"
+        let browser = acceptance["browser"]["status"].string ?? ""
+        let desktop = acceptance["desktop"]["status"].string ?? ""
+        if exec && ["verified", "not_required"].contains(browser) && ["verified", "not_required"].contains(desktop) { return .verified }
+        if exec || browser == "verified" || desktop == "verified" { return .partial }
+        return .pending
+    }
+    var hasRequest: Bool { [.partial, .verified, .confirmed].contains(self) }
+    var proofComplete: Bool { self == .verified || self == .confirmed }
+    var label: String {
+        switch self {
+        case .verified, .confirmed: return productText("真实调用已验证", "Real calls verified")
+        case .partial: return productText("部分调用已验证", "Some calls verified")
+        case .expired: return productText("测试请求已过期", "Test request expired")
+        case .contextChanged: return productText("连接信息已变化", "Connection details changed")
+        case .pending: return productText("尚未验证真实调用", "Real calls not yet verified")
+        }
+    }
+}
 extension ProductModel {
+    var chatVerification: ProductChatVerification { .observed(acceptance, contextChanged: plugin["contextChanged"].bool) }
+    var chatNextStep: String {
+        switch chatVerification {
+        case .confirmed: return productText("真实调用与目标聊天确认已完成。", "Real calls and target-chat confirmation are complete.")
+        case .verified: return productText("所选能力的真实调用已通过。仅待你确认在目标聊天看到了结果，无需重新连接或安装插件。", "Real calls passed for the selected capabilities. Only your confirmation of seeing the results remains; no reconnect or reinstall is needed.")
+        case .partial: return productText("已收到真实聊天调用，继续验证其余能力即可。", "Real chat calls were received. Continue verifying the remaining capabilities.")
+        case .expired: return productText("测试请求已过期；这不表示连接中断。需要验收时可生成新请求。", "The test request expired; this does not mean the connection stopped. Generate a new request when verification is needed.")
+        case .contextChanged: return productText("请核对当前连接，再验证真实调用。", "Review the current connection, then verify real calls.")
+        case .pending:
+            if plugin["accountActions"]["installation"].string == "user_confirmed" { return productText("在 ChatGPT 使用 Styx 完成一次真实调用。", "Use Styx in ChatGPT to verify a real call.") }
+            return productText("在 ChatGPT 添加 Styx；如果已经安装，直接开始真实调用验证。", "Add Styx in ChatGPT, or start real-call verification if it is already installed.")
+        }
+    }
     var localIndicator: ProductConnectionIndicator {
         guard loaded, observationError == nil else { return .unknown }
         guard localPrepared else { return .attention }
@@ -76,14 +114,15 @@ extension ProductModel {
     var chatIndicator: ProductConnectionIndicator {
         if observationError != nil { return .unknown }
         if tunnelAttempt == .connecting { return .attention }
-        if tunnelConnection == .connected && accepted && !plugin["contextChanged"].bool { return .connected }
+        if tunnelConnection == .connected && chatVerification.proofComplete { return .connected }
         if tunnelConnection == .notConfigured { return .offline }
+        if tunnelConnection == .connected && chatVerification != .contextChanged { return .unknown }
         return .attention
     }
     var chatMenuTitle: String {
         if chatIndicator == .connected { return "ChatGPT" }
         if tunnelConnection == .notConfigured { return productText("连接 ChatGPT", "Connect ChatGPT") }
-        if tunnelConnection == .connected { return productText("完成 ChatGPT 连接", "Finish ChatGPT setup") }
+        if tunnelConnection == .connected { return productText("ChatGPT · 待验证", "ChatGPT · Verification pending") }
         return productText("修复 ChatGPT 连接", "Fix ChatGPT connection")
     }
     var hasSavedRuntimeKey: Bool {
@@ -261,7 +300,7 @@ struct ProductTunnelStatus: View {
                 Text(model.tunnelFeedback).font(.callout)
             }.accessibilityElement(children: .combine)
             if model.tunnelConnection == .connected {
-                Text(productText("下一步，在 ChatGPT 添加 Styx。", "Next, add Styx in ChatGPT.")).font(.caption).foregroundStyle(.secondary)
+                Text(model.chatNextStep).font(.caption).foregroundStyle(.secondary)
             } else if model.tunnelAttempt == .failed || model.tunnelAttempt == .timedOut || model.tunnelConnection == .unavailable {
                 Text(productText("请检查网络；也可以编辑 Tunnel ID 和运行密钥后再试。", "Check the network, or edit the Tunnel ID and runtime key, then retry.")).font(.caption).foregroundStyle(.secondary)
             }
