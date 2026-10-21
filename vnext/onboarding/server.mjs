@@ -363,7 +363,7 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
    }else if(url.pathname==='/api/capabilities/rollback'){
     keys(data,['authorize','transactionId']);const result=await api.rollbackDeploymentCapabilities(stateDir,data);send(200,{capabilities:result});return;
    }else if(url.pathname==='/api/capabilities'){
-    keys(data,['authorize','computer','browser']);const result=await changeDeploymentCapabilities(stateDir,data,{trustedMacPreviewApp:macPreviewApp});send(200,{capabilities:result});return;
+    keys(data,['authorize','computer','browser','browserChannel','persistLogin']);const result=await changeDeploymentCapabilities(stateDir,data,{trustedMacPreviewApp:macPreviewApp});send(200,{capabilities:result});return;
    }else if(url.pathname==='/api/tunnel/configure'){
     keys(data,['tunnelId','apiKey','authorize','autoStart']);if(!tunnel)fail('bundled_tunnel_unavailable');
     const result=configureTunnel(stateDir,data);send(200,{tunnel:result});return;

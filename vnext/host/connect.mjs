@@ -167,8 +167,14 @@ if (process.argv[1] && path.resolve(process.argv[1])===fileURLToPath(import.meta
       onStatus:state=>status(state),
       onReady:info=>status('connected',{lane:'exec'})}),
     ...(config.browser?.enabled?[import('./browser.mjs').then(({runBrowserConnector})=>runBrowserConnector(config,{signal:abort.signal,onStatus:(state,meta)=>status(state,meta),onReady:()=>status('connected',{lane:'browser'})}))]:[]),
-    ...(process.platform==='linux'&&!process.env.DISPLAY&&!process.env.WAYLAND_DISPLAY&&!config.computer?.socket&&!config.computer?.env?.DISPLAY&&!config.computer?.env?.WAYLAND_DISPLAY?[]:[runComputerConnectors(config,{signal:abort.signal,
-      onStatus:(state,meta)=>status(state,meta),
-      onReady:()=>status('connected',{lane:'computer'})})])
+    ...(config.computer?.enabled?[process.platform==='linux'
+      ? import('./linux-desktop.mjs').then(({runLinuxDesktopLifecycle,resolveLinuxDesktopSession})=>runLinuxDesktopLifecycle({
+        signal:abort.signal,onStatus:(state,meta)=>status(state,meta),
+        resolveSession:()=>resolveLinuxDesktopSession({env:{...process.env,...config.computer.env}}),
+        connect:(session,{signal})=>runComputerConnectors({...config,computer:{...config.computer,
+          env:{...config.computer.env,DISPLAY:'',WAYLAND_DISPLAY:'',...session.env}}},{signal,
+          onStatus:(state,meta)=>status(state,meta),onReady:()=>status('connected',{lane:'computer'})})}))
+      :runComputerConnectors(config,{signal:abort.signal,onStatus:(state,meta)=>status(state,meta),
+        onReady:()=>status('connected',{lane:'computer'})})]:[])
   ]);
 }

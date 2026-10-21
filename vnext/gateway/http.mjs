@@ -34,6 +34,9 @@ export async function createGatewayHttp(gateway, {
     throw new Error('Explicit allowed hosts required for non-loopback binding');
   const hosts = allowedHosts ?? [host + ':' + port];
   const digest = createHash('sha256').update(token).digest();
+  // Stable only within the explicitly shared bearer authority. This is not a
+  // ChatGPT account ID. Domain separation keeps the auth digest off the wire.
+  const browserPrincipal=createHash('sha256').update('styx/browser-profile/v1\0').update(digest).digest('hex');
   if(enrollment && timingSafeEqual(digest,enrollment.adminDigest))
     throw Error('Enrollment owner token must differ from MCP bearer');
   const sessions = new Map();
@@ -107,7 +110,7 @@ export async function createGatewayHttp(gateway, {
         sessions.set(id, {transport, server, owner, inFlight: 1, lastActivityAt: Date.now()});
       }
     });
-    const server = gateway.serverForOwner(owner);
+    const server = gateway.serverForOwner(owner,{browserPrincipal});
     transport.onclose = () => {
       if (sid) sessions.delete(sid);
       void gateway.closeOwner?.(owner).catch(() => {});

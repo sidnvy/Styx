@@ -22,6 +22,9 @@ export function activeHostConfig(raw,releaseRoot) {
     updated.computer={...raw.computer,binary:cua};
   }
   if(raw.browser?.enabled){for(const name of ['host/browser.mjs','packages/styx-browser-provider/host.mjs','packages/styx-browser-provider/config.mjs','packages/styx-browser-provider/prepare.mjs','packages/styx-browser-provider/contract.mjs','packages/styx-browser-provider/playwright-contract-0.0.83.json','packages/styx-browser-provider/node_modules/@playwright/mcp/package.json']){if(!fs.existsSync(path.join(releaseRoot,...name.split('/'))))throw Error('signed_browser_runtime_missing');}}
+  if(raw.browser?.enabled&&(raw.browser.channel||raw.browser.persistLogin)){
+    for(const name of ['installed.mjs','login-state.mjs'])if(!fs.existsSync(path.join(releaseRoot,'packages/styx-browser-provider',name)))throw Error('signed_browser_runtime_missing');
+  }
   // The Host binary paths are intentionally derived from the signed active
   // release, never from mutable onboarding/Host config fields.
   return updated;

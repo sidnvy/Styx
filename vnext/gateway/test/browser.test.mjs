@@ -16,6 +16,23 @@ test('Browser schemas preserve locked native definitions and add only environmen
   assert.equal((await provider.callTool('browser_take_screenshot',{},'a')).structuredContent.error,'invalid_arguments');
   assert.equal((await provider.callTool('browser_snapshot',{_meta:{[BROWSER_META_OWNER]:'forged'}},'a')).structuredContent.error,'invalid_arguments');
 });
+test('login authority is bound by transport while tabs and references retain invocation owners',async t=>{
+  const {provider,calls}=fixture(t),principal='1'.repeat(64);
+  provider.bindPrincipal('chat-a',principal);provider.bindPrincipal('chat-b',principal);
+  const a=token(await provider.callTool('browser_snapshot',{},'chat-a'));
+  const first=calls.at(-1)._meta;
+  await provider.callTool('browser_snapshot',{},'chat-b');
+  const second=calls.at(-1)._meta;
+  assert.equal(first['app.styx/browser-profile-owner'],principal);
+  assert.equal(second['app.styx/browser-profile-owner'],principal);
+  assert.notEqual(first[BROWSER_META_OWNER],second[BROWSER_META_OWNER]);
+  assert.equal((await provider.callTool('browser_click',{target:a},'chat-b')).structuredContent.error,'browser_snapshot_required');
+  assert.throws(()=>provider.bindPrincipal('chat-a','2'.repeat(64)),/principal_changed/);
+  assert.throws(()=>provider.bindPrincipal('forged','caller-chosen'),/invalid_browser_principal/);
+  await provider.closeOwner('chat-a');assert.equal(provider.principals.has('chat-a'),false);
+  await provider.callTool('browser_snapshot',{},'unbound');
+  assert.equal(calls.at(-1)._meta['app.styx/browser-profile-owner'],undefined);
+});
 test('Browser scopes all target fields to owner, device and latest observation',async t=>{
   const {provider,calls}=fixture(t);const first=token(await provider.callTool('browser_snapshot',{},'alice'));
   for(const [name,args]of [['browser_click',{target:first}],['browser_drag',{startTarget:first,endTarget:first}],['browser_fill_form',{fields:[{name:'field',type:'textbox',target:first,value:'x'}]}]])assert.equal((await provider.callTool(name,args,'bob')).structuredContent.error,'browser_snapshot_required');

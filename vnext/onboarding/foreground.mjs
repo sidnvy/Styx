@@ -113,7 +113,17 @@ async function start(d,operations,abort){
    const signal=abort.signal,retryMinMs=500,retryMaxMs=1500;
    track(operations.runHost??runHostConnector,selected.host,{signal,retryMinMs,retryMaxMs,onReady:()=>{entry.execConnection='connected'},onStatus:()=>{entry.execConnection='disconnected'}});
    if(entry.browserRequested){const runner=operations.runBrowser??(await import('../host/browser.mjs')).runBrowserConnector;track(runner,selected.host,{signal,onReady:()=>{entry.browserConnection='connected'},onStatus:state=>{entry.browserConnection=state}});}
-   if(entry.computerRequested){
+   if(entry.computerRequested&&process.platform==='linux'&&(!operations.guiAvailable||operations.runLinuxDesktop)){
+    const {runLinuxDesktopLifecycle,resolveLinuxDesktopSession}=await import('../host/linux-desktop.mjs');
+    track((_config,options)=>(operations.runLinuxDesktop??runLinuxDesktopLifecycle)({
+     signal:options.signal,
+     onStatus:state=>{entry.desktopConnection=state==='session_available'?'connecting':'session_unavailable_or_unobserved'},
+     resolveSession:()=>entry.scopeValid()?resolveLinuxDesktopSession({env:{...process.env,...selected.host.computer.env}}):{available:false,reason:'foreground_scope_changed'},
+     connect:(session,{signal:desktopSignal})=>(operations.runComputer??runComputerConnectors)({...selected.host,
+      computer:{...selected.host.computer,env:{...selected.host.computer.env,DISPLAY:'',WAYLAND_DISPLAY:'',...session.env}}},
+      {signal:desktopSignal,retryMinMs,retryMaxMs,onReady:()=>{entry.desktopConnection='connected'},onStatus:()=>{entry.desktopConnection='disconnected'}})
+    }),selected.host,{signal});
+   }else if(entry.computerRequested){
     const currentScope=()=>{try{return entry.scopeValid()}catch{return false}};
     entry.resumeComputer=async()=>{
      if(entry.computerStarted)return;

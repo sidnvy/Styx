@@ -59,11 +59,11 @@ async function setup(t,{slots=2,native=false}={}){
     exec:{binary:path.resolve('packages/styx-exec-adapter/.runtime/codex'),cwd:tmp,
       env:{CODEX_HOME:path.join(tmp,'codex-home')}},
     computer:{enabled:true,binary:computerBinary,connections:slots,
-      ...(native?{env:{CUA_DRIVER_RS_ENABLE_WAYLAND:'1'}}:{env:{DISPLAY:':styx-protocol-fixture'}})}};
+      ...(native?{env:{CUA_DRIVER_RS_ENABLE_WAYLAND:'1'}}:{})}};
   await fs.mkdir(cfg.exec.env.CODEX_HOME);
   const cfgPath=path.join(tmp,'host.json');
   await fs.writeFile(cfgPath,JSON.stringify(cfg),{mode:0o600});
-  child=spawn(process.execPath,['host/connect.mjs',cfgPath],{
+  child=spawn(process.execPath,[native?'host/connect.mjs':'gateway/test/fixtures/connector-lanes.mjs',cfgPath],{
     cwd:path.resolve('.'),stdio:['ignore','pipe','pipe'],
     env:{...process.env,DO_NOT_TRACK:'1'}
   });

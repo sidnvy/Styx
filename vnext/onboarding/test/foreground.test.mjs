@@ -197,3 +197,25 @@ test('capability editing stops only its own confirmed foreground and preserves i
  assert.equal(fs.readFileSync(path.join(f.stateDir,'foreground.lock'),'utf8'),'foreign-owner');
  fs.unlinkSync(path.join(f.stateDir,'foreground.lock'));
 });
+
+
+test('Linux desktop loss and return drain only Computer while foreground Exec and identity remain', {skip:process.platform!=='linux'},async t=>{
+ const {runLinuxDesktopLifecycle}=await import('../../host/linux-desktop.mjs');
+ const f=await fixture(t,{computer:true});let session={available:false,reason:'desktop_locked'},execStopped=false;
+ const identityFile=path.join(f.base,'device/identity.json'),before=fs.readFileSync(identityFile);
+ const runHost=async(c,options)=>{try{await f.ops.runHost(c,options)}finally{execStopped=true}};
+ const ops={...f.ops,runHost,runLinuxDesktop:options=>runLinuxDesktopLifecycle({...options,resolveSession:()=>session,pollMs:10})};
+ await startDeploymentForeground(f.stateDir,{authorize:true},ops);
+ await until(()=>readDeploymentForeground(f.stateDir).desktopConnection==='session_unavailable_or_unobserved');
+ assert.equal(readDeploymentForeground(f.stateDir).execConnection,'connected');
+ session={available:true,key:'session-first',env:{WAYLAND_DISPLAY:'wayland-fixture',DISPLAY:''}};
+ await until(()=>readDeploymentForeground(f.stateDir).desktopConnection==='connected');
+ assert.equal(f.runCalls.length,2);
+ session={available:false,reason:'no_active_graphical_session'};
+ await until(()=>readDeploymentForeground(f.stateDir).desktopConnection==='session_unavailable_or_unobserved');
+ assert.equal(execStopped,false);assert.equal(readDeploymentForeground(f.stateDir).execConnection,'connected');
+ session={available:true,key:'session-second',env:{WAYLAND_DISPLAY:'wayland-fixture-2',DISPLAY:''}};
+ await until(()=>readDeploymentForeground(f.stateDir).desktopConnection==='connected');
+ assert.equal(f.runCalls.length,3);assert.deepEqual(fs.readFileSync(identityFile),before);
+ await stopDeploymentForeground(f.stateDir);assert.equal(execStopped,true);
+});

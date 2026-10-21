@@ -9,7 +9,7 @@ import {requirePrivateFile} from './private-storage.mjs';
 
 const ROOT=fileURLToPath(new URL('../',import.meta.url));
 const STATIC=Object.freeze([
-  'host/connect.mjs','host/computer.mjs',
+  'host/connect.mjs','host/computer.mjs','host/linux-desktop.mjs',
   'host/launch.mjs','host/installer.mjs','host/health-update.mjs','host/service-update.mjs',
   'host/enroll.mjs','host/setup-native.mjs','host/macos-preview-trust.mjs','host/macos-local-signing.mjs','host/doctor.mjs','host/linux-service.mjs',
   'host/macos-launchagent.mjs','host/macos-native-launcher.mjs','host/windows-task.ps1',
@@ -99,7 +99,7 @@ export function buildHostRelease({destination,version,privateKeyFile,
     if(browserRuntime){
       const browserRoot=path.join(sourceRoot,'packages/styx-browser-provider'),browserLock=JSON.parse(fs.readFileSync(path.join(browserRoot,'package-lock.json'),'utf8'));
       for(const [locator,locked]of Object.entries(browserLock.packages??{})){if(!locator)continue;const folder=path.join(browserRoot,...locator.split('/'));if(!fs.existsSync(folder)){if(locked.optional)continue;throw Error('browser_locked_dependency_missing');}const pkg=JSON.parse(fs.readFileSync(path.join(folder,'package.json'),'utf8'));assert(pkg.version===locked.version&&typeof locked.integrity==='string','browser_dependency_lock_mismatch');}
-      for(const name of ['host/browser.mjs',...['host.mjs','config.mjs','contract.mjs','prepare.mjs','package.json','package-lock.json','playwright-contract-0.0.83.json'].map(name=>'packages/styx-browser-provider/'+name)])copy(path.join(sourceRoot,name),path.join(destination,name));
+      for(const name of ['host/browser.mjs',...['host.mjs','config.mjs','contract.mjs','prepare.mjs','installed.mjs','login-state.mjs','package.json','package-lock.json','playwright-contract-0.0.83.json'].map(name=>'packages/styx-browser-provider/'+name)])copy(path.join(sourceRoot,name),path.join(destination,name));
       const dependencyRoot=path.join(browserRoot,'node_modules');
       const members=(root,prefix='')=>fs.readdirSync(root,{withFileTypes:true}).flatMap(entry=>{if(entry.name==='.bin'||entry.name==='.package-lock.json')return [];const rel=prefix?prefix+'/'+entry.name:entry.name;if(entry.isDirectory())return members(path.join(root,entry.name),rel);if(!entry.isFile())throw Error('unsupported_browser_dependency');return /\.(map|ts)$/.test(entry.name)?[]:[rel];});
       for(const name of members(dependencyRoot))copy(path.join(dependencyRoot,name),path.join(destination,'packages/styx-browser-provider/node_modules',name));

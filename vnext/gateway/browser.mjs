@@ -6,13 +6,14 @@ const plain=x=>x!==null&&typeof x==='object'&&!Array.isArray(x);
 const nativeRef=/^(?:f\d+)?e\d+$/;
 const tokenRef=/^styx-[a-f0-9]{32}$/;
 const targetKeys=new Set(['target','startTarget','endTarget']);
+const PROFILE_OWNER='app.styx/browser-profile-owner';
 const wrapTool=tool=>({...structuredClone(tool),inputSchema:{...structuredClone(tool.inputSchema),properties:{...structuredClone(tool.inputSchema.properties),environment_id:{type:'string',minLength:1,description:'Device from list_execution_environments. Omit only when a default device is configured.'}}}});
 
 // Schemas stay native. Only opaque reference VALUES are bound to owner and the
 // current observation; no model-visible page/session protocol is introduced.
 export class BrowserProvider{
   constructor({registry,relay,connect}={}){
-    this.registry=registry;this.relay=relay;this.stopped=false;this.connections=new Map();this.pending=new Map();this.pendingAbort=new Map();this.owners=new Map();this.tokens=new Map();
+    this.registry=registry;this.relay=relay;this.stopped=false;this.connections=new Map();this.pending=new Map();this.pendingAbort=new Map();this.owners=new Map();this.tokens=new Map();this.principals=new Map();
     this.schema=browserTools.map(wrapTool);const validator=new AjvJsonSchemaValidator();
     this.validators=new Map(this.schema.map(tool=>[tool.name,validator.getValidator(tool.inputSchema)]));
     this.connect=connect??(async (target,{signal}={})=>{
@@ -33,6 +34,14 @@ export class BrowserProvider{
     });
   }
   async listTools(){return this.schema;}
+  // Only the authenticated transport binds this identity. It is not an account
+  // assertion or a model-supplied workspace selector; tabs/refs retain the
+  // short-lived invocation owner even when dedicated login storage is reused.
+  bindPrincipal(owner,principal){
+    if(typeof owner!=='string'||!owner||!/^[a-f0-9]{64}$/.test(principal??''))throw Error('invalid_browser_principal');
+    const current=this.principals.get(owner);if(current&&current!==principal)throw Error('browser_principal_changed');
+    this.principals.set(owner,principal);
+  }
   target(id){const target=this.registry.resolve(id);if(target.browser?.enabled!==true)throw Error('browser_not_available');return target;}
   context(owner,target){
     if(typeof owner!=='string'||!owner)throw Error('invalid_owner');
@@ -100,9 +109,11 @@ export class BrowserProvider{
         if(context.closed||this.target(target.id).generation!==context.generation)throw Error('browser_generation_changed');
         const unwrapped=this.unwrap(nativeArgs,context);
         if(!readOnly||name==='browser_snapshot')context.refs.clear();
-        if(Buffer.byteLength(JSON.stringify({name,arguments:unwrapped,_meta:{[BROWSER_META_OWNER]:context.token}}))+256>8*1024*1024)throw Error('browser_frame_limit');
+        const meta={[BROWSER_META_OWNER]:context.token};
+        if(this.principals.has(owner))meta[PROFILE_OWNER]=this.principals.get(owner);
+        if(Buffer.byteLength(JSON.stringify({name,arguments:unwrapped,_meta:meta}))+256>8*1024*1024)throw Error('browser_frame_limit');
         dispatched=true;
-        const result=await item.client.callTool({name,arguments:unwrapped,_meta:{[BROWSER_META_OWNER]:context.token}});
+        const result=await item.client.callTool({name,arguments:unwrapped,_meta:meta});
         if(name==='browser_close'){context.refs.clear();context.readiness='not_started';}
         return name==='browser_snapshot'&&!nativeArgs.filename?this.wrapResult(result,context):result;
       }finally{context.active--;release();}
@@ -118,6 +129,7 @@ export class BrowserProvider{
   status(target,owner){const context=this.owners.get(owner)?.contexts.get(target.id);const active=context&&!context.closed&&context.generation===target.generation&&this.connections.get(target.id)?.closed===false;return {configured:target.browser?.enabled===true,readiness:active?context.readiness:'unknown',version:active?context.version:'unknown',headless:active?context.headless:'unknown'};}
   hasOwnerWork(owner){return [...(this.owners.get(owner)?.contexts.values()??[])].some(c=>c.active>0||c.queued>0);}
   async closeOwner(owner){
+    this.principals.delete(owner);
     const state=this.owners.get(owner);if(!state)return;state.closed=true;
     for(const [id,context]of state.contexts){context.closed=true;context.refs.clear();this.tokens.delete(context.token);const item=this.connections.get(id);if(item&&!item.closed)await item.client.notification({method:BROWSER_OWNER_CLOSED,params:{owner:context.token}}).catch(()=>{});}
     this.owners.delete(owner);

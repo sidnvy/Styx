@@ -95,7 +95,7 @@ test('preview includes the independently locked foreground Browser dependency cl
  const provider='packages/styx-browser-provider';
  // Copy the real production provider, without workspace ancestors or installed
  // Host resources: Node must resolve every import within the packaged tree.
- for(const name of ['host/private-storage.mjs',...['host.mjs','prepare.mjs','config.mjs','contract.mjs','playwright-contract-0.0.83.json'].map(name=>provider+'/'+name)]){
+ for(const name of ['host/private-storage.mjs',...['host.mjs','prepare.mjs','config.mjs','contract.mjs','installed.mjs','login-state.mjs','playwright-contract-0.0.83.json'].map(name=>provider+'/'+name)]){
   const target=path.join(destination,name);fs.mkdirSync(path.dirname(target),{recursive:true});fs.copyFileSync(path.join(sourceRoot,name),target);
  }
  copyOfflineDependencies({lockFile:path.join(sourceRoot,'package-lock.json'),dependenciesDir:path.join(sourceRoot,'node_modules'),destination});

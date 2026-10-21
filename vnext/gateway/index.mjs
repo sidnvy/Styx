@@ -28,7 +28,8 @@ export function createStyxGateway({catalog, connect, computer, browser, gui = nu
   const browserProvider=browser===undefined?new BrowserProvider({registry,relay}):browser;
   return {
     registry, pool, exec, computer: cua, browser:browserProvider, gui, relay,
-    serverForOwner(owner) {
+    serverForOwner(owner,{browserPrincipal}={}) {
+      if(browserPrincipal!==undefined)browserProvider?.bindPrincipal?.(owner,browserPrincipal);
       return createGatewayMcp({exec, computer:cua, browser:browserProvider, gui, registry, owner, relay, cas, casOnly, onToolResult});
     },
     hasOwnerWork(owner) {
