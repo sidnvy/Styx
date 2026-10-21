@@ -44,12 +44,13 @@ function fixtureState(directory,role){
  save();return {receipt,save,record};
 }
 export function requireCrossGates(receipt,names){receipt.missingRequiredGates=names.filter(name=>receipt.gates[name]?.status!=='PASS');assert(receipt.missingRequiredGates.length===0,'cross_required_gates_incomplete');}
+export function crossOperationSuccess(result={}){const {status:resultStatus,...fields}=result;return {...fields,...(resultStatus!==undefined?{resultStatus}:{}),status:'PASS'};}
 async function commandLoop(directory,handlers,onAttempt=()=>{}){
  for(;;){
   for(const name of fs.readdirSync(path.join(directory,'requests')).sort()){
    if(!/^[a-f0-9]{32}\.json$/.test(name)||fs.existsSync(path.join(directory,'responses',name)))continue;
    const file=path.join(directory,'requests',name);assert(fs.statSync(file).size<65536,'cross_command_too_large');const {operation,payload={}}=JSON.parse(fs.readFileSync(file,'utf8'));
-   let answer;try{assert(typeof handlers[operation]==='function','cross_command_not_allowed');answer={status:'PASS',...await handlers[operation](payload)};}catch(e){answer={status:'BLOCKED',reason:/^[A-Za-z0-9_]+$/.test(e.message??'')?e.message:'cross_operation_failed'};}
+   let answer;try{assert(typeof handlers[operation]==='function','cross_command_not_allowed');answer=crossOperationSuccess(await handlers[operation](payload));}catch(e){answer={status:'BLOCKED',reason:/^[A-Za-z0-9_]+$/.test(e.message??'')?e.message:'cross_operation_failed'};}
    onAttempt({operation,requestId:name,status:answer.status,...(answer.reason?{reason:answer.reason}:{}),at:new Date().toISOString()});
    publishCrossFile(path.join(directory,'responses',name),JSON.stringify(answer)+'\n');
    if(operation==='abort'||operation==='stop'&&answer.status==='PASS')return answer;
