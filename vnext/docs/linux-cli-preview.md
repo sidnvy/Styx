@@ -85,3 +85,34 @@ reboot, lock-screen recovery, remote pairing and ChatGPT account invocation
 remain separate native/manual acceptance gates. Failure to include a signed
 Host bundle blocks Host setup; lack of a tunnel binary blocks that connector,
 but does not block local Gateway-only or headless CLI use.
+
+## Native Host and Browser acceptance runner
+
+`host/linux-cli-acceptance.mjs` is opt-in, outside ordinary test execution. It
+requires a preview distribution containing both signed runtimes, installed
+Chrome, OpenSSL, and an owning user without a conflicting `styx-host.service`.
+It never installs or stops that global unit. If the real Core service observer
+refuses the environment, inspect the blocker; do not replace it with a mock.
+
+Run on an explicitly authorized native Linux x64 test host:
+
+```sh
+STYX_RUN_LINUX_CLI_ACCEPTANCE=1 node host/linux-cli-acceptance.mjs /absolute/public-test-paths.json
+```
+
+The input contains only `directory` (fresh evidence output) and `distribution`
+(existing portable preview). The runner creates private disposable deployment
+state, actual TLS Gateway, actual signed Host installation, scoped owner-local
+pairing approval and doctor. It then uses Core foreground lifecycle, genuine
+Codex Exec and installed Chrome through TLS MCP. A synthetic loopback site
+provides independent click readback and test-only login storage. It tests Host
+stop/reconnect without identity recreation, then imports a real one-use invite
+into a second independent Core deployment and approves its exact fingerprint.
+The second Host executes and browses through the first Gateway without creating
+another Gateway. Both devices in this scenario run on one physical Linux
+computer; it does not prove cross-machine routing or firewall behavior.
+
+The receipt separates each real gate, account boundaries and cleanup. Only
+owned child processes and disposable state are involved. A failed cleanup keeps
+state for reconciliation instead of reporting success. `CODEX_HOME` and browser
+profiles are isolated; no production credentials or daily profiles are read.
