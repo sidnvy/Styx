@@ -29,7 +29,7 @@ const statusTool = {
   annotations: {readOnlyHint: true, destructiveHint: false, idempotentHint: true}
 };
 
-export function createGatewayMcp({exec, computer, browser, gui, registry, owner, relay = null, cas = null, casOnly = false, onToolResult = null}) {
+export function createGatewayMcp({exec, computer, browser, gui, registry, owner, relay = null, cas = null, casOnly = false, onToolResult = null, withOwner = (_meta,operation)=>operation(owner)}) {
   if (typeof owner !== 'string' || !owner) throw new TypeError('Authenticated session required');
   if (casOnly && !cas) throw Error('cas_lab_requires_explicit_experiment_ledger');
   const server = new Server({name: 'styx-vnext', version: '0.1.0'},
@@ -52,7 +52,7 @@ export function createGatewayMcp({exec, computer, browser, gui, registry, owner,
     });
   }
   server.setRequestHandler(ListToolsRequestSchema, async () => ({tools: await definitions()}));
-  async function observed(name,args,operation){
+  async function observed(owner,name,args,operation){
     let target=null;
     try{const execution=name==='write_stdin'?exec.sessions?.get(args.session_id):null;target=registry.resolve(execution?.environment??args.environment_id);}catch{}
     const operationId=randomUUID();
@@ -62,7 +62,7 @@ export function createGatewayMcp({exec, computer, browser, gui, registry, owner,
     return result;
   }
 
-  server.setRequestHandler(CallToolRequestSchema, async ({params}) => {
+  server.setRequestHandler(CallToolRequestSchema, async ({params}) => withOwner(params._meta,async owner => {
     const {name, arguments: args = {}} = params;
     if (cas && CAS_TOOLS.some(tool => tool.name === name))
       return casCall(cas, name, args);
@@ -96,16 +96,16 @@ export function createGatewayMcp({exec, computer, browser, gui, registry, owner,
       };
       return {structuredContent: result, content: [{type: 'text', text: JSON.stringify(result)}]};
     }
-    if(browser&&(await browser.listTools()).some(tool=>tool.name===name))return observed(name,args,()=>browser.callTool(name,args,owner));
-    if (execTools.some(t => t.name === name)) return observed(name,args,()=>exec.callTool(name, args, owner));
+    if(browser&&(await browser.listTools()).some(tool=>tool.name===name))return observed(owner,name,args,()=>browser.callTool(name,args,owner));
+    if (execTools.some(t => t.name === name)) return observed(owner,name,args,()=>exec.callTool(name, args, owner));
     if (computer && computerAllowed() &&
       (await computer.listTools()).some(t => t.name === name)) {
-      return observed(name,args,()=>computer.callTool(name,args,owner));
+      return observed(owner,name,args,()=>computer.callTool(name,args,owner));
     }
     if (gui && !computer && computerAllowed() && guiTools.some(t => t.name === name)) {
       return gui.callTool(name, args, owner);
     }
     return {isError: true, content: [{type: 'text', text: 'unknown_tool'}]};
-  });
+  }));
   return server;
 }

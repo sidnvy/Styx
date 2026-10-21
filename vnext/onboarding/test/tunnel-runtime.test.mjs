@@ -150,3 +150,18 @@ test('editing connection can retain the server-owned key without disclosing it',
  assert.equal(fs.readFileSync(path.join(dir,current.keyFile),'utf8'),key);
  assert.equal(fs.readdirSync(dir).filter(n=>n.startsWith('key-')).length,1);
 });
+
+test('Tunnel context capability is separate, private, stable and injected only by file reference',async t=>{
+ const {tunnelContext}=await import('../tunnel-context.mjs');
+ const f=fixture(t);assert.equal(tunnelContext(f.stateDir),null);
+ const context=tunnelContext(f.stateDir,{create:true});assert.match(context.token,/^[a-f0-9]{64}$/);
+ assert.notEqual(context.token,token);assert.deepEqual(tunnelContext(f.stateDir,{create:true}),context);
+ if(process.platform!=='win32')assert.equal(fs.statSync(context.file).mode&0o077,0);
+ configureTunnel(f.stateDir,{tunnelId,apiKey:key,authorize:true});const runtime=new TunnelRuntime(f);
+ await runtime.start({authorize:true});
+ const args=JSON.parse(f.calls[0][1][3]);
+ assert.equal(args.filter(x=>x==='X-Styx-Tunnel-Context: file:'+context.file).length,2);
+ assert.equal(JSON.stringify(f.calls).includes(context.token),false);
+ await runtime.stop();
+ fs.writeFileSync(context.file,'invalid');assert.throws(()=>tunnelContext(f.stateDir),/invalid_tunnel_context/);
+});
