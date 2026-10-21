@@ -1,13 +1,13 @@
 // A deterministic, stored ZIP of one freshly validated plugin. This API takes
 // configuration and proof, never filesystem roots, arbitrary members or secrets.
-import {buildPackageFiles,crc32} from './package.mjs';
+import {buildPackageFiles,crc32,PACKAGED_SKILLS} from './package.mjs';
 
-const ALLOWED=new Set(['plugin.json','mcp.json','skills/styx-native-onboarding/SKILL.md','assets/icon.png']);
+const ALLOWED=new Set(['plugin.json','mcp.json',...PACKAGED_SKILLS.map(name=>`skills/${name}/SKILL.md`),'assets/icon.png']);
 const MAX_ARCHIVE_BYTES=2*1024*1024;
 export function buildPackageArchive(config,receipt,options={}){
  const built=buildPackageFiles(config,receipt,options),local=[],central=[],entries=[];
  let offset=0,centralSize=0;
- if(built.files.length<3||built.files.length>4)throw Error('invalid_plugin_archive_members');
+ if(built.files.length<2+PACKAGED_SKILLS.length||built.files.length>3+PACKAGED_SKILLS.length)throw Error('invalid_plugin_archive_members');
  for(const file of built.files){
   if(!ALLOWED.has(file.path)||entries.includes('styx-native/'+file.path)||!Buffer.isBuffer(file.data))throw Error('invalid_plugin_archive_members');
   const member='styx-native/'+file.path,name=Buffer.from(member,'utf8'),size=file.data.length,checksum=crc32(file.data);

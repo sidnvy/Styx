@@ -31,7 +31,17 @@ A fresh account connection needs a newly provisioned Styx Gateway with its own s
 
 From the concrete merged-release handoff, obtain exact source/release revision, signed native Host bundle, publisher public key and independently trusted SHA-256 SPKI DER fingerprint. Do not invent download URLs, hashes, endpoints, or signing identities. The App-owned tunnel adds the model-only Bearer credential to both discovery and requests; the local Gateway still requires it. For this tunnel connection, choose No authentication in ChatGPT; the runtime API key belongs only in Styx. Direct HTTPS connections retain their separately configured authentication contract. Never put credentials in chat, a plugin package, or command arguments. Owner key operations are outside model-facing MCP tools.
 
-For the guided App flow, choose create or reuse and save the display name/descriptions/optional PNG icon. Default to ChatGPT Plugins → + → Add custom MCP server → Connection: Tunnel → the same Tunnel ID → Authentication: No authentication → Create as a plugin. Install that plugin and select it with @ in a new chat. Preserve its returned plugin URL when available. This connection does not automatically install the optional packaged Styx skill. A ZIP containing that skill remains an optional advanced distribution path; use the shared Core export, which verifies the local TLS Gateway but not cloud reachability, and a supported import flow. ZIP creation cannot replace account connection or actual tool-call acceptance. Local upload/install confirmations are user attestations, not platform observations. Never create a cloud plugin just to probe access.
+For the guided App flow, preserve or edit the display name, description and PNG
+icon in Styx, then export its verified plugin ZIP. Import through the supported
+ChatGPT plugin upload workflow and install it; prefer Upload new version for the
+existing Styx plugin. The package includes this onboarding skill plus CLI,
+Browser Automation and Computer Use skills. Use those skills for daily tasks.
+If the account cannot upload or the package is desktop-only, report that exact
+limitation rather than claiming web support or silently dropping its skills.
+The shared Core export verifies local TLS Gateway discovery, not cloud reachability.
+ZIP creation and installation do not replace actual chat tool-call acceptance.
+Local upload/install confirmations are user attestations, not platform observations.
+Never create a cloud plugin merely to probe access.
 
 For initial package generation, the Gateway owner first performs authenticated MCP discovery against the actual fresh connection. Record the exact connection identity, server name, tool names, and verification time using the release's plugin verification contract. Then run `node vnext/plugin/package.mjs ABS_CONFIG ABS_OUTPUT/styx-native` from the trusted source. This validates the operator receipt, not a new live probe. Inspect the package, archive the one `styx-native` directory outside itself, and save through the supported plugin creation/install flow. Creation is not successful connection acceptance. Never create a placeholder cloud plugin.
 
