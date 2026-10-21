@@ -1,4 +1,4 @@
-# Windows native first version
+# Windows native preview
 
 Native .NET Framework 4.8 Windows Forms shell, not a browser or WebView. Notification-area icon opens a daily connection panel. Settings has General, Computers and ChatGPT navigation; setup contains its own create/join stages. The approved orb is copied from `assets/brand/styx-logo.png`.
 
@@ -6,7 +6,7 @@ The app owns a Node child through private stdin/stdout pipes. The child starts t
 
 ## Build
 
-`node host/build-windows-app.mjs /absolute/public-build-inputs.json` accepts sourceRoot (absolute vnext directory with production dependencies), fresh output, and an explicit Windows nodeBinary. Optional opensslBinary must be a standalone OpenSSL executable with its dependencies supplied externally; optional tunnelBinary must be the supported official tunnel client. Provide hostBundle, publisherKeyFile and publisherSha256 together for signed Host preparation. Never pass credentials in this public build input. The builder requires an Ed25519 publisher key, verifies its SPKI DER SHA-256 pin, and verifies the signed Windows release before and after copying it unchanged. Core verifies the actual release again during preparation. The builder hashes bundled executables into `windows-runtime.json`. Its Node MZ check establishes executable format only; it does not verify an upstream version or provenance. Adjacent `LICENSE`, `node-provenance.json` and `node-upstream.json` files are copied into the runtime directory when present, with their inclusion recorded without claiming upstream verification.
+`node host/build-windows-app.mjs /absolute/public-build-inputs.json` accepts sourceRoot (absolute vnext directory with production dependencies), fresh output, and an explicit Windows nodeBinary. Optional opensslBinary must be a standalone OpenSSL executable with its dependencies supplied externally; optional tunnelBinary must be the supported official tunnel client. Provide hostBundle, publisherKeyFile and publisherSha256 together for signed Host preparation. Never pass credentials in this public build input. The builder requires an Ed25519 publisher key, verifies its SPKI DER SHA-256 pin, and verifies the signed Windows release before and after copying it unchanged. Core verifies the actual release again during preparation. The builder checks Node and optional helpers as PE executables for the requested architecture, hashes them into `windows-runtime.json`, and requires the adjacent Node `LICENSE`. A format check does not verify an upstream version or provenance. Adjacent `node-provenance.json` and `node-upstream.json` records are included when present without claiming fresh upstream verification.
 
 On Windows it compiles with the installed Framework compiler. From Linux it stages a package for Windows compilation. Run the supplied `build.ps1` where scripts are permitted, or invoke Framework `csc.exe` directly with the references shown in that script. No execution policy, task, registry, startup or production configuration changes are needed. The compiler is part of Windows Framework; no SDK installation is required.
 
@@ -18,8 +18,30 @@ Start `StyxPreview.exe` from the package directory. A source-only compile withou
 
 NAB isolated test directory: `C:\Users\Sid\Documents\StyxWindowsFirst-20261021`. Initial source compiled there with Framework `csc.exe`, and self-test returned 0. No production tasks, identities, browser profiles or config were touched. Interactive tray behavior, real connection, native CUA, full packaging and ChatGPT account acceptance remain separate gates.
 
-Computers shows local status/capabilities and can list paired devices, select the default, and revoke access. Browser selection uses the shared auto/Chrome/Edge channel and persistent dedicated-login settings. Current gaps: Advanced ZIP export is described as experimental and is not available from this first native UI. The preview has no installer, code signing, auto-update or login registration.
+Computers shows local status/capabilities and can list paired devices, select the default, and revoke access. Browser selection uses the shared auto/Chrome/Edge channel and persistent dedicated-login settings. Current gaps: Advanced ZIP export is described as experimental and is not available from this first native UI. The preview now includes an explicit fresh-folder per-user installer. It has no product code signing, auto-update, registry registration or login startup registration.
 
 The portable compiled shell and bundled Node/Core preview are available in task outputs `outputs/windows-native-first-20261021` and on NAB under the isolated directory's `package` subdirectory. The latest package compiled successfully; the private Windows Core bootstrap and real snapshot request passed, followed by clean shutdown. Windows Node was compared against the previously recorded public SHA-256 `9c9245166b4a8e182e0b797da9c20136117ff24368eaff1fec8343a123c8db0e`. The included source/rendering harness draws its own native controls into `native-settings.png`; that rendering was visually inspected and does not prove interactive desktop acceptance. Temporary owned processes remaining: zero.
 
 `StyxSessionProbe.exe` is a read-only native preflight. It requires a nonzero own session, UserInteractive, WinSta0, and accessible Default input desktop before returning `available`; it never switches desktop, captures another app or synthesizes input. Under NAB SSH it correctly returned session 0 / unavailable. The Windows bridge invokes the probe through a package-trusted `desktopProbe` manifest pin before Core foreground startup. The native Windows builder records this hash after compilation; `build.ps1` refreshes it when a package manifest is present. Manual compiler users must update that public pin after recompiling the probe. Missing, invalid, mismatched, inaccessible and session-zero probes all leave desktop control unavailable. `available` is only startup preflight, not CUA execution acceptance. Continuous lock/logout observation and recovery remain unverified.
+
+## Fresh-folder preview packaging and installation
+
+The builder reads public source files from the Git index by default. Outside a checkout, pass an explicit `sourceFiles` array of reviewed repository-relative public paths. It does not scan arbitrary local source files or include ignored `.runtime`/`.cache` state. Production dependency locations and versions come from each package lock; missing required dependencies or redirected source/binary/dependency paths fail the build. Signed Host payloads use an independent exact copier and are verified again in the final package.
+
+A native Windows build produces `windows-package.json`, `install-windows-preview.mjs` and `Install-StyxPreview.cmd`. The manifest checks package consistency only; it is **not evidence of authenticity**. A bundle signed by an ephemeral test publisher remains test material, not product distribution trust.
+
+From the original preview package, run:
+
+```text
+Install-StyxPreview.cmd verify
+Install-StyxPreview.cmd install "C:\Users\YOUR_USER\Documents\NEW_PREVIEW_FOLDER"
+Install-StyxPreview.cmd uninstall "C:\Users\YOUR_USER\Documents\NEW_PREVIEW_FOLDER"
+```
+
+The target must be an explicit fresh directory with an existing parent under the current user's home. Existing targets and source/target overlap are refused. Open `StyxPreview.exe` in the installed folder; no registry entry, shortcut, startup task, service or OS permission is changed. Device state and dedicated website logins are outside this file installation and are preserved on removal.
+
+Keep the original package for uninstall: Windows cannot delete the Node executable running from the installed directory. Uninstall requires the matching install receipt and unchanged package contents, and rechecks receipt/manifest identity immediately before removal. Unexpected or changed files are retained for review. An incomplete install is also retained with a failure marker rather than recursively removed. This is conservative drift detection, not protection against a malicious same-user concurrent process.
+
+`compile:false` or a Linux staging build is not installable. Running `build.ps1` by hand does **not** upgrade that staged package: its manifest would be stale and its compiled flag remains false. Rerun the native Windows builder into a new output directory to produce a consistent installable preview.
+
+Missing signed Host artifacts, trusted TLS helper or official tunnel client remain unavailable capabilities. Per-user preview file installation does not establish a complete cold install, product signing, permission continuity, account acceptance or upgrade behavior. Release builds must use the repository's checked build entrypoint and quality gates.
