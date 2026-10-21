@@ -1,5 +1,5 @@
 import fs from 'node:fs';
-import {requirePrivateDirectory,requirePrivateFile,requirePrivatePaths,openPrivatePayloadFiles,ensurePrivateDirectory,openPrivateFile,writePrivateFile} from './private-storage.mjs';
+import {requirePrivateDirectory,requirePrivateFile,requirePrivatePaths,openPrivatePayloadFiles,createPrivatePayloadDirectories,ensurePrivateDirectory,openPrivateFile,writePrivateFile} from './private-storage.mjs';
 import path from 'node:path';
 import {
   createHash,createPublicKey,verify,randomBytes
@@ -127,18 +127,23 @@ function privateWindowsStage(temp,parents){
   let current=directory;
   for(;;){const entry=bindings.get(current);assert(entry?.kind==='directory','stage_parent_not_owned');check(entry);if(current===temp)break;current=path.dirname(current);}
  };
- const directory=folder=>{
-  const relative=path.relative(temp,folder);assert(relative===''||!relative.startsWith('..'+path.sep)&&relative!=='..'&&!path.isAbsolute(relative),'invalid_private_release_directory');
-  let current=temp;
-  for(const part of relative.split(path.sep).filter(Boolean)){
-   checkAncestors(current);current=path.join(current,part);
-   if(!bindings.has(current)){const verified=ensurePrivateDirectory(current,{exclusive:true,bigint:true});remember(current,'directory',verified);}
-   else check(bindings.get(current));
+ const prepareDirectories=payloads=>{
+  const levels=new Map();
+  for(const item of payloads){
+   let folder=path.dirname(item.destination);
+   const relative=path.relative(temp,folder);assert(relative===''||!relative.startsWith('..'+path.sep)&&relative!=='..'&&!path.isAbsolute(relative),'invalid_private_release_directory');
+   while(folder!==temp){const depth=path.relative(temp,folder).split(path.sep).length;if(!levels.has(depth))levels.set(depth,new Set());levels.get(depth).add(folder);folder=path.dirname(folder);}
   }
-  checkAncestors(current);
+  for(const depth of [...levels.keys()].sort((a,b)=>a-b)){
+   const folders=[...levels.get(depth)].sort();
+   for(let offset=0;offset<folders.length;offset+=32){
+    const group=folders.slice(offset,offset+32);for(const folder of group)checkAncestors(path.dirname(folder));
+    const created=createPrivatePayloadDirectories(group);
+    for(const item of created){checkAncestors(path.dirname(item.path));remember(item.path,'directory',item.info);}
+   }
+  }
  };
  const copyBatch=payloads=>{
-  for(const item of payloads)directory(path.dirname(item.destination));
   for(const item of payloads)checkAncestors(path.dirname(item.destination));
   const outputs=openPrivatePayloadFiles(payloads.map(item=>({path:item.destination,mode:item.mode??0o600})));
   try{
@@ -156,7 +161,7 @@ function privateWindowsStage(temp,parents){
   }finally{for(const output of outputs)fs.closeSync(output.fd);}
  };
  const entries=()=>[...bindings.values()];
- return {copyBatch,canRemove(){
+ return {prepareDirectories,copyBatch,canRemove(){
   try{
    for(const file of [...parentPaths,temp])check(bindings.get(file));
    const walk=folder=>{for(const child of fs.readdirSync(folder,{withFileTypes:true})){
@@ -215,6 +220,7 @@ export function stageSignedRelease({sourceDir,installRoot,publicKeyPem,
       windowsStage=privateWindowsStage({path:temp,info:tempInfo},[{path:installRoot,info:rootInfo},{path:releases,info:releasesInfo}]);
       const payloads=[...receipt.manifest.files.map(entry=>({source:path.join(sourceDir,...entry.path.split('/')),destination:path.join(temp,...entry.path.split('/')),mode:entry.executable?0o700:0o600})),
         ...['manifest.json','manifest.sig'].map(name=>({source:path.join(sourceDir,name),destination:path.join(temp,name),mode:0o600}))];
+      windowsStage.prepareDirectories(payloads);
       for(let offset=0;offset<payloads.length;offset+=32)windowsStage.copyBatch(payloads.slice(offset,offset+32));
       windowsStage.validate();
     }else{

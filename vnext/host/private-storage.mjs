@@ -213,6 +213,80 @@ $parent=$null;$stream=$null`).replace('$stream.SetAccessControl($acl);$stream.Fl
  }
 }
 
+// The same public-payload-only boundary for fresh directories. Callers supply
+// one depth level at a time: every parent already exists and is identity-bound.
+// No existing directory can enter the batch and no directory contains payload
+// bytes until all native ownership and real-DACL readbacks have succeeded.
+export function createPrivatePayloadDirectories(folders){
+ if(process.platform!=='win32')throw Error('windows_payload_batch_required');
+ if(!Array.isArray(folders)||folders.length<1||folders.length>32||new Set(folders).size!==folders.length||Array.from(folders).some(p=>typeof p!=='string'||!path.isAbsolute(p)||path.normalize(p)!==p))throw Error('private_payload_directory_batch_invalid');
+ const created=[];
+ try{
+  for(const folder of folders){
+   const parent=path.dirname(folder),parentInfo=fs.lstatSync(parent,{bigint:true});
+   if(!parentInfo.isDirectory()||parentInfo.isSymbolicLink())throw Error('private_payload_parent_not_regular');
+   fs.mkdirSync(folder,{mode:0o700});const info=fs.lstatSync(folder,{bigint:true});
+   if(!info.isDirectory()||info.isSymbolicLink())throw Error('private_payload_directory_not_regular');
+   created.push({path:folder,parent,parentInfo,info});
+  }
+  const marker='$parent=$null;$stream=$null';if(WINDOWS_NEW_FILE_ACL.split(marker).length!==2)throw Error('private_payload_native_contract_changed');
+  const prefix=WINDOWS_NEW_FILE_ACL.slice(0,WINDOWS_NEW_FILE_ACL.indexOf(marker));
+  const script=prefix+String.raw`[object[]]$items=ConvertFrom-Json -InputObject $env:STYX_NEW_PAYLOAD_DIRECTORIES
+if($items.Count -lt 1 -or $items.Count -gt 32){throw 'private_payload_directory_batch_invalid'}
+foreach($item in $items){
+ $parentHandle=$null;$directoryHandle=$null
+ try {
+  $parentHandle=[StyxNewFileIdentity]::Parent([String]$item.parent)
+  [StyxNewFileIdentity]::Check($parentHandle,[UInt64]::Parse([String]$item.parentId),$true)
+  $directoryHandle=[StyxNewFileIdentity]::Parent([String]$item.folder)
+  [StyxNewFileIdentity]::Check($directoryHandle,[UInt64]::Parse([String]$item.folderId),$true)
+  $current=[Security.Principal.WindowsIdentity]::GetCurrent().User
+  $acl=New-Object Security.AccessControl.DirectorySecurity
+  $acl.SetOwner($current);$acl.SetAccessRuleProtection($true,$false)
+  $allowed=@($current.Value,'S-1-5-18','S-1-5-32-544')
+  foreach($sid in $allowed){
+   $identity=New-Object Security.Principal.SecurityIdentifier($sid)
+   $rule=New-Object Security.AccessControl.FileSystemAccessRule($identity,'FullControl','ContainerInherit,ObjectInherit','None','Allow')
+   $acl.AddAccessRule($rule)
+  }
+  Set-Acl -LiteralPath ([String]$item.folder) -AclObject $acl
+  $actual=Get-Acl -LiteralPath ([String]$item.folder)
+  if($actual.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $current.Value){throw 'private_payload_owner_mismatch'}
+  $descriptor=New-Object Security.AccessControl.RawSecurityDescriptor -ArgumentList $actual.Sddl
+  if($null -eq $descriptor.DiscretionaryAcl){throw 'private_payload_null_dacl'}
+  if(-not $actual.AreAccessRulesProtected){throw 'private_payload_inheritance_unprotected'}
+  $rules=$actual.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])
+  foreach($rule in $rules){
+   if($rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and $allowed -notcontains $rule.IdentityReference.Value){throw 'private_payload_broad_dacl'}
+  }
+  foreach($sid in $allowed){
+   $found=$false
+   foreach($rule in $rules){if($rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and $rule.IdentityReference.Value -eq $sid -and (([int]$rule.InheritanceFlags -band 3) -eq 3) -and $rule.PropagationFlags -eq [Security.AccessControl.PropagationFlags]::None -and (($rule.FileSystemRights -band [Security.AccessControl.FileSystemRights]::FullControl) -eq [Security.AccessControl.FileSystemRights]::FullControl)){$found=$true}}
+   if(-not $found){throw 'private_payload_inheritance_rules_missing'}
+  }
+  [StyxNewFileIdentity]::Check($directoryHandle,[UInt64]::Parse([String]$item.folderId),$true)
+  [StyxNewFileIdentity]::Check($parentHandle,[UInt64]::Parse([String]$item.parentId),$true)
+ }finally{if($null -ne $directoryHandle){$directoryHandle.Dispose()};if($null -ne $parentHandle){$parentHandle.Dispose()}}
+}
+`;
+  const rows=created.map(x=>({folder:x.path,folderId:x.info.ino.toString(),parent:x.parent,parentId:x.parentInfo.ino.toString()}));
+  for(let offset=0;offset<rows.length;){
+   let end=Math.min(offset+32,rows.length),group=rows.slice(offset,end);
+   while(JSON.stringify(group).length>16384&&end>offset+1)group=rows.slice(offset,--end);
+   if(JSON.stringify(group).length>16384)throw Error('private_payload_directory_batch_limit');
+   execFileSync('powershell.exe',['-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(script,'utf16le').toString('base64')],{env:{...process.env,STYX_NEW_PAYLOAD_DIRECTORIES:JSON.stringify(group)},windowsHide:true,timeout:WINDOWS_ACL_TIMEOUT_MS,stdio:['ignore','ignore','ignore']});offset=end;
+  }
+  for(const item of created){
+   const parent=fs.lstatSync(item.parent,{bigint:true}),current=fs.lstatSync(item.path,{bigint:true});
+   if(!parent.isDirectory()||parent.isSymbolicLink()||!current.isDirectory()||current.isSymbolicLink()||!sameFile(parent,item.parentInfo)||!sameFile(current,item.info))throw Error('private_payload_directory_binding_changed');
+  }
+  return created.map(({path,info})=>({path,info}));
+ }catch(error){
+  for(const item of created.reverse())try{const parent=fs.lstatSync(item.parent,{bigint:true}),current=fs.lstatSync(item.path,{bigint:true});if(parent.isDirectory()&&!parent.isSymbolicLink()&&current.isDirectory()&&!current.isSymbolicLink()&&sameFile(parent,item.parentInfo)&&sameFile(current,item.info))fs.rmdirSync(item.path);}catch{}
+  throw Error(error.code==='ETIMEDOUT'?'private_payload_directory_creation_timed_out':'private_payload_directory_creation_failed');
+ }
+}
+
 // One synchronous boundary, not a cache. Every path is freshly lstatted and
 // every actual Windows DACL is checked on each invocation. Never carry this
 // result across an await, callback or mutation as authorization for later use.
