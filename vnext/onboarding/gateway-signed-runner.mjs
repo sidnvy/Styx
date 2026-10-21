@@ -1,3 +1,4 @@
+import {tunnelContext} from './tunnel-context.mjs';
 // Installed signed application entrypoint. Verify the whole active release
 // with the trusted stable installer before importing its application/deps.
 import fs from 'node:fs';
@@ -25,7 +26,7 @@ try{
  const {createAcceptanceObserver}=await import('../shared/onboarding-evidence.mjs');
  const gateway=createStyxGateway({catalog,onToolResult:createAcceptanceObserver(stateDir)});
  const enrollment=new EnrollmentController({rootDir:runtime.enrollmentDir,adminTokenFile:runtime.adminTokenFile,registry:gateway.registry,relay:gateway.relay});
- let handle;try{handle=await createGatewayHttp(gateway,{token:fs.readFileSync(runtime.modelTokenFile,'utf8').trim(),host:runtime.listenHost,port:Number(new URL(runtime.url).port),allowedHosts:[new URL(runtime.url).host],tlsCertificateFile:runtime.tlsCertificateFile,tlsPrivateKeyFile:runtime.tlsPrivateKeyFile,enrollment});}catch(e){await gateway.close();throw e;}
+ let handle;try{handle=await createGatewayHttp(gateway,{tunnelContextToken:tunnelContext(stateDir,{create:true}).token,token:fs.readFileSync(runtime.modelTokenFile,'utf8').trim(),host:runtime.listenHost,port:Number(new URL(runtime.url).port),allowedHosts:[new URL(runtime.url).host],tlsCertificateFile:runtime.tlsCertificateFile,tlsPrivateKeyFile:runtime.tlsPrivateKeyFile,enrollment});}catch(e){await gateway.close();throw e;}
  let stopping=false;const stop=()=>{if(stopping)return;stopping=true;handle.close().then(()=>process.exit(0),()=>process.exit(2));};
  process.on('SIGTERM',stop);process.on('SIGINT',stop);process.stdout.write('Styx signed Gateway running.\n');
 }catch{process.stderr.write('Styx signed Gateway startup failed; inspect private deployment state.\n');process.exitCode=2;}

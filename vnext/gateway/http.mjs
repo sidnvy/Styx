@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import {randomUUID, createHash, timingSafeEqual} from 'node:crypto';
 import {StreamableHTTPServerTransport} from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import {handleEnrollment} from './enrollment.mjs';
+import {ConversationOwners} from './conversation-owners.mjs';
 
 function authorize(req, digest, hosts, origins) {
   if (!hosts.includes(req.headers.host)) return 403;
@@ -21,7 +22,7 @@ function authorize(req, digest, hosts, origins) {
 export async function createGatewayHttp(gateway, {
   token, host = '127.0.0.1', port = 8795, allowedHosts, allowedOrigins = [],
   idleSessionTimeoutMs = 15 * 60 * 1000,
-  tlsCertificateFile, tlsPrivateKeyFile, enrollment = null
+  tlsCertificateFile, tlsPrivateKeyFile, enrollment = null, tunnelContextToken = null
 } = {}) {
   if (typeof token !== 'string' || token.length < 32 || /\s/.test(token))
     throw new Error('Strong inbound bearer required');
@@ -40,6 +41,9 @@ export async function createGatewayHttp(gateway, {
   if(enrollment && timingSafeEqual(digest,enrollment.adminDigest))
     throw Error('Enrollment owner token must differ from MCP bearer');
   const sessions = new Map();
+  if(tunnelContextToken!==null&&!/^[a-f0-9]{64}$/.test(tunnelContextToken))throw Error('Invalid Tunnel context capability');
+  const contextDigest=tunnelContextToken===null?null:createHash('sha256').update(tunnelContextToken).digest();
+  const conversations=contextDigest?new ConversationOwners({key:tunnelContextToken,gateway,principal:browserPrincipal}):null;
   // Clients can abandon short-lived sessions without DELETE. There is no MCP
   // session-count cap: one account must not block another account from connecting.
   // Reclaim 15-minute idle sessions on new initialization, preserving in-flight
@@ -55,6 +59,7 @@ export async function createGatewayHttp(gateway, {
       await session.server.close().catch(() => {});
       await gateway.closeOwner?.(session.owner).catch(() => {});
     }
+    await conversations?.reap(idleSessionTimeoutMs);
   }
   if (Boolean(tlsCertificateFile) !== Boolean(tlsPrivateKeyFile))
     throw new Error('TLS certificate and key must be supplied together');
@@ -73,12 +78,17 @@ export async function createGatewayHttp(gateway, {
     if (req.url !== '/mcp') return refuse(404, 'Not found');
     const denied = authorize(req, digest, hosts, allowedOrigins);
     if (denied) return refuse(denied, 'Forbidden');
+    const contextHeader=req.headers['x-styx-tunnel-context'];
+    const trustedTunnel=typeof contextHeader==='string'&&contextDigest!==null&&
+      timingSafeEqual(createHash('sha256').update(contextHeader).digest(),contextDigest);
+    if(contextHeader!==undefined&&!trustedTunnel)return refuse(403,'Invalid Tunnel context');
     if (!['POST', 'GET', 'DELETE'].includes(req.method)) return refuse(405, 'Method not allowed');
     const sessionId = req.headers['mcp-session-id'];
     if (Array.isArray(sessionId)) return refuse(400, 'Invalid session');
     if (sessionId) {
       const established = sessions.get(sessionId);
       if (!established) return refuse(404, 'Session not found');
+      if(established.trustedTunnel!==trustedTunnel)return refuse(403,'Session ingress changed');
       // A long-lived GET SSE subscription is passive, not an active tool call.
       // Otherwise an abandoned client with an open SSE stream is never reaped.
       const activeOperation = req.method !== 'GET';
@@ -107,10 +117,11 @@ export async function createGatewayHttp(gateway, {
       sessionIdGenerator: () => randomUUID(),
       onsessioninitialized: id => {
         sid = id;
-        sessions.set(id, {transport, server, owner, inFlight: 1, lastActivityAt: Date.now()});
+        sessions.set(id, {transport, server, owner, trustedTunnel, inFlight: 1, lastActivityAt: Date.now()});
       }
     });
-    const server = gateway.serverForOwner(owner,{browserPrincipal});
+    const server = gateway.serverForOwner(owner,{browserPrincipal,
+      ...(trustedTunnel?{withOwner:(meta,operation)=>conversations.run(meta,operation)}:{})});
     transport.onclose = () => {
       if (sid) sessions.delete(sid);
       void gateway.closeOwner?.(owner).catch(() => {});

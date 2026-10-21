@@ -114,3 +114,40 @@ test('Exec target-selection errors remain actionable before connecting a native 
   assert.equal(connected,false);
  }finally{await gateway.close()}
 });
+
+test('trusted Tunnel conversation survives HTTP reconnects without merging users or chats', async t => {
+ const hosts=[],token='test-model-'+ 'a'.repeat(40),context='b'.repeat(64),browserOwners=[],computerOwners=[];
+ const cfg=catalog();cfg.targets[0].exec={transport:'outbound',token_file:'/tmp/fixture-token'};cfg.targets[0].computer={enabled:true,transport:'outbound'};cfg.targets[0].browser={enabled:true,transport:'outbound'};
+ const browser={bindPrincipal(owner,principal){browserOwners.push({owner,principal})},async listTools(){return [{name:'browser_probe',inputSchema:{type:'object'}}]},async callTool(_n,_a,owner){return {content:[{type:'text',text:owner}]}},async close(){}};
+ const computer={async listTools(){return [{name:'computer_probe',inputSchema:{type:'object'}}]},async callTool(_n,_a,owner){computerOwners.push(owner);return {content:[{type:'text',text:owner}]}},async close(){}};
+ const gateway=createStyxGateway({catalog:cfg,connect:async()=>fakeRuntime(),browser,computer});
+ const server=await createGatewayHttp(gateway,{token,port:0,allowedHosts:hosts,tunnelContextToken:context});
+ const address='http://127.0.0.1:'+server.address.port+'/mcp';hosts.push('127.0.0.1:'+server.address.port);t.after(()=>server.close());
+ async function client(capability=context){
+  const transport=new StreamableHTTPClientTransport(new URL(address),{requestInit:{headers:{Authorization:'Bearer '+token,...(capability?{'X-Styx-Tunnel-Context':capability}:{})}}});
+  const c=new Client({name:'conversation-test',version:'1'});await c.connect(transport);t.after(()=>c.close());return c;
+ }
+ const meta={'openai/subject':'user-a','openai/session':'chat-a','openai/organization':'org-a'};
+ const call=(c,name,args={},m=meta)=>c.callTool({name,arguments:args,_meta:m});
+ const a=await client();
+ const running=await call(a,'exec_command',{cmd:'sleep',yield_time_ms:0});
+ const id=running.structuredContent.session_id;assert.ok(id);
+ const browserA=await call(a,'browser_probe');await a.close();
+ const b=await client();
+ const resumed=await call(b,'write_stdin',{session_id:id,chars:'',yield_time_ms:0});
+ assert.equal(resumed.isError,undefined);assert.equal(resumed.structuredContent.session_id,id);
+ assert.equal((await call(b,'browser_probe')).content[0].text,browserA.content[0].text);
+ assert.equal((await call(b,'computer_probe')).content[0].text,browserA.content[0].text);
+ for(const change of [{'openai/session':'chat-b'},{'openai/subject':'user-b'},{'openai/organization':'org-b'}]) {
+  assert.equal((await call(b,'write_stdin',{session_id:id,chars:'x',yield_time_ms:0},{...meta,...change})).structuredContent.error,'unknown_session');
+ }
+ const plain=await client(null);
+ assert.equal((await call(plain,'write_stdin',{session_id:id,chars:'',yield_time_ms:0})).structuredContent.error,'unknown_session');
+ assert.equal((await call(b,'exec_command',{cmd:'test'},{})).structuredContent.error,'trusted_conversation_metadata_required');
+ assert.equal((await call(b,'exec_command',{cmd:'test'},{...meta,'openai/session':{bad:true}})).structuredContent.error,'trusted_conversation_metadata_required');
+ await assert.rejects(client('c'.repeat(64)));
+ await call(b,'browser_probe',{}, {...meta,'openai/subject':'user-b'});
+ const profiles=browserOwners.filter(x=>x.owner.startsWith('tunnel-conversation:'));
+ assert.notEqual(profiles[0].principal,profiles.at(-1).principal);
+ assert.equal(computerOwners[0],browserA.content[0].text);
+});
