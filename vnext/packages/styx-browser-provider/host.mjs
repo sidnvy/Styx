@@ -1,4 +1,6 @@
 import path from 'node:path';
+import {readLoginState,writeLoginState} from './login-state.mjs';
+import {resolveInstalledBrowser} from './installed.mjs';
 import fs from 'node:fs';
 import {pathToFileURL} from 'node:url';
 import {createConnection} from '@playwright/mcp';
@@ -10,7 +12,7 @@ import {CallToolRequestSchema,ListToolsRequestSchema,ListRootsRequestSchema} fro
 import {ensurePrivateDirectory,requirePrivateDirectory} from '../../host/private-storage.mjs';
 import {prepareManagedBrowser} from './prepare.mjs';
 import {normalizeBrowserConfig} from './config.mjs';
-import {BROWSER_CONTRACT,BROWSER_VERSION,BROWSER_META_OWNER,BROWSER_OWNER_CLOSED,BROWSER_STATE_CHANGED,browserTools,browserFailure} from './contract.mjs';
+import {BROWSER_CONTRACT,BROWSER_VERSION,BROWSER_META_OWNER,BROWSER_META_PROFILE_OWNER,BROWSER_OWNER_CLOSED,BROWSER_STATE_CHANGED,browserTools,browserFailure} from './contract.mjs';
 const ownerPattern=/^[a-f0-9]{64}$/;
 const localFileURL=value=>{try{return new URL(value).protocol==='file:'}catch{return false}};
 const referenceTarget=(value,key='')=>Array.isArray(value)?value.some(v=>referenceTarget(v)):value&&typeof value==='object'?Object.entries(value).some(([k,v])=>referenceTarget(v,k)):['target','startTarget','endTarget'].includes(key)&&typeof value==='string'&&/^(?:f\d+)?e\d+$/.test(value);
@@ -21,6 +23,7 @@ const exactContract=tools=>JSON.stringify(tools.filter(t=>!BROWSER_CONTRACT.omit
 export class HostBrowserSupervisor{
   constructor({browser,cwd,idleMs=15*60*1000,clock=()=>Date.now(),operations={}}={}){
     this.config=normalizeBrowserConfig(browser);
+    if(this.config){const installed=resolveInstalledBrowser(this.config);if(installed)this.config={...this.config,executablePath:installed.executablePath};}
     if(!this.config||typeof cwd!=='string'||!path.isAbsolute(cwd))throw Error('browser_workspace_required');
     if(!Number.isSafeInteger(idleMs)||idleMs<1000)throw Error('invalid_browser_idle_policy');
     if(!this.config.headless&&process.platform==='linux'&&!process.env.DISPLAY&&!process.env.WAYLAND_DISPLAY)throw Error('browser_gui_session_unavailable');
@@ -35,17 +38,19 @@ export class HostBrowserSupervisor{
   }
   notify(owner,state){for(const server of this.servers)void server.notification({method:BROWSER_STATE_CHANGED,params:{owner,state}}).catch(()=>{});}
   status(owner){const lease=this.leases.get(owner);return {state:lease?.uncertain||lease?.closeError?'unknown':lease?.context&&!lease.closed?'ready_observed':'not_started',active:lease?.active??0,headless:this.config.headless,version:lease?.context?.browser()?.version()??'unknown'};}
-  async lease(owner){
+  async lease(owner,principal){
     if(this.stopped)throw Error('browser_provider_closed');
     if(!ownerPattern.test(owner??''))throw Error('browser_owner_required');
-    const existing=this.leases.get(owner);if(existing){if(existing.closed){await existing.closing;return this.lease(owner);}return existing.opening;}
+    if(this.config.persistLogin&&!ownerPattern.test(principal??''))throw Error('browser_profile_owner_required');
+    const existing=this.leases.get(owner);if(existing){if(existing.principal!==principal)throw Error('browser_profile_owner_changed');if(existing.closed){await existing.closing;return this.lease(owner,principal);}return existing.opening;}
     const folder=path.join(this.config.profileRoot,owner),profile=path.join(folder,'profile'),output=path.join(folder,'output');
     for(const dir of [folder,profile,output])ensurePrivateDirectory(dir);
-    const item={owner,context:null,client:null,server:null,tail:Promise.resolve(),active:0,queued:0,closed:false,uncertain:false,observation:0,snapshotObservation:null,lastUsed:this.clock(),profile,output};
+    const item={owner,principal,context:null,client:null,server:null,tail:Promise.resolve(),active:0,queued:0,closed:false,uncertain:false,observation:0,snapshotObservation:null,lastUsed:this.clock(),profile,output};
     item.opening=(async()=>{
       const native=await (this.operations.createConnection??createConnection)({browser:{browserName:'chromium',isolated:false},capabilities:['core'],webmcp:false,
         outputDir:output,filePaths:'absolute',snapshot:{mode:'none'},imageResponses:'allow',timeouts:{idle:0}},async()=>{
           if(item.closed||this.stopped)throw Error('browser_owner_closed');
+          if(item.restoreError)throw Error('browser_login_restore_failed');
           if(!item.context){
             item.launching??=(async()=>{
               if(!this.config.executablePath){this.runtime??=prepareManagedBrowser({profileRoot:this.config.profileRoot,authorize:true,signal:this.abort.signal}).catch(error=>{this.runtime=null;throw error;});const prepared=await this.runtime;if(item.closed||this.stopped)throw Error('browser_owner_closed');item.executablePath=prepared.executablePath;}
@@ -54,6 +59,7 @@ export class HostBrowserSupervisor{
                 executablePath:this.config.executablePath??item.executablePath,acceptDownloads:true,downloadsPath:output,
                 viewport:{width:1280,height:800}});
               item.context=context;
+              if(this.config.persistLogin){try{const state=readLoginState(this.config.profileRoot,principal);if(state)await context.setStorageState(state);item.loginReady=true;}catch(error){item.restoreError=true;throw error;}}
               const invalidate=()=>{item.observation++;item.snapshotObservation=null;this.notify(owner,{readiness:'ready_observed',observationChanged:true,headless:this.config.headless,version:context.browser()?.version()??'unknown'});};
               const observePage=page=>{page.on('framenavigated',invalidate);page.on('close',invalidate);};
               for(const page of context.pages?.()??[])observePage(page);
@@ -77,9 +83,9 @@ export class HostBrowserSupervisor{
     this.leases.set(owner,item);
     try{return await item.opening;}catch(error){await this.closeOwner(owner);throw error;}
   }
-  async callTool(name,args,owner){
+  async callTool(name,args,owner,principal){
     if(!browserTools.some(t=>t.name===name))return browserFailure('unknown_tool');
-    const item=await this.lease(owner);
+    const item=await this.lease(owner,principal);
     const previous=item.tail;let release;item.tail=new Promise(r=>{release=r});item.queued++;
     await previous;item.queued--;item.active++;
     try{
@@ -93,12 +99,15 @@ export class HostBrowserSupervisor{
       }
       if(['browser_navigate','browser_tabs'].includes(name)&&typeof args.url==='string'&&localFileURL(args.url))return browserFailure('browser_file_navigation_denied');
       if(referenceTarget(args)&&item.snapshotObservation!==item.observation)return browserFailure('browser_snapshot_required');
+      if(name==='browser_close')await this.saveLogin(item);
       const observation=item.observation;let result;
       try{result=await item.client.callTool({name,arguments:args});}
       catch(error){item.uncertain=true;this.notify(owner,{readiness:'unknown',headless:this.config.headless,version:'unknown'});throw error;}
+      if(!result.isError&&name!=='browser_close')await this.saveLogin(item);
       if(name==='browser_snapshot'&&!args.filename&&!result.isError&&observation===item.observation)item.snapshotObservation=item.observation;
       if(name==='browser_close'&&!result.isError)await this.closeOwner(owner);
       const status=this.status(owner);this.notify(owner,{readiness:status.state,headless:status.headless,version:status.version});
+      if(item.persistenceError)result={...result,content:[...(result.content??[]),{type:'text',text:'The browser action completed, but its login continuation snapshot could not be saved.'}]};
       return result;
     }finally{item.active--;item.lastUsed=this.clock();release();}
   }
@@ -109,12 +118,16 @@ export class HostBrowserSupervisor{
     server.setRequestHandler(CallToolRequestSchema,async({params})=>{
       const owner=params._meta?.[BROWSER_META_OWNER];
       if(!ownerPattern.test(owner??''))return browserFailure('browser_owner_required');
-      try{return await supervisor.callTool(params.name,params.arguments??{},owner);}
-      catch(error){return browserFailure(['browser_upstream_contract_changed','browser_owner_closed'].includes(error.message)?error.message:'browser_native_unavailable',true);}
+      try{return await supervisor.callTool(params.name,params.arguments??{},owner,params._meta?.[BROWSER_META_PROFILE_OWNER]);}
+      catch(error){return browserFailure(['browser_upstream_contract_changed','browser_owner_closed','browser_profile_owner_required','browser_profile_owner_changed'].includes(error.message)?error.message:'browser_native_unavailable',true);}
     });
     server.fallbackNotificationHandler=async({method,params})=>{if(method===BROWSER_OWNER_CLOSED&&ownerPattern.test(params?.owner??''))await supervisor.closeOwner(params.owner)};
     const onclose=server.onclose;server.onclose=()=>{this.servers.delete(server);onclose?.();};this.servers.add(server);
     return server;
+  }
+  async saveLogin(item){
+    if(!this.config.persistLogin||!item.context||!item.loginReady||item.uncertain)return;
+    try{const state=await item.context.storageState({indexedDB:true});writeLoginState(this.config.profileRoot,item.principal,state);item.persistenceError=false;}catch{item.persistenceError=true;}
   }
   async closeOwner(owner){
     const item=this.leases.get(owner);if(!item)return;if(item.closing)return item.closing;
@@ -125,6 +138,7 @@ export class HostBrowserSupervisor{
         // until the actual context has settled and its closure is confirmed.
         await item.opening.catch(()=>{});
         await item.launching?.catch(()=>{});
+        await this.saveLogin(item);
         await item.context?.close();item.context=null;
         await item.client?.close();await item.server?.close();
         this.notify(owner,{readiness:'not_started',headless:this.config.headless,version:'unknown'});

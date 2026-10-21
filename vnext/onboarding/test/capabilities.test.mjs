@@ -246,3 +246,21 @@ test('unresolved browser preparation ownership stays uncertain after configurati
  const state=readDeploymentCapabilities(f.dir);assert.equal(state.status,'uncertain');assert.equal(state.reason,'browser_preparation_owner_requires_reconciliation');assert.deepEqual(fs.readFileSync(f.hostFile),before);assert.equal(fs.existsSync(lock),true);assert.equal(f.calls.length,0);
  await assert.rejects(rollbackDeploymentCapabilities(f.dir,{authorize:true,transactionId:state.transactionId},f.ops),/browser_preparation_in_progress/);assert.equal(fs.existsSync(lock),true);assert.equal(f.calls.length,0);
 });
+
+test('existing enrolled Host selects installed browser and login persistence through one guarded transaction',async t=>{
+ const f=browserFixture(t),identityBefore=fs.readFileSync(path.join(f.base,'device/identity.json')),profileBefore=fs.readFileSync(f.profile);
+ let prepared;
+ await changeDeploymentCapabilities(f.dir,{authorize:true,browser:true,browserChannel:'msedge',persistLogin:true},{...f.ops,prepareBrowser:async scope=>{prepared=scope.browser;return {status:'prepared',readiness:'not_verified'}}});
+ assert.equal(prepared.channel,'msedge');assert.equal(prepared.persistLogin,true);
+ const host=JSON.parse(fs.readFileSync(f.hostFile)),config=JSON.parse(fs.readFileSync(path.join(f.dir,'deployment.json'))),enrollment=JSON.parse(fs.readFileSync(path.join(f.base,'enrollment.json')));
+ for(const browser of [host.browser,config.host.browser,enrollment.browser_config]){assert.equal(browser.channel,'msedge');assert.equal(browser.persistLogin,true);}
+ assert.deepEqual(fs.readFileSync(path.join(f.base,'device/identity.json')),identityBefore);assert.deepEqual(fs.readFileSync(f.profile),profileBefore);
+ await rollbackDeploymentCapabilities(f.dir,{authorize:true,transactionId:readDeploymentCapabilities(f.dir).transactionId},f.ops);
+ assert.equal(JSON.parse(fs.readFileSync(path.join(f.dir,'deployment.json'))).host.browser.channel,undefined);
+});
+
+test('installed browser selection requires explicit Browser intent and rejects unbounded selection values',async t=>{
+ const f=browserFixture(t);
+ for(const selection of [{authorize:true,browserChannel:'chrome'},{authorize:true,browser:false,persistLogin:true},{authorize:true,browser:true,browserChannel:'firefox'},{authorize:true,browser:true,persistLogin:'yes'}])await assert.rejects(changeDeploymentCapabilities(f.dir,selection,f.ops));
+ assert.equal(f.calls.length,0);assert.equal(fs.existsSync(path.join(f.dir,'capabilities.json')),false);
+});

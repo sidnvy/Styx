@@ -39,8 +39,8 @@ export function validateDeployment(config,{checkNetwork=true}={}){
  for(const k of ['bundle','publisherKeyFile','baseDir'])if(!abs(config.host[k]))fail('absolute_host_paths_required');
  if(!/^[a-f0-9]{64}$/.test(config.host.publisherSha256??'')||typeof config.host.label!=='string'||!config.host.label||config.host.label.length>72||typeof config.host.computer!=='boolean')fail('invalid_host_setup');
  if(config.host.browser!==undefined){
-  exact(config.host.browser,['enabled','headless','executablePath']);
-  if(typeof config.host.browser.enabled!=='boolean'||config.host.browser.headless!==undefined&&typeof config.host.browser.headless!=='boolean'||config.host.browser.executablePath!==undefined&&!abs(config.host.browser.executablePath))fail('invalid_browser_selection');
+  exact(config.host.browser,['enabled','headless','executablePath','channel','persistLogin']);
+  if(config.host.browser.persistLogin!==undefined&&typeof config.host.browser.persistLogin!=='boolean'||config.host.browser.channel!==undefined&&!['auto','chrome','msedge'].includes(config.host.browser.channel)||typeof config.host.browser.enabled!=='boolean'||config.host.browser.headless!==undefined&&typeof config.host.browser.headless!=='boolean'||config.host.browser.executablePath!==undefined&&!abs(config.host.browser.executablePath))fail('invalid_browser_selection');
  }
  if(config.host.wayland!==undefined&&typeof config.host.wayland!=='boolean')fail('invalid_wayland_selection');
  if(config.host.shell!==undefined&&!abs(config.host.shell))fail('absolute_native_shell_required');

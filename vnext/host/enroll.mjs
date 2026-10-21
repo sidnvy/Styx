@@ -43,7 +43,7 @@ function configOf(raw){
   if(config.browser_requested!==undefined)assert(typeof config.browser_requested==='boolean','invalid_browser_selection');
   if(config.browser_requested){
     const b=config.browser_config;
-    assert(b&&typeof b==='object'&&!Array.isArray(b)&&!Object.keys(b).some(k=>!['enabled','headless','profileRoot','executablePath'].includes(k))&&b.enabled===true&&typeof b.headless==='boolean'&&typeof b.profileRoot==='string'&&path.isAbsolute(b.profileRoot)&&(b.executablePath===undefined||typeof b.executablePath==='string'&&path.isAbsolute(b.executablePath)),'invalid_local_browser_configuration');
+    assert(b&&typeof b==='object'&&!Array.isArray(b)&&!Object.keys(b).some(k=>!['enabled','headless','profileRoot','executablePath','channel','persistLogin'].includes(k))&&(b.persistLogin===undefined||typeof b.persistLogin==='boolean')&&(b.channel===undefined||['auto','chrome','msedge'].includes(b.channel))&&b.enabled===true&&typeof b.headless==='boolean'&&typeof b.profileRoot==='string'&&path.isAbsolute(b.profileRoot)&&(b.executablePath===undefined||typeof b.executablePath==='string'&&path.isAbsolute(b.executablePath)),'invalid_local_browser_configuration');
   }
   if(config.computer_requested) {
     assert(typeof config.computer_binary==='string'&&path.isAbsolute(config.computer_binary),

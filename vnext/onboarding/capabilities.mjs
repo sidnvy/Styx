@@ -70,11 +70,16 @@ export function readDeploymentCapabilities(d){
  const journal=read(file);assert(journal.schema===1&&journal.configSha256===hash(fs.readFileSync(path.join(d,'deployment.json'))),'capability_scope_changed');
  return publicStatus(journal);
 }
-export async function changeDeploymentCapabilities(d,{authorize=false,computer,browser}={},operations={}){
+export async function changeDeploymentCapabilities(d,{authorize=false,computer,browser,browserChannel,persistLogin}={},operations={}){
+ if(browserChannel!==undefined||persistLogin!==undefined){
+  assert(browser===true&&authorize===true,'explicit_browser_selection_authorization_required');
+  assert(browserChannel===undefined||['auto','chrome','msedge'].includes(browserChannel),'invalid_browser_channel');
+  assert(persistLogin===undefined||typeof persistLogin==='boolean','invalid_browser_login_persistence');
+ }
  if(browser!==undefined){
   assert(authorize===true&&typeof browser==='boolean','explicit_browser_capability_authorization_required');
   assert(computer===undefined||typeof computer==='boolean','explicit_desktop_capability_authorization_required');
-  return changeBrowserCapabilities(d,{browser,computer},operations);
+  return changeBrowserCapabilities(d,{browser,computer,browserChannel,persistLogin},operations);
  }
  assert(authorize===true&&typeof computer==='boolean','explicit_desktop_capability_authorization_required');
  requirePrivateDirectory(d);
@@ -212,7 +217,9 @@ function browserSnapshot(d,selection,ops){
  if(selection.computer===true&&host.computer?.enabled!==true)computer=ops.prepare(d,true).computer;
  if(selection.computer===false)computer=undefined;
  const desiredBrowser={...(config.host.browser??{}),enabled:selection.browser,headless:config.host.browser?.headless??host.browser?.headless??true};
- const browser={enabled:true,headless:desiredBrowser.headless,profileRoot,...(desiredBrowser.executablePath?{executablePath:desiredBrowser.executablePath}:{})};
+ if(selection.browserChannel!==undefined){desiredBrowser.channel=selection.browserChannel;delete desiredBrowser.executablePath;}
+ if(selection.persistLogin!==undefined)desiredBrowser.persistLogin=selection.persistLogin;
+ const browser={enabled:true,headless:desiredBrowser.headless,...(desiredBrowser.persistLogin!==undefined?{persistLogin:desiredBrowser.persistLogin}:{}),...(desiredBrowser.channel?{channel:desiredBrowser.channel}:{}),profileRoot,...(desiredBrowser.executablePath?{executablePath:desiredBrowser.executablePath}:{})};
  if(selection.browser){
   // This verifies the same signed closure selected by the real Host launcher.
   try{activeHostConfig({...host,browser},active.release_root)}catch{throw Error('browser_enabled_host_update_required')}
@@ -248,7 +255,7 @@ function browserSnapshot(d,selection,ops){
  if(nextState.onboardingDecisions?.background?.configSha256===state.configSha256)nextState.onboardingDecisions.background.configSha256=nextState.configSha256;
  after.set('state',encode(nextState));
  for(const item of files)item.after=after.get(item.name);
- return {...scope,config,state,host,requestedComputer,requestedBrowser:selection.browser,profileRoot,profileIdentity,files,preserved,active,moduleFile:path.join(active.release_root,'packages/styx-browser-provider/prepare.mjs')};
+ return {...scope,config,state,host,requestedComputer,requestedBrowser:selection.browser,browser,profileRoot,profileIdentity,files,preserved,active,moduleFile:path.join(active.release_root,'packages/styx-browser-provider/prepare.mjs')};
 }
 const ownerFile=owner=>owner.admin_token_file;
 function unchangedBrowserScope(scope,{allowAfter=false}={}){
@@ -277,6 +284,12 @@ async function signedBrowserUpdate(scope,observed,selection,ops){
  return result;
 }
 async function prepareSignedBrowser(scope){
+ if(scope.browser.channel||scope.browser.executablePath){
+  const file=path.join(path.dirname(scope.moduleFile),'installed.mjs');
+  const api=await import(pathToFileURL(file).href+'?sha256='+hash(privateBytes(file)));
+  const result=api.resolveInstalledBrowser(scope.browser);
+  return {status:'prepared',channel:result.channel,observation:'installed_browser_executable',readiness:'not_verified'};
+ }
  const api=await import(pathToFileURL(scope.moduleFile).href+'?sha256='+hash(privateBytes(scope.moduleFile)));
  assert(typeof api.prepareManagedBrowser==='function'&&typeof api.readManagedBrowser==='function','browser_enabled_host_update_required');
  ensurePrivateDirectory(scope.profileRoot);

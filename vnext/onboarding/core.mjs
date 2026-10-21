@@ -67,7 +67,7 @@ function browserPreparationScope(d,{ownsAdvance=false}={}){
  if(host.browser.profileRoot!==profileRoot)fail('browser_profile_binding_changed');
  requirePrivateDirectory(profileRoot);
  const preserved=[path.join(d,'deployment.json'),path.join(d,'state.json'),hostFile,identityFile,privateFile,host.token_file,publisher,path.join(install,'active.json')].map(file=>[file,hash(file)]);
- return {configured:true,approved:true,moduleFile,profileRoot,unchanged:()=>preserved.every(([file,digest])=>hash(file)===digest)};
+ return {configured:true,approved:true,moduleFile,profileRoot,browser:host.browser,unchanged:()=>preserved.every(([file,digest])=>hash(file)===digest)};
 }
 function browserPreparationProjection(result){
  if(!['prepared','not_prepared','preparation_blocked'].includes(result?.status))fail('browser_preparation_result_invalid');
@@ -78,11 +78,20 @@ async function browserPreparationModule(scope){
  if(typeof api.readManagedBrowser!=='function'||typeof api.prepareManagedBrowser!=='function')fail('browser_enabled_host_bundle_required');
  return api;
 }
+async function installedBrowserProjection(scope){
+ const file=path.join(path.dirname(scope.moduleFile),'installed.mjs');
+ if(!fs.existsSync(file))fail('browser_enabled_host_bundle_required');
+ const api=await import(pathToFileURL(file).href+'?sha256='+hash(file));
+ const result=api.resolveInstalledBrowser(scope.browser);
+ if(!scope.unchanged())fail('browser_preparation_scope_changed');
+ return {schema:1,configured:true,approved:true,status:'prepared',channel:result.channel,observation:'installed_browser_executable',readiness:'not_verified',accountAcceptance:'NOT RUN'};
+}
 export async function readDeploymentBrowser(d){
  const scope=browserPreparationScope(d);
  if(!scope.configured)return {schema:1,configured:false,status:'not_configured',readiness:'not_verified',accountAcceptance:'NOT RUN'};
  if(scope.pending)return {schema:1,configured:true,status:'awaiting_host_approval',readiness:'not_verified',accountAcceptance:'NOT RUN'};
  if(scope.approved===false)return {schema:1,configured:true,approved:false,status:'not_approved',observation:'approved_host_configuration',readiness:'not_verified',accountAcceptance:'NOT RUN'};
+ if(scope.browser.channel||scope.browser.executablePath)return installedBrowserProjection(scope);
  const api=await browserPreparationModule(scope);if(!scope.unchanged())fail('browser_preparation_scope_changed');
  const result=api.readManagedBrowser(scope.profileRoot);if(!scope.unchanged())fail('browser_preparation_scope_changed');
  return browserPreparationProjection(result);
@@ -94,6 +103,7 @@ export async function prepareDeploymentBrowser(d,options={}){
  try{
   const scope=browserPreparationScope(d,{ownsAdvance:true});
   if(scope.approved!==true)fail('approved_browser_host_required');
+  if(scope.browser.channel||scope.browser.executablePath)return installedBrowserProjection(scope);
   const api=await browserPreparationModule(scope);
   if(!scope.unchanged())fail('browser_preparation_scope_changed');
   const result=await api.prepareManagedBrowser({profileRoot:scope.profileRoot,authorize:true,...(options.recover!==undefined?{recover:options.recover}:{}),...(options.signal?{signal:options.signal}:{})});

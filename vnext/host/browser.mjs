@@ -1,4 +1,5 @@
 import WebSocket from 'ws';
+import {resolveInstalledBrowser} from '../packages/styx-browser-provider/installed.mjs';
 import {browserFailure} from '../packages/styx-browser-provider/contract.mjs';
 import {hostAuthentication,normalizeConnector} from './connect.mjs';
 import {normalizeBrowserConfig} from '../packages/styx-browser-provider/config.mjs';
@@ -25,6 +26,7 @@ export async function runBrowserConnector(config,{signal,once=false,onReady,onSt
     try{
       if(!supervisor){
         let browser=c.browser;
+        const installed=resolveInstalledBrowser(browser);if(installed)browser={...browser,executablePath:installed.executablePath};
         if(!browser.executablePath){onStatus?.('preparing',{lane:'browser'});const {prepareManagedBrowser}=await import('../packages/styx-browser-provider/prepare.mjs');const runtime=await prepareManagedBrowser({profileRoot:browser.profileRoot,authorize:true,signal});browser={...browser,executablePath:runtime.executablePath};}
         const {HostBrowserSupervisor}=await import('../packages/styx-browser-provider/host.mjs');supervisor=new HostBrowserSupervisor({browser,cwd:c.exec.cwd});
       }
