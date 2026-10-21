@@ -1,5 +1,5 @@
 import fs from 'node:fs';
-import {requirePrivateDirectory,requirePrivateFile,ensurePrivateDirectory,openPrivateFile,writePrivateFile} from './private-storage.mjs';
+import {requirePrivateDirectory,requirePrivateFile,requirePrivatePaths,openPrivatePayloadFiles,ensurePrivateDirectory,openPrivateFile,writePrivateFile} from './private-storage.mjs';
 import path from 'node:path';
 import {
   createHash,createPublicKey,verify,randomBytes
@@ -20,8 +20,8 @@ function assert(yes,reason){if(!yes)throw Error(reason)}
 function existingInfo(file){try{return fs.lstatSync(file)}catch(error){if(error.code==='ENOENT')return null;throw error}}
 function privateRoot(root,{create=false}={}) {
   assert(typeof root==='string'&&path.isAbsolute(root),'absolute_install_root_required');
-  if(create)ensurePrivateDirectory(root);
-  else requirePrivateDirectory(root);
+  if(create)return ensurePrivateDirectory(root);
+  return requirePrivateDirectory(root);
 }
 function fileAtomic(dest,content){
   const temp=dest+'.new-'+randomBytes(8).toString('hex');
@@ -109,10 +109,84 @@ export function verifySignedRelease(sourceDir,publicKeyPem,{platform=process.pla
   return {version:manifest.version,platform,arch,manifest,sha256:sha256(manifestRaw)};
 }
 function sha256(data){return createHash('sha256').update(data).digest('hex')}
+const sameIdentity=(a,b)=>a.dev===b.dev&&a.ino===b.ino;
+function validatedNumberIdentity(info){
+ assert(Number.isSafeInteger(info.dev)&&Number.isSafeInteger(info.ino),'stage_file_identity_precision_unsafe');
+ return {dev:BigInt(info.dev),ino:BigInt(info.ino)};
+}
+// This optimization copies only publisher-signed PUBLIC release payloads, never
+// credentials. Authorization is local to this synchronous staging invocation.
+// Fresh directories receive explicit private ownership; empty payload files
+// receive native-ID-bound ownership/DACLs in batches. Every real DACL is still
+// checked in bounded batches before any generation becomes visible.
+function privateWindowsStage(temp,parents){
+ const bindings=new Map();
+ const inspect=(file,kind)=>{const info=fs.lstatSync(file,{bigint:true});assert(!info.isSymbolicLink()&&(kind==='directory'?info.isDirectory():info.isFile()),'stage_path_not_regular');return info;};
+ const remember=(file,kind,expected)=>{assert(!bindings.has(file),'stage_path_already_bound');assert(expected&&sameIdentity(expected,inspect(file,kind)),'stage_path_identity_changed');bindings.set(file,{path:file,kind,info:expected});};
+ const check=entry=>{assert(sameIdentity(entry.info,inspect(entry.path,entry.kind)),'stage_path_identity_changed');};
+ for(const item of [...parents,temp])remember(item.path,'directory',validatedNumberIdentity(item.info));
+ const parentPaths=parents.map(x=>x.path);temp=temp.path;
+ const checkAncestors=directory=>{
+  for(const file of parentPaths)check(bindings.get(file));
+  let current=directory;
+  for(;;){const entry=bindings.get(current);assert(entry?.kind==='directory','stage_parent_not_owned');check(entry);if(current===temp)break;current=path.dirname(current);}
+ };
+ const directory=folder=>{
+  const relative=path.relative(temp,folder);assert(relative===''||!relative.startsWith('..'+path.sep)&&relative!=='..'&&!path.isAbsolute(relative),'invalid_private_release_directory');
+  let current=temp;
+  for(const part of relative.split(path.sep).filter(Boolean)){
+   checkAncestors(current);current=path.join(current,part);
+   if(!bindings.has(current)){const verified=ensurePrivateDirectory(current,{exclusive:true});remember(current,'directory',validatedNumberIdentity(verified));}
+   else check(bindings.get(current));
+  }
+  checkAncestors(current);
+ };
+ const copyBatch=payloads=>{
+  for(const item of payloads)directory(path.dirname(item.destination));
+  for(const item of payloads)checkAncestors(path.dirname(item.destination));
+  const outputs=openPrivatePayloadFiles(payloads.map(item=>({path:item.destination,mode:item.mode??0o600})));
+  try{
+   for(let index=0;index<outputs.length;index++){
+    const output=outputs[index],item=payloads[index],destination=item.destination;
+    const created=fs.fstatSync(output.fd,{bigint:true});remember(destination,'file',created);
+    checkAncestors(path.dirname(destination));check(bindings.get(destination));
+    const input=fs.openSync(item.source,'r');
+    try{
+     const block=Buffer.allocUnsafe(1024*1024);let count;
+     while((count=fs.readSync(input,block,0,block.length,null))>0){let written=0;while(written<count){const n=fs.writeSync(output.fd,block,written,count-written);assert(n>0,'stage_write_failed');written+=n;}}
+     fs.fsyncSync(output.fd);assert(sameIdentity(created,fs.fstatSync(output.fd,{bigint:true})),'stage_path_identity_changed');check(bindings.get(destination));checkAncestors(path.dirname(destination));
+    }finally{fs.closeSync(input);}
+   }
+  }finally{for(const output of outputs)fs.closeSync(output.fd);}
+ };
+ const entries=()=>[...bindings.values()];
+ return {copyBatch,canRemove(){
+  try{
+   for(const file of [...parentPaths,temp])check(bindings.get(file));
+   const walk=folder=>{for(const child of fs.readdirSync(folder,{withFileTypes:true})){
+    const file=path.join(folder,child.name),entry=bindings.get(file);if(!entry)return false;check(entry);
+    if(entry.kind==='directory'&&!walk(file))return false;
+   }return true;};
+   return walk(temp);
+  }catch{return false;}
+ },validate(){
+  const all=entries();for(const entry of all)check(entry);
+  for(let offset=0;offset<all.length;){
+   // Windows environment payloads also have a character limit; keep both the
+   // existing 32-path bound and the existing private-path JSON bound intact.
+   let end=Math.min(offset+32,all.length),batch=all.slice(offset,end);
+   while(JSON.stringify(batch.map(x=>x.path)).length>16384&&end>offset+1)batch=all.slice(offset,--end);
+   for(const entry of batch)check(entry);
+   requirePrivatePaths(batch.map(({path,kind})=>({path,kind})));
+   for(const entry of batch)check(entry);offset=end;
+  }
+  for(const entry of all)check(entry);
+ },checkBindings(){for(const entry of entries())check(entry);}};
+}
 export function stageSignedRelease({sourceDir,installRoot,publicKeyPem,
   platform=process.platform,arch=process.arch}) {
   const receipt=verifySignedRelease(sourceDir,publicKeyPem,{platform,arch});
-  privateRoot(installRoot,{create:true});
+  const rootInfo=privateRoot(installRoot,{create:true});
   // Stable launcher and its verification helper are supplied by the trusted
   // local Styx installer executable, NEVER accepted from unsigned bundle
   // contents. They are not an alternative unsigned update path.
@@ -129,7 +203,7 @@ export function stageSignedRelease({sourceDir,installRoot,publicKeyPem,
     }
   }
   const releases=path.join(installRoot,'releases');
-  ensurePrivateDirectory(releases);
+  const releasesInfo=ensurePrivateDirectory(releases);
   const dest=path.join(releases,receipt.version);
   if(existingInfo(dest)){
     requirePrivateDirectory(dest);
@@ -138,19 +212,32 @@ export function stageSignedRelease({sourceDir,installRoot,publicKeyPem,
     return {status:'already_staged',version:receipt.version};
   }
   const temp=path.join(releases,'.stage-'+randomBytes(8).toString('hex'));
-  ensurePrivateDirectory(temp,{exclusive:true});
+  const tempInfo=ensurePrivateDirectory(temp,{exclusive:true});
+  let windowsStage;
   try{
-    for(const entry of receipt.manifest.files){
-      const from=path.join(sourceDir,...entry.path.split('/'));
-      const to=path.join(temp,...entry.path.split('/'));
-      privateSubdirectory(temp,path.dirname(to));
-      copyPrivate(from,to,entry.executable?0o700:0o600);
+    if(process.platform==='win32'){
+      windowsStage=privateWindowsStage({path:temp,info:tempInfo},[{path:installRoot,info:rootInfo},{path:releases,info:releasesInfo}]);
+      const payloads=[...receipt.manifest.files.map(entry=>({source:path.join(sourceDir,...entry.path.split('/')),destination:path.join(temp,...entry.path.split('/')),mode:entry.executable?0o700:0o600})),
+        ...['manifest.json','manifest.sig'].map(name=>({source:path.join(sourceDir,name),destination:path.join(temp,name),mode:0o600}))];
+      for(let offset=0;offset<payloads.length;offset+=32)windowsStage.copyBatch(payloads.slice(offset,offset+32));
+      windowsStage.validate();
+    }else{
+      for(const entry of receipt.manifest.files){
+        const from=path.join(sourceDir,...entry.path.split('/')),to=path.join(temp,...entry.path.split('/'));
+        privateSubdirectory(temp,path.dirname(to));copyPrivate(from,to,entry.executable?0o700:0o600);
+      }
+      copyPrivate(path.join(sourceDir,'manifest.json'),path.join(temp,'manifest.json'));
+      copyPrivate(path.join(sourceDir,'manifest.sig'),path.join(temp,'manifest.sig'));
     }
-    copyPrivate(path.join(sourceDir,'manifest.json'),path.join(temp,'manifest.json'));
-    copyPrivate(path.join(sourceDir,'manifest.sig'),path.join(temp,'manifest.sig'));
     verifySignedRelease(temp,publicKeyPem,{platform,arch});
+    windowsStage?.checkBindings();
     fs.renameSync(temp,dest);
-  }catch(e){fs.rmSync(temp,{recursive:true,force:true});throw e}
+  }catch(e){
+    // POSIX behavior is unchanged. On Windows an unknown/replaced child or
+    // root never authorizes recursive deletion of a foreign tree.
+    if(process.platform!=='win32'||windowsStage?.canRemove())fs.rmSync(temp,{recursive:true,force:true});
+    throw e;
+  }
   return {status:'staged',version:receipt.version};
 }
 function readPointer(installRoot) {

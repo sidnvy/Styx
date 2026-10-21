@@ -157,6 +157,62 @@ export function writePrivateFile(filename,data,{mode=0o600,encoding='utf8'}={}){
  }
 }
 
+// Publisher-signed PUBLIC payload staging only. Credentials continue to use
+// openPrivateFile one at a time. Own wx handles stay open while one native
+// invocation assigns the same owner/private DACL to at most 32 empty files.
+// No existing file is repaired and no result is reusable authorization.
+export function openPrivatePayloadFiles(entries){
+ if(process.platform!=='win32')throw Error('windows_payload_batch_required');
+ if(!Array.isArray(entries)||entries.length<1||entries.length>32||Array.from(entries).some(entry=>!entry||Object.keys(entry).some(k=>!['path','mode'].includes(k))||typeof entry.path!=='string'||!path.isAbsolute(entry.path)||path.normalize(entry.path)!==entry.path||![0o600,0o700].includes(entry.mode??0o600)))throw Error('private_payload_batch_invalid');
+ const opened=[];
+ try{
+  for(const entry of entries){
+   const parent=path.dirname(entry.path),parentInfo=fs.lstatSync(parent,{bigint:true});
+   if(!parentInfo.isDirectory()||parentInfo.isSymbolicLink())throw Error('private_payload_parent_not_regular');
+   const fd=fs.openSync(entry.path,'wx',entry.mode??0o600),created=fs.fstatSync(fd,{bigint:true});
+   opened.push({path:entry.path,fd,created,parent,parentInfo});
+  }
+  const rows=opened.map(x=>({file:x.path,fileId:x.created.ino.toString(),parent:x.parent,parentId:x.parentInfo.ino.toString()}));
+  for(const needle of ['$parent=$null;$stream=$null','$stream.SetAccessControl($acl);$stream.Flush($true)'])if(WINDOWS_NEW_FILE_ACL.split(needle).length!==2)throw Error('private_payload_native_contract_changed');
+  const script=WINDOWS_NEW_FILE_ACL.replace('$parent=$null;$stream=$null',String.raw`[object[]]$items=ConvertFrom-Json -InputObject $env:STYX_NEW_PAYLOAD_FILES
+if($items.Count -lt 1 -or $items.Count -gt 32){throw 'private_payload_batch_invalid'}
+foreach($item in $items){
+$env:STYX_NEW_PRIVATE_FILE=[String]$item.file
+$env:STYX_NEW_FILE_ID=[String]$item.fileId
+$env:STYX_NEW_FILE_PARENT=[String]$item.parent
+$env:STYX_NEW_FILE_PARENT_ID=[String]$item.parentId
+$parent=$null;$stream=$null`).replace('$stream.SetAccessControl($acl);$stream.Flush($true)',String.raw`$stream.SetAccessControl($acl);$stream.Flush($true)
+ # Read back the actual descriptor through the same native-ID-checked handle
+ # before the caller can write its first public payload byte.
+ $observed=$stream.GetAccessControl()
+ if($observed.GetOwner([Security.Principal.SecurityIdentifier]).Value -ne $current.Value){throw 'private_payload_owner_mismatch'}
+ $descriptor=New-Object Security.AccessControl.RawSecurityDescriptor -ArgumentList ($observed.GetSecurityDescriptorSddlForm([Security.AccessControl.AccessControlSections]::All))
+ if($null -eq $descriptor.DiscretionaryAcl){throw 'private_payload_null_dacl'}
+ $allowed=@($current.Value,'S-1-5-18','S-1-5-32-544')
+ foreach($rule in $observed.GetAccessRules($true,$true,[Security.Principal.SecurityIdentifier])){
+  if($rule.AccessControlType -eq [Security.AccessControl.AccessControlType]::Allow -and $allowed -notcontains $rule.IdentityReference.Value){throw 'private_payload_broad_dacl'}
+ }`)+ '\n}';
+  // Bound environment data as well as path count; keep all original wx FDs
+  // open across every native group until the caller receives them.
+  for(let offset=0;offset<rows.length;){
+   let end=Math.min(offset+32,rows.length),group=rows.slice(offset,end);
+   while(JSON.stringify(group).length>16384&&end>offset+1)group=rows.slice(offset,--end);
+   if(JSON.stringify(group).length>16384)throw Error('private_payload_batch_limit');
+   execFileSync('powershell.exe',['-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(script,'utf16le').toString('base64')],{
+    env:{...process.env,STYX_NEW_PAYLOAD_FILES:JSON.stringify(group)},windowsHide:true,timeout:WINDOWS_ACL_TIMEOUT_MS,stdio:['ignore','ignore','ignore']});
+   offset=end;
+  }
+  for(const item of opened){
+   const parent=fs.lstatSync(item.parent,{bigint:true}),file=fs.lstatSync(item.path,{bigint:true}),handle=fs.fstatSync(item.fd,{bigint:true});
+   if(!parent.isDirectory()||parent.isSymbolicLink()||!file.isFile()||file.isSymbolicLink()||!sameFile(parent,item.parentInfo)||!sameFile(file,item.created)||!sameFile(handle,item.created)||handle.size!==0n)throw Error('private_payload_creation_binding_changed');
+  }
+  return opened.map(({path,fd})=>({path,fd}));
+ }catch(error){
+  for(const item of opened){fs.closeSync(item.fd);try{const parent=fs.lstatSync(item.parent,{bigint:true}),current=fs.lstatSync(item.path,{bigint:true});if(parent.isDirectory()&&!parent.isSymbolicLink()&&sameFile(parent,item.parentInfo)&&current.isFile()&&!current.isSymbolicLink()&&current.size===0n&&sameFile(current,item.created))fs.unlinkSync(item.path);}catch{}}
+  throw Error(error.code==='ETIMEDOUT'?'private_payload_creation_timed_out':'private_payload_creation_failed');
+ }
+}
+
 // One synchronous boundary, not a cache. Every path is freshly lstatted and
 // every actual Windows DACL is checked on each invocation. Never carry this
 // result across an await, callback or mutation as authorization for later use.
