@@ -40,7 +40,7 @@ test('private configuration never returns credentials and supports atomic creden
 test('child gets fixed server-derived arguments and file references, never raw secrets or inherited env',async t=>{
  const f=fixture(t);configureTunnel(f.stateDir,{tunnelId,apiKey:key,authorize:true});const runtime=new TunnelRuntime(f);
  const result=await runtime.start({authorize:true});assert.equal(result.status,'running');assert.equal(result.accountAcceptance,'NOT RUN');
- const [binary,runnerArgs,opts]=f.calls[0],args=JSON.parse(runnerArgs[3]);assert.equal(binary,process.execPath);assert.equal(runnerArgs[1],f.binary);assert.ok(args.includes('https://127.0.0.1:8795/mcp'));assert.ok(args.includes('--mcp.discovery-extra-headers'));
+ const [binary,runnerArgs,opts]=f.calls[0],args=JSON.parse(runnerArgs[3]);assert.equal(binary,process.execPath);assert.equal(runnerArgs[1],f.binary);assert.ok(args.includes('https://127.0.0.1:8795/mcp'));assert.ok(args.includes('--mcp.discovery-extra-headers'));assert.equal(args[args.indexOf('--log.format')+1],'json','Official client requires structured logging when log level is set');
  assert.equal(JSON.stringify(f.calls).includes(key),false);assert.equal(JSON.stringify(f.calls).includes(token),false);assert.deepEqual(Object.keys(opts.env).sort(),['HOME','PATH','XDG_CONFIG_HOME']);assert.deepEqual(opts.stdio,['pipe','ignore','ignore']);
  assert.equal(fs.readFileSync(path.join(f.stateDir,'tunnel','gateway-header'),'utf8'),'Bearer '+token);
  assert.throws(()=>configureTunnel(f.stateDir,{tunnelId,apiKey:key,authorize:true}),/running_or_interrupted/);
