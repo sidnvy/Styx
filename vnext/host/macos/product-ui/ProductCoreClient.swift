@@ -1,5 +1,15 @@
 import Foundation
 
+// Opt-in local diagnostics: fixed route names and numeric results only.
+// Never emit request/response bodies, session URLs, headers or credentials.
+enum ProductNativeDiagnostics {
+    static func event(_ message: String) {
+        guard CommandLine.arguments.contains("--native-diagnostics") else { return }
+        let line = "STYX_NATIVE " + message + "\n"
+        FileHandle.standardError.write(Data(line.utf8))
+    }
+}
+
 // This client uses only the private bootstrap handed to the owning App by its
 // Node child. Credentials stay in memory and never enter URLs after bootstrap.
 indirect enum ProductJSON: Codable, Equatable {
@@ -118,7 +128,15 @@ final class ProductCoreClient {
             request.setValue(csrf, forHTTPHeaderField: "X-Styx-CSRF")
             request.httpBody = try JSONEncoder().encode(body)
         }
-        let (data, response) = try await transport.data(for: request)
+        ProductNativeDiagnostics.event("request " + (body == nil ? "GET " : "POST ") + route)
+        let data: Data
+        let response: URLResponse
+        do { (data, response) = try await transport.data(for: request) }
+        catch {
+            ProductNativeDiagnostics.event("transport_failure " + route + " code=" + String((error as NSError).code))
+            throw error
+        }
+        ProductNativeDiagnostics.event("response " + route + " status=" + String((response as? HTTPURLResponse)?.statusCode ?? 0))
         guard let response = response as? HTTPURLResponse,
               response.url == url,
               response.statusCode == 200 else { throw ProductCoreError.rejected }
@@ -156,7 +174,7 @@ struct ProductStep: Identifiable {
     }
     var complete: Bool { ["succeeded", "skipped"].contains(status) }
 }
-struct ProductDevice: Identifiable {
+struct ProductDevice: Identifiable, Equatable {
     let id: String
     let label: String
     let isDefault: Bool

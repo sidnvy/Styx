@@ -173,14 +173,19 @@ enum ProductRestorationPolicy {
     let client: ProductCoreClient
     #if STYX_TESTING
     var testSuppressObservations = false
+    var testPreview = false
+    var testObservationLoopStarts = 0
+    var testObservationConsumerCount: Int { observationConsumers.count }
+    var testObservationLoopRunning: Bool { observationTask != nil }
     #endif
-    @Published var page: ProductPage = .welcome
+    @Published var page: ProductPage = .welcome { didSet { if page != oldValue { ProductNativeDiagnostics.event("page " + String(describing: page)) } } }
     @Published var busy = false
     @Published var signingUpgrade: ProductJSON = .null
     @Published var signingUpgradeState: ProductJSON = .null
     @Published var loaded = false
     @Published var loadingMessage = productText("正在连接本机 Styx…", "Connecting to Styx on this Mac…")
     @Published var error: String?
+    @Published var observationError: String?
     @Published var status: ProductJSON = .null
     @Published var journey: ProductJSON = .null
     @Published var acceptance: ProductJSON = .null
@@ -220,6 +225,47 @@ enum ProductRestorationPolicy {
     @Published var tunnelAttempt: ProductTunnelAttempt = .idle
     private var tunnelMonitor: Task<Void, Never>?
     @Published var settingsSection: ProductSettingsSection = .general
+    @Published var settingsNavigationID = UUID()
+    @Published var settingsVisible = false
+    @Published var onboardingVisible = false
+    @Published var invitationCopied = false
+    @Published var invitationInFlight = false
+    var observationInFlight = false
+    var mutationRevision = 0
+    private var observationTask: Task<Void, Never>?
+    private var observationConsumers: Set<UUID> = []
+    func requestSettings(_ section: ProductSettingsSection) {
+        settingsSection = section
+        settingsNavigationID = UUID()
+    }
+    func publish<Value: Equatable>(_ keyPath: ReferenceWritableKeyPath<ProductModel, Value>, _ value: Value) {
+        if self[keyPath: keyPath] != value { self[keyPath: keyPath] = value }
+    }
+    // All visible surfaces share one polling task. Closing the last surface
+    // cancels it; a reconnect monitor temporarily owns the faster snapshot reads.
+    func observePresentation() async {
+        let id = UUID(); observationConsumers.insert(id)
+        if observationTask == nil {
+            #if STYX_TESTING
+            testObservationLoopStarts += 1
+            #endif
+            observationTask = Task { [weak self] in
+                while !Task.isCancelled {
+                    guard let self = self else { return }
+                    await self.bootstrap()
+                    if self.tunnelAttempt != .connecting { await self.refreshMenu() }
+                    do { try await Task.sleep(nanoseconds: 3_000_000_000) } catch { return }
+                }
+            }
+        }
+        defer {
+            observationConsumers.remove(id)
+            if observationConsumers.isEmpty { observationTask?.cancel(); observationTask = nil }
+        }
+        while !Task.isCancelled {
+            do { try await Task.sleep(nanoseconds: 60_000_000_000) } catch { return }
+        }
+    }
     @Published var selectedDeviceID: String?
     @Published var menuVisible = false
     @Published var invitationExpanded = false
@@ -281,6 +327,9 @@ enum ProductRestorationPolicy {
     }
 
     func bootstrap() async {
+        #if STYX_TESTING
+        if testSuppressObservations { return }
+        #endif
         observePermissions()
         guard !loaded && !busy else { return }
         busy = true
@@ -295,9 +344,20 @@ enum ProductRestorationPolicy {
     }
     func refresh() async {
         observePermissions()
-        guard !busy else { return }
-        busy = true; defer { busy = false }
-        do { try await reload(); error = nil } catch { reportFailure() }
+        #if STYX_TESTING
+        if testSuppressObservations { return }
+        #endif
+        guard !busy, !observationInFlight else { return }
+        observationInFlight = true; defer { observationInFlight = false }
+        let revision = mutationRevision
+        do {
+            try await reload()
+            if revision == mutationRevision { publish(\.observationError, nil) }
+        } catch {
+            if revision == mutationRevision && !Task.isCancelled {
+                publish(\.observationError, productText("暂时无法刷新连接状态。可以继续编辑，稍后重试。", "Connection status could not refresh. You can keep editing and retry."))
+            }
+        }
     }
     func reviewSigningUpgrade() {
         signingUpgrade = .null
@@ -314,34 +374,43 @@ enum ProductRestorationPolicy {
     private func reload() async throws {
         // Native permission observation must not depend on a successful Core read.
         observePermissions()
-        loadingMessage = productText("正在核对连接状态…", "Checking current connections…")
-        if session["nativeSigningUpgradeSupported"].bool { signingUpgradeState = try await client.read("native-signing/status")["upgrade"] }
+        let revision = mutationRevision
+        if !loaded { publish(\.loadingMessage, productText("正在核对连接状态…", "Checking current connections…")) }
+        if session["nativeSigningUpgradeSupported"].bool {
+            let upgrade = try await client.read("native-signing/status")["upgrade"]
+            guard revision == mutationRevision, !Task.isCancelled else { return }
+            publish(\.signingUpgradeState, upgrade)
+        }
         let snapshot: ProductJSON
         do { snapshot = try await client.read("snapshot") }
         catch {
             if signingUpgradeNeedsReview { page = .preparation; loaded = true; return }
             throw error
         }
-        status = snapshot["status"]
-        journey = snapshot["journey"]; tunnelObservationStale = false
+        guard revision == mutationRevision, !Task.isCancelled else { return }
+        applySnapshot(snapshot)
+    }
+    func applySnapshot(_ snapshot: ProductJSON) {
+        publish(\.status, snapshot["status"])
+        publish(\.journey, snapshot["journey"]); publish(\.tunnelObservationStale, false)
         if deployment != nil {
             if localPrepared && deployment?.browserRequested == true {
                 // A Browser observation failure does not hide Exec or the rest
                 // of the App. Preparation takes a fresh authoritative reading.
-                browserObservation = snapshot["browser"]
-            } else { browserObservation = .null }
+                publish(\.browserObservation, snapshot["browser"])
+            } else { publish(\.browserObservation, .null) }
             let latest = snapshot["acceptance"]
             if latest["challenge"]["id"] != acceptance["challenge"]["id"] { desktopValue = "" }
-            acceptance = latest
+            publish(\.acceptance, latest)
             if !joined {
-                plugin = snapshot["plugin"]
+                publish(\.plugin, snapshot["plugin"])
                 if !pluginDraftEdited {
-                    pluginMode = plugin["selection"]["mode"].string ?? "create"
-                    pluginName = plugin["presentation"]["displayName"].string ?? "Styx"
-                    pluginDescription = plugin["presentation"]["shortDescription"].string ?? productText("连接你的电脑", "Connect your computers")
-                    accountLabel = plugin["selection"]["accountLabel"].string ?? ""
-                    pluginURL = plugin["selection"]["pluginUrl"].string ?? ""
-                    pluginIcon = plugin["presentation"]["icon"]
+                    publish(\.pluginMode, plugin["selection"]["mode"].string ?? "create")
+                    publish(\.pluginName, plugin["presentation"]["displayName"].string ?? "Styx")
+                    publish(\.pluginDescription, plugin["presentation"]["shortDescription"].string ?? productText("连接你的电脑", "Connect your computers"))
+                    publish(\.accountLabel, plugin["selection"]["accountLabel"].string ?? "")
+                    publish(\.pluginURL, plugin["selection"]["pluginUrl"].string ?? "")
+                    publish(\.pluginIcon, plugin["presentation"]["icon"])
                 }
             }
         }
@@ -350,8 +419,8 @@ enum ProductRestorationPolicy {
             // recovery definition or temporarily unavailable launchd must not
             // prevent opening the rest of the App to inspect and recover it.
             let observed = snapshot["lifecycle"]["loginAtStartup"].string ?? "unknown"
-            loginStartup = ["enabled", "disabled", "not_installed"].contains(observed) ? observed : "unknown"
-        } else { loginStartup = "unknown" }
+            publish(\.loginStartup, ["enabled", "disabled", "not_installed"].contains(observed) ? observed : "unknown")
+        } else { publish(\.loginStartup, "unknown") }
         observePermissions()
         if !restoredPage {
             restoredPage = true
@@ -364,6 +433,7 @@ enum ProductRestorationPolicy {
         }
     }
     private func reportFailure(_ failure: Error? = nil) {
+        ProductNativeDiagnostics.event("operation_failed page=" + String(describing: page))
         // Never interpolate raw transport errors, response bodies or secrets.
         switch failure as? ProductWorkflowError {
         case .browserPreparationNeedsReview:
@@ -382,11 +452,18 @@ enum ProductRestorationPolicy {
             error = productText("操作未完成。请刷新状态后检查；结果不确定的操作不会自动重试。", "The operation did not complete. Refresh to inspect its state; uncertain operations are not replayed.")
         }
     }
+    private func waitForObservation() async throws {
+        while observationInFlight { try await Task.sleep(nanoseconds: 20_000_000) }
+    }
     func perform(_ operation: @escaping () async throws -> Void) {
+        #if STYX_TESTING
+        if testPreview { error = "UI preview: no Core operation was performed."; return }
+        #endif
         guard !busy else { return }
+        mutationRevision += 1
         busy = true; error = nil
         Task {
-            do { try await operation(); try await reload() }
+            do { try await waitForObservation(); try await operation(); try await reload() }
             catch { reportFailure(error); try? await reload() }
             busy = false
         }
@@ -459,7 +536,7 @@ enum ProductRestorationPolicy {
     }
     func observePermissions() {
         let observation = permissionReader()
-        axGranted = observation.accessibility; screenGranted = observation.screenRecording
+        publish(\.axGranted, observation.accessibility); publish(\.screenGranted, observation.screenRecording)
     }
     func verifyPermissionsAndRecover() async throws {
         observePermissions()
@@ -508,6 +585,9 @@ enum ProductRestorationPolicy {
         }
     }
     func saveTunnel(id: String, newKey: String?) async throws {
+        #if STYX_TESTING
+        if testPreview { throw ProductCoreError.unavailable }
+        #endif
         guard !busy else { throw ProductCoreError.unavailable }
         let normalized = id.trimmingCharacters(in: .whitespacesAndNewlines)
         guard ProductTunnelInputPolicy.tunnelError(normalized) == nil,
@@ -515,8 +595,10 @@ enum ProductRestorationPolicy {
             throw ProductCoreError.rejected
         }
         tunnelMonitor?.cancel(); tunnelObservationStale = true; tunnelAttempt = .connecting
+        mutationRevision += 1
         busy = true; error = nil
         defer { busy = false }
+        try await waitForObservation()
         // The Core keeps the stored key private. Omitting apiKey deliberately
         // retains it; the App never reads it back into a password field.
         if journey["tunnel"]["status"].string == "running" {
@@ -531,11 +613,16 @@ enum ProductRestorationPolicy {
         monitorTunnel()
     }
     func startTunnel() {
+        #if STYX_TESTING
+        if testPreview { error = "UI preview: connection operations are disabled."; return }
+        #endif
         guard !busy, tunnelAttempt != .connecting else { return }
         tunnelMonitor?.cancel(); tunnelObservationStale = true; tunnelAttempt = .connecting
+        mutationRevision += 1
         busy = true; error = nil
         Task {
             do {
+                try await waitForObservation()
                 _ = try await client.write("tunnel/start", ["authorize": .bool(true)])
                 busy = false; monitorTunnel()
             } catch { busy = false; tunnelAttempt = .failed; reportFailure(error) }
@@ -582,12 +669,15 @@ enum ProductRestorationPolicy {
     func clearSecrets() {
         handoffTimer?.invalidate(); handoffTimer = nil
         handoffCredential = ""; handoffTarget = ""; runtimeKey = ""; invite = ""
-        createdInvitation = .null
+        createdInvitation = .null; invitationCopied = false
         if let copied = copiedCredential, copiedCredentialChangeCount == NSPasteboard.general.changeCount,
            NSPasteboard.general.string(forType: .string) == copied { NSPasteboard.general.clearContents() }
         copiedCredential = nil; copiedCredentialChangeCount = nil
     }
     func copy(_ value: String, secret: Bool = false) {
+        #if STYX_TESTING
+        if testPreview { return }
+        #endif
         guard !value.isEmpty else { return }
         NSPasteboard.general.clearContents(); NSPasteboard.general.setString(value, forType: .string)
         if secret { copiedCredential = value; copiedCredentialChangeCount = NSPasteboard.general.changeCount }
@@ -682,6 +772,9 @@ enum ProductRestorationPolicy {
         }
     }
     func openOfficial(_ value: String) {
+        #if STYX_TESTING
+        if testPreview { return }
+        #endif
         guard let url = URL(string: value), let c = URLComponents(url: url, resolvingAgainstBaseURL: false), c.user == nil, c.password == nil else { return }
         let official = c.scheme == "https" && ["platform.openai.com", "chatgpt.com", "developers.openai.com"].contains(c.host ?? "") && c.port == nil
         let system = c.scheme == "x-apple.systempreferences" && ["com.apple.preference.security", "com.apple.Localization-Settings.extension"].contains(c.path)

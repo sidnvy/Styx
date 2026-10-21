@@ -117,7 +117,20 @@ func productCoreSelfTest() throws {
     try require(ProductRestorationPolicy.page(deployment: stalled, localPrepared: true, browser: preparedBrowser, foreground: .object(["status": .string("needs_attention")]), accepted: true, accessibility: true, screenRecording: true) == .preparation, "Uncertain connection recovery skipped review")
     let defaultPlugin: ProductJSON = .object(["required": .bool(true), "profileSaved": .bool(false), "contextChanged": .bool(false), "presentation": .object(["displayName": .string("Styx")]), "selection": .object(["mode": .string("create"), "accountLabel": .string(""), "pluginUrl": .string("")])])
     let defaultProfile = try ProductPluginWorkflow.defaultProfileIfMissing(defaultPlugin)
-    try require(defaultProfile?["presentation"] == defaultPlugin["presentation"] && defaultProfile?["selection"] == defaultPlugin["selection"], "Direct connection changed the authoritative default profile")
+    var expectedPresentation = defaultPlugin["presentation"].object
+    if let icon = ProductBrandAsset.icon {
+        expectedPresentation["icon"] = icon
+        guard let encoded = icon["dataBase64"].string, let bytes = Data(base64Encoded: encoded),
+              NSImage(data: bytes) != nil else { throw ProductCoreError.invalidResponse }
+    }
+    try require(defaultProfile?["presentation"] == .object(expectedPresentation) && defaultProfile?["selection"] == defaultPlugin["selection"] && defaultProfile?["authorize"] == .bool(true), "Direct connection must preserve authoritative metadata and only fill a missing icon with bundled artwork")
+    var unsavedCustom = defaultPlugin.object
+    unsavedCustom["presentation"] = .object(["displayName": .string("Custom"), "icon": .string("keep-custom-icon")])
+    let customDefault = try ProductPluginWorkflow.defaultProfileIfMissing(.object(unsavedCustom))
+    try require(customDefault?["presentation"] == unsavedCustom["presentation"], "Default creation replaced an existing icon")
+    unsavedCustom["presentation"] = .object(["displayName": .string("Styx"), "icon": .null])
+    let nullDefault = try ProductPluginWorkflow.defaultProfileIfMissing(.object(unsavedCustom))
+    try require(nullDefault?["presentation"]?["icon"] == (ProductBrandAsset.icon ?? .null), "Explicit null icon did not use available bundled artwork")
     var customized = defaultPlugin.object
     customized["profileSaved"] = .bool(true)
     customized["presentation"] = .object(["displayName": .string("Existing custom name"), "icon": .string("retained")])

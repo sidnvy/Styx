@@ -59,7 +59,7 @@ struct ProductView: View {
                         case .settings: settings
                         }
                     }
-                    if let error = model.error {
+                    if let error = model.error ?? model.observationError {
                         Text(error).foregroundStyle(.red).font(.callout).textSelection(.enabled)
                         Button(productText("重新检查", "Check again")) { Task { await model.refresh() } }
                     }
@@ -67,15 +67,9 @@ struct ProductView: View {
             }
         }.background(Color(nsColor: .windowBackgroundColor))
             .frame(minWidth: 580, minHeight: 500)
-            .disabled(model.busy)
             .sheet(isPresented: $editTunnel) { ProductTunnelEditor(model: model) }
-            .task { await model.bootstrap() }
-            .task(id: model.page) {
-                guard model.page == .chat else { return }
-                while !Task.isCancelled {
-                    try? await Task.sleep(nanoseconds: 3_000_000_000)
-                    if !Task.isCancelled { await model.refresh() }
-                }
+            .task(id: model.onboardingVisible || model.settingsVisible) {
+                if model.onboardingVisible || model.settingsVisible { await model.observePresentation() }
             }
             .onReceive(NotificationCenter.default.publisher(for: NSApplication.didBecomeActiveNotification)) { _ in model.observePermissions() }
             .onChange(of: model.page) { _ in model.observePermissions() }
@@ -107,9 +101,9 @@ struct ProductView: View {
                 Label("CLI", systemImage: "terminal").font(.headline)
                 Text(productText("已包含", "Included")).font(.caption).foregroundStyle(.secondary)
                 Divider()
-                Toggle("Computer Use", isOn: $model.computer)
+                Toggle(isOn: $model.computer) { Label("Computer Use", systemImage: "hand.point.up.left") }
                 Divider()
-                Toggle("Browser Automation", isOn: $model.browser)
+                Toggle(isOn: $model.browser) { Label("Browser Automation", systemImage: "globe") }
                 Text(productText("自动准备专用浏览器；网站登录时由你确认。", "A dedicated browser is prepared for you. Sign in to websites when needed.")).font(.caption).foregroundStyle(.secondary)
             }
             TextField(productText("电脑名称", "Computer name"), text: $model.label)
@@ -205,7 +199,7 @@ struct ProductView: View {
     }
     private func permissionRow(_ title: String, granted: Bool, screen: Bool) -> some View {
         HStack {
-            Label(title, systemImage: granted ? "checkmark.circle.fill" : "circle")
+            Label(title, systemImage: screen ? "record.circle" : "accessibility")
             Spacer()
             Text(granted ? productText("已允许", "Allowed") : productText("需要允许", "Permission needed")).foregroundStyle(.secondary)
             if granted || model.permissionWasRequested(screen) {
@@ -252,9 +246,9 @@ struct ProductView: View {
     private var tunnelPanel: some View {
         ProductPanel(title: productText("1. 电脑端连接", "1. Connection on this computer")) {
             ProductTunnelStatus(model: model)
-            Button(model.tunnelConnection == .notConfigured ? productText("填写连接信息", "Enter connection details") : productText("编辑连接信息", "Edit connection details")) { editTunnel = true }
+            Button(model.tunnelConnection == .notConfigured ? productText("填写连接信息", "Enter connection details") : productText("编辑连接信息", "Edit connection details")) { editTunnel = true }.accessibilityIdentifier("styx-onboarding-edit-tunnel")
             if model.tunnelConnection != .connected && model.tunnelConnection != .notConfigured {
-                Button(productText("重新连接", "Reconnect")) { model.startTunnel() }.disabled(model.tunnelAttempt == .connecting)
+                Button(productText("重新连接", "Reconnect")) { model.startTunnel() }.disabled(model.busy || model.tunnelAttempt == .connecting).accessibilityIdentifier("styx-reconnect")
             }
         }
     }
@@ -426,8 +420,8 @@ struct ProductView: View {
                         Text(productText("可选能力由主台审批。请在主台核对当前授权；这里不会自行扩大权限。", "Optional capabilities are approved on the main computer. Review authorization there; this computer cannot expand it itself.")).font(.callout).foregroundStyle(.secondary)
                         approvalNotice
                     } else {
-                        Toggle("Computer Use", isOn: $model.computer)
-                        Toggle("Browser Automation", isOn: $model.browser)
+                        Toggle(isOn: $model.computer) { Label("Computer Use", systemImage: "hand.point.up.left") }
+                        Toggle(isOn: $model.browser) { Label("Browser Automation", systemImage: "globe") }
                         Text(productText("更改能力会暂停本次 App 管理的连接，请先完成正在进行的操作。其他服务或管理入口的连接需要先停止并对账。", "Changes pause connections managed by this App. Finish active work first. Stop and reconcile connections owned by other services or managers separately.")).font(.caption).foregroundStyle(.secondary)
                         Button(productText("应用更改", "Apply changes")) { model.updateCapabilities() }
                     }
@@ -525,7 +519,7 @@ struct ProductAcceptanceField: NSViewRepresentable {
         }
     }
     required init?(coder: NSCoder) { nil }
-    func present() { model.observePermissions(); window?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
+    func present() { model.onboardingVisible = true; model.observePermissions(); window?.makeKeyAndOrderFront(nil); NSApp.activate(ignoringOtherApps: true) }
     func showPreferences() { showSettings(.general) }
     func showOnboarding() {
         menuPopover?.performClose(nil)
@@ -534,7 +528,7 @@ struct ProductAcceptanceField: NSViewRepresentable {
     }
     func showSettings(_ section: ProductSettingsSection) {
         menuPopover?.performClose(nil)
-        model.settingsSection = section; model.observePermissions()
+        model.requestSettings(section); model.settingsVisible = true; model.observePermissions()
         if settingsWindow == nil {
             let preferences = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 680, height: 560), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
             preferences.title = productText("Styx 设置", "Styx Settings")
@@ -572,7 +566,13 @@ struct ProductAcceptanceField: NSViewRepresentable {
         model.menuVisible = false; menuSizeTimer?.invalidate(); menuSizeTimer = nil
     }
 
-    func windowWillClose(_ notification: Notification) { model.clearSecrets() }
+    func windowWillClose(_ notification: Notification) {
+        if let closing = notification.object as? NSWindow {
+            if closing === settingsWindow { model.settingsVisible = false }
+            if closing === window { model.onboardingVisible = false }
+        }
+        if !model.settingsVisible && !model.onboardingVisible { model.clearSecrets() }
+    }
     func currentDesktopReadback(challengeID: String) -> String? {
         guard model.challengeID == challengeID, let field = acceptanceField,
               field.window === window, window?.isVisible == true, !field.isHiddenOrHasHiddenAncestor,
