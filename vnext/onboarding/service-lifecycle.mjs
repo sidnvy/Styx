@@ -42,8 +42,24 @@ const windowsInspect=`$ErrorActionPreference='Stop';$t=Get-ScheduledTask -TaskNa
 function fixedWindows(run,d,release,action,configFile){
  const helper=path.join(release.folder??release.sourceDir??path.join(d.installRoot,'releases',release.manifest.version),'host','windows-task.ps1');
  assert(release.manifest.files.some(e=>e.path==='host/windows-task.ps1'),'signed_windows_task_helper_missing');
- const args=['-NoLogo','-NoProfile','-NonInteractive','-File',helper,'-Action',action,'-TaskName',d.id,...(configFile?['-ConfigPath',configFile]:[])];
- return JSON.parse(String(run('powershell.exe',args,{encoding:'utf8',timeout:45000,windowsHide:true,stdio:['ignore','pipe','pipe']})).trim());
+ return runVerifiedWindowsTask({helper,expectedSha256:release.manifest.files.find(e=>e.path==='host/windows-task.ps1').sha256,action,taskName:d.id,configFile},run);
+}
+// Fixed signed helper only. Execute the exact hash-checked bytes as a command,
+// so read-only status does not require changing the user's script-file policy.
+// Paths and actions are data, never interpolated into PowerShell source.
+export function runVerifiedWindowsTask({helper,expectedSha256,action,taskName,configFile},run=execFileSync){
+ assert(['install','status','start','stop'].includes(action),'unsupported_service_action');
+ assert(taskName==='Styx-Host'||/^StyxPilot-[A-Za-z0-9-]{1,30}$/.test(taskName),'invalid_service_identity');
+ const info=fs.lstatSync(helper);assert(info.isFile()&&!info.isSymbolicLink()&&info.size<=32768,'signed_windows_task_helper_invalid');
+ const bytes=fs.readFileSync(helper);assert(createHash('sha256').update(bytes).digest('hex')===expectedSha256,'signed_windows_task_helper_changed');
+ const script=`$ErrorActionPreference='Stop'
+$source=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String($env:STYX_FIXED_TASK_SOURCE))
+$params=@{Action=$env:STYX_FIXED_TASK_ACTION;TaskName=$env:STYX_FIXED_TASK_NAME}
+if($env:STYX_FIXED_TASK_CONFIG){$params.ConfigPath=$env:STYX_FIXED_TASK_CONFIG}
+& ([ScriptBlock]::Create($source)) @params`;
+ const env={...process.env,STYX_FIXED_TASK_SOURCE:bytes.toString('base64'),STYX_FIXED_TASK_ACTION:action,STYX_FIXED_TASK_NAME:taskName,STYX_FIXED_TASK_CONFIG:configFile??''};
+ assert(env.STYX_FIXED_TASK_SOURCE.length<=30000,'signed_windows_task_helper_too_large');
+ return JSON.parse(String(run('powershell.exe',['-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(script,'utf16le').toString('base64')],{env,encoding:'utf8',timeout:45000,windowsHide:true,stdio:['ignore','pipe','pipe']})).trim());
 }
 function sanitized(platform,native){
  if(platform==='linux')return native.status!=='reported'?{state:'unknown',persistence:'unknown'}:{state:native.load==='not-found'?'not_installed':native.active==='active'&&native.pid>0?'running':['inactive','failed'].includes(native.active)&&native.pid===0?'stopped':'transitioning',persistence:native.enabled==='enabled'?'enabled':native.enabled==='disabled'?'disabled':'unknown'};

@@ -18,7 +18,9 @@ if ($TaskName -ne 'Styx-Host' -and $TaskName -notmatch '^StyxPilot-[A-Za-z0-9-]{
 $current=[Security.Principal.WindowsIdentity]::GetCurrent()
 $sid=$current.User.Value
 $session=[Diagnostics.Process]::GetCurrentProcess().SessionId
-if ($session -eq 0 -or -not [Environment]::UserInteractive) {
+# Read-only observation is also needed by headless Exec Hosts. Only lifecycle
+# mutations require the interactive user session; status still verifies ownership.
+if ($Action -ne 'status' -and ($session -eq 0 -or -not [Environment]::UserInteractive)) {
     throw 'interactive_user_session_required'
 }
 function Get-OwnedTask {
