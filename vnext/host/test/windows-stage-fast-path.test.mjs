@@ -32,6 +32,24 @@ test('payload batch is Windows-only and refuses existing files before repairing 
  assert.equal(fs.readFileSync(file,'utf8'),'foreign existing fixture');
 });
 
+test('private directory exact BigInt identities survive lossy Number stat values without changing default return type',t=>{
+ const f=fixture(t),folder=path.join(f.root,'exact-directory'),original=fs.lstatSync;let lossyReads=0;
+ fs.lstatSync=(file,options)=>{const info=original(file,options);if(file===folder&&!options?.bigint){lossyReads++;return Object.assign(Object.create(Object.getPrototypeOf(info)),info,{ino:Number.MAX_SAFE_INTEGER+3});}return info;};
+ try{const created=ensurePrivateDirectory(folder,{exclusive:true,bigint:true});assert.equal(typeof created.ino,'bigint');assert.equal(created.ino,original(folder,{bigint:true}).ino);assert.equal(ensurePrivateDirectory(folder,{bigint:true}).ino,created.ino);assert.equal(typeof ensurePrivateDirectory(folder).ino,'number');assert(lossyReads>0);}finally{fs.lstatSync=original;}
+});
+
+test('native exact-directory ACL check refuses a replacement without deleting the foreign empty directory',{skip:!windows},t=>{
+ const f=fixture(t),folder=path.join(f.root,'replace-exact-directory'),original=cp.execFileSync;let replacement;
+ cp.execFileSync=(program,args,options)=>{
+  if(program==='powershell.exe'&&options?.env?.STYX_PRIVATE_PATHS_TO_VERIFY&&!replacement&&JSON.parse(options.env.STYX_PRIVATE_PATHS_TO_VERIFY).includes(folder)){
+   fs.renameSync(folder,folder+'.own-moved');fs.mkdirSync(folder);replacement=fs.lstatSync(folder,{bigint:true});
+  }
+  return original(program,args,options);
+ };syncBuiltinESMExports();
+ try{assert.throws(()=>ensurePrivateDirectory(folder,{exclusive:true,bigint:true}),/private_directory_creation_failed/);}finally{cp.execFileSync=original;syncBuiltinESMExports();}
+ assert(replacement);assert.equal(fs.lstatSync(folder,{bigint:true}).ino,replacement.ino);assert.equal(fs.readdirSync(folder).length,0);
+});
+
 test('native signed public stage validates every actual DACL and signature with bounded ACL process count',{skip:!windows,timeout:600000},t=>{
  let f=fixture(t,64);
  if(process.env.STYX_WINDOWS_STAGE_BUNDLE){f={...f,source:process.env.STYX_WINDOWS_STAGE_BUNDLE,publicKeyPem:fs.readFileSync(process.env.STYX_WINDOWS_STAGE_PUBLISHER),version:JSON.parse(fs.readFileSync(path.join(process.env.STYX_WINDOWS_STAGE_BUNDLE,'manifest.json'))).version};}
@@ -85,6 +103,22 @@ test('native redirected child directory is not traversed or recursively removed'
   try{fs.renameSync(file,file+'.own-moved');fs.symlinkSync(outside,file,'junction');redirected=file;}catch{}
  }return original(file,...args);},()=>assert.throws(()=>stage(f),/private_directory_not_regular|stage_path_(not_regular|identity_changed)/));
  assert(redirected);assert.equal(fs.readFileSync(path.join(outside,'sentinel'),'utf8'),'FOREIGN DIRECTORY');assert.equal(fs.readdirSync(outside).length,1);assert(fs.lstatSync(redirected).isSymbolicLink());assert(!published(f));
+});
+
+test('native failed empty-file batch preserves original inode linked inside a replaced foreign parent',{skip:!windows},t=>{
+ const f=fixture(t),original=cp.execFileSync;let foreignFile,sentinel;
+ cp.execFileSync=(program,args,options)=>{
+  if(program==='powershell.exe'&&options?.env?.STYX_NEW_PAYLOAD_FILES&&!foreignFile){
+   const first=JSON.parse(options.env.STYX_NEW_PAYLOAD_FILES)[0],moved=first.parent+'.own-moved';
+   fs.renameSync(first.parent,moved);fs.mkdirSync(first.parent);
+   foreignFile=path.join(first.parent,path.basename(first.file));fs.linkSync(path.join(moved,path.basename(first.file)),foreignFile);
+   sentinel=path.join(first.parent,'foreign-sentinel');fs.writeFileSync(sentinel,'FOREIGN PARENT SENTINEL');
+   throw Error('controlled_empty_batch_failure');
+  }
+  return original(program,args,options);
+ };syncBuiltinESMExports();
+ try{assert.throws(()=>stage(f),/private_payload_creation_failed/);}finally{cp.execFileSync=original;syncBuiltinESMExports();}
+ assert(foreignFile);assert(fs.existsSync(foreignFile));assert.equal(fs.statSync(foreignFile).size,0);assert.equal(fs.readFileSync(sentinel,'utf8'),'FOREIGN PARENT SENTINEL');assert(!published(f));
 });
 
 test('native actual installer process death cannot publish a partially copied generation',{skip:!windows,timeout:120000},async t=>{

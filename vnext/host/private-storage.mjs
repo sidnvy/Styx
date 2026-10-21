@@ -230,18 +230,31 @@ export function requirePrivatePaths(entries) {
 
 // Apply ACLs only to a directory created by this invocation, before placing
 // any secret in it. Existing directories are inspected without modification.
-export function ensurePrivateDirectory(folder,{exclusive=false}={}) {
+export function ensurePrivateDirectory(folder,{exclusive=false,bigint=false}={}) {
   if(typeof folder!=='string'||!path.isAbsolute(folder))
     throw Error('private_directory_absolute_path_required');
   if(typeof exclusive!=='boolean')throw Error('private_directory_exclusive_invalid');
-  if(!exclusive){try{fs.lstatSync(folder);return requirePrivateDirectory(folder)}
+  if(typeof bigint!=='boolean')throw Error('private_directory_identity_option_invalid');
+  const verifiedIdentity=expected=>{
+    if(!bigint)return requirePrivateDirectory(folder);
+    const before=fs.lstatSync(folder,{bigint:true});
+    if(!before.isDirectory()||before.isSymbolicLink()||expected&&!sameFile(before,expected))throw Error('private_directory_creation_binding_changed');
+    requirePrivateDirectory(folder);
+    const after=fs.lstatSync(folder,{bigint:true});
+    if(!after.isDirectory()||after.isSymbolicLink()||!sameFile(before,after))throw Error('private_directory_creation_binding_changed');
+    return after;
+  };
+  if(!exclusive){try{fs.lstatSync(folder);return verifiedIdentity()}
   catch(e){if(e.code!=='ENOENT')throw e}}
   // Non-recursive: callers must explicitly choose an existing parent. Never
   // create or change ACLs on arbitrary ancestor directories.
+  const parent=bigint?path.dirname(folder):undefined,parentInfo=bigint?fs.lstatSync(parent,{bigint:true}):undefined;
+  if(bigint&&(!parentInfo.isDirectory()||parentInfo.isSymbolicLink()))throw Error('private_directory_parent_not_regular');
   fs.mkdirSync(folder,{mode:0o700});
+  const created=bigint?fs.lstatSync(folder,{bigint:true}):undefined;
   try{
     if(process.platform==='win32'){
-      const script=[
+      let script=[
         "$ErrorActionPreference='Stop'",
         '$folder=$env:STYX_NEW_PRIVATE_DIRECTORY',
         '$item=Get-Item -LiteralPath $folder -Force',
@@ -257,15 +270,32 @@ export function ensurePrivateDirectory(folder,{exclusive=false}={}) {
         '}',
         'Set-Acl -LiteralPath $folder -AclObject $acl'
       ].join('\n');
+      if(bigint){
+        const marker='$parent=$null;$stream=$null';
+        if(WINDOWS_NEW_FILE_ACL.split(marker).length!==2)throw Error('private_directory_native_contract_changed');
+        const prefix=WINDOWS_NEW_FILE_ACL.slice(0,WINDOWS_NEW_FILE_ACL.indexOf(marker));
+        script=prefix+String.raw`$parentHandle=$null;$directoryHandle=$null
+try {
+ $parentHandle=[StyxNewFileIdentity]::Parent($env:STYX_NEW_DIRECTORY_PARENT)
+ [StyxNewFileIdentity]::Check($parentHandle,[UInt64]::Parse($env:STYX_NEW_DIRECTORY_PARENT_ID),$true)
+ $directoryHandle=[StyxNewFileIdentity]::Parent($env:STYX_NEW_PRIVATE_DIRECTORY)
+ [StyxNewFileIdentity]::Check($directoryHandle,[UInt64]::Parse($env:STYX_NEW_DIRECTORY_ID),$true)
+`+script+String.raw`
+ [StyxNewFileIdentity]::Check($directoryHandle,[UInt64]::Parse($env:STYX_NEW_DIRECTORY_ID),$true)
+ [StyxNewFileIdentity]::Check($parentHandle,[UInt64]::Parse($env:STYX_NEW_DIRECTORY_PARENT_ID),$true)
+}finally{if($null -ne $directoryHandle){$directoryHandle.Dispose()};if($null -ne $parentHandle){$parentHandle.Dispose()}}
+`;
+      }
       execFileSync('powershell.exe',['-NoLogo','-NoProfile','-NonInteractive',
         '-EncodedCommand',Buffer.from(script,'utf16le').toString('base64')],{
-        env:{...process.env,STYX_NEW_PRIVATE_DIRECTORY:folder},windowsHide:true,
+        env:{...process.env,STYX_NEW_PRIVATE_DIRECTORY:folder,...(bigint?{STYX_NEW_DIRECTORY_ID:created.ino.toString(),STYX_NEW_DIRECTORY_PARENT:parent,STYX_NEW_DIRECTORY_PARENT_ID:parentInfo.ino.toString()}:{})},windowsHide:true,
         timeout:WINDOWS_ACL_TIMEOUT_MS,stdio:['ignore','ignore','ignore']});
     }
-    return requirePrivateDirectory(folder);
+    if(bigint){const currentParent=fs.lstatSync(parent,{bigint:true});if(!currentParent.isDirectory()||currentParent.isSymbolicLink()||!sameFile(parentInfo,currentParent))throw Error('private_directory_creation_binding_changed');}
+    return verifiedIdentity(created);
   }catch(e){
     // rmdir cannot delete files an external process may have placed here.
-    try{fs.rmdirSync(folder)}catch{}
+    try{if(!bigint||sameFile(created,fs.lstatSync(folder,{bigint:true}))&&sameFile(parentInfo,fs.lstatSync(parent,{bigint:true})))fs.rmdirSync(folder)}catch{}
     throw Error(e.code==='ETIMEDOUT'
       ?'private_directory_creation_timed_out':'private_directory_creation_failed');
   }

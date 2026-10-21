@@ -18,9 +18,9 @@ const hash=file=>{
 };
 function assert(yes,reason){if(!yes)throw Error(reason)}
 function existingInfo(file){try{return fs.lstatSync(file)}catch(error){if(error.code==='ENOENT')return null;throw error}}
-function privateRoot(root,{create=false}={}) {
+function privateRoot(root,{create=false,bigint=false}={}) {
   assert(typeof root==='string'&&path.isAbsolute(root),'absolute_install_root_required');
-  if(create)return ensurePrivateDirectory(root);
+  if(create)return ensurePrivateDirectory(root,{bigint});
   return requirePrivateDirectory(root);
 }
 function fileAtomic(dest,content){
@@ -110,10 +110,6 @@ export function verifySignedRelease(sourceDir,publicKeyPem,{platform=process.pla
 }
 function sha256(data){return createHash('sha256').update(data).digest('hex')}
 const sameIdentity=(a,b)=>a.dev===b.dev&&a.ino===b.ino;
-function validatedNumberIdentity(info){
- assert(Number.isSafeInteger(info.dev)&&Number.isSafeInteger(info.ino),'stage_file_identity_precision_unsafe');
- return {dev:BigInt(info.dev),ino:BigInt(info.ino)};
-}
 // This optimization copies only publisher-signed PUBLIC release payloads, never
 // credentials. Authorization is local to this synchronous staging invocation.
 // Fresh directories receive explicit private ownership; empty payload files
@@ -124,7 +120,7 @@ function privateWindowsStage(temp,parents){
  const inspect=(file,kind)=>{const info=fs.lstatSync(file,{bigint:true});assert(!info.isSymbolicLink()&&(kind==='directory'?info.isDirectory():info.isFile()),'stage_path_not_regular');return info;};
  const remember=(file,kind,expected)=>{assert(!bindings.has(file),'stage_path_already_bound');assert(expected&&sameIdentity(expected,inspect(file,kind)),'stage_path_identity_changed');bindings.set(file,{path:file,kind,info:expected});};
  const check=entry=>{assert(sameIdentity(entry.info,inspect(entry.path,entry.kind)),'stage_path_identity_changed');};
- for(const item of [...parents,temp])remember(item.path,'directory',validatedNumberIdentity(item.info));
+ for(const item of [...parents,temp])remember(item.path,'directory',item.info);
  const parentPaths=parents.map(x=>x.path);temp=temp.path;
  const checkAncestors=directory=>{
   for(const file of parentPaths)check(bindings.get(file));
@@ -136,7 +132,7 @@ function privateWindowsStage(temp,parents){
   let current=temp;
   for(const part of relative.split(path.sep).filter(Boolean)){
    checkAncestors(current);current=path.join(current,part);
-   if(!bindings.has(current)){const verified=ensurePrivateDirectory(current,{exclusive:true});remember(current,'directory',validatedNumberIdentity(verified));}
+   if(!bindings.has(current)){const verified=ensurePrivateDirectory(current,{exclusive:true,bigint:true});remember(current,'directory',verified);}
    else check(bindings.get(current));
   }
   checkAncestors(current);
@@ -186,7 +182,7 @@ function privateWindowsStage(temp,parents){
 export function stageSignedRelease({sourceDir,installRoot,publicKeyPem,
   platform=process.platform,arch=process.arch}) {
   const receipt=verifySignedRelease(sourceDir,publicKeyPem,{platform,arch});
-  const rootInfo=privateRoot(installRoot,{create:true});
+  const rootInfo=privateRoot(installRoot,{create:true,bigint:process.platform==='win32'});
   // Stable launcher and its verification helper are supplied by the trusted
   // local Styx installer executable, NEVER accepted from unsigned bundle
   // contents. They are not an alternative unsigned update path.
@@ -203,7 +199,7 @@ export function stageSignedRelease({sourceDir,installRoot,publicKeyPem,
     }
   }
   const releases=path.join(installRoot,'releases');
-  const releasesInfo=ensurePrivateDirectory(releases);
+  const releasesInfo=ensurePrivateDirectory(releases,{bigint:process.platform==='win32'});
   const dest=path.join(releases,receipt.version);
   if(existingInfo(dest)){
     requirePrivateDirectory(dest);
@@ -212,7 +208,7 @@ export function stageSignedRelease({sourceDir,installRoot,publicKeyPem,
     return {status:'already_staged',version:receipt.version};
   }
   const temp=path.join(releases,'.stage-'+randomBytes(8).toString('hex'));
-  const tempInfo=ensurePrivateDirectory(temp,{exclusive:true});
+  const tempInfo=ensurePrivateDirectory(temp,{exclusive:true,bigint:process.platform==='win32'});
   let windowsStage;
   try{
     if(process.platform==='win32'){
