@@ -23,17 +23,22 @@ export function gatewayFetch(endpoint,{ca}={}) {
     if(input instanceof Request)throw Error('request_object_not_supported');
     if(init.body!=null&&typeof init.body!=='string'&&!(init.body instanceof Uint8Array))throw Error('unsupported_request_body');
     return new Promise((resolve,reject)=>{
+      let connectionDeadline;
       const req=https.request(u,{method:init.method??'GET',headers:Object.fromEntries(new Headers(init.headers)),
         // A verifier must neither consume nor leave shared onboarding sockets.
         agent:false,ca,rejectUnauthorized:true,signal:init.signal},res=>{
+        clearTimeout(connectionDeadline);
         if(res.statusCode>=300&&res.statusCode<400){res.resume();reject(Error('gateway_redirect_refused'));return;}
         const headers=new Headers();for(const [k,v] of Object.entries(res.headers))if(v!==undefined)headers.set(k,Array.isArray(v)?v.join(', '):v);
         const body=[204,205,304].includes(res.statusCode)?null:Readable.toWeb(res);
         if(body===null)res.resume();
         resolve(new Response(body,{status:res.statusCode,headers}));
       });
-      req.setTimeout(10000,()=>req.destroy(Error('gateway_request_timeout')));
-      req.on('error',reject);req.end(init.body);
+      // Bound DNS/TCP/TLS setup, not an established MCP response. Long tools
+      // and SSE streams use the caller's AbortSignal/SDK request deadline.
+      connectionDeadline=setTimeout(()=>req.destroy(Error('gateway_connection_timeout')),10000);
+      req.once('socket',socket=>socket.once('secureConnect',()=>clearTimeout(connectionDeadline)));
+      req.on('error',error=>{clearTimeout(connectionDeadline);reject(error);});req.end(init.body);
     });
   };
 }
