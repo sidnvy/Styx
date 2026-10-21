@@ -20,6 +20,7 @@ test('portable CLI boots same Core and an independent signed Gateway without Hos
  const {privateKey}=generateKeyPairSync('ed25519');const key=path.join(root,'key.pem');fs.writeFileSync(key,privateKey.export({type:'pkcs8',format:'pem'}),{mode:0o600});
  const output=path.join(root,'preview');const result=buildLinuxCli({destination:output,version:'0.3.0-test',privateKeyFile:key,nodeBinary:process.env.STYX_TEST_LINUX_NODE});
  assert.equal(result.hostBundleIncluded,false);assert.equal(result.identityCreated,false);
+ assert.match(fs.readFileSync(path.join(output,'README.md'),'utf8'),/Gateway-only/);
  assert.equal(fs.existsSync(path.join(output,'host-bundle')),false);assert.equal(fs.existsSync(path.join(output,'key.pem')),false);
  const cli=(...args)=>JSON.parse(execFileSync(path.join(output,'styx'),args,{encoding:'utf8',timeout:20000}));
  assert.ok(cli('help').commands.includes('plan STATE'));
