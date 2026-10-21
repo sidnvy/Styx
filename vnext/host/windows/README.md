@@ -1,0 +1,25 @@
+# Windows native first version
+
+Native .NET Framework 4.8 Windows Forms shell, not a browser or WebView. Notification-area icon opens a daily connection panel. Settings has General, Computers and ChatGPT navigation; setup contains its own create/join stages. The approved orb is copied from `assets/brand/styx-logo.png`.
+
+The app owns a Node child through private stdin/stdout pipes. The child starts the existing onboarding Core HTTP server on an ephemeral loopback port; bearer and CSRF values stay inside that process. Exact allowlisted operations call the same server routes as the Mac app. Closing stdin drains Core through `close()`. No service or login task is installed by this preview. Keep Styx open to retain a foreground connection. The preview state identity is `%LOCALAPPDATA%\StyxPreview\WindowsFirst`, separate from established installations. `STYX_NATIVE_STATE` selects an isolated test state path.
+
+## Build
+
+`node host/build-windows-app.mjs /absolute/public-build-inputs.json` accepts sourceRoot (absolute vnext directory with production dependencies), fresh output, and an explicit Windows nodeBinary. Optional opensslBinary must be a standalone OpenSSL executable with its dependencies supplied externally; optional tunnelBinary must be the supported official tunnel client. Provide hostBundle, publisherKeyFile and publisherSha256 together for signed Host preparation. Never pass credentials in this public build input. The builder verifies the publisher pin, copies the signed bundle unchanged, and Core verifies the actual release during preparation. The builder hashes bundled executables into `windows-runtime.json`.
+
+On Windows it compiles with the installed Framework compiler. From Linux it stages a package for Windows compilation. Run the supplied `build.ps1` where scripts are permitted, or invoke Framework `csc.exe` directly with the references shown in that script. No execution policy, task, registry, startup or production configuration changes are needed. The compiler is part of Windows Framework; no SDK installation is required.
+
+Start `StyxPreview.exe` from the package directory. A source-only compile without runtime resources can exercise the native UI but cannot connect. Missing signed artifacts, TLS helper or tunnel client remain explicit unavailable gates, never simulated success.
+
+## Verification
+
+`node host/windows/core-bridge.test.mjs` exercises bootstrap boundaries, authoritative defaults/CSRF, explicit join approval, Core preparation delegation and pipe cleanup. `StyxPreview.exe --self-test` constructs every native page and writes a public `native-self-test.json` in its package directory; it does not start Core or modify device state. This own-app construction harness is valid over SSH but is not desktop visual/CUA acceptance.
+
+NAB isolated test directory: `C:\Users\Sid\Documents\StyxWindowsFirst-20261021`. Initial source compiled there with Framework `csc.exe`, and self-test returned 0. No production tasks, identities, browser profiles or config were touched. Interactive tray behavior, real connection, native CUA, full packaging and ChatGPT account acceptance remain separate gates.
+
+Computers shows local status/capabilities and can list paired devices, select the default, and revoke access. Browser selection uses the shared auto/Chrome/Edge channel and persistent dedicated-login settings. Current gaps: Advanced ZIP export is described as experimental and is not available from this first native UI. The preview has no installer, code signing, auto-update or login registration.
+
+The portable compiled shell and bundled Node/Core preview are available in task outputs `outputs/windows-native-first-20261021` and on NAB under the isolated directory's `package` subdirectory. The latest package compiled successfully; the private Windows Core bootstrap and real snapshot request passed, followed by clean shutdown. Windows Node was compared against the previously recorded public SHA-256 `9c9245166b4a8e182e0b797da9c20136117ff24368eaff1fec8343a123c8db0e`. The included source/rendering harness draws its own native controls into `native-settings.png`; that rendering was visually inspected and does not prove interactive desktop acceptance. Temporary owned processes remaining: zero.
+
+`StyxSessionProbe.exe` is a read-only native preflight. It requires a nonzero own session, UserInteractive, WinSta0, and accessible Default input desktop before returning `available`; it never switches desktop, captures another app or synthesizes input. Under NAB SSH it correctly returned session 0 / unavailable. Shared `foreground.mjs` still needs an authenticated, package-trusted hook to invoke this probe from the actual app user session. `available` is only preflight, not CUA execution acceptance.
