@@ -86,3 +86,34 @@ long-running reliability, production publisher trust and ChatGPT account-side
 tool invocation. Linux graphical Computer Use is not accepted by these headless
 tests. Chrome and Edge were respectively tested on Linux and Windows; this does
 not prove every browser/platform combination.
+
+## Third integration round: transport and Windows preparation
+
+The verified-TLS client no longer treats ten seconds without socket traffic as
+failure after TLS establishment. Its ten-second deadline covers connection
+establishment; established calls use their caller/SDK deadline and cancellation.
+A real TLS MCP response delayed eleven seconds and a separate cancellation test
+passed. Authentication, wrong-CA and redirect protections remain tested. This is
+not a claim about arbitrary-duration account-side calls.
+
+Windows signed public-payload staging now creates new files and directories in
+bounded native ACL batches. This path handles publisher-signed public code only;
+credential APIs keep their existing behavior. It binds exact BigInt file IDs,
+checks current ownership and actual DACLs, rejects unknown/replaced objects,
+verifies all signed members, and publishes only the completed generation.
+An interrupted or foreign tree never authorizes recursive cleanup.
+
+The first actual 2200-member NAB run rejected imprecise Number file identities;
+the next run exposed excessive per-directory ACL startup cost. Neither passed.
+With exact identities and directory batching, the same public payload staged in
+100977 ms, with 195 PowerShell invocations and actual DACL checks on all 2689
+installed paths. That measurement is scoped to ed0885a + 7b922a6. The subsequent
+unknown-empty-directory rejection and complete adversarial retest remain separate
+acceptance gates; this timing alone does not accept the final installer.
+
+At integrated revision 55207e3, all fourteen shared engineering quality checks
+passed: 748 tests passed, zero failed, 39 skipped. Four dependency audits and four
+SBOMs completed. Skipped platform tests do not establish native acceptance. The
+receipt is `outputs/platform-third-20261021/quality-final-stage/receipt.json` in
+the parent task directory. Cross-physical Core join/Exec/Edge/reconnect and the
+final Windows preview remain pending their own receipts.
