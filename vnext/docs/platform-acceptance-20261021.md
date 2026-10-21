@@ -107,9 +107,13 @@ The first actual 2200-member NAB run rejected imprecise Number file identities;
 the next run exposed excessive per-directory ACL startup cost. Neither passed.
 With exact identities and directory batching, the same public payload staged in
 100977 ms, with 195 PowerShell invocations and actual DACL checks on all 2689
-installed paths. That measurement is scoped to ed0885a + 7b922a6. The subsequent
-unknown-empty-directory rejection and complete adversarial retest remain separate
-acceptance gates; this timing alone does not accept the final installer.
+installed paths. That measurement is scoped to ed0885a + 7b922a6. The subsequent final run included unknown-empty-directory rejection and all
+twelve native tests passed without skips. Its full 2200-member stage took
+101238 ms with the same 195 native invocations and 2689 actual DACL checks.
+Windows returned EPERM when the test tried to move a parent containing live
+file handles: original IDs and empty files remained unchanged and nothing was
+published. The rebound-parent cleanup branch was NOT EXERCISED; this is an
+observed OS protection, not a successful injected hardlink attack.
 
 At integrated revision 55207e3, all fourteen shared engineering quality checks
 passed: 748 tests passed, zero failed, 39 skipped. Four dependency audits and four
