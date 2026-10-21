@@ -97,6 +97,12 @@ test('native unknown child on failure preserves foreign sentinel and unpublished
  assert(sentinel);assert.equal(fs.readFileSync(sentinel,'utf8'),'FOREIGN UNKNOWN SENTINEL');assert(!published(f));
 });
 
+test('native unknown empty directory is refused even though signed file inventory ignores empty directories',{skip:!windows},t=>{
+ const f=fixture(t);let unknown;
+ withFsPatch('fsyncSync',(original,fd)=>{const result=original(fd);if(!unknown){const name=scratchStage(f);if(name){unknown=path.join(f.installRoot,'releases',name,'foreign-empty-directory');fs.mkdirSync(unknown);}}return result;},()=>assert.throws(()=>stage(f),/stage_unknown_member/));
+ assert(unknown);assert(fs.statSync(unknown).isDirectory());assert(!published(f));
+});
+
 test('native redirected child directory is not traversed or recursively removed',{skip:!windows},t=>{
  const f=fixture(t),outside=path.join(f.root,'foreign-directory');fs.mkdirSync(outside);fs.writeFileSync(path.join(outside,'sentinel'),'FOREIGN DIRECTORY');let redirected;
  withFsPatch('lstatSync',(original,file,...args)=>{if(!redirected&&String(file).includes('.stage-')&&path.basename(String(file))==='data'){

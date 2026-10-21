@@ -161,17 +161,19 @@ function privateWindowsStage(temp,parents){
   }finally{for(const output of outputs)fs.closeSync(output.fd);}
  };
  const entries=()=>[...bindings.values()];
+ const ownedTreeMatches=folder=>{
+  for(const child of fs.readdirSync(folder,{withFileTypes:true})){
+   const file=path.join(folder,child.name),entry=bindings.get(file);if(!entry)return false;check(entry);
+   if(entry.kind==='directory'&&!ownedTreeMatches(file))return false;
+  }return true;
+ };
  return {prepareDirectories,copyBatch,canRemove(){
   try{
    for(const file of [...parentPaths,temp])check(bindings.get(file));
-   const walk=folder=>{for(const child of fs.readdirSync(folder,{withFileTypes:true})){
-    const file=path.join(folder,child.name),entry=bindings.get(file);if(!entry)return false;check(entry);
-    if(entry.kind==='directory'&&!walk(file))return false;
-   }return true;};
-   return walk(temp);
+   return ownedTreeMatches(temp);
   }catch{return false;}
  },validate(){
-  const all=entries();for(const entry of all)check(entry);
+  const all=entries();for(const entry of all)check(entry);assert(ownedTreeMatches(temp),'stage_unknown_member');
   for(let offset=0;offset<all.length;){
    // Windows environment payloads also have a character limit; keep both the
    // existing 32-path bound and the existing private-path JSON bound intact.
@@ -181,8 +183,8 @@ function privateWindowsStage(temp,parents){
    requirePrivatePaths(batch.map(({path,kind})=>({path,kind})));
    for(const entry of batch)check(entry);offset=end;
   }
-  for(const entry of all)check(entry);
- },checkBindings(){for(const entry of entries())check(entry);}};
+  for(const entry of all)check(entry);assert(ownedTreeMatches(temp),'stage_unknown_member');
+ },checkBindings(){for(const entry of entries())check(entry);assert(ownedTreeMatches(temp),'stage_unknown_member');}};
 }
 export function stageSignedRelease({sourceDir,installRoot,publicKeyPem,
   platform=process.platform,arch=process.arch}) {
