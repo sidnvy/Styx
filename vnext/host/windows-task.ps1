@@ -24,8 +24,18 @@ if ($Action -ne 'status' -and ($session -eq 0 -or -not [Environment]::UserIntera
     throw 'interactive_user_session_required'
 }
 function Get-OwnedTask {
-    $existing=Get-ScheduledTask -TaskName $TaskName -ErrorAction SilentlyContinue
-    if ($null -eq $existing) { return $null }
+    try {
+        $existing=Get-ScheduledTask -TaskName $TaskName -ErrorAction Stop
+    } catch {
+        # Only the scheduler's exact missing-name result establishes absence.
+        # Access denied, provider failure and unknown errors remain unknown.
+        if ($_.CategoryInfo.Category -eq [Management.Automation.ErrorCategory]::ObjectNotFound -and
+            $_.FullyQualifiedErrorId -eq 'CmdletizationQuery_NotFound_TaskName,Get-ScheduledTask') {
+            return $null
+        }
+        throw
+    }
+    if ($null -eq $existing) { throw 'task_query_returned_no_state' }
     if ($existing.Description -ne $marker) { throw 'task_not_owned_by_styx' }
     $principalId=[string]$existing.Principal.UserId
     if ($principalId -match '^S-1-') { $actualSid=$principalId }

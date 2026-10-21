@@ -34,3 +34,25 @@ test('native read-only task status works under current policy without a GUI sess
  if(state.session===0)assert.throws(()=>runVerifiedWindowsTask({...request,action:'start'}),/interactive_user_session_required/);
  assert.equal(policy(),before);
 });
+
+test('native task-query failures stay unknown; only exact missing-name errors establish absence',{skip:process.platform!=='win32'},()=>{
+ const script=`$ErrorActionPreference='Stop';$ProgressPreference='SilentlyContinue'
+$tokens=$null;$errors=$null
+$ast=[Management.Automation.Language.Parser]::ParseFile($env:STYX_QUERY_TEST_HELPER,[ref]$tokens,[ref]$errors)
+if($errors.Count){throw 'invalid_helper_syntax'}
+$fn=$ast.Find({param($n) $n -is [Management.Automation.Language.FunctionDefinitionAst] -and $n.Name -eq 'Get-OwnedTask'},$true)
+if($null -eq $fn){throw 'missing_task_query'}
+. ([ScriptBlock]::Create($fn.Extent.Text))
+$TaskName='StyxPilot-QueryFault';$marker='unused';$sid='unused'
+function Get-ScheduledTask { [CmdletBinding()]param([string]$TaskName)
+ if($env:STYX_QUERY_TEST_CASE -eq 'empty'){return}
+ $category=if($env:STYX_QUERY_TEST_CASE -eq 'denied'){[Management.Automation.ErrorCategory]::PermissionDenied}else{[Management.Automation.ErrorCategory]::ObjectNotFound}
+ $id=if($env:STYX_QUERY_TEST_CASE -eq 'missing'){'CmdletizationQuery_NotFound_TaskName,Get-ScheduledTask'}else{'unexpected_scheduler_failure'}
+ throw [Management.Automation.ErrorRecord]::new([Exception]::new('controlled_query_failure'),$id,$category,$TaskName)
+}
+$absent=$false;$refused=$false
+try{$value=Get-OwnedTask;$absent=$null -eq $value}catch{$refused=$true}
+if($env:STYX_QUERY_TEST_CASE -eq 'missing'){if(-not $absent -or $refused){throw 'missing_task_not_recognized'}}else{if(-not $refused -or $absent){throw 'query_failure_misreported_as_absent'}}
+`;
+ for(const kind of ['missing','denied','foreign-missing','empty'])execFileSync('powershell.exe',['-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(script,'utf16le').toString('base64')],{env:{...process.env,STYX_QUERY_TEST_HELPER:helper,STYX_QUERY_TEST_CASE:kind},windowsHide:true,stdio:'pipe',timeout:30000});
+});
