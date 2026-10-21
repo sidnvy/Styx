@@ -10,13 +10,19 @@ import {execFileSync} from 'node:child_process';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StreamableHTTPClientTransport} from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import {gatewayFetch} from '../onboarding/connection.mjs';
-import {ensurePrivateDirectory,requirePrivateDirectory,writePrivateFile} from './private-storage.mjs';
+import {ensurePrivateDirectory,requirePrivateDirectory,requirePrivateFile,writePrivateFile} from './private-storage.mjs';
 import {buildHostRelease} from './build-host-release.mjs';
 const sourceRoot=fileURLToPath(new URL('../',import.meta.url));
 const assert=(ok,code)=>{if(!ok)throw Error(code)};
 const sha=p=>createHash('sha256').update(fs.readFileSync(p)).digest('hex');
 const pause=ms=>new Promise(r=>setTimeout(r,ms));
 const text=r=>(r.content??[]).filter(x=>x.type==='text').map(x=>x.text).join('\n');
+export function saveCrossReceipt(filename,data){
+ const tmp=filename+'.'+randomBytes(12).toString('hex')+'.tmp';
+ if(fs.existsSync(filename))requirePrivateFile(filename);
+ writePrivateFile(tmp,JSON.stringify(data,null,2)+'\n');
+ try{fs.renameSync(tmp,filename);}finally{fs.rmSync(tmp,{force:true});}
+}
 export function crossScope(options,role,platform=process.platform){
  assert(process.env.STYX_RUN_CROSS_PLATFORM_ACCEPTANCE==='1','explicit_cross_platform_acceptance_required');
  assert(role==='gateway'?platform==='linux':role==='host'&&platform==='win32','cross_native_role_platform_required');
@@ -32,7 +38,7 @@ function fixtureState(directory,role){
  assert(!fs.existsSync(directory),'fresh_cross_directory_required');ensurePrivateDirectory(directory,{exclusive:true});
  for(const name of ['requests','responses','private'])ensurePrivateDirectory(path.join(directory,name),{exclusive:true});
  const receipt={schema:1,role,status:'RUNNING',startedAt:new Date().toISOString(),gates:{},attempts:[],boundaries:{productionMutation:'NOT RUN',servicesTasksFirewallMutation:'NOT RUN',sshTunnel:'NOT USED',chatgptAccountAcceptance:'NOT RUN',cua:'disabled'},source:{actor:sha(fileURLToPath(import.meta.url)),connection:sha(path.join(sourceRoot,'onboarding/connection.mjs'))}};
- const save=()=>writePrivateFile(path.join(directory,'receipt.json'),JSON.stringify(receipt,null,2)+'\n');
+ const save=()=>saveCrossReceipt(path.join(directory,'receipt.json'),receipt);
  const record=(name,evidence={})=>{receipt.gates[name]={status:'PASS',...evidence};save();};
  save();return {receipt,save,record};
 }

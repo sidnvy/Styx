@@ -1,6 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {crossScope,observedCrossReference,requireCrossGates} from '../cross-platform-acceptance.mjs';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {crossScope,observedCrossReference,requireCrossGates,saveCrossReceipt} from '../cross-platform-acceptance.mjs';
 test('cross-machine actors require explicit opt-in, native roles and exact network scope',()=>{
  const original=process.env.STYX_RUN_CROSS_PLATFORM_ACCEPTANCE;
  try{
@@ -27,4 +30,9 @@ test('native completion refuses missing gates instead of promoting stop to accep
  receipt.gates.joined={status:'PASS'};receipt.gates.reconnected={status:'PASS'};
  assert.doesNotThrow(()=>requireCrossGates(receipt,['prepared','joined','reconnected']));
  assert.deepEqual(receipt.missingRequiredGates,[]);
+});
+test('progress receipt safely replaces its own earlier file and leaves no temporary members',{skip:process.platform==='win32'},t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'styx-cross-receipt-'));fs.chmodSync(root,0o700);t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
+ const file=path.join(root,'receipt.json');saveCrossReceipt(file,{status:'RUNNING'});saveCrossReceipt(file,{status:'PASS'});
+ assert.deepEqual(JSON.parse(fs.readFileSync(file)),{status:'PASS'});assert.equal(fs.statSync(file).mode&0o777,0o600);assert.deepEqual(fs.readdirSync(root),['receipt.json']);
 });
