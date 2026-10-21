@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {crossScope,observedCrossReference} from '../cross-platform-acceptance.mjs';
+import {crossScope,observedCrossReference,requireCrossGates} from '../cross-platform-acceptance.mjs';
 test('cross-machine actors require explicit opt-in, native roles and exact network scope',()=>{
  const original=process.env.STYX_RUN_CROSS_PLATFORM_ACCEPTANCE;
  try{
@@ -19,4 +19,12 @@ test('cross-machine Browser test acts only on observed opaque refs',()=>{
  const snapshot={content:[{type:'text',text:'- button "Store" [ref=styx-abcdef012345]'}]};
  assert.equal(observedCrossReference(snapshot,'Store'),'styx-abcdef012345');
  assert.throws(()=>observedCrossReference(snapshot,'Delete'),/cross_owned_observed_reference_missing/);
+});
+test('native completion refuses missing gates instead of promoting stop to acceptance',()=>{
+ const receipt={gates:{prepared:{status:'PASS'}}};
+ assert.throws(()=>requireCrossGates(receipt,['prepared','joined','reconnected']),/cross_required_gates_incomplete/);
+ assert.deepEqual(receipt.missingRequiredGates,['joined','reconnected']);
+ receipt.gates.joined={status:'PASS'};receipt.gates.reconnected={status:'PASS'};
+ assert.doesNotThrow(()=>requireCrossGates(receipt,['prepared','joined','reconnected']));
+ assert.deepEqual(receipt.missingRequiredGates,[]);
 });
