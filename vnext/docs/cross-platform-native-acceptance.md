@@ -58,3 +58,61 @@ prove interactive Cua, login/lock/reboot recovery, or arbitrary NAT traversal.
 The VPN or LAN supplies a route only; TLS identity, invitation and explicit
 device approval supply trust. A blocked direct route is a blocked result, not a
 reason to disable TLS or silently alter firewall policy.
+
+## Physical acceptance result — 2026-10-22 (Asia/Shanghai)
+
+Final Windows `host-run4` and Linux `gateway-run4` completed with `PASS`,
+respectively six and seven required gates, no missing gates. These are two
+physical machines, unlike the earlier two-Host test on one Linux workstation.
+The direct route used Workstation's explicitly authorized `10.0.2.19` VPN
+interface and NAB `10.0.8.146`; SSH transferred control inputs only. The listener
+was not wildcard-bound, no SSH data tunnel or firewall change was used.
+
+The final Core flow created and consumed a new one-use invitation, independently
+confirmed the actual TLS fingerprint, generated the Windows identity, refused
+an incorrect device fingerprint, approved the exact pending identity, claimed
+credentials, ran doctor and started the foreground Host. The owned foreground
+projection reported an external Gateway and no local Gateway directory existed.
+Real Windows PowerShell Exec slept for 12 seconds and returned the exact marker
+with exit 0 in **12,307 ms**. Installed Edge observed the dedicated loopback site,
+typed and clicked, with the independent site observing exactly one stored action.
+After terminating only owned Codex PID **20444**, supervision created PID
+**12892**. Exec then succeeded in **264 ms**, Edge observations succeeded, and
+identity/configuration/credential hashes remained unchanged.
+
+A request deliberately overlapping the executor crash failed. Its original
+`BLOCKED` attempt remains in the Gateway receipt; an explicit probe after crash
+completion succeeded. This is recovery of the connection and executor, not
+transparent replay of failed requests or durable task resumption.
+
+Both actors exited 0. Windows recorded 12 owned descendant observations with
+none remaining; an independent CIM/listener check found no actor or fixture
+listener. Linux owner/runtime PIDs and port 35431 were independently absent.
+Both sides removed only their own private state and request/response IPC,
+including invitations, credentials, signing key and browser profile. No task,
+service, firewall, daily profile or production configuration was changed.
+
+Source scope matters: Linux Gateway Core came from the previously checked
+`a9b0263` CLI distribution; its actor's MCP client used the corrected
+`connection.mjs` digest recorded in the evidence, which exercised the long TLS
+response fix. The Windows public source snapshot received six explicitly hashed
+runtime overlays matching integration commit `0bd097f`, then built a fresh signed
+Host with a test-only publisher and fresh journal. This does not claim that the
+old Linux distribution was rebuilt with every later Core change. The ephemeral
+private publisher key was deleted, not delivered as an official release key.
+
+Earlier attempts remain separate: the initial attempt exposed slow Windows
+staging; run2 exposed script-file policy/headless status refusal; run3 found an
+acceptance actor using the cross-process projection instead of the owned API.
+Those blocked/diagnostic receipts were retained. The final run used the approved
+staging fix, hash-bound helper command, honest scheduler query errors, and owned
+foreground API; no fake service observer was substituted.
+
+Public evidence is under the task's
+`outputs/cross-platform-20261021/delivery-run4/`: `delivery.json` inventories
+receipt/module hashes, both final actor receipts, initial/recovered tool results,
+the retained during-crash failure, source overlays and independent cleanup.
+Original attempt evidence remains beside that delivery directory. This does not
+validate interactive Windows Cua, machine reboot/login/logout, Linux update
+migration or rollback, ChatGPT account acceptance, arbitrary NAT traversal, or
+an official release signature. Those remain separate acceptance boundaries.
