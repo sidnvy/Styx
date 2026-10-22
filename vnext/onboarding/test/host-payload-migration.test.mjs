@@ -7,7 +7,7 @@ import {spawnSync} from 'node:child_process';
 import {createHash,generateKeyPairSync,sign} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
 import {stageSignedRelease,activateRelease,refreshVerifiedBootstrap,activeRelease} from '../../host/installer.mjs';
-import {planHostPayloadMigration,applyHostPayloadMigration,rollbackHostPayloadMigration,readHostPayloadMigration,inspectHostPayloadCandidate} from '../host-payload-migration.mjs';
+import {planHostPublisherTransition,planHostPayloadMigration,applyHostPayloadMigration,rollbackHostPayloadMigration,readHostPayloadMigration,inspectHostPayloadCandidate} from '../host-payload-migration.mjs';
 const sha=x=>createHash('sha256').update(x).digest('hex');
 const key=()=>generateKeyPairSync('ed25519');
 const pem=k=>k.publicKey.export({type:'spki',format:'pem'});
@@ -161,4 +161,15 @@ test('real process exit after archiving doctor observation retains recoverable r
  const module=fileURLToPath(new URL('../host-payload-migration.mjs',import.meta.url)),script=`import {rollbackHostPayloadMigration} from ${JSON.stringify(module)};await rollbackHostPayloadMigration(JSON.parse(process.env.STYX_TEST_MIGRATION),{platform:'darwin',observeAbsence:async()=>({status:'absent'}),onPhase:p=>{if(p==='restored_deployment')process.exit(75)}});`;
  const child=spawnSync(process.execPath,['--input-type=module','-e',script],{encoding:'utf8',env:{...process.env,STYX_TEST_MIGRATION:JSON.stringify({stateDir:f.stateDir,transactionId:result.transactionId,authorize:true})}});assert.equal(child.status,75,child.stderr);
  await rollback(f,result.transactionId);unchanged(before);assert.ok(json(path.join(f.stateDir,'host-payload-migration.json')).rollbackObservation);
+});
+
+for(const platform of ['win32','linux'])test(`${platform} publisher replacement needs explicit independent pins and remains reversible`,async t=>{
+ const f=fixture(t,{platform,cross:true}),keyFile=path.join(f.dir,'reviewed-publisher.pem');put(keyFile,pem(f.nextKey));
+ const publisherReview={authorization:'replace_host_publisher',publisherKeyFile:keyFile,expectedCurrentPublisherSha256:pin(f.oldKey),expectedTargetPublisherSha256:pin(f.nextKey),expectedManifestSha256:sha(fs.readFileSync(path.join(f.candidate,'manifest.json')))};
+ await assert.rejects(planHostPayloadMigration({stateDir:f.stateDir,bundle:f.candidate},f.adapters),/publisher_transition_requires_trusted_platform_identity/);
+ for(const altered of [{authorization:'automatic'},{expectedCurrentPublisherSha256:'a'.repeat(64)},{expectedTargetPublisherSha256:'b'.repeat(64)},{expectedManifestSha256:'c'.repeat(64)}])await assert.rejects(planHostPublisherTransition({stateDir:f.stateDir,bundle:f.candidate,publisherReview:{...publisherReview,...altered}},f.adapters));
+ const plan=await planHostPublisherTransition({stateDir:f.stateDir,bundle:f.candidate,publisherReview},f.adapters),before=new Map([...plan.changes,...plan.preserved].map(x=>[x.path,fs.readFileSync(x.path)]));assert.equal(plan.publisherTrust,'explicit_owner_replacement_no_signer_continuity');assert.equal(plan.publisherChange,true);
+ await assert.rejects(applyHostPayloadMigration({stateDir:f.stateDir,plan},f.adapters),/authorization_required/);
+ put(keyFile,pem(key()));await assert.rejects(applyHostPayloadMigration({stateDir:f.stateDir,plan,authorize:true},f.adapters),/owner_publisher_key_changed/);unchanged(before);put(keyFile,pem(f.nextKey));
+ const result=await applyHostPayloadMigration({stateDir:f.stateDir,plan,authorize:true},f.adapters);assert.equal(activeRelease(f.root,pem(f.nextKey),f.opts).version,'0.2.0-next');await rollback(f,result.transactionId);unchanged(before);
 });

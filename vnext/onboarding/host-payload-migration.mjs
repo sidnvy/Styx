@@ -38,7 +38,7 @@ function journal(d){
  }
  return j;
 }
-function publicJournal(j){return j?{schema:1,transactionId:j.transactionId,status:j.status,current:j.plan.current,target:j.plan.target,nativeHealth:'NOT RUN',accountAcceptance:'NOT RUN',serviceMutation:'NONE',identityMutation:'NONE',systemPermissions:'UNCHANGED'}:{schema:1,status:'not_started'}}
+function publicJournal(j){return j?{schema:1,transactionId:j.transactionId,status:j.status,current:j.plan.current,target:j.plan.target,...(j.plan.publisherTrust?{publisherTrust:j.plan.publisherTrust}:{}),nativeHealth:'NOT RUN',accountAcceptance:'NOT RUN',serviceMutation:'NONE',identityMutation:'NONE',systemPermissions:'UNCHANGED'}:{schema:1,status:'not_started'}}
 export function readHostPayloadMigration({stateDir}={}){assert(absolute(stateDir),'absolute_state_directory_required');requirePrivateDirectory(stateDir);return publicJournal(journal(stateDir))}
 function pin(pem){const key=createPublicKey(pem);assert(key.asymmetricKeyType==='ed25519','host_payload_ed25519_publisher_required');return sha(key.export({type:'spki',format:'der'}))}
 function inventory(dir,files){if(!fs.existsSync(dir))return;requirePrivateDirectory(dir);for(const name of fs.readdirSync(dir).sort()){const file=path.join(dir,name),s=fs.lstatSync(file);assert(!s.isSymbolicLink(),'host_payload_preserved_path_redirected');if(s.isDirectory())inventory(file,files);else files.push({path:file,sha256:sha(bytes(file))});assert(files.length<=512,'host_payload_preserved_inventory_too_large')}}
@@ -101,8 +101,16 @@ async function absent(s,adapters){
 function target(s,bundle,adapters){
  const platform=s.platform;
  assert(absolute(bundle),'absolute_host_payload_bundle_required');
- let pem=s.pem,app=null;
+ let pem=s.pem,app=null,publisherReview=null;
  try{verifySignedRelease(bundle,pem,{platform,arch:process.arch})}catch{
+  if(adapters.publisherReview){
+   const r=adapters.publisherReview;
+   assert(r&&Object.keys(r).sort().join(',')==='authorization,expectedCurrentPublisherSha256,expectedManifestSha256,expectedTargetPublisherSha256,publisherKeyFile'&&r.authorization==='replace_host_publisher'&&absolute(r.publisherKeyFile)&&[r.expectedCurrentPublisherSha256,r.expectedTargetPublisherSha256,r.expectedManifestSha256].every(digest),'host_payload_owner_publisher_review_invalid');
+   assert(r.expectedCurrentPublisherSha256===pin(s.pem)&&r.expectedTargetPublisherSha256!==pin(s.pem),'host_payload_owner_publisher_review_stale');
+   pem=bytes(r.publisherKeyFile);assert(pin(pem)===r.expectedTargetPublisherSha256,'host_payload_owner_publisher_key_changed');
+   const reviewed=verifySignedRelease(bundle,pem,{platform,arch:process.arch});assert(reviewed.sha256===r.expectedManifestSha256,'host_payload_owner_manifest_changed');
+   publisherReview={...r};
+  }else{
   assert(platform==='darwin','host_payload_publisher_transition_requires_trusted_platform_identity');
   const registered=s.config.host.macPreviewApp,appPath=registered?.path;
   assert(absolute(appPath)&&path.basename(appPath)==='Styx.app'&&digest(registered.certificateSha256)&&/^[a-f0-9]{40}$/.test(registered.certificateSha1??''),'host_payload_registered_certificate_required');
@@ -114,13 +122,14 @@ function target(s,bundle,adapters){
   for(const file of [defaultsFile,publicFile]){const st=fs.lstatSync(file);assert(st.isFile()&&!st.isSymbolicLink()&&fs.realpathSync(file)===file&&st.size<=65536,'host_payload_app_resource_changed')}
   const defaults=JSON.parse(fs.readFileSync(defaultsFile));assert(Object.keys(defaults).length===3&&defaults.bundle==='host-bundle'&&defaults.publisherKeyFile==='publisher.pem'&&digest(defaults.publisherSha256),'host_payload_app_artifacts_invalid');
   pem=fs.readFileSync(publicFile);assert(pin(pem)===defaults.publisherSha256,'host_payload_app_publisher_changed');
+  }
  }
  const release=verifySignedRelease(bundle,pem,{platform,arch:process.arch});complete(release,s.host,platform);
  assert(release.version!==s.current.version,'distinct_host_payload_version_required');
- return {pem,release,bundle,app:app?{path:app.path,cdhash:app.cdhash,certificateSha1:app.certificateSha1,certificateSha256:app.certificateSha256}:null};
+ return {pem,release,bundle,publisherReview,app:app?{path:app.path,cdhash:app.cdhash,certificateSha1:app.certificateSha1,certificateSha256:app.certificateSha256}:null};
 }
 function candidateInspection(s,t){
- const body={schema:1,platform:s.platform,stateDir:s.d,bundle:t.bundle,current:{version:s.current.version,manifestSha256:s.current.sha256,publisherSha256:pin(s.pem)},target:{version:t.release.version,manifestSha256:t.release.sha256,publisherSha256:pin(t.pem)},publisherChange:pin(s.pem)!==pin(t.pem),app:t.app,
+ const body={schema:1,platform:s.platform,stateDir:s.d,bundle:t.bundle,current:{version:s.current.version,manifestSha256:s.current.sha256,publisherSha256:pin(s.pem)},target:{version:t.release.version,manifestSha256:t.release.sha256,publisherSha256:pin(t.pem)},publisherChange:pin(s.pem)!==pin(t.pem),...(t.publisherReview?{publisherReview:t.publisherReview,publisherTrust:'explicit_owner_replacement_no_signer_continuity'}:{}),app:t.app,
   managed:s.files.filter(f=>!['state','background','capabilities'].includes(f.name)).map(f=>({name:f.name,path:f.path,sha256:sha(f.before),mode:f.mode})),preserved:s.preserved};
  return {...body,bindingSha256:sha(JSON.stringify(body)),nativeAbsence:'NOT OBSERVED',installation:'NOT RUN'};
 }
@@ -153,10 +162,17 @@ function proposed(s,t){
 async function build(stateDir,bundle,adapters,ownTransaction){
  const s=snapshot(stateDir,platformOf(adapters));noActivity(stateDir,s.root);const old=journal(stateDir);assert(!old||['applied','rolled_back'].includes(old.status)||old.transactionId===ownTransaction&&old.status==='capturing','host_payload_requires_rollback');
  const t=target(s,bundle,adapters);if(adapters.handoffAdmission){if(!ownTransaction)checkHandoffAdmission(stateDir,adapters.handoffAdmission);assert(candidateInspection(s,t).bindingSha256===adapters.handoffAdmission.candidateBinding,'host_payload_handoff_candidate_changed')}await absent(s,adapters);
- const files=proposed(s,t),body={schema:1,kind:KIND,platform:s.platform,stateDir,...(adapters.handoffAdmission?{handoffTicketId:adapters.handoffAdmission.ticketId}:{}),status:'offline_reviewable',bundle,current:{version:s.current.version,manifestSha256:s.current.sha256,publisherSha256:pin(s.pem)},target:{version:t.release.version,manifestSha256:t.release.sha256,publisherSha256:pin(t.pem)},publisherChange:pin(s.pem)!==pin(t.pem),receiptReconciliation:s.receiptReconciliation,preparationEvidenceReconciliation:s.preparationEvidenceReconciliation,app:t.app,changes:files.map(f=>({name:f.name,path:f.path,beforeSha256:sha(f.before),afterSha256:sha(f.after),beforeMode:f.mode,afterMode:f.afterMode})),preserved:s.preserved,nativeAbsence:'observed',serviceMutation:'NONE',nativeHealth:'NOT RUN',accountAcceptance:'NOT RUN'};
+ const files=proposed(s,t),body={schema:1,kind:KIND,platform:s.platform,stateDir,...(adapters.handoffAdmission?{handoffTicketId:adapters.handoffAdmission.ticketId}:{}),status:'offline_reviewable',bundle,current:{version:s.current.version,manifestSha256:s.current.sha256,publisherSha256:pin(s.pem)},target:{version:t.release.version,manifestSha256:t.release.sha256,publisherSha256:pin(t.pem)},publisherChange:pin(s.pem)!==pin(t.pem),...(t.publisherReview?{publisherReview:t.publisherReview,publisherTrust:'explicit_owner_replacement_no_signer_continuity'}:{}),receiptReconciliation:s.receiptReconciliation,preparationEvidenceReconciliation:s.preparationEvidenceReconciliation,app:t.app,changes:files.map(f=>({name:f.name,path:f.path,beforeSha256:sha(f.before),afterSha256:sha(f.after),beforeMode:f.mode,afterMode:f.afterMode})),preserved:s.preserved,nativeAbsence:'observed',serviceMutation:'NONE',nativeHealth:'NOT RUN',accountAcceptance:'NOT RUN'};
  return {s,t,files,plan:{...body,planId:sha(JSON.stringify(body))}};
 }
 export async function planHostPayloadMigration({stateDir,bundle}={},adapters={}){assert(absolute(stateDir),'absolute_state_directory_required');for(const n of [...LOCKS,RECOVERY]){if(n==='advance.lock'&&adapters.handoffAdmission)checkHandoffAdmission(stateDir,adapters.handoffAdmission);else assert(!fs.existsSync(path.join(stateDir,n)),'host_payload_management_busy');}try{return (await build(stateDir,bundle,adapters)).plan}catch(error){if(!(error instanceof NativeAbsenceRequired))throw error;return {schema:1,status:'blocked',reason:error.reason,installation:'NOT RUN',nativeHealth:'NOT RUN',accountAcceptance:'NOT RUN'}}}
+// This separate owner operation is intentionally unavailable to automatic App
+// handoffs. The expected pins and manifest digest must be reviewed independently
+// of the candidate package; it establishes new trust, not signing continuity.
+export async function planHostPublisherTransition({stateDir,bundle,publisherReview}={},adapters={}){
+ assert(publisherReview?.authorization==='replace_host_publisher','explicit_publisher_replacement_review_required');
+ return planHostPayloadMigration({stateDir,bundle},{...adapters,publisherReview});
+}
 function checkPreserved(entries){for(const f of entries)assert(sha(bytes(f.path))===f.sha256,'host_payload_preserved_state_changed')}
 function locks(d,transactionId,{recover,owner,plan,handoffAdmission}={}){
  const held=[],recoveryOwner=recover&&LOCKS.some(n=>fs.existsSync(path.join(d,n)))?owner:null;
@@ -187,6 +203,7 @@ function save(d,j,status,activeFile){j.status=status;j.updatedAt=new Date().toIS
 function assertFiles(files,side){for(const f of files)assert(bytes(f.path,f.name.startsWith('bootstrap_')).equals(f[side]),'host_payload_managed_file_changed')}
 export async function applyHostPayloadMigration({stateDir,plan,authorize=false}={},adapters={}){
  assert(authorize===true,'explicit_host_payload_authorization_required');assert(plan?.stateDir===stateDir&&digest(plan.planId),'host_payload_reviewed_plan_required');
+ if(plan.publisherReview)adapters={...adapters,publisherReview:plan.publisherReview};
  assert(!fs.existsSync(path.join(stateDir,RECOVERY)),'host_payload_recovery_in_progress');
  const initial=await build(stateDir,plan.bundle,adapters);assert(JSON.stringify(initial.plan)===JSON.stringify(plan),'host_payload_review_stale');
  const transactionId=randomBytes(16).toString('hex'),held=locks(stateDir,transactionId,{plan,handoffAdmission:adapters.handoffAdmission});let pending=true,j=journal(stateDir);
