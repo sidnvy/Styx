@@ -219,7 +219,7 @@ export async function recoverDeploymentDeviceIngress(d,options={}){return recove
 export {readAdditionalDeviceIngress as readDeploymentDeviceIngressSetup};
 export async function closeDeploymentPairingWindow(d,options={}){
  exact(options,['authorize']);if(options.authorize!==true)fail('explicit_owner_pairing_close_required');const g=ownedGateway(d),entry=g.config.gateway.deviceIngress;
- if(!entry)return {schema:1,pairing:{status:'closed'}};
+ if(!entry?.enabled)return g.controller?g.controller.closePrimaryPairing():ownerCommand(g.owner,'invitations-close');
  return gatewayIngressCommand(d,'close',{generation:entry.generation});
 }
 export async function createDeploymentPairingLink(d,options={}){

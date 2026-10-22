@@ -12,6 +12,7 @@ import {TargetRegistry} from '../registry.mjs';
 import {EnrollmentController} from '../enrollment.mjs';
 import {createStyxGateway} from '../index.mjs';
 import {createGatewayHttp} from '../http.mjs';
+import {ownerCommand} from '../enroll-admin.mjs';
 import {
   initLocalIdentity,requestEnrollment,claimEnrollment,enrollmentRequest
 } from '../../host/enroll.mjs';
@@ -60,6 +61,41 @@ async function fixture(t) {
   });
   return {tmp,gateway,controller,admin,config,http,cert,adminToken,mcpToken,enrollDir};
 }
+
+test('closing primary invitations persists rejection without disturbing approved or pending devices',
+  {timeout:25000},async t=>{
+  const f=await fixture(t),guest=f.config('approved',false);
+  const first=(await f.admin('invitations',{})).body;
+  const pending=await requestEnrollment(guest,first.invitation);
+  await f.admin('approve',{request_id:pending.request_id,fingerprint:pending.fingerprint,enable_computer:false});
+  const ready=await claimEnrollment(guest);
+  const target=f.gateway.registry.resolve(ready.device_id),tokenBefore=await fs.readFile(target.exec.token_file);
+  const waiting=(await f.admin('invitations',{})).body;
+  await requestEnrollment(f.config('waiting',false),waiting.invitation);
+  const unused=(await f.admin('invitations',{})).body;
+  const scoped=f.controller.invite({}, {origin:'https://192.0.2.1:8443',certificate_sha256:'a'.repeat(64),generation:'b'.repeat(32),window_id:'independent-window'});
+  const before=JSON.parse(await fs.readFile(f.controller.stateFile,'utf8'));
+  await assert.rejects(enrollmentRequest(guest,'invitations/close',{}),/unauthorized/);
+  await assert.rejects(f.admin('invitations/close',{unexpected:true}),/invalid_primary_pairing_close/);
+  const owner={gateway_url:guest.gateway_url,gateway_ca_file:f.cert,admin_token_file:path.join(f.tmp,'admin.token')};
+  const stateFile=f.controller.stateFile;
+  try{
+    f.controller.stateFile=path.join(f.tmp,'missing-directory','state.json');
+    await assert.rejects(ownerCommand(owner,'invitations-close'));
+    assert.deepEqual(f.controller.db,before,'failed persistence must not publish an in-memory close');
+    assert.deepEqual(JSON.parse(await fs.readFile(stateFile,'utf8')),before);
+  }finally{f.controller.stateFile=stateFile;}
+  assert.equal((await ownerCommand(owner,'invitations-close')).pairing.status,'closed');
+  assert.equal((await ownerCommand(owner,'invitations-close')).pairing.status,'closed');
+  await assert.rejects(requestEnrollment(f.config('closed',false),unused.invitation),/invitation_expired_or_used/);
+  const after=JSON.parse(await fs.readFile(f.controller.stateFile,'utf8'));
+  assert.deepEqual(after.pending,before.pending);assert.deepEqual(after.devices,before.devices);
+  assert.deepEqual(after.invitations.at(-1),before.invitations.at(-1),'a separate ingress window remains valid');
+  assert.ok(scoped.invitation);assert.deepEqual(await fs.readFile(target.exec.token_file),tokenBefore);
+  assert.equal(f.gateway.registry.resolve(ready.device_id).exec.token_file,target.exec.token_file);
+  const restored=new EnrollmentController({rootDir:f.enrollDir,adminTokenFile:owner.admin_token_file,registry:new TargetRegistry({version:1,targets:[]})});
+  assert.deepEqual(restored.db,after,'closed invitations survive a controller restart');
+});
 
 test('one-use invitation + device-generated key + owner-approved fingerprint + encrypted host token',
   {timeout:25000},async t=>{

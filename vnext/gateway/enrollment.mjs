@@ -145,6 +145,23 @@ export class EnrollmentController {
     }
     if(changed)this.save();
   }
+  closePrimaryPairing(body={}){
+    assert(isObject(body)&&Object.keys(body).length===0,'invalid_primary_pairing_close');
+    // Legacy primary listeners have unscoped invitations. Closing those must
+    // not invalidate a separate LAN window or change pending/approved devices.
+    let changed=false;
+    const invitations=this.db.invitations.map(invitation=>{
+      if(!invitation.ingress&&invitation.window_id===undefined&&!invitation.used){
+        changed=true;return {...invitation,used:true,invalidated_at:this.now()};
+      }
+      return invitation;
+    });
+    if(changed){
+      commitFile(this.stateFile,JSON.stringify({...this.db,invitations},null,2)+'\n');
+      this.db.invitations=invitations;
+    }
+    return {schema:1,pairing:{status:'closed'}};
+  }
   join(body,ingress=null){
     const {fingerprint,publicKey}=validateJoin(body);
     const invite=this.db.invitations.find(x=>x.hash===sha(body.invitation));
@@ -426,6 +443,7 @@ export async function handleEnrollment(req,res,{controller,allowedHosts,allowAdm
     assert(req.socket.encrypted||isLoopback(req),'enrollment_requires_tls',403);
     const routes={
       '/styx/enroll/invitations':['POST',true,'invite'],
+      '/styx/enroll/invitations/close':['POST',true,'closePrimaryPairing'],
       '/styx/enroll/pending':['GET',true,'listPending'],
       '/styx/enroll/approve':['POST',true,'approve'],
       '/styx/enroll/devices':['GET',true,'devices'],

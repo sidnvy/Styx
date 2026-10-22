@@ -41,6 +41,9 @@ export async function ownerCommand(config,cmd,args=[]) {
       route='device-ingress/pairing-open';data={generation:args[0],ttl_seconds:Number(args[1]??600)};break;
     case 'invite':
       route='invitations';data={ttl_seconds:Number(args[0]??600)};break;
+    case 'invitations-close':
+      if(args.length)throw Error('invalid_primary_pairing_close');
+      route='invitations/close';data={};break;
     case 'pending':route='pending';break;
     case 'devices':route='devices';break;
     case 'approve':

@@ -32,6 +32,22 @@ async function fixture(t){
 }
 function get(url,ca){return new Promise((resolve,reject)=>{const req=https.get(url,{ca:fs.readFileSync(ca),agent:false},res=>{res.resume();res.on('end',()=>resolve(res.statusCode))});req.on('error',reject)})}
 const options={skip:process.platform!=='linux'||!host,timeout:30000};
+test('Core and CLI close legacy primary invitations instead of reporting an unchanged invitation as closed',options,async t=>{
+ const f=await fixture(t),owner=JSON.parse(fs.readFileSync(path.join(f.state,'gateway/owner.json')));
+ const database=path.join(f.state,'gateway/enrollment/state.json');
+ for(const viaCLI of [false,true]){
+  const invitation=await ownerCommand(owner,'invite',['600']);
+  assert.equal(JSON.parse(fs.readFileSync(database)).invitations.at(-1).used,false);
+  if(viaCLI){
+   const child=spawn(process.execPath,[fileURLToPath(new URL('../cli.mjs',import.meta.url)),'pairing-close',f.state,'--authorize'],{stdio:['ignore','pipe','pipe']});
+   let output='';child.stdout.on('data',chunk=>output+=chunk);child.stderr.on('data',chunk=>output+=chunk);
+   assert.equal((await once(child,'close'))[0],0,output);assert.equal(JSON.parse(output).pairing.status,'closed');
+  }else assert.equal((await closeDeploymentPairingWindow(f.state,{authorize:true})).pairing.status,'closed');
+  assert.equal(JSON.parse(fs.readFileSync(database)).invitations.at(-1).used,true);
+  await assert.rejects(requestEnrollment({gateway_url:f.config.gateway.url,gateway_ca_file:owner.gateway_ca_file,storage_dir:path.join(f.root,'rejected-'+viaCLI),label:'Closed invitation',cwd:f.root,shell:'/bin/sh',exec_binary:'/not-executed/exec',computer_requested:false},invitation.invitation),/invitation_expired_or_used/);
+ }
+ for(const [name,bytes] of f.preserved)assert.deepEqual(fs.readFileSync(name),bytes);
+});
 test('Core adds actual LAN TLS without changing primary identity, live observation scope or confirmation identity',options,async t=>{
  const f=await fixture(t),file=path.join(f.state,'deployment.json'),before=fs.readFileSync(file),scope=deploymentConnectionHash(before);
  fs.writeFileSync(path.join(f.state,'foreground.lock'),'fixture-owned-observer',{mode:0o600});
