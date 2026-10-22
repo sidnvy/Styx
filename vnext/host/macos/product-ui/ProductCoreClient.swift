@@ -44,7 +44,7 @@ indirect enum ProductJSON: Codable, Equatable {
     var object: [String: ProductJSON] { if case .object(let v) = self { return v }; return [:] }
 }
 
-enum ProductCoreError: Error { case invalidBootstrap, unavailable, rejected, invalidResponse }
+enum ProductCoreError: Error { case invalidBootstrap, unavailable, rejected, invalidResponse, workInProgress, workStateUnknown }
 
 final class ProductRedirectBlocker: NSObject, URLSessionTaskDelegate {
     func urlSession(_ session: URLSession, task: URLSessionTask,
@@ -62,7 +62,7 @@ final class ProductCoreClient {
     private let transport: URLSession
     private let redirectBlocker = ProductRedirectBlocker()
     static let reads: Set<String> = ["native-signing/status", "app/lifecycle", "session", "snapshot", "native-status", "status", "journey", "acceptance", "plugin", "browser", "diagnostics"]
-    static let writes: Set<String> = ["native-signing/plan", "native-signing/apply", "app/quit", "app/login", "device/revoke", "create", "local-setup", "advance", "foreground", "foreground/stop", "browser/prepare", "capabilities", "tunnel/configure", "tunnel/start", "tunnel/stop", "plugin/profile", "plugin/record", "connection-handoff", "acceptance/begin", "acceptance/confirm", "acceptance/desktop-readback", "devices", "default-device", "device-ingress/plan", "device-ingress/verify", "device-ingress/prepare", "device-ingress/status", "device-ingress/recover", "pairing-link/close", "pairing-link/inspect", "pairing-link/accept", "pairing-link/create", "pending/list", "pending/approve"]
+    static let writes: Set<String> = ["host-payload/handoff/prepare", "host-payload/handoff/status", "host-payload/handoff/cancel", "native-signing/plan", "native-signing/apply", "app/quit", "app/login", "device/revoke", "create", "local-setup", "advance", "foreground", "foreground/stop", "browser/prepare", "capabilities", "tunnel/configure", "tunnel/start", "tunnel/stop", "plugin/profile", "plugin/record", "connection-handoff", "acceptance/begin", "acceptance/confirm", "acceptance/desktop-readback", "devices", "default-device", "device-ingress/plan", "device-ingress/verify", "device-ingress/prepare", "device-ingress/status", "device-ingress/recover", "pairing-link/close", "pairing-link/inspect", "pairing-link/accept", "pairing-link/create", "pending/list", "pending/approve"]
 
     static func bootstrap(_ url: URL) -> (origin: URL, token: String)? {
         guard var c = URLComponents(url: url, resolvingAgainstBaseURL: false),
@@ -138,8 +138,12 @@ final class ProductCoreClient {
         }
         ProductNativeDiagnostics.event("response " + route + " status=" + String((response as? HTTPURLResponse)?.statusCode ?? 0))
         guard let response = response as? HTTPURLResponse,
-              response.url == url,
-              response.statusCode == 200 else { throw ProductCoreError.rejected }
+              response.url == url else { throw ProductCoreError.rejected }
+        if response.statusCode == 409, data.count <= 4096, let failure = try? JSONDecoder().decode(ProductJSON.self, from: data) {
+            if failure["error"].string == "work_in_progress" { throw ProductCoreError.workInProgress }
+            if failure["error"].string == "work_state_unknown" { throw ProductCoreError.workStateUnknown }
+        }
+        guard response.statusCode == 200 else { throw ProductCoreError.rejected }
         // Match Core's existing 2 MiB response/archive contract.
         guard data.count <= 2 * 1024 * 1024,
               response.mimeType == mimeType else { throw ProductCoreError.invalidResponse }

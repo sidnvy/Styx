@@ -289,6 +289,8 @@ enum ProductRestorationPolicy {
     private var restoredPage = false
     private let permissionReader: () -> (accessibility: Bool, screenRecording: Bool)
     private let permissionActions: ProductPermissionActions
+    var launchPayloadUpdater: ((String) throws -> Void)?
+    @Published var payloadUpdateStatus: ProductJSON = .null
     var recoverComputerUse: (() async throws -> Void)?
 
     var deployment: ProductDeployment? { ProductDeployment(status["deployment"]) }
@@ -471,6 +473,39 @@ enum ProductRestorationPolicy {
         Task {
             do { try await waitForObservation(); try await operation(); try await reload() }
             catch { reportFailure(error); try? await reload() }
+            busy = false
+        }
+    }
+    func checkPayloadUpdate() {
+        perform { [self] in payloadUpdateStatus = try await client.write("host-payload/handoff/status", [:])["handoff"] }
+    }
+    func cancelPayloadUpdate() {
+        guard let ticket = payloadUpdateStatus["ticketId"].string else { return }
+        perform { [self] in payloadUpdateStatus = try await client.write("host-payload/handoff/cancel", ["authorize": .bool(true), "ticketId": .string(ticket)])["handoff"] }
+    }
+    func finishPayloadUpdate() {
+        guard !busy else { return }
+        let alert = NSAlert()
+        alert.messageText = productText("完成 Styx 更新？", "Finish the Styx update?")
+        alert.informativeText = productText("Styx 会短暂退出并重新打开。请先结束正在使用这台电脑的任务；现有设置和配对会保留。", "Styx will briefly quit and reopen. Finish tasks using this computer first. Settings and pairing will be preserved.")
+        alert.addButton(withTitle: productText("更新并重新打开", "Update and reopen"))
+        alert.addButton(withTitle: productText("取消", "Cancel"))
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        busy = true; error = nil
+        Task {
+            do {
+                try await waitForObservation()
+                payloadUpdateStatus = try await client.write("host-payload/handoff/prepare", ["authorize": .bool(true)])["handoff"]
+                guard payloadUpdateStatus["status"].string == "awaiting_exit", let ticket = payloadUpdateStatus["ticketId"].string, let launch = launchPayloadUpdater else { throw ProductCoreError.invalidResponse }
+                do { try launch(ticket) }
+                catch { payloadUpdateStatus = try await client.write("host-payload/handoff/cancel", ["authorize": .bool(true), "ticketId": .string(ticket)])["handoff"]; throw error }
+            } catch {
+                switch error as? ProductCoreError {
+                case .workInProgress: self.error = productText("有任务仍在运行。请完成后再更新。", "Tasks are still running. Finish them before updating.")
+                case .workStateUnknown: self.error = productText("暂时无法确认任务状态。请稍后重试。", "The task state could not be confirmed. Try again shortly.")
+                default: self.error = productText("更新尚未开始。请检查更新状态后重试。", "The update has not started. Check update status and retry.")
+                }
+            }
             busy = false
         }
     }

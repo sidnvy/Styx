@@ -6,6 +6,7 @@ import CoreGraphics
 import Darwin
 import WebKit
 import UniformTypeIdentifiers
+import CryptoKit
 
 let bundleID = "app.styx.host"
 enum HostError: Error { case unsafeRuntime, alreadyRunning, socketPath, daemonUnavailable }
@@ -658,6 +659,27 @@ func productSystemQuitReason(_ reason: OSType?) -> Bool {
         controller.model.recoverComputerUse = { [weak self] in
             guard let owner = self else { throw ProductWorkflowError.computerPermissionRecoveryRequired }
             try await owner.recoverComputerUseAfterPermissions(url)
+        }
+        controller.model.launchPayloadUpdater = { [weak self] ticket in
+            guard let owner = self, !owner.terminationPending,
+                  ticket.range(of: "^[a-f0-9]{32}$", options: .regularExpression) != nil,
+                  let bundled = Bundle.main.executableURL?.deletingLastPathComponent().appendingPathComponent("StyxUpdater") else { throw HostError.unsafeRuntime }
+            let root = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support/Styx/Setup")
+            let state = root.appendingPathComponent("deployment").path
+            let binding = SHA256.hash(data: Data(state.utf8)).map { String(format: "%02x", $0) }.joined().prefix(16)
+            let stages = root.appendingPathComponent("host-payload-updaters"), group = stages.appendingPathComponent(String(binding)), directory = group.appendingPathComponent(ticket), helper = directory.appendingPathComponent("StyxUpdater")
+            for url in [root, stages, group, directory, helper] {
+                let attributes = try FileManager.default.attributesOfItem(atPath: url.path)
+                guard attributes[.type] as? FileAttributeType == (url == helper ? .typeRegular : .typeDirectory),
+                      (attributes[.ownerAccountID] as? NSNumber)?.uint32Value == getuid(),
+                      let mode = attributes[.posixPermissions] as? NSNumber, mode.intValue & 0o077 == 0 else { throw HostError.unsafeRuntime }
+            }
+            guard SHA256.hash(data: try Data(contentsOf: helper)) == SHA256.hash(data: try Data(contentsOf: bundled)) else { throw HostError.unsafeRuntime }
+            let process = Process(); process.executableURL = helper; process.arguments = [ticket]
+            process.standardInput = FileHandle.nullDevice; process.standardOutput = FileHandle.nullDevice; process.standardError = FileHandle.nullDevice
+            process.environment = ["HOME": NSHomeDirectory(), "PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "TMPDIR": NSTemporaryDirectory()]
+            try process.run()
+            NSApp.terminate(nil)
         }
         controller.showMenuInvitation = { [weak self] in
             self?.toggleProductPanel()

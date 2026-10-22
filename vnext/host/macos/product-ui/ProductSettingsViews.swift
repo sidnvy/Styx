@@ -88,12 +88,24 @@ struct ProductSettingsView: View {
                 Label(notice, systemImage: "exclamationmark.circle")
                     .font(.callout).foregroundStyle(.secondary)
                     .accessibilityIdentifier("styx-component-update-notice")
+                HStack {
+                    if ["publisher_changed", "update_available"].contains(model.status["components"]["host"]["status"].string ?? "") {
+                        Button(productText("完成更新…", "Finish update…")) { model.finishPayloadUpdate() }.disabled(model.busy)
+                    }
+                    Button(productText("检查更新状态", "Check update status")) { model.checkPayloadUpdate() }.disabled(model.busy)
+                    if ["preparing", "awaiting_exit", "blocked", "needs_recovery"].contains(model.payloadUpdateStatus["status"].string ?? "") {
+                        Button(productText("取消尚未执行的更新", "Cancel pending update")) { model.cancelPayloadUpdate() }.disabled(model.busy)
+                    }
+                }
+                if let state = model.payloadUpdateStatus["status"].string {
+                    Text(state == "cancelled" ? productText("已取消，当前组件未更改。", "Cancelled. The current components were not changed.") : state == "applied_stopped" ? productText("组件已更新。", "Components updated.") : state == "not_started" ? productText("尚未开始更新。", "The update has not started.") : productText("更新尚未完成。可重试或取消尚未执行的更新；若已经开始更改，请使用更新窗口中的恢复入口。", "The update has not finished. Retry or cancel a pending update; if changes have started, use recovery in the updater window.")).font(.caption).foregroundStyle(.secondary)
+                }
             }
         }.frame(maxWidth: .infinity, alignment: .leading)
     }
     private var componentNotice: String? {
         switch model.status["components"]["host"]["status"].string {
-        case "publisher_changed": return productText("运行组件尚未更新。此版本需要先完成发布者信任迁移，现有配置和连接将保留。", "Runtime components have not been updated. This version requires a publisher trust migration; existing settings and connections are retained.")
+        case "publisher_changed": return productText("运行组件尚未更新。完成更新后继续使用；现有设置和配对会保留。", "Runtime components have not been updated. Finish the update to continue; settings and pairing will be preserved.")
         case "update_available": return productText("App 与运行组件的版本不同。当前仍使用已安装的运行组件。", "The App and runtime components have different versions. The installed runtime is still selected.")
         case "same_version_conflict", "candidate_unverified", "unavailable", "needs_recovery": return productText("无法确认运行组件更新状态。请检查安装或恢复记录；不要重新配对。", "Runtime update status needs review. Check the installation or recovery record; pairing does not need to be reset.")
         default: return nil

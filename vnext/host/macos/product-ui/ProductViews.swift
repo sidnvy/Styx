@@ -607,7 +607,11 @@ struct ProductAcceptanceField: NSViewRepresentable {
                 completion(false)
                 let alert = NSAlert()
                 alert.messageText = productText("暂时无法安全退出 Styx", "Styx could not finish quitting")
-                alert.informativeText = productText("尚未确认 Styx 的自动恢复已暂停。请稍后再次选择“退出 Styx”。", "Styx could not confirm that automatic recovery was paused. Try Quit Styx again shortly.")
+                switch error as? ProductCoreError {
+                case .workInProgress: alert.informativeText = productText("有任务仍在运行。请完成后再退出。", "Tasks are still running. Finish them before quitting.")
+                case .workStateUnknown: alert.informativeText = productText("暂时无法确认任务状态。请稍后重试。", "The task state could not be confirmed. Try again shortly.")
+                default: alert.informativeText = productText("尚未确认 Styx 的自动恢复已暂停。请稍后再次选择“退出 Styx”。", "Styx could not confirm that automatic recovery was paused. Try Quit Styx again shortly.")
+                }
                 if let parent = window {
                     showWindow(nil); NSApp.activate(ignoringOtherApps: true)
                     alert.beginSheetModal(for: parent) { _ in }

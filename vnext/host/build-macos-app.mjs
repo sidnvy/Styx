@@ -9,6 +9,7 @@ import {crc32,normalizePresentation} from '../plugin/package.mjs';
 
 export const MAC_BUNDLE_ID='app.styx.host';
 const SOURCE=fileURLToPath(new URL('./macos/Styx.swift',import.meta.url));
+const UPDATER=fileURLToPath(new URL('./macos/StyxUpdater.swift',import.meta.url));
 const GLYPH=fileURLToPath(new URL('./macos/BrandGlyph.swift',import.meta.url));
 const ICON_RENDERER=fileURLToPath(new URL('./macos/render-brand-icons.swift',import.meta.url));
 const PRODUCT_UI=fileURLToPath(new URL('./macos/product-ui/',import.meta.url));
@@ -59,6 +60,7 @@ export function macSigningPlan({app,identity,teamID,notaryProfile}={}){
   // Sign nested code first. Never use --deep to paper over unidentified code.
   const steps=[
     ['/usr/bin/codesign',['--force','--options','runtime','--timestamp','--sign',identity,path.posix.join(app,'Contents/MacOS/cua-driver')]],
+    ['/usr/bin/codesign',['--force','--options','runtime','--timestamp','--sign',identity,path.posix.join(app,'Contents/MacOS/StyxUpdater')]],
     ['/usr/bin/codesign',['--force','--options','runtime','--timestamp','--sign',identity,app]],
     ['/usr/bin/codesign',['--verify','--deep','--strict','--verbose=2',app]],
     ['/usr/bin/codesign',['--verify','--strict','-R',`=anchor apple generic and identifier "${MAC_BUNDLE_ID}" and certificate leaf[subject.OU] = "${teamID}"`,app]]
@@ -82,6 +84,7 @@ export function macDevelopmentSigningPlan({app,identity,teamID}={}){
   assert(/^[A-Z0-9]{10}$/.test(teamID??''),'development_signing_team_required');
   return [
     ['/usr/bin/codesign',['--force','--options','runtime','--timestamp=none','--sign',identity,path.posix.join(app,'Contents/MacOS/cua-driver')]],
+    ['/usr/bin/codesign',['--force','--options','runtime','--timestamp=none','--sign',identity,path.posix.join(app,'Contents/MacOS/StyxUpdater')]],
     ['/usr/bin/codesign',['--force','--options','runtime','--timestamp=none','--sign',identity,app]],
     ['/usr/bin/codesign',['--verify','--deep','--strict','--verbose=2',app]],
     ['/usr/bin/codesign',['--verify','--strict','-R',`=anchor apple generic and identifier "${MAC_BUNDLE_ID}" and certificate leaf[subject.OU] = "${teamID}"`,app]]
@@ -178,7 +181,7 @@ export function buildMacApp({app,cuaBinary,version,identity,teamID,notaryProfile
   assert(/^cua-driver 0\.36\.0(?:\s|$)/.test(observed),'pinned_cua_036_required');
   assert(!notaryProfile||identity,'notarization_requires_signing');
   assert(!teamID||identity,'team_requires_signing');
-  const steps=localSigning!==undefined?macLocalSigningPlan({app,localSigning,files:[path.posix.join(app,'Contents/MacOS/cua-driver'),path.posix.join(app,'Contents/MacOS/Styx')]}):identity?(signingMode==='local-development'
+  const steps=localSigning!==undefined?macLocalSigningPlan({app,localSigning,files:[path.posix.join(app,'Contents/MacOS/cua-driver'),path.posix.join(app,'Contents/MacOS/Styx'),path.posix.join(app,'Contents/MacOS/StyxUpdater')]}):identity?(signingMode==='local-development'
     ?macDevelopmentSigningPlan({app,identity,teamID})
     :macSigningPlan({app,identity,teamID,notaryProfile})):[];
   fs.mkdirSync(path.dirname(app),{recursive:true});
@@ -212,6 +215,7 @@ export function buildMacApp({app,cuaBinary,version,identity,teamID,notaryProfile
     fs.copyFileSync(cuaBinary,driver,fs.constants.COPYFILE_EXCL);fs.chmodSync(driver,0o755);
     const inputHash=createHash('sha256').update(fs.readFileSync(cuaBinary)).digest('hex');
     execFileSync('/usr/bin/xcrun',swiftArgs,{stdio:'inherit',timeout:180000});
+    execFileSync('/usr/bin/xcrun',macSwiftBuildArguments({source:UPDATER,output:path.join(macos,'StyxUpdater'),sdkPath,moduleCachePath}),{stdio:'inherit',timeout:180000});
     execFileSync('/usr/bin/plutil',['-lint',path.join(app,'Contents/Info.plist')],{stdio:'inherit'});
     for(const [command,args] of steps){
       // A local keychain approval must not turn into an unattended long wait.

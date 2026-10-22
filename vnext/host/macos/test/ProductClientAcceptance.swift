@@ -14,6 +14,13 @@ import Foundation
         do { _ = try await client.write("plugin/export", [:]); throw ProductCoreError.invalidResponse }
         catch ProductCoreError.rejected { }
         let expected = CommandLine.arguments[2]
+        if expected == "work_in_progress" || expected == "work_state_unknown" {
+            do { _ = try await client.write("host-payload/handoff/prepare", ["authorize": .bool(true)]); throw ProductCoreError.invalidResponse }
+            catch ProductCoreError.workInProgress { guard expected == "work_in_progress" else { throw ProductCoreError.invalidResponse } }
+            catch ProductCoreError.workStateUnknown { guard expected == "work_state_unknown" else { throw ProductCoreError.invalidResponse } }
+            print("PASS: native maintenance admission case \(expected)")
+            return
+        }
         let archive: Data
         do { archive = try await client.exportPlugin() }
         catch {
