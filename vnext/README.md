@@ -77,6 +77,8 @@ installation occurred. No unrelated application was touched.
 
 ## Developer tests
 
+Shared branch, source and acceptance rules: [development baseline](docs/development-baseline.md).
+
 Requires Node.js 22+, Python 3, and Linux x86_64 for pinned Codex binary test.
 
     cd vnext

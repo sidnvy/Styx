@@ -1,87 +1,71 @@
 # “添加电脑”的附加网络入口契约
 
-状态：待实现。当前源码的入口预检、邀请和独立审批不能组合成已完成的普通用户 LAN 添加流程；本文不是实现或验收凭据。
+状态：公共 Core / Gateway 已实现。`ae86337` 加入同一 Gateway 的附加精确 TLS 入口、事务恢复和独立配对窗口；`1b23221` 修正公开 join 预检。Windows / 网页接线和 Linux CLI 已纳入该来源；macOS 新 UI 的接线、三平台源码回灌和目标账号完整流程仍需分别核对，见[共享开发基线](development-baseline.md)。本文件保留实现约束，不把源码或单次原生结果写成全部平台产品验收。
 
-适用起点：主台已有 localhost Gateway、本机 Host 和可用的 ChatGPT 连接。用户点击“添加电脑”后，应增加一个经授权的设备入口，继续使用同一个 Gateway，而不要求修改原聊天配置。
+真实附加入口验收记录在任务输出 `outputs/cross-platform-ready-20261022/delivery.json`、两端 actor receipt 和 `evidence-inventory.json`。Linux `1b23221` 新产物与相同公共 Core 的 Windows 冻结源码通过直接 TLS 加入：Gateway 9 项、Windows 6 项门槛通过；原 localhost MCP 会话持续可用，12 秒 Exec、真实 Edge 和关闭窗口后的执行器重连通过。测试没有使用 SSH 转发，未变更已装服务或防火墙；两端私有状态和自建进程已清理。这不是实际 ChatGPT 账号或全部原生 App 界面的验收。
+
+适用起点仍是已有 localhost Gateway、本机 Host 和可用 ChatGPT 连接的主台。“添加电脑”增加经授权的设备入口，继续使用同一个 Gateway，不要求修改原聊天配置。
 
 ## 必须保留的既有状态
 
 - 原 Gateway 的 localhost 地址、端口、证书、私钥、model/admin 凭据与 owner 配置保持原值。
 - 本机 Host 的连接地址、身份、凭据、能力和系统权限保持不变。
 - 隧道、插件地址及账号配置不重建；不自动更改默认设备。
-- 新入口与原入口使用同一进程中的 registry、EnrollmentController、Host relay 和撤销记录。不能由 App 另起一个 Gateway，或用第二个 controller 并发打开同一配对数据库。
+- 所有入口共享同一 registry、EnrollmentController、Host relay 和撤销记录。App 不另起 Gateway 或 controller 并发管理同一配对数据库。
 
-现有 `device-ingress-change.mjs` 是离线首设备主入口迁移：会改变主 URL、证书和 Host 配置，并明确拒绝已有 tunnel/plugin。它不能充当这里的在线附加入口实现，也不能通过移除拒绝条件来冒充实现。
+`device-ingress-change.mjs` 仍是离线首设备主入口迁移：会改变主 URL、证书和 Host 配置，并拒绝已有 tunnel/plugin。它不是在线附加入口的实现，不能通过移除拒绝条件冒充该流程。
 
-## 最小用户调用链
+## 用户调用链
 
-1. App 经共享 Core 读取当前 Gateway 的实际归属和入口能力；无归属、状态未知或运行版本不支持时明确停止，不新建 Gateway。
-2. 点击“添加电脑”即进入局域网邀请，不另设技术角色或网络范围选择页。Core 在已授权的局域网范围内选择并核对本机实际拥有的精确 IPv4 地址及可用端口；出现多个无法明确选择的网络或需新增系统授权时才说明阻塞。邀请中呈现另一台电脑需要核对的入口和信任信息；不使用 `0.0.0.0`，不自动修改防火墙、路由或系统权限。
-3. Core 执行受控附加入口事务，并让当前 Gateway 进程启动该入口。确认实际监听成功后，才能发出包含该入口的限时邀请。配置成功和本机 TLS 探测都不等于新电脑可达。
-4. 新电脑明确选择“加入已有”，核对邀请地址和证书，通过真实 TLS 建立连接并提交既有签名加入请求。
-5. 两端显示同一次请求的公开核对摘要。主台核对后批准设备；批准范围遵从设备端已经确认的能力选择。摘要不是连接密钥，也不替代 TLS、签名和独立审批。
-6. 新 Host 领取既有加密凭据并主动连接。原 ChatGPT 连接通过同一 registry 看到新设备；用户明确选择新设备执行真实命令及其所选能力的实际验收，不重新创建插件或搬运私钥、API key、配置文件。
+1. App 经共享 Core 读取 Gateway 的实际归属和入口能力；归属未知或旧运行版本不支持时明确停止，不新建 Gateway。
+2. “添加电脑”进入局域网邀请。Core 核对用户已授权且本机实际拥有的精确 IPv4 地址与端口；多网卡无法明确选择时报告阻塞。不使用 `0.0.0.0`，不自动更改防火墙、路由或系统权限。
+3. Core 执行附加入口事务，让当前 Gateway 进程启动入口；实际监听确认后才创建该入口的限时邀请。本机配置和 TLS 探测不等于另一台电脑可达。
+4. 新电脑明确选择“加入已有”，核对邀请地址和证书，通过真实 TLS 提交既有签名加入请求。
+5. 两端核对同一次请求的公开摘要。主台确认设备身份；能力遵从设备端已经确认并签名的申请。摘要不是连接密钥，也不代替 TLS、签名和独立审批。
+6. 新 Host 领取既有加密凭据并主动连接。原聊天通过同一 registry 选择新设备，实际验收所选能力；不重新创建插件，不搬运私钥、API key 或配置文件。
 
-## Gateway 运行时与 owner 控制
+## 同一 Gateway 与 owner 控制
 
-可以复用 `gateway/enroll-admin.mjs` 的 ownerCommand 传输：本机 HTTPS、独立 admin 凭据和既有固定命令校验。已有 invite/approve/revoke 命令没有启动监听器的功能；应增加窄的入口状态、准备、启用和配对窗口控制命令，不把网络变更藏在创建邀请或只读探测中。
+`gateway/device-ingress.mjs` 管理附加 listener。前台 Core 与后台 signed Gateway runner 使用同一实现；已有后台 Gateway 时，App 通过原 localhost HTTPS / admin 入口请求处理，不在 App 进程另建配对数据库或 relay。
 
-前台 Core 和后台 signed Gateway runner 必须接入同一个入口管理实现。后台 Gateway 已运行时，App 通过原 localhost owner 入口请求它处理；不在 App 进程中另建配对数据库或 relay。LAN 上不提供 owner 控制命令。
+`gateway/enroll-admin.mjs` 的固定命令包括 `ingress-status`、`ingress-prepare`、`ingress-enable`、`ingress-disable`、`pairing-open`、`pairing-close`。网络授权与状态读取分开；LAN 不提供 owner 控制。Core 对外使用 `prepareDeploymentDeviceIngress`、`readDeploymentDeviceIngressSetup`、`recoverDeploymentDeviceIngress` 和既有邀请/关闭配对 API。
 
-最小 LAN HTTP 路由仅为 join、claim、confirm；升级路由复用既有 Host exec/computer/browser 认证和能力检查。不开放 LAN MCP 或 invitations、approve、revoke 等管理路由。
+LAN HTTP 只开放 join、claim、confirm；Host 升级路由复用既有 exec/computer/browser 认证和能力校验。不开放 LAN MCP、invitations、approve、revoke 等管理路由。
 
-`gateway/outbound.mjs` 当前只允许一次 attach，并在 attach 中建立 heartbeat；`gateway/http.mjs` 的 close 会关闭整个 Gateway。新增入口前必须拆分：
+多监听器共享 relay 的连接表、重复 Host 检查、generation、撤销与 heartbeat。附加入口局部关闭只释放自己的连接与 listener，不能调用全局关闭或清除原 MCP session、本机 Host 和其他监听器的资源。localhost 服务独立先启动；LAN 失败不能拖垮原聊天入口。
 
-- 多监听器共享同一 relay 的连接表、重复 Host 检查、generation、撤销和 heartbeat；不能每个监听器各建一套 relay。
-- 原 Gateway 总关闭负责全部资源；附加入口的局部关闭不能调用 gateway.close 或 relay.close，不能清除原 MCP session、本机 Host 连接或其他监听器的资源。
-- 原 localhost 服务先独立启动。LAN 地址缺失、端口占用或证书异常只使附加入口进入待处理状态，不能拖垮原聊天入口；不能为恢复而偷偷换地址、端口或身份。
+## 配对窗口与连接入口分别管理
 
-## 配对窗口与连接入口是两个生命周期
+关闭“添加电脑”窗口或邀请到期只关闭新加入权限，并使该窗口未使用的邀请失效。已批准 Host 继续连接、断网重连；有效请求的 claim/confirm 按独立期限处理。真实跨机器验收已覆盖关窗口后的工具调用与执行器重连。
 
-关闭“添加电脑”窗口或到达邀请时限，只关闭新加入权限并使该窗口尚未使用的邀请失效。已经批准的设备仍可连接、断网重连；有效批准请求的 claim/confirm 按其独立期限处理。
+只有明确关闭附加连接入口才停止该 listener，并报告远端连接受影响；localhost 保留。单台设备撤销继续使用 durable tombstone、旧凭据拒绝和对应 relay 断开机制。
 
-因此不能把“关闭配对窗口”实现成关闭 LAN listener。只有用户明确关闭“其他电脑连接入口”，才停止该入口，并告知远端设备连接会受影响；localhost 和原 ChatGPT 入口仍保留。撤销单台设备继续使用既有 durable tombstone、凭据拒绝及 relay 断开机制。
+入口属于实际 Gateway 进程。重启恢复只使用原先授权的 descriptor；网卡暂缺或端口暂占时以 1 至 15 秒退避重试，保留原地址、generation、证书 pin 和身份，不重开邀请或重放 MCP。显式准备、启用、停用或关闭入口管理器会取消旧恢复任务。证书不匹配或过期不能靠重试放宽信任；这不是任意断网、重启或登录恢复都已验收的承诺。
 
-入口属于实际 Gateway 进程：前台 Gateway 退出时其入口结束；持久 Gateway 按已授权的登录恢复策略重新对账。恢复使用原 Host 身份和凭据，不重新配对。新入口不需要 Cua 或桌面权限。
+## 配置与事务
 
-## 配置 authority 与事务
+`deployment.json` 的 `gateway.deviceIngress` 是精确入口授权，保留原 `url/listenHost` 语义；generation、URL、精确 IP 和证书 DER SHA256 受校验。`onboarding/device-ingress-config.mjs` 派生独立 TLS 文件路径和 runner descriptor，不建立第二份角色或网络 authority。
 
-建议把附加入口期望配置纳入现有 deployment.json 的 Gateway 范围，例如新增严格校验的 `gateway.deviceIngress`，保留原 url/listenHost 语义。证书路径、运行时描述和服务使用数据由 Core 派生；可以有独立的派生入口 runtime，但它不是第二份角色或网络授权 authority。
+`state.configSha256` 仍绑定完整配置。`shared/deployment-scope.mjs` 仅在既有 Host 执行与聊天证明的连接范围投影中排除新增入口，使原 URL、身份和聊天绑定继续有效；既有证据保留来源，不因此生成一次新账号验收。事务共同锁、持久 intent/journal/history、写入前锁身份复核和相关 hash 对账共同约束变更。回滚只恢复本次入口变更，不能删除原身份、其他凭据或用旧数据库抹掉已经发生的设备批准。
 
-不能简单添加一个字段后只更新 state.configSha256：
+不确定事务明确进入 `needs_reconciliation`，由显式 `retry` / `rollback` 对账，不盲目重放。恢复有独占 `device-ingress-recovery.lock`；残留 guard 即使 PID 已死也不自动删除，须受审查的恢复处理，不能声称任何崩溃点都自动自愈。
 
-- `deployment-config.mjs` 和 `gateway-deployment-reader.mjs` 目前只认识单入口，后者严格校验 canonical runtime 字段和证据。
-- background/capabilities 等 journal 绑定完整配置 hash；foreground 的 scopeValid 也捕获完整配置 hash。直接改配置会使已有前台连接失去有效 scope。
-- `shared/onboarding-evidence.mjs` 的聊天验收 binding 同样包含完整配置 hash。附加网络授权不能静默改写成一次新聊天验收。
+配置仍含 `gateway.deviceIngress` 时，运行时更新/恢复拒绝不支持该配置的旧 Gateway application（未声明或低于 source contract 2）。需要先显式回滚附加入口配置，不能静默删字段；历史签名包的来源闭包兼容是另一项校验。
 
-事务需持有相关共同锁，记录精确 before/after、派生材料、当前 Gateway 的接收确认和可回滚阶段；不自动重放不确定操作。须为纯附加入口变更建立经过验证的 scope/adoption 或版本化迁移，使既有 Host 执行范围继续有效，并对账所有关联 hash。保留既有验收时，应保留原证据来源和受审查的 binding 迁移记录，不伪造新证明。
+## TLS、核对摘要与预检
 
-原 tunnel/plugin 继续绑定原 localhost URL、证书与凭据，不需要改变账号配置。回滚只撤回本次附加入口变更，不能删除已存在的身份、配对记录或其他设备凭据。已由新入口完成的设备批准属于独立事实，不能靠恢复旧数据库副本抹掉。
+当前实现选择独立的 LAN 自签 TLS 身份，并在邀请中明确绑定该入口与叶证书信任；不由主 localhost 证书推算或声称继承其根信任。主证书、私钥和原聊天信任不变。再次启用、重启和重连复用原证书，并核对已授权的 DER pin。
 
-## TLS、可信接入 scope 和续期限制
+Gateway 在实际 listener 的 TLS 请求上记录 origin、叶证书 hash 和 generation，用于请求绑定的 owner 核对摘要；Host 也按实际 TLS peer 计算。摘要还绑定 request ID 和设备公钥指纹，不信任客户端 JSON 自报的 listener 身份。邀请同时绑定对应入口和窗口。
 
-不能承诺现有证书一定是 CA。若观察到原证书确实允许标准 CA 签发、密钥匹配且仍有足够有效期，可使用标准 PKIX 为精确 LAN 地址签发独立叶证书；原证书及私钥文件字节不变，原根身份不更换，新 Host 校验 hostname 与完整信任链。
+`1b23221` 的 `verifyDeviceIngress` 使用公开 join 路由的预期 `405 method_not_allowed` 做无副作用 HTTPS 预检，不再要求 LAN 上被屏蔽的 owner pending 路由返回 401。预检成功仍需新电脑真实 TLS、加入、领取和 Host 工具调用才能证明跨设备可用。
 
-也可选择同一 Gateway 的独立 LAN TLS 证书，但首次必须向用户明确展示并授权这个新增入口的信任。它不等于原 canonical TLS 身份，也不能静默替换旧身份或声称已由原根认证。已有入口再次启用、重启和重连不得随意重新生成证书身份。
+当前证书准备使用 30 天自签证书。自动续期、信任变更及 IP 更新不是本轮已经完成的通用方案；到期或 pin 不匹配必须明确处理，不能偷偷更换地址/证书，也不能用“重新配对所有设备”代替受审查的迁移。
 
-原 Gateway 当前创建的是 30 天自签证书；附加叶证书不能消除根证书到期问题。计划和状态必须呈现证书有效期、续期所需条件及信任变化。非 CA、临近过期或到期状态需要明确的续期／迁移处理，不能以“重新配对所有设备”替代升级方案。
+## 剩余验收范围
 
-当前公开核对摘要包含 origin、实际 TLS 叶证书 hash、requestId 和设备公钥指纹。Host 已按所连接的 TLS peer 计算；owner 端目前按主 localhost 地址和主证书推算，新增入口后会不一致。应由 Gateway 在收到 join 时记录经实际 listener/TLS 握手确认的入口 origin、叶证书 hash 和入口 generation，再用于 owner 投影；不能信任客户端 JSON 自报这些值。邀请也应绑定对应入口和窗口。
+- 各平台原生 App 与网页的完整普通用户链路，特别是 Mac 新 UI 的实际接线；共享 Core 通过不代表界面均通过。
+- 已连接的目标 ChatGPT 账号指定新设备运行所选能力；原有账号确认不得由 actor 的 MCP 客户端结果代替。
+- 针对交付产物的登录、注销、重启、网络恢复，以及错误核对、过期、抢用、撤销和证书/IP 变化的用户恢复流程。
 
-入口预检的 HTTPS 校验机制可复用，但现 verifier 固定 canonical URL，并期待 owner pending 路由返回 401，不能原样用于屏蔽管理路由的 LAN 入口。新检查从受控派生入口取目标，使用无副作用的明确响应核验；例如 GET join 得到预期 405。仍需新电脑实际 TLS、加入和 Host 连接来证明跨设备可用。
-
-## 实现位置和明确限制
-
-主要接入点：Core/config/reader 与现事务基础；gateway/http、outbound、enrollment、enroll-admin；Core 前台启动和 gateway-signed-runner；onboarding/server 与“添加电脑”UI；Host 保留既有加入、领取凭据、连接和重连链。
-
-第一版只承诺用户已授权且真实可达的精确网络入口。没有自建发现／中继服务，不承诺扫码即可跨越任意 NAT；LAN、VPN 或已知 IP 也不是自动信任依据。IP 变化需明确对账和受信任的地址更新，不自动改现有 Host 身份或凭据。旧运行版本缺少入口管理能力时，需先通过既有受控更新流程升级，不临时绕过签名或再起服务。
-
-## 只需闭合的用户关键案例
-
-1. 已可用的单机主台实际加入另一台电脑；原 ChatGPT、localhost、本机 Host、证书和凭据保持，能在原聊天中选择新设备运行真实命令。
-2. 新电脑看到的核对摘要与主台同一请求一致；错误核对、过期或已抢用邀请不能获得批准或凭据。
-3. 关闭配对窗口后，已批准设备持续工作且能断网重连；撤销设备后旧凭据拒绝，原本机和其他批准设备不受影响。
-4. App 退出／登录恢复以及网络暂不可用时，分别遵守当前 Gateway 的前台或持久生命周期；不重建身份；LAN 失败不影响原 localhost 聊天入口。
-5. 附加入口事务失败、IP 变化和证书将到期时，有明确可执行的恢复状态；不清空部署，不静默换信任，不把配置成功或本机探测当跨设备／账号验收。
-
-这些案例未完成前，应继续明确报告“网络入口尚未接通”，不能以离线迁移或低层跨机 smoke 代替普通用户“添加电脑”流程。
+第一版只覆盖已授权且真实可达的精确网络入口。没有自建发现/中继服务，不承诺跨越任意 NAT；LAN、VPN 或已知 IP 本身不构成信任。已通过的 Core / 物理案例与上述未完成范围分别报告，不再笼统称“网络入口尚未实现”，也不宣称全部普通用户流程或三平台发行已经完成。
