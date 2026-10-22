@@ -50,6 +50,8 @@ test('failed OS write retains intent without read-time replay; an explicit retry
  const ops={plan:previous=>{plans++;return {action:'create',registration:{schema:1}}},apply:()=>{attempts++;throw Error('native_write_unconfirmed')}};
  await assert.rejects(changeDeploymentAppLoginPreference(f.stateDir,{authorize:true,enabled:true},ops),/native_write_unconfirmed/);
  assert.equal(readDeploymentAppLoginPreference(f.stateDir).lastOperation.status,'needs_attention');
+ const observed=await readDeploymentAppLifecycle(f.stateDir,{operations:{platform:'win32',windowsAdapter:{readWindowsAppLogin:async()=>({status:'registered_unverified',registration:{present:true,owned:true,targetMatches:true}})}}});
+ assert.equal(observed.status,'needs_attention');assert.equal(observed.registration.present,true);
  assert.equal(fs.existsSync(path.join(f.stateDir,'advance.lock')),false);assert.equal(attempts,1);
  ops.apply=()=>{attempts++;return {status:'registered_unverified'}};
  const result=await changeDeploymentAppLoginPreference(f.stateDir,{authorize:true,enabled:true},ops);
