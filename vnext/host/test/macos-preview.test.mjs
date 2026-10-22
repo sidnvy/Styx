@@ -7,11 +7,18 @@ import {execFileSync,spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {createHash,generateKeyPairSync} from 'node:crypto';
 import {macAdhocSigningPlan,macSigningPlan,macLocalSigningPlan,publicMacLocalSigning} from '../build-macos-app.mjs';
-import {copyOfflineDependencies,copyPreviewDependencies,finalizePreviewHostBundle,machOFiles,previewSourceFiles,verifyPreviewTunnelInput,previewSigningReceipt,withPreviewHostPublisher} from '../build-macos-preview.mjs';
+import {copyOfflineDependencies,copyPreviewDependencies,finalizePreviewHostBundle,machOFiles,previewSourceFiles,verifyPreviewTunnelInput,previewSigningReceipt,withPreviewHostPublisher,previewReleasePublisher} from '../build-macos-preview.mjs';
 import {verifySignedRelease} from '../installer.mjs';
 import {verifyMacPreviewApp} from '../macos-preview-trust.mjs';
 const hash=b=>createHash('sha256').update(b).digest('hex');
 function scratch(t){const root=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'styx-preview-test-')));t.after(()=>fs.rmSync(root,{recursive:true,force:true}));return root;}
+test('stable signed App builds cannot accidentally rotate the Host publisher',()=>{
+ const localSigning={identitySha1:'c'.repeat(40),certificateSha256:'d'.repeat(64),keychain:'/private/build/local.keychain-db'};
+ for(const hostPublisher of [undefined,{mode:'ephemeral'}])assert.throws(()=>previewReleasePublisher({localSigning,hostPublisher}),/stable_app_requires_persistent_host_publisher/);
+ const hostPublisher={mode:'persistent',privateKeyFile:'/private/build/host-publisher.pem'};
+ assert.equal(previewReleasePublisher({localSigning,hostPublisher}),hostPublisher);
+ assert.equal(previewReleasePublisher({}),undefined);
+});
 test('ad-hoc preview signs all contained nested code before final app, separate from Developer ID',()=>{
  const app='/build/Styx.app',files=[app+'/Contents/MacOS/Styx',app+'/Contents/Resources/host-bundle/bin/node'];
  const steps=macAdhocSigningPlan({app,files});assert.equal(steps[0][1].at(-1),files[1]);assert.equal(steps.at(-2)[1].at(-1),app);

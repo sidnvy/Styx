@@ -68,6 +68,15 @@ export function previewSigningReceipt(localSigning){
  return {signing:localSigning===undefined?'adhoc_preview':'local_certificate_preview',notarization:'NOT RUN',external_publisher_identity:'NOT ESTABLISHED',private_key_in_artifact:false,
   ...(localSigning===undefined?{}:{local_signing:publicMacLocalSigning(localSigning)})};
 }
+// A stable App identity must never silently rotate the Host publisher on each
+// package build. Ad-hoc fixtures may still explicitly use ephemeral keys.
+export function previewReleasePublisher({localSigning,hostPublisher}={}){
+ if(localSigning!==undefined){
+  normalizeMacLocalSigning(localSigning);
+  assert(hostPublisher?.mode==='persistent','stable_app_requires_persistent_host_publisher');
+ }
+ return hostPublisher;
+}
 // Release signing is separate from the App codesign certificate. Keep the
 // external publisher untouched and use an owned private snapshot for the existing
 // file-based Host builder, so both manifest passes use the same key bytes.
@@ -127,6 +136,7 @@ export function buildMacPreview(config){
  assert(process.platform==='darwin'&&process.arch==='arm64','native_arm64_macos_preview_build_required');
  assert(config&&typeof config==='object'&&!Object.keys(config).some(k=>!['destination','version','releaseVersion','sourceRevision','nodeBinary','codexBinary','cuaBinary','sourceRoot','dependenciesDir','createDmg','tunnelBinary','sdkPath','moduleCachePath','localSigning','hostPublisher'].includes(k)),'invalid_preview_configuration');
  const {destination,version,releaseVersion,sourceRevision,nodeBinary,codexBinary,cuaBinary,tunnelBinary,sdkPath,moduleCachePath,localSigning,hostPublisher,sourceRoot=ROOT,dependenciesDir=path.join(sourceRoot,'node_modules'),createDmg=true}=config;
+ previewReleasePublisher({localSigning,hostPublisher});
  const signingReceipt=previewSigningReceipt(localSigning);
  for(const p of [destination,nodeBinary,codexBinary,cuaBinary,sourceRoot,dependenciesDir])assert(ABS(p),'absolute_preview_paths_required');
  assert(/^[a-f0-9]{40}$/.test(sourceRevision??'')&&typeof createDmg==='boolean','preview_revision_and_archive_selection_required');
