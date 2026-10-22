@@ -80,7 +80,9 @@ jobs:
         with:
           python-version: '3.12'
       - name: Install locked Host test dependencies
-        run: npm --prefix vnext ci --ignore-scripts --no-audit --no-fund
+        run: |
+          npm --prefix vnext ci --ignore-scripts --no-audit --no-fund
+          npm --prefix vnext/packages/styx-browser-provider ci --ignore-scripts --no-audit --no-fund
       - name: Prepare official independent Node and native Host executors
         run: |
           set -euo pipefail

@@ -580,8 +580,9 @@ func productSystemQuitReason(_ reason: OSType?) -> Bool {
         output.fileHandleForReading.readabilityHandler = { [weak self] handle in
             let data = handle.availableData
             if data.isEmpty { handle.readabilityHandler = nil; return }
+            guard let owner = self else { return }
             DispatchQueue.main.async {
-                guard let owner = self, owner.setupProcess === child else { return }
+                guard owner.setupProcess === child else { return }
                 guard let text = String(data: data, encoding: .utf8), owner.setupBuffer.utf8.count + data.count <= 4096 else {
                     owner.stopSetup(); owner.setupStatusLine?.title = "Local setup protocol unavailable"; return
                 }
@@ -602,8 +603,9 @@ func productSystemQuitReason(_ reason: OSType?) -> Bool {
             }
         }
         child.terminationHandler = { [weak self] terminated in
+            guard let owner = self else { return }
             DispatchQueue.main.async {
-                guard let owner = self, owner.setupProcess === terminated else { return }
+                guard owner.setupProcess === terminated else { return }
                 owner.setupOutput?.fileHandleForReading.readabilityHandler = nil
                 try? owner.setupInput?.fileHandleForWriting.close()
                 owner.setupProcess = nil; owner.setupInput = nil; owner.setupOutput = nil; owner.setupURL = nil
@@ -693,7 +695,8 @@ func productSystemQuitReason(_ reason: OSType?) -> Bool {
     func observeProductComponents(_ url: URL) {
         componentTimer?.invalidate()
         componentTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
-            Task { @MainActor in await self?.refreshProductComponents(url) }
+            guard let owner = self else { return }
+            Task { @MainActor in await owner.refreshProductComponents(url) }
         }
         Task { @MainActor in await refreshProductComponents(url) }
     }
@@ -760,8 +763,9 @@ func productSystemQuitReason(_ reason: OSType?) -> Bool {
         let (child, lifetime) = makeEmbeddedDaemon(driver: driver,
             socketPath: runtime.socket, pidFile: runtime.path + "/cua.pid")
         child.terminationHandler = { [weak self] terminated in
+            guard let owner = self else { return }
             DispatchQueue.main.async {
-                guard let owner = self, owner.daemon === terminated else { return }
+                guard owner.daemon === terminated else { return }
                 try? owner.lifetimeWriter?.close(); owner.lifetimeWriter = nil
                 owner.daemon = nil; owner.timer?.invalidate(); owner.runtime?.clear()
                 owner.phase = "daemon_exited"
@@ -775,7 +779,10 @@ func productSystemQuitReason(_ reason: OSType?) -> Bool {
         lifetimeWriter = lifetime.fileHandleForWriting
         daemon = child; phase = "starting"
         deadline = Date().addingTimeInterval(15)
-        timer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in Task { @MainActor in self?.poll() } }
+        timer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self] _ in
+            guard let owner = self else { return }
+            Task { @MainActor in owner.poll() }
+        }
     }
     func poll() {
         guard let runtime = runtime, let daemon = daemon, daemon.isRunning else { return }

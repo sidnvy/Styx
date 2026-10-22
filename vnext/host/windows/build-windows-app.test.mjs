@@ -12,7 +12,7 @@ const productSource=fileURLToPath(new URL('../../',import.meta.url));
 const sharedSources=['gateway/conversation-owners.mjs','onboarding/tunnel-context.mjs'];
 const skillSources=['styx-native-onboarding','styx-cli','styx-browser','styx-computer-use'].map(name=>'plugin/skills/'+name+'/SKILL.md');
 function fixture(t,{type='ed25519'}={}){
- const dir=fs.mkdtempSync(path.join(os.tmpdir(),'styx-windows-builder-'));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+ const dir=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'styx-windows-builder-')));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
  const sourceRoot=path.join(dir,'source');fs.mkdirSync(sourceRoot);const sourceFiles=[];
  const put=(name,data)=>{const file=path.join(sourceRoot,name);fs.mkdirSync(path.dirname(file),{recursive:true});fs.writeFileSync(file,data);sourceFiles.push(name);};
  for(const name of ['Styx.cs','SessionProbe.cs','build.ps1','core-bridge.mjs','native-app-authority.mjs'])put('host/windows/'+name,'source fixture');
