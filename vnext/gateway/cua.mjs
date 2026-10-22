@@ -18,6 +18,7 @@ const RECOVERY = Object.freeze({
   default_environment_required: 'Call list_execution_environments and pass the selected environment_id, or choose a default device in Styx Settings.',
   computer_slots_busy: 'The desktop connection is temporarily unavailable. Retry after the current operation finishes.',
   computer_snapshot_required: 'Stay on Styx computer tools; do not use AppleScript/System Events or shell input as a fallback. Take a fresh get_window_state or get_desktop_state snapshot in this conversation before acting. Desktop observations from another connection cannot be reused.',
+  computer_session_expired: 'The native desktop session ended. This action was not replayed. Take a fresh get_window_state or get_desktop_state observation before deciding whether to act again.',
   computer_queue_full: 'The desktop has too many pending operations. Wait for the current operations to finish, then retry.',
   computer_host_offline: 'Open Styx on the selected device and check its connection in Settings.'
 });
@@ -26,6 +27,16 @@ const failure = (code,uncertain=false) => {
   return {isError:true,structuredContent:data,
     content:[{type:'text',text:JSON.stringify(data)}]};
 };
+
+// Cua 0.36 rejects an ended namespace before invoking the requested tool.
+// Do not infer that guarantee from arbitrary error text or transport failures.
+function endedNativeSession(result,name,session) {
+  const data=result?.structuredContent;
+  const text=`session has ended; tool call '${name}' was rejected. Call start_session with session '${session}' to start it again, or use a new session label.`;
+  return result?.isError===true && data?.code==='tool_invocation_failed' &&
+    data.exit_code===1 && data.error_code==='INVALID_ARGUMENT' &&
+    Array.isArray(result.content) && result.content.some(item=>item.type==='text' && typeof item.text==='string' && item.text.trim()===text);
+}
 
 function requireToken(path) {
   requirePrivateFile(path);
@@ -200,17 +211,22 @@ export class CuaProvider {
       const target=this.#target(environment_id);
       let ownerState=this.ownerStates.get(owner);
       if(!ownerState){
-        ownerState={closed:false,contexts:new Map(),targets:new Set()};this.ownerStates.set(owner,ownerState);
+        ownerState={closed:false,contexts:new Map(),targets:new Set(),needsObservation:new Set()};this.ownerStates.set(owner,ownerState);
       }
       ownerState.targets.add(target.id);
       const current=await this.#get(target);
       return await this.#enqueue(current,async()=>{
-        if(this.stopped)throw Error('computer_provider_closed');
-        if(ownerState.closed)throw Error('computer_owner_closed');
-        if(this.#target(target.id).generation!==target.generation ||
-          current.generation!==target.generation)throw Error('computer_generation_changed');
-        if(this.sessions.get(target.id)!==current || current.client.styxTransport?.closed)
-          throw Error('computer_session_lost');
+        const assertCurrent=()=>{
+          if(this.stopped)throw Error('computer_provider_closed');
+          if(ownerState.closed)throw Error('computer_owner_closed');
+          if(this.#target(target.id).generation!==target.generation ||
+            current.generation!==target.generation)throw Error('computer_generation_changed');
+          if(this.sessions.get(target.id)!==current || current.client.styxTransport?.closed)
+            throw Error('computer_session_lost');
+        };
+        assertCurrent();
+        if(!READ_TOOLS.has(name) && ownerState.needsObservation.has(target.id))
+          return failure('computer_session_expired');
         let context=ownerState.contexts.get(target.id);
         if(!context || context.transport!==current){
           context={transport:current,session:'styx-'+randomUUID()};
@@ -231,15 +247,45 @@ export class CuaProvider {
         if(coordinates && (current.capture?.context!==context || current.capture.target!==captureTarget || nativeArgs.from_zoom))
           throw Error('computer_snapshot_required');
         const observes=name==='get_window_state' || name==='get_desktop_state';
-        if(observes || name==='verify_state')current.capture=null;
-        // A different owner's mutation may change any previously observed UI.
-        if(!READ_TOOLS.has(name)) {
-          for(const [id,holder] of current.snapshots)if(holder!==context)current.snapshots.delete(id);
-          if(current.capture?.context!==context)current.capture=null;
+        const invalidateAfterDispatch=()=>{
+          if(observes || name==='verify_state')current.capture=null;
+          // An actual or ambiguous mutation can change another owner's UI.
+          if(!READ_TOOLS.has(name)) {
+            for(const [id,holder] of current.snapshots)if(holder!==context)current.snapshots.delete(id);
+            if(current.capture?.context!==context)current.capture=null;
+          }
+        };
+        const retireContext=()=>{
+          ownerState.needsObservation.add(target.id);
+          if(ownerState.contexts.get(target.id)===context)ownerState.contexts.delete(target.id);
+          for(const [id,holder] of current.snapshots)if(holder===context)current.snapshots.delete(id);
+          if(current.capture?.context===context)current.capture=null;
+        };
+        let requestArgs=nativeArgs;
+        if(ownerState.needsObservation.has(target.id)) {
+          requestArgs={...nativeArgs};delete requestArgs.since;
         }
-        // Never replay an action after an ambiguous transport failure.
-        dispatched=true;
-        const result=await current.client.callTool({name,arguments:{...nativeArgs,session:context.session}});
+        const invoke=async()=>{
+          assertCurrent();dispatched=true;
+          try{return await current.client.callTool({name,arguments:{...requestArgs,session:context.session}});}
+          catch(error){invalidateAfterDispatch();throw error;}
+        };
+        let result=await invoke();
+        if(endedNativeSession(result,name,context.session)) {
+          retireContext();
+          // No action is replayed, even when the rejection proves no input was
+          // delivered. Only an observation can establish a new native context.
+          if(!READ_TOOLS.has(name))return failure('computer_session_expired');
+          assertCurrent();
+          context={transport:current,session:'styx-'+randomUUID()};
+          ownerState.contexts.set(target.id,context);
+          requestArgs={...nativeArgs};delete requestArgs.since;
+          result=await invoke();
+          if(endedNativeSession(result,name,context.session)) {
+            retireContext();return failure('computer_session_expired');
+          }
+        }
+        invalidateAfterDispatch();
         if(observes && !result.isError) {
           const data=result.structuredContent;
           if(plain(data)) {
@@ -247,14 +293,17 @@ export class CuaProvider {
               current.snapshots.delete(id);
             if(typeof data.snapshot_id==='string' && /^s[0-9a-f]{8}$/.test(data.snapshot_id)) {
               current.snapshots.set(data.snapshot_id,context);
+              if(nativeArgs.display_only!==true)ownerState.needsObservation.delete(target.id);
               while(current.snapshots.size>64)current.snapshots.delete(current.snapshots.keys().next().value);
             }
           }
           // Implicit screenshot selection is global in some native backends.
           // Permit pixels only from this owner's latest matching observation.
           current.capture=null;
-          if(nativeArgs.display_only!==true && plain(data) && typeof data.capture_id==='string' && data.screenshot_frame_valid!==false && (name==='get_desktop_state' || nativeArgs.include_screenshot!==false))
+          if(nativeArgs.display_only!==true && plain(data) && typeof data.capture_id==='string' && data.screenshot_frame_valid!==false && (name==='get_desktop_state' || nativeArgs.include_screenshot!==false)) {
             current.capture={context,target:name==='get_desktop_state'?'desktop':JSON.stringify([nativeArgs.pid,nativeArgs.window_id])};
+            ownerState.needsObservation.delete(target.id);
+          }
         }
         return result;
       });

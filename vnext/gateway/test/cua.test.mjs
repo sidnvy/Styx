@@ -223,3 +223,129 @@ test('missing default and busy desktop return actionable categories without raw 
  assert.doesNotMatch(JSON.stringify(unknown),/PRIVATE_RAW_DRIVER_MESSAGE/);
  await f.provider.close();
 });
+
+const endedSession=input=>({isError:true,
+  structuredContent:{code:'tool_invocation_failed',exit_code:1,error_code:'INVALID_ARGUMENT'},
+  content:[{type:'text',text:`session has ended; tool call '${input.name}' was rejected. Call start_session with session '${input.arguments.session}' to start it again, or use a new session label.`}]});
+
+function lifecycleFixture(t) {
+  const registry=new TargetRegistry({version:1,default_environment_id:'mac',targets:[target('mac','darwin')]});
+  const calls=[],expired=new Set();let connections=0,closed=0,snapshot=0,respond;
+  const provider=new CuaProvider({registry,connect:async()=>{
+    connections++;
+    return {getServerVersion:()=>({name:'cua-driver',version:'0.36.0'}),
+      async close(){closed++},async callTool(input){
+        calls.push(input);
+        if(respond)return respond(input);
+        if(expired.has(input.arguments.session))return endedSession(input);
+        return {content:[],structuredContent:{snapshot_id:'s'+(++snapshot).toString(16).padStart(8,'0'),capture_id:'capture-'+snapshot,screenshot_frame_valid:true}};
+      }};
+  }});
+  t.after(()=>provider.close());
+  return {provider,registry,calls,expired,setResponder(value){respond=value},
+    get connections(){return connections},get closed(){return closed}};
+}
+const windowArgs={pid:123,window_id:456};
+
+test('an ended owner observation recovers once on the shared transport without merging snapshots',async t=>{
+  const f=lifecycleFixture(t);
+  const a=await f.provider.callTool('get_window_state',windowArgs,'alice');
+  const alice=f.calls.at(-1).arguments.session;
+  const b=await f.provider.callTool('get_window_state',windowArgs,'bob');
+  const bob=f.calls.at(-1).arguments.session;
+  f.expired.add(alice);
+  await f.provider.callTool('list_windows',{},'bob');
+  const before=f.calls.length;
+  const result=await f.provider.callTool('get_window_state',{...windowArgs,since:a.structuredContent.snapshot_id},'alice');
+  assert.equal(result.isError,undefined);assert.equal(f.connections,1);assert.equal(f.closed,0);
+  assert.equal(f.calls.length,before+2);
+  assert.equal(f.calls.at(-2).arguments.session,alice);
+  assert.notEqual(f.calls.at(-1).arguments.session,alice);
+  assert.notEqual(f.calls.at(-1).arguments.session,bob);
+  assert.equal(f.calls.at(-1).arguments.since,undefined,'old snapshot diffs must not cross recovery');
+  const snapshots=f.provider.sessions.get('mac').snapshots;
+  assert.equal(snapshots.has(a.structuredContent.snapshot_id),false);
+  assert.equal(snapshots.get(b.structuredContent.snapshot_id).session,bob);
+  assert.equal(snapshots.get(result.structuredContent.snapshot_id).session,f.calls.at(-1).arguments.session);
+  for(const id of [a.structuredContent.snapshot_id,b.structuredContent.snapshot_id]) {
+    const denied=await f.provider.callTool('click',{element_token:id+':1'},'alice');
+    assert.equal(denied.structuredContent.error,'computer_snapshot_required');
+  }
+  const valid=await f.provider.callTool('click',{element_token:b.structuredContent.snapshot_id+':1'},'bob');
+  assert.equal(valid.isError,undefined);assert.equal(f.calls.at(-1).arguments.session,bob);
+});
+
+test('ended native input is never replayed and only its owner loses references',async t=>{
+  const f=lifecycleFixture(t);
+  const a=await f.provider.callTool('get_window_state',windowArgs,'alice');
+  const alice=f.calls.at(-1).arguments.session;
+  const b=await f.provider.callTool('get_window_state',windowArgs,'bob');
+  const bob=f.calls.at(-1).arguments.session;
+  f.expired.add(alice);
+  const before=f.calls.length;
+  const result=await f.provider.callTool('type_text',{element_token:a.structuredContent.snapshot_id+':1',text:'test-only'},'alice');
+  assert.equal(f.calls.length,before+1);assert.equal(result.structuredContent.error,'computer_session_expired');
+  assert.equal(result.structuredContent.uncertain,undefined);
+  const shared=f.provider.sessions.get('mac');
+  assert.equal(shared.snapshots.has(a.structuredContent.snapshot_id),false);
+  assert.equal(shared.snapshots.get(b.structuredContent.snapshot_id).session,bob);
+  assert.equal(shared.capture.context.session,bob);
+  for(const args of [{element_token:a.structuredContent.snapshot_id+':1'},{...windowArgs,x:10,y:10},{target:{kind:'window',...windowArgs}}]) {
+    assert.equal((await f.provider.callTool('click',args,'alice')).structuredContent.error,'computer_session_expired');
+  }
+  assert.equal(f.calls.length,before+1,'explicit target must not bypass fresh-observation gate');
+  await f.provider.callTool('list_windows',{},'alice');
+  assert.equal((await f.provider.callTool('click',{target:{kind:'window',...windowArgs}},'alice')).structuredContent.error,'computer_session_expired');
+  const fresh=await f.provider.callTool('get_window_state',windowArgs,'alice');
+  assert.equal((await f.provider.callTool('click',{element_token:fresh.structuredContent.snapshot_id+':1'},'alice')).isError,undefined);
+});
+
+test('native session recovery is bounded to one read retry',async t=>{
+  const f=lifecycleFixture(t);f.setResponder(endedSession);
+  const result=await f.provider.callTool('get_window_state',windowArgs,'alice');
+  assert.equal(result.structuredContent.error,'computer_session_expired');
+  assert.equal(f.calls.length,2);assert.notEqual(f.calls[0].arguments.session,f.calls[1].arguments.session);
+  assert.equal(f.provider.ownerStates.get('alice').contexts.size,0);
+  assert.equal(f.provider.sessions.get('mac').snapshots.size,0);
+  assert.equal(f.connections,1);
+});
+
+test('lookalike native errors do not retire or retry a session',async t=>{
+  const variants=[r=>({...r,isError:false}),r=>({...r,structuredContent:{...r.structuredContent,error_code:'OTHER'}}),
+    r=>({...r,structuredContent:{...r.structuredContent,exit_code:2}}),
+    r=>({...r,content:[{type:'text',text:r.content[0].text.replace("'list_windows'","'click'")}]}),
+    r=>({...r,content:[{type:'text',text:r.content[0].text.replace(/styx-[a-f0-9-]+/,'styx-different-owner')}]}),
+    r=>({...r,content:[{type:'text',text:'session has ended'}]})];
+  const f=lifecycleFixture(t);
+  for(const change of variants) {
+    let expected;f.setResponder(input=>(expected=change(endedSession(input))));
+    const before=f.calls.length;
+    assert.deepEqual(await f.provider.callTool('list_windows',{},'alice'),expected);
+    assert.equal(f.calls.length,before+1);
+  }
+  assert.equal(new Set(f.calls.map(x=>x.arguments.session)).size,1);
+});
+
+test('ambiguous input transport failure is not retried and invalidates foreign references',async t=>{
+  const f=lifecycleFixture(t);
+  const a=await f.provider.callTool('get_window_state',windowArgs,'alice');
+  const b=await f.provider.callTool('get_window_state',windowArgs,'bob');
+  const before=f.calls.length;f.setResponder(()=>{throw Error('session has ended')});
+  const result=await f.provider.callTool('click',{element_token:a.structuredContent.snapshot_id+':1'},'alice');
+  assert.equal(f.calls.length,before+1);assert.equal(result.structuredContent.error,'computer_transport_unavailable');
+  assert.equal(result.structuredContent.uncertain,true);
+  assert.equal(f.provider.sessions.get('mac').snapshots.has(b.structuredContent.snapshot_id),false);
+});
+
+for(const interruption of ['owner','device','provider'])test(interruption+' closure during expired read prevents recovery dispatch',async t=>{
+  const f=lifecycleFixture(t);let entered,release;
+  const started=new Promise(resolve=>{entered=resolve}),gate=new Promise(resolve=>{release=resolve});
+  f.setResponder(async input=>{entered();await gate;return endedSession(input)});
+  const pending=f.provider.callTool('get_window_state',windowArgs,'alice');await started;
+  if(interruption==='owner')await f.provider.closeOwner('alice');
+  else if(interruption==='device')f.registry.revokeHost('mac');
+  else await f.provider.close();
+  release();const result=await pending;
+  assert.equal(f.calls.length,1);
+  assert.equal(result.structuredContent.error,{owner:'computer_owner_closed',device:'environment_access_denied',provider:'computer_provider_closed'}[interruption]);
+});
