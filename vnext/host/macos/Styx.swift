@@ -424,6 +424,7 @@ final class SetupWindowController: NSWindowController, WKNavigationDelegate, WKU
     appMenu.addItem(withTitle: text("打开 Styx…", "Open Styx…"), action: #selector(StyxDelegate.openSettings), keyEquivalent: "o").target = actionTarget
     #if STYX_PRODUCT_UI
     appMenu.addItem(withTitle: text("设置…", "Settings…"), action: #selector(StyxDelegate.openProductPreferences), keyEquivalent: ",").target = actionTarget
+    actionTarget?.platformUpdate?.appendMenuItem(to: appMenu)
     #endif
     appMenu.addItem(NSMenuItem.separator())
     appMenu.addItem(withTitle: text("退出 Styx", "Quit Styx"), action: #selector(StyxDelegate.quit), keyEquivalent: "q").target = actionTarget
@@ -487,6 +488,9 @@ func productSystemQuitReason(_ reason: OSType?) -> Bool {
     var terminationApproved = false
     var setupBuffer = ""
     var setupOpenRequested = false
+    #if STYX_PRODUCT_UI
+    var platformUpdate: ProductPlatformUpdate?
+    #endif
     var setupStatusLine: NSMenuItem?
     let setupPreference = "Styx.SetupWindowOpened.v1"
     var runtime: RuntimeDirectory?
@@ -505,6 +509,9 @@ func productSystemQuitReason(_ reason: OSType?) -> Bool {
     var signalSources: [DispatchSourceSignal] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        #if STYX_PRODUCT_UI
+        platformUpdate = ProductPlatformUpdate.configured()
+        #endif
         NSApp.mainMenu = styxApplicationMenu(actionTarget: self)
         for number in [SIGTERM, SIGINT] {
             signal(number, SIG_IGN)

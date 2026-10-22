@@ -7,6 +7,7 @@ import {execFileSync} from 'node:child_process';
 import {createHash,generateKeyPairSync,createPublicKey,createPrivateKey,sign} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
 import {buildMacApp,macAppBuildMetadata,macAdhocSigningPlan,macLocalSigningPlan,normalizeMacLocalSigning,publicMacLocalSigning} from './build-macos-app.mjs';
+import {isSparkleFrameworkLink} from './macos/platform-update/sparkle-build.mjs';
 import {buildHostRelease} from './build-host-release.mjs';
 import {verifySignedRelease} from './installer.mjs';
 import {requirePrivateFile} from './private-storage.mjs';
@@ -27,8 +28,8 @@ export function previewSourceFiles(sourceRoot,{revision}={}){
  const tops=new Set(['onboarding','gateway','host','shared','packages','licenses','plugin','assets']);
  return files.filter(name=>{const parts=name.split('/');assert(parts.every(x=>x&&x!=='.'&&x!=='..')&&!name.includes('\\'),'invalid_source_snapshot_path');return (tops.has(parts[0])||['package.json','package-lock.json'].includes(name))&&!name.endsWith('.test.mjs')&&!parts.some(p=>p.startsWith('.')||SKIP.has(p));}).sort();
 }
-function scanPrivateMaterial(root){
- function walk(dir){for(const e of fs.readdirSync(dir,{withFileTypes:true})){const file=path.join(dir,e.name);assert(!e.isSymbolicLink(),'distribution_symlink_forbidden');if(e.isDirectory())walk(file);else{assert(!['admin.token','model.token','device.token','identity.pem','publisher-private.pem'].includes(e.name),'private_material_filename_in_distribution');const bytes=fs.readFileSync(file);assert(!/-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----[\r\n]/.test(bytes.toString('utf8')),'private_key_in_distribution');}}}walk(root);
+function scanPrivateMaterial(root,{allowSparkle=false}={}){
+ function walk(dir){for(const e of fs.readdirSync(dir,{withFileTypes:true})){const file=path.join(dir,e.name);if(e.isSymbolicLink()&&allowSparkle&&isSparkleFrameworkLink(root,file))continue;assert(!e.isSymbolicLink(),'distribution_symlink_forbidden');if(e.isDirectory())walk(file);else{assert(!['admin.token','model.token','device.token','identity.pem','publisher-private.pem'].includes(e.name),'private_material_filename_in_distribution');const bytes=fs.readFileSync(file);assert(!/-----BEGIN (?:RSA |EC |OPENSSH )?PRIVATE KEY-----[\r\n]/.test(bytes.toString('utf8')),'private_key_in_distribution');}}}walk(root);
 }
 export function copyOfflineDependencies({lockFile,dependenciesDir,destination,requiredPackages=['@modelcontextprotocol/sdk','ws']}){
  const lock=JSON.parse(fs.readFileSync(lockFile,'utf8'));assert(lock.lockfileVersion===3&&lock.packages,'locked_npm_graph_required');
@@ -59,9 +60,9 @@ export function copyPreviewDependencies({sourceRoot,dependenciesDir=path.join(so
  });
 }
 
-export function machOFiles(root){
+export function machOFiles(root,{preserveSparkle=false}={}){
  const files=[];
- function walk(dir){for(const e of fs.readdirSync(dir,{withFileTypes:true})){const file=path.join(dir,e.name);assert(!e.isSymbolicLink(),'distribution_symlink_forbidden');if(e.isDirectory())walk(file);else{assert(e.isFile(),'distribution_regular_files_required');const fd=fs.openSync(file,'r'),head=Buffer.alloc(8);let n;try{n=fs.readSync(fd,head,0,8,0)}finally{fs.closeSync(fd)}if(n>=4&&['feedface','cefaedfe','feedfacf','cffaedfe','cafebabe','bebafeca','cafebabf','bfbafeca'].includes(head.subarray(0,4).toString('hex')))files.push(file);}}}
+ function walk(dir){for(const e of fs.readdirSync(dir,{withFileTypes:true})){const file=path.join(dir,e.name);if(preserveSparkle&&file===path.join(root,'Contents/Frameworks/Sparkle.framework'))continue;assert(!e.isSymbolicLink(),'distribution_symlink_forbidden');if(e.isDirectory())walk(file);else{assert(e.isFile(),'distribution_regular_files_required');const fd=fs.openSync(file,'r'),head=Buffer.alloc(8);let n;try{n=fs.readSync(fd,head,0,8,0)}finally{fs.closeSync(fd)}if(n>=4&&['feedface','cefaedfe','feedfacf','cffaedfe','cafebabe','bebafeca','cafebabf','bfbafeca'].includes(head.subarray(0,4).toString('hex')))files.push(file);}}}
  walk(root);return files.sort();
 }
 export function previewSigningReceipt(localSigning){
@@ -131,10 +132,10 @@ export function verifyPreviewTunnelInput(binary){
  }
  return {...TUNNEL_PREVIEW_PIN};
 }
-function publicModes(root){for(const e of fs.readdirSync(root,{withFileTypes:true})){const f=path.join(root,e.name);assert(!e.isSymbolicLink(),'distribution_symlink_forbidden');if(e.isDirectory()){fs.chmodSync(f,0o755);publicModes(f)}else fs.chmodSync(f,fs.statSync(f).mode&0o111?0o755:0o644);}}
+function publicModes(root,{app=root,allowSparkle=false}={}){for(const e of fs.readdirSync(root,{withFileTypes:true})){const f=path.join(root,e.name);if(e.isSymbolicLink()&&allowSparkle&&isSparkleFrameworkLink(app,f))continue;assert(!e.isSymbolicLink(),'distribution_symlink_forbidden');if(e.isDirectory()){fs.chmodSync(f,0o755);publicModes(f,{app,allowSparkle})}else fs.chmodSync(f,fs.statSync(f).mode&0o111?0o755:0o644);}}
 export function buildMacPreview(config){
- assert(config&&typeof config==='object'&&!Object.keys(config).some(k=>!['destination','version','buildNumber','updateRelease','releaseVersion','sourceRevision','nodeBinary','codexBinary','cuaBinary','sourceRoot','dependenciesDir','createDmg','tunnelBinary','sdkPath','moduleCachePath','localSigning','hostPublisher'].includes(k)),'invalid_preview_configuration');
- const {destination,version,buildNumber,updateRelease=false,releaseVersion,sourceRevision,nodeBinary,codexBinary,cuaBinary,tunnelBinary,sdkPath,moduleCachePath,localSigning,hostPublisher,sourceRoot=ROOT,dependenciesDir=path.join(sourceRoot,'node_modules'),createDmg=true}=config;
+ assert(config&&typeof config==='object'&&!Object.keys(config).some(k=>!['destination','version','buildNumber','updateRelease','platformUpdate','releaseVersion','sourceRevision','nodeBinary','codexBinary','cuaBinary','sourceRoot','dependenciesDir','createDmg','tunnelBinary','sdkPath','moduleCachePath','localSigning','hostPublisher'].includes(k)),'invalid_preview_configuration');
+ const {destination,version,buildNumber,updateRelease=false,platformUpdate,releaseVersion,sourceRevision,nodeBinary,codexBinary,cuaBinary,tunnelBinary,sdkPath,moduleCachePath,localSigning,hostPublisher,sourceRoot=ROOT,dependenciesDir=path.join(sourceRoot,'node_modules'),createDmg=true}=config;
  const appMetadata=macAppBuildMetadata({version,buildNumber,updateRelease});
  assert(process.platform==='darwin'&&process.arch==='arm64','native_arm64_macos_preview_build_required');
  previewReleasePublisher({localSigning,hostPublisher});
@@ -149,7 +150,7 @@ export function buildMacPreview(config){
  return withPreviewHostPublisher(hostPublisher,({privateKey,privateFile,publicPem,fingerprint,publisherMode})=>{
  fs.mkdirSync(destination,{mode:0o700});const image=path.join(destination,'image-root');fs.mkdirSync(image);
  const app=path.join(image,'Styx.app'),resources=path.join(app,'Contents/Resources');
-  const appBuild=buildMacApp({app,cuaBinary,version,buildNumber,updateRelease,sdkPath,moduleCachePath:moduleCachePath??path.join(destination,'swift-module-cache'),...(localSigning===undefined?{}:{localSigning})});
+  const appBuild=buildMacApp({app,cuaBinary,version,buildNumber,updateRelease,platformUpdate,sdkPath,moduleCachePath:moduleCachePath??path.join(destination,'swift-module-cache'),...(localSigning===undefined?{}:{localSigning})});
   const source=path.join(resources,'onboarding/vnext');fs.mkdirSync(source,{recursive:true});
   for(const name of sourceFiles)tree(path.join(sourceRoot,...name.split('/')),path.join(source,...name.split('/')));
   fs.writeFileSync(path.join(resources,'source-files.json'),JSON.stringify({schema:1,revision:sourceRevision,files:sourceFiles.map(name=>({path:name,sha256:sha(path.join(sourceRoot,...name.split('/')))}))},null,2)+'\n');
@@ -168,18 +169,18 @@ export function buildMacPreview(config){
   fs.writeFileSync(path.join(resources,'production-dependencies.json'),JSON.stringify({schema:1,sourceRevision,graph:'npm-package-lock-production',packages:dependencies},null,2)+'\n');
   // Sign native payload bytes first; Ed25519 then covers their transformed bytes.
   const plan=options=>localSigning===undefined?macAdhocSigningPlan(options):macLocalSigningPlan({...options,localSigning});
-  const native=machOFiles(app);for(const [command,args]of plan({app,files:native,sealApp:false}))execFileSync(command,args,{stdio:'pipe',timeout:30000});
+  const native=machOFiles(app,{preserveSparkle:platformUpdate!==undefined});for(const [command,args]of plan({app,files:native,sealApp:false}))execFileSync(command,args,{stdio:'pipe',timeout:30000});
   const transformation=localSigning===undefined?'macos_adhoc_codesign':'macos_local_certificate_codesign';
   fs.writeFileSync(path.join(runtime,'node-provenance.json'),JSON.stringify({...nodeRecord,upstream_binary_sha256:nodeRecord.binary_sha256,binary_sha256:sha(path.join(runtime,'node')),transformation,upstream_verification_record:'node-upstream.json'},null,2)+'\n');
   if(tunnelRecord)fs.writeFileSync(path.join(resources,'tunnel-client.json'),JSON.stringify({...tunnelRecord,path:'runtime/tunnel-client',upstream_binary_sha256:tunnelRecord.binary_sha256,binary_sha256:sha(path.join(runtime,'tunnel-client')),transformation},null,2)+'\n');
   finalizePreviewHostBundle(bundle,privateKey,{localSigning,publisherMode});verifySignedRelease(bundle,publicPem);
-  scanPrivateMaterial(app);publicModes(app);for(const [command,args]of plan({app,files:[],sealApp:true}))execFileSync(command,args,{stdio:'pipe',timeout:30000});
+  scanPrivateMaterial(app,{allowSparkle:platformUpdate!==undefined});publicModes(app,{allowSparkle:platformUpdate!==undefined});for(const [command,args]of plan({app,files:[],sealApp:true}))execFileSync(command,args,{stdio:'pipe',timeout:30000});
   execFileSync(path.join(runtime,'node'),['--version'],{stdio:'pipe',timeout:10000});
   fs.writeFileSync(path.join(image,'READ-ME.txt'),'Styx developer preview — '+(localSigning===undefined?'ad-hoc signed':'signed with a persistent local development certificate')+', NOT notarized.\nMove Styx.app to /Applications before launching. macOS may require an explicit Open Anyway action.\nNo Apple Developer identity, automatic TCC grants, paid signing or public account connection is claimed.\nThe app includes runtime, offline dependencies and a local-build signed Host payload.\n');
   fs.symlinkSync('/Applications',path.join(image,'Applications'));
   const zip='Styx-'+releaseVersion+'-macos-arm64.zip';execFileSync('/usr/bin/ditto',['-c','-k','--keepParent',app,path.join(destination,zip)],{stdio:'pipe',timeout:180000});
   const artifacts=[zip];if(createDmg){const dmg='Styx-'+releaseVersion+'-macos-arm64.dmg';execFileSync('/usr/bin/hdiutil',['create','-volname','Styx Developer Preview','-srcfolder',image,'-format','UDZO',path.join(destination,dmg)],{stdio:'pipe',timeout:300000});artifacts.push(dmg);}
-  const receipt={schema:1,kind:'precompiled_developer_preview',sourceRevision,version,buildNumber:appMetadata.buildNumber,buildNumberSource:appMetadata.buildNumberSource,updateRelease:appMetadata.updateRelease,releaseVersion,platform:'darwin',arch:'arm64',...signingReceipt,compiler:appBuild.compiler,publisher_spki_sha256:fingerprint,host_publisher_mode:publisherMode,production_packages:dependencies.length,browser_production_packages:dependencies.filter(record=>record.lockFile==='packages/styx-browser-provider/package-lock.json').length,tunnel_client:tunnelRecord?{version:tunnelRecord.version,archive_sha256:tunnelRecord.archive_sha256}:null,native_code_files:native.map(p=>path.relative(app,p).split(path.sep).join('/')),artifacts:artifacts.map(name=>({name,sha256:sha(path.join(destination,name)),bytes:fs.statSync(path.join(destination,name)).size})),native_ui_acceptance:'NOT RUN',cold_install:'NOT RUN'};
+  const receipt={schema:1,kind:'precompiled_developer_preview',sourceRevision,version,buildNumber:appMetadata.buildNumber,buildNumberSource:appMetadata.buildNumberSource,updateRelease:appMetadata.updateRelease,releaseVersion,platform:'darwin',arch:'arm64',...signingReceipt,compiler:appBuild.compiler,platformUpdate:appBuild.platformUpdate,publisher_spki_sha256:fingerprint,host_publisher_mode:publisherMode,production_packages:dependencies.length,browser_production_packages:dependencies.filter(record=>record.lockFile==='packages/styx-browser-provider/package-lock.json').length,tunnel_client:tunnelRecord?{version:tunnelRecord.version,archive_sha256:tunnelRecord.archive_sha256}:null,native_code_files:native.map(p=>path.relative(app,p).split(path.sep).join('/')),artifacts:artifacts.map(name=>({name,sha256:sha(path.join(destination,name)),bytes:fs.statSync(path.join(destination,name)).size})),native_ui_acceptance:'NOT RUN',cold_install:'NOT RUN'};
   fs.writeFileSync(path.join(destination,'preview-receipt.json'),JSON.stringify(receipt,null,2)+'\n');return receipt;
  },{excludedRoots:[sourceRoot,dependenciesDir,destination]});
 }

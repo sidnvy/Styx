@@ -6,6 +6,7 @@ import {execFileSync} from 'node:child_process';
 import {createHash,X509Certificate} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
 import {crc32,normalizePresentation} from '../plugin/package.mjs';
+import {normalizeMacPlatformUpdate,stageMacSparkle,sparkleDistributionSigningPlan} from './macos/platform-update/sparkle-build.mjs';
 
 export const MAC_BUNDLE_ID='app.styx.host';
 const SOURCE=fileURLToPath(new URL('./macos/Styx.swift',import.meta.url));
@@ -43,8 +44,9 @@ export function macAppBuildMetadata({version,buildNumber,updateRelease=false}={}
   return {marketingVersion:version,buildNumber:buildNumber??'0',updateRelease,
     buildNumberSource:buildNumber===undefined?'development_sentinel_not_for_updates':'explicit_release_sequence'};
 }
-export function appInfoPlist(version,{buildNumber,updateRelease=false}={}){
+export function appInfoPlist(version,{buildNumber,updateRelease=false,platformUpdate,app}={}){
   const metadata=macAppBuildMetadata({version,buildNumber,updateRelease});
+  const updater=normalizeMacPlatformUpdate(platformUpdate,{app,updateRelease});
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -58,6 +60,14 @@ export function appInfoPlist(version,{buildNumber,updateRelease=false}={}){
 <key>CFBundleShortVersionString</key><string>${xml(version)}</string>
 <key>CFBundleVersion</key><string>${xml(metadata.buildNumber)}</string>
 <key>StyxUpdateRelease</key><${metadata.updateRelease?'true':'false'}/>
+${updater?`<key>SUFeedURL</key><string>${xml(updater.feedUrl)}</string>
+<key>SUPublicEDKey</key><string>${xml(updater.publicEdKey)}</string>
+<key>SUEnableAutomaticChecks</key><false/>
+<key>SUAutomaticallyUpdate</key><false/>
+<key>SUSendProfileInfo</key><false/>
+<key>SUVerifyUpdateBeforeExtraction</key><true/>
+<key>StyxIsolatedPlatformUpdateProbe</key><${updater.isolatedProbe?'true':'false'}/>
+${updater.isolatedProbe?'<key>NSAppTransportSecurity</key><dict><key>NSAllowsLocalNetworking</key><true/></dict>':''}`:''}
 <key>LSMinimumSystemVersion</key><string>13.0</string>
 <key>LSUIElement</key><true/>
 <key>NSHighResolutionCapable</key><true/>
@@ -158,25 +168,28 @@ export function macNativeSwiftSources(){
   assert(additionalSources.length>0,'native_product_sources_required');
   return {source:SOURCE,additionalSources};
 }
-export function macSwiftBuildArguments({source,output,arch=process.arch,sdkPath,moduleCachePath,additionalSources=[]}={}){
+export function macSwiftBuildArguments({source,output,arch=process.arch,sdkPath,moduleCachePath,additionalSources=[],frameworkSearchPath}={}){
   const absolute=p=>typeof p==='string'&&path.posix.isAbsolute(p)&&path.posix.normalize(p)===p&&!/[\x00-\x1f\x7f]/.test(p);
   assert(absolute(source)&&absolute(output),'absolute_swift_build_paths_required');
   assert(Array.isArray(additionalSources)&&additionalSources.every(absolute),'absolute_additional_swift_sources_required');
   assert(['arm64','x64'].includes(arch),'unsupported_swift_build_arch');
   assert(sdkPath===undefined||absolute(sdkPath),'absolute_macos_sdk_required');
+  assert(frameworkSearchPath===undefined||absolute(frameworkSearchPath),'absolute_framework_search_path_required');
   assert(moduleCachePath===undefined||absolute(moduleCachePath),'absolute_swift_module_cache_required');
   assert(sdkPath===undefined||moduleCachePath!==undefined,'explicit_sdk_requires_isolated_module_cache');
   return ['swiftc','-O','-warnings-as-errors','-target',`${arch==='arm64'?'arm64':'x86_64'}-apple-macosx13.0`,
     ...(sdkPath===undefined?[]:['-sdk',sdkPath]),...(moduleCachePath===undefined?[]:['-module-cache-path',moduleCachePath]),
+    ...(frameworkSearchPath?['-F',frameworkSearchPath,'-framework','Sparkle','-Xlinker','-rpath','-Xlinker','@executable_path/../Frameworks']:[]),
     ...(additionalSources.length?['-D','STYX_PRODUCT_UI']:[]),source,...additionalSources,'-o',output,'-framework','AppKit','-framework','ApplicationServices','-framework','CoreGraphics','-framework','SwiftUI','-framework','WebKit'];
 }
-export function buildMacApp({app,cuaBinary,version,buildNumber,updateRelease=false,identity,teamID,notaryProfile,signingMode='distribution',localSigning,sdkPath,moduleCachePath}={}){
+export function buildMacApp({app,cuaBinary,version,buildNumber,updateRelease=false,platformUpdate,identity,teamID,notaryProfile,signingMode='distribution',localSigning,sdkPath,moduleCachePath}={}){
   assert(process.platform==='darwin','native_macos_build_required');
   const build=macAppBuildMetadata({version,buildNumber,updateRelease});
   // Developer ID output needs a distinct build even before a feed is enabled;
   // signing is not a claim that this artifact has been publicly published.
   if(identity&&signingMode==='distribution'||notaryProfile)assert(buildNumber!==undefined,'macos_distribution_build_number_required');
-  const plist=appInfoPlist(version,{buildNumber,updateRelease});
+  const updater=normalizeMacPlatformUpdate(platformUpdate,{app,updateRelease});
+  const plist=appInfoPlist(version,{buildNumber,updateRelease,platformUpdate,app});
   assert(['distribution','local-development'].includes(signingMode),'invalid_macos_signing_mode');
   if(localSigning!==undefined){normalizeMacLocalSigning(localSigning);assert(identity===undefined&&teamID===undefined&&notaryProfile===undefined&&signingMode==='distribution','local_signing_modes_mutually_exclusive');}
   assert(signingMode!=='local-development'||identity,'local_development_identity_required');
@@ -187,7 +200,7 @@ export function buildMacApp({app,cuaBinary,version,buildNumber,updateRelease=fal
   const nativeSources=macNativeSwiftSources(),productSources=nativeSources.additionalSources;
   const buildRoot=fs.mkdtempSync(path.join(os.tmpdir(),'styx-native-build-'));
   const entry=path.join(buildRoot,'main.swift');fs.copyFileSync(nativeSources.source,entry);
-  const swiftArgs=macSwiftBuildArguments({source:entry,additionalSources:productSources,output:path.join(app,'Contents/MacOS/Styx'),sdkPath,moduleCachePath});
+  const swiftArgs=macSwiftBuildArguments({source:entry,additionalSources:productSources,output:path.join(app,'Contents/MacOS/Styx'),sdkPath,moduleCachePath,...(updater?{frameworkSearchPath:path.join(app,'Contents/Frameworks')}: {})});
   if(sdkPath!==undefined)assert(fs.statSync(sdkPath).isDirectory()&&fs.statSync(path.join(sdkPath,'SDKSettings.json')).isFile(),'macos_sdk_directory_required');
   if(moduleCachePath!==undefined)assert(!fs.existsSync(moduleCachePath),'fresh_swift_module_cache_required');
   const stat=fs.lstatSync(cuaBinary);
@@ -209,6 +222,7 @@ export function buildMacApp({app,cuaBinary,version,buildNumber,updateRelease=fal
       const descriptor=verifyMacLocalSigning(localSigning);
       fs.writeFileSync(path.join(app,'Contents/Resources/local-signing.json'),JSON.stringify(descriptor,null,2)+'\n',{flag:'wx'});
     }
+    const sparkle=updater?stageMacSparkle(updater,{app,buildRoot}):null;
     for(const name of ['cua-LICENSE','styx-LICENSE','provenance.json'])
       fs.copyFileSync(path.join(LICENSES,name),path.join(notices,name),fs.constants.COPYFILE_EXCL);
     const brand=path.join(app,'Contents/Resources/brand');fs.mkdirSync(brand);
@@ -232,13 +246,14 @@ export function buildMacApp({app,cuaBinary,version,buildNumber,updateRelease=fal
     execFileSync('/usr/bin/xcrun',swiftArgs,{stdio:'inherit',timeout:180000});
     execFileSync('/usr/bin/xcrun',macSwiftBuildArguments({source:UPDATER,output:path.join(macos,'StyxUpdater'),sdkPath,moduleCachePath}),{stdio:'inherit',timeout:180000});
     execFileSync('/usr/bin/plutil',['-lint',path.join(app,'Contents/Info.plist')],{stdio:'inherit'});
-    for(const [command,args] of steps){
+    for(const [command,args] of [...(updater?sparkleDistributionSigningPlan({app,identity,signingMode}):[]),...steps]){
       // A local keychain approval must not turn into an unattended long wait.
       const output=execFileSync(command,args,{encoding:'utf8',timeout:localSigning!==undefined||signingMode==='local-development'?15000:1800000});
       if(args[0]==='notarytool')assert(JSON.parse(output).status==='Accepted','notarization_not_accepted');
     }
     return {schema:1,bundle_id:MAC_BUNDLE_ID,version,buildNumber:build.buildNumber,buildNumberSource:build.buildNumberSource,updateRelease:build.updateRelease,arch:process.arch,
       cua_version:observed,cua_input_sha256:inputHash,app,
+      platformUpdate:sparkle?{frameworkVersion:sparkle.version,archiveSha256:sparkle.archiveSha256,feedUrl:updater.feedUrl,isolatedProbe:updater.isolatedProbe}:null,
       signing:localSigning!==undefined||identity?'PASS':'NOT RUN',
       signing_detail:localSigning!==undefined?'local_certificate_preview':identity?(signingMode==='local-development'?'apple_development_local_only':'developer_id_verified'):'unsigned_development_bundle',
       signing_mode:localSigning!==undefined?'local_certificate_preview':signingMode,...(localSigning!==undefined?{local_signing:publicMacLocalSigning(localSigning)}:{}),external_distribution:'NOT RUN',
