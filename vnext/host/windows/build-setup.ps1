@@ -37,7 +37,7 @@ try {
   }
   [IO.Compression.ZipFileExtensions]::CreateEntryFromFile($archive,$launcher,'StyxLauncher.exe',[IO.Compression.CompressionLevel]::Optimal) | Out-Null
  }finally{$archive.Dispose()}
- & $compiler /nologo /warn:4 /warnaserror+ /target:winexe /platform:anycpu /optimize+ /reference:System.Windows.Forms.dll /reference:System.Drawing.dll /reference:System.IO.Compression.dll /reference:System.IO.Compression.FileSystem.dll /win32icon:"$iconFile" /win32manifest:"$PSScriptRoot\setup.manifest" /resource:"$zipFile,StyxPayload.zip" /out:"$OutputFile" "$PSScriptRoot\Setup.cs"
+ & $compiler /nologo /warn:4 /warnaserror+ /target:winexe /platform:anycpu /optimize+ /reference:System.Windows.Forms.dll /reference:System.Drawing.dll /reference:System.Web.Extensions.dll /reference:System.IO.Compression.dll /reference:System.IO.Compression.FileSystem.dll /win32icon:"$iconFile" /win32manifest:"$PSScriptRoot\setup.manifest" /resource:"$zipFile,StyxPayload.zip" /out:"$OutputFile" "$PSScriptRoot\Setup.cs"
  if($LASTEXITCODE -ne 0){throw 'setup_compile_failed'}
  [ordered]@{status='built_unsigned_setup';artifact=$OutputFile;sha256=(Get-FileHash -LiteralPath $OutputFile -Algorithm SHA256).Hash.ToLowerInvariant();packageSha256=(Get-FileHash -LiteralPath (Join-Path $PackageDirectory 'windows-package.json') -Algorithm SHA256).Hash.ToLowerInvariant();scope='current_user';desktopAcceptance='NOT RUN';authenticode='NOT SIGNED'} | ConvertTo-Json
 } finally {Remove-Item -LiteralPath $stage -Recurse -Force}

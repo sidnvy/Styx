@@ -8,10 +8,12 @@ using System.Runtime.InteropServices;
 using System.Threading.Tasks;
 using System.Threading;
 using System.Security.Principal;
+using System.Collections.Generic;
+using System.Web.Script.Serialization;
 using System.Windows.Forms;
 internal sealed class StyxSetup:Form {
  readonly Label status=new Label();readonly Button install=new Button(),rollback=new Button(),open=new Button();readonly ProgressBar progress=new ProgressBar();readonly CheckBox desktop=new CheckBox();
- readonly string root=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"Programs","Styx");string staging;bool busy;readonly Mutex installationMutex=new Mutex(false,"Local\\Styx.Setup."+WindowsIdentity.GetCurrent().User.Value);
+ readonly string root=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"Programs","Styx");string staging;bool busy;readonly Mutex installationMutex=CreateInstallationMutex();
  StyxSetup(){Text="Styx Setup";ClientSize=new Size(490,310);FormBorderStyle=FormBorderStyle.FixedDialog;MaximizeBox=false;StartPosition=FormStartPosition.CenterScreen;
   var title=new Label{Text="Install Styx",Font=new Font(SystemFonts.MessageBoxFont.FontFamily,20),AutoSize=true,Location=new Point(26,24)};
   status.SetBounds(28,75,434,85);status.Text="Install for your Windows account. Device settings and paired computers are kept when updating.\n\nDevelopment preview — publisher signature is not verified.";
@@ -20,6 +22,10 @@ internal sealed class StyxSetup:Form {
   Controls.AddRange(new Control[]{title,status,progress,desktop,install,rollback,open});install.Click+=async(s,e)=>await Run(false);rollback.Click+=async(s,e)=>await Run(true);open.Click+=(s,e)=>{try{Process.Start(new ProcessStartInfo(Path.Combine(root,"Styx.exe")){UseShellExecute=true});Close();}catch{status.Text="Styx could not open. Your installation has been retained. Try opening Styx from the Start menu.";}};
   FormClosing+=(s,e)=>{if(busy)e.Cancel=true;};FormClosed+=(s,e)=>{if(staging!=null)try{Directory.Delete(staging,true);}catch{}};
  }
+ internal static Mutex CreateInstallationMutex(){return new Mutex(false,"Global\\Styx.Setup."+WindowsIdentity.GetCurrent().User.Value);}
+ // Only called under the real cross-session mutex. Internal Node lifecycle entry points
+ // never reclaim another process's lock, so they cannot race this native recovery.
+ static void RecoverInterruptedLock(string installRoot){var file=Path.Combine(installRoot,".setup.lock");if(!File.Exists(file))return;if((File.GetAttributes(installRoot)&FileAttributes.ReparsePoint)!=0||(File.GetAttributes(file)&FileAttributes.ReparsePoint)!=0)throw new IOException("The install path was redirected.");var held=new JavaScriptSerializer().Deserialize<Dictionary<string,object>>(File.ReadAllText(file));int pid=Convert.ToInt32(held["pid"]);if(Convert.ToInt32(held["schema"])!=1||pid<=0)throw new IOException("The interrupted setup lock could not be checked.");bool active;try{using(var process=Process.GetProcessById(pid))active=!process.HasExited;}catch(ArgumentException){active=false;}if(active)throw new IOException("Another Styx installation operation is still running. Wait for it to finish, then retry.");File.Delete(file);}
  static string Quote(string text){if(text.Contains("\"")||text.Contains("\r")||text.Contains("\n"))throw new ArgumentException();return "\""+text+"\"";}
  void Report(string message){BeginInvoke((Action)(()=>status.Text=message));}
  void Extract(){staging=Path.Combine(Path.GetTempPath(),"StyxSetup-"+Guid.NewGuid().ToString("N"));Directory.CreateDirectory(staging);
@@ -32,8 +38,8 @@ internal sealed class StyxSetup:Form {
  async Task Run(bool restore){bool ownsMutex;try{ownsMutex=installationMutex.WaitOne(0);}catch(AbandonedMutexException){ownsMutex=true;}if(!ownsMutex){status.Text="Another Styx Setup is running. Close it, then retry here.";return;}busy=true;install.Enabled=false;rollback.Enabled=false;desktop.Enabled=false;progress.Style=ProgressBarStyle.Marquee;status.Text=restore?"Checking the previous version…":"Preparing installation…";
   try{string target=Path.Combine(root,"Styx.exe"),start=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.Programs),"Styx.lnk"),desk=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.DesktopDirectory),"Styx.lnk");bool addDesktop=desktop.Checked;
    // COM shortcut operations stay on the STA UI thread; existing unrelated links are never replaced.
-   Shortcut(start,target,true);if(addDesktop)Shortcut(desk,target,true);
-   await Task.Run(()=>{if(staging==null)Extract();Directory.CreateDirectory(Path.GetDirectoryName(root));var package=Path.Combine(staging,"package");var info=new ProcessStartInfo(Path.Combine(package,"runtime","node.exe")){UseShellExecute=false,CreateNoWindow=true,RedirectStandardOutput=true,RedirectStandardError=true};info.Arguments=Quote(Path.Combine(package,"vnext","host","windows","setup-install.mjs"))+" "+(restore?"rollback":"install")+" "+Quote(root)+(restore?"":" "+Quote(Path.Combine(staging,"StyxLauncher.exe")))+" --native-mutex-held";
+   Shortcut(start,target,true);if(addDesktop)Shortcut(desk,target,true);RecoverInterruptedLock(root);
+   await Task.Run(()=>{if(staging==null)Extract();Directory.CreateDirectory(Path.GetDirectoryName(root));var package=Path.Combine(staging,"package");var info=new ProcessStartInfo(Path.Combine(package,"runtime","node.exe")){UseShellExecute=false,CreateNoWindow=true,RedirectStandardOutput=true,RedirectStandardError=true};info.Arguments=Quote(Path.Combine(package,"vnext","host","windows","setup-install.mjs"))+" "+(restore?"rollback":"install")+" "+Quote(root)+(restore?"":" "+Quote(Path.Combine(staging,"StyxLauncher.exe")));
     using(var child=new Process{StartInfo=info}){child.OutputDataReceived+=(s,e)=>{if(e.Data!=null)Report(restore?"Verifying and restoring the previous version…":"Checking files and installing Styx…");};child.Start();child.BeginOutputReadLine();var error=child.StandardError.ReadToEnd();child.WaitForExit();if(child.ExitCode!=0)throw new InvalidOperationException(error.Length>0?error:"The installation could not be completed.");}
    });Shortcut(start,target,false);if(addDesktop)Shortcut(desk,target,false);status.Text=restore?"Previous version restored. Close Styx if it is running, then open it again. Your device settings are kept.":"Styx is installed. If Styx is already running, quit it before opening this version. Your device settings are kept.";open.Visible=true;install.Text="Done";install.Visible=false;rollback.Visible=false;
   }catch(Exception error){status.Text="Setup could not finish. Existing versions and device settings are retained.\n"+error.Message;install.Text="Retry";install.Enabled=true;rollback.Enabled=File.Exists(Path.Combine(root,"installation.json"));desktop.Enabled=true;}

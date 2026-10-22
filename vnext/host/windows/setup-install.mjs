@@ -18,14 +18,6 @@ function acquireLock(root){
  try{fs.linkSync(temp,lock);return ()=>{regular(lock);assert(hash(lock)===hash(temp),'setup_lock_changed');fs.unlinkSync(lock);fs.unlinkSync(temp);};}
  catch(error){fs.unlinkSync(temp);if(error.code==='EEXIST')throw Error('another_setup_or_interrupted_setup');throw error;}
 }
-// Product entry point calls this only while holding the per-user Windows named mutex.
-// No automatic recovery in the exported lifecycle functions: arbitrary concurrent callers
-// must never remove a lock after observing an old owner's PID.
-function recoverUnderNativeMutex(root){
- targetRoot(root);if(!fs.existsSync(root))return;regular(root,true);const lock=path.join(root,'.setup.lock');if(!fs.existsSync(lock))return;regular(lock);const held=JSON.parse(fs.readFileSync(lock,'utf8'));assert(held.schema===1&&Number.isSafeInteger(held.pid)&&held.pid>0,'invalid_setup_lock');
- try{process.kill(held.pid,0);throw Error('another_setup_is_running');}catch(error){if(error.code!=='ESRCH')throw error;}
- fs.unlinkSync(lock);
-}
 async function api(source){return import(pathToFileURL(path.join(source,'install-windows-preview.mjs')));}
 async function verifyRelease(root,receipt,id,verifyPackage){const release=receipt.releases.find(r=>r.id===id);assert(release,'unknown_installation_release');const folder=path.join(root,'releases',id);regular(path.join(root,'releases'),true);regular(folder,true);assert(hash(path.join(folder,'windows-package.json'))===release.packageSha256,'installed_release_changed');await verifyPackage(folder,{installed:true});return folder;}
 export async function installManaged(source,root,launcher,{onProgress}={}){
@@ -46,7 +38,7 @@ export async function rollbackManaged(source,root){targetRoot(root);regular(root
  try{const {verifyPackage}=await api(source),before=read(root);assert(before.previous,'previous_release_unavailable');await verifyRelease(root,before,before.previous,verifyPackage);const current=before.previous;write(root,{...before,current,previous:before.current});return {status:'rolled_back',root,current,previous:before.current,statePreserved:true,restartRequired:true};}finally{releaseLock();}}
 export function managedStatus(root){targetRoot(root);if(!fs.existsSync(root))return {status:'not_installed',root};const value=read(root);return {status:'installed',root,current:value.current,previous:value.previous,rollbackAvailable:!!value.previous,statePreserved:true};}
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url)){
- try{const args=process.argv.slice(2),nativeRecovery=args.at(-1)==='--native-mutex-held';if(nativeRecovery){assert(process.platform==='win32','native_windows_setup_required');args.pop();}const [operation,root,launcher]=args,source=fileURLToPath(new URL('../../../',import.meta.url));let result;if(nativeRecovery)recoverUnderNativeMutex(root);
+ try{const args=process.argv.slice(2),[operation,root,launcher]=args,source=fileURLToPath(new URL('../../../',import.meta.url));let result;
  if(operation==='install'&&root&&launcher&&args.length===3)result=await installManaged(source,root,launcher,{onProgress:progress=>console.log(JSON.stringify(progress))});
  else if(operation==='rollback'&&root&&args.length===2)result=await rollbackManaged(source,root);
  else if(operation==='status'&&root&&args.length===2)result=managedStatus(root);
