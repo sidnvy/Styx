@@ -251,6 +251,22 @@ export async function runManagedLinuxPilot(raw,{optIn=process.env.STYX_RUN_MANAG
       systemdUser(unitName,'start');await ready(release1);note(phase);
     }
     if(signal?.aborted)throw Error('managed_pilot_aborted');
+    phase='computer_child_recovery_preserves_exec';
+    const beforeComputerPeer=[...gateway.relay.computerPeers.get(target)][0],beforeExecPeer=gateway.relay.sessions.get(target),serviceBefore=statusUserService(unitName);
+    const children=pid=>fs.readFileSync('/proc/'+pid+'/task/'+pid+'/children','utf8').trim().split(/\s+/).filter(Boolean).map(Number);
+    const version=activeRelease(installRoot,publisher.publicKey).version,releaseRoot=path.join(installRoot,'releases',version);
+    const connector=children(serviceBefore.pid).find(pid=>fs.readFileSync('/proc/'+pid+'/cmdline','utf8').split('\0').includes(path.join(releaseRoot,'host/connect.mjs')));
+    assert(connector,'owned_connector_missing');
+    const cua=children(connector).filter(pid=>{try{return fs.realpathSync('/proc/'+pid+'/exe')===path.join(releaseRoot,'bin/cua-driver')&&fs.readFileSync('/proc/'+pid+'/cmdline','utf8').split('\0')[1]==='mcp'}catch{return false}});
+    assert(cua.length===1,'owned_computer_worker_ambiguous');
+    process.kill(cua[0],'SIGTERM');
+    await sampleExec('STYX_EXEC_DURING_COMPUTER_RECOVERY');
+    await until(()=>gateway.relay.computerConnected(target)===1&&[...gateway.relay.computerPeers.get(target)][0]!==beforeComputerPeer,'computer_worker_not_reconnected');
+    assert(gateway.relay.sessions.get(target)===beforeExecPeer&&statusUserService(unitName).pid===serviceBefore.pid,'computer_recovery_restarted_exec_or_service');
+    await closeClient();transport=new StreamableHTTPClientTransport(new URL(origin+'/mcp'),{requestInit:{headers:{Authorization:'Bearer '+modelToken}},fetch:caFetch(origin,ca)});
+    client=new Client({name:'styx-owned-managed-reconnected',version:'0.1.0'});await client.connect(transport);clients.push({client,transport});
+    await sampleExec('STYX_EXEC_AFTER_COMPUTER_RECOVERY');
+    receipt.computerRecovery={workerPid:cua[0],sameServicePid:true,sameExecConnection:true,computerPeerReplaced:true,actionReplay:'none'};note(phase);
     phase='owned_gui_screenshot_ax_action_readback';
     async function tool(name,args){
       const res=await client.callTool({name,arguments:args});
