@@ -5,6 +5,7 @@ import path from 'node:path';
 import http from 'node:http';
 import net from 'node:net';
 import {completeLocalSetup,isRetryableLocalCheck} from './local-setup.mjs';
+import {nativeHostStartupDecision} from './native-host-startup.mjs';
 import {enableDeploymentBackground,observeDeploymentBackground} from './background.mjs';
 import {configureTunnel,TunnelRuntime} from './tunnel-runtime.mjs';
 import {changeDeploymentCapabilities,readDeploymentCapabilities} from './capabilities.mjs';
@@ -100,7 +101,7 @@ async function body(req,maximumBytes=65536){
  req.setEncoding('utf8');let data='';for await(const chunk of req){data+=chunk;if(Buffer.byteLength(data)>maximumBytes)fail('body_too_large')}
  try{return JSON.parse(data)}catch{fail('invalid_json')}
 }
-export async function createOnboardingServer({stateDir,port=0,trustedForwardOrigin,trustedOpenSSL=process.platform==='win32'?undefined:'/usr/bin/openssl',trustedOpenSSLConfig,core,artifactDefaultsFile,verifyConnection,gatewayService,pairingLinks,trustedMacPreviewApp,backgroundControl=enableDeploymentBackground,backgroundRead=observeDeploymentBackground,trustedTunnelClient}={}){
+export async function createOnboardingServer({stateDir,port=0,trustedForwardOrigin,trustedOpenSSL=process.platform==='win32'?undefined:'/usr/bin/openssl',trustedOpenSSLConfig,core,artifactDefaultsFile,verifyConnection,gatewayService,pairingLinks,trustedMacPreviewApp,backgroundControl=enableDeploymentBackground,backgroundRead=observeDeploymentBackground,trustedTunnelClient,nativeAppAuthority}={}){
  if(typeof stateDir!=='string'||!path.isAbsolute(stateDir))fail('absolute_state_directory_required');
  if(!Number.isInteger(port)||port<0||port>65535)fail('invalid_port');
  const forwarded=trustedForwardOrigin?browserOrigin(trustedForwardOrigin):null;
@@ -154,7 +155,15 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
    ['foreground_uncertain_state_requires_reconciliation','foreground_management_operation_in_progress'].includes(code)?'interrupted_operation_requires_review':'connection_start_failed';
   nativeStartup={status:'reconciliation_required',observation:'current_process',reason};
  };
+ const nativeAppOwned=!!macPreviewApp||(typeof nativeAppAuthority==='function'&&nativeAppAuthority()?.source==='current_windows_native_app');
+ const checkNativeHostStartup=async()=>{
+  if(!nativeAppOwned)return true;
+  const decision=await nativeHostStartupDecision(stateDir,{artifacts,core:api});
+  if(decision.status==='continue')return true;
+  nativeStartup=decision;return false;
+ };
  const resumeNativeStartup=async()=>{
+  if(!await checkNativeHostStartup())return;
   try{
    const deployment=await api.readDeployment(stateDir);
    const browser=deployment.roles?.browser==='requested'?await api.readDeploymentBrowser?.(stateDir):null;
@@ -239,6 +248,9 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
   // A first transition from byte-pinned ad-hoc code to a persistent signer is
   // a reviewed Core migration, never an incidental status/startup side effect.
   if(nativeSigningMigrationRequired&&req.method==='POST'&&!['/api/app/quit','/api/native-signing/plan','/api/native-signing/apply'].includes(url.pathname)){send(409,{error:'native_signing_registration_required'});return}
+  // Connections and setup mutations cannot race an admitted native bundle
+  // reconciliation. Recovery/quit stay reachable; read-only status stays honest.
+  if(nativeAppOwned&&nativeStartup.reason?.startsWith('host_payload_')&&req.method==='POST'&&!['/api/app/quit','/api/app/quit-admission'].includes(url.pathname)&&!url.pathname.startsWith('/api/host-payload/')){send(409,{error:nativeStartup.reason});return}
   if(req.method==='GET'&&url.pathname==='/api/session'){
    send(200,{csrf,platform:process.platform,journeySupported:true,nativeAppLifecycleSupported:!!macPreviewApp,nativeSigningUpgradeSupported:!!macPreviewApp,diagnosticsSupported:true,browserPreparationSupported:typeof api.readDeploymentBrowser==='function'&&typeof api.prepareDeploymentBrowser==='function',foregroundSupported:typeof api.startDeploymentForeground==='function'&&typeof api.stopDeploymentForeground==='function',acceptanceSupported:['readDeploymentAcceptance','beginDeploymentAcceptance','confirmDeploymentAcceptance','recordDeploymentDesktopReadback'].every(k=>typeof api[k]==='function'),connectionHandoffSupported:typeof api.prepareDeploymentConnectionHandoff==='function',packagedPreviewTrusted:!!macPreviewApp,backgroundSupported:true,capabilityChangeSupported:true,deviceSettingsSupported:typeof api.readDeploymentDevices==='function',tunnelSupported:!!tunnel,localGatewayAvailable:!!trustedOpenSSL,pauseSupported:typeof api.stopDeploymentGateway==='function',startSupported:typeof api.startDeploymentGateway==='function',
     deviceIngressSupported:typeof api.planDeviceIngress==='function'&&typeof api.verifyDeviceIngress==='function',pairingLinkImportSupported:linkImportAvailable,pairingLinkCreateSupported:typeof api.createDeploymentPairingLink==='function',pendingApprovalSupported:typeof api.listDeploymentPending==='function'&&typeof api.approveDeploymentPending==='function',hostServiceSupported:typeof api.controlDeploymentHostService==='function',gatewayServiceSupported:gatewayServiceAvailable,gatewayService:gatewayServiceCapability,localGatewayAddresses:typeof api.localGatewayAddresses==='function'?api.localGatewayAddresses():[],defaults,accountAcceptance:'NOT RUN',nativeInstaller:'NOT RUN',trustedForwarding:!!forwarded});return;
@@ -505,11 +517,11 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
  // Foreground Core verifies native service ownership and refuses duplicate or
  // uncertain owners; it never regenerates pairing identities on reconnect.
  if(nativeSigningMigrationRequired)nativeStartup={status:'reconciliation_required',observation:'current_process',reason:'native_signing_registration_required'};
- if(macPreviewApp&&!nativeSigningMigrationRequired&&fs.existsSync(path.join(stateDir,'deployment.json'))&&typeof api.startDeploymentForeground==='function'){
+ if(nativeAppOwned&&!nativeSigningMigrationRequired&&fs.existsSync(path.join(stateDir,'deployment.json'))&&typeof api.startDeploymentForeground==='function'){
   await resumeNativeStartup();
  }
  // Only a previously recorded user opt-in can resume this App-owned connection.
- if(tunnel&&!nativeSigningMigrationRequired&&fs.existsSync(stateDir))await tunnel.resume().catch(()=>{});
+ if(tunnel&&!nativeSigningMigrationRequired&&!nativeStartup.reason?.startsWith('host_payload_')&&fs.existsSync(stateDir))await tunnel.resume().catch(()=>{});
  return {server,origin,url:origin+'/#session='+session,
   close(){if(closing)return closing;pendingLink=null;
    closing=(async()=>{

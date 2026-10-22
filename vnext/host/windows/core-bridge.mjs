@@ -113,6 +113,7 @@ export async function startWindowsCore(resourceRoot,stateRoot){
     configureWindowsAclHelper(member(cfg.privateStorage.path,cfg.privateStorage.sha256),cfg.privateStorage.sha256);
    }
    const core=await import('../../onboarding/core.mjs'),nativeDesktopApp=()=>observeWindowsNativeAppAuthority(resourceRoot,cfg);
+   options.nativeAppAuthority=nativeDesktopApp;
    hostPayloadHandoffSupported=cfg.hostUpdater?.path==='StyxUpdater.exe'&&/^[a-f0-9]{64}$/.test(cfg.hostUpdater?.sha256??'');
    desktopAcceptanceSupported=cfg.desktopApp?.path==='StyxPreview.exe'&&/^[a-f0-9]{64}$/.test(cfg.desktopApp?.sha256??'')&&cfg.desktopProbe?.path==='StyxSessionProbe.exe'&&/^[a-f0-9]{64}$/.test(cfg.desktopProbe?.sha256??'');
    options.core={...core,startDeploymentForeground:(directory,authorization)=>core.startDeploymentForeground(directory,authorization,{guiAvailable:()=>nativeDesktopAvailable(resourceRoot,cfg.desktopProbe)}),beginDeploymentAcceptance:(directory,authorization)=>core.beginDeploymentAcceptance(directory,authorization,{nativeDesktopApp}),recordDeploymentDesktopReadback:(directory,authorization)=>core.recordDeploymentDesktopReadback(directory,authorization,{nativeDesktopApp})};
