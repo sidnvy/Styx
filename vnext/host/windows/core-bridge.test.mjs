@@ -93,7 +93,7 @@ test('native component upgrade uses shared handoff APIs and only a trusted launc
  const c=await createClient({url,launchHostPayloadHandoff:async id=>{launches.push(id);return {status:'launched',ticketId:id}}},{fetchImpl:f.fetchImpl});
  await c.dispatch(req('runtimeUpgradePrepare',{bundle:'C:\\foreign',publisher:'foreign'}));assert.deepEqual(f.requests.at(-1).body,{authorize:true});assert.equal(f.requests.at(-1).route,'host-payload/handoff/prepare');assert.equal(f.requests.at(-1).options.signal,undefined);
  await c.dispatch(req('runtimeUpgradeLaunch',{ticketId}));assert.deepEqual(launches,[ticketId]);await assert.rejects(c.dispatch(req('runtimeUpgradeLaunch',{ticketId:'../escape'})),/native_handoff_unavailable/);
- await c.dispatch(req('runtimeUpgradeStatus'));assert.equal(f.requests.at(-1).route,'host-payload/handoff/status');
+ await c.dispatch(req('runtimeUpgradeStatus'));assert.equal(f.requests.at(-2).route,'host-payload/handoff/status');assert.equal(f.requests.at(-1).route,'host-payload/status');
  await c.dispatch(req('runtimeUpgradeCancel',{ticketId}));assert.deepEqual(f.requests.at(-1).body,{authorize:true,ticketId});
  const plain=await createClient({url},{fetchImpl:f.fetchImpl});await assert.rejects(plain.dispatch(req('runtimeUpgradeLaunch',{ticketId})),/native_handoff_unavailable/);
 });
