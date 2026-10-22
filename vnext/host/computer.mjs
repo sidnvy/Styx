@@ -50,12 +50,12 @@ export function computerMcpArgs(driver,{platform=process.platform}={}) {
   return ['mcp',...(driver.socket?['--socket',driver.socket]:[])];
 }
 
-export async function connectComputerOnce(config,{signal,onReady}={}) {
+export async function connectComputerOnce(config,{signal,onReady,workAdmission}={}) {
   const c=computerConfig(config);
   if(!c)throw Error('computer_not_configured');
   if(signal?.aborted)throw Error('connector_cancelled');
   const auth=hostAuthentication(c);
-  let ws,child,childClosed,cleanup;
+  let ws,child,childClosed,cleanup;const workPeer=workAdmission?.openPeer('computer');
   let childExited=false;
   let closed=false;
   const stop=()=>{
@@ -115,7 +115,7 @@ export async function connectComputerOnce(config,{signal,onReady}={}) {
         }catch{stop();return}
         if(ws.readyState!==WebSocket.OPEN){stop();return}
         if(ws.bufferedAmount>2*MAX_COMPUTER_FRAME){stop();return}
-        ws.send(line,{binary:false},err=>{if(err)stop()});
+        ws.send(line,{binary:false},err=>{if(err){workAdmission?.markUnknown();stop()}else{try{workPeer?.response(JSON.parse(line))}catch{workAdmission?.markUnknown()}}});
       }
     });
     ws.on('message',(payload,isBinary)=>{
@@ -127,6 +127,7 @@ export async function connectComputerOnce(config,{signal,onReady}={}) {
       try {
         const msg=JSON.parse(String(payload));
         if(!msg || typeof msg!=='object' || Array.isArray(msg))throw Error();
+        try{workPeer?.request(msg)}catch(error){if(error.message==='device_in_maintenance'){ws.send(JSON.stringify({jsonrpc:'2.0',id:msg.id,error:{code:-32001,message:'device_in_maintenance'}}));return}throw error}
         child.stdin.write(JSON.stringify(msg)+'\n');
       }catch{stop()}
     });
@@ -153,7 +154,7 @@ export async function connectComputerOnce(config,{signal,onReady}={}) {
       if(closed) resolve();
     });
   }finally{
-    await stop();
+    workPeer?.close();await stop();
     signal?.removeEventListener('abort',abort);
     // Termination of a tool server does not establish that an in-flight GUI
     // click was rolled back. Gateway presents unknown mutation outcome.
@@ -161,14 +162,14 @@ export async function connectComputerOnce(config,{signal,onReady}={}) {
 }
 
 export async function runComputerConnectors(config,{signal,once=false,
-  retryMinMs=500,retryMaxMs=15000,onReady,onStatus}={}) {
+  retryMinMs=500,retryMaxMs=15000,onReady,onStatus,workAdmission}={}) {
   const c=computerConfig(config);
   if(!c)return;
   const one=async slot=>{
     let failed=0;
     while(!signal?.aborted) {
       try{
-        await connectComputerOnce(c,{signal,onReady});
+        await connectComputerOnce(c,{signal,onReady,workAdmission});
         failed=0;onStatus?.('disconnected',{slot,lane:'computer'});
       }catch{
         failed++;

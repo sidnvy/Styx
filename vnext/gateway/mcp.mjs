@@ -29,7 +29,7 @@ const statusTool = {
   annotations: {readOnlyHint: true, destructiveHint: false, idempotentHint: true}
 };
 
-export function createGatewayMcp({exec, computer, browser, gui, registry, owner, relay = null, cas = null, casOnly = false, onToolResult = null, withOwner = (_meta,operation)=>operation(owner)}) {
+export function createGatewayMcp({exec, computer, browser, gui, registry, owner, relay = null, cas = null, casOnly = false, onToolResult = null, workAdmission = null, withOwner = (_meta,operation)=>operation(owner)}) {
   if (typeof owner !== 'string' || !owner) throw new TypeError('Authenticated session required');
   if (casOnly && !cas) throw Error('cas_lab_requires_explicit_experiment_ledger');
   const server = new Server({name: 'styx-vnext', version: '0.1.0'},
@@ -58,6 +58,7 @@ export function createGatewayMcp({exec, computer, browser, gui, registry, owner,
     const operationId=randomUUID();
     if(target&&typeof onToolResult?.before==='function')try{await onToolResult.before({name,args,owner,target,operationId})}catch{}
     const result=await operation();
+    if(target&&result?.structuredContent?.uncertain)workAdmission?.markUnknown?.(target.id);
     if(onToolResult&&target)try{const current=registry.resolve(target.id);if(current.generation===target.generation)await onToolResult({name,args,result,owner,target:current,operationId});}catch{/* Observation never changes/replays an executed request. */}
     return result;
   }
@@ -96,16 +97,22 @@ export function createGatewayMcp({exec, computer, browser, gui, registry, owner,
       };
       return {structuredContent: result, content: [{type: 'text', text: JSON.stringify(result)}]};
     }
-    if(browser&&(await browser.listTools()).some(tool=>tool.name===name))return observed(owner,name,args,()=>browser.callTool(name,args,owner));
-    if (execTools.some(t => t.name === name)) return observed(owner,name,args,()=>exec.callTool(name, args, owner));
+    let release;
+    try {
+      if(workAdmission){const record=name==='write_stdin'?exec.sessions.get(args.session_id):null;const target=registry.resolve(record?.environment??args.environment_id);release=workAdmission.enter(target.id,name,{continuation:name==='write_stdin'});}
+    }catch(error){return {isError:true,structuredContent:{error:error.message},content:[{type:'text',text:error.message}]};}
+    try {
+    if(browser&&(await browser.listTools()).some(tool=>tool.name===name))return await observed(owner,name,args,()=>browser.callTool(name,args,owner));
+    if (execTools.some(t => t.name === name)) return await observed(owner,name,args,()=>exec.callTool(name, args, owner));
     if (computer && computerAllowed() &&
       (await computer.listTools()).some(t => t.name === name)) {
-      return observed(owner,name,args,()=>computer.callTool(name,args,owner));
+      return await observed(owner,name,args,()=>computer.callTool(name,args,owner));
     }
     if (gui && !computer && computerAllowed() && guiTools.some(t => t.name === name)) {
-      return gui.callTool(name, args, owner);
+      return await gui.callTool(name, args, owner);
     }
     return {isError: true, content: [{type: 'text', text: 'unknown_tool'}]};
+    } finally {release?.();}
   }));
   return server;
 }

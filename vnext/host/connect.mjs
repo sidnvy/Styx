@@ -69,11 +69,11 @@ export function hostAuthentication(config){
   };
 }
 
-export async function connectHostOnce(config, {signal,onReady}={}) {
+export async function connectHostOnce(config, {signal,onReady,workAdmission}={}) {
   const c=normalizeConnector(config);
   const auth=hostAuthentication(c);
   if (signal?.aborted) throw Error('connector_cancelled');
-  let client,ws;
+  let client,ws;const workPeer=workAdmission?.openPeer('exec');
   try {
     client=await stdioClient({
       binary:c.exec.binary,cwd:c.exec.cwd,
@@ -99,27 +99,27 @@ export async function connectHostOnce(config, {signal,onReady}={}) {
       channel.on('closed',()=>{ws.terminate();finish()});
       ws.on('message',(data,isBinary)=>{
         if (isBinary || data.length>2*1024*1024) {ws.terminate();return}
-        try {channel.send(String(data))}
-        catch {ws.terminate()}
+        try {const message=JSON.parse(String(data));workPeer?.request(message);channel.send(String(data))}
+        catch(error){if(error.message==='device_in_maintenance'){const message=JSON.parse(String(data));ws.send(JSON.stringify({jsonrpc:'2.0',id:message.id,error:{code:-32001,message:'device_in_maintenance'}}));return}ws.terminate()}
       });
       channel.on('message', data=>{
         if (ws.readyState!==WebSocket.OPEN) return;
         if (Buffer.byteLength(data)>2*1024*1024) {ws.terminate();return}
-        ws.send(String(data),{binary:false},err=>{if(err)ws.terminate()});
+        ws.send(String(data),{binary:false},err=>{if(err){workAdmission?.markUnknown();ws.terminate()}else{try{workPeer?.response(JSON.parse(String(data)))}catch{workAdmission?.markUnknown()}}});
       });
-      onReady?.({host_id:c.host_id});
+      workPeer?.ready();onReady?.({host_id:c.host_id});
     });
   } finally {
-    ws?.terminate();
+    workPeer?.close();ws?.terminate();
     await client?.close().catch(()=>{});
   }
 }
 export async function runHostConnector(config,{signal,once:runOnce=false,
-  retryMinMs=500,retryMaxMs=15000,onReady,onStatus}={}) {
+  retryMinMs=500,retryMaxMs=15000,onReady,onStatus,workAdmission}={}) {
   let failures=0;
   while(!signal?.aborted) {
     try {
-      await connectHostOnce(config,{signal,onReady});
+      await connectHostOnce(config,{signal,onReady,workAdmission});
       failures=0;onStatus?.('disconnected');
     } catch {
       failures++;

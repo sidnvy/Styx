@@ -1,3 +1,4 @@
+import {createHostWorkAdmission} from '../shared/work-admission.mjs';
 import {deploymentConnectionHash} from '../shared/deployment-scope.mjs';
 // Process-owned foreground lifecycle. No wrapper, service installation,
 // enrollment, credential regeneration or permission grant is performed here.
@@ -37,11 +38,12 @@ function projection(entry){
  return {schema:1,status:entry.stopping?'stopping':entry.failed?'needs_attention':connected?'connected':entry.host==='service'?'using_service':'started',observation:'current_process',host:entry.host,gateway:entry.gateway,execConnection:entry.execConnection,desktopConnection:entry.desktopConnection,browserConnection:entry.browserConnection,browserRequested:entry.browserRequested,computerRequested:entry.computerRequested,toolHealth:'not_verified',accountAcceptance:'NOT RUN',appExit:'owned_foreground_connections_stop',serviceMutation:'NOT RUN'};
 }
 export function readDeploymentForeground(d){
- absolute(d);const entry=owners.get(d);if(entry){try{if(!entry.scopeValid())return {...projection(entry),status:'needs_attention',execConnection:'not_observed',desktopConnection:'not_observed',browserConnection:'not_observed',reason:'foreground_scope_changed'}}catch{return {...projection(entry),status:'needs_attention',execConnection:'not_observed',desktopConnection:'not_observed',browserConnection:'not_observed',reason:'foreground_scope_changed'}}return projection(entry)}
+ absolute(d);if(starting.has(d)&&!owners.has(d))return{schema:1,status:'needs_attention',host:'not_owned',reason:'foreground_start_in_progress',observation:'current_process'};const entry=owners.get(d);if(entry){try{if(!entry.scopeValid())return {...projection(entry),status:'needs_attention',execConnection:'not_observed',desktopConnection:'not_observed',browserConnection:'not_observed',reason:'foreground_scope_changed'}}catch{return {...projection(entry),status:'needs_attention',execConnection:'not_observed',desktopConnection:'not_observed',browserConnection:'not_observed',reason:'foreground_scope_changed'}}return projection(entry)}
  return {schema:1,status:fs.existsSync(lockFile(d))?'needs_attention':'not_running',observation:'current_process',host:'not_owned',gateway:'not_owned',execConnection:'not_observed',desktopConnection:'not_observed',browserConnection:'not_observed',toolHealth:'not_verified',accountAcceptance:'NOT RUN',...(fs.existsSync(lockFile(d))?{reason:'foreground_owned_or_interrupted_do_not_take_over'}:{})};
 }
 // Public status may observe another process; it never adopts that process.
 export async function observeDeploymentForeground(d){absolute(d);return observeForegroundOwner(d)}
+export function ownedForegroundAdmission(d){absolute(d);const e=owners.get(d);if(!e||e.stopping||e.failed||!e.scopeValid()||e.host!=='foreground')return null;return e.workAdmission;}
 async function guiAvailable(api,d){
  if(process.platform==='darwin')return (await api.readDeploymentPermissions?.(d))?.source==='current_native_app_preflight';
  if(process.platform==='linux')return !!(process.env.DISPLAY||process.env.WAYLAND_DISPLAY);
@@ -94,6 +96,7 @@ async function start(d,operations,abort){
  if(abort.signal.aborted)fail('foreground_start_cancelled');
  const release=claim(d);
  const entry={abort,release,host:selected.host?hostStatus.state==='running'?'service':'foreground':'disabled',gateway:config.mode==='join-existing'?'external':gatewayServiceRunning?'service':'foreground',execConnection:selected.host?'connecting':'not_required',desktopConnection:'not_requested',browserConnection:selected.host?.browser?.enabled?'connecting':'not_requested',browserRequested:selected.host?.browser?.enabled===true,computerRequested:selected.host?.computer?.enabled===true,startedGateway:false,stopping:false,failed:false,tasks:[],api,scopeValid:()=>deploymentConnectionHash(fs.readFileSync(path.join(d,'deployment.json')))===configurationHash&&(!selected.unchanged||selected.unchanged())};
+ entry.workAdmission=entry.host==='foreground'?createHostWorkAdmission(selected.host.host_id):null;
  owners.set(d,entry);
  try{
   entry.observer=await startForegroundObservation({stateDir:d,configurationHash,projection:()=>readDeploymentForeground(d)});
@@ -111,9 +114,9 @@ async function start(d,operations,abort){
     // Attach rejection handling immediately; no raw subprocess diagnostics.
     const task=Promise.resolve().then(()=>runner(config,options)).then(()=>{if(!entry.stopping&&!abort.signal.aborted)entry.failed=true},()=>{entry.failed=true;abort.abort()});entry.tasks.push(task);
    };
-   const signal=abort.signal,retryMinMs=500,retryMaxMs=1500;
-   track(operations.runHost??runHostConnector,selected.host,{signal,retryMinMs,retryMaxMs,onReady:()=>{entry.execConnection='connected'},onStatus:()=>{entry.execConnection='disconnected'}});
-   if(entry.browserRequested){const runner=operations.runBrowser??(await import('../host/browser.mjs')).runBrowserConnector;track(runner,selected.host,{signal,onReady:()=>{entry.browserConnection='connected'},onStatus:state=>{entry.browserConnection=state}});}
+   const signal=abort.signal,retryMinMs=500,retryMaxMs=1500,workAdmission=entry.workAdmission;
+   track(operations.runHost??runHostConnector,selected.host,{signal,retryMinMs,retryMaxMs,workAdmission,onReady:()=>{entry.execConnection='connected'},onStatus:()=>{entry.execConnection='disconnected'}});
+   if(entry.browserRequested){const runner=operations.runBrowser??(await import('../host/browser.mjs')).runBrowserConnector;track(runner,selected.host,{signal,workAdmission,onReady:()=>{entry.browserConnection='connected'},onStatus:state=>{entry.browserConnection=state}});}
    if(entry.computerRequested&&process.platform==='linux'&&(!operations.guiAvailable||operations.runLinuxDesktop)){
     const {runLinuxDesktopLifecycle,resolveLinuxDesktopSession}=await import('../host/linux-desktop.mjs');
     track((_config,options)=>(operations.runLinuxDesktop??runLinuxDesktopLifecycle)({
@@ -122,7 +125,7 @@ async function start(d,operations,abort){
      resolveSession:()=>entry.scopeValid()?resolveLinuxDesktopSession({env:{...process.env,...selected.host.computer.env}}):{available:false,reason:'foreground_scope_changed'},
      connect:(session,{signal:desktopSignal})=>(operations.runComputer??runComputerConnectors)({...selected.host,
       computer:{...selected.host.computer,env:{...selected.host.computer.env,DISPLAY:'',WAYLAND_DISPLAY:'',...session.env}}},
-      {signal:desktopSignal,retryMinMs,retryMaxMs,onReady:()=>{entry.desktopConnection='connected'},onStatus:()=>{entry.desktopConnection='disconnected'}})
+      {signal:desktopSignal,retryMinMs,retryMaxMs,workAdmission,onReady:()=>{entry.desktopConnection='connected'},onStatus:()=>{entry.desktopConnection='disconnected'}})
     }),selected.host,{signal});
    }else if(entry.computerRequested){
     const currentScope=()=>{try{return entry.scopeValid()}catch{return false}};
@@ -137,7 +140,7 @@ async function start(d,operations,abort){
       entry.desktopConnection=gui?'connecting':'session_unavailable_or_unobserved';
       if(gui){
        entry.computerStarted=true;
-       track(operations.runComputer??runComputerConnectors,selected.host,{signal,retryMinMs,retryMaxMs,onReady:()=>{entry.desktopConnection='connected'},onStatus:()=>{entry.desktopConnection='disconnected'}});
+       track(operations.runComputer??runComputerConnectors,selected.host,{signal,retryMinMs,retryMaxMs,workAdmission,onReady:()=>{entry.desktopConnection='connected'},onStatus:()=>{entry.desktopConnection='disconnected'}});
       }
      })();entry.computerStarting=attempt;try{await attempt}finally{entry.computerStarting=null}
     };
