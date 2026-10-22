@@ -36,17 +36,17 @@ Name: "{userprograms}\{#ProductName}"; Filename: "{app}\versions\{#PackageHash}\
 
 ; The App creates this optional entry through Core. Setup only retargets an
 ; existing owned entry; a deleted entry is never recreated by an upgrade.
-Name: "{userstartup}\{#ProductName}"; Filename: "{app}\versions\{#PackageHash}\StyxPreview.exe"; WorkingDir: "{app}\versions\{#PackageHash}"; Parameters: "{code:StartupArguments}"; Comment: "Styx"; Flags: uninsneveruninstall; Check: OwnedStartupUnchanged
+Name: "{userstartup}\Styx"; Filename: "{app}\versions\{#PackageHash}\StyxPreview.exe"; WorkingDir: "{app}\versions\{#PackageHash}"; Parameters: "{code:StartupArguments}"; Comment: "Styx"; Flags: uninsneveruninstall; Check: OwnedStartupUnchanged
 
 [UninstallDelete]
-Type: files; Name: "{userstartup}\{#ProductName}.lnk"; Check: OwnedStartupUnchanged
+Type: files; Name: "{userstartup}\Styx.lnk"; Check: OwnedStartupUnchanged
 
 [Code]
 var StartupOwned: Boolean; StartupHash, StartupArgs: String;
 function NativeAttributes(Name: String): Cardinal;
   external 'GetFileAttributesW@kernel32.dll stdcall';
 function StartupPath: String;
-begin Result := ExpandConstant('{userstartup}\{#ProductName}.lnk'); end;
+begin Result := ExpandConstant('{userstartup}\Styx.lnk'); end;
 function StartupArguments(Param: String): String;
 begin Result := StartupArgs; end;
 function OwnedStartupUnchanged: Boolean;
