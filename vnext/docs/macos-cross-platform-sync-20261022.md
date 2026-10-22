@@ -6,7 +6,7 @@
 
 共享开发按 [develop 工作流](development-baseline.md) 进行。本地 `develop` 已在 `c4aafad5ba46c098b81498b58619cb8b2b5e1c64` 真实合并原始 Mac 历史，parents 为 `4eaaac1` 和 `d2eca1106006684051d9c31828ee62de6b4651e2`。相对前者仅合入 8 个 Mac UI 文件（319 行新增、143 行删除）；涉及的 Mac Swift 内容逐文件等于 `d2eca11`，`gateway`、`onboarding`、`packages`、`plugin` 的共享 Core 保持 `4eaaac1`，与 Linux `1b23221` 公共 Core 一致。
 
-CI 的产品源清单、`develop` push 触发、先 compile 再 native fixture 与 unsigned scratch 测试工件配置已在独立提交 `4964910` 修正，本地定向检查 17 项、16 通过、1 跳过。远端 `develop` 发布、Mac 隔离源码回灌以及整合后完整 quality / native compile 尚待完成；Mac 隔离副本的 Core 仍为旧 `d0f41e6`。这些源码与配置结果不等于已更新安装、完整原生验收或统一发行。
+CI 产品源清单与执行顺序在 `4964910` 修正；实际旧 Xcode 编译与跨平台输入问题随后由 `858b984`、`ed31eb4`、`824f3d9` 修复。共享 `develop` 已发布，Mac 原开发源码在核对 clean HEAD 后安全快进到 `824f3d9`，共享 Core 已回灌。该 Mac 的隔离完整产品编译、自检、Core/窗口 fixture 通过；macOS 14 CI 的完整编译、原生检查及真实 Cua owner SIGKILL/EOF 检查通过。本地同版 Node 22 完整 fixture 为 853 通过、0 失败、43 跳过；依赖与 quality 证据见[共享开发基线](development-baseline.md)。GitHub Linux CI-only 失败仍在定位，Windows CI 在执行，未声明整体 CI 全绿。这些结果不等于已更新安装、账号验收或统一发行。
 
 ## 最初同步轮次的来源与保留范围
 
@@ -57,6 +57,6 @@ Windows 本轮保留现有 Tunnel 设置路径。Mac 源码的 ZIP 默认交互�
 - 全新 ZIP-only 网页账号首装，以及长期验收历史跨挑战过期的呈现。
 - 附加 LAN 入口的 Core / Gateway 与真实 Linux / Windows TLS、Exec、Edge、关窗口后重连已经补齐；完整原生 App 与目标 ChatGPT 账号的普通用户流程仍需验收，Mac 新 UI 接线须单独确认。当前物理证据为任务输出 `outputs/cross-platform-ready-20261022/delivery.json`（`1b23221`，Gateway 9 项、Windows 6 项通过）。
 - 统一发行、各平台完整升级/回滚及整机重启验收。后续 Windows / Linux 已有隔离工程候选和按来源记录的原生检查；Linux 后续受控升级/回滚有独立 PASS，早期 quiescence BLOCKED 记录仍保留，不能推广为任意后续版本均通过。
-- 本地 `develop` 已整合 `d2eca11` UI 并保留当前公共 Core；Mac 隔离源码回灌、整合后完整 quality / native compile 及平台调用链验收待完成。源码回灌仍不等于更新安装。
+- Mac UI 已整合，共享 Core 已回灌并完成独立编译/原生 fixture；Mac 添加电脑的多接口选择、入口恢复及关闭配对窗口仍需原生交互接线与真实配对验收。源码与 fixture 不等于更新安装或完整用户验收。
 
 上述最初同步轮次没有 GitHub 推送、PR 合并或线上部署，也没有修改 piermini、NAB 既有服务/配置/权限或 Mac 安装。当前 consolidation 的源码同步/分支发布与既有安装部署分别记录，不从旧轮次的结果推断当前已完成。

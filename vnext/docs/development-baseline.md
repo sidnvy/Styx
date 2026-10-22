@@ -35,12 +35,23 @@ Styx 的公共集成分支是 `develop`。功能分支从 `develop` 建立，评
 | --- | --- |
 | Windows `4eaaac1` | 包含 `1b23221` 公共 Core；后两项提交为 Windows 启动呈现修改 |
 | Linux `1b23221` | 与上述 Windows 来源的公共 Core 一致；原生适配和产物闭包分别记录 |
-| macOS UI `d2eca11` | 原始历史和最新 UI 已合入本地 `develop`；Mac 隔离副本的公共 Core 仍为旧 `d0f41e6`，共享源码回灌待完成 |
+| macOS UI `d2eca11` | 原始历史和最新 UI 已合入 `develop`；Mac 开发源码已安全快进到共享代码 `824f3d9`，工作区干净，已安装 App 未替换 |
 
 `ae86337` 已实现同一 Gateway 的附加精确 TLS 入口、恢复与配对窗口关闭；`1b23221` 修正受限入口的公开 join 预检。真实 Linux / Windows 附加入口验收见任务证据 `outputs/cross-platform-ready-20261022/delivery.json`：Gateway 9 项、Windows 6 项通过，保留原 localhost MCP 会话，真实 Exec / Edge 和关闭窗口后的重连通过。它不证明 Mac 新 UI 已接线或目标 ChatGPT 账号已验收。详见[附加入口契约](add-computer-network-entry.md)和[Mac 来源记录](macos-cross-platform-sync-20261022.md)。
 
 已用 `git cherry develop` 逐一核对 11 条相关平台、Browser 与验收分支，没有未回收补丁，原分支保留。历史 cherry-pick 以补丁等价核对；未成为 ancestor 本身不表示漏合，也不以 `ours` 合并补造历史关系。
 
-CI 修正已独立提交为 `4964910`，涵盖实际产品源文件列表、`develop` push 触发、先编译再运行 native fixture，以及测试用 unsigned scratch 工件。本地定向检查为 17 项、16 通过、1 跳过；这不是远端 CI、整合后完整 quality 或原生编译全部通过的声明。
+`develop` 已发布到 [GitHub](https://github.com/sidnvy/Styx/tree/develop)。初次实际 CI 暴露的旧 Xcode 弱引用跨队列捕获、Browser 独立依赖遗漏及 macOS 临时目录别名问题，分别由 `858b984`、`ed31eb4`、`824f3d9` 补齐。生产编译仍使用 warnings-as-errors，包输入仍拒绝 symlink；没有通过跳过失败检查来合并。
 
-远端 `develop` 发布、Mac 隔离源码回灌、整合后的完整 quality / native compile 仍待完成。当前工作是三平台源码 consolidation，不代表已统一发行、已更新现有安装或已部署。
+已完成的整合验证：
+
+- 完整 quality（`858b984`）：依赖树、四套依赖审计/SBOM、锁稳定性全部 PASS；行为与集成检查 853 通过、0 失败、43 个环境或可选原生检查跳过。
+- 发行包同版 Node 22.23.3（`824f3d9`）：完整 fixture 再次 853 通过、0 失败、43 跳过。相对上述 quality 的产品代码增量仅为两份 Mac Swift 回调兼容修复，由原生编译和检查覆盖。
+- Mac 开发电脑（`824f3d9`）：独立工作树、完整产品 Swift 编译、native self-test、私有 HTTP/Core 观察及原生窗口 fixture PASS；确认输入闭包后，原开发源码仅作 clean fast-forward。未改安装、服务、权限或私有状态。
+- [macOS 14 / Xcode 15.4 CI](https://github.com/sidnvy/Styx/actions/runs/39736072666)：实际产品编译、原生 client/Core/window fixture、官方 Cua owner SIGKILL/EOF 清理全部 PASS。Linux / macOS 的独立协议与产物检查也已通过。
+
+任务证据保存在 `outputs/consolidation-20261022/`：来源 bundle 和 SHA256、11 分支补丁核对、输入闭包、原始失败及修复后的 quality、同版 Node fixture、Mac 回灌和原生 receipt。初轮 quality 因新工作树漏准备锁定 Exec 二进制失败；补齐原二进制后重跑通过，原失败保留。
+
+尚未完成：GitHub Linux 完整回归仍有 CI-only 失败，同版本地检查已通过，正在通过实际失败日志定位；Windows CI 尚在执行。不能把现有结果称为整体 CI 全绿。Mac“添加电脑”的单接口默认路径已调用共享 Core；多接口选择、入口恢复与主动关闭配对窗口的原生交互仍需补齐和真实配对验收。
+
+本轮完成源码 consolidation、共享分支发布和 Mac Core 回灌；三平台尚未从这一基线统一重建安装包，没有更新既有安装或部署，也没有完成新用户 ChatGPT 账号、完整重启及升级权限验收。
