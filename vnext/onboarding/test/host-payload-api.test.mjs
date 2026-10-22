@@ -5,6 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import {createOnboardingServer} from '../server.mjs';
 import {main} from '../cli.mjs';
+import {WorkAdmission} from '../../shared/work-admission.mjs';
+import {prepareHostUpdateAdmission,commitHostUpdateAdmission,cancelHostUpdateAdmission} from '../host-update-admission.mjs';
 
 test('native update API authenticates mutations and cannot substitute a payload, publisher, state directory or admission token',async t=>{
  const stateDir=fs.mkdtempSync(path.join(os.tmpdir(),'styx-handoff-api-'));t.after(()=>fs.rmSync(stateDir,{recursive:true,force:true}));
@@ -21,6 +23,28 @@ test('native update API authenticates mutations and cannot substitute a payload,
  assert.equal(calls.length,0);const response=await post({authorize:true});assert.equal(response.status,200);assert.deepEqual(calls,[{stateDir,bundle:artifacts.bundle,authorize:true}]);
  assert.equal((await response.json()).handoff.status,'awaiting_exit');
  assert.deepEqual(await main(['host-payload-handoff-status',stateDir]),{schema:1,status:'not_started'});
+});
+
+for(const outcome of ['response_returns','response_stays_pending','peer_changes'])test('update admission holds its fence while a triggering click settles: '+outcome,async t=>{
+ const stateDir=fs.mkdtempSync(path.join(os.tmpdir(),'styx-click-update-'));t.after(()=>fs.rmSync(stateDir,{recursive:true,force:true}));
+ const defaults=path.join(stateDir,'artifacts.json');fs.writeFileSync(defaults,JSON.stringify({bundle:path.join(stateDir,'bundle'),publisherKeyFile:path.join(stateDir,'publisher.pem'),publisherSha256:'a'.repeat(64)}),{mode:0o600});
+ let identity='original',ticketId,staged=0,first=true,signal;
+ const begun=new Promise(resolve=>{signal=resolve}),controller=new WorkAdmission({observe:()=>({identity,retained:0,unknown:false})}),finish=controller.enter('local','computer');
+ const core={
+  prepareDeploymentWorkAdmission:async(d,{purpose})=>{const value=prepareHostUpdateAdmission({stateDir:d,purpose},{gateway:controller,ownsGateway:true,requiresLocalHost:false});ticketId=value.ticketId;if(first){first=false;signal()}return value;},
+  commitDeploymentWorkAdmission:async(d,{ticketId})=>commitHostUpdateAdmission({stateDir:d,ticketId}),
+  cancelDeploymentWorkAdmission:async(d,{ticketId})=>cancelHostUpdateAdmission({stateDir:d,ticketId}),
+  prepareHostPayloadHandoff:async()=>{staged++;return{status:'awaiting_exit'}}
+ };
+ const app=await createOnboardingServer({stateDir,core,artifactDefaultsFile:defaults});t.after(async()=>{await app.close();finish();try{cancelHostUpdateAdmission({stateDir,ticketId})}catch{}});
+ const headers={Authorization:'Bearer '+new URLSearchParams(new URL(app.url).hash.slice(1)).get('session')},session=await(await fetch(app.origin+'/api/session',{headers})).json();
+ const response=fetch(app.origin+'/api/host-payload/handoff/prepare',{method:'POST',headers:{...headers,Origin:app.origin,'X-Styx-CSRF':session.csrf,'Content-Type':'application/json'},body:JSON.stringify({authorize:true})});
+ await begun;assert.throws(()=>controller.enter('another','exec'),/device_in_maintenance/);
+ if(outcome==='peer_changes')identity='replacement';
+ if(outcome!=='response_stays_pending')finish();
+ const result=await response;
+ if(outcome==='response_returns'){assert.equal(result.status,200);assert.equal(staged,1);assert.throws(()=>controller.enter('another','exec'),/device_in_maintenance/);}
+ else{assert.equal(result.status,409);assert.equal((await result.json()).error,outcome==='peer_changes'?'work_state_unknown':'work_in_progress');assert.equal(staged,0);controller.enter('another','exec')();if(outcome==='response_stays_pending')assert.equal(controller.active.size,1);}
 });
 
 test('an active or unobserved task blocks update and quit without leaving the App in maintenance',async t=>{

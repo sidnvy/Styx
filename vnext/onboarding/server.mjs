@@ -130,10 +130,21 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
  const cancelWorkAdmission=async()=>{if(!workAdmission)return;await api.cancelDeploymentWorkAdmission(stateDir,{ticketId:workAdmission.ticketId,authorize:true});workAdmission=null;};
  const admitWork=async(purpose,commit=false)=>{
   if(typeof api.prepareDeploymentWorkAdmission!=='function'||typeof api.commitDeploymentWorkAdmission!=='function'||typeof api.cancelDeploymentWorkAdmission!=='function')fail('work_state_unknown');
-  const admission=await api.prepareDeploymentWorkAdmission(stateDir,{authorize:true,purpose});workAdmission=admission;
-  if(admission?.status!=='ready'){await cancelWorkAdmission();fail(admission?.status==='waiting'?'work_in_progress':'work_state_unknown');}
-  if(commit){const committed=await api.commitDeploymentWorkAdmission(stateDir,{ticketId:admission.ticketId,authorize:true});if(committed?.status!=='ready'){await cancelWorkAdmission();fail(committed?.status==='waiting'?'work_in_progress':'work_state_unknown');}}
-  return admission;
+  let admission=await api.prepareDeploymentWorkAdmission(stateDir,{authorize:true,purpose});workAdmission=admission;
+  try{
+   // A remote click can request an update before its own Cua response returns.
+   // Keep the fence closed while already dispatched work settles naturally;
+   // retained commands and uncertain outcomes never enter this grace period.
+   const deadline=performance.now()+2000;
+   while(admission?.status==='waiting'&&admission.retained===0&&admission.active>0&&performance.now()<deadline){
+    await new Promise(resolve=>setTimeout(resolve,25));
+    admission=await api.prepareDeploymentWorkAdmission(stateDir,{authorize:true,purpose});
+    if(admission?.ticketId!==workAdmission.ticketId)fail('work_state_unknown');
+   }
+   if(admission?.status!=='ready')fail(admission?.status==='waiting'?'work_in_progress':'work_state_unknown');
+   if(commit){const committed=await api.commitDeploymentWorkAdmission(stateDir,{ticketId:admission.ticketId,authorize:true});if(committed?.status!=='ready')fail(committed?.status==='waiting'?'work_in_progress':'work_state_unknown');}
+   return admission;
+  }catch(error){await cancelWorkAdmission();throw error}
  };
  const signingApp=()=>Object.fromEntries(['path','cdhash','certificateSha1','certificateSha256'].map(key=>[key,macPreviewApp?.[key]]));
  const startupFailure=error=>{
