@@ -1,13 +1,17 @@
 name: Styx macOS app compile
 on:
+  push:
+    branches: [develop]
+    paths: ['vnext/**', '.github/workflows/styx-macos-app.yml']
   pull_request:
-    paths: ['vnext/host/macos/**', 'vnext/host/*macos*', 'vnext/host/test/*macos*', 'vnext/onboarding/**', '.github/workflows/styx-macos-app.yml']
+    paths: ['vnext/**', '.github/workflows/styx-macos-app.yml']
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
   compile:
     runs-on: macos-14
+    timeout-minutes: 20
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
@@ -15,18 +19,22 @@ jobs:
           node-version: '22'
       - name: Install locked VNext dependencies
         run: npm --prefix vnext ci --ignore-scripts --no-audit --no-fund
-      - name: Packaging contract tests
-        run: node --test vnext/host/test/macos-app.test.mjs vnext/host/macos/test/*.test.mjs
-      - name: Compile native owner (no driver or signing credentials)
-        run: xcrun swiftc -D STYX_TESTING -warnings-as-errors vnext/host/macos/Styx.swift -o "$RUNNER_TEMP/Styx" -framework AppKit -framework ApplicationServices -framework CoreGraphics
-      - name: Native ownership self-test
-        run: '"$RUNNER_TEMP/Styx" --self-test'
+      - name: Packaging contracts
+        run: node --test vnext/host/test/macos-app.test.mjs
+      - name: Compile production sources as a native testing owner
+        run: |
+          node vnext/host/macos/ci-native-build.mjs "$RUNNER_TEMP/styx-native-ci"
+          echo "STYX_NATIVE_TEST_BINARY=$RUNNER_TEMP/styx-native-ci/Styx.app/Contents/MacOS/Styx" >> "$GITHUB_ENV"
+      - name: Native ownership and product protocol self-test
+        run: '"$STYX_NATIVE_TEST_BINARY" --self-test'
+      - name: Native client and isolated Core observation fixtures
+        run: node --test --test-concurrency=1 vnext/host/macos/test/*.test.mjs
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - name: Provision checksum-pinned Cua in scratch
         run: python vnext/host/prepare-cua.py --output "$RUNNER_TEMP/styx-liveness-cua"
       - name: Verify actual Cua exits when its native owner is killed
-        run: python vnext/host/macos/liveness-acceptance.py "$RUNNER_TEMP/Styx" "$RUNNER_TEMP/styx-liveness-cua/cua-driver"
+        run: python vnext/host/macos/liveness-acceptance.py "$STYX_NATIVE_TEST_BINARY" "$RUNNER_TEMP/styx-liveness-cua/cua-driver"
       - name: Record boundaries
-        run: echo 'Developer ID signing, notarization, LaunchServices responsibility, TCC, native GUI, full app crash recovery, and upgrade permission persistence NOT RUN.' >> "$GITHUB_STEP_SUMMARY"
+        run: echo 'Synthetic native window/Core fixtures and the Cua owner lifetime are checked. Developer ID signing, notarization, LaunchServices responsibility, TCC, real desktop automation, full app crash recovery, and upgrade permission persistence NOT RUN.' >> "$GITHUB_STEP_SUMMARY"

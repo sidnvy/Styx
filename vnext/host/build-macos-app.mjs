@@ -139,6 +139,11 @@ export function macLocalSigningPlan({app,localSigning,files=[],sealApp=true}={})
   if(sealApp){add(app);steps.push(['/usr/bin/codesign',['--verify','--deep','--strict','--verbose=2',app]]);}
   return steps;
 }
+export function macNativeSwiftSources(){
+  const additionalSources=[GLYPH,...fs.readdirSync(PRODUCT_UI).filter(name=>name.endsWith('.swift')).sort().map(name=>path.join(PRODUCT_UI,name))];
+  assert(additionalSources.length>0,'native_product_sources_required');
+  return {source:SOURCE,additionalSources};
+}
 export function macSwiftBuildArguments({source,output,arch=process.arch,sdkPath,moduleCachePath,additionalSources=[]}={}){
   const absolute=p=>typeof p==='string'&&path.posix.isAbsolute(p)&&path.posix.normalize(p)===p&&!/[\x00-\x1f\x7f]/.test(p);
   assert(absolute(source)&&absolute(output),'absolute_swift_build_paths_required');
@@ -161,10 +166,9 @@ export function buildMacApp({app,cuaBinary,version,identity,teamID,notaryProfile
   assert(typeof app==='string'&&path.isAbsolute(app)&&path.basename(app)==='Styx.app','invalid_styx_app_path');
   assert(typeof cuaBinary==='string'&&path.isAbsolute(cuaBinary),'absolute_cua_binary_required');
   assert(!fs.existsSync(app)&&!fs.existsSync(app+'.notarization.zip'),'app_destination_exists');
-  const productSources=[GLYPH,...fs.readdirSync(PRODUCT_UI).filter(n=>n.endsWith('.swift')).sort().map(n=>path.join(PRODUCT_UI,n))];
-  assert(productSources.length>0,'native_product_sources_required');
+  const nativeSources=macNativeSwiftSources(),productSources=nativeSources.additionalSources;
   const buildRoot=fs.mkdtempSync(path.join(os.tmpdir(),'styx-native-build-'));
-  const entry=path.join(buildRoot,'main.swift');fs.copyFileSync(SOURCE,entry);
+  const entry=path.join(buildRoot,'main.swift');fs.copyFileSync(nativeSources.source,entry);
   const swiftArgs=macSwiftBuildArguments({source:entry,additionalSources:productSources,output:path.join(app,'Contents/MacOS/Styx'),sdkPath,moduleCachePath});
   if(sdkPath!==undefined)assert(fs.statSync(sdkPath).isDirectory()&&fs.statSync(path.join(sdkPath,'SDKSettings.json')).isFile(),'macos_sdk_directory_required');
   if(moduleCachePath!==undefined)assert(!fs.existsSync(moduleCachePath),'fresh_swift_module_cache_required');
