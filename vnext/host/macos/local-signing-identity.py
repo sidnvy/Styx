@@ -5,6 +5,7 @@ No Apple account, system trust store, TCC changes or private-key distribution.
 An incomplete identity fails closed: rerunning never rotates an existing key.
 """
 import argparse
+import ctypes
 import fcntl
 import hashlib
 import json
@@ -45,6 +46,28 @@ def keychains():
     return shlex.split(run(['/usr/bin/security', 'list-keychains', '-d', 'user']).decode())
 
 
+def unlock_existing_keychain(keychain, password):
+    # Keep the dedicated builder password out of child argv/process listings.
+    security = ctypes.CDLL('/System/Library/Frameworks/Security.framework/Security')
+    security.SecKeychainOpen.argtypes = [ctypes.c_char_p, ctypes.POINTER(ctypes.c_void_p)]
+    security.SecKeychainUnlock.argtypes = [ctypes.c_void_p, ctypes.c_uint32, ctypes.c_void_p, ctypes.c_bool]
+    handle = ctypes.c_void_p()
+    result = security.SecKeychainOpen(str(keychain).encode(), ctypes.byref(handle))
+    if result:
+        raise RuntimeError('existing keychain open failed: ' + str(result))
+    encoded = password.encode()
+    buffer = ctypes.create_string_buffer(encoded)
+    try:
+        result = security.SecKeychainUnlock(handle, len(encoded), buffer, True)
+        if result:
+            raise RuntimeError('existing keychain unlock failed: ' + str(result))
+    finally:
+        ctypes.memset(buffer, 0, len(buffer))
+        core = ctypes.CDLL('/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation')
+        core.CFRelease.argtypes = [ctypes.c_void_p]
+        core.CFRelease(handle)
+
+
 def prepare(root):
     root.mkdir(mode=0o700, parents=False, exist_ok=True)
     st = root.lstat()
@@ -71,7 +94,7 @@ def prepare(root):
             current = keychains()
             if str(keychain) not in current:
                 run(['/usr/bin/security', 'list-keychains', '-d', 'user', '-s', *current, str(keychain)])
-            run(['/usr/bin/security', 'unlock-keychain', '-p', password, str(keychain)])
+            unlock_existing_keychain(keychain, password)
             return value
         # Never silently replace a partially prepared key or keychain.
         if any(file.exists() for file in [password_file, keychain, cert]):
