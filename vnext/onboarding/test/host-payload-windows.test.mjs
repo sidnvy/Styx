@@ -1,5 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import {spawn} from 'node:child_process';
+import {once} from 'node:events';
 import {observeWindowsHostPayloadAbsence as observe} from '../host-payload-windows.mjs';
 const scope={installRoot:'C:\\Users\\Sid\\Test\\host\\install',hostConfigFile:'C:\\Users\\Sid\\Test\\host\\device\\host.json',stateDir:'C:\\Users\\Sid\\Test\\state',hostServiceTaskName:'StyxPilot-Upgrade123',appPath:'C:\\Users\\Sid\\Test\\app\\Styx.exe'};
 const options={platform:'win32',pid:123,execPath:'C:\\Program Files\\nodejs\\node.exe'};
@@ -19,4 +24,18 @@ test('scope rejects path aliases, UNC/network and foreign labels before observat
  for(const changes of [{installRoot:'C:\\'},{stateDir:'C:\\Users\\Sid\\Test\\..\\state'},{stateDir:'\\\\server\\share\\state'},{hostServiceTaskName:'Foreign-Host'},{hostServiceTaskName:'StyxPilot-abc;whoami'},{appPath:'relative.exe'}])assert.equal(observe({...scope,...changes},opts).reason,'native_scope_invalid');
  assert.equal(observe(scope,{...opts,platform:'linux'}).reason,'windows_native_observation_required');
  assert.equal(observe(scope,{...opts,pid:0}).reason,'native_scope_invalid');
+});
+
+// Real native process observations: the updater sibling must not look like a
+// live Host, while exact and nested arguments (including spaces) still block.
+test('native absence distinguishes updater siblings from owned path components',{skip:process.platform!=='win32'},async t=>{
+ const base=fs.mkdtempSync(path.join(os.tmpdir(),'Styx absence boundary '));
+ t.after(()=>fs.rmSync(base,{recursive:true,force:true}));
+ const host=path.join(base,'host');const native={installRoot:path.join(host,'install'),hostConfigFile:path.join(host,'device/host.json'),stateDir:path.join(base,'deployment'),hostServiceTaskName:'StyxPilot-Boundary'+process.pid,appPath:path.join(base,'app/Styx.exe')};
+ const cases=[[host+'-payload-updaters\\node.exe','absent'],[host+'-archive','absent'],[host,'blocked'],[path.join(host,'install/node.exe'),'blocked'],[host.replaceAll('\\','/'),'blocked'],[native.hostConfigFile,'blocked'],[native.appPath,'blocked']];
+ for(const [argument,status] of cases){
+  const child=spawn(process.execPath,['-e',"process.stdout.write('ready');setTimeout(()=>{},60000)",argument],{stdio:['ignore','pipe','ignore'],windowsHide:true});
+  try{await once(child.stdout,'data');const observed=observe(native);assert.equal(observed.status,status,JSON.stringify({argument,observed}));if(status==='blocked')assert.equal(observed.reason,'native_owned_process_present');}
+  finally{child.kill();await once(child,'exit');}
+ }
 });

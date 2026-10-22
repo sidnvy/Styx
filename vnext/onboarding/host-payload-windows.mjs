@@ -20,7 +20,24 @@ try {
  $sid=[Security.Principal.WindowsIdentity]::GetCurrent().User.Value
  $needles=@($s.installRoot,[IO.Path]::GetDirectoryName($s.installRoot),$s.hostConfigFile,$s.stateDir)
  if($s.PSObject.Properties.Name -contains 'appPath'){$needles+=@($s.appPath)}
- function Matches([string]$value){foreach($n in $needles){if($value.IndexOf($n,[StringComparison]::OrdinalIgnoreCase) -ge 0){return $true}};return $false}
+ # A sibling such as host-payload-updaters is not inside host. Match complete
+ # path components in executable paths and quoted/unquoted command arguments.
+ function Matches([string]$value){
+  $value=$value.Replace('/','\')
+  foreach($n in $needles){
+   $start=0
+   while($start -lt $value.Length){
+    $at=$value.IndexOf($n,$start,[StringComparison]::OrdinalIgnoreCase)
+    if($at -lt 0){break}
+    $end=$at+$n.Length
+    if($end -eq $value.Length){return $true}
+    $next=$value[$end]
+    if($next -eq '\' -or $next -eq '"' -or $next -eq "'" -or [char]::IsWhiteSpace($next)){return $true}
+    $start=$end
+   }
+  }
+  return $false
+ }
  # A task may restart a stopped process. Any relevant definition blocks,
  # regardless of Enabled or current State; never infer absence from stopped.
  foreach($t in @(Get-ScheduledTask -ErrorAction Stop)){
