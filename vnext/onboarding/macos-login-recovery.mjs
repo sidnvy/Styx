@@ -6,6 +6,8 @@ import os from 'node:os';
 import {execFileSync} from 'node:child_process';
 import {requirePrivateFile,ensurePrivateDirectory} from '../host/private-storage.mjs';
 const check=(ok,code)=>{if(!ok)throw Error(code)};
+const UNLOAD_WAIT_MS=5000,UNLOAD_POLL_MS=100;
+const pause=milliseconds=>Atomics.wait(new Int32Array(new SharedArrayBuffer(4)),0,0,milliseconds);
 const xml=s=>s.replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;').replaceAll('"','&quot;').replaceAll("'",'&apos;');
 function absolute(s){check(typeof s==='string'&&path.posix.isAbsolute(s)&&path.posix.normalize(s)===s&&!/[\x00-\x1f\x7f]/.test(s),'login_recovery_invalid_path');return s}
 export function macLoginRecoveryPlan({appPath='/Applications/Styx.app',tunnelRoot,logDir}={}){
@@ -24,12 +26,13 @@ export function macLoginRecoveryPlan({appPath='/Applications/Styx.app',tunnelRoo
  '<key>StandardErrorPath</key><string>'+xml(path.join(logDir,e.label+'.stderr.log'))+'</string>',
  '</dict></plist>',''].join('\n')}));
 }
-export function controlMacLoginRecovery(config,{action='status',authorize=false,platform=process.platform,home=os.homedir(),uid=process.getuid?.(),run=execFileSync}={}){
+export function controlMacLoginRecovery(config,{action='status',authorize=false,platform=process.platform,home=os.homedir(),uid=process.getuid?.(),run=execFileSync,now=()=>performance.now(),wait=pause}={}){
  check(platform==='darwin'&&uid>0,'login_recovery_graphical_user_required');
  check(['install','start','stop','suspend','status','uninstall'].includes(action),'login_recovery_action_invalid');
  check(action==='status'||authorize===true,'login_recovery_authorization_required');
  const plan=macLoginRecoveryPlan(config),domain='gui/'+uid;
- const ctl=(...args)=>String(run('/bin/launchctl',args,{encoding:'utf8',timeout:20000,stdio:['ignore','pipe','pipe']}));
+ const timedCtl=(timeout,...args)=>String(run('/bin/launchctl',args,{encoding:'utf8',timeout,stdio:['ignore','pipe','pipe']}));
+ const ctl=(...args)=>timedCtl(20000,...args);
  // A user boot domain is not a logged-in Aqua domain.
  ctl('print',domain);
  const dir=path.join(home,'Library','LaunchAgents');
@@ -37,9 +40,9 @@ export function controlMacLoginRecovery(config,{action='status',authorize=false,
  // login. A private plist at the expected path alone does not prove that the
  // currently loaded job came from it: launchd may still hold an older/foreign
  // in-memory definition. Inspect both source and argv before unloading it.
- const assertLoadedOwner=e=>{
+ const assertLoadedOwner=(e,timeout=20000)=>{
   let text;
-  try{text=ctl('print',domain+'/'+e.label)}catch(error){
+  try{text=timedCtl(timeout,'print',domain+'/'+e.label)}catch(error){
    if(/Could not find (?:specified )?service/.test(String(error.stderr??'')))return false;
    throw Error('login_recovery_observation_unknown');
   }
@@ -53,10 +56,29 @@ export function controlMacLoginRecovery(config,{action='status',authorize=false,
  // Validate the entire plan before any mutation, including existing definitions.
  for(const e of plan){
   e.file=path.join(dir,e.label+'.plist');
-  if(fs.existsSync(e.file)){requirePrivateFile(e.file);check(fs.readFileSync(e.file,'utf8')===e.plist,'login_recovery_existing_definition_mismatch');}
+  if(fs.existsSync(e.file)){const info=requirePrivateFile(e.file);check(fs.readFileSync(e.file,'utf8')===e.plist,'login_recovery_existing_definition_mismatch');e.definition={ino:info.ino,dev:info.dev};}
   else check(!observe(e.label).loaded,'login_recovery_unowned_loaded_job');
-  if(action==='suspend'&&fs.existsSync(e.file))assertLoadedOwner(e);
+  if(['suspend','stop','uninstall'].includes(action)&&e.definition)assertLoadedOwner(e);
  }
+ // bootout returns before launchd has necessarily removed the job. Keep the
+ // existing synchronous Core contract, but bound both polling and each native
+ // observation by one monotonic deadline. Unknown or foreign state is failure,
+ // never a reason to repeat bootout, change preference, or force a process out.
+ const assertDefinition=e=>{
+  if(!e.definition){check(!fs.existsSync(e.file),'login_recovery_existing_definition_mismatch');return;}
+  const info=requirePrivateFile(e.file);
+  check(info.ino===e.definition.ino&&info.dev===e.definition.dev&&fs.readFileSync(e.file,'utf8')===e.plist,'login_recovery_existing_definition_mismatch');
+ };
+ const awaitUnloaded=e=>{
+  const deadline=now()+UNLOAD_WAIT_MS;
+  for(;;){
+   assertDefinition(e);
+   const remaining=deadline-now();check(remaining>0,'login_recovery_unload_unconfirmed');
+   if(!assertLoadedOwner(e,Math.max(1,Math.ceil(remaining)))){assertDefinition(e);return;}
+   const rest=deadline-now();check(rest>0,'login_recovery_unload_unconfirmed');
+   wait(Math.min(UNLOAD_POLL_MS,rest));
+  }
+ };
  if(action==='install'){
   const app=fs.lstatSync(config.appPath??'/Applications/Styx.app');check(app.isDirectory()&&!app.isSymbolicLink(),'login_recovery_app_missing');
   run('/usr/bin/codesign',['--verify','--deep','--strict',config.appPath??'/Applications/Styx.app'],{stdio:'pipe',timeout:20000});
@@ -87,12 +109,13 @@ export function controlMacLoginRecovery(config,{action='status',authorize=false,
    // untouched. bootout removes KeepAlive only from the current GUI domain;
    // launchd can load the still-enabled definition at the next user login.
    // Missing definitions are a no-op, never an implicit service installation.
-   if(fs.existsSync(e.file)&&assertLoadedOwner(e))ctl('bootout',target);
-   check(!observe(e.label).loaded,'login_recovery_unload_unconfirmed');
+   assertDefinition(e);if(assertLoadedOwner(e))ctl('bootout',target);
+   awaitUnloaded(e);
   }
   if(['stop','uninstall'].includes(action)){
-   ctl('disable',target);if(observe(e.label).loaded)ctl('bootout',target);
-   check(!observe(e.label).loaded,'login_recovery_unload_unconfirmed');
+   assertDefinition(e);const loaded=assertLoadedOwner(e);
+   ctl('disable',target);if(loaded)ctl('bootout',target);
+   awaitUnloaded(e);
    if(action==='uninstall'&&fs.existsSync(e.file))fs.unlinkSync(e.file);
   }
   results.push({label:e.label,installed:fs.existsSync(e.file),...observe(e.label)});

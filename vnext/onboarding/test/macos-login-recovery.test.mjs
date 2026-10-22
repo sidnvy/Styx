@@ -22,7 +22,8 @@ function fixture(t){
   if(op==='bootout')loaded.delete(target);
   return '';
  };
- return {home,config,calls,loaded,definitions,opts:{home,platform:'darwin',uid:process.getuid(),run,authorize:true}};
+ let elapsed=0;const waits=[];
+ return {home,config,calls,loaded,definitions,waits,elapsed:()=>elapsed,opts:{home,platform:'darwin',uid:process.getuid(),run,authorize:true,now:()=>elapsed,wait:ms=>{waits.push(ms);elapsed+=ms}}};
 }
 test('LaunchServices wait; throttled recovery for all exits; Aqua login only',()=>{
  const [app,tunnel]=macLoginRecoveryPlan({logDir:'/tmp/log & dir',tunnelRoot:'/tmp/tunnel root'});
@@ -161,5 +162,54 @@ test('login install refuses unsafe existing Library or LaunchAgents instead of r
   assert.equal(f.calls.some(x=>['disable','enable','bootstrap'].includes(x[1][0])),false);
   assert.equal(fs.existsSync(path.join(dir,'app.styx.desktop-login.plist')),false);
   assert.equal(fs.existsSync(f.config.logDir),false);
+ }
+});
+
+for(const action of ['suspend','stop','uninstall'])test(`${action} waits for native bootout settlement exactly once and keeps definition until confirmed`,t=>{
+ const f=fixture(t);controlMacLoginRecovery(f.config,{...f.opts,action:'install'});
+ const target='gui/'+process.getuid()+'/app.styx.desktop-login',file=path.join(f.home,'Library/LaunchAgents/app.styx.desktop-login.plist'),original=fs.readFileSync(file);f.calls.length=0;
+ let bootout=false,postReads=0;const timeouts=[];
+ const run=(bin,args,options)=>{
+  if(args[0]==='bootout'){bootout=true;f.calls.push([bin,args]);return '';}
+  if(bootout&&args[0]==='print'&&args[1]===target&&options.timeout<=5000){
+   timeouts.push(options.timeout);assert.deepEqual(fs.readFileSync(file),original);
+   if(++postReads===4)f.loaded.delete(target);
+  }
+  return f.opts.run(bin,args,options);
+ };
+ const result=controlMacLoginRecovery(f.config,{...f.opts,action,run});
+ assert.equal(result.services[0].loaded,false);assert.equal(result.services[0].installed,action!=='uninstall');assert.equal(f.elapsed(),300);
+ assert.equal(f.calls.filter(x=>x[1][0]==='bootout').length,1);assert.deepEqual(timeouts.slice(0,4),[5000,4900,4800,4700]);
+ assert.deepEqual(f.calls.filter(x=>x[1][0]!=='print').map(x=>x[1][0]),action==='suspend'?['bootout']:['disable','bootout']);
+ if(action!=='uninstall')assert.deepEqual(fs.readFileSync(file),original);
+});
+test('native unload deadline retains definition and does not retry bootout or kill when job remains loaded',t=>{
+ const f=fixture(t);controlMacLoginRecovery(f.config,{...f.opts,action:'install'});f.calls.length=0;
+ const file=path.join(f.home,'Library/LaunchAgents/app.styx.desktop-login.plist'),original=fs.readFileSync(file);
+ assert.throws(()=>controlMacLoginRecovery(f.config,{...f.opts,action:'uninstall',run:(bin,args,options)=>{if(args[0]==='bootout'){f.calls.push([bin,args]);return ''}return f.opts.run(bin,args,options)}}),/unload_unconfirmed/);
+ assert.equal(f.elapsed(),5000);assert.equal(f.waits.length,50);assert.deepEqual(fs.readFileSync(file),original);assert.equal(f.loaded.size,1);
+ assert.equal(f.calls.filter(x=>x[1][0]==='bootout').length,1);assert(f.calls.every(([bin])=>bin==='/bin/launchctl'));
+});
+test('unknown or foreign definition during settlement fails immediately without deleting or reissuing commands',t=>{
+ for(const failure of ['unknown','foreign-job','changed-file']){
+  const f=fixture(t);controlMacLoginRecovery(f.config,{...f.opts,action:'install'});f.calls.length=0;
+  const file=path.join(f.home,'Library/LaunchAgents/app.styx.desktop-login.plist');let bootout=false;
+  const run=(bin,args,options)=>{
+   if(args[0]==='bootout'){f.calls.push([bin,args]);bootout=true;if(failure==='changed-file')fs.appendFileSync(file,'<!-- changed -->');return '';}
+   if(bootout&&args[0]==='print'){
+    if(failure==='unknown')throw Object.assign(Error('unknown'),{stderr:'Permission denied'});
+    if(failure==='foreign-job')return 'path = /foreign/entry.plist\n arguments = {\n /usr/bin/other\n }';
+   }
+   return f.opts.run(bin,args,options);
+  };
+  assert.throws(()=>controlMacLoginRecovery(f.config,{...f.opts,action:'uninstall',run}),/observation_unknown|loaded_definition_mismatch|existing_definition_mismatch/);
+  assert.equal(f.waits.length,0);assert(fs.existsSync(file));assert.equal(f.calls.filter(x=>x[1][0]==='bootout').length,1);
+ }
+});
+test('stop and uninstall reject foreign loaded argv before changing future login preference',t=>{
+ for(const action of ['stop','uninstall']){
+  const f=fixture(t);controlMacLoginRecovery(f.config,{...f.opts,action:'install'});const target='gui/'+process.getuid()+'/app.styx.desktop-login';
+  f.definitions.set(target,f.definitions.get(target).replace('  /usr/bin/open','  /usr/bin/foreign'));f.calls.length=0;
+  assert.throws(()=>controlMacLoginRecovery(f.config,{...f.opts,action}),/loaded_definition_mismatch/);assert(f.calls.every(x=>x[1][0]==='print'));
  }
 });
