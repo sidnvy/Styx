@@ -30,11 +30,12 @@ const failure = (code,uncertain=false) => {
 
 // Cua 0.36 rejects an ended namespace before invoking the requested tool.
 // Do not infer that guarantee from arbitrary error text or transport failures.
+// The signed macOS MCP response omits error_code; if present it must agree.
 function endedNativeSession(result,name,session) {
   const data=result?.structuredContent;
   const text=`session has ended; tool call '${name}' was rejected. Call start_session with session '${session}' to start it again, or use a new session label.`;
   return result?.isError===true && data?.code==='tool_invocation_failed' &&
-    data.exit_code===1 && data.error_code==='INVALID_ARGUMENT' &&
+    data.exit_code===1 && (data.error_code===undefined || data.error_code==='INVALID_ARGUMENT') &&
     Array.isArray(result.content) && result.content.some(item=>item.type==='text' && typeof item.text==='string' && item.text.trim()===text);
 }
 
