@@ -161,6 +161,69 @@ test('one-use invitation + device-generated key + owner-approved fingerprint + e
   assert.equal((await fs.stat(admitted.exec.token_file).catch(()=>null)),null);
 });
 
+test('concurrent TLS invitation consumers admit one pending identity; losing device recovers only with a new invitation',
+  {timeout:25000},async t=>{
+  const f=await fixture(t);
+  const clients=[f.config('race-first',false),f.config('race-second',false)];
+  // Create independent identities before dispatch so key generation does not
+  // serialize the two real HTTPS requests. Neither result is awaited first.
+  const identities=clients.map(initLocalIdentity);
+  assert.notEqual(identities[0].fingerprint,identities[1].fingerprint);
+  const invitation=(await f.admin('invitations',{})).body;
+  assert.equal(invitation.one_use,true);
+  const results=await Promise.allSettled(clients.map(c=>requestEnrollment(c,invitation.invitation)));
+  assert.equal(results.filter(r=>r.status==='fulfilled').length,1);
+  assert.equal(results.filter(r=>r.status==='rejected').length,1);
+  const winner=results.findIndex(r=>r.status==='fulfilled'),loser=1-winner;
+  assert.match(results[loser].reason.message,/invitation_expired_or_used/);
+  assert.equal(results[loser].reason.status,403);
+  const pending=results[winner].value;
+  const requests=(await f.admin('pending')).body;
+  assert.equal(requests.length,1);
+  assert.equal(requests[0].device_id,identities[winner].device_id);
+  assert.equal(requests[0].fingerprint,identities[winner].fingerprint);
+  assert.equal((await claimEnrollment(clients[winner])).status,'pending');
+  assert.equal(f.gateway.registry.list().length,0);
+  await assert.rejects(fs.stat(path.join(clients[winner].storage_dir,'host.token')),/ENOENT/);
+  const privatePending=JSON.parse(await fs.readFile(path.join(clients[winner].storage_dir,'pending.json'),'utf8'));
+  // Winning the invitation does not grant transport access: the private claim
+  // secret is not a Host bearer, and no owner has approved this identity.
+  const unapproved=new WebSocket(clients[winner].gateway_url.replace('https:','wss:')+
+    '/styx/hosts/'+pending.device_id+'/exec',{
+      ca:await fs.readFile(f.cert),headers:{Authorization:'Bearer '+privatePending.claim_secret}
+    });
+  t.after(()=>unapproved.terminate());
+  const denied=await new Promise((resolve,reject)=>{
+    unapproved.on('unexpected-response',(_req,res)=>{res.resume();unapproved.terminate();resolve(res.statusCode)});
+    unapproved.on('error',reject);
+    unapproved.on('open',()=>{unapproved.close();resolve(101)});
+  });
+  assert.equal(denied,403);
+  assert.equal(f.gateway.relay.connected(pending.device_id),false);
+
+  const fresh=(await f.admin('invitations',{})).body;
+  assert.notEqual(fresh.invitation,invitation.invitation);
+  await assert.rejects(requestEnrollment(clients[loser],invitation.invitation),/invitation_expired_or_used/);
+  const recovery=await requestEnrollment(clients[loser],fresh.invitation);
+  assert.equal(recovery.device_id,identities[loser].device_id,'recovery keeps the losing device identity');
+  assert.equal((await claimEnrollment(clients[loser])).status,'pending');
+  await f.admin('approve',{request_id:recovery.request_id,fingerprint:recovery.fingerprint,enable_computer:false});
+  const ready=await claimEnrollment(clients[loser]);
+  assert.equal(ready.status,'ready_to_connect');
+  const token=(await fs.readFile(path.join(clients[loser].storage_dir,'host.token'),'utf8')).trim();
+  const admitted=new WebSocket(clients[loser].gateway_url.replace('https:','wss:')+
+    '/styx/hosts/'+recovery.device_id+'/exec',{
+      ca:await fs.readFile(f.cert),headers:{Authorization:'Bearer '+token}
+    });
+  t.after(()=>admitted.terminate());
+  await once(admitted,'open');
+  assert.equal(f.gateway.relay.connected(recovery.device_id),true);
+  assert.equal((await claimEnrollment(clients[winner])).status,'pending','fresh approval cannot approve the earlier claimant');
+  assert.equal(f.gateway.registry.list().length,1);
+  await assert.rejects(requestEnrollment(f.config('race-old-invite',false),invitation.invitation),/invitation_expired_or_used/);
+  const closed=once(admitted,'close');admitted.close();await closed;
+});
+
 test('no credential before owner approval; claim secret and admin bearer are distinct',
   {timeout:22000},async t=>{
   const f=await fixture(t);
