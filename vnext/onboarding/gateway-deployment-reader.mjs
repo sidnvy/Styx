@@ -1,3 +1,4 @@
+import {assertHostPayloadMigrationSettled} from './host-payload-start-guard.mjs';
 import {deploymentDeviceIngress} from './device-ingress-config.mjs';
 // Read-only Core configuration/evidence checks for the contained Gateway app.
 import fs from 'node:fs';
@@ -10,7 +11,7 @@ const sum=file=>createHash('sha256').update(fs.readFileSync(file)).digest('hex')
 function read(file){requirePrivateFile(file);if(fs.statSync(file).size>1024*1024)fail('state_file_too_large');return JSON.parse(fs.readFileSync(file,'utf8'));}
 export function readGatewayDeployment(stateDir){
  if(typeof stateDir!=='string'||!path.isAbsolute(stateDir)||path.normalize(stateDir)!==stateDir)fail('absolute_state_directory_required');
- requirePrivateDirectory(stateDir);const deploymentFile=path.join(stateDir,'deployment.json'),config=read(deploymentFile),state=read(path.join(stateDir,'state.json'));
+ requirePrivateDirectory(stateDir);assertHostPayloadMigrationSettled(stateDir);const deploymentFile=path.join(stateDir,'deployment.json'),config=read(deploymentFile),state=read(path.join(stateDir,'state.json'));
  validateDeployment(config,{checkNetwork:false});
  if(config.mode!=='create-local'||state.schema!==1||state.mode!==config.mode||state.configSha256!==sum(deploymentFile)||!Array.isArray(state.steps))fail('invalid_gateway_deployment_state');
  const prepared=state.steps.find(s=>s.id==='gateway.prepare'&&s.status==='succeeded');if(!prepared)fail('gateway_prepare_required');

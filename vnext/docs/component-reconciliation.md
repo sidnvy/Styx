@@ -38,8 +38,9 @@ Mac 构建现在支持显式持久 Host publisher，并在公开 receipt 记录�
 
 ## 尚未完成
 
-此改动不等于完整自动更新。历史 publisher 的受审查迁移、macOS/Windows
-Host 更新服务适配器、Host-only 的独立健康证明、活动任务排空，仍需实现并验证。
+此改动不等于完整自动更新。macOS 无常驻服务的离线 publisher 迁移现已接入
+[Host payload 事务](host-payload-migration.md)。macOS/Windows 已安装服务更新、
+Host-only 的独立健康证明、活动任务排空，仍需实现并验证。
 迁移必须保留设备身份/配对与可回滚的旧 release，不得用重装或改 pin 冒充更新。
 
 Linux 的现有 stopped-service 更新与恢复能力不能直接外推到上述平台或运行模式。

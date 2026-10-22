@@ -125,7 +125,7 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
  const session=randomBytes(32).toString('base64url'),csrf=randomBytes(32).toString('base64url');
  let origin,closing=null,busy=false;
  let nativeStartup={status:'not_requested',observation:'current_process'};
- let signingPlan=null;
+ let signingPlan=null,payloadPlan=null;
  const signingApp=()=>Object.fromEntries(['path','cdhash','certificateSha1','certificateSha256'].map(key=>[key,macPreviewApp?.[key]]));
  const startupFailure=error=>{
   const code=error?.message;
@@ -259,7 +259,7 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
    }catch{send(409,{error:'observation_unavailable'})}return;
   }
   if(req.method!=='POST'){send(405,{error:'method_refused'});return}
-  if(!['/api/native-signing/plan','/api/native-signing/apply','/api/app/quit','/api/app/login','/api/plugin/profile','/api/plugin/export','/api/plugin/record','/api/foreground','/api/foreground/stop','/api/browser/prepare','/api/journey/background-preference','/api/connection-handoff','/api/acceptance/begin','/api/acceptance/confirm','/api/acceptance/desktop-readback','/api/host-update/plan','/api/host-update/status','/api/host-update/apply','/api/host-update/recover','/api/runtime-change/status','/api/runtime-change/plan','/api/runtime-change/apply','/api/runtime-change/recover','/api/native-migration/plan','/api/native-migration/apply','/api/native-migration/rollback','/api/device-ingress/plan','/api/device-ingress/verify','/api/device-ingress/prepare','/api/device-ingress/status','/api/device-ingress/recover','/api/pairing-link/close','/api/create','/api/devices','/api/default-device','/api/device/revoke','/api/capabilities','/api/capabilities/rollback','/api/tunnel/configure','/api/tunnel/start','/api/tunnel/stop','/api/background','/api/local-setup','/api/advance','/api/pause','/api/start','/api/verify-gateway','/api/service','/api/pairing-link/inspect','/api/pairing-link/accept','/api/pairing-link/create','/api/pending/list','/api/pending/approve'].includes(url.pathname)){send(404,{error:'not_found'});return}
+  if(!['/api/host-payload/plan','/api/host-payload/apply','/api/host-payload/rollback','/api/host-payload/status','/api/native-signing/plan','/api/native-signing/apply','/api/app/quit','/api/app/login','/api/plugin/profile','/api/plugin/export','/api/plugin/record','/api/foreground','/api/foreground/stop','/api/browser/prepare','/api/journey/background-preference','/api/connection-handoff','/api/acceptance/begin','/api/acceptance/confirm','/api/acceptance/desktop-readback','/api/host-update/plan','/api/host-update/status','/api/host-update/apply','/api/host-update/recover','/api/runtime-change/status','/api/runtime-change/plan','/api/runtime-change/apply','/api/runtime-change/recover','/api/native-migration/plan','/api/native-migration/apply','/api/native-migration/rollback','/api/device-ingress/plan','/api/device-ingress/verify','/api/device-ingress/prepare','/api/device-ingress/status','/api/device-ingress/recover','/api/pairing-link/close','/api/create','/api/devices','/api/default-device','/api/device/revoke','/api/capabilities','/api/capabilities/rollback','/api/tunnel/configure','/api/tunnel/start','/api/tunnel/stop','/api/background','/api/local-setup','/api/advance','/api/pause','/api/start','/api/verify-gateway','/api/service','/api/pairing-link/inspect','/api/pairing-link/accept','/api/pairing-link/create','/api/pending/list','/api/pending/approve'].includes(url.pathname)){send(404,{error:'not_found'});return}
   if(busy){send(409,{error:'operation_in_progress'});return}busy=true;
   try{
    const data=await body(req,url.pathname==='/api/plugin/profile'?400*1024:65536);
@@ -322,6 +322,25 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
     keys(data,which==='begin'?['authorize']:which==='confirm'?['authorize','challengeId','observedInTargetChat']:['authorize','challengeId','value','pid','windowId']);
     if(data.authorize!==true||typeof api[name]!=='function')fail('acceptance_authorization_required');
     send(200,{acceptance:publicAcceptance(await api[name](stateDir,data),{includeChallenge:true})});return;
+   }else if(url.pathname==='/api/host-payload/plan'){
+    keys(data,[]);payloadPlan=null;
+    if(!artifacts.bundle||typeof api.planHostPayloadMigration!=='function')fail('host_payload_upgrade_unavailable');
+    payloadPlan=await api.planHostPayloadMigration({stateDir,bundle:artifacts.bundle});
+    const release=value=>({version:value?.version,manifestSha256:value?.manifestSha256,publisherSha256:value?.publisherSha256});
+    send(200,{upgrade:{status:payloadPlan.status,planId:payloadPlan.planId,current:release(payloadPlan.current),target:release(payloadPlan.target),publisherChange:payloadPlan.publisherChange===true,requiresApplicationExit:true,installation:'NOT RUN',runtimeHealth:'NOT RUN'}});return;
+   }else if(url.pathname==='/api/host-payload/apply'){
+    keys(data,['authorize','planId']);
+    if(data.authorize!==true||!payloadPlan||data.planId!==payloadPlan.planId||typeof api.applyHostPayloadMigration!=='function')fail('host_payload_reviewed_plan_required');
+    const reviewed=payloadPlan;payloadPlan=null;
+    send(200,{upgrade:await api.applyHostPayloadMigration({stateDir,plan:reviewed,authorize:true})});return;
+   }else if(url.pathname==='/api/host-payload/rollback'){
+    keys(data,['authorize','transactionId']);
+    if(data.authorize!==true||typeof api.rollbackHostPayloadMigration!=='function')fail('host_payload_rollback_authorization_required');
+    payloadPlan=null;
+    send(200,{upgrade:await api.rollbackHostPayloadMigration({stateDir,transactionId:data.transactionId,authorize:true})});return;
+   }else if(url.pathname==='/api/host-payload/status'){
+    keys(data,[]);if(typeof api.readHostPayloadMigration!=='function')fail('host_payload_upgrade_unavailable');
+    send(200,{upgrade:await api.readHostPayloadMigration({stateDir})});return;
    }else if(url.pathname==='/api/host-update/plan'){
     keys(data,['bundle','rollback']);send(200,{plan:await api.planHostUpdate({stateDir,...data})});return;
    }else if(url.pathname==='/api/host-update/apply'){

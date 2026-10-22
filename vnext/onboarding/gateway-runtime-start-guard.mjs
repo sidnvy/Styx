@@ -1,3 +1,4 @@
+import {assertHostPayloadMigrationSettled} from './host-payload-start-guard.mjs';
 // Shared read-only startup interlock. The update journal and Core lock remain
 // authoritative; this module never creates, adopts or removes either.
 import fs from 'node:fs';
@@ -9,6 +10,7 @@ function present(file){try{fs.lstatSync(file);return true}catch(error){if(error.
 export function assertGatewayRuntimeStartAllowed({stateDir,baseDir,ownsAdvance=false}={}){
  if(!absolute(stateDir)||baseDir!==undefined&&!absolute(baseDir))fail();
  requirePrivateDirectory(stateDir);
+ assertHostPayloadMigrationSettled(stateDir);
  if(present(path.join(stateDir,'gateway-runtime-recovery.lock')))fail();
  const advance=path.join(stateDir,'advance.lock');
  if(present(advance)){

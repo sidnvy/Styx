@@ -1,3 +1,4 @@
+import {assertHostPayloadMigrationSettled} from './host-payload-start-guard.mjs';
 import {assertGatewayRuntimeStartAllowed} from './gateway-runtime-start-guard.mjs';
 import {prepareAdditionalDeviceIngress,recoverAdditionalDeviceIngress,readAdditionalDeviceIngress} from './device-ingress-setup.mjs';
 import {tunnelContext} from './tunnel-context.mjs';
@@ -34,7 +35,7 @@ function write(file,value){writeBytes(file,Buffer.from(JSON.stringify(value,null
 const hash=file=>createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 const evidenceFile=file=>({path:file,sha256:hash(file)});
 
-function load(d){if(!abs(d))fail('absolute_state_directory_required');requirePrivateDirectory(d);const journal=registrationJournal(d);if(journal&&!['applied','rolled_back'].includes(journal.status))fail('mac_signing_registration_requires_rollback');const config=read(filename(d,'deployment.json')),state=read(filename(d,'state.json'));validateDeployment(config,{checkNetwork:false});if(state.schema!==1||state.mode!==config.mode||state.configSha256!==hash(filename(d,'deployment.json'))||!Array.isArray(state.steps))fail('invalid_onboarding_state');return {config,state};}
+function load(d){if(!abs(d))fail('absolute_state_directory_required');requirePrivateDirectory(d);assertHostPayloadMigrationSettled(d);const journal=registrationJournal(d);if(journal&&!['applied','rolled_back'].includes(journal.status))fail('mac_signing_registration_requires_rollback');const config=read(filename(d,'deployment.json')),state=read(filename(d,'state.json'));validateDeployment(config,{checkNetwork:false});if(state.schema!==1||state.mode!==config.mode||state.configSha256!==hash(filename(d,'deployment.json'))||!Array.isArray(state.steps))fail('invalid_onboarding_state');return {config,state};}
 function publicState(d,state,config){
  const observations=[...state.steps.filter(s=>s.id.startsWith('host.service.')&&s.evidence).map(s=>({at:s.updatedAt,evidence:s.evidence})),...(state.maintenance??[])].filter(x=>x.evidence).sort((a,b)=>String(a.at??'').localeCompare(String(b.at??'')));
  const hostServiceMaintenance={lastObservation:observations.at(-1)?.evidence??null,hasUncertainMutation:hasUncertainServiceMutation(state),history:(state.maintenance??[]).map(x=>({action:x.action,status:x.status,at:x.at}))};
@@ -509,3 +510,4 @@ export {planDeviceIngressChange,applyDeviceIngressChange,rollbackDeviceIngressCh
 export {changeDeploymentCapabilities,readDeploymentCapabilities,rollbackDeploymentCapabilities} from './capabilities.mjs';
 
 export {readDeploymentComponents} from './components.mjs';
+export {planHostPayloadMigration,applyHostPayloadMigration,rollbackHostPayloadMigration,readHostPayloadMigration} from './host-payload-migration.mjs';

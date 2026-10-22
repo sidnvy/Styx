@@ -1,3 +1,4 @@
+import {assertHostPayloadMigrationSettled} from './host-payload-start-guard.mjs';
 // Read-only package/installed-generation reconciliation. This never adopts a
 // publisher, starts/stops a process, or treats signed metadata as runtime health.
 import fs from 'node:fs';
@@ -39,6 +40,7 @@ export function readDeploymentComponents(stateDir,{artifacts}={}){
  if(!fs.existsSync(stateDir))return result({status:'not_configured'});
  try{
   requirePrivateDirectory(stateDir);
+  try{assertHostPayloadMigrationSettled(stateDir)}catch{return result({status:'needs_recovery',requiredAction:'rollback_host_payload_migration'})}
   const configFile=path.join(stateDir,'deployment.json');if(!fs.existsSync(configFile))return result({status:'not_configured'});
   requirePrivateFile(configFile);const bytes=regular(configFile),config=JSON.parse(bytes),state=privateJson(path.join(stateDir,'state.json'));
   if(config.schema!==1||state.schema!==1||state.configSha256!==sha(bytes)||state.mode!==config.mode)fail();

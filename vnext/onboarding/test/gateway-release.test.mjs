@@ -58,7 +58,7 @@ function historicalBundle(f,revision,version){
 test('contained Gateway build accepts only tracked source and locked production dependencies',t=>{
  const f=fixture(t),result=buildGatewayRelease(f.options),pub=f.keys.publicKey.export({format:'pem',type:'spki'});
  const manifest=JSON.parse(fs.readFileSync(path.join(f.options.destination,'manifest.json'),'utf8'));assert.deepEqual(manifest.files.filter(e=>!e.path.startsWith('bin/')&&!gatewayApplicationFile(e.path)).map(e=>e.path),[]);
- const verified=verifyGatewayRuntimeRelease(f.options.destination,pub);assert.equal(verified.manifest.component,'gateway-application');assert.equal(verified.manifest.sourceContract,2);assert.ok(result.dependencies>2);
+ const verified=verifyGatewayRuntimeRelease(f.options.destination,pub);assert.equal(verified.manifest.component,'gateway-application');assert.equal(verified.manifest.sourceContract,3);assert.ok(result.dependencies>2);
  assert.ok(!verified.manifest.files.some(e=>e.executable&&!/^bin\/node(?:\.exe)?$/.test(e.path)));
  assert.ok(!verified.manifest.files.some(e=>!e.path.startsWith('app/node_modules/')&&/(?:^|\/)(?:test|tests|fixtures|__tests__|__fixtures__|examples)(?:\/|$)|^bin\/(?:codex|cua-driver)/.test(e.path)));
  for(const entry of manifest.files){const bytes=fs.readFileSync(path.join(f.options.destination,entry.path));assert.equal(bytes.length,entry.size,entry.path);assert.equal(digest(bytes),entry.sha256,entry.path);}
@@ -69,7 +69,7 @@ test('contained Gateway build accepts only tracked source and locked production 
  const other=path.join(f.root,'untracked-build');execFileSync('git',['-C',f.publisherSource,'rm','--cached','onboarding/gateway-deployment-reader.mjs']);
  assert.throws(()=>buildGatewayRelease({...f.options,destination:other}),/untracked_gateway_release_source/);assert.equal(fs.existsSync(other),false);
 });
-test('source contract 2 refuses every missing required application source',t=>{
+test('source contract 3 refuses every missing required application source',t=>{
  const f=fixture(t);buildGatewayRelease(f.options);const file=path.join(f.options.destination,'manifest.json'),original=fs.readFileSync(file),manifest=JSON.parse(original),signature=fs.readFileSync(path.join(f.options.destination,'manifest.sig'));
  for(const name of GATEWAY_SOURCE_FILES.map(name=>'app/'+name)){
   const member=path.join(f.options.destination,name),bytes=fs.readFileSync(member),incomplete={...manifest,files:manifest.files.filter(e=>e.path!==name)},raw=JSON.stringify(incomplete)+'\n';
@@ -154,7 +154,7 @@ test('real unversioned 26/28-file applications remain readable without relaxing 
   assert.throws(()=>verifyGatewayRuntimeRelease(older.bundle,pub),/complete_signed_gateway_source_imports_required/,statement);
  }
  fs.writeFileSync(file,original);writeManifest(older.bundle,older.manifest,f.keys.privateKey);
- for(const sourceContract of [0,1,3,'2',null]){
+ for(const sourceContract of [0,1,4,'3',null]){
   writeManifest(older.bundle,{...older.manifest,sourceContract},f.keys.privateKey);
   assert.throws(()=>verifyGatewayRuntimeRelease(older.bundle,pub),/unsupported_gateway_source_contract/);
  }
@@ -177,4 +177,12 @@ test('actual historical signed payload installs, upgrades and rolls back through
  const rolledBack=readGatewayRuntime(config);assert.equal(rolledBack.version,legacy.manifest.version);assert.equal(rolledBack.manifestSha256,oldManifest);
  fs.rmSync(legacy.bundle,{recursive:true});fs.rmSync(f.options.destination,{recursive:true});
  assert.equal(readGatewayRuntime(config).manifestSha256,oldManifest);
+});
+
+// A prior contract must retain its original minimum when a new interlock is added.
+test('actual contract 2 payload remains verifiable after contract 3 adds Host migration interlock',t=>{
+ const f=fixture(t);buildGatewayRelease(f.options);const pub=f.keys.publicKey.export({format:'pem',type:'spki'});
+ const prior=historicalBundle(f,'77d73a0','100.0.0-contract-2');prior.manifest.sourceContract=2;writeManifest(prior.bundle,prior.manifest,f.keys.privateKey);
+ assert.equal(verifyGatewayRuntimeRelease(prior.bundle,pub).manifest.sourceContract,2);
+ assert.equal(prior.manifest.files.some(e=>e.path==='app/onboarding/host-payload-start-guard.mjs'),false);
 });

@@ -1,6 +1,6 @@
 // Deliberate production source closure, shared by the publisher and installer.
 // Host binaries, enrollment, test fixtures and mutable source globs are absent.
-export const GATEWAY_SOURCE_FILES=Object.freeze([
+export const GATEWAY_V2_SOURCE_FILES=Object.freeze([
  'gateway/index.mjs','gateway/runtime.mjs','gateway/registry.mjs','gateway/mcp.mjs','gateway/conversation-owners.mjs',
  'gateway/device-ingress.mjs','gateway/cua.mjs','gateway/browser.mjs','gateway/outbound.mjs','gateway/http.mjs','gateway/enrollment.mjs',
  'gateway/cua-portable-0.36.0.json','gateway/cas/mcp.mjs','gateway/cas/controller.html',
@@ -11,6 +11,7 @@ export const GATEWAY_SOURCE_FILES=Object.freeze([
  'host/private-storage.mjs','shared/onboarding-evidence.mjs','shared/deployment-scope.mjs','onboarding/deployment-config.mjs',
  'onboarding/device-ingress-config.mjs','onboarding/gateway-runtime-start-guard.mjs','onboarding/gateway-deployment-reader.mjs','onboarding/gateway-signed-runner.mjs','onboarding/tunnel-context.mjs'
 ]);
+export const GATEWAY_SOURCE_FILES=Object.freeze([...GATEWAY_V2_SOURCE_FILES,'onboarding/host-payload-start-guard.mjs']);
 // Source contracts are independent of publisher version labels. The legacy
 // minimum is the original 26-file application, before shared Tunnel sessions.
 // Later unversioned bundles must additionally contain everything their signed
@@ -26,7 +27,7 @@ export const LEGACY_GATEWAY_SOURCE_FILES=Object.freeze([
  'host/private-storage.mjs','shared/onboarding-evidence.mjs','onboarding/deployment-config.mjs',
  'onboarding/gateway-deployment-reader.mjs','onboarding/gateway-signed-runner.mjs'
 ]);
-export const GATEWAY_SOURCE_CONTRACT=2;
+export const GATEWAY_SOURCE_CONTRACT=3;
 export const GATEWAY_ENTRYPOINT='app/onboarding/gateway-signed-runner.mjs';
 const sources=new Set(GATEWAY_SOURCE_FILES.map(name=>'app/'+name));
 // Locked packages may load runtime modules from directories called test/tests.

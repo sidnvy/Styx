@@ -480,3 +480,31 @@ test('add-computer API keeps exact Core authority, requires consent, and cannot 
   for(const call of calls)assert.equal(call.directory,path.join(f.root,'deployment'));
  }finally{await f.cleanup()}
 });
+
+test('Host payload API uses bundled candidate and a one-shot reviewed plan; it cannot import a publisher or stop work',async t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'styx-payload-api-'));t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
+ const artifacts={bundle:path.join(root,'host-bundle'),publisherKeyFile:path.join(root,'publisher.pem'),publisherSha256:'a'.repeat(64)},defaults=path.join(root,'artifacts.json');
+ fs.writeFileSync(defaults,JSON.stringify(artifacts),{mode:0o600});
+ let planned,applied=0,rolledBack=0,stopped=0;
+ const f=await fixture({artifactDefaultsFile:defaults,core:{
+  planHostPayloadMigration(input){planned={...input,planId:'review-1',status:'offline_reviewable',current:{version:'old'},target:{version:'new'},publisherChange:true,privateInternalEvidence:'not-public'};return planned},
+  applyHostPayloadMigration(input){assert.equal(input.stateDir,planned.stateDir);assert.equal(input.plan,planned);assert.equal(input.authorize,true);applied++;return {status:'applied_stopped',runtimeHealth:'NOT RUN'}},
+  rollbackHostPayloadMigration(input){assert.equal(input.stateDir,planned.stateDir);assert.equal(input.authorize,true);assert.equal(input.transactionId,'a'.repeat(32));rolledBack++;return {status:'rolled_back_stopped'}},
+  readHostPayloadMigration(){return {status:'not_started'}},
+  stopOwnedDeploymentForeground(){stopped++;return {status:'stopped'}}
+ }});
+ try{
+  const post='/api/host-payload/plan';assert.equal((await fetch(f.origin+post,{method:'POST'})).status,401);
+  assert.notEqual((await f.post(post,{}, {'X-Styx-CSRF':'wrong'})).status,200);
+  assert.notEqual((await f.post(post,{bundle:'/foreign',publisherSha256:'b'.repeat(64)})).status,200);
+  const r=await f.post(post,{});assert.equal(r.status,200);const body=await r.json();assert.equal(body.upgrade.planId,'review-1');assert.equal(body.upgrade.current.version,'old');assert.equal(body.upgrade.target.version,'new');assert.equal(body.upgrade.publisherChange,true);assert.equal(planned.bundle,artifacts.bundle);assert.equal(planned.stateDir,path.join(f.root,'deployment'));assert.equal(JSON.stringify(body).includes('privateInternalEvidence'),false);assert.equal(JSON.stringify(body).includes(root),false);
+  assert.notEqual((await f.post('/api/host-payload/apply',{authorize:true,planId:'foreign'})).status,200);
+  assert.notEqual((await f.post('/api/host-payload/apply',{authorize:false,planId:'review-1'})).status,200);
+  assert.notEqual((await f.post('/api/host-payload/apply',{authorize:true,planId:'review-1',plan:{stateDir:'/foreign'}})).status,200);
+  const updated=await f.post('/api/host-payload/apply',{authorize:true,planId:'review-1'});assert.equal(updated.status,200);assert.equal((await updated.json()).upgrade.status,'applied_stopped');assert.equal(applied,1);
+  assert.notEqual((await f.post('/api/host-payload/apply',{authorize:true,planId:'review-1'})).status,200);assert.equal(applied,1);
+  assert.notEqual((await f.post('/api/host-payload/rollback',{authorize:false,transactionId:'a'.repeat(32)})).status,200);
+  assert.equal((await f.post('/api/host-payload/rollback',{authorize:true,transactionId:'a'.repeat(32)})).status,200);assert.equal(rolledBack,1);
+  assert.equal((await f.post('/api/host-payload/status',{})).status,200);assert.equal(stopped,0);
+ }finally{await f.cleanup()}
+});
