@@ -71,7 +71,7 @@ begin
     if (CompareText(Target, Folder + '\StyxPreview.exe') <> 0) or (Length(VersionName) <> 64) then exit;
     for I := 1 to Length(VersionName) do if Pos(VersionName[I], '0123456789abcdef') = 0 then exit;
     if CompareText(Folder, InstallRoot + '\versions\' + VersionName) <> 0 then exit;
-    if CompareText(String(Link.WorkingDirectory), Folder) <> 0 then exit;
+    if CompareText(RemoveBackslashUnlessRoot(String(Link.WorkingDirectory)), Folder) <> 0 then exit;
     if not FileExists(Folder + '\windows-package.json') then exit;
     if GetSHA256OfFile(Folder + '\windows-package.json') <> VersionName then exit;
     if not FileExists(Target) then exit;

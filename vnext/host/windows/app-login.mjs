@@ -6,7 +6,7 @@ import {createHash} from 'node:crypto';
 import {execFileSync} from 'node:child_process';
 import {observeWindowsNativeAppAuthority} from './native-app-authority.mjs';
 const assert=(v,e)=>{if(!v)throw Error(e)},sha=b=>createHash('sha256').update(b).digest('hex'),hash=f=>sha(fs.readFileSync(f));
-const same=(a,b)=>typeof a==='string'&&typeof b==='string'&&a.toLowerCase()===b.toLowerCase();
+const same=(a,b)=>typeof a==='string'&&typeof b==='string'&&a.replace(/[\\/]+$/,'').toLowerCase()===b.replace(/[\\/]+$/,'').toLowerCase();
 const absolute=s=>typeof s==='string'&&path.win32.isAbsolute(s)&&path.win32.normalize(s)===s&&!/["\x00-\x1f\x7f]/.test(s);
 const digest=s=>typeof s==='string'&&/^[a-f0-9]{64}$/.test(s);
 const keys=['schema','kind','ownerSid','shortcutPath','installRoot','resourceRoot','packageSha256','appSha256','stateDir'];

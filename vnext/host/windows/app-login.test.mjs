@@ -28,3 +28,18 @@ test('registration cannot redirect user state or describe an arbitrary executabl
 test('Azure AD user SID is accepted as a live identity without assuming a local account',async()=>{
  const read=await readWindowsAppLogin({stateDir},operations({present:false,ownerSid:'S-1-12-1-111-222-333-444'}));assert.equal(read.status,'not_registered');
 });
+
+test('native App and Inno directory separators identify the same owned startup target',{skip:process.platform!=='win32'},async t=>{
+ const fs=await import('node:fs'),path=await import('node:path'),os=await import('node:os'),{createHash}=await import('node:crypto');
+ const temp=fs.mkdtempSync(path.join(os.tmpdir(),'styx-login-path-'));t.after(()=>fs.rmSync(temp,{recursive:true,force:true}));
+ const hash=b=>createHash('sha256').update(b).digest('hex'),app=Buffer.from('data-only native path fixture'),runtime=Buffer.from('{}');
+ const manifest=JSON.stringify({schema:1,compiled:true,files:[{path:'StyxPreview.exe',sha256:hash(app)},{path:'windows-runtime.json',sha256:hash(runtime)}]}),pin=hash(manifest),root=path.join(temp,'versions',pin);
+ fs.mkdirSync(root,{recursive:true});fs.writeFileSync(path.join(root,'StyxPreview.exe'),app);fs.writeFileSync(path.join(root,'windows-runtime.json'),runtime);fs.writeFileSync(path.join(root,'windows-package.json'),manifest);
+ const sd=path.join(temp,'state','deployment'),authority={source:'current_windows_native_app',nativeAppPid:123,nativeAppGeneration:'test-seam'};
+ for(const trailing of [false,true]){
+  const reg={schema:1,kind:'windows-startup-shortcut',ownerSid,shortcutPath,installRoot:temp,resourceRoot:root+'\\',packageSha256:pin,appSha256:hash(app),stateDir:sd};
+  const op={...operations({present:true,sha256:'a'.repeat(64),target:path.join(root,'StyxPreview.exe'),arguments:'--startup --state-dir "'+path.dirname(sd)+'"',workingDirectory:root+(trailing?'\\':'')}),observeApp:()=>authority};
+  const view=await readWindowsAppLogin({stateDir:sd,registration:reg,trustedApp:{resourceRoot:root+'\\',authority}},op);
+  assert.equal(view.registration.owned,true);assert.equal(view.registration.targetMatches,true);
+ }
+});
