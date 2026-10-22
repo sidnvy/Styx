@@ -9,12 +9,25 @@ import {observeMacHostPayloadAbsence} from '../host-payload-native.mjs';
 function fixture(t){
  const home=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'styx-native-absence-'))),uid=process.getuid();t.after(()=>fs.rmSync(home,{recursive:true,force:true}));
  const scope={installRoot:path.join(home,'host/install'),hostConfigFile:path.join(home,'host/device/host.json'),stateDir:path.join(home,'deployment'),hostServiceLabel:'app.styx.host.fixture'};
+ fs.mkdirSync(scope.installRoot,{recursive:true});
  const calls=[];const run=(command,args)=>{calls.push([command,args]);if(command==='/bin/launchctl')throw Object.assign(Error('missing'),{status:113,stderr:'Could not find service'});if(command==='/bin/ps')return `${uid} 123 1 /usr/bin/login\n`;throw Error('unexpected_command')};
  return {home,uid,scope,calls,options:{home,uid,platform:'darwin',run},run};
 }
 test('observes only fixed native reads; absent requires every service and process check',t=>{
  const f=fixture(t),r=observeMacHostPayloadAbsence(f.scope,f.options);assert.equal(r.status,'absent');assert.equal(r.mutation,'NONE');assert.equal(r.pointInTime,true);
  assert.equal(f.calls.filter(([cmd])=>cmd==='/bin/launchctl').length,9);assert.deepEqual(f.calls.at(-1),['/bin/ps',['-ww','-axo','uid=,pid=,ppid=,command=']]);
+});
+test('only native-verified current independent updater is exempt; parent and other Host PIDs remain blocked',t=>{
+ const f=fixture(t),pid=456,exe=fs.realpathSync(process.execPath),options={...f.options,pid,execPath:exe};
+ const runFor=rows=>(cmd,args)=>cmd==='/bin/ps'?(args.includes('-p')?`${f.uid} ${exe}\n`:rows):f.run(cmd,args);
+ const self=`${f.uid} ${pid} 1 ${exe} updater.mjs --state ${f.scope.stateDir}\n`;
+ assert.equal(observeMacHostPayloadAbsence(f.scope,{...options,run:runFor(self)}).status,'absent');
+ for(const row of [`${f.uid} 457 ${pid} ${f.scope.installRoot}/bin/codex\n`,`${f.uid} 458 1 /bin/sh runner ${f.scope.stateDir}\n`]){
+  const r=observeMacHostPayloadAbsence(f.scope,{...options,run:runFor(self+row)});assert.equal(r.reason,'native_owned_process_present');assert.equal(r.processCount,1);
+ }
+ assert.equal(observeMacHostPayloadAbsence(f.scope,{...options,run:(cmd,args)=>cmd==='/bin/ps'?(args.includes('-p')?`${f.uid+1} ${exe}`:self):f.run(cmd,args)}).reason,'native_updater_identity_unverified');
+ const inside=path.join(f.scope.installRoot,'node');fs.writeFileSync(inside,'not executable');
+ assert.equal(observeMacHostPayloadAbsence(f.scope,{...options,execPath:inside,run:runFor(self)}).reason,'independent_updater_runtime_required');
 });
 test('installed recovery job blocks even if disabled or unloaded, including dangling symlink',t=>{
  const f=fixture(t),dir=path.join(f.home,'Library/LaunchAgents');fs.mkdirSync(dir,{recursive:true});const file=path.join(dir,'app.styx.desktop-login.plist');fs.symlinkSync(path.join(f.home,'absent'),file);

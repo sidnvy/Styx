@@ -12,10 +12,10 @@ const sha=value=>createHash('sha256').update(value).digest('hex');
 const options={encoding:'utf8',timeout:10000,maxBuffer:8*1024*1024,stdio:['ignore','pipe','pipe']};
 
 export function observeMacHostPayloadAbsence({installRoot,hostConfigFile,hostServiceLabel,gatewayServiceLabel,stateDir,appPath='/Applications/Styx.app'}={},
-  {home=os.homedir(),uid=process.getuid?.(),run=execFileSync,platform=process.platform}={}){
+  {home=os.homedir(),uid=process.getuid?.(),run=execFileSync,platform=process.platform,pid=process.pid,execPath=process.execPath}={}){
  const result=(status,reason,extra={})=>({schema:1,status,observation:'native_offline_boundary',mutation:'NONE',...(reason?{reason}:{}),...extra});
  if(platform!=='darwin')return result('blocked','macos_native_observation_required');
- if(![installRoot,hostConfigFile,stateDir,home,appPath].every(absolute)||!Number.isSafeInteger(uid)||uid<1||!label(hostServiceLabel))return result('blocked','native_scope_invalid');
+ if(![installRoot,hostConfigFile,stateDir,home,appPath,execPath].every(absolute)||!Number.isSafeInteger(uid)||uid<1||!Number.isSafeInteger(pid)||pid<1||!label(hostServiceLabel))return result('blocked','native_scope_invalid');
  const gatewayLabel='app.styx.gateway.'+sha(stateDir).slice(0,12);
  if(gatewayServiceLabel!==undefined&&gatewayServiceLabel!==gatewayLabel)return result('blocked','gateway_service_label_mismatch');
  const labels=[...new Set([hostServiceLabel,gatewayLabel,'app.styx.desktop-login'])];
@@ -49,7 +49,20 @@ export function observeMacHostPayloadAbsence({installRoot,hostConfigFile,hostSer
    // Preserve arguments internally to catch wrappers, legacy Gateway runtimes,
    // orphaned Exec/Cua children and a Core which references this state directory.
    // Never return commands: they may contain credentials or unrelated user data.
-   if(needles.some(needle=>row[4].includes(needle)))pids.push(Number(row[2]));
+   if(needles.some(needle=>row[4].includes(needle))){
+    if(Number(row[2])===pid){
+     // CLI arguments necessarily name the deployment and candidate. Only this
+     // exact updater may be ignored, and only after native executable identity
+     // confirms it runs outside the Host tree that the transaction will change.
+     const executable=fs.realpathSync(execPath),root=fs.realpathSync(installRoot);
+     if(executable===root||executable.startsWith(root+path.sep))return result('blocked','independent_updater_runtime_required');
+     const identity=String(run('/bin/ps',['-ww','-p',String(pid),'-o','uid=,comm='],options)).trim();
+     const current=/^(\d+)\s+(.+)$/.exec(identity);
+     if(!current||Number(current[1])!==uid||fs.realpathSync(current[2])!==executable)return result('blocked','native_updater_identity_unverified');
+     continue;
+    }
+    pids.push(Number(row[2]));
+   }
   }
   if(!observed)return result('blocked','native_process_observation_unknown');
   if(pids.length)return result('blocked','native_owned_process_present',{processCount:pids.length,pids});
