@@ -904,7 +904,9 @@ if CommandLine.arguments.count == 2 && CommandLine.arguments[1] == "--ui-preview
         catch { fputs("Styx UI preview failed\n", stderr); exit(1) }
     }
 }
-if CommandLine.arguments.count == 3 && CommandLine.arguments[1] == "--presentation-snapshots" {
+// Allow process-local AppKit preferences (e.g. -AppleLanguages) without
+// accidentally falling through to the real App when rendering a fixture.
+if CommandLine.arguments.count >= 3 && CommandLine.arguments[1] == "--presentation-snapshots" {
     MainActor.assumeIsolated {
         do { try productPresentationSnapshots(directory: URL(fileURLWithPath: CommandLine.arguments[2])); exit(0) }
         catch { fputs("Styx presentation render failed\n", stderr); exit(1) }

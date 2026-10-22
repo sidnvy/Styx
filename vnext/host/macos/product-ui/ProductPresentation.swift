@@ -26,7 +26,7 @@ enum ProductConnectionIndicator: Equatable {
         case .connected: return productText("已连接", "Connected")
         case .offline: return productText("未连接", "Disconnected")
         case .attention: return productText("需要处理", "Needs attention")
-        case .unknown: return productText("状态尚未确认", "Status not observed")
+        case .unknown: return productText("暂时无法获取状态", "Status unavailable")
         }
     }
 }
@@ -44,6 +44,35 @@ struct ProductConnectionDot: View {
             case .unknown: Image(systemName: "questionmark.circle").foregroundStyle(.secondary).font(.system(size: 11))
             }
         }.frame(width: 12, height: 14).help(state.label).accessibilityLabel(state.label)
+    }
+}
+enum ProductCapabilityKind {
+    case cli, computer, browser
+    var title: String {
+        switch self {
+        case .cli: return productText("命令行（CLI）", "Command line (CLI)")
+        case .computer: return productText("操作电脑（Computer Use）", "Computer Use")
+        case .browser: return productText("浏览器自动化", "Browser Automation")
+        }
+    }
+    var detail: String {
+        switch self {
+        case .cli: return productText("运行命令和脚本 · 始终包含", "Run commands and scripts · Always included")
+        case .computer: return productText("查看屏幕、点击和输入", "View the screen, click and type")
+        case .browser: return productText("打开网页、点击和填写表单", "Open websites, click and fill in forms")
+        }
+    }
+    var symbol: String {
+        switch self { case .cli: return "terminal"; case .computer: return "hand.point.up.left"; case .browser: return "globe" }
+    }
+}
+struct ProductCapabilityLabel: View {
+    let kind: ProductCapabilityKind
+    var body: some View {
+        VStack(alignment: .leading, spacing: 4) {
+            Label(kind.title, systemImage: kind.symbol)
+            Text(kind.detail).font(.caption).foregroundStyle(.secondary)
+        }
     }
 }
 enum ProductTunnelInputPolicy {
@@ -79,26 +108,42 @@ enum ProductChatVerification: Equatable {
     var proofComplete: Bool { self == .verified || self == .confirmed }
     var label: String {
         switch self {
-        case .verified, .confirmed: return productText("真实调用已验证", "Real calls verified")
-        case .partial: return productText("部分调用已验证", "Some calls verified")
-        case .expired: return productText("测试请求已过期", "Test request expired")
-        case .contextChanged: return productText("连接信息已变化", "Connection details changed")
-        case .pending: return productText("尚未验证真实调用", "Real calls not yet verified")
+        case .verified, .confirmed: return productText("各项功能测试通过", "All feature tests passed")
+        case .partial: return productText("部分测试已完成", "Some tests completed")
+        case .expired: return productText("这条测试消息已过期", "This test message has expired")
+        case .contextChanged: return productText("请先更新插件的连接信息", "Update the plugin connection first")
+        case .pending: return productText("从 ChatGPT 试用这台电脑", "Try this computer from ChatGPT")
         }
     }
 }
 extension ProductModel {
     var chatVerification: ProductChatVerification { .observed(acceptance, contextChanged: plugin["contextChanged"].bool) }
+    var needsPluginSetup: Bool {
+        chatVerification == .contextChanged || (chatVerification == .pending && plugin["accountActions"]["installation"].string != "user_confirmed")
+    }
+    var chatReady: Bool {
+        chatIndicator == .connected && localIndicator == .connected && chatVerification.proofComplete
+            && (!computerApproved || axGranted && screenGranted)
+    }
+    var chatStatusTitle: String {
+        if chatIndicator == .unknown { return productText("暂时无法获取连接状态", "Connection status unavailable") }
+        if chatReady { return productText("已就绪", "Ready to use") }
+        if chatIndicator == .connected { return productText("连接已建立", "Connection established") }
+        if tunnelConnection == .connected && chatVerification == .contextChanged { return productText("插件连接需要更新", "Plugin connection needs updating") }
+        return tunnelFeedback
+    }
     var chatNextStep: String {
+        if observationError != nil { return productText("暂时无法获取最新状态，请点击“重新检查”。", "The latest state is unavailable. Select Check again.") }
+        if localIndicator != .connected { return productText("这台电脑尚未就绪，请先完成“电脑”中的设置。", "Finish setting up this computer in Computers first.") }
+        if computerApproved && (!axGranted || !screenGranted) { return productText("操作电脑需要系统权限。请在“电脑”中开启辅助功能和屏幕录制。", "Computer interaction needs system permissions. Enable Accessibility and Screen Recording in Computers.") }
         switch chatVerification {
-        case .confirmed: return productText("真实调用与目标聊天确认已完成。", "Real calls and target-chat confirmation are complete.")
-        case .verified: return productText("所选能力的真实调用已通过。仅待你确认在目标聊天看到了结果，无需重新连接或安装插件。", "Real calls passed for the selected capabilities. Only your confirmation of seeing the results remains; no reconnect or reinstall is needed.")
-        case .partial: return productText("已收到真实聊天调用，继续验证其余能力即可。", "Real chat calls were received. Continue verifying the remaining capabilities.")
-        case .expired: return productText("测试请求已过期；这不表示连接中断。需要验收时可生成新请求。", "The test request expired; this does not mean the connection stopped. Generate a new request when verification is needed.")
-        case .contextChanged: return productText("请核对当前连接，再验证真实调用。", "Review the current connection, then verify real calls.")
+        case .confirmed, .verified: return productText("在 ChatGPT 中选择 Styx，即可使用这台电脑。", "Select Styx in ChatGPT to use this computer.")
+        case .partial: return productText("ChatGPT 已成功使用部分功能。打开“试用 Styx”查看进度。", "ChatGPT has used some features successfully. Open Try Styx to see progress.")
+        case .expired: return productText("在 ChatGPT 中选择 Styx。需要检查各项功能时，可以重新试用。", "Select Styx in ChatGPT. You can run a new test to check its features.")
+        case .contextChanged: return productText("连接信息已更改。请在 ChatGPT 中更新已有 Styx 的连接。", "Connection details changed. Update the existing Styx connection in ChatGPT.")
         case .pending:
-            if plugin["accountActions"]["installation"].string == "user_confirmed" { return productText("在 ChatGPT 使用 Styx 完成一次真实调用。", "Use Styx in ChatGPT to verify a real call.") }
-            return productText("在 ChatGPT 添加 Styx；如果已经安装，直接开始真实调用验证。", "Add Styx in ChatGPT, or start real-call verification if it is already installed.")
+            if !needsPluginSetup { return productText("打开“试用 Styx”，从 ChatGPT 检查这台电脑的功能。", "Open Try Styx to test this computer from ChatGPT.") }
+            return productText("接下来在 ChatGPT 安装 Styx。已经安装的话，可以直接试用。", "Next, install Styx in ChatGPT. If it is already installed, you can try it now.")
         }
     }
     var localIndicator: ProductConnectionIndicator {
@@ -114,16 +159,19 @@ extension ProductModel {
     var chatIndicator: ProductConnectionIndicator {
         if observationError != nil { return .unknown }
         if tunnelAttempt == .connecting { return .attention }
-        if tunnelConnection == .connected && chatVerification.proofComplete { return .connected }
+        if tunnelConnection == .unknown { return .unknown }
+        // This dot reports the current connection, not the lifetime of a test
+        // challenge or whether the user has confirmed seeing its results.
+        if tunnelConnection == .connected && chatVerification != .contextChanged { return .connected }
         if tunnelConnection == .notConfigured { return .offline }
-        if tunnelConnection == .connected && chatVerification != .contextChanged { return .unknown }
         return .attention
     }
     var chatMenuTitle: String {
-        if chatIndicator == .connected { return "ChatGPT" }
         if tunnelConnection == .notConfigured { return productText("连接 ChatGPT", "Connect ChatGPT") }
-        if tunnelConnection == .connected { return productText("ChatGPT · 待验证", "ChatGPT · Verification pending") }
-        return productText("修复 ChatGPT 连接", "Fix ChatGPT connection")
+        if tunnelConnection == .connected && chatVerification == .contextChanged { return productText("更新 ChatGPT 连接", "Update ChatGPT connection") }
+        // Keep navigation stable while reconnecting or when a read fails. The
+        // adjacent indicator and Settings explain the current connection state.
+        return "ChatGPT"
     }
     var hasSavedRuntimeKey: Bool {
         ["configured", "running", "interrupted"].contains(journey["tunnel"]["status"].string ?? "")
@@ -193,7 +241,7 @@ struct ProductDailyPanel: View {
                 ProductMenuRow(title: productText("这台 Mac", "This Mac"), symbol: "laptopcomputer", state: model.localIndicator, disclosure: true) { showSettings(.computers) }
                 Divider().padding(.vertical, 5)
                 if model.joined {
-                    ProductMenuRow(title: productText("主台连接", "Main computer"), symbol: "link", state: model.localIndicator, disclosure: true) { showSettings(.computers) }
+                    ProductMenuRow(title: productText("管理电脑连接", "Main computer"), symbol: "link", state: model.localIndicator, disclosure: true) { showSettings(.computers) }
                 } else {
                     Text(productText("电脑", "Computers")).font(.system(size: 11, weight: .medium)).foregroundStyle(.secondary).frame(maxWidth: .infinity, alignment: .leading).padding(.horizontal, 10).padding(.vertical, 5)
                     ForEach(model.devices.filter { !$0.isLocal }) { device in
@@ -228,10 +276,10 @@ struct ProductInvitationView: View {
             if let value = model.createdInvitation["link"].string {
                 Text(productText("在另一台电脑打开邀请链接", "Open the invitation on the other computer")).font(.caption)
                 Button { model.copy(value, secret: true); model.invitationCopied = true } label: { Label(model.invitationCopied ? productText("邀请已复制", "Invitation copied") : productText("复制邀请链接", "Copy invitation link"), systemImage: "doc.on.doc").frame(maxWidth: .infinity) }
-                Text(productText("邀请将在 10 分钟后过期", "Invitation expires in 10 minutes")).font(.caption2).foregroundStyle(.secondary)
+                Text(productText("邀请自生成起 10 分钟内有效", "The invitation is valid for 10 minutes after creation")).font(.caption2).foregroundStyle(.secondary)
             } else if !model.ingress["blockers"].array.isEmpty {
-                Text(productText("当前连接入口还不能供另一台电脑访问。", "The current connection entry is not reachable from another computer.")).font(.caption)
-                Text(productText("请先在连接设置中准备可达入口。", "Prepare a reachable entry in connection settings first.")).font(.caption).foregroundStyle(.secondary)
+                Text(productText("暂时无法邀请其他电脑", "Other computers cannot be invited yet")).font(.caption.weight(.semibold))
+                Text(productText("其他电脑无法访问这台 Mac。需要先配置电脑之间的网络连接；此版本暂不支持在 App 中完成这项配置。", "Other computers cannot reach this Mac. The network connection between computers needs configuring; this version cannot configure it in the app.")).font(.caption).foregroundStyle(.secondary)
             } else if model.invitationInFlight {
                 ProgressView().controlSize(.small)
             } else if model.error != nil {
@@ -292,6 +340,7 @@ extension ProductModel {
 enum ProductTunnelAttempt: Equatable { case idle, connecting, failed, timedOut }
 struct ProductTunnelStatus: View {
     @ObservedObject var model: ProductModel
+    var showNextStep = true
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack {
@@ -299,7 +348,7 @@ struct ProductTunnelStatus: View {
                 else { Image(systemName: model.tunnelConnection == .connected ? "globe" : "exclamationmark.circle").foregroundStyle(model.tunnelConnection == .connected ? Color.green : Color.secondary) }
                 Text(model.tunnelFeedback).font(.callout)
             }.accessibilityElement(children: .combine)
-            if model.tunnelConnection == .connected {
+            if showNextStep && model.tunnelConnection == .connected {
                 Text(model.chatNextStep).font(.caption).foregroundStyle(.secondary)
             } else if model.tunnelAttempt == .failed || model.tunnelAttempt == .timedOut || model.tunnelConnection == .unavailable {
                 Text(productText("请检查网络；也可以编辑 Tunnel ID 和运行密钥后再试。", "Check the network, or edit the Tunnel ID and runtime key, then retry.")).font(.caption).foregroundStyle(.secondary)

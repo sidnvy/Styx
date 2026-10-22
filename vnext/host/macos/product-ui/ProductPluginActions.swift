@@ -40,9 +40,9 @@ extension ProductModel {
     }
     func rebindPluginConnection() {
         let alert = NSAlert()
-        alert.messageText = productText("重新核对聊天连接", "Review the changed chat connection")
-        alert.informativeText = productText("请先在 ChatGPT 核对下方的 Tunnel。继续会保留插件资料，并要求重新确认安装和执行聊天验证；不会更改电脑身份或凭据。", "First check the Tunnel shown below in ChatGPT. Continuing preserves plugin details and requires new installation confirmation and chat verification. Computer identity and credentials are retained.")
-        alert.addButton(withTitle: productText("已核对，更新记录", "Checked — update record"))
+        alert.messageText = productText("更新插件的连接信息？", "Update the plugin connection?")
+        alert.informativeText = productText("请先确认 ChatGPT 中已有 Styx 使用的是设置页显示的 Tunnel ID。继续后会保留插件名称和图标，并重新进行安装确认与试用。", "First confirm that the existing Styx in ChatGPT uses the Tunnel ID shown in Settings. Continuing keeps its name and icon, and starts a new installation confirmation and test.")
+        alert.addButton(withTitle: productText("已核对，继续", "Checked — continue"))
         alert.addButton(withTitle: productText("取消", "Cancel"))
         let expectedConnection = plugin["connection"]
         guard alert.runModal() == .alertFirstButtonReturn else { return }
