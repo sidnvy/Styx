@@ -8,29 +8,39 @@ import {activeRelease} from './installer.mjs';
 import {requirePrivateFile} from './private-storage.mjs';
 
 // A local preflight only; no automatic service or OS permission changes.
-async function version(binary) {
-  const info=fs.lstatSync(binary);
-  if(!info.isFile()||info.isSymbolicLink())throw Error('nonregular_runtime_binary');
+const VERSION_TIMEOUT_MS=30000;
+const SPAWN_ERRORS=new Set(['ENOENT','EACCES','EPERM','ENOEXEC','ENOMEM','EAGAIN','EMFILE','ENFILE','ETXTBSY','EIO']);
+const safeError=error=>SPAWN_ERRORS.has(error?.code)?error.code:'UNKNOWN';
+// timeoutMs is a bounded test seam; Doctor always uses the fixed product limit.
+// A deadline ends only after this owned --version child has actually closed.
+export async function probeRuntimeVersion(binary,{timeoutMs=VERSION_TIMEOUT_MS}={}) {
+  if(!Number.isInteger(timeoutMs)||timeoutMs<1||timeoutMs>VERSION_TIMEOUT_MS)throw Error('invalid_version_probe_timeout');
+  const started=performance.now(),probe={status:'pending',elapsedMs:0,timeoutMs,exitCode:null,signal:null};
+  const result=(status,version=null)=>({version,probe:{...probe,status,elapsedMs:Math.round(performance.now()-started)}});
+  try{const info=fs.lstatSync(binary);if(!info.isFile()||info.isSymbolicLink())return result('invalid_binary');}
+  catch(error){probe.errorCode=safeError(error);return result('binary_unavailable');}
   return await new Promise(resolve=>{
-    let completed=false,stdout='';
-    let child;
-    const finish=value=>{
-      if(completed)return;
-      completed=true;clearTimeout(timer);resolve(value);
+    let completed=false,stdout='',size=0,child,timer,stopped;
+    const finish=(status,version=null)=>{if(completed)return;completed=true;clearTimeout(timer);resolve(result(status,version));};
+    const stop=status=>{
+      if(completed||stopped)return;stopped=status;
+      // This is a fixed, side-effect-free version probe, not an Exec command.
+      // Kill only its owned process and wait for close before returning evidence.
+      child.kill('SIGKILL');
     };
-    try{
-      child=spawn(binary,['--version'],{
-        stdio:['ignore','pipe','ignore'],windowsHide:true
-      });
-    }catch{return resolve(null)}
-    const timer=setTimeout(()=>{child.kill();finish(null)},4000);
-    timer.unref?.();
-    child.stdout.on('data',bytes=>{
-      stdout+=String(bytes);
-      if(stdout.length>2048){child.kill();finish(null)}
+    try{child=spawn(binary,['--version'],{stdio:['ignore','pipe','ignore'],windowsHide:true});}
+    catch(error){probe.errorCode=safeError(error);finish('spawn_error');return;}
+    timer=setTimeout(()=>stop('timeout'),timeoutMs);
+    child.stdout.on('data',bytes=>{size+=bytes.length;if(size>2048)stop('output_limit');else stdout+=String(bytes);});
+    child.once('error',error=>{probe.errorCode=safeError(error);if(!child.pid)finish('spawn_error');else stopped='spawn_error';});
+    child.once('close',(code,signal)=>{
+      probe.exitCode=Number.isInteger(code)?code:null;
+      probe.signal=typeof signal==='string'&&/^SIG[A-Z0-9]{1,12}$/.test(signal)?signal:null;
+      if(stopped)finish(stopped);
+      else if(signal)finish('terminated');
+      else if(code!==0)finish('exit_nonzero');
+      else finish('ok',stdout.trim().slice(0,120));
     });
-    child.once('error',()=>finish(null));
-    child.once('close',code=>finish(code===0?stdout.trim().slice(0,120):null));
   });
 }
 function installedConfig(raw,{installRoot,trustPublicKeyFile,platform}){
@@ -103,23 +113,27 @@ export async function doctor(config,{platform=process.platform,
     // enrollment paths after signature/payload verification failed.
     if(checks.signed_install!=='invalid' && checks.host_credential==='ok'){
       try {
-        const ver=await version(normalized.exec.binary);
+        const observed=await probeRuntimeVersion(normalized.exec.binary);
+        const ver=observed.version;checks.executor_probe=observed.probe;
         checks.executor_version=ver;
         if(!ver?.startsWith('codex-cli '))throw Error();
         if(selected.release && !/^codex-cli 0\.163\.0(?:$|\s)/.test(ver))
           throw Error();
       }catch{
         checks.executor_version=null;
+        if(checks.executor_probe?.status==='ok')checks.executor_probe.status='version_mismatch';
         blockers.push('codex_executor_unavailable');
       }
       if(normalized.computer?.enabled){
         try {
-          const ver=await version(normalized.computer.binary);
+          const observed=await probeRuntimeVersion(normalized.computer.binary);
+          const ver=observed.version;checks.computer_probe=observed.probe;
           checks.computer_version=ver;
           if(selected.release && !/^cua-driver 0\.36\.0(?:$|\s)/.test(ver??''))
             throw Error();
         }catch{
           checks.computer_version=null;
+          if(checks.computer_probe?.status==='ok')checks.computer_probe.status='version_mismatch';
           if(selected.release)blockers.push('signed_computer_runtime_unavailable');
         }
       }
