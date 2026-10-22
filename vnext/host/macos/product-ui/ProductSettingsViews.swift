@@ -26,15 +26,22 @@ struct ProductSettingsView: View {
                     settingsGroup(.chat) { chat }
                     settingsGroup(.general) { general }
                         .frame(minHeight: max(0, viewport.size.height - 48), alignment: .top)
-                    if let error = model.error ?? model.observationError {
-                        Text(error).font(.callout).foregroundStyle(.red).textSelection(.enabled)
-                        Button(productText("重新检查", "Check again")) { Task { await model.refresh() } }
-                    }
                 }.padding(24).frame(maxWidth: .infinity, alignment: .leading)
             }.background(Color(nsColor: .windowBackgroundColor))
                 .onAppear { proxy.scrollTo(model.settingsSection, anchor: .top) }
                 .onChange(of: model.settingsNavigationID) { _ in proxy.scrollTo(model.settingsSection, anchor: .top) }
         }
+        }.safeAreaInset(edge: .bottom, spacing: 0) {
+            if let error = model.error ?? model.observationError {
+                VStack(alignment: .leading, spacing: 8) {
+                    Divider()
+                    Text(error).font(.callout).foregroundStyle(.red).textSelection(.enabled)
+                    Button(productText("重新检查", "Check again")) { Task { await model.refresh() } }
+                }.padding(.horizontal, 24).padding(.bottom, 16)
+                    .frame(maxWidth: .infinity, alignment: .leading)
+                    .background(Color(nsColor: .windowBackgroundColor))
+                    .accessibilityIdentifier("styx-settings-operation-error")
+            }
         }.frame(minWidth: 640, minHeight: 500)
             .sheet(isPresented: $addComputer) {
                 VStack(alignment: .leading, spacing: 16) {
