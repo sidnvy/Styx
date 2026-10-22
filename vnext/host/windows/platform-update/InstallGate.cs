@@ -4,6 +4,9 @@ using System.IO;
 using System.Runtime.InteropServices;
 using System.Text;
 using System.Web.Script.Serialization;
+using System.Security.AccessControl;
+using System.Security.Principal;
+using System.Security.Cryptography;
 
 // Read-only Restart Manager admission. Never calls RmShutdown or RmRestart.
 internal static class InstallGate {
@@ -35,8 +38,32 @@ internal static class InstallGate {
    foreach(string version in Directory.GetDirectories(versions))Package(version,files);
   }
  }
+ static string Hash(string file){using(var s=SHA256.Create())using(var f=File.OpenRead(file))return BitConverter.ToString(s.ComputeHash(f)).Replace("-","").ToLowerInvariant();}
+ static bool Equal(string a,string b){return String.Equals(a,b,StringComparison.OrdinalIgnoreCase);}
+ static void PrivateFile(string file,string sid){
+  Regular(file);var acl=File.GetAccessControl(file);if(acl.GetOwner(typeof(SecurityIdentifier)).Value!=sid)throw new IOException();
+  foreach(FileSystemAccessRule r in acl.GetAccessRules(true,true,typeof(SecurityIdentifier)))if(r.AccessControlType==AccessControlType.Allow&&r.IdentityReference.Value!=sid&&r.IdentityReference.Value!="S-1-5-18"&&r.IdentityReference.Value!="S-1-5-32-544")throw new IOException();
+ }
+ static Dictionary<string,object> Object(object value){return (Dictionary<string,object>)value;}
+ static int LoginOwnership(string[] a){
+  if(a.Length!=5)return 2;string root=Path.GetFullPath(a[1]),state=Path.Combine(Path.GetFullPath(a[2]),"deployment"),target=Path.GetFullPath(a[3]),link=Path.GetFullPath(a[4]);
+  string sid=WindowsIdentity.GetCurrent().User.Value,record=Path.Combine(state,"state.json"),deployment=Path.Combine(state,"deployment.json");
+  PrivateFile(record,sid);PrivateFile(deployment,sid);Regular(link);
+  if(File.GetAccessControl(link).GetOwner(typeof(SecurityIdentifier)).Value!=sid)return 2;
+  if(!Equal(Path.GetDirectoryName(link),Environment.GetFolderPath(Environment.SpecialFolder.Startup)))return 2;
+  if(new FileInfo(record).Length>4*1024*1024)return 2;
+  var value=new JavaScriptSerializer{MaxJsonLength=4*1024*1024}.Deserialize<Dictionary<string,object>>(File.ReadAllText(record));
+  if((string)value["configSha256"]!=Hash(deployment))return 2;
+  var registration=Object(Object(Object(value["appPreferences"])["loginAtStartup"])["registration"]);
+  if((int)registration["schema"]!=1||(string)registration["kind"]!="windows-startup-shortcut"||(string)registration["ownerSid"]!=sid||!Equal((string)registration["shortcutPath"],link)||!Equal((string)registration["stateDir"],state)||!Equal((string)registration["installRoot"],root))return 2;
+  string registered=(string)registration["resourceRoot"],registeredHash=(string)registration["packageSha256"];
+  if(!Equal(registered,Path.Combine(root,"versions",registeredHash))||Hash(Path.Combine(registered,"windows-package.json"))!=registeredHash||Hash(Path.Combine(registered,"StyxPreview.exe"))!=(string)registration["appSha256"])return 2;
+  string name=Path.GetFileName(target);if(!System.Text.RegularExpressions.Regex.IsMatch(name,"^[a-f0-9]{64}$")||!Equal(target,Path.Combine(root,"versions",name))||Hash(Path.Combine(target,"windows-package.json"))!=name)return 2;
+  return 0;
+ }
  static int Main(string[] args){
   try{
+   if(args.Length>0&&args[0]=="check-login")return LoginOwnership(args);
    if(args.Length!=2||args[0]!="check"||!Path.IsPathRooted(args[1]))return 2;
    string root=Path.GetFullPath(args[1]);if(!Directory.Exists(root))return 0;
    var files=new List<string>();Files(root,files);if(files.Count==0)return 0;

@@ -13,3 +13,10 @@ test('Windows native installer admission holds package mutex and observes runnin
   compile(['/reference:System.Windows.Forms.dll','/reference:System.Drawing.dll','/main:InstallCoordinationTest','/out:'+harness,path.join(here,'../Styx.cs'),path.join(here,'InstallCoordinationTest.cs')]);
   execFileSync(harness,[path.join(temp,'Programs Styx 中文'),gate],{windowsHide:true,timeout:30000,stdio:'pipe'});
 });
+
+test('Windows installer requires the existing Core registration before touching a startup entry',{skip:process.platform!=='win32'},t=>{
+ const temp=fs.mkdtempSync(path.join(os.tmpdir(),'styx-login-ownership-'));t.after(()=>fs.rmSync(temp,{recursive:true,force:true}));
+ const csc=path.join(process.env.WINDIR,'Microsoft.NET/Framework64/v4.0.30319/csc.exe'),gate=path.join(temp,'gate.exe'),harness=path.join(temp,'test.exe');
+ const compile=(out,file)=>execFileSync(csc,['/nologo','/warn:4','/warnaserror+','/target:exe','/reference:System.Web.Extensions.dll','/out:'+out,path.join(here,file)],{windowsHide:true,stdio:'pipe'});
+ compile(gate,'InstallGate.cs');compile(harness,'LoginOwnershipTest.cs');execFileSync(harness,[temp,gate],{windowsHide:true,timeout:30000,stdio:'pipe'});
+});

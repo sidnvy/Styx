@@ -49,7 +49,7 @@ if($s.action -ne 'read'){
  elseif($s.action -eq 'create'){
   if($r.present){throw 'app_login_shortcut_changed'}
   $temp=Join-Path $s.stateDir ('app-login-'+[Guid]::NewGuid().ToString('N')+'.lnk')
-  try{$w=New-Object -ComObject WScript.Shell;$l=$w.CreateShortcut($temp);$l.TargetPath=$s.target;$l.Arguments=$s.arguments;$l.WorkingDirectory=$s.workingDirectory;$l.Description='Styx';$l.Save();[IO.File]::Move($temp,$link)}finally{if(Test-Path -LiteralPath $temp){Remove-Item -LiteralPath $temp -Force}}
+  try{$w=New-Object -ComObject WScript.Shell;$l=$w.CreateShortcut($temp);$l.TargetPath=$s.target;$l.Arguments=$s.arguments;$l.WorkingDirectory=$s.workingDirectory;$l.Description='Styx';$l.Save();$acl=Get-Acl -LiteralPath $temp;$acl.SetOwner([Security.Principal.SecurityIdentifier]::new($sid));Set-Acl -LiteralPath $temp -AclObject $acl;[IO.File]::Move($temp,$link)}finally{if(Test-Path -LiteralPath $temp){Remove-Item -LiteralPath $temp -Force}}
  }else{throw 'app_login_action_invalid'}
  $r=Read-Link
 }

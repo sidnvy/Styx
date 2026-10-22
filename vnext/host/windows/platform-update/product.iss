@@ -58,8 +58,8 @@ function InstallRoot: String;
 begin
   Result := ExpandConstant('{localappdata}\Programs\{#InstallFolder}');
 end;
-procedure CaptureOwnedStartup;
-var Shell, Link: Variant; Target, Folder, VersionName, StateRoot: String; I: Integer;
+procedure CaptureOwnedStartup(Gate: String);
+var Shell, Link: Variant; Target, Folder, VersionName, StateRoot: String; I, Code: Integer;
 begin
   StartupOwned := False;
   if not FileExists(StartupPath) then exit;
@@ -80,6 +80,8 @@ begin
     if Copy(StartupArgs, Length(StartupArgs), 1) <> '"' then exit;
     StateRoot := Copy(StartupArgs, 24, Length(StartupArgs) - 24);
     if (Length(StateRoot) < 3) or (Copy(StateRoot, 2, 2) <> ':\') or (Pos('"', StateRoot) <> 0) or (Pos(#13, StateRoot) <> 0) or (Pos(#10, StateRoot) <> 0) then exit;
+    if not Exec(Gate, 'check-login "' + InstallRoot + '" "' + StateRoot + '" "' + Folder + '" "' + StartupPath + '"', '', SW_HIDE, ewWaitUntilTerminated, Code) then exit;
+    if Code <> 0 then exit;
     StartupHash := GetSHA256OfFile(StartupPath); StartupOwned := True;
   except
     Log('The startup shortcut is not an owned Styx entry; leaving it unchanged.');
@@ -118,7 +120,7 @@ begin
   ExtractTemporaryFile('StyxInstallGate.exe');
   // SetupMutex is held here. Recheck AppMutex to close the startup race.
   Result := CheckIdle(ExpandConstant('{tmp}\StyxInstallGate.exe'));
-  if Result = '' then CaptureOwnedStartup;
+  if Result = '' then CaptureOwnedStartup(ExpandConstant('{tmp}\StyxInstallGate.exe'));
 end;
 function InitializeUninstall: Boolean;
 var Problem: String;
@@ -131,6 +133,6 @@ begin
     if not UninstallSilent then MsgBox(Problem, mbInformation, MB_OK);
     exit;
   end;
-  CaptureOwnedStartup;
+  CaptureOwnedStartup(ExpandConstant('{app}\.installer\StyxInstallGate.exe'));
   Result := True;
 end;
