@@ -590,17 +590,28 @@ struct ProductAcceptanceField: NSViewRepresentable {
         model.clearSecrets()
         Task {
             do {
-                if !model.loaded { await model.bootstrap() }
-                guard model.session["nativeAppLifecycleSupported"].bool else { throw ProductCoreError.unavailable }
-                _ = try await model.client.write("app/quit", ["authorize": .bool(true)])
+                // Quitting needs only the authenticated lifecycle endpoint. A
+                // page bootstrap also scans connections and must not hold quit.
+                let session = try await model.client.read("session")
+                guard session["nativeAppLifecycleSupported"].bool else { throw ProductCoreError.unavailable }
+                let lifecycle = try await model.client.write("app/quit", ["authorize": .bool(true)])["lifecycle"]
+                guard ["suspended", "absent"].contains(lifecycle["currentSessionRecovery"].string ?? ""),
+                      lifecycle["loaded"] == .bool(false), lifecycle["running"] == .bool(false),
+                      lifecycle["loginPreference"].string == "unchanged" else { throw ProductCoreError.invalidResponse }
                 observationTimer?.invalidate(); observationTimer = nil
                 menuSizeTimer?.invalidate(); menuSizeTimer = nil; menuPopover?.performClose(nil); settingsWindow?.close()
                 completion(true)
             } catch {
+                // Resolve AppKit's pending termination before presenting UI.
+                // Dismissing an error must never be required to release quit.
+                completion(false)
                 let alert = NSAlert()
                 alert.messageText = productText("暂时无法安全退出 Styx", "Styx could not finish quitting")
-                alert.informativeText = productText("Styx 的连接还未完全停止。请稍等片刻，再选择“退出 Styx”。", "Styx connections have not finished stopping. Wait a moment, then choose Quit Styx again.")
-                alert.runModal(); completion(false)
+                alert.informativeText = productText("尚未确认 Styx 的自动恢复已暂停。请稍后再次选择“退出 Styx”。", "Styx could not confirm that automatic recovery was paused. Try Quit Styx again shortly.")
+                if let parent = window {
+                    showWindow(nil); NSApp.activate(ignoringOtherApps: true)
+                    alert.beginSheetModal(for: parent) { _ in }
+                }
             }
         }
     }
