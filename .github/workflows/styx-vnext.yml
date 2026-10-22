@@ -48,6 +48,24 @@ jobs:
         run: npm run quality -- acceptance/quality
       - name: Real executor via authenticated MCP and native process RPC
         run: node ci/acceptance.mjs native-exec acceptance/native-exec
+      - name: Report failed fixture details
+        if: failure()
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const root='acceptance/quality/fixtures',file=root+'/receipt.json';
+          if(fs.existsSync(file)){
+            const receipt=JSON.parse(fs.readFileSync(file,'utf8'));
+            console.log(JSON.stringify({revision:receipt.revision,status:receipt.status,suites:receipt.suites},null,2));
+            for(const suite of receipt.suites??[]){
+              if(suite.status!=='FAIL'||!/^[-a-z]+\.tap$/.test(suite.log??''))continue;
+              const lines=fs.readFileSync(root+'/'+suite.log,'utf8').split('\n');let shown=0;
+              for(let i=0;i<lines.length&&shown<20;i++)if(/^\s*not ok \d+/.test(lines[i])){
+                console.log(lines.slice(Math.max(0,i-1),i+30).join('\n'));shown++;
+              }
+            }
+          }
+          NODE
       - name: Preserve acceptance receipts even on failure
         if: always()
         uses: actions/upload-artifact@v4
