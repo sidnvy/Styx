@@ -21,11 +21,15 @@
 
 候选安装器是当前用户范围的开发预览；工程记录必须注明 Authenticode 签名和实际安装窗口验收是否完成。
 
-## Linux：Arch / headless CLI
+## Linux：Arch CLI / headless / Hyprland
 
 按 [Linux 首次运行步骤](linux-cli-preview.md#first-local-run-headless-gateway-only) 使用独立私有状态目录。Gateway-only 不应安装或启动 Host、Exec、Cua，也不应要求桌面权限。
 
-Host-only 通过邀请加入已有 Gateway，不创建第二个 Gateway。分别执行真实命令，并使用已经安装的 Chrome 或 Edge 做网页观察、输入与点击。浏览器使用独立资料目录；保留登录需要用户完成一次登录。首轮不包含 Linux 桌面 App 或 Computer Use。
+Host-only 通过邀请加入已有 Gateway，不创建第二个 Gateway。分别执行真实命令，并使用已经安装的 Chrome 或 Edge 做网页观察、输入与点击。浏览器使用独立资料目录；保留登录需要用户完成一次登录。Linux 使用 CLI 管理，不提供桌面 App。
+
+首轮支持 Hyprland 会话中的 Computer Use。选择该能力后，在当前已登录、可交互的 Hyprland 桌面上，通过 Styx 观察一个专用测试窗口，读取截图或界面元素，再执行一次无害操作并核对结果。仅启动驱动或检查版本不算桌面验收。
+
+没有图形会话的 headless 环境不应启动 Cua，也不能显示 Computer Use 就绪；Exec 和 headless Browser Automation 应仍可工作。分别记录无 GUI 隔离环境、实际注销后重新登录、整机重启后的结果；前一项通过不代替后两项。
 
 ## 最后共同检查
 
