@@ -6,7 +6,7 @@ import {createHash,randomBytes} from 'node:crypto';
 import {execFileSync} from 'node:child_process';
 import {requirePrivateFile,requirePrivateDirectory,ensurePrivateDirectory} from '../host/private-storage.mjs';
 import {activeRelease,verifySignedRelease,verifiedServiceNode} from '../host/installer.mjs';
-import {linuxUserUnit,installLinuxService,systemdUser,statusUserService} from '../host/linux-service.mjs';
+import {linuxUserUnit,knownLinuxUserUnit,installLinuxService,systemdUser,statusUserService} from '../host/linux-service.mjs';
 import {macHostExecutionIdentity} from '../host/macos-native-launcher.mjs';
 import {macLaunchAgent,writeMacLaunchAgent,controlMacLaunchAgent,statusMacLaunchAgent} from '../host/macos-launchagent.mjs';
 const assert=(v,c)=>{if(!v)throw Error(c)};
@@ -89,7 +89,7 @@ export async function hostServiceAction({action,role='host',serviceConfigFile,au
   }else{
    observe=()=>fixedWindows(run,d,release,'status');control=verb=>fixedWindows(run,d,release,verb);
   }
-  const binding=()=>{if(file){requirePrivateFile(file);assert(fs.readFileSync(file,'utf8')===expected,'service_definition_scope_mismatch')}else{const state=observe();if(state.status==='not_installed')return;const native=JSON.parse(String(run('powershell.exe',['-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(windowsInspect,'utf16le').toString('base64')],{env:{...process.env,STYX_SERVICE_NAME:d.id},encoding:'utf8',timeout:15000,windowsHide:true,stdio:['ignore','pipe','pipe']})));assert(native.execute===d.nodeBinary&&native.working===d.installRoot&&native.arguments===['launch.mjs','',d.hostConfigFile,d.trustPublicKeyFile].map((p,i)=>'"'+(i===0?path.join(d.installRoot,p):i===1?d.installRoot:p)+'"').join(' '),'service_definition_scope_mismatch')}};
+  const binding=()=>{if(file){requirePrivateFile(file);assert(platform==='linux'?knownLinuxUserUnit(fs.readFileSync(file,'utf8'),options):fs.readFileSync(file,'utf8')===expected,'service_definition_scope_mismatch')}else{const state=observe();if(state.status==='not_installed')return;const native=JSON.parse(String(run('powershell.exe',['-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from(windowsInspect,'utf16le').toString('base64')],{env:{...process.env,STYX_SERVICE_NAME:d.id},encoding:'utf8',timeout:15000,windowsHide:true,stdio:['ignore','pipe','pipe']})));assert(native.execute===d.nodeBinary&&native.working===d.installRoot&&native.arguments===['launch.mjs','',d.hostConfigFile,d.trustPublicKeyFile].map((p,i)=>'"'+(i===0?path.join(d.installRoot,p):i===1?d.installRoot:p)+'"').join(' '),'service_definition_scope_mismatch')}};
   if(action==='install'){
    assert(!file||!fs.existsSync(file),'service_already_installed');
    attempted=true;

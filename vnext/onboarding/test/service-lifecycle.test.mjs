@@ -74,3 +74,11 @@ test('read-only service observation constructs fixed scope and never mutates nat
  assert.equal(result.status,'reported');assert.equal(result.installed,false);
  assert.deepEqual(native.calls.map(c=>c[1]),['show']);
 });
+test('known legacy simple unit remains manageable without rewriting its installed definition',{skip:!linux},async t=>{
+ const f=fixture(t),native=manager(),options={home:f.home,run:native.run};
+ assert.equal((await hostServiceAction(f.request('install'),options)).status,'reported');
+ const unit=path.join(f.home,'.config/systemd/user',f.id),legacy=fs.readFileSync(unit,'utf8').replace('Type=exec\n','Type=simple\n');fs.writeFileSync(unit,legacy);
+ assert.equal((await hostServiceAction(f.request('start'),options)).state,'running');
+ assert.equal((await hostServiceAction(f.request('stop'),options)).state,'stopped');
+ assert.equal(fs.readFileSync(unit,'utf8'),legacy);
+});
