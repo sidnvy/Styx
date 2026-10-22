@@ -34,3 +34,37 @@ test('native desktop entrypoint is package pinned and rejects noninteractive/sec
  assert.equal(nativeDesktopAvailable(root,pin,{run:()=>{throw Error('unavailable');},platform:'win32'}),false);
  assert.equal(nativeDesktopAvailable(root,pin,{run:()=>'x'.repeat(4097),platform:'win32'}),false);
 });
+
+
+test('concurrent status reads share one snapshot, then observe fresh state without mutations',async()=>{
+ const routes=[];let release,count=0;
+ const client=await createClient({url,desktopAcceptanceSupported:true},{fetchImpl:async(address,options)=>{
+  const route=new URL(address).pathname.slice(5);routes.push(route);assert.equal(options.method,'GET');assert.equal(options.body,undefined);
+  let data=route==='session'?{csrf:'B'.repeat(43)}:{};
+  if(route==='snapshot'){count++;if(count===1)await new Promise(resolve=>release=resolve);data={status:{foreground:{status:count===1?'started':'connected'}}};}
+  return {ok:true,headers:new Headers({'content-type':'application/json'}),text:async()=>JSON.stringify(data)};
+ }});
+ const first=client.dispatch(req('status')),second=client.dispatch(req('status'));assert.equal(count,1);release();
+ const [a,b]=await Promise.all([first,second]);assert.deepEqual(a,b);assert.equal(a.session.desktopAcceptanceSupported,true);assert.equal(a.status.foreground.status,'started');
+ assert.equal((await client.dispatch(req('status'))).status.foreground.status,'connected');assert.deepEqual(routes,['session','snapshot','snapshot']);
+});
+
+test('a failed observation is not cached and does not prevent a later refresh',async()=>{
+ let count=0;const client=await createClient({url},{fetchImpl:async address=>{const route=new URL(address).pathname.slice(5);if(route==='snapshot'&&++count===1)throw Error('private transport details');const data=route==='session'?{csrf:'B'.repeat(43)}:{status:{foreground:{status:'connected'}}};return {ok:true,headers:new Headers({'content-type':'application/json'}),text:async()=>JSON.stringify(data)};}});
+ await assert.rejects(client.dispatch(req('status')));assert.equal((await client.dispatch(req('status'))).status.foreground.status,'connected');assert.equal(count,2);
+});
+
+test('native desktop readback sends only current challenge evidence; unknown browser preferences stay omitted',async()=>{
+ const f=fixture(),client=await createClient({url},{fetchImpl:f.fetchImpl});
+ await client.dispatch(req('acceptanceDesktopReadback',{challengeId:'a'.repeat(32),value:'STYX_GUI_'+'b'.repeat(32),pid:123,windowId:456,authorize:false,nativeAppGeneration:'forged'}));
+ assert.equal(f.requests.at(-1).route,'acceptance/desktop-readback');assert.deepEqual(f.requests.at(-1).body,{authorize:true,challengeId:'a'.repeat(32),value:'STYX_GUI_'+'b'.repeat(32),pid:123,windowId:456});
+ await client.dispatch(req('setCapabilities',{computer:true,browser:false}));assert.deepEqual(f.requests.at(-1).body,{authorize:true,computer:true,browser:false});
+});
+
+test('only the two fixed native binding failures cross HTTP and pipe boundaries',async()=>{
+ for(const reason of ['windows_native_app_binding_required','desktop_acceptance_native_app_changed','private-path-token-value']){
+  const client=await createClient({url},{fetchImpl:async address=>{const session=new URL(address).pathname==='/api/session';return {ok:session,headers:new Headers({'content-type':'application/json'}),text:async()=>JSON.stringify(session?{csrf:'B'.repeat(43)}:{error:reason,detail:'NEVER_EXPOSE_PRIVATE_DETAIL'})};}});
+  const input=new PassThrough(),output=new PassThrough();let result='';output.on('data',data=>result+=data);input.end(JSON.stringify(req('acceptanceBegin'))+'\n');await serve({input,output,instance:{url,close:async()=>{}},client});
+  const response=JSON.parse(result.trim());assert.equal(response.ok,false);assert.equal(response.error,reason==='private-path-token-value'?'operation_failed_review_settings':reason);assert(!result.includes('NEVER_EXPOSE_PRIVATE_DETAIL'));assert(!result.includes('private-path-token-value'));
+ }
+});

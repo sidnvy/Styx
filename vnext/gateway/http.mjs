@@ -17,8 +17,9 @@ function authorize(req, digest, hosts, origins) {
   return timingSafeEqual(actual, digest) ? null : 401;
 }
 
-// MCP's HTTP session is the model invocation owner. A new authenticated
-// connection cannot reuse an old process or GUI element reference.
+// Ordinary clients own resources per authenticated HTTP session. The private
+// App-owned Tunnel may bind a verified conversation across transport sessions;
+// neither bearer possession nor caller-selected metadata alone enables this.
 export async function createGatewayHttp(gateway, {
   token, host = '127.0.0.1', port = 8795, allowedHosts, allowedOrigins = [],
   idleSessionTimeoutMs = 15 * 60 * 1000,

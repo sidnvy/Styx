@@ -222,3 +222,40 @@ test('real native Browser data URL and snapshot reach the production MCP accepta
   const proof=readDeploymentAcceptance(f.stateDir);assert.equal(proof.browser.status,'verified');assert.equal(proof.browser.source,'authenticated_mcp_browser_result');assert.equal(proof.desktop.status,'not_required');assert.equal(proof.requestProof.status,'pending');assert.equal(proof.complete,false);assert.equal(proof.targetChatConfirmation.providerIdentity,'not_verified');
  }finally{await client.close();await http.close();await supervisor.close();}
 });
+
+test('Windows desktop challenge requires runtime authority and rejects caller-supplied identity',t=>{
+ const f=fixture(t,{desktop:true,platform:'win32'}),identity={source:'current_windows_native_app',nativeAppPid:123,nativeAppGeneration:'638900000000000000'};
+ f.put(path.join(f.stateDir,'windows-native-app.json'),identity);
+ for(const nativeDesktopApp of [undefined,()=>({source:'current_native_app_preflight',nativeAppPid:123}),()=>({...identity,nativeAppGeneration:123}),()=>({...identity,nativeAppGeneration:'not-a-generation'}),()=>({...identity,nativeAppPid:0}),()=>{throw Error('untrusted detail');}]){
+  assert.throws(()=>beginDeploymentAcceptance(f.stateDir,{authorize:true},{nativeDesktopApp}),/^Error: windows_native_app_binding_required$/);
+  assert.equal(readDeploymentAcceptance(f.stateDir).status,'not_started');
+ }
+ for(const callerInput of [{pid:123},{nativeAppPid:123},{nativeAppGeneration:identity.nativeAppGeneration},{nativeDesktopApp:identity}])assert.throws(()=>beginDeploymentAcceptance(f.stateDir,{authorize:true,...callerInput},{nativeDesktopApp:()=>identity}),/invalid_acceptance_options/);
+ const a=beginDeploymentAcceptance(f.stateDir,{authorize:true},{nativeDesktopApp:()=>identity});
+ assert.match(a.challenge.prompt,/pid 123/);assert.match(a.challenge.command,/^Write-Output/);assert.equal(a.desktop.status,'pending');assert.equal(a.complete,false);
+ const record=JSON.parse(fs.readFileSync(path.join(f.stateDir,'account-acceptance.json')));assert.equal(record.desktopAppPid,123);assert.equal(record.desktopAppGeneration,identity.nativeAppGeneration);
+ const browserOnly=fixture(t,{browser:true,platform:'win32'});
+ assert.equal(beginDeploymentAcceptance(browserOnly.stateDir,{authorize:true},{nativeDesktopApp:()=>{throw Error('not required');}}).desktop.status,'not_required');
+});
+test('synthetic Windows authority contract still requires observed Cua action and independent native readback',t=>{
+ const f=fixture(t,{desktop:true,platform:'win32'}),identity={source:'current_windows_native_app',nativeAppPid:123,nativeAppGeneration:'638900000000000000'},runtime={nativeDesktopApp:()=>identity};
+ const a=beginDeploymentAcceptance(f.stateDir,{authorize:true},runtime);
+ const readback={authorize:true,challengeId:a.challenge.id,value:a.challenge.desktopValue,pid:123,windowId:45};
+ assert.throws(()=>recordDeploymentDesktopReadback(f.stateDir,readback),/^Error: desktop_acceptance_native_app_changed$/);
+ assert.throws(()=>recordDeploymentDesktopReadback(f.stateDir,{...readback,nativeAppGeneration:identity.nativeAppGeneration},runtime),/invalid_acceptance_options/);
+ recordDeploymentDesktopReadback(f.stateDir,readback,runtime);f.observer(f.event(a.challenge));
+ assert.equal(readDeploymentAcceptance(f.stateDir).desktop.status,'pending');
+ const observation={name:'get_window_state',args:{environment_id:f.target.id,pid:123,window_id:45},result:{content:[{type:'image',data:'synthetic-contract-only',mimeType:'image/png'}],structuredContent:{snapshot_id:'s00000001',screenshot_frame_valid:true}}};
+ const action={name:'type_text',args:{environment_id:f.target.id,element_token:'s00000001:7',text:a.challenge.desktopValue},operationId:'synthetic-windows-contract-action',result:{content:[]}};
+ f.observer(f.event(a.challenge,observation));f.observer.before(f.event(a.challenge,action));f.observer(f.event(a.challenge,action));f.observer(f.event(a.challenge,observation));
+ assert.equal(readDeploymentAcceptance(f.stateDir).desktop.status,'pending','the MCP action clears earlier manual/native values');
+ for(const changed of [{...identity,nativeAppPid:124},{...identity,nativeAppGeneration:'638900000000000001'},{source:'not_observed'}])assert.throws(()=>recordDeploymentDesktopReadback(f.stateDir,readback,{nativeDesktopApp:()=>changed}),/^Error: desktop_acceptance_native_app_changed$/);
+ assert.equal(readDeploymentAcceptance(f.stateDir).desktop.status,'pending');
+ assert.throws(()=>confirmDeploymentAcceptance(f.stateDir,{authorize:true,challengeId:a.challenge.id,observedInTargetChat:true}),/actual_mcp_acceptance_evidence_required/);
+ recordDeploymentDesktopReadback(f.stateDir,{...readback,value:'unrelated'},runtime);assert.equal(readDeploymentAcceptance(f.stateDir).desktop.status,'pending');
+ assert.throws(()=>recordDeploymentDesktopReadback(f.stateDir,{...readback,challengeId:'different'},runtime),/desktop_acceptance_scope_mismatch/);
+ recordDeploymentDesktopReadback(f.stateDir,readback,runtime);
+ assert.equal(readDeploymentAcceptance(f.stateDir).desktop.status,'verified');assert.equal(readDeploymentAcceptance(f.stateDir).complete,false);
+ const saved=JSON.parse(fs.readFileSync(path.join(f.stateDir,'account-acceptance.json')));assert.equal(saved.desktop.readbackGeneration,identity.nativeAppGeneration);
+ assert.equal(confirmDeploymentAcceptance(f.stateDir,{authorize:true,challengeId:a.challenge.id,observedInTargetChat:true}).complete,true,'contract fixtures validate Core predicates only, never real desktop completion');
+});

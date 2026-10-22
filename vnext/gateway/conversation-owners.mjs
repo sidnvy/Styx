@@ -16,7 +16,10 @@ export class ConversationOwners {
   const scope=JSON.stringify([this.principal,meta['openai/organization']??null,meta['openai/subject'],meta['openai/session']]);
   const owner='tunnel-conversation:'+createHmac('sha256',this.key).update(scope).digest('hex');
   let state=this.states.get(owner);
-  if(!state){state={active:0,last:this.clock()};this.states.set(owner,state);}
+  // Idle cleanup may already be closing this conversation's resources. Wait
+  // before dispatching new work so that old cleanup cannot erase its state.
+  while(state?.closing){await state.closing;state=this.states.get(owner);}
+  if(!state){state={active:0,last:this.clock(),closing:null};this.states.set(owner,state);}
   state.active++;state.last=this.clock();
   const profile=createHmac('sha256',this.key).update('browser-profile\0'+JSON.stringify([this.principal,meta['openai/organization']??null,meta['openai/subject']])).digest('hex');
   this.gateway.browser?.bindPrincipal?.(owner,profile);
@@ -25,8 +28,12 @@ export class ConversationOwners {
  async reap(timeout) {
   if(!timeout)return;
   for(const [owner,state]of this.states) {
-   if(state.active||state.last>this.clock()-timeout||this.gateway.hasOwnerWork?.(owner))continue;
-   this.states.delete(owner);await this.gateway.closeOwner?.(owner);
+   if(state.closing||state.active||state.last>this.clock()-timeout||this.gateway.hasOwnerWork?.(owner))continue;
+   state.closing=Promise.resolve().then(async()=>{
+    await this.gateway.closeOwner?.(owner);
+    if(this.states.get(owner)===state)this.states.delete(owner);
+   });
+   await state.closing;
   }
  }
 }

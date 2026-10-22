@@ -7,7 +7,7 @@ import {execFileSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {requirePrivateFile} from '../host/private-storage.mjs';
 import {verifySignedRelease} from '../host/installer.mjs';
-import {GATEWAY_SOURCE_FILES,GATEWAY_ENTRYPOINT,productionDependencyFile} from './gateway-release-contract.mjs';
+import {GATEWAY_SOURCE_FILES,GATEWAY_ENTRYPOINT,productionDependencyFile,productionDependencyPath} from './gateway-release-contract.mjs';
 const ROOT=fileURLToPath(new URL('../',import.meta.url));
 const fail=code=>{throw Error(code)};
 const abs=value=>typeof value==='string'&&path.isAbsolute(value)&&path.normalize(value)===value;
@@ -53,7 +53,7 @@ function walkDependency(root,relative=''){
   const name=relative?relative+'/'+entry.name:entry.name;
   if(entry.isSymbolicLink())fail('gateway_dependency_symlink_forbidden');
   if(entry.isDirectory()){
-   if(!['node_modules','test','tests','__tests__','fixtures','__fixtures__','examples','benchmark','benchmarks','docs'].includes(entry.name))files.push(...walkDependency(root,name));
+   if(productionDependencyPath(name))files.push(...walkDependency(root,name));
   }else if(entry.isFile()&&productionDependencyFile(name))files.push(name);
   else if(!entry.isFile())fail('gateway_dependency_nonregular_member');
  }

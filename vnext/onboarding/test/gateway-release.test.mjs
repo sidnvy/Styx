@@ -4,7 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import net from 'node:net';
-import {generateKeyPairSync} from 'node:crypto';
+import {createHash,generateKeyPairSync,sign} from 'node:crypto';
 import {execFileSync,spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {once} from 'node:events';
@@ -17,6 +17,7 @@ import {readGatewayDeployment} from '../gateway-deployment-reader.mjs';
 import {verifyGatewayConnection} from '../connection.mjs';
 import {planGatewayRuntimeChange,applyGatewayRuntimeChange} from '../gateway-runtime-update.mjs';
 const source=fileURLToPath(new URL('../../',import.meta.url));
+const digest=bytes=>createHash('sha256').update(bytes).digest('hex');
 function fixture(t){
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'styx-gateway-release-'));fs.chmodSync(root,0o700);t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
  const keys=generateKeyPairSync('ed25519'),privateKeyFile=path.join(root,'private.pem'),publisherKeyFile=path.join(root,'publisher.pem'),nodeLicenseFile=path.join(root,'NODE-LICENSE');
@@ -35,12 +36,47 @@ test('contained Gateway build accepts only tracked source and locked production 
  const manifest=JSON.parse(fs.readFileSync(path.join(f.options.destination,'manifest.json'),'utf8'));assert.deepEqual(manifest.files.filter(e=>!e.path.startsWith('bin/')&&!gatewayApplicationFile(e.path)).map(e=>e.path),[]);
  const verified=verifyGatewayRuntimeRelease(f.options.destination,pub);assert.equal(verified.manifest.component,'gateway-application');assert.ok(result.dependencies>2);
  assert.ok(!verified.manifest.files.some(e=>e.executable&&!/^bin\/node(?:\.exe)?$/.test(e.path)));
- assert.ok(!verified.manifest.files.some(e=>/(?:^|\/)(?:test|tests|fixtures|__tests__|__fixtures__|examples)(?:\/|$)|bin\/(?:codex|cua-driver)/.test(e.path)));
+ assert.ok(!verified.manifest.files.some(e=>!e.path.startsWith('app/node_modules/')&&/(?:^|\/)(?:test|tests|fixtures|__tests__|__fixtures__|examples)(?:\/|$)|^bin\/(?:codex|cua-driver)/.test(e.path)));
+ for(const entry of manifest.files){const bytes=fs.readFileSync(path.join(f.options.destination,entry.path));assert.equal(bytes.length,entry.size,entry.path);assert.equal(digest(bytes),entry.sha256,entry.path);}
+ for(const name of ['gateway/conversation-owners.mjs','onboarding/tunnel-context.mjs'])assert.ok(manifest.files.some(e=>e.path==='app/'+name),name);
  assert.equal(verified.manifest.files.filter(e=>e.path.startsWith('app/host/')).length,1);
  assert.ok(!fs.existsSync(path.join(f.options.destination,'app/onboarding/core.mjs')));
  const provenance=JSON.parse(fs.readFileSync(path.join(f.options.destination,'provenance/gateway-build.json'),'utf8'));assert.equal(provenance.nativePlatformAcceptance,'NOT RUN');
  const other=path.join(f.root,'untracked-build');execFileSync('git',['-C',f.publisherSource,'rm','--cached','onboarding/gateway-deployment-reader.mjs']);
  assert.throws(()=>buildGatewayRelease({...f.options,destination:other}),/untracked_gateway_release_source/);assert.equal(fs.existsSync(other),false);
+});
+test('a correctly signed application missing either shared session module is refused',t=>{
+ const f=fixture(t);buildGatewayRelease(f.options);const file=path.join(f.options.destination,'manifest.json'),original=fs.readFileSync(file),manifest=JSON.parse(original),signature=fs.readFileSync(path.join(f.options.destination,'manifest.sig'));
+ for(const name of ['app/gateway/conversation-owners.mjs','app/onboarding/tunnel-context.mjs']){
+  const member=path.join(f.options.destination,name),bytes=fs.readFileSync(member),incomplete={...manifest,files:manifest.files.filter(e=>e.path!==name)},raw=JSON.stringify(incomplete)+'\n';
+  fs.unlinkSync(member);fs.writeFileSync(file,raw);fs.writeFileSync(path.join(f.options.destination,'manifest.sig'),sign(null,Buffer.from(raw),f.keys.privateKey).toString('base64url'));
+  assert.throws(()=>verifyGatewayRuntimeRelease(f.options.destination,f.keys.publicKey.export({format:'pem',type:'spki'})),/complete_signed_gateway_application_required/,name);
+  fs.writeFileSync(member,bytes,{mode:0o600});fs.writeFileSync(file,original);fs.writeFileSync(path.join(f.options.destination,'manifest.sig'),signature);
+ }
+});
+test('locked runtime imports survive test, tests and fixtures directories without private state',t=>{
+ const f=fixture(t),dependenciesRoot=path.join(f.root,'locked-dependencies'),pkg=JSON.parse(fs.readFileSync(path.join(f.publisherSource,'package.json'))),packages={'':{dependencies:pkg.dependencies}};
+ const put=(name,data)=>{const file=path.join(dependenciesRoot,name);fs.mkdirSync(path.dirname(file),{recursive:true});fs.writeFileSync(file,data);};
+ for(const name of ['@modelcontextprotocol/sdk','ws']){
+  const version=pkg.dependencies[name];packages['node_modules/'+name]={version,integrity:'sha512-dGVzdA=='};
+  put(name+'/package.json',JSON.stringify({name,version,type:'commonjs',main:'index.cjs'}));put(name+'/index.cjs',name==='ws'?'module.exports = {};':'module.exports = require("./test/loader.cjs");');
+ }
+ put('@modelcontextprotocol/sdk/test/loader.cjs','module.exports = require("../tests/runtime.cjs");');
+ put('@modelcontextprotocol/sdk/tests/runtime.cjs','module.exports = require("../fixtures/value.json");');
+ put('@modelcontextprotocol/sdk/fixtures/value.json',JSON.stringify({status:'locked runtime executed'}));
+ for(const name of ['.cache/private.json','profiles/private.json','.env.local.json','runtime.log','runtime.tmp'])put('@modelcontextprotocol/sdk/'+name,'PRIVATE_STATE_DO_NOT_SHIP');
+ fs.writeFileSync(path.join(f.publisherSource,'package-lock.json'),JSON.stringify({lockfileVersion:3,packages}));
+ buildGatewayRelease({...f.options,dependenciesRoot});
+ const output=path.join(f.options.destination,'app/node_modules/@modelcontextprotocol/sdk'),manifest=JSON.parse(fs.readFileSync(path.join(f.options.destination,'manifest.json')));
+ for(const name of ['test/loader.cjs','tests/runtime.cjs','fixtures/value.json'])assert.ok(manifest.files.some(e=>e.path==='app/node_modules/@modelcontextprotocol/sdk/'+name),name);
+ for(const name of ['.cache','profiles','.env.local.json','runtime.log','runtime.tmp'])assert.equal(fs.existsSync(path.join(output,name)),false,name);
+ if(process.platform!=='win32'){
+  const redirect=path.join(dependenciesRoot,'@modelcontextprotocol/sdk/tests/redirect.cjs');fs.symlinkSync(path.join(output,'index.cjs'),redirect);
+  const destination=path.join(f.root,'redirected');assert.throws(()=>buildGatewayRelease({...f.options,dependenciesRoot,destination}),/gateway_dependency_symlink_forbidden/);assert.equal(fs.existsSync(destination),false);fs.unlinkSync(redirect);
+ }
+ fs.rmSync(f.publisherSource,{recursive:true});fs.rmSync(dependenciesRoot,{recursive:true});
+ const observed=JSON.parse(execFileSync(process.execPath,['-e','console.log(JSON.stringify(require(process.argv[1])))',output],{cwd:f.root,encoding:'utf8',env:{...process.env,NODE_PATH:'',NODE_OPTIONS:''}}));
+ assert.deepEqual(observed,{status:'locked runtime executed'});
 });
 test('signed Gateway runs authenticated MCP after its publisher checkout and original bundle are removed',{timeout:30000},async t=>{
  const f=fixture(t),built=buildGatewayRelease(f.options),second=path.join(f.root,'second-bundle');buildGatewayRelease({...f.options,destination:second,version:'2.0.0-signed-gateway-test'});
