@@ -323,7 +323,11 @@ async function execute(d,c,id,ownerApproval){
  }
  if(id==='host.doctor'){
   const r=await doctor(read(path.join(base,'device','host.json')),{installRoot:path.join(base,'install'),trustPublicKeyFile:path.join(base,'publisher.pem')});
-  return {status:r.status,blockers:r.blockers,warnings:r.warnings};
+  // Preserve bounded, structured probe outcomes for recovery; never persist
+  // arbitrary process output, credentials or the rest of the local checks.
+  return {status:r.status,blockers:r.blockers,warnings:r.warnings,runtimeProbes:{
+   ...(r.checks.executor_probe?{exec:r.checks.executor_probe}:{}),
+   ...(r.checks.computer_probe?{computer:r.checks.computer_probe}:{})}};
  }
  fail('unsupported_onboarding_step');
 }
