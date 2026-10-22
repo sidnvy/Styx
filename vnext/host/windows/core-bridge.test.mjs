@@ -61,8 +61,8 @@ test('native desktop readback sends only current challenge evidence; unknown bro
  await client.dispatch(req('setCapabilities',{computer:true,browser:false}));assert.deepEqual(f.requests.at(-1).body,{authorize:true,computer:true,browser:false});
 });
 
-test('only the two fixed native binding failures cross HTTP and pipe boundaries',async()=>{
- for(const reason of ['windows_native_app_binding_required','desktop_acceptance_native_app_changed','private-path-token-value']){
+test('only fixed actionable native failures cross HTTP and pipe boundaries',async()=>{
+ for(const reason of ['windows_native_app_binding_required','desktop_acceptance_native_app_changed','work_in_progress','work_state_unknown','private-path-token-value']){
   const client=await createClient({url},{fetchImpl:async address=>{const session=new URL(address).pathname==='/api/session';return {ok:session,headers:new Headers({'content-type':'application/json'}),text:async()=>JSON.stringify(session?{csrf:'B'.repeat(43)}:{error:reason,detail:'NEVER_EXPOSE_PRIVATE_DETAIL'})};}});
   const input=new PassThrough(),output=new PassThrough();let result='';output.on('data',data=>result+=data);input.end(JSON.stringify(req('acceptanceBegin'))+'\n');await serve({input,output,instance:{url,close:async()=>{}},client});
   const response=JSON.parse(result.trim());assert.equal(response.ok,false);assert.equal(response.error,reason==='private-path-token-value'?'operation_failed_review_settings':reason);assert(!result.includes('NEVER_EXPOSE_PRIVATE_DETAIL'));assert(!result.includes('private-path-token-value'));
@@ -87,3 +87,15 @@ test('save-and-connect retains the same explicit Tunnel resume choice as the Mac
  assert.deepEqual(f.requests.at(-1).body,{authorize:true,tunnelId:'tunnel_owned_fixture',apiKey:'sk-fixture-not-a-real-key',autoStart:true});
  assert.equal(f.requests.at(-1).route,'tunnel/configure');
 });
+
+test('native component upgrade uses shared handoff APIs and only a trusted launch callback',async()=>{
+ const f=fixture(),ticketId='a'.repeat(32),launches=[];
+ const c=await createClient({url,launchHostPayloadHandoff:async id=>{launches.push(id);return {status:'launched',ticketId:id}}},{fetchImpl:f.fetchImpl});
+ await c.dispatch(req('runtimeUpgradePrepare',{bundle:'C:\\foreign',publisher:'foreign'}));assert.deepEqual(f.requests.at(-1).body,{authorize:true});assert.equal(f.requests.at(-1).route,'host-payload/handoff/prepare');assert.equal(f.requests.at(-1).options.signal,undefined);
+ await c.dispatch(req('runtimeUpgradeLaunch',{ticketId}));assert.deepEqual(launches,[ticketId]);await assert.rejects(c.dispatch(req('runtimeUpgradeLaunch',{ticketId:'../escape'})),/native_handoff_unavailable/);
+ await c.dispatch(req('runtimeUpgradeStatus'));assert.equal(f.requests.at(-1).route,'host-payload/handoff/status');
+ await c.dispatch(req('runtimeUpgradeCancel',{ticketId}));assert.deepEqual(f.requests.at(-1).body,{authorize:true,ticketId});
+ const plain=await createClient({url},{fetchImpl:f.fetchImpl});await assert.rejects(plain.dispatch(req('runtimeUpgradeLaunch',{ticketId})),/native_handoff_unavailable/);
+});
+
+test("native quit requests shared work admission without accepting caller flags",async()=>{const f=fixture(),c=await createClient({url},{fetchImpl:f.fetchImpl});await c.dispatch(req("quitAdmission",{force:true,authorize:false}));assert.deepEqual(f.requests.at(-1).body,{authorize:true});assert.equal(f.requests.at(-1).route,"app/quit-admission");});

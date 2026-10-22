@@ -6,17 +6,18 @@ import {fileURLToPath} from 'node:url';
 import {createHash} from 'node:crypto';
 import {execFileSync} from 'node:child_process';
 import {ensurePrivateDirectory,writePrivateFile,requirePrivateDirectory} from '../private-storage.mjs';
+import {launchWindowsHostPayloadHandoff} from './host-payload-handoff.mjs';
 import {observeWindowsNativeAppAuthority} from './native-app-authority.mjs';
-const SAFE_NATIVE_ERRORS=new Set(['windows_native_app_binding_required','desktop_acceptance_native_app_changed']);
-export const OPERATIONS=Object.freeze(['status','create','inspectJoin','join','prepare','connect','disconnect','setCapabilities','tunnelSave','tunnelStart','tunnelStop','acceptanceBegin','acceptanceConfirm','acceptanceDesktopReadback','devices','setDefault','revokeDevice','inviteComputer','closePairing','recoverIngress','pendingComputers','approveComputer']);
+const SAFE_NATIVE_ERRORS=new Set(['windows_native_app_binding_required','desktop_acceptance_native_app_changed','work_in_progress','work_state_unknown']);
+export const OPERATIONS=Object.freeze(['status','create','inspectJoin','join','prepare','connect','disconnect','setCapabilities','tunnelSave','tunnelStart','tunnelStop','acceptanceBegin','acceptanceConfirm','acceptanceDesktopReadback','devices','setDefault','revokeDevice','inviteComputer','closePairing','recoverIngress','pendingComputers','approveComputer','runtimeUpgradePrepare','runtimeUpgradeLaunch','runtimeUpgradeStatus','runtimeUpgradeCancel','quitAdmission']);
 export function bootstrap(url){const u=new URL(url);if(u.protocol!=='http:'||u.hostname!=='127.0.0.1'||!u.port||u.pathname!=='/'||u.search||u.username||u.password||!/^#session=[A-Za-z0-9_-]{43}$/.test(u.hash))throw Error('invalid_bootstrap');const token=u.hash.slice(9);u.hash='';return {origin:u.origin,token};}
 export async function createClient(instance,{fetchImpl=fetch}={}){
  const {origin,token}=bootstrap(instance.url);let csrf;
- const call=async(route,body)=>{const response=await fetchImpl(origin+'/api/'+route,{method:body?'POST':'GET',redirect:'error',headers:{Authorization:'Bearer '+token,Origin:origin,...(body?{'Content-Type':'application/json','X-Styx-CSRF':csrf}:{})},...(body?{body:JSON.stringify(body)}:{}),...(['advance','local-setup','browser/prepare'].includes(route)?{}:{signal:AbortSignal.timeout(body?120000:20000)})});if(!response.headers.get('content-type')?.startsWith('application/json'))throw Error('core_rejected');const text=await response.text();if(Buffer.byteLength(text)>2*1024*1024)throw Error('core_response_too_large');const value=JSON.parse(text);if(!response.ok)throw Error(SAFE_NATIVE_ERRORS.has(value?.error)?value.error:'core_rejected');return value;};
+ const call=async(route,body)=>{const response=await fetchImpl(origin+'/api/'+route,{method:body?'POST':'GET',redirect:'error',headers:{Authorization:'Bearer '+token,Origin:origin,...(body?{'Content-Type':'application/json','X-Styx-CSRF':csrf}:{})},...(body?{body:JSON.stringify(body)}:{}),...(['advance','local-setup','browser/prepare','host-payload/handoff/prepare'].includes(route)?{}:{signal:AbortSignal.timeout(body?120000:20000)})});if(!response.headers.get('content-type')?.startsWith('application/json'))throw Error('core_rejected');const text=await response.text();if(Buffer.byteLength(text)>2*1024*1024)throw Error('core_response_too_large');const value=JSON.parse(text);if(!response.ok)throw Error(SAFE_NATIVE_ERRORS.has(value?.error)?value.error:'core_rejected');return value;};
  const session=await call('session');csrf=session.csrf;if(!/^[A-Za-z0-9_-]{43}$/.test(csrf??''))throw Error('invalid_csrf');let inspected,accepted,observation;
  const observe=()=>{
   if(!observation){
-   const pending=call('snapshot').then(snapshot=>({session:{localGatewayAvailable:session.localGatewayAvailable,tunnelSupported:session.tunnelSupported,artifactsAvailable:!!session.defaults?.bundle,desktopAcceptanceSupported:instance.desktopAcceptanceSupported===true},...snapshot}));
+   const pending=call('snapshot').then(snapshot=>({session:{localGatewayAvailable:session.localGatewayAvailable,tunnelSupported:session.tunnelSupported,artifactsAvailable:!!session.defaults?.bundle,desktopAcceptanceSupported:instance.desktopAcceptanceSupported===true,hostPayloadHandoffSupported:instance.hostPayloadHandoffSupported===true},...snapshot}));
    observation=pending;
    const clear=()=>{if(observation===pending)observation=undefined;};pending.then(clear,clear);
   }
@@ -25,6 +26,14 @@ export async function createClient(instance,{fetchImpl=fetch}={}){
  return {async dispatch(request){
   if(!request||request.schema!==1||!Number.isSafeInteger(request.id)||!OPERATIONS.includes(request.operation)||!request.input||typeof request.input!=='object'||Array.isArray(request.input))throw Error('invalid_native_request');
   const i=request.input,op=request.operation;
+  if(op==='quitAdmission')return call('app/quit-admission',{authorize:true});
+  if(op==='runtimeUpgradePrepare')return call('host-payload/handoff/prepare',{authorize:true});
+  if(op==='runtimeUpgradeStatus')return call('host-payload/handoff/status',{});
+  if(op==='runtimeUpgradeCancel')return call('host-payload/handoff/cancel',{authorize:true,ticketId:i.ticketId});
+  if(op==='runtimeUpgradeLaunch'){
+   if(typeof instance.launchHostPayloadHandoff!=='function'||!/^[a-f0-9]{32}$/.test(i.ticketId??''))throw Error('native_handoff_unavailable');
+   return instance.launchHostPayloadHandoff(i.ticketId);
+  }
   if(op==='devices')return call('devices',{});
   if(op==='pendingComputers')return call('pending/list',{authorize:true});
   if(op==='approveComputer')return call('pending/approve',{authorize:true,requestId:i.requestId,comparisonCodeConfirmation:i.comparisonCode});
@@ -91,7 +100,7 @@ export function verifyOpenSslBundle(resourceRoot,pin){
 export async function startWindowsCore(resourceRoot,stateRoot){
  if(!path.isAbsolute(stateRoot)||!path.isAbsolute(resourceRoot))throw Error('absolute_native_paths_required');
  ensurePrivateDirectory(stateRoot);requirePrivateDirectory(stateRoot);
- let desktopAcceptanceSupported=false;
+ let desktopAcceptanceSupported=false,hostPayloadHandoffSupported=false;
  let options={stateDir:path.join(stateRoot,'deployment'),trustedOpenSSL:undefined};
  const manifest=path.join(resourceRoot,'windows-runtime.json');
  if(fs.existsSync(manifest)){
@@ -99,6 +108,7 @@ export async function startWindowsCore(resourceRoot,stateRoot){
   const member=(relative,sha)=>{if(typeof relative!=='string'||path.isAbsolute(relative)||relative.split(/[\\/]/).some(x=>['','..','.'].includes(x)))throw Error('invalid_resource');const file=path.join(resourceRoot,relative);if(!fs.realpathSync(file).startsWith(fs.realpathSync(resourceRoot)+path.sep))throw Error('redirected_resource');if(sha&&createHash('sha256').update(fs.readFileSync(file)).digest('hex')!==sha)throw Error('resource_integrity_failed');return file;};
   if(process.platform==='win32'){
    const core=await import('../../onboarding/core.mjs'),nativeDesktopApp=()=>observeWindowsNativeAppAuthority(resourceRoot,cfg);
+   hostPayloadHandoffSupported=cfg.hostUpdater?.path==='StyxUpdater.exe'&&/^[a-f0-9]{64}$/.test(cfg.hostUpdater?.sha256??'');
    desktopAcceptanceSupported=cfg.desktopApp?.path==='StyxPreview.exe'&&/^[a-f0-9]{64}$/.test(cfg.desktopApp?.sha256??'')&&cfg.desktopProbe?.path==='StyxSessionProbe.exe'&&/^[a-f0-9]{64}$/.test(cfg.desktopProbe?.sha256??'');
    options.core={...core,startDeploymentForeground:(directory,authorization)=>core.startDeploymentForeground(directory,authorization,{guiAvailable:()=>nativeDesktopAvailable(resourceRoot,cfg.desktopProbe)}),beginDeploymentAcceptance:(directory,authorization)=>core.beginDeploymentAcceptance(directory,authorization,{nativeDesktopApp}),recordDeploymentDesktopReadback:(directory,authorization)=>core.recordDeploymentDesktopReadback(directory,authorization,{nativeDesktopApp})};
   }
@@ -106,7 +116,7 @@ export async function startWindowsCore(resourceRoot,stateRoot){
   if(cfg.openssl){const config=verifyOpenSslBundle(resourceRoot,cfg.openssl);options.trustedOpenSSL=member(cfg.openssl.path,cfg.openssl.sha256);if(config)options.trustedOpenSSLConfig=config;}
   if(cfg.tunnel)options.trustedTunnelClient={binary:member(cfg.tunnel.path,cfg.tunnel.sha256),sha256:cfg.tunnel.sha256};
  }
- const {createOnboardingServer}=await import('../../onboarding/server.mjs');const instance=await createOnboardingServer(options);return {...instance,desktopAcceptanceSupported};
+ const {createOnboardingServer}=await import('../../onboarding/server.mjs');const instance=await createOnboardingServer(options);return {...instance,desktopAcceptanceSupported,hostPayloadHandoffSupported,...(hostPayloadHandoffSupported?{launchHostPayloadHandoff:ticketId=>launchWindowsHostPayloadHandoff({stateDir:options.stateDir,ticketId})}:{})};
 }
 export async function serve({input=process.stdin,output=process.stdout,instance,client:providedClient}={}){
  let owned=instance,client;

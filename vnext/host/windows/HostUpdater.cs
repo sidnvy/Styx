@@ -1,0 +1,28 @@
+using System;
+using System.Collections.Generic;
+using System.Diagnostics;
+using System.Drawing;
+using System.IO;
+using System.Threading.Tasks;
+using System.Web.Script.Serialization;
+using System.Windows.Forms;
+
+namespace StyxHostUpdate {
+ sealed class Updater:Form {
+  readonly string root=AppDomain.CurrentDomain.BaseDirectory;readonly Label status;readonly ProgressBar progress;readonly Button reopen;bool working=true;string state;
+  static readonly JavaScriptSerializer Json=new JavaScriptSerializer {MaxJsonLength=2097152};
+  static string Field(object value,string key){var d=value as Dictionary<string,object>;object item;return d!=null&&d.TryGetValue(key,out item)?item as string??"":"";}
+  static string Quote(string value){if(value.IndexOf('"')>=0||value.IndexOf('\n')>=0||value.IndexOf('\r')>=0)throw new IOException();return "\""+value+"\"";}
+  static string Hash(string file){using(var h=System.Security.Cryptography.SHA256.Create())using(var f=File.OpenRead(file)){return BitConverter.ToString(h.ComputeHash(f)).Replace("-","").ToLowerInvariant();}}
+  internal Updater(){Text="Styx Update";ClientSize=new Size(420,170);FormBorderStyle=FormBorderStyle.FixedDialog;MaximizeBox=false;StartPosition=FormStartPosition.CenterScreen;Font=new Font("Segoe UI",10);status=new Label {Text="Waiting for Styx to close…",Left=24,Top=24,Width=370,Height=65};progress=new ProgressBar {Left=24,Top=100,Width=370,Height=8,Style=ProgressBarStyle.Marquee};reopen=new Button {Text="Open Styx",Left=284,Top=125,Width=110,Visible=false};reopen.Click+=(s,e)=>OpenOriginal();Controls.Add(status);Controls.Add(progress);Controls.Add(reopen);FormClosing+=(s,e)=>{if(working)e.Cancel=true;};Shown+=async(s,e)=>await Run();}
+  object Execute(string ticket){var info=new ProcessStartInfo(Path.Combine(root,"node.exe"),Quote(Path.Combine(root,"vnext","onboarding","cli.mjs"))+" host-payload-handoff-execute "+Quote(state)+" "+Quote(ticket)+" --authorize"){UseShellExecute=false,CreateNoWindow=true,RedirectStandardOutput=true,RedirectStandardError=true,WorkingDirectory=root};info.EnvironmentVariables.Remove("NODE_OPTIONS");info.EnvironmentVariables.Remove("NODE_PATH");using(var child=new Process {StartInfo=info}){child.ErrorDataReceived+=(s,e)=>{};child.Start();child.BeginErrorReadLine();string output=child.StandardOutput.ReadToEnd();child.WaitForExit();if(output.Length>2097152||child.ExitCode!=0)throw new IOException();return Json.DeserializeObject(output);}}
+  async Task Run(){try{var input=Json.DeserializeObject(File.ReadAllText(Path.Combine(root,"input.json")));state=Field(input,"stateDir");string ticket=Field(input,"ticketId");if(!Path.IsPathRooted(state)||!System.Text.RegularExpressions.Regex.IsMatch(ticket,"^[a-f0-9]{32}$"))throw new IOException();var until=DateTime.UtcNow.AddMinutes(2);object result;
+    while(true){result=await Task.Run(()=>Execute(ticket));if(Field(result,"status")!="waiting_for_exit")break;if(DateTime.UtcNow>until)throw new IOException();await Task.Delay(1000);status.Text="Waiting for Styx to finish closing…";}
+    if(Field(result,"status")!="applied_stopped"){working=false;progress.Visible=false;status.Text="The update could not start. Your settings are retained. Open Styx to review the result.";reopen.Visible=true;return;}
+    string app=Field(result,"appPath");if(!Path.IsPathRooted(app)||Path.GetFileName(app)!="StyxPreview.exe"||Hash(app)!=Hash(Path.Combine(root,"StyxPreview.exe")))throw new IOException();status.Text="Updated. Reopening Styx…";working=false;StartApp(app);Close();
+   }catch{working=false;progress.Visible=false;status.Text="The update needs review. Your recovery record is retained. Open Styx to review it before trying again.";reopen.Visible=true;}}
+  void StartApp(string app){var info=new ProcessStartInfo(app){UseShellExecute=false,WorkingDirectory=Path.GetDirectoryName(app)};info.EnvironmentVariables["STYX_NATIVE_STATE"]=Path.GetDirectoryName(state);info.EnvironmentVariables.Remove("NODE_OPTIONS");info.EnvironmentVariables.Remove("NODE_PATH");Process.Start(info);}
+  void OpenOriginal(){try{var ticket=Json.DeserializeObject(File.ReadAllText(Path.Combine(state,"host-payload-handoff.json")));string app=Field(ticket,"appPath");if(!Path.IsPathRooted(app)||Path.GetFileName(app)!="StyxPreview.exe"||Hash(app)!=Hash(Path.Combine(root,"StyxPreview.exe")))throw new IOException();StartApp(app);Close();}catch{status.Text="Styx could not reopen. Open your installed Styx app manually; keep this recovery record.";}}
+  [STAThread] static int Main(){Application.EnableVisualStyles();Application.SetCompatibleTextRenderingDefault(false);Application.Run(new Updater());return 0;}
+ }
+}
