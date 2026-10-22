@@ -7,7 +7,7 @@ import {execFileSync,spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {createHash,generateKeyPairSync} from 'node:crypto';
 import {macAdhocSigningPlan,macSigningPlan,macLocalSigningPlan,publicMacLocalSigning} from '../build-macos-app.mjs';
-import {copyOfflineDependencies,copyPreviewDependencies,finalizePreviewHostBundle,machOFiles,previewSourceFiles,verifyPreviewTunnelInput,previewSigningReceipt} from '../build-macos-preview.mjs';
+import {copyOfflineDependencies,copyPreviewDependencies,finalizePreviewHostBundle,machOFiles,previewSourceFiles,verifyPreviewTunnelInput,previewSigningReceipt,withPreviewHostPublisher} from '../build-macos-preview.mjs';
 import {verifySignedRelease} from '../installer.mjs';
 import {verifyMacPreviewApp} from '../macos-preview-trust.mjs';
 const hash=b=>createHash('sha256').update(b).digest('hex');
@@ -123,4 +123,51 @@ test('preview includes the independently locked foreground Browser dependency cl
  fs.mkdirSync(path.join(incomplete,provider),{recursive:true});
  fs.copyFileSync(path.join(sourceRoot,provider,'package-lock.json'),path.join(incomplete,provider,'package-lock.json'));
  assert.throws(()=>copyPreviewDependencies({sourceRoot:incomplete,dependenciesDir:path.join(sourceRoot,'node_modules'),destination:path.join(root,'failed')}),/required_production_dependency_missing/);
+});
+
+function publisherFile(root,{type='ed25519',mode=0o600}={}){
+ const {privateKey}=generateKeyPairSync(type,type==='rsa'?{modulusLength:2048}:{}),file=path.join(root,'publisher-private.pem');
+ fs.writeFileSync(file,privateKey.export({type:'pkcs8',format:'pem'}),{mode,flag:'wx'});return file;
+}
+test('persistent Host publisher signs two generations with the same pin and preserves its external key',t=>{
+ const root=scratch(t),file=publisherFile(root),before=fs.readFileSync(file),fingerprints=[],manifests=[];
+ for(const version of ['0.3.0-first','0.3.0-second']){
+  let temporary;
+  withPreviewHostPublisher({mode:'persistent',privateKeyFile:file},publisher=>{
+   temporary=publisher.privateFile;assert.notEqual(temporary,file);assert.deepEqual(fs.readFileSync(temporary),before);
+   const bundle=path.join(root,version);fs.mkdirSync(path.join(bundle,'bin'),{recursive:true});fs.mkdirSync(path.join(bundle,'provenance'));
+   fs.writeFileSync(path.join(bundle,'bin/node'),'fixture-'+version);fs.writeFileSync(path.join(bundle,'provenance/node.json'),JSON.stringify({binary_sha256:'a'.repeat(64)}));
+   fs.writeFileSync(path.join(bundle,'manifest.json'),JSON.stringify({schema:1,version,platform:process.platform,arch:process.arch,files:[{path:'bin/node',executable:true}]}));
+   finalizePreviewHostBundle(bundle,publisher.privateKey,{publisherMode:publisher.publisherMode});
+   const checked=verifySignedRelease(bundle,publisher.publicPem);manifests.push(checked.sha256);fingerprints.push(publisher.fingerprint);
+   const provenance=JSON.parse(fs.readFileSync(path.join(bundle,'provenance/macos-preview.json')));
+   assert.equal(provenance.publisher_mode,'persistent');assert.equal(provenance.publisher_trust,'persistent_local_build_key_not_developer_id');
+   assert.doesNotMatch(JSON.stringify(provenance),/PRIVATE KEY|publisher-private/);
+   assert.deepEqual(fs.readdirSync(bundle).sort(),['bin','manifest.json','manifest.sig','provenance']);
+  });
+  assert.equal(fs.existsSync(path.dirname(temporary)),false);assert.deepEqual(fs.readFileSync(file),before);
+ }
+ assert.equal(fingerprints[0],fingerprints[1]);assert.notEqual(manifests[0],manifests[1]);
+});
+test('Host publisher rejects insecure files, wrong key types and package input keys before building',{skip:process.platform==='win32'},t=>{
+ const root=scratch(t),file=publisherFile(root);let built=false;
+ const attempt=(value,options)=>withPreviewHostPublisher(value,()=>{built=true},options);
+ assert.throws(()=>attempt({mode:'persistent',privateKeyFile:'relative'}),/absolute_host_publisher_key_required/);
+ fs.chmodSync(file,0o644);assert.throws(()=>attempt({mode:'persistent',privateKeyFile:file}),/private_file_permissions/);fs.chmodSync(file,0o600);
+ const link=path.join(root,'link');fs.symlinkSync(file,link);assert.throws(()=>attempt({mode:'persistent',privateKeyFile:link}),/private_file_not_regular/);
+ const hardLink=path.join(root,'hard-link');fs.linkSync(file,hardLink);assert.throws(()=>attempt({mode:'persistent',privateKeyFile:file}),/invalid_host_publisher_key_file/);fs.unlinkSync(hardLink);
+ assert.throws(()=>attempt({mode:'persistent',privateKeyFile:file},{excludedRoots:[root]}),/host_publisher_key_in_package_inputs/);
+ assert.throws(()=>attempt({mode:'ephemeral',privateKeyFile:file}),/ephemeral_host_publisher_key_forbidden/);
+ fs.unlinkSync(file);publisherFile(root,{type:'rsa'});assert.throws(()=>attempt({mode:'persistent',privateKeyFile:file}),/ed25519_host_publisher_key_required/);
+ fs.writeFileSync(file,'invalid-key');assert.throws(()=>attempt({mode:'persistent',privateKeyFile:file}),/invalid_host_publisher_private_key/);
+ assert.equal(built,false);
+});
+test('Host publisher always removes its own temporary key after failure and never deletes an external key',t=>{
+ const root=scratch(t),file=publisherFile(root),original=fs.readFileSync(file),pins=[];
+ for(const selection of [undefined,{mode:'ephemeral'},{mode:'persistent',privateKeyFile:file}]){
+  let temporary;
+  assert.throws(()=>withPreviewHostPublisher(selection,publisher=>{temporary=publisher.privateFile;pins.push(publisher.fingerprint);assert.equal(fs.statSync(temporary).mode&0o077,0);throw Error('fixture_build_failure')}),/fixture_build_failure/);
+  assert.equal(fs.existsSync(path.dirname(temporary)),false);assert.deepEqual(fs.readFileSync(file),original);
+ }
+ assert.notEqual(pins[0],pins[1]);
 });

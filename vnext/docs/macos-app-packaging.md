@@ -31,6 +31,47 @@ separate from first-launch approval.
 
 See [macOS preview installation](macos-preview-install.md) for the end-user flow.
 
+## Host release signing across preview updates
+
+`build-macos-preview.mjs` has a separate Ed25519 publisher identity for the
+embedded Host release. The App's persistent macOS code-signing certificate does
+not make this Host identity persistent. For a series of updatable previews, add
+this field to the existing preview build JSON:
+
+```json
+{
+  "hostPublisher": {
+    "mode": "persistent",
+    "privateKeyFile": "/absolute/private-release-signing/host-publisher.pem"
+  }
+}
+```
+
+Supply an existing owner-only Ed25519 private key outside the source tree,
+dependency tree and output directory. The builder rejects relative paths,
+symlinks, hard links, public permissions and other key types. It neither creates
+nor replaces that external key. It uses a private temporary snapshot during the
+build and deletes the snapshot on success or failure. The external key remains
+on the build machine; only the public key and its SPKI SHA-256 pin enter the App.
+The final private-material scan still runs before sealing and archiving the App.
+
+Use the same publisher key with a distinct `releaseVersion` for each changed
+Host payload. `preview-receipt.json` records `host_publisher_mode` and
+`publisher_spki_sha256`; the signed Host provenance records `publisher_mode`.
+Neither record contains the key path or private key. Persistent signing here
+establishes repeatable local-build identity, not Developer ID or notarization.
+
+For throwaway fixtures, `"hostPublisher": {"mode": "ephemeral"}` explicitly
+selects a one-build identity. Omitting the field retains that legacy preview
+behavior. Such builds generate a different pin each time and are not a continuous
+Host update series. An invalid persistent-key configuration fails; it never falls
+back to a temporary publisher.
+
+This change does not migrate an installed deployment's trusted publisher, update
+its Host, or modify system permissions. Historical deployments pinned to a lost
+ephemeral key require a separately reviewed trust migration. Do not overwrite
+`publisher.pem` or the deployment's pin to bypass verification.
+
 ## Build on the target Mac
 
 Use Node >=22, Xcode command line tools, and a trusted, native architecture
