@@ -7,7 +7,7 @@ import {execFileSync,spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {createHash,generateKeyPairSync} from 'node:crypto';
 import {macAdhocSigningPlan,macSigningPlan,macLocalSigningPlan,publicMacLocalSigning} from '../build-macos-app.mjs';
-import {copyOfflineDependencies,copyPreviewDependencies,finalizePreviewHostBundle,machOFiles,previewSourceFiles,verifyPreviewTunnelInput,previewSigningReceipt,withPreviewHostPublisher,previewReleasePublisher} from '../build-macos-preview.mjs';
+import {buildMacPreview,copyOfflineDependencies,copyPreviewDependencies,finalizePreviewHostBundle,machOFiles,previewSourceFiles,verifyPreviewTunnelInput,previewSigningReceipt,withPreviewHostPublisher,previewReleasePublisher} from '../build-macos-preview.mjs';
 import {verifySignedRelease} from '../installer.mjs';
 import {verifyMacPreviewApp} from '../macos-preview-trust.mjs';
 const hash=b=>createHash('sha256').update(b).digest('hex');
@@ -177,4 +177,12 @@ test('Host publisher always removes its own temporary key after failure and neve
   assert.equal(fs.existsSync(path.dirname(temporary)),false);assert.deepEqual(fs.readFileSync(file),original);
  }
  assert.notEqual(pins[0],pins[1]);
+});
+
+
+test('preview update releases reject missing or invalid build sequence before native tooling',()=>{
+ const base={version:'0.3.0',releaseVersion:'0.3.0-rc.20261022.8',updateRelease:true};
+ assert.throws(()=>buildMacPreview(base),/macos_update_release_build_number_required/);
+ assert.throws(()=>buildMacPreview({...base,buildNumber:base.releaseVersion}),/invalid_macos_build_number/);
+ assert.throws(()=>buildMacPreview({...base,buildNumber:'1008',updateRelease:'true'}),/invalid_macos_update_release/);
 });

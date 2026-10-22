@@ -33,8 +33,18 @@ export function prepareMacPluginIcon(bytes){
   normalizePresentation({icon:{mimeType:'image/png',dataBase64:result.toString('base64')}});
   return result;
 }
-export function appInfoPlist(version){
+// Keep release ordering separate from the marketing version. This canonical
+// subset fits Apple's documented 4/2/2 digit components and avoids aliases.
+export function macAppBuildMetadata({version,buildNumber,updateRelease=false}={}){
   assert(/^\d+\.\d+\.\d+$/.test(version??''),'invalid_app_version');
+  assert(typeof updateRelease==='boolean','invalid_macos_update_release');
+  assert(buildNumber===undefined||typeof buildNumber==='string'&&/^[1-9]\d{0,3}(?:\.(?:0|[1-9]\d?)){0,2}$/.test(buildNumber),'invalid_macos_build_number');
+  assert(!updateRelease||buildNumber!==undefined,'macos_update_release_build_number_required');
+  return {marketingVersion:version,buildNumber:buildNumber??'0',updateRelease,
+    buildNumberSource:buildNumber===undefined?'development_sentinel_not_for_updates':'explicit_release_sequence'};
+}
+export function appInfoPlist(version,{buildNumber,updateRelease=false}={}){
+  const metadata=macAppBuildMetadata({version,buildNumber,updateRelease});
   return `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -46,7 +56,8 @@ export function appInfoPlist(version){
 <key>CFBundleLocalizations</key><array><string>en</string><string>zh-Hans</string></array>
 <key>CFBundlePackageType</key><string>APPL</string>
 <key>CFBundleShortVersionString</key><string>${xml(version)}</string>
-<key>CFBundleVersion</key><string>${xml(version)}</string>
+<key>CFBundleVersion</key><string>${xml(metadata.buildNumber)}</string>
+<key>StyxUpdateRelease</key><${metadata.updateRelease?'true':'false'}/>
 <key>LSMinimumSystemVersion</key><string>13.0</string>
 <key>LSUIElement</key><true/>
 <key>NSHighResolutionCapable</key><true/>
@@ -159,9 +170,13 @@ export function macSwiftBuildArguments({source,output,arch=process.arch,sdkPath,
     ...(sdkPath===undefined?[]:['-sdk',sdkPath]),...(moduleCachePath===undefined?[]:['-module-cache-path',moduleCachePath]),
     ...(additionalSources.length?['-D','STYX_PRODUCT_UI']:[]),source,...additionalSources,'-o',output,'-framework','AppKit','-framework','ApplicationServices','-framework','CoreGraphics','-framework','SwiftUI','-framework','WebKit'];
 }
-export function buildMacApp({app,cuaBinary,version,identity,teamID,notaryProfile,signingMode='distribution',localSigning,sdkPath,moduleCachePath}={}){
+export function buildMacApp({app,cuaBinary,version,buildNumber,updateRelease=false,identity,teamID,notaryProfile,signingMode='distribution',localSigning,sdkPath,moduleCachePath}={}){
   assert(process.platform==='darwin','native_macos_build_required');
-  const plist=appInfoPlist(version);
+  const build=macAppBuildMetadata({version,buildNumber,updateRelease});
+  // Developer ID output needs a distinct build even before a feed is enabled;
+  // signing is not a claim that this artifact has been publicly published.
+  if(identity&&signingMode==='distribution'||notaryProfile)assert(buildNumber!==undefined,'macos_distribution_build_number_required');
+  const plist=appInfoPlist(version,{buildNumber,updateRelease});
   assert(['distribution','local-development'].includes(signingMode),'invalid_macos_signing_mode');
   if(localSigning!==undefined){normalizeMacLocalSigning(localSigning);assert(identity===undefined&&teamID===undefined&&notaryProfile===undefined&&signingMode==='distribution','local_signing_modes_mutually_exclusive');}
   assert(signingMode!=='local-development'||identity,'local_development_identity_required');
@@ -222,7 +237,7 @@ export function buildMacApp({app,cuaBinary,version,identity,teamID,notaryProfile
       const output=execFileSync(command,args,{encoding:'utf8',timeout:localSigning!==undefined||signingMode==='local-development'?15000:1800000});
       if(args[0]==='notarytool')assert(JSON.parse(output).status==='Accepted','notarization_not_accepted');
     }
-    return {schema:1,bundle_id:MAC_BUNDLE_ID,version,arch:process.arch,
+    return {schema:1,bundle_id:MAC_BUNDLE_ID,version,buildNumber:build.buildNumber,buildNumberSource:build.buildNumberSource,updateRelease:build.updateRelease,arch:process.arch,
       cua_version:observed,cua_input_sha256:inputHash,app,
       signing:localSigning!==undefined||identity?'PASS':'NOT RUN',
       signing_detail:localSigning!==undefined?'local_certificate_preview':identity?(signingMode==='local-development'?'apple_development_local_only':'developer_id_verified'):'unsigned_development_bundle',

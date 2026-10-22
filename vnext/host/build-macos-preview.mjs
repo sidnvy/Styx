@@ -6,7 +6,7 @@ import path from 'node:path';
 import {execFileSync} from 'node:child_process';
 import {createHash,generateKeyPairSync,createPublicKey,createPrivateKey,sign} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
-import {buildMacApp,macAdhocSigningPlan,macLocalSigningPlan,normalizeMacLocalSigning,publicMacLocalSigning} from './build-macos-app.mjs';
+import {buildMacApp,macAppBuildMetadata,macAdhocSigningPlan,macLocalSigningPlan,normalizeMacLocalSigning,publicMacLocalSigning} from './build-macos-app.mjs';
 import {buildHostRelease} from './build-host-release.mjs';
 import {verifySignedRelease} from './installer.mjs';
 import {requirePrivateFile} from './private-storage.mjs';
@@ -133,9 +133,10 @@ export function verifyPreviewTunnelInput(binary){
 }
 function publicModes(root){for(const e of fs.readdirSync(root,{withFileTypes:true})){const f=path.join(root,e.name);assert(!e.isSymbolicLink(),'distribution_symlink_forbidden');if(e.isDirectory()){fs.chmodSync(f,0o755);publicModes(f)}else fs.chmodSync(f,fs.statSync(f).mode&0o111?0o755:0o644);}}
 export function buildMacPreview(config){
+ assert(config&&typeof config==='object'&&!Object.keys(config).some(k=>!['destination','version','buildNumber','updateRelease','releaseVersion','sourceRevision','nodeBinary','codexBinary','cuaBinary','sourceRoot','dependenciesDir','createDmg','tunnelBinary','sdkPath','moduleCachePath','localSigning','hostPublisher'].includes(k)),'invalid_preview_configuration');
+ const {destination,version,buildNumber,updateRelease=false,releaseVersion,sourceRevision,nodeBinary,codexBinary,cuaBinary,tunnelBinary,sdkPath,moduleCachePath,localSigning,hostPublisher,sourceRoot=ROOT,dependenciesDir=path.join(sourceRoot,'node_modules'),createDmg=true}=config;
+ const appMetadata=macAppBuildMetadata({version,buildNumber,updateRelease});
  assert(process.platform==='darwin'&&process.arch==='arm64','native_arm64_macos_preview_build_required');
- assert(config&&typeof config==='object'&&!Object.keys(config).some(k=>!['destination','version','releaseVersion','sourceRevision','nodeBinary','codexBinary','cuaBinary','sourceRoot','dependenciesDir','createDmg','tunnelBinary','sdkPath','moduleCachePath','localSigning','hostPublisher'].includes(k)),'invalid_preview_configuration');
- const {destination,version,releaseVersion,sourceRevision,nodeBinary,codexBinary,cuaBinary,tunnelBinary,sdkPath,moduleCachePath,localSigning,hostPublisher,sourceRoot=ROOT,dependenciesDir=path.join(sourceRoot,'node_modules'),createDmg=true}=config;
  previewReleasePublisher({localSigning,hostPublisher});
  const signingReceipt=previewSigningReceipt(localSigning);
  for(const p of [destination,nodeBinary,codexBinary,cuaBinary,sourceRoot,dependenciesDir])assert(ABS(p),'absolute_preview_paths_required');
@@ -148,7 +149,7 @@ export function buildMacPreview(config){
  return withPreviewHostPublisher(hostPublisher,({privateKey,privateFile,publicPem,fingerprint,publisherMode})=>{
  fs.mkdirSync(destination,{mode:0o700});const image=path.join(destination,'image-root');fs.mkdirSync(image);
  const app=path.join(image,'Styx.app'),resources=path.join(app,'Contents/Resources');
-  const appBuild=buildMacApp({app,cuaBinary,version,sdkPath,moduleCachePath:moduleCachePath??path.join(destination,'swift-module-cache'),...(localSigning===undefined?{}:{localSigning})});
+  const appBuild=buildMacApp({app,cuaBinary,version,buildNumber,updateRelease,sdkPath,moduleCachePath:moduleCachePath??path.join(destination,'swift-module-cache'),...(localSigning===undefined?{}:{localSigning})});
   const source=path.join(resources,'onboarding/vnext');fs.mkdirSync(source,{recursive:true});
   for(const name of sourceFiles)tree(path.join(sourceRoot,...name.split('/')),path.join(source,...name.split('/')));
   fs.writeFileSync(path.join(resources,'source-files.json'),JSON.stringify({schema:1,revision:sourceRevision,files:sourceFiles.map(name=>({path:name,sha256:sha(path.join(sourceRoot,...name.split('/')))}))},null,2)+'\n');
@@ -178,7 +179,7 @@ export function buildMacPreview(config){
   fs.symlinkSync('/Applications',path.join(image,'Applications'));
   const zip='Styx-'+releaseVersion+'-macos-arm64.zip';execFileSync('/usr/bin/ditto',['-c','-k','--keepParent',app,path.join(destination,zip)],{stdio:'pipe',timeout:180000});
   const artifacts=[zip];if(createDmg){const dmg='Styx-'+releaseVersion+'-macos-arm64.dmg';execFileSync('/usr/bin/hdiutil',['create','-volname','Styx Developer Preview','-srcfolder',image,'-format','UDZO',path.join(destination,dmg)],{stdio:'pipe',timeout:300000});artifacts.push(dmg);}
-  const receipt={schema:1,kind:'precompiled_developer_preview',sourceRevision,version,releaseVersion,platform:'darwin',arch:'arm64',...signingReceipt,compiler:appBuild.compiler,publisher_spki_sha256:fingerprint,host_publisher_mode:publisherMode,production_packages:dependencies.length,browser_production_packages:dependencies.filter(record=>record.lockFile==='packages/styx-browser-provider/package-lock.json').length,tunnel_client:tunnelRecord?{version:tunnelRecord.version,archive_sha256:tunnelRecord.archive_sha256}:null,native_code_files:native.map(p=>path.relative(app,p).split(path.sep).join('/')),artifacts:artifacts.map(name=>({name,sha256:sha(path.join(destination,name)),bytes:fs.statSync(path.join(destination,name)).size})),native_ui_acceptance:'NOT RUN',cold_install:'NOT RUN'};
+  const receipt={schema:1,kind:'precompiled_developer_preview',sourceRevision,version,buildNumber:appMetadata.buildNumber,buildNumberSource:appMetadata.buildNumberSource,updateRelease:appMetadata.updateRelease,releaseVersion,platform:'darwin',arch:'arm64',...signingReceipt,compiler:appBuild.compiler,publisher_spki_sha256:fingerprint,host_publisher_mode:publisherMode,production_packages:dependencies.length,browser_production_packages:dependencies.filter(record=>record.lockFile==='packages/styx-browser-provider/package-lock.json').length,tunnel_client:tunnelRecord?{version:tunnelRecord.version,archive_sha256:tunnelRecord.archive_sha256}:null,native_code_files:native.map(p=>path.relative(app,p).split(path.sep).join('/')),artifacts:artifacts.map(name=>({name,sha256:sha(path.join(destination,name)),bytes:fs.statSync(path.join(destination,name)).size})),native_ui_acceptance:'NOT RUN',cold_install:'NOT RUN'};
   fs.writeFileSync(path.join(destination,'preview-receipt.json'),JSON.stringify(receipt,null,2)+'\n');return receipt;
  },{excludedRoots:[sourceRoot,dependenciesDir,destination]});
 }

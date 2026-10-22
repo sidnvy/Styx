@@ -9,7 +9,7 @@ import {deflateSync} from 'node:zlib';
 import {createHash,X509Certificate} from 'node:crypto';
 import {rootCertificates} from 'node:tls';
 import {crc32,normalizePresentation} from '../../plugin/package.mjs';
-import {appInfoPlist,macSigningPlan,macDevelopmentSigningPlan,macLocalSigningPlan,normalizeMacLocalSigning,publicMacLocalSigning,verifyMacLocalSigning,buildMacApp,macSwiftBuildArguments,prepareMacPluginIcon,MAC_BUNDLE_ID} from '../build-macos-app.mjs';
+import {appInfoPlist,macAppBuildMetadata,macSigningPlan,macDevelopmentSigningPlan,macLocalSigningPlan,normalizeMacLocalSigning,publicMacLocalSigning,verifyMacLocalSigning,buildMacApp,macSwiftBuildArguments,prepareMacPluginIcon,MAC_BUNDLE_ID} from '../build-macos-app.mjs';
 
 const localSigning={identitySha1:'a'.repeat(40),certificateSha256:'b'.repeat(64),keychain:'/private/build/signing.keychain-db'};
 test('persistent local signing rejects weak, ambiguous or injected configuration and publishes no keychain path',()=>{
@@ -163,4 +163,29 @@ test('native codesign parses an inline requirement and rejects a mismatched iden
     assert.notEqual(result.status,0);
     assert.match(result.stderr,/does not satisfy|failed to satisfy|requirement failed/i);
   }finally{fs.rmSync(dir,{recursive:true,force:true})}
+});
+
+
+test('successive update builds keep marketing version but emit distinct explicit bundle versions',()=>{
+  const first=appInfoPlist('0.3.0',{buildNumber:'1008',updateRelease:true});
+  const second=appInfoPlist('0.3.0',{buildNumber:'1009',updateRelease:true});
+  for(const plist of [first,second])assert.match(plist,/<key>CFBundleShortVersionString<\/key><string>0\.3\.0<\/string>/);
+  assert.match(first,/<key>CFBundleVersion<\/key><string>1008<\/string>/);
+  assert.match(second,/<key>CFBundleVersion<\/key><string>1009<\/string>/);
+  assert.match(second,/<key>StyxUpdateRelease<\/key><true\/>/);
+  assert.throws(()=>appInfoPlist('0.3.0',{updateRelease:true}),/macos_update_release_build_number_required/);
+});
+test('build numbers use bounded canonical Apple numeric components, never Host prerelease semver',()=>{
+  for(const buildNumber of ['1','1008','9999.99.99','1008.1','1008.1.0'])
+    assert.equal(macAppBuildMetadata({version:'0.3.0',buildNumber,updateRelease:true}).buildNumber,buildNumber);
+  for(const buildNumber of [null,0,1008,'','0','01','1.01','1.00.1','10000','1.100','1.1.100','1.2.3.4','1\n','1-rc.7','0.3.0-rc.20261022.7','9'.repeat(200),'<x>','1.2.'])
+    assert.throws(()=>appInfoPlist('0.3.0',{buildNumber,updateRelease:true}),/invalid_macos_build_number/);
+  assert.throws(()=>appInfoPlist('0.3.0',{buildNumber:'1008',updateRelease:'true'}),/invalid_macos_update_release/);
+});
+test('legacy development builds are explicitly excluded from update releases',()=>{
+  assert.deepEqual(macAppBuildMetadata({version:'0.3.0'}),{marketingVersion:'0.3.0',buildNumber:'0',updateRelease:false,buildNumberSource:'development_sentinel_not_for_updates'});
+  const plist=appInfoPlist('0.3.0');
+  assert.match(plist,/<key>CFBundleVersion<\/key><string>0<\/string>/);
+  assert.match(plist,/<key>StyxUpdateRelease<\/key><false\/>/);
+  assert.equal(macAppBuildMetadata({version:'0.3.0',buildNumber:'1008'}).updateRelease,false);
 });
