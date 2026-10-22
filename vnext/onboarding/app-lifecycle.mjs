@@ -132,7 +132,8 @@ async function windowsLifecycle(stateDir,options,mutation){
   return {...publicWindowsLifecycle(changed.observed),desiredEnabled:changed.preference.desiredEnabled,lastOperation:changed.preference.lastOperation};
  }
  const observed=await adapter.readWindowsAppLogin(scope);
- return {...publicWindowsLifecycle(observed),desiredEnabled:previous.desiredEnabled,lastOperation:previous.lastOperation};
+ return {...publicWindowsLifecycle(observed),desiredEnabled:previous.desiredEnabled,lastOperation:previous.lastOperation,
+  ...(previous.lastOperation&&previous.lastOperation.status!=='succeeded'?{status:'needs_attention',reason:'app_login_change_unconfirmed'}:{})};
 }
 function publicWindowsLifecycle(observed){
  // A proposed package rebind is internal reconciliation input, not a public
