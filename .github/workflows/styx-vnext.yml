@@ -118,7 +118,7 @@ jobs:
       - name: Validate checksum and safe archive extraction regressions
         run: python -m unittest discover -s vnext/host/test -p test_prepare_node.py
       - name: Validate portable signed staging and local pairing identity
-        run: node --test --test-concurrency=1 vnext/host/test/*.test.mjs vnext/host/windows/*.test.mjs
+        run: node --test --test-concurrency=1 vnext/host/test/*.test.mjs vnext/host/windows/*.test.mjs vnext/host/windows/platform-update/product.test.mjs
       - name: Check Windows interactive-task installer syntax
         if: matrix.runner == 'windows-2025'
         shell: pwsh
