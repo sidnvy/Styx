@@ -1,6 +1,7 @@
 name: Styx VNext contracts
 on:
   push:
+    branches: [develop, main]
     paths:
       - 'vnext/**'
       - '.github/workflows/styx-vnext.yml'
@@ -8,6 +9,10 @@ on:
     paths:
       - 'vnext/**'
       - '.github/workflows/styx-vnext.yml'
+  workflow_dispatch:
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 jobs:
   contracts:
     runs-on: ubuntu-latest

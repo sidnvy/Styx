@@ -6,6 +6,9 @@ on:
   pull_request:
     paths: ['vnext/**', '.github/workflows/styx-macos-app.yml']
   workflow_dispatch:
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 permissions:
   contents: read
 jobs:
