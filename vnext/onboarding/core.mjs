@@ -510,4 +510,4 @@ export {planDeviceIngressChange,applyDeviceIngressChange,rollbackDeviceIngressCh
 export {changeDeploymentCapabilities,readDeploymentCapabilities,rollbackDeploymentCapabilities} from './capabilities.mjs';
 
 export {readDeploymentComponents} from './components.mjs';
-export {planHostPayloadMigration,applyHostPayloadMigration,rollbackHostPayloadMigration,readHostPayloadMigration} from './host-payload-migration.mjs';
+export {inspectHostPayloadCandidate,planHostPayloadMigration,applyHostPayloadMigration,rollbackHostPayloadMigration,readHostPayloadMigration} from './host-payload-migration.mjs';
