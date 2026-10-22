@@ -164,3 +164,13 @@ test('login binding rejects changed or redirected definitions, unknown preferenc
  fs.renameSync(path.dirname(file),path.dirname(file)+'.original');fs.symlinkSync(path.dirname(file)+'.original',path.dirname(file));assert.throws(()=>readDeploymentAppLoginBinding(f.stateDir,f.cli),/directory_untrusted/);
  assert.deepEqual(mutationCalls(f),[]);
 });
+
+test('native launchctl enabled/disabled wording and Boolean overrides have the same binding',t=>{
+ const f=fixture(t);f.mutate('login',true);f.calls.length=0;
+ for(const [native,boolean,preference] of [['enabled','false','enabled'],['disabled','true','disabled']]){
+  const using=word=>({operations:{...f.operations,run:(bin,args)=>args[0]==='print-disabled'?'\tdisabled services = {\n\t\t"app.styx.desktop-login" => '+word+'\n\t}':f.operations.run(bin,args)}});
+  assert.equal(readDeploymentAppLifecycle(f.stateDir,using(native)).loginAtStartup,preference);
+  assert.deepEqual(readDeploymentAppLoginBinding(f.stateDir,using(native)),readDeploymentAppLoginBinding(f.stateDir,using(boolean)));
+ }
+ assert.deepEqual(mutationCalls(f),[]);
+});

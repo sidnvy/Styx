@@ -69,9 +69,10 @@ function assertLoadedOwnership(ctx,text){
 function disabledOverride(ctx){
  const text=ctl(ctx,'print-disabled',domain(ctx));
  if(!/^\s*disabled services = \{\s*$/m.test(text)||!/^\s*}\s*$/m.test(text))fail('app_lifecycle_preference_unknown');
- const entries=[...text.matchAll(/^\s*"app\.styx\.desktop-login"\s*=>\s*(true|false)\s*$/gm)];
+ const entries=[...text.matchAll(/^\s*"app\.styx\.desktop-login"\s*=>\s*(true|false|enabled|disabled)\s*$/gm)];
  if(entries.length>1||(text.match(/"app\.styx\.desktop-login"/g)??[]).length!==entries.length)fail('app_lifecycle_preference_unknown');
- return entries.length?entries[0][1]==='true':null;
+ // launchctl versions report either Boolean overrides or enabled/disabled.
+ return entries.length?['true','disabled'].includes(entries[0][1]):null;
 }
 function preference(ctx,installed){
  if(!installed)return 'not_installed';
