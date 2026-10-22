@@ -3,7 +3,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import {execFileSync} from 'node:child_process';
+import {execFileSync,spawnSync} from 'node:child_process';
 import {fileURLToPath,pathToFileURL} from 'node:url';
 import {createHash,generateKeyPairSync,sign} from 'node:crypto';
 import {buildWindowsApp,windowsExecutableArchitecture} from '../build-windows-app.mjs';
@@ -124,4 +124,40 @@ test('Core and additional-ingress req explicitly use the selected configuration 
  const before=process.env.OPENSSL_CONF,result=await advanceDeployment(state,{authorize:['gateway.prepare']});assert.equal(result.steps.find(s=>s.id==='gateway.prepare').status,'succeeded');
  let descriptor;const additional=await prepareAdditionalDeviceIngress(state,{authorize:true,listenHost:'192.0.2.71'}, {addresses:()=>['192.0.2.71'],command:async(operation,value)=>{if(operation==='status')return {supported:true,status:'not_configured'};if(operation==='prepare'){descriptor=value;return {status:'prepared'}}if(operation==='enable')return {status:'listening',generation:value.generation,ingress:{certificate_sha256:descriptor.certificateSha256}};throw Error('unexpected_fixture_command')}});
  assert.equal(additional.status,'listening');const calls=fs.readFileSync(capture,'utf8').trim().split('\n').map(line=>JSON.parse(line));assert.equal(calls.length,2);for(const args of calls)assert.deepEqual(args.slice(0,3),['req','-config',configuration]);assert.equal(process.env.OPENSSL_CONF,before);
+});
+
+function progressFixture(t){
+ const f=fixture(t);
+ for(const name of ['host/installer.mjs','host/private-storage.mjs']){const file=path.join(f.config.sourceRoot,name);fs.mkdirSync(path.dirname(file),{recursive:true});fs.copyFileSync(path.join(productSource,name),file);f.sourceFiles.push(name);}
+ for(let index=0;index<400;index++){const name='assets/progress-'+String(index).padStart(4,'0')+'.txt';fs.writeFileSync(path.join(f.config.sourceRoot,name),'Public progress fixture '+index);f.sourceFiles.push(name);}
+ buildWindowsApp(f.config);return {...f,installer:path.join(f.config.output,'install-windows-preview.mjs')};
+}
+function assertProgress(messages,total){
+ for(const message of messages){assert.deepEqual(Object.keys(message).sort(),['completed','phase','status','total']);assert.equal(message.status,'verifying_package');assert.ok(['files','signed_host'].includes(message.phase));assert.ok(Number.isSafeInteger(message.completed));assert.ok(Number.isSafeInteger(message.total));assert.ok(message.completed>=0&&message.completed<=message.total);}
+ const files=messages.filter(message=>message.phase==='files');assert.equal(files[0].completed,0);assert.equal(files.at(-1).completed,total);assert.ok(files.length>=4);
+ for(let index=1;index<files.length;index++){assert.equal(files[index].total,total);const advance=files[index].completed-files[index-1].completed;assert.ok(advance>0&&advance<=200);if(index<files.length-1)assert.ok(advance>=100);}
+ assert.deepEqual(messages.filter(message=>message.phase==='signed_host'),[{status:'verifying_package',phase:'signed_host',completed:0,total:1},{status:'verifying_package',phase:'signed_host',completed:1,total:1}]);
+}
+test('optional package progress is bounded, completes both real verification phases and preserves the manifest',async t=>{
+ const f=progressFixture(t),api=await import(pathToFileURL(f.installer)),manifestFile=path.join(f.config.output,'windows-package.json'),before=fs.readFileSync(manifestFile),messages=[];
+ const verified=await api.verifyPackage(f.config.output,{onProgress:message=>messages.push(message)});assertProgress(messages,verified.files.length);assert.deepEqual(fs.readFileSync(manifestFile),before);assert.equal(verified.compiled,false);
+ await assert.rejects(api.verifyPackage(f.config.output,{onProgress:true}),/invalid_preview_progress_callback/);
+});
+test('verify CLI keeps its default single result and emits only fixed NDJSON progress when explicitly requested',t=>{
+ const f=progressFixture(t),run=args=>spawnSync(process.execPath,[f.installer,...args],{cwd:f.dir,encoding:'utf8',timeout:60000}),expected={status:'package_integrity_verified',compiled:false,authenticity:'not_verified_unsigned_preview'};
+ const plain=run(['verify']);assert.equal(plain.status,0,plain.stderr);assert.equal(plain.stderr,'');assert.deepEqual(plain.stdout.trim().split('\n').map(line=>JSON.parse(line)),[expected]);
+ const total=JSON.parse(fs.readFileSync(path.join(f.config.output,'windows-package.json'))).files.length;
+ for(const args of [['verify','--progress'],['verify',f.config.output,'--progress']]){const result=run(args);assert.equal(result.status,0,result.stderr);assert.equal(result.stderr,'');const messages=result.stdout.trim().split('\n').map(line=>JSON.parse(line));assert.deepEqual(messages.pop(),expected);assertProgress(messages,total);assert.equal(result.stdout.includes(f.dir),false);assert.equal(result.stdout.includes('publisher.pem'),false);}
+ for(const args of [['verify','--progress','--progress'],['verify','--progress',f.config.output],['verify',f.config.output,'--unknown'],['verify',f.config.output,'extra'],['install',f.config.output,'--progress']]){const result=run(args);assert.equal(result.status,2);assert.equal(result.stdout,'');assert.equal(JSON.parse(result.stderr).status,'FAIL');}
+});
+test('progress never converts a changed hash, extra member or invalid signed Host into a successful verification',async t=>{
+ const f=progressFixture(t),api=await import(pathToFileURL(f.installer)),root=f.config.output,file=path.join(root,'vnext/assets/progress-0399.txt'),original=fs.readFileSync(file),manifestFile=path.join(root,'windows-package.json'),manifest=JSON.parse(fs.readFileSync(manifestFile));
+ fs.writeFileSync(file,Buffer.alloc(original.length,0x78));const messages=[];await assert.rejects(api.verifyPackage(root,{onProgress:message=>messages.push(message)}),/preview_package_file_changed/);assert.ok(messages.some(message=>message.completed>=100));assert.ok(messages.every(message=>message.completed<message.total));
+ const failed=spawnSync(process.execPath,[f.installer,'verify','--progress'],{encoding:'utf8',timeout:60000});assert.equal(failed.status,2);assert.equal(JSON.parse(failed.stderr).reason,'preview_package_file_changed');assert.ok(failed.stdout.trim().split('\n').map(line=>JSON.parse(line)).every(message=>message.status==='verifying_package'));assert.equal(failed.stdout.includes(f.dir),false);fs.writeFileSync(file,original);
+ const extra=path.join(root,'unlisted-user-file');fs.writeFileSync(extra,'Private fixture must never be output');const extraMessages=[];await assert.rejects(api.verifyPackage(root,{onProgress:message=>extraMessages.push(message)}),/unexpected_preview_package_members/);assert.ok(extraMessages.every(message=>message.completed<message.total));fs.unlinkSync(extra);
+ // Keep the unsigned outer inventory consistent so only the complete signed
+ // Host verification can reject this modified signature.
+ const signature=path.join(root,'host-bundle/manifest.sig');fs.writeFileSync(signature,'A'.repeat(86));const entry=manifest.files.find(item=>item.path==='host-bundle/manifest.sig');entry.size=fs.statSync(signature).size;entry.sha256=digest(fs.readFileSync(signature));fs.writeFileSync(manifestFile,JSON.stringify(manifest));
+ const signedMessages=[];await assert.rejects(api.verifyPackage(root,{onProgress:message=>signedMessages.push(message)}),/release_signature_untrusted/);assert.deepEqual(signedMessages.filter(message=>message.phase==='signed_host'),[{status:'verifying_package',phase:'signed_host',completed:0,total:1}]);
+ const rejected=spawnSync(process.execPath,[f.installer,'verify','--progress'],{encoding:'utf8',timeout:60000});assert.equal(rejected.status,2);assert.equal(JSON.parse(rejected.stderr).reason,'release_signature_untrusted');assert.ok(rejected.stdout.trim().split('\n').map(line=>JSON.parse(line)).every(message=>message.status==='verifying_package'));
 });
