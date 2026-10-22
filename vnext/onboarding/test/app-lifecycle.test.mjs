@@ -3,11 +3,11 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import {readDeploymentAppLifecycle,controlDeploymentAppLifecycle} from '../app-lifecycle.mjs';
+import {readDeploymentAppLifecycle,controlDeploymentAppLifecycle,readDeploymentAppLoginBinding} from '../app-lifecycle.mjs';
 import {macLoginRecoveryPlan} from '../macos-login-recovery.mjs';
 const label='app.styx.desktop-login';
 function fixture(t,{registered=true,missingState=false}={}){
- const home=fs.mkdtempSync(path.join(os.tmpdir(),'styx-app-lifecycle-'));
+ const home=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'styx-app-lifecycle-')));
  t.after(()=>fs.rmSync(home,{recursive:true,force:true}));
  const stateDir=path.join(home,'state'),appPath=path.join(home,'Styx.app'),cdhash='a'.repeat(40),calls=[],verified=[],jobs=new Map(),disabled=new Map();
  fs.mkdirSync(appPath);fs.mkdirSync(path.join(home,'Library/LaunchAgents'),{recursive:true});
@@ -143,5 +143,24 @@ test('missing GUI or unknown job observation is never treated as stopped',t=>{
  for(const run of [()=>{throw Error('no GUI session')},(bin,args)=>{if(args[0]==='print'&&args[1]!==f.gui)throw Error('unknown transport');return f.operations.run(bin,args)}]){
   assert.throws(()=>f.mutate('quit',undefined,{operations:{...f.operations,run}}),/no GUI session|observation_unknown/);
  }
+ assert.deepEqual(mutationCalls(f),[]);
+});
+
+test('login binding is authoritative, read-only and stable across normal Quit',t=>{
+ const f=fixture(t),absent=readDeploymentAppLoginBinding(f.stateDir,f.cli);
+ assert.equal(absent.installed,false);f.mutate('login',true);
+ f.calls.length=0;const before=readDeploymentAppLoginBinding(f.stateDir,f.cli);
+ assert.equal(before.installed,true);assert.equal(before.appPath,f.appPath);assert.equal(before.disabledOverride,false);assert.equal(before.loginPreference,'enabled');assert.equal(before.loaded,undefined);assert.match(before.sha256,/^[a-f0-9]{64}$/);assert.deepEqual(mutationCalls(f),[]);
+ f.mutate('quit');f.calls.length=0;assert.deepEqual(readDeploymentAppLoginBinding(f.stateDir,f.cli),before);assert.deepEqual(mutationCalls(f),[]);
+ f.disabled.delete(label);assert.equal(readDeploymentAppLoginBinding(f.stateDir,f.cli).disabledOverride,null);
+ f.disabled.set(label,true);assert.equal(readDeploymentAppLoginBinding(f.stateDir,f.cli).loginPreference,'disabled');
+});
+test('login binding rejects changed or redirected definitions, unknown preferences and unverified App',t=>{
+ const f=fixture(t);f.mutate('login',true);const file=path.join(f.home,'Library/LaunchAgents',label+'.plist'),original=fs.readFileSync(file);f.calls.length=0;
+ fs.appendFileSync(file,'<!-- changed -->');assert.throws(()=>readDeploymentAppLoginBinding(f.stateDir,f.cli),/login_definition_changed/);fs.writeFileSync(file,original);
+ const badSignature={operations:{...f.operations,verifyApp:()=>{throw Error('signature_invalid')}}};assert.throws(()=>readDeploymentAppLoginBinding(f.stateDir,badSignature),/signature_invalid/);
+ for(const text of ['unavailable','disabled services = {\n "app.styx.desktop-login" => unknown\n}', 'disabled services = {\n "app.styx.desktop-login" => false\n "app.styx.desktop-login" => unknown\n}'])assert.throws(()=>readDeploymentAppLoginBinding(f.stateDir,{operations:{...f.operations,run:(bin,args)=>args[0]==='print-disabled'?text:f.operations.run(bin,args)}}),/preference_unknown/);
+ fs.renameSync(file,file+'.original');fs.symlinkSync(file+'.original',file);assert.throws(()=>readDeploymentAppLoginBinding(f.stateDir,f.cli),/not_regular/);fs.unlinkSync(file);fs.linkSync(file+'.original',file);assert.throws(()=>readDeploymentAppLoginBinding(f.stateDir,f.cli),/definition_untrusted/);fs.unlinkSync(file);fs.renameSync(file+'.original',file);
+ fs.renameSync(path.dirname(file),path.dirname(file)+'.original');fs.symlinkSync(path.dirname(file)+'.original',path.dirname(file));assert.throws(()=>readDeploymentAppLoginBinding(f.stateDir,f.cli),/directory_untrusted/);
  assert.deepEqual(mutationCalls(f),[]);
 });

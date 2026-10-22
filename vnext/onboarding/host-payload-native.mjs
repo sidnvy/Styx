@@ -5,14 +5,15 @@ import os from 'node:os';
 import path from 'node:path';
 import {createHash} from 'node:crypto';
 import {execFileSync} from 'node:child_process';
+import {readDeploymentAppLoginBinding} from './app-lifecycle.mjs';
 
 const absolute=value=>typeof value==='string'&&path.isAbsolute(value)&&path.normalize(value)===value&&value!=='/'&&!/[\x00-\x1f\x7f]/.test(value);
 const label=value=>typeof value==='string'&&/^[A-Za-z0-9][A-Za-z0-9._-]{1,127}$/.test(value);
 const sha=value=>createHash('sha256').update(value).digest('hex');
 const options={encoding:'utf8',timeout:10000,maxBuffer:8*1024*1024,stdio:['ignore','pipe','pipe']};
 
-export function observeMacHostPayloadAbsence({installRoot,hostConfigFile,hostServiceLabel,gatewayServiceLabel,stateDir,appPath='/Applications/Styx.app'}={},
-  {home=os.homedir(),uid=process.getuid?.(),run=execFileSync,platform=process.platform,pid=process.pid,execPath=process.execPath}={}){
+export function observeMacHostPayloadAbsence({installRoot,hostConfigFile,hostServiceLabel,gatewayServiceLabel,stateDir,appPath='/Applications/Styx.app',desktopLoginBinding}={},
+  {home=os.homedir(),uid=process.getuid?.(),run=execFileSync,platform=process.platform,pid=process.pid,execPath=process.execPath,verifyApp}={}){
  const result=(status,reason,extra={})=>({schema:1,status,observation:'native_offline_boundary',mutation:'NONE',...(reason?{reason}:{}),...extra});
  if(platform!=='darwin')return result('blocked','macos_native_observation_required');
  if(![installRoot,hostConfigFile,stateDir,home,appPath,execPath].every(absolute)||!Number.isSafeInteger(uid)||uid<1||!Number.isSafeInteger(pid)||pid<1||!label(hostServiceLabel))return result('blocked','native_scope_invalid');
@@ -22,13 +23,21 @@ export function observeMacHostPayloadAbsence({installRoot,hostConfigFile,hostSer
  try{
   const st=fs.lstatSync(home);
   if(!st.isDirectory()||st.isSymbolicLink()||st.uid!==uid||st.mode&0o022||fs.realpathSync(home)!==home)return result('blocked','native_home_untrusted');
-  // A disabled, unloaded plist can still be enabled at next login. The first
-  // migration boundary requires absence rather than inferring durable inhibit.
+  // A reviewed definition may survive normal Quit. Re-derive its authority,
+  // bytes and future-login preference; the following launchctl/process checks
+  // still require current-session absence. This never unloads or disables jobs.
+  const checkLogin=()=>{
+   if(desktopLoginBinding===undefined)return null;
+   const binding=readDeploymentAppLoginBinding(stateDir,{operations:{home,uid,run,platform,...(verifyApp?{verifyApp}:{})}});
+   if(JSON.stringify(binding)!==JSON.stringify(desktopLoginBinding)||binding.installed&&binding.appPath!==appPath)throw Error('native_app_login_binding_changed');
+   return binding;
+  };
+  const login=checkLogin();
   for(const folder of [path.join(home,'Library/LaunchAgents'),'/Library/LaunchAgents','/Library/LaunchDaemons','/System/Library/LaunchAgents','/System/Library/LaunchDaemons']){
    let info;try{info=fs.lstatSync(folder)}catch(error){if(error.code==='ENOENT')continue;throw error}
    if(!info.isDirectory()||info.isSymbolicLink())return result('blocked','native_service_directory_untrusted');
    for(const name of labels){
-    try{fs.lstatSync(path.join(folder,name+'.plist'));return result('blocked','native_service_definition_present',{serviceLabel:name});}
+    try{const file=path.join(folder,name+'.plist');fs.lstatSync(file);if(login?.installed&&name==='app.styx.desktop-login'&&file===login.path)continue;return result('blocked','native_service_definition_present',{serviceLabel:name});}
     catch(error){if(error.code!=='ENOENT')throw error}
    }
   }
@@ -66,6 +75,7 @@ export function observeMacHostPayloadAbsence({installRoot,hostConfigFile,hostSer
   }
   if(!observed)return result('blocked','native_process_observation_unknown');
   if(pids.length)return result('blocked','native_owned_process_present',{processCount:pids.length,pids});
-  return result('absent',null,{services:'not_installed_or_loaded',processes:'no_matching_current_user_process',pointInTime:true});
+  checkLogin();
+  return result('absent',null,{services:login?.installed?'owned_login_definition_preserved_all_jobs_unloaded':'not_installed_or_loaded',processes:'no_matching_current_user_process',pointInTime:true});
  }catch{return result('blocked','native_observation_unavailable')}
 }

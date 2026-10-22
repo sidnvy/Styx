@@ -4,6 +4,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import {execFileSync} from 'node:child_process';
+import {createHash} from 'node:crypto';
 import {requirePrivateDirectory,requirePrivateFile} from '../host/private-storage.mjs';
 import {assertMacPreviewContinuity,verifyMacPreviewApp} from '../host/macos-preview-trust.mjs';
 import {controlMacLoginRecovery,macLoginRecoveryPlan} from './macos-login-recovery.mjs';
@@ -65,18 +66,46 @@ function assertLoadedOwnership(ctx,text){
  const args=/^\s*arguments = \{\n([\s\S]*?)^\s*\}/m.exec(text)?.[1]?.split('\n').map(x=>x.trim()).filter(Boolean);
  if(/^\s*path = (.+)$/m.exec(text)?.[1]!==file||!Array.isArray(args)||args.length!==expected.args.length||!args.every((arg,i)=>arg===expected.args[i]))fail('app_lifecycle_loaded_app_not_owned');
 }
+function disabledOverride(ctx){
+ const text=ctl(ctx,'print-disabled',domain(ctx));
+ if(!/^\s*disabled services = \{\s*$/m.test(text)||!/^\s*}\s*$/m.test(text))fail('app_lifecycle_preference_unknown');
+ const entries=[...text.matchAll(/^\s*"app\.styx\.desktop-login"\s*=>\s*(true|false)\s*$/gm)];
+ if(entries.length>1||(text.match(/"app\.styx\.desktop-login"/g)??[]).length!==entries.length)fail('app_lifecycle_preference_unknown');
+ return entries.length?entries[0][1]==='true':null;
+}
 function preference(ctx,installed){
  if(!installed)return 'not_installed';
- try{
-  const text=ctl(ctx,'print-disabled',domain(ctx));
-  if(!/^\s*disabled services = \{\s*$/m.test(text)||!/^\s*}\s*$/m.test(text))return 'unknown';
-  const override=/^\s*"app\.styx\.desktop-login"\s*=>\s*(true|false)\s*$/m.exec(text);
-  // No override means the exact checked plist's default: RunAtLoad, no Disabled.
-  // A matching malformed entry is not silently interpreted as enabled.
-  if(!override&&text.includes('"'+label+'"'))return 'unknown';
-  return override?.[1]==='true'?'disabled':'enabled';
- }catch{return 'unknown'}
+ try{return disabledOverride(ctx)===true?'disabled':'enabled'}catch{return 'unknown'}
 }
+// Internal read-only binding for the Host transaction. An absent definition
+// grants no exception. An installed one must derive from authoritative App
+// registration and exactly match our existing generator, never a caller path.
+// Loaded state is deliberately separate: preparation happens before normal Quit.
+export function readDeploymentAppLoginBinding(stateDir,{operations={}}={}){
+ absolute(stateDir,'app_lifecycle_absolute_state_directory_required');
+ const ops={platform:process.platform,home:os.homedir(),uid:process.getuid?.(),run:execFileSync,...operations};
+ if(ops.platform!=='darwin'||!(ops.uid>0))fail('app_lifecycle_graphical_user_required');
+ absolute(ops.home,'app_lifecycle_home_invalid');
+ const file=path.join(ops.home,'Library','LaunchAgents',label+'.plist');
+ const absent={schema:1,label,path:file,installed:false};
+ // Reject redirected ancestors even when a link points at a missing target.
+ for(const dir of [ops.home,path.join(ops.home,'Library'),path.dirname(file)]){
+  if(!existing(dir))return absent;
+  const st=fs.lstatSync(dir);
+  if(!st.isDirectory()||st.isSymbolicLink()||st.uid!==ops.uid||st.mode&0o022||fs.realpathSync(dir)!==dir)fail('app_lifecycle_login_directory_untrusted');
+ }
+ if(!existing(file))return absent;
+ const ctx=context(stateDir,{operations:ops});
+ if(!ctx.config||ctx.source!=='verified_deployment_identity')fail('app_lifecycle_verified_app_required');
+ const expected=macLoginRecoveryPlan(ctx.config)[0],st=requirePrivateFile(file);
+ if(st.uid!==ops.uid||st.nlink!==1||st.size>65536)fail('app_lifecycle_login_definition_untrusted');
+ const content=fs.readFileSync(file);
+ if(content.toString('utf8')!==expected.plist)fail('app_lifecycle_login_definition_changed');
+ const override=disabledOverride(ctx),after=requirePrivateFile(file);
+ if(st.ino!==after.ino||st.dev!==after.dev||st.mode!==after.mode||!fs.readFileSync(file).equals(content))fail('app_lifecycle_login_definition_changed');
+ return {schema:1,label,path:file,installed:true,appPath:ctx.appPath,sha256:createHash('sha256').update(content).digest('hex'),mode:st.mode&0o777,disabledOverride:override,loginPreference:override===true?'disabled':'enabled'};
+}
+
 function observe(ctx){
  if(ctx.ops.platform!=='darwin')return {schema:1,status:'not_applicable',source:ctx.source,loginAtStartup:'unknown',installed:false,loaded:false,running:false,accountAcceptance:'NOT RUN'};
  const text=loadedDefinition(ctx);assertLoadedOwnership(ctx,text);

@@ -4,6 +4,8 @@ import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
 import {createHash} from 'node:crypto';
+import {readDeploymentAppLoginBinding} from '../app-lifecycle.mjs';
+import {macLoginRecoveryPlan} from '../macos-login-recovery.mjs';
 import {observeMacHostPayloadAbsence} from '../host-payload-native.mjs';
 
 function fixture(t){
@@ -60,4 +62,35 @@ test('scope rejects wrong platform, label, UID, aliases and mismatched Gateway i
  assert.equal(observeMacHostPayloadAbsence({...f.scope,gatewayServiceLabel:expected},f.options).status,'absent');
  for(const bad of [{gatewayServiceLabel:'styx-gateway-wrong.service'},{hostServiceLabel:'../../escape'},{installRoot:'/'},{stateDir:f.scope.stateDir+'/../deployment'}])assert.equal(observeMacHostPayloadAbsence({...f.scope,...bad},f.options).status,'blocked');
  assert.equal(observeMacHostPayloadAbsence(f.scope,{...f.options,platform:'linux'}).reason,'macos_native_observation_required');assert.equal(observeMacHostPayloadAbsence(f.scope,{...f.options,uid:0}).reason,'native_scope_invalid');
+});
+
+function ownedLogin(t){
+ const f=fixture(t),appPath=path.join(f.home,'Styx.app'),file=path.join(f.home,'Library/LaunchAgents/app.styx.desktop-login.plist');
+ fs.mkdirSync(f.scope.stateDir,{mode:0o700});fs.mkdirSync(path.dirname(file),{recursive:true,mode:0o700});fs.mkdirSync(appPath);
+ fs.writeFileSync(path.join(f.scope.stateDir,'deployment.json'),JSON.stringify({host:{macPreviewApp:{path:appPath,cdhash:'a'.repeat(40)}}}),{mode:0o600});
+ fs.writeFileSync(file,macLoginRecoveryPlan({appPath,logDir:path.join(f.scope.stateDir,'login-recovery-logs')})[0].plist,{mode:0o600});
+ let disabled=false;const run=(cmd,args)=>cmd==='/bin/launchctl'&&args[0]==='print-disabled'?'disabled services = {\n "app.styx.desktop-login" => '+disabled+'\n}':f.run(cmd,args);
+ const options={...f.options,run,verifyApp:value=>value};
+ const binding=readDeploymentAppLoginBinding(f.scope.stateDir,{operations:options});
+ return {...f,file,options,scope:{...f.scope,appPath,desktopLoginBinding:binding},disable:()=>{disabled=true}};
+}
+test('only exact authoritative unloaded login definition is preserved; loaded job remains blocked',t=>{
+ const f=ownedLogin(t),before=fs.readFileSync(f.file),r=observeMacHostPayloadAbsence(f.scope,f.options);
+ assert.equal(r.status,'absent');assert.equal(r.services,'owned_login_definition_preserved_all_jobs_unloaded');assert.deepEqual(fs.readFileSync(f.file),before);
+ for(const domain of ['gui/'+f.uid,'user/'+f.uid,'system']){
+  const loaded=observeMacHostPayloadAbsence(f.scope,{...f.options,run:(cmd,args)=>cmd==='/bin/launchctl'&&args[0]==='print'&&args[1]===domain+'/app.styx.desktop-login'?'state = running':f.options.run(cmd,args)});
+  assert.equal(loaded.reason,'native_service_loaded');assert.equal(loaded.serviceLabel,'app.styx.desktop-login');
+ }
+ assert.equal(observeMacHostPayloadAbsence({...f.scope,desktopLoginBinding:undefined},f.options).reason,'native_service_definition_present');
+ assert(f.calls.every(([cmd,args])=>cmd!=='/bin/launchctl'||['print','print-disabled'].includes(args[0])));
+});
+test('login exception cannot be manufactured and refuses definition, preference, signature or existence drift',t=>{
+ const f=ownedLogin(t),original=fs.readFileSync(f.file);
+ fs.appendFileSync(f.file,'<!-- foreign -->');assert.equal(observeMacHostPayloadAbsence(f.scope,f.options).status,'blocked');
+ const forged={...f.scope.desktopLoginBinding,sha256:createHash('sha256').update(fs.readFileSync(f.file)).digest('hex')};assert.equal(observeMacHostPayloadAbsence({...f.scope,desktopLoginBinding:forged},f.options).status,'blocked');fs.writeFileSync(f.file,original);
+ assert.equal(observeMacHostPayloadAbsence(f.scope,{...f.options,verifyApp:()=>{throw Error('signature invalid')}}).status,'blocked');
+ fs.unlinkSync(f.file);assert.equal(observeMacHostPayloadAbsence(f.scope,f.options).status,'blocked');
+ const missing=readDeploymentAppLoginBinding(f.scope.stateDir,{operations:f.options});fs.writeFileSync(f.file,original,{mode:0o600});assert.equal(observeMacHostPayloadAbsence({...f.scope,desktopLoginBinding:missing},f.options).status,'blocked');
+ f.disable();assert.equal(observeMacHostPayloadAbsence(f.scope,f.options).status,'blocked');
+ const disabled=readDeploymentAppLoginBinding(f.scope.stateDir,{operations:f.options});assert.equal(observeMacHostPayloadAbsence({...f.scope,desktopLoginBinding:disabled},f.options).status,'absent');
 });

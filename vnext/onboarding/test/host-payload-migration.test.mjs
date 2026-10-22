@@ -10,6 +10,8 @@ import {gatewayServicePlan} from '../gateway-service.mjs';
 import {prepareGatewayRuntime} from '../gateway-runtime.mjs';
 import {GATEWAY_SOURCE_FILES,GATEWAY_ENTRYPOINT,GATEWAY_SOURCE_CONTRACT} from '../gateway-release-contract.mjs';
 import {linuxUserUnit} from '../../host/linux-service.mjs';
+import {macLoginRecoveryPlan} from '../macos-login-recovery.mjs';
+import {observeMacHostPayloadAbsence} from '../host-payload-native.mjs';
 import {observeLinuxHostPayloadAbsence} from '../host-payload-linux.mjs';
 import {stageSignedRelease,activateRelease,refreshVerifiedBootstrap,activeRelease} from '../../host/installer.mjs';
 import {planHostPublisherTransition,planHostPayloadMigration,applyHostPayloadMigration,rollbackHostPayloadMigration,readHostPayloadMigration,inspectHostPayloadCandidate} from '../host-payload-migration.mjs';
@@ -22,7 +24,7 @@ const json=p=>JSON.parse(fs.readFileSync(p));
 const opts={platform:'darwin',arch:process.arch};
 function fixture(t,{cross=false,platform='darwin'}={}){
  const opts={platform,arch:process.arch},suffix=platform==='win32'?'.exe':'';
- const dir=fs.mkdtempSync(path.join(os.tmpdir(),'styx-payload-'));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
+ const dir=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'styx-payload-')));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
  const stateDir=path.join(dir,'deployment'),base=path.join(dir,'host'),root=path.join(base,'install'),app=path.join(dir,'Styx.app'),oldKey=key(),nextKey=cross?key():oldKey;
  function bundle(directory,version,k){
   const names=['private-storage','installer','launch','connect','enroll','setup-native','doctor','macos-launchagent','macos-native-launcher','linux-service'].map(n=>'host/'+n+'.mjs').concat(['host/windows-task.ps1',...['node','codex','cua-driver'].map(n=>'bin/'+n+suffix)]);
@@ -43,7 +45,7 @@ function fixture(t,{cross=false,platform='darwin'}={}){
  const configSha256=sha(fs.readFileSync(path.join(stateDir,'deployment.json'))),evidenceFile=p=>({path:p,sha256:sha(fs.readFileSync(p))});
  put(path.join(stateDir,'state.json'),{schema:1,mode:config.mode,configSha256,steps:[{id:'host.prepare',status:'succeeded',evidence:{...receipt,receipt:evidenceFile(path.join(base,'setup-receipt.json')),serviceConfiguration:evidenceFile(path.join(base,'service.json'))}},{id:'host.claim',status:'succeeded',evidence:{hostConfiguration:evidenceFile(service.hostConfigFile)}},{id:'host.doctor',status:'succeeded',evidence:{healthy:true}},{id:'host.service.install',status:'pending'}],onboardingDecisions:{background:{configSha256}}});
  put(path.join(stateDir,'background.json'),{schema:1,configSha256,status:'disabled'});put(path.join(stateDir,'capabilities.json'),{schema:1,configSha256,status:'applied'});
- const adapters={platform,...(platform==='linux'?{linuxServiceOptions:{home:dir}}:{}),observeAbsence:async()=>({status:'absent'}),verifyApp:value=>({...value,cdhash:'d'.repeat(40),trust:'local_certificate_preview_not_notarized'})};
+ const adapters={platform,macLoginOptions:{home:dir},...(platform==='linux'?{linuxServiceOptions:{home:dir}}:{}),observeAbsence:async()=>({status:'absent'}),verifyApp:value=>({...value,cdhash:'d'.repeat(40),trust:'local_certificate_preview_not_notarized'})};
  return {dir,stateDir,base,root,app,config,candidate,oldKey,nextKey,adapters,bundle,opts};
 }
 async function reviewed(f){const plan=await planHostPayloadMigration({stateDir:f.stateDir,bundle:f.candidate},f.adapters);const before=new Map([...plan.changes,...plan.preserved].map(x=>[x.path,fs.readFileSync(x.path)]));return {plan,before};}
@@ -82,7 +84,7 @@ for(const phase of ['prepared','written_deployment','written_publisher','written
 });
 test('actual updater process exit in write leaves durable journal and recoverable dead-owner locks',async t=>{
  const f=fixture(t,{cross:true}),{plan,before}=await reviewed(f),module=fileURLToPath(new URL('../host-payload-migration.mjs',import.meta.url));
- const script=`import {applyHostPayloadMigration} from ${JSON.stringify(module)};const input=JSON.parse(process.env.STYX_TEST_MIGRATION);await applyHostPayloadMigration(input,{platform:'darwin',observeAbsence:async()=>({status:'absent'}),verifyApp:v=>({...v,cdhash:'d'.repeat(40),trust:'local_certificate_preview_not_notarized'}),onPhase:p=>{if(p==='written_publisher')process.exit(73)}});`;
+ const script=`import {applyHostPayloadMigration} from ${JSON.stringify(module)};const input=JSON.parse(process.env.STYX_TEST_MIGRATION);await applyHostPayloadMigration(input,{platform:'darwin',macLoginOptions:{home:${JSON.stringify(f.dir)}},observeAbsence:async()=>({status:'absent'}),verifyApp:v=>({...v,cdhash:'d'.repeat(40),trust:'local_certificate_preview_not_notarized'}),onPhase:p=>{if(p==='written_publisher')process.exit(73)}});`;
  const child=spawnSync(process.execPath,['--input-type=module','-e',script],{encoding:'utf8',env:{...process.env,STYX_TEST_MIGRATION:JSON.stringify({stateDir:f.stateDir,plan,authorize:true})}});assert.equal(child.status,73,child.stderr);
  const j=readHostPayloadMigration({stateDir:f.stateDir});assert.equal(j.status,'writing');await rollback(f,j.transactionId);unchanged(before);
 });
@@ -103,7 +105,7 @@ for(const phase of ['locked','snapshot_bootstrap_node'])test(`real process exit 
  const f=fixture(t,{cross:true}),first=await reviewed(f);
  const applied=await applyHostPayloadMigration({stateDir:f.stateDir,plan:first.plan,authorize:true},f.adapters);await rollback(f,applied.transactionId);
  const {plan,before}=await reviewed(f),module=fileURLToPath(new URL('../host-payload-migration.mjs',import.meta.url));
- const script=`import {applyHostPayloadMigration} from ${JSON.stringify(module)};await applyHostPayloadMigration(JSON.parse(process.env.STYX_TEST_MIGRATION),{platform:'darwin',observeAbsence:async()=>({status:'absent'}),verifyApp:v=>({...v,cdhash:'d'.repeat(40),trust:'local_certificate_preview_not_notarized'}),onPhase:p=>{if(p===${JSON.stringify(phase)})process.exit(74)}});`;
+ const script=`import {applyHostPayloadMigration} from ${JSON.stringify(module)};await applyHostPayloadMigration(JSON.parse(process.env.STYX_TEST_MIGRATION),{platform:'darwin',macLoginOptions:{home:${JSON.stringify(f.dir)}},observeAbsence:async()=>({status:'absent'}),verifyApp:v=>({...v,cdhash:'d'.repeat(40),trust:'local_certificate_preview_not_notarized'}),onPhase:p=>{if(p===${JSON.stringify(phase)})process.exit(74)}});`;
  const child=spawnSync(process.execPath,['--input-type=module','-e',script],{encoding:'utf8',env:{...process.env,STYX_TEST_MIGRATION:JSON.stringify({stateDir:f.stateDir,plan,authorize:true})}});assert.equal(child.status,74,child.stderr);
  const current=readHostPayloadMigration({stateDir:f.stateDir});assert.equal(current.status,'capturing');assert.notEqual(current.transactionId,applied.transactionId);assert.ok(fs.existsSync(path.join(f.stateDir,'advance.lock')));unchanged(before);
  await rollback(f,current.transactionId);unchanged(before);assert.ok(!fs.existsSync(path.join(f.stateDir,'advance.lock')));
@@ -163,7 +165,7 @@ test('doctor exception permits rollback but unrelated state changes and service 
 test('real process exit after archiving doctor observation retains recoverable rollback',async t=>{
  const f=fixture(t),{plan,before}=await reviewed(f),result=await applyHostPayloadMigration({stateDir:f.stateDir,plan,authorize:true},f.adapters),file=path.join(f.stateDir,'state.json'),state=json(file);
  state.steps=state.steps.map(step=>step.id==='host.doctor'?{id:step.id,status:'succeeded',updatedAt:new Date().toISOString(),evidence:{status:'ready_for_exec',blockers:[],warnings:[]}}:step);put(file,state);
- const module=fileURLToPath(new URL('../host-payload-migration.mjs',import.meta.url)),script=`import {rollbackHostPayloadMigration} from ${JSON.stringify(module)};await rollbackHostPayloadMigration(JSON.parse(process.env.STYX_TEST_MIGRATION),{platform:'darwin',observeAbsence:async()=>({status:'absent'}),onPhase:p=>{if(p==='restored_deployment')process.exit(75)}});`;
+ const module=fileURLToPath(new URL('../host-payload-migration.mjs',import.meta.url)),script=`import {rollbackHostPayloadMigration} from ${JSON.stringify(module)};await rollbackHostPayloadMigration(JSON.parse(process.env.STYX_TEST_MIGRATION),{platform:'darwin',macLoginOptions:{home:${JSON.stringify(f.dir)}},observeAbsence:async()=>({status:'absent'}),onPhase:p=>{if(p==='restored_deployment')process.exit(75)}});`;
  const child=spawnSync(process.execPath,['--input-type=module','-e',script],{encoding:'utf8',env:{...process.env,STYX_TEST_MIGRATION:JSON.stringify({stateDir:f.stateDir,transactionId:result.transactionId,authorize:true})}});assert.equal(child.status,75,child.stderr);
  await rollback(f,result.transactionId);unchanged(before);assert.ok(json(path.join(f.stateDir,'host-payload-migration.json')).rollbackObservation);
 });
@@ -240,4 +242,52 @@ test('Gateway changed definition, runtime, running/enabled/dropin state refuse w
 test('Gateway definition drift after apply blocks rollback until original observed binding returns',async t=>{
  const f=combinedLinuxFixture(t),{plan,before}=await reviewed(f),r=await applyHostPayloadMigration({stateDir:f.stateDir,plan,authorize:true},f.adapters),original=fs.readFileSync(f.gatewayUnit);
  fs.appendFileSync(f.gatewayUnit,'# changed\n');await assert.rejects(rollback(f,r.transactionId),/native_absence_required/);assert.equal(activeRelease(f.root,pem(f.oldKey),f.opts).version,'0.2.0-next');fs.writeFileSync(f.gatewayUnit,original);await rollback(f,r.transactionId);unchanged(before);
+});
+
+function macLoginFixture(t){
+ const f=fixture(t,{cross:true}),file=path.join(f.dir,'Library/LaunchAgents/app.styx.desktop-login.plist');
+ put(file,macLoginRecoveryPlan({appPath:f.app,logDir:path.join(f.stateDir,'login-recovery-logs')})[0].plist);
+ let override=false,loaded=false;const calls=[];
+ const run=(cmd,args)=>{
+  calls.push([cmd,args]);
+  if(cmd==='/bin/ps')return process.getuid()+' 123 1 /usr/bin/login\n';
+  if(cmd==='/bin/launchctl'){
+   if(args[0]==='print-disabled')return 'disabled services = {\n "app.styx.desktop-login" => '+override+'\n}';
+   if(loaded&&args[1]==='gui/'+process.getuid()+'/app.styx.desktop-login')return 'state = running';
+   throw Object.assign(Error('missing'),{status:113,stderr:'Could not find service'});
+  }
+  throw Error('unexpected native mutation');
+ };
+ f.adapters.macLoginOptions={home:f.dir,run};
+ f.adapters.observeAbsence=input=>observeMacHostPayloadAbsence(input,{platform:'darwin',home:f.dir,run,verifyApp:f.adapters.verifyApp});
+ return {...f,file,calls,load:value=>{loaded=value},override:value=>{override=value}};
+}
+test('macOS login-enabled normal Quit binding survives migration and rollback without changing launchd preference',async t=>{
+ const f=macLoginFixture(t);f.load(true);
+ const candidate=inspectHostPayloadCandidate({stateDir:f.stateDir,bundle:f.candidate},f.adapters);
+ assert.equal(candidate.nativeAppLogin.loginPreference,'enabled');assert.equal(candidate.nativeAppLogin.loaded,undefined);
+ const blocked=await planHostPayloadMigration({stateDir:f.stateDir,bundle:f.candidate},f.adapters);assert.equal(blocked.reason,'native_service_loaded');
+ f.load(false);assert.equal(inspectHostPayloadCandidate({stateDir:f.stateDir,bundle:f.candidate},f.adapters).bindingSha256,candidate.bindingSha256);
+ const {plan,before}=await reviewed(f);assert.equal(plan.serviceMutation,'NONE');assert(plan.preserved.some(p=>p.path===f.file));assert(!plan.changes.some(p=>p.path===f.file));
+ const r=await applyHostPayloadMigration({stateDir:f.stateDir,plan,authorize:true},f.adapters);assert.equal(r.status,'applied_stopped');assert.deepEqual(fs.readFileSync(f.file),before.get(f.file));
+ await rollback(f,r.transactionId);unchanged(before);
+ assert(f.calls.every(([cmd,args])=>cmd!=='/bin/launchctl'||['print','print-disabled'].includes(args[0])));
+});
+test('macOS login definition and override drift after review refuse apply or rollback without restoring over user changes',async t=>{
+ const f=macLoginFixture(t),{plan,before}=await reviewed(f),original=fs.readFileSync(f.file);
+ f.override(true);await assert.rejects(applyHostPayloadMigration({stateDir:f.stateDir,plan,authorize:true},f.adapters),/review_stale/);unchanged(before);f.override(false);
+ fs.appendFileSync(f.file,'<!-- foreign -->');await assert.rejects(applyHostPayloadMigration({stateDir:f.stateDir,plan,authorize:true},f.adapters),/login_definition_changed/);fs.writeFileSync(f.file,original);
+ const r=await applyHostPayloadMigration({stateDir:f.stateDir,plan,authorize:true},f.adapters);
+ f.override(true);await assert.rejects(rollback(f,r.transactionId),/login_binding_changed/);assert.equal(activeRelease(f.root,pem(f.nextKey),opts).version,'0.2.0-next');f.override(false);
+ fs.unlinkSync(f.file);await assert.rejects(rollback(f,r.transactionId),/login_binding_changed/);put(f.file,original);
+ f.load(true);await assert.rejects(rollback(f,r.transactionId),/native_absence_required/);f.load(false);await rollback(f,r.transactionId);unchanged(before);
+});
+test('macOS login absence is review-bound and mid-transaction preference drift retains the existing recovery journal',async t=>{
+ const f=macLoginFixture(t),original=fs.readFileSync(f.file);fs.unlinkSync(f.file);
+ const absent=await reviewed(f);assert.equal(absent.plan.nativeAppLogin.installed,false);put(f.file,original);
+ await assert.rejects(applyHostPayloadMigration({stateDir:f.stateDir,plan:absent.plan,authorize:true},f.adapters),/review_stale/);
+ const {plan,before}=await reviewed(f);
+ await assert.rejects(applyHostPayloadMigration({stateDir:f.stateDir,plan,authorize:true},{...f.adapters,onPhase:phase=>{if(phase==='written_pointer')f.override(true)}}),/explicit_rollback_required/);
+ const j=readHostPayloadMigration({stateDir:f.stateDir});assert.equal(j.status,'uncertain');assert(fs.existsSync(path.join(f.stateDir,'advance.lock')));
+ await assert.rejects(rollback(f,j.transactionId),/rollback_interrupted/);f.override(false);await rollback(f,j.transactionId);unchanged(before);
 });
