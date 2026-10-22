@@ -101,3 +101,17 @@ for(const phase of ['locked','snapshot_bootstrap_node'])test(`real process exit 
  const current=readHostPayloadMigration({stateDir:f.stateDir});assert.equal(current.status,'capturing');assert.notEqual(current.transactionId,applied.transactionId);assert.ok(fs.existsSync(path.join(f.stateDir,'advance.lock')));unchanged(before);
  await rollback(f,current.transactionId);unchanged(before);assert.ok(!fs.existsSync(path.join(f.stateDir,'advance.lock')));
 });
+
+test('a historical receipt is explicitly reconciled against verified active payload and restored exactly on rollback',async t=>{
+ const f=fixture(t,{cross:true}),file=path.join(f.base,'setup-receipt.json'),receipt=json(file);
+ const version='0.0.1-historical',release_root=path.join(f.root,'releases',version);
+ put(file,{...receipt,version,release_root,node:path.join(release_root,'bin/node'),publisher_sha256:'f'.repeat(64)});
+ const stateFile=path.join(f.stateDir,'state.json'),state=json(stateFile);state.steps[0].evidence.receipt.sha256=sha(fs.readFileSync(file));state.steps[0].evidence.serviceConfiguration.sha256='a'.repeat(64);put(stateFile,state);
+ const {plan,before}=await reviewed(f);assert.deepEqual(plan.receiptReconciliation,{status:'historical_receipt',recordedVersion:version,verifiedActiveVersion:'0.1.0-old'});assert.equal(plan.preparationEvidenceReconciliation.length,1);assert.equal(plan.preparationEvidenceReconciliation[0].recordedSha256,'a'.repeat(64));
+ const result=await applyHostPayloadMigration({stateDir:f.stateDir,plan,authorize:true},f.adapters);
+ assert.equal(json(file).version,'0.2.0-next');assert.equal(json(file).publisher_sha256,pin(f.nextKey));await rollback(f,result.transactionId);unchanged(before);
+ const altered=json(stateFile);altered.steps[1].evidence.hostConfiguration.sha256='b'.repeat(64);put(stateFile,altered);await assert.rejects(planHostPayloadMigration({stateDir:f.stateDir,bundle:f.candidate},f.adapters),/completed_evidence_changed/);put(stateFile,before.get(stateFile));
+ for(const changed of [{service_config:'/foreign'},{enrollment_config:'/foreign'},{release_root:'/foreign'},{node:'/foreign'},{version:'../foreign'},{publisher_sha256:'invalid'}]){
+  put(file,{...json(file),...changed});await assert.rejects(planHostPayloadMigration({stateDir:f.stateDir,bundle:f.candidate},f.adapters),/receipt_binding_changed/);put(file,before.get(file));
+ }
+});

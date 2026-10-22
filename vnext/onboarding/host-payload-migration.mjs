@@ -60,15 +60,29 @@ function snapshot(d){
  const active=activeRelease(root,pem,{platform:'darwin',arch:process.arch});assert(active,'host_payload_active_release_required');
  const current=verifySignedRelease(active.release_root,pem,{platform:'darwin',arch:process.arch});complete(current,host);
  assert([path.join(root,'node'),path.join(active.release_root,'bin/node')].includes(service.nodeBinary)&&sha(bytes(service.nodeBinary,true))===current.manifest.files.find(f=>f.path==='bin/node')?.sha256,'host_payload_service_node_changed');
- const receipt=read(names.receipt);assert(receipt.schema===1&&receipt.version===current.version&&receipt.publisher_sha256===pin(pem)&&receipt.node===service.nodeBinary&&receipt.release_root===active.release_root&&receipt.service_config===names.service,'host_payload_receipt_binding_changed');
+ // Historical hotfixes could update the verified active generation without
+ // rewriting this installation receipt. It is audit evidence, never a source
+ // of executable paths or publisher trust. Bind and review its repair explicitly.
+ const receipt=read(names.receipt);
+ assert(receipt.schema===1&&typeof receipt.version==='string'&&/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(receipt.version)&&digest(receipt.publisher_sha256)&&receipt.service_config===names.service&&receipt.enrollment_config===path.join(base,'enrollment.json'),'host_payload_receipt_binding_changed');
+ const recordedRoot=path.join(root,'releases',receipt.version);
+ assert(receipt.release_root===recordedRoot&&[path.join(root,'node'),path.join(recordedRoot,'bin/node')].includes(receipt.node),'host_payload_receipt_binding_changed');
+ const receiptReconciliation={status:receipt.version===current.version&&receipt.publisher_sha256===pin(pem)&&receipt.node===service.nodeBinary&&receipt.release_root===active.release_root?'current':'historical_receipt',recordedVersion:receipt.version,verifiedActiveVersion:current.version};
  for(const n of BOOTSTRAP){const source=n==='node'?'bin/node':'host/'+n;assert(sha(bytes(names['bootstrap_'+n],true))===current.manifest.files.find(f=>f.path===source)?.sha256,'host_payload_bootstrap_changed')}
- for(const step of state.steps.filter(s=>s.status==='succeeded'))for(const value of Object.values(step.evidence??{}))if(value&&typeof value==='object'&&absolute(value.path)&&digest(value.sha256))assert(sha(bytes(value.path))===value.sha256,'host_payload_completed_evidence_changed');
+ const preparationEvidenceReconciliation=[];
+ for(const step of state.steps.filter(s=>s.status==='succeeded'))for(const [name,value] of Object.entries(step.evidence??{}))if(value&&typeof value==='object'&&absolute(value.path)&&digest(value.sha256)){
+  const actual=sha(bytes(value.path));if(actual===value.sha256)continue;
+  // Only the already independently validated current service definition can
+  // repair this known historical hotfix gap. Other evidence drift still fails.
+  assert(receiptReconciliation.status==='historical_receipt'&&receipt.version!==current.version&&step.id==='host.prepare'&&name==='serviceConfiguration'&&value.path===names.service,'host_payload_completed_evidence_changed');
+  preparationEvidenceReconciliation.push({stepId:step.id,evidence:name,recordedSha256:value.sha256,verifiedCurrentSha256:actual});
+ }
  const files=[];for(const [name,file]of Object.entries(names)){if(['background','capabilities'].includes(name)&&!fs.existsSync(file))continue;const before=bytes(file,name.startsWith('bootstrap_'));files.push({name,path:file,before,mode:fs.statSync(file).mode&0o777});if(['background','capabilities'].includes(name)){const value=JSON.parse(before);assert(value.schema===1&&value.configSha256===state.configSha256&&!['configuring','running','uncertain','rolling_back'].includes(value.status)&&!value.operations?.some(s=>['running','uncertain'].includes(s.status)),'host_payload_auxiliary_requires_reconciliation')}}
  const preserved=[];inventory(path.join(base,'device'),preserved);inventory(path.join(d,'gateway'),preserved);
  for(const file of [path.join(base,'enrollment.json'),path.join(base,'setup-state.json'),path.join(base,'gateway-ca.pem'),path.join(d,'onboarding-plugin.json'),path.join(d,'account-acceptance.json')])if(fs.existsSync(file))preserved.push({path:file,sha256:sha(bytes(file))});
  inventory(path.join(d,'tunnel'),preserved);
  if(host.browser?.profileRoot){assert(host.browser.profileRoot===path.join(base,'browser'),'host_payload_browser_profile_binding_changed');requirePrivateDirectory(host.browser.profileRoot)}
- return {d,config,state,base,root,names,service,host,pem,active,current,files,preserved};
+ return {d,config,state,base,root,names,service,host,pem,active,current,files,preserved,receiptReconciliation,preparationEvidenceReconciliation};
 }
 function noActivity(d,root){for(const file of [path.join(d,'foreground.lock'),path.join(d,'host-update-recovery.lock'),...['.health-update-lock','.health-operation-lock','.health-recovery-guard'].map(n=>path.join(root,n))])assert(!fs.existsSync(file),'host_payload_active_or_uncertain_owner');for(const [name,statuses] of [['host-update.json',['completed','recovered']],['mac-signing-registration.json',['applied','rolled_back']]]){const f=path.join(d,name);if(fs.existsSync(f)){const r=read(f);assert(statuses.includes(r.phase??r.status),'host_payload_other_transaction_requires_recovery')}}}
 class NativeAbsenceRequired extends Error {
@@ -116,7 +130,7 @@ function proposed(s,t){
 async function build(stateDir,bundle,adapters,ownTransaction){
  const s=snapshot(stateDir);noActivity(stateDir,s.root);const old=journal(stateDir);assert(!old||['applied','rolled_back'].includes(old.status)||old.transactionId===ownTransaction&&old.status==='capturing','host_payload_requires_rollback');
  const t=target(s,bundle,adapters);await absent(s,adapters);
- const files=proposed(s,t),body={schema:1,kind:KIND,stateDir,status:'offline_reviewable',bundle,current:{version:s.current.version,manifestSha256:s.current.sha256,publisherSha256:pin(s.pem)},target:{version:t.release.version,manifestSha256:t.release.sha256,publisherSha256:pin(t.pem)},publisherChange:pin(s.pem)!==pin(t.pem),app:t.app,changes:files.map(f=>({name:f.name,path:f.path,beforeSha256:sha(f.before),afterSha256:sha(f.after),beforeMode:f.mode,afterMode:f.afterMode})),preserved:s.preserved,nativeAbsence:'observed',serviceMutation:'NONE',nativeHealth:'NOT RUN',accountAcceptance:'NOT RUN'};
+ const files=proposed(s,t),body={schema:1,kind:KIND,stateDir,status:'offline_reviewable',bundle,current:{version:s.current.version,manifestSha256:s.current.sha256,publisherSha256:pin(s.pem)},target:{version:t.release.version,manifestSha256:t.release.sha256,publisherSha256:pin(t.pem)},publisherChange:pin(s.pem)!==pin(t.pem),receiptReconciliation:s.receiptReconciliation,preparationEvidenceReconciliation:s.preparationEvidenceReconciliation,app:t.app,changes:files.map(f=>({name:f.name,path:f.path,beforeSha256:sha(f.before),afterSha256:sha(f.after),beforeMode:f.mode,afterMode:f.afterMode})),preserved:s.preserved,nativeAbsence:'observed',serviceMutation:'NONE',nativeHealth:'NOT RUN',accountAcceptance:'NOT RUN'};
  return {s,t,files,plan:{...body,planId:sha(JSON.stringify(body))}};
 }
 export async function planHostPayloadMigration({stateDir,bundle}={},adapters={}){assert(absolute(stateDir),'absolute_state_directory_required');for(const n of [...LOCKS,RECOVERY])assert(!fs.existsSync(path.join(stateDir,n)),'host_payload_management_busy');try{return (await build(stateDir,bundle,adapters)).plan}catch(error){if(!(error instanceof NativeAbsenceRequired))throw error;return {schema:1,status:'blocked',reason:error.reason,installation:'NOT RUN',nativeHealth:'NOT RUN',accountAcceptance:'NOT RUN'}}}

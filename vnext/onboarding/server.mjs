@@ -327,7 +327,7 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
     if(!artifacts.bundle||typeof api.planHostPayloadMigration!=='function')fail('host_payload_upgrade_unavailable');
     payloadPlan=await api.planHostPayloadMigration({stateDir,bundle:artifacts.bundle});
     const release=value=>({version:value?.version,manifestSha256:value?.manifestSha256,publisherSha256:value?.publisherSha256});
-    send(200,{upgrade:{status:payloadPlan.status,reason:payloadPlan.reason,planId:payloadPlan.planId,current:release(payloadPlan.current),target:release(payloadPlan.target),publisherChange:payloadPlan.publisherChange===true,requiresApplicationExit:true,installation:'NOT RUN',runtimeHealth:'NOT RUN'}});return;
+    send(200,{upgrade:{status:payloadPlan.status,reason:payloadPlan.reason,planId:payloadPlan.planId,current:release(payloadPlan.current),target:release(payloadPlan.target),publisherChange:payloadPlan.publisherChange===true,receiptReconciliation:payloadPlan.receiptReconciliation,preparationEvidenceReconciliation:payloadPlan.preparationEvidenceReconciliation,requiresApplicationExit:true,installation:'NOT RUN',runtimeHealth:'NOT RUN'}});return;
    }else if(url.pathname==='/api/host-payload/apply'){
     keys(data,['authorize','planId']);
     if(data.authorize!==true||payloadPlan?.status!=='offline_reviewable'||data.planId!==payloadPlan.planId||typeof api.applyHostPayloadMigration!=='function')fail('host_payload_reviewed_plan_required');
