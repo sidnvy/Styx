@@ -101,7 +101,7 @@ async function body(req,maximumBytes=65536){
  req.setEncoding('utf8');let data='';for await(const chunk of req){data+=chunk;if(Buffer.byteLength(data)>maximumBytes)fail('body_too_large')}
  try{return JSON.parse(data)}catch{fail('invalid_json')}
 }
-export async function createOnboardingServer({stateDir,port=0,trustedForwardOrigin,trustedOpenSSL=process.platform==='win32'?undefined:'/usr/bin/openssl',trustedOpenSSLConfig,core,artifactDefaultsFile,verifyConnection,gatewayService,pairingLinks,trustedMacPreviewApp,backgroundControl=enableDeploymentBackground,backgroundRead=observeDeploymentBackground,trustedTunnelClient,nativeAppAuthority}={}){
+export async function createOnboardingServer({stateDir,port=0,trustedForwardOrigin,trustedOpenSSL=process.platform==='win32'?undefined:'/usr/bin/openssl',trustedOpenSSLConfig,core,artifactDefaultsFile,verifyConnection,gatewayService,pairingLinks,trustedMacPreviewApp,backgroundControl=enableDeploymentBackground,backgroundRead=observeDeploymentBackground,trustedTunnelClient,nativeAppAuthority,trustedWindowsApp}={}){
  if(typeof stateDir!=='string'||!path.isAbsolute(stateDir))fail('absolute_state_directory_required');
  if(!Number.isInteger(port)||port<0||port>65535)fail('invalid_port');
  const forwarded=trustedForwardOrigin?browserOrigin(trustedForwardOrigin):null;
@@ -156,6 +156,13 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
   nativeStartup={status:'reconciliation_required',observation:'current_process',reason};
  };
  const nativeAppOwned=!!macPreviewApp||(typeof nativeAppAuthority==='function'&&nativeAppAuthority()?.source==='current_windows_native_app');
+ const nativeAppLifecycleSupported=!!macPreviewApp||(nativeAppOwned&&typeof trustedWindowsApp==='function');
+ const lifecycleContext=()=>{
+  if(macPreviewApp)return {trustedAppPath:macPreviewApp.path};
+  const app=trustedWindowsApp?.();
+  if(!nativeAppLifecycleSupported||app?.authority?.source!=='current_windows_native_app')fail('native_app_lifecycle_unavailable');
+  return {trustedWindowsApp:app};
+ };
  const checkNativeHostStartup=async()=>{
   if(!nativeAppOwned)return true;
   const decision=await nativeHostStartupDecision(stateDir,{artifacts,core:api});
@@ -226,7 +233,7 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
    acceptance=publicAcceptance(typeof observedApi.readDeploymentAcceptance==='function'?await observedApi.readDeploymentAcceptance(stateDir):null,{includeChallenge:true});
    if(status.deployment.mode!=='join-existing'&&typeof observedApi.readDeploymentPlugin==='function')plugin=await observedApi.readDeploymentPlugin(stateDir);
   }
-  if(macPreviewApp&&typeof api.readDeploymentAppLifecycle==='function')try{lifecycle=await api.readDeploymentAppLifecycle(stateDir,{trustedAppPath:macPreviewApp.path})}catch{}
+  if(nativeAppLifecycleSupported&&typeof api.readDeploymentAppLifecycle==='function')try{lifecycle=await api.readDeploymentAppLifecycle(stateDir,lifecycleContext())}catch{}
   return {status,journey,browser,acceptance,plugin,lifecycle};
  };
  const assets=new Map([['/',['index.html','text/html; charset=utf-8']],['/ui/app.mjs',['app.mjs','text/javascript; charset=utf-8']],['/ui/style.css',['style.css','text/css; charset=utf-8']]]);
@@ -252,12 +259,12 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
   // reconciliation. Recovery/quit stay reachable; read-only status stays honest.
   if(nativeAppOwned&&nativeStartup.reason?.startsWith('host_payload_')&&req.method==='POST'&&!['/api/app/quit','/api/app/quit-admission'].includes(url.pathname)&&!url.pathname.startsWith('/api/host-payload/')){send(409,{error:nativeStartup.reason});return}
   if(req.method==='GET'&&url.pathname==='/api/session'){
-   send(200,{csrf,platform:process.platform,journeySupported:true,nativeAppLifecycleSupported:!!macPreviewApp,nativeSigningUpgradeSupported:!!macPreviewApp,diagnosticsSupported:true,browserPreparationSupported:typeof api.readDeploymentBrowser==='function'&&typeof api.prepareDeploymentBrowser==='function',foregroundSupported:typeof api.startDeploymentForeground==='function'&&typeof api.stopDeploymentForeground==='function',acceptanceSupported:['readDeploymentAcceptance','beginDeploymentAcceptance','confirmDeploymentAcceptance','recordDeploymentDesktopReadback'].every(k=>typeof api[k]==='function'),connectionHandoffSupported:typeof api.prepareDeploymentConnectionHandoff==='function',packagedPreviewTrusted:!!macPreviewApp,backgroundSupported:true,capabilityChangeSupported:true,deviceSettingsSupported:typeof api.readDeploymentDevices==='function',tunnelSupported:!!tunnel,localGatewayAvailable:!!trustedOpenSSL,pauseSupported:typeof api.stopDeploymentGateway==='function',startSupported:typeof api.startDeploymentGateway==='function',
+   send(200,{csrf,platform:process.platform,journeySupported:true,nativeAppLifecycleSupported,nativeSigningUpgradeSupported:!!macPreviewApp,diagnosticsSupported:true,browserPreparationSupported:typeof api.readDeploymentBrowser==='function'&&typeof api.prepareDeploymentBrowser==='function',foregroundSupported:typeof api.startDeploymentForeground==='function'&&typeof api.stopDeploymentForeground==='function',acceptanceSupported:['readDeploymentAcceptance','beginDeploymentAcceptance','confirmDeploymentAcceptance','recordDeploymentDesktopReadback'].every(k=>typeof api[k]==='function'),connectionHandoffSupported:typeof api.prepareDeploymentConnectionHandoff==='function',packagedPreviewTrusted:!!macPreviewApp,backgroundSupported:true,capabilityChangeSupported:true,deviceSettingsSupported:typeof api.readDeploymentDevices==='function',tunnelSupported:!!tunnel,localGatewayAvailable:!!trustedOpenSSL,pauseSupported:typeof api.stopDeploymentGateway==='function',startSupported:typeof api.startDeploymentGateway==='function',
     deviceIngressSupported:typeof api.planDeviceIngress==='function'&&typeof api.verifyDeviceIngress==='function',pairingLinkImportSupported:linkImportAvailable,pairingLinkCreateSupported:typeof api.createDeploymentPairingLink==='function',pendingApprovalSupported:typeof api.listDeploymentPending==='function'&&typeof api.approveDeploymentPending==='function',hostServiceSupported:typeof api.controlDeploymentHostService==='function',gatewayServiceSupported:gatewayServiceAvailable,gatewayService:gatewayServiceCapability,localGatewayAddresses:typeof api.localGatewayAddresses==='function'?api.localGatewayAddresses():[],defaults,accountAcceptance:'NOT RUN',nativeInstaller:'NOT RUN',trustedForwarding:!!forwarded});return;
   }
   if(req.method==='GET'&&url.pathname==='/api/app/lifecycle'){
-   if(!macPreviewApp||typeof api.readDeploymentAppLifecycle!=='function'){send(409,{error:'native_app_lifecycle_unavailable'});return}
-   try{send(200,{lifecycle:await api.readDeploymentAppLifecycle(stateDir,{trustedAppPath:macPreviewApp.path})})}catch{send(409,{error:'native_app_lifecycle_observation_failed'})}return;
+   if(!nativeAppLifecycleSupported||typeof api.readDeploymentAppLifecycle!=='function'){send(409,{error:'native_app_lifecycle_unavailable'});return}
+   try{send(200,{lifecycle:await api.readDeploymentAppLifecycle(stateDir,lifecycleContext())})}catch{send(409,{error:'native_app_lifecycle_observation_failed'})}return;
   }
   if(req.method==='GET'&&url.pathname==='/api/native-signing/status'){
    if(!macPreviewApp){send(409,{error:'native_signing_upgrade_unavailable'});return}
@@ -323,9 +330,9 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
    }else if(['/api/app/quit','/api/app/login'].includes(url.pathname)){
     const action=url.pathname.endsWith('/quit')?'quit':'login';
     keys(data,action==='quit'?['authorize']:['authorize','enabled']);
-    if(!macPreviewApp||data.authorize!==true||typeof api.controlDeploymentAppLifecycle!=='function')fail('native_app_lifecycle_unavailable');
+    if(!nativeAppLifecycleSupported||data.authorize!==true||typeof api.controlDeploymentAppLifecycle!=='function')fail('native_app_lifecycle_unavailable');
     if(action==='quit')await admitWork('quit',true);
-    try{send(200,{lifecycle:await api.controlDeploymentAppLifecycle(stateDir,{...data,action},{trustedAppPath:macPreviewApp.path})});}catch(error){if(action==='quit')await cancelWorkAdmission();throw error}return;
+    try{send(200,{lifecycle:await api.controlDeploymentAppLifecycle(stateDir,{...data,action},lifecycleContext())});}catch(error){if(action==='quit')await cancelWorkAdmission();throw error}return;
    }else if(url.pathname==='/api/plugin/profile'){
     keys(data,['authorize','presentation','selection']);if(data.authorize!==true||typeof api.setDeploymentPluginProfile!=='function')fail('plugin_authorization_required');send(200,{plugin:await api.setDeploymentPluginProfile(stateDir,data)});return;
    }else if(url.pathname==='/api/plugin/record'){

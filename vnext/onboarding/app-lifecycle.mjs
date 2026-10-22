@@ -115,10 +115,49 @@ function observe(ctx){
  const {installed,loaded,running}=result.services[0];
  return {schema:1,status:running?'running':installed?'stopped':'not_installed',source:ctx.source,loginAtStartup:preference(ctx,installed),installed,loaded,running,accountAcceptance:'NOT RUN'};
 }
-export function readDeploymentAppLifecycle(stateDir,options={}){return observe(context(stateDir,options))}
+async function windowsLifecycle(stateDir,options,mutation){
+ // A startup shortcut cannot respawn the current App. Normal Quit is admitted
+ // by the existing work fence and must not depend on a readable startup entry.
+ if(mutation?.action==='quit')return {schema:1,status:'not_applicable',currentSessionRecovery:'not_applicable',loginPreference:'unchanged'};
+ const core=await import('./core.mjs');
+ const adapter=options.operations?.windowsAdapter??await import('../host/windows/app-login.mjs');
+ const trustedApp=options.trustedWindowsApp;
+ const previous=core.readDeploymentAppLoginPreference(stateDir);
+ const scope={stateDir,registration:previous.registration,trustedApp};
+ if(mutation?.action==='login'){
+  const changed=await core.changeDeploymentAppLoginPreference(stateDir,{authorize:true,enabled:mutation.enabled},{
+   plan:preference=>adapter.planWindowsAppLogin({...scope,registration:preference.registration,enabled:mutation.enabled}),
+   apply:plan=>adapter.controlWindowsAppLogin(plan,{authorize:true})
+  });
+  return {...publicWindowsLifecycle(changed.observed),desiredEnabled:changed.preference.desiredEnabled,lastOperation:changed.preference.lastOperation};
+ }
+ const observed=await adapter.readWindowsAppLogin(scope);
+ return {...publicWindowsLifecycle(observed),desiredEnabled:previous.desiredEnabled,lastOperation:previous.lastOperation};
+}
+function publicWindowsLifecycle(observed){
+ // A proposed package rebind is internal reconciliation input, not a public
+ // claim of startup availability or an instruction to persist from a GET.
+ const {reconciledRegistration,...publicValue}=observed??{};
+ return publicValue;
+}
+export async function reconcileDeploymentAppLifecycle(stateDir,options={}){
+ if((options.operations?.platform??process.platform)!=='win32')return {status:'not_applicable'};
+ absolute(stateDir,'app_lifecycle_absolute_state_directory_required');
+ if(!existing(path.join(stateDir,'deployment.json')))return {status:'not_configured'};
+ const core=await import('./core.mjs'),adapter=options.operations?.windowsAdapter??await import('../host/windows/app-login.mjs');
+ return core.reconcileDeploymentAppLoginPreference(stateDir,async previous=>{
+  const observed=await adapter.reconcileWindowsAppLogin({stateDir,registration:previous.registration,trustedApp:options.trustedWindowsApp});
+  return observed.reconciledRegistration??null;
+ });
+}
+export function readDeploymentAppLifecycle(stateDir,options={}){
+ if((options.operations?.platform??process.platform)==='win32')return windowsLifecycle(stateDir,options);
+ return observe(context(stateDir,options));
+}
 export function controlDeploymentAppLifecycle(stateDir,options={},trusted={}){
  if(!options||typeof options!=='object'||Array.isArray(options)||Object.keys(options).some(key=>!['authorize','action','enabled'].includes(key))||options.authorize!==true)fail('app_lifecycle_authorization_required');
  if(!['quit','login'].includes(options.action)||options.action==='login'&&typeof options.enabled!=='boolean'||options.action==='quit'&&options.enabled!==undefined)fail('app_lifecycle_action_invalid');
+ if((trusted.operations?.platform??process.platform)==='win32')return windowsLifecycle(stateDir,trusted,options);
  const ctx=context(stateDir,trusted);domain(ctx);
  // Inspect before any mutation, including fresh installs and explicit startup
  // changes. Existing private files and loaded launchd definitions must agree.

@@ -385,6 +385,57 @@ export function setDeploymentOnboardingPreference(stateDir,options={}){
  const release=lock(stateDir);try{const {state}=load(stateDir);state.onboardingDecisions={...state.onboardingDecisions,background:{choice:options.background,configSha256:state.configSha256,at:new Date().toISOString()}};write(filename(stateDir,'state.json'),state);return {...readDeploymentOnboardingPreference(stateDir),serviceMutation:'NOT RUN'};}finally{release()}
 }
 
+// App preferences share the existing management state and lock. They do not
+// change deployment roles/hash or make a registered OS entry count as running.
+export function readDeploymentAppLoginPreference(stateDir){
+ const {state}=load(stateDir),value=state.appPreferences?.loginAtStartup;
+ if(value===undefined)return {desiredEnabled:null,registration:null,lastOperation:null};
+ if(!obj(value)||typeof value.desiredEnabled!=='boolean'||value.registration!==null&&!obj(value.registration)||!obj(value.lastOperation)||!['running','succeeded','needs_attention'].includes(value.lastOperation.status))fail('app_login_preference_invalid');
+ return structuredClone(value);
+}
+// Native adapters are supplied only by the lifecycle facade, never by HTTP/CLI
+// request bodies. Persist intent before touching the OS; reads never replay it.
+export async function changeDeploymentAppLoginPreference(stateDir,options={},operations={}){
+ exact(options,['enabled','authorize']);
+ if(options.authorize!==true||typeof options.enabled!=='boolean')fail('app_lifecycle_authorization_required');
+ if(typeof operations.plan!=='function'||typeof operations.apply!=='function')fail('app_login_native_adapter_required');
+ const release=lock(stateDir);let state,preference;
+ try{
+  ({state}=load(stateDir));
+  for(const name of ['background.lock','capabilities.lock'])if(fs.existsSync(filename(stateDir,name)))fail('app_login_management_busy');
+  const previous=readDeploymentAppLoginPreference(stateDir);
+  const plan=await operations.plan(previous);
+  if(!obj(plan)||!['create','remove','none'].includes(plan.action)||plan.registration!==null&&!obj(plan.registration))fail('app_login_plan_invalid');
+  preference={desiredEnabled:options.enabled,registration:plan.registration,lastOperation:{status:'running',action:plan.action,at:new Date().toISOString()}};
+  state.appPreferences={...state.appPreferences,loginAtStartup:preference};write(filename(stateDir,'state.json'),state);
+  let observed;
+  try{observed=await operations.apply(plan)}catch(error){
+   preference.lastOperation={...preference.lastOperation,status:'needs_attention',reason:'app_login_change_unconfirmed',at:new Date().toISOString()};
+   write(filename(stateDir,'state.json'),state);throw error;
+  }
+  preference.lastOperation={...preference.lastOperation,status:'succeeded',at:new Date().toISOString()};
+  write(filename(stateDir,'state.json'),state);
+  return {preference:structuredClone(preference),observed};
+ }finally{release()}
+}
+// A normal verified native launch may reconcile an installer-updated target.
+// The adapter only observes; this is one atomic state write, never OS startup
+// registration or a retry of an uncertain user operation.
+export async function reconcileDeploymentAppLoginPreference(stateDir,resolveRegistration){
+ if(typeof resolveRegistration!=='function')fail('app_login_native_adapter_required');
+ const release=lock(stateDir);
+ try{
+  const {state}=load(stateDir),previous=readDeploymentAppLoginPreference(stateDir);
+  if(!previous.registration)return {status:'not_registered'};
+  if(previous.lastOperation.status!=='succeeded')return {status:'needs_attention'};
+  for(const name of ['background.lock','capabilities.lock'])if(fs.existsSync(filename(stateDir,name)))fail('app_login_management_busy');
+  const registration=await resolveRegistration(previous);
+  if(!registration||JSON.stringify(registration)===JSON.stringify(previous.registration))return {status:'unchanged'};
+  state.appPreferences={...state.appPreferences,loginAtStartup:{...previous,registration,lastOperation:{status:'succeeded',action:'reconcile',at:new Date().toISOString()}}};
+  write(filename(stateDir,'state.json'),state);return {status:'reconciled'};
+ }finally{release()}
+}
+
 // Explicit registration of a persistent local signer. This transaction changes
 // management configuration only; native jobs, TCC and enrolled identities are
 // never installed, stopped, re-paired or granted permissions here.
@@ -503,7 +554,7 @@ export function rollbackDeploymentMacSigningRegistration(d,options={}){
  }
 }
 
-export {readDeploymentAppLifecycle,controlDeploymentAppLifecycle} from './app-lifecycle.mjs';
+export {readDeploymentAppLifecycle,controlDeploymentAppLifecycle,reconcileDeploymentAppLifecycle} from './app-lifecycle.mjs';
 
 export {planDeviceIngressChange,applyDeviceIngressChange,rollbackDeviceIngressChange} from './device-ingress-change.mjs';
 

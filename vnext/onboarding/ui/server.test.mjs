@@ -38,6 +38,26 @@ async function fixture(options={}){
  return{...instance,root,get,post,session,token,get calls(){return calls},async cleanup(){await instance.close();fs.rmSync(root,{recursive:true,force:true})}};
 }
 
+test('Windows App lifecycle uses fresh native authority and rejects request-supplied registration',async()=>{
+ let owned=true,writes=0;
+ const authority=()=>({source:owned?'current_windows_native_app':'not_observed'});
+ const resourceRoot=path.resolve('verified-package');
+ const f=await fixture({nativeAppAuthority:authority,trustedWindowsApp:()=>({resourceRoot,authority:authority()}),core:{
+  readDeploymentAppLifecycle:(_d,trusted)=>{assert.equal(trusted.trustedWindowsApp.resourceRoot,resourceRoot);return {status:'registered_unverified',systemApproval:'unknown'}},
+  controlDeploymentAppLifecycle:(_d,data,trusted)=>{assert.deepEqual(data,{authorize:true,enabled:true,action:'login'});assert.equal(trusted.trustedWindowsApp.authority.source,'current_windows_native_app');writes++;return {status:'registered_unverified',systemApproval:'unknown'}}
+ }});
+ try{
+  assert.equal(f.session.nativeAppLifecycleSupported,true);
+  assert.equal((await f.get('/api/app/lifecycle')).status,200);
+  assert.equal((await f.post('/api/app/login',{authorize:true,enabled:true})).status,200);assert.equal(writes,1);
+  const forged=await f.post('/api/app/login',{authorize:true,enabled:true,registration:{resourceRoot:'/chosen'}});
+  assert.notEqual(forged.status,200);assert.equal(writes,1);
+  owned=false;
+  assert.equal((await f.get('/api/app/lifecycle')).status,409);
+  assert.notEqual((await f.post('/api/app/login',{authorize:true,enabled:true})).status,200);assert.equal(writes,1);
+ }finally{await f.cleanup()}
+});
+
 test('native snapshot shares fresh observations for one response without promoting skipped service checks',async()=>{
  let generation=1;const reads={};const counted=(name,value)=>()=>{reads[name]=(reads[name]??0)+1;return typeof value==='function'?value():value};
  const foreground=()=>({schema:1,status:'connected',observation:'authenticated_foreground_owner',host:'foreground',gateway:'foreground',execConnection:generation===1?'connected':'disconnected',desktopConnection:'not_requested',toolHealth:'not_verified',ownerGeneration:String(generation)});
