@@ -17,7 +17,7 @@ export async function createClient(instance,{fetchImpl=fetch}={}){
  const session=await call('session');csrf=session.csrf;if(!/^[A-Za-z0-9_-]{43}$/.test(csrf??''))throw Error('invalid_csrf');let inspected,accepted,observation;
  const observe=()=>{
   if(!observation){
-   const pending=call('snapshot').then(snapshot=>({session:{localGatewayAvailable:session.localGatewayAvailable,tunnelSupported:session.tunnelSupported,artifactsAvailable:!!session.defaults?.bundle,desktopAcceptanceSupported:instance.desktopAcceptanceSupported===true,hostPayloadHandoffSupported:instance.hostPayloadHandoffSupported===true},...snapshot}));
+   const pending=call('snapshot').catch(async error=>{if(instance.hostPayloadHandoffSupported!==true)throw error;const recovery=await call('host-payload/handoff/status',{});if(!/^[a-f0-9]{32}$/.test(recovery.handoff?.ticketId??'')||!['preparing','awaiting_exit','blocked','needs_recovery','applied_stopped'].includes(recovery.handoff?.status))throw error;return {status:{deployment:null},componentRecovery:recovery.handoff};}).then(snapshot=>({session:{localGatewayAvailable:session.localGatewayAvailable,tunnelSupported:session.tunnelSupported,artifactsAvailable:!!session.defaults?.bundle,desktopAcceptanceSupported:instance.desktopAcceptanceSupported===true,hostPayloadHandoffSupported:instance.hostPayloadHandoffSupported===true},...snapshot}));
    observation=pending;
    const clear=()=>{if(observation===pending)observation=undefined;};pending.then(clear,clear);
   }
