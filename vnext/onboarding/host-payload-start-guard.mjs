@@ -9,6 +9,13 @@ export function assertHostPayloadMigrationSettled(stateDir){
  if(typeof stateDir!=='string'||!path.isAbsolute(stateDir)||path.normalize(stateDir)!==stateDir)fail();
  requirePrivateDirectory(stateDir);
  if(present(path.join(stateDir,'host-payload-migration-recovery.lock')))fail();
+ // Admission precedes journal creation; an interrupted capture still needs
+ // recovery even when the previous transaction has a terminal journal.
+ const admission=path.join(stateDir,'advance.lock');
+ if(present(admission)){
+  let record;try{if(requirePrivateFile(admission).size<=2*1024*1024)record=JSON.parse(fs.readFileSync(admission,'utf8'))}catch{}
+  if(record?.kind==='host-payload-migration-v1')fail();
+ }
  const file=path.join(stateDir,'host-payload-migration.json');if(!present(file))return;
  try{
   if(requirePrivateFile(file).size>1024*1024)fail();

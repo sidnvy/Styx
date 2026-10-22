@@ -485,9 +485,9 @@ test('Host payload API uses bundled candidate and a one-shot reviewed plan; it c
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'styx-payload-api-'));t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
  const artifacts={bundle:path.join(root,'host-bundle'),publisherKeyFile:path.join(root,'publisher.pem'),publisherSha256:'a'.repeat(64)},defaults=path.join(root,'artifacts.json');
  fs.writeFileSync(defaults,JSON.stringify(artifacts),{mode:0o600});
- let planned,applied=0,rolledBack=0,stopped=0;
+ let planned,blocked=false,applied=0,rolledBack=0,stopped=0;
  const f=await fixture({artifactDefaultsFile:defaults,core:{
-  planHostPayloadMigration(input){planned={...input,planId:'review-1',status:'offline_reviewable',current:{version:'old'},target:{version:'new'},publisherChange:true,privateInternalEvidence:'not-public'};return planned},
+  planHostPayloadMigration(input){if(blocked)return {status:'blocked',reason:'native_owned_process_present'};planned={...input,planId:'review-1',status:'offline_reviewable',current:{version:'old'},target:{version:'new'},publisherChange:true,privateInternalEvidence:'not-public'};return planned},
   applyHostPayloadMigration(input){assert.equal(input.stateDir,planned.stateDir);assert.equal(input.plan,planned);assert.equal(input.authorize,true);applied++;return {status:'applied_stopped',runtimeHealth:'NOT RUN'}},
   rollbackHostPayloadMigration(input){assert.equal(input.stateDir,planned.stateDir);assert.equal(input.authorize,true);assert.equal(input.transactionId,'a'.repeat(32));rolledBack++;return {status:'rolled_back_stopped'}},
   readHostPayloadMigration(){return {status:'not_started'}},
@@ -506,5 +506,7 @@ test('Host payload API uses bundled candidate and a one-shot reviewed plan; it c
   assert.notEqual((await f.post('/api/host-payload/rollback',{authorize:false,transactionId:'a'.repeat(32)})).status,200);
   assert.equal((await f.post('/api/host-payload/rollback',{authorize:true,transactionId:'a'.repeat(32)})).status,200);assert.equal(rolledBack,1);
   assert.equal((await f.post('/api/host-payload/status',{})).status,200);assert.equal(stopped,0);
+  blocked=true;const denied=await (await f.post(post,{})).json();assert.equal(denied.upgrade.status,'blocked');assert.equal(denied.upgrade.reason,'native_owned_process_present');assert.equal(denied.upgrade.planId,undefined);
+  assert.notEqual((await f.post('/api/host-payload/apply',{authorize:true})).status,200);assert.equal(applied,1);
  }finally{await f.cleanup()}
 });

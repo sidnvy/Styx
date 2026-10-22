@@ -18,7 +18,8 @@
 ## 事务
 
 1. `host-payload-plan STATE BUNDLE` 验证原配置、已安装代次、候选与原生离线边界，
-   产生绑定当前文件内容的计划。计划是私有维护文件。
+   产生绑定当前文件内容的计划。计划是私有维护文件。原生边界不满足时返回
+   `blocked` 和固定原因（运行中、服务仍存在或需要独立更新器），不产生可执行 planId。
 2. `host-payload-apply STATE PRIVATE_PLAN --authorize` 再验证计划，在共享管理锁下
    stage 完整签名 release，保存旧/新文件快照并逐项写入执行记录。
 3. 同步 publisher、active pointer、稳定启动文件、服务描述和 Core 配置/证据，

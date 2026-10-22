@@ -71,11 +71,14 @@ function snapshot(d){
  return {d,config,state,base,root,names,service,host,pem,active,current,files,preserved};
 }
 function noActivity(d,root){for(const file of [path.join(d,'foreground.lock'),path.join(d,'host-update-recovery.lock'),...['.health-update-lock','.health-operation-lock','.health-recovery-guard'].map(n=>path.join(root,n))])assert(!fs.existsSync(file),'host_payload_active_or_uncertain_owner');for(const [name,statuses] of [['host-update.json',['completed','recovered']],['mac-signing-registration.json',['applied','rolled_back']]]){const f=path.join(d,name);if(fs.existsSync(f)){const r=read(f);assert(statuses.includes(r.phase??r.status),'host_payload_other_transaction_requires_recovery')}}}
+class NativeAbsenceRequired extends Error {
+ constructor(reason){super('host_payload_native_absence_required');this.reason=['native_owned_process_present','native_service_definition_present','native_service_loaded','independent_updater_runtime_required'].includes(reason)?reason:'native_observation_unavailable'}
+}
 async function absent(s,adapters){
  assert((adapters.platform??process.platform)==='darwin','host_payload_macos_offline_only');
  const observe=adapters.observeAbsence??(await import('./host-payload-native.mjs')).observeMacHostPayloadAbsence;
  const result=await observe({stateDir:s.d,installRoot:s.root,hostConfigFile:s.service.hostConfigFile,hostServiceLabel:s.service.label,appPath:s.config?.host?.macPreviewApp?.path??'/Applications/Styx.app'});
- assert(result?.status==='absent','host_payload_native_absence_required');
+ if(result?.status!=='absent')throw new NativeAbsenceRequired(result?.reason);
 }
 function target(s,bundle,adapters){
  assert(absolute(bundle),'absolute_host_payload_bundle_required');
@@ -116,7 +119,7 @@ async function build(stateDir,bundle,adapters,ownTransaction){
  const files=proposed(s,t),body={schema:1,kind:KIND,stateDir,status:'offline_reviewable',bundle,current:{version:s.current.version,manifestSha256:s.current.sha256,publisherSha256:pin(s.pem)},target:{version:t.release.version,manifestSha256:t.release.sha256,publisherSha256:pin(t.pem)},publisherChange:pin(s.pem)!==pin(t.pem),app:t.app,changes:files.map(f=>({name:f.name,path:f.path,beforeSha256:sha(f.before),afterSha256:sha(f.after),beforeMode:f.mode,afterMode:f.afterMode})),preserved:s.preserved,nativeAbsence:'observed',serviceMutation:'NONE',nativeHealth:'NOT RUN',accountAcceptance:'NOT RUN'};
  return {s,t,files,plan:{...body,planId:sha(JSON.stringify(body))}};
 }
-export async function planHostPayloadMigration({stateDir,bundle}={},adapters={}){assert(absolute(stateDir),'absolute_state_directory_required');for(const n of [...LOCKS,RECOVERY])assert(!fs.existsSync(path.join(stateDir,n)),'host_payload_management_busy');return (await build(stateDir,bundle,adapters)).plan}
+export async function planHostPayloadMigration({stateDir,bundle}={},adapters={}){assert(absolute(stateDir),'absolute_state_directory_required');for(const n of [...LOCKS,RECOVERY])assert(!fs.existsSync(path.join(stateDir,n)),'host_payload_management_busy');try{return (await build(stateDir,bundle,adapters)).plan}catch(error){if(!(error instanceof NativeAbsenceRequired))throw error;return {schema:1,status:'blocked',reason:error.reason,installation:'NOT RUN',nativeHealth:'NOT RUN',accountAcceptance:'NOT RUN'}}}
 function checkPreserved(entries){for(const f of entries)assert(sha(bytes(f.path))===f.sha256,'host_payload_preserved_state_changed')}
 function locks(d,transactionId,{recover,owner,plan}={}){
  const held=[],recoveryOwner=recover&&LOCKS.some(n=>fs.existsSync(path.join(d,n)))?owner:null;

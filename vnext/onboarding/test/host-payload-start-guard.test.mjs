@@ -31,3 +31,15 @@ test('only bound terminal journals permit startup; malformed evidence and a reco
  f.write({...f.record,status:'rolled_back'});const guard=path.join(f.stateDir,'host-payload-migration-recovery.lock');fs.writeFileSync(guard,'owned',{mode:0o600});assert.throws(()=>assertHostPayloadMigrationSettled(f.stateDir),/requires_recovery/);assert.equal(fs.readFileSync(guard,'utf8'),'owned');fs.unlinkSync(guard);
  fs.unlinkSync(f.file);fs.symlinkSync(path.join(f.stateDir,'absent'),f.file);assert.throws(()=>assertHostPayloadMigrationSettled(f.stateDir),/requires_recovery/);
 });
+
+test('capture admission is visible as recovery before a journal exists or replaces a terminal journal',t=>{
+ const f=fixture(t),lock=path.join(f.stateDir,'advance.lock');
+ fs.writeFileSync(lock,JSON.stringify({kind:'other'}),{mode:0o600});
+ assert.doesNotThrow(()=>assertHostPayloadMigrationSettled(f.stateDir));
+ for(const prior of [null,'applied','rolled_back']){
+  if(prior)f.write({...f.record,status:prior});
+  fs.writeFileSync(lock,JSON.stringify({...f.record,plan:{stateDir:f.stateDir}}));
+  assert.throws(()=>assertHostPayloadMigrationSettled(f.stateDir),/requires_recovery/);
+  assert.equal(readDeploymentComponents(f.stateDir).host.status,'needs_recovery');
+ }
+});

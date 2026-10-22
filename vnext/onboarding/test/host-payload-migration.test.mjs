@@ -59,7 +59,11 @@ test('cross publisher requires registered same certificate and exact sealed App 
 test('unknown native state, foreground owner, stale review and absent authorization refuse mutation',async t=>{
  const f=fixture(t),{plan,before}=await reviewed(f);
  await assert.rejects(applyHostPayloadMigration({stateDir:f.stateDir,plan},f.adapters),/authorization_required/);
- await assert.rejects(planHostPayloadMigration({stateDir:f.stateDir,bundle:f.candidate},{...f.adapters,observeAbsence:async()=>({status:'blocked'})}),/native_absence_required/);
+ for(const reason of ['native_owned_process_present','native_service_definition_present','native_service_loaded','independent_updater_runtime_required','PRIVATE_TEST_TOKEN']){
+  const blocked=await planHostPayloadMigration({stateDir:f.stateDir,bundle:f.candidate},{...f.adapters,observeAbsence:async()=>({status:'blocked',reason,pids:[123],stderr:'PRIVATE_TEST_TOKEN'})});
+  assert.equal(blocked.status,'blocked');assert.equal(blocked.reason,reason==='PRIVATE_TEST_TOKEN'?'native_observation_unavailable':reason);assert.equal(blocked.planId,undefined);assert.doesNotMatch(JSON.stringify(blocked),/PRIVATE_TEST_TOKEN|pids|stderr/);
+ }
+ await assert.rejects(applyHostPayloadMigration({stateDir:f.stateDir,plan,authorize:true},{...f.adapters,observeAbsence:async()=>({status:'blocked'})}),/native_absence_required/);unchanged(before);
  put(path.join(f.stateDir,'foreground.lock'),{});await assert.rejects(planHostPayloadMigration({stateDir:f.stateDir,bundle:f.candidate},f.adapters),/active_or_uncertain_owner/);fs.unlinkSync(path.join(f.stateDir,'foreground.lock'));
  const stale={...plan,planId:'0'.repeat(64)};await assert.rejects(applyHostPayloadMigration({stateDir:f.stateDir,plan:stale,authorize:true},f.adapters),/review_stale/);unchanged(before);
 });
