@@ -138,6 +138,9 @@ namespace StyxNative {
    try{var reading=observation;if(reading!=null){try{await reading;}catch{}if(observation==reading)observation=null;}await action();if(settings.HasFeedback(pending))settings.Feedback("Operation completed. Review the current connection and test evidence below.");}
    catch(Exception error){string text=failure;var native=error as NativeOperationException;if(native!=null&&native.Code=="windows_native_app_binding_required")text="The desktop test could not start. This package could not verify the current native Styx app. Your settings are retained.";else if(native!=null&&native.Code=="desktop_acceptance_native_app_changed")text="The native Styx app changed during this desktop test. Create a new test in this app before continuing.";else if(native!=null&&native.Code=="work_in_progress")text="A task is still running. Wait for it to finish before quitting or updating Styx.";else if(native!=null&&native.Code=="work_state_unknown")text="Styx could not confirm whether tasks are running. Keep it open and try again after checking the connection.";message.Text="Connection needs attention. Open Settings to review the last result.";settings.Feedback(text);}
    finally{if(message.Text==pending)message.Text=previousMessage;settings.Enabled=true;busy=false;mutationDone.TrySetResult(true);}
+   // A mutation invalidates an in-flight startup observation. Resume only that
+   // read after settling; never replay the mutation or block the ready controls.
+   if(!closing&&core!=null&&ManagementOnly)LoadInitialDetails();
   }
   internal async void FinishInviting(){if(core==null)return;try{while(busy)await mutationDone.Task;await Run(async()=>{await Call("closePairing");},"Closing invitation…","The pairing window could not be confirmed closed. Review the connection; the invitation retains its original expiry.");}catch{settings.Feedback("The pairing window could not be confirmed closed. Review the connection before inviting again.");}}
   internal async Task Read(Func<Task> action){try{await action();}catch{settings.ObservationFailed("This information could not be refreshed. Your entries and the last confirmed state are retained.");}}
@@ -148,11 +151,11 @@ namespace StyxNative {
   async Task ObserveStatus(){
    if(observation!=null){await observation;return;}
    int revision=mutationRevision;var pending=Call("status");observation=pending;
-   try{var latest=await pending;if(revision==mutationRevision){snapshot=latest;PublishStatus();}}finally{if(observation==pending)observation=null;}
+   try{var latest=await pending;if(!closing&&revision==mutationRevision){snapshot=latest;PublishStatus();}}finally{if(observation==pending)observation=null;}
   }
   void PublishStatus(){
    if(ManagementOnly){message.Text="Reading connection settings… Component update and recovery are available.";tray.Text="Styx — connection not checked";settings.ShowPage("component-start");return;}
-   if(Json.Get(snapshot,"componentRecovery")!=null){message.Text="A component update needs review. Your settings and recovery record are retained.";tray.Text="Styx — update needs review";settings.ShowPage("update-recovery");settings.Feedback(message.Text);return;}
+   if(Json.Get(snapshot,"componentRecovery")!=null){message.Text="A component update needs review. Your settings and recovery record are retained.";tray.Text="Styx — update needs review";settings.ShowPage("update-recovery");if(settings.HasFeedback(""))settings.Feedback(message.Text);return;}
    var f=Json.Str(snapshot,"status","foreground","status");var exec=Json.Str(snapshot,"status","foreground","execConnection");
    message.Text=f=="connected"&&exec=="connected"?"Connected to this computer.\n\nExec transport is online. Tool execution and ChatGPT account confirmation are shown separately in Settings.":f=="started"?"Connecting…\n\nKeep Styx open while this computer connects.":"Connection is paused or unavailable.\n\nOpen Settings to review, prepare or reconnect.";
    tray.Text=f=="connected"&&exec=="connected"?"Styx — connected":"Styx — needs attention";settings.ShowStatus(snapshot);
@@ -166,7 +169,7 @@ namespace StyxNative {
    var launched=await Call("runtimeUpgradeLaunch",Json.Obj("ticketId",ticket));if(Json.Str(launched,"status")!="launched"||Json.Str(launched,"ticketId")!=ticket)throw new IOException();
    settings.Feedback("The updater is ready. Closing Styx…");settings.BeginInvoke(new Action(Quit));
   },"Preparing the component update…","The update could not be started. Keep Styx open and review the update status before trying again. Your settings and pairing are retained.");}
-  async void LoadInitialDetails(){try{await ObserveStatus();}catch{if(!closing)settings.ObservationFailed("Connection settings could not be read. Update and recovery remain available. Refresh status to try again.");}}
+  async void LoadInitialDetails(){int revision=mutationRevision;try{await ObserveStatus();}catch{if(!closing&&revision==mutationRevision)settings.ObservationFailed("Connection settings could not be read. Update and recovery remain available. Refresh status to try again.");}}
   internal Task ReviewRuntime(){return Run(async()=>{
    var result=await Call("runtimeUpgradeStatus");string ticket=Json.Str(result,"handoff","ticketId"),status=Json.Str(result,"handoff","status"),transaction=Json.Str(result,"upgrade","transactionId");
    if(status=="not_started"||status=="cancelled"||status=="rolled_back"){settings.Feedback("No component update is waiting. You can check for an update again.");return;}
