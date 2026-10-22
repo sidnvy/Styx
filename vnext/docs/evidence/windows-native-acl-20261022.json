@@ -1,0 +1,111 @@
+{
+  "schema": 1,
+  "date": "2026-10-22",
+  "platform": "Windows 11 x64, NAB isolated test directory",
+  "status": "NATIVE_ACL_AND_API_PROFILE_PASSED",
+  "nativeChecks": [
+    "current-user owner",
+    "Administrators owner rejected",
+    "Everyone Allow rejected",
+    "changed ACL rechecked",
+    "empty DACL allowed",
+    "null DACL rejected",
+    "Chinese filename",
+    "path beyond MAX_PATH",
+    "junction rejected",
+    "replaced helper rejected"
+  ],
+  "baseline": [
+    {
+      "route": "components",
+      "http": 200,
+      "milliseconds": 3043,
+      "stats": {
+        "DACL": {
+          "calls": 8,
+          "milliseconds": 2994
+        }
+      }
+    },
+    {
+      "route": "native-status",
+      "http": 200,
+      "milliseconds": 28085,
+      "stats": {
+        "DACL": {
+          "calls": 55,
+          "milliseconds": 22235
+        },
+        "other_PowerShell": {
+          "calls": 2,
+          "milliseconds": 3077
+        }
+      }
+    },
+    {
+      "route": "snapshot",
+      "http": 200,
+      "milliseconds": 30102,
+      "stats": {
+        "DACL": {
+          "calls": 69,
+          "milliseconds": 24448
+        },
+        "other_PowerShell": {
+          "calls": 2,
+          "milliseconds": 3227
+        }
+      }
+    }
+  ],
+  "native": [
+    {
+      "route": "components",
+      "http": 200,
+      "milliseconds": 770,
+      "stats": {
+        "native_DACL": {
+          "calls": 8,
+          "milliseconds": 738
+        }
+      }
+    },
+    {
+      "route": "native-status",
+      "http": 200,
+      "milliseconds": 10818,
+      "stats": {
+        "native_DACL": {
+          "calls": 55,
+          "milliseconds": 4973
+        },
+        "other_PowerShell": {
+          "calls": 2,
+          "milliseconds": 3442
+        }
+      }
+    },
+    {
+      "route": "snapshot",
+      "http": 200,
+      "milliseconds": 9801,
+      "stats": {
+        "native_DACL": {
+          "calls": 69,
+          "milliseconds": 5126
+        },
+        "other_PowerShell": {
+          "calls": 2,
+          "milliseconds": 2553
+        }
+      }
+    }
+  ],
+  "limitations": [
+    "Instrumented copy of rc6 configured fixture; not a new product package or GUI acceptance.",
+    "Final UTF-8 adapter repeated native correctness tests; profile uses the same API logic before that encoding-only change.",
+    "Full snapshot still takes about 10 seconds; process startup and service observations remain.",
+    "No production install, system policy, trust store or service changed.",
+    "Permission creation remains the existing handle-bound implementation; no ACL results are cached."
+  ]
+}

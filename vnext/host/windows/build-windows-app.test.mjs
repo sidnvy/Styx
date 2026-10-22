@@ -15,7 +15,7 @@ function fixture(t,{type='ed25519'}={}){
  const dir=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'styx-windows-builder-')));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
  const sourceRoot=path.join(dir,'source');fs.mkdirSync(sourceRoot);const sourceFiles=[];
  const put=(name,data)=>{const file=path.join(sourceRoot,name);fs.mkdirSync(path.dirname(file),{recursive:true});fs.writeFileSync(file,data);sourceFiles.push(name);};
- for(const name of ['Styx.cs','HostUpdater.cs','SessionProbe.cs','build.ps1','core-bridge.mjs','native-app-authority.mjs'])put('host/windows/'+name,'source fixture');
+ for(const name of ['Styx.cs','HostUpdater.cs','SessionProbe.cs','PrivateStorage.cs','build.ps1','core-bridge.mjs','native-app-authority.mjs'])put('host/windows/'+name,'source fixture');
  for(const name of [...sharedSources,...skillSources])put(name,'source fixture');
  put('assets/brand/styx-logo.png','image fixture');put('package.json','{"type":"module"}');put('package-lock.json',JSON.stringify({lockfileVersion:3,packages:{'node_modules/@modelcontextprotocol/sdk':{version:'1.32.1',integrity:'sha512-unit-fixture'}}}));
  fs.mkdirSync(path.join(sourceRoot,'node_modules/@modelcontextprotocol/sdk'),{recursive:true});fs.writeFileSync(path.join(sourceRoot,'node_modules/@modelcontextprotocol/sdk/package.json'),'{"version":"1.32.1"}');

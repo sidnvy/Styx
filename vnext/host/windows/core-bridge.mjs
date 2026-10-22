@@ -5,7 +5,7 @@ import readline from 'node:readline';
 import {fileURLToPath} from 'node:url';
 import {createHash} from 'node:crypto';
 import {execFileSync} from 'node:child_process';
-import {ensurePrivateDirectory,writePrivateFile,requirePrivateDirectory} from '../private-storage.mjs';
+import {ensurePrivateDirectory,writePrivateFile,requirePrivateDirectory,configureWindowsAclHelper} from '../private-storage.mjs';
 import {launchWindowsHostPayloadHandoff} from './host-payload-handoff.mjs';
 import {observeWindowsNativeAppAuthority} from './native-app-authority.mjs';
 const SAFE_NATIVE_ERRORS=new Set(['windows_native_app_binding_required','desktop_acceptance_native_app_changed','work_in_progress','work_state_unknown']);
@@ -108,6 +108,10 @@ export async function startWindowsCore(resourceRoot,stateRoot){
   const cfg=JSON.parse(fs.readFileSync(manifest,'utf8'));
   const member=(relative,sha)=>{if(typeof relative!=='string'||path.isAbsolute(relative)||relative.split(/[\\/]/).some(x=>['','..','.'].includes(x)))throw Error('invalid_resource');const file=path.join(resourceRoot,relative);if(!fs.realpathSync(file).startsWith(fs.realpathSync(resourceRoot)+path.sep))throw Error('redirected_resource');if(sha&&createHash('sha256').update(fs.readFileSync(file)).digest('hex')!==sha)throw Error('resource_integrity_failed');return file;};
   if(process.platform==='win32'){
+   if(cfg.privateStorage){
+    if(cfg.privateStorage.path!=='StyxPrivateStorage.exe'||!/^[a-f0-9]{64}$/.test(cfg.privateStorage.sha256??''))throw Error('invalid_private_acl_helper');
+    configureWindowsAclHelper(member(cfg.privateStorage.path,cfg.privateStorage.sha256),cfg.privateStorage.sha256);
+   }
    const core=await import('../../onboarding/core.mjs'),nativeDesktopApp=()=>observeWindowsNativeAppAuthority(resourceRoot,cfg);
    hostPayloadHandoffSupported=cfg.hostUpdater?.path==='StyxUpdater.exe'&&/^[a-f0-9]{64}$/.test(cfg.hostUpdater?.sha256??'');
    desktopAcceptanceSupported=cfg.desktopApp?.path==='StyxPreview.exe'&&/^[a-f0-9]{64}$/.test(cfg.desktopApp?.sha256??'')&&cfg.desktopProbe?.path==='StyxSessionProbe.exe'&&/^[a-f0-9]{64}$/.test(cfg.desktopProbe?.sha256??'');

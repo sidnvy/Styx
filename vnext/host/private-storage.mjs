@@ -1,6 +1,22 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import {execFileSync} from 'node:child_process';
+import {createHash} from 'node:crypto';
+
+// Set only by the native bridge from its packaged executable manifest. CLI
+// callers keep the existing PowerShell implementation. Neither HTTP input nor
+// environment variables can select an executable. Each check observes live ACLs.
+let windowsAclHelper;
+function verifyAclHelper(helper){
+  const info=fs.lstatSync(helper.file);
+  if(!info.isFile()||info.isSymbolicLink()||fs.realpathSync(helper.file).toLowerCase()!==helper.file.toLowerCase()||
+    createHash('sha256').update(fs.readFileSync(helper.file)).digest('hex')!==helper.sha256)
+    throw Error('private_acl_helper_changed');
+}
+export function configureWindowsAclHelper(file,sha256){
+  if(process.platform!=='win32'||typeof file!=='string'||!path.isAbsolute(file)||path.basename(file)!=='StyxPrivateStorage.exe'||!/^[a-f0-9]{64}$/.test(sha256??''))throw Error('invalid_private_acl_helper');
+  const helper={file:path.resolve(file),sha256};verifyAclHelper(helper);windowsAclHelper=Object.freeze(helper);
+}
 
 // PowerShell cold startup on loaded native Windows runners can exceed seven
 // seconds. Keep ACL operations bounded without retrying a partially applied ACL.
@@ -96,6 +112,12 @@ const WINDOWS_ACL_CHECK = [
 function checkWindowsAcl(filenames,kind) {
   const encoded=Buffer.from(WINDOWS_ACL_CHECK,'utf16le').toString('base64');
   try{
+    if(windowsAclHelper){
+      verifyAclHelper(windowsAclHelper);
+      execFileSync(windowsAclHelper.file,['--check'],{input:JSON.stringify(filenames.map(filename=>path.toNamespacedPath(filename))),
+        windowsHide:true,timeout:WINDOWS_ACL_TIMEOUT_MS,stdio:['pipe','ignore','ignore']});
+      return;
+    }
     execFileSync('powershell.exe',[
       '-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',encoded
     // Windows PowerShell 5's filesystem provider otherwise reports existing
