@@ -134,7 +134,7 @@ export async function runHostConnector(config,{signal,once:runOnce=false,
     });
   }
 }
-if (process.argv[1] && path.resolve(process.argv[1])===fileURLToPath(import.meta.url)) {
+async function runCommandLine() {
   const filename=process.argv[2];
   if (!filename) {process.stderr.write('Usage: node host/connect.mjs /private/host.json or --stdin-config\n');process.exit(2)}
   let config;
@@ -162,7 +162,7 @@ if (process.argv[1] && path.resolve(process.argv[1])===fileURLToPath(import.meta
   const status=(state,{lane='exec',slot}={})=>
     process.stdout.write(JSON.stringify({host:config.host_id,lane,
       ...(slot!==undefined?{slot}:{}),status:state})+'\n');
-  await Promise.all([
+  try { await Promise.all([
     runHostConnector(config,{signal:abort.signal,
       onStatus:state=>status(state),
       onReady:info=>status('connected',{lane:'exec'})}),
@@ -176,5 +176,14 @@ if (process.argv[1] && path.resolve(process.argv[1])===fileURLToPath(import.meta
           onStatus:(state,meta)=>status(state,meta),onReady:()=>status('connected',{lane:'computer'})})}))
       :runComputerConnectors(config,{signal:abort.signal,onStatus:(state,meta)=>status(state,meta),
         onReady:()=>status('connected',{lane:'computer'})})]:[])
-  ]);
+  ]); } finally { abort.abort(); }
+}
+// Finish evaluating this module before optional Browser imports it for shared
+// authentication. Awaiting the CLI lanes at module scope deadlocks that cycle.
+// Keep Browser lazy: Exec-only signed bundles do not contain its provider.
+if (process.argv[1] && path.resolve(process.argv[1])===fileURLToPath(import.meta.url)) {
+  void runCommandLine().catch(()=>{
+    process.stderr.write('Styx Host startup failed.\n');
+    process.exitCode=1;
+  });
 }
