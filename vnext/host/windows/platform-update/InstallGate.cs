@@ -59,6 +59,10 @@ internal static class InstallGate {
   string registered=(string)registration["resourceRoot"],registeredHash=(string)registration["packageSha256"];
   if(!Equal(registered,Path.Combine(root,"versions",registeredHash))||Hash(Path.Combine(registered,"windows-package.json"))!=registeredHash||Hash(Path.Combine(registered,"StyxPreview.exe"))!=(string)registration["appSha256"])return 2;
   string name=Path.GetFileName(target);if(!System.Text.RegularExpressions.Regex.IsMatch(name,"^[a-f0-9]{64}$")||!Equal(target,Path.Combine(root,"versions",name))||Hash(Path.Combine(target,"windows-package.json"))!=name)return 2;
+  Regular(target);string targetManifest=Path.Combine(target,"windows-package.json"),targetApp=Path.Combine(target,"StyxPreview.exe");Regular(targetManifest);Regular(targetApp);
+  var targetPackage=new JavaScriptSerializer{MaxJsonLength=16*1024*1024}.Deserialize<Dictionary<string,object>>(File.ReadAllText(targetManifest));
+  string appPin=null;foreach(var entry in (System.Collections.IEnumerable)targetPackage["files"]){var file=Object(entry);if((string)file["path"]=="StyxPreview.exe"){if(appPin!=null)return 2;appPin=(string)file["sha256"];}}
+  if(appPin==null||Hash(targetApp)!=appPin)return 2;
   return 0;
  }
  static int Main(string[] args){
