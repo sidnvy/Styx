@@ -73,7 +73,7 @@ namespace StyxNative {
  }
  sealed class StyxContext:ApplicationContext {
   readonly string root,state;readonly NotifyIcon tray;readonly Icon icon;readonly Form panel;readonly Settings settings;readonly CancellationTokenSource startupCancellation=new CancellationTokenSource();readonly Stopwatch startupClock=Stopwatch.StartNew();readonly bool startupTest;readonly System.Windows.Forms.Timer startupTimer;
-  Core core;bool busy,closing,starting,actionsGatedDuringStartup=true;int mutationRevision,progressEvents;long firstPaintTicks=-1,verificationStartedTicks=-1,verifiedTicks=-1,readyTicks=-1;object snapshot;Task<object> observation;TaskCompletionSource<bool> mutationDone;readonly Label message;
+  Core core;bool busy,closing,starting,startupHostUpdateAttempted,actionsGatedDuringStartup=true;int mutationRevision,progressEvents;long firstPaintTicks=-1,verificationStartedTicks=-1,verifiedTicks=-1,readyTicks=-1;object snapshot;Task<object> observation;TaskCompletionSource<bool> mutationDone;readonly Label message;
   internal int ResultCode=2;
   internal object CurrentStatus { get { return snapshot; } }
   internal bool ManagementOnly { get { return Json.Yes(snapshot,"loadingDetails"); } }
@@ -140,7 +140,7 @@ namespace StyxNative {
    finally{if(message.Text==pending)message.Text=previousMessage;settings.Enabled=true;busy=false;mutationDone.TrySetResult(true);}
    // A mutation invalidates an in-flight startup observation. Resume only that
    // read after settling; never replay the mutation or block the ready controls.
-   if(!closing&&core!=null&&ManagementOnly)LoadInitialDetails();
+   if(!closing&&core!=null&&ManagementOnly)LoadInitialDetails();else await CompleteStartupUpdate();
   }
   internal async void FinishInviting(){if(core==null)return;try{while(busy)await mutationDone.Task;await Run(async()=>{await Call("closePairing");},"Closing invitation…","The pairing window could not be confirmed closed. Review the connection; the invitation retains its original expiry.");}catch{settings.Feedback("The pairing window could not be confirmed closed. Review the connection before inviting again.");}}
   internal async Task Read(Func<Task> action){try{await action();}catch{settings.ObservationFailed("This information could not be refreshed. Your entries and the last confirmed state are retained.");}}
@@ -152,23 +152,33 @@ namespace StyxNative {
    if(observation!=null){await observation;return;}
    int revision=mutationRevision;var pending=Call("status");observation=pending;
    try{var latest=await pending;if(!closing&&revision==mutationRevision){snapshot=latest;PublishStatus();}}finally{if(observation==pending)observation=null;}
+   await CompleteStartupUpdate();
+  }
+  async Task CompleteStartupUpdate(){
+   if(closing||busy||core==null||startupHostUpdateAttempted||Json.Str(snapshot,"status","nativeStartup","status")!="reconciliation_required"||Json.Str(snapshot,"status","nativeStartup","reason")!="host_payload_update_required"||!Json.Yes(snapshot,"status","nativeStartup","automaticUpdate"))return;
+   // Core owns the decision. This launch attempts it once; failure remains an
+   // explicit recovery action, including when later status reads say to update.
+   startupHostUpdateAttempted=true;await UpdateRuntime(false);
   }
   void PublishStatus(){
    if(ManagementOnly){message.Text="Reading connection settings… Component update and recovery are available.";tray.Text="Styx — connection not checked";settings.ShowPage("component-start");return;}
+   if(Json.Str(snapshot,"status","nativeStartup","status")=="reconciliation_required"&&Json.Str(snapshot,"status","nativeStartup","reason").StartsWith("host_payload_")){message.Text="The installed Styx update needs its components reconciled.";tray.Text="Styx — component update";settings.ShowPage("update-recovery");return;}
    if(Json.Get(snapshot,"componentRecovery")!=null){message.Text="A component update needs review. Your settings and recovery record are retained.";tray.Text="Styx — update needs review";settings.ShowPage("update-recovery");if(settings.HasFeedback(""))settings.Feedback(message.Text);return;}
    var f=Json.Str(snapshot,"status","foreground","status");var exec=Json.Str(snapshot,"status","foreground","execConnection");
    message.Text=f=="connected"&&exec=="connected"?"Connected to this computer.\n\nExec transport is online. Tool execution and ChatGPT account confirmation are shown separately in Settings.":f=="started"?"Connecting…\n\nKeep Styx open while this computer connects.":"Connection is paused or unavailable.\n\nOpen Settings to review, prepare or reconnect.";
    tray.Text=f=="connected"&&exec=="connected"?"Styx — connected":"Styx — needs attention";settings.ShowStatus(snapshot);
   }
   internal async Task<object> Call(string op,Dictionary<string,object> input=null){if(core==null)throw new IOException();return await core.Call(op,input??Json.Obj());}
-  internal Task UpdateRuntime(){return Run(async()=>{
-   if(MessageBox.Show(settings,"Styx will close briefly to update its components, then reopen. Finish any running tasks before continuing.","Update Styx components",MessageBoxButtons.OKCancel,MessageBoxIcon.Information)!=DialogResult.OK)return;
+  internal Task UpdateRuntime(){return UpdateRuntime(true);}
+  Task UpdateRuntime(bool confirm){return Run(async()=>{
+   startupHostUpdateAttempted=true;
+   if(confirm&&MessageBox.Show(settings,"Styx will close briefly to update its components, then reopen. Finish any running tasks before continuing.","Update Styx components",MessageBoxButtons.OKCancel,MessageBoxIcon.Information)!=DialogResult.OK)return;
    var prepared=await Call("runtimeUpgradePrepare");string ticket=Json.Str(prepared,"handoff","ticketId");
    if(Json.Str(prepared,"handoff","status")!="awaiting_exit"||!System.Text.RegularExpressions.Regex.IsMatch(ticket,"^[a-f0-9]{32}$"))throw new IOException();
    await AdmitQuit();
    var launched=await Call("runtimeUpgradeLaunch",Json.Obj("ticketId",ticket));if(Json.Str(launched,"status")!="launched"||Json.Str(launched,"ticketId")!=ticket)throw new IOException();
    settings.Feedback("The updater is ready. Closing Styx…");settings.BeginInvoke(new Action(Quit));
-  },"Preparing the component update…","The update could not be started. Keep Styx open and review the update status before trying again. Your settings and pairing are retained.");}
+  },confirm?"Preparing the component update…":"Finishing the Styx update… Styx will close briefly and reopen.","The update could not be started. Keep Styx open and review the update status before trying again. Your settings and pairing are retained.");}
   async void LoadInitialDetails(){int revision=mutationRevision;try{await ObserveStatus();}catch{if(!closing&&revision==mutationRevision)settings.ObservationFailed("Connection settings could not be read. Update and recovery remain available. Refresh status to try again.");}}
   internal Task ReviewRuntime(){return Run(async()=>{
    var result=await Call("runtimeUpgradeStatus");string ticket=Json.Str(result,"handoff","ticketId"),status=Json.Str(result,"handoff","status"),transaction=Json.Str(result,"upgrade","transactionId");
@@ -217,7 +227,7 @@ namespace StyxNative {
    else if(name=="create"||name=="join"){Capabilities();if(name=="join"){link=Input("Private pairing link");link.UseSystemPasswordChar=true;Action("Review pairing link",async()=>{var r=await owner.Call("inspectJoin",Json.Obj("link",link.Text));link.Clear();joinOrigin=Json.Str(r,"preview","origin");joinCa=Json.Str(r,"preview","caSha256");Feedback("Gateway: "+joinOrigin+"\nCertificate SHA-256: "+(joinCa.Length>0?joinCa:"system trust")+"\nSelect Approve and prepare only if these match your Gateway.");});}Action(name=="join"?"Approve and prepare":"Prepare this computer",async()=>{var choice=Choice();if(name=="join"){if(String.IsNullOrEmpty(joinOrigin))throw new InvalidOperationException();choice["approvedGatewayOrigin"]=joinOrigin;if(!String.IsNullOrEmpty(joinCa))choice["approvedCaSha256"]=joinCa;}await owner.Call(name=="join"?"join":"create",choice);ShowPage("overview");Feedback("Preparing signed components…");var prepared=await owner.Call("prepare");if(!ShowJoinProgress(prepared)){await owner.Call("connect");await owner.RefreshAfterMutation();}});Action("Return",()=>{ShowPage("welcome");return Task.FromResult(0);},false);}
    else if(name=="overview"){updateRuntime=StyxContext.Button(content,"Update and reopen Styx",owner.UpdateRuntime);updateRuntime.Visible=CanUpdateRuntime(owner.CurrentStatus);if(Json.Yes(owner.CurrentStatus,"session","hostPayloadHandoffSupported"))StyxContext.Button(content,"Review component update",owner.ReviewRuntime);Explain("Connection and account checks are observed separately. Styx runs in your signed-in Windows session. Lock, logout, UAC and elevated applications can limit desktop control.",88);RefreshAction();Action("Continue preparation",async()=>{var r=await owner.Call("prepare");if(!ShowJoinProgress(r))await owner.RefreshAfterMutation();});Action("Reconnect",owner.Reconnect,false);Action("Pause",async()=>{await owner.Call("disconnect");await owner.RefreshAfterMutation();});Action("Add computer",async()=>{var r=await owner.Call("inviteComputer");ShowInvitation(r);});Action("Confirm joining computer",async()=>{ShowPendingComputers(await owner.Call("pendingComputers"));});Action("Paired computers",async()=>{var r=await owner.Call("devices");ShowDevices(r);});Action("Edit capabilities",()=>{ShowPage("capabilities");return Task.FromResult(0);},false);}
    else if(name=="component-start"){Explain("Reading connection settings… Component update and recovery remain available while this check completes.",65);updateRuntime=StyxContext.Button(content,"Update and reopen Styx",owner.UpdateRuntime);updateRuntime.Visible=CanUpdateRuntime(owner.CurrentStatus);if(Json.Yes(owner.CurrentStatus,"session","hostPayloadHandoffSupported"))StyxContext.Button(content,"Review component update",owner.ReviewRuntime);RefreshAction();Status(ComponentNotice(owner.CurrentStatus));}
-   else if(name=="update-recovery"){Explain("Review the interrupted update before reconnecting this computer. Your identity and pairing are retained.",70);StyxContext.Button(content,"Review component update",owner.ReviewRuntime);}
+   else if(name=="update-recovery"){Explain("Styx must finish updating its components before reconnecting this computer. If the update needs attention, review it below. Your identity and pairing are retained.",90);updateRuntime=StyxContext.Button(content,"Update and reopen Styx",owner.UpdateRuntime);updateRuntime.Visible=CanUpdateRuntime(owner.CurrentStatus);StyxContext.Button(content,"Review component update",owner.ReviewRuntime);}
    else if(name=="join-waiting"){Explain("Join your main computer",40);}
    else if(name=="add-computer"){Explain("On the other computer, open Styx and choose Join existing. Use the invitation below.",70);}
    else if(name=="pending-computers"){Explain("Compare the code shown on the joining computer. Confirm only when both codes match.",70);}

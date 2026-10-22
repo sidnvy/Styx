@@ -20,6 +20,17 @@ namespace StyxNative {
      Set(context,"snapshot",Json.Obj("loadingDetails",true,"session",Json.Obj("hostPayloadHandoffSupported",true)));
      settings.ShowPage("chat");
      var observation=(Task)typeof(StyxContext).GetMethod("ObserveStatus",Fields).Invoke(context,null);
+     if(args[2].StartsWith("auto-")){
+      await observation;
+      var first=await context.Call("counts");int expected=args[2]=="auto-fails"?1:0;
+      Check(Convert.ToInt32(Json.Get(first,"updates"))==expected,"bootstrap_update_not_once_or_unapproved");
+      Check(!context.ManagementOnly&&(string)Get(settings,"page")=="update-recovery","bootstrap_reconciliation_hidden_as_reading");
+      if(expected==1)Check(((Label)Get(settings,"feedback")).Text.Contains("The update could not be started"),"bootstrap_failure_missing");
+      await context.Refresh();var later=await context.Call("counts");
+      Check(Convert.ToInt32(Json.Get(later,"updates"))==expected,"bootstrap_failure_replayed_on_refresh");
+      Check(settings.Enabled&&!context.MutationBusy,"bootstrap_failure_disabled_recovery");
+      File.WriteAllText(args[3],"PASS");result=0;return;
+     }
      const string failure="Fixture update failed; review before retrying.";
      await context.Run(async()=>{await context.Call("runtimeUpgradePrepare");},"Preparing fixture update…",failure);
      Check(settings.Enabled&&!context.MutationBusy,"controls_not_reenabled");
