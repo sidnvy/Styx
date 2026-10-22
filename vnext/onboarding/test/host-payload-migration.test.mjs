@@ -6,6 +6,9 @@ import path from 'node:path';
 import {spawnSync} from 'node:child_process';
 import {createHash,generateKeyPairSync,sign} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
+import {gatewayServicePlan} from '../gateway-service.mjs';
+import {prepareGatewayRuntime} from '../gateway-runtime.mjs';
+import {GATEWAY_SOURCE_FILES,GATEWAY_ENTRYPOINT,GATEWAY_SOURCE_CONTRACT} from '../gateway-release-contract.mjs';
 import {linuxUserUnit} from '../../host/linux-service.mjs';
 import {observeLinuxHostPayloadAbsence} from '../host-payload-linux.mjs';
 import {stageSignedRelease,activateRelease,refreshVerifiedBootstrap,activeRelease} from '../../host/installer.mjs';
@@ -201,4 +204,40 @@ test('Linux daemon-reload failure retains transaction ownership until explicit r
  const record=readHostPayloadMigration({stateDir:f.stateDir});assert.equal(record.status,'uncertain');assert.ok(fs.existsSync(path.join(f.stateDir,'advance.lock')));
  await assert.rejects(rollback(f,record.transactionId),/rollback_interrupted/);assert.equal(readHostPayloadMigration({stateDir:f.stateDir}).status,'uncertain');assert.ok(fs.existsSync(path.join(f.stateDir,'advance.lock')));
  f.failReload(false);await rollback(f,record.transactionId);unchanged(before);assert.equal(fs.existsSync(path.join(f.stateDir,'advance.lock')),false);
+});
+
+function combinedLinuxFixture(t,{legacy=false}={}){
+ const f=installedLinuxFixture(t),config=json(path.join(f.stateDir,'deployment.json'));
+ config.mode='create-local';config.gateway={url:'https://127.0.0.1:18999',openssl:'/usr/bin/openssl'};
+ if(!legacy){
+  const bundle=path.join(f.dir,'gateway-bundle'),names=[...GATEWAY_SOURCE_FILES.map(n=>'app/'+n),'app/package.json','app/package-lock.json','licenses/node-LICENSE','licenses/styx-LICENSE','provenance/gateway-build.json','bin/node'];
+  const files=names.map(name=>{const content=Buffer.from(name.endsWith('.json')?'{}':'// isolated signed fixture\n');put(path.join(bundle,name),content,name==='bin/node'?0o700:0o600);return {path:name,sha256:sha(content),size:content.length,executable:name==='bin/node'}});
+  const raw=Buffer.from(JSON.stringify({schema:1,version:'1.0.0-gateway',platform:'linux',arch:process.arch,component:'gateway-application',sourceContract:GATEWAY_SOURCE_CONTRACT,entrypoint:GATEWAY_ENTRYPOINT,files})+'\n');
+  put(path.join(bundle,'manifest.json'),raw);put(path.join(bundle,'manifest.sig'),sign(null,raw,f.oldKey.privateKey).toString('base64url')+'\n');
+  config.gateway.runtime={bundle,publisherKeyFile:path.join(f.base,'publisher.pem'),publisherSha256:pin(f.oldKey),baseDir:path.join(f.dir,'gateway-runtime')};prepareGatewayRuntime(config.gateway.runtime);
+ }
+ put(path.join(f.stateDir,'deployment.json'),config);
+ const hostFile=path.join(f.base,'device/host.json'),host=json(hostFile);host.gateway_ws_url='wss://127.0.0.1:18999/';put(hostFile,host);
+ const state=json(path.join(f.stateDir,'state.json'));state.mode='create-local';state.configSha256=sha(fs.readFileSync(path.join(f.stateDir,'deployment.json')));state.onboardingDecisions.background.configSha256=state.configSha256;state.steps.find(s=>s.id==='host.claim').evidence.hostConfiguration.sha256=sha(fs.readFileSync(hostFile));state.steps.push({id:'gateway.prepare',status:'succeeded'},...(!legacy?[{id:'gateway.runtime.prepare',status:'succeeded'}]:[]));put(path.join(f.stateDir,'state.json'),state);
+ for(const name of ['background','capabilities']){const file=path.join(f.stateDir,name+'.json'),value=json(file);value.configSha256=state.configSha256;put(file,value)}
+ const plan=gatewayServicePlan(f.stateDir),gatewayUnit=path.join(path.dirname(f.unit),plan.name);put(gatewayUnit,plan.unit);
+ const gatewayState={...f.state,FragmentPath:gatewayUnit};const previous=f.adapters.linuxServiceOptions.run;
+ const run=(bin,args)=>bin.endsWith('systemctl')&&args.includes('--user')&&args.includes(plan.name)?Object.entries(gatewayState).map(([k,v])=>k+'='+v).join('\n'):previous(bin,args);
+ f.adapters.linuxServiceOptions.run=run;f.adapters.observeAbsence=input=>observeLinuxHostPayloadAbsence(input,{home:f.dir,run,observeProcesses:()=>true});
+ return {...f,config,gatewayUnit,gatewayState};
+}
+for(const legacy of [false,true])test(`stopped exact ${legacy?'Host-owned Node':'independent signed'} Gateway stays unchanged through Host migration and rollback`,async t=>{
+ const f=combinedLinuxFixture(t,{legacy}),{plan,before}=await reviewed(f),original=fs.readFileSync(f.gatewayUnit);
+ assert.equal(plan.nativeGatewayService.runtime.source,legacy?'legacy_host':'gateway');assert.equal(plan.nativeGatewayService.unit,original.toString());assert.equal(plan.changes.some(c=>c.path===f.gatewayUnit),false);assert.ok(plan.preserved.some(c=>c.path===f.gatewayUnit));
+ const r=await applyHostPayloadMigration({stateDir:f.stateDir,plan,authorize:true},f.adapters);assert.deepEqual(fs.readFileSync(f.gatewayUnit),original);await rollback(f,r.transactionId);unchanged(before);assert.deepEqual(fs.readFileSync(f.gatewayUnit),original);
+});
+test('Gateway changed definition, runtime, running/enabled/dropin state refuse without service writes',async t=>{
+ for(const [key,value] of [['ActiveState','active'],['UnitFileState','enabled'],['MainPID','42'],['DropInPaths','/foreign.conf']]){const f=combinedLinuxFixture(t);f.gatewayState[key]=value;await assert.rejects(reviewed(f),/not_stopped_disabled/);assert.equal(f.reloads(),0)}
+ for(const mutation of ['unit','runtime']){const f=combinedLinuxFixture(t),{plan}=await reviewed(f);const file=mutation==='unit'?f.gatewayUnit:plan.nativeGatewayService.runtime.nodeBinary;fs.appendFileSync(file,'foreign');await assert.rejects(applyHostPayloadMigration({stateDir:f.stateDir,plan,authorize:true},f.adapters));assert.equal(f.reloads(),0)}
+ const changed=combinedLinuxFixture(t),review=await reviewed(changed);changed.gatewayState.UnitFileState='enabled';await assert.rejects(applyHostPayloadMigration({stateDir:changed.stateDir,plan:review.plan,authorize:true},changed.adapters),/not_stopped_disabled/);assert.equal(changed.reloads(),0);
+ const f=combinedLinuxFixture(t,{legacy:true});fs.writeFileSync(f.gatewayUnit,fs.readFileSync(f.gatewayUnit,'utf8').replace('/onboarding/gateway-runner.mjs','/onboarding/old-gateway-runner.mjs'));await assert.rejects(reviewed(f),/gateway_unit_definition_changed/);
+});
+test('Gateway definition drift after apply blocks rollback until original observed binding returns',async t=>{
+ const f=combinedLinuxFixture(t),{plan,before}=await reviewed(f),r=await applyHostPayloadMigration({stateDir:f.stateDir,plan,authorize:true},f.adapters),original=fs.readFileSync(f.gatewayUnit);
+ fs.appendFileSync(f.gatewayUnit,'# changed\n');await assert.rejects(rollback(f,r.transactionId),/native_absence_required/);assert.equal(activeRelease(f.root,pem(f.oldKey),f.opts).version,'0.2.0-next');fs.writeFileSync(f.gatewayUnit,original);await rollback(f,r.transactionId);unchanged(before);
 });
