@@ -160,7 +160,8 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
    let deviceCapabilities=null;try{deviceCapabilities=readDeploymentCapabilities(stateDir)}catch{}
    let foreground=null;try{foreground=await observedApi.readDeploymentForeground?.(stateDir)}catch{}
    let ownedForeground=null;try{ownedForeground=observedApi.readOwnedDeploymentForeground?.(stateDir)}catch{}
-   return {deployment,dependencies,ownerPairingScope,services,background,foreground,ownedForeground,deviceCapabilities,tunnel:tunnelStatus,nativeStartup,busy};
+   const components=typeof observedApi.readDeploymentComponents==='function'?await observedApi.readDeploymentComponents(stateDir,{artifacts:artifacts.bundle?artifacts:undefined}):null;
+   return {deployment,dependencies,ownerPairingScope,services,background,foreground,ownedForeground,deviceCapabilities,components,tunnel:tunnelStatus,nativeStartup,busy};
   }catch(error){if(!fs.existsSync(stateDir))return {deployment:null,dependencies:[],busy};throw error}
  };
  const readNativeStatus=async()=>{
@@ -235,6 +236,10 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
   if(req.method==='GET'&&url.pathname==='/api/plugin'){
    if(typeof api.readDeploymentPlugin!=='function'){send(404,{error:'plugin_workflow_unavailable'});return}
    try{send(200,{plugin:await api.readDeploymentPlugin(stateDir)})}catch{send(409,{error:'plugin_state_unavailable'})}return;
+  }
+  if(req.method==='GET'&&url.pathname==='/api/components'){
+   if(typeof api.readDeploymentComponents!=='function'){send(404,{error:'component_observation_unavailable'});return}
+   send(200,{components:await api.readDeploymentComponents(stateDir,{artifacts:artifacts.bundle?artifacts:undefined})});return;
   }
   if(req.method==='GET'&&url.pathname==='/api/status'){
    try{send(200,await readStatus())}catch{send(409,{error:'deployment_unavailable'})}return;

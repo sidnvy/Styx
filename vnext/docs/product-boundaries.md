@@ -9,6 +9,11 @@
 当前恢复；登录启动独立设置；主界面为概览、电脑、聊天连接，活动入口暂隐藏。
 App 管理范围以实际 ownership 为准，不能误停 CLI 独立管理的 Core。
 
+2026-10-22：Linux 首轮包含 Arch 的 headless 与 Hyprland 桌面环境。Computer Use
+由本机选择及有效桌面会话共同决定；没有桌面会话时不宣称可用，不限制 Exec 和可用的
+Browser Automation。CLI 可以管理上述能力，不要求另做 Linux 桌面 App。
+组件版本与发布者身份的当前收敛边界见[组件更新对账](component-reconciliation.md)。
+
 会话身份、资源限制与尚未产品化的长期自主任务见[会话与任务生命周期](session-and-task-lifecycle.md)。
 
 ## 三种用户流程

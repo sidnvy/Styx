@@ -84,7 +84,20 @@ struct ProductSettingsView: View {
                 Text(productText("关闭窗口后，Styx 会在菜单栏继续运行。退出 Styx 后，ChatGPT 将无法使用这台电脑。", "Styx keeps running in the menu bar when you close a window. Quitting Styx makes this computer unavailable to ChatGPT.")).font(.caption).foregroundStyle(.secondary)
             }
             Section { LabeledContent(productText("版本", "Version"), value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—") }
+            if let notice = componentNotice {
+                Label(notice, systemImage: "exclamationmark.circle")
+                    .font(.callout).foregroundStyle(.secondary)
+                    .accessibilityIdentifier("styx-component-update-notice")
+            }
         }.frame(maxWidth: .infinity, alignment: .leading)
+    }
+    private var componentNotice: String? {
+        switch model.status["components"]["host"]["status"].string {
+        case "publisher_changed": return productText("运行组件尚未更新。此版本需要先完成发布者信任迁移，现有配置和连接将保留。", "Runtime components have not been updated. This version requires a publisher trust migration; existing settings and connections are retained.")
+        case "update_available": return productText("App 与运行组件的版本不同。当前仍使用已安装的运行组件。", "The App and runtime components have different versions. The installed runtime is still selected.")
+        case "same_version_conflict", "candidate_unverified", "unavailable", "needs_recovery": return productText("无法确认运行组件更新状态。请检查安装或恢复记录；不要重新配对。", "Runtime update status needs review. Check the installation or recovery record; pairing does not need to be reset.")
+        default: return nil
+        }
     }
     private var local: some View {
         VStack(alignment: .leading, spacing: 16) {

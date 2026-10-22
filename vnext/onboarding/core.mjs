@@ -507,3 +507,5 @@ export {readDeploymentAppLifecycle,controlDeploymentAppLifecycle} from './app-li
 export {planDeviceIngressChange,applyDeviceIngressChange,rollbackDeviceIngressChange} from './device-ingress-change.mjs';
 
 export {changeDeploymentCapabilities,readDeploymentCapabilities,rollbackDeploymentCapabilities} from './capabilities.mjs';
+
+export {readDeploymentComponents} from './components.mjs';
