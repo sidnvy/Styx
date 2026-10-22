@@ -344,6 +344,21 @@ namespace StyxNative {
    if(!StyxContext.ReconnectResult(Json.Obj("status",Json.Obj("foreground",Json.Obj("status","connected","execConnection","connected")))).StartsWith("Reconnected.")||!StyxContext.ReconnectResult(Json.Obj("status",Json.Obj("foreground",Json.Obj("status","started")))).Contains("still starting")||StyxContext.ReconnectResult(Json.Obj()).StartsWith("Reconnected."))throw new Exception("reconnect_feedback_overclaimed");
    keyDraft="";tunnelDraft="";Feedback("");ShowPage("welcome");Show();CreateControl();PerformLayout();Application.DoEvents();using(var image=new Bitmap(Width,Height)){DrawToBitmap(image,new Rectangle(0,0,Width,Height));image.Save(Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"native-settings.png"));}}
  }
+ static class InstallCoordination {
+  // Inno owns versioned program files; Core state remains outside the install tree.
+  static Mutex appMutex;
+  internal static string Scope(string resources){
+   string root=Path.GetFullPath(resources).TrimEnd(Path.DirectorySeparatorChar,Path.AltDirectorySeparatorChar);
+   var parent=Directory.GetParent(root);string name=Path.GetFileName(root);
+   if(parent!=null&&((parent.Name=="versions"&&System.Text.RegularExpressions.Regex.IsMatch(name,"^[a-f0-9]{64}$"))||(parent.Name=="releases"&&System.Text.RegularExpressions.Regex.IsMatch(name,"^[a-f0-9-]{36}$"))))root=parent.Parent.FullName;
+   using(var sha=System.Security.Cryptography.SHA256.Create())return BitConverter.ToString(sha.ComputeHash(System.Text.Encoding.Unicode.GetBytes(root.ToLowerInvariant()))).Replace("-","").ToLowerInvariant();
+  }
+  internal static bool Enter(string resources){
+   string scope=Scope(resources);appMutex=new Mutex(false,"Global\\Styx.App."+scope);
+   Mutex setup;if(Mutex.TryOpenExisting("Global\\Styx.Install."+scope,out setup)){setup.Dispose();return false;}return true;
+  }
+  internal static void KeepAlive(){GC.KeepAlive(appMutex);}
+ }
  static class Program {
   [STAThread]static int Main(string[] args){
    Application.EnableVisualStyles();Application.SetCompatibleTextRenderingDefault(false);string root=AppDomain.CurrentDomain.BaseDirectory;
@@ -356,9 +371,10 @@ namespace StyxNative {
      else throw new ArgumentException();
     }
     if(!Path.IsPathRooted(state))throw new ArgumentException();state=Path.GetFullPath(state);
+    if(!InstallCoordination.Enter(root)){if(!test&&!startupTest)MessageBox.Show("Styx is being installed or updated. Open it again when Setup has finished.","Styx",MessageBoxButtons.OK,MessageBoxIcon.Information);return 3;}
     var app=new StyxContext(root,state,test,startupTest);
     if(test){app.Verify();app.Quit();File.WriteAllText(Path.Combine(root,"native-self-test.json"),"{\"status\":\"PASS\",\"pages\":9,\"uiConstruction\":true,\"joinStateRendering\":true,\"editingAndEvidenceState\":true,\"desktopAcceptance\":\"NOT RUN\",\"serviceMutation\":\"NOT RUN\"}");return 0;}
-    Application.Run(app);return startupTest?app.ResultCode:0;
+    Application.Run(app);InstallCoordination.KeepAlive();return startupTest?app.ResultCode:0;
    }catch{if(!test&&!startupTest)MessageBox.Show("Styx could not open. Check that the app resources and runtime are present.","Styx",MessageBoxButtons.OK,MessageBoxIcon.Information);return 2;}
   }
  }
