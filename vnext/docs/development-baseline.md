@@ -2,6 +2,28 @@
 
 Styx 的公共集成分支是 `develop`。功能分支从 `develop` 建立，评审和验证后回到 `develop`；`main` 只接收经过评审、具有交付范围和验证记录的发布基线。平台目录或一台电脑上的开发副本不是另一套公共 Core。
 
+
+## 当前收敛：原生更新与实际组件一致
+
+本轮实现位于 `feature/core-platform-upgrade-20261022`，尚待最终原生安装链验收后回到 `develop`。App 文件的安装、替换和卸载交给平台发行机制；Core 保留同一份配置、身份、Host 迁移记录及恢复规则。安装新版 App 不等于已更新 Host，启动时必须按包内组件核对已安装版本。
+
+- macOS 接入可选 Sparkle 标准更新界面及 AppKit 正常退出；仅有有效更新源的构建才显示更新入口。候选包没有发布更新源，不能称已完成正式在线更新。
+- Windows 私有文件权限改用包内固定哈希的原生 Windows ACL 读取器，保留实时检查和拒绝不明确权限。相同状态的全量读取从约 30.1 秒降至 9.8 秒；这仍不是即时响应。更新失败后，失效的读取会重新发起一次，失败提示不会被刷新覆盖。
+- 原生 App 只按 Core 明确授权尝试一次随包 Host 更新。准备检查之前就记录事务，失败或取消后重开不会默默重试。用户明确选择恢复时复用同一套事务。
+- Linux 新安装使用稳定 `install/node` 路径及 systemd `Type=exec`，仍等待真实连接就绪。旧包生成的、精确匹配且已停止并禁用的服务定义可加入现有 Host 迁移事务；更新和回滚均对账并重新加载 systemd，不修改系统目录权限、不自动启动服务。
+
+截至 rc8 的实际证据：
+
+| 平台 | 已验证 | 本轮边界 |
+| --- | --- | --- |
+| macOS / PilotMac | rc5 → rc8 Host 迁移、原生 helper 检查及重开、真实 Exec / Cua、正常退出后再打开；23 项身份文件和既有权限保持 | 本次由 CLI 恢复入口触发；旧取消记录阻止自动重试是预期行为。未计作 UI 点击、自动新目标更新或 Sparkle 发布源验收 |
+| Windows / NAB | 私有文件 ACL、失败界面恢复、标准 per-user Inno 隔离安装/升级/卸载原型 | rc8 真正自动 Host 链发现路径前缀误判，更新器被误认为运行中的 Host；已修正并通过真实进程检查，完整新包链待重跑。Inno 原型不等于产品安装器完成 |
+| Linux / Workstation | rc8 包内 Chrome、Exec、Hyprland Cua；关闭桌面能力不启动 Cua；旧已安装服务迁移、回滚和真实进程中断后的 CLI 恢复及远端 Exec | Edge 复用未变 provider 的已有证据；旧服务测试采用专属隔离单元名。未做物理注销/重启或新聊天账号验收 |
+
+`91ccfbc` 完整工程门槛通过：970 通过、0 失败、47 环境/可选原生检查跳过，依赖审计、SBOM、锁文件一致性通过。Mac 包来源 `4fe9038` 相对该提交仅修正 Mac 临时目录测试别名。后续 Windows 路径修复及 Linux 旧服务迁移另有真实验收记录，不能把 rc8 的原始失败改写为通过。
+
+当前任务证据：`outputs/unified-rc8-20261022/checkpoint.json`、`outputs/macos-updater-20261022/rc8-native-acceptance.json`、`outputs/windows-auto8-20261022/native-receipt.json`、`outputs/linux-rc8-20261022/receipt.json`、`outputs/linux-legacy-service-20261022/receipt.json`。证据目录不进入发行包；最终交付须记录精确来源及包哈希。三平台完整验收、新用户聊天账号、物理重启/登录及正式发行信任仍分开记录。
+
 ## 日常开发与集成
 
 1. 先确认 `develop` 的来源 revision、干净状态和当前集成记录，再建立 `feature/...` 分支。明确本次行为、平台范围与验收边界。
