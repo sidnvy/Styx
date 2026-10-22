@@ -330,6 +330,7 @@ test('exit before output EOF retains session and UTF-8 decoder until closed drai
   const early=await f.adapter.writeStdin({session_id:initial.session_id,yield_time_ms:0},owner);
   assert.equal(early.session_id,initial.session_id);
   assert.equal(early.exit_code,undefined);
+  assert.equal(f.adapter.sessions.get(initial.session_id).executionSettled,false);
   const bytes=Buffer.from('你好');
   f.options.reply={...empty,chunks:[{seq:2,stream:'stdout',chunk:bytes.subarray(0,2).toString('base64')}],nextSeq:3};
   const partial=await f.adapter.writeStdin({session_id:initial.session_id,yield_time_ms:0},owner);
@@ -337,6 +338,7 @@ test('exit before output EOF retains session and UTF-8 decoder until closed drai
   f.options.reply={...empty,chunks:[{seq:3,stream:'stdout',chunk:bytes.subarray(2).toString('base64')}],nextSeq:5,closed:true};
   const tail=await f.adapter.writeStdin({session_id:initial.session_id,yield_time_ms:0},owner);
   assert.equal(tail.output,'你好');assert.equal(tail.session_id,initial.session_id);
+  assert.equal(f.adapter.sessions.get(initial.session_id).executionSettled,true);
   f.options.reply={...empty,nextSeq:5,closed:true};
   const drained=await f.adapter.writeStdin({session_id:initial.session_id,yield_time_ms:0},owner);
   assert.equal(drained.exit_code,0);assert.equal(drained.output,'');
@@ -420,4 +422,16 @@ test('missing process during an uncertain start remains outcome_unknown', async 
   assert.equal(result.structuredContent.uncertain, true);
   assert.equal(f.adapter.sessions.has(sid), true);
   assert.equal(f.calls.filter(c => c.method === 'process/start').length, 1);
+});
+
+test('unknown execution and uncertain input survive terminal observations without replay', async () => {
+  const f=fixture();let notify;f.runtime.observeProcess=(_process,callback)=>{notify=callback;return()=>{}};
+  const first=await f.start(),record=f.adapter.sessions.get(first.session_id);
+  notify({settled:false,unknown:true,transportLost:true});notify({settled:true,unknown:false});
+  assert.equal(record.executionUnknown,true);assert.equal(record.executionSettled,false);
+  const g=fixture();let complete;g.runtime.observeProcess=(_process,callback)=>{complete=callback;return()=>{}};
+  const second=await g.start(),uncertain=g.adapter.sessions.get(second.session_id);uncertain.uncertainInput=true;complete({settled:true,unknown:false});
+  assert.equal(uncertain.executionSettled,true);assert.equal(uncertain.uncertainInput,true);
+  await assert.rejects(g.adapter.writeStdin({session_id:second.session_id,chars:'do not replay'},owner),/outcome_unknown/);
+  assert.equal(g.calls.filter(c=>c.method==='process/write').length,0);
 });

@@ -8,13 +8,13 @@ const MAX_FRAME = 2 * 1024 * 1024;
 export class RpcClient {
   constructor(channel, {timeoutMs = 35000} = {}) {
     this.channel = channel; this.timeoutMs = timeoutMs; this.pending = new Map(); this.seq = 0;
-    this.closed = false;
+    this.closed = false; this.processObservers = new Map();
     channel.on('message', bytes => {
       try {
         if (Buffer.byteLength(bytes) > MAX_FRAME) throw Error();
         const m = JSON.parse(String(bytes));
         if (!m || typeof m !== 'object' || Array.isArray(m)) throw Error();
-        if (m.method && m.id === undefined) return; // Output is consumed via cursor RPC.
+        if (m.method && m.id === undefined) { this.observeNotification(m); return; } // Output remains cursor-owned.
         const pending = this.pending.get(m.id);
         if (!pending) return;
         if (Object.hasOwn(m, 'result') === Object.hasOwn(m, 'error')) throw Error();
@@ -31,8 +31,35 @@ export class RpcClient {
     });
     channel.on('closed', () => this.fail());
   }
+  observeProcess(processId, callback) {
+    if (this.closed) throw new TransportFault();
+    if (typeof processId !== 'string' || !processId || typeof callback !== 'function' || this.processObservers.has(processId))
+      throw new ExecError('invalid_process_observer');
+    const observer = {callback, exited: null, closed: null};
+    this.processObservers.set(processId, observer);
+    return () => { if (this.processObservers.get(processId) === observer) this.processObservers.delete(processId); };
+  }
+  observeNotification(message) {
+    if (!['process/exited', 'process/closed'].includes(message.method)) return;
+    const p = message.params, observer = this.processObservers.get(p?.processId);
+    if (!observer) return; // Never adopt a different/unregistered native process.
+    const valid = Number.isSafeInteger(p.seq) && p.seq > 0 &&
+      (message.method !== 'process/exited' || Number.isSafeInteger(p.exitCode));
+    const name = message.method === 'process/exited' ? 'exited' : 'closed';
+    if (!valid || observer[name] !== null) {
+      observer.callback({settled:false, unknown:true});
+      this.processObservers.delete(p.processId); return;
+    }
+    observer[name] = p.seq;
+    if (observer.exited !== null && observer.closed !== null) {
+      const settled = observer.closed > observer.exited;
+      observer.callback({settled, unknown:!settled});
+    }
+  }
   fail() {
     this.closed = true;
+    for (const observer of this.processObservers.values()) observer.callback({settled:false, unknown:true, transportLost:true});
+    this.processObservers.clear();
     for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(new TransportFault()); }
     this.pending.clear();
   }
@@ -146,6 +173,10 @@ export class ExecConnection {
     if (!this.sessionId) throw new ExecError('session_lost');
     await this.client?.close();
     return this.initialize(true); // Explicit read-side reconciliation; no RPC replay.
+  }
+  observeProcess(processId, callback) {
+    if (this.lost || !this.client) throw new ExecError('session_lost');
+    return this.client.observeProcess(processId, callback);
   }
   request(method, params) {
     if (this.lost) return Promise.reject(new ExecError('session_lost'));

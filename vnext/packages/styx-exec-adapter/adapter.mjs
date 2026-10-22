@@ -110,13 +110,19 @@ export class ExecAdapter {
     const record = {id, owner, environment: b.id, binding: identity(b), runtime: b.runtime,
       process: randomUUID(), cursor: null, state: 'starting', queue: Promise.resolve(),
       decoders: new Map(), terminalSeqSlots: 0,
-      uncertainInput: false, tty: a.tty ?? false};
+      uncertainInput: false, executionSettled: false, executionUnknown: false, tty: a.tty ?? false};
     this.sessions.set(id, record);
     return this.serial(record, async () => {
       const began = performance.now();
       try { await this.owned(id, owner); }
-      catch (e) { this.sessions.delete(id); throw e; }
+      catch (e) { record.stopObserving?.(); this.sessions.delete(id); throw e; }
       try {
+        // Register before dispatch: a short command can finish before start replies.
+        record.stopObserving = b.runtime.observeProcess?.(record.process, observation => {
+          if (observation.transportLost && record.executionSettled) return;
+          record.executionUnknown ||= observation.unknown === true;
+          record.executionSettled = observation.settled === true && !record.executionUnknown;
+        });
         const started = await b.runtime.request('process/start', {
           processId: record.process, argv,
           cwd: cwdFileUri, env: {...b.env}, envPolicy: codexEnvPolicy(b.platform),
@@ -126,7 +132,7 @@ export class ExecAdapter {
         if (started?.processId !== record.process) { record.state = 'start_unknown'; fail('outcome_unknown', id, true); }
         record.state = 'running';
       } catch (e) {
-        if (e instanceof RpcFault) { this.sessions.delete(id); fail('executor_rejected'); }
+        if (e instanceof RpcFault) { record.stopObserving?.(); this.sessions.delete(id); fail('executor_rejected'); }
         record.state = 'start_unknown'; fail('outcome_unknown', id, true);
       }
       return this.read(record, a, began, a.yield_time_ms ?? 10000);
@@ -187,7 +193,7 @@ export class ExecAdapter {
         if (e instanceof RpcFault && e.rpcReason === 'unknown_process') {
           // The native record is gone; its exit and remaining output cannot
           // be recovered from this handle. Do not invent an exit or replay.
-          this.sessions.delete(r.id); r.state = 'process_lost';
+          r.stopObserving?.(); this.sessions.delete(r.id); r.state = 'process_lost';
           fail('process_lost', r.id, true);
         }
         fail('read_unavailable', r.id);
@@ -195,6 +201,9 @@ export class ExecAdapter {
       await this.owned(r.id, r.owner);
       const decoded = this.decode(reply, r);
       if (reply.failure !== null && reply.failure !== undefined) fail('execution_failed', r.id);
+      // Execution completion and output drain are separate facts. Keep cursor,
+      // decoder and owner intact until the caller drains its retained handle.
+      if (reply.exited && reply.closed && !r.executionUnknown) r.executionSettled = true;
       for (const bytes of decoded) { chunks.push(bytes); size += bytes.length; }
       final = reply;
       // Upstream exit may precede output EOF. Only closed plus an empty
@@ -210,7 +219,7 @@ export class ExecAdapter {
       for (const decoder of r.decoders.values()) {
         const tail = decoder.end(); if (tail) chunks.push(tail);
       }
-      this.sessions.delete(r.id); r.state = 'exited';
+      r.stopObserving?.(); this.sessions.delete(r.id); r.state = 'exited';
     } else if (r.state === 'start_unknown') {
       // process/read proves the named process exists. It never replays start.
       r.state = 'running';
@@ -261,7 +270,8 @@ export class ExecAdapter {
     const results = [];
     for (const r of this.sessions.values()) {
       await r.queue;
-      let confirmed = false;
+      let confirmed = r.executionSettled && !r.executionUnknown && !r.uncertainInput;
+      if (confirmed) { r.stopObserving?.(); results.push({session_id:r.id,confirmed:true}); continue; }
       try {
         // terminate only requests cancellation; a successful RPC ack is NOT
         // independent evidence that the OS process has exited.
@@ -281,7 +291,7 @@ export class ExecAdapter {
       } catch {
         // Unknown termination is never silently converted to a success.
       }
-      results.push({session_id: r.id, confirmed});
+      r.stopObserving?.(); results.push({session_id: r.id, confirmed});
     }
     this.sessions.clear();
     return results;
