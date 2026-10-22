@@ -98,7 +98,10 @@ function checkWindowsAcl(filenames,kind) {
   try{
     execFileSync('powershell.exe',[
       '-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',encoded
-    ],{env:{...process.env,STYX_PRIVATE_PATHS_TO_VERIFY:JSON.stringify(filenames)},
+    // Windows PowerShell 5's filesystem provider otherwise reports existing
+    // staged dependency files beyond MAX_PATH as missing. Namespace the same
+    // already inspected absolute paths; ownership and DACL checks stay intact.
+    ],{env:{...process.env,STYX_PRIVATE_PATHS_TO_VERIFY:JSON.stringify(filenames.map(filename=>path.toNamespacedPath(filename)))},
       windowsHide:true,timeout:WINDOWS_ACL_TIMEOUT_MS,stdio:['ignore','ignore','ignore']});
   }catch(e){throw Error('private_'+kind+(e.code==='ETIMEDOUT'
     ?'_acl_check_timed_out':'_acl_not_owner_only'))}

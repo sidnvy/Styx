@@ -59,3 +59,14 @@ test('native batch preserves single and multiple path values including spaces an
   assert.equal(infos.length,3);assert.equal(infos[0].isDirectory(),true);
   assert.equal(infos[1].isFile(),true);assert.equal(infos[2].isFile(),true);
 });
+
+test('Windows validates long staged paths and still rejects a broad DACL',{skip:!windows},t=>{
+  const f=fixture(t);let folder=f.state;
+  while(folder.length<280)folder=path.join(folder,'staged-dependency-'.repeat(3));
+  fs.mkdirSync(folder,{recursive:true});
+  const file=path.join(folder,'private-test.txt');fs.writeFileSync(file,'test-only');
+  const entries=[{path:folder,kind:'directory'},{path:file,kind:'file'}];
+  assert.equal(requirePrivatePaths(entries).length,2);
+  execFileSync('icacls.exe',[path.toNamespacedPath(file),'/grant','*S-1-1-0:(R)'],{stdio:'ignore',windowsHide:true,timeout:30000});
+  assert.throws(()=>requirePrivatePaths(entries),/private_paths_acl_not_owner_only/);
+});
