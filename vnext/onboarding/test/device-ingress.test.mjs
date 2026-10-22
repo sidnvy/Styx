@@ -78,7 +78,7 @@ test('real Gateway TLS and unauthenticated enrollment routing are observed witho
 
 test('exact HTTPS target, configured CA, origin shape and certificate pin are checked before I/O', async t => {
   let requests = 0;
-  const f = await fixture(t, (_req, res) => { requests++; res.writeHead(401); res.end('{"error":"unauthorized"}'); });
+  const f = await fixture(t, (_req, res) => { requests++; res.writeHead(405); res.end('{"error":"method_not_allowed"}'); });
   for (const options of [{url: 'https://foreign.example'}, {url: f.url + '/mcp'}, {url: f.url + '?secret=NO_ECHO'},
     {url: f.url.replace('https:', 'http:')}, {url: f.url, caFile: '/tmp/arbitrary-ca.pem'},
     {url: f.url, expectedCertificateSha256: '0'.repeat(64)}, {url: f.url, rejectUnauthorized: false}]) {
@@ -90,12 +90,12 @@ test('exact HTTPS target, configured CA, origin shape and certificate pin are ch
 test('read-only probe sends no credentials, refuses redirects and does not accept arbitrary HTTP success', async t => {
   let mode = 'good', calls = 0;
   const f = await fixture(t, (req, res) => {
-    calls++; assert.equal(req.method, 'GET'); assert.equal(req.url, '/styx/enroll/pending');
+    calls++; assert.equal(req.method, 'GET'); assert.equal(req.url, '/styx/enroll/join');
     assert.equal(req.headers.authorization, undefined); assert.equal(req.headers.cookie, undefined);
     if (mode === 'redirect') { res.writeHead(302, {Location: 'https://foreign.example'}); res.end(); }
-    else if (mode === 'wrong') { res.writeHead(200); res.end('{"error":"unauthorized"}'); }
-    else if (mode === 'large') { res.writeHead(401); res.end('x'.repeat(9000)); }
-    else { res.writeHead(401); res.end('{"error":"unauthorized"}'); }
+    else if (mode === 'wrong') { res.writeHead(200); res.end('{"error":"method_not_allowed"}'); }
+    else if (mode === 'large') { res.writeHead(405); res.end('x'.repeat(9000)); }
+    else { res.writeHead(405); res.end('{"error":"method_not_allowed"}'); }
   });
   await verifyDeviceIngress(f.dir, {url: f.url});
   mode = 'redirect'; await assert.rejects(verifyDeviceIngress(f.dir, {url: f.url}), /redirect_refused/);
@@ -141,7 +141,7 @@ test('absolute timeout covers a TLS peer that never finishes its response', asyn
 test('a migration during verification invalidates the observation instead of blessing a new target', async t => {
   let release, received;
   const requestReceived = new Promise(resolve => { received = resolve; });
-  const f = await fixture(t, (_req, res) => { release = () => { res.writeHead(401); res.end('{"error":"unauthorized"}'); }; received(); });
+  const f = await fixture(t, (_req, res) => { release = () => { res.writeHead(405); res.end('{"error":"method_not_allowed"}'); }; received(); });
   const verify = verifyDeviceIngress(f.dir, {url: f.url});
   await requestReceived;
   f.changeConfig(config => { config.gateway.url = 'https://127.0.0.1:9999'; });

@@ -122,7 +122,7 @@ export async function verifyDeviceIngress(stateDir, options = {}) {
   const baseline = ctx.local ? ctx.trust.summary.sha256 : options.expectedCertificateSha256;
   if (ctx.local && options.expectedCertificateSha256 !== undefined && options.expectedCertificateSha256 !== baseline)
     fail('device_ingress_certificate_identity_changed');
-  const endpoint = new URL('/styx/enroll/pending', target);
+  const endpoint = new URL('/styx/enroll/join', target);
   const observed = await new Promise((resolve, reject) => {
     let peer, settled = false, timer;
     const finish = (error, result) => {
@@ -143,7 +143,7 @@ export async function verifyDeviceIngress(stateDir, options = {}) {
       res.on('error', () => finish('device_ingress_endpoint_not_verified'));
       res.on('end', () => {
         let body; try { body = JSON.parse(Buffer.concat(chunks).toString('utf8')); } catch {}
-        if (!peer || res.statusCode !== 401 || body?.error !== 'unauthorized') {
+        if (!peer || res.statusCode !== 405 || body?.error !== 'method_not_allowed') {
           finish('device_ingress_endpoint_not_verified'); return;
         }
         finish(null, peer);
@@ -173,6 +173,6 @@ export async function verifyDeviceIngress(stateDir, options = {}) {
   return {schema: 1, status: 'ingress_endpoint_verified', configuredOrigin: target,
     observedAt: new Date().toISOString(), observationScope: 'current_machine',
     tls: {status: 'verified', certificate: observed, identity: baseline ? 'certificate_matched' : 'configured_trust_verified'},
-    enrollment: 'unauthenticated_owner_route_rejected', remoteReachability: 'NOT VERIFIED', remoteUsable: false,
+    enrollment: 'unauthenticated_join_route_observed_without_mutation', remoteReachability: 'NOT VERIFIED', remoteUsable: false,
     hostConnection: 'NOT VERIFIED', deviceApproval: 'NOT RUN', accountAcceptance: 'NOT RUN'};
 }

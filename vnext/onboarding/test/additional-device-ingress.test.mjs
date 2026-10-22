@@ -12,7 +12,7 @@ import {GatewayDeviceIngress} from '../../gateway/device-ingress.mjs';
 import {ownerCommand} from '../../gateway/enroll-admin.mjs';
 import {createHash} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
-import {createDeployment,advanceDeployment,stopDeploymentGateway,createDeploymentPairingLink,prepareDeploymentDeviceIngress,recoverDeploymentDeviceIngress,readDeploymentDeviceIngressSetup,closeDeploymentPairingWindow,localGatewayAddresses,listDeploymentPending,approveDeploymentPending} from '../core.mjs';
+import {createDeployment,advanceDeployment,stopDeploymentGateway,createDeploymentPairingLink,prepareDeploymentDeviceIngress,recoverDeploymentDeviceIngress,readDeploymentDeviceIngressSetup,closeDeploymentPairingWindow,verifyDeviceIngress,localGatewayAddresses,listDeploymentPending,approveDeploymentPending} from '../core.mjs';
 import {requestEnrollment} from '../../host/enroll.mjs';
 import {recoverAdditionalDeviceIngress} from '../device-ingress-setup.mjs';
 import {acceptPairingLink} from '../pairing-links.mjs';
@@ -192,4 +192,20 @@ test('rollback refuses foreign or unidentifiable retry ownership instead of rely
   assert.deepEqual(calls,['status']);assert.deepEqual(fs.readFileSync(path.join(f.state,'deployment.json')),configuration);
  }
  for(const [file,bytes] of f.preserved)assert.deepEqual(fs.readFileSync(file),bytes);
+});
+
+test('joining Core verifies the real restricted device listener without accessing owner routes', {skip:!host},async t=>{
+ const f=await fixture(t);await prepareDeploymentDeviceIngress(f.state,{authorize:true,listenHost:host});
+ const configured=JSON.parse(fs.readFileSync(path.join(f.state,'deployment.json'))),entry=configured.gateway.deviceIngress;
+ const cert=path.join(f.state,'gateway/device-ingress',entry.generation,'certificate.pem');
+ const input=path.join(f.root,'probe-input.json'),state=path.join(f.root,'probe-join');
+ fs.writeFileSync(input,JSON.stringify({schema:1,mode:'join-existing',gateway:{url:entry.url,caFile:cert},host:{...f.config.host,baseDir:path.join(f.root,'probe-host')}}),{mode:0o600});
+ createDeployment(input,{stateDir:state});
+ const database=path.join(f.state,'gateway/enrollment/state.json');
+ const before=fs.existsSync(database)?fs.readFileSync(database):null;
+ assert.equal(await get(new URL('/styx/enroll/pending',entry.url),cert),404);
+ const observed=await verifyDeviceIngress(state,{url:entry.url,expectedCertificateSha256:entry.certificateSha256});
+ assert.equal(observed.status,'ingress_endpoint_verified');assert.equal(observed.enrollment,'unauthenticated_join_route_observed_without_mutation');
+ assert.equal(observed.tls.certificate.sha256,entry.certificateSha256);assert.equal(observed.remoteUsable,false);
+ if(before)assert.deepEqual(fs.readFileSync(database),before);else assert.equal(fs.existsSync(database),false);
 });
