@@ -1,0 +1,110 @@
+{
+  "schema": 1,
+  "result": "PASS",
+  "scope": "isolated Sparkle App update only",
+  "sourceBaseline": "a1ffffd7cf6b9b5f6e17c3a418c631f0852e2039",
+  "sparkle": {
+    "version": "2.10.0",
+    "officialArchiveSha256": "c2bf58aa8387266ac179357b1415d6f2635f044da8be41042af32425dae6da0c"
+  },
+  "build": {
+    "sparkleVersion": "2.10.0",
+    "appPath": "/private/tmp/styx-sparkle-platform-20261022/probe/installed/StyxSparkleProbe.app",
+    "publicEdKey": "d5yEI+CPLWo5iiGXGAnTDQySgYBvr1IFIGzFMiIQBhE=",
+    "feedUrl": "http://127.0.0.1:49256/appcast.xml",
+    "serverPid": 66149,
+    "archiveSha256": "251ac7dc79e25432ccbe1dea0513e6d6ceef207437dcaa180a83c58813d9639d",
+    "signing": "ad-hoc fixture App; archive Ed25519 with ephemeral private seed stored outside served directory",
+    "productionStyx": "UNCHANGED"
+  },
+  "events": [
+    {
+      "version": "1",
+      "event": "launched",
+      "time": 1792679525.352643,
+      "bundle": "/private/tmp/styx-sparkle-platform-20261022/probe/installed/StyxSparkleProbe.app",
+      "pid": 66198
+    },
+    {
+      "pid": 66198,
+      "version": "1",
+      "bundle": "/private/tmp/styx-sparkle-platform-20261022/probe/installed/StyxSparkleProbe.app",
+      "time": 1792679573.2770948,
+      "event": "valid_update_found"
+    },
+    {
+      "time": 1792679631.5217,
+      "pid": 66198,
+      "event": "will_install",
+      "version": "1",
+      "bundle": "/private/tmp/styx-sparkle-platform-20261022/probe/installed/StyxSparkleProbe.app"
+    },
+    {
+      "time": 1792679631.522109,
+      "pid": 66198,
+      "event": "will_relaunch",
+      "version": "1",
+      "bundle": "/private/tmp/styx-sparkle-platform-20261022/probe/installed/StyxSparkleProbe.app"
+    },
+    {
+      "time": 1792679631.5267038,
+      "pid": 66198,
+      "event": "termination_requested",
+      "version": "1",
+      "bundle": "/private/tmp/styx-sparkle-platform-20261022/probe/installed/StyxSparkleProbe.app"
+    },
+    {
+      "time": 1792679631.579152,
+      "pid": 66198,
+      "event": "termination_admitted",
+      "version": "1",
+      "bundle": "/private/tmp/styx-sparkle-platform-20261022/probe/installed/StyxSparkleProbe.app"
+    },
+    {
+      "bundle": "/private/tmp/styx-sparkle-platform-20261022/probe/installed/StyxSparkleProbe.app",
+      "pid": 67021,
+      "time": 1792679631.719852,
+      "version": "2",
+      "event": "launched"
+    },
+    {
+      "pid": 67021,
+      "event": "termination_requested",
+      "bundle": "/private/tmp/styx-sparkle-platform-20261022/probe/installed/StyxSparkleProbe.app",
+      "version": "2",
+      "time": 1792679724.438483
+    },
+    {
+      "pid": 67021,
+      "event": "termination_admitted",
+      "bundle": "/private/tmp/styx-sparkle-platform-20261022/probe/installed/StyxSparkleProbe.app",
+      "version": "2",
+      "time": 1792679724.492352
+    }
+  ],
+  "actualUi": {
+    "oldSnapshot": "s00000001",
+    "updateDialog": "s00000002",
+    "installRelaunchButton": "s00000003:1",
+    "newSnapshot": "s00000004",
+    "newWindow": 15824
+  },
+  "postUpdateSignatureStrict": true,
+  "fixtureProcessesStopped": true,
+  "feedServerStopped": true,
+  "productionStyx": {
+    "version": "0.3.0-rc.20261022.5",
+    "appPid": 50763,
+    "corePid": 50769,
+    "preservedFiles": 23,
+    "allHashesMatch": true,
+    "unchanged": true
+  },
+  "notValidated": [
+    "Styx Host configuration migration",
+    "public HTTPS release feed",
+    "Developer ID and notarization",
+    "production Sparkle key provisioning",
+    "production Styx update"
+  ]
+}
