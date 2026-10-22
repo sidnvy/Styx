@@ -215,3 +215,12 @@ HTTP initialize 成功且仍加载前次无 MCP 连接上限的源码。ExecAdap
 后续应先核对并复用已讨论／已存在的浏览器接入方案，再补同一 Core 下的能力配置、连接／授权、状态和生命周期，并单独验收真实网页观察与操作、标签页／会话归属和恢复。具体 Browser 实现尚未在此定型；不得把 Cua 的浏览器窗口点击或测试专用 CDP 连通当成 Browser provider 验收。
 
 2026-10-20 独立 Browser 分支已接入锁定 Playwright MCP、Host Browser lane、Core 配置/准备与独立验收证据。实现范围、隔离测试及仍未完成的迁移/原生打包/真实账号验收见 [Browser provider 开发验收](browser-provider.md)。这不表示现有已安装 App 自动具有 Browser。
+
+## 2026-10-22 additive-entry development update
+
+The additional device entry now has a shared Core transaction, HTTP/CLI controls,
+Windows invitation/recovery integration and startup retry without replacing the
+localhost MCP/tunnel origin. See [its contract and acceptance boundaries](additional-device-ingress-acceptance.md).
+Earlier gap tables above describe historical snapshots. This update is not a
+claim that macOS native UI integration, interactive Windows Cua, new-account chat
+installation or complete reboot acceptance has passed.

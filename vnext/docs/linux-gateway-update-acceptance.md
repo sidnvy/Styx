@@ -35,6 +35,14 @@ cleanup deletes that private subdirectory; the receipt contains hashes and
 bounded observations, never credential values. A refusal exits 2 and records
 `BLOCKED`; that outcome is not a passed update test.
 
+For an actual application payload change, additionally provide an independent
+absolute `previousSourceRoot` pointing to a tracked historical checkout. Its own
+`onboarding/gateway-release.mjs` builds the old generation with its historical
+source closure; the current builder builds the new one. This mode requires real
+`app/` payload differences and records their names. The same verified official
+Node binary is used in both generations, so this still does not claim a Node
+version upgrade.
+
 ## Intended sequence and scope
 
 1. Verify official Node provenance, binary/license hashes and actual version.
@@ -54,8 +62,8 @@ bounded observations, never credential values. A refusal exits 2 and records
    recovery, then run/probe the recovered signed runner.
 8. Confirm owned child process identities have exited and remove task secrets.
 
-The payloads in this fixture are identical; only signed generation metadata
-differs. Even a fully passing sequence would prove generation transaction,
+When `previousSourceRoot` is omitted, the payloads are identical; only signed
+generation metadata differs. Even a fully passing sequence would prove generation transaction,
 startup, rollback and recovery behavior, **not an upgrade to a different Node
 binary or application revision**. The test publisher is not official product
 distribution trust. The fresh Gateway has no approved remote devices; populated
@@ -130,3 +138,50 @@ No alternative bus, observer injection, authorization bypass, or policy change
 was attempted. These failed isolation attempts neither pass generation
 transactions nor resolve the ordinary workstation's `EACCES` blocker. Native
 successful update, rollback and interruption recovery remain unaccepted.
+
+
+## Native repair and changed-application acceptance — 2026-10-22
+
+The ordinary Arch workstation now passes the real signed application update,
+offline rollback and interruption recovery sequence. Evidence is task output
+`linux-update-20261021-run3-20261022/receipt.json` (native Exec session 49114,
+exit 0). Independent cleanup is in the adjacent `cleanup-observation.json`.
+The older blocked receipts above remain unchanged historical evidence.
+
+The production Linux observer was repaired as described in
+[Linux Gateway offline observation](linux-gateway-quiescence.md). It combines
+kernel exclusion of current executable inodes with complete same-user command
+lines, and still refuses unknown arguments, loaded units and active runtimes.
+The same five pre-existing protected processes still denied executable links;
+no process-security policy or existing process was changed. There was no PID
+namespace, observer override or substituted user bus.
+
+The old signed application was built by the real `4c91cfc` checkout's own
+publisher module, and the new signed application by the current source. The
+signed inventories contained 1,658 and 1,662 files with 96 dependencies each;
+14 application payload paths differed. This includes actual Gateway and Exec
+adapter source changes, rather than only manifest version metadata.
+
+Passed in the independent temporary deployment:
+
+- Old signed application startup with its installed Node and authenticated
+  TLS MCP initialization/tools listing.
+- Review-bound offline application update, followed by actual new-generation
+  signed startup and TLS MCP.
+- Offline signed rollback, followed by actual old-generation signed startup
+  and TLS MCP.
+- A real owned installer killed with SIGKILL after `pointer_switched`, then
+  explicit verified transaction recovery and recovered old-generation TLS MCP.
+- All four running signed processes were also refused by the production
+  quiescence observer as `gateway_runtime_process_still_running`.
+- All nine deployment/Gateway configuration, identity, TLS and credential file
+  hashes, including the Gateway tunnel-context token, remained identical.
+- All owned processes exited; private fixtures and the ephemeral signing key
+  were removed. A separate read-back found the unit absent/inactive/PID 0,
+  no unit definition, no known runner PID and no fixture-path process.
+
+The official Node 22.23.3 binary is identical in both generations. This passes
+an actual Gateway application update, not a Node version change. Signing trust
+is an ephemeral test publisher. Real reboot/power loss, populated remote-device
+approval migration, Exec/Cua/Browser installation, ChatGPT account use and a
+production deployment remain outside this acceptance.

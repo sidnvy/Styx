@@ -184,6 +184,12 @@ export class ExecAdapter {
       } catch (e) {
         if (e.code === 'session_lost') { r.state = 'lost'; fail('session_lost', r.id); }
         if (e instanceof RpcFault && r.state === 'start_unknown') fail('outcome_unknown', r.id, true);
+        if (e instanceof RpcFault && e.rpcReason === 'unknown_process') {
+          // The native record is gone; its exit and remaining output cannot
+          // be recovered from this handle. Do not invent an exit or replay.
+          this.sessions.delete(r.id); r.state = 'process_lost';
+          fail('process_lost', r.id, true);
+        }
         fail('read_unavailable', r.id);
       }
       await this.owned(r.id, r.owner);

@@ -3,7 +3,7 @@
 // mechanics, not an upgrade to another Node binary or application revision.
 import fs from 'node:fs';
 import path from 'node:path';
-import {fileURLToPath} from 'node:url';
+import {fileURLToPath,pathToFileURL} from 'node:url';
 import {createHash,generateKeyPairSync} from 'node:crypto';
 import {spawn,execFileSync} from 'node:child_process';
 import {createServer} from 'node:net';
@@ -22,14 +22,16 @@ const pause=ms=>new Promise(resolve=>setTimeout(resolve,ms));
 const here=fileURLToPath(import.meta.url);
 export function linuxGatewayUpdatePaths(options={},platform=process.platform,arch=process.arch){
  assert(platform==='linux'&&arch==='x64','linux_x64_acceptance_required');
- const {directory,nodeBinary,nodeLicenseFile,nodeProvenanceFile,sourceRoot,dependenciesRoot}=options;
+ const {directory,nodeBinary,nodeLicenseFile,nodeProvenanceFile,sourceRoot,dependenciesRoot,previousSourceRoot}=options;
  for(const value of [directory,nodeBinary,nodeLicenseFile,nodeProvenanceFile,sourceRoot,dependenciesRoot])assert(typeof value==='string'&&path.isAbsolute(value)&&path.normalize(value)===value,'absolute_acceptance_paths_required');
  assert(/^linux-update-20261021(?:-[A-Za-z0-9_-]+)?$/.test(path.basename(directory)),'scoped_linux_update_directory_required');
- for(const input of [nodeBinary,nodeLicenseFile,nodeProvenanceFile,sourceRoot,dependenciesRoot])assert(input!==directory&&!input.startsWith(directory+path.sep),'independent_acceptance_inputs_required');
- return {directory,nodeBinary,nodeLicenseFile,nodeProvenanceFile,sourceRoot,dependenciesRoot};
+ if(previousSourceRoot!==undefined)assert(typeof previousSourceRoot==='string'&&path.isAbsolute(previousSourceRoot)&&path.normalize(previousSourceRoot)===previousSourceRoot,'absolute_acceptance_paths_required');
+ for(const input of [nodeBinary,nodeLicenseFile,nodeProvenanceFile,sourceRoot,dependenciesRoot,...(previousSourceRoot===undefined?[]:[previousSourceRoot])])assert(input!==directory&&!input.startsWith(directory+path.sep),'independent_acceptance_inputs_required');
+ return {directory,nodeBinary,nodeLicenseFile,nodeProvenanceFile,sourceRoot,dependenciesRoot,...(previousSourceRoot===undefined?{}:{previousSourceRoot})};
 }
 export function linuxGatewayPreservedInventory(stateDir){
  const result={'deployment.json':sha(path.join(stateDir,'deployment.json'))};
+ for(const name of ['tunnel-context.json'])if(fs.existsSync(path.join(stateDir,name)))result[name]=sha(path.join(stateDir,name));
  const walk=(dir,relative)=>{for(const entry of fs.readdirSync(dir,{withFileTypes:true}).sort((a,b)=>a.name.localeCompare(b.name))){
   const name=relative+'/'+entry.name,file=path.join(dir,entry.name);assert(!entry.isSymbolicLink(),'unexpected_preserved_symlink');
   if(entry.isDirectory())walk(file,name);else {assert(entry.isFile(),'unexpected_preserved_file');result[name]=sha(file);}
@@ -80,11 +82,20 @@ export async function runLinuxGatewayUpdateAcceptance(options){
   phase='build_signed_generations';const key=generateKeyPairSync('ed25519'),privateKeyFile=path.join(privateRoot,'publisher-private.pem'),publisherKeyFile=path.join(privateRoot,'publisher.pem');
   writePrivateFile(privateKeyFile,key.privateKey.export({type:'pkcs8',format:'pem'}));writePrivateFile(publisherKeyFile,key.publicKey.export({type:'spki',format:'pem'}));
   const bundles=['update-old.20261021','update-new.20261021'].map(version=>({version,bundle:path.join(privateRoot,version)}));
-  const builds=bundles.map(({bundle:destination,version})=>buildGatewayRelease({...cfg,destination,version,privateKeyFile}));
+  // Publisher-side acceptance only: an old checkout builds its own historical
+  // source closure. Never retrofit the new allowlist into an old signed app.
+  let previousBuild=buildGatewayRelease;
+  if(cfg.previousSourceRoot){const module=path.join(cfg.previousSourceRoot,'onboarding/gateway-release.mjs'),info=fs.lstatSync(module);assert(info.isFile()&&!info.isSymbolicLink(),'regular_previous_gateway_builder_required');previousBuild=(await import(pathToFileURL(module).href)).buildGatewayRelease;assert(typeof previousBuild==='function','previous_gateway_builder_required');}
+  const builds=bundles.map(({bundle:destination,version},index)=>(index===0?previousBuild:buildGatewayRelease)({...cfg,sourceRoot:index===0?(cfg.previousSourceRoot??cfg.sourceRoot):cfg.sourceRoot,destination,version,privateKeyFile}));
   const pem=fs.readFileSync(publisherKeyFile),verified=bundles.map(x=>verifyGatewayRuntimeRelease(x.bundle,pem));
-  assert(JSON.stringify(verified[0].manifest.files)===JSON.stringify(verified[1].manifest.files),'generation_payloads_differ');
+  const oldFiles=new Map(verified[0].manifest.files.map(file=>[file.path,file])),newFiles=new Map(verified[1].manifest.files.map(file=>[file.path,file]));
+  const changedPayloadFiles=[...new Set([...oldFiles.keys(),...newFiles.keys()])].filter(name=>JSON.stringify(oldFiles.get(name))!==JSON.stringify(newFiles.get(name))).sort();
+  assert(cfg.previousSourceRoot===undefined?changedPayloadFiles.length===0:changedPayloadFiles.some(name=>name.startsWith('app/')),'expected_application_payload_difference_mismatch');
+  receipt.boundaries.binaryUpgrade='NOT RUN; identical official Node 22.23.3 binary in both signed generations';
+  receipt.boundaries.applicationUpdate=changedPayloadFiles.length?'actual changed application payload under ephemeral test publisher':'NOT RUN; identical application payload';
+  receipt.changedPayloadFiles=changedPayloadFiles;
   assert(builds[0].manifestSha256!==builds[1].manifestSha256,'generation_manifests_not_distinct');
-  fs.rmSync(privateKeyFile);record('two_complete_signed_generations_identical_payload',{generations:builds.map(({version,manifestSha256,files,dependencies})=>({version,manifestSha256,files,dependencies})),nodeSha256:sha(cfg.nodeBinary),privateSigningKeyDeleted:true});
+  fs.rmSync(privateKeyFile);record(changedPayloadFiles.length?'two_complete_signed_generations_changed_application_payload':'two_complete_signed_generations_identical_payload',{changedPayloadFiles,generations:builds.map(({version,manifestSha256,files,dependencies})=>({version,manifestSha256,files,dependencies})),nodeSha256:sha(cfg.nodeBinary),privateSigningKeyDeleted:true});
   const probe=createServer();await new Promise(resolve=>probe.listen(0,'127.0.0.1',resolve));const port=probe.address().port;await new Promise(resolve=>probe.close(resolve));
   runtime={bundle:bundles[0].bundle,publisherKeyFile,publisherSha256:builds[0].publisherSha256,baseDir:path.join(privateRoot,'gateway-runtime')};
   const input=path.join(privateRoot,'input.json'),config={schema:1,mode:'create-local',gateway:{url:'https://127.0.0.1:'+port,openssl:'/usr/bin/openssl',runtime}};writePrivateFile(input,JSON.stringify(config));
@@ -102,9 +113,10 @@ export async function runLinuxGatewayUpdateAcceptance(options){
    owned.push(ownedIdentity(currentChild.pid));await waitForReady(currentChild);
    const exe=fs.readlinkSync('/proc/'+currentChild.pid+'/exe'),args=fs.readFileSync('/proc/'+currentChild.pid+'/cmdline').toString().split('\0').filter(Boolean);
    assert(exe===active.nodeBinary&&args[1]===active.runnerBinary,'actual_signed_process_binding_mismatch');
+   let runningRefusal;try{quiet()}catch(error){runningRefusal=error.message}assert(runningRefusal==='gateway_runtime_process_still_running','running_signed_gateway_quiescence_not_refused');
    const client=new Client({name:'styx-linux-update-owned',version:'1'}),endpoint=config.gateway.url+'/mcp';
    const transport=new StreamableHTTPClientTransport(new URL(endpoint),{requestInit:{headers:{Authorization:'Bearer '+fs.readFileSync(path.join(stateDir,'gateway/model.token'),'utf8').trim()}},fetch:gatewayFetch(endpoint,{ca:fs.readFileSync(path.join(stateDir,'gateway/certificate.pem'))})});
-   try{await client.connect(transport);const tools=await client.listTools();assert(tools.tools.some(x=>x.name==='exec_command'),'tls_mcp_tools_missing');return {version:active.version,manifestSha256:active.manifestSha256,nodeSha256:sha(active.nodeBinary),runnerSha256:sha(active.runnerBinary),pid:currentChild.pid,tools:tools.tools.map(x=>x.name)};}
+   try{await client.connect(transport);const tools=await client.listTools();assert(tools.tools.some(x=>x.name==='exec_command'),'tls_mcp_tools_missing');return {version:active.version,manifestSha256:active.manifestSha256,nodeSha256:sha(active.nodeBinary),runnerSha256:sha(active.runnerBinary),pid:currentChild.pid,runningQuiescenceRefusal:runningRefusal,tools:tools.tools.map(x=>x.name)};}
    finally{await transport.terminateSession().catch(()=>{});await client.close().catch(()=>{});await stop(currentChild);currentChild=undefined;}
   };
   phase='old_signed_runner_tls_mcp';record('old_generation_actual_signed_runner_tls_mcp',await start('old'));
@@ -129,7 +141,7 @@ export async function runLinuxGatewayUpdateAcceptance(options){
   assert(JSON.stringify(linuxGatewayPreservedInventory(stateDir))===JSON.stringify(before),'final_preserved_configuration_changed');receipt.preservedFilesAfter=linuxGatewayPreservedInventory(stateDir);receipt.status='PASS';
  }catch(error){
   receipt.status='BLOCKED';receipt.failedPhase=phase;receipt.reason=/^[A-Za-z0-9_]+$/.test(error.message??'')?error.message:'native_update_acceptance_operation_failed';
-  if(error.message==='gateway_process_quiescence_unknown'){
+  if(error.message==='gateway_process_quiescence_unknown'&&phase==='review_update_apply'){
    receipt.quiescenceBlocker={inaccessibleCurrentUserProcesses:inaccessibleProcesses(),policyChanges:'NOT RUN',observerOverride:'NOT USED'};
    const unchanged=readGatewayRuntime(runtime),current=linuxGatewayPreservedInventory(stateDir);
    const baseline=receipt.gates.real_core_gateway_only_prepare_no_host.preservedFiles;

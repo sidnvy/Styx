@@ -61,3 +61,67 @@ test('generated installer validates manifest and refuses uncompiled, tampered or
 test('fresh per-user copy and owned uninstall preserve unrelated/state data',async t=>{const f=fixture(t);buildWindowsApp(noHost(f.config));const mf=path.join(f.config.output,'windows-package.json'),m=JSON.parse(fs.readFileSync(mf));m.compiled=true;fs.writeFileSync(mf,JSON.stringify(m));const api=await import(pathToFileURL(path.join(f.config.output,'install-windows-preview.mjs')));const home=process.env.USERPROFILE??os.homedir(),relative=path.relative(home,process.cwd()),base=relative.startsWith('..')||path.isAbsolute(relative)?home:process.cwd();const parent=fs.mkdtempSync(path.join(base,'styx-unit-install-'));t.after(()=>fs.rmSync(parent,{recursive:true,force:true}));const target=path.join(parent,'fresh target'),state=path.join(parent,'device-state');fs.writeFileSync(state,'unchanged');await api.installPreview(f.config.output,target);assert.equal((await api.verifyPackage(target,{installed:true})).compiled,true);await assert.rejects(api.installPreview(f.config.output,target),/existing_target_refused/);fs.writeFileSync(path.join(target,'unrelated-user-file'),'keep');await assert.rejects(api.uninstallPreview(target),/unexpected_preview_package_members/);assert.equal(fs.readFileSync(path.join(target,'unrelated-user-file'),'utf8'),'keep');fs.unlinkSync(path.join(target,'unrelated-user-file'));await api.uninstallPreview(target);assert.equal(fs.existsSync(target),false);assert.equal(fs.readFileSync(state,'utf8'),'unchanged');});
 
 test('source/target overlap is refused and failed install preserves unexpected files',async t=>{const f=fixture(t);buildWindowsApp(noHost(f.config));const mf=path.join(f.config.output,'windows-package.json'),m=JSON.parse(fs.readFileSync(mf));m.compiled=true;fs.writeFileSync(mf,JSON.stringify(m));const api=await import(pathToFileURL(path.join(f.config.output,'install-windows-preview.mjs')));await assert.rejects(api.installPreview(f.config.output,path.join(f.config.output,'nested-target')),/source_target_overlap_refused/);const home=process.env.USERPROFILE??os.homedir(),relative=path.relative(home,process.cwd()),base=relative.startsWith('..')||path.isAbsolute(relative)?home:process.cwd(),parent=fs.mkdtempSync(path.join(base,'styx-unit-rollback-'));t.after(()=>fs.rmSync(parent,{recursive:true,force:true}));const target=path.join(parent,'fresh'),original=fs.copyFileSync;try{fs.copyFileSync=(source,destination,...rest)=>{if(destination.startsWith(target+path.sep)){fs.writeFileSync(path.join(target,'unknown-user-file'),'must remain');throw Error('copy_fixture_failure');}return original(source,destination,...rest);};await assert.rejects(api.installPreview(f.config.output,target),/copy_fixture_failure/);}finally{fs.copyFileSync=original;}assert.equal(fs.readFileSync(path.join(target,'unknown-user-file'),'utf8'),'must remain');assert.equal(JSON.parse(fs.readFileSync(path.join(target,'.styx-preview-failed-install.json'),'utf8')).status,'failed_install_retained_for_review');});
+
+test('portable TLS helper packages and pins its complete DLL/config/license closure before native use',async t=>{
+ const f=fixture(t),directory=path.join(f.dir,'portable-tls');fs.mkdirSync(path.join(directory,'bin'),{recursive:true});fs.mkdirSync(path.join(directory,'ssl'));
+ fs.copyFileSync(f.config.nodeBinary,path.join(directory,'bin/openssl.exe'));fs.writeFileSync(path.join(directory,'bin/libcrypto.dll'),'synthetic runtime dependency');fs.writeFileSync(path.join(directory,'ssl/openssl.cnf'),'synthetic configuration');fs.writeFileSync(path.join(directory,'LICENSE'),'test license');
+ buildWindowsApp({...noHost(f.config),opensslBundle:{directory,executable:'bin/openssl.exe',config:'ssl/openssl.cnf'}});
+ const root=f.config.output,pin=JSON.parse(fs.readFileSync(path.join(root,'windows-runtime.json'))).openssl;
+ assert.equal(pin.path,'runtime/openssl/bin/openssl.exe');assert.equal(pin.files.length,4);
+ const {verifyOpenSslBundle}=await import('./core-bridge.mjs');assert.equal(verifyOpenSslBundle(root,pin),path.join(root,'runtime/openssl/ssl/openssl.cnf'));assert.deepEqual(pin.config,pin.files.find(item=>item.path==='runtime/openssl/ssl/openssl.cnf'));
+ for(const config of [{...pin.config,sha256:'0'.repeat(64)},{...pin.config,path:'runtime/openssl/../foreign.cnf'},{...pin.config,foreign:true},{}])assert.throws(()=>verifyOpenSslBundle(root,{...pin,config}),/invalid_tls_helper_bundle/);
+ assert.throws(()=>verifyOpenSslBundle(root,{path:pin.path,sha256:pin.sha256,config:pin.config}),/invalid_tls_helper_bundle/);
+ assert.equal(verifyOpenSslBundle(root,{path:pin.path,sha256:pin.sha256}),undefined);const legacy={...pin};delete legacy.config;assert.equal(verifyOpenSslBundle(root,legacy),undefined);
+ const dll=path.join(root,'runtime/openssl/bin/libcrypto.dll'),original=fs.readFileSync(dll);fs.appendFileSync(dll,'tampered');assert.throws(()=>verifyOpenSslBundle(root,pin),/tls_helper_bundle_changed/);fs.writeFileSync(dll,original);
+ const extra=path.join(root,'runtime/openssl/bin/foreign-provider.dll');fs.writeFileSync(extra,'unlisted');assert.throws(()=>verifyOpenSslBundle(root,pin),/tls_helper_bundle_changed/);fs.unlinkSync(extra);
+ const cnf=path.join(root,'runtime/openssl/ssl/openssl.cnf'),configuration=fs.readFileSync(cnf);fs.appendFileSync(cnf,'tamper');assert.throws(()=>verifyOpenSslBundle(root,pin),/tls_helper_bundle_changed/);fs.writeFileSync(cnf,configuration);
+ fs.unlinkSync(cnf);assert.throws(()=>verifyOpenSslBundle(root,pin));
+ const invalid=fixture(t);assert.throws(()=>buildWindowsApp({...noHost(invalid.config),opensslBinary:invalid.config.nodeBinary,opensslBundle:{directory,executable:'bin/openssl.exe'}}),/invalid_openssl_bundle_input/);
+});
+
+test('TLS bundle configuration input cannot escape its directory or redirect to another file',{skip:process.platform==='win32'?'symlink creation requires a separate Windows developer privilege':false},t=>{
+ for(const name of ['../foreign.cnf','ssl\\openssl.cnf','/foreign.cnf','ssl/./openssl.cnf','ssl/linked.cnf','ssl']){
+  const f=fixture(t),directory=path.join(f.dir,'portable');fs.mkdirSync(path.join(directory,'ssl'),{recursive:true});fs.copyFileSync(f.config.nodeBinary,path.join(directory,'openssl.exe'));const foreign=path.join(f.dir,'foreign.cnf');fs.writeFileSync(foreign,'foreign configuration');fs.symlinkSync(foreign,path.join(directory,'ssl/linked.cnf'));
+  assert.throws(()=>buildWindowsApp({...noHost(f.config),opensslBundle:{directory,executable:'openssl.exe',config:name}}),/invalid_openssl_bundle_input|redirected_package_input/);assert.equal(fs.existsSync(f.config.output),false);
+ }
+});
+
+test('only the trusted native resource can supply the local TLS configuration',async t=>{
+ const {validateUiConfig}=await import('../../onboarding/server.mjs'),{validateDeployment}=await import('../../onboarding/deployment-config.mjs');
+ const f=fixture(t),configFile=path.join(f.dir,'openssl.cnf');fs.writeFileSync(configFile,'configuration fixture');
+ const input={schema:1,mode:'create-local',gateway:{url:'https://127.0.0.1:37981'},host:{bundle:f.config.hostBundle,publisherKeyFile:f.config.publisherKeyFile,publisherSha256:f.config.publisherSha256,baseDir:path.join(f.dir,'host'),label:'TLS authority contract',computer:false}};
+ const trusted={trustedOpenSSL:f.config.nodeBinary,trustedOpenSSLConfig:configFile};
+ const accepted=validateUiConfig(input,trusted);assert.equal(accepted.gateway.opensslConfig,configFile);assert.equal(validateDeployment(accepted),accepted);
+ for(const value of [configFile,'foreign.cnf',null])assert.throws(()=>validateUiConfig({...input,gateway:{...input.gateway,opensslConfig:value}},trusted),/invalid_configuration_fields/);
+ assert.equal(Object.hasOwn(validateUiConfig(input,{trustedOpenSSL:f.config.nodeBinary}).gateway,'opensslConfig'),false);
+ const join={...input,mode:'join-existing',invitationFile:path.join(f.dir,'invitation'),gateway:{url:'https://existing.styx.test'}};
+ assert.equal(Object.hasOwn(validateUiConfig(join,trusted).gateway,'opensslConfig'),false);assert.throws(()=>validateDeployment({...join,gateway:{...join.gateway,opensslConfig:configFile}}),/join_cannot_prepare_gateway/);
+ for(const value of ['relative.cnf',f.dir])assert.throws(()=>validateDeployment({...accepted,gateway:{...accepted.gateway,opensslConfig:value}}),/absolute_openssl_configuration_required|trusted_openssl_configuration_regular_file_required/);
+ if(process.platform!=='win32'){const link=path.join(f.dir,'config-link');fs.symlinkSync(configFile,link);assert.throws(()=>validateDeployment({...accepted,gateway:{...accepted.gateway,opensslConfig:link}}),/trusted_openssl_configuration_regular_file_required/);}
+});
+
+test('native bridge passes the verified bundle configuration through authenticated HTTP creation',{timeout:180000},async t=>{
+ const f=fixture(t),directory=path.join(f.dir,'portable');fs.mkdirSync(path.join(directory,'ssl'),{recursive:true});fs.copyFileSync(f.config.nodeBinary,path.join(directory,'openssl.exe'));fs.writeFileSync(path.join(directory,'ssl/openssl.cnf'),'configuration fixture');
+ buildWindowsApp({...noHost(f.config),opensslBundle:{directory,executable:'openssl.exe',config:'ssl/openssl.cnf'}});
+ const {startWindowsCore,bootstrap}=await import('./core-bridge.mjs'),stateRoot=path.join(f.dir,'native-state'),instance=await startWindowsCore(f.config.output,stateRoot);t.after(()=>instance.close());
+ const {origin,token}=bootstrap(instance.url),headers={Authorization:'Bearer '+token},session=await(await fetch(origin+'/api/session',{headers})).json();
+ const input={schema:1,mode:'create-local',gateway:{url:session.defaults.gatewayUrl},host:{bundle:f.config.hostBundle,publisherKeyFile:f.config.publisherKeyFile,publisherSha256:f.config.publisherSha256,baseDir:path.join(f.dir,'host'),label:'Native TLS creation contract',computer:false}};
+ const post=data=>fetch(origin+'/api/create',{method:'POST',headers:{...headers,Origin:origin,'X-Styx-CSRF':session.csrf,'Content-Type':'application/json'},body:JSON.stringify(data)});
+ const rejected=await post({...input,gateway:{...input.gateway,opensslConfig:path.join(f.dir,'injected.cnf')}});assert.equal(rejected.status,409);assert.equal(fs.existsSync(path.join(stateRoot,'deployment/deployment.json')),false);
+ const created=await post(input);assert.equal(created.status,200,await created.text());
+ const stored=JSON.parse(fs.readFileSync(path.join(stateRoot,'deployment/deployment.json')));assert.equal(stored.gateway.opensslConfig,path.join(f.config.output,'runtime/openssl/ssl/openssl.cnf'));assert.equal(stored.gateway.openssl,path.join(f.config.output,'runtime/openssl/openssl.exe'));
+});
+
+// Linux executes real OpenSSL behind a recording helper. The additional-listener
+// command is a contract fixture; this test does not claim Windows or LAN account acceptance.
+test('Core and additional-ingress req explicitly use the selected configuration despite an invalid inherited default',{skip:process.platform!=='linux',timeout:30000},async t=>{
+ const f=fixture(t),configuration=path.join(f.dir,'selected config;literal.cnf'),capture=path.join(f.dir,'req-arguments.jsonl'),binary=path.join(f.dir,'record-openssl');
+ fs.writeFileSync(configuration,'[req]\ndistinguished_name=styx_dn\n[styx_dn]\n');
+ fs.writeFileSync(binary,'#!'+process.execPath+'\nconst fs=require("node:fs"),{spawnSync}=require("node:child_process");fs.appendFileSync('+JSON.stringify(capture)+',JSON.stringify(process.argv.slice(2))+"\\n");const r=spawnSync("/usr/bin/openssl",process.argv.slice(2),{stdio:"ignore",env:{...process.env,OPENSSL_CONF:'+JSON.stringify(path.join(f.dir,'absent-default.cnf'))+'}});process.exit(r.status??3);\n',{mode:0o700});
+ const {createDeployment,advanceDeployment}=await import('../../onboarding/core.mjs'),{prepareAdditionalDeviceIngress}=await import('../../onboarding/device-ingress-setup.mjs');
+ const config={schema:1,mode:'create-local',gateway:{url:'https://127.0.0.1:37981',openssl:binary,opensslConfig:configuration},host:{bundle:f.config.hostBundle,publisherKeyFile:f.config.publisherKeyFile,publisherSha256:f.config.publisherSha256,baseDir:path.join(f.dir,'host'),label:'Explicit OpenSSL configuration contract',computer:false}};
+ const input=path.join(f.dir,'deployment-input.json'),state=path.join(f.dir,'deployment');fs.writeFileSync(input,JSON.stringify(config),{mode:0o600});createDeployment(input,{stateDir:state});
+ const before=process.env.OPENSSL_CONF,result=await advanceDeployment(state,{authorize:['gateway.prepare']});assert.equal(result.steps.find(s=>s.id==='gateway.prepare').status,'succeeded');
+ let descriptor;const additional=await prepareAdditionalDeviceIngress(state,{authorize:true,listenHost:'192.0.2.71'}, {addresses:()=>['192.0.2.71'],command:async(operation,value)=>{if(operation==='status')return {supported:true,status:'not_configured'};if(operation==='prepare'){descriptor=value;return {status:'prepared'}}if(operation==='enable')return {status:'listening',generation:value.generation,ingress:{certificate_sha256:descriptor.certificateSha256}};throw Error('unexpected_fixture_command')}});
+ assert.equal(additional.status,'listening');const calls=fs.readFileSync(capture,'utf8').trim().split('\n').map(line=>JSON.parse(line));assert.equal(calls.length,2);for(const args of calls)assert.deepEqual(args.slice(0,3),['req','-config',configuration]);assert.equal(process.env.OPENSSL_CONF,before);
+});

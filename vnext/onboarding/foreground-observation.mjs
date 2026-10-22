@@ -1,3 +1,4 @@
+import {deploymentConnectionHash} from '../shared/deployment-scope.mjs';
 // Ephemeral cross-process observation, never an authoritative role/config store.
 // Challenge authentication avoids disclosing the shared secret to a reused port.
 import fs from 'node:fs';
@@ -73,7 +74,7 @@ export async function observeForegroundOwner(stateDir){
  catch(error){if(error.code==='ENOENT')return missing(stateDir,fs.existsSync(path.join(stateDir,'foreground.lock'))?'foreground_owned_or_interrupted_do_not_take_over':'not_running');return missing(stateDir,'foreground_observation_receipt_unavailable')}
  function unchanged(){
   if(!equalSnapshot(privateSnapshot(file),saved)||!lockMatches(stateDir,receipt.lock))fail('foreground_observation_owner_changed');
-  const config=privateSnapshot(path.join(stateDir,'deployment.json'));if(sha(config.bytes)!==receipt.configurationHash)fail('foreground_scope_changed');
+  const config=privateSnapshot(path.join(stateDir,'deployment.json'));if(deploymentConnectionHash(config.bytes)!==receipt.configurationHash)fail('foreground_scope_changed');
  }
  try{
   unchanged();const challenge=randomBytes(32).toString('hex');

@@ -19,8 +19,14 @@ export class RpcClient {
         if (!pending) return;
         if (Object.hasOwn(m, 'result') === Object.hasOwn(m, 'error')) throw Error();
         this.pending.delete(m.id); clearTimeout(pending.timer);
-        if (m.error) pending.reject(new RpcFault(m.error.code));
-        else pending.resolve(m.result);
+        if (m.error) {
+          // Codex 0.163.0 also uses -32600 for a starting process. Only this
+          // exact response to our own process/read proves its record is gone.
+          // Retain a fixed reason, never arbitrary executor diagnostics.
+          const missing = pending.readProcessId !== undefined && m.error.code === -32600 &&
+            m.error.message === 'unknown process id ' + pending.readProcessId;
+          pending.reject(new RpcFault(m.error.code, {reason: missing ? 'unknown_process' : undefined}));
+        } else pending.resolve(m.result);
       } catch { this.fail(); channel.close(); }
     });
     channel.on('closed', () => this.fail());
@@ -40,7 +46,9 @@ export class RpcClient {
     const id = ++this.seq;
     return new Promise((resolve, reject) => {
       const timer = setTimeout(() => { this.fail(); this.channel.close(); }, this.timeoutMs);
-      this.pending.set(id, {resolve, reject, timer});
+      this.pending.set(id, {resolve, reject, timer,
+        readProcessId: method === 'process/read' && typeof params?.processId === 'string' ?
+          params.processId : undefined});
       try { this.channel.send(JSON.stringify({id, method, params})); }
       catch { this.fail(); this.channel.close(); }
     });

@@ -60,6 +60,114 @@ Persistent user-service control uses existing `gateway-service`/`host-service`
 commands, explicit authorization and recorded preparation. It is separate from
 package extraction and foreground execution. Run `help` for exact commands.
 
+## Foreground Secure MCP Tunnel
+
+The CLI uses the same `configureTunnel` and `TunnelRuntime` as the App.
+A distribution can include the official Linux `tunnel-client` with public release
+notices and `runtime/tunnel-client.json`, which records its version and verified
+binary SHA-256. Official runtime client 0.0.17 has passed local `--version` and
+`run --help` contract checks; those checks do not connect an OpenAI account.
+Ordinary users of that distribution do not enter an executable path or hash.
+The CLI never downloads or substitutes a missing client.
+
+First finish the existing create-local Gateway preparation and keep its owned
+loopback HTTPS Gateway running. For a combined headless installation, leave
+`computer:false` and select Browser separately if wanted. `tunnel-run` neither
+starts Cua nor changes any role or capability. A Host-only joined deployment
+uses its Gateway owner's connection and does not create a second account entry.
+
+In the intended OpenAI organization, the user creates/selects a Secure MCP
+Tunnel, associates it with the target ChatGPT workspace, and obtains its runtime
+key. Official steps and permission names are documented in
+[Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels).
+Enter the ID and key locally in an owner-private JSON file, inside an
+owner-private directory (POSIX directory mode 0700 and file mode 0600):
+
+```json
+{
+  "tunnelId": "<the actual tunnel ID>",
+  "apiKey": "<runtime key entered locally>",
+  "autoStart": false
+}
+```
+
+The only accepted fields are `tunnelId`, `apiKey`, and optional `autoStart`.
+The initial configuration needs its runtime key. A later configuration may omit
+`apiKey` to retain the existing server-owned key. `autoStart` is the existing
+App resume preference; it does not install a service or make CLI observation
+start a process. Configure explicitly:
+
+```sh
+./styx tunnel-configure /absolute/private/STATE /absolute/private/connection.json --authorize
+./styx tunnel-status /absolute/private/STATE
+```
+
+The key is stored by the existing private Tunnel configuration; it is absent
+from command arguments and command results. Do not paste it into the ChatGPT
+conversation, plugin ZIP, or a shell command. The connection file is not a
+plugin package or a replacement Gateway role/configuration file.
+
+Use the existing `./styx foreground /absolute/private/STATE --authorize` in one
+terminal to keep the prepared Gateway/selected Host alive. In another terminal:
+
+```sh
+./styx tunnel-run /absolute/private/STATE --authorize
+```
+
+The default client and manifest are resolved only from the installed
+`app/onboarding` module's fixed `../../runtime/` directory. The manifest must
+have schema 1 and the exact basename `tunnel-client`; runtime directory,
+manifest, and executable symlinks are rejected. The executable must match the
+manifest's SHA-256 and be executable. Missing material returns
+`packaged_tunnel_client_unavailable`; invalid material returns
+`packaged_tunnel_client_invalid`. Neither case searches the environment, CWD,
+or another installation.
+
+Advanced operator-supplied client: if a preview omits the bundled client, an
+operator may use a separately verified official release. Put only `binary`
+(its absolute executable path) and `sha256` (its independently verified 64
+lowercase hex pin) in a private `client.json`, then run
+`./styx tunnel-run /absolute/private/STATE /absolute/private/client.json --authorize`.
+This explicit override does not download a client. A self-computed hash alone
+is not publisher verification.
+
+Keep that terminal open. SIGINT/Ctrl-C and SIGTERM stop only this invocation's
+owned runtime/supervisor. The runtime can reconnect its transport after an
+unexpected client exit using its existing policy; it never replays an MCP call.
+A startup failure cancels this invocation's recovery before returning an error.
+The executable pin is rechecked by the runtime and its supervisor. No persisted
+PID is adopted or killed; no user/system service, login task, or download is
+performed. Systemd persistence is an explicit `tunnel-service` operation described below;
+it is not an effect of `autoStart` or package extraction.
+
+`tunnel-status` is read-only. `packagedClient.available` reports only local
+manifest/executable integrity; it does not start or execute the client.
+`configured` proves saved configuration only;
+`owner_unobserved` means an owner lock exists but this CLI process has not
+observed its owner. It does not mean that owner is dead or that the transport
+is active. Do not remove the lock or launch another client to bypass it.
+Transport readiness and ChatGPT account acceptance remain `not_observed` /
+`NOT RUN` in this standalone status output.
+
+In the target ChatGPT account/workspace, the user opens Plugins, chooses
+**Add custom MCP server → Tunnel**, selects the same tunnel, chooses
+**No authentication** for this App/CLI-owned forwarding path, creates the
+plugin, and installs it. The local runtime supplies the Gateway model Bearer;
+the runtime key stays in Styx. These are the documented
+[custom MCP connection steps](https://developers.openai.com/plugins/deploy/connect-chatgpt),
+separate from ZIP export or public plugin submission.
+
+For the existing combined Gateway+Host acceptance flow, run
+`./styx acceptance-begin /absolute/private/STATE --authorize`, copy its current
+challenge prompt to a new target chat with the installed plugin selected, and
+inspect `./styx acceptance /absolute/private/STATE` after the real tool calls.
+Only after seeing the results in that target chat should the user provide the
+current `challengeId` and `observedInTargetChat:true` in a private approval JSON
+and run `./styx acceptance-confirm STATE PRIVATE_APPROVAL_JSON --authorize`.
+Local Tunnel startup, fixture tests, and ZIP generation do not establish those
+account-side results. A Gateway-only deployment has no local Host challenge;
+verify its selected enrolled Host separately.
+
 ## Repeatable acceptance, without production mutation
 
 Use a fresh private test root and an available loopback port. Record artifact
@@ -83,8 +191,10 @@ hash, publisher pin, process ownership, config roles and account acceptance.
 Log each actual result separately from simulated error cases. Real logout,
 reboot, lock-screen recovery, remote pairing and ChatGPT account invocation
 remain separate native/manual acceptance gates. Failure to include a signed
-Host bundle blocks Host setup; lack of a tunnel binary blocks that connector,
-but does not block local Gateway-only or headless CLI use.
+Host bundle blocks Host setup. The Tunnel connector requires either the
+bundled official client or the explicit operator-supplied verified client
+described above; its absence does not block local Gateway-only or headless CLI
+use.
 
 ## Native Host and Browser acceptance runner
 
@@ -116,3 +226,56 @@ The receipt separates each real gate, account boundaries and cleanup. Only
 owned child processes and disposable state are involved. A failed cleanup keeps
 state for reconciliation instead of reporting success. `CODEX_HOME` and browser
 profiles are isolated; no production credentials or daily profiles are read.
+
+
+## Explicit Linux user-service Tunnel lifecycle
+
+A distribution containing the packaged Tunnel client can run the same owner in
+its current user's systemd manager. Finish `tunnel-configure` first and keep the
+prepared Gateway running through its own authorized lifecycle. Then use:
+
+```sh
+./styx tunnel-service /absolute/private/STATE install --authorize
+./styx tunnel-service /absolute/private/STATE status
+./styx tunnel-service /absolute/private/STATE start --authorize
+./styx tunnel-service /absolute/private/STATE stop --authorize
+./styx tunnel-service /absolute/private/STATE uninstall --authorize
+```
+
+`install` writes only the exact owned unit definition and reloads the user
+manager. It does not start or enable the service. `start` explicitly enables the
+unit for the user session and starts it; `stop` disables it and confirms it is
+inactive. `uninstall` disables/stops its exact unit, confirms it is inactive,
+and removes that definition. Deployment state, runtime keys and browser
+profiles remain. No command invokes sudo, changes linger, changes a firewall,
+or installs a system service. **Boot without user login: NOT CONFIGURED.**
+
+The unit name is derived from the absolute state-directory hash. Its command
+uses only the actual installed module's fixed `runtime/node` and
+`app/onboarding/cli.mjs tunnel-run STATE --authorize`. Node must match its
+packaged provenance hash; `packagedCliTunnelClient()` verifies the packaged
+client pin. The operator-only private client override cannot be selected by
+this service. Package paths containing executable-path characters systemd
+rejects (such as quotes, backslashes or wildcards) are refused before install.
+An altered/non-owned unit or a conflicting manager definition is
+refused; an existing definition is never silently replaced. Stop/uninstall can
+still stop the owned unit when package material needs repair.
+
+Status is read-only and creates no state or user-unit directories. It reports
+systemd `ActiveState`, `MainPID` and enablement separately. An enabled unit is
+not evidence of an active process. Even a running service does not establish
+Tunnel cloud readiness, plugin installation or target ChatGPT account
+acceptance; those remain `not_observed` / `NOT RUN`. Do not run a simultaneous
+foreground Tunnel for this state. An unobserved existing Tunnel owner lock
+blocks a fresh service start and is retained for inspection.
+
+This first lifecycle module has no durable operation journal. A partial
+systemctl failure returns `needs_reconciliation` and retains the owned unit
+when possible; an uninstall reload failure attempts an exclusive restoration
+without overwriting another file. Inspect `status` and the exact unit before
+retrying. A process/power interruption is not automatically adopted or replayed.
+Unit-contract tests use a fake user home and command runner and are **not native
+systemd acceptance**. Real user-manager startup, stop, logout/login recovery,
+network reconnect and account-side behavior require separate native evidence.
+The portable preview's external artifact-verification boundary still applies;
+a generated unit is not a new distribution signature.

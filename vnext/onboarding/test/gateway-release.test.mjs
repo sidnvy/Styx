@@ -8,13 +8,14 @@ import {createHash,generateKeyPairSync,sign} from 'node:crypto';
 import {execFileSync,spawn} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {once} from 'node:events';
-import {GATEWAY_SOURCE_FILES,gatewayApplicationFile} from '../gateway-release-contract.mjs';
+import {GATEWAY_SOURCE_FILES,LEGACY_GATEWAY_SOURCE_FILES,gatewayApplicationFile} from '../gateway-release-contract.mjs';
 import {buildGatewayRelease} from '../gateway-release.mjs';
-import {verifyGatewayRuntimeRelease,readGatewayRuntime} from '../gateway-runtime.mjs';
+import {verifyGatewayRuntimeRelease,prepareGatewayRuntime,readGatewayRuntime} from '../gateway-runtime.mjs';
 import {createDeployment,advanceDeployment} from '../core.mjs';
 import {gatewayServicePlan} from '../gateway-service.mjs';
 import {readGatewayDeployment} from '../gateway-deployment-reader.mjs';
 import {verifyGatewayConnection} from '../connection.mjs';
+import {stageSignedRelease,activateRelease} from '../../host/installer.mjs';
 import {planGatewayRuntimeChange,applyGatewayRuntimeChange} from '../gateway-runtime-update.mjs';
 const source=fileURLToPath(new URL('../../',import.meta.url));
 const digest=bytes=>createHash('sha256').update(bytes).digest('hex');
@@ -31,10 +32,33 @@ function fixture(t){
  const options={destination:path.join(root,'bundle'),version:'1.0.0-signed-gateway-test',privateKeyFile,nodeBinary:process.execPath,nodeLicenseFile,sourceRoot:publisherSource,dependenciesRoot:path.join(source,'node_modules')};
  return {root,keys,options,publisherKeyFile,publisherSource};
 }
+function writeManifest(bundle,manifest,key){
+ const raw=JSON.stringify(manifest,null,2)+'\n';fs.writeFileSync(path.join(bundle,'manifest.json'),raw);fs.writeFileSync(path.join(bundle,'manifest.sig'),sign(null,Buffer.from(raw),key).toString('base64url')+'\n');
+}
+// Copy actual historical product bytes, not current source with missing files
+// or a new manifest relabeled as legacy. Dependencies retain their signed tree.
+function historicalBundle(f,revision,version){
+ const bundle=path.join(f.root,'historical-'+revision);fs.cpSync(f.options.destination,bundle,{recursive:true});
+ const gitFile=name=>execFileSync('git',['-C',source,'show',revision+':vnext/'+name],{maxBuffer:4*1024*1024});
+ const contract=gitFile('onboarding/gateway-release-contract.mjs').toString('utf8');
+ const names=[...contract.slice(0,contract.indexOf('export const GATEWAY_ENTRYPOINT')).matchAll(/'([^']+\.(?:mjs|json|html))'/g)].map(match=>match[1]);
+ const allowed=new Set(names.map(name=>'app/'+name));
+ const manifest=JSON.parse(fs.readFileSync(path.join(bundle,'manifest.json')));
+ for(const entry of manifest.files){
+  if(entry.path.startsWith('app/')&&!entry.path.startsWith('app/node_modules/')&&!['app/package.json','app/package-lock.json'].includes(entry.path)&&!allowed.has(entry.path))fs.unlinkSync(path.join(bundle,entry.path));
+ }
+ manifest.files=manifest.files.filter(entry=>!entry.path.startsWith('app/')||entry.path.startsWith('app/node_modules/')||['app/package.json','app/package-lock.json'].includes(entry.path)||allowed.has(entry.path));
+ for(const name of [...names,'package.json','package-lock.json']){
+  const bytes=gitFile(name),member='app/'+name;fs.writeFileSync(path.join(bundle,member),bytes);
+  const entry=manifest.files.find(entry=>entry.path===member);entry.sha256=digest(bytes);entry.size=bytes.length;
+ }
+ delete manifest.sourceContract;manifest.version=version;writeManifest(bundle,manifest,f.keys.privateKey);
+ return {bundle,manifest,names};
+}
 test('contained Gateway build accepts only tracked source and locked production dependencies',t=>{
  const f=fixture(t),result=buildGatewayRelease(f.options),pub=f.keys.publicKey.export({format:'pem',type:'spki'});
  const manifest=JSON.parse(fs.readFileSync(path.join(f.options.destination,'manifest.json'),'utf8'));assert.deepEqual(manifest.files.filter(e=>!e.path.startsWith('bin/')&&!gatewayApplicationFile(e.path)).map(e=>e.path),[]);
- const verified=verifyGatewayRuntimeRelease(f.options.destination,pub);assert.equal(verified.manifest.component,'gateway-application');assert.ok(result.dependencies>2);
+ const verified=verifyGatewayRuntimeRelease(f.options.destination,pub);assert.equal(verified.manifest.component,'gateway-application');assert.equal(verified.manifest.sourceContract,2);assert.ok(result.dependencies>2);
  assert.ok(!verified.manifest.files.some(e=>e.executable&&!/^bin\/node(?:\.exe)?$/.test(e.path)));
  assert.ok(!verified.manifest.files.some(e=>!e.path.startsWith('app/node_modules/')&&/(?:^|\/)(?:test|tests|fixtures|__tests__|__fixtures__|examples)(?:\/|$)|^bin\/(?:codex|cua-driver)/.test(e.path)));
  for(const entry of manifest.files){const bytes=fs.readFileSync(path.join(f.options.destination,entry.path));assert.equal(bytes.length,entry.size,entry.path);assert.equal(digest(bytes),entry.sha256,entry.path);}
@@ -45,9 +69,9 @@ test('contained Gateway build accepts only tracked source and locked production 
  const other=path.join(f.root,'untracked-build');execFileSync('git',['-C',f.publisherSource,'rm','--cached','onboarding/gateway-deployment-reader.mjs']);
  assert.throws(()=>buildGatewayRelease({...f.options,destination:other}),/untracked_gateway_release_source/);assert.equal(fs.existsSync(other),false);
 });
-test('a correctly signed application missing either shared session module is refused',t=>{
+test('source contract 2 refuses every missing required application source',t=>{
  const f=fixture(t);buildGatewayRelease(f.options);const file=path.join(f.options.destination,'manifest.json'),original=fs.readFileSync(file),manifest=JSON.parse(original),signature=fs.readFileSync(path.join(f.options.destination,'manifest.sig'));
- for(const name of ['app/gateway/conversation-owners.mjs','app/onboarding/tunnel-context.mjs']){
+ for(const name of GATEWAY_SOURCE_FILES.map(name=>'app/'+name)){
   const member=path.join(f.options.destination,name),bytes=fs.readFileSync(member),incomplete={...manifest,files:manifest.files.filter(e=>e.path!==name)},raw=JSON.stringify(incomplete)+'\n';
   fs.unlinkSync(member);fs.writeFileSync(file,raw);fs.writeFileSync(path.join(f.options.destination,'manifest.sig'),sign(null,Buffer.from(raw),f.keys.privateKey).toString('base64url'));
   assert.throws(()=>verifyGatewayRuntimeRelease(f.options.destination,f.keys.publicKey.export({format:'pem',type:'spki'})),/complete_signed_gateway_application_required/,name);
@@ -106,4 +130,51 @@ test('signed Gateway runs authenticated MCP after its publisher checkout and ori
  assert.equal(gatewayServicePlan(stateDir).runner,descriptor.runner);assert.deepEqual(fs.readFileSync(path.join(stateDir,'gateway/certificate.pem')),beforeCertificate);assert.deepEqual(fs.readFileSync(path.join(stateDir,'gateway/model.token')),beforeCredential);
  const evidence=readGatewayDeployment(stateDir);assert.equal(evidence.runtime.url,'https://127.0.0.1:'+port);
  const file=path.join(stateDir,'gateway/runtime.json'),before=fs.readFileSync(file,'utf8');fs.writeFileSync(file,before+'\n');assert.throws(()=>readGatewayDeployment(stateDir),/completed_gateway_evidence_changed/);
+});
+
+
+test('real unversioned 26/28-file applications remain readable without relaxing signed import closure',t=>{
+ const f=fixture(t),pub=f.keys.publicKey.export({format:'pem',type:'spki'});buildGatewayRelease(f.options);
+ const prior=historicalBundle(f,'4c91cfc','99.0.0-legacy-28'),older=historicalBundle(f,'f09d0ad','100.0.0-legacy-26');
+ assert.equal(prior.names.length,28);assert.equal(older.names.length,26);assert.deepEqual(new Set(older.names),new Set(LEGACY_GATEWAY_SOURCE_FILES));
+ assert.equal(verifyGatewayRuntimeRelease(prior.bundle,pub).version,'99.0.0-legacy-28');
+ assert.equal(verifyGatewayRuntimeRelease(older.bundle,pub).version,'100.0.0-legacy-26');
+ // Optional in the historical minimum, but required by this actual 28-file
+ // generation's static and dynamic imports.
+ for(const name of ['app/gateway/conversation-owners.mjs','app/onboarding/tunnel-context.mjs']){
+  const file=path.join(prior.bundle,name),bytes=fs.readFileSync(file);fs.unlinkSync(file);
+  writeManifest(prior.bundle,{...prior.manifest,files:prior.manifest.files.filter(entry=>entry.path!==name)},f.keys.privateKey);
+  assert.throws(()=>verifyGatewayRuntimeRelease(prior.bundle,pub),/complete_signed_gateway_source_imports_required/,name);
+  fs.writeFileSync(file,bytes);writeManifest(prior.bundle,prior.manifest,f.keys.privateKey);
+ }
+ const runner='app/onboarding/gateway-signed-runner.mjs',file=path.join(older.bundle,runner),original=fs.readFileSync(file);
+ for(const statement of ["import './missing-source.mjs';","export * from './missing-source.mjs';","await import('./missing-source.mjs');","import '../../../../unknown-bootstrap.mjs';"]){
+  const bytes=Buffer.concat([Buffer.from(statement+'\n'),original]);fs.writeFileSync(file,bytes);
+  const manifest=structuredClone(older.manifest),entry=manifest.files.find(entry=>entry.path===runner);entry.size=bytes.length;entry.sha256=digest(bytes);writeManifest(older.bundle,manifest,f.keys.privateKey);
+  assert.throws(()=>verifyGatewayRuntimeRelease(older.bundle,pub),/complete_signed_gateway_source_imports_required/,statement);
+ }
+ fs.writeFileSync(file,original);writeManifest(older.bundle,older.manifest,f.keys.privateKey);
+ for(const sourceContract of [0,1,3,'2',null]){
+  writeManifest(older.bundle,{...older.manifest,sourceContract},f.keys.privateKey);
+  assert.throws(()=>verifyGatewayRuntimeRelease(older.bundle,pub),/unsupported_gateway_source_contract/);
+ }
+ writeManifest(older.bundle,older.manifest,f.keys.privateKey);
+ const unknown='app/onboarding/unknown.mjs',bytes=Buffer.from('export {};');fs.writeFileSync(path.join(older.bundle,unknown),bytes);
+ writeManifest(older.bundle,{...older.manifest,files:[...older.manifest.files,{path:unknown,sha256:digest(bytes),size:bytes.length,executable:false}]},f.keys.privateKey);
+ assert.throws(()=>verifyGatewayRuntimeRelease(older.bundle,pub),/gateway_runtime_contains_host_or_unknown_payload/);
+});
+
+test('actual historical signed payload installs, upgrades and rolls back through current runtime verification',t=>{
+ const f=fixture(t),built=buildGatewayRelease(f.options),pub=f.keys.publicKey.export({format:'pem',type:'spki'});
+ const legacy=historicalBundle(f,'4c91cfc','99.0.0-actual-legacy');
+ const config={bundle:legacy.bundle,publisherKeyFile:f.publisherKeyFile,publisherSha256:built.publisherSha256,baseDir:path.join(f.root,'legacy-runtime')};
+ const installed=prepareGatewayRuntime(config),oldManifest=readGatewayRuntime(config).manifestSha256;
+ assert.equal(installed.version,legacy.manifest.version);
+ stageSignedRelease({sourceDir:f.options.destination,installRoot:installed.installRoot,publicKeyPem:pub});
+ activateRelease(installed.installRoot,built.version,pub);
+ assert.equal(readGatewayRuntime(config).version,built.version);
+ activateRelease(installed.installRoot,legacy.manifest.version,pub);
+ const rolledBack=readGatewayRuntime(config);assert.equal(rolledBack.version,legacy.manifest.version);assert.equal(rolledBack.manifestSha256,oldManifest);
+ fs.rmSync(legacy.bundle,{recursive:true});fs.rmSync(f.options.destination,{recursive:true});
+ assert.equal(readGatewayRuntime(config).manifestSha256,oldManifest);
 });

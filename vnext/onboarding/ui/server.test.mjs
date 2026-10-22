@@ -463,3 +463,20 @@ test('status distinguishes the authenticated public foreground from the current 
   assert.equal(foreground.observation,'authenticated_foreground_owner');assert.equal(ownedForeground.host,'not_owned');
  }finally{await f.cleanup()}
 });
+
+test('add-computer API keeps exact Core authority, requires consent, and cannot accept TLS paths or foreign state',async()=>{
+ const calls=[];const hook=name=>(directory,options)=>{calls.push({name,directory,options});return {schema:1,status:'applied'}};
+ const f=await fixture({core:{prepareDeploymentDeviceIngress:hook('prepare'),recoverDeploymentDeviceIngress:hook('recover'),closeDeploymentPairingWindow:hook('close'),readDeploymentDeviceIngressSetup:hook('status')}});
+ try{
+  assert.equal((await f.post('/api/device-ingress/prepare',{authorize:true,listenHost:'192.0.2.10'},{'X-Styx-CSRF':''})).status,403);
+  for(const input of [{authorize:false},{authorize:true,tlsPrivateKeyFile:'/foreign/key'},{authorize:true,stateDir:'/foreign'}])assert.equal((await f.post('/api/device-ingress/prepare',input)).status,409);
+  assert.equal(calls.length,0);
+  assert.equal((await f.post('/api/device-ingress/prepare',{authorize:true,listenHost:'192.0.2.10'})).status,200);
+  assert.equal((await f.post('/api/device-ingress/recover',{authorize:true,action:'rollback',overwrite:true})).status,409);
+  assert.equal((await f.post('/api/device-ingress/recover',{authorize:true,action:'rollback'})).status,200);
+  assert.equal((await f.post('/api/pairing-link/close',{authorize:true})).status,200);
+  assert.equal((await f.post('/api/device-ingress/status',{})).status,200);
+  assert.deepEqual(calls.map(x=>x.name),['prepare','recover','close','status']);
+  for(const call of calls)assert.equal(call.directory,path.join(f.root,'deployment'));
+ }finally{await f.cleanup()}
+});

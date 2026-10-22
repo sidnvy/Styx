@@ -59,8 +59,9 @@ test('real Gateway TLS and unauthenticated enrollment routing are observed witho
   const f = await fixture(t);
   const before = fs.readFileSync(f.stateFile, 'utf8'), configBefore = fs.readFileSync(f.deploymentFile, 'utf8');
   const plan = planDeviceIngress(f.dir);
-  assert.equal(plan.status, 'loopback_only');
-  assert.ok(plan.blockers.includes('loopback_cannot_accept_other_computers'));
+  assert.equal(plan.status, 'preparation_required');
+  assert.equal(plan.networkExposureAuthorized, false);assert.equal(plan.remoteUsable, false);
+  assert.ok(Array.isArray(plan.candidates));
   assert.equal(plan.tls.gatewayCertificate.currentlyValid, true);
   assert.equal(plan.tls.gatewayCertificate.renewalDue, true);
   const result = await verifyDeviceIngress(f.dir, {url: f.url});

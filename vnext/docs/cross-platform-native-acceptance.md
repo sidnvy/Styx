@@ -26,6 +26,16 @@ stdout contains only status/path, never invitation material or credentials.
 Keep private files private on both native platforms. Move only the short-lived
 invitation through the encrypted management connection, not keys or Host tokens.
 
+Set `additionalEntry:true` for the ordinary Add Computer acceptance. This starts
+an independently prepared Gateway on localhost and connects a real MCP client
+first. Core then adds the authorized exact-interface listener. The actor checks
+that the same MCP session and all primary TLS, owner and token files remain
+unchanged. Invitation origin and certificate come from the new listener.
+`close` closes its pairing window; approved devices must still reconnect and run
+tools afterward. The final receipt requires these extra gates in this mode.
+This does not prove an existing external chat account or a local Host remained
+connected: those require their own recorded live clients.
+
 Sequence:
 
 1. Read physical addresses/routes and test direct reachability. SSH is only the
@@ -36,8 +46,8 @@ Sequence:
    `approvedCaSha256` independently checked against Gateway ready material.
    Core verifies the reachable TLS endpoint, imports approved CA trust and
    requests enrollment using its own generated Windows identity.
-4. Send Gateway `approve` with Windows `requestId`, `deviceId`, `fingerprint`.
-   Owner compares the actual pending identity; wrong fingerprint is rejected
+4. Send Gateway `approve` with Windows `requestId`, `deviceId`, `fingerprint`, and (for additional-entry mode)
+   the joining side’s `comparisonCode`. Owner compares the actual pending identity; wrong fingerprint is rejected
    before exact explicit approval. Send Windows `claim` to complete Core doctor
    and foreground Host startup. Joining must not create another Gateway.
 5. Gateway `verify` takes the approved `deviceId`, Windows actor's own `siteUrl`,

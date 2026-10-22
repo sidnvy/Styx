@@ -1,3 +1,4 @@
+import {deploymentConnectionHash} from './deployment-scope.mjs';
 // Private execution evidence, never an account identity provider or an admin MCP API.
 import fs from 'node:fs';
 import path from 'node:path';
@@ -41,7 +42,7 @@ export function acceptanceBinding(stateDir){
  if(!record||record.target?.id!==host.host_id||record.target.allowed!==true)fail('acceptance_device_not_approved');
  const certificate=path.join(stateDir,'gateway/certificate.pem');requirePrivateFile(certificate);
  const model=path.join(stateDir,'gateway/model.token');requirePrivateFile(model);
- return {config,host,target:record.target,binding:evidenceHash(JSON.stringify({configuration:evidenceHash(fs.readFileSync(deploymentFile)),certificate:evidenceHash(fs.readFileSync(certificate)),modelCredential:evidenceHash(fs.readFileSync(model)),device:identity.device_id,fingerprint:identity.fingerprint,generation:record.target.generation,desktop:record.target.computer?.enabled===true,...(record.target.browser?.enabled===true?{browser:true}:{})}))};
+ return {config,host,target:record.target,binding:evidenceHash(JSON.stringify({configuration:deploymentConnectionHash(fs.readFileSync(deploymentFile)),certificate:evidenceHash(fs.readFileSync(certificate)),modelCredential:evidenceHash(fs.readFileSync(model)),device:identity.device_id,fingerprint:identity.fingerprint,generation:record.target.generation,desktop:record.target.computer?.enabled===true,...(record.target.browser?.enabled===true?{browser:true}:{})}))};
 }
 export function writeAcceptanceEvidence(stateDir,record){
  const file=acceptanceFile(stateDir),temp=file+'.'+randomBytes(8).toString('hex')+'.tmp';

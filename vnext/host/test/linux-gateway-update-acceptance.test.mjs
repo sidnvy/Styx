@@ -7,6 +7,9 @@ import {linuxGatewayUpdatePaths,linuxGatewayPreservedInventory,runLinuxGatewayUp
 const inputs={directory:'/tmp/linux-update-20261021-fixture',nodeBinary:'/tmp/payload/node',nodeLicenseFile:'/tmp/payload/LICENSE',nodeProvenanceFile:'/tmp/payload/provenance.json',sourceRoot:'/tmp/source',dependenciesRoot:'/tmp/source/node_modules'};
 test('native update requires Linux x64, fresh task scope, independent absolute inputs and explicit opt-in',async()=>{
  assert.deepEqual(linuxGatewayUpdatePaths(inputs,'linux','x64'),inputs);
+ const changed={...inputs,previousSourceRoot:'/tmp/previous-source'};assert.deepEqual(linuxGatewayUpdatePaths(changed,'linux','x64'),changed);
+ assert.throws(()=>linuxGatewayUpdatePaths({...inputs,previousSourceRoot:'relative'},'linux','x64'),/absolute_acceptance_paths_required/);
+ assert.throws(()=>linuxGatewayUpdatePaths({...inputs,previousSourceRoot:inputs.directory+'/old'},'linux','x64'),/independent_acceptance_inputs_required/);
  assert.throws(()=>linuxGatewayUpdatePaths(inputs,'win32','x64'),/linux_x64_acceptance_required/);
  assert.throws(()=>linuxGatewayUpdatePaths({...inputs,directory:'/tmp/production'},'linux','x64'),/scoped_linux_update_directory_required/);
  assert.throws(()=>linuxGatewayUpdatePaths({...inputs,nodeBinary:inputs.directory+'/node'},'linux','x64'),/independent_acceptance_inputs_required/);

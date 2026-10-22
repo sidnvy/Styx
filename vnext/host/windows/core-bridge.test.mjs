@@ -68,3 +68,22 @@ test('only the two fixed native binding failures cross HTTP and pipe boundaries'
   const response=JSON.parse(result.trim());assert.equal(response.ok,false);assert.equal(response.error,reason==='private-path-token-value'?'operation_failed_review_settings':reason);assert(!result.includes('NEVER_EXPOSE_PRIVATE_DETAIL'));assert(!result.includes('private-path-token-value'));
  }
 });
+
+test('native add-computer asks for an interface only when ambiguous and keeps invitation lifecycle explicit',async()=>{
+ const calls=[];const client=await createClient({url},{fetchImpl:async(address,options)=>{
+  const route=new URL(address).pathname.slice(5),body=options.body?JSON.parse(options.body):null;calls.push({route,body});
+  const data=route==='session'?{csrf:'B'.repeat(43)}:route==='device-ingress/plan'?{ingress:{gateway:'local',blockers:[],requiresInterfaceChoice:true,candidates:['192.0.2.10','192.0.2.11']}}:route==='pairing-link/create'?{link:'private-fixture-invitation'}:{};
+  return {ok:true,headers:new Headers({'content-type':'application/json'}),text:async()=>JSON.stringify(data)};
+ }});
+ assert.equal((await client.dispatch(req('inviteComputer'))).status,'select_network_interface');assert(!calls.some(x=>x.route==='pairing-link/create'));
+ assert.equal((await client.dispatch(req('inviteComputer',{listenHost:'192.0.2.10',tlsPrivateKeyFile:'never forward'}))).status,'waiting_for_computer');assert.deepEqual(calls.at(-1),{route:'pairing-link/create',body:{authorize:true,listenHost:'192.0.2.10'}});
+ await client.dispatch(req('pendingComputers'));assert.equal(calls.at(-1).route,'pending/list');assert(!calls.some(x=>x.route==='pairing-link/close'));
+ await client.dispatch(req('closePairing'));assert.deepEqual(calls.at(-1),{route:'pairing-link/close',body:{authorize:true}});
+});
+
+test('save-and-connect retains the same explicit Tunnel resume choice as the Mac app',async()=>{
+ const f=fixture(),client=await createClient({url},{fetchImpl:f.fetchImpl});
+ await client.dispatch(req('tunnelSave',{tunnelId:'tunnel_owned_fixture',runtimeKey:'sk-fixture-not-a-real-key',autoStart:false,binary:'never-forward'}));
+ assert.deepEqual(f.requests.at(-1).body,{authorize:true,tunnelId:'tunnel_owned_fixture',apiKey:'sk-fixture-not-a-real-key',autoStart:true});
+ assert.equal(f.requests.at(-1).route,'tunnel/configure');
+});

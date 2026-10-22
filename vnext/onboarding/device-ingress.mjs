@@ -1,3 +1,5 @@
+import {localGatewayAddresses} from './deployment-config.mjs';
+import {readAdditionalDeviceIngress} from './device-ingress-setup.mjs';
 // Read-only add-device preflight. No listener changes, trust import, invitation
 // issuance, discovery or credentials. A local probe is never remote acceptance.
 import fs from 'node:fs';
@@ -67,6 +69,7 @@ function context(stateDir) {
 }
 
 export function planDeviceIngress(stateDir) {
+  const pending=readAdditionalDeviceIngress(stateDir);if(['preparing','running','needs_reconciliation'].includes(pending.status))return {schema:1,gateway:'unknown',status:'needs_reconciliation',blockers:['device_ingress_recovery_required'],setup:pending,remoteUsable:false,remoteReachability:'NOT VERIFIED',readiness:'not_inferred'};
   const ctx = context(stateDir), {config, configuredOrigin, local, trust, runtimePrepared} = ctx;
   const listenHost = local ? config.gateway.listenHost ?? '127.0.0.1' : null;
   const targetLoopback = loopback(new URL(configuredOrigin).hostname);
@@ -76,6 +79,17 @@ export function planDeviceIngress(stateDir) {
   if (targetLoopback || local && loopback(listenHost)) blockers.push('loopback_cannot_accept_other_computers');
   if (local && !loopback(listenHost) && config.gateway.allowRemoteHosts !== true) blockers.push('network_exposure_not_authorized');
   if (local && trust && !trust.summary.currentlyValid) blockers.push('gateway_certificate_not_currently_valid');
+  const addresses=localGatewayAddresses(),entry=config.gateway.deviceIngress;
+  if(local&&runtimePrepared&&trust?.summary.currentlyValid&&loopback(listenHost)){
+    const setup=readAdditionalDeviceIngress(stateDir);
+    const networkBlockers=addresses.length===0?['device_ingress_network_unavailable']:entry?.enabled&&!addresses.includes(entry.listenHost)?['device_ingress_address_changed']:[];
+    if(['preparing','running','needs_reconciliation'].includes(setup.status))networkBlockers.push('device_ingress_recovery_required');
+    return {schema:1,configuredOrigin,gateway:'local',listenHost,status:entry?.enabled?'configured_unverified':'preparation_required',
+      networkExposureAuthorized:entry?.enabled===true,blockers:networkBlockers,candidates:addresses,requiresInterfaceChoice:!entry?.enabled&&addresses.length>1,
+      ...(entry?{deviceEntry:{url:entry.url,listenHost:entry.listenHost,generation:entry.generation}}:{}),setup,
+      remoteUsable:false,remoteReachability:'NOT VERIFIED',readiness:'not_inferred',tls:{status:'configured_unverified',gatewayCertificate:trust.summary,renewal:'NOT AUTOMATED'},
+      nextAction:entry?.enabled?'open_pairing_window':'prepare_additional_entry',crossNetwork:'reachable_entrypoint_required_no_automatic_nat_traversal'};
+  }
   return {
     schema: 1, configuredOrigin, gateway: local ? 'local' : 'external', listenHost,
     status: local ? (loopback(listenHost) ? 'loopback_only' : 'configured_unverified') : 'not_hosted',

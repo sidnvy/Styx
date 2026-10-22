@@ -7,7 +7,7 @@ import {execFileSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {requirePrivateFile} from '../host/private-storage.mjs';
 import {verifySignedRelease} from '../host/installer.mjs';
-import {GATEWAY_SOURCE_FILES,GATEWAY_ENTRYPOINT,productionDependencyFile,productionDependencyPath} from './gateway-release-contract.mjs';
+import {GATEWAY_SOURCE_FILES,GATEWAY_SOURCE_CONTRACT,GATEWAY_ENTRYPOINT,productionDependencyFile,productionDependencyPath} from './gateway-release-contract.mjs';
 const ROOT=fileURLToPath(new URL('../',import.meta.url));
 const fail=code=>{throw Error(code)};
 const abs=value=>typeof value==='string'&&path.isAbsolute(value)&&path.normalize(value)===value;
@@ -85,7 +85,7 @@ export function buildGatewayRelease({destination,version,privateKeyFile,nodeBina
   const provenance={schema:1,source:'explicit_tracked_source_allowlist',lockSha256:digest(fs.readFileSync(path.join(sourceRoot,'package-lock.json'))),dependencies:dependencies.map(({locator,version,integrity})=>({locator,version,integrity})),installedDependencyBytes:'trusted_publisher_tree_hashed_in_signed_manifest',nativePlatformAcceptance:'NOT RUN'};
   const provenanceRaw=JSON.stringify(provenance,null,2)+'\n';fs.mkdirSync(path.join(destination,'provenance'),{mode:0o700});fs.writeFileSync(path.join(destination,'provenance/gateway-build.json'),provenanceRaw,{mode:0o600,flag:'wx'});files.push({path:'provenance/gateway-build.json',sha256:digest(provenanceRaw),size:Buffer.byteLength(provenanceRaw),executable:false});
   files.sort((a,b)=>a.path.localeCompare(b.path));
-  const manifest={schema:1,component:'gateway-application',entrypoint:GATEWAY_ENTRYPOINT,version,platform:process.platform,arch:process.arch,files};
+  const manifest={schema:1,component:'gateway-application',sourceContract:GATEWAY_SOURCE_CONTRACT,entrypoint:GATEWAY_ENTRYPOINT,version,platform:process.platform,arch:process.arch,files};
   const raw=JSON.stringify(manifest,null,2)+'\n';fs.writeFileSync(path.join(destination,'manifest.json'),raw,{mode:0o600,flag:'wx'});fs.writeFileSync(path.join(destination,'manifest.sig'),sign(null,Buffer.from(raw),key).toString('base64url')+'\n',{mode:0o600,flag:'wx'});
   const publicKey=createPublicKey(key),pem=publicKey.export({format:'pem',type:'spki'});verifySignedRelease(destination,pem);
   return {component:manifest.component,version,platform:process.platform,arch:process.arch,files:files.length,dependencies:dependencies.length,manifestSha256:digest(raw),publisherSha256:digest(publicKey.export({type:'spki',format:'der'})),entrypoint:GATEWAY_ENTRYPOINT};

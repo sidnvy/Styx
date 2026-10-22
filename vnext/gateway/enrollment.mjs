@@ -1,7 +1,7 @@
 import fs from 'node:fs';
 import {requirePrivateFile,ensurePrivateDirectory,openPrivateFile} from '../shared/private-file.mjs';
 import path from 'node:path';
-import {joinPayload,capabilityPayload} from '../shared/enrollment-protocol.mjs';
+import {joinPayload,capabilityPayload,pairingComparisonCode} from '../shared/enrollment-protocol.mjs';
 export {joinPayload};
 import {
   randomBytes, createHash, timingSafeEqual, createPublicKey,
@@ -126,21 +126,35 @@ export class EnrollmentController {
     const given=createHash('sha256').update(m[1]).digest();
     return timingSafeEqual(given,this.adminDigest);
   }
-  invite({ttl_seconds=600}={}){
+  invite({ttl_seconds=600}={},ingress=null){
     assert(Number.isSafeInteger(ttl_seconds)&&ttl_seconds>=60&&ttl_seconds<=600,
       'invalid_invitation_ttl');
     const active=this.db.invitations.filter(x=>!x.used&&x.exp>this.now()).length;
     assert(active<64,'too_many_invitations',429);
     const code=randomBytes(32).toString('base64url');
     const entry={id:randomBytes(10).toString('hex'),hash:sha(code),
-      exp:this.now()+ttl_seconds*1000,used:false};
+      exp:this.now()+ttl_seconds*1000,used:false,
+      ...(ingress?{ingress:{origin:ingress.origin,certificate_sha256:ingress.certificate_sha256,generation:ingress.generation},window_id:ingress.window_id}:{})};
     this.db.invitations.push(entry);this.save();
     return {invitation:code,expires_at:entry.exp,one_use:true};
   }
-  join(body){
+  closePairingWindow(windowId){
+    let changed=false;
+    for(const invitation of this.db.invitations){
+      if(invitation.window_id===windowId&&!invitation.used){invitation.used=true;invitation.invalidated_at=this.now();changed=true;}
+    }
+    if(changed)this.save();
+  }
+  join(body,ingress=null){
     const {fingerprint,publicKey}=validateJoin(body);
     const invite=this.db.invitations.find(x=>x.hash===sha(body.invitation));
     assert(invite && !invite.used && invite.exp>this.now(),'invitation_expired_or_used',403);
+    if(invite.ingress||ingress?.requireScopedInvitation){
+      assert(invite.ingress&&ingress&&invite.window_id===ingress.window_id&&
+        invite.ingress.origin===ingress.origin&&
+        invite.ingress.certificate_sha256===ingress.certificate_sha256&&
+        invite.ingress.generation===ingress.generation,'invitation_ingress_mismatch',403);
+    }
     assert(!this.db.devices.some(x=>x.status==='revoked'&&x.fingerprint===fingerprint),
       'device_identity_retired',403);
     assert(!this.db.pending.some(x=>x.device_id===body.device_id) &&
@@ -157,11 +171,18 @@ export class EnrollmentController {
       computer_requested:body.computer_requested,browser_requested:body.browser_requested===true,
       public_key_pem:publicKey.export({format:'pem',type:'spki'}),
       fingerprint,claim_hash:sha(claimSecret),
+      ...(ingress?{ingress:{origin:ingress.origin,certificate_sha256:ingress.certificate_sha256,generation:ingress.generation}}:{}),
       exp:this.now()+JOIN_MS,status:'pending'
     });
     this.save();
+    const request=this.db.pending.at(-1);
     return {request_id:requestId,claim_secret:claimSecret,
-      fingerprint,status:'pending',expires_at:this.now()+JOIN_MS};
+      fingerprint,status:'pending',expires_at:request.exp,...this.comparison(request)};
+  }
+  comparison(request){
+    if(!request.ingress)return {};
+    const ingress={...request.ingress};
+    return {ingress,comparison_code:pairingComparisonCode({gatewayOrigin:ingress.origin,certificateSha256:ingress.certificate_sha256,requestId:request.request_id,deviceFingerprint:request.fingerprint})};
   }
   listPending(){
     return this.db.pending.filter(x=>x.status==='pending'&&x.exp>this.now())
@@ -169,7 +190,7 @@ export class EnrollmentController {
         request_id:x.request_id,device_id:x.device_id,label:x.label,
         platform:x.platform,cwd:x.cwd,shell:x.shell,
         fingerprint:x.fingerprint,computer_requested:x.computer_requested,browser_requested:x.browser_requested===true,
-        expires_at:x.exp
+        expires_at:x.exp,...this.comparison(x)
       }));
   }
   approve(body={}){
@@ -397,7 +418,7 @@ const isLoopback=req=>['127.0.0.1','::1','::ffff:127.0.0.1']
   .includes(req.socket.remoteAddress);
 
 /** Narrow HTTP adapter for onboarding, separate from model MCP tools. */
-export async function handleEnrollment(req,res,{controller,allowedHosts}={}){
+export async function handleEnrollment(req,res,{controller,allowedHosts,allowAdmin=true,deviceIngress=null,ingress=null}={}){
   if(!controller || !req.url?.startsWith('/styx/enroll/'))return false;
   try{
     assert(allowedHosts.includes(req.headers.host),'host_not_allowed',403);
@@ -412,13 +433,24 @@ export async function handleEnrollment(req,res,{controller,allowedHosts}={}){
       '/styx/enroll/recover':['POST',true,'recover'],
       '/styx/enroll/capabilities':['POST',true,'capabilities'],
       '/styx/enroll/set-default':['POST',true,'setDefault'],
+      '/styx/enroll/device-ingress/status':['GET',true,'status',deviceIngress],
+      '/styx/enroll/device-ingress/prepare':['POST',true,'prepare',deviceIngress],
+      '/styx/enroll/device-ingress/enable':['POST',true,'enable',deviceIngress],
+      '/styx/enroll/device-ingress/disable':['POST',true,'disable',deviceIngress],
+      '/styx/enroll/device-ingress/pairing-open':['POST',true,'openPairing',deviceIngress],
+      '/styx/enroll/device-ingress/pairing-close':['POST',true,'closePairing',deviceIngress],
       '/styx/enroll/join':['POST',false,'join'],
       '/styx/enroll/claim':['POST',false,'claim'],
       '/styx/enroll/confirm':['POST',false,'confirm']
     };
     const route=routes[req.url];
     assert(route,'not_found',404);
-    const [method,admin,fn]=route;
+    const [method,admin,fn,target=controller]=route;
+    assert(!admin||allowAdmin,'not_found',404);
+    if(req.url.startsWith('/styx/enroll/device-ingress/')){
+      assert(deviceIngress,'device_ingress_not_supported',404);
+      assert(isLoopback(req)&&['127.0.0.1','::1','::ffff:127.0.0.1'].includes(req.socket.localAddress),'localhost_owner_control_required',403);
+    }
     assert(req.method===method,'method_not_allowed',405);
     if(admin) {
       const present=(req.rawHeaders??[]).filter((_,i)=>i%2===0)
@@ -429,7 +461,17 @@ export async function handleEnrollment(req,res,{controller,allowedHosts}={}){
       assert(!req.headers.authorization,'unauthorized',401);
     }
     const data=method==='POST'?await jsonBody(req):undefined;
-    const result=controller[fn](data);
+    let context=ingress;
+    if(fn==='join'&&req.socket.encrypted){
+      // TLSSocket reports the local certificate selected by the actual handshake.
+      // Neither the request JSON nor the canonical Gateway certificate supplies this binding.
+      const raw=req.socket.getCertificate?.()?.raw;
+      assert(raw,'listener_tls_identity_unavailable',403);
+      const certificate_sha256=sha(raw),origin='https://'+req.headers.host;
+      assert(!ingress||ingress.origin===origin&&ingress.certificate_sha256===certificate_sha256,'listener_tls_identity_mismatch',403);
+      context={...ingress,origin,certificate_sha256,generation:ingress?.generation??'canonical'};
+    }
+    const result=await target[fn](data,...(fn==='join'?[context]:[]));
     send(res,fn==='join'?202:fn==='claim'&&result.status==='pending'?202:200,result);
   }catch(e){
     send(res,Number.isInteger(e.status)?e.status:500,

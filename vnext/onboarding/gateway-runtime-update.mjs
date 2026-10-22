@@ -12,6 +12,7 @@ import {gatewayServiceIdentity} from './gateway-service.mjs';
 import {platformGatewayService} from './gateway-platform-services.mjs';
 import {stageSignedRelease,activateRelease} from '../host/installer.mjs';
 import {ensurePrivateDirectory,requirePrivateDirectory,requirePrivateFile,openPrivateFile,writePrivateFile} from '../host/private-storage.mjs';
+import {observeLinuxGatewayProcesses} from '../host/linux-gateway-quiescence.mjs';
 
 const fail=code=>{throw Error(code)};
 const sum=bytes=>createHash('sha256').update(bytes).digest('hex');
@@ -47,13 +48,21 @@ function deployment(stateDir,{observationOnly=false}={}){
  if(!observationOnly&&observed.gatewayRuntime.status==='running')fail('foreground_gateway_must_be_stopped');
  if(!observationOnly&&(state.steps.some(x=>['running','uncertain'].includes(x.status))||[...(state.maintenance??[]),...(state.gatewayMaintenance??[])].some(x=>['running','uncertain'].includes(x.status))))fail('uncertain_deployment_action_requires_reconciliation');
  const cfg=config.gateway.runtime;requirePrivateDirectory(cfg.baseDir);
- return {stateDir,config:cfg,state,configSha256:hash(path.join(stateDir,'deployment.json')),installRoot:path.join(cfg.baseDir,'install'),journal:path.join(cfg.baseDir,'runtime-change.json')};
+ return {stateDir,config:cfg,deviceIngressConfigured:Object.hasOwn(config.gateway,'deviceIngress'),opensslConfigurationConfigured:Object.hasOwn(config.gateway,'opensslConfig'),state,configSha256:hash(path.join(stateDir,'deployment.json')),installRoot:path.join(cfg.baseDir,'install'),journal:path.join(cfg.baseDir,'runtime-change.json')};
 }
 function pending(scope){
  if(!fs.existsSync(scope.journal))return null;
  const record=read(scope.journal);if(record.schema!==1||!['completed','recovered','committing','prepared','staged'].includes(record.status))fail('invalid_runtime_change_journal');
  if(!/^[a-f0-9]{32}$/.test(record.id??'')||record.plan?.installRoot!==scope.installRoot||record.plan?.stateDir!==scope.stateDir||![record.plan.current?.version,record.plan.target?.version].every(v=>/^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$/.test(v??'')))fail('invalid_runtime_change_journal');
  return ['completed','recovered'].includes(record.status)?null:record;
+}
+function requireCompatibleApplication(scope,verified){
+ // Even a disabled entry is a strict deployment field that historical signed
+ // readers cannot parse. Preserve the authority and require explicit removal
+ // through the additional-entry rollback before selecting an older app.
+ const compatible=verified.manifest.component==='gateway-application'&&verified.manifest.sourceContract>=2;
+ if(scope.deviceIngressConfigured&&!compatible)fail('device_ingress_requires_compatible_gateway_application');
+ if(scope.opensslConfigurationConfigured&&!compatible)fail('openssl_configuration_requires_compatible_gateway_application');
 }
 function targetRelease(scope,{bundle,rollback}){
  const pem=fs.readFileSync(path.join(scope.config.baseDir,'publisher.pem'),'utf8');
@@ -66,6 +75,7 @@ function targetRelease(scope,{bundle,rollback}){
  }else if(rollback!==undefined&&rollback!==false)fail('invalid_runtime_rollback_selection');
  if(!abs(source))fail('absolute_gateway_runtime_bundle_required');
  const verified=verifyGatewayRuntimeRelease(source,pem);
+ requireCompatibleApplication(scope,verified);
  return {pem,source,verified};
 }
 export function planGatewayRuntimeChange({stateDir,bundle,rollback}={}){
@@ -155,26 +165,20 @@ export function readGatewayRuntimeChange({stateDir}={}){
 }
 
 // No negative observation is inferred from a failed command, missing bus, or
-// inaccessible process. Those cases require a known, inspectable offline state.
+// inaccessible argv. Linux may instead prove current executable inode exclusion
+// for an inaccessible exe link; it still requires complete process arguments.
 export function observeGatewayRuntimeQuiescence({stateDir,installRoot},{run=execFileSync,home=os.homedir()}={}){
  const name=gatewayServiceIdentity(stateDir),nodeBinary=path.join(installRoot,nodeName());
  const descriptor={stateDir,nodeBinary,runner,identityHash:sum(stateDir)};
  if(process.platform==='linux'){
-  const file=path.join(home,'.config/systemd/user',name);if(fs.existsSync(file))fail('gateway_service_definition_must_be_uninstalled');
+  const file=path.join(home,'.config/systemd/user',name);
+  let definitionPresent=false;try{fs.lstatSync(file);definitionPresent=true}catch(error){if(error.code!=='ENOENT')fail('gateway_service_quiescence_unknown')}
+  if(definitionPresent)fail('gateway_service_definition_must_be_uninstalled');
   let text;try{text=String(run('/usr/bin/systemctl',['--user','show',name,'--property=LoadState,ActiveState,MainPID'],{encoding:'utf8',timeout:10000,stdio:['ignore','pipe','pipe']}));}catch{fail('gateway_service_quiescence_unknown');}
   const values=Object.fromEntries(text.trim().split('\n').map(s=>s.split('=')));
   if(values.LoadState!=='not-found'||values.ActiveState!=='inactive'||values.MainPID!=='0')fail('gateway_service_definition_must_be_uninstalled');
-  for(const entry of fs.readdirSync('/proc')){
-   if(!/^\d+$/.test(entry))continue;
-   const proc=path.join('/proc',entry);
-   try{
-    if(fs.statSync(proc).uid!==process.getuid())continue;
-    const args=fs.readFileSync(path.join(proc,'cmdline')).toString().split('\0').filter(Boolean);
-    if(!args.length)continue;
-    const executable=fs.readlinkSync(path.join(proc,'exe')).replace(/ \(deleted\)$/,'');
-    if(executable.startsWith(installRoot+path.sep)||Number(entry)!==process.pid&&args.includes(stateDir))fail('gateway_runtime_process_still_running');
-   }catch(e){if(['ENOENT','ESRCH'].includes(e.code))continue;if(e.message==='gateway_runtime_process_still_running')throw e;fail('gateway_process_quiescence_unknown');}
-  }
+  const processObservation=observeLinuxGatewayProcesses({stateDir,installRoot});
+  return {service:'not_installed',processes:'none',checkedAt:new Date().toISOString(),processObservation};
  }else{
   let service;try{service=platformGatewayService({action:'status',descriptor},{run,home});}catch{fail('gateway_service_quiescence_unknown');}
   if(service.status!=='not_installed')fail('gateway_service_definition_must_be_uninstalled');
@@ -248,6 +252,7 @@ export function recoverGatewayRuntimeChange({stateDir,transactionId,authorize=fa
   const pem=fs.readFileSync(path.join(scope.config.baseDir,'publisher.pem'),'utf8');
   if(sum(createPublicKey(pem).export({type:'spki',format:'der'}))!==scope.config.publisherSha256)fail('publisher_fingerprint_mismatch');
   const previous=verifyGatewayRuntimeRelease(path.join(scope.installRoot,'releases',record.plan.current.version),pem);
+  requireCompatibleApplication(scope,previous);
   if(previous.sha256!==record.plan.current.manifestSha256)fail('runtime_change_previous_release_changed');
   if(previous.manifest.files.find(e=>e.path==='bin/'+nodeName()).sha256!==record.backupNodeSha256)fail('runtime_change_backup_changed');
   const pointer=Buffer.from(record.backupPointer,'base64');if(sum(pointer)!==record.plan.current.pointerSha256)fail('runtime_change_backup_changed');

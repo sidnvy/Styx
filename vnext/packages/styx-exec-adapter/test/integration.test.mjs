@@ -280,3 +280,35 @@ test('stdio: Codex envPolicy inherits native graphical session but rejects sensi
     'styx-wayland-fixture-17|/tmp/styx-test-runtime|' +
     'unix:path=/tmp/styx-owned-bus|absent|absent');
 });
+
+test('stdio: native closed-process retention expiry reports process_lost without replay', async t => {
+  const {a, runtime} = await stdio(t);
+  const request = runtime.request.bind(runtime), calls = [];
+  runtime.request = async (method, params) => {
+    calls.push(method);
+    return request(method, params);
+  };
+  // A deliberate new fixture: observe stdout, then leave its completed native
+  // record unpolled beyond Codex's fixed 30s retention. No service is changed.
+  const first = await a.execCommand({
+    cmd:'printf RETENTION_PROBE; sleep 0.05; exit 7', yield_time_ms:0, login:false
+  }, owner);
+  assert.ok(first.session_id);
+  await sleep(31000);
+  const result = await a.callTool('write_stdin', {
+    session_id:first.session_id, yield_time_ms:0
+  }, owner);
+  assert.deepEqual(result.structuredContent, {
+    error:'process_lost', session_id:first.session_id, uncertain:true
+  });
+  assert.equal(a.sessions.size, 0);
+  assert.deepEqual(await runtime.request('environment/status', {}), {status:'ready'});
+  assert.equal(calls.filter(m => m === 'process/start').length, 1);
+  assert.equal(calls.filter(m => m === 'process/write').length, 0);
+  const count = calls.length;
+  const later = await a.callTool('write_stdin', {
+    session_id:first.session_id, chars:'must not replay', yield_time_ms:0
+  }, owner);
+  assert.equal(later.structuredContent.error, 'unknown_session');
+  assert.equal(calls.length, count);
+});

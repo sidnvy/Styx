@@ -3,9 +3,12 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import {generateKeyPairSync,createHash} from 'node:crypto';
-import {spawn,spawnSync} from 'node:child_process';
+import {generateKeyPairSync,createHash,sign} from 'node:crypto';
+import {fileURLToPath} from 'node:url';
+import {spawn,spawnSync,execFileSync} from 'node:child_process';
 import {createDeployment} from '../core.mjs';
+import {buildGatewayRelease} from '../gateway-release.mjs';
+import {GATEWAY_SOURCE_FILES} from '../gateway-release-contract.mjs';
 import {buildGatewayRuntimeRelease,prepareGatewayRuntime,readGatewayRuntime} from '../gateway-runtime.mjs';
 import {planGatewayRuntimeChange,applyGatewayRuntimeChange,recoverGatewayRuntimeChange,observeGatewayRuntimeQuiescence,readGatewayRuntimeChange} from '../gateway-runtime-update.mjs';
 
@@ -26,7 +29,7 @@ function fixture(t){
  const sentinels=['certificate.pem','private-key.pem','model.token','admin.token','devices.json','identity.json'].map(name=>{const file=path.join(gateway,name);fs.writeFileSync(file,'existing '+name+'\n',{mode:0o600});return {file,sha256:hash(file)};});
  const journal=()=>JSON.parse(fs.readFileSync(path.join(runtime.baseDir,'runtime-change.json'),'utf8'));
  const preserved=()=>{for(const value of sentinels)assert.equal(hash(value.file),value.sha256);};
- return {root,runtime,stateDir,first,second,third,journal,preserved};
+ return {root,key,privateKeyFile,nodeBinary,nodeLicenseFile,runtime,stateDir,first,second,third,journal,preserved};
 }
 test('review-bound offline update then signed rollback preserve identity, credentials and configuration',t=>{
  const f=fixture(t),cfgHash=hash(path.join(f.stateDir,'deployment.json'));
@@ -167,4 +170,82 @@ test('an unexplained recovery guard without any journal never projects clean sta
  assert.throws(()=>applyGatewayRuntimeChange({stateDir:f.stateDir,plan,authorize:true},quiet),/busy_or_interrupted_lock/);
  assert.equal(fs.readFileSync(guard,'utf8'),'unknown owner\n');assert.equal(fs.existsSync(path.join(f.stateDir,'advance.lock')),false);
  assert.equal(readGatewayRuntime(f.runtime).version,'1.0.0');f.preserved();
+});
+
+
+function setDeviceIngress(f,enabled){
+ const file=path.join(f.stateDir,'deployment.json'),config=JSON.parse(fs.readFileSync(file));
+ if(enabled===null)delete config.gateway.deviceIngress;
+ else config.gateway.deviceIngress={schema:1,enabled,generation:'a'.repeat(32),url:'https://192.0.2.25:18795',listenHost:'192.0.2.25',certificateSha256:'b'.repeat(64)};
+ fs.writeFileSync(file,JSON.stringify(config,null,2)+'\n');
+ const stateFile=path.join(f.stateDir,'state.json'),state=JSON.parse(fs.readFileSync(stateFile));state.configSha256=hash(file);fs.writeFileSync(stateFile,JSON.stringify(state));
+ return fs.readFileSync(file);
+}
+function signedApplication(f){
+ const source=fileURLToPath(new URL('../../',import.meta.url)),publisherSource=path.join(f.root,'app-source');fs.mkdirSync(publisherSource,{mode:0o700});
+ for(const name of [...GATEWAY_SOURCE_FILES,'package.json','package-lock.json','licenses/styx-LICENSE']){
+  const dest=path.join(publisherSource,name);fs.mkdirSync(path.dirname(dest),{recursive:true,mode:0o700});fs.copyFileSync(path.join(source,name),dest);
+ }
+ execFileSync('git',['init','-q',publisherSource]);execFileSync('git',['-C',publisherSource,'add','.']);
+ const destination=path.join(f.root,'application-bundle');
+ return {bundle:destination,...buildGatewayRelease({destination,version:'4.0.0',privateKeyFile:f.privateKeyFile,nodeBinary:f.nodeBinary,nodeLicenseFile:f.nodeLicenseFile,sourceRoot:publisherSource,dependenciesRoot:path.join(source,'node_modules')})};
+}
+test('an additional-entry field rejects an undeclared target during both plan and apply before switching runtime',t=>{
+ for(const enabled of [true,false]){
+  const f=fixture(t),plan=planGatewayRuntimeChange({stateDir:f.stateDir,bundle:f.second.bundle}),before=readGatewayRuntime(f.runtime);
+  const configuration=setDeviceIngress(f,enabled),pointer=fs.readFileSync(path.join(before.installRoot,'active.json')),node=fs.readFileSync(before.nodeBinary);
+  assert.throws(()=>planGatewayRuntimeChange({stateDir:f.stateDir,bundle:f.second.bundle}),/device_ingress_requires_compatible_gateway_application/);
+  assert.throws(()=>applyGatewayRuntimeChange({stateDir:f.stateDir,plan,authorize:true},quiet),/device_ingress_requires_compatible_gateway_application/);
+  assert.deepEqual(fs.readFileSync(path.join(before.installRoot,'active.json')),pointer);assert.deepEqual(fs.readFileSync(before.nodeBinary),node);
+  assert.deepEqual(fs.readFileSync(path.join(f.stateDir,'deployment.json')),configuration);assert.equal(fs.existsSync(path.join(f.runtime.baseDir,'runtime-change.json')),false);f.preserved();
+ }
+});
+test('contract 2 applications retain added-entry configuration and require explicit entry rollback before older targets',t=>{
+ const f=fixture(t),application=signedApplication(f),configuration=setDeviceIngress(f,true);
+ const plan=planGatewayRuntimeChange({stateDir:f.stateDir,bundle:application.bundle});
+ assert.equal(applyGatewayRuntimeChange({stateDir:f.stateDir,plan,authorize:true},quiet).version,application.version);
+ assert.deepEqual(fs.readFileSync(path.join(f.stateDir,'deployment.json')),configuration);
+ assert.throws(()=>planGatewayRuntimeChange({stateDir:f.stateDir,rollback:true}),/device_ingress_requires_compatible_gateway_application/);
+ // An otherwise complete signed application without the declaration cannot
+ // claim deployment-field support merely because its source happens to be new.
+ const undeclared=path.join(f.root,'undeclared-application');fs.cpSync(application.bundle,undeclared,{recursive:true});
+ const manifest=JSON.parse(fs.readFileSync(path.join(undeclared,'manifest.json')));delete manifest.sourceContract;manifest.version='5.0.0';
+ const raw=JSON.stringify(manifest)+'\n';fs.writeFileSync(path.join(undeclared,'manifest.json'),raw);fs.writeFileSync(path.join(undeclared,'manifest.sig'),sign(null,Buffer.from(raw),f.key.privateKey).toString('base64url'));
+ assert.throws(()=>planGatewayRuntimeChange({stateDir:f.stateDir,bundle:undeclared}),/device_ingress_requires_compatible_gateway_application/);
+ assert.equal(readGatewayRuntime(f.runtime).version,application.version);assert.deepEqual(fs.readFileSync(path.join(f.stateDir,'deployment.json')),configuration);f.preserved();
+ setDeviceIngress(f,null);
+ const rollback=planGatewayRuntimeChange({stateDir:f.stateDir,rollback:true});
+ assert.equal(applyGatewayRuntimeChange({stateDir:f.stateDir,plan:rollback,authorize:true},quiet).version,f.first.version);
+});
+test('recovery refuses a previous runtime lacking entry support before restoring its Node or pointer',t=>{
+ const f=fixture(t),application=signedApplication(f);const configuration=setDeviceIngress(f,true);
+ const plan=planGatewayRuntimeChange({stateDir:f.stateDir,bundle:application.bundle});
+ assert.throws(()=>applyGatewayRuntimeChange({stateDir:f.stateDir,plan,authorize:true},{...quiet,afterCheckpoint(stage){if(stage==='pointer_switched')throw Error('interrupted');}}),/interrupted/);
+ const record=f.journal(),current=readGatewayRuntime(f.runtime),pointer=fs.readFileSync(path.join(current.installRoot,'active.json')),node=fs.readFileSync(current.nodeBinary);
+ assert.throws(()=>recoverGatewayRuntimeChange({stateDir:f.stateDir,transactionId:record.id,authorize:true},quiet),/device_ingress_requires_compatible_gateway_application/);
+ assert.deepEqual(fs.readFileSync(path.join(current.installRoot,'active.json')),pointer);assert.deepEqual(fs.readFileSync(current.nodeBinary),node);
+ assert.deepEqual(fs.readFileSync(path.join(f.stateDir,'deployment.json')),configuration);assert.equal(f.journal().status,'committing');assert.equal(fs.existsSync(record.backupNode),true);f.preserved();
+});
+
+function setOpenSslConfiguration(f){
+ const configuration=path.join(f.root,'openssl.cnf');fs.writeFileSync(configuration,'pinned TLS configuration contract fixture\n',{mode:0o600});
+ const file=path.join(f.stateDir,'deployment.json'),config=JSON.parse(fs.readFileSync(file));config.gateway.opensslConfig=configuration;fs.writeFileSync(file,JSON.stringify(config,null,2)+'\n');
+ const stateFile=path.join(f.stateDir,'state.json'),state=JSON.parse(fs.readFileSync(stateFile));state.configSha256=hash(file);fs.writeFileSync(stateFile,JSON.stringify(state));return fs.readFileSync(file);
+}
+test('pinned OpenSSL configuration requires contract 2 without selecting an unreadable older application',t=>{
+ const f=fixture(t),oldPlan=planGatewayRuntimeChange({stateDir:f.stateDir,bundle:f.second.bundle}),before=readGatewayRuntime(f.runtime),pointer=fs.readFileSync(path.join(before.installRoot,'active.json')),node=fs.readFileSync(before.nodeBinary),configuration=setOpenSslConfiguration(f);
+ assert.equal(Object.hasOwn(JSON.parse(configuration).gateway,'deviceIngress'),false);
+ assert.throws(()=>planGatewayRuntimeChange({stateDir:f.stateDir,bundle:f.second.bundle}),/openssl_configuration_requires_compatible_gateway_application/);
+ assert.throws(()=>applyGatewayRuntimeChange({stateDir:f.stateDir,plan:oldPlan,authorize:true},quiet),/openssl_configuration_requires_compatible_gateway_application/);
+ assert.deepEqual(fs.readFileSync(path.join(before.installRoot,'active.json')),pointer);assert.deepEqual(fs.readFileSync(before.nodeBinary),node);assert.equal(fs.existsSync(path.join(f.runtime.baseDir,'runtime-change.json')),false);
+ const application=signedApplication(f),plan=planGatewayRuntimeChange({stateDir:f.stateDir,bundle:application.bundle});assert.equal(applyGatewayRuntimeChange({stateDir:f.stateDir,plan,authorize:true},quiet).version,application.version);
+ assert.throws(()=>planGatewayRuntimeChange({stateDir:f.stateDir,rollback:true}),/openssl_configuration_requires_compatible_gateway_application/);
+ assert.deepEqual(fs.readFileSync(path.join(f.stateDir,'deployment.json')),configuration);f.preserved();
+});
+test('interrupted update cannot recover an older reader by dropping the pinned OpenSSL configuration',t=>{
+ const f=fixture(t),configuration=setOpenSslConfiguration(f),application=signedApplication(f),plan=planGatewayRuntimeChange({stateDir:f.stateDir,bundle:application.bundle});
+ assert.throws(()=>applyGatewayRuntimeChange({stateDir:f.stateDir,plan,authorize:true},{...quiet,afterCheckpoint(stage){if(stage==='pointer_switched')throw Error('interrupted')}}),/interrupted/);
+ const current=readGatewayRuntime(f.runtime),pointer=fs.readFileSync(path.join(current.installRoot,'active.json')),node=fs.readFileSync(current.nodeBinary),record=f.journal();
+ assert.throws(()=>recoverGatewayRuntimeChange({stateDir:f.stateDir,transactionId:record.id,authorize:true},quiet),/openssl_configuration_requires_compatible_gateway_application/);
+ assert.deepEqual(fs.readFileSync(path.join(current.installRoot,'active.json')),pointer);assert.deepEqual(fs.readFileSync(current.nodeBinary),node);assert.deepEqual(fs.readFileSync(path.join(f.stateDir,'deployment.json')),configuration);f.preserved();
 });

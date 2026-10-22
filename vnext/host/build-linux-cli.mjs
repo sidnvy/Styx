@@ -20,7 +20,7 @@ export function cliProductSource(name){
  return /^(onboarding|gateway|host|shared|packages\/styx-(exec-adapter|gui-broker|browser-provider))\/.+\.mjs$/.test(name)||
  /^(onboarding\/ui\/.+\.(js|html|css)|gateway\/.+\.(json|html)|packages\/styx-[^/]+\/(package(?:-lock)?\.json|playwright-contract-0\.0\.83\.json)|plugin\/(package\.mjs|archive\.mjs|plugin\.json|skills\/.+\.md)|assets\/brand\/styx-logo\.png|licenses\/.+|package(?:-lock)?\.json)$/.test(name);
 }
-export function buildLinuxCli({destination,version,privateKeyFile,nodeBinary,sourceRoot=ROOT,dependenciesRoot=path.join(sourceRoot,'node_modules'),hostBundle}={}){
+export function buildLinuxCli({destination,version,privateKeyFile,nodeBinary,sourceRoot=ROOT,dependenciesRoot=path.join(sourceRoot,'node_modules'),hostBundle,tunnelBinary,tunnelNoticesDir}={}){
  if(process.platform!=='linux'||process.arch!=='x64')fail('linux_x64_native_build_required');
  for(const p of [destination,privateKeyFile,nodeBinary,sourceRoot,dependenciesRoot])if(typeof p!=='string'||!path.isAbsolute(p)||path.normalize(p)!==p)fail('absolute_cli_paths_required');
  if(fs.existsSync(destination))fail('fresh_cli_output_required');
@@ -28,6 +28,7 @@ export function buildLinuxCli({destination,version,privateKeyFile,nodeBinary,sou
  if(provenance.schema!==1||provenance.component!=='node'||provenance.platform!=='linux'||provenance.arch!=='x64'||provenance.version!=='22.23.3'||provenance.archive_sha256!=='df450af89261115ef9f9e3830c3eeb2cc9213b63c720b1af623cb5dcbe2e02de'||provenance.binary_sha256!==hash(fs.readFileSync(regular(nodeBinary)))||provenance.license_sha256!==hash(fs.readFileSync(regular(path.join(nodeDir,'LICENSE')))))fail('pinned_cli_node_provenance_required');
  if(execFileSync(nodeBinary,['--version'],{encoding:'utf8',timeout:7000}).trim()!=='v22.23.3')fail('pinned_cli_node_version_required');
  const pub=createPublicKey(fs.readFileSync(privateKeyFile)),pem=pub.export({type:'spki',format:'pem'}),pin=hash(pub.export({type:'spki',format:'der'}));
+ if(tunnelBinary){if(!path.isAbsolute(tunnelBinary)||execFileSync(regular(tunnelBinary),['--version'],{encoding:'utf8',timeout:7000}).trim().split(/\s+/).every(x=>x!=='0.0.17'))fail('pinned_tunnel_client_version_required');if(!tunnelNoticesDir||!path.isAbsolute(tunnelNoticesDir)||!fs.lstatSync(tunnelNoticesDir).isDirectory())fail('tunnel_client_licenses_required');}
  if(hostBundle)verifySignedRelease(hostBundle,pem,{platform:'linux',arch:'x64'});
  fs.mkdirSync(destination,{mode:0o700});
  try{
@@ -44,9 +45,10 @@ export function buildLinuxCli({destination,version,privateKeyFile,nodeBinary,sou
   copy(nodeBinary,path.join(destination,'runtime/node'));fs.chmodSync(path.join(destination,'runtime/node'),0o700);
   copy(path.join(nodeDir,'LICENSE'),path.join(destination,'runtime/LICENSE'));
   copy(path.join(nodeDir,'node-provenance.json'),path.join(destination,'runtime/node-provenance.json'));
+  if(tunnelBinary){copy(tunnelBinary,path.join(destination,'runtime/tunnel-client'));fs.chmodSync(path.join(destination,'runtime/tunnel-client'),0o700);fs.mkdirSync(path.join(destination,'licenses'),{mode:0o700});tree(tunnelNoticesDir,path.join(destination,'licenses/tunnel-client'));fs.writeFileSync(path.join(destination,'runtime/tunnel-client.json'),JSON.stringify({schema:1,path:'tunnel-client',sha256:hash(fs.readFileSync(tunnelBinary)),version:'0.0.17'})+'\n',{mode:0o600});}
   fs.writeFileSync(path.join(destination,'publisher.pem'),pem,{mode:0o600});
   fs.writeFileSync(path.join(destination,'styx'),'#!/bin/sh\nset -eu\nHERE=$(CDPATH= cd -- "$(dirname -- "$0")" && pwd)\nexec "$HERE/runtime/node" "$HERE/app/onboarding/cli.mjs" "$@"\n',{mode:0o700});
-  const receipt={schema:1,component:'linux-cli-preview',version,platform:'linux',arch:'x64',publisherSha256:pin,gateway,hostBundleIncluded:!!hostBundle,sourceFiles:sources.length,node:provenance,identityCreated:false,serviceMutation:'NOT RUN',nativeAcceptance:'NOT RUN',chatAccountAcceptance:'NOT RUN',distributionTrust:'publisher_provided_preview_not_public_release'};
+  const receipt={schema:1,component:'linux-cli-preview',version,platform:'linux',arch:'x64',publisherSha256:pin,gateway,hostBundleIncluded:!!hostBundle,tunnelClientIncluded:!!tunnelBinary,tunnelClientVersion:tunnelBinary?'0.0.17':null,sourceFiles:sources.length,node:provenance,identityCreated:false,serviceMutation:'NOT RUN',nativeAcceptance:'NOT RUN',chatAccountAcceptance:'NOT RUN',distributionTrust:'publisher_provided_preview_not_public_release'};
   fs.writeFileSync(path.join(destination,'build-receipt.json'),JSON.stringify(receipt,null,2)+'\n',{mode:0o600});return receipt;
  }catch(e){fs.rmSync(destination,{recursive:true,force:true});throw e;}
 }

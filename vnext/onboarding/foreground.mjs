@@ -1,3 +1,4 @@
+import {deploymentConnectionHash} from '../shared/deployment-scope.mjs';
 // Process-owned foreground lifecycle. No wrapper, service installation,
 // enrollment, credential regeneration or permission grant is performed here.
 import fs from 'node:fs';
@@ -79,7 +80,7 @@ export async function startDeploymentForeground(d,options={},operations={}){
 }
 async function start(d,operations,abort){
  const api=operations.core??await import('./core.mjs');requirePrivateDirectory(d);
- const state=await api.readDeployment(d),config=read(path.join(d,'deployment.json')),configurationHash=sha(fs.readFileSync(path.join(d,'deployment.json'))),selected=scope(d,state,config);
+ const state=await api.readDeployment(d),config=read(path.join(d,'deployment.json')),configurationHash=deploymentConnectionHash(fs.readFileSync(path.join(d,'deployment.json'))),selected=scope(d,state,config);
  const hostStatus=selected.host?await (operations.hostStatus??observeHostService)({serviceConfigFile:selected.serviceConfigFile}):null;
  if(selected.host&&(hostStatus?.status!=='reported'||!['running','stopped','not_installed'].includes(hostStatus.state)))fail('foreground_host_service_state_unknown');
  const gatewayStatus=config.mode==='create-local'?await (operations.gatewayStatus??((dir)=>api.controlDeploymentService(dir,{role:'gateway',action:'status'})))(d):null;
@@ -89,10 +90,10 @@ async function start(d,operations,abort){
  if(selected.host){
   const capabilityFile=path.join(d,'capabilities.json');if(fs.existsSync(capabilityFile)&&['running','uncertain'].includes(read(capabilityFile).status))fail('foreground_capability_state_uncertain');
  }
- if(selected.unchanged&&!selected.unchanged()||sha(fs.readFileSync(path.join(d,'deployment.json')))!==configurationHash)fail('foreground_scope_changed');
+ if(selected.unchanged&&!selected.unchanged()||deploymentConnectionHash(fs.readFileSync(path.join(d,'deployment.json')))!==configurationHash)fail('foreground_scope_changed');
  if(abort.signal.aborted)fail('foreground_start_cancelled');
  const release=claim(d);
- const entry={abort,release,host:selected.host?hostStatus.state==='running'?'service':'foreground':'disabled',gateway:config.mode==='join-existing'?'external':gatewayServiceRunning?'service':'foreground',execConnection:selected.host?'connecting':'not_required',desktopConnection:'not_requested',browserConnection:selected.host?.browser?.enabled?'connecting':'not_requested',browserRequested:selected.host?.browser?.enabled===true,computerRequested:selected.host?.computer?.enabled===true,startedGateway:false,stopping:false,failed:false,tasks:[],api,scopeValid:()=>sha(fs.readFileSync(path.join(d,'deployment.json')))===configurationHash&&(!selected.unchanged||selected.unchanged())};
+ const entry={abort,release,host:selected.host?hostStatus.state==='running'?'service':'foreground':'disabled',gateway:config.mode==='join-existing'?'external':gatewayServiceRunning?'service':'foreground',execConnection:selected.host?'connecting':'not_required',desktopConnection:'not_requested',browserConnection:selected.host?.browser?.enabled?'connecting':'not_requested',browserRequested:selected.host?.browser?.enabled===true,computerRequested:selected.host?.computer?.enabled===true,startedGateway:false,stopping:false,failed:false,tasks:[],api,scopeValid:()=>deploymentConnectionHash(fs.readFileSync(path.join(d,'deployment.json')))===configurationHash&&(!selected.unchanged||selected.unchanged())};
  owners.set(d,entry);
  try{
   entry.observer=await startForegroundObservation({stateDir:d,configurationHash,projection:()=>readDeploymentForeground(d)});

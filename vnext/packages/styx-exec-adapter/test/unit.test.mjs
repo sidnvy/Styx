@@ -352,3 +352,72 @@ test('exited but open streams yield a retained session without a busy read loop'
   const reads=f.calls.slice(before).filter(c=>c.method==='process/read');
   assert.ok(reads.length>=1&&reads.length<=8,'open streams must use bounded observation, not hot spin');
 });
+
+test('RPC classifies only the exact missing process/read record without retaining raw text', async () => {
+  for (const [method, code, message, expected] of [
+    ['process/read', -32600, 'unknown process id owned-fixed-id', 'unknown_process'],
+    ['process/read', -32600, 'unknown process id another-id', undefined],
+    ['process/read', -32600, 'unknown process id owned-fixed-id with extra diagnostics', undefined],
+    ['process/read', -32600, 'process id owned-fixed-id is starting', undefined],
+    ['process/read', -32603, 'unknown process id owned-fixed-id', undefined],
+    ['process/start', -32600, 'unknown process id owned-fixed-id', undefined],
+    ['process/read', -32600, 'PRIVATE arbitrary upstream failure', undefined]
+  ]) {
+    const channel = new EventEmitter(); channel.close = () => {};
+    channel.send = wire => {
+      const m = JSON.parse(wire);
+      queueMicrotask(() => channel.emit('message', JSON.stringify({id: m.id,
+        error: {code, message}})));
+    };
+    const client = new RpcClient(channel);
+    await assert.rejects(client.request(method, {processId: 'owned-fixed-id'}), e => {
+      assert.ok(e instanceof RpcFault);
+      assert.equal(e.rpcCode, code);
+      assert.equal(e.rpcReason, expected);
+      assert.equal(e.message, 'executor_rejected');
+      assert.equal(JSON.stringify(e).includes(message), false);
+      return true;
+    });
+    await client.close();
+  }
+});
+test('a confirmed missing native process retires its handle with an uncertain outcome and never replays', async () => {
+  const f = fixture(), r = await f.start(), p = [...f.processes.values()][0];
+  f.push(p, 'already observed');
+  const observed = await f.adapter.writeStdin({session_id:r.session_id, yield_time_ms:0}, owner);
+  assert.equal(observed.output, 'already observed');
+  f.options.readError = new RpcFault(-32600, {reason:'unknown_process'});
+  const result = await f.adapter.callTool('write_stdin', {session_id:r.session_id, yield_time_ms:0}, owner);
+  assert.deepEqual(result.structuredContent, {error:'process_lost', session_id:r.session_id, uncertain:true});
+  assert.equal(f.adapter.sessions.has(r.session_id), false);
+  const count = f.calls.length;
+  const later = await f.adapter.callTool('write_stdin', {session_id:r.session_id, chars:'do not replay'}, owner);
+  assert.equal(later.structuredContent.error, 'unknown_session');
+  assert.equal(f.calls.length, count);
+  assert.equal(f.calls.filter(c => c.method === 'process/start').length, 1);
+  assert.equal(f.calls.filter(c => c.method === 'process/write').length, 0);
+});
+test('unclassified read rejection and transport failure retain a pollable handle', async () => {
+  for (const error of [new RpcFault(-32600), new RpcFault(-32603), new TransportFault()]) {
+    const f = fixture(), r = await f.start();
+    f.options.readError = error;
+    const result = await f.adapter.callTool('write_stdin', {session_id:r.session_id, yield_time_ms:0}, owner);
+    assert.deepEqual(result.structuredContent, {error:'read_unavailable', session_id:r.session_id, uncertain:false});
+    assert.equal(f.adapter.sessions.has(r.session_id), true);
+    f.options.readError = undefined;
+    const recovered = await f.adapter.writeStdin({session_id:r.session_id, yield_time_ms:0}, owner);
+    assert.equal(recovered.session_id, r.session_id);
+    assert.equal(f.calls.filter(c => c.method === 'process/start').length, 1);
+  }
+});
+test('missing process during an uncertain start remains outcome_unknown', async () => {
+  const f = fixture({startError:new TransportFault()});
+  const initial = await f.adapter.callTool('exec_command', {cmd:'uncertain start'}, owner);
+  const sid = initial.structuredContent.session_id;
+  f.options.readError = new RpcFault(-32600, {reason:'unknown_process'});
+  const result = await f.adapter.callTool('write_stdin', {session_id:sid, yield_time_ms:0}, owner);
+  assert.equal(result.structuredContent.error, 'outcome_unknown');
+  assert.equal(result.structuredContent.uncertain, true);
+  assert.equal(f.adapter.sessions.has(sid), true);
+  assert.equal(f.calls.filter(c => c.method === 'process/start').length, 1);
+});

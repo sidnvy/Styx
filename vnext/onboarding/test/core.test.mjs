@@ -163,7 +163,7 @@ test('owner pairing link joins a fresh second deployment with explicit origin, C
  await advanceDeployment(f.stateDir,{authorize:['gateway.prepare','gateway.start','gateway.verify']});
  await assert.rejects(createDeploymentPairingLink(f.stateDir,{authorize:false}),/explicit_owner_link_authorization_required/);
  const reopened=await import('../core.mjs?reopened-owner-ui');
- const issued=await reopened.createDeploymentPairingLink(f.stateDir,{authorize:true});assert.equal(issued.remoteUsable,false);assert.equal(issued.reachability,'loopback_only');
+ const issued=await reopened.createDeploymentPairingLink(f.stateDir,{authorize:true,listenHost:localGatewayAddresses()[0]});assert.equal(issued.remoteUsable,false);assert.equal(issued.reachability,'local_interface_configured_unverified');
  const {inspectPairingLink,acceptPairingLink}=await import('../pairing-links.mjs');
  const preview=inspectPairingLink(issued.link),privateJoin=path.join(f.root,'join-material');
  acceptPairingLink(issued.link,{stateDir:privateJoin,approvedGatewayOrigin:preview.origin,approvedCaSha256:preview.caSha256});
@@ -225,6 +225,7 @@ test('uncertain workflow and maintenance service mutations share one guard while
 test('CLI owner pairing workflow stores invitation privately and never prints its secret',async t=>{
  const f=await fixture(t);delete f.config.pairingMode;fs.writeFileSync(f.configFile,JSON.stringify(f.config));createDeployment(f.configFile,{stateDir:f.stateDir});
  await advanceDeployment(f.stateDir,{authorize:['gateway.prepare','gateway.start','gateway.verify']});
+ await main(['device-ingress-prepare',f.stateDir,localGatewayAddresses()[0],'--authorize']);
  const output=path.join(f.root,'join-link');const summary=await main(['pairing-link',f.stateDir,output,'--authorize']);
  const link=fs.readFileSync(output,'utf8').trim();assert.match(link,/^styx:\/\/join#/);assert.equal(summary.link,undefined);assert.equal(JSON.stringify(summary).includes(link),false);assert.equal(fs.statSync(output).mode&0o077,0);
  const preview=await main(['inspect-link',output]);const approval=path.join(f.root,'link-approval.json'),importDir=path.join(f.root,'imported');fs.writeFileSync(approval,JSON.stringify({stateDir:importDir,approvedGatewayOrigin:preview.origin,approvedCaSha256:preview.caSha256}),{mode:0o600});

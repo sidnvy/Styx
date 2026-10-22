@@ -6,7 +6,7 @@ import {createHash,createPublicKey,createPrivateKey,randomBytes,sign} from 'node
 import {fileURLToPath} from 'node:url';
 import {ensurePrivateDirectory,requirePrivateDirectory,requirePrivateFile,writePrivateFile} from '../host/private-storage.mjs';
 import {verifySignedRelease,stageSignedRelease,activateRelease,activeRelease,verifiedServiceNode} from '../host/installer.mjs';
-import {GATEWAY_SOURCE_FILES,GATEWAY_ENTRYPOINT,gatewayApplicationFile} from './gateway-release-contract.mjs';
+import {GATEWAY_SOURCE_FILES,LEGACY_GATEWAY_SOURCE_FILES,GATEWAY_SOURCE_CONTRACT,GATEWAY_ENTRYPOINT,gatewayApplicationFile} from './gateway-release-contract.mjs';
 
 const fail=code=>{throw Error(code)};
 const sum=bytes=>createHash('sha256').update(bytes).digest('hex');
@@ -25,24 +25,62 @@ function trust(config,{installed=false}={}){
  if(sum(key.export({type:'spki',format:'der'}))!==config.publisherSha256)fail('publisher_fingerprint_mismatch');
  return {pem,file};
 }
-function runtimeOnly(verified){
+// Tokenize without executing signed application code. Comments and quoted
+// examples cannot add imports; static import/export-from and literal dynamic
+// imports retain their actual specifier. Escaped specifiers are unsupported
+// rather than silently resolving a different path.
+function literalImports(source){
+ const tokens=[...source.matchAll(/\/\*[\s\S]*?\*\/|\/\/[^\r\n]*|'(?:\\[\s\S]|[^'\\\r\n])*'|"(?:\\[\s\S]|[^"\\\r\n])*"|`(?:\\[\s\S]|[^`\\])*`|[A-Za-z_$][\w$]*|[^\s]/g)]
+  .map(match=>match[0]).filter(token=>!token.startsWith('//')&&!token.startsWith('/*'));
+ const result=[];
+ const add=token=>{if(!token||!['"',"'"].includes(token[0]))return;if(token.includes('\\'))fail('unsupported_gateway_source_import');result.push(token.slice(1,-1));};
+ for(let i=0;i<tokens.length;i++){
+  const token=tokens[i];
+  if(!['import','export'].includes(token)||tokens[i-1]==='.')continue;
+  const next=tokens[i+1];
+  if(token==='import'&&next==='('){if([')',','].includes(tokens[i+3]))add(tokens[i+2]);continue;}
+  if(token==='import'&&['"',"'"].includes(next?.[0])){add(next);continue;}
+  if(next==='.'||token==='export'&&!['{','*'].includes(next))continue;
+  for(let j=i+1;j<tokens.length&&tokens[j]!==';';j++){
+   if(tokens[j]==='from'){add(tokens[j+1]);break;}
+  }
+ }
+ return result;
+}
+function verifySourceClosure(bundle,entries){
+ const names=new Set(entries.map(entry=>entry.path));
+ for(const entry of entries){
+  if(!entry.path.startsWith('app/')||entry.path.startsWith('app/node_modules/')||!entry.path.endsWith('.mjs'))continue;
+  for(const specifier of literalImports(fs.readFileSync(path.join(bundle,...entry.path.split('/')),'utf8'))){
+   if(!specifier.startsWith('.'))continue;
+   if(entry.path===GATEWAY_ENTRYPOINT&&['../../../../installer.mjs','../../../../private-storage.mjs'].includes(specifier))continue;
+   const resolved=path.posix.normalize(path.posix.join(path.posix.dirname(entry.path),specifier));
+   if(!resolved.startsWith('app/')||!names.has(resolved))fail('complete_signed_gateway_source_imports_required');
+  }
+ }
+}
+function runtimeOnly(verified,bundle){
  const name='bin/'+nodeName(),entries=verified.manifest.files;
  if(!entries.some(e=>e.path===name&&e.executable))fail('signed_gateway_node_required');
+ if(Object.hasOwn(verified.manifest,'sourceContract')&&verified.manifest.sourceContract!==GATEWAY_SOURCE_CONTRACT)fail('unsupported_gateway_source_contract');
  if(verified.manifest.component==='gateway-application'){
   const names=new Set(entries.map(e=>e.path));
-  if(verified.manifest.entrypoint!==GATEWAY_ENTRYPOINT||[...GATEWAY_SOURCE_FILES.map(file=>'app/'+file),'app/package.json','app/package-lock.json','licenses/node-LICENSE','licenses/styx-LICENSE','provenance/gateway-build.json'].some(file=>!names.has(file)))fail('complete_signed_gateway_application_required');
+  const required=Object.hasOwn(verified.manifest,'sourceContract')?GATEWAY_SOURCE_FILES:LEGACY_GATEWAY_SOURCE_FILES;
+  if(verified.manifest.entrypoint!==GATEWAY_ENTRYPOINT||[...required.map(file=>'app/'+file),'app/package.json','app/package-lock.json','licenses/node-LICENSE','licenses/styx-LICENSE','provenance/gateway-build.json'].some(file=>!names.has(file)))fail('complete_signed_gateway_application_required');
   if(entries.some(e=>e.path!==name&&(!gatewayApplicationFile(e.path)||e.executable)))fail('gateway_runtime_contains_host_or_unknown_payload');
+  verifySourceClosure(bundle,entries);
   return verified;
  }
  if(verified.manifest.component!==undefined)fail('unsupported_gateway_release_component');
+ if(Object.hasOwn(verified.manifest,'sourceContract'))fail('unsupported_gateway_source_contract');
  // A Gateway runtime is a separate signed artifact, not a Host package whose
  // Exec/Cua files are silently copied into a Gateway-only installation.
  if(entries.some(e=>e.path!==name&&(!/^(licenses|provenance)\/[A-Za-z0-9._/-]+$/.test(e.path)||e.executable)))fail('gateway_runtime_contains_host_or_unknown_payload');
  return verified;
 }
-export function verifyGatewayRuntimeRelease(bundle,publicKeyPem){return runtimeOnly(verifySignedRelease(bundle,publicKeyPem));}
+export function verifyGatewayRuntimeRelease(bundle,publicKeyPem){return runtimeOnly(verifySignedRelease(bundle,publicKeyPem),bundle);}
 export function prepareGatewayRuntime(config){
- const {pem}=trust(config),verified=runtimeOnly(verifySignedRelease(config.bundle,pem));
+ const {pem}=trust(config),verified=runtimeOnly(verifySignedRelease(config.bundle,pem),config.bundle);
  requirePrivateDirectory(path.dirname(config.baseDir));
  if(fs.existsSync(config.baseDir))fail('gateway_runtime_directory_already_exists');
  ensurePrivateDirectory(config.baseDir,{exclusive:true});
@@ -66,7 +104,7 @@ export function readGatewayRuntime(config){
  requirePrivateDirectory(config.baseDir);
  const {pem,file}=trust(config,{installed:true}),installRoot=path.join(config.baseDir,'install');
  const active=activeRelease(installRoot,pem);if(!active)fail('no_active_gateway_runtime');
- const verified=runtimeOnly(verifySignedRelease(active.release_root,pem));
+ const verified=runtimeOnly(verifySignedRelease(active.release_root,pem),active.release_root);
  const nodeBinary=verifiedServiceNode({installRoot,publicKeyPem:pem});
  return {status:'gateway_runtime_verified',version:active.version,installRoot,nodeBinary,publisherKeyFile:file,publisherSha256:config.publisherSha256,manifestSha256:verified.sha256,
   application:verified.manifest.component==='gateway-application'?'signed_application':'source_checkout_preview',...(verified.manifest.component==='gateway-application'?{runnerBinary:path.join(active.release_root,GATEWAY_ENTRYPOINT)}:{})};

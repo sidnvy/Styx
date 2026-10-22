@@ -23,6 +23,22 @@ export async function ownerCommand(config,cmd,args=[]) {
   };
   let route,data;
   switch(cmd){
+    case 'ingress-status':
+      if(args.length)throw Error('invalid_device_ingress_arguments');
+      route='device-ingress/status';break;
+    case 'ingress-prepare':
+      if(args.length!==1||typeof args[0]!=='string')throw Error('device_ingress_descriptor_required');
+      try{data=JSON.parse(args[0])}catch{throw Error('device_ingress_descriptor_required')}
+      route='device-ingress/prepare';break;
+    case 'ingress-enable':
+    case 'ingress-disable':
+    case 'pairing-close':
+      if(args.length!==1||typeof args[0]!=='string')throw Error('device_ingress_generation_required');
+      route='device-ingress/'+({'ingress-enable':'enable','ingress-disable':'disable','pairing-close':'pairing-close'}[cmd]);
+      data={generation:args[0]};break;
+    case 'pairing-open':
+      if(args.length<1||args.length>2||typeof args[0]!=='string')throw Error('device_ingress_generation_required');
+      route='device-ingress/pairing-open';data={generation:args[0],ttl_seconds:Number(args[1]??600)};break;
     case 'invite':
       route='invitations';data={ttl_seconds:Number(args[0]??600)};break;
     case 'pending':route='pending';break;

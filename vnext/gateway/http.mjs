@@ -5,6 +5,7 @@ import {randomUUID, createHash, timingSafeEqual} from 'node:crypto';
 import {StreamableHTTPServerTransport} from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import {handleEnrollment} from './enrollment.mjs';
 import {ConversationOwners} from './conversation-owners.mjs';
+import {GatewayDeviceIngress} from './device-ingress.mjs';
 
 function authorize(req, digest, hosts, origins) {
   if (!hosts.includes(req.headers.host)) return 403;
@@ -23,7 +24,7 @@ function authorize(req, digest, hosts, origins) {
 export async function createGatewayHttp(gateway, {
   token, host = '127.0.0.1', port = 8795, allowedHosts, allowedOrigins = [],
   idleSessionTimeoutMs = 15 * 60 * 1000,
-  tlsCertificateFile, tlsPrivateKeyFile, enrollment = null, tunnelContextToken = null
+  tlsCertificateFile, tlsPrivateKeyFile, enrollment = null, tunnelContextToken = null, deviceIngress = null
 } = {}) {
   if (typeof token !== 'string' || token.length < 32 || /\s/.test(token))
     throw new Error('Strong inbound bearer required');
@@ -42,6 +43,7 @@ export async function createGatewayHttp(gateway, {
   if(enrollment && timingSafeEqual(digest,enrollment.adminDigest))
     throw Error('Enrollment owner token must differ from MCP bearer');
   const sessions = new Map();
+  const ingressManager=enrollment?new GatewayDeviceIngress({gateway,enrollment}):null;
   if(tunnelContextToken!==null&&!/^[a-f0-9]{64}$/.test(tunnelContextToken))throw Error('Invalid Tunnel context capability');
   const contextDigest=tunnelContextToken===null?null:createHash('sha256').update(tunnelContextToken).digest();
   const conversations=contextDigest?new ConversationOwners({key:tunnelContextToken,gateway,principal:browserPrincipal}):null;
@@ -73,7 +75,7 @@ export async function createGatewayHttp(gateway, {
     };
     if (req.url?.startsWith('/styx/enroll/')) {
       if(!enrollment) return refuse(404,'Not found');
-      await handleEnrollment(req,res,{controller:enrollment,allowedHosts:hosts});
+      await handleEnrollment(req,res,{controller:enrollment,allowedHosts:hosts,deviceIngress:ingressManager});
       return;
     }
     if (req.url !== '/mcp') return refuse(404, 'Not found');
@@ -149,20 +151,33 @@ export async function createGatewayHttp(gateway, {
         requestCert:true,rejectUnauthorized:false},handler)
     : createServer(handler);
   gateway.relay?.attach(http,{allowedHosts:hosts});
-  await new Promise((resolve, reject) => {
-    http.once('error', reject);
-    http.listen(port, host, resolve);
-  });
+  try{
+    await new Promise((resolve, reject) => {
+      const onError=error=>{http.removeListener('listening',onListening);reject(error)};
+      const onListening=()=>{http.removeListener('error',onError);resolve()};
+      http.once('error',onError);http.once('listening',onListening);
+      http.listen(port, host);
+    });
+  }catch(error){gateway.relay?.detach(http);http.close();throw error}
+  if(deviceIngress&&ingressManager)await ingressManager.restore(deviceIngress);
+  let closePromise;
   return {
-    address: http.address(), sessions,
-    async close() {
-      await Promise.allSettled([...sessions.values()].map(async ({server, transport}) => {
-        await transport.close(); await server.close();
-      }));
-      sessions.clear();
-      // Upgraded Host sockets keep HTTP close pending. Stop owned relays first.
-      await gateway.close();
-      await new Promise(resolve => http.close(resolve));
+    address: http.address(), sessions, deviceIngress:ingressManager,
+    close() {
+      if(closePromise)return closePromise;
+      closePromise=(async()=>{
+        let ingressError;
+        try{await ingressManager?.close()}catch(error){ingressError=error;}
+        await Promise.allSettled([...sessions.values()].map(async ({server, transport}) => {
+          await transport.close(); await server.close();
+        }));
+        sessions.clear();
+        // Upgraded Host sockets keep HTTP close pending. Stop owned relays first.
+        await gateway.close();
+        await new Promise(resolve => http.close(resolve));
+        if(ingressError)throw ingressError;
+      })();
+      return closePromise;
     }
   };
 }

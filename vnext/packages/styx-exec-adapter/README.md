@@ -65,6 +65,15 @@ executor retains detached sessions for 30 seconds. Expiry or executor restart fa
 closed. Adapter mappings are memory-only: gateway restart loses them rather than
 guessing or launching replacements. Durable gateway recovery is future work.
 
+A native process record can expire before a caller drains its output. The fixed
+upstream executor retains a closed process for 30 seconds; this is separate from
+Styx handle ownership. A precisely identified missing record now returns
+`process_lost` with `uncertain:true` and retires that handle. Check the expected
+artifacts or process state before deciding whether to run another command; do not
+infer exit0 or automatically replay the original command. Unclassified RPC read faults
+remain `read_unavailable` with a retained handle. See
+[read retention evidence and limits](READ-RETENTION-CONTRACT.md).
+
 Successful dispatch, termination acknowledgement, process exit and test acceptance
 are separate facts. Cleanup checks terminal read evidence. Nonzero command exits
 are normal tool results with `exit_code`, not MCP transport failures.

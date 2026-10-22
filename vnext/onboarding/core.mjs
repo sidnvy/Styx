@@ -1,3 +1,5 @@
+import {assertGatewayRuntimeStartAllowed} from './gateway-runtime-start-guard.mjs';
+import {prepareAdditionalDeviceIngress,recoverAdditionalDeviceIngress,readAdditionalDeviceIngress} from './device-ingress-setup.mjs';
 import {tunnelContext} from './tunnel-context.mjs';
 import fs from 'node:fs';
 import {localGatewayAddresses,validateDeployment} from './deployment-config.mjs';
@@ -20,7 +22,7 @@ import {doctor} from '../host/doctor.mjs';
 import {readDeploymentAcceptance} from './account-acceptance.mjs';
 import {verifyMacPreviewApp,assertMacPreviewContinuity} from '../host/macos-preview-trust.mjs';
 
-const live=new Map();
+const live=new Map(),advanceOwners=new Set();
 const fail=code=>{throw Error(code)};
 const obj=x=>x&&typeof x==='object'&&!Array.isArray(x);
 const abs=x=>typeof x==='string'&&path.isAbsolute(x)&&path.normalize(x)===x;
@@ -114,7 +116,7 @@ export async function prepareDeploymentBrowser(d,options={}){
  }finally{release();}
 }
 export function planDeployment(stateDir){const {config,state}=load(stateDir);return {schema:1,mode:config.mode,roles:deploymentRoles(config),steps:state.steps.map((s,i)=>({id:s.id,status:s.status,requires:state.steps.slice(0,i).map(x=>x.id),authorizationRequired:true})),ownerPairingScope:config.host&&config.mode==='create-local'?{gatewayUrl:config.gateway.url,label:config.host.label,enableComputer:config.host.computer,enableBrowser:config.host.browser?.enabled===true}:null,service:{status:'not_checked',lastObservation:publicState(stateDir,state,config).hostServiceMaintenance.lastObservation,configFile:config.host?path.join(config.host.baseDir,'service.json'):null,platform:process.platform},accountAcceptance:readDeploymentAcceptance(stateDir).complete?'user_confirmed_with_mcp_evidence':'NOT RUN'};}
-function lock(d,record,{recovering=false}={}){const file=filename(d,'advance.lock');let fd;try{if(!recovering&&fs.existsSync(filename(d,'mac-signing-registration-recovery.lock')))fail('onboarding_busy_or_interrupted_lock');fd=openPrivateFile(file,0o600);}catch{fail('onboarding_busy_or_interrupted_lock');}const stamp=fs.fstatSync(fd);try{if(record){fs.writeFileSync(fd,JSON.stringify(record));fs.fsyncSync(fd);}}catch(error){fs.closeSync(fd);fs.unlinkSync(file);throw error;}return (retain=false)=>{fs.closeSync(fd);if(!retain&&fs.existsSync(file)){const current=fs.lstatSync(file);if(current.ino!==stamp.ino||current.dev!==stamp.dev)fail('onboarding_lock_identity_changed');fs.unlinkSync(file);}};}
+function lock(d,record,{recovering=false}={}){const file=filename(d,'advance.lock');let fd;try{if(!recovering&&fs.existsSync(filename(d,'mac-signing-registration-recovery.lock')))fail('onboarding_busy_or_interrupted_lock');fd=openPrivateFile(file,0o600);}catch{fail('onboarding_busy_or_interrupted_lock');}const stamp=fs.fstatSync(fd);advanceOwners.add(d);try{if(record){fs.writeFileSync(fd,JSON.stringify(record));fs.fsyncSync(fd);}}catch(error){advanceOwners.delete(d);fs.closeSync(fd);fs.unlinkSync(file);throw error;}return (retain=false)=>{advanceOwners.delete(d);fs.closeSync(fd);if(!retain&&fs.existsSync(file)){const current=fs.lstatSync(file);if(current.ino!==stamp.ino||current.dev!==stamp.dev)fail('onboarding_lock_identity_changed');fs.unlinkSync(file);}};}
 function serviceScope(c,action){
  const serviceConfigFile=path.join(c.host.baseDir,'service.json'),raw=read(serviceConfigFile),windows=process.platform==='win32';
  return {approved:true,action,role:'host',serviceConfigFile,serviceId:windows?raw.task_name:process.platform==='darwin'?raw.label:raw.unitName,installRoot:windows?raw.install_root:raw.installRoot,hostConfigFile:windows?raw.host_config_file:raw.hostConfigFile,trustPublicKeyFile:windows?raw.publisher_key_file:raw.trustPublicKeyFile,nodeBinary:windows?raw.node_binary:raw.nodeBinary,...(raw.logDir!==undefined?{logDir:raw.logDir}:{}),...(raw.restartSec!==undefined?{restartSec:raw.restartSec}:{}),...(raw.nativeApp!==undefined?{nativeApp:raw.nativeApp}:{})};
@@ -175,22 +177,26 @@ function prepareGateway(d,c){
  const p=gatewayPaths(d);if(fs.existsSync(p.root))fail('gateway_directory_already_exists');ensurePrivateDirectory(p.root,{exclusive:true});
  for(const f of [p.model,p.admin])writePrivateFile(f,randomBytes(48).toString('base64url')+'\n');
  writePrivateFile(p.key,'');writePrivateFile(p.cert,'');
- execFileSync(c.gateway.openssl,['req','-x509','-newkey','rsa:2048','-nodes','-sha256','-days','30','-keyout',p.key,'-out',p.cert,'-subj','/CN=Styx local Gateway','-addext','subjectAltName=IP:'+(c.gateway.listenHost??'127.0.0.1')],{stdio:'ignore',timeout:20000});
+ execFileSync(c.gateway.openssl,['req',...(c.gateway.opensslConfig?['-config',c.gateway.opensslConfig]:[]),'-x509','-newkey','rsa:2048','-nodes','-sha256','-days','30','-keyout',p.key,'-out',p.cert,'-subj','/CN=Styx local Gateway','-addext','subjectAltName=IP:'+(c.gateway.listenHost??'127.0.0.1')],{stdio:'ignore',timeout:20000});
  fs.chmodSync(p.key,0o600);fs.chmodSync(p.cert,0o600);requirePrivateFile(p.key);requirePrivateFile(p.cert);
  write(p.catalog,{version:1,targets:[]});write(p.owner,{gateway_url:c.gateway.url,gateway_ca_file:p.cert,admin_token_file:p.admin});
  write(p.runtime,{schema:1,url:c.gateway.url,listenHost:c.gateway.listenHost??'127.0.0.1',tlsCertificateFile:p.cert,tlsPrivateKeyFile:p.key,modelTokenFile:p.model,adminTokenFile:p.admin,enrollmentDir:filename(p.root,'enrollment'),catalogFile:p.catalog});
  return {runtime:evidenceFile(p.runtime),certificate:evidenceFile(p.cert),ownerConfig:p.owner,ownerConfiguration:evidenceFile(p.owner),modelCredentialFile:p.model,tlsTrust:'dedicated_self_signed_ca_local_only',publicIngress:'NOT CONFIGURED'};
 }
 export async function startDeploymentGateway(d){
+ const release=advanceOwners.has(d)?null:lock(d);try{return await startOwnedGateway(d)}finally{release?.()}
+}
+async function startOwnedGateway(d){
  const {config,state}=load(d);if(config.mode!=='create-local')fail('not_local_gateway');validateDeployment(config);
  if(live.has(d))return {status:'running',url:config.gateway.url,ownership:'current_process'};
  if(state.steps.find(s=>s.id==='gateway.prepare')?.status!=='succeeded')fail('gateway_prepare_required');
- const {runtime:cfg,catalog}=readGatewayDeployment(d);
+ const {runtime:cfg,catalog,deviceIngress}=readGatewayDeployment(d);
  const {createStyxGateway}=await import('../gateway/index.mjs');const {createGatewayHttp}=await import('../gateway/http.mjs');const {EnrollmentController}=await import('../gateway/enrollment.mjs');
  const {createAcceptanceObserver}=await import('../shared/onboarding-evidence.mjs');
  const gateway=createStyxGateway({catalog,onToolResult:createAcceptanceObserver(d)});
  const enrollment=new EnrollmentController({rootDir:cfg.enrollmentDir,adminTokenFile:cfg.adminTokenFile,registry:gateway.registry,relay:gateway.relay});
- let handle;try{handle=await createGatewayHttp(gateway,{tunnelContextToken:tunnelContext(d,{create:true}).token,token:fs.readFileSync(cfg.modelTokenFile,'utf8').trim(),host:cfg.listenHost,port:Number(new URL(cfg.url).port),allowedHosts:[new URL(cfg.url).host],tlsCertificateFile:cfg.tlsCertificateFile,tlsPrivateKeyFile:cfg.tlsPrivateKeyFile,enrollment});}catch(e){await gateway.close();throw e;}
+ assertGatewayRuntimeStartAllowed({stateDir:d,baseDir:config.gateway.runtime?.baseDir,ownsAdvance:advanceOwners.has(d)});
+ let handle;try{handle=await createGatewayHttp(gateway,{tunnelContextToken:tunnelContext(d,{create:true}).token,token:fs.readFileSync(cfg.modelTokenFile,'utf8').trim(),host:cfg.listenHost,port:Number(new URL(cfg.url).port),allowedHosts:[new URL(cfg.url).host],tlsCertificateFile:cfg.tlsCertificateFile,tlsPrivateKeyFile:cfg.tlsPrivateKeyFile,enrollment,...(deviceIngress?{deviceIngress}:{})});}catch(e){await gateway.close();throw e;}
  live.set(d,{http:handle,gateway,controller:enrollment});return {status:'running',url:cfg.url,ownership:'current_process',persistentService:'NOT OBSERVED'};
 }
 export async function stopDeploymentGateway(d){if(!abs(d))fail('absolute_state_directory_required');const h=live.get(d);if(!h)return {status:'not_owned_by_current_process'};let timer;try{await Promise.race([(async()=>{await h.gateway.relay.close();await h.http.close();})(),new Promise((_,reject)=>{timer=setTimeout(()=>reject(Error('gateway_shutdown_timed_out')),5000);})]);live.delete(d);}finally{clearTimeout(timer);}return {status:'stopped',ownership:'current_process'};}
@@ -198,26 +204,46 @@ function ownedGateway(d){
  const {config,state}=load(d);if(config.mode!=='create-local')fail('owned_local_gateway_required');readGatewayDeployment(d);
  const p=gatewayPaths(d),owner=read(p.owner);
  if(new URL(owner.gateway_url).origin!==new URL(config.gateway.url).origin||owner.gateway_ca_file!==p.cert||owner.admin_token_file!==p.admin)fail('owner_gateway_binding_changed');
- return {config,controller:live.get(d)?.controller,owner};
+ return {config,controller:live.get(d)?.controller,ingress:live.get(d)?.http?.deviceIngress,owner};
 }
 async function pendingOwned(g){return g.controller?g.controller.listPending():ownerCommand(g.owner,'pending');}
 // Owner-only return value contains a short-lived invitation secret. Never expose
 // this operation as MCP or include its result in public status/diagnostic logs.
-export async function createDeploymentPairingLink(d,options={}){
- exact(options,['authorize']);if(options.authorize!==true)fail('explicit_owner_link_authorization_required');
- const g=ownedGateway(d),release=lock(d);
- try{const {createPairingLink}=await import('./pairing-links.mjs');
-  const invitation=g.controller?g.controller.invite({ttl_seconds:600}):await ownerCommand(g.owner,'invite',['600']);
-  return {...createPairingLink({controller:{invite:()=>invitation},gatewayOrigin:g.config.gateway.url,approved:true,caPem:fs.readFileSync(gatewayPaths(d).cert,'utf8'),ttlSeconds:600}),reachability:(g.config.gateway.listenHost??'127.0.0.1')==='127.0.0.1'?'loopback_only':'local_interface_configured_unverified',remoteUsable:false,reachabilityVerification:'NOT RUN'};
- }catch{throw Error('owner_pairing_link_failed_inspect_private_gateway');}finally{release();}
+async function gatewayIngressCommand(d,operation,input){
+ const g=ownedGateway(d),names={status:'ingress-status',prepare:'ingress-prepare',enable:'ingress-enable',disable:'ingress-disable',open:'pairing-open',close:'pairing-close'};
+ if(g.ingress){const method={open:'openPairing',close:'closePairing'}[operation]??operation;return g.ingress[method](...(operation==='status'?[]:[input]));}
+ return ownerCommand(g.owner,names[operation],operation==='status'?[]:operation==='prepare'?[JSON.stringify(input)]:operation==='open'?[input.generation,String(input.ttl_seconds??600)]:[input.generation]);
 }
+export async function prepareDeploymentDeviceIngress(d,options={}){return prepareAdditionalDeviceIngress(d,options,{command:(op,input)=>gatewayIngressCommand(d,op,input)});}
+export async function recoverDeploymentDeviceIngress(d,options={}){return recoverAdditionalDeviceIngress(d,options,{command:(op,input)=>gatewayIngressCommand(d,op,input)});}
+export {readAdditionalDeviceIngress as readDeploymentDeviceIngressSetup};
+export async function closeDeploymentPairingWindow(d,options={}){
+ exact(options,['authorize']);if(options.authorize!==true)fail('explicit_owner_pairing_close_required');const g=ownedGateway(d),entry=g.config.gateway.deviceIngress;
+ if(!entry)return {schema:1,pairing:{status:'closed'}};
+ return gatewayIngressCommand(d,'close',{generation:entry.generation});
+}
+export async function createDeploymentPairingLink(d,options={}){
+ exact(options,['authorize','listenHost','port']);if(options.authorize!==true)fail('explicit_owner_link_authorization_required');
+ let g=ownedGateway(d);
+ if((g.config.gateway.listenHost??'127.0.0.1')==='127.0.0.1'){
+  await prepareDeploymentDeviceIngress(d,options);g=ownedGateway(d);
+ }
+ const release=lock(d);
+ try{
+  const {createPairingLink}=await import('./pairing-links.mjs'),entry=g.config.gateway.deviceIngress;
+  const invitation=entry?.enabled?await gatewayIngressCommand(d,'open',{generation:entry.generation,ttl_seconds:600}):g.controller?g.controller.invite({ttl_seconds:600}):await ownerCommand(g.owner,'invite',['600']);
+  const origin=entry?.enabled?entry.url:g.config.gateway.url,cert=entry?.enabled?path.join(d,'gateway/device-ingress',entry.generation,'certificate.pem'):gatewayPaths(d).cert;
+  return {...createPairingLink({controller:{invite:()=>invitation},gatewayOrigin:origin,approved:true,caPem:fs.readFileSync(cert,'utf8'),ttlSeconds:600}),reachability:'local_interface_configured_unverified',remoteUsable:false,reachabilityVerification:'NOT RUN'};
+ }finally{release();}
+}
+
 function pendingPublic(items){
  if(!Array.isArray(items))fail('invalid_pending_response');
- return items.map(x=>{if(!/^[a-f0-9]{32}$/.test(x.request_id??'')||!/^styx-[a-f0-9]{24}$/.test(x.device_id??'')||!/^([a-f0-9]{64})$/.test(x.fingerprint??''))fail('invalid_pending_response');return {request_id:x.request_id,device_id:x.device_id,label:x.label,platform:x.platform,cwd:x.cwd,shell:x.shell,fingerprint:x.fingerprint,computer_requested:x.computer_requested,browser_requested:x.browser_requested===true,expires_at:x.expires_at};});
+ return items.map(x=>{if(!/^[a-f0-9]{32}$/.test(x.request_id??'')||!/^styx-[a-f0-9]{24}$/.test(x.device_id??'')||!/^([a-f0-9]{64})$/.test(x.fingerprint??''))fail('invalid_pending_response');return {request_id:x.request_id,device_id:x.device_id,label:x.label,platform:x.platform,cwd:x.cwd,shell:x.shell,fingerprint:x.fingerprint,computer_requested:x.computer_requested,browser_requested:x.browser_requested===true,expires_at:x.expires_at,...(x.ingress?{ingress:x.ingress}:{}),...(typeof x.comparison_code==='string'?{comparison_code:x.comparison_code}:{})};});
 }
 export async function listDeploymentPending(d,options={}){
  exact(options,['authorize']);if(options.authorize!==true)fail('explicit_owner_pending_authorization_required');
- try{const g=ownedGateway(d),certificateSha256=createHash('sha256').update(new X509Certificate(fs.readFileSync(gatewayPaths(d).cert)).raw).digest('hex');return pendingPublic(await pendingOwned(g)).map(request=>({...request,comparison_code:pairingComparisonCode({gatewayOrigin:new URL(g.config.gateway.url).origin,certificateSha256,requestId:request.request_id,deviceFingerprint:request.fingerprint})}));}catch{throw Error('owner_pending_read_failed');}
+ try{const g=ownedGateway(d),certificateSha256=createHash('sha256').update(new X509Certificate(fs.readFileSync(gatewayPaths(d).cert)).raw).digest('hex');return pendingPublic(await pendingOwned(g)).map(request=>({...request,comparison_code:request.comparison_code??pairingComparisonCode({gatewayOrigin:new URL(g.config.gateway.url).origin,certificateSha256,requestId:request.request_id,deviceFingerprint:request.fingerprint})}));}catch{throw Error('owner_pending_read_failed');}
 }
 export async function approveDeploymentPending(d,options={}){
  exact(options,['authorize','requestId','fingerprint','enableComputer','enableBrowser']);

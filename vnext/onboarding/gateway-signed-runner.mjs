@@ -1,3 +1,4 @@
+import {assertGatewayRuntimeStartAllowed} from './gateway-runtime-start-guard.mjs';
 import {tunnelContext} from './tunnel-context.mjs';
 // Installed signed application entrypoint. Verify the whole active release
 // with the trusted stable installer before importing its application/deps.
@@ -21,12 +22,13 @@ try{
  const active=activeRelease(installRoot,pem);if(!active||path.join(active.release_root,'app/onboarding/gateway-signed-runner.mjs')!==here)fail('gateway_application_generation_changed');
  const verified=verifySignedRelease(active.release_root,pem);if(verified.manifest.component!=='gateway-application'||verified.manifest.entrypoint!=='app/onboarding/gateway-signed-runner.mjs')fail('signed_gateway_application_required');
  const {readGatewayDeployment}=await import('./gateway-deployment-reader.mjs');
- const {runtime,catalog}=readGatewayDeployment(stateDir);
+ const {runtime,catalog,deviceIngress}=readGatewayDeployment(stateDir);
  const [{createStyxGateway},{createGatewayHttp},{EnrollmentController}]=await Promise.all([import('../gateway/index.mjs'),import('../gateway/http.mjs'),import('../gateway/enrollment.mjs')]);
  const {createAcceptanceObserver}=await import('../shared/onboarding-evidence.mjs');
  const gateway=createStyxGateway({catalog,onToolResult:createAcceptanceObserver(stateDir)});
  const enrollment=new EnrollmentController({rootDir:runtime.enrollmentDir,adminTokenFile:runtime.adminTokenFile,registry:gateway.registry,relay:gateway.relay});
- let handle;try{handle=await createGatewayHttp(gateway,{tunnelContextToken:tunnelContext(stateDir,{create:true}).token,token:fs.readFileSync(runtime.modelTokenFile,'utf8').trim(),host:runtime.listenHost,port:Number(new URL(runtime.url).port),allowedHosts:[new URL(runtime.url).host],tlsCertificateFile:runtime.tlsCertificateFile,tlsPrivateKeyFile:runtime.tlsPrivateKeyFile,enrollment});}catch(e){await gateway.close();throw e;}
+ assertGatewayRuntimeStartAllowed({stateDir,baseDir:base});
+ let handle;try{handle=await createGatewayHttp(gateway,{tunnelContextToken:tunnelContext(stateDir,{create:true}).token,token:fs.readFileSync(runtime.modelTokenFile,'utf8').trim(),host:runtime.listenHost,port:Number(new URL(runtime.url).port),allowedHosts:[new URL(runtime.url).host],tlsCertificateFile:runtime.tlsCertificateFile,tlsPrivateKeyFile:runtime.tlsPrivateKeyFile,enrollment,...(deviceIngress?{deviceIngress}:{})});}catch(e){await gateway.close();throw e;}
  let stopping=false;const stop=()=>{if(stopping)return;stopping=true;handle.close().then(()=>process.exit(0),()=>process.exit(2));};
  process.on('SIGTERM',stop);process.on('SIGINT',stop);process.stdout.write('Styx signed Gateway running.\n');
 }catch{process.stderr.write('Styx signed Gateway startup failed; inspect private deployment state.\n');process.exitCode=2;}

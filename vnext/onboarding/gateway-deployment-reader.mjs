@@ -1,3 +1,4 @@
+import {deploymentDeviceIngress} from './device-ingress-config.mjs';
 // Read-only Core configuration/evidence checks for the contained Gateway app.
 import fs from 'node:fs';
 import path from 'node:path';
@@ -25,5 +26,5 @@ export function readGatewayDeployment(stateDir){
  for(const file of [cert,runtime.tlsPrivateKeyFile,runtime.modelTokenFile,runtime.adminTokenFile,runtime.catalogFile])requirePrivateFile(file);
  const certificate=new X509Certificate(fs.readFileSync(cert));
  if(!certificate.checkPrivateKey(createPrivateKey(fs.readFileSync(runtime.tlsPrivateKeyFile))))fail('gateway_tls_identity_changed');
- return {config,runtime,catalog:read(runtime.catalogFile),configurationSha256:state.configSha256,certificateSha256:sum(cert)};
+ return {config,runtime,deviceIngress:deploymentDeviceIngress(stateDir,config),catalog:read(runtime.catalogFile),configurationSha256:state.configSha256,certificateSha256:sum(cert)};
 }

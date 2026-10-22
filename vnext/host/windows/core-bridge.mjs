@@ -8,7 +8,7 @@ import {execFileSync} from 'node:child_process';
 import {ensurePrivateDirectory,writePrivateFile,requirePrivateDirectory} from '../private-storage.mjs';
 import {observeWindowsNativeAppAuthority} from './native-app-authority.mjs';
 const SAFE_NATIVE_ERRORS=new Set(['windows_native_app_binding_required','desktop_acceptance_native_app_changed']);
-export const OPERATIONS=Object.freeze(['status','create','inspectJoin','join','prepare','connect','disconnect','setCapabilities','tunnelSave','tunnelStart','tunnelStop','acceptanceBegin','acceptanceConfirm','acceptanceDesktopReadback','devices','setDefault','revokeDevice','inviteComputer','pendingComputers','approveComputer']);
+export const OPERATIONS=Object.freeze(['status','create','inspectJoin','join','prepare','connect','disconnect','setCapabilities','tunnelSave','tunnelStart','tunnelStop','acceptanceBegin','acceptanceConfirm','acceptanceDesktopReadback','devices','setDefault','revokeDevice','inviteComputer','closePairing','recoverIngress','pendingComputers','approveComputer']);
 export function bootstrap(url){const u=new URL(url);if(u.protocol!=='http:'||u.hostname!=='127.0.0.1'||!u.port||u.pathname!=='/'||u.search||u.username||u.password||!/^#session=[A-Za-z0-9_-]{43}$/.test(u.hash))throw Error('invalid_bootstrap');const token=u.hash.slice(9);u.hash='';return {origin:u.origin,token};}
 export async function createClient(instance,{fetchImpl=fetch}={}){
  const {origin,token}=bootstrap(instance.url);let csrf;
@@ -28,10 +28,13 @@ export async function createClient(instance,{fetchImpl=fetch}={}){
   if(op==='devices')return call('devices',{});
   if(op==='pendingComputers')return call('pending/list',{authorize:true});
   if(op==='approveComputer')return call('pending/approve',{authorize:true,requestId:i.requestId,comparisonCodeConfirmation:i.comparisonCode});
+  if(op==='closePairing')return call('pairing-link/close',{authorize:true});
+  if(op==='recoverIngress')return call('device-ingress/recover',{authorize:true,action:i.action});
   if(op==='inviteComputer'){
    const {ingress}=await call('device-ingress/plan',{});
-   if(!ingress||ingress.gateway!=='local'||ingress.blockers?.length)return {status:'network_setup_required'};
-   return {status:'waiting_for_computer',invitation:await call('pairing-link/create',{authorize:true})};
+   if(!ingress||ingress.gateway!=='local'||ingress.blockers?.length)return {status:'network_setup_required',ingress};
+   if(ingress.requiresInterfaceChoice&&!i.listenHost)return {status:'select_network_interface',candidates:ingress.candidates};
+   return {status:'waiting_for_computer',invitation:await call('pairing-link/create',{authorize:true,...(i.listenHost?{listenHost:i.listenHost}:{})})};
   }
   if(op==='setDefault'||op==='revokeDevice')return call(op==='setDefault'?'default-device':'device/revoke',{authorize:true,deviceId:i.deviceId});
   if(op==='status')return observe();
@@ -60,7 +63,7 @@ export async function createClient(instance,{fetchImpl=fetch}={}){
    return call('snapshot');
   }
   const routes={connect:'foreground',disconnect:'foreground/stop',setCapabilities:'capabilities',tunnelSave:'tunnel/configure',tunnelStart:'tunnel/start',tunnelStop:'tunnel/stop',acceptanceBegin:'acceptance/begin',acceptanceConfirm:'acceptance/confirm',acceptanceDesktopReadback:'acceptance/desktop-readback'};
-  const body=op==='tunnelSave'?{authorize:true,tunnelId:i.tunnelId,apiKey:i.runtimeKey,autoStart:false}:op==='setCapabilities'?{authorize:true,computer:i.computer,browser:i.browser,browserChannel:i.browserChannel,persistLogin:i.persistLogin}:op==='acceptanceConfirm'?{authorize:true,challengeId:i.challengeId,observedInTargetChat:true}:op==='acceptanceDesktopReadback'?{authorize:true,challengeId:i.challengeId,value:i.value,pid:i.pid,windowId:i.windowId}:{authorize:true};
+  const body=op==='tunnelSave'?{authorize:true,tunnelId:i.tunnelId,apiKey:i.runtimeKey,autoStart:true}:op==='setCapabilities'?{authorize:true,computer:i.computer,browser:i.browser,browserChannel:i.browserChannel,persistLogin:i.persistLogin}:op==='acceptanceConfirm'?{authorize:true,challengeId:i.challengeId,observedInTargetChat:true}:op==='acceptanceDesktopReadback'?{authorize:true,challengeId:i.challengeId,value:i.value,pid:i.pid,windowId:i.windowId}:{authorize:true};
   return call(routes[op],body);
  }};
 }
@@ -75,6 +78,15 @@ export function nativeDesktopAvailable(resourceRoot,pin,{run=execFileSync,platfo
   if(typeof text!=='string'||Buffer.byteLength(text)>4096)return false;
   const value=JSON.parse(text);return value?.schema===1&&value.status==='available'&&Number.isInteger(value.sessionId)&&value.sessionId>0&&value.interactive===true&&value.windowStation==='WinSta0'&&value.inputDesktop==='Default';
  }catch{return false;}
+}
+export function verifyOpenSslBundle(resourceRoot,pin){
+ if(!pin?.files){if(pin?.config!==undefined)throw Error('invalid_tls_helper_bundle');return;}
+ if(!Array.isArray(pin.files)||pin.files.length<1||pin.files.length>=4000||!pin.path?.startsWith('runtime/openssl/'))throw Error('invalid_tls_helper_bundle');
+ const bundleRoot=path.join(resourceRoot,'runtime/openssl'),rootInfo=fs.lstatSync(bundleRoot);if(!rootInfo.isDirectory()||rootInfo.isSymbolicLink()||path.resolve(fs.realpathSync(bundleRoot)).toLowerCase()!==path.resolve(bundleRoot).toLowerCase())throw Error('redirected_tls_helper_bundle');
+ const names=new Set();for(const item of pin.files){if(!item||Object.keys(item).some(k=>!['path','sha256'].includes(k))||typeof item.path!=='string'||!item.path.startsWith('runtime/openssl/')||item.path.includes('\\')||item.path.includes(':')||item.path.split('/').some(x=>!x||x==='..'||x==='.')||names.has(item.path)||!/^[a-f0-9]{64}$/.test(item.sha256??''))throw Error('invalid_tls_helper_bundle');names.add(item.path);const file=path.join(resourceRoot,...item.path.split('/')),stat=fs.lstatSync(file);if(!stat.isFile()||stat.isSymbolicLink()||createHash('sha256').update(fs.readFileSync(file)).digest('hex')!==item.sha256)throw Error('tls_helper_bundle_changed');}
+ const files=[];const walk=(directory,prefix)=>{for(const item of fs.readdirSync(directory,{withFileTypes:true})){if(item.isSymbolicLink())throw Error('redirected_tls_helper_bundle');const relative=prefix+'/'+item.name;if(item.isDirectory())walk(path.join(directory,item.name),relative);else if(item.isFile())files.push(relative);else throw Error('invalid_tls_helper_bundle');}};
+ walk(path.join(resourceRoot,'runtime/openssl'),'runtime/openssl');if(!names.has(pin.path)||JSON.stringify(files.sort())!==JSON.stringify([...names].sort()))throw Error('tls_helper_bundle_changed');
+ if(pin.config!==undefined){const config=pin.config;if(!config||Object.keys(config).some(k=>!['path','sha256'].includes(k))||!pin.files.some(item=>item.path===config.path&&item.sha256===config.sha256))throw Error('invalid_tls_helper_bundle');return path.join(resourceRoot,...config.path.split('/'));}
 }
 export async function startWindowsCore(resourceRoot,stateRoot){
  if(!path.isAbsolute(stateRoot)||!path.isAbsolute(resourceRoot))throw Error('absolute_native_paths_required');
@@ -91,7 +103,7 @@ export async function startWindowsCore(resourceRoot,stateRoot){
    options.core={...core,startDeploymentForeground:(directory,authorization)=>core.startDeploymentForeground(directory,authorization,{guiAvailable:()=>nativeDesktopAvailable(resourceRoot,cfg.desktopProbe)}),beginDeploymentAcceptance:(directory,authorization)=>core.beginDeploymentAcceptance(directory,authorization,{nativeDesktopApp}),recordDeploymentDesktopReadback:(directory,authorization)=>core.recordDeploymentDesktopReadback(directory,authorization,{nativeDesktopApp})};
   }
   if(cfg.artifacts){const artifacts={bundle:member(cfg.artifacts.bundle),publisherKeyFile:member(cfg.artifacts.publisherKeyFile),publisherSha256:cfg.artifacts.publisherSha256};const file=path.join(stateRoot,'artifacts.json');if(fs.existsSync(file))fs.unlinkSync(file);writePrivateFile(file,JSON.stringify(artifacts));options.artifactDefaultsFile=file;}
-  if(cfg.openssl)options.trustedOpenSSL=member(cfg.openssl.path,cfg.openssl.sha256);
+  if(cfg.openssl){const config=verifyOpenSslBundle(resourceRoot,cfg.openssl);options.trustedOpenSSL=member(cfg.openssl.path,cfg.openssl.sha256);if(config)options.trustedOpenSSLConfig=config;}
   if(cfg.tunnel)options.trustedTunnelClient={binary:member(cfg.tunnel.path,cfg.tunnel.sha256),sha256:cfg.tunnel.sha256};
  }
  const {createOnboardingServer}=await import('../../onboarding/server.mjs');const instance=await createOnboardingServer(options);return {...instance,desktopAcceptanceSupported};

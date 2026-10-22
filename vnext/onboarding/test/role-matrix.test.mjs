@@ -90,7 +90,7 @@ test('App HTTP and CLI advance the same Gateway-only deployment and return ident
  const status=await(await fetch(app.origin+'/api/status',{headers})).json(),cli=await main(['status',f.stateDir]);
  assert.deepEqual(status.deployment.roles,cli.roles);assert.deepEqual(status.deployment.steps.map(s=>[s.id,s.status]),cli.steps.map(s=>[s.id,s.status]));
  assert.equal(status.deployment.gatewayRuntime,'running');assert.equal(status.deployment.roles.exec,'disabled');
- const ingress=await(await post('device-ingress/plan',{})).json();assert.equal(ingress.ingress.status,'loopback_only');
+ const ingress=await(await post('device-ingress/plan',{})).json();assert.equal(ingress.ingress.status,'preparation_required');
  assert.equal((await(await post('device-ingress/verify',{url:f.config.gateway.url})).json()).ingress.remoteUsable,false);
 });
 test('service command success cannot replace observed readiness; uncertain stop remains available',async t=>{

@@ -37,14 +37,15 @@ export class OutboundHostRelay {
     this.registry=registry;this.heartbeatMs=heartbeatMs;
     this.computerAcquireWaitMs=computerAcquireWaitMs;
     this.sessions=new Map();this.computerPeers=new Map();this.browserPeers=new Map();
-    this.stopped=false;this.attached=false;
+    this.stopped=false;this.attachments=new Map();
     this.wss=new WebSocketServer({noServer:true,maxPayload:MAX_COMPUTER_FRAME,perMessageDeflate:false});
   }
   attach(server,{allowedHosts}={}) {
-    if (this.attached) throw Error('host_relay_already_attached');
+    if (this.stopped) throw Error('host_relay_closed');
+    if (this.attachments.has(server)) throw Error('host_relay_already_attached');
     if (!Array.isArray(allowedHosts)) throw Error('explicit_upgrade_hosts_required');
-    this.attached=true;
-    server.on('upgrade',(req,socket,head)=>{
+    const attachment={server,onUpgrade:null};
+    const onUpgrade=(req,socket,head)=>{
       const path=(req.url??'').split('?')[0];
       if (!path.startsWith('/styx/hosts/')) {socket.destroy();return}
       const match=HOST_PATH.exec(req.url??'');
@@ -89,13 +90,14 @@ export class OutboundHostRelay {
         reject(socket,409);return;
       }
       // Reserve identity synchronously before handling the upgrade.
-      const entry={id:hostId,lane,generation:target.generation,ws:null,
+      const entry={id:hostId,lane,generation:target.generation,attachment,ws:null,
         closed:false,claimed:false,channel:null,computerTransport:null,browserTransport:null,alive:true};
       if (lane==='exec') this.sessions.set(hostId,entry);
       else if(lane==='browser')this.browserPeers.set(hostId,entry);
       else {peers.add(entry);this.computerPeers.set(hostId,peers)};
       try {
         this.wss.handleUpgrade(req,socket,head,ws=>{
+          if(entry.closed){ws.terminate();return}
           entry.ws=ws;
           ws.on('pong',()=>{entry.alive=true});
           ws.on('close',()=>this.drop(entry));
@@ -122,7 +124,12 @@ export class OutboundHostRelay {
       } catch {
         this.drop(entry);socket.destroy();
       }
-    });
+    };
+    attachment.onUpgrade=onUpgrade;
+    this.attachments.set(server,attachment);
+    server.on('upgrade',onUpgrade);
+    // One heartbeat and one identity/connection table across every listener.
+    if(this.timer)return;
     this.timer=setInterval(()=>{
       const all=[...this.sessions.values(),...this.browserPeers.values(),
         ...[...this.computerPeers.values()].flatMap(peers=>[...peers])];
@@ -141,6 +148,17 @@ export class OutboundHostRelay {
       }
     },this.heartbeatMs);
     this.timer.unref?.();
+  }
+  detach(server) {
+    const attachment=this.attachments.get(server);
+    if(!attachment)return;
+    this.attachments.delete(server);
+    server.removeListener('upgrade',attachment.onUpgrade);
+    for(const entry of [...this.sessions.values(),...this.browserPeers.values(),
+      ...[...this.computerPeers.values()].flatMap(peers=>[...peers])]) {
+      if(entry.attachment!==attachment)continue;
+      entry.ws?.terminate();this.drop(entry);
+    }
   }
   drop(entry) {
     if (entry.closed) return;
@@ -280,6 +298,7 @@ export class OutboundHostRelay {
   }
   async close() {
     this.stopped=true;clearInterval(this.timer);
+    for(const server of [...this.attachments.keys()])this.detach(server);
     for(const entry of [...this.sessions.values(),...this.browserPeers.values(),
       ...[...this.computerPeers.values()].flatMap(peers=>[...peers])]) {
       entry.ws?.terminate();this.drop(entry);

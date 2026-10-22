@@ -68,3 +68,10 @@ test('installed Node and trust survive installer process exit and unavailable so
  assert.equal(observed.status,'gateway_runtime_verified');assert.equal(observed.manifestSha256,result.manifestSha256);
  assert.equal(execFileSync(result.nodeBinary,['--version'],{encoding:'utf8',timeout:10000}),process.version+'\n');
 });
+
+
+test('runtime-only artifacts cannot advertise an application source contract',t=>{
+ const f=fixture(t);resign(f,manifest=>{manifest.sourceContract=2});
+ assert.throws(()=>prepareGatewayRuntime(f.config),/unsupported_gateway_source_contract/);
+ assert.equal(fs.existsSync(f.config.baseDir),false);
+});
