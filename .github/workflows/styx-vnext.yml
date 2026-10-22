@@ -19,6 +19,9 @@ jobs:
         working-directory: vnext
     steps:
       - uses: actions/checkout@v4
+        with:
+          # Migration tests verify real historical signed source closures.
+          fetch-depth: 0
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
