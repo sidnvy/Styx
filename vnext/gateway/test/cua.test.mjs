@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {TargetRegistry} from '../registry.mjs';
-import {CuaProvider} from '../cua.mjs';
+import {CuaProvider,connectCuaMcp} from '../cua.mjs';
 import {createStyxGateway} from '../index.mjs';
 
 const target = (id,platform,enabled=true) => ({
@@ -225,7 +225,8 @@ test('missing default and busy desktop return actionable categories without raw 
 });
 
 const endedSession=input=>({isError:true,
-  structuredContent:{code:'tool_invocation_failed',exit_code:1,error_code:'INVALID_ARGUMENT'},
+  // Captured from the signed macOS 0.36.0 MCP driver. Its error_code is absent.
+  structuredContent:{code:'tool_invocation_failed',exit_code:1},
   content:[{type:'text',text:`session has ended; tool call '${input.name}' was rejected. Call start_session with session '${input.arguments.session}' to start it again, or use a new session label.`}]});
 
 function lifecycleFixture(t) {
@@ -324,6 +325,53 @@ test('lookalike native errors do not retire or retry a session',async t=>{
     assert.equal(f.calls.length,before+1);
   }
   assert.equal(new Set(f.calls.map(x=>x.arguments.session)).size,1);
+});
+
+test('explicit INVALID_ARGUMENT metadata also admits an exact ended-session rejection',async t=>{
+  const f=lifecycleFixture(t);
+  f.setResponder(input=>{
+    const result=endedSession(input);result.structuredContent.error_code='INVALID_ARGUMENT';return result;
+  });
+  const result=await f.provider.callTool('list_windows',{},'alice');
+  assert.equal(result.structuredContent.error,'computer_session_expired');
+  assert.equal(f.calls.length,2);
+});
+
+test('signed native MCP ended-session response recovers on the same transport',{
+  skip:!process.env.STYX_NATIVE_CUA_SOCKET || !process.env.STYX_NATIVE_CUA_BINARY,
+  timeout:20000
+},async t=>{
+  const nativeTarget={id:'native-contract',generation:'contract-test',cwd:process.cwd(),computer:{enabled:true,
+    transport:'stdio',binary:process.env.STYX_NATIVE_CUA_BINARY,socket:process.env.STYX_NATIVE_CUA_SOCKET,
+    env:{CUA_DRIVER_EMBEDDED:'1',DO_NOT_TRACK:'1',CUA_DRIVER_RS_TELEMETRY_ENABLED:'false'}}};
+  const calls=[];let client,connections=0;
+  const provider=new CuaProvider({registry:{resolve:()=>nativeTarget},connect:async target=>{
+    connections++;client=await connectCuaMcp(target);
+    const call=client.callTool.bind(client);
+    client.callTool=async input=>{calls.push(input);return call(input)};
+    return client;
+  }});
+  t.after(async()=>{
+    if(client)for(const session of new Set(calls.map(call=>call.arguments.session)))
+      await client.callTool({name:'end_session',arguments:{session}}).catch(()=>{});
+    await provider.close();
+  });
+  assert.notEqual((await provider.callTool('list_windows',{app:'Styx'},'alice')).isError,true);
+  const alice=calls.at(-1).arguments.session;
+  assert.notEqual((await provider.callTool('list_windows',{app:'Styx'},'bob')).isError,true);
+  const bob=calls.at(-1).arguments.session;
+  assert.notEqual((await client.callTool({name:'end_session',arguments:{session:alice}})).isError,true);
+  const rejected=await client.callTool({name:'list_windows',arguments:{session:alice,app:'Styx'}});
+  assert.equal(rejected.isError,true);assert.equal(rejected.structuredContent.code,'tool_invocation_failed');
+  assert.equal(rejected.structuredContent.exit_code,1);
+  const before=calls.length;
+  const recovered=await provider.callTool('list_windows',{app:'Styx'},'alice');
+  assert.notEqual(recovered.isError,true);assert.equal(calls.length,before+2);
+  assert.equal(calls.at(-2).arguments.session,alice);
+  assert.notEqual(calls.at(-1).arguments.session,alice);
+  assert.notEqual(calls.at(-1).arguments.session,bob);
+  assert.notEqual((await provider.callTool('list_windows',{app:'Styx'},'bob')).isError,true);
+  assert.equal(calls.at(-1).arguments.session,bob);assert.equal(connections,1);
 });
 
 test('ambiguous input transport failure is not retried and invalidates foreign references',async t=>{
