@@ -567,12 +567,13 @@ struct ProductAcceptanceField: NSViewRepresentable {
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         menuSizeTimer?.invalidate()
         menuSizeTimer = Timer.scheduledTimer(withTimeInterval: 0.2, repeats: true) { [weak self, weak popover] _ in
+            guard let owner = self, let panel = popover else { return }
             Task { @MainActor in
-                guard let self = self, let popover = popover, popover.isShown else { return }
+                guard panel.isShown else { return }
                 let size = host.view.fittingSize
                 let target = NSSize(width: 332, height: min(720, max(120, size.height)))
-                if abs(popover.contentSize.height - target.height) > 1 { popover.contentSize = target }
-                _ = self
+                if abs(panel.contentSize.height - target.height) > 1 { panel.contentSize = target }
+                _ = owner
             }
         }
     }
