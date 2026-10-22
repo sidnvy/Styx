@@ -32,7 +32,10 @@ export class WorkAdmission {
 // Observe the existing authenticated protocol at the actual local dispatch point.
 export function createHostWorkAdmission(deviceId){
  const peers=new Map(),processes=new Map();let sequence=0,unknown=false,execObserved=false;
- const admission=new WorkAdmission({observe:()=>({identity:[...peers.keys()].sort().join(','),retained:processes.size,unknown:unknown||!execObserved})});
+ // Output handles belong to their callers until drained. They are not running
+ // work once this authenticated Exec peer proves both process exit and EOF.
+ // Admission does not read, consume, or delete any native output.
+ const admission=new WorkAdmission({observe:()=>({identity:[...peers.keys()].sort().join(','),retained:[...processes.values()].filter(p=>!p.executionSettled).length,unknown:unknown||!execObserved})});
  admission.openPeer=lane=>{
   const id=String(++sequence),requests=new Map();peers.set(id,lane);let closed=false;
   return{
@@ -44,11 +47,28 @@ export function createHostWorkAdmission(deviceId){
     if(!tracked||message.id===undefined)return;
     const release=admission.enter(deviceId,lane,{continuation:lane==='exec'&&!work});
     const processId=message.params?.processId;
-    if(work&&lane==='exec'){if(typeof processId!=='string'||processes.has(processId)){release();throw Error('maintenance_process_identity_unknown')}processes.set(processId,{peer:id,state:'starting'})}
+    if(work&&lane==='exec'){if(typeof processId!=='string'||processes.has(processId)){release();throw Error('maintenance_process_identity_unknown')}processes.set(processId,{peer:id,state:'starting',executionSettled:false})}
     if(requests.has(message.id)){unknown=true;release();throw Error('maintenance_duplicate_request')}
     requests.set(message.id,{release,method:message.method,processId});
    },
    response(message){
+    if(lane==='exec'&&message.id===undefined&&['process/exited','process/closed'].includes(message.method)){
+     const p=message.params,process=processes.get(p?.processId);
+     if(!process||process.peer!==id)return;
+     if(!Number.isSafeInteger(p.seq)||p.seq<1||(message.method==='process/exited'&&!Number.isSafeInteger(p.exitCode))){unknown=true;return}
+     if(message.method==='process/exited'){
+      if(process.exitedSeq!==undefined&&(process.exitedSeq!==p.seq||process.exitCode!==p.exitCode)){unknown=true;return}
+      process.exitedSeq=p.seq;process.exitCode=p.exitCode;
+     }else{
+      if(process.closedSeq!==undefined&&process.closedSeq!==p.seq){unknown=true;return}
+      process.closedSeq=p.seq;
+     }
+     if(process.exitedSeq!==undefined&&process.closedSeq!==undefined){
+      if(process.closedSeq<=process.exitedSeq){unknown=true;return}
+      process.executionSettled=true;
+     }
+     return;
+    }
     const request=requests.get(message.id);if(!request)return;
     requests.delete(message.id);request.release();const process=processes.get(request.processId);
     // A valid terminal tool error is completed work, not a lost reply.
@@ -61,10 +81,11 @@ export function createHostWorkAdmission(deviceId){
     }
     if(request.method==='process/read'){
      const r=message.result;if(message.error||!r){unknown=true;return}
-     if(r.exited===true&&r.closed===true&&Array.isArray(r.chunks)&&r.chunks.length===0)processes.delete(request.processId);
+     if(typeof r.exited!=='boolean'||typeof r.closed!=='boolean'||!Array.isArray(r.chunks)||!Number.isSafeInteger(r.nextSeq)||r.nextSeq<1||(r.exited&&!Number.isSafeInteger(r.exitCode))||(r.closed&&!r.exited)){unknown=true;return}
+     if(process?.peer===id&&r.exited&&r.closed){process.executionSettled=true;if(r.chunks.length===0)processes.delete(request.processId)}
     }
    },
-   close(){if(closed)return;closed=true;if(requests.size||[...processes.values()].some(p=>p.peer===id))unknown=true;for(const r of requests.values())r.release();requests.clear();peers.delete(id)}
+   close(){if(closed)return;closed=true;if(requests.size||[...processes.values()].some(p=>p.peer===id&&!p.executionSettled))unknown=true;for(const r of requests.values())r.release();requests.clear();for(const [key,p]of processes)if(p.peer===id&&p.executionSettled)processes.delete(key);peers.delete(id)}
   };
  };
  admission.markUnknown=()=>{unknown=true};

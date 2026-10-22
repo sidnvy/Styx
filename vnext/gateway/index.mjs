@@ -33,8 +33,8 @@ export function createStyxGateway({catalog, connect, computer, browser, gui = nu
     const peerIdentity=entry=>{if(!peerIds.has(entry))peerIds.set(entry,++nextPeer);return peerIds.get(entry)};
     const peers=[...relay.sessions.values(),...relay.browserPeers.values(),...[...relay.computerPeers.values()].flatMap(x=>[...x])].filter(p=>matches(p.id));
     const targets=registry.list().map(t=>registry.resolve(t.environment_id)).filter(t=>matches(t.id));
-    return {identity:JSON.stringify([targets.map(t=>[t.id,t.generation]),peers.map(p=>[p.id,p.lane,p.generation,peerIdentity(p)]).sort()]),retained:records.length,
-      unknown:scope==='all'&&!!cas||records.some(r=>r.state==='lost'||r.state==='start_unknown'||r.uncertainInput||r.runtime?.lost)||[...uncertainTargets].some(matches)};
+    return {identity:JSON.stringify([targets.map(t=>[t.id,t.generation]),peers.map(p=>[p.id,p.lane,p.generation,peerIdentity(p)]).sort()]),retained:records.filter(r=>!r.executionSettled).length,
+      unknown:scope==='all'&&!!cas||records.some(r=>r.state==='start_unknown'||r.uncertainInput||!r.executionSettled&&(r.executionUnknown||r.state==='lost'||r.runtime?.lost||r.runtime?.client?.closed))||[...uncertainTargets].some(matches)};
   }});
   workAdmission.markUnknown=id=>uncertainTargets.add(id);
   return {

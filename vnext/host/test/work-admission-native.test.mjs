@@ -27,5 +27,17 @@ test('native Host-only and Gateway-wide fences retain waiting command, allow inp
   for(let n=0;result.structuredContent.session_id&&n<30;n++){result=await call('write_stdin',{session_id:id,chars:'',yield_time_ms:250});output+=result.structuredContent.output??''}
   assert.equal(result.structuredContent.exit_code,0);assert.equal(output,'retained-command');assert.equal(controller.commit(ticket).status,'ready');controller.cancel(ticket);
  }
+ // The process may finish after the last MCP poll. Its authenticated terminal
+ // notifications must unblock Quit without consuming the owner's later output.
+ let pending=await call('exec_command',{cmd:'read answer; sleep 0.1; printf preserved-result',login:false,yield_time_ms:0});
+ const completedId=pending.structuredContent.session_id;assert.ok(completedId);
+ pending=await call('write_stdin',{session_id:completedId,chars:'continue\n',yield_time_ms:0});
+ let preserved=pending.structuredContent.output??'';assert.equal(pending.structuredContent.session_id,completedId);
+ const settledTicket=randomBytes(16).toString('hex');host.begin({ticketId:settledTicket});gateway.workAdmission.begin({ticketId:settledTicket});
+ for(let n=0;n<100&&(host.status(settledTicket).status!=='ready'||gateway.workAdmission.status(settledTicket).status!=='ready');n++)await tick();
+ assert.equal(host.status(settledTicket).status,'ready');assert.equal(gateway.workAdmission.status(settledTicket).status,'ready');assert(gateway.exec.sessions.has(completedId));
+ pending=await call('write_stdin',{session_id:completedId,chars:'',yield_time_ms:1000});preserved+=pending.structuredContent.output??'';
+ assert.equal(preserved,'preserved-result');assert.equal(pending.structuredContent.exit_code,0);assert(!gateway.exec.sessions.has(completedId));
+ host.cancel(settledTicket);gateway.workAdmission.cancel(settledTicket);
  let next=await call('exec_command',{cmd:'printf resumed',login:false,yield_time_ms:1000}),resumed=next.structuredContent.output??'';while(next.structuredContent.session_id){next=await call('write_stdin',{session_id:next.structuredContent.session_id,chars:'',yield_time_ms:250});resumed+=next.structuredContent.output??''}assert.equal(resumed,'resumed');assert.equal(next.structuredContent.exit_code,0);
 });
