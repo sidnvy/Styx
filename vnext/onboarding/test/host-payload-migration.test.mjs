@@ -6,6 +6,8 @@ import path from 'node:path';
 import {spawnSync} from 'node:child_process';
 import {createHash,generateKeyPairSync,sign} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
+import {linuxUserUnit} from '../../host/linux-service.mjs';
+import {observeLinuxHostPayloadAbsence} from '../host-payload-linux.mjs';
 import {stageSignedRelease,activateRelease,refreshVerifiedBootstrap,activeRelease} from '../../host/installer.mjs';
 import {planHostPublisherTransition,planHostPayloadMigration,applyHostPayloadMigration,rollbackHostPayloadMigration,readHostPayloadMigration,inspectHostPayloadCandidate} from '../host-payload-migration.mjs';
 const sha=x=>createHash('sha256').update(x).digest('hex');
@@ -38,7 +40,7 @@ function fixture(t,{cross=false,platform='darwin'}={}){
  const configSha256=sha(fs.readFileSync(path.join(stateDir,'deployment.json'))),evidenceFile=p=>({path:p,sha256:sha(fs.readFileSync(p))});
  put(path.join(stateDir,'state.json'),{schema:1,mode:config.mode,configSha256,steps:[{id:'host.prepare',status:'succeeded',evidence:{...receipt,receipt:evidenceFile(path.join(base,'setup-receipt.json')),serviceConfiguration:evidenceFile(path.join(base,'service.json'))}},{id:'host.claim',status:'succeeded',evidence:{hostConfiguration:evidenceFile(service.hostConfigFile)}},{id:'host.doctor',status:'succeeded',evidence:{healthy:true}},{id:'host.service.install',status:'pending'}],onboardingDecisions:{background:{configSha256}}});
  put(path.join(stateDir,'background.json'),{schema:1,configSha256,status:'disabled'});put(path.join(stateDir,'capabilities.json'),{schema:1,configSha256,status:'applied'});
- const adapters={platform,observeAbsence:async()=>({status:'absent'}),verifyApp:value=>({...value,cdhash:'d'.repeat(40),trust:'local_certificate_preview_not_notarized'})};
+ const adapters={platform,...(platform==='linux'?{linuxServiceOptions:{home:dir}}:{}),observeAbsence:async()=>({status:'absent'}),verifyApp:value=>({...value,cdhash:'d'.repeat(40),trust:'local_certificate_preview_not_notarized'})};
  return {dir,stateDir,base,root,app,config,candidate,oldKey,nextKey,adapters,bundle,opts};
 }
 async function reviewed(f){const plan=await planHostPayloadMigration({stateDir:f.stateDir,bundle:f.candidate},f.adapters);const before=new Map([...plan.changes,...plan.preserved].map(x=>[x.path,fs.readFileSync(x.path)]));return {plan,before};}
@@ -172,4 +174,31 @@ for(const platform of ['win32','linux'])test(`${platform} publisher replacement 
  await assert.rejects(applyHostPayloadMigration({stateDir:f.stateDir,plan},f.adapters),/authorization_required/);
  put(keyFile,pem(key()));await assert.rejects(applyHostPayloadMigration({stateDir:f.stateDir,plan,authorize:true},f.adapters),/owner_publisher_key_changed/);unchanged(before);put(keyFile,pem(f.nextKey));
  const result=await applyHostPayloadMigration({stateDir:f.stateDir,plan,authorize:true},f.adapters);assert.equal(activeRelease(f.root,pem(f.nextKey),f.opts).version,'0.2.0-next');await rollback(f,result.transactionId);unchanged(before);
+});
+
+function installedLinuxFixture(t){
+ const f=fixture(t,{platform:'linux'}),service=json(path.join(f.base,'service.json')),unit=path.join(f.dir,'.config/systemd/user',service.unitName);
+ put(unit,linuxUserUnit(service).replace('Type=exec','Type=simple'));fs.chmodSync(path.dirname(unit),0o755);
+ let reloads=0,reloadFails=false;const state={LoadState:'loaded',ActiveState:'inactive',SubState:'dead',UnitFileState:'disabled',MainPID:'0',FragmentPath:unit,DropInPaths:'',Restart:'on-failure',Type:'simple'};
+ const run=(binary,args)=>{if(binary.endsWith('systemd-analyze'))return args.includes('--user')?path.dirname(unit):path.join(f.dir,'system-units');if(args.includes('daemon-reload')){reloads++;if(reloadFails)throw Error('owned reload failed');return ''}return args.includes('--user')?Object.entries(state).map(([k,v])=>k+'='+v).join('\n'):'LoadState=not-found\nActiveState=inactive\nSubState=dead\nUnitFileState=\nMainPID=0\nFragmentPath=\n';};
+ f.adapters.linuxServiceOptions={home:f.dir,run};f.adapters.observeAbsence=input=>observeLinuxHostPayloadAbsence(input,{home:f.dir,run,observeProcesses:()=>true});
+ return {...f,unit,state,reloads:()=>reloads,failReload:value=>{reloadFails=value}};
+}
+test('stopped disabled legacy Linux unit is reviewed, migrated and rolled back with the same payload snapshots',async t=>{
+ const f=installedLinuxFixture(t),{plan,before}=await reviewed(f),old=fs.readFileSync(f.unit,'utf8');
+ assert.equal(plan.serviceMutation,'linux_user_unit_binding');assert.equal(plan.nativeService.path,f.unit);assert.equal(plan.changes.filter(x=>x.name==='linuxHostUnit').length,1);
+ const result=await applyHostPayloadMigration({stateDir:f.stateDir,plan,authorize:true},f.adapters);
+ assert.equal(result.status,'applied_stopped');assert.equal(result.serviceMutation,'linux_user_unit_binding');assert.ok(fs.readFileSync(f.unit,'utf8').includes('ExecStart='+f.root+'/node '));assert.ok(fs.readFileSync(f.unit,'utf8').includes('Type=simple'));assert.equal(f.reloads(),1);
+ await rollback(f,result.transactionId);unchanged(before);assert.equal(fs.readFileSync(f.unit,'utf8'),old);assert.equal(f.reloads(),2);
+});
+test('Linux unit running, enabled, overridden or changed after review is never adopted',async t=>{
+ for(const [key,value]of [['ActiveState','active'],['UnitFileState','enabled'],['DropInPaths','/unreviewed.conf'],['MainPID','1234']]){const f=installedLinuxFixture(t);f.state[key]=value;await assert.rejects(reviewed(f),/not_stopped_disabled/)}
+ const f=installedLinuxFixture(t),{plan}=await reviewed(f);fs.appendFileSync(f.unit,'# foreign change\n');await assert.rejects(applyHostPayloadMigration({stateDir:f.stateDir,plan,authorize:true},f.adapters),/definition_changed/);assert.equal(f.reloads(),0);
+});
+test('Linux daemon-reload failure retains transaction ownership until explicit rollback and successful reload',async t=>{
+ const f=installedLinuxFixture(t),{plan,before}=await reviewed(f);f.failReload(true);
+ await assert.rejects(applyHostPayloadMigration({stateDir:f.stateDir,plan,authorize:true},f.adapters),/explicit_rollback_required/);
+ const record=readHostPayloadMigration({stateDir:f.stateDir});assert.equal(record.status,'uncertain');assert.ok(fs.existsSync(path.join(f.stateDir,'advance.lock')));
+ await assert.rejects(rollback(f,record.transactionId),/rollback_interrupted/);assert.equal(readHostPayloadMigration({stateDir:f.stateDir}).status,'uncertain');assert.ok(fs.existsSync(path.join(f.stateDir,'advance.lock')));
+ f.failReload(false);await rollback(f,record.transactionId);unchanged(before);assert.equal(fs.existsSync(path.join(f.stateDir,'advance.lock')),false);
 });

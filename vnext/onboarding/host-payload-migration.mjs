@@ -7,6 +7,7 @@ import {validateDeployment} from './deployment-config.mjs';
 import {verifySignedRelease,stageSignedRelease,activeRelease} from '../host/installer.mjs';
 import {assertMacPreviewContinuity,verifyMacPreviewApp} from '../host/macos-preview-trust.mjs';
 import {requirePrivateDirectory,requirePrivateFile,ensurePrivateDirectory,openPrivateFile} from '../host/private-storage.mjs';
+import {inspectLinuxHostPayloadUnit,linuxHostPayloadUnitPath,reconcileLinuxHostPayloadUnit,writeLinuxHostPayloadUnit} from './host-payload-linux-service.mjs';
 import {acquireRecoveryGuard} from './recovery-guard.mjs';
 const KIND='host-payload-migration-v1',JOURNAL='host-payload-migration.json',RECOVERY='host-payload-migration-recovery.lock';
 const LOCKS=['advance.lock','background.lock','capabilities.lock','onboarding-plugin.lock','account-acceptance.lock'];
@@ -38,7 +39,7 @@ function journal(d){
  }
  return j;
 }
-function publicJournal(j){if(j?.plan?.handoffTicketId){const {planId,...body}=j.plan;assert(id(j.plan.handoffTicketId)&&digest(planId)&&sha(JSON.stringify(body))===planId,'host_payload_invalid_handoff_receipt')}return j?{schema:1,transactionId:j.transactionId,status:j.status,...(j.plan.handoffTicketId?{handoffTicketId:j.plan.handoffTicketId}:{}),current:j.plan.current,target:j.plan.target,...(j.plan.publisherTrust?{publisherTrust:j.plan.publisherTrust}:{}),nativeHealth:'NOT RUN',accountAcceptance:'NOT RUN',serviceMutation:'NONE',identityMutation:'NONE',systemPermissions:'UNCHANGED'}:{schema:1,status:'not_started'}}
+function publicJournal(j){if(j?.plan?.handoffTicketId){const {planId,...body}=j.plan;assert(id(j.plan.handoffTicketId)&&digest(planId)&&sha(JSON.stringify(body))===planId,'host_payload_invalid_handoff_receipt')}return j?{schema:1,transactionId:j.transactionId,status:j.status,...(j.plan.handoffTicketId?{handoffTicketId:j.plan.handoffTicketId}:{}),current:j.plan.current,target:j.plan.target,...(j.plan.publisherTrust?{publisherTrust:j.plan.publisherTrust}:{}),nativeHealth:'NOT RUN',accountAcceptance:'NOT RUN',serviceMutation:j.plan.nativeService?'linux_user_unit_binding':'NONE',identityMutation:'NONE',systemPermissions:'UNCHANGED'}:{schema:1,status:'not_started'}}
 export function readHostPayloadMigration({stateDir}={}){assert(absolute(stateDir),'absolute_state_directory_required');requirePrivateDirectory(stateDir);return publicJournal(journal(stateDir))}
 function pin(pem){const key=createPublicKey(pem);assert(key.asymmetricKeyType==='ed25519','host_payload_ed25519_publisher_required');return sha(key.export({type:'spki',format:'der'}))}
 function inventory(dir,files){if(!fs.existsSync(dir))return;requirePrivateDirectory(dir);for(const name of fs.readdirSync(dir).sort()){const file=path.join(dir,name),s=fs.lstatSync(file);assert(!s.isSymbolicLink(),'host_payload_preserved_path_redirected');if(s.isDirectory())inventory(file,files);else files.push({path:file,sha256:sha(bytes(file))});assert(files.length<=512,'host_payload_preserved_inventory_too_large')}}
@@ -48,7 +49,7 @@ function complete(release,host,platform){
  assert(required.every(name=>release.manifest.files.some(f=>f.path===name&&(!name.startsWith('bin/')||f.executable))),'host_payload_complete_signed_release_required');
 }
 function roots(d,base,platform){return {deployment:path.join(d,'deployment.json'),service:path.join(base,'service.json'),receipt:path.join(base,'setup-receipt.json'),publisher:path.join(base,'publisher.pem'),pointer:path.join(base,'install/active.json'),...Object.fromEntries(BOOTSTRAP.map(n=>['bootstrap_'+n,path.join(base,'install',n==='node'?nodeName(platform):n)])),background:path.join(d,'background.json'),capabilities:path.join(d,'capabilities.json'),state:path.join(d,'state.json')}}
-function snapshot(d,platform){
+function snapshot(d,platform,adapters={}){
  assert(absolute(d),'absolute_state_directory_required');requirePrivateDirectory(d);
  const config=read(path.join(d,'deployment.json')),state=read(path.join(d,'state.json'));validateDeployment(config,{checkNetwork:false});
  assert(state.schema===1&&state.mode===config.mode&&state.configSha256===sha(bytes(path.join(d,'deployment.json')))&&Array.isArray(state.steps),'host_payload_deployment_binding_changed');
@@ -86,7 +87,8 @@ function snapshot(d,platform){
  for(const file of [path.join(base,'enrollment.json'),path.join(base,'setup-state.json'),path.join(base,'gateway-ca.pem'),path.join(d,'onboarding-plugin.json'),path.join(d,'account-acceptance.json')])if(fs.existsSync(file))preserved.push({path:file,sha256:sha(bytes(file))});
  inventory(path.join(d,'tunnel'),preserved);
  if(host.browser?.profileRoot){assert(host.browser.profileRoot===path.join(base,'browser'),'host_payload_browser_profile_binding_changed');requirePrivateDirectory(host.browser.profileRoot)}
- return {d,platform,config,state,base,root,names,service,serviceRaw,host,pem,active,current,files,preserved,receiptReconciliation,preparationEvidenceReconciliation};
+ const unit=platform==='linux'?inspectLinuxHostPayloadUnit(service,adapters.linuxServiceOptions):null;if(unit)files.push(unit);
+ return {d,platform,config,state,base,root,names,service,serviceRaw,host,pem,active,current,files,preserved,receiptReconciliation,preparationEvidenceReconciliation,...(unit?{nativeService:unit.binding}:{})};
 }
 function noActivity(d,root){for(const file of [path.join(d,'foreground.lock'),path.join(d,'host-update-recovery.lock'),...['.health-update-lock','.health-operation-lock','.health-recovery-guard'].map(n=>path.join(root,n))])assert(!fs.existsSync(file),'host_payload_active_or_uncertain_owner');for(const [name,statuses] of [['host-update.json',['completed','recovered']],['mac-signing-registration.json',['applied','rolled_back']]]){const f=path.join(d,name);if(fs.existsSync(f)){const r=read(f);assert(statuses.includes(r.phase??r.status),'host_payload_other_transaction_requires_recovery')}}}
 class NativeAbsenceRequired extends Error {
@@ -95,7 +97,7 @@ class NativeAbsenceRequired extends Error {
 async function absent(s,adapters){
  assert(platformOf(adapters)===s.platform,'host_payload_platform_mismatch');
  const observe=adapters.observeAbsence??(s.platform==='darwin'?(await import('./host-payload-native.mjs')).observeMacHostPayloadAbsence:s.platform==='linux'?(await import('./host-payload-linux.mjs')).observeLinuxHostPayloadAbsence:(await import('./host-payload-windows.mjs')).observeWindowsHostPayloadAbsence);
- const result=await observe({stateDir:s.d,installRoot:s.root,hostConfigFile:s.service.hostConfigFile,...(s.platform==='darwin'?{hostServiceLabel:s.service.id,appPath:s.config?.host?.macPreviewApp?.path??'/Applications/Styx.app'}:s.platform==='linux'?{hostServiceUnitName:s.service.id}:{hostServiceTaskName:s.service.id})});
+ const result=await observe({stateDir:s.d,installRoot:s.root,hostConfigFile:s.service.hostConfigFile,...(s.platform==='darwin'?{hostServiceLabel:s.service.id,appPath:s.config?.host?.macPreviewApp?.path??'/Applications/Styx.app'}:s.platform==='linux'?{hostServiceUnitName:s.service.id,...(s.nativeService?{hostServiceBinding:s.nativeService}:{})}:{hostServiceTaskName:s.service.id})});
  if(result?.status!=='absent')throw new NativeAbsenceRequired(result?.reason);
 }
 function target(s,bundle,adapters){
@@ -136,7 +138,7 @@ function candidateInspection(s,t){
 // Candidate inspection can run before App exit. It never approves execution;
 // the executor repeats full inspection and native absence after the handoff.
 export function inspectHostPayloadCandidate({stateDir,bundle}={},adapters={}){
- const s=snapshot(stateDir,platformOf(adapters));return candidateInspection(s,target(s,bundle,adapters));
+ const s=snapshot(stateDir,platformOf(adapters),adapters);return candidateInspection(s,target(s,bundle,adapters));
 }
 function checkHandoffAdmission(d,admission){
  assert(admission&&id(admission.ticketId)&&digest(admission.token)&&digest(admission.candidateBinding)&&Number.isSafeInteger(admission.ownerPid)&&admission.ownerPid>1,'host_payload_handoff_admission_invalid');
@@ -157,12 +159,12 @@ function proposed(s,t){
  state.steps=state.steps.map(step=>step.id==='host.doctor'||step.id.startsWith('host.service.')?{id:step.id,status:'pending'}:step);
  after.state=encode(state);
  for(const name of ['background','capabilities']){const file=s.files.find(f=>f.name===name);if(file)after[name]=encode({...JSON.parse(file.before),configSha256:state.configSha256,...(name==='background'?{status:'needs_attention',reason:'host_payload_changed_requires_verification',host:'not_observed',hostConnection:'not_checked',gateway:'not_observed'}:{})})}
- return s.files.map(f=>({...f,after:after[f.name],afterMode:f.name==='bootstrap_node'?0o700:f.mode}));
+ return s.files.map(f=>({...f,after:after[f.name]??f.after,afterMode:f.name==='bootstrap_node'?0o700:f.mode}));
 }
 async function build(stateDir,bundle,adapters,ownTransaction){
- const s=snapshot(stateDir,platformOf(adapters));noActivity(stateDir,s.root);const old=journal(stateDir);assert(!old||['applied','rolled_back'].includes(old.status)||old.transactionId===ownTransaction&&old.status==='capturing','host_payload_requires_rollback');
+ const s=snapshot(stateDir,platformOf(adapters),adapters);noActivity(stateDir,s.root);const old=journal(stateDir);assert(!old||['applied','rolled_back'].includes(old.status)||old.transactionId===ownTransaction&&old.status==='capturing','host_payload_requires_rollback');
  const t=target(s,bundle,adapters);if(adapters.handoffAdmission){if(!ownTransaction)checkHandoffAdmission(stateDir,adapters.handoffAdmission);assert(candidateInspection(s,t).bindingSha256===adapters.handoffAdmission.candidateBinding,'host_payload_handoff_candidate_changed')}await absent(s,adapters);
- const files=proposed(s,t),body={schema:1,kind:KIND,platform:s.platform,stateDir,...(adapters.handoffAdmission?{handoffTicketId:adapters.handoffAdmission.ticketId}:{}),status:'offline_reviewable',bundle,current:{version:s.current.version,manifestSha256:s.current.sha256,publisherSha256:pin(s.pem)},target:{version:t.release.version,manifestSha256:t.release.sha256,publisherSha256:pin(t.pem)},publisherChange:pin(s.pem)!==pin(t.pem),...(t.publisherReview?{publisherReview:t.publisherReview,publisherTrust:'explicit_owner_replacement_no_signer_continuity'}:{}),receiptReconciliation:s.receiptReconciliation,preparationEvidenceReconciliation:s.preparationEvidenceReconciliation,app:t.app,changes:files.map(f=>({name:f.name,path:f.path,beforeSha256:sha(f.before),afterSha256:sha(f.after),beforeMode:f.mode,afterMode:f.afterMode})),preserved:s.preserved,nativeAbsence:'observed',serviceMutation:'NONE',nativeHealth:'NOT RUN',accountAcceptance:'NOT RUN'};
+ const files=proposed(s,t),body={schema:1,kind:KIND,platform:s.platform,stateDir,...(adapters.handoffAdmission?{handoffTicketId:adapters.handoffAdmission.ticketId}:{}),status:'offline_reviewable',bundle,current:{version:s.current.version,manifestSha256:s.current.sha256,publisherSha256:pin(s.pem)},target:{version:t.release.version,manifestSha256:t.release.sha256,publisherSha256:pin(t.pem)},publisherChange:pin(s.pem)!==pin(t.pem),...(t.publisherReview?{publisherReview:t.publisherReview,publisherTrust:'explicit_owner_replacement_no_signer_continuity'}:{}),receiptReconciliation:s.receiptReconciliation,preparationEvidenceReconciliation:s.preparationEvidenceReconciliation,app:t.app,...(s.nativeService?{nativeService:s.nativeService}:{}),changes:files.map(f=>({name:f.name,path:f.path,beforeSha256:sha(f.before),afterSha256:sha(f.after),beforeMode:f.mode,afterMode:f.afterMode})),preserved:s.preserved,nativeAbsence:s.nativeService?'stopped_disabled_owned_host_service':'observed',serviceMutation:s.nativeService?'linux_user_unit_binding':'NONE',nativeHealth:'NOT RUN',accountAcceptance:'NOT RUN'};
  return {s,t,files,plan:{...body,planId:sha(JSON.stringify(body))}};
 }
 export async function planHostPayloadMigration({stateDir,bundle}={},adapters={}){assert(absolute(stateDir),'absolute_state_directory_required');for(const n of [...LOCKS,RECOVERY]){if(n==='advance.lock'&&adapters.handoffAdmission)checkHandoffAdmission(stateDir,adapters.handoffAdmission);else assert(!fs.existsSync(path.join(stateDir,n)),'host_payload_management_busy');}try{return (await build(stateDir,bundle,adapters)).plan}catch(error){if(!(error instanceof NativeAbsenceRequired))throw error;return {schema:1,status:'blocked',reason:error.reason,installation:'NOT RUN',nativeHealth:'NOT RUN',accountAcceptance:'NOT RUN'}}}
@@ -218,8 +220,9 @@ export async function applyHostPayloadMigration({stateDir,plan,authorize=false}=
   const previous=path.join(stateDir,JOURNAL);if(fs.existsSync(previous))atomic(path.join(directory,'previous-journal.json'),bytes(previous));
   j={schema:1,kind:KIND,transactionId,plan,owner:held.owner,files:plan.changes,preserved:plan.preserved,status:'prepared',captureComplete:true};save(stateDir,j,'prepared');pending=true;adapters.onPhase?.('prepared');
   await absent(b.s,adapters);held.assertOwned();noActivity(stateDir,b.s.root);checkPreserved(b.s.preserved);assertFiles(b.files,'before');
-  for(const f of b.files){held.assertOwned();assert(bytes(f.path,f.name.startsWith('bootstrap_')).equals(f.before),'host_payload_managed_file_changed');save(stateDir,j,'writing',f.name);atomic(f.path,f.after,f.afterMode);adapters.onPhase?.('written_'+f.name)}
+  for(const f of b.files){held.assertOwned();assert(bytes(f.path,f.name.startsWith('bootstrap_')).equals(f.before),'host_payload_managed_file_changed');save(stateDir,j,'writing',f.name);if(f.name==='linuxHostUnit')writeLinuxHostPayloadUnit(b.s.service,b.s.nativeService,f.after,{...adapters.linuxServiceOptions,expectedSha256:sha(f.before),mode:f.afterMode});else atomic(f.path,f.after,f.afterMode);adapters.onPhase?.('written_'+f.name)}
   assertFiles(b.files,'after');checkPreserved(b.s.preserved);assert(activeRelease(b.s.root,b.t.pem,{platform:b.s.platform,arch:process.arch})?.version===plan.target.version,'host_payload_activation_invalid');
+  if(b.s.nativeService){reconcileLinuxHostPayloadUnit(b.s.service,b.s.nativeService,adapters.linuxServiceOptions);adapters.onPhase?.('linux_unit_reloaded')}
   save(stateDir,j,'applied');pending=false;return {...publicJournal(j),status:'applied_stopped',nextAction:'verify_host_before_start'};
  }catch(e){if(pending&&j){try{save(stateDir,j,'uncertain')}catch{}fail('host_payload_interrupted_explicit_rollback_required')}throw e}finally{held.close(pending)}
 }
@@ -240,12 +243,12 @@ function doctorObservation(after,current){
   return JSON.stringify(observed)===JSON.stringify(expected);
  }catch{return false}
 }
-function rollbackFiles(d,j){
+function rollbackFiles(d,j,adapters){
  const platform=j.plan.platform??'darwin';assert(['darwin','linux','win32'].includes(platform),'host_payload_platform_unsupported');
  const {planId,...body}=j.plan;assert(sha(JSON.stringify(body))===planId&&JSON.stringify(j.files)===JSON.stringify(j.plan.changes)&&JSON.stringify(j.preserved)===JSON.stringify(j.plan.preserved),'host_payload_snapshot_invalid');
  const directory=path.join(d,'host-payload-migration-snapshots',j.transactionId);requirePrivateDirectory(directory);
  const config=JSON.parse(bytes(path.join(directory,'deployment.before'))),state=JSON.parse(bytes(path.join(directory,'state.before')));validateDeployment(config,{checkNetwork:false});assert(state.configSha256===sha(bytes(path.join(directory,'deployment.before')))&&state.mode===config.mode,'host_payload_snapshot_invalid');
- const expected=roots(d,config.host.baseDir,platform);assert(Array.isArray(j.files)&&j.files.length>=10&&new Set(j.files.map(f=>f.name)).size===j.files.length,'host_payload_snapshot_invalid');
+ const expected=roots(d,config.host.baseDir,platform);if(j.plan.nativeService){assert(platform==='linux','host_payload_snapshot_invalid');const raw=JSON.parse(bytes(path.join(directory,'service.before')));expected.linuxHostUnit=linuxHostPayloadUnitPath(serviceFields(raw,platform),adapters.linuxServiceOptions);assert(j.plan.nativeService.path===expected.linuxHostUnit,'host_payload_snapshot_invalid')}assert(Array.isArray(j.files)&&j.files.length>=10&&new Set(j.files.map(f=>f.name)).size===j.files.length,'host_payload_snapshot_invalid');
  assert(Object.keys(expected).filter(n=>!['background','capabilities'].includes(n)).every(n=>j.files.some(f=>f.name===n)),'host_payload_snapshot_invalid');
  for(const name of ['background','capabilities'])assert(j.files.some(f=>f.name===name)||!fs.existsSync(expected[name]),'host_payload_new_auxiliary_state');
  const files=j.files.map(f=>{assert(expected[f.name]===f.path&&validMode(f.beforeMode,platform)&&validMode(f.afterMode,platform)&&digest(f.beforeSha256)&&digest(f.afterSha256),'host_payload_snapshot_invalid');const before=bytes(path.join(directory,f.name+'.before'),f.name.startsWith('bootstrap_')),after=bytes(path.join(directory,f.name+'.after'),f.name.startsWith('bootstrap_')),current=bytes(f.path,f.name.startsWith('bootstrap_')),currentSha256=sha(current);assert(sha(before)===f.beforeSha256&&sha(after)===f.afterSha256,'host_payload_snapshot_invalid');const observation=![f.beforeSha256,f.afterSha256].includes(currentSha256);assert(!observation||f.name==='state'&&doctorObservation(after,current),'host_payload_rollback_scope_changed');return {...f,before,after,currentSha256,...(observation?{observation:current}:{})}});
@@ -253,7 +256,7 @@ function rollbackFiles(d,j){
  assert(pin(pem)===config.host.publisherSha256&&pointer.version===j.plan.current.version&&pointer.manifest_sha256===j.plan.current.manifestSha256,'host_payload_snapshot_invalid');
  const old=verifySignedRelease(path.join(root,'releases',pointer.version),pem,{platform,arch:process.arch});assert(old.sha256===pointer.manifest_sha256,'host_payload_previous_release_changed');
  for(const n of BOOTSTRAP)assert(sha(files.find(f=>f.name==='bootstrap_'+n).before)===old.manifest.files.find(f=>f.path===(n==='node'?'bin/'+nodeName(platform):'host/'+n))?.sha256,'host_payload_previous_bootstrap_changed');
- return {files,s:{d,platform,root,config,service:serviceFields(JSON.parse(files.find(f=>f.name==='service').before),platform)}};
+ return {files,s:{d,platform,root,config,service:serviceFields(JSON.parse(files.find(f=>f.name==='service').before),platform),...(j.plan.nativeService?{nativeService:j.plan.nativeService}:{})}};
 }
 export async function rollbackHostPayloadMigration({stateDir,transactionId,authorize=false}={},adapters={}){
  assert(authorize===true&&absolute(stateDir)&&id(transactionId),'explicit_host_payload_rollback_required');requirePrivateDirectory(stateDir);
@@ -263,16 +266,16 @@ export async function rollbackHostPayloadMigration({stateDir,transactionId,autho
   held=locks(stateDir,transactionId,{recover:true,owner:j.owner,plan:j.plan});
   if(!['applied','rolled_back'].includes(j.status)){pending=true;j.owner=held.owner;save(stateDir,j,j.status)}
   if(j.captureComplete===false){
-   const s=snapshot(stateDir,platformOf(adapters));noActivity(stateDir,s.root);await absent(s,adapters);held.assertOwned();guard.assertOwned();
+   const s=snapshot(stateDir,platformOf(adapters),adapters);noActivity(stateDir,s.root);await absent(s,adapters);held.assertOwned();guard.assertOwned();
    const changes=s.files.map(f=>({name:f.name,path:f.path,beforeSha256:sha(f.before),beforeMode:f.mode}));
    assert(JSON.stringify(changes)===JSON.stringify(j.plan.changes.map(({name,path,beforeSha256,beforeMode})=>({name,path,beforeSha256,beforeMode})))&&JSON.stringify(s.preserved)===JSON.stringify(j.plan.preserved),'host_payload_admission_state_changed');
    assert(s.current.version===j.plan.current.version&&s.current.sha256===j.plan.current.manifestSha256&&pin(s.pem)===j.plan.current.publisherSha256,'host_payload_admission_state_changed');
    checkPreserved(j.preserved);save(stateDir,j,'rolled_back');pending=false;return {...publicJournal(j),status:'rolled_back_stopped'};
   }
-  const {files,s}=rollbackFiles(stateDir,j);noActivity(stateDir,s.root);await absent(s,adapters);held.assertOwned();guard.assertOwned();checkPreserved(j.preserved);
+  const {files,s}=rollbackFiles(stateDir,j,adapters);noActivity(stateDir,s.root);await absent(s,adapters);held.assertOwned();guard.assertOwned();checkPreserved(j.preserved);
   for(const f of files.filter(f=>f.observation)){const file=path.join(stateDir,'host-payload-migration-snapshots',j.transactionId,'doctor-'+f.currentSha256+'.json');atomic(file,f.observation);j.rollbackObservation={kind:'candidate_host_doctor',path:file,sha256:f.currentSha256};}
   j.owner=held.owner;save(stateDir,j,'rolling_back');pending=true;adapters.onPhase?.('rolling_back');
-  for(const f of files){held.assertOwned();guard.assertOwned();assert(sha(bytes(f.path,f.name.startsWith('bootstrap_')))===f.currentSha256,'host_payload_rollback_scope_changed');save(stateDir,j,'rolling_back',f.name);atomic(f.path,f.before,f.beforeMode);adapters.onPhase?.('restored_'+f.name)}
-  assertFiles(files,'before');checkPreserved(j.preserved);guard.assertOwned();save(stateDir,j,'rolled_back');pending=false;return {...publicJournal(j),status:'rolled_back_stopped'};
+  for(const f of files){held.assertOwned();guard.assertOwned();assert(sha(bytes(f.path,f.name.startsWith('bootstrap_')))===f.currentSha256,'host_payload_rollback_scope_changed');save(stateDir,j,'rolling_back',f.name);if(f.name==='linuxHostUnit')writeLinuxHostPayloadUnit(s.service,s.nativeService,f.before,{...adapters.linuxServiceOptions,expectedSha256:f.currentSha256,mode:f.beforeMode});else atomic(f.path,f.before,f.beforeMode);adapters.onPhase?.('restored_'+f.name)}
+  assertFiles(files,'before');checkPreserved(j.preserved);guard.assertOwned();if(s.nativeService){reconcileLinuxHostPayloadUnit(s.service,s.nativeService,adapters.linuxServiceOptions);adapters.onPhase?.('linux_unit_rollback_reloaded')}save(stateDir,j,'rolled_back');pending=false;return {...publicJournal(j),status:'rolled_back_stopped'};
  }catch(e){if(pending&&j){try{save(stateDir,j,'uncertain')}catch{}fail('host_payload_rollback_interrupted')}throw e}finally{try{held?.close(pending)}finally{guard.close()}}
 }
