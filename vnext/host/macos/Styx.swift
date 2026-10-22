@@ -891,6 +891,20 @@ func productSystemQuitReason(_ reason: OSType?) -> Bool {
 
 #if STYX_TESTING
 #if STYX_PRODUCT_UI
+if CommandLine.arguments.count == 4 && CommandLine.arguments[1] == "--invitation-self-test" {
+    MainActor.assumeIsolated {
+        let application = NSApplication.shared
+        application.setActivationPolicy(.accessory)
+        Task { @MainActor in
+            do {
+                let value = try String(contentsOfFile: CommandLine.arguments[2], encoding: .utf8).trimmingCharacters(in: .whitespacesAndNewlines)
+                guard let url = URL(string: value) else { throw ProductCoreError.invalidBootstrap }
+                try await productInvitationSelfTest(sessionURL: url, mode: CommandLine.arguments[3]); exit(0)
+            } catch { fputs("Styx invitation self-test failed: \(error)\n", stderr); exit(1) }
+        }
+        application.run()
+    }
+}
 if CommandLine.arguments.count == 3 && CommandLine.arguments[1] == "--observation-self-test" {
     MainActor.assumeIsolated {
         let application = NSApplication.shared

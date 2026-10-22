@@ -41,7 +41,7 @@ struct ProductSettingsView: View {
                     Text(productText("添加电脑", "Add computer")).font(.title2.weight(.semibold))
                     ProductInvitationView(model: model)
                     ProductPendingIdentities(model: model)
-                    HStack { Spacer(); Button(productText("完成", "Done")) { addComputer = false }.accessibilityIdentifier("styx-invitation-done").keyboardShortcut(.cancelAction) }
+                    HStack { Spacer(); Button(productText("完成", "Done")) { model.closeDeviceInvitation { addComputer = false } }.disabled(model.busy).accessibilityIdentifier("styx-invitation-done").keyboardShortcut(.cancelAction) }
                 }.padding(24).frame(width: 460)
             }
             .sheet(isPresented: $editTunnel) { ProductTunnelEditor(model: model) }
