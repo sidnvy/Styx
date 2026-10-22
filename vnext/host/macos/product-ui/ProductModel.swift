@@ -520,6 +520,7 @@ enum ProductRestorationPolicy {
                 // cancelled or failed work is available only via recovery UI.
                 guard ["not_started", "applied_stopped"].contains(payloadUpdateStatus["status"].string ?? "") else { throw ProductCoreError.invalidResponse }
                 payloadUpdateStatus = try await client.write("host-payload/handoff/prepare", ["authorize": .bool(true)])["handoff"]
+                guard payloadUpdateStatus["status"].string == "awaiting_exit" else { throw ProductCoreError.invalidResponse }
             } else {
                 let resumable = ["awaiting_exit", "blocked", "needs_recovery"].contains(payloadUpdateStatus["status"].string ?? "") || (resume && payloadUpdateStatus["status"].string == "applied_stopped")
                 if !resumable { payloadUpdateStatus = try await client.write("host-payload/handoff/prepare", ["authorize": .bool(true)])["handoff"] }
