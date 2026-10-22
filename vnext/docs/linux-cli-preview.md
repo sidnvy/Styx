@@ -49,9 +49,9 @@ All paths below must be absolute and normalized, parent directories private.
   persistLogin:true}` (or `msedge`). Installed Chrome/Edge is required; no daily
   browser profile is attached. `./styx browser-select STATE chrome --authorize`
   changes an existing prepared deployment through the same Core transaction.
-- Desktop Computer Use: optional on Arch graphical sessions. `linux-session`
-  only reports observed session suitability, never claims Cua acceptance. A
-  headless user must leave `computer:false`.
+- Desktop Computer Use is outside this first Linux delivery. Keep
+  `computer:false` on Arch and headless servers. `linux-session` reports the
+  observed session only; it does not enable or verify desktop control.
 
 Start with `./styx create PRIVATE_INPUT STATE`, `plan STATE`, `status STATE`.
 `advance STATE STEP...` requires naming the exact planned steps. For interactive
@@ -59,6 +59,56 @@ foreground runtime use `foreground STATE --authorize`; keep its terminal open.
 Persistent user-service control uses existing `gateway-service`/`host-service`
 commands, explicit authorization and recorded preparation. It is separate from
 package extraction and foreground execution. Run `help` for exact commands.
+
+## First local run: headless Gateway-only
+
+After checking the separately supplied archive SHA-256, unpack into a private
+versioned directory. Set `STYX_DIST` to that absolute directory. This sequence
+uses a new state directory and port 18443; choose another free loopback port if
+needed. OpenSSL must already be installed. Package extraction does not start a
+service, and a Gateway-only installation does not install Exec or Cua.
+
+```sh
+umask 077
+STYX_DIST=/absolute/Styx-VERSION-linux-x64
+STYX_TEST=$(mktemp -d "$HOME/styx-first-run.XXXXXX")
+"$STYX_DIST/runtime/node" --input-type=module - "$STYX_DIST" "$STYX_TEST" <<'JS'
+import fs from 'node:fs';
+import path from 'node:path';
+const [dist, root] = process.argv.slice(2);
+const build = JSON.parse(fs.readFileSync(path.join(dist, 'build-receipt.json')));
+const config = {schema: 1, mode: 'create-local', gateway: {
+  url: 'https://127.0.0.1:18443', openssl: '/usr/bin/openssl', runtime: {
+    bundle: path.join(dist, 'gateway-bundle'),
+    publisherKeyFile: path.join(dist, 'publisher.pem'),
+    publisherSha256: build.publisherSha256,
+    baseDir: path.join(root, 'gateway-runtime')
+  }
+}};
+fs.writeFileSync(path.join(root, 'input.json'), JSON.stringify(config), {mode: 0o600});
+JS
+"$STYX_DIST/styx" create "$STYX_TEST/input.json" "$STYX_TEST/state"
+"$STYX_DIST/styx" plan "$STYX_TEST/state"
+"$STYX_DIST/styx" advance "$STYX_TEST/state" gateway.runtime.prepare gateway.prepare
+"$STYX_DIST/styx" foreground "$STYX_TEST/state" --authorize
+```
+
+The last command stays open and prints `Styx foreground connection started`
+after authenticated local Gateway verification. It should not open a browser or
+request desktop permission. In another terminal use the same absolute paths:
+
+```sh
+/absolute/Styx-VERSION-linux-x64/styx foreground-status /absolute/styx-first-run.XXXXXX/state
+/absolute/Styx-VERSION-linux-x64/styx status /absolute/styx-first-run.XXXXXX/state
+```
+
+Expect Gateway running, Host/Exec/Computer/Browser disabled, and account
+acceptance `NOT RUN`. Press Ctrl-C in the first terminal to stop its owned
+Gateway; starting the same foreground command again reuses the same state and
+identity. Keep the state directory for later pairing; never put it inside the
+versioned distribution. A server without a user systemd manager can use this
+foreground mode under its administrator's process supervisor. Boot-before-login
+persistence is not configured by this recipe.
 
 ## Foreground Secure MCP Tunnel
 
@@ -210,8 +260,11 @@ Run on an explicitly authorized native Linux x64 test host:
 STYX_RUN_LINUX_CLI_ACCEPTANCE=1 node host/linux-cli-acceptance.mjs /absolute/public-test-paths.json
 ```
 
-The input contains only `directory` (fresh evidence output) and `distribution`
-(existing portable preview). The runner creates private disposable deployment
+The input contains `directory` (fresh evidence output), `distribution`
+(existing portable preview), `listenHost` (one exact non-loopback IPv4 of the
+authorized test machine), and `authorizeExactInterface:true`. The additional
+TLS listener exercises invitation reachability on that selected interface; it
+does not modify the firewall. The runner creates private disposable deployment
 state, actual TLS Gateway, actual signed Host installation, scoped owner-local
 pairing approval and doctor. It then uses Core foreground lifecycle, genuine
 Codex Exec and installed Chrome through TLS MCP. A synthetic loopback site
