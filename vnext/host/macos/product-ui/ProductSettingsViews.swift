@@ -88,9 +88,13 @@ struct ProductSettingsView: View {
                 Label(notice, systemImage: "exclamationmark.circle")
                     .font(.callout).foregroundStyle(.secondary)
                     .accessibilityIdentifier("styx-component-update-notice")
+            }
                 HStack {
                     if ["publisher_changed", "update_available"].contains(model.status["components"]["host"]["status"].string ?? "") {
                         Button(productText("完成更新…", "Finish update…")) { model.finishPayloadUpdate() }.disabled(model.busy)
+                    }
+                    if ["awaiting_exit", "blocked", "needs_recovery", "applied_stopped"].contains(model.payloadUpdateStatus["status"].string ?? "") {
+                        Button(productText("继续更新检查…", "Continue update check…")) { model.finishPayloadUpdate(resume: true) }.disabled(model.busy)
                     }
                     Button(productText("检查更新状态", "Check update status")) { model.checkPayloadUpdate() }.disabled(model.busy)
                     if ["preparing", "awaiting_exit", "blocked", "needs_recovery"].contains(model.payloadUpdateStatus["status"].string ?? "") {
@@ -98,9 +102,8 @@ struct ProductSettingsView: View {
                     }
                 }
                 if let state = model.payloadUpdateStatus["status"].string {
-                    Text(state == "cancelled" ? productText("已取消，当前组件未更改。", "Cancelled. The current components were not changed.") : state == "applied_stopped" ? productText("组件已更新。", "Components updated.") : state == "not_started" ? productText("尚未开始更新。", "The update has not started.") : productText("更新尚未完成。可重试或取消尚未执行的更新；若已经开始更改，请使用更新窗口中的恢复入口。", "The update has not finished. Retry or cancel a pending update; if changes have started, use recovery in the updater window.")).font(.caption).foregroundStyle(.secondary)
+                    Text(state == "cancelled" ? productText("已取消，当前组件未更改。", "Cancelled. The current components were not changed.") : state == "applied_stopped" ? productText("组件已更新。", "Components updated.") : state == "rolled_back" ? productText("已恢复更新前的组件。", "Previous components restored.") : state == "not_started" ? productText("尚未开始更新。", "The update has not started.") : productText("更新尚未完成。可重试或取消尚未执行的更新；若已经开始更改，请使用更新窗口中的恢复入口。", "The update has not finished. Retry or cancel a pending update; if changes have started, use recovery in the updater window.")).font(.caption).foregroundStyle(.secondary)
                 }
-            }
         }.frame(maxWidth: .infinity, alignment: .leading)
     }
     private var componentNotice: String? {

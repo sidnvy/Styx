@@ -483,7 +483,7 @@ enum ProductRestorationPolicy {
         guard let ticket = payloadUpdateStatus["ticketId"].string else { return }
         perform { [self] in payloadUpdateStatus = try await client.write("host-payload/handoff/cancel", ["authorize": .bool(true), "ticketId": .string(ticket)])["handoff"] }
     }
-    func finishPayloadUpdate() {
+    func finishPayloadUpdate(resume: Bool = false) {
         guard !busy else { return }
         let alert = NSAlert()
         alert.messageText = productText("完成 Styx 更新？", "Finish the Styx update?")
@@ -495,8 +495,10 @@ enum ProductRestorationPolicy {
         Task {
             do {
                 try await waitForObservation()
-                payloadUpdateStatus = try await client.write("host-payload/handoff/prepare", ["authorize": .bool(true)])["handoff"]
-                guard payloadUpdateStatus["status"].string == "awaiting_exit", let ticket = payloadUpdateStatus["ticketId"].string, let launch = launchPayloadUpdater else { throw ProductCoreError.invalidResponse }
+                payloadUpdateStatus = try await client.write("host-payload/handoff/status", [:])["handoff"]
+                let resumable = ["awaiting_exit", "blocked", "needs_recovery"].contains(payloadUpdateStatus["status"].string ?? "") || (resume && payloadUpdateStatus["status"].string == "applied_stopped")
+                if !resumable { payloadUpdateStatus = try await client.write("host-payload/handoff/prepare", ["authorize": .bool(true)])["handoff"] }
+                guard ["awaiting_exit", "blocked", "needs_recovery", "applied_stopped"].contains(payloadUpdateStatus["status"].string ?? ""), let ticket = payloadUpdateStatus["ticketId"].string, let launch = launchPayloadUpdater else { throw ProductCoreError.invalidResponse }
                 do { try launch(ticket) }
                 catch { payloadUpdateStatus = try await client.write("host-payload/handoff/cancel", ["authorize": .bool(true), "ticketId": .string(ticket)])["handoff"]; throw error }
             } catch {
