@@ -49,9 +49,14 @@ All paths below must be absolute and normalized, parent directories private.
   persistLogin:true}` (or `msedge`). Installed Chrome/Edge is required; no daily
   browser profile is attached. `./styx browser-select STATE chrome --authorize`
   changes an existing prepared deployment through the same Core transaction.
-- Desktop Computer Use is outside this first Linux delivery. Keep
-  `computer:false` on Arch and headless servers. `linux-session` reports the
-  observed session only; it does not enable or verify desktop control.
+- Computer Use: the first Linux desktop target is **Arch with Hyprland**.
+  Select `host.computer:true` when creating a desktop Host. An existing combined
+  deployment can use `./styx capabilities STATE computer-on --authorize`.
+  Keep `computer:false` for an intentionally headless-only Host. If Computer Use
+  is selected but no eligible graphical session exists, only the Computer lane
+  stays unavailable; Gateway, Exec and optional headless Browser continue.
+  `linux-session` observes the session; it does not enable Computer Use or prove
+  that observation/input work.
 
 Start with `./styx create PRIVATE_INPUT STATE`, `plan STATE`, `status STATE`.
 `advance STATE STEP...` requires naming the exact planned steps. For interactive
@@ -59,6 +64,34 @@ foreground runtime use `foreground STATE --authorize`; keep its terminal open.
 Persistent user-service control uses existing `gateway-service`/`host-service`
 commands, explicit authorization and recorded preparation. It is separate from
 package extraction and foreground execution. Run `help` for exact commands.
+
+## Hyprland Computer Use
+
+Use the signed Host bundle containing the pinned Cua driver, then the same
+`create` → `plan` → preparation/pairing → `foreground` flow as other Hosts.
+The existing identity and pairing are reused; no Linux desktop App is required.
+Host-only devices choose `computer:true` in their own input before joining and
+confirm the current invitation/identity through the existing join flow.
+
+Run `./styx linux-session` first. An eligible session is the owning user's local,
+active, unlocked Wayland login with a private runtime directory and owned
+display socket. The CLI/Host can recover the GUI environment from the user's
+systemd manager; a stale `WAYLAND_DISPLAY` alone is not sufficient. Hyprland
+must publish its current environment to that manager for service-based use.
+Styx does not change the compositor, enable linger, or modify system permissions.
+
+Logout, lock or loss of that session stops only Computer Use. A later eligible
+session reconnects with the same identity; it does not replay previous actions.
+Lock observation relies on logind's `LockedHint`. A session observation or
+connected transport is not a completed native acceptance test.
+
+For source/native acceptance, `host/run-native-cua.mjs` reuses that same session
+probe and requires executable pinned Codex/Cua binaries plus Zenity. Its owned
+scratch dialog verifies window discovery, screenshot, accessibility elements,
+button click and independent successful process exit through Gateway MCP and
+Host. The dialog and its temporary Host/Gateway are cleaned up afterward.
+This does not certify other compositors, lock/logout/reboot behavior, or a
+ChatGPT account connection.
 
 ## First local run: headless Gateway-only
 
