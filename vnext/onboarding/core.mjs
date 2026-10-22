@@ -511,3 +511,5 @@ export {changeDeploymentCapabilities,readDeploymentCapabilities,rollbackDeployme
 
 export {readDeploymentComponents} from './components.mjs';
 export {inspectHostPayloadCandidate,planHostPayloadMigration,applyHostPayloadMigration,rollbackHostPayloadMigration,readHostPayloadMigration} from './host-payload-migration.mjs';
+
+export {prepareHostPayloadHandoff,executeHostPayloadHandoff,readHostPayloadHandoff,cancelHostPayloadHandoff} from './host-payload-handoff.mjs';
