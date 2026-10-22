@@ -679,7 +679,7 @@ func productSystemQuitReason(_ reason: OSType?) -> Bool {
             process.standardInput = FileHandle.nullDevice; process.standardOutput = FileHandle.nullDevice; process.standardError = FileHandle.nullDevice
             process.environment = ["HOME": NSHomeDirectory(), "PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "TMPDIR": NSTemporaryDirectory()]
             try process.run()
-            NSApp.terminate(nil)
+            productScheduleApplicationTermination()
         }
         controller.showMenuInvitation = { [weak self] in
             self?.toggleProductPanel()
