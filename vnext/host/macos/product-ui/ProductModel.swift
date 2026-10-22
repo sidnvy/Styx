@@ -290,6 +290,7 @@ enum ProductRestorationPolicy {
     private let permissionReader: () -> (accessibility: Bool, screenRecording: Bool)
     private let permissionActions: ProductPermissionActions
     var launchPayloadUpdater: ((String) throws -> Void)?
+    private var automaticPayloadUpdateAttempted = false
     @Published var payloadUpdateStatus: ProductJSON = .null
     var recoverComputerUse: (() async throws -> Void)?
 
@@ -348,6 +349,19 @@ enum ProductRestorationPolicy {
             label = session["defaults"]["label"].string ?? Host.current().localizedName ?? "Mac"
             try await reload()
             loaded = true
+            // The authenticated Core alone decides whether this new App may
+            // complete its bundled Host update. Never infer authority from a
+            // version string, and never retry automatically after a failure.
+            let startup = status["nativeStartup"]
+            if !automaticPayloadUpdateAttempted,
+               session["nativeAppLifecycleSupported"].bool,
+               startup["status"].string == "reconciliation_required",
+               startup["reason"].string == "host_payload_update_required",
+               startup["automaticUpdate"] == .bool(true) {
+                automaticPayloadUpdateAttempted = true
+                loadingMessage = productText("正在完成 Styx 更新…", "Finishing the Styx update…")
+                await executePayloadUpdate(automatic: true)
+            }
         } catch { reportFailure() }
     }
     func refresh() async {
@@ -493,22 +507,33 @@ enum ProductRestorationPolicy {
         guard alert.runModal() == .alertFirstButtonReturn else { return }
         busy = true; error = nil
         Task {
-            do {
-                try await waitForObservation()
-                payloadUpdateStatus = try await client.write("host-payload/handoff/status", [:])["handoff"]
+            await executePayloadUpdate(resume: resume)
+            busy = false
+        }
+    }
+    private func executePayloadUpdate(resume: Bool = false, automatic: Bool = false) async {
+        do {
+            try await waitForObservation()
+            payloadUpdateStatus = try await client.write("host-payload/handoff/status", [:])["handoff"]
+            if automatic {
+                // Recheck the durable ticket immediately before preparing;
+                // cancelled or failed work is available only via recovery UI.
+                guard ["not_started", "applied_stopped"].contains(payloadUpdateStatus["status"].string ?? "") else { throw ProductCoreError.invalidResponse }
+                payloadUpdateStatus = try await client.write("host-payload/handoff/prepare", ["authorize": .bool(true)])["handoff"]
+            } else {
                 let resumable = ["awaiting_exit", "blocked", "needs_recovery"].contains(payloadUpdateStatus["status"].string ?? "") || (resume && payloadUpdateStatus["status"].string == "applied_stopped")
                 if !resumable { payloadUpdateStatus = try await client.write("host-payload/handoff/prepare", ["authorize": .bool(true)])["handoff"] }
-                guard ["awaiting_exit", "blocked", "needs_recovery", "applied_stopped"].contains(payloadUpdateStatus["status"].string ?? ""), let ticket = payloadUpdateStatus["ticketId"].string, let launch = launchPayloadUpdater else { throw ProductCoreError.invalidResponse }
-                do { try launch(ticket) }
-                catch { payloadUpdateStatus = try await client.write("host-payload/handoff/cancel", ["authorize": .bool(true), "ticketId": .string(ticket)])["handoff"]; throw error }
-            } catch {
-                switch error as? ProductCoreError {
-                case .workInProgress: self.error = productText("有任务仍在运行。请完成后再更新。", "Tasks are still running. Finish them before updating.")
-                case .workStateUnknown: self.error = productText("暂时无法确认任务状态。请稍后重试。", "The task state could not be confirmed. Try again shortly.")
-                default: self.error = productText("更新尚未开始。请检查更新状态后重试。", "The update has not started. Check update status and retry.")
-                }
             }
-            busy = false
+            guard ["awaiting_exit", "blocked", "needs_recovery", "applied_stopped"].contains(payloadUpdateStatus["status"].string ?? ""), let ticket = payloadUpdateStatus["ticketId"].string, let launch = launchPayloadUpdater else { throw ProductCoreError.invalidResponse }
+            do { try launch(ticket) }
+            catch { payloadUpdateStatus = try await client.write("host-payload/handoff/cancel", ["authorize": .bool(true), "ticketId": .string(ticket)])["handoff"]; throw error }
+        } catch {
+            switch error as? ProductCoreError {
+            case .workInProgress: self.error = productText("有任务仍在运行。请完成后再更新。", "Tasks are still running. Finish them before updating.")
+            case .workStateUnknown: self.error = productText("暂时无法确认任务状态。请稍后重试。", "The task state could not be confirmed. Try again shortly.")
+            default: self.error = productText("更新尚未完成。请检查更新状态后重试。", "The update has not finished. Check update status and retry.")
+            }
+            requestSettings(.general)
         }
     }
     func createAndPrepare() {
