@@ -662,7 +662,8 @@ enum ProductRestorationPolicy {
             handoffCredential = secret
             handoffTarget = handoff["connection"]["tunnelId"].string ?? handoff["connection"]["url"].string ?? ""
             handoffTimer = Timer.scheduledTimer(withTimeInterval: min(60, expiry / 1000 - Date().timeIntervalSince1970), repeats: false) { [weak self] _ in
-                Task { @MainActor in self?.clearSecrets() }
+                guard let owner = self else { return }
+                Task { @MainActor in owner.clearSecrets() }
             }
         }
     }

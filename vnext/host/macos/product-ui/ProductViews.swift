@@ -528,7 +528,8 @@ struct ProductAcceptanceField: NSViewRepresentable {
         window.delegate = self; window.contentView = NSHostingView(rootView: ProductView(model: model, controller: self))
         window.center(); window.setFrameAutosaveName("Styx.ProductWindow.v6")
         observationTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
-            Task { @MainActor in await self?.observeDesktopReadback() }
+            guard let owner = self else { return }
+            Task { @MainActor in await owner.observeDesktopReadback() }
         }
     }
     required init?(coder: NSCoder) { nil }
