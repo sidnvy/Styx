@@ -120,8 +120,17 @@ jobs:
           fi
       - name: Validate checksum and safe archive extraction regressions
         run: python -m unittest discover -s vnext/host/test -p test_prepare_node.py
-      - name: Validate portable signed staging and local pairing identity
-        run: node --test --test-concurrency=1 vnext/host/test/*.test.mjs vnext/host/windows/*.test.mjs vnext/host/windows/platform-update/product.test.mjs
+      - name: Validate complete platform selection
+        run: node --test vnext/ci/test/host-contracts.test.mjs
+      - name: Validate applicable Host contracts in isolated parallel files
+        run: node vnext/ci/host-contracts.mjs "$RUNNER_TEMP/styx-host-contracts"
+      - name: Preserve selected contracts and failure evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: host-contracts-${{ matrix.runner }}
+          path: ${{ runner.temp }}/styx-host-contracts/
+          if-no-files-found: error
       - name: Check Windows interactive-task installer syntax
         if: matrix.runner == 'windows-2025'
         shell: pwsh
