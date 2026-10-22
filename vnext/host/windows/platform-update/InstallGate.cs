@@ -39,7 +39,7 @@ internal static class InstallGate {
   }
  }
  static string Hash(string file){using(var s=SHA256.Create())using(var f=File.OpenRead(file))return BitConverter.ToString(s.ComputeHash(f)).Replace("-","").ToLowerInvariant();}
- static bool Equal(string a,string b){return String.Equals(a,b,StringComparison.OrdinalIgnoreCase);}
+ static bool Equal(string a,string b){return String.Equals(a.TrimEnd(Path.DirectorySeparatorChar,Path.AltDirectorySeparatorChar),b.TrimEnd(Path.DirectorySeparatorChar,Path.AltDirectorySeparatorChar),StringComparison.OrdinalIgnoreCase);}
  static void PrivateFile(string file,string sid){
   Regular(file);var acl=File.GetAccessControl(file);if(acl.GetOwner(typeof(SecurityIdentifier)).Value!=sid)throw new IOException();
   foreach(FileSystemAccessRule r in acl.GetAccessRules(true,true,typeof(SecurityIdentifier)))if(r.AccessControlType==AccessControlType.Allow&&r.IdentityReference.Value!=sid&&r.IdentityReference.Value!="S-1-5-18"&&r.IdentityReference.Value!="S-1-5-32-544")throw new IOException();
