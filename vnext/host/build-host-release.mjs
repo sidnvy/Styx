@@ -13,7 +13,7 @@ const STATIC=Object.freeze([
   'host/launch.mjs','host/installer.mjs','host/health-update.mjs','host/service-update.mjs',
   'host/enroll.mjs','host/setup-native.mjs','host/macos-preview-trust.mjs','host/macos-local-signing.mjs','host/doctor.mjs','host/linux-service.mjs',
   'host/macos-launchagent.mjs','host/macos-native-launcher.mjs','host/windows-task.ps1',
-  'shared/enrollment-protocol.mjs',
+  'shared/enrollment-protocol.mjs','shared/work-admission.mjs',
   'host/private-storage.mjs','shared/private-file.mjs',
   'licenses/styx-LICENSE','licenses/cua-LICENSE',
   'licenses/codex-LICENSE','licenses/codex-NOTICE','licenses/provenance.json',

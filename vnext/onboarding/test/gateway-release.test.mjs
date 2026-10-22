@@ -58,7 +58,7 @@ function historicalBundle(f,revision,version){
 test('contained Gateway build accepts only tracked source and locked production dependencies',t=>{
  const f=fixture(t),result=buildGatewayRelease(f.options),pub=f.keys.publicKey.export({format:'pem',type:'spki'});
  const manifest=JSON.parse(fs.readFileSync(path.join(f.options.destination,'manifest.json'),'utf8'));assert.deepEqual(manifest.files.filter(e=>!e.path.startsWith('bin/')&&!gatewayApplicationFile(e.path)).map(e=>e.path),[]);
- const verified=verifyGatewayRuntimeRelease(f.options.destination,pub);assert.equal(verified.manifest.component,'gateway-application');assert.equal(verified.manifest.sourceContract,3);assert.ok(result.dependencies>2);
+ const verified=verifyGatewayRuntimeRelease(f.options.destination,pub);assert.equal(verified.manifest.component,'gateway-application');assert.equal(verified.manifest.sourceContract,4);assert.ok(result.dependencies>2);
  assert.ok(!verified.manifest.files.some(e=>e.executable&&!/^bin\/node(?:\.exe)?$/.test(e.path)));
  assert.ok(!verified.manifest.files.some(e=>!e.path.startsWith('app/node_modules/')&&/(?:^|\/)(?:test|tests|fixtures|__tests__|__fixtures__|examples)(?:\/|$)|^bin\/(?:codex|cua-driver)/.test(e.path)));
  for(const entry of manifest.files){const bytes=fs.readFileSync(path.join(f.options.destination,entry.path));assert.equal(bytes.length,entry.size,entry.path);assert.equal(digest(bytes),entry.sha256,entry.path);}
@@ -154,7 +154,7 @@ test('real unversioned 26/28-file applications remain readable without relaxing 
   assert.throws(()=>verifyGatewayRuntimeRelease(older.bundle,pub),/complete_signed_gateway_source_imports_required/,statement);
  }
  fs.writeFileSync(file,original);writeManifest(older.bundle,older.manifest,f.keys.privateKey);
- for(const sourceContract of [0,1,4,'3',null]){
+ for(const sourceContract of [0,1,5,'4',null]){
   writeManifest(older.bundle,{...older.manifest,sourceContract},f.keys.privateKey);
   assert.throws(()=>verifyGatewayRuntimeRelease(older.bundle,pub),/unsupported_gateway_source_contract/);
  }
@@ -185,4 +185,11 @@ test('actual contract 2 payload remains verifiable after contract 3 adds Host mi
  const prior=historicalBundle(f,'77d73a0','100.0.0-contract-2');prior.manifest.sourceContract=2;writeManifest(prior.bundle,prior.manifest,f.keys.privateKey);
  assert.equal(verifyGatewayRuntimeRelease(prior.bundle,pub).manifest.sourceContract,2);
  assert.equal(prior.manifest.files.some(e=>e.path==='app/onboarding/host-payload-start-guard.mjs'),false);
+});
+
+test('actual contract 3 payload remains verifiable after work admission extends the signed closure',t=>{
+ const f=fixture(t);buildGatewayRelease(f.options);const pub=f.keys.publicKey.export({format:'pem',type:'spki'});
+ const prior=historicalBundle(f,'70fbeb6','101.0.0-contract-3');prior.manifest.sourceContract=3;writeManifest(prior.bundle,prior.manifest,f.keys.privateKey);
+ assert.equal(verifyGatewayRuntimeRelease(prior.bundle,pub).manifest.sourceContract,3);
+ assert.equal(prior.manifest.files.some(e=>e.path==='app/shared/work-admission.mjs'),false);
 });

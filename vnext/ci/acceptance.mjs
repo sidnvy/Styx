@@ -27,6 +27,7 @@ export function runAcceptance(tier,directory) {
     .sort().map(x=>dir+'/'+x);
   const suites=tier==='fixtures'?[
     ['gateway',files('gateway/test')],
+    ['shared',files('shared/test')],
     ['exec-contract',['packages/styx-exec-adapter/test/unit.test.mjs',
       'packages/styx-exec-adapter/test/windows.test.mjs']],
     ['gui-broker',files('packages/styx-gui-broker/test')],

@@ -6,7 +6,7 @@ import {createHash,createPublicKey,createPrivateKey,randomBytes,sign} from 'node
 import {fileURLToPath} from 'node:url';
 import {ensurePrivateDirectory,requirePrivateDirectory,requirePrivateFile,writePrivateFile} from '../host/private-storage.mjs';
 import {verifySignedRelease,stageSignedRelease,activateRelease,activeRelease,verifiedServiceNode} from '../host/installer.mjs';
-import {GATEWAY_SOURCE_FILES,GATEWAY_V2_SOURCE_FILES,LEGACY_GATEWAY_SOURCE_FILES,GATEWAY_SOURCE_CONTRACT,GATEWAY_ENTRYPOINT,gatewayApplicationFile} from './gateway-release-contract.mjs';
+import {GATEWAY_SOURCE_FILES,GATEWAY_V2_SOURCE_FILES,GATEWAY_V3_SOURCE_FILES,LEGACY_GATEWAY_SOURCE_FILES,GATEWAY_SOURCE_CONTRACT,GATEWAY_ENTRYPOINT,gatewayApplicationFile} from './gateway-release-contract.mjs';
 
 const fail=code=>{throw Error(code)};
 const sum=bytes=>createHash('sha256').update(bytes).digest('hex');
@@ -62,10 +62,10 @@ function verifySourceClosure(bundle,entries){
 function runtimeOnly(verified,bundle){
  const name='bin/'+nodeName(),entries=verified.manifest.files;
  if(!entries.some(e=>e.path===name&&e.executable))fail('signed_gateway_node_required');
- if(Object.hasOwn(verified.manifest,'sourceContract')&&![2,GATEWAY_SOURCE_CONTRACT].includes(verified.manifest.sourceContract))fail('unsupported_gateway_source_contract');
+ if(Object.hasOwn(verified.manifest,'sourceContract')&&![2,3,GATEWAY_SOURCE_CONTRACT].includes(verified.manifest.sourceContract))fail('unsupported_gateway_source_contract');
  if(verified.manifest.component==='gateway-application'){
   const names=new Set(entries.map(e=>e.path));
-  const required=verified.manifest.sourceContract===2?GATEWAY_V2_SOURCE_FILES:Object.hasOwn(verified.manifest,'sourceContract')?GATEWAY_SOURCE_FILES:LEGACY_GATEWAY_SOURCE_FILES;
+  const required=verified.manifest.sourceContract===2?GATEWAY_V2_SOURCE_FILES:verified.manifest.sourceContract===3?GATEWAY_V3_SOURCE_FILES:Object.hasOwn(verified.manifest,'sourceContract')?GATEWAY_SOURCE_FILES:LEGACY_GATEWAY_SOURCE_FILES;
   if(verified.manifest.entrypoint!==GATEWAY_ENTRYPOINT||[...required.map(file=>'app/'+file),'app/package.json','app/package-lock.json','licenses/node-LICENSE','licenses/styx-LICENSE','provenance/gateway-build.json'].some(file=>!names.has(file)))fail('complete_signed_gateway_application_required');
   if(entries.some(e=>e.path!==name&&(!gatewayApplicationFile(e.path)||e.executable)))fail('gateway_runtime_contains_host_or_unknown_payload');
   verifySourceClosure(bundle,entries);
