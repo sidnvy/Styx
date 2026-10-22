@@ -72,7 +72,7 @@ namespace StyxNative {
   }
  }
  sealed class StyxContext:ApplicationContext {
-  readonly string root,state;readonly NotifyIcon tray;readonly Icon icon;readonly Form panel;readonly Settings settings;readonly CancellationTokenSource startupCancellation=new CancellationTokenSource();readonly Stopwatch startupClock=Stopwatch.StartNew();readonly bool startupTest;readonly System.Windows.Forms.Timer startupTimer;
+  readonly string root,state;readonly NotifyIcon tray;readonly Icon icon;readonly Form panel;readonly Settings settings;readonly CancellationTokenSource startupCancellation=new CancellationTokenSource();readonly Stopwatch startupClock=Stopwatch.StartNew();readonly bool startupTest,loginStartup;readonly System.Windows.Forms.Timer startupTimer;
   Core core;bool busy,closing,starting,startupHostUpdateAttempted,actionsGatedDuringStartup=true;int mutationRevision,progressEvents;long firstPaintTicks=-1,verificationStartedTicks=-1,verifiedTicks=-1,readyTicks=-1;object snapshot;Task<object> observation;TaskCompletionSource<bool> mutationDone;readonly Label message;
   internal int ResultCode=2;
   internal object CurrentStatus { get { return snapshot; } }
@@ -80,8 +80,8 @@ namespace StyxNative {
   internal bool MutationBusy { get { return busy||starting; } }
   [DllImport("user32.dll")]static extern bool DestroyIcon(IntPtr hIcon);
   internal static Icon BrandIcon(string file){using(var original=Image.FromFile(file))using(var bitmap=new Bitmap(original,new Size(32,32))){IntPtr handle=bitmap.GetHicon();try{return (Icon)Icon.FromHandle(handle).Clone();}finally{DestroyIcon(handle);}}}
-  internal StyxContext(string resourceRoot,string stateDirectory,bool test,bool testStartup=false){
-   root=resourceRoot;state=stateDirectory;startupTest=testStartup;icon=BrandIcon(Path.Combine(root,"styx-logo.png"));
+  internal StyxContext(string resourceRoot,string stateDirectory,bool test,bool testStartup=false,bool fromLogin=false){
+   root=resourceRoot;state=stateDirectory;startupTest=testStartup;loginStartup=fromLogin;icon=BrandIcon(Path.Combine(root,"styx-logo.png"));
    panel=Window("Styx",new Size(340,420));panel.ShowInTaskbar=false;panel.FormBorderStyle=FormBorderStyle.FixedToolWindow;
    var stack=Stack(panel);Logo(stack,64);Heading(stack,"Your computer, connected");
    message=Text(stack,"Open Settings to get started.",110);
@@ -94,7 +94,7 @@ namespace StyxNative {
    if(!test){
     starting=true;settings.Startup("Opening Styx…",true,false);message.Text="Opening Styx…";
     // WM_TIMER runs after pending paints; BeginInvoke can overtake WM_PAINT.
-    settings.Shown+=(s,e)=>startupTimer.Start();OpenSettings();
+    if(loginStartup){settings.CreateControl();settings.Handle.ToInt64();startupTimer.Start();}else{settings.Shown+=(s,e)=>startupTimer.Start();OpenSettings();}
    }
   }
   internal void RecordFirstPaint(){if(firstPaintTicks<0)firstPaintTicks=startupClock.ElapsedTicks;}
@@ -222,8 +222,11 @@ namespace StyxNative {
   Dictionary<string,object> CapabilityChoice(){var values=Json.Obj("computer",computer.Checked,"browser",browser.Checked);int selected=channel.SelectedIndex-1;if(selected>=0)values["browserChannel"]=selected==1?"msedge":selected==2?"chrome":"auto";if(persist.CheckState!=CheckState.Indeterminate)values["persistLogin"]=persist.Checked;return values;}
   Dictionary<string,object> Choice(){var values=Json.Obj("label",label.Text.Trim(),"computer",computer.Checked,"browser",browser.Checked);if(label.Text.Trim().Length==0)throw new InvalidOperationException();values["browserChannel"]=channel.SelectedIndex==1?"msedge":channel.SelectedIndex==2?"chrome":"auto";values["persistLogin"]=persist.Checked;return values;}
   static bool InvitationPage(string name){return name=="add-computer"||name=="pending-computers";}
+  async Task ReadLogin(){ApplyLogin(await owner.Call("appLifecycle"));}
+  void ApplyLogin(object response){string state=Json.Str(response,"lifecycle","status");Feedback(state=="not_registered"?"Login startup is off.":state=="registered_unverified"?"Login startup is registered. Windows can disable it independently; check Windows startup settings.":"Login startup needs attention. Check Windows startup settings; Styx has not replaced an unfamiliar entry.");}
   internal void ShowPage(string name){if(owner.ManagementOnly&&name!="update-recovery"){if(name!="component-start")requestedPage=name;name="component-start";}if(InvitationPage(page)&&!InvitationPage(name))owner.FinishInviting();page=name;updateRuntime=null;desktopInput=null;desktopInputLabel=null;challengePrompt=null;confirmChat=null;var previous=new Control[content.Controls.Count];content.Controls.CopyTo(previous,0);foreach(var item in previous)if(item!=feedback&&item!=statusReadout&&item!=observationError){var picture=item as PictureBox;if(picture!=null&&picture.Image!=null)picture.Image.Dispose();item.Dispose();}content.Controls.Clear();Status("");owner.Logo(content,48);StyxContext.Heading(content,name=="chat"?"Connect ChatGPT":(name=="overview"||name=="component-start"||name=="update-recovery")?"This computer":"Get started with Styx");
-   if(name=="welcome"){Explain("Set up this computer, or join a Gateway you already own.");Action("Set up this computer",()=>{ShowPage("create");return Task.FromResult(0);},false);Action("Join an existing Gateway",()=>{ShowPage("join");return Task.FromResult(0);},false);}
+   if(name=="welcome"){Explain("Set up this computer, or join a Gateway you already own.");Action("Set up this computer",()=>{ShowPage("create");return Task.FromResult(0);},false);Action("Join an existing Gateway",()=>{ShowPage("join");return Task.FromResult(0);},false);if(Json.Get(owner.CurrentStatus,"status","deployment")!=null)Action("Login startup",async()=>{ShowPage("login-startup");await ReadLogin();});}
+   else if(name=="login-startup"){Explain("Start Styx in the system tray when you sign in. Quitting Styx stops this session only.",70);Action("Enable login startup",async()=>{ApplyLogin(await owner.Call("appLogin",Json.Obj("enabled",true)));});Action("Disable login startup",async()=>{ApplyLogin(await owner.Call("appLogin",Json.Obj("enabled",false)));});Action("Windows startup settings",()=>{Process.Start("ms-settings:startupapps");return Task.FromResult(0);},false);Action("Check status",ReadLogin);}
    else if(name=="create"||name=="join"){Capabilities();if(name=="join"){link=Input("Private pairing link");link.UseSystemPasswordChar=true;Action("Review pairing link",async()=>{var r=await owner.Call("inspectJoin",Json.Obj("link",link.Text));link.Clear();joinOrigin=Json.Str(r,"preview","origin");joinCa=Json.Str(r,"preview","caSha256");Feedback("Gateway: "+joinOrigin+"\nCertificate SHA-256: "+(joinCa.Length>0?joinCa:"system trust")+"\nSelect Approve and prepare only if these match your Gateway.");});}Action(name=="join"?"Approve and prepare":"Prepare this computer",async()=>{var choice=Choice();if(name=="join"){if(String.IsNullOrEmpty(joinOrigin))throw new InvalidOperationException();choice["approvedGatewayOrigin"]=joinOrigin;if(!String.IsNullOrEmpty(joinCa))choice["approvedCaSha256"]=joinCa;}await owner.Call(name=="join"?"join":"create",choice);ShowPage("overview");Feedback("Preparing signed components…");var prepared=await owner.Call("prepare");if(!ShowJoinProgress(prepared)){await owner.Call("connect");await owner.RefreshAfterMutation();}});Action("Return",()=>{ShowPage("welcome");return Task.FromResult(0);},false);}
    else if(name=="overview"){updateRuntime=StyxContext.Button(content,"Update and reopen Styx",owner.UpdateRuntime);updateRuntime.Visible=CanUpdateRuntime(owner.CurrentStatus);if(Json.Yes(owner.CurrentStatus,"session","hostPayloadHandoffSupported"))StyxContext.Button(content,"Review component update",owner.ReviewRuntime);Explain("Connection and account checks are observed separately. Styx runs in your signed-in Windows session. Lock, logout, UAC and elevated applications can limit desktop control.",88);RefreshAction();Action("Continue preparation",async()=>{var r=await owner.Call("prepare");if(!ShowJoinProgress(r))await owner.RefreshAfterMutation();});Action("Reconnect",owner.Reconnect,false);Action("Pause",async()=>{await owner.Call("disconnect");await owner.RefreshAfterMutation();});Action("Add computer",async()=>{var r=await owner.Call("inviteComputer");ShowInvitation(r);});Action("Confirm joining computer",async()=>{ShowPendingComputers(await owner.Call("pendingComputers"));});Action("Paired computers",async()=>{var r=await owner.Call("devices");ShowDevices(r);});Action("Edit capabilities",()=>{ShowPage("capabilities");return Task.FromResult(0);},false);}
    else if(name=="component-start"){Explain("Reading connection settings… Component update and recovery remain available while this check completes.",65);updateRuntime=StyxContext.Button(content,"Update and reopen Styx",owner.UpdateRuntime);updateRuntime.Visible=CanUpdateRuntime(owner.CurrentStatus);if(Json.Yes(owner.CurrentStatus,"session","hostPayloadHandoffSupported"))StyxContext.Button(content,"Review component update",owner.ReviewRuntime);RefreshAction();Status(ComponentNotice(owner.CurrentStatus));}
@@ -362,17 +365,18 @@ namespace StyxNative {
  static class Program {
   [STAThread]static int Main(string[] args){
    Application.EnableVisualStyles();Application.SetCompatibleTextRenderingDefault(false);string root=AppDomain.CurrentDomain.BaseDirectory;
-   string state=Environment.GetEnvironmentVariable("STYX_NATIVE_STATE")??Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"StyxPreview","WindowsFirst");bool test=false,startupTest=false,stateSet=false;
+   string state=Environment.GetEnvironmentVariable("STYX_NATIVE_STATE")??Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"StyxPreview","WindowsFirst");bool test=false,startupTest=false,stateSet=false,fromLogin=false;
    try{
     for(int index=0;index<args.Length;index++){
      if(args[index]=="--self-test"&&!test&&!startupTest)test=true;
      else if(args[index]=="--self-test-startup"&&!test&&!startupTest)startupTest=true;
+     else if(args[index]=="--startup"&&!fromLogin)fromLogin=true;
      else if(args[index]=="--state-dir"&&!stateSet&&index+1<args.Length){state=args[++index];stateSet=true;}
      else throw new ArgumentException();
     }
     if(!Path.IsPathRooted(state))throw new ArgumentException();state=Path.GetFullPath(state);
     if(!InstallCoordination.Enter(root)){if(!test&&!startupTest)MessageBox.Show("Styx is being installed or updated. Open it again when Setup has finished.","Styx",MessageBoxButtons.OK,MessageBoxIcon.Information);return 3;}
-    var app=new StyxContext(root,state,test,startupTest);
+    var app=new StyxContext(root,state,test,startupTest,fromLogin);
     if(test){app.Verify();app.Quit();File.WriteAllText(Path.Combine(root,"native-self-test.json"),"{\"status\":\"PASS\",\"pages\":9,\"uiConstruction\":true,\"joinStateRendering\":true,\"editingAndEvidenceState\":true,\"desktopAcceptance\":\"NOT RUN\",\"serviceMutation\":\"NOT RUN\"}");return 0;}
     Application.Run(app);InstallCoordination.KeepAlive();return startupTest?app.ResultCode:0;
    }catch{if(!test&&!startupTest)MessageBox.Show("Styx could not open. Check that the app resources and runtime are present.","Styx",MessageBoxButtons.OK,MessageBoxIcon.Information);return 2;}

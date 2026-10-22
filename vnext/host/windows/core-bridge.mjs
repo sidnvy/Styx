@@ -9,7 +9,7 @@ import {ensurePrivateDirectory,writePrivateFile,requirePrivateDirectory,configur
 import {launchWindowsHostPayloadHandoff} from './host-payload-handoff.mjs';
 import {observeWindowsNativeAppAuthority} from './native-app-authority.mjs';
 const SAFE_NATIVE_ERRORS=new Set(['windows_native_app_binding_required','desktop_acceptance_native_app_changed','work_in_progress','work_state_unknown']);
-export const OPERATIONS=Object.freeze(['status','create','inspectJoin','join','prepare','connect','disconnect','setCapabilities','tunnelSave','tunnelStart','tunnelStop','acceptanceBegin','acceptanceConfirm','acceptanceDesktopReadback','devices','setDefault','revokeDevice','inviteComputer','closePairing','recoverIngress','pendingComputers','approveComputer','runtimeUpgradePrepare','runtimeUpgradeLaunch','runtimeUpgradeStatus','runtimeUpgradeCancel','quitAdmission','runtimeUpgradeRollback','startupStatus']);
+export const OPERATIONS=Object.freeze(['status','create','inspectJoin','join','prepare','connect','disconnect','setCapabilities','tunnelSave','tunnelStart','tunnelStop','acceptanceBegin','acceptanceConfirm','acceptanceDesktopReadback','devices','setDefault','revokeDevice','inviteComputer','closePairing','recoverIngress','pendingComputers','approveComputer','runtimeUpgradePrepare','runtimeUpgradeLaunch','runtimeUpgradeStatus','runtimeUpgradeCancel','quitAdmission','runtimeUpgradeRollback','startupStatus','appLifecycle','appLogin']);
 export function bootstrap(url){const u=new URL(url);if(u.protocol!=='http:'||u.hostname!=='127.0.0.1'||!u.port||u.pathname!=='/'||u.search||u.username||u.password||!/^#session=[A-Za-z0-9_-]{43}$/.test(u.hash))throw Error('invalid_bootstrap');const token=u.hash.slice(9);u.hash='';return {origin:u.origin,token};}
 export async function createClient(instance,{fetchImpl=fetch}={}){
  const {origin,token}=bootstrap(instance.url);let csrf;
@@ -27,6 +27,8 @@ export async function createClient(instance,{fetchImpl=fetch}={}){
   if(!request||request.schema!==1||!Number.isSafeInteger(request.id)||!OPERATIONS.includes(request.operation)||!request.input||typeof request.input!=='object'||Array.isArray(request.input))throw Error('invalid_native_request');
   const i=request.input,op=request.operation;
   if(op==='startupStatus'){const value=await call('components');if(value.components?.host?.status==='not_configured')return observe();return {session:{localGatewayAvailable:session.localGatewayAvailable,tunnelSupported:session.tunnelSupported,artifactsAvailable:!!session.defaults?.bundle,desktopAcceptanceSupported:instance.desktopAcceptanceSupported===true,hostPayloadHandoffSupported:instance.hostPayloadHandoffSupported===true},status:{components:value.components},loadingDetails:true};}
+  if(op==='appLifecycle')return call('app/lifecycle');
+  if(op==='appLogin'){if(Object.keys(i).length!==1||typeof i.enabled!=='boolean')throw Error('invalid_native_request');return call('app/login',{authorize:true,enabled:i.enabled});}
   if(op==='quitAdmission')return call('app/quit-admission',{authorize:true});
   if(op==='runtimeUpgradePrepare')return call('host-payload/handoff/prepare',{authorize:true});
   if(op==='runtimeUpgradeStatus'){const handoff=await call('host-payload/handoff/status',{}),upgrade=await call('host-payload/status',{});return {...handoff,...upgrade};}
@@ -101,7 +103,7 @@ export function verifyOpenSslBundle(resourceRoot,pin){
 export async function startWindowsCore(resourceRoot,stateRoot){
  if(!path.isAbsolute(stateRoot)||!path.isAbsolute(resourceRoot))throw Error('absolute_native_paths_required');
  ensurePrivateDirectory(stateRoot);requirePrivateDirectory(stateRoot);
- let desktopAcceptanceSupported=false,hostPayloadHandoffSupported=false;
+ let desktopAcceptanceSupported=false,hostPayloadHandoffSupported=false,appLoginReconciliation={status:'not_observed'};
  let options={stateDir:path.join(stateRoot,'deployment'),trustedOpenSSL:undefined};
  const manifest=path.join(resourceRoot,'windows-runtime.json');
  if(fs.existsSync(manifest)){
@@ -114,6 +116,8 @@ export async function startWindowsCore(resourceRoot,stateRoot){
    }
    const core=await import('../../onboarding/core.mjs'),nativeDesktopApp=()=>observeWindowsNativeAppAuthority(resourceRoot,cfg);
    options.nativeAppAuthority=nativeDesktopApp;
+   options.trustedWindowsApp=()=>({resourceRoot,authority:nativeDesktopApp()});
+   try{appLoginReconciliation=await core.reconcileDeploymentAppLifecycle(options.stateDir,{trustedWindowsApp:options.trustedWindowsApp()});}catch{appLoginReconciliation={status:'needs_attention'};}
    hostPayloadHandoffSupported=cfg.hostUpdater?.path==='StyxUpdater.exe'&&/^[a-f0-9]{64}$/.test(cfg.hostUpdater?.sha256??'');
    desktopAcceptanceSupported=cfg.desktopApp?.path==='StyxPreview.exe'&&/^[a-f0-9]{64}$/.test(cfg.desktopApp?.sha256??'')&&cfg.desktopProbe?.path==='StyxSessionProbe.exe'&&/^[a-f0-9]{64}$/.test(cfg.desktopProbe?.sha256??'');
    options.core={...core,startDeploymentForeground:(directory,authorization)=>core.startDeploymentForeground(directory,authorization,{guiAvailable:()=>nativeDesktopAvailable(resourceRoot,cfg.desktopProbe)}),beginDeploymentAcceptance:(directory,authorization)=>core.beginDeploymentAcceptance(directory,authorization,{nativeDesktopApp}),recordDeploymentDesktopReadback:(directory,authorization)=>core.recordDeploymentDesktopReadback(directory,authorization,{nativeDesktopApp})};
@@ -122,7 +126,7 @@ export async function startWindowsCore(resourceRoot,stateRoot){
   if(cfg.openssl){const config=verifyOpenSslBundle(resourceRoot,cfg.openssl);options.trustedOpenSSL=member(cfg.openssl.path,cfg.openssl.sha256);if(config)options.trustedOpenSSLConfig=config;}
   if(cfg.tunnel)options.trustedTunnelClient={binary:member(cfg.tunnel.path,cfg.tunnel.sha256),sha256:cfg.tunnel.sha256};
  }
- const {createOnboardingServer}=await import('../../onboarding/server.mjs');const instance=await createOnboardingServer(options);return {...instance,desktopAcceptanceSupported,hostPayloadHandoffSupported,...(hostPayloadHandoffSupported?{launchHostPayloadHandoff:(ticketId,mode)=>launchWindowsHostPayloadHandoff({stateDir:options.stateDir,ticketId,mode})}:{})};
+ const {createOnboardingServer}=await import('../../onboarding/server.mjs');const instance=await createOnboardingServer(options);return {...instance,desktopAcceptanceSupported,hostPayloadHandoffSupported,appLoginReconciliation,...(hostPayloadHandoffSupported?{launchHostPayloadHandoff:(ticketId,mode)=>launchWindowsHostPayloadHandoff({stateDir:options.stateDir,ticketId,mode})}:{})};
 }
 export async function serve({input=process.stdin,output=process.stdout,instance,client:providedClient}={}){
  let owned=instance,client;
