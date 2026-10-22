@@ -46,6 +46,9 @@ export function controlMacLoginRecovery(config,{action='status',authorize=false,
    if(/Could not find (?:specified )?service/.test(String(error.stderr??'')))return false;
    throw Error('login_recovery_observation_unknown');
   }
+  // Matching launchd metadata cannot authorize an unregistered job that
+  // appeared after the absent-definition preflight.
+  check(e.definition,'login_recovery_unowned_loaded_job');
   const source=/^\s*path = (.+)$/m.exec(text)?.[1];
   const argv=/^\s*arguments = \{\n([\s\S]*?)^\s*\}/m.exec(text)?.[1]
    ?.split('\n').map(line=>line.trim()).filter(Boolean);

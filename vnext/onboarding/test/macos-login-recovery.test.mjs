@@ -213,3 +213,19 @@ test('stop and uninstall reject foreign loaded argv before changing future login
   assert.throws(()=>controlMacLoginRecovery(f.config,{...f.opts,action}),/loaded_definition_mismatch/);assert(f.calls.every(x=>x[1][0]==='print'));
  }
 });
+test('an unregistered job appearing after absent preflight is never adopted even with matching path and argv',t=>{
+ for(const action of ['suspend','stop','uninstall']){
+  const f=fixture(t),target='gui/'+process.getuid()+'/app.styx.desktop-login',file=path.join(f.home,'Library/LaunchAgents/app.styx.desktop-login.plist');
+  const entry=macLoginRecoveryPlan(f.config)[0];let reads=0;
+  const run=(bin,args,options)=>{
+   if(args[0]==='print'&&args[1]===target&&++reads===2){
+    f.loaded.add(target);
+    f.definitions.set(target,'state = running\n path = '+file+'\n arguments = {\n'+entry.args.map(arg=>'  '+arg).join('\n')+'\n }\n');
+   }
+   return f.opts.run(bin,args,options);
+  };
+  assert.throws(()=>controlMacLoginRecovery(f.config,{...f.opts,action,run}),/unowned_loaded_job/);
+  assert.equal(reads,2);assert.equal(f.loaded.has(target),true);assert.equal(fs.existsSync(file),false);
+  assert(f.calls.every(([,args])=>args[0]==='print'));
+ }
+});
