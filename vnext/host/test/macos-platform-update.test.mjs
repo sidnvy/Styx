@@ -28,7 +28,7 @@ test('unverified framework bytes are rejected before extraction or any executabl
  assert.throws(()=>stageMacSparkle({...config,sparkleArchive:archive},{app:path.join(root,'Styx.app'),buildRoot:root,run:()=>assert.fail('unverified bytes must not execute')}),/sparkle_archive_checksum_mismatch/);
 });
 test('only canonical Sparkle links stay within the copied framework',t=>{
- const app=fs.mkdtempSync(path.join(os.tmpdir(),'styx-sparkle-links-'));t.after(()=>fs.rmSync(app,{recursive:true,force:true}));const framework=path.join(app,'Contents/Frameworks/Sparkle.framework');fs.mkdirSync(path.join(framework,'Versions/B'),{recursive:true});fs.writeFileSync(path.join(framework,'Versions/B/Sparkle'),'fixture');fs.symlinkSync('B',path.join(framework,'Versions/Current'));fs.symlinkSync('Versions/Current/Sparkle',path.join(framework,'Sparkle'));
+ const app=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'styx-sparkle-links-')));t.after(()=>fs.rmSync(app,{recursive:true,force:true}));const framework=path.join(app,'Contents/Frameworks/Sparkle.framework');fs.mkdirSync(path.join(framework,'Versions/B'),{recursive:true});fs.writeFileSync(path.join(framework,'Versions/B/Sparkle'),'fixture');fs.symlinkSync('B',path.join(framework,'Versions/Current'));fs.symlinkSync('Versions/Current/Sparkle',path.join(framework,'Sparkle'));
  assert.equal(isSparkleFrameworkLink(app,path.join(framework,'Sparkle')),true);fs.unlinkSync(path.join(framework,'Sparkle'));fs.symlinkSync('/tmp',path.join(framework,'Sparkle'));assert.throws(()=>isSparkleFrameworkLink(app,path.join(framework,'Sparkle')),/link_changed/);
  assert.equal(isSparkleFrameworkLink(app,path.join(app,'unrecognized')),false);
 });
