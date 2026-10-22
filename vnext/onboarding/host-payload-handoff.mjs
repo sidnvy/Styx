@@ -5,7 +5,7 @@ import path from 'node:path';
 import {createHash,randomBytes} from 'node:crypto';
 import {inspectHostPayloadCandidate,planHostPayloadMigration,applyHostPayloadMigration} from './host-payload-migration.mjs';
 import {verifyMacPreviewApp} from '../host/macos-preview-trust.mjs';
-import {requirePrivateDirectory,requirePrivateFile,ensurePrivateDirectory,openPrivateFile} from '../host/private-storage.mjs';
+import {requirePrivateDirectory,requirePrivateFile,requirePrivatePaths,ensurePrivateDirectory,openPrivateFile} from '../host/private-storage.mjs';
 import {acquireRecoveryGuard} from './recovery-guard.mjs';
 const KIND='host-payload-handoff-v1',FILE='host-payload-handoff.json',PREPARE='host-payload-handoff-prepare.lock',EXECUTE='host-payload-handoff-execute.lock',TTL=15*60*1000;
 const id=x=>/^[a-f0-9]{32}$/.test(x??''),digest=x=>/^[a-f0-9]{64}$/.test(x??''),sha=b=>createHash('sha256').update(b).digest('hex');
@@ -21,7 +21,7 @@ function admission(t){return{schema:1,kind:KIND,stateDir:t.stateDir,ticketId:t.t
 function owns(t){const f=path.join(t.stateDir,'advance.lock');let observed;try{observed=read(f)}catch{fail('handoff_admission_changed')}assert(JSON.stringify(observed)===JSON.stringify(admission(t)),'handoff_admission_changed');return f}
 function dead(pid){try{process.kill(pid,0);return false}catch(e){return e.code==='ESRCH'}}
 function save(t){write(path.join(t.stateDir,FILE),t)}
-function runtimeDirectory(t){return path.join(t.stateDir,'host-payload-handoffs',t.ticketId)}
+function runtimeDirectory(t){return path.join(path.dirname(t.stateDir),'host-payload-updaters',sha(t.stateDir).slice(0,16),t.ticketId)}
 function inventory(source,relative,files){const s=fs.lstatSync(source);assert(!s.isSymbolicLink(),'handoff_source_redirected');if(s.isDirectory()){for(const n of fs.readdirSync(source).sort())inventory(path.join(source,n),path.posix.join(relative,n),files)}else{assert(s.isFile(),'handoff_source_not_regular');files.push({source,relative,executable:!!(s.mode&0o111)})}}
 async function resolveApp({stateDir,config}){
  if(process.platform==='win32')return(await import('../host/windows/host-payload-handoff.mjs')).resolveWindowsHostPayloadHandoffApp({stateDir,config});
@@ -30,11 +30,12 @@ async function resolveApp({stateDir,config}){
  return{appPath:app.path,bundle:path.join(resources,'host-bundle'),identity:app,files};
 }
 function safeFiles(app){assert(path.isAbsolute(app.appPath)&&path.isAbsolute(app.bundle)&&Array.isArray(app.files)&&app.files.length>0&&app.files.length<=12000,'handoff_updater_sources_invalid');const names=new Set();for(const f of app.files){assert(path.isAbsolute(f.source)&&typeof f.relative==='string'&&!path.posix.isAbsolute(f.relative)&&!f.relative.includes('\\')&&f.relative.split('/').every(p=>p&&p!=='.'&&p!=='..')&&!names.has(f.relative),'handoff_updater_source_invalid');names.add(f.relative)}return app}
-function stage(t,app){const dir=path.join(t.stateDir,'host-payload-handoffs');ensurePrivateDirectory(dir);const destination=runtimeDirectory(t);ensurePrivateDirectory(destination,{exclusive:true});let total=0;const files=[];
+function stage(t,app){const parent=path.dirname(t.stateDir);requirePrivateDirectory(parent);const updates=path.join(parent,'host-payload-updaters');ensurePrivateDirectory(updates);const dir=path.join(updates,sha(t.stateDir).slice(0,16));ensurePrivateDirectory(dir);const destination=runtimeDirectory(t);ensurePrivateDirectory(destination,{exclusive:true});let total=0;const files=[];
  for(const f of app.files){const s=fs.lstatSync(f.source);assert(s.isFile()&&!s.isSymbolicLink(),'handoff_source_redirected');total+=s.size;assert(s.size<=256*1024*1024&&total<=2*1024*1024*1024,'handoff_source_size_invalid');const bytes=fs.readFileSync(f.source),target=path.join(destination,...f.relative.split('/'));fs.mkdirSync(path.dirname(target),{recursive:true,mode:0o700});fs.writeFileSync(target,bytes,{flag:'wx',mode:f.executable?0o700:0o600});files.push({...f,sha256:sha(bytes)})}
- return files;
+ write(path.join(destination,'input.json'),{stateDir:t.stateDir,ticketId:t.ticketId});return files;
 }
-function checkFiles(t,files,{source=false}={}){for(const f of files){const target=path.join(runtimeDirectory(t),...f.relative.split('/'));requirePrivateFile(target);assert(sha(fs.readFileSync(target))===f.sha256,'handoff_runtime_changed');if(source){const s=fs.lstatSync(f.source);assert(s.isFile()&&!s.isSymbolicLink()&&sha(fs.readFileSync(f.source))===f.sha256,'handoff_source_changed')}}}
+function checkFiles(t,files,{source=false}={}){for(let index=0;index<files.length;index+=32){const batch=files.slice(index,index+32),paths=batch.map(f=>({path:path.join(runtimeDirectory(t),...f.relative.split('/')),kind:'file'}));requirePrivatePaths(paths);for(let i=0;i<batch.length;i++){const f=batch[i],target=paths[i].path;assert(sha(fs.readFileSync(target))===f.sha256,'handoff_runtime_changed');if(source){const s=fs.lstatSync(f.source);assert(s.isFile()&&!s.isSymbolicLink()&&sha(fs.readFileSync(f.source))===f.sha256,'handoff_source_changed')}}}}
+
 function verifyRuntime(t){const f=path.join(runtimeDirectory(t),'runtime-manifest.json');requirePrivateFile(f);assert(digest(t.runtimeManifestSha256)&&sha(fs.readFileSync(f))===t.runtimeManifestSha256,'handoff_runtime_manifest_changed');checkFiles(t,read(f,8*1024*1024))}
 function applied(t){const file=path.join(t.stateDir,'host-payload-migration.json');if(!fs.existsSync(file))return null;const j=read(file);if(j.plan?.handoffTicketId!==t.ticketId)return null;const {planId,...body}=j.plan;assert(j.schema===1&&j.kind==='host-payload-migration-v1'&&id(j.transactionId)&&j.plan.stateDir===t.stateDir&&sha(JSON.stringify(body))===planId,'handoff_migration_binding_invalid');assert(JSON.stringify(j.plan.current)===JSON.stringify(t.candidate.current)&&JSON.stringify(j.plan.target)===JSON.stringify(t.candidate.target),'handoff_migration_target_changed');if(j.status!=='applied')return null;for(const f of j.plan.changes)assert(sha(fs.readFileSync(f.path))===f.afterSha256,'handoff_applied_files_changed');for(const f of j.plan.preserved)assert(sha(fs.readFileSync(f.path))===f.sha256,'handoff_preserved_files_changed');return j.transactionId}
 export function readHostPayloadHandoff({stateDir}={}){const t=ticket(stateDir);return t?publicTicket(t):orphan(stateDir)??publicTicket(null)}
