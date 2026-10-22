@@ -45,7 +45,16 @@ export async function runManagedWindowsPilot({directory,nodeBinary,codexBinary,c
  let gateway,server,client,transport,installAttempted=false,phase='signed_build';
  const installRoot=path.join(state,'installed');
  const helper=path.join(root,'windows-task.ps1');
- const control=(action,cfg)=>ps('& '+literal(helper)+' -Action '+action+' -TaskName '+literal(taskName)+(cfg?' -ConfigPath '+literal(cfg):''));
+ const helperHash=sha(helper);
+ // Execute these exact reviewed helper bytes without changing PowerShell's
+ // script-file execution policy. User data remains separately encoded data.
+ const control=(action,cfg)=>{
+  assert(['install','start','stop','status','uninstall'].includes(action),'invalid_pilot_task_action');
+  assert(sha(helper)===helperHash,'pilot_task_helper_changed');
+  const source=fs.readFileSync(helper).toString('base64');
+  const params=Buffer.from(JSON.stringify({Action:action,TaskName:taskName,...(cfg?{ConfigPath:cfg}:{})})).toString('base64');
+  return ps('$source=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('+literal(source)+'));$values=[Text.Encoding]::UTF8.GetString([Convert]::FromBase64String('+literal(params)+'))|ConvertFrom-Json;$params=@{};$values.PSObject.Properties|ForEach-Object {$params[$_.Name]=$_.Value};& ([ScriptBlock]::Create($source)) @params');
+ };
  const ownPids=()=>JSON.parse(ps('@(Get-CimInstance Win32_Process -Filter "Name=\'node.exe\'" | Where-Object {$_.ExecutablePath -eq '+literal(path.join(installRoot,'node.exe'))+'} | Select-Object -ExpandProperty ProcessId) | ConvertTo-Json -Compress')||'[]');
  const pids=()=>{const v=ownPids();return Array.isArray(v)?v:[v]};
  async function closeClient(){if(transport)await transport.terminateSession().catch(()=>{});await client?.close().catch(()=>{});client=null;transport=null}
