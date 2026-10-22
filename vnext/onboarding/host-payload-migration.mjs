@@ -22,7 +22,7 @@ const id=x=>/^[a-f0-9]{32}$/.test(x??''),digest=x=>/^[a-f0-9]{64}$/.test(x??'');
 function bytes(file,large=false){assert(requirePrivateFile(file).size<=(large?256*1024*1024:2*1024*1024),'host_payload_file_too_large');return fs.readFileSync(file)}
 const read=file=>JSON.parse(bytes(file));
 function sync(dir){if(process.platform==='win32')return;const fd=fs.openSync(dir,'r');try{fs.fsyncSync(fd)}finally{fs.closeSync(fd)}}
-function atomic(file,data,mode=0o600){const tmp=file+'.'+randomBytes(8).toString('hex')+'.tmp',fd=openPrivateFile(tmp,mode);try{fs.writeFileSync(fd,data);fs.fsyncSync(fd)}finally{fs.closeSync(fd)}try{fs.renameSync(tmp,file);sync(path.dirname(file))}finally{if(fs.existsSync(tmp))fs.unlinkSync(tmp)}}
+function atomic(file,data,mode=0o600){const tmp=file+'.'+randomBytes(8).toString('hex')+'.tmp',fd=openPrivateFile(tmp,process.platform==='win32'?(mode&0o100?0o700:0o600):mode);try{fs.writeFileSync(fd,data);fs.fsyncSync(fd)}finally{fs.closeSync(fd)}try{fs.renameSync(tmp,file);sync(path.dirname(file))}finally{if(fs.existsSync(tmp))fs.unlinkSync(tmp)}}
 function journal(d){
  const file=path.join(d,JOURNAL);let j=fs.existsSync(file)?read(file):null;
  if(j)assert(j.schema===1&&j.kind===KIND&&id(j.transactionId)&&j.plan?.stateDir===d&&['capturing','prepared','writing','applied','rolling_back','rolled_back','uncertain'].includes(j.status),'host_payload_invalid_journal');
@@ -207,6 +207,22 @@ export async function applyHostPayloadMigration({stateDir,plan,authorize=false}=
  }catch(e){if(pending&&j){try{save(stateDir,j,'uncertain')}catch{}fail('host_payload_interrupted_explicit_rollback_required')}throw e}finally{held.close(pending)}
 }
 function validMode(mode,platform){return Number.isInteger(mode)&&mode>=0&&mode<=0o777&&(platform==='win32'||(mode&0o077)===0)}
+// A read-only doctor result belongs to the candidate generation. Preserve it
+// as rollback evidence, rather than treating normal verification as a foreign
+// configuration edit. No service action or other state change is admitted.
+function doctorObservation(after,current){
+ try{
+  const expected=JSON.parse(after),observed=JSON.parse(current);
+  const original=expected.steps?.filter(s=>s.id==='host.doctor'),checks=observed.steps?.filter(s=>s.id==='host.doctor');
+  if(original?.length!==1||checks?.length!==1||JSON.stringify(original[0])!==JSON.stringify({id:'host.doctor',status:'pending'}))return false;
+  const step=checks[0];if(!['succeeded','blocked'].includes(step.status)||Object.keys(step).some(k=>!['id','status','updatedAt','evidence','error'].includes(k))||typeof step.updatedAt!=='string'||!Number.isFinite(Date.parse(step.updatedAt)))return false;
+  if(step.error!==undefined&&step.error!=='step_failed_inspect_local_evidence_no_automatic_replay')return false;
+  if(step.evidence!==undefined){const e=step.evidence;if(!e||Object.keys(e).some(k=>!['status','blockers','warnings'].includes(k))||typeof e.status!=='string'||!Array.isArray(e.blockers)||!Array.isArray(e.warnings))return false;if(step.status==='succeeded'&&(e.status!=='ready_for_exec'||e.blockers.length||step.error))return false;}
+  else if(step.status!=='blocked'||!step.error)return false;
+  observed.steps=observed.steps.map(s=>s.id==='host.doctor'?original[0]:s);
+  return JSON.stringify(observed)===JSON.stringify(expected);
+ }catch{return false}
+}
 function rollbackFiles(d,j){
  const platform=j.plan.platform??'darwin';assert(['darwin','linux','win32'].includes(platform),'host_payload_platform_unsupported');
  const {planId,...body}=j.plan;assert(sha(JSON.stringify(body))===planId&&JSON.stringify(j.files)===JSON.stringify(j.plan.changes)&&JSON.stringify(j.preserved)===JSON.stringify(j.plan.preserved),'host_payload_snapshot_invalid');
@@ -215,7 +231,7 @@ function rollbackFiles(d,j){
  const expected=roots(d,config.host.baseDir,platform);assert(Array.isArray(j.files)&&j.files.length>=10&&new Set(j.files.map(f=>f.name)).size===j.files.length,'host_payload_snapshot_invalid');
  assert(Object.keys(expected).filter(n=>!['background','capabilities'].includes(n)).every(n=>j.files.some(f=>f.name===n)),'host_payload_snapshot_invalid');
  for(const name of ['background','capabilities'])assert(j.files.some(f=>f.name===name)||!fs.existsSync(expected[name]),'host_payload_new_auxiliary_state');
- const files=j.files.map(f=>{assert(expected[f.name]===f.path&&validMode(f.beforeMode,platform)&&validMode(f.afterMode,platform)&&digest(f.beforeSha256)&&digest(f.afterSha256),'host_payload_snapshot_invalid');const before=bytes(path.join(directory,f.name+'.before'),f.name.startsWith('bootstrap_')),after=bytes(path.join(directory,f.name+'.after'),f.name.startsWith('bootstrap_'));assert(sha(before)===f.beforeSha256&&sha(after)===f.afterSha256&&[f.beforeSha256,f.afterSha256].includes(sha(bytes(f.path,f.name.startsWith('bootstrap_')))),'host_payload_rollback_scope_changed');return {...f,before,after}});
+ const files=j.files.map(f=>{assert(expected[f.name]===f.path&&validMode(f.beforeMode,platform)&&validMode(f.afterMode,platform)&&digest(f.beforeSha256)&&digest(f.afterSha256),'host_payload_snapshot_invalid');const before=bytes(path.join(directory,f.name+'.before'),f.name.startsWith('bootstrap_')),after=bytes(path.join(directory,f.name+'.after'),f.name.startsWith('bootstrap_')),current=bytes(f.path,f.name.startsWith('bootstrap_')),currentSha256=sha(current);assert(sha(before)===f.beforeSha256&&sha(after)===f.afterSha256,'host_payload_snapshot_invalid');const observation=![f.beforeSha256,f.afterSha256].includes(currentSha256);assert(!observation||f.name==='state'&&doctorObservation(after,current),'host_payload_rollback_scope_changed');return {...f,before,after,currentSha256,...(observation?{observation:current}:{})}});
  const pem=files.find(f=>f.name==='publisher').before,root=path.join(config.host.baseDir,'install'),pointer=JSON.parse(files.find(f=>f.name==='pointer').before);
  assert(pin(pem)===config.host.publisherSha256&&pointer.version===j.plan.current.version&&pointer.manifest_sha256===j.plan.current.manifestSha256,'host_payload_snapshot_invalid');
  const old=verifySignedRelease(path.join(root,'releases',pointer.version),pem,{platform,arch:process.arch});assert(old.sha256===pointer.manifest_sha256,'host_payload_previous_release_changed');
@@ -237,8 +253,9 @@ export async function rollbackHostPayloadMigration({stateDir,transactionId,autho
    checkPreserved(j.preserved);save(stateDir,j,'rolled_back');pending=false;return {...publicJournal(j),status:'rolled_back_stopped'};
   }
   const {files,s}=rollbackFiles(stateDir,j);noActivity(stateDir,s.root);await absent(s,adapters);held.assertOwned();guard.assertOwned();checkPreserved(j.preserved);
+  for(const f of files.filter(f=>f.observation)){const file=path.join(stateDir,'host-payload-migration-snapshots',j.transactionId,'doctor-'+f.currentSha256+'.json');atomic(file,f.observation);j.rollbackObservation={kind:'candidate_host_doctor',path:file,sha256:f.currentSha256};}
   j.owner=held.owner;save(stateDir,j,'rolling_back');pending=true;adapters.onPhase?.('rolling_back');
-  for(const f of files){held.assertOwned();guard.assertOwned();assert([f.beforeSha256,f.afterSha256].includes(sha(bytes(f.path,f.name.startsWith('bootstrap_')))),'host_payload_rollback_scope_changed');save(stateDir,j,'rolling_back',f.name);atomic(f.path,f.before,f.beforeMode);adapters.onPhase?.('restored_'+f.name)}
+  for(const f of files){held.assertOwned();guard.assertOwned();assert(sha(bytes(f.path,f.name.startsWith('bootstrap_')))===f.currentSha256,'host_payload_rollback_scope_changed');save(stateDir,j,'rolling_back',f.name);atomic(f.path,f.before,f.beforeMode);adapters.onPhase?.('restored_'+f.name)}
   assertFiles(files,'before');checkPreserved(j.preserved);guard.assertOwned();save(stateDir,j,'rolled_back');pending=false;return {...publicJournal(j),status:'rolled_back_stopped'};
  }catch(e){if(pending&&j){try{save(stateDir,j,'uncertain')}catch{}fail('host_payload_rollback_interrupted')}throw e}finally{try{held?.close(pending)}finally{guard.close()}}
 }

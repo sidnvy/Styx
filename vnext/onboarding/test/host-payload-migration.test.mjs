@@ -140,3 +140,25 @@ test('handoff keeps a continuous startup interlock and cannot be consumed while 
  assert.equal(readHostPayloadMigration({stateDir:f.stateDir}).status,'uncertain');assert.ok(fs.existsSync(lock));
  await rollback(f,readHostPayloadMigration({stateDir:f.stateDir}).transactionId);unchanged(before);assert.ok(!fs.existsSync(lock));
 });
+
+for(const status of ['succeeded','blocked'])test(`rollback archives candidate doctor ${status} observation and restores the previous generation`,async t=>{
+ const f=fixture(t),{plan,before}=await reviewed(f),result=await applyHostPayloadMigration({stateDir:f.stateDir,plan,authorize:true},f.adapters);
+ const file=path.join(f.stateDir,'state.json'),state=json(file);state.steps=state.steps.map(step=>step.id==='host.doctor'?{id:step.id,status,updatedAt:new Date().toISOString(),evidence:{status:status==='succeeded'?'ready_for_exec':'blocked',blockers:status==='succeeded'?[]:['test_blocker'],warnings:[]}}:step);put(file,state);const observed=fs.readFileSync(file);
+ await rollback(f,result.transactionId);unchanged(before);
+ const j=json(path.join(f.stateDir,'host-payload-migration.json'));assert.equal(j.rollbackObservation.kind,'candidate_host_doctor');assert.equal(j.rollbackObservation.sha256,sha(observed));assert.deepEqual(fs.readFileSync(j.rollbackObservation.path),observed);
+});
+test('doctor exception permits rollback but unrelated state changes and service observations remain protected',async t=>{
+ const f=fixture(t),{plan}=await reviewed(f),result=await applyHostPayloadMigration({stateDir:f.stateDir,plan,authorize:true},f.adapters),file=path.join(f.stateDir,'state.json'),after=json(file);
+ const observed=structuredClone(after);observed.steps=observed.steps.map(step=>step.id==='host.doctor'?{id:step.id,status:'blocked',updatedAt:new Date().toISOString(),error:'step_failed_inspect_local_evidence_no_automatic_replay'}:step);
+ for(const change of [s=>{s.mode='create-local'},s=>{s.steps[0].status='blocked'},s=>{s.steps.find(x=>x.id==='host.service.install').status='succeeded'},s=>{s.maintenance=[{status:'succeeded'}]}]){
+  const state=structuredClone(observed);change(state);put(file,state);await assert.rejects(rollback(f,result.transactionId),/rollback_scope_changed/);assert.deepEqual(json(file),state);
+ }
+ put(file,observed);await rollback(f,result.transactionId);
+});
+test('real process exit after archiving doctor observation retains recoverable rollback',async t=>{
+ const f=fixture(t),{plan,before}=await reviewed(f),result=await applyHostPayloadMigration({stateDir:f.stateDir,plan,authorize:true},f.adapters),file=path.join(f.stateDir,'state.json'),state=json(file);
+ state.steps=state.steps.map(step=>step.id==='host.doctor'?{id:step.id,status:'succeeded',updatedAt:new Date().toISOString(),evidence:{status:'ready_for_exec',blockers:[],warnings:[]}}:step);put(file,state);
+ const module=fileURLToPath(new URL('../host-payload-migration.mjs',import.meta.url)),script=`import {rollbackHostPayloadMigration} from ${JSON.stringify(module)};await rollbackHostPayloadMigration(JSON.parse(process.env.STYX_TEST_MIGRATION),{platform:'darwin',observeAbsence:async()=>({status:'absent'}),onPhase:p=>{if(p==='restored_deployment')process.exit(75)}});`;
+ const child=spawnSync(process.execPath,['--input-type=module','-e',script],{encoding:'utf8',env:{...process.env,STYX_TEST_MIGRATION:JSON.stringify({stateDir:f.stateDir,transactionId:result.transactionId,authorize:true})}});assert.equal(child.status,75,child.stderr);
+ await rollback(f,result.transactionId);unchanged(before);assert.ok(json(path.join(f.stateDir,'host-payload-migration.json')).rollbackObservation);
+});
