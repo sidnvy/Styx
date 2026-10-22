@@ -5,7 +5,7 @@ import path from 'node:path';
 import {createHash,randomBytes} from 'node:crypto';
 import {inspectHostPayloadCandidate,planHostPayloadMigration,applyHostPayloadMigration} from './host-payload-migration.mjs';
 import {verifyMacPreviewApp} from '../host/macos-preview-trust.mjs';
-import {requirePrivateDirectory,requirePrivateFile,requirePrivatePaths,ensurePrivateDirectory,openPrivateFile} from '../host/private-storage.mjs';
+import {requirePrivateDirectory,requirePrivateFile,requirePrivatePaths,ensurePrivateDirectory,openPrivateFile,configureWindowsAclHelper} from '../host/private-storage.mjs';
 import {acquireRecoveryGuard} from './recovery-guard.mjs';
 const KIND='host-payload-handoff-v1',FILE='host-payload-handoff.json',PREPARE='host-payload-handoff-prepare.lock',EXECUTE='host-payload-handoff-execute.lock',TTL=15*60*1000;
 const id=x=>/^[a-f0-9]{32}$/.test(x??''),digest=x=>/^[a-f0-9]{64}$/.test(x??''),sha=b=>createHash('sha256').update(b).digest('hex');
@@ -36,7 +36,17 @@ function stage(t,app){const parent=path.dirname(t.stateDir);requirePrivateDirect
 }
 function checkFiles(t,files,{source=false}={}){for(let index=0;index<files.length;index+=32){const batch=files.slice(index,index+32),paths=batch.map(f=>({path:path.join(runtimeDirectory(t),...f.relative.split('/')),kind:'file'}));requirePrivatePaths(paths);for(let i=0;i<batch.length;i++){const f=batch[i],target=paths[i].path;assert(sha(fs.readFileSync(target))===f.sha256,'handoff_runtime_changed');if(source){const s=fs.lstatSync(f.source);assert(s.isFile()&&!s.isSymbolicLink()&&sha(fs.readFileSync(f.source))===f.sha256,'handoff_source_changed')}}}}
 
-function verifyRuntime(t){const f=path.join(runtimeDirectory(t),'runtime-manifest.json');requirePrivateFile(f);assert(digest(t.runtimeManifestSha256)&&sha(fs.readFileSync(f))===t.runtimeManifestSha256,'handoff_runtime_manifest_changed');checkFiles(t,read(f,8*1024*1024))}
+function verifyRuntime(t){
+ const f=path.join(runtimeDirectory(t),'runtime-manifest.json');requirePrivateFile(f);
+ assert(digest(t.runtimeManifestSha256)&&sha(fs.readFileSync(f))===t.runtimeManifestSha256,'handoff_runtime_manifest_changed');
+ const files=read(f,8*1024*1024);
+ // The independent Host transaction uses the same read-only native adapter.
+ // Bootstrap trust with the existing private-file check and ticket-bound
+ // manifest before selecting it; never take an executable from environment.
+ const helper=process.platform==='win32'?files.find(item=>item.relative==='StyxPrivateStorage.exe'):null;
+ if(helper){const file=path.join(runtimeDirectory(t),'StyxPrivateStorage.exe');requirePrivateFile(file);configureWindowsAclHelper(file,helper.sha256);}
+ checkFiles(t,files);
+}
 function applied(t){const file=path.join(t.stateDir,'host-payload-migration.json');if(!fs.existsSync(file))return null;const j=read(file);if(j.plan?.handoffTicketId!==t.ticketId)return null;const {planId,...body}=j.plan;assert(j.schema===1&&j.kind==='host-payload-migration-v1'&&id(j.transactionId)&&j.plan.stateDir===t.stateDir&&sha(JSON.stringify(body))===planId,'handoff_migration_binding_invalid');assert(JSON.stringify(j.plan.current)===JSON.stringify(t.candidate.current)&&JSON.stringify(j.plan.target)===JSON.stringify(t.candidate.target),'handoff_migration_target_changed');if(!['applied','rolled_back'].includes(j.status))return null;for(const f of j.plan.changes)assert(sha(fs.readFileSync(f.path))===(j.status==='applied'?f.afterSha256:f.beforeSha256),'handoff_applied_files_changed');for(const f of j.plan.preserved)assert(sha(fs.readFileSync(f.path))===f.sha256,'handoff_preserved_files_changed');return{transactionId:j.transactionId,status:j.status==='applied'?'applied_stopped':'rolled_back'}}
 function rolledBack(t){if(!t)return null;const file=path.join(t.stateDir,'host-payload-migration.json');return fs.existsSync(file)&&read(file).status==='rolled_back'?applied(t):null}
 export function readHostPayloadHandoff({stateDir}={}){const t=ticket(stateDir);const recovered=rolledBack(t);return t?publicTicket(recovered?{...t,...recovered}:t):orphan(stateDir)??publicTicket(null)}

@@ -22,7 +22,7 @@ export function resolveWindowsHostPayloadHandoffApp({stateDir,config}={}, {resou
  const authority=observeApp(resourceRoot,runtime);assert(authority.source==='current_windows_native_app','handoff_windows_native_app_required');
  const names=new Set(),files=[];
  for(const member of manifest.files){assert(relative(member.path)&&digest(member.sha256)&&!names.has(member.path),'handoff_windows_package_invalid');names.add(member.path);const source=path.join(resourceRoot,...member.path.split('/'));regular(source);assert(hash(source)===member.sha256,'handoff_windows_package_changed');
-  if(member.path.startsWith('vnext/')||['runtime/node.exe','StyxUpdater.exe','StyxPreview.exe'].includes(member.path))files.push({source,relative:member.path==='runtime/node.exe'?'node.exe':member.path,executable:member.path.endsWith('.exe')});
+  if(member.path.startsWith('vnext/')||['runtime/node.exe','StyxUpdater.exe','StyxPreview.exe','StyxPrivateStorage.exe'].includes(member.path))files.push({source,relative:member.path==='runtime/node.exe'?'node.exe':member.path,executable:member.path.endsWith('.exe')});
  }
  for(const name of ['windows-runtime.json','runtime/node.exe','StyxUpdater.exe','StyxPreview.exe','vnext/onboarding/cli.mjs','vnext/onboarding/host-payload-handoff.mjs'])assert(names.has(name),'handoff_windows_package_incomplete');
  assert(runtime.hostUpdater?.path==='StyxUpdater.exe'&&digest(runtime.hostUpdater.sha256)&&hash(path.join(resourceRoot,'StyxUpdater.exe'))===runtime.hostUpdater.sha256,'handoff_windows_updater_unverified');
