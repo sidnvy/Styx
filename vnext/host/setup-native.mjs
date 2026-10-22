@@ -60,7 +60,7 @@ export function prepareNativeSetup(config){
       ...(process.platform==='darwin'?{computer_socket:`/tmp/styx-cua-${process.getuid()}/cua.sock`}:{}),
       ...(process.platform==='linux'&&config.wayland===true?{computer_env:{CUA_DRIVER_RS_ENABLE_WAYLAND:'1'}}:{})}:{})};
   write(path.join(baseDir,'enrollment.json'),enrollment);
-  const node=process.platform==='win32'?path.join(installRoot,'node.exe'):path.join(release,'bin','node');
+  const node=process.platform==='win32'?path.join(installRoot,'node.exe'):process.platform==='linux'?path.join(installRoot,'node'):path.join(release,'bin','node');
   const common={installRoot,hostConfigFile:path.join(device,'host.json'),trustPublicKeyFile:trust,nodeBinary:node};
   const service=process.platform==='win32'?{task_name:'Styx-Host',install_root:installRoot,host_config_file:common.hostConfigFile,publisher_key_file:trust,node_binary:node}
     :process.platform==='darwin'?{...common,label:'app.styx.connector',logDir:path.join(baseDir,'logs'),...(config.macTeamID?{nativeApp:{path:'/Applications/Styx.app',teamID:config.macTeamID}}:{})}:{...common,unitName:'styx-host.service'};

@@ -5,7 +5,7 @@ import path from 'node:path';
 import os from 'node:os';
 import {generateKeyPairSync,sign,createHash} from 'node:crypto';
 import {stageSignedRelease,activateRelease,servicePlan} from '../installer.mjs';
-import {linuxUserUnit,writeUserService,installLinuxService,
+import {linuxUserUnit,knownLinuxUserUnit,writeUserService,installLinuxService,
   removeLinuxService,statusUserService,systemdUser} from '../linux-service.mjs';
 
 const linux=process.platform==='linux';
@@ -48,7 +48,11 @@ test('Linux unit references a verified signed release; no hidden dependency on C
     const f=await fixture(t);
     const unit=linuxUserUnit(f.options);
     assert.ok(unit.startsWith('# Managed by Styx VNext'));
-    assert.match(unit,/Type=simple/);
+    assert.match(unit,/Type=exec/);
+    assert.equal(knownLinuxUserUnit(unit,f.options),true);
+    assert.equal(knownLinuxUserUnit(unit.replace('Type=exec','Type=simple'),f.options),true);
+    assert.equal(knownLinuxUserUnit(unit.replace('Type=exec','Type=forking'),f.options),false);
+    assert.equal(knownLinuxUserUnit(unit.replace('Restart=on-failure','Restart=always'),f.options),false);
     assert.match(unit,/Restart=on-failure/);
     assert.match(unit,/UMask=0077/);
     assert.match(unit,/WantedBy=default\.target/);

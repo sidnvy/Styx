@@ -27,6 +27,7 @@ function fixture(t){
 }
 test('fresh setup uses verified bundled paths and stops before pairing or service registration',t=>{
  const f=fixture(t),r=prepareNativeSetup(f.config);assert.equal(r.status,'prepared_not_paired');assert.equal(r.pairing,'NOT RUN');
+ if(process.platform==='linux'){const service=JSON.parse(fs.readFileSync(r.service_config));assert.equal(service.nodeBinary,path.join(f.config.baseDir,'install/node'));assert.equal(r.node,service.nodeBinary);assert.equal(fs.statSync(service.nodeBinary).isFile(),true);}
  const cfg=JSON.parse(fs.readFileSync(r.enrollment_config));assert.ok(cfg.exec_binary.startsWith(r.release_root));assert.equal(cfg.computer_requested,false);
  assert.equal(fs.existsSync(path.join(cfg.storage_dir,'identity.pem')),false);assert.equal(fs.existsSync(path.join(cfg.storage_dir,'host.json')),false);
  assert.throws(()=>prepareNativeSetup(f.config),/setup_directory_already_exists/);

@@ -46,9 +46,9 @@ function receipt(f,phase='stop_intent'){
 test('Host upgrade plan verifies signed generations and preserves all files without pretending executable lifecycle support',t=>{
  const f=fixture(t),before=snapshot(f.root),plan=api.planHostUpdate({stateDir:f.stateDir,bundle:f.releases['2.0.0'].source});
  assert.equal(plan.status,'blocked');assert.equal(plan.current.version,'1.0.0');assert.equal(plan.target.version,'2.0.0');assert.equal(plan.preservedEvidence.hostConfiguration,hash(f.host));assert.equal(plan.preservedEvidence.identityPrivateKey,hash(f.identityKey));assert.equal(plan.preservedEvidence.credential,hash(f.token));
- assert.equal(plan.blockers.includes('durably_inhibited_native_candidate_start_required'),process.platform!=='linux');assert.ok(plan.blockers.includes('service_generation_node_pin_migration_required'));assert.ok(plan.blockers.includes('real_candidate_exec_health_and_gateway_connection_identity_required'));
+ assert.equal(plan.blockers.includes('durably_inhibited_native_candidate_start_required'),process.platform!=='linux');assert.ok(plan.blockers.includes('service_generation_node_pin_migration_required'));assert.equal(plan.blockers.includes('real_candidate_exec_health_and_gateway_connection_identity_required'),false);
  assert.equal(plan.candidateHealth,'NOT RUN');assert.equal(plan.service.state,'not_observed');assert.equal(plan.accountAcceptance,'NOT RUN');assert.match(plan.reviewSha256,/^[a-f0-9]{64}$/);
- const inspection=api.readHostUpdate({stateDir:f.stateDir});assert.equal(inspection.transactions.length,0);assert.equal(inspection.current.runtimeHealth,'not_observed');assert.equal(inspection.recovery.status,'not_implemented');
+ const inspection=api.readHostUpdate({stateDir:f.stateDir});assert.equal(inspection.transactions.length,0);assert.equal(inspection.current.runtimeHealth,'not_observed');assert.equal(inspection.recovery.status,process.platform==='linux'?'explicit_stopped_recovery_available':'not_implemented');
  assert.deepEqual(snapshot(f.root),before);assert.deepEqual(Object.keys(api).sort(),['applyHostUpdate','planHostUpdate','readHostUpdate','recoverHostUpdate']);assert.doesNotMatch(JSON.stringify({plan,inspection}),/SECRET_PRIVATE|SECRET_CREDENTIAL/);
 });
 test('receipt inspection verifies signed evidence, transaction lock and pointer without executing native recovery',t=>{
@@ -265,4 +265,32 @@ test('recovery guard release refuses to erase a replacement lock',t=>{
  const file=path.join(root,'recovery.lock'),guard=acquireRecoveryGuard(file,{kind:'fixture-explicit-recovery',transactionId:'a'.repeat(32)});
  fs.renameSync(file,file+'.prior');fs.writeFileSync(file,'foreign replacement',{mode:0o600});
  assert.throws(()=>guard.assertOwned(),/identity_changed/);assert.throws(()=>guard.close(),/identity_changed/);assert.equal(fs.readFileSync(file,'utf8'),'foreign replacement');
+});
+
+test('Host-only managed service upgrade keeps its role and needs no local Gateway credentials',{skip:process.platform!=='linux'},async t=>{
+ const f=managedFixture(t),file=path.join(f.stateDir,'deployment.json'),config=JSON.parse(fs.readFileSync(file));config.mode='join-existing';config.gateway={url:config.gateway.url};fs.writeFileSync(file,JSON.stringify(config),{mode:0o600});
+ const stateFile=path.join(f.stateDir,'state.json'),state=JSON.parse(fs.readFileSync(stateFile));state.mode='join-existing';state.configSha256=hash(file);fs.writeFileSync(stateFile,JSON.stringify(state),{mode:0o600});
+ const before=hash(file),ops=controlledRuntime(),plan=api.planHostUpdate({stateDir:f.stateDir,bundle:f.releases['2.0.0'].source});assert.equal(plan.status,'ready');assert.equal(fs.existsSync(path.join(f.stateDir,'gateway')),false);
+ const result=await api.applyHostUpdate({stateDir:f.stateDir,plan,authorize:true},ops);assert.equal(result.status,'activated');assert.equal(result.nativeHealth.remoteMcp,'NOT OBSERVED');assert.equal(hash(file),before);
+ assert.equal(fs.existsSync(path.join(f.stateDir,'gateway')),false);assert.equal(api.readHostUpdate({stateDir:f.stateDir}).recovery.status,'explicit_stopped_recovery_available');
+});
+
+test('systemd active is not yet candidate readiness; only missing child is polled within startup bound',{skip:process.platform!=='linux'},async t=>{
+ const f=nativeAdapterFixture(t);let checks=0;
+ const runtime=createHostUpdateRuntime(f.ctx,{home:f.home,run:f.run,observeQuiescence:()=>true,observeConnection:async()=>false,observeProcess:()=>{if(++checks===1)throw Error('host_update_candidate_generation_unobserved');return {pid:12345,connectorPid:12346}}});
+ await runtime.prepare(()=>{});await runtime.stop({signal:new AbortController().signal},()=>{});await runtime.start({version:'2.0.0',signal:new AbortController().signal});assert.equal(checks,2);
+});
+test('Host-only health separates signed service child, local Exec probe and current connection, rejecting disconnect after probe',{skip:process.platform!=='linux'},async t=>{
+ const f=nativeAdapterFixture(t);f.ctx.config.mode='join-existing';let connected=true,probes=0;
+ const run=(binary,args)=>f.run(binary,args)+(args[1]==='show'?'InvocationID='+'a'.repeat(32)+'\nStandardOutput=journal\n':'');
+ const options={home:f.home,run,observeQuiescence:()=>true,observeProcess:pid=>({pid,connectorPid:12346}),observeJournal:()=>connected?'connected':'disconnected',probeExec:async({binary})=>{assert.equal(binary,path.join(f.installRoot,'releases/2.0.0/bin/codex'));probes++;return true}};
+ const runtime=createHostUpdateRuntime(f.ctx,options);await runtime.prepare(()=>{});await runtime.stop({signal:new AbortController().signal},()=>{});await runtime.start({version:'2.0.0',signal:new AbortController().signal});assert.equal(await runtime.health({version:'2.0.0',signal:new AbortController().signal}),true);assert.equal(probes,1);assert.equal(runtime.healthEvidence().remoteMcp,'NOT RUN');
+ const failing=createHostUpdateRuntime(f.ctx,{...options,probeExec:async()=>{connected=false;return true}});const native={schema:1,unitFile:f.unitFile,dropFile:f.dropFile,initialEnabled:'enabled',initialActive:false,unitSha256:hash(f.unitFile),dropInstalled:true};await failing.prepare(()=>{},native);await assert.rejects(failing.health({version:'2.0.0',signal:new AbortController().signal}),/health_identity_changed/);assert.equal(failing.healthEvidence(),null);
+ assert.equal(fs.existsSync(path.join(f.stateDir,'gateway')),false);
+});
+
+test('legacy simple service definition remains accepted without rewriting its startup policy',{skip:process.platform!=='linux'},async t=>{
+ const f=nativeAdapterFixture(t),old=fs.readFileSync(f.unitFile,'utf8').replace('Type=exec','Type=simple');fs.writeFileSync(f.unitFile,old,{mode:0o600});
+ const runtime=createHostUpdateRuntime(f.ctx,{home:f.home,run:f.run,observeQuiescence:()=>true});let receipt;await runtime.prepare(value=>{receipt=value});
+ assert.equal(fs.readFileSync(f.unitFile,'utf8'),old);assert.equal(receipt.unitSha256,hash(f.unitFile));
 });

@@ -78,7 +78,7 @@ export function readHostUpdate({stateDir,transactionId}={}){
   });
  }
  return {schema:1,role:'host',status:!ctx.current||lock.status!=='absent'||Object.values(operation).some(value=>value!=='absent')||transactions.some(row=>['needs_recovery','unverified'].includes(row.status))||managedRecord(ctx)&&!['completed','recovered'].includes(managedRecord(ctx).phase)?'needs_recovery':'reported',current:{version:ctx.current?.version??null,manifestSha256:ctx.current?.sha256??null,signature:ctx.current?'verified':'unverified',...(!ctx.current?{reason:'active_release_unavailable_or_changed'}:{}),runtimeHealth:'not_observed'},lock,operation,transactions,
-  managed:managedProjection(managedRecord(ctx)),recovery:{status:process.platform==='linux'&&ctx.config.mode==='create-local'?'explicit_stopped_recovery_available':'not_implemented',requires:['observe_owned_service_stopped_and_durably_restart_inhibited','verify_previous_signed_generation_and_transaction_ownership','restore_signed_bootstrap_without_replaying_uncertain_start']},accountAcceptance:'NOT RUN'};
+  managed:managedProjection(managedRecord(ctx)),recovery:{status:process.platform==='linux'?'explicit_stopped_recovery_available':'not_implemented',requires:['observe_owned_service_stopped_and_durably_restart_inhibited','verify_previous_signed_generation_and_transaction_ownership','restore_signed_bootstrap_without_replaying_uncertain_start']},accountAcceptance:'NOT RUN'};
 }
 export function planHostUpdate({stateDir,bundle,rollback=false}={}){
  const ctx=scope(stateDir);if(typeof rollback!=='boolean'||rollback&&bundle!==undefined)fail('host_update_select_bundle_or_rollback');
@@ -89,7 +89,6 @@ export function planHostUpdate({stateDir,bundle,rollback=false}={}){
  if(candidate.version===ctx.current.version)fail('distinct_host_update_version_required');
  const blockers=[];
  if(process.platform!=='linux')blockers.push('durably_inhibited_native_candidate_start_required');
- if(ctx.config.mode!=='create-local')blockers.push('real_candidate_exec_health_and_gateway_connection_identity_required');
  for(const name of ['foreground.lock','background.lock','capabilities.lock'])if(fs.existsSync(path.join(stateDir,name)))blockers.push('active_or_uncertain_'+name.replace('.lock','')+'_owner_requires_reconciliation');
  const managed=managedRecord(ctx);if(managed&&!['completed','recovered'].includes(managed.phase))blockers.push('managed_host_update_requires_recovery');
  const stableNode=path.join(ctx.installRoot,process.platform==='win32'?'node.exe':'node');
@@ -101,7 +100,7 @@ export function planHostUpdate({stateDir,bundle,rollback=false}={}){
  const plan={schema:1,role:'host',status:blockers.length?'blocked':'ready',action:rollback?'rollback':'update',stateDir,configurationSha256:ctx.configurationSha256,serviceConfigurationSha256:ctx.serviceConfigurationSha256,
   current:{version:ctx.current.version,manifestSha256:ctx.current.sha256,pointerSha256:hash(path.join(ctx.installRoot,'active.json'))},target:{version:candidate.version,manifestSha256:candidate.sha256,bundle:source},preservedEvidence:ctx.preserved,
   service:{id:ctx.service.id,runtime:ctx.service.nodeBinary===stableNode?'stable_signed_node':'generation_or_external_node',state:'not_observed',persistence:'not_observed'},blockers,
-  prerequisites:['stop_and_durably_inhibit_only_verified_owned_service','start_candidate_without_enabling_login_boot_or_recovery_triggers','observe_real_candidate_exec_rpc_and_bound_gateway_identity','keep_inhibition_through_health_or_signed_rollback','review_service_config_and_native_permission_identity_migration'],
+  prerequisites:['stop_and_durably_inhibit_only_verified_owned_service','start_candidate_without_enabling_login_boot_or_recovery_triggers',ctx.config.mode==='join-existing'?'observe_signed_service_connector_local_exec_probe_and_current_host_connection':'observe_real_candidate_exec_rpc_and_bound_gateway_identity','keep_inhibition_through_health_or_signed_rollback','review_service_config_and_native_permission_identity_migration'],
   installation:'NOT RUN',candidateHealth:'NOT RUN',nativePermissions:'NOT RUN',accountAcceptance:'NOT RUN'};
  return {...plan,reviewSha256:sha(JSON.stringify(plan))};
 }
@@ -165,7 +164,7 @@ export async function applyHostUpdate({stateDir,plan,authorize=false}={}, {runti
   const result=await updateServiceRelease({installRoot:ctx.installRoot,version:plan.target.version,publicKeyPem:ctx.pem,timeoutMs,
    stopService:async call=>{check();record.engineTransactionId=call.transactionId;saveManaged(ctx,record,'executing');return runtime.stop(call,native=>{if(call.signal.aborted)fail('host_update_stop_completion_expired');return saveNative(native)})},
    startService:async call=>{check();return runtime.start(call)},
-   checkHealth:async call=>{check();const healthy=await runtime.health(call);if(call.signal.aborted)fail('host_update_health_completion_expired');check();if(healthy){record.health={status:'verified',version:call.version,method:'mcp_exec_candidate_process_ancestry_and_authenticated_host_connection',at:new Date().toISOString()};saveManaged(ctx,record,'executing')}return healthy}
+   checkHealth:async call=>{check();const healthy=await runtime.health(call);if(call.signal.aborted)fail('host_update_health_completion_expired');check();if(healthy){record.health={status:'verified',version:call.version,...(runtime.healthEvidence?.()??{method:'provided_runtime_health_observer',remoteMcp:'NOT OBSERVED'}),at:new Date().toISOString()};saveManaged(ctx,record,'executing')}return healthy}
   });
   record.engineTransactionId=result.transactionId;record.outcome=result.status;
   if(['activated','rolled_back'].includes(result.status)){
