@@ -34,6 +34,9 @@ import AppKit
         return
     }
     model.beginDeviceInvitation(); try await settled()
+    if mode == "lost-create" {
+        try require(model.createdInvitation == .null && model.invitationWindowOpen && model.invitationError != nil, "Lost create response hid a potentially open pairing window")
+    } else {
     try require(model.createdInvitation["link"].string != nil && model.invitationWindowOpen, "Recovered explicit create failed")
     model.loadPending(); try await settled()
     guard let request = model.pending.first else { throw ProductCoreError.invalidResponse }
@@ -44,6 +47,7 @@ import AppKit
     model.comparisonConfirmation = request["comparison_code"].string ?? ""
     model.approvePending(); try await settled()
     try require(model.selectedPending == .null && model.comparisonConfirmation.isEmpty, "Confirmed request was not approved exactly once")
+    }
     var closed = false
     model.closeDeviceInvitation { closed = true }; try await settled()
     try require(!closed && model.invitationWindowOpen && model.invitationError != nil, "Failed close hid an open invitation")

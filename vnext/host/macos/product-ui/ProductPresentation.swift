@@ -218,8 +218,10 @@ extension ProductModel {
                 ingressSetup = try await client.write("device-ingress/status", [:])["setup"]
                 guard ingressSetup["status"].string == "applied" else { throw ProductCoreError.unavailable }
             }
-            createdInvitation = try await client.write("pairing-link/create", options)
+            // The Gateway may open its window before the response is lost.
+            // Keep close available until Core confirms that window is closed.
             invitationWindowOpen = true
+            createdInvitation = try await client.write("pairing-link/create", options)
         }
     }
     func recoverDeviceInvitation(_ action: String) {
