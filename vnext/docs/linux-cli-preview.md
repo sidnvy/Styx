@@ -365,3 +365,28 @@ systemd acceptance**. Real user-manager startup, stop, logout/login recovery,
 network reconnect and account-side behavior require separate native evidence.
 The portable preview's external artifact-verification boundary still applies;
 a generated unit is not a new distribution signature.
+
+## Native browser and isolated Host recovery acceptance
+
+`host/linux-browser-acceptance.mjs` exercises the actual Browser provider in a
+fresh private profile against its own loopback page. Run separately with
+`channel:"chrome"` and `channel:"msedge"`; an optional absolute
+`executablePath` selects an independently extracted browser. It does not install
+a browser, inspect a daily profile, or sign into an account.
+
+```sh
+STYX_RUN_LINUX_BROWSER_ACCEPTANCE=1 node host/linux-browser-acceptance.mjs /absolute/browser-options.json
+```
+
+Options contain a fresh `directory` and the explicit channel. The receipt
+records browser version, snapshot/type/click, an independent HTTP action count,
+PNG screenshot, and synthetic login storage restored into a new MCP owner.
+The action count must remain one after reconnect. This provider acceptance does
+not substitute for the packaged Core/TLS MCP scenario above.
+
+The existing `managed-update-pilot.mjs` also terminates only the isolated
+service's signed Cua MCP child and verifies that the Computer connection is
+replaced while both the service PID and Exec connection stay unchanged. Fresh
+native screenshot, accessibility observation and action readback follow that
+recovery. This is a child-crash test; it is not evidence of physical logout,
+lock/unlock, or machine reboot.
