@@ -7,20 +7,23 @@ struct ProductTryoutView: View {
     @ObservedObject var model: ProductModel
     weak var controller: ProductWindowController?
     private var currentTest: Bool {
-        model.challengeID != nil && model.chatVerification != .expired && model.chatVerification != .contextChanged
+        model.challengeID != nil && model.chatVerification.usesCurrentTest
     }
     var body: some View {
         ProductPanel(title: productText("试用 Styx", "Try Styx")) {
             Text(model.chatVerification.label).font(.headline)
             if model.chatVerification == .expired {
                 Text(productText("测试消息仅在限定时间内有效。你可以生成一条新消息；这不会更改连接设置。", "Test messages are valid for a limited time. Generate a new one without changing your connection settings.")).foregroundStyle(.secondary)
+            } else if model.chatVerification == .needsRetest {
+                Text(productText("之前的测试结果已失效。生成一条新测试消息即可，无需重新安装插件或更改连接设置。", "Previous test results are no longer current. Create a new test message; you do not need to reinstall the plugin or change its connection settings.")).foregroundStyle(.secondary)
             } else if model.chatVerification == .contextChanged {
                 Text(productText("关闭此窗口，按安装指引更新已有插件的连接信息，再回来试用。", "Close this window and follow the installation guide to update the existing plugin connection, then try again.")).foregroundStyle(.secondary)
             }
-            if !model.chatVerification.proofComplete && model.chatVerification != .contextChanged {
+            if model.chatVerification.allowsNewTest {
                 Text(productText("在 ChatGPT 新建聊天，用 @ 选择 Styx。将测试消息粘贴并发送，ChatGPT 会依次试用你开启的功能。", "Start a new chat in ChatGPT and select Styx with @. Paste and send the test message to try each enabled feature."))
                 if !currentTest {
                     Button(productText("生成测试消息", "Create test message")) { model.beginAcceptance() }
+                        .accessibilityIdentifier("styx-tryout-create-message")
                         .disabled(model.busy || model.tunnelConnection != .connected || !model.localPrepared)
                 }
                 if model.tunnelConnection != .connected {
@@ -51,7 +54,7 @@ struct ProductTryoutView: View {
                         .disabled(model.busy || !model.targetProofReady)
                 }
             }
-            if model.accepted {
+            if model.accepted && model.chatVerification.proofComplete {
                 Text(productText("试用已完成，可以回到 ChatGPT 继续使用。", "The test is complete. You can continue using Styx in ChatGPT.")).foregroundStyle(.secondary)
             }
             if let error = model.error ?? model.observationError {

@@ -54,6 +54,14 @@ func productCoreSelfTest() throws {
     try require(ProductChatVerification.observed(liveProof, contextChanged: false) == .verified, "Real calls incorrectly require manual account attestation to display verified")
     try require(!liveProof["complete"].bool, "Presentation fabricated account attestation")
     try require(ProductChatVerification.observed(liveProof, contextChanged: true) == .contextChanged, "Old proof survived a changed connection")
+    for complete in [false, true] {
+        let oldProof: ProductJSON = .object(liveProof.object.merging(["status": .string("acceptance_context_changed"), "complete": .bool(complete)]) { _, new in new })
+        let retest = ProductChatVerification.observed(oldProof, contextChanged: false)
+        try require(retest == .needsRetest && !retest.proofComplete && !retest.hasRequest, "Outdated acceptance reused old verified or complete evidence")
+        try require(retest.allowsNewTest && !retest.usesCurrentTest, "Outdated acceptance prevented a new challenge or reused the old one")
+        try require(ProductChatVerification.observed(oldProof, contextChanged: true) == .contextChanged, "A genuine plugin change bypassed connection review")
+    }
+    try require(!ProductChatVerification.contextChanged.allowsNewTest, "Changed plugin connection allowed an unreviewed test")
     try require(ProductChatVerification.observed(.object(["requestProof": liveProof["requestProof"]]), contextChanged: false) == .partial, "CLI alone became complete desktop/browser proof")
     try require(ProductChatVerification.observed(.object(["requestProof": liveProof["requestProof"], "browser": .object(["status": .string("not_required")]), "desktop": .object(["status": .string("not_required")])]), contextChanged: false) == .verified, "Exec-only proof requires disabled capabilities")
     try require(ProductChatVerification.observed(.object(["status": .string("acceptance_expired")]), contextChanged: false) == .expired, "Expired challenge became a connection failure")

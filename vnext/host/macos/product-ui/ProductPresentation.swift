@@ -92,9 +92,10 @@ enum ProductTunnelInputPolicy {
     }
 }
 enum ProductChatVerification: Equatable {
-    case pending, partial, verified, confirmed, expired, contextChanged
+    case pending, partial, verified, confirmed, expired, needsRetest, contextChanged
     static func observed(_ acceptance: ProductJSON, contextChanged: Bool) -> Self {
-        if contextChanged || acceptance["status"].string == "acceptance_context_changed" { return .contextChanged }
+        if contextChanged { return .contextChanged }
+        if acceptance["status"].string == "acceptance_context_changed" { return .needsRetest }
         if acceptance["complete"].bool { return .confirmed }
         if acceptance["status"].string == "acceptance_expired" { return .expired }
         let exec = acceptance["requestProof"]["status"].string == "verified"
@@ -106,11 +107,14 @@ enum ProductChatVerification: Equatable {
     }
     var hasRequest: Bool { [.partial, .verified, .confirmed].contains(self) }
     var proofComplete: Bool { self == .verified || self == .confirmed }
+    var allowsNewTest: Bool { !proofComplete && self != .contextChanged }
+    var usesCurrentTest: Bool { ![.expired, .needsRetest, .contextChanged].contains(self) }
     var label: String {
         switch self {
         case .verified, .confirmed: return productText("各项功能测试通过", "All feature tests passed")
         case .partial: return productText("部分测试已完成", "Some tests completed")
         case .expired: return productText("这条测试消息已过期", "This test message has expired")
+        case .needsRetest: return productText("请重新测试这台电脑", "Test this computer again")
         case .contextChanged: return productText("请先更新插件的连接信息", "Update the plugin connection first")
         case .pending: return productText("从 ChatGPT 试用这台电脑", "Try this computer from ChatGPT")
         }
@@ -140,6 +144,7 @@ extension ProductModel {
         case .confirmed, .verified: return productText("在 ChatGPT 中选择 Styx，即可使用这台电脑。", "Select Styx in ChatGPT to use this computer.")
         case .partial: return productText("ChatGPT 已成功使用部分功能。打开“试用 Styx”查看进度。", "ChatGPT has used some features successfully. Open Try Styx to see progress.")
         case .expired: return productText("在 ChatGPT 中选择 Styx。需要检查各项功能时，可以重新试用。", "Select Styx in ChatGPT. You can run a new test to check its features.")
+        case .needsRetest: return productText("之前的测试结果已失效。打开“试用 Styx”重新测试，无需更改插件连接。", "Previous test results are no longer current. Open Try Styx to test again without changing the plugin connection.")
         case .contextChanged: return productText("连接信息已更改。请在 ChatGPT 中更新已有 Styx 的连接。", "Connection details changed. Update the existing Styx connection in ChatGPT.")
         case .pending:
             if !needsPluginSetup { return productText("打开“试用 Styx”，从 ChatGPT 检查这台电脑的功能。", "Open Try Styx to test this computer from ChatGPT.") }

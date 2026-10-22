@@ -146,11 +146,14 @@ import SwiftUI
             try require(!model.chatReady, "Past successful calls hid an offline computer")
             model.status = connectedStatus
             model.plugin = .object(["connection": initialPlugin["connection"], "accountActions": .object(["installation": .string("user_confirmed")])])
-            for state in ["acceptance_expired", "pending"] {
+            for state in ["acceptance_expired", "acceptance_context_changed", "pending"] {
                 model.acceptance = .object(["status": .string(state)])
                 try require(model.chatIndicator == .connected && model.chatMenuTitle == "ChatGPT" && !model.chatReady && !model.needsPluginSetup, "Test lifetime changed the connection status or requested reinstallation")
             }
             model.plugin = initialPlugin
+            model.acceptance = .object(["status": .string("acceptance_context_changed"), "complete": .bool(true)])
+            try require(model.chatVerification == .needsRetest && !model.needsPluginSetup && !model.chatReady, "Outdated evidence was mistaken for a plugin change or current readiness")
+            try require(model.chatIndicator == .connected && model.chatMenuTitle == "ChatGPT", "Outdated evidence changed the live connection indicator or menu")
             model.acceptance = .object(["status": .string("acceptance_expired")])
             try require(!model.needsPluginSetup, "An expired test requested installation again without evidence that the plugin was removed")
             model.plugin = .object(["connection": initialPlugin["connection"], "contextChanged": .bool(true)])
@@ -220,10 +223,24 @@ import SwiftUI
             try require(testField.window === tryout && !testField.isHiddenOrHasHiddenAncestor && testField.stringValue == "PREVIEW-ONLY", "Successful proof removed or reset the field before independent readback")
             try require(!model.accepted, "Rendering successful proof attested on the user's behalf")
             try capture(tryout, "tryout-passed")
+            model.acceptance = .object(verifiedAcceptance.object.merging(["status": .string("acceptance_context_changed"), "complete": .bool(true), "challenge": challenge]) { _, new in new })
+            try await Task.sleep(nanoseconds: 200_000_000)
+            try require(find(tryout, "styx-acceptance-target") == nil, "Outdated evidence exposed the previous challenge field")
+            try require(model.chatVerification == .needsRetest && !model.chatReady && !model.needsPluginSetup, "Retest recovery reused proof or demanded plugin reconfiguration")
+            try capture(tryout, "tryout-needs-retest")
+            model.error = nil
+            try press(tryout, "styx-tryout-create-message")
+            try await Task.sleep(nanoseconds: 100_000_000)
+            try require(model.error == "UI preview: no Core operation was performed.", "Retest button did not reach the existing begin action")
+            model.error = nil
             model.acceptance = .object(["status": .string("acceptance_expired"), "challenge": challenge])
             try await Task.sleep(nanoseconds: 200_000_000)
             try require(find(tryout, "styx-acceptance-target") == nil, "An expired challenge still exposes an active test field")
             try capture(tryout, "tryout-expired")
+            model.plugin = .object(["connection": initialPlugin["connection"], "contextChanged": .bool(true)])
+            try await Task.sleep(nanoseconds: 200_000_000)
+            try require(find(tryout, "styx-tryout-create-message") == nil && model.needsPluginSetup, "A genuine plugin change exposed the retest bypass")
+            model.plugin = initialPlugin
             try press(tryout, "styx-tryout-close")
             try await Task.sleep(nanoseconds: 300_000_000)
             try capture(settings, "settings-chat-expired")
