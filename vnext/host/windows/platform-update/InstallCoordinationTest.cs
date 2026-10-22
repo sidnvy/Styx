@@ -17,7 +17,8 @@ internal static class InstallCoordinationTest {
    Check(InstallCoordination.Enter(version),"app_did_not_recover_after_setup");
    Mutex held;Check(Mutex.TryOpenExisting("Global\\Styx.App."+scope,out held),"app_mutex_not_held");held.Dispose();
    string child=Path.Combine(version,"fixture.exe");File.Copy(System.Reflection.Assembly.GetExecutingAssembly().Location,child);
-   File.WriteAllText(Path.Combine(version,"windows-package.json"),"{\"files\":[{\"path\":\"fixture.exe\"}]}");
+   string longStatic="sdk/"+new string('a',180)+"/example.d.ts.map";
+   File.WriteAllText(Path.Combine(version,"windows-package.json"),"{\"files\":[{\"path\":\""+longStatic+"\"},{\"path\":\"fixture.exe\"}]}");
    Check(Gate(gate,root)==0,"idle_install_rejected");
    using(var p=Process.Start(new ProcessStartInfo(child,"child"){UseShellExecute=false,CreateNoWindow=true,RedirectStandardInput=true,RedirectStandardOutput=true})){
     try{Check(p.StandardOutput.ReadLine()=="ready","child_not_ready");Check(Gate(gate,root)==1,"restart_manager_missed_running_package");}

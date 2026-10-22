@@ -100,8 +100,12 @@ to that root). App creates its mutex before checking the install mutex and
 holds it through Core shutdown until process exit. Setup holds its mutex and
 rechecks App admission immediately before copying. Uninstall explicitly holds
 the same install mutex as well; `SetupMutex` alone does not cover uninstall.
-A read-only Restart Manager query also checks all installed package resources,
-including old binaries that predate the mutex protocol. Occupied or unknown
+A read-only Restart Manager query also checks all installed executable images
+(`.exe`, `.dll`, `.node`), including old binaries that predate the mutex protocol.
+This follows Inno's default executable/DLL filter, adding native Node addons;
+SDK/source/map files are not evidence of a running process. Ordinary static-file
+locks remain subject to Inno's normal behavior. Versions never overwrite each
+other's files. Occupied or unknown
 resources block installation; there is no forced shutdown or automatic retry.
 
 The existing Core pipe EOF handler calls its owned server's `close()` when App
