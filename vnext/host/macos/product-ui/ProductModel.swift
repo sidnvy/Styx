@@ -297,9 +297,9 @@ enum ProductRestorationPolicy {
     var signingUpgradeNeedsReview: Bool { signingUpgradeState["status"].string == "needs_review" || status["nativeStartup"]["reason"].string == "native_signing_upgrade_requires_review" }
     var connectionReviewMessage: String {
         switch status["nativeStartup"]["reason"].string {
-        case "existing_service_requires_review": return productText("检测到已有后台服务，但尚未确认可安全复用。请核对旧服务的安装与运行状态；Styx 不会自动停止或替换它。", "Existing background services could not be verified for safe reuse. Review their installation and running state; Styx will not stop or replace them automatically.")
-        case "connection_owned_elsewhere": return productText("已有其他进程连接这台电脑。请先确认该连接的用途；Styx 不会重复连接或接管它。", "Another process already owns this computer's connection. Review that connection before continuing; Styx will not duplicate or take it over.")
-        case "interrupted_operation_requires_review": return productText("上次操作尚未确认完成。请先核对执行记录，再恢复连接；不会自动重试安装或配对。", "A previous operation is unconfirmed. Review its record before resuming; installation and pairing are not replayed automatically.")
+        case "existing_service_requires_review": return productText("这台电脑已有另一套 Styx 后台服务，暂时无法连接。请让安装该服务的人检查后，再重试本机连接。", "Another Styx background service is installed on this computer. Ask the person who installed it to check it, then retry this computer’s connection.")
+        case "connection_owned_elsewhere": return productText("这台电脑正由另一个 Styx 程序连接。请先在那个程序中断开，再重试本机连接。", "Another Styx program is connected to this computer. Disconnect it in that program, then retry this computer’s connection.")
+        case "interrupted_operation_requires_review": return productText("上次设置中断，暂时无法恢复连接。请保留现有设置，将此提示交给 Styx 维护者处理。", "Setup was interrupted and the connection cannot resume yet. Keep your settings and share this message with the Styx maintainer.")
         default: return productText("本机连接未能恢复。可以重试连接；若仍失败，请保留现有设置并检查诊断记录。", "This computer's connection could not resume. Retry the connection; if it still fails, preserve your settings and inspect diagnostics.")
         }
     }
@@ -437,19 +437,19 @@ enum ProductRestorationPolicy {
         // Never interpolate raw transport errors, response bodies or secrets.
         switch failure as? ProductWorkflowError {
         case .browserPreparationNeedsReview:
-            error = productText("Browser 准备状态需要检查。请刷新状态，确认主台审批及浏览器准备记录后继续。", "Browser preparation needs review. Refresh and check owner approval and browser preparation before continuing.")
+            error = productText("浏览器尚未准备好。请点击“重新检查”；若这台电脑由邀请加入，请先在发出邀请的电脑上允许浏览器自动化。", "The browser is not ready. Select Check again. If this computer joined by invitation, first allow Browser Automation on the computer that invited it.")
         case .capabilityNeedsOfflineReview:
-            error = productText("更改 Browser 前，需要先停止并核对现有 Host 服务或其他管理入口的连接。Styx 不会替你停止这些组件；请完成对账后重试。", "Before changing Browser, stop and reconcile Host services or connections owned by another manager. Styx will not stop those components. Retry after reconciliation.")
+            error = productText("暂时无法更改功能：这台电脑正由另一个 Styx 程序或后台服务连接。请先在管理它的程序中断开，再应用更改。", "Features cannot be changed while another Styx program or background service is connected. Disconnect it in the program that manages it, then apply your changes.")
         case .foregroundStopUnconfirmed:
-            error = productText("本次连接是否停止尚未确认，能力尚未更改。请刷新并核对组件状态，避免重复操作。", "Connection shutdown is unconfirmed; capabilities have not been changed. Refresh and reconcile component state before trying again.")
+            error = productText("连接还未完全停止，功能没有更改。请稍等片刻，再点击“重新检查”。", "The connection has not finished stopping, so features have not changed. Wait a moment, then select Check again.")
         case .capabilityChangeInterrupted:
-            error = productText("能力更改未能确认完成。请先检查组件状态并恢复事务，再选择恢复连接；不会自动重试更改。", "Capability changes could not be confirmed. Inspect component state and recover the transaction before resuming. Changes will not be replayed.")
+            error = productText("功能更改中断，暂时无法确定是否已保存。请保留现有设置，将此提示交给 Styx 维护者处理。", "The feature update was interrupted and may not have been saved. Keep your settings and share this message with the Styx maintainer.")
         case .foregroundRecoveryRequired:
-            error = productText("能力更改已完成，但连接恢复尚未确认。请刷新状态后选择“恢复本次连接”。", "Capabilities were updated, but connection recovery is unconfirmed. Refresh, then choose Resume this connection.")
+            error = productText("功能已更改，电脑还未重新连接。请点击“继续设置”，然后重试本机连接。", "Features were updated, but this computer has not reconnected. Select Continue setup, then retry this computer’s connection.")
         case .computerPermissionRecoveryRequired:
-            error = productText("Computer Use 尚未恢复。请确认系统权限已开启；若刚修改权限，请退出并重新打开 Styx 后重试。", "Computer Use has not resumed. Confirm the system permissions; if you just changed them, quit and reopen Styx, then try again.")
+            error = productText("还无法操作电脑。请检查 Styx 的辅助功能和屏幕录制权限；若刚开启权限，请退出并重新打开 Styx。", "Computer interaction is unavailable. Check Styx’s Accessibility and Screen Recording permissions. If you just enabled them, quit and reopen Styx.")
         default:
-            error = productText("操作未完成。请刷新状态后检查；结果不确定的操作不会自动重试。", "The operation did not complete. Refresh to inspect its state; uncertain operations are not replayed.")
+            error = productText("操作未完成。请点击“重新检查”查看最新状态；若仍有问题，请将此提示交给 Styx 维护者。", "The operation did not finish. Select Check again to see the latest state. If the issue persists, share this message with the Styx maintainer.")
         }
     }
     private func waitForObservation() async throws {
@@ -694,7 +694,7 @@ enum ProductRestorationPolicy {
     func revokeDevice(_ device: ProductDevice) {
         let alert = NSAlert()
         alert.messageText = productText("撤销这台电脑的访问？", "Revoke this computer's access?")
-        alert.informativeText = device.label + "\n" + productText("该电脑将无法继续访问，需要主台重新审核才能加入。", "This computer will lose access and require a new owner review before joining again.")
+        alert.informativeText = device.label + "\n" + productText("该电脑将无法继续访问，需要管理电脑重新审核才能加入。", "This computer will lose access and require a new owner review before joining again.")
         alert.addButton(withTitle: productText("撤销访问", "Revoke access"))
         alert.addButton(withTitle: productText("取消", "Cancel"))
         guard alert.runModal() == .alertFirstButtonReturn else { return }

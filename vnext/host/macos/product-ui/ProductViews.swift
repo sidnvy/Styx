@@ -89,21 +89,20 @@ struct ProductView: View {
         VStack(spacing: 24) {
             ProductBrand(size: 100).padding(.top, 40)
             Text(productText("欢迎使用 Styx", "Welcome to Styx")).font(.system(size: 32, weight: .semibold))
-            Text(productText("把你的电脑连接到聊天。", "Connect your computer to your chat.")).foregroundStyle(.secondary)
+            Text(productText("在 ChatGPT 中使用你的电脑。", "Use your computer from ChatGPT.")).foregroundStyle(.secondary)
             Button(productText("开始设置", "Get started")) { model.joining = false; model.page = .capabilities }.buttonStyle(.borderedProminent).controlSize(.large)
             Button(productText("加入已有 Styx", "Join an existing Styx")) { model.joining = true; model.page = .invitation }.buttonStyle(.link)
         }.frame(maxWidth: .infinity).padding(.bottom, 50)
     }
     private var capabilities: some View {
         VStack(alignment: .leading, spacing: 20) {
-            heading(productText("这台电脑能做什么？", "What can this computer do?"))
-            ProductPanel(title: productText("能力", "Capabilities")) {
-                Label("CLI", systemImage: "terminal").font(.headline)
-                Text(productText("已包含", "Included")).font(.caption).foregroundStyle(.secondary)
+            heading(productText("允许 ChatGPT 做什么？", "What can ChatGPT do?"), productText("选择 ChatGPT 可以在这台电脑上使用的功能。", "Choose the features ChatGPT can use on this computer."))
+            ProductPanel(title: productText("这台电脑的功能", "Features on this computer")) {
+                ProductCapabilityLabel(kind: .cli)
                 Divider()
-                Toggle(isOn: $model.computer) { Label("Computer Use", systemImage: "hand.point.up.left") }
+                Toggle(isOn: $model.computer) { ProductCapabilityLabel(kind: .computer) }
                 Divider()
-                Toggle(isOn: $model.browser) { Label("Browser Automation", systemImage: "globe") }
+                Toggle(isOn: $model.browser) { ProductCapabilityLabel(kind: .browser) }
                 Text(productText("自动准备专用浏览器；网站登录时由你确认。", "A dedicated browser is prepared for you. Sign in to websites when needed.")).font(.caption).foregroundStyle(.secondary)
             }
             TextField(productText("电脑名称", "Computer name"), text: $model.label)
@@ -139,7 +138,7 @@ struct ProductView: View {
                     Button(productText("核对本次升级", "Review this upgrade")) { model.reviewSigningUpgrade() }.buttonStyle(.borderedProminent)
                 }
             } else if model.signingUpgradeNeedsReview {
-                Text(productText("升级未能确认完成，执行记录已保留。请先检查并恢复这次事务；不要清空设置或反复点击升级。", "Upgrade completion is unconfirmed and its execution record is retained. Inspect and recover this transaction before continuing; do not reset settings or repeatedly apply the upgrade.")).foregroundStyle(.secondary)
+                Text(productText("升级未完成，现有设置已保留。此版本无法自动恢复，请将此提示交给 Styx 维护者处理。", "The upgrade did not finish and your settings are retained. This version cannot recover it automatically; share this message with the Styx maintainer.")).foregroundStyle(.secondary)
             } else if let check = model.retryableCommandCheck {
                 Text(ProductPreparationPolicy.commandCheckMessage(check)).foregroundStyle(.secondary)
                 Button(productText("重新检查命令组件", "Check command component again")) { model.recheckCommandComponent() }.buttonStyle(.borderedProminent)
@@ -148,8 +147,8 @@ struct ProductView: View {
                 Button(productText("重试本机连接", "Retry this computer's connection")) { model.resumeForeground() }
             } else if let blocked = model.preparationBlocker {
                 if blocked.status == "awaiting_approval" || ProductPreparationPolicy.canCheckOwnerApproval(model.deployment) {
-                    Text(productText("请在主台核对并批准这台电脑，然后检查连接。", "Review and approve this computer on the main computer, then check the connection.")).foregroundStyle(.secondary)
-                    Button(productText("检查主台批准", "Check owner approval")) { model.continuePreparation() }.buttonStyle(.borderedProminent)
+                    Text(productText("请在管理电脑核对并批准这台电脑，然后检查连接。", "Review and approve this computer on the main computer, then check the connection.")).foregroundStyle(.secondary)
+                    Button(productText("检查管理电脑批准", "Check owner approval")) { model.continuePreparation() }.buttonStyle(.borderedProminent)
                 } else {
                     Text(blocked.status == "uncertain" ? productText("上次准备的结果尚未确认。请刷新并核对详细信息；安装和配对不会自动重试。", "The previous setup result is unconfirmed. Refresh and review details; installation and pairing will not be retried automatically.") : productText("准备暂时停止。请刷新状态并核对详细信息，再继续处理。", "Setup has paused. Refresh the status and review details before continuing.")).foregroundStyle(.secondary)
                 }
@@ -174,14 +173,14 @@ struct ProductView: View {
         case .working: return productText("正在准备", "Preparing")
         case .completed: return productText("已准备", "Prepared")
         case .blocked: return productText("需要检查", "Needs checking")
-        case .awaitingApproval: return productText("等待主台批准", "Awaiting owner approval")
+        case .awaitingApproval: return productText("等待管理电脑批准", "Awaiting owner approval")
         case .needsReview: return productText("需要核对", "Needs review")
-        case .notApproved: return productText("尚未获主台批准", "Not approved by the owner")
+        case .notApproved: return productText("尚未获管理电脑批准", "Not approved by the owner")
         }
     }
     private var permissions: some View {
         VStack(alignment: .leading, spacing: 20) {
-            heading(productText("允许 Computer Use", "Allow Computer Use"), productText("以下权限需要你在 macOS 中亲自开启。", "Grant these permissions yourself in macOS."))
+            heading(productText("允许 Styx 操作电脑", "Allow Styx to use this computer"), productText("请在 macOS 中为 Styx 开启以下权限。", "Enable these permissions for Styx in macOS."))
             ProductPanel(title: productText("系统权限", "System permissions")) {
                 permissionRow(productText("辅助功能", "Accessibility"), granted: model.axGranted, screen: false)
                 Divider()
@@ -190,7 +189,7 @@ struct ProductView: View {
             }
             if !model.axGranted || !model.screenGranted {
                 DisclosureGroup(productText("开关已开启，但这里仍未识别？", "Enabled in System Settings but still not recognized?")) {
-                    Text(productText("请确认授权的是“应用程序”中的 Styx。开发预览版更新后，旧授权可能仍显示开启：在对应权限列表中移除旧 Styx，再添加 /Applications/Styx.app 并开启，然后退出并重新打开。已有设置和电脑连接会保留。", "Confirm the permission belongs to Styx in Applications. After a development preview update, an old grant may still look enabled: remove the old Styx entry, add /Applications/Styx.app and enable it, then quit and reopen. Existing settings and computer connections are retained.")).font(.callout).foregroundStyle(.secondary).textSelection(.enabled)
+                    Text(productText("请确认系统设置中开启的是“应用程序”里的 Styx，然后退出并重新打开 Styx，再点击“重新检查权限”。", "Confirm that System Settings grants access to Styx in Applications. Quit and reopen Styx, then select Check permissions again.")).font(.callout).foregroundStyle(.secondary).textSelection(.enabled)
                 }
             }
             Button(productText("重新检查权限", "Check permissions again")) { model.observePermissions() }
@@ -199,7 +198,10 @@ struct ProductView: View {
     }
     private func permissionRow(_ title: String, granted: Bool, screen: Bool) -> some View {
         HStack {
-            Label(title, systemImage: screen ? "record.circle" : "accessibility")
+            VStack(alignment: .leading, spacing: 4) {
+                Label(title, systemImage: screen ? "record.circle" : "accessibility")
+                Text(screen ? productText("查看屏幕内容", "View screen content") : productText("点击、滚动和输入", "Click, scroll and type")).font(.caption).foregroundStyle(.secondary)
+            }
             Spacer()
             Text(granted ? productText("已允许", "Allowed") : productText("需要允许", "Permission needed")).foregroundStyle(.secondary)
             if granted || model.permissionWasRequested(screen) {
@@ -211,14 +213,14 @@ struct ProductView: View {
     }
     private var invitation: some View {
         VStack(alignment: .leading, spacing: 20) {
-            heading(productText("加入已有 Styx", "Join an existing Styx"), productText("在主台选择“电脑 → 添加电脑”，取得一次性邀请。", "On the main computer, choose Computers → Add computer to create an invitation."))
+            heading(productText("加入已有 Styx", "Join an existing Styx"), productText("在已经设置好 Styx 的电脑上打开“设置 → 电脑 → 添加电脑”，复制邀请链接。", "On the computer where Styx is already set up, open Settings → Computers → Add computer and copy the invitation link."))
             SecureField(productText("粘贴邀请", "Paste invitation"), text: $model.invite)
             Button(productText("检查邀请", "Inspect invitation")) { model.inspectInvitation() }.disabled(model.invite.isEmpty)
             if let origin = model.inspection["preview"]["origin"].string {
-                ProductPanel(title: productText("核对主台身份", "Verify the main computer")) {
+                ProductPanel(title: productText("核对管理电脑身份", "Verify the main computer")) {
                     Text(origin).textSelection(.enabled)
                     if let fingerprint = model.inspection["preview"]["caSha256"].string { Text(fingerprint).font(.system(.caption, design: .monospaced)).textSelection(.enabled) }
-                    Text(productText("请通过可信渠道与主台核对。下一步仍须验证连接并等待主台独立批准。", "Compare these details with the main computer through a trusted channel. Connection verification and independent approval are still required.")).font(.callout).foregroundStyle(.secondary)
+                    Text(productText("请通过可信渠道与管理电脑核对。下一步仍须验证连接并等待管理电脑独立批准。", "Compare these details with the main computer through a trusted channel. Connection verification and independent approval are still required.")).font(.callout).foregroundStyle(.secondary)
                     Button(productText("已核对，继续", "Details match — continue")) { model.acceptInvitation() }.buttonStyle(.borderedProminent)
                 }
             }
@@ -229,24 +231,25 @@ struct ProductView: View {
         VStack(alignment: .leading, spacing: 20) {
             heading(productText("连接 ChatGPT", "Connect ChatGPT"))
             if model.joined {
-                ProductPanel(title: productText("由主台管理", "Managed on the main computer")) {
-                    Text(productText("回到原来的聊天，选择这台电脑进行实际调用。此处无需新建插件或聊天入口。", "Return to the existing chat and select this computer for a real tool call. Its plugin and chat connection are managed on the main computer."))
+                ProductPanel(title: productText("由管理电脑管理", "Managed on the main computer")) {
+                    Text(productText("回到 ChatGPT，在已有 Styx 的聊天中选择这台电脑。", "Return to ChatGPT and select this computer in a chat using the existing Styx plugin."))
                     approvalNotice
                 }
             } else if !model.localPrepared {
                 Button(productText("先完成电脑准备", "Finish computer setup")) { model.page = .preparation }
             } else {
                 tunnelPanel
-                if !model.chatVerification.hasRequest {
+                if model.needsPluginSetup {
                     officialPanel
                     if usePluginPackage { pluginUploadPanel }
                 }
-                acceptancePanel
+                ProductTryoutView(model: model, controller: controller)
+                if model.accepted { Button(productText("完成设置", "Finish setup")) { model.page = .overview }.buttonStyle(.borderedProminent) }
             }
         }
     }
     private var tunnelPanel: some View {
-        ProductPanel(title: productText("1. 电脑端连接", "1. Connection on this computer")) {
+        ProductPanel(title: productText("1. 连接这台电脑", "1. Connect this computer")) {
             ProductTunnelStatus(model: model)
             Button(model.tunnelConnection == .notConfigured ? productText("填写连接信息", "Enter connection details") : productText("编辑连接信息", "Edit connection details")) { editTunnel = true }.accessibilityIdentifier("styx-onboarding-edit-tunnel")
             if model.tunnelConnection != .connected && model.tunnelConnection != .notConfigured {
@@ -304,57 +307,32 @@ struct ProductView: View {
     }
     private var pluginUploadPanel: some View {
         ProductPanel(title: productText("3. 上传到 ChatGPT", "3. Upload to ChatGPT")) {
+            Text(productText("已有 Styx：打开它的详情，上传新版本。首次安装：选择“上传插件”，导入 ZIP 后安装。", "Already have Styx? Open its details and upload a new version. For a first installation, choose Upload plugin, import the ZIP and install it."))
             if model.exportedPluginURL != nil && !model.pluginDraftEdited {
-                Text(productText("在 ChatGPT 的插件管理中选择“上传插件”，导入刚保存的 styx-native.zip 后安装。已有 Styx 时优先上传新版本。上传入口是否可用取决于账号或工作区权限。", "In ChatGPT plugin management, choose Upload plugin, import the saved styx-native.zip, then install it. For an existing Styx plugin, prefer Upload new version. Upload availability depends on account or workspace permissions."))
                 Button(productText("打开 ChatGPT 上传 ZIP", "Open ChatGPT to upload ZIP")) { model.openOfficial("https://chatgpt.com/plugins") }.buttonStyle(.borderedProminent)
                 Button(productText("我已上传并安装 Styx", "I uploaded and installed Styx")) { model.confirmPluginInstallation() }
                     .disabled(model.plugin["contextChanged"].bool || model.plugin["export"]["status"].string != "exported")
             } else {
                 Text(productText("先保存上方的插件 ZIP，再到 ChatGPT 插件管理中上传并安装。", "First save the plugin ZIP above, then upload and install it in ChatGPT plugin management.")).foregroundStyle(.secondary)
             }
+            ProductPluginCompatibilityNote()
         }
     }
 
-    private var acceptancePanel: some View {
-        ProductPanel(title: productText("最后，试用 Styx", "Finally, try Styx")) {
-            Text(model.chatVerification.label).font(.headline)
-            if !model.chatVerification.proofComplete {
-                Text(productText("在 ChatGPT 新聊天中用 @ 选择 Styx，发送下方的测试请求。", "In a new ChatGPT conversation, select Styx with @ and send the test request below."))
-                Button(productText("生成测试请求", "Generate test request")) { model.beginAcceptance() }
-            }
-            if let prompt = model.acceptance["challenge"]["prompt"].string {
-                if !model.chatVerification.proofComplete {
-                    Text(prompt).font(.system(.callout, design: .monospaced)).textSelection(.enabled)
-                    Button(productText("复制到目标聊天", "Copy for your target chat")) { model.copy(prompt) }
-                }
-                // Keep the field mounted after native proof arrives: the chat
-                // still needs an independent observation of the entered value.
-                if model.acceptance["challenge"]["desktopValue"].string != nil {
-                    Text(productText("桌面验证输入框（由聊天里的 Computer Use 操作）", "Desktop verification field (operated by Computer Use from chat)")).font(.caption)
-                    ProductAcceptanceField(model: model, owner: controller).frame(height: 30)
-                }
-                statusRow("CLI", model.acceptance["requestProof"]["status"].string)
-                statusRow("Browser Automation", model.acceptance["browser"]["status"].string)
-                statusRow("Computer Use", model.acceptance["desktop"]["status"].string)
-                if !model.accepted { Button(productText("我在目标聊天看到了结果", "I saw the results in the target chat")) { model.confirmChat() }.disabled(!model.targetProofReady) }
-            }
-            if model.accepted { Button(productText("完成设置", "Finish setup")) { model.page = .overview }.buttonStyle(.borderedProminent) }
-        }
-    }
     private var overview: some View {
         VStack(alignment: .leading, spacing: 20) {
-            heading("Styx", model.accepted ? productText("聊天验证已完成。", "Chat verification completed.") : productText("各项状态来自本次实际检查。", "These states come from observed checks."))
+            heading("Styx", productText("查看这台电脑的功能和连接。", "Check this computer’s features and connection."))
             ProductPanel(title: productText("这台电脑", "This computer")) {
-                statusRow("CLI", model.journey["readiness"]["exec"]["status"].string)
-                statusRow("Browser Automation", model.browserNotApproved ? "not_approved" : model.journey["readiness"]["browser"]["status"].string)
-                statusRow("Computer Use", model.computerNotApproved ? "not_approved" : model.journey["readiness"]["desktop"]["status"].string)
+                statusRow(ProductCapabilityKind.cli.title, model.journey["readiness"]["exec"]["status"].string)
+                statusRow(ProductCapabilityKind.browser.title, model.browserNotApproved ? "not_approved" : model.journey["readiness"]["browser"]["status"].string)
+                statusRow(ProductCapabilityKind.computer.title, model.computerNotApproved ? "not_approved" : model.journey["readiness"]["desktop"]["status"].string)
                 approvalNotice
                 if !model.localPrepared { Button(productText("继续设置", "Continue setup")) { model.page = .preparation } }
                 if model.computerApproved && (!model.axGranted || !model.screenGranted) { Button(productText("检查系统权限", "Review system permissions")) { model.page = .permissions } }
-                if model.foregroundRecoveryNeeded { Button(productText("恢复本次连接", "Resume this connection")) { model.resumeForeground() } }
+                if model.foregroundRecoveryNeeded { Button(productText("恢复电脑连接", "Resume computer connection")) { model.resumeForeground() } }
             }
             ProductPanel(title: productText("聊天连接", "Chat connection")) {
-                Text(model.joined ? productText("由主台管理", "Managed on the main computer") : model.chatVerification.label)
+                Text(model.joined ? productText("由管理电脑管理", "Managed on the main computer") : model.chatStatusTitle)
                 Button(productText("查看聊天连接", "View chat connection")) { model.page = .chat }
             }
         }
@@ -377,13 +355,13 @@ struct ProductView: View {
             }
             if !model.joined {
                 ProductPanel(title: productText("添加电脑", "Add computer")) {
-                    Text(productText("另一台电脑安装 Styx 后选择“加入已有”。先检查电脑间的安全入口。", "Install Styx on the other computer and choose Join existing. First check the secure connection between computers."))
-                    Button(productText("检查连接入口", "Check connection entry")) { model.checkIngress() }
+                    Text(productText("在另一台电脑安装 Styx，选择“加入已有 Styx”。先检查两台电脑能否连接。", "Install Styx on the other computer and choose Join an existing Styx. First check the connection between the computers."))
+                    Button(productText("检查电脑间连接", "Check connection between computers")) { model.checkIngress() }
                     if model.ingress != .null {
                         if model.ingress["status"].string == "loopback_only" {
-                            Text(productText("当前只允许本机连接。需要先在主台准备获准的网络入口，再邀请其他电脑。", "This connection currently accepts only this computer. Prepare an authorized network entry on the main computer before inviting another computer.")).font(.callout)
+                            Text(productText("其他电脑暂时无法访问这台 Mac，需要先配置电脑之间的网络连接。此版本暂不支持在 App 中完成这项配置。", "Other computers cannot reach this Mac yet. Configure the network connection between computers first; this version cannot do that in the app.")).font(.callout)
                         } else {
-                            Text(productText("新电脑仍需验证可达性与 TLS；聊天 Tunnel 不代替电脑间入口。", "The joining computer must verify reachability and TLS; the chat tunnel is not a computer connection entry.")).font(.caption).foregroundStyle(.secondary)
+                            Text(productText("邀请发出后，新电脑会检查安全连接，并等待你批准。", "After receiving an invitation, the new computer checks the secure connection and waits for your approval.")).font(.caption).foregroundStyle(.secondary)
                         }
                         Button(productText("生成限时邀请", "Create a temporary invitation")) { model.createInvitation() }.disabled(!model.ingress["blockers"].array.isEmpty)
                     }
@@ -426,17 +404,17 @@ struct ProductView: View {
             }
             if model.deployment != nil {
                 ProductPanel(title: productText("这台电脑的能力", "This computer's capabilities")) {
-                    Label("CLI", systemImage: "terminal")
+                    ProductCapabilityLabel(kind: .cli)
                     if model.joined {
-                        Text(productText("可选能力由主台审批。请在主台核对当前授权；这里不会自行扩大权限。", "Optional capabilities are approved on the main computer. Review authorization there; this computer cannot expand it itself.")).font(.callout).foregroundStyle(.secondary)
+                        Text(productText("可选能力由管理电脑审批。请在管理电脑核对当前授权；这里不会自行扩大权限。", "Optional capabilities are approved on the main computer. Review authorization there; this computer cannot expand it itself.")).font(.callout).foregroundStyle(.secondary)
                         approvalNotice
                     } else {
-                        Toggle(isOn: $model.computer) { Label("Computer Use", systemImage: "hand.point.up.left") }
-                        Toggle(isOn: $model.browser) { Label("Browser Automation", systemImage: "globe") }
-                        Text(productText("更改能力会暂停本次 App 管理的连接，请先完成正在进行的操作。其他服务或管理入口的连接需要先停止并对账。", "Changes pause connections managed by this App. Finish active work first. Stop and reconcile connections owned by other services or managers separately.")).font(.caption).foregroundStyle(.secondary)
+                        Toggle(isOn: $model.computer) { ProductCapabilityLabel(kind: .computer) }
+                        Toggle(isOn: $model.browser) { ProductCapabilityLabel(kind: .browser) }
+                        Text(productText("应用更改时，Styx 会暂时断开这台电脑。请先完成正在进行的操作。", "Applying changes temporarily disconnects this computer. Finish any active work first.")).font(.caption).foregroundStyle(.secondary)
                         Button(productText("应用更改", "Apply changes")) { model.updateCapabilities() }
                     }
-                    if model.foregroundRecoveryNeeded { Button(productText("恢复本次连接", "Resume this connection")) { model.resumeForeground() } }
+                    if model.foregroundRecoveryNeeded { Button(productText("恢复电脑连接", "Resume computer connection")) { model.resumeForeground() } }
                 }
             }
         }
@@ -446,21 +424,22 @@ struct ProductView: View {
     }
     @ViewBuilder private var approvalNotice: some View {
         if model.browserNotApproved {
-            Text(productText("Browser Automation 尚未获主台批准；已批准的 CLI 等能力仍可连接。", "Browser Automation was not approved on the main computer. Approved capabilities, including CLI, can still connect.")).font(.callout).foregroundStyle(.secondary)
+            Text(productText("浏览器自动化尚未获管理电脑批准，已允许的功能仍可使用。", "Browser Automation was not approved on the main computer. Approved capabilities, including CLI, can still connect.")).font(.callout).foregroundStyle(.secondary)
         }
         if model.computerNotApproved {
-            Text(productText("Computer Use 尚未获主台批准；此处无需为它开启系统权限。", "Computer Use was not approved on the main computer. System permissions for it are not needed here.")).font(.callout).foregroundStyle(.secondary)
+            Text(productText("操作电脑尚未获管理电脑批准，暂时无需开启系统权限。", "Computer Use was not approved on the main computer. System permissions for it are not needed here.")).font(.callout).foregroundStyle(.secondary)
         }
     }
     private func stateTitle(_ status: String) -> String {
         switch status {
         case "succeeded", "completed": return productText("已完成", "Completed")
-        case "connected", "ready": return productText("已连接，待实际验证", "Connected; verification separate")
-        case "verified": return productText("实际验证通过", "Verified by execution")
-        case "not_requested", "not_required", "skipped": return productText("未启用或无需检查", "Not enabled or not required")
-        case "not_approved": return productText("尚未获主台批准", "Not approved by the owner")
+        case "connected", "ready": return productText("已准备好", "Ready")
+        case "verified": return productText("测试通过", "Test passed")
+        case "not_requested": return productText("未启用", "Not enabled")
+        case "not_required", "skipped": return productText("无需检查", "Not required")
+        case "not_approved": return productText("尚未获管理电脑批准", "Not approved by the owner")
         case "running", "starting", "connecting": return productText("正在处理", "In progress")
-        case "awaiting_approval": return productText("等待主台批准", "Awaiting approval")
+        case "awaiting_approval": return productText("等待管理电脑批准", "Awaiting approval")
         case "preflight_passed": return productText("基础检查通过", "Preflight passed")
         case "failed", "uncertain", "blocked", "needs_attention": return productText("需要检查", "Needs attention")
         case "session_unavailable": return productText("需要图形登录会话", "Graphical login required")
@@ -638,7 +617,7 @@ struct ProductAcceptanceField: NSViewRepresentable {
             } catch {
                 let alert = NSAlert()
                 alert.messageText = productText("暂时无法安全退出 Styx", "Styx could not finish quitting")
-                alert.informativeText = productText("组件停止状态尚未确认。请刷新状态后重试退出。", "Component shutdown has not been confirmed. Refresh status and try quitting again.")
+                alert.informativeText = productText("Styx 的连接还未完全停止。请稍等片刻，再选择“退出 Styx”。", "Styx connections have not finished stopping. Wait a moment, then choose Quit Styx again.")
                 alert.runModal(); completion(false)
             }
         }

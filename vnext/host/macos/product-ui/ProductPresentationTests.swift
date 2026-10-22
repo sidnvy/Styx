@@ -47,6 +47,7 @@ import SwiftUI
     model.loaded = true
     model.testSuppressObservations = true
     model.testPreview = true
+    model.axGranted = true; model.screenGranted = true
     model.status = .object(["deployment": .object(["mode": .string("create-local"), "steps": .array([])]),
                             "foreground": .object(["status": .string("connected"), "computerRequested": .bool(true)])])
     model.journey = .object(["steps": .array([.object(["id": .string("local_setup"), "status": .string("completed")])]),
@@ -136,7 +137,31 @@ import SwiftUI
             try await Task.sleep(nanoseconds: 300_000_000)
             try capture(panel, "panel")
             try require(model.chatIndicator == .connected && model.chatMenuTitle == "ChatGPT", "Menu mistakes missing manual confirmation for connection failure")
-            try require(model.chatVerification == .verified && !model.accepted, "Settings proof and account confirmation were conflated")
+            try require(model.chatReady && model.chatVerification == .verified && !model.accepted, "Settings proof and account confirmation were conflated")
+            let verifiedAcceptance = model.acceptance, initialPlugin = model.plugin, connectedStatus = model.status
+            model.screenGranted = false
+            try require(!model.chatReady, "Past successful calls hid a missing system permission")
+            model.screenGranted = true
+            model.status = .object(["deployment": model.status["deployment"], "foreground": .object(["status": .string("not_running")])])
+            try require(!model.chatReady, "Past successful calls hid an offline computer")
+            model.status = connectedStatus
+            model.plugin = .object(["connection": initialPlugin["connection"], "accountActions": .object(["installation": .string("user_confirmed")])])
+            for state in ["acceptance_expired", "pending"] {
+                model.acceptance = .object(["status": .string(state)])
+                try require(model.chatIndicator == .connected && model.chatMenuTitle == "ChatGPT" && !model.chatReady && !model.needsPluginSetup, "Test lifetime changed the connection status or requested reinstallation")
+            }
+            model.plugin = initialPlugin
+            model.acceptance = .object(["status": .string("acceptance_expired")])
+            try require(!model.needsPluginSetup, "An expired test requested installation again without evidence that the plugin was removed")
+            model.plugin = .object(["connection": initialPlugin["connection"], "contextChanged": .bool(true)])
+            try require(model.chatIndicator == .attention && !model.chatReady && model.needsPluginSetup, "A changed connection skipped plugin review")
+            model.plugin = initialPlugin; model.acceptance = verifiedAcceptance
+            model.observationError = "fixture read unavailable"
+            try require(model.chatIndicator == .unknown && !model.chatReady && model.chatMenuTitle == "ChatGPT", "A failed observation reported readiness or requested a plugin update from old data")
+            model.observationError = nil
+            model.tunnelAttempt = .connecting
+            try require(model.chatMenuTitle == "ChatGPT" && !model.chatReady, "A connection attempt changed navigation or reported readiness")
+            model.tunnelAttempt = .idle
             model.journey = .object(["steps": model.journey["steps"], "tunnel": .object(["status": .string("interrupted"), "transport": .string("unavailable")])])
             try require(model.chatIndicator != .connected && model.chatVerification == .verified, "Past successful calls hid a currently broken transport")
             model.journey = .object(["steps": model.journey["steps"], "tunnel": .object(["status": .string("running"), "transport": .string("ready")])])
@@ -180,6 +205,29 @@ import SwiftUI
             try await Task.sleep(nanoseconds: 300_000_000)
             model.requestSettings(.chat)
             try await Task.sleep(nanoseconds: 200_000_000)
+            let challenge: ProductJSON = .object(["id": .string("preview-challenge"), "prompt": .string("Synthetic preview message. No tools are run."), "desktopValue": .string("PREVIEW-ONLY"), "expiresAt": .number(Date().addingTimeInterval(1800).timeIntervalSince1970 * 1000)])
+            model.acceptance = .object(["challenge": challenge, "requestProof": .object(["status": .string("verified")]), "browser": .object(["status": .string("pending")]), "desktop": .object(["status": .string("pending")])])
+            try await Task.sleep(nanoseconds: 200_000_000)
+            try require(find(settings, "styx-acceptance-target") == nil, "Ordinary Settings exposes a test input")
+            try press(settings, "styx-settings-tryout")
+            try await Task.sleep(nanoseconds: 300_000_000)
+            guard let tryout = settings.attachedSheet,
+                  let testField = views(tryout.contentView!, NSTextField.self).first(where: { $0.identifier?.rawValue == "styx-acceptance-target" }) else { throw ProductCoreError.invalidResponse }
+            testField.stringValue = "PREVIEW-ONLY"
+            try capture(tryout, "tryout-partial")
+            model.acceptance = .object(verifiedAcceptance.object.merging(["challenge": challenge]) { _, new in new })
+            try await Task.sleep(nanoseconds: 200_000_000)
+            try require(testField.window === tryout && !testField.isHiddenOrHasHiddenAncestor && testField.stringValue == "PREVIEW-ONLY", "Successful proof removed or reset the field before independent readback")
+            try require(!model.accepted, "Rendering successful proof attested on the user's behalf")
+            try capture(tryout, "tryout-passed")
+            model.acceptance = .object(["status": .string("acceptance_expired"), "challenge": challenge])
+            try await Task.sleep(nanoseconds: 200_000_000)
+            try require(find(tryout, "styx-acceptance-target") == nil, "An expired challenge still exposes an active test field")
+            try capture(tryout, "tryout-expired")
+            try press(tryout, "styx-tryout-close")
+            try await Task.sleep(nanoseconds: 300_000_000)
+            try capture(settings, "settings-chat-expired")
+            model.acceptance = verifiedAcceptance
             try press(settings, "styx-settings-edit-tunnel")
             try await Task.sleep(nanoseconds: 300_000_000)
             guard let editor = settings.attachedSheet else { throw ProductCoreError.invalidResponse }
@@ -213,6 +261,12 @@ import SwiftUI
             try press(onboarding, "styx-reconnect")
             try require(model.error == "UI preview: connection operations are disabled.", "Reconnect button did not dispatch its action")
             try capture(onboarding, "onboarding-chat")
+            model.error = nil; model.page = .capabilities
+            try await Task.sleep(nanoseconds: 200_000_000)
+            try capture(onboarding, "onboarding-capabilities")
+            model.page = .permissions; model.axGranted = false; model.screenGranted = false
+            try await Task.sleep(nanoseconds: 200_000_000)
+            try capture(onboarding, "onboarding-permissions")
             print("PASS: native settings section navigation, local invitation sheet, connection editor, retained focus/input/scroll, and menu rendered. Synthetic state; no real connection or account acceptance.")
         } catch { print("PRESENTATION FAILURE:", error); failure = error }
         app.stop(nil)
