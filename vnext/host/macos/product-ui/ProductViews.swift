@@ -147,7 +147,8 @@ struct ProductView: View {
                 Button(productText("重试本机连接", "Retry this computer's connection")) { model.resumeForeground() }
             } else if let blocked = model.preparationBlocker {
                 if blocked.status == "awaiting_approval" || ProductPreparationPolicy.canCheckOwnerApproval(model.deployment) {
-                    Text(productText("请在管理电脑核对并批准这台电脑，然后检查连接。", "Review and approve this computer on the main computer, then check the connection.")).foregroundStyle(.secondary)
+                    Text(productText("请在发出邀请的电脑核对下方配对码并确认连接。", "Compare this pairing code on the inviting computer and confirm the connection.")).foregroundStyle(.secondary)
+                    if let code = model.joiningComparisonCode { Text(code).font(.system(.title3, design: .monospaced)).textSelection(.enabled) }
                     Button(productText("检查管理电脑批准", "Check owner approval")) { model.continuePreparation() }.buttonStyle(.borderedProminent)
                 } else {
                     Text(blocked.status == "uncertain" ? productText("上次准备的结果尚未确认。请刷新并核对详细信息；安装和配对不会自动重试。", "The previous setup result is unconfirmed. Refresh and review details; installation and pairing will not be retried automatically.") : productText("准备暂时停止。请刷新状态并核对详细信息，再继续处理。", "Setup has paused. Refresh the status and review details before continuing.")).foregroundStyle(.secondary)
@@ -355,31 +356,10 @@ struct ProductView: View {
             }
             if !model.joined {
                 ProductPanel(title: productText("添加电脑", "Add computer")) {
-                    Text(productText("在另一台电脑安装 Styx，选择“加入已有 Styx”。先检查两台电脑能否连接。", "Install Styx on the other computer and choose Join an existing Styx. First check the connection between the computers."))
-                    Button(productText("检查电脑间连接", "Check connection between computers")) { model.checkIngress() }
-                    if model.ingress != .null {
-                        if model.ingress["status"].string == "loopback_only" {
-                            Text(productText("其他电脑暂时无法访问这台 Mac，需要先配置电脑之间的网络连接。此版本暂不支持在 App 中完成这项配置。", "Other computers cannot reach this Mac yet. Configure the network connection between computers first; this version cannot do that in the app.")).font(.callout)
-                        } else {
-                            Text(productText("邀请发出后，新电脑会检查安全连接，并等待你批准。", "After receiving an invitation, the new computer checks the secure connection and waits for your approval.")).font(.caption).foregroundStyle(.secondary)
-                        }
-                        Button(productText("生成限时邀请", "Create a temporary invitation")) { model.createInvitation() }.disabled(!model.ingress["blockers"].array.isEmpty)
-                    }
-                    if let link = model.createdInvitation["link"].string {
-                        Button(productText("复制邀请", "Copy invitation")) { model.copy(link, secret: true) }
-                        Text(productText("请只交给要加入的电脑；已批准设备不会因关闭窗口断开。", "Share only with the joining computer. Closing this window does not disconnect approved devices.")).font(.caption)
-                    }
-                    Button(productText("检查待批准请求", "Check pending requests")) { model.loadPending() }
-                    ForEach(Array(model.pending.enumerated()), id: \.offset) { _, row in
-                        Button(row["label"].string ?? productText("新电脑", "New computer")) { model.selectedPending = row; model.approveComputer = false; model.approveBrowser = false; model.fingerprintConfirmation = "" }
-                    }
-                    if model.selectedPending != .null {
-                        Text(model.selectedPending["fingerprint"].string ?? "").font(.system(.caption, design: .monospaced)).textSelection(.enabled)
-                        TextField(productText("输入新电脑显示的身份指纹", "Enter the fingerprint shown on the new computer"), text: $model.fingerprintConfirmation)
-                        Toggle("Computer Use", isOn: $model.approveComputer).disabled(!model.selectedPending["computer_requested"].bool)
-                        Toggle("Browser Automation", isOn: $model.approveBrowser).disabled(!model.selectedPending["browser_requested"].bool)
-                        Button(productText("批准这台电脑", "Approve this computer")) { model.approvePending() }.disabled(model.fingerprintConfirmation.isEmpty)
-                    }
+                    ProductInvitationView(model: model)
+                    ProductPendingIdentities(model: model)
+                    Button(productText("检查待连接的电脑", "Check waiting computers")) { model.loadPending() }
+
                 }
             }
         }

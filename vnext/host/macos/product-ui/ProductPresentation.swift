@@ -176,23 +176,90 @@ extension ProductModel {
     var hasSavedRuntimeKey: Bool {
         ["configured", "running", "interrupted"].contains(journey["tunnel"]["status"].string ?? "")
     }
-    func beginDeviceInvitation() {
-        invitationExpanded = true
-        guard createdInvitation == .null else { return }
+    var ingressCandidates: [String] { ingress["candidates"].array.compactMap(\.string) }
+    var ingressNeedsRecovery: Bool { ["preparing", "running", "needs_reconciliation"].contains(ingressSetup["status"].string ?? "") }
+    var ingressRecoveryBlocked: Bool { ["recovery_guard", "observation_unavailable"].contains(ingressSetup["phase"].string ?? "") }
+    var joiningComparisonCode: String? {
+        status["deployment"]["steps"].array.first(where: { $0["id"].string == "host.request" })?["comparison_code"].string
+    }
+    func invitationOperation(_ operation: @escaping () async throws -> Void) {
         perform { [self] in
-            invitationInFlight = true
+            invitationInFlight = true; invitationError = nil
             defer { invitationInFlight = false }
-            ingress = try await client.write("device-ingress/plan", [:])["ingress"]
-            guard ingress["blockers"].array.isEmpty else { return }
-            createdInvitation = try await client.write("pairing-link/create", ["authorize": .bool(true)])
+            do { try await operation() }
+            catch {
+                // A timed-out write is uncertain. Read its journal before showing
+                // recovery; never replay preparation or publish an old invitation.
+                createdInvitation = .null; invitationCopied = false
+                if let observed = try? await client.write("device-ingress/status", [:])["setup"] { ingressSetup = observed }
+                else { ingressSetup = .object(["status": .string("needs_reconciliation"), "phase": .string("observation_unavailable")]) }
+                invitationError = productText("未能完成。请检查网络后重试；如果准备中断，请先恢复或撤回。", "Could not finish. Check your network and try again. If preparation was interrupted, resume or undo it first.")
+            }
         }
     }
-    func approveSelectedIdentity() {
-        fingerprintConfirmation = selectedPending["fingerprint"].string ?? ""
-        approveComputer = selectedPending["computer_requested"].bool
-        approveBrowser = selectedPending["browser_requested"].bool
+    func readInvitationPlan() async throws {
+        ingressSetup = try await client.write("device-ingress/status", [:])["setup"]
+        ingress = try await client.write("device-ingress/plan", [:])["ingress"]
+        if !ingressCandidates.contains(selectedIngressAddress) { selectedIngressAddress = "" }
+    }
+    func beginDeviceInvitation() {
+        invitationExpanded = true
+        guard !busy else { return }
+        if let expiry = createdInvitation["expiresAt"].number, expiry > Date().timeIntervalSince1970 * 1000 { return }
+        invitationOperation { [self] in
+            invitationClosed = false; createdInvitation = .null; invitationCopied = false
+            try await readInvitationPlan()
+            guard !ingressNeedsRecovery, ingress["blockers"].array.isEmpty else { return }
+            if ingress["requiresInterfaceChoice"].bool && !ingressCandidates.contains(selectedIngressAddress) { return }
+            var options: [String: ProductJSON] = ["authorize": .bool(true)]
+            if ingress["requiresInterfaceChoice"].bool { options["listenHost"] = .string(selectedIngressAddress) }
+            if ingress["nextAction"].string == "prepare_additional_entry" {
+                _ = try await client.write("device-ingress/prepare", options)
+                ingressSetup = try await client.write("device-ingress/status", [:])["setup"]
+                guard ingressSetup["status"].string == "applied" else { throw ProductCoreError.unavailable }
+            }
+            createdInvitation = try await client.write("pairing-link/create", options)
+            invitationWindowOpen = true
+        }
+    }
+    func recoverDeviceInvitation(_ action: String) {
+        guard ["retry", "rollback"].contains(action), !ingressRecoveryBlocked else { return }
+        invitationOperation { [self] in
+            ingressSetup = try await client.write("device-ingress/recover", ["authorize": .bool(true), "action": .string(action)])["setup"]
+            try await readInvitationPlan()
+            if action == "rollback" { invitationClosed = true; invitationWindowOpen = false }
+            // Recovery never silently creates a new invitation.
+        }
+    }
+    func confirmIngressRollback() {
+        let alert = NSAlert()
+        alert.messageText = productText("撤回这次连接准备？", "Undo this connection setup?")
+        alert.informativeText = productText("使用这个新增入口的电脑会断开。原聊天连接和这台 Mac 的连接不受影响。", "Computers using this added connection will disconnect. Your existing chat connection and this Mac's connection remain available.")
+        alert.addButton(withTitle: productText("撤回准备", "Undo setup")); alert.addButton(withTitle: productText("取消", "Cancel"))
+        if alert.runModal() == .alertFirstButtonReturn { recoverDeviceInvitation("rollback") }
+    }
+    func closeDeviceInvitation(completion: @escaping () -> Void = {}) {
+        guard !busy else { return }
+        if !invitationWindowOpen { invitationExpanded = false; completion(); return }
+        invitationOperation { [self] in
+            let result = try await client.write("pairing-link/close", ["authorize": .bool(true)])
+            guard result["ingress"]["pairing"]["status"].string == "closed" else { throw ProductCoreError.invalidResponse }
+            createdInvitation = .null; invitationCopied = false; invitationWindowOpen = false
+            invitationClosed = true; invitationExpanded = false; completion()
+        }
+    }
+    func confirmPendingIdentity(_ request: ProductJSON) {
+        guard !busy, let code = request["comparison_code"].string else { return }
+        let alert = NSAlert()
+        alert.messageText = productText("两台电脑的配对码是否一致？", "Do both computers show the same pairing code?")
+        alert.informativeText = (request["label"].string ?? "Styx") + "\n\n" + code
+        alert.addButton(withTitle: productText("一致，连接", "Match — connect"))
+        alert.addButton(withTitle: productText("不一致或取消", "Do not match or cancel"))
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        selectedPending = request; comparisonConfirmation = code
         approvePending()
     }
+
 }
 
 struct ProductMenuRow: View {
@@ -250,7 +317,7 @@ struct ProductDailyPanel: View {
                         }
                     }
                     ProductMenuRow(title: productText("添加电脑", "Add computer"), symbol: "plus") {
-                        if model.invitationExpanded { model.invitationExpanded = false }
+                        if model.invitationExpanded { model.closeDeviceInvitation() }
                         else { model.beginDeviceInvitation() }
                     }.foregroundStyle(Color.accentColor)
                     if model.invitationExpanded { ProductInvitationView(model: model); ProductPendingIdentities(model: model) }
@@ -273,20 +340,54 @@ struct ProductInvitationView: View {
     @ObservedObject var model: ProductModel
     var body: some View {
         VStack(alignment: .leading, spacing: 10) {
-            if let value = model.createdInvitation["link"].string {
-                Text(productText("在另一台电脑打开邀请链接", "Open the invitation on the other computer")).font(.caption)
-                Button { model.copy(value, secret: true); model.invitationCopied = true } label: { Label(model.invitationCopied ? productText("邀请已复制", "Invitation copied") : productText("复制邀请链接", "Copy invitation link"), systemImage: "doc.on.doc").frame(maxWidth: .infinity) }
-                Text(productText("邀请自生成起 10 分钟内有效", "The invitation is valid for 10 minutes after creation")).font(.caption2).foregroundStyle(.secondary)
+            if model.invitationInFlight {
+                HStack { ProgressView().controlSize(.small); Text(productText("正在准备邀请…", "Preparing invitation…")).font(.caption) }
+            } else if let value = model.createdInvitation["link"].string {
+                TimelineView(.periodic(from: .now, by: 1)) { context in
+                    if let expiry = model.createdInvitation["expiresAt"].number, expiry <= context.date.timeIntervalSince1970 * 1000 {
+                        Text(productText("邀请已过期", "Invitation expired")).font(.caption)
+                        Button(productText("生成新邀请", "Create new invitation")) { model.beginDeviceInvitation() }
+                    } else {
+                        Text(productText("在另一台电脑的 Styx 中选择“加入已有”，粘贴此邀请。", "In Styx on the other computer, choose Join an existing Styx and paste this invitation.")).font(.caption)
+                        Button { model.copy(value, secret: true); model.invitationCopied = true } label: { Label(model.invitationCopied ? productText("邀请已复制", "Invitation copied") : productText("复制邀请链接", "Copy invitation link"), systemImage: "doc.on.doc").frame(maxWidth: .infinity) }
+                        Text(productText("邀请有效期为 10 分钟", "Invitations expire after 10 minutes")).font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
+            } else if model.ingressNeedsRecovery {
+                Text(productText("连接准备中断", "Connection setup was interrupted")).font(.caption.weight(.semibold))
+                if model.ingressRecoveryBlocked {
+                    Text(productText("上次恢复未完成，需要检查后才能继续。请联系 Styx 维护者。", "The previous recovery did not finish and needs inspection. Contact the Styx maintainer.")).font(.caption)
+                    Button(productText("重新检查", "Check again")) { model.beginDeviceInvitation() }
+                } else {
+                    Text(productText("可以继续准备，或撤回这次网络连接更改。", "Resume preparation or undo this network connection change.")).font(.caption).foregroundStyle(.secondary)
+                    HStack {
+                        Button(productText("继续准备", "Resume setup")) { model.recoverDeviceInvitation("retry") }
+                        Button(productText("撤回准备", "Undo setup")) { model.confirmIngressRollback() }
+                    }
+                }
             } else if !model.ingress["blockers"].array.isEmpty {
-                Text(productText("暂时无法邀请其他电脑", "Other computers cannot be invited yet")).font(.caption.weight(.semibold))
-                Text(productText("其他电脑无法访问这台 Mac。需要先配置电脑之间的网络连接；此版本暂不支持在 App 中完成这项配置。", "Other computers cannot reach this Mac. The network connection between computers needs configuring; this version cannot configure it in the app.")).font(.caption).foregroundStyle(.secondary)
-            } else if model.invitationInFlight {
-                ProgressView().controlSize(.small)
-            } else if model.error != nil {
-                Text(productText("邀请未能生成。请重试。", "The invitation could not be created. Try again.")).font(.caption)
-                Button(productText("重试", "Retry")) { model.beginDeviceInvitation() }
+                Text(productText("暂时无法邀请其他电脑", "Cannot invite another computer yet")).font(.caption.weight(.semibold))
+                Text(ProductInvitationPolicy.blockerMessage(model.ingress)).font(.caption).foregroundStyle(.secondary)
+                Button(productText("重新检查", "Check again")) { model.beginDeviceInvitation() }
+            } else if model.ingress["requiresInterfaceChoice"].bool {
+                Text(productText("选择另一台电脑能够访问的网络地址。", "Choose the network address the other computer can reach.")).font(.caption)
+                Picker(productText("网络地址", "Network address"), selection: $model.selectedIngressAddress) {
+                    Text(productText("选择地址", "Choose an address")).tag("")
+                    ForEach(model.ingressCandidates, id: \.self) { Text($0).tag($0) }
+                }
+                Button(productText("创建邀请", "Create invitation")) { model.beginDeviceInvitation() }.disabled(!model.ingressCandidates.contains(model.selectedIngressAddress))
+            } else if model.invitationClosed {
+                Text(productText("邀请已关闭", "Invitation closed")).font(.caption)
+                Button(productText("创建新邀请", "Create new invitation")) { model.beginDeviceInvitation() }
+            } else {
+                Button(productText("创建邀请", "Create invitation")) { model.beginDeviceInvitation() }
             }
-        }.padding(10).accessibilityIdentifier("styx-invitation-content")
+            if let error = model.invitationError { Text(error).font(.caption).foregroundStyle(.red) }
+            if model.invitationWindowOpen {
+                Button(productText("关闭邀请", "Close invitation")) { model.closeDeviceInvitation() }
+                Text(productText("已连接的电脑仍可使用。", "Connected computers remain available.")).font(.caption2).foregroundStyle(.secondary)
+            }
+        }.padding(10).accessibilityIdentifier("styx-invitation-content").disabled(model.busy)
     }
 }
 struct ProductPendingIdentities: View {
@@ -296,9 +397,14 @@ struct ProductPendingIdentities: View {
             let request = identity.value
             VStack(alignment: .leading, spacing: 8) {
                 Text(productText("连接", "Connect") + " " + (request["label"].string ?? productText("新电脑", "New computer")) + "?").font(.headline)
-                Text(productText("请确认这是你刚刚邀请的电脑。", "Confirm this is the computer you just invited.")).font(.caption).foregroundStyle(.secondary)
-                DisclosureGroup(productText("设备身份", "Device identity")) { Text(request["fingerprint"].string ?? "").font(.system(.caption2, design: .monospaced)).textSelection(.enabled) }
-                Button(productText("连接", "Connect")) { model.selectedPending = request; model.approveSelectedIdentity() }.buttonStyle(.borderedProminent).disabled(model.busy)
+                Text(productText("核对另一台电脑上显示的配对码。", "Compare the pairing code shown on the other computer.")).font(.caption).foregroundStyle(.secondary)
+                if let code = request["comparison_code"].string {
+                    Text(code).font(.system(.body, design: .monospaced)).textSelection(.enabled)
+                    Button(productText("核对配对码", "Verify pairing code")) { model.confirmPendingIdentity(request) }.buttonStyle(.borderedProminent).disabled(model.busy)
+                } else {
+                    Text(productText("等待配对码，请重新检查。", "Waiting for the pairing code. Check again.")).font(.caption)
+                    Button(productText("重新检查", "Check again")) { model.loadPending() }.disabled(model.busy)
+                }
             }.padding(10)
         }
     }

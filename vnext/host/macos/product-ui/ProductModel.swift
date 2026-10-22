@@ -220,6 +220,12 @@ enum ProductRestorationPolicy {
     @Published var screenGranted = false
     @Published var ingress: ProductJSON = .null
     @Published var createdInvitation: ProductJSON = .null
+    @Published var ingressSetup: ProductJSON = .null
+    @Published var selectedIngressAddress = ""
+    @Published var invitationError: String?
+    @Published var invitationClosed = false
+    @Published var invitationWindowOpen = false
+    @Published var comparisonConfirmation = ""
     @Published var pending: [ProductJSON] = []
     @Published var tunnelObservationStale = false
     @Published var tunnelAttempt: ProductTunnelAttempt = .idle
@@ -708,11 +714,15 @@ enum ProductRestorationPolicy {
         perform { [self] in _ = try await client.write("app/login", ["authorize": .bool(true), "enabled": .bool(enabled)]) }
     }
     func checkIngress() { perform { [self] in ingress = try await client.write("device-ingress/plan", [:])["ingress"] } }
-    func createInvitation() { perform { [self] in createdInvitation = try await client.write("pairing-link/create", ["authorize": .bool(true)]) } }
+    func createInvitation() { beginDeviceInvitation() }
     func loadPending() { perform { [self] in pending = try await client.write("pending/list", ["authorize": .bool(true)])["pending"].array } }
     func approvePending() {
+        guard let payload = ProductInvitationPolicy.approval(selectedPending, confirmation: comparisonConfirmation) else { return }
+        // Capture only the request the user explicitly compared. Later polling
+        // cannot substitute another identity or its requested capabilities.
+        comparisonConfirmation = ""
         perform { [self] in
-            _ = try await client.write("pending/approve", ["authorize": .bool(true), "requestId": selectedPending["request_id"], "fingerprintConfirmation": .string(fingerprintConfirmation), "enableComputer": .bool(approveComputer), "enableBrowser": .bool(approveBrowser)])
+            _ = try await client.write("pending/approve", payload)
             selectedPending = .null; fingerprintConfirmation = ""
             pending = try await client.write("pending/list", ["authorize": .bool(true)])["pending"].array
         }
