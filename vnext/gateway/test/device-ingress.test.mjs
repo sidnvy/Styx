@@ -8,7 +8,7 @@ import {createServer} from 'node:net';
 import {checkServerIdentity} from 'node:tls';
 import {once} from 'node:events';
 import {execFileSync} from 'node:child_process';
-import {randomBytes,createHash,X509Certificate} from 'node:crypto';
+import {randomBytes,createHash,X509Certificate,createPublicKey,sign,constants} from 'node:crypto';
 import WebSocket from 'ws';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StreamableHTTPClientTransport} from '@modelcontextprotocol/sdk/client/streamableHttp.js';
@@ -18,7 +18,7 @@ import {EnrollmentController} from '../enrollment.mjs';
 import {GatewayDeviceIngress} from '../device-ingress.mjs';
 import {ownerCommand} from '../enroll-admin.mjs';
 import {requestEnrollment,claimEnrollment} from '../../host/enroll.mjs';
-import {pairingComparisonCode} from '../../shared/enrollment-protocol.mjs';
+import {pairingComparisonCode,capabilityPayload} from '../../shared/enrollment-protocol.mjs';
 
 const digest=file=>createHash('sha256').update(new X509Certificate(fs.readFileSync(file)).raw).digest('hex');
 const lanAddress=()=>Object.values(os.networkInterfaces()).flat().find(value=>value?.family==='IPv4'&&!value.internal)?.address;
@@ -243,4 +243,34 @@ test('a certificate replaced during startup backoff never changes the authorized
  assert.equal(f.gateway.relay.attachments.size,1);assert.equal(f.enrollment.db.invitations.length,0);
  await assert.rejects(f.request(f.descriptor.url,replacement.cert,'/styx/enroll/join'),/ECONNREFUSED/);
  assert.equal((await f.request(f.canonical,f.primary.cert,'/styx/enroll/pending')).status,401);
+});
+
+
+test('closed pairing LAN ingress permits only authenticated self-device capability GET and signed CAS POST',{timeout:20000},async t=>{
+ const f=await fixture(t);if(!f)return;
+ await f.command('ingress-prepare',[JSON.stringify(f.descriptor)]);await f.command('ingress-enable',[f.descriptor.generation]);
+ async function join(label){
+  const invite=await f.command('pairing-open',[f.descriptor.generation,'600']),guest=f.guest(label),pending=await requestEnrollment(guest,invite.invitation);
+  await f.command('approve',[pending.request_id,pending.fingerprint]);const claimed=await claimEnrollment(guest),host=JSON.parse(fs.readFileSync(claimed.local_host_config));
+  return {id:claimed.device_id,token:fs.readFileSync(host.token_file,'utf8').trim(),key:fs.readFileSync(path.join(guest.storage_dir,'identity.pem')),tokenFile:host.token_file};
+ }
+ const a=await join('self-a'),b=await join('self-b');await f.command('pairing-close',[f.descriptor.generation]);
+ assert.equal((await f.command('ingress-status')).pairing.status,'closed');
+ const route=id=>'/styx/enroll/self/'+id+'/capabilities',request=(id,token,body,options={})=>f.request(f.descriptor.url,f.lan.cert,route(id),{method:body===undefined?'GET':'POST',data:body,...options,headers:{Authorization:'Bearer '+token,...options.headers}});
+ const current=await request(a.id,a.token);assert.equal(current.status,200);assert.equal(current.body.device_id,a.id);assert.deepEqual(current.body.capabilities,{exec:true,computer:false,browser:false});
+ for(const token of [b.token,f.adminToken,f.mcpToken,'x'.repeat(48)])assert.equal((await request(a.id,token)).status,403);
+ assert.equal((await request(b.id,a.token)).status,403);
+ assert.equal((await request(a.id,a.token,undefined,{method:'DELETE'})).status,405);
+ for(const headers of [{Host:'wrong.example'},{Origin:f.descriptor.url},{Authorization:['Bearer '+a.token,'Bearer '+a.token]}])assert.equal((await request(a.id,a.token,undefined,{headers})).status,403);
+ for(const url of [route(a.id)+'/',route(a.id)+'?x=1','/styx/enroll/self/'+a.id+'/capabilities/extra','/styx/enroll/self/'+a.id+'/revoke','/styx/enroll/self/styx-INVALID/capabilities','/mcp','/styx/enroll/capabilities','/styx/enroll/devices','/styx/enroll/pending','/styx/enroll/invitations','/styx/enroll/approve','/styx/enroll/revoke']){
+  assert.equal((await f.request(f.descriptor.url,f.lan.cert,url,{method:'POST',data:{},headers:{Authorization:'Bearer '+f.adminToken}})).status,404,url);
+ }
+ const update={device_id:a.id,fingerprint:current.body.fingerprint,generation:current.body.generation,enable_computer:true,enable_browser:true,public_key_pem:createPublicKey(a.key).export({type:'spki',format:'pem'})};
+ update.signature=sign('sha256',Buffer.from(capabilityPayload(update)),{key:a.key,padding:constants.RSA_PKCS1_PSS_PADDING,saltLength:32}).toString('base64url');
+ assert.equal((await request(a.id,b.token,update)).status,403);assert.equal((await request(b.id,b.token,update)).status,403);assert.equal((await request(a.id,a.token,{...update,signature:'invalid'})).status,403);
+ const changed=await request(a.id,a.token,update);assert.equal(changed.status,200);assert.equal(changed.body.status,'updated');assert.deepEqual(changed.body.capabilities,{exec:true,computer:true,browser:true});assert.notEqual(changed.body.generation,current.body.generation);
+ assert.equal((await request(a.id,a.token,update)).status,409,'stale generation cannot replay');
+ const observed=await request(a.id,a.token);assert.equal(observed.body.generation,changed.body.generation);assert.deepEqual(observed.body.capabilities,changed.body.capabilities);assert.equal(fs.readFileSync(a.tokenFile,'utf8').trim(),a.token);
+ assert.deepEqual((await request(b.id,b.token)).body.capabilities,{exec:true,computer:false,browser:false},'other enrolled device unchanged');
+ await f.command('revoke',[a.id]);assert.equal((await request(a.id,a.token)).status,403);assert.equal((await request(b.id,b.token)).status,200);
 });

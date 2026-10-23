@@ -99,7 +99,11 @@ export class GatewayDeviceIngress {
         if(fresh.ingress.certificate_sha256!==this.prepared.ingress.certificate_sha256)fail('device_ingress_generation_identity_changed',409);
         const allowedHosts=[new URL(fresh.descriptor.url).host];
         server=createServer({cert:fresh.cert,key:fresh.key,requestCert:true,rejectUnauthorized:false},async(req,res)=>{
-          if(!['/styx/enroll/join','/styx/enroll/claim','/styx/enroll/confirm'].includes(req.url)){
+          // Already-approved devices retain only their authenticated self-device
+          // capability endpoint after the invitation window closes. Management
+          // routes remain absent; the shared handler enforces token/signature CAS.
+          const selfCapabilities=/^\/styx\/enroll\/self\/(styx-[a-f0-9]{24})\/capabilities$/.test(req.url);
+          if(!selfCapabilities&&!['/styx/enroll/join','/styx/enroll/claim','/styx/enroll/confirm'].includes(req.url)){
             res.writeHead(404,{'content-type':'application/json','cache-control':'no-store'});res.end(JSON.stringify({error:'not_found'}));return;
           }
           const window=this.window&&this.window.expires_at>this.enrollment.now()?this.window:null;
