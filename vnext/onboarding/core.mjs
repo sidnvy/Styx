@@ -575,16 +575,24 @@ export {prepareHostPayloadHandoff,executeHostPayloadHandoff,readHostPayloadHando
 
 // Only this Core process's owned runtimes can be admitted for a graceful App
 // exit. An independent service is neither adopted nor stopped by this action.
-export async function prepareDeploymentWorkAdmission(d,{authorize=false,purpose='quit'}={}){
- if(authorize!==true||!['quit','host-update'].includes(purpose))fail('explicit_work_admission_required');
- const fg=await import('./foreground.mjs'),control=await import('./host-update-admission.mjs');
- const observed=fg.readDeploymentForeground(d),ownsGateway=!!live.get(d)?.gateway,gateway=live.get(d)?.gateway?.workAdmission,localHost=fg.ownedForegroundAdmission(d);
+function ownedDeploymentAdmissionScope(d,fg){
+ const observed=fg.readDeploymentForeground(d),ownsGateway=!!live.get(d)?.gateway,gateway=live.get(d)?.gateway,localHost=fg.ownedForegroundAdmission(d);
  const requiresLocalHost=observed.host==='foreground'||observed.status==='needs_attention';
  const allowEmpty=!ownsGateway&&!requiresLocalHost&&['not_running','using_service','started'].includes(observed.status);
- return control.prepareHostUpdateAdmission({stateDir:d,purpose},{gateway,localHost,ownsGateway,requiresLocalHost,allowEmpty});
+ return {gateway,localHost,ownsGateway,requiresLocalHost,allowEmpty};
+}
+export async function prepareDeploymentWorkAdmission(d,{authorize=false,purpose='quit'}={}){
+ if(authorize!==true||!['quit','host-update'].includes(purpose))fail('explicit_work_admission_required');
+ const [fg,control]=await Promise.all([import('./foreground.mjs'),import('./host-update-admission.mjs')]);
+ return control.prepareHostUpdateAdmission({stateDir:d,purpose},ownedDeploymentAdmissionScope(d,fg));
 }
 export async function commitDeploymentWorkAdmission(d,{ticketId,authorize=false}={}){
- if(authorize!==true)fail('explicit_work_admission_required');const api=await import('./host-update-admission.mjs');return api.commitHostUpdateAdmission({stateDir:d,ticketId});
+ if(authorize!==true)fail('explicit_work_admission_required');
+ const [fg,api]=await Promise.all([import('./foreground.mjs'),import('./host-update-admission.mjs')]);
+ const {purpose}=api.readHostUpdateAdmission({stateDir:d,ticketId});
+ // Recheck the actual owners synchronously with commit, after the last await.
+ api.prepareHostUpdateAdmission({stateDir:d,purpose,ticketId},ownedDeploymentAdmissionScope(d,fg));
+ return api.commitHostUpdateAdmission({stateDir:d,ticketId});
 }
 export async function cancelDeploymentWorkAdmission(d,{ticketId,authorize=false}={}){
  if(authorize!==true)fail('explicit_work_admission_required');const api=await import('./host-update-admission.mjs');return api.cancelHostUpdateAdmission({stateDir:d,ticketId});
