@@ -24,7 +24,7 @@ Keep device ID/fingerprint, enrollment capability generation, Gateway execution 
 
 The same Host link generation cannot be replaced by a late close for another generation. Revocation/CAS invalidates Core connection authority. The actor checks current device authority and owner fence at the actual synchronous `start_send` boundary after socket readiness, and at response delivery. Business requests have bounded multiplexing and a separate control allowance. A queued request cannot bypass an owner fence simply because it passed an earlier check.
 
-A new Gateway execution epoch fences prior Gateway-issued owners. Retired epochs prevent A→B→A resurrection within retained process history. Host generation changes invalidate old native references. Connection loss neither restarts the executor nor redispatches operations or consumed reads. Durable restart/resume of this routing inventory is not implemented by this slice.
+A new Gateway execution epoch fences prior Gateway-issued owners. Retired epochs prevent A→B→A resurrection within retained process history. Host generation changes invalidate old native references. Connection loss neither restarts the executor nor redispatches operations or consumed reads. A parsed business handler is polled once so synchronous Core admission/Host job registration precedes its response wait; the same pending future is retained. EOF with pending responses is `ResponseLost`, never normal completion. Durable restart/resume of this routing inventory is not implemented by this slice.
 
 ## Owner close and unknown outcomes
 

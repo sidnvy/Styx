@@ -14,7 +14,7 @@ use crate::providers::codex::{
     StartProcess,
 };
 pub mod wire;
-use futures_util::{StreamExt, stream::FuturesUnordered};
+use futures_util::{FutureExt, StreamExt, stream::FuturesUnordered};
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::Write,
@@ -640,13 +640,17 @@ impl<'a> HostProtocol<'a> {
                     (id, reply)
                 }
                 frame = link.recv() => {
-                    let Some(frame) = frame else { break; };
+                    let Some(frame) = frame else {
+                        if !pending.is_empty() { return Err(ProtocolError::ResponseLost); }
+                        break;
+                    };
                     if frame.generation != generation || frame.as_str().len() > FRAME_LIMIT { return Err(ProtocolError::InvalidFrame); }
                     let request: Request = serde_json::from_str(frame.as_str()).map_err(|_| ProtocolError::InvalidFrame)?;
                     if (!negotiated && request.connection_generation.is_some()) ||
                        (negotiated && request.connection_generation.as_ref() != Some(&generation)) {
                         return Err(ProtocolError::NegotiationRejected);
                     }
+                    let request_id = request.request_id.clone();
                     let reply = if !negotiated {
                         match request.call {
                             Call::Negotiate { version, challenge, gateway_namespace, gateway_epoch }
@@ -671,10 +675,17 @@ impl<'a> HostProtocol<'a> {
                     else if pending.len() >= 2 { rejection(ErrorCategory::Busy) }
                     else {
                         let owner = call_owner(&request.call).cloned();
-                        pending.push(Box::pin(async move { (request.request_id, owner, self.handle(request.call).await) }));
-                        continue;
+                        // Poll once at admission: dispatch/cleanup synchronously
+                        // register Host-owned work before waiting for its result.
+                        // A concurrently ready EOF may abandon only the waiter,
+                        // not an unpolled, already parsed dispatch request.
+                        let mut handler: futures_util::future::BoxFuture<'_, (RequestId, Option<OwnerRef>, Reply)> = Box::pin(async move { (request.request_id, owner, self.handle(request.call).await) });
+                        match handler.as_mut().now_or_never() {
+                            Some((_, _, reply)) => reply,
+                            None => { pending.push(handler); continue; }
+                        }
                     };
-                    (request.request_id, reply)
+                    (request_id, reply)
                 }
             };
             let response = Response {

@@ -48,7 +48,7 @@ tokio-tungstenite.workspace = true
 [dev-dependencies]
 rmcp = { workspace = true, features = ["client", "transport-streamable-http-client-reqwest"] }
 
-reqwest = { workspace = true, features = ["rustls-no-provider"] }
+reqwest = { workspace = true, features = ["rustls"] }
 
 [lints]
 workspace = true
