@@ -1,0 +1,1719 @@
+{
+  "schema": 1,
+  "contract_revision": "draft-1",
+  "baseline_revision": "44cf1470e6b0cfdfd2c2372e54e84ebd279c59c3",
+  "status_values": [
+    "PASS",
+    "FAIL",
+    "BLOCKED",
+    "NOT_RUN",
+    "NOT_APPLICABLE"
+  ],
+  "rules": [
+    "Scenario closure, not assertion counts, defines completion.",
+    "NOT_APPLICABLE requires documented scope/owner decision; cannot silently excuse required platform gaps.",
+    "Mock PASS is not native PASS; cross-compiled/staged is not installed/accepted.",
+    "Performance budgets and cold/warm definitions are frozen by R03 before performance claims.",
+    "A26 full-logout/boot promises require supported principal and environment; unavailable identity/key/home is BLOCKED, never fake PASS.",
+    "Native physical lifecycle tests obey device authorization and no Workstation reboot/piermini."
+  ],
+  "scenarios": [
+    {
+      "id": "A01",
+      "name": "Legacy crypto/wire",
+      "severity": "P1",
+      "required_for": "full_declared_product_release",
+      "platforms": [
+        "all"
+      ],
+      "contracts": [
+        "C01",
+        "C07",
+        "C08"
+      ],
+      "tasks": [
+        "R05",
+        "R12"
+      ],
+      "preconditions": [
+        "explicit evidence tier; final release result requires final immutable candidate instance or approved inheritance mapping",
+        "owned test fixture/profile and device lease",
+        "independent observer version/hash recorded"
+      ],
+      "trigger": "旧JS生成签名/RSA claim及v1/v2缺省字段，Rust读写互认",
+      "independent_oracle": "冻结原始bytes+独立签名验证器，精确比较SPKI/payload/字段顺序",
+      "negative_control": "改变一个字节/签名域/缺省字段必须拒绝",
+      "recovery": "只读失败，不轮换key或降级算法",
+      "cleanup": "核对子进程/窗口/service/临时文件归属，只清理本任务资源，保存Unknown和失败证据；不删除原Pair/权限。",
+      "evidence": [
+        "source_revision",
+        "contract_revision",
+        "artifact_hashes",
+        "platform_and_session_generation",
+        "redacted_timeline",
+        "observer_source_hash",
+        "independent_effect_observation",
+        "cleanup_receipt"
+      ],
+      "catalog_status": "SPECIFIED_NOT_EXECUTED",
+      "required_evidence_tier": "contract/fault evidence plus explicit final-candidate applicability mapping; native aspects remain native"
+    },
+    {
+      "id": "A02",
+      "name": "Raw state import",
+      "severity": "P1",
+      "required_for": "full_declared_product_release",
+      "platforms": [
+        "all"
+      ],
+      "contracts": [
+        "C07"
+      ],
+      "tasks": [
+        "R06",
+        "R20"
+      ],
+      "preconditions": [
+        "explicit evidence tier; final release result requires final immutable candidate instance or approved inheritance mapping",
+        "owned test fixture/profile and device lease",
+        "independent observer version/hash recorded"
+      ],
+      "trigger": "读取含已完成/不完整journal、不同JSON空白与大整数的旧profile",
+      "independent_oracle": "迁移前后原始文件hash与无损字段独立清单",
+      "negative_control": "坏hash/未知schema/不明lock不写入",
+      "recovery": "报告blocked和阶段，保持原bytes",
+      "cleanup": "核对子进程/窗口/service/临时文件归属，只清理本任务资源，保存Unknown和失败证据；不删除原Pair/权限。",
+      "evidence": [
+        "source_revision",
+        "contract_revision",
+        "artifact_hashes",
+        "platform_and_session_generation",
+        "redacted_timeline",
+        "observer_source_hash",
+        "independent_effect_observation",
+        "cleanup_receipt"
+      ],
+      "catalog_status": "SPECIFIED_NOT_EXECUTED",
+      "required_evidence_tier": "contract/fault evidence plus explicit final-candidate applicability mapping; native aspects remain native"
+    },
+    {
+      "id": "A03",
+      "name": "Single owner and boot identity",
+      "severity": "P1",
+      "required_for": "full_declared_product_release",
+      "platforms": [
+        "all"
+      ],
+      "contracts": [
+        "C01",
+        "C07"
+      ],
+      "tasks": [
+        "R06",
+        "R10",
+        "R22"
+      ],
+      "preconditions": [
+        "explicit evidence tier; final release result requires final immutable candidate instance or approved inheritance mapping",
+        "owned test fixture/profile and device lease",
+        "independent observer version/hash recorded"
+      ],
+      "trigger": "第二writer竞争、PID复用、同boot时间抖动、恢复重启",
+      "independent_oracle": "OS锁+PID creation/boot事实与独立writer探针",
+      "negative_control": "旧PID/伪lease不得接管或误停真owner",
+      "recovery": "安全拒绝，明确stale lease处理证明",
+      "cleanup": "核对子进程/窗口/service/临时文件归属，只清理本任务资源，保存Unknown和失败证据；不删除原Pair/权限。",
+      "evidence": [
+        "source_revision",
+        "contract_revision",
+        "artifact_hashes",
+        "platform_and_session_generation",
+        "redacted_timeline",
+        "observer_source_hash",
+        "independent_effect_observation",
+        "cleanup_receipt"
+      ],
+      "catalog_status": "SPECIFIED_NOT_EXECUTED",
+      "required_evidence_tier": "contract/fault evidence plus explicit final-candidate applicability mapping; native aspects remain native"
+    },
+    {
+      "id": "A04",
+      "name": "Local IPC authentication",
+      "severity": "P1",
+      "required_for": "full_declared_product_release",
+      "platforms": [
+        "all"
+      ],
+      "contracts": [
+        "C01",
+        "C06"
+      ],
+      "tasks": [
+        "R08",
+        "R15",
+        "R16",
+        "R17"
+      ],
+      "preconditions": [
+        "explicit evidence tier; final release result requires final immutable candidate instance or approved inheritance mapping",
+        "owned test fixture/profile and device lease",
+        "independent observer version/hash recorded"
+      ],
+      "trigger": "错误用户/Session、伪server、替换socket/reparse、远端NamedPipe客户端",
+      "independent_oracle": "独立客户端被拒且owned fixture副作用计数0",
+      "negative_control": "合法peer可读状态；伪session声明不能注册",
+      "recovery": "关闭该peer，合法其他lane不失效",
+      "cleanup": "核对子进程/窗口/service/临时文件归属，只清理本任务资源，保存Unknown和失败证据；不删除原Pair/权限。",
+      "evidence": [
+        "source_revision",
+        "contract_revision",
+        "artifact_hashes",
+        "platform_and_session_generation",
+        "redacted_timeline",
+        "observer_source_hash",
+        "independent_effect_observation",
+        "cleanup_receipt"
+      ],
+      "catalog_status": "SPECIFIED_NOT_EXECUTED",
+      "required_evidence_tier": "final_native_package for required runtime/platform effects"
+    },
+    {
+      "id": "A05",
+      "name": "Pairing full journey",
+      "severity": "P1",
+      "required_for": "full_declared_product_release",
+      "platforms": [
+        "linux",
+        "windows",
+        "macos"
+      ],
+      "contracts": [
+        "C01",
+        "C08"
+      ],
+      "tasks": [
+        "R12",
+        "R13",
+        "R27"
+      ],
+      "preconditions": [
+        "explicit evidence tier; final release result requires final immutable candidate instance or approved inheritance mapping",
+        "owned test fixture/profile and device lease",
+        "independent observer version/hash recorded"
+      ],
+      "trigger": "新邀请→双端比较→批准→claim；过期/重复claim/撤销；Gateway分别在三OS承担角色",
+      "independent_oracle": "独立两端fingerprint/CA/publisher和设备列表，实际Exec nonce读回",
+      "negative_control": "错比较码/错CA/错设备/过期邀请拒绝",
+      "recovery": "已有Pair不重建；加入端不创建新Gateway/Tunnel/plugin",
+      "cleanup": "核对子进程/窗口/service/临时文件归属，只清理本任务资源，保存Unknown和失败证据；不删除原Pair/权限。",
+      "evidence": [
+        "source_revision",
+        "contract_revision",
+        "artifact_hashes",
+        "platform_and_session_generation",
+        "redacted_timeline",
+        "observer_source_hash",
+        "independent_effect_observation",
+        "cleanup_receipt"
+      ],
+      "catalog_status": "SPECIFIED_NOT_EXECUTED",
+      "required_evidence_tier": "final_native_package for required runtime/platform effects"
+    },
+    {
+      "id": "A06",
+      "name": "Self capability CAS",
+      "severity": "P1",
+      "required_for": "full_declared_product_release",
+      "platforms": [
+        "all"
+      ],
+      "contracts": [
+        "C01",
+        "C02",
+        "C07"
+      ],
+      "tasks": [
+        "R12",
+        "R21"
+      ],
+      "preconditions": [
+        "explicit evidence tier; final release result requires final immutable candidate instance or approved inheritance mapping",
+        "owned test fixture/profile and device lease",
+        "independent observer version/hash recorded"
+      ],
+      "trigger": "Host自身凭据能力修改、旧generation重试、跨device请求、活工作修改",
+      "independent_oracle": "Gateway registry grant前后版本+独立业务动作计数",
+      "negative_control": "不得取得admin token，不得跨设备或绕过settlement",
+      "recovery": "丢回复只读查CAS结果，不重派mutation",
+      "cleanup": "核对子进程/窗口/service/临时文件归属，只清理本任务资源，保存Unknown和失败证据；不删除原Pair/权限。",
+      "evidence": [
+        "source_revision",
+        "contract_revision",
+        "artifact_hashes",
+        "platform_and_session_generation",
+        "redacted_timeline",
+        "observer_source_hash",
+        "independent_effect_observation",
+        "cleanup_receipt"
+      ],
+      "catalog_status": "SPECIFIED_NOT_EXECUTED",
+      "required_evidence_tier": "final_native_package for required runtime/platform effects"
+    },
+    {
+      "id": "A07",
+      "name": "Revoke/dispatch race",
+      "severity": "P1",
+      "required_for": "full_declared_product_release",
+      "platforms": [
+        "all"
+      ],
+      "contracts": [
+        "C01",
+        "C02",
+        "C04"
+      ],
+      "tasks": [
+        "R07",
+        "R18",
+        "R19",
+        "R27"
+      ],
+      "preconditions": [
+        "explicit evidence tier; final release result requires final immutable candidate instance or approved inheritance mapping",
+        "owned test fixture/profile and device lease",
+        "independent observer version/hash recorded"
+      ],
+      "trigger": "任务排队期间撤销，或dispatch后撤权并丢回复",
+      "independent_oracle": "fixture记录动作时间/次数，准入序列与grant revision独立核对",
+      "negative_control": "未dispatch撤销后动作计数0；已执行不可谎称rollback",
+      "recovery": "拒绝新工作，in-flight按证据终态或Unknown",
+      "cleanup": "核对子进程/窗口/service/临时文件归属，只清理本任务资源，保存Unknown和失败证据；不删除原Pair/权限。",
+      "evidence": [
+        "source_revision",
+        "contract_revision",
+        "artifact_hashes",
+        "platform_and_session_generation",
+        "redacted_timeline",
+        "observer_source_hash",
+        "independent_effect_observation",
+        "cleanup_receipt"
+      ],
+      "catalog_status": "SPECIFIED_NOT_EXECUTED",
+      "required_evidence_tier": "contract/fault evidence plus explicit final-candidate applicability mapping; native aspects remain native"
+    },
+    {
+      "id": "A08",
+      "name": "Real Exec contract",
+      "severity": "P1",
+      "required_for": "full_declared_product_release",
+      "platforms": [
+        "all"
+      ],
+      "contracts": [
+        "C04"
+      ],
+      "tasks": [
+        "R09",
+        "R13"
+      ],
+      "preconditions": [
+        "explicit evidence tier; final release result requires final immutable candidate instance or approved inheritance mapping",
+        "owned test fixture/profile and device lease",
+        "independent observer version/hash recorded"
+      ],
+      "trigger": "真实Codex执行PTY/stdin/UTF8/非零exit/分页大输出/exit早于EOF",
+      "independent_oracle": "独立nonce文件、OS进程身份、输出digest和exit code",
+      "negative_control": "跨owner/generation旧handle不可读写",
+      "recovery": "完整drain后回收，保留仍运行或未知记录",
+      "cleanup": "核对子进程/窗口/service/临时文件归属，只清理本任务资源，保存Unknown和失败证据；不删除原Pair/权限。",
+      "evidence": [
+        "source_revision",
+        "contract_revision",
+        "artifact_hashes",
+        "platform_and_session_generation",
+        "redacted_timeline",
+        "observer_source_hash",
+        "independent_effect_observation",
+        "cleanup_receipt"
+      ],
+      "catalog_status": "SPECIFIED_NOT_EXECUTED",
+      "required_evidence_tier": "final_native_package for required runtime/platform effects"
+    },
+    {
+      "id": "A09",
+      "name": "Exec ambiguous mutation",
+      "severity": "P1",
+      "required_for": "full_declared_product_release",
+      "platforms": [
+        "all"
+      ],
+      "contracts": [
+        "C04"
+      ],
+      "tasks": [
+        "R09",
+        "R27"
+      ],
+      "preconditions": [
+        "explicit evidence tier; final release result requires final immutable candidate instance or approved inheritance mapping",
+        "owned test fixture/profile and device lease",
+        "independent observer version/hash recorded"
+      ],
+      "trigger": "只丢process/start或write确认，动作确已执行",
+      "independent_oracle": "独立文件/管道记录一次副作用；捕获发送次数",
+      "negative_control": "observer识别0次/2次，duplicate writeId不得重复",
+      "recovery": "Unknown且不重放；仍可安全观察/有权cancel",
+      "cleanup": "核对子进程/窗口/service/临时文件归属，只清理本任务资源，保存Unknown和失败证据；不删除原Pair/权限。",
+      "evidence": [
+        "source_revision",
+        "contract_revision",
+        "artifact_hashes",
+        "platform_and_session_generation",
+        "redacted_timeline",
+        "observer_source_hash",
+        "independent_effect_observation",
+        "cleanup_receipt"
+      ],
+      "catalog_status": "SPECIFIED_NOT_EXECUTED",
+      "required_evidence_tier": "contract/fault evidence plus explicit final-candidate applicability mapping; native aspects remain native"
+    },
+    {
+      "id": "A10",
+      "name": "Cleanup evidence",
+      "severity": "P1",
+      "required_for": "full_declared_product_release",
+      "platforms": [
+        "all"
+      ],
+      "contracts": [
+        "C04"
+      ],
+      "tasks": [
+        "R09",
+        "R10",
+        "R27"
+      ],
+      "preconditions": [
+        "explicit evidence tier; final release result requires final immutable candidate instance or approved inheritance mapping",
+        "owned test fixture/profile and device lease",
+        "independent observer version/hash recorded"
+      ],
+      "trigger": "terminate仅ack、closed-only、malformed terminal、exit-before-EOF",
+      "independent_oracle": "真实pid+creation identity退出与独立readback；协议故障fixture",
+      "negative_control": "仅closed不能reported stopped，terminate ack不能confirmed",
+      "recovery": "Unknown/Blocked保留，不释放不明owner",
+      "cleanup": "核对子进程/窗口/service/临时文件归属，只清理本任务资源，保存Unknown和失败证据；不删除原Pair/权限。",
+      "evidence": [
+        "source_revision",
+        "contract_revision",
+        "artifact_hashes",
+        "platform_and_session_generation",
+        "redacted_timeline",
+        "observer_source_hash",
+        "independent_effect_observation",
+        "cleanup_receipt"
+      ],
+      "catalog_status": "SPECIFIED_NOT_EXECUTED",
+      "required_evidence_tier": "final_native_package for required runtime/platform effects"
+    },
+    {
+      "id": "A11",
+      "name": "Network vs executor lifetime",
+      "severity": "P1",
+      "required_for": "full_declared_product_release",
+      "platforms": [
+        "all"
+      ],
+      "contracts": [
+        "C01",
+        "C04"
+      ],
+      "tasks": [
+        "R10",
+        "R11",
+        "R13"
+      ],
+      "preconditions": [
+        "explicit evidence tier; final release result requires final immutable candidate instance or approved inheritance mapping",
+        "owned test fixture/profile and device lease",
+        "independent observer version/hash recorded"
+      ],
+      "trigger": "活Exec时断Gateway连接，再同owner重连；再换Gateway epoch/owner",
+      "independent_oracle": "OS子进程连续身份、nonce计数、cursor无重复",
+      "negative_control": "新owner不能接管旧句柄或重放start",
+      "recovery": "同授权可续取；不能协调则Unknown与显式处理",
+      "cleanup": "核对子进程/窗口/service/临时文件归属，只清理本任务资源，保存Unknown和失败证据；不删除原Pair/权限。",
+      "evidence": [
+        "source_revision",
+        "contract_revision",
+        "artifact_hashes",
+        "platform_and_session_generation",
+        "redacted_timeline",
+        "observer_source_hash",
+        "independent_effect_observation",
+        "cleanup_receipt"
+      ],
+      "catalog_status": "SPECIFIED_NOT_EXECUTED",
+      "required_evidence_tier": "final_native_package for required runtime/platform effects"
+    },
+    {
+      "id": "A12",
+      "name": "Backpressure/fairness",
+      "severity": "P1",
+      "required_for": "full_declared_product_release",
+      "platforms": [
+        "all"
+      ],
+      "contracts": [
+        "C04",
+        "C06"
+      ],
+      "tasks": [
+        "R07",
+        "R08",
+        "R10",
+        "R34"
+      ],
+      "preconditions": [
+        "explicit evidence tier; final release result requires final immutable candidate instance or approved inheritance mapping",
+        "owned test fixture/profile and device lease",
+        "independent observer version/hash recorded"
+      ],
+      "trigger": "单owner饱和输出/大frame/排队，另owner发低负载",
+      "independent_oracle": "独立RSS/队列字节/latency和进程数量观测",
+      "negative_control": "oversize拒绝；不得驱逐正在运行任务以腾位置",
+      "recovery": "释放自有资源，其他owner保持可用",
+      "cleanup": "核对子进程/窗口/service/临时文件归属，只清理本任务资源，保存Unknown和失败证据；不删除原Pair/权限。",
+      "evidence": [
+        "source_revision",
+        "contract_revision",
+        "artifact_hashes",
+        "platform_and_session_generation",
+        "redacted_timeline",
+        "observer_source_hash",
+        "independent_effect_observation",
+        "cleanup_receipt"
+      ],
+      "catalog_status": "SPECIFIED_NOT_EXECUTED",
+      "required_evidence_tier": "contract/fault evidence plus explicit final-candidate applicability mapping; native aspects remain native"
+    },
+    {
+      "id": "A13",
+      "name": "No desktop",
+      "severity": "P1",
+      "required_for": "full_declared_product_release",
+      "platforms": [
+        "all"
+      ],
+      "contracts": [
+        "C02",
+        "C03"
+      ],
+      "tasks": [
+        "R10",
+        "R14",
+        "R19",
+        "R30",
+        "R31",
+        "R32"
+      ],
+      "preconditions": [
+        "explicit evidence tier; final release result requires final immutable candidate instance or approved inheritance mapping",
+        "owned test fixture/profile and device lease",
+        "independent observer version/hash recorded"
+      ],
+      "trigger": "无DISPLAY/Wayland/native GUI/session agent启动Host",
+      "independent_oracle": "真实Exec nonce和headless网页计数；OS确认无GUI进程依赖",
+      "negative_control": "Desktop明确NoGraphicalSession/Unsupported，不fake ready",
+      "recovery": "无需权限申请；Desktop出现后独立发现",
+      "cleanup": "核对子进程/窗口/service/临时文件归属，只清理本任务资源，保存Unknown和失败证据；不删除原Pair/权限。",
+      "evidence": [
+        "source_revision",
+        "contract_revision",
+        "artifact_hashes",
+        "platform_and_session_generation",
+        "redacted_timeline",
+        "observer_source_hash",
+        "independent_effect_observation",
+        "cleanup_receipt"
+      ],
+      "catalog_status": "SPECIFIED_NOT_EXECUTED",
+      "required_evidence_tier": "final_native_package for required runtime/platform effects"
+    },
+    {
+      "id": "A14",
+      "name": "SSH/fresh env/old tmux",
+      "severity": "P1",
+      "required_for": "full_declared_product_release",
+      "platforms": [
+        "linux"
+      ],
+      "contracts": [
+        "C03"
+      ],
+      "tasks": [
+        "R14",
+        "R15",
+        "R30"
+      ],
+      "preconditions": [
+        "explicit evidence tier; final release result requires final immutable candidate instance or approved inheritance mapping",
+        "owned test fixture/profile and device lease",
+        "independent observer version/hash recorded"
+      ],
+      "trigger": "桌面终端→fresh SSH→旧tmux带过期显示环境各调同一授权桌面",
+      "independent_oracle": "agent kernel Session绑定与owned窗口readback",
+      "negative_control": "显式旧/locked目标不得fallback别会话",
+      "recovery": "返回歧义/失效后重新显式选，不全局export环境",
+      "cleanup": "核对子进程/窗口/service/临时文件归属，只清理本任务资源，保存Unknown和失败证据；不删除原Pair/权限。",
+      "evidence": [
+        "source_revision",
+        "contract_revision",
+        "artifact_hashes",
+        "platform_and_session_generation",
+        "redacted_timeline",
+        "observer_source_hash",
+        "independent_effect_observation",
+        "cleanup_receipt"
+      ],
+      "catalog_status": "SPECIFIED_NOT_EXECUTED",
+      "required_evidence_tier": "final_native_package for required runtime/platform effects"
+    },
+    {
+      "id": "A15",
+      "name": "SSH disconnect",
+      "severity": "P1",
+      "required_for": "full_declared_product_release",
+      "platforms": [
+        "linux",
+        "windows",
+        "macos"
+      ],
+      "contracts": [
+        "C01",
+        "C07"
+      ],
+      "tasks": [
+        "R22",
+        "R30",
+        "R31",
+        "R32"
+      ],
+      "preconditions": [
+        "explicit evidence tier; final release result requires final immutable candidate instance or approved inheritance mapping",
+        "owned test fixture/profile and device lease",
+        "independent observer version/hash recorded"
+      ],
+      "trigger": "独立Host服务工作时断开启动/管理SSH",
+      "independent_oracle": "第三连接观察同一manager/Host进程+真实业务副作用",
+      "negative_control": "临时前台模式不得伪称持久；无孤儿pane依赖",
+      "recovery": "按服务desired-state持续，不重新配对",
+      "cleanup": "核对子进程/窗口/service/临时文件归属，只清理本任务资源，保存Unknown和失败证据；不删除原Pair/权限。",
+      "evidence": [
+        "source_revision",
+        "contract_revision",
+        "artifact_hashes",
+        "platform_and_session_generation",
+        "redacted_timeline",
+        "observer_source_hash",
+        "independent_effect_observation",
+        "cleanup_receipt"
+      ],
+      "catalog_status": "SPECIFIED_NOT_EXECUTED",
+      "required_evidence_tier": "final_native_package for required runtime/platform effects"
+    },
+    {
+      "id": "A16",
+      "name": "Multiple sessions",
+      "severity": "P1",
+      "required_for": "full_declared_product_release",
+      "platforms": [
+        "all"
+      ],
+      "contracts": [
+        "C03"
+      ],
+      "tasks": [
+        "R14",
+        "R15",
+        "R16",
+        "R17"
+      ],
+      "preconditions": [
+        "explicit evidence tier; final release result requires final immutable candidate instance or approved inheritance mapping",
+        "owned test fixture/profile and device lease",
+        "independent observer version/hash recorded"
+      ],
+      "trigger": "同用户多session/seat，显式session失效或未选",
+      "independent_oracle": "两个owned fixture分别计数，非目标计数0",
+      "negative_control": "未选返回Ambiguous；错display/socket关联拒绝",
+      "recovery": "重新选择需授权与fresh observation，不取第一实例",
+      "cleanup": "核对子进程/窗口/service/临时文件归属，只清理本任务资源，保存Unknown和失败证据；不删除原Pair/权限。",
+      "evidence": [
+        "source_revision",
+        "contract_revision",
+        "artifact_hashes",
+        "platform_and_session_generation",
+        "redacted_timeline",
+        "observer_source_hash",
+        "independent_effect_observation",
+        "cleanup_receipt"
+      ],
+      "catalog_status": "SPECIFIED_NOT_EXECUTED",
+      "required_evidence_tier": "final_native_package for required runtime/platform effects"
+    },
+    {
+      "id": "A17",
+      "name": "Desktop generation restart",
+      "severity": "P1",
+      "required_for": "full_declared_product_release",
+      "platforms": [
+        "linux",
+        "windows",
+        "macos"
+      ],
+      "contracts": [
+        "C03",
+        "C04"
+      ],
+      "tasks": [
+        "R14",
+        "R18",
+        "R30",
+        "R31",
+        "R32"
+      ],
+      "preconditions": [
+        "explicit evidence tier; final release result requires final immutable candidate instance or approved inheritance mapping",
+        "owned test fixture/profile and device lease",
+        "independent observer version/hash recorded"
+      ],
+      "trigger": "专用Hyprland/compositor/agent/login实例重建后使用旧引用",
+      "independent_oracle": "旧/新实例native identity和两个fixture计数",
+      "negative_control": "旧snapshot/window/token/generation动作必须0",
+      "recovery": "新session重新发现和观察；Exec/headlessBrowser连续",
+      "cleanup": "核对子进程/窗口/service/临时文件归属，只清理本任务资源，保存Unknown和失败证据；不删除原Pair/权限。",
+      "evidence": [
+        "source_revision",
+        "contract_revision",
+        "artifact_hashes",
+        "platform_and_session_generation",
+        "redacted_timeline",
+        "observer_source_hash",
+        "independent_effect_observation",
+        "cleanup_receipt"
+      ],
+      "catalog_status": "SPECIFIED_NOT_EXECUTED",
+      "required_evidence_tier": "final_native_package for required runtime/platform effects"
+    },
+    {
+      "id": "A18",
+      "name": "Lock/unlock/switch/revoke",
+      "severity": "P1",
+      "required_for": "full_declared_product_release",
+      "platforms": [
+        "all"
+      ],
+      "contracts": [
+        "C02",
+        "C03",
+        "C04"
+      ],
+      "tasks": [
+        "R15",
+        "R16",
+        "R17",
+        "R18"
+      ],
+      "preconditions": [
+        "explicit evidence tier; final release result requires final immutable candidate instance or approved inheritance mapping",
+        "owned test fixture/profile and device lease",
+        "independent observer version/hash recorded"
+      ],
+      "trigger": "专用session锁定/解锁/快切用户/撤销OS权限",
+      "independent_oracle": "OS独立会话事实、权限设置、fixture计数",
+      "negative_control": "on-console/旧poll状态不能授权新动作；protected desktop拒绝",
+      "recovery": "撤销generation，in-flight可Unknown，不复用旧snapshot",
+      "cleanup": "核对子进程/窗口/service/临时文件归属，只清理本任务资源，保存Unknown和失败证据；不删除原Pair/权限。",
+      "evidence": [
+        "source_revision",
+        "contract_revision",
+        "artifact_hashes",
+        "platform_and_session_generation",
+        "redacted_timeline",
+        "observer_source_hash",
+        "independent_effect_observation",
+        "cleanup_receipt"
+      ],
+      "catalog_status": "SPECIFIED_NOT_EXECUTED",
+      "required_evidence_tier": "final_native_package for required runtime/platform effects"
+    },
+    {
+      "id": "A19",
+      "name": "Partial desktop capability",
+      "severity": "P1",
+      "required_for": "full_declared_product_release",
+      "platforms": [
+        "all"
+      ],
+      "contracts": [
+        "C02"
+      ],
+      "tasks": [
+        "R14",
+        "R18"
+      ],
+      "preconditions": [
+        "explicit evidence tier; final release result requires final immutable candidate instance or approved inheritance mapping",
+        "owned test fixture/profile and device lease",
+        "independent observer version/hash recorded"
+      ],
+      "trigger": "capture缺权限或input unsupported，其他provider仍可读",
+      "independent_oracle": "独立捕获/窗口读回与输入fixture分项观测",
+      "negative_control": "不得从capture成功声称input/AX可用",
+      "recovery": "准确分项降级，Exec与Browser不连带停",
+      "cleanup": "核对子进程/窗口/service/临时文件归属，只清理本任务资源，保存Unknown和失败证据；不删除原Pair/权限。",
+      "evidence": [
+        "source_revision",
+        "contract_revision",
+        "artifact_hashes",
+        "platform_and_session_generation",
+        "redacted_timeline",
+        "observer_source_hash",
+        "independent_effect_observation",
+        "cleanup_receipt"
+      ],
+      "catalog_status": "SPECIFIED_NOT_EXECUTED",
+      "required_evidence_tier": "final_native_package for required runtime/platform effects"
+    },
+    {
+      "id": "A20",
+      "name": "Desktop crash isolation",
+      "severity": "P1",
+      "required_for": "full_declared_product_release",
+      "platforms": [
+        "all"
+      ],
+      "contracts": [
+        "C03",
+        "C04"
+      ],
+      "tasks": [
+        "R10",
+        "R18",
+        "R27"
+      ],
+      "preconditions": [
+        "explicit evidence tier; final release result requires final immutable candidate instance or approved inheritance mapping",
+        "owned test fixture/profile and device lease",
+        "independent observer version/hash recorded"
+      ],
+      "trigger": "Cua/agent在动作前/后崩溃",
+      "independent_oracle": "独立动作计数、Host/Exec/Browser连续身份及响应",
+      "negative_control": "未知动作无重放，不能shared abort全Host",
+      "recovery": "局部失效/清理/重发现，保留Unknown",
+      "cleanup": "核对子进程/窗口/service/临时文件归属，只清理本任务资源，保存Unknown和失败证据；不删除原Pair/权限。",
+      "evidence": [
+        "source_revision",
+        "contract_revision",
+        "artifact_hashes",
+        "platform_and_session_generation",
+        "redacted_timeline",
+        "observer_source_hash",
+        "independent_effect_observation",
+        "cleanup_receipt"
+      ],
+      "catalog_status": "SPECIFIED_NOT_EXECUTED",
+      "required_evidence_tier": "final_native_package for required runtime/platform effects"
+    },
+    {
+      "id": "A21",
+      "name": "Observation/target stale",
+      "severity": "P1",
+      "required_for": "full_declared_product_release",
+      "platforms": [
+        "all"
+      ],
+      "contracts": [
+        "C03",
+        "C04"
+      ],
+      "tasks": [
+        "R14",
+        "R18"
+      ],
+      "preconditions": [
+        "explicit evidence tier; final release result requires final immutable candidate instance or approved inheritance mapping",
+        "owned test fixture/profile and device lease",
+        "independent observer version/hash recorded"
+      ],
+      "trigger": "跨owner使用token，window/PID复用、坐标/显示器热插拔",
+      "independent_oracle": "不同fixture窗口独立计数和实例ID",
+      "negative_control": "旧引用/旧显示坐标不能作用到新目标",
+      "recovery": "拒绝并fresh snapshot；不换窗口重试动作",
+      "cleanup": "核对子进程/窗口/service/临时文件归属，只清理本任务资源，保存Unknown和失败证据；不删除原Pair/权限。",
+      "evidence": [
+        "source_revision",
+        "contract_revision",
+        "artifact_hashes",
+        "platform_and_session_generation",
+        "redacted_timeline",
+        "observer_source_hash",
+        "independent_effect_observation",
+        "cleanup_receipt"
+      ],
+      "catalog_status": "SPECIFIED_NOT_EXECUTED",
+      "required_evidence_tier": "final_native_package for required runtime/platform effects"
+    },
+    {
+      "id": "A22",
+      "name": "Browser isolation and login",
+      "severity": "P1",
+      "required_for": "full_declared_product_release",
+      "platforms": [
+        "all"
+      ],
+      "contracts": [
+        "C01",
+        "C02",
+        "C04"
+      ],
+      "tasks": [
+        "R19",
+        "R27"
+      ],
+      "preconditions": [
+        "explicit evidence tier; final release result requires final immutable candidate instance or approved inheritance mapping",
+        "owned test fixture/profile and device lease",
+        "independent observer version/hash recorded"
+      ],
+      "trigger": "两个owner/相同principal与不同principal，重连/升级后登录状态",
+      "independent_oracle": "本地测试网站cookie/profile与server计数独立检查",
+      "negative_control": "跨owner refs/cookies拒绝，不共享current tab或任意用户profile",
+      "recovery": "Rust监督context，保护登录状态，合法恢复不重新授权配对",
+      "cleanup": "核对子进程/窗口/service/临时文件归属，只清理本任务资源，保存Unknown和失败证据；不删除原Pair/权限。",
+      "evidence": [
+        "source_revision",
+        "contract_revision",
+        "artifact_hashes",
+        "platform_and_session_generation",
+        "redacted_timeline",
+        "observer_source_hash",
+        "independent_effect_observation",
+        "cleanup_receipt"
+      ],
+      "catalog_status": "SPECIFIED_NOT_EXECUTED",
+      "required_evidence_tier": "final_native_package for required runtime/platform effects"
+    },
+    {
+      "id": "A23",
+      "name": "Browser unknown and worker failure",
+      "severity": "P1",
+      "required_for": "full_declared_product_release",
+      "platforms": [
+        "all"
+      ],
+      "contracts": [
+        "C04"
+      ],
+      "tasks": [
+        "R19",
+        "R27"
+      ],
+      "preconditions": [
+        "explicit evidence tier; final release result requires final immutable candidate instance or approved inheritance mapping",
+        "owned test fixture/profile and device lease",
+        "independent observer version/hash recorded"
+      ],
+      "trigger": "网页动作已发生但response丢失/worker挂起，随后继续调用",
+      "independent_oracle": "自建HTTP服务器计数和worker/context OS观察",
+      "negative_control": "次数2必须使oracle失败；关闭socket不等于context stopped",
+      "recovery": "Unknown后封锁不安全后续操作，确认close再fresh context",
+      "cleanup": "核对子进程/窗口/service/临时文件归属，只清理本任务资源，保存Unknown和失败证据；不删除原Pair/权限。",
+      "evidence": [
+        "source_revision",
+        "contract_revision",
+        "artifact_hashes",
+        "platform_and_session_generation",
+        "redacted_timeline",
+        "observer_source_hash",
+        "independent_effect_observation",
+        "cleanup_receipt"
+      ],
+      "catalog_status": "SPECIFIED_NOT_EXECUTED",
+      "required_evidence_tier": "final_native_package for required runtime/platform effects"
+    },
+    {
+      "id": "A24",
+      "name": "Headed/headless/attach separation",
+      "severity": "P1",
+      "required_for": "full_declared_product_release",
+      "platforms": [
+        "all"
+      ],
+      "contracts": [
+        "C02",
+        "C03"
+      ],
+      "tasks": [
+        "R19",
+        "R30",
+        "R31",
+        "R32"
+      ],
+      "preconditions": [
+        "explicit evidence tier; final release result requires final immutable candidate instance or approved inheritance mapping",
+        "owned test fixture/profile and device lease",
+        "independent observer version/hash recorded"
+      ],
+      "trigger": "headed session失效，headless并行；尝试未提供attach",
+      "independent_oracle": "两浏览器服务器计数与进程/session观测",
+      "negative_control": "attach拒绝，不能fallback任意已运行Chrome或Cua",
+      "recovery": "仅headed降级，headless继续",
+      "cleanup": "核对子进程/窗口/service/临时文件归属，只清理本任务资源，保存Unknown和失败证据；不删除原Pair/权限。",
+      "evidence": [
+        "source_revision",
+        "contract_revision",
+        "artifact_hashes",
+        "platform_and_session_generation",
+        "redacted_timeline",
+        "observer_source_hash",
+        "independent_effect_observation",
+        "cleanup_receipt"
+      ],
+      "catalog_status": "SPECIFIED_NOT_EXECUTED",
+      "required_evidence_tier": "final_native_package for required runtime/platform effects"
+    },
+    {
+      "id": "A25",
+      "name": "GUI Quit/Stop/autostart modes",
+      "severity": "P1",
+      "required_for": "full_declared_product_release",
+      "platforms": [
+        "all"
+      ],
+      "contracts": [
+        "C01",
+        "C04",
+        "C07"
+      ],
+      "tasks": [
+        "R22",
+        "R23"
+      ],
+      "preconditions": [
+        "explicit evidence tier; final release result requires final immutable candidate instance or approved inheritance mapping",
+        "owned test fixture/profile and device lease",
+        "independent observer version/hash recorded"
+      ],
+      "trigger": "关窗、Quit App-managed、Quit persistent UI、Stop Host、禁用autostart、恢复器运行",
+      "independent_oracle": "OS进程/manager desired-state+活Exec计数、stop receipt",
+      "negative_control": "Quit不能误停独立CLI/service；Stop不能被KeepAlive复活",
+      "recovery": "按模式停止/保留，busy/Unknown诚实；保留Pair",
+      "cleanup": "核对子进程/窗口/service/临时文件归属，只清理本任务资源，保存Unknown和失败证据；不删除原Pair/权限。",
+      "evidence": [
+        "source_revision",
+        "contract_revision",
+        "artifact_hashes",
+        "platform_and_session_generation",
+        "redacted_timeline",
+        "observer_source_hash",
+        "independent_effect_observation",
+        "cleanup_receipt"
+      ],
+      "catalog_status": "SPECIFIED_NOT_EXECUTED",
+      "required_evidence_tier": "final_native_package for required runtime/platform effects"
+    },
+    {
+      "id": "A26",
+      "name": "Full logout / boot persistence",
+      "severity": "P1",
+      "required_for": "full_declared_product_release",
+      "platforms": [
+        "all"
+      ],
+      "contracts": [
+        "C01",
+        "C03",
+        "C07"
+      ],
+      "tasks": [
+        "R02",
+        "R22",
+        "R30",
+        "R31",
+        "R32",
+        "R38"
+      ],
+      "preconditions": [
+        "explicit evidence tier; final release result requires final immutable candidate instance or approved inheritance mapping",
+        "owned test fixture/profile and device lease",
+        "independent observer version/hash recorded"
+      ],
+      "trigger": "persistent模式完整用户logout持续服务为必需；另按已冻结环境条件验证OS ready后boot/prelogin，不能通过不声明支持免除logout gate",
+      "independent_oracle": "OS服务principal、PID birth/boot identity、第三端Exec与browser真实请求",
+      "negative_control": "图形task启动不算Host恢复；无key/home时不能fake ready",
+      "recovery": "按已记录scope恢复；缺合法principal/环境则BLOCKED，不改SYSTEM/root",
+      "cleanup": "核对子进程/窗口/service/临时文件归属，只清理本任务资源，保存Unknown和失败证据；不删除原Pair/权限。",
+      "evidence": [
+        "source_revision",
+        "contract_revision",
+        "artifact_hashes",
+        "platform_and_session_generation",
+        "redacted_timeline",
+        "observer_source_hash",
+        "independent_effect_observation",
+        "cleanup_receipt"
+      ],
+      "catalog_status": "SPECIFIED_NOT_EXECUTED",
+      "required_evidence_tier": "final_native_package for required runtime/platform effects"
+    },
+    {
+      "id": "A27",
+      "name": "Fresh install and role journeys",
+      "severity": "P1",
+      "required_for": "full_declared_product_release",
+      "platforms": [
+        "all"
+      ],
+      "contracts": [
+        "C01",
+        "C02",
+        "C08"
+      ],
+      "tasks": [
+        "R23",
+        "R24",
+        "R29",
+        "R30",
+        "R31",
+        "R32"
+      ],
+      "preconditions": [
+        "explicit evidence tier; final release result requires final immutable candidate instance or approved inheritance mapping",
+        "owned test fixture/profile and device lease",
+        "independent observer version/hash recorded"
+      ],
+      "trigger": "无开发依赖/无继承权限新账号：单机setup和join-existing两条路径",
+      "independent_oracle": "安装包hash、真实进程入口、审批/设备列表、owned三能力readback",
+      "negative_control": "缺权限准确拒绝；join不创建Gateway/Tunnel/plugin",
+      "recovery": "权限/账号由用户授权；可诊断/恢复，不偷偷下载依赖",
+      "cleanup": "核对子进程/窗口/service/临时文件归属，只清理本任务资源，保存Unknown和失败证据；不删除原Pair/权限。",
+      "evidence": [
+        "source_revision",
+        "contract_revision",
+        "artifact_hashes",
+        "platform_and_session_generation",
+        "redacted_timeline",
+        "observer_source_hash",
+        "independent_effect_observation",
+        "cleanup_receipt"
+      ],
+      "catalog_status": "SPECIFIED_NOT_EXECUTED",
+      "required_evidence_tier": "final_native_package for required runtime/platform effects"
+    },
+    {
+      "id": "A28",
+      "name": "Artifact integrity and source closure",
+      "severity": "P1",
+      "required_for": "full_declared_product_release",
+      "platforms": [
+        "all"
+      ],
+      "contracts": [
+        "C08"
+      ],
+      "tasks": [
+        "R24",
+        "R25",
+        "R29",
+        "R35"
+      ],
+      "preconditions": [
+        "explicit evidence tier; final release result requires final immutable candidate instance or approved inheritance mapping",
+        "owned test fixture/profile and device lease",
+        "independent observer version/hash recorded"
+      ],
+      "trigger": "篡改Rust/native/worker/manifest、混用旧新组件、路径穿越/重解析",
+      "independent_oracle": "独立验签/hash清单和启动前无副作用观察",
+      "negative_control": "合法签名也不能许可不支持runtime format/reader",
+      "recovery": "拒绝激活，保留现有有效安装",
+      "cleanup": "核对子进程/窗口/service/临时文件归属，只清理本任务资源，保存Unknown和失败证据；不删除原Pair/权限。",
+      "evidence": [
+        "source_revision",
+        "contract_revision",
+        "artifact_hashes",
+        "platform_and_session_generation",
+        "redacted_timeline",
+        "observer_source_hash",
+        "independent_effect_observation",
+        "cleanup_receipt"
+      ],
+      "catalog_status": "SPECIFIED_NOT_EXECUTED",
+      "required_evidence_tier": "final_native_package for required runtime/platform effects"
+    },
+    {
+      "id": "A29",
+      "name": "Same-identity cutover",
+      "severity": "P1",
+      "required_for": "full_declared_product_release",
+      "platforms": [
+        "all"
+      ],
+      "contracts": [
+        "C01",
+        "C07",
+        "C08"
+      ],
+      "tasks": [
+        "R26",
+        "R33"
+      ],
+      "preconditions": [
+        "explicit evidence tier; final release result requires final immutable candidate instance or approved inheritance mapping",
+        "owned test fixture/profile and device lease",
+        "independent observer version/hash recorded"
+      ],
+      "trigger": "旧→Rust切换原Pair，存在活任务/未知事务/已停服务",
+      "independent_oracle": "前后authority原始hash/Browser状态、单writerOSlease、真实调用",
+      "negative_control": "活/未知工作不能force切换，身份/CA/publisher不轮换",
+      "recovery": "fence→结算→释放→接管→verify→commit，无双writer",
+      "cleanup": "核对子进程/窗口/service/临时文件归属，只清理本任务资源，保存Unknown和失败证据；不删除原Pair/权限。",
+      "evidence": [
+        "source_revision",
+        "contract_revision",
+        "artifact_hashes",
+        "platform_and_session_generation",
+        "redacted_timeline",
+        "observer_source_hash",
+        "independent_effect_observation",
+        "cleanup_receipt"
+      ],
+      "catalog_status": "SPECIFIED_NOT_EXECUTED",
+      "required_evidence_tier": "final_native_package for required runtime/platform effects"
+    },
+    {
+      "id": "A30",
+      "name": "Transaction interruption",
+      "severity": "P1",
+      "required_for": "full_declared_product_release",
+      "platforms": [
+        "all"
+      ],
+      "contracts": [
+        "C07",
+        "C08"
+      ],
+      "tasks": [
+        "R21",
+        "R26",
+        "R27",
+        "R33"
+      ],
+      "preconditions": [
+        "explicit evidence tier; final release result requires final immutable candidate instance or approved inheritance mapping",
+        "owned test fixture/profile and device lease",
+        "independent observer version/hash recorded"
+      ],
+      "trigger": "每个持久write/replace/flush/activate边界故障或进程退出",
+      "independent_oracle": "外部fault controller+磁盘raw bytes/OSowner+重启只读协调",
+      "negative_control": "不能把ack或文件存在当commit，Unknown不自动重放",
+      "recovery": "识别阶段并继续已证明安全步骤或rollback",
+      "cleanup": "核对子进程/窗口/service/临时文件归属，只清理本任务资源，保存Unknown和失败证据；不删除原Pair/权限。",
+      "evidence": [
+        "source_revision",
+        "contract_revision",
+        "artifact_hashes",
+        "platform_and_session_generation",
+        "redacted_timeline",
+        "observer_source_hash",
+        "independent_effect_observation",
+        "cleanup_receipt"
+      ],
+      "catalog_status": "SPECIFIED_NOT_EXECUTED",
+      "required_evidence_tier": "contract/fault evidence plus explicit final-candidate applicability mapping; native aspects remain native"
+    },
+    {
+      "id": "A31",
+      "name": "Commit succeeded reply lost",
+      "severity": "P1",
+      "required_for": "full_declared_product_release",
+      "platforms": [
+        "all"
+      ],
+      "contracts": [
+        "C04",
+        "C07"
+      ],
+      "tasks": [
+        "R08",
+        "R21",
+        "R23",
+        "R27"
+      ],
+      "preconditions": [
+        "explicit evidence tier; final release result requires final immutable candidate instance or approved inheritance mapping",
+        "owned test fixture/profile and device lease",
+        "independent observer version/hash recorded"
+      ],
+      "trigger": "事务已commit后丢GUI/CLI回复",
+      "independent_oracle": "独立journal/raw状态与重新查询transaction id",
+      "negative_control": "客户端不能重执行计划/重建identity",
+      "recovery": "只读reconcile返回同一终态",
+      "cleanup": "核对子进程/窗口/service/临时文件归属，只清理本任务资源，保存Unknown和失败证据；不删除原Pair/权限。",
+      "evidence": [
+        "source_revision",
+        "contract_revision",
+        "artifact_hashes",
+        "platform_and_session_generation",
+        "redacted_timeline",
+        "observer_source_hash",
+        "independent_effect_observation",
+        "cleanup_receipt"
+      ],
+      "catalog_status": "SPECIFIED_NOT_EXECUTED",
+      "required_evidence_tier": "contract/fault evidence plus explicit final-candidate applicability mapping; native aspects remain native"
+    },
+    {
+      "id": "A32",
+      "name": "Rollback and reader barrier",
+      "severity": "P1",
+      "required_for": "full_declared_product_release",
+      "platforms": [
+        "all"
+      ],
+      "contracts": [
+        "C07",
+        "C08"
+      ],
+      "tasks": [
+        "R24",
+        "R26",
+        "R33"
+      ],
+      "preconditions": [
+        "explicit evidence tier; final release result requires final immutable candidate instance or approved inheritance mapping",
+        "owned test fixture/profile and device lease",
+        "independent observer version/hash recorded"
+      ],
+      "trigger": "代码回滚、不可逆schema、升级后撤销授权、旧新状态混用",
+      "independent_oracle": "旧/新reader独立验证+前后授权状态和包hash",
+      "negative_control": "回滚不得复活撤权或覆盖新状态；不兼容旧reader拒绝启动",
+      "recovery": "仅可逆状态rollback；其他明确Blocked/ManualReview",
+      "cleanup": "核对子进程/窗口/service/临时文件归属，只清理本任务资源，保存Unknown和失败证据；不删除原Pair/权限。",
+      "evidence": [
+        "source_revision",
+        "contract_revision",
+        "artifact_hashes",
+        "platform_and_session_generation",
+        "redacted_timeline",
+        "observer_source_hash",
+        "independent_effect_observation",
+        "cleanup_receipt"
+      ],
+      "catalog_status": "SPECIFIED_NOT_EXECUTED",
+      "required_evidence_tier": "final_native_package for required runtime/platform effects"
+    },
+    {
+      "id": "A33",
+      "name": "Protocol interoperability",
+      "severity": "P1",
+      "required_for": "full_declared_product_release",
+      "platforms": [
+        "all"
+      ],
+      "contracts": [
+        "C01",
+        "C06",
+        "C08"
+      ],
+      "tasks": [
+        "R05",
+        "R11",
+        "R12",
+        "R13",
+        "R27"
+      ],
+      "preconditions": [
+        "explicit evidence tier; final release result requires final immutable candidate instance or approved inheritance mapping",
+        "owned test fixture/profile and device lease",
+        "independent observer version/hash recorded"
+      ],
+      "trigger": "旧GW/RustHost、RustGW/旧Host、Rust/Rust及不支持版本/降级请求",
+      "independent_oracle": "独立旧实现/冻结wire vectors和真实executorreadback",
+      "negative_control": "不支持强session合同不能假造generation/放宽授权",
+      "recovery": "协商范围诚实，保留公开工具兼容，拒绝安全降级",
+      "cleanup": "核对子进程/窗口/service/临时文件归属，只清理本任务资源，保存Unknown和失败证据；不删除原Pair/权限。",
+      "evidence": [
+        "source_revision",
+        "contract_revision",
+        "artifact_hashes",
+        "platform_and_session_generation",
+        "redacted_timeline",
+        "observer_source_hash",
+        "independent_effect_observation",
+        "cleanup_receipt"
+      ],
+      "catalog_status": "SPECIFIED_NOT_EXECUTED",
+      "required_evidence_tier": "contract/fault evidence plus explicit final-candidate applicability mapping; native aspects remain native"
+    },
+    {
+      "id": "A34",
+      "name": "Performance and steady resources",
+      "severity": "P1",
+      "required_for": "full_declared_product_release",
+      "platforms": [
+        "all"
+      ],
+      "contracts": [
+        "C04",
+        "C06"
+      ],
+      "tasks": [
+        "R03",
+        "R34"
+      ],
+      "preconditions": [
+        "explicit evidence tier; final release result requires final immutable candidate instance or approved inheritance mapping",
+        "owned test fixture/profile and device lease",
+        "independent observer version/hash recorded"
+      ],
+      "trigger": "按SPEC冷/暖启动、网络不可达、压力/drain/soak负载",
+      "independent_oracle": "独立单调计时、CPU/IO/RSS/pid/句柄和真实client请求",
+      "negative_control": "校验不挪到ready之后，不删慢样本，不把放宽timeout算优化",
+      "recovery": "符合冻结预算或明确失败/调整决定，资源可回收",
+      "cleanup": "核对子进程/窗口/service/临时文件归属，只清理本任务资源，保存Unknown和失败证据；不删除原Pair/权限。",
+      "evidence": [
+        "source_revision",
+        "contract_revision",
+        "artifact_hashes",
+        "platform_and_session_generation",
+        "redacted_timeline",
+        "observer_source_hash",
+        "independent_effect_observation",
+        "cleanup_receipt"
+      ],
+      "catalog_status": "SPECIFIED_NOT_EXECUTED",
+      "required_evidence_tier": "final_native_package for required runtime/platform effects"
+    },
+    {
+      "id": "A35",
+      "name": "Secret and content containment",
+      "severity": "P1",
+      "required_for": "full_declared_product_release",
+      "platforms": [
+        "all"
+      ],
+      "contracts": [
+        "C01",
+        "C06",
+        "C07"
+      ],
+      "tasks": [
+        "R06",
+        "R08",
+        "R25",
+        "R35"
+      ],
+      "preconditions": [
+        "explicit evidence tier; final release result requires final immutable candidate instance or approved inheritance mapping",
+        "owned test fixture/profile and device lease",
+        "independent observer version/hash recorded"
+      ],
+      "trigger": "合成key/token/invite/屏幕文本/输入进入各失败路径及crash",
+      "independent_oracle": "独立扫描argv/stdout/stderr/日志/receipt/包与debug输出",
+      "negative_control": "注入已知泄漏的负控制必须被scanner发现",
+      "recovery": "保留脱敏证据；私密crash单独ACL与显式政策",
+      "cleanup": "核对子进程/窗口/service/临时文件归属，只清理本任务资源，保存Unknown和失败证据；不删除原Pair/权限。",
+      "evidence": [
+        "source_revision",
+        "contract_revision",
+        "artifact_hashes",
+        "platform_and_session_generation",
+        "redacted_timeline",
+        "observer_source_hash",
+        "independent_effect_observation",
+        "cleanup_receipt"
+      ],
+      "catalog_status": "SPECIFIED_NOT_EXECUTED",
+      "required_evidence_tier": "final_native_package for required runtime/platform effects"
+    },
+    {
+      "id": "A36",
+      "name": "Real account/Agent integration",
+      "severity": "P1",
+      "required_for": "full_declared_product_release",
+      "platforms": [
+        "all"
+      ],
+      "contracts": [
+        "C01",
+        "C02",
+        "C08"
+      ],
+      "tasks": [
+        "R37"
+      ],
+      "preconditions": [
+        "explicit evidence tier; final release result requires final immutable candidate instance or approved inheritance mapping",
+        "owned test fixture/profile and device lease",
+        "independent observer version/hash recorded"
+      ],
+      "trigger": "真实ChatGPT目标账号/工作区安装连接，fresh chat调用三能力并换owner",
+      "independent_oracle": "平台安装状态+独立Exec/Browser/Cua业务读回",
+      "negative_control": "SDK直连/旧账号证据不替新候选账号验收；跨聊天引用拒绝",
+      "recovery": "明确用户MFA/审批门槛，账号受阻记BLOCKED",
+      "cleanup": "核对子进程/窗口/service/临时文件归属，只清理本任务资源，保存Unknown和失败证据；不删除原Pair/权限。",
+      "evidence": [
+        "source_revision",
+        "contract_revision",
+        "artifact_hashes",
+        "platform_and_session_generation",
+        "redacted_timeline",
+        "observer_source_hash",
+        "independent_effect_observation",
+        "cleanup_receipt"
+      ],
+      "catalog_status": "SPECIFIED_NOT_EXECUTED",
+      "required_evidence_tier": "real_account"
+    },
+    {
+      "id": "A37",
+      "name": "Supply chain / offline runtime",
+      "severity": "P1",
+      "required_for": "full_declared_product_release",
+      "platforms": [
+        "all"
+      ],
+      "contracts": [
+        "C08"
+      ],
+      "tasks": [
+        "R01",
+        "R25",
+        "R29",
+        "R35"
+      ],
+      "preconditions": [
+        "explicit evidence tier; final release result requires final immutable candidate instance or approved inheritance mapping",
+        "owned test fixture/profile and device lease",
+        "independent observer version/hash recorded"
+      ],
+      "trigger": "clean构建缓存/locked输入、禁网普通运行、外部依赖来源不匹配",
+      "independent_oracle": "SBOM/锁/签名hash、进程加载来源与网络观察",
+      "negative_control": "无系统Node、无开发路径、无未固定首次下载；来源错误拒绝",
+      "recovery": "明确缺依赖/Blocked，不自动取latest",
+      "cleanup": "核对子进程/窗口/service/临时文件归属，只清理本任务资源，保存Unknown和失败证据；不删除原Pair/权限。",
+      "evidence": [
+        "source_revision",
+        "contract_revision",
+        "artifact_hashes",
+        "platform_and_session_generation",
+        "redacted_timeline",
+        "observer_source_hash",
+        "independent_effect_observation",
+        "cleanup_receipt"
+      ],
+      "catalog_status": "SPECIFIED_NOT_EXECUTED",
+      "required_evidence_tier": "final_native_package for required runtime/platform effects"
+    },
+    {
+      "id": "A38",
+      "name": "JS core retirement",
+      "severity": "P1",
+      "required_for": "full_declared_product_release",
+      "platforms": [
+        "all"
+      ],
+      "contracts": [
+        "C01",
+        "C08"
+      ],
+      "tasks": [
+        "R28",
+        "R29"
+      ],
+      "preconditions": [
+        "explicit evidence tier; final release result requires final immutable candidate instance or approved inheritance mapping",
+        "owned test fixture/profile and device lease",
+        "independent observer version/hash recorded"
+      ],
+      "trigger": "删除旧JS核心后的普通启动、恢复、doctor、安装、回滚与Browser关闭配置",
+      "independent_oracle": "source/package manifest+实际进程/入口追踪，正常命令真实结果",
+      "negative_control": "Node只允许已声明Browser worker；不能存在隐藏JS Gateway/Host/Core fallback",
+      "recovery": "旧基准从archive读取，final active链只Rust权威",
+      "cleanup": "核对子进程/窗口/service/临时文件归属，只清理本任务资源，保存Unknown和失败证据；不删除原Pair/权限。",
+      "evidence": [
+        "source_revision",
+        "contract_revision",
+        "artifact_hashes",
+        "platform_and_session_generation",
+        "redacted_timeline",
+        "observer_source_hash",
+        "independent_effect_observation",
+        "cleanup_receipt"
+      ],
+      "catalog_status": "SPECIFIED_NOT_EXECUTED",
+      "required_evidence_tier": "final_native_package for required runtime/platform effects"
+    },
+    {
+      "id": "A39",
+      "name": "Management parity and cancellation",
+      "severity": "P1",
+      "required_for": "full_declared_product_release",
+      "platforms": [
+        "all"
+      ],
+      "contracts": [
+        "C04",
+        "C07"
+      ],
+      "tasks": [
+        "R20",
+        "R21",
+        "R23"
+      ],
+      "preconditions": [
+        "explicit evidence tier; final release result requires final immutable candidate instance or approved inheritance mapping",
+        "owned test fixture/profile and device lease",
+        "independent observer version/hash recorded"
+      ],
+      "trigger": "CLI/GUI/API执行相同计划/能力变更；UI观察timeout或断管",
+      "independent_oracle": "同一journal/lease+独立OS业务状态和transaction查询",
+      "negative_control": "一次UI read timeout不得Dispose Core或中断Exec；各入口不得各写状态",
+      "recovery": "operation-local cancel/read-only reconcile，保持single writer",
+      "cleanup": "核对子进程/窗口/service/临时文件归属，只清理本任务资源，保存Unknown和失败证据；不删除原Pair/权限。",
+      "evidence": [
+        "source_revision",
+        "contract_revision",
+        "artifact_hashes",
+        "platform_and_session_generation",
+        "redacted_timeline",
+        "observer_source_hash",
+        "independent_effect_observation",
+        "cleanup_receipt"
+      ],
+      "catalog_status": "SPECIFIED_NOT_EXECUTED",
+      "required_evidence_tier": "final_native_package for required runtime/platform effects"
+    },
+    {
+      "id": "A40",
+      "name": "Four-target immutable delivery",
+      "severity": "P1",
+      "required_for": "full_declared_product_release",
+      "platforms": [
+        "linux-x64",
+        "windows-x64",
+        "macos-arm64",
+        "macos-x64"
+      ],
+      "contracts": [
+        "C08"
+      ],
+      "tasks": [
+        "R29",
+        "R30",
+        "R31",
+        "R32",
+        "R36"
+      ],
+      "preconditions": [
+        "explicit evidence tier; final release result requires final immutable candidate instance or approved inheritance mapping",
+        "owned test fixture/profile and device lease",
+        "independent observer version/hash recorded"
+      ],
+      "trigger": "同冻结SHA构建签名回收四目标并核实际安装版本",
+      "independent_oracle": "两端artifact hash、native/staged标记、running process和receipt独立比对",
+      "negative_control": "某平台贴补丁/unsigned中间产物/交叉编译不能冒充相同最终验收",
+      "recovery": "新字节必须新candidate；保留旧失败，不改标签",
+      "cleanup": "核对子进程/窗口/service/临时文件归属，只清理本任务资源，保存Unknown和失败证据；不删除原Pair/权限。",
+      "evidence": [
+        "source_revision",
+        "contract_revision",
+        "artifact_hashes",
+        "platform_and_session_generation",
+        "redacted_timeline",
+        "observer_source_hash",
+        "independent_effect_observation",
+        "cleanup_receipt"
+      ],
+      "catalog_status": "SPECIFIED_NOT_EXECUTED",
+      "required_evidence_tier": "final_native_package for required runtime/platform effects"
+    }
+  ],
+  "result_model": {
+    "catalog_is_not_execution_result": true,
+    "instance_key": [
+      "scenario_id",
+      "os_arch",
+      "manager_mode",
+      "topology",
+      "runtime_combination",
+      "candidate_hash"
+    ],
+    "required_instance_manifest_frozen_by": "R29 before execution; based on explicit risk/target coverage, not full Cartesian product",
+    "evidence_tiers": [
+      "design",
+      "static",
+      "model",
+      "transport_fault",
+      "real_executor_dev",
+      "final_native_package",
+      "real_account"
+    ],
+    "release_aggregation": "all required instances must satisfy gate; per-target BLOCKED/NOT_RUN never hidden by another PASS",
+    "inheritance_rule": "source/dependency/runtime/contract/target comparison plus independent impact review; required installed native/account/migration instances cannot be replaced by dev/mock proof"
+  },
+  "targets": [
+    "linux-x64",
+    "windows-x64",
+    "macos-arm64",
+    "macos-x64"
+  ],
+  "platform_aliases": {
+    "all": "all four targets",
+    "linux": "linux-x64",
+    "windows": "windows-x64",
+    "macos": [
+      "macos-arm64",
+      "macos-x64"
+    ]
+  },
+  "manager_modes": [
+    "foreground_cli",
+    "app_managed_compatibility",
+    "persistent_service"
+  ],
+  "result_instance_schema": {
+    "required": [
+      "scenario_id",
+      "os_arch",
+      "manager_mode",
+      "topology",
+      "runtime_combination",
+      "candidate_hash",
+      "contract_revision",
+      "evidence_tier",
+      "observer_hash",
+      "environment",
+      "status",
+      "evidence",
+      "cleanup_receipt"
+    ],
+    "status": [
+      "PASS",
+      "FAIL",
+      "BLOCKED",
+      "NOT_RUN",
+      "NOT_APPLICABLE"
+    ],
+    "optional": [
+      "inheritance_review",
+      "scope_decision",
+      "hardware_or_virtualized",
+      "timestamps",
+      "failure_phase"
+    ],
+    "notes": "schema是计划格式，R00将其转为机器校验格式；catalog没有单一执行status"
+  }
+}

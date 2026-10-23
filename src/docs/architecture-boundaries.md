@@ -1,4 +1,5 @@
 # Architecture boundaries and incremental evolution
+> 2026-10-24 owner update: the technology choice below is superseded by [Rust rewrite execution baseline](rust-core-rewrite/README.md). Rust will replace the Styx-owned core; the earlier no-rewrite/Node decision is historical. Identity, permissions, ownership and unknown-result safety remain requirements. This file records the pre-rewrite architecture review, not the current execution plan.
 
 Review baseline: `8e4e645f741573242aaf4dbe2abd2cccbb4678a3` (2026-10-24). This document records current contracts and proposed changes; it does not claim the proposed session APIs or unattended desktop scenarios are implemented.
 

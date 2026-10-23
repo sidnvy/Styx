@@ -1,0 +1,1355 @@
+{
+  "schema": 1,
+  "plan_revision": "draft-1",
+  "baseline_revision": "44cf1470e6b0cfdfd2c2372e54e84ebd279c59c3",
+  "active_slots": 4,
+  "default_new_worktrees": 0,
+  "integration_checkout": "existing styx-develop",
+  "staging_checkout": "existing styx-capability-lifecycle",
+  "execution_state": "PLAN_ONLY_NOT_STARTED",
+  "tasks": [
+    {
+      "id": "R00",
+      "title": "Freeze normative contracts and feature inventory",
+      "milestone": "M0",
+      "depends_on": [],
+      "owner_role": "integrator",
+      "planned_paths": [
+        "src/crates/styx-contracts",
+        "src/docs/rust-core-rewrite"
+      ],
+      "entry_condition": "C01-C08 draft+44cf147 API inventory",
+      "deliverable_and_exit_condition": "contract v1、public CLI/MCP/Control required/changed/deferred清单、golden分类规则、known defect列表，所有调用方可引用",
+      "independent_validation": "另一reviewer核对真实源码/旧缺陷，不从JS逐行翻译决定架构",
+      "scenario_ids": [],
+      "shared_files_rule": "root manifest/lock/contract public surface由integrator独占；planned paths仅在领取lease后可写",
+      "status": "PLANNED",
+      "implementation_started": false,
+      "receipt_required": [
+        "base_revision",
+        "contract_revision",
+        "changed_paths",
+        "relevant_checks",
+        "known_failures",
+        "cleanup_and_lease_return"
+      ]
+    },
+    {
+      "id": "R01",
+      "title": "Toolchain, SDK and protocol feasibility",
+      "milestone": "M0",
+      "depends_on": [],
+      "owner_role": "foundation",
+      "planned_paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "src/tools"
+      ],
+      "entry_condition": "四OS目标/官方依赖候选",
+      "deliverable_and_exit_condition": "固定Rust/MSRV/features/依赖来源和许可证；native target compile/protocol spike；offline缓存准备方案",
+      "independent_validation": "真实工具链/锁和MCP旧版本握手，不用stub SDK自证",
+      "scenario_ids": [
+        "A37"
+      ],
+      "shared_files_rule": "root manifest/lock/contract public surface由integrator独占；planned paths仅在领取lease后可写",
+      "status": "PLANNED",
+      "implementation_started": false,
+      "receipt_required": [
+        "base_revision",
+        "contract_revision",
+        "changed_paths",
+        "relevant_checks",
+        "known_failures",
+        "cleanup_and_lease_return"
+      ]
+    },
+    {
+      "id": "R02",
+      "title": "Platform manager identity and IPC ADR spikes",
+      "milestone": "M0",
+      "depends_on": [],
+      "owner_role": "platform",
+      "planned_paths": [
+        "src/docs/rust-core-rewrite/DECISIONS.md",
+        "src/tools/platform-spikes"
+      ],
+      "entry_condition": "用户/服务/权限约束与设备lease",
+      "deliverable_and_exit_condition": "平台peer/session身份spike及lifetime_scope、principal/权限/key/home/network可行性报告；G03 IPC方案可验证。需要owner选择的新服务身份/授权单独交R38，不阻塞typed Core/IPC开发。",
+      "independent_validation": "OS原生principal/peer/session观察；S4U/InteractiveToken不能当未测持久性",
+      "scenario_ids": [
+        "A26"
+      ],
+      "shared_files_rule": "root manifest/lock/contract public surface由integrator独占；planned paths仅在领取lease后可写",
+      "status": "PLANNED",
+      "implementation_started": false,
+      "receipt_required": [
+        "base_revision",
+        "contract_revision",
+        "changed_paths",
+        "relevant_checks",
+        "known_failures",
+        "cleanup_and_lease_return"
+      ]
+    },
+    {
+      "id": "R03",
+      "title": "Independent observers and performance baseline",
+      "milestone": "M0",
+      "depends_on": [],
+      "owner_role": "quality",
+      "planned_paths": [
+        "src/acceptance",
+        "src/bench"
+      ],
+      "entry_condition": "冻结legacy二进制/源码及SPEC预算",
+      "deliverable_and_exit_condition": "Exec/Cua/Browser observer能识别零/一次/两次；冷暖测量脚本与容量/性能预算冻结；旧test按真实合同/缺陷/仅源码形状/重复分类，后两类不机械移植或算覆盖。",
+      "independent_validation": "独立owned app/server/OS观察，不读同一产品success字段作为最终断言",
+      "scenario_ids": [
+        "A34"
+      ],
+      "shared_files_rule": "root manifest/lock/contract public surface由integrator独占；planned paths仅在领取lease后可写",
+      "status": "PLANNED",
+      "implementation_started": false,
+      "receipt_required": [
+        "base_revision",
+        "contract_revision",
+        "changed_paths",
+        "relevant_checks",
+        "known_failures",
+        "cleanup_and_lease_return"
+      ]
+    },
+    {
+      "id": "R04",
+      "title": "Create four-crate workspace and CLI composition",
+      "milestone": "M1",
+      "depends_on": [
+        "R00",
+        "R01"
+      ],
+      "owner_role": "integrator",
+      "planned_paths": [
+        "Cargo.toml",
+        "Cargo.lock",
+        "src/crates/*/Cargo.toml",
+        "src/crates/styx/src"
+      ],
+      "entry_condition": "已冻结contract/工具链",
+      "deliverable_and_exit_condition": "workspace按依赖方向编译；styx version/help真实CLI，禁止空成功业务命令；基础CI/lints",
+      "independent_validation": "依赖图与可执行入口审查；只声明skeleton而非功能实现",
+      "scenario_ids": [],
+      "shared_files_rule": "root manifest/lock/contract public surface由integrator独占；planned paths仅在领取lease后可写",
+      "status": "PLANNED",
+      "implementation_started": false,
+      "receipt_required": [
+        "base_revision",
+        "contract_revision",
+        "changed_paths",
+        "relevant_checks",
+        "known_failures",
+        "cleanup_and_lease_return"
+      ]
+    },
+    {
+      "id": "R05",
+      "title": "Typed contracts and exact legacy codec",
+      "milestone": "M1",
+      "depends_on": [
+        "R00",
+        "R04"
+      ],
+      "owner_role": "contracts",
+      "planned_paths": [
+        "src/crates/styx-contracts/src"
+      ],
+      "entry_condition": "normative bytes/crypto/ID格式",
+      "deliverable_and_exit_condition": "newtypes、versions、error/outcome/descriptor DTO及legacy签名字节codec；Rust/JS互认旧identity",
+      "independent_validation": "独立raw vectors+错字节/缺字段/domain负控制；不更新golden掩盖差异",
+      "scenario_ids": [
+        "A01",
+        "A33"
+      ],
+      "shared_files_rule": "root manifest/lock/contract public surface由integrator独占；planned paths仅在领取lease后可写",
+      "status": "PLANNED",
+      "implementation_started": false,
+      "receipt_required": [
+        "base_revision",
+        "contract_revision",
+        "changed_paths",
+        "relevant_checks",
+        "known_failures",
+        "cleanup_and_lease_return"
+      ]
+    },
+    {
+      "id": "R06",
+      "title": "Private store, leases and read-only legacy import",
+      "milestone": "M1",
+      "depends_on": [
+        "R04",
+        "R05"
+      ],
+      "owner_role": "storage",
+      "planned_paths": [
+        "src/crates/styx-runtime/src/storage"
+      ],
+      "entry_condition": "C07和OS锁/文件原语",
+      "deliverable_and_exit_condition": "只读导入保raw bytes、大整数；私有路径/ACL、single-writer lease、稳定boot/process identity",
+      "independent_validation": "外部第二writer/路径替换/错误锁/原始hash观察；无生产写入",
+      "scenario_ids": [
+        "A02",
+        "A03",
+        "A35"
+      ],
+      "shared_files_rule": "root manifest/lock/contract public surface由integrator独占；planned paths仅在领取lease后可写",
+      "status": "PLANNED",
+      "implementation_started": false,
+      "receipt_required": [
+        "base_revision",
+        "contract_revision",
+        "changed_paths",
+        "relevant_checks",
+        "known_failures",
+        "cleanup_and_lease_return"
+      ]
+    },
+    {
+      "id": "R07",
+      "title": "Core operation, policy, admission and ports",
+      "milestone": "M1",
+      "depends_on": [
+        "R00",
+        "R04",
+        "R05"
+      ],
+      "owner_role": "core",
+      "planned_paths": [
+        "src/crates/styx-core/src/operation",
+        "src/crates/styx-core/src/admission",
+        "src/crates/styx-core/src/router",
+        "src/crates/styx-core/src/ports"
+      ],
+      "entry_condition": "typed policies/状态机",
+      "deliverable_and_exit_condition": "准入交集、operation结果/liveness/drain分离、维护fence、typed ports；无OS/Tokio/fs依赖",
+      "independent_validation": "独立小状态模型/property反例，撤权/派发竞态与Unknown不重放",
+      "scenario_ids": [
+        "A07",
+        "A12"
+      ],
+      "shared_files_rule": "root manifest/lock/contract public surface由integrator独占；planned paths仅在领取lease后可写",
+      "status": "PLANNED",
+      "implementation_started": false,
+      "receipt_required": [
+        "base_revision",
+        "contract_revision",
+        "changed_paths",
+        "relevant_checks",
+        "known_failures",
+        "cleanup_and_lease_return"
+      ]
+    },
+    {
+      "id": "R08",
+      "title": "Authenticated bounded Control/Agent IPC",
+      "milestone": "M1",
+      "depends_on": [
+        "R04",
+        "R05",
+        "R06",
+        "R07",
+        "R02"
+      ],
+      "owner_role": "ipc",
+      "planned_paths": [
+        "src/crates/styx-runtime/src/ipc"
+      ],
+      "entry_condition": "C06+R02验证的peer方案",
+      "deliverable_and_exit_condition": "版本/角色/实例/deadline/reqid、NamedPipe/UDS抽象、transaction查询和operation-local取消",
+      "independent_validation": "独立伪peer/伪server/错session/oversize客户端；UI timeout不杀Core",
+      "scenario_ids": [
+        "A04",
+        "A12",
+        "A31",
+        "A35"
+      ],
+      "shared_files_rule": "root manifest/lock/contract public surface由integrator独占；planned paths仅在领取lease后可写",
+      "status": "PLANNED",
+      "implementation_started": false,
+      "receipt_required": [
+        "base_revision",
+        "contract_revision",
+        "changed_paths",
+        "relevant_checks",
+        "known_failures",
+        "cleanup_and_lease_return"
+      ]
+    },
+    {
+      "id": "R09",
+      "title": "Rust Exec adapter over real Codex",
+      "milestone": "M2",
+      "depends_on": [
+        "R05",
+        "R07"
+      ],
+      "owner_role": "exec",
+      "planned_paths": [
+        "src/crates/styx-runtime/src/providers/codex"
+      ],
+      "entry_condition": "原Codex pin与wire合同",
+      "deliverable_and_exit_condition": "进程UUID/writeId、owner/cursor/UTF8/PTY/exit/EOF/cleanup/Unknown完整实现",
+      "independent_validation": "真实executor+独立nonce/pid读回；丢ack无重放；closed-only不能confirmed",
+      "scenario_ids": [
+        "A08",
+        "A09",
+        "A10"
+      ],
+      "shared_files_rule": "root manifest/lock/contract public surface由integrator独占；planned paths仅在领取lease后可写",
+      "status": "PLANNED",
+      "implementation_started": false,
+      "receipt_required": [
+        "base_revision",
+        "contract_revision",
+        "changed_paths",
+        "relevant_checks",
+        "known_failures",
+        "cleanup_and_lease_return"
+      ]
+    },
+    {
+      "id": "R10",
+      "title": "Rust Host and connection-independent supervision",
+      "milestone": "M2",
+      "depends_on": [
+        "R06",
+        "R07",
+        "R08",
+        "R09"
+      ],
+      "owner_role": "host",
+      "planned_paths": [
+        "src/crates/styx-runtime/src/host"
+      ],
+      "entry_condition": "executor与owner合同",
+      "deliverable_and_exit_condition": "outbound认证/重连、per-lane监督、bounded任务/进程树清理；连接中断不重建executor",
+      "independent_validation": "第三进程观察活Exec跨网络断线、错误owner拒绝、worker故障局部隔离",
+      "scenario_ids": [
+        "A03",
+        "A10",
+        "A11",
+        "A12",
+        "A13",
+        "A20"
+      ],
+      "shared_files_rule": "root manifest/lock/contract public surface由integrator独占；planned paths仅在领取lease后可写",
+      "status": "PLANNED",
+      "implementation_started": false,
+      "receipt_required": [
+        "base_revision",
+        "contract_revision",
+        "changed_paths",
+        "relevant_checks",
+        "known_failures",
+        "cleanup_and_lease_return"
+      ]
+    },
+    {
+      "id": "R11",
+      "title": "Rust Gateway MCP/HTTP/WSS routing",
+      "milestone": "M3",
+      "depends_on": [
+        "R04",
+        "R05",
+        "R07"
+      ],
+      "owner_role": "gateway",
+      "planned_paths": [
+        "src/crates/styx-runtime/src/gateway/transport",
+        "src/crates/styx-runtime/src/gateway/mcp"
+      ],
+      "entry_condition": "冻结MCP版本/headers/tool schemas",
+      "deliverable_and_exit_condition": "真实MCP transport/owner分配、allowedHost/origin、session资源/target路由，旧工具兼容",
+      "independent_validation": "独立标准MCP client与协议captures；非法auth/origin负控制、无GUI依赖",
+      "scenario_ids": [
+        "A11",
+        "A33"
+      ],
+      "shared_files_rule": "root manifest/lock/contract public surface由integrator独占；planned paths仅在领取lease后可写",
+      "status": "PLANNED",
+      "implementation_started": false,
+      "receipt_required": [
+        "base_revision",
+        "contract_revision",
+        "changed_paths",
+        "relevant_checks",
+        "known_failures",
+        "cleanup_and_lease_return"
+      ]
+    },
+    {
+      "id": "R12",
+      "title": "Rust pairing, grants, registry and self-CAS",
+      "milestone": "M3",
+      "depends_on": [
+        "R05",
+        "R06",
+        "R11"
+      ],
+      "owner_role": "gateway-policy",
+      "planned_paths": [
+        "src/crates/styx-core/src/gateway_policy",
+        "src/crates/styx-core/src/grants",
+        "src/crates/styx-runtime/src/gateway/enrollment",
+        "src/crates/styx-runtime/src/gateway/registry"
+      ],
+      "entry_condition": "legacy RSA/claim/CA/publisher合同",
+      "deliverable_and_exit_condition": "邀请/双端比较/审批/claim/撤销/默认target与self能力CAS，同设备无admin凭据；审批/撤销/grant/CAS转换只在Core；runtime只认证、crypto/storage/transport适配和调用，不重复授权规则。",
+      "independent_validation": "不同实现互认签名；错CA/跨device/重放/过期/active work负控制",
+      "scenario_ids": [
+        "A01",
+        "A05",
+        "A06",
+        "A33"
+      ],
+      "shared_files_rule": "root manifest/lock/contract public surface由integrator独占；planned paths仅在领取lease后可写",
+      "status": "PLANNED",
+      "implementation_started": false,
+      "receipt_required": [
+        "base_revision",
+        "contract_revision",
+        "changed_paths",
+        "relevant_checks",
+        "known_failures",
+        "cleanup_and_lease_return"
+      ]
+    },
+    {
+      "id": "R13",
+      "title": "First vertical slice: old Gateway to Rust Host",
+      "milestone": "M2",
+      "depends_on": [
+        "R09",
+        "R10"
+      ],
+      "owner_role": "vertical-owner",
+      "planned_paths": [
+        "src/acceptance/interop-exec"
+      ],
+      "entry_condition": "已批准隔离Pair，旧Gateway不可变基线",
+      "deliverable_and_exit_condition": "真实TLS/WSS、Rust Host/CLI→Codex Exec，PTY/read/write/断连/cancel/cleanup及保identity",
+      "independent_validation": "独立nonce+OS进程/readback和原签名身份hash，不以echo stub代替",
+      "scenario_ids": [
+        "A05",
+        "A08",
+        "A11",
+        "A33"
+      ],
+      "shared_files_rule": "root manifest/lock/contract public surface由integrator独占；planned paths仅在领取lease后可写",
+      "status": "PLANNED",
+      "implementation_started": false,
+      "receipt_required": [
+        "base_revision",
+        "contract_revision",
+        "changed_paths",
+        "relevant_checks",
+        "known_failures",
+        "cleanup_and_lease_return"
+      ]
+    },
+    {
+      "id": "R14",
+      "title": "Session registry, selection and capability projection",
+      "milestone": "M3",
+      "depends_on": [
+        "R05",
+        "R07"
+      ],
+      "owner_role": "session",
+      "planned_paths": [
+        "src/crates/styx-core/src/session",
+        "src/crates/styx-runtime/src/session"
+      ],
+      "entry_condition": "C02/C03选择策略冻结",
+      "deliverable_and_exit_condition": "显式target/approved binding/hint区分，list/attach/events、generation、分项事实投影",
+      "independent_validation": "错目标fallback/多候选/旧实例/无权限状态模型与独立fake adapters",
+      "scenario_ids": [
+        "A13",
+        "A14",
+        "A16",
+        "A17",
+        "A19",
+        "A21"
+      ],
+      "shared_files_rule": "root manifest/lock/contract public surface由integrator独占；planned paths仅在领取lease后可写",
+      "status": "PLANNED",
+      "implementation_started": false,
+      "receipt_required": [
+        "base_revision",
+        "contract_revision",
+        "changed_paths",
+        "relevant_checks",
+        "known_failures",
+        "cleanup_and_lease_return"
+      ]
+    },
+    {
+      "id": "R15",
+      "title": "Linux session/desktop platform adapter",
+      "milestone": "M3",
+      "depends_on": [
+        "R02",
+        "R08",
+        "R14"
+      ],
+      "owner_role": "linux",
+      "planned_paths": [
+        "src/crates/styx-runtime/src/platform/linux"
+      ],
+      "entry_condition": "logind/Hyprland/Wayland目标与peer事实",
+      "deliverable_and_exit_condition": "异步有界session probe/事件补漏、Agent注册及Window/Capture/Input实际支持映射",
+      "independent_validation": "fresh SSH/旧tmux/双session关联负控制；专用环境compositor生命周期",
+      "scenario_ids": [
+        "A04",
+        "A14",
+        "A16",
+        "A18"
+      ],
+      "shared_files_rule": "root manifest/lock/contract public surface由integrator独占；planned paths仅在领取lease后可写",
+      "status": "PLANNED",
+      "implementation_started": false,
+      "receipt_required": [
+        "base_revision",
+        "contract_revision",
+        "changed_paths",
+        "relevant_checks",
+        "known_failures",
+        "cleanup_and_lease_return"
+      ]
+    },
+    {
+      "id": "R16",
+      "title": "Windows session/desktop platform adapter",
+      "milestone": "M3",
+      "depends_on": [
+        "R02",
+        "R08",
+        "R14"
+      ],
+      "owner_role": "windows",
+      "planned_paths": [
+        "src/crates/styx-runtime/src/platform/windows",
+        "src/host/windows/SessionProbe.cs"
+      ],
+      "entry_condition": "SID/LUID/session/integrity和NamedPipe合同",
+      "deliverable_and_exit_condition": "native bridge的typed事实、lock/secure desktop/generation失效；不靠SYSTEM",
+      "independent_validation": "OS会话/fixture独立readback；Session0/错误logon/旧snapshot拒绝",
+      "scenario_ids": [
+        "A04",
+        "A16",
+        "A18"
+      ],
+      "shared_files_rule": "root manifest/lock/contract public surface由integrator独占；planned paths仅在领取lease后可写",
+      "status": "PLANNED",
+      "implementation_started": false,
+      "receipt_required": [
+        "base_revision",
+        "contract_revision",
+        "changed_paths",
+        "relevant_checks",
+        "known_failures",
+        "cleanup_and_lease_return"
+      ]
+    },
+    {
+      "id": "R17",
+      "title": "macOS session/TCC platform adapter",
+      "milestone": "M3",
+      "depends_on": [
+        "R02",
+        "R08",
+        "R14"
+      ],
+      "owner_role": "macos",
+      "planned_paths": [
+        "src/crates/styx-runtime/src/platform/macos",
+        "src/host/macos/native-bridge"
+      ],
+      "entry_condition": "原签名App/TCC责任及可用native接口",
+      "deliverable_and_exit_condition": "UID/audit/login/lock/agent实例，保embedded Cua责任；headless不启动授权UI",
+      "independent_validation": "真实native元数据与owned app；不以on-console代替unlocked、不换cert",
+      "scenario_ids": [
+        "A04",
+        "A16",
+        "A18"
+      ],
+      "shared_files_rule": "root manifest/lock/contract public surface由integrator独占；planned paths仅在领取lease后可写",
+      "status": "PLANNED",
+      "implementation_started": false,
+      "receipt_required": [
+        "base_revision",
+        "contract_revision",
+        "changed_paths",
+        "relevant_checks",
+        "known_failures",
+        "cleanup_and_lease_return"
+      ]
+    },
+    {
+      "id": "R18",
+      "title": "Rust Cua target/observation authority",
+      "milestone": "M3",
+      "depends_on": [
+        "R07",
+        "R08",
+        "R10",
+        "R14"
+      ],
+      "owner_role": "desktop",
+      "planned_paths": [
+        "src/crates/styx-runtime/src/providers/cua"
+      ],
+      "entry_condition": "固定Cua schema与Session port",
+      "deliverable_and_exit_condition": "owner/target/snapshot/element/坐标代次验证、排队、deadline、取消/Unknown，真正运行Cua",
+      "independent_validation": "owned fixture读回与dispatch后丢回复计数；target替换/跨owner负控制",
+      "scenario_ids": [
+        "A07",
+        "A17",
+        "A18",
+        "A19",
+        "A20",
+        "A21"
+      ],
+      "shared_files_rule": "root manifest/lock/contract public surface由integrator独占；planned paths仅在领取lease后可写",
+      "status": "PLANNED",
+      "implementation_started": false,
+      "receipt_required": [
+        "base_revision",
+        "contract_revision",
+        "changed_paths",
+        "relevant_checks",
+        "known_failures",
+        "cleanup_and_lease_return"
+      ]
+    },
+    {
+      "id": "R19",
+      "title": "Rust Browser supervisor and minimal worker",
+      "milestone": "M3",
+      "depends_on": [
+        "R07",
+        "R08",
+        "R10",
+        "R14"
+      ],
+      "owner_role": "browser",
+      "planned_paths": [
+        "src/crates/styx-runtime/src/providers/browser",
+        "src/providers/browser-worker"
+      ],
+      "entry_condition": "固定Playwright/Node闭包与profile/owner合同",
+      "deliverable_and_exit_condition": "Rust拥有lease/ref/login政策/恢复；worker仅backend调用；headless/headed明确、attach拒绝",
+      "independent_validation": "自建HTTP计数与cookie/profile验证，worker crash/重复/未知结果无重放",
+      "scenario_ids": [
+        "A07",
+        "A13",
+        "A22",
+        "A23",
+        "A24"
+      ],
+      "shared_files_rule": "root manifest/lock/contract public surface由integrator独占；planned paths仅在领取lease后可写",
+      "status": "PLANNED",
+      "implementation_started": false,
+      "receipt_required": [
+        "base_revision",
+        "contract_revision",
+        "changed_paths",
+        "relevant_checks",
+        "known_failures",
+        "cleanup_and_lease_return"
+      ]
+    },
+    {
+      "id": "R20",
+      "title": "Rust management config, roles and planning",
+      "milestone": "M4",
+      "depends_on": [
+        "R05",
+        "R06",
+        "R07"
+      ],
+      "owner_role": "management",
+      "planned_paths": [
+        "src/crates/styx-core/src/management/deployment",
+        "src/crates/styx-core/src/management/plan",
+        "src/crates/styx-runtime/src/management"
+      ],
+      "entry_condition": "legacy功能清单与单writer store",
+      "deliverable_and_exit_condition": "CLI/GUI共用role/config/plan/status/diagnostics，配置意图不冒充健康",
+      "independent_validation": "相同计划不同client一致；raw状态与外部OS事实分离，join无新Gateway",
+      "scenario_ids": [
+        "A02",
+        "A39"
+      ],
+      "shared_files_rule": "root manifest/lock/contract public surface由integrator独占；planned paths仅在领取lease后可写",
+      "status": "PLANNED",
+      "implementation_started": false,
+      "receipt_required": [
+        "base_revision",
+        "contract_revision",
+        "changed_paths",
+        "relevant_checks",
+        "known_failures",
+        "cleanup_and_lease_return"
+      ]
+    },
+    {
+      "id": "R21",
+      "title": "Rust transactions, updates and explicit recovery",
+      "milestone": "M4",
+      "depends_on": [
+        "R06",
+        "R07",
+        "R20"
+      ],
+      "owner_role": "transactions",
+      "planned_paths": [
+        "src/crates/styx-core/src/management/transaction",
+        "src/crates/styx-core/src/management/recovery",
+        "src/crates/styx-runtime/src/transactions"
+      ],
+      "entry_condition": "C07 journal/flush/reader barrier",
+      "deliverable_and_exit_condition": "能力/部署/更新/rollback/停止事务统一，commit丢回复可只读协调，不复活撤权",
+      "independent_validation": "每个写入/激活边界外部故障注入+原始bytes/OSlease核对",
+      "scenario_ids": [
+        "A06",
+        "A30",
+        "A31",
+        "A39"
+      ],
+      "shared_files_rule": "root manifest/lock/contract public surface由integrator独占；planned paths仅在领取lease后可写",
+      "status": "PLANNED",
+      "implementation_started": false,
+      "receipt_required": [
+        "base_revision",
+        "contract_revision",
+        "changed_paths",
+        "relevant_checks",
+        "known_failures",
+        "cleanup_and_lease_return"
+      ]
+    },
+    {
+      "id": "R22",
+      "title": "Native service managers and owner modes",
+      "milestone": "M4",
+      "depends_on": [
+        "R02",
+        "R06",
+        "R10",
+        "R15",
+        "R16",
+        "R17",
+        "R21",
+        "R38"
+      ],
+      "owner_role": "platform-manager",
+      "planned_paths": [
+        "src/crates/styx-runtime/src/platform/*/manager",
+        "src/tools/service-templates"
+      ],
+      "entry_condition": "G02 principal决策与desired-state合同",
+      "deliverable_and_exit_condition": "foreground/App-managed/persistent明确；OS manager启动/恢复/Stop和autostart分离",
+      "independent_validation": "GUI退出/断SSH/声明scope内logout真实验证；错误lease不得误停他人进程",
+      "scenario_ids": [
+        "A03",
+        "A15",
+        "A25",
+        "A26"
+      ],
+      "shared_files_rule": "root manifest/lock/contract public surface由integrator独占；planned paths仅在领取lease后可写",
+      "status": "PLANNED",
+      "implementation_started": false,
+      "receipt_required": [
+        "base_revision",
+        "contract_revision",
+        "changed_paths",
+        "relevant_checks",
+        "known_failures",
+        "cleanup_and_lease_return"
+      ]
+    },
+    {
+      "id": "R23",
+      "title": "Native UI and CLI clients switch to Rust API",
+      "milestone": "M4",
+      "depends_on": [
+        "R08",
+        "R20",
+        "R21",
+        "R22"
+      ],
+      "owner_role": "native-ui",
+      "planned_paths": [
+        "src/host/macos/product-ui",
+        "src/host/windows/Styx.cs",
+        "src/crates/styx/src/cli"
+      ],
+      "entry_condition": "Control API、manager模式与旧普通用户流程",
+      "deliverable_and_exit_condition": "原UI不重设计；无JS bridge business；同API配置/状态/权限/tryout/Stop，CLI功能清单闭合",
+      "independent_validation": "UI/CLI同事务结果；UI timeout无连带中断；实际owned tryout",
+      "scenario_ids": [
+        "A25",
+        "A27",
+        "A31",
+        "A39"
+      ],
+      "shared_files_rule": "root manifest/lock/contract public surface由integrator独占；planned paths仅在领取lease后可写",
+      "status": "PLANNED",
+      "implementation_started": false,
+      "receipt_required": [
+        "base_revision",
+        "contract_revision",
+        "changed_paths",
+        "relevant_checks",
+        "known_failures",
+        "cleanup_and_lease_return"
+      ]
+    },
+    {
+      "id": "R24",
+      "title": "Native manifest/bootstrap/installer format",
+      "milestone": "M4",
+      "depends_on": [
+        "R01",
+        "R05",
+        "R06",
+        "R21"
+      ],
+      "owner_role": "installer",
+      "planned_paths": [
+        "src/crates/styx-runtime/src/release",
+        "src/host/native-build",
+        "src/host/*/platform-update"
+      ],
+      "entry_condition": "C08新格式与旧reader限制",
+      "deliverable_and_exit_condition": "legacy_js/native_rust显式验证、原生bootstrap和必要一次bridge、schema barrier/installerrollback",
+      "independent_validation": "篡改/错format/错entry/旧reader拒绝；原publisher与TCC链证明",
+      "scenario_ids": [
+        "A27",
+        "A28",
+        "A32"
+      ],
+      "shared_files_rule": "root manifest/lock/contract public surface由integrator独占；planned paths仅在领取lease后可写",
+      "status": "PLANNED",
+      "implementation_started": false,
+      "receipt_required": [
+        "base_revision",
+        "contract_revision",
+        "changed_paths",
+        "relevant_checks",
+        "known_failures",
+        "cleanup_and_lease_return"
+      ]
+    },
+    {
+      "id": "R25",
+      "title": "Build supply chain and reproducible payload",
+      "milestone": "M4",
+      "depends_on": [
+        "R01",
+        "R04",
+        "R24"
+      ],
+      "owner_role": "release-engineering",
+      "planned_paths": [
+        "src/tools/release",
+        "src/ci",
+        "src/licenses"
+      ],
+      "entry_condition": "锁/外部inputs/工具链/目标SDK",
+      "deliverable_and_exit_condition": "四目标本地构建、签名步骤、SBOM/许可证/审计、inputs及payload hash与atomic收集",
+      "independent_validation": "独立source/input/运行闭包核对，offline运行，unsigned reproducibility差异解释",
+      "scenario_ids": [
+        "A28",
+        "A35",
+        "A37"
+      ],
+      "shared_files_rule": "root manifest/lock/contract public surface由integrator独占；planned paths仅在领取lease后可写",
+      "status": "PLANNED",
+      "implementation_started": false,
+      "receipt_required": [
+        "base_revision",
+        "contract_revision",
+        "changed_paths",
+        "relevant_checks",
+        "known_failures",
+        "cleanup_and_lease_return"
+      ]
+    },
+    {
+      "id": "R26",
+      "title": "Single-owner cutover coordinator",
+      "milestone": "M4",
+      "depends_on": [
+        "R10",
+        "R12",
+        "R18",
+        "R19",
+        "R21",
+        "R22",
+        "R23",
+        "R24"
+      ],
+      "owner_role": "migration",
+      "planned_paths": [
+        "src/crates/styx-runtime/src/migration"
+      ],
+      "entry_condition": "原profilepreservation manifest和可逆schema策略",
+      "deliverable_and_exit_condition": "fence/结算/旧owner释放/newlease/activate/verify/commit可恢复，绝无同root双writer",
+      "independent_validation": "隔离旧profile升级中断与双writer攻击，原字节/身份/授权前后独立检查",
+      "scenario_ids": [
+        "A29",
+        "A30",
+        "A32"
+      ],
+      "shared_files_rule": "root manifest/lock/contract public surface由integrator独占；planned paths仅在领取lease后可写",
+      "status": "PLANNED",
+      "implementation_started": false,
+      "receipt_required": [
+        "base_revision",
+        "contract_revision",
+        "changed_paths",
+        "relevant_checks",
+        "known_failures",
+        "cleanup_and_lease_return"
+      ]
+    },
+    {
+      "id": "R27",
+      "title": "Interop and independent fault-boundary review",
+      "milestone": "M4",
+      "depends_on": [
+        "R03",
+        "R12",
+        "R13",
+        "R18",
+        "R19",
+        "R21",
+        "R24",
+        "R26"
+      ],
+      "owner_role": "independent-quality",
+      "planned_paths": [
+        "src/acceptance/interop",
+        "src/acceptance/faults"
+      ],
+      "entry_condition": "真实provider和迁移切片，固定observer",
+      "deliverable_and_exit_condition": "四种runtime组合适用合同、负控制、mutation/tx每阶段丢ack/崩溃、已知缺陷不复刻",
+      "independent_validation": "另一作者审oracle/反例；未支持强合同明确compatibility而非假generation",
+      "scenario_ids": [
+        "A05",
+        "A07",
+        "A09",
+        "A10",
+        "A20",
+        "A22",
+        "A23",
+        "A30",
+        "A31",
+        "A33"
+      ],
+      "shared_files_rule": "root manifest/lock/contract public surface由integrator独占；planned paths仅在领取lease后可写",
+      "status": "PLANNED",
+      "implementation_started": false,
+      "receipt_required": [
+        "base_revision",
+        "contract_revision",
+        "changed_paths",
+        "relevant_checks",
+        "known_failures",
+        "cleanup_and_lease_return"
+      ]
+    },
+    {
+      "id": "R28",
+      "title": "Retire JS core and canonical final entrypoints",
+      "milestone": "M5",
+      "depends_on": [
+        "R13",
+        "R15",
+        "R16",
+        "R17",
+        "R18",
+        "R19",
+        "R20",
+        "R21",
+        "R22",
+        "R23",
+        "R24",
+        "R26",
+        "R27"
+      ],
+      "owner_role": "integrator",
+      "planned_paths": [
+        "src/gateway",
+        "src/onboarding",
+        "src/host JS core entries",
+        "package.json",
+        "Cargo.toml",
+        "README.md"
+      ],
+      "entry_condition": "隔离Rust所有能力与cutover证明，旧基准已archive",
+      "deliverable_and_exit_condition": "删除active JS Gateway/Host/Core及永久fallback；保留允许worker/UI/build脚本，根命令Rust；source仅src；旧root-entry/source-layout等对node路径的实现形状断言退役，保留单权威、可启动、认证拒绝等真正行为合同。",
+      "independent_validation": "source/package运行入口allowlist与真实无Node-core启动，Git历史可回查",
+      "scenario_ids": [
+        "A38"
+      ],
+      "shared_files_rule": "root manifest/lock/contract public surface由integrator独占；planned paths仅在领取lease后可写",
+      "status": "PLANNED",
+      "implementation_started": false,
+      "receipt_required": [
+        "base_revision",
+        "contract_revision",
+        "changed_paths",
+        "relevant_checks",
+        "known_failures",
+        "cleanup_and_lease_return"
+      ]
+    },
+    {
+      "id": "R29",
+      "title": "Freeze one SHA and build four final candidates",
+      "milestone": "M5",
+      "depends_on": [
+        "R25",
+        "R28"
+      ],
+      "owner_role": "integrator-release",
+      "planned_paths": [
+        "release manifest/version registry",
+        "external candidate output"
+      ],
+      "entry_condition": "所有writer交lease，clean SHA+contracts+lock+inputs",
+      "deliverable_and_exit_condition": "一次完整local gate，四目标同SHA artifact/sign/build receipts，包不可变、atomic回收hash一致；设备执行前冻结required instance matrix及每scenario最终候选覆盖/合法继承映射。",
+      "independent_validation": "独立包/签名/输入验证和actual CLI完整性，交叉构建不冒充native",
+      "scenario_ids": [
+        "A27",
+        "A28",
+        "A37",
+        "A38",
+        "A40"
+      ],
+      "shared_files_rule": "root manifest/lock/contract public surface由integrator独占；planned paths仅在领取lease后可写",
+      "status": "PLANNED",
+      "implementation_started": false,
+      "receipt_required": [
+        "base_revision",
+        "contract_revision",
+        "changed_paths",
+        "relevant_checks",
+        "known_failures",
+        "cleanup_and_lease_return"
+      ]
+    },
+    {
+      "id": "R30",
+      "title": "Linux full native acceptance",
+      "milestone": "M6",
+      "depends_on": [
+        "R29"
+      ],
+      "owner_role": "linux-device-owner",
+      "planned_paths": [
+        "external evidence/linux"
+      ],
+      "entry_condition": "exact Linux candidate和专用测试session",
+      "deliverable_and_exit_condition": "Arch/Hyprland+headless整段旅程，SSH/tmux/多session/权限/生命周期与清理状态",
+      "independent_validation": "独立owned GUI/HTTP/OSoracle；不重启/注销开发Workstation、不触piermini",
+      "scenario_ids": [
+        "A13",
+        "A14",
+        "A15",
+        "A17",
+        "A24",
+        "A26",
+        "A27",
+        "A40"
+      ],
+      "shared_files_rule": "root manifest/lock/contract public surface由integrator独占；planned paths仅在领取lease后可写",
+      "status": "PLANNED",
+      "implementation_started": false,
+      "receipt_required": [
+        "base_revision",
+        "contract_revision",
+        "changed_paths",
+        "relevant_checks",
+        "known_failures",
+        "cleanup_and_lease_return"
+      ]
+    },
+    {
+      "id": "R31",
+      "title": "Windows full native acceptance",
+      "milestone": "M6",
+      "depends_on": [
+        "R29"
+      ],
+      "owner_role": "windows-device-owner",
+      "planned_paths": [
+        "external evidence/windows"
+      ],
+      "entry_condition": "exact Windows candidate，nab5 lease与原Pair/Startup记录",
+      "deliverable_and_exit_condition": "单机/join/GUIQuit/service/真实boot与冷启动/securedesktop/权限、原Pair迁移",
+      "independent_validation": "独立OS/owned fixture/网络nonce；isolated不能替原Pair，无SYSTEM绕过",
+      "scenario_ids": [
+        "A13",
+        "A15",
+        "A17",
+        "A24",
+        "A26",
+        "A27",
+        "A40"
+      ],
+      "shared_files_rule": "root manifest/lock/contract public surface由integrator独占；planned paths仅在领取lease后可写",
+      "status": "PLANNED",
+      "implementation_started": false,
+      "receipt_required": [
+        "base_revision",
+        "contract_revision",
+        "changed_paths",
+        "relevant_checks",
+        "known_failures",
+        "cleanup_and_lease_return"
+      ]
+    },
+    {
+      "id": "R32",
+      "title": "macOS ARM/x64 native acceptance",
+      "milestone": "M6",
+      "depends_on": [
+        "R29"
+      ],
+      "owner_role": "macos-device-owner",
+      "planned_paths": [
+        "external evidence/macos"
+      ],
+      "entry_condition": "exact两arch candidate，pho与原ARM/签名设备lease",
+      "deliverable_and_exit_condition": "两arch实际安装/TCC/GUI+headless/lock/logout管理scope/同身份升级；缺签名/设备明确BLOCKED",
+      "independent_validation": "独立native fixture/权限责任/OS进程；仅compile不代PASS、不导出key",
+      "scenario_ids": [
+        "A13",
+        "A15",
+        "A17",
+        "A24",
+        "A26",
+        "A27",
+        "A40"
+      ],
+      "shared_files_rule": "root manifest/lock/contract public surface由integrator独占；planned paths仅在领取lease后可写",
+      "status": "PLANNED",
+      "implementation_started": false,
+      "receipt_required": [
+        "base_revision",
+        "contract_revision",
+        "changed_paths",
+        "relevant_checks",
+        "known_failures",
+        "cleanup_and_lease_return"
+      ]
+    },
+    {
+      "id": "R33",
+      "title": "Final-package migration/interruption/rollback",
+      "milestone": "M6",
+      "depends_on": [
+        "R29",
+        "R26"
+      ],
+      "owner_role": "migration-device-coordinator",
+      "planned_paths": [
+        "external evidence/migration"
+      ],
+      "entry_condition": "exact最终包+旧trusted包/状态、与R30-R32共享设备预约",
+      "deliverable_and_exit_condition": "每平台fresh/旧→新/丢commit回复/rollback与reader barrier，撤权不复活",
+      "independent_validation": "独立raw bytes/publisher/device/CA与OSlease，单writer及最终真实业务",
+      "scenario_ids": [
+        "A29",
+        "A30",
+        "A32"
+      ],
+      "shared_files_rule": "root manifest/lock/contract public surface由integrator独占；planned paths仅在领取lease后可写",
+      "status": "PLANNED",
+      "implementation_started": false,
+      "receipt_required": [
+        "base_revision",
+        "contract_revision",
+        "changed_paths",
+        "relevant_checks",
+        "known_failures",
+        "cleanup_and_lease_return"
+      ]
+    },
+    {
+      "id": "R34",
+      "title": "Performance and resource/soak acceptance",
+      "milestone": "M6",
+      "depends_on": [
+        "R03",
+        "R29"
+      ],
+      "owner_role": "performance",
+      "planned_paths": [
+        "external evidence/performance"
+      ],
+      "entry_condition": "冻结预算/硬件/冷暖/负载，签名最终包；workload/concurrency/payload/warmup/window/fairness和资源趋势判据在执行前冻结，不能验收后补。",
+      "deliverable_and_exit_condition": "逐阶段cold/warm/IPC/并发/drain/soak样本全保留，达到目标或明确FAIL/决策",
+      "independent_validation": "独立计时/CPU/IO/RSS/句柄/子进程；不移动必要校验或删慢样本",
+      "scenario_ids": [
+        "A12",
+        "A34"
+      ],
+      "shared_files_rule": "root manifest/lock/contract public surface由integrator独占；planned paths仅在领取lease后可写",
+      "status": "PLANNED",
+      "implementation_started": false,
+      "receipt_required": [
+        "base_revision",
+        "contract_revision",
+        "changed_paths",
+        "relevant_checks",
+        "known_failures",
+        "cleanup_and_lease_return"
+      ]
+    },
+    {
+      "id": "R35",
+      "title": "Independent security and supply-chain release review",
+      "milestone": "M6",
+      "depends_on": [
+        "R27",
+        "R29"
+      ],
+      "owner_role": "security-reviewer",
+      "planned_paths": [
+        "external evidence/security"
+      ],
+      "entry_condition": "最终包/输入/审计/scene receipts",
+      "deliverable_and_exit_condition": "C01-C08安全不变量、秘密/路径/IPC/降级/代码边界与签名完整性逐项复核",
+      "independent_validation": "非作者审查+主动负控制；compile/test数不能代无越权证明",
+      "scenario_ids": [
+        "A28",
+        "A35",
+        "A37"
+      ],
+      "shared_files_rule": "root manifest/lock/contract public surface由integrator独占；planned paths仅在领取lease后可写",
+      "status": "PLANNED",
+      "implementation_started": false,
+      "receipt_required": [
+        "base_revision",
+        "contract_revision",
+        "changed_paths",
+        "relevant_checks",
+        "known_failures",
+        "cleanup_and_lease_return"
+      ]
+    },
+    {
+      "id": "R36",
+      "title": "Release gate and owner handoff",
+      "milestone": "M7",
+      "depends_on": [
+        "R30",
+        "R31",
+        "R32",
+        "R33",
+        "R34",
+        "R35",
+        "R37"
+      ],
+      "owner_role": "integrator",
+      "planned_paths": [
+        "README.md",
+        "release docs",
+        "external Owner Control Report"
+      ],
+      "entry_condition": "所有required场景终态和exact artifact receipts",
+      "deliverable_and_exit_condition": "清晰Preview/Stable判定、运行/升级/恢复手册、无无主进程/lease/工作树和双实现，原生/账号/signing限制明确",
+      "independent_validation": "独立evidence index核对；缺required项保持INCOMPLETE，不更改测试期望求绿",
+      "scenario_ids": [
+        "A40"
+      ],
+      "shared_files_rule": "root manifest/lock/contract public surface由integrator独占；planned paths仅在领取lease后可写",
+      "status": "PLANNED",
+      "implementation_started": false,
+      "receipt_required": [
+        "base_revision",
+        "contract_revision",
+        "changed_paths",
+        "relevant_checks",
+        "known_failures",
+        "cleanup_and_lease_return"
+      ]
+    },
+    {
+      "id": "R37",
+      "title": "Final-candidate real account / Agent acceptance",
+      "milestone": "M6",
+      "depends_on": [
+        "R29",
+        "R30",
+        "R31",
+        "R32"
+      ],
+      "owner_role": "account-device-coordinator",
+      "planned_paths": [
+        "external evidence/account"
+      ],
+      "entry_condition": "最终包已安装且原生基本旅程闭合；账号/工作区/设备lease明确，MFA与审批由用户完成",
+      "deliverable_and_exit_condition": "最终候选在真实ChatGPT目标账号/工作区安装连接，fresh chat真实调用Exec/Browser/Cua并核跨owner隔离；缺账号授权或平台入口则BLOCKED",
+      "independent_validation": "平台安装状态+独立业务readback，SDK/旧账号/开发切片不能替代",
+      "scenario_ids": [
+        "A36"
+      ],
+      "shared_files_rule": "账号/GUI归同一设备lease；R36只消费结果，不在入口条件中自锁",
+      "status": "PLANNED",
+      "implementation_started": false,
+      "receipt_required": [
+        "base_revision",
+        "contract_revision",
+        "candidate_hash",
+        "account_scope_redacted",
+        "independent_effects",
+        "cleanup_and_lease_return"
+      ]
+    },
+    {
+      "id": "R38",
+      "title": "Close persistent service principal and installation authorization gate",
+      "milestone": "M4",
+      "depends_on": [
+        "R02"
+      ],
+      "owner_role": "integrator-platform",
+      "planned_paths": [
+        "src/docs/rust-core-rewrite/DECISIONS.md",
+        "external evidence/service-principal-decision"
+      ],
+      "entry_condition": "R02已证明可选OS方案与影响；若新增账户/系统注册/凭据则提供具体方案和隔离证据",
+      "deliverable_and_exit_condition": "G02每平台合法principal/Exec身份/注册权限/凭据储存与可用性、logout/boot条件和新安装管理模式明确；必要owner决定已记录。不能用SYSTEM/root绕过或将缺项改N/A。",
+      "independent_validation": "OS原生认证/服务注册原理与隔离spike证据；真实持续运行仍由最终包A26验收",
+      "scenario_ids": [
+        "A26"
+      ],
+      "shared_files_rule": "material trust decisions由integrator提案；此gate只阻塞persistent manager/cutover，其他开发继续",
+      "status": "PLANNED",
+      "implementation_started": false,
+      "receipt_required": [
+        "base_revision",
+        "platform_identity_options",
+        "authorization_and_credential_impact",
+        "decision_receipt",
+        "remaining_native_gates"
+      ]
+    }
+  ]
+}

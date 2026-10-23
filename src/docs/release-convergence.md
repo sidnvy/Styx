@@ -1,5 +1,7 @@
 # Release convergence
 
+> Current direction: see [Rust core rewrite](rust-core-rewrite/README.md). This page describes the legacy convergence/candidate baseline; its source/test/package results are not Rust implementation or acceptance.
+
 Product scope and Gateway/Host/Core separation are frozen. Exec uses the pinned Codex execution protocol; Browser and Computer Use are independent execution capabilities. No additional Agent reasoning layer or management authority is introduced.
 
 ## Canonical source and compatibility
