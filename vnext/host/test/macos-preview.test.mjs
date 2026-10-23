@@ -194,3 +194,12 @@ test('Mac preview selects distinct pinned Intel inputs without changing arm64 pi
  assert.equal(Object.keys(intel.notices).filter(n=>n.includes('amd64')).length,2);
  assert.throws(()=>macPreviewInputs('ia32'),/unsupported_macos_preview_arch/);
 });
+
+test('Intel unsigned helper is signed before the main executable in both preview modes',()=>{
+ const app='/build/Styx.app',main=app+'/Contents/MacOS/Styx',helper=app+'/Contents/MacOS/StyxUpdater';
+ const localSigning={identitySha1:'c'.repeat(40),certificateSha256:'d'.repeat(64),keychain:'/private/build/local.keychain-db'};
+ for(const plan of [macAdhocSigningPlan({app,files:[main,helper],sealApp:false}),macLocalSigningPlan({app,files:[main,helper],sealApp:false,localSigning})]){
+  const signed=plan.filter(([,args])=>args.includes('--sign')).map(([,args])=>args.at(-1));
+  assert.deepEqual(signed,[helper,main]);
+ }
+});
