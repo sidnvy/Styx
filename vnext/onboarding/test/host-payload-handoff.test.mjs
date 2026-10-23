@@ -34,9 +34,19 @@ test('preflight failure persists across process restart, blocks automatic retry 
   const file=path.join(f.d,'host-payload-handoff.json'),previous=JSON.parse(fs.readFileSync(file));previous.status='applied_stopped';fs.writeFileSync(file,JSON.stringify(previous));
   const result=child(`import {prepareHostPayloadHandoff} from ${JSON.stringify(handoffModule)};const f=JSON.parse(process.env.STYX_HANDOFF_FIXTURE);try{await prepareHostPayloadHandoff({stateDir:f.d,authorize:true},{resolveApp:()=>{if(f.failure==='resolve')throw Error('test_app_invalid');return f.app},inspectCandidate:()=>{throw Error('test_payload_invalid')}})}catch{process.exitCode=72}`,{d:f.d,failure,app:f.adapters.resolveApp()});
   assert.equal(result.status,72,result.stderr);
-  const failed=readHostPayloadHandoff({stateDir:f.d});assert.equal(failed.status,'cancelled');assert.equal(failed.reason,'handoff_preparation_failed');assert.notEqual(failed.ticketId,first.ticketId);assert.equal(failed.target,undefined);assert.equal(fs.existsSync(path.join(f.d,'advance.lock')),false);
-  const decision=await nativeHostStartupDecision(f.d,{artifacts:{bundle:f.candidate.bundle},core:{readHostPayloadHandoff,readDeploymentComponents:()=>({host:{status:'update_available',bundled:{manifestSha256:'a'.repeat(64)}}})}});assert.equal(decision.automaticUpdate,false);
+  const failed=readHostPayloadHandoff({stateDir:f.d});assert.equal(failed.status,'cancelled');assert.equal(failed.phase,'preflight_only');assert.equal(failed.reason,'handoff_preparation_failed');assert.notEqual(failed.ticketId,first.ticketId);assert.equal(failed.target,undefined);assert.equal(fs.existsSync(path.join(f.d,'advance.lock')),false);
+  const decision=await nativeHostStartupDecision(f.d,{artifacts:{bundle:f.candidate.bundle},core:{readDeployment:()=>({steps:[{id:'host.claim',status:'succeeded'}]}),readHostPayloadHandoff,readDeploymentComponents:()=>({host:{status:'update_available',bundled:{manifestSha256:'a'.repeat(64)}}})}});assert.equal(decision.automaticUpdate,false);
   await assert.rejects(executeHostPayloadHandoff({stateDir:f.d,ticketId:failed.ticketId,authorize:true}),/handoff_requires_recovery/);
   const retry=await prepareHostPayloadHandoff({stateDir:f.d,authorize:true},f.adapters);assert.equal(retry.status,'awaiting_exit');cancelHostPayloadHandoff({stateDir:f.d,ticketId:retry.ticketId,authorize:true});
  }
+});
+
+
+test('a cancelled preflight with retained update admission remains recovery gated',async t=>{
+ const f=fixture(t);await assert.rejects(prepareHostPayloadHandoff({stateDir:f.d,authorize:true},{resolveApp:()=>{throw Error('fixture_preflight')}}));
+ assert.equal(readHostPayloadHandoff({stateDir:f.d}).phase,'preflight_only');
+ const lock=path.join(f.d,'advance.lock');fs.writeFileSync(lock,JSON.stringify({kind:'host-payload-handoff-v1'}),{mode:0o600});
+ assert.equal(readHostPayloadHandoff({stateDir:f.d}).status,'needs_recovery');
+ fs.writeFileSync(lock,'',{mode:0o600});
+ assert.equal(readHostPayloadHandoff({stateDir:f.d}).status,'cancelled'); // The current Core step lock is not an updater admission.
 });

@@ -242,7 +242,7 @@ namespace StyxNative {
     Exception failure=null;try{
      if(before!=null)await before();
      var prepared=await owner.Call("prepare");owner.ApplyPreparationResult(prepared);
-     if(!PendingJoin(prepared)){await owner.Call("connect");ShowPage("overview");await owner.RefreshAfterMutation();}
+     if(!PendingJoin(prepared)&&!Json.Str(prepared,"status","nativeStartup","reason").StartsWith("host_payload_")){await owner.Call("connect");ShowPage("overview");await owner.RefreshAfterMutation();}
     }catch(Exception error){failure=error;}
     if(failure!=null){
      // Read the saved result after a failure; never replay preparation.
@@ -251,7 +251,7 @@ namespace StyxNative {
     }
    },PreparationMessage,"Connection not completed. Check your main computer or use a new invitation."),false);
   }
-  Task ContinueJoiningView(){ShowPage("overview");ShowStatus(owner.CurrentStatus);return Task.FromResult(0);}
+  Task ContinueJoiningView(){Feedback("");ShowPage("overview");ShowStatus(owner.CurrentStatus);return Task.FromResult(0);}
   static bool CanRecoverJoin(object data){return Json.Yes(data,"session","joinRecoverySupported")&&Json.Yes(data,"status","joinRecovery","canRecover");}
   void ReviewInvitationAction(){
    joinOrigin="";joinCa="";link=Input("Invitation link",true);

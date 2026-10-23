@@ -78,6 +78,7 @@ export async function createClient(instance,{fetchImpl=fetch}={}){
    let status=await call('status');
    if(status.deployment?.mode==='join-existing'){
     for(let n=0;n<4;n++){
+     if(status.nativeStartup?.reason?.startsWith('host_payload_'))break;
      const step=status.deployment.steps.find(s=>!['succeeded','skipped'].includes(s.status));
      if(!step||!['host.prepare','host.request','host.claim','host.doctor'].includes(step.id)||!(['pending','awaiting_approval'].includes(step.status)||step.status==='blocked'&&(step.id==='host.claim'||step.id==='host.doctor'&&step.retryable===true)))break;
      await call('advance',{authorize:[step.id]});status=await call('status');if(status.deployment.steps.find(s=>s.id===step.id)?.status!=='succeeded')break;

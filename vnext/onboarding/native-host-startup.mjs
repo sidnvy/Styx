@@ -4,10 +4,21 @@
 export async function nativeHostStartupDecision(stateDir,{artifacts,core}={}){
  if(!artifacts?.bundle)return {status:'continue'};
  try{
+  const deployment=await core.readDeployment(stateDir);
+  const steps=deployment.steps??[];
+  const enrollmentComplete=steps.some(s=>['host.claim','host.pair'].includes(s.id)&&s.status==='succeeded');
+  const blocked=reason=>({status:'reconciliation_required',observation:'current_process',reason,automaticUpdate:false});
+  // Prepared files (and even a token written during claim) are not completed
+  // enrollment. Preserve the existing join path until its durable claim settles.
+  if(steps.some(s=>s.id==='host.prepare')&&!enrollmentComplete){
+   const prior=await core.readHostPayloadHandoff({stateDir});
+   if(prior?.status!=='not_started'&&!(prior?.status==='cancelled'&&prior.phase==='preflight_only'))
+    return blocked('host_payload_requires_review');
+   return {status:'continue',phase:'enrollment_incomplete'};
+  }
   const components=await core.readDeploymentComponents(stateDir,{artifacts});
   const host=components?.host;
   if(['not_configured','not_prepared','aligned'].includes(host?.status))return {status:'continue'};
-  const blocked=reason=>({status:'reconciliation_required',observation:'current_process',reason,automaticUpdate:false});
   if(host?.status!=='update_available')return blocked('host_payload_requires_review');
   const handoff=await core.readHostPayloadHandoff({stateDir});
   const previous=handoff?.status;

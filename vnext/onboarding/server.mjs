@@ -5,6 +5,7 @@ import path from 'node:path';
 import http from 'node:http';
 import net from 'node:net';
 import {completeLocalSetup,isRetryableLocalCheck} from './local-setup.mjs';
+import {registerDeploymentRuntimeGuard} from './runtime-guard.mjs';
 import {nativeHostStartupDecision} from './native-host-startup.mjs';
 import {enableDeploymentBackground,observeDeploymentBackground} from './background.mjs';
 import {configureTunnel,TunnelRuntime} from './tunnel-runtime.mjs';
@@ -166,8 +167,14 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
  const checkNativeHostStartup=async()=>{
   if(!nativeAppOwned)return true;
   const decision=await nativeHostStartupDecision(stateDir,{artifacts,core:api});
-  if(decision.status==='continue')return true;
+  if(decision.status==='continue'){if(nativeStartup.reason?.startsWith('host_payload_'))nativeStartup={status:'preparation_required',observation:'current_process'};return true;}
   nativeStartup=decision;return false;
+ };
+ let releaseRuntimeGuard=()=>{};
+ const runtimeGuard=async()=>{
+  const decision=await nativeHostStartupDecision(stateDir,{artifacts,core:api});
+  if(decision.phase==='enrollment_incomplete')fail('foreground_prepared_paired_host_doctor_required');
+  if(decision.status!=='continue'){nativeStartup=decision;fail(decision.reason);}
  };
  const resumeNativeStartup=async()=>{
   if(!await checkNativeHostStartup())return;
@@ -368,6 +375,7 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
     send(200,{acceptance:publicAcceptance(await api[name](stateDir,data),{includeChallenge:true})});return;
    }else if(url.pathname==='/api/host-payload/handoff/prepare'){
     keys(data,['authorize']);if(data.authorize!==true||!artifacts.bundle||typeof api.prepareHostPayloadHandoff!=='function')fail('host_payload_handoff_authorization_required');
+    if(nativeAppOwned&&(await nativeHostStartupDecision(stateDir,{artifacts,core:api})).phase==='enrollment_incomplete')fail('foreground_prepared_paired_host_doctor_required');
     await admitWork('host-update');try{send(200,{handoff:await api.prepareHostPayloadHandoff({stateDir,bundle:artifacts.bundle,authorize:true})});}catch(error){await cancelWorkAdmission();throw error}return;
    }else if(url.pathname==='/api/host-payload/handoff/status'){
     keys(data,[]);if(typeof api.readHostPayloadHandoff!=='function')fail('host_payload_handoff_unavailable');
@@ -458,11 +466,13 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
    }else if(url.pathname==='/api/local-setup'){
     keys(data,['ownerApproval']);
     const result=await completeLocalSetup(api,stateDir,data.ownerApproval);
+    await checkNativeHostStartup();
     send(200,{workflow:result,deployment:publicDeployment(await api.readDeployment(stateDir))});return;
    }else if(url.pathname==='/api/advance'){
     keys(data,['authorize','ownerApproval']);if(!Array.isArray(data.authorize)||data.authorize.length!==1||!STEPS.has(data.authorize[0]))fail('one_known_step_required');
     if(data.authorize[0]==='host.pair'){keys(data.ownerApproval,['approve','gatewayUrl','label','enableComputer','enableBrowser']);if(data.ownerApproval.approve!==true||typeof data.ownerApproval.gatewayUrl!=='string'||typeof data.ownerApproval.label!=='string'||typeof data.ownerApproval.enableComputer!=='boolean'||data.ownerApproval.enableBrowser!==undefined&&typeof data.ownerApproval.enableBrowser!=='boolean')fail('explicit_owner_pairing_scope_required')}else if(data.ownerApproval!==undefined)fail('unexpected_owner_approval');
     await api.advanceDeployment(stateDir,{authorize:data.authorize,...(data.ownerApproval?{ownerApproval:data.ownerApproval}:{})});
+    await checkNativeHostStartup();
    }else if(url.pathname==='/api/join/recover'){
     keys(data,['authorize','joinLinkId']);if(data.authorize!==true||!acceptedLink||acceptedLink.id!==data.joinLinkId||typeof api.recoverDeploymentJoin!=='function')fail('accepted_pairing_scope_required');
     const pairingFile=acceptedLink.file;const recovery=await api.recoverDeploymentJoin(stateDir,{authorize:true,pairingFile});acceptedLink=null;send(200,{recovery});return;
@@ -521,10 +531,11 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
     await api.stopDeploymentGateway(stateDir);
    }
    send(200,{deployment:publicDeployment(await api.readDeployment(stateDir))});
-  }catch(error){const safe=['work_in_progress','work_state_unknown','windows_native_app_binding_required','desktop_acceptance_native_app_changed','device_ingress_recovery_required','device_ingress_recovery_guard_requires_inspection','device_ingress_select_interface','device_ingress_network_unavailable','device_ingress_address_change_requires_review','device_ingress_gateway_upgrade_required','device_ingress_exact_owned_interface_required','device_ingress_listener_not_confirmed','device_ingress_requires_compatible_gateway_application','openssl_configuration_requires_compatible_gateway_application','foreground_not_owned_or_unsafe_for_capability_change','foreground_stop_unconfirmed','native_owned_foreground_control_required','browser_enabled_host_bundle_required','approved_browser_host_required','browser_profile_binding_changed','browser_preparation_scope_changed','browser_preparation_management_operation_in_progress','browser_capability_foreground_must_be_stopped','browser_capability_host_must_be_stopped','browser_capability_all_connections_must_be_offline','browser_enabled_host_update_required','foreground_host_handoff_required','tunnel_running_or_interrupted','tunnel_client_integrity_failed','background_uncertain_requires_reconciliation','capability_uncertain_requires_reconciliation','local_owner_capability_change_only','host_state_not_safe_for_capability_change'];send(409,{error:safe.includes(error?.message)?error.message:'operation_failed_check_status'})}finally{busy=false}
+  }catch(error){const safe=['host_payload_update_required','host_payload_requires_review','foreground_prepared_paired_host_doctor_required','work_in_progress','work_state_unknown','windows_native_app_binding_required','desktop_acceptance_native_app_changed','device_ingress_recovery_required','device_ingress_recovery_guard_requires_inspection','device_ingress_select_interface','device_ingress_network_unavailable','device_ingress_address_change_requires_review','device_ingress_gateway_upgrade_required','device_ingress_exact_owned_interface_required','device_ingress_listener_not_confirmed','device_ingress_requires_compatible_gateway_application','openssl_configuration_requires_compatible_gateway_application','foreground_not_owned_or_unsafe_for_capability_change','foreground_stop_unconfirmed','native_owned_foreground_control_required','browser_enabled_host_bundle_required','approved_browser_host_required','browser_profile_binding_changed','browser_preparation_scope_changed','browser_preparation_management_operation_in_progress','browser_capability_foreground_must_be_stopped','browser_capability_host_must_be_stopped','browser_capability_all_connections_must_be_offline','browser_enabled_host_update_required','foreground_host_handoff_required','tunnel_running_or_interrupted','tunnel_client_integrity_failed','background_uncertain_requires_reconciliation','capability_uncertain_requires_reconciliation','local_owner_capability_change_only','host_state_not_safe_for_capability_change'];send(409,{error:safe.includes(error?.message)?error.message:'operation_failed_check_status'})}finally{busy=false}
  });
  server.requestTimeout=30000;server.headersTimeout=10000;server.maxHeadersCount=30;
  await new Promise((resolve,reject)=>{server.once('error',reject);server.listen(port,'127.0.0.1',resolve)});
+ try{if(nativeAppOwned)releaseRuntimeGuard=registerDeploymentRuntimeGuard(stateDir,runtimeGuard);}catch(error){await new Promise(resolve=>server.close(resolve));throw error}
  origin=forwarded??`http://127.0.0.1:${server.address().port}`;
  // A verified native App reopens the same prepared deployment. This is an
  // explicit lifecycle boundary, never a side effect of a GET/status request.
@@ -544,6 +555,7 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
     // Keep the failure visible on repeated close calls rather than marking an
     // interrupted shutdown successful after setting a boolean too early.
     for(const stop of [()=>tunnel?.stop(),()=>new Promise(resolve=>server.close(resolve)),()=>api.stopDeploymentForeground?.(stateDir),()=>api.stopDeploymentGateway?.(stateDir)])try{await stop()}catch(error){failure??=error}
+    releaseRuntimeGuard();
     if(failure)throw failure;
    })();return closing;
   }};

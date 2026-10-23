@@ -189,3 +189,18 @@ test('native startup diagnostics stay local, bounded and reject nonnumeric/priva
  for(const input of bad)await assert.rejects(client.dispatch(req('startupDiagnostics',input)),/invalid_native_startup_diagnostics/);
  assert.equal(fs.readFileSync(file,'utf8'),before);assert.deepEqual(fs.readdirSync(state).sort(),['native-startup-self-test.json','native-startup.json']);
 });
+
+
+test('join preparation stops after claim when the current native bundle needs reconciliation',async()=>{
+ const advanced=[];let claimed=false;
+ const state=()=>({deployment:{mode:'join-existing',steps:[{id:'host.prepare',status:'succeeded'},{id:'host.request',status:'succeeded'},{id:'host.claim',status:claimed?'succeeded':'pending'},{id:'host.doctor',status:'pending'}]},...(claimed?{nativeStartup:{reason:'host_payload_update_required',automaticUpdate:true}}:{})});
+ const client=await createClient({url},{fetchImpl:async(address,options)=>{
+  const route=new URL(address).pathname.slice(5);
+  if(route==='advance'){advanced.push(JSON.parse(options.body).authorize[0]);claimed=true;}
+  const data=route==='session'?{csrf:'B'.repeat(43)}:route==='snapshot'?{status:state()}:state();
+  return {ok:true,headers:new Headers({'content-type':'application/json'}),text:async()=>JSON.stringify(data)};
+ }});
+ const latest=await client.dispatch(req('prepare'));
+ assert.deepEqual(advanced,['host.claim']);assert.equal(latest.status.nativeStartup.reason,'host_payload_update_required');
+ assert.equal(latest.status.deployment.steps.at(-1).status,'pending');
+});
