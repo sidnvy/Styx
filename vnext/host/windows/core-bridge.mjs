@@ -21,7 +21,8 @@ export async function createClient(instance,{fetchImpl=fetch}={}){
   if(recovery?.rollbackRequired!==true||!/^[a-f0-9]{32}$/.test(recovery.transactionId??''))return null;
   return {status:{joinRecovery:recovery}};
  };
- const observe=()=>{
+ const observe=(fresh=false)=>{
+  if(fresh)observation=undefined;
   if(!observation){
    const pending=call('snapshot').catch(async error=>{try{const interrupted=await interruptedJoin();if(interrupted)return interrupted;}catch{}if(instance.hostPayloadHandoffSupported!==true)throw error;const recovery=await call('host-payload/handoff/status',{});if(!/^[a-f0-9]{32}$/.test(recovery.handoff?.ticketId??'')||!['preparing','awaiting_exit','blocked','needs_recovery','applied_stopped'].includes(recovery.handoff?.status))throw error;return {status:{deployment:null},componentRecovery:recovery.handoff};}).then(snapshot=>({session:{joinRecoverySupported:session.joinRecoverySupported===true,localGatewayAvailable:session.localGatewayAvailable,tunnelSupported:session.tunnelSupported,artifactsAvailable:!!session.defaults?.bundle,desktopAcceptanceSupported:instance.desktopAcceptanceSupported===true,hostPayloadHandoffSupported:instance.hostPayloadHandoffSupported===true},...snapshot}));
    observation=pending;
@@ -33,7 +34,7 @@ export async function createClient(instance,{fetchImpl=fetch}={}){
   if(!request||request.schema!==1||!Number.isSafeInteger(request.id)||!OPERATIONS.includes(request.operation)||!request.input||typeof request.input!=='object'||Array.isArray(request.input))throw Error('invalid_native_request');
   const i=request.input,op=request.operation;
   if(op==='startupStatus'){let value;try{value=await call('components');}catch(error){const interrupted=await interruptedJoin().catch(()=>null);if(interrupted)return {session:{joinRecoverySupported:true},...interrupted};throw error;}if(value.components?.host?.status==='not_configured')return observe();return {session:{joinRecoverySupported:session.joinRecoverySupported===true,localGatewayAvailable:session.localGatewayAvailable,tunnelSupported:session.tunnelSupported,artifactsAvailable:!!session.defaults?.bundle,desktopAcceptanceSupported:instance.desktopAcceptanceSupported===true,hostPayloadHandoffSupported:instance.hostPayloadHandoffSupported===true},status:{components:value.components},loadingDetails:true};}
-  if(op==='rollbackJoin'){if(session.joinRecoverySupported!==true||!/^[a-f0-9]{32}$/.test(i.transactionId??''))throw Error('join_recovery_unavailable');return call('join/rollback',{authorize:true,transactionId:i.transactionId});}
+  if(op==='rollbackJoin'){if(session.joinRecoverySupported!==true||!/^[a-f0-9]{32}$/.test(i.transactionId??''))throw Error('join_recovery_unavailable');try{return await call('join/rollback',{authorize:true,transactionId:i.transactionId});}finally{observation=undefined;}}
   if(op==='appLifecycle')return call('app/lifecycle');
   if(op==='appLogin'){if(Object.keys(i).length!==1||typeof i.enabled!=='boolean')throw Error('invalid_native_request');return call('app/login',{authorize:true,enabled:i.enabled});}
   if(op==='quitAdmission')return call('app/quit-admission',{authorize:true});
@@ -63,7 +64,7 @@ export async function createClient(instance,{fetchImpl=fetch}={}){
    if(!inspected||i.approvedGatewayOrigin!==inspected.preview.origin||i.approvedCaSha256!==inspected.preview.caSha256)throw Error('explicit_join_confirmation_required');
    const confirmed=inspected;inspected=undefined;
    accepted=await call('pairing-link/accept',{inspectionId:confirmed.inspectionId,approvedGatewayOrigin:i.approvedGatewayOrigin,...(i.approvedCaSha256?{approvedCaSha256:i.approvedCaSha256}:{})});
-   if(op==='recoverJoin')return call('join/recover',{authorize:true,joinLinkId:accepted.joinLinkId});
+   if(op==='recoverJoin'){try{return await call('join/recover',{authorize:true,joinLinkId:accepted.joinLinkId});}finally{observation=undefined;}}
   }
   if(op==='create'||op==='join'){
    const d=session.defaults,host=Object.fromEntries(['bundle','publisherKeyFile','publisherSha256','baseDir'].map(k=>[k,d[k]]));if(Object.values(host).some(v=>typeof v!=='string'))throw Error('bundled_artifacts_required');
@@ -71,6 +72,7 @@ export async function createClient(instance,{fetchImpl=fetch}={}){
    return call('create',{schema:1,mode:op==='join'?'join-existing':'create-local',gateway:{url:op==='join'?accepted.origin:d.gatewayUrl},host,...(op==='join'?{joinLinkId:accepted.joinLinkId}:{})});
   }
   if(op==='prepare'){
+   try{
    let status=await call('status');
    if(status.deployment?.mode==='join-existing'){
     for(let n=0;n<4;n++){
@@ -82,7 +84,8 @@ export async function createClient(instance,{fetchImpl=fetch}={}){
    status=await call('status');
    const local=new Set(['gateway.runtime.prepare','gateway.prepare','gateway.start','gateway.verify','host.prepare','host.pair','host.invite','host.request','host.claim','host.doctor']);const ready=status.deployment?.steps.filter(s=>local.has(s.id)).every(s=>s.status==='succeeded');
    if(ready&&status.deployment.roles?.browser==='requested'){const {browser}=await call('browser');if(browser?.status==='not_prepared'||browser?.status==='not_configured'||browser?.status==='preparation_required')await call('browser/prepare',{authorize:true});}
-   return observe();
+   return await observe(true);
+   }catch(error){observation=undefined;throw error;}
   }
   const routes={connect:'foreground',disconnect:'foreground/stop',setCapabilities:'capabilities',tunnelSave:'tunnel/configure',tunnelStart:'tunnel/start',tunnelStop:'tunnel/stop',acceptanceBegin:'acceptance/begin',acceptanceConfirm:'acceptance/confirm',acceptanceDesktopReadback:'acceptance/desktop-readback'};
   const body=op==='tunnelSave'?{authorize:true,tunnelId:i.tunnelId,apiKey:i.runtimeKey,autoStart:true}:op==='setCapabilities'?{authorize:true,computer:i.computer,browser:i.browser,browserChannel:i.browserChannel,persistLogin:i.persistLogin}:op==='acceptanceConfirm'?{authorize:true,challengeId:i.challengeId,observedInTargetChat:true}:op==='acceptanceDesktopReadback'?{authorize:true,challengeId:i.challengeId,value:i.value,pid:i.pid,windowId:i.windowId}:{authorize:true};

@@ -154,3 +154,23 @@ test('interrupted join is observable before full startup and rolls back only the
  await client.dispatch(req('rollbackJoin',{transactionId,force:true}));assert.deepEqual(calls.at(-1),{route:'join/rollback',body:{authorize:true,transactionId}});assert(!calls.some(x=>['create','advance','local-setup'].includes(x.route)));
  rollbackRequired=false;await assert.rejects(client.dispatch(req('startupStatus')),/interrupted deployment/);await assert.rejects(client.dispatch(req('status')),/interrupted deployment/);
 });
+
+test('preparation and rollback never adopt an observation begun before their mutation completed',async()=>{
+ for(const operation of ['prepare','rollbackJoin']){
+  let release,reads=0,changed=false;const transactionId='e'.repeat(32);
+  const client=await createClient({url},{fetchImpl:async(address,options)=>{
+   const route=new URL(address).pathname.slice(5);let data={};
+   if(route==='session')data={csrf:'B'.repeat(43),joinRecoverySupported:true};
+   if(route==='snapshot'){reads++;const value=changed?'current':'stale';if(reads===1)await new Promise(resolve=>release=resolve);data={status:{observed:value}};}
+   if(route==='status')data={deployment:{mode:'join-existing',steps:[{id:'host.request',status:'pending'}]}};
+   if(route==='advance'||route==='join/rollback')changed=true;
+   return {ok:true,headers:new Headers({'content-type':'application/json'}),text:async()=>JSON.stringify(data)};
+  }});
+  const old=client.dispatch(req('status'));
+  const completed=await client.dispatch(req(operation,{transactionId}));
+  const current=operation==='prepare'?completed:await client.dispatch(req('status'));
+  assert.equal(current.status.observed,'current');assert.equal(reads,2);
+  release();assert.equal((await old).status.observed,'stale');
+  assert.equal((await client.dispatch(req('status'))).status.observed,'current');
+ }
+});
