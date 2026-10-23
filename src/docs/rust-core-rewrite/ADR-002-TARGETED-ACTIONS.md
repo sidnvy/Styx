@@ -1,6 +1,6 @@
 # ADR-002 · Continuation authority and action settlement
 
-Status: accepted implementation decision, 2026-10-24. Core target-bound actions, Codex permit-consuming continuation adapters and Host/WSS prepare-dispatch-inspect routes are implemented. Physical resource archival remains incomplete.
+Status: accepted implementation decision, 2026-10-24. Core target-bound actions, Codex permit-consuming continuation adapters and Host/WSS prepare-dispatch-inspect routes are implemented. Core-attested physical archival and known-action audit transfer are implemented under ADR-003; periodic persistent supervision and durable restart recovery remain incomplete.
 
 ## Problem and decision
 
@@ -16,7 +16,7 @@ Fresh resource reads recheck the same original target binding/current owner/curr
 
 Known request-level action completion can be retained/pruned as an action without inventing a child process. Unknown targeted actions cannot be evicted while their target may still execute. They become eligible under the declared retention policy only after the exact original target is independently proven Exited and Drained; Unknown history is preserved. Parent target metadata cannot disappear first in a way that fabricates that proof. Maintenance cannot use `not_applicable` to skip unsettled target uncertainty.
 
-Core-attested physical retirement of provider buffers after ambiguous stdin is a separate follow-up. It must bind exact uncertain action and ended target, fence resource mutation and preserve audit state; no force-retire boolean or clearing input_unknown is authorized by this ADR.
+ADR-003 implements physical retirement of provider buffers after ambiguous stdin: exact uncertain action and ended target, actual Host quiescence, fenced resource mutation and retained audit. No force-retire boolean or clearing input_unknown is authorized. Physical release never changes Unknown outcome.
 
 ## Callers and verification impact
 

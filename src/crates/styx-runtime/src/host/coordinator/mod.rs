@@ -1,6 +1,9 @@
 //! Host-owned start/read/targeted-action composition.
-//! No network DTO can construct control authority. Resource archival and legacy
-//! raw-wire mode remain outside this composition.
+//! No network DTO can construct control authority. Physical retention is Core-
+//! attested; legacy raw-wire mode remains outside this composition.
+mod retention;
+pub use retention::{RetentionBlock, RetentionCollection};
+
 use crate::providers::codex::{
     ActionEvidence, ActionReceipt, CleanupReceipt, CodexStdio, DispatchEvidence, ExecError,
     ProcessAction, ProcessOutput, StartProcess, TerminationEvidence,
@@ -9,7 +12,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 use styx_contracts::{error::ErrorCategory, identity::*, operation::*};
 use styx_core::{operations::*, policy::AdmissionFacts};
-use tokio::sync::{Semaphore, oneshot};
+use tokio::sync::{OwnedRwLockReadGuard, RwLock, Semaphore, oneshot};
 use tokio::task::JoinSet;
 
 #[derive(Debug, thiserror::Error)]
@@ -45,6 +48,7 @@ struct Inner {
     jobs: Mutex<JoinSet<()>>,
     slots: Arc<Semaphore>,
     cleanup_lock: tokio::sync::Mutex<()>,
+    execution_gate: Arc<RwLock<()>>,
     origin: Instant,
     #[cfg(test)]
     delivery_gate: Mutex<Option<(Arc<tokio::sync::Notify>, Arc<tokio::sync::Notify>)>>,
@@ -88,6 +92,8 @@ pub enum StartSubmission {
 pub struct ActionCompletion {
     pub snapshot: OperationSnapshot,
     pub receipt: ActionReceipt,
+    /// Operation result is unchanged if physical retention needs supervision.
+    pub retention_error: Option<CoordinatorError>,
 }
 pub struct ActionTicket {
     response: oneshot::Receiver<Result<ActionCompletion, CoordinatorError>>,
@@ -132,6 +138,7 @@ impl HostCoordinator {
             jobs: Mutex::new(JoinSet::new()),
             slots: Arc::new(Semaphore::new(max_jobs)),
             cleanup_lock: tokio::sync::Mutex::new(()),
+            execution_gate: Arc::new(RwLock::new(())),
             origin: Instant::now(),
             #[cfg(test)]
             delivery_gate: Mutex::new(None),
@@ -186,6 +193,12 @@ impl HostCoordinator {
                 return Ok(StartSubmission::Existing(snapshot));
             }
         }
+        let execution = self
+            .inner
+            .execution_gate
+            .clone()
+            .try_read_owned()
+            .map_err(|_| CoordinatorError::Busy)?;
         let runtime = tokio::runtime::Handle::try_current().map_err(|_| CoordinatorError::Busy)?;
         let slot = self
             .inner
@@ -220,6 +233,7 @@ impl HostCoordinator {
             inner: inner.clone(),
             operation: operation.clone(),
             settled: false,
+            _execution: execution,
         };
         jobs.spawn_on(
             async move {
@@ -303,6 +317,12 @@ impl HostCoordinator {
                 return Ok(ActionSubmission::Existing(snapshot));
             }
         }
+        let execution = self
+            .inner
+            .execution_gate
+            .clone()
+            .try_read_owned()
+            .map_err(|_| CoordinatorError::Busy)?;
         let runtime = tokio::runtime::Handle::try_current().map_err(|_| CoordinatorError::Busy)?;
         let slot = self
             .inner
@@ -331,6 +351,7 @@ impl HostCoordinator {
             inner: inner.clone(),
             operation: operation.clone(),
             settled: false,
+            _execution: execution,
         };
         let mut jobs = self.inner.jobs.lock().expect("Host jobs mutex");
         while jobs.try_join_next().is_some() {}
@@ -348,13 +369,28 @@ impl HostCoordinator {
                     .ledger
                     .record_action_result(&operation, fact, inner.now());
                 guard.settled = settled.is_ok();
+                let retention_error = if let Ok(snapshot) = &settled {
+                    transfer_known_action(
+                        &mut state.ledger,
+                        &inner.adapter,
+                        &receipt,
+                        snapshot.state,
+                    )
+                    .err()
+                } else {
+                    None
+                };
                 drop(state);
                 // Explicitly move/drop the WHOLE guard inside this supervised task;
                 // Rust disjoint-field capture must not leave the guard in the caller.
                 drop(guard);
                 let _ = response.send(
                     settled
-                        .map(|snapshot| ActionCompletion { snapshot, receipt })
+                        .map(|snapshot| ActionCompletion {
+                            snapshot,
+                            receipt,
+                            retention_error,
+                        })
                         .map_err(CoordinatorError::from),
                 );
             },
@@ -395,7 +431,14 @@ impl HostCoordinator {
         }
         match self.inner.adapter.lookup_action(owner, id) {
             Ok(receipt) => Ok(Some(receipt)),
-            Err(ExecError::UnknownHandle) => Ok(None),
+            Err(ExecError::UnknownHandle) => match state.ledger.provider_audit(id) {
+                Some(bytes) => Ok(Some(CodexStdio::action_from_audit(
+                    id.clone(),
+                    snapshot.target.expect("checked action"),
+                    bytes,
+                )?)),
+                None => Ok(None),
+            },
             Err(error) => Err(error.into()),
         }
     }
@@ -428,6 +471,12 @@ impl HostCoordinator {
         max_bytes: usize,
         wait: Duration,
     ) -> Result<ProcessOutput, CoordinatorError> {
+        let _execution = self
+            .inner
+            .execution_gate
+            .clone()
+            .try_read_owned()
+            .map_err(|_| CoordinatorError::Busy)?;
         let now = self.now();
         {
             let state = self.inner.state.lock().expect("Host state mutex");
@@ -541,10 +590,29 @@ async fn run_action(adapter: &CodexStdio, permit: DispatchPermit) -> ActionRecei
         ProcessAction::Terminate {} => adapter.terminate(permit, &handle).await,
     }
 }
+fn transfer_known_action(
+    ledger: &mut OperationLedger,
+    adapter: &CodexStdio,
+    receipt: &ActionReceipt,
+    historical_state: OperationState,
+) -> Result<(), CoordinatorError> {
+    ledger.record_provider_audit(&receipt.operation, adapter.action_audit(receipt)?)?;
+    if matches!(
+        historical_state,
+        OperationState::Succeeded | OperationState::Failed | OperationState::Cancelled
+    ) {
+        let permit = ledger.begin_action_release(&receipt.operation)?;
+        let proof = adapter.release_action(permit)?;
+        ledger.record_provider_release(proof)?;
+    }
+    Ok(())
+}
+
 struct UnsettledAction {
     inner: Arc<Inner>,
     operation: OperationId,
     settled: bool,
+    _execution: OwnedRwLockReadGuard<()>,
 }
 impl Drop for UnsettledAction {
     fn drop(&mut self) {
@@ -562,6 +630,7 @@ struct UnsettledStart {
     inner: Arc<Inner>,
     operation: OperationId,
     settled: bool,
+    _execution: OwnedRwLockReadGuard<()>,
 }
 impl Drop for UnsettledStart {
     fn drop(&mut self) {

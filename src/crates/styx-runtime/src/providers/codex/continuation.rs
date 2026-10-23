@@ -3,7 +3,8 @@ use super::*;
 use styx_contracts::operation::ResourceTarget;
 
 // Independent provider-local metadata allowance; not the Core retention budget.
-// No payload bytes are retained. Exhaustion refuses new actions until Host end.
+// No payload bytes are retained. Core-attested audit transfer frees known
+// receipts; uncertain receipts remain until ended-resource archival.
 const ACTION_METADATA_BYTES: usize = 1024 * 1024;
 const ACTION_ENTRY_ACCOUNTING_BYTES: usize = 4096;
 const MAX_ACTIONS: usize = ACTION_METADATA_BYTES / ACTION_ENTRY_ACCOUNTING_BYTES;
@@ -45,13 +46,15 @@ impl ProcessAction {
         Ok(())
     }
 }
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ActionEvidence {
     Acknowledged,
     NotDispatched,
     Unknown,
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum ActionAcknowledgment {
     WriteAccepted,
     /// Native process/terminate replied to the request. This is NOT exit proof.
@@ -69,9 +72,10 @@ pub struct ActionReceipt {
     pub cause: Option<ExecError>,
 }
 pub(super) struct StoredAction {
-    owner: OwnerLease,
-    payload_digest: Sha256Digest,
-    receipt: ActionReceipt,
+    pub(super) native_process_uuid: String,
+    pub(super) owner: OwnerLease,
+    pub(super) payload_digest: Sha256Digest,
+    pub(super) receipt: ActionReceipt,
 }
 pub(super) type ActionRecords = BTreeMap<OperationId, StoredAction>;
 
@@ -187,6 +191,7 @@ impl CodexStdio {
             actions.insert(
                 permit.id().clone(),
                 StoredAction {
+                    native_process_uuid: handle.process_id.clone(),
                     owner: permit.owner().clone(),
                     payload_digest: Sha256Digest::of_bytes(permit.payload()),
                     receipt: receipt.clone(),

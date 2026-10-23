@@ -7,6 +7,7 @@
 //! is discovered, adopted, restarted or replaced.
 mod continuation;
 mod output;
+mod retention;
 mod rpc;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
 pub use continuation::{ActionAcknowledgment, ActionEvidence, ActionReceipt, ProcessAction};
@@ -200,6 +201,7 @@ pub struct CleanupReceipt {
     pub stderr_task_reaped: bool,
 }
 struct Record {
+    retired: bool,
     read_mode: Option<ReadMode>,
     cursor: Option<u64>,
     gaps: u64,
@@ -394,6 +396,7 @@ impl CodexStdio {
                 gaps: 0,
                 decoder: OutputDecoder::default(),
                 drained: false,
+                retired: false,
                 input_unknown: None,
                 last_exit: None,
             })),
@@ -461,7 +464,11 @@ impl CodexStdio {
         if &record.owner != owner || record.handle != *handle {
             return Err(ExecError::OwnerMismatch);
         }
-        Ok(record.state.clone().lock_owned().await)
+        let state = record.state.clone().lock_owned().await;
+        if state.retired {
+            return Err(ExecError::UnknownHandle);
+        }
+        Ok(state)
     }
     /// Read-only recovery for a cancelled start future. Never re-dispatches.
     pub async fn lookup_operation(
@@ -730,15 +737,13 @@ impl CodexStdio {
     }
     /// Retire a fully observed resource. Core's linear DispatchPermit and
     /// authoritative ledger retain old-operation rejection after this cleanup.
-    pub async fn retire(
-        &self,
-        owner: &OwnerLease,
-        handle: &ProcessHandle,
-    ) -> Result<(), ExecError> {
-        let record = self.owned(owner, handle).await?;
+    #[cfg(test)]
+    async fn retire(&self, owner: &OwnerLease, handle: &ProcessHandle) -> Result<(), ExecError> {
+        let mut record = self.owned(owner, handle).await?;
         if !record.drained || record.last_exit.is_none() || record.input_unknown.is_some() {
             return Err(ExecError::ResourceUnsettled);
         }
+        record.retired = true;
         self.records
             .lock()
             .expect("records mutex")

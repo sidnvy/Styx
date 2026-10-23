@@ -2,6 +2,7 @@
 //! No native process/GUI/device acceptance is claimed by these scenarios.
 use styx_contracts::{capability::*, error::*, identity::*, operation::*, session::*};
 use styx_core::{operations::*, policy::*};
+mod support;
 
 fn id<T: TryFrom<&'static str>>(s: &'static str) -> T
 where
@@ -330,6 +331,8 @@ fn ack_and_pre_io_refusal_settle_only_the_request_not_the_running_process() {
     );
     l.begin_maintenance();
     assert!(!l.maintenance_settled());
+    support::release_action(&mut l, &a);
+    support::release_action(&mut l, &refused);
     assert_eq!(l.reap(MonotonicMillis(16)), 2); // known action results, not target
     assert_eq!(l.inspect(&o, &r.id, r.payload_digest).unwrap(), before);
 }
@@ -376,6 +379,7 @@ fn unknown_is_retained_until_both_target_exit_and_drain_plus_full_retention() {
     assert_eq!(l.reap(MonotonicMillis(2009)), 0);
     assert!(l.inspect(&o, &r.id, r.payload_digest).is_ok());
     assert_eq!(l.inspect(&o, &a.id, a.payload_digest).unwrap(), unknown);
+    support::release_resource(&mut l, &r, &[&a]);
     assert_eq!(l.reap(MonotonicMillis(2010)), 2);
     assert_eq!(
         l.inspect(&o, &a.id, a.payload_digest),
@@ -406,6 +410,7 @@ fn late_unknown_starts_its_own_retention_and_pending_actions_pin_ended_parent() 
         .unwrap();
     assert!(l.maintenance_settled());
     assert_eq!(l.reap(MonotonicMillis(110)), 0);
+    support::release_resource(&mut l, &r, &[&a]);
     assert_eq!(l.reap(MonotonicMillis(111)), 2);
 }
 #[test]
@@ -441,6 +446,7 @@ fn unstarted_refused_cancelled_and_expired_action_reservations_are_never_resourc
         l.record_action_result(&a.id, ActionResult::Acknowledged, MonotonicMillis(5)),
         Err(ErrorCategory::StateConflict)
     );
+    support::release_resource(&mut l, &reserved, &[]);
     let expired = prepare(&mut l, &o, &r);
     assert_eq!(l.reap(MonotonicMillis(1000)), 2); // earlier refused + cancelled action
     assert_eq!(
@@ -465,5 +471,322 @@ fn unstarted_refused_cancelled_and_expired_action_reservations_are_never_resourc
     assert_eq!(
         l.prepare_targeted(&o, target(&r), context(), vec![], MonotonicMillis(5)),
         Err(ErrorCategory::Busy)
+    );
+}
+
+#[test]
+fn physical_release_is_required_and_abandoned_linear_release_stays_fenced() {
+    let (mut l, o, r) = setup();
+    let mut provider = support::FakeProvider::default();
+    provider.retain(&r);
+    l.record_executor_fact(
+        &r.id,
+        ExecutorFact::Exited { successful: true },
+        MonotonicMillis(3),
+    )
+    .unwrap();
+    assert_eq!(
+        l.begin_resource_release(&target(&r)).unwrap_err(),
+        ErrorCategory::StateConflict
+    );
+    l.record_executor_fact(&r.id, ExecutorFact::OutputDrained, MonotonicMillis(4))
+        .unwrap();
+    assert_eq!(l.reap(MonotonicMillis(100)), 0);
+    assert_eq!(provider.len(), 1);
+    let before = l.inspect(&o, &r.id, r.payload_digest).unwrap();
+    let permit = l.begin_resource_release(&target(&r)).unwrap();
+    assert_eq!(permit.resource().unwrap().snapshot(), &before);
+    assert_eq!(permit.resource().unwrap().owner(), &o);
+    assert_eq!(permit.resource().unwrap().audit_digest(), None);
+    assert_eq!(
+        l.authorize_resource_access(
+            &o,
+            &r.id,
+            r.payload_digest,
+            &context(),
+            &facts(),
+            MonotonicMillis(5)
+        ),
+        Err(ErrorCategory::StateConflict)
+    );
+    // Dropping authority is not evidence that an independent provider freed it.
+    drop(permit);
+    assert_eq!(
+        l.begin_resource_release(&target(&r)).unwrap_err(),
+        ErrorCategory::StateConflict
+    );
+    assert_eq!(l.reap(MonotonicMillis(100)), 0);
+    assert_eq!(provider.len(), 1);
+    assert_eq!(l.inspect(&o, &r.id, r.payload_digest).unwrap(), before);
+}
+
+#[test]
+fn known_action_audit_transfers_while_parent_lives_and_preserves_no_replay() {
+    let (mut l, o, r) = setup();
+    let a = prepare(&mut l, &o, &r);
+    let mut provider = support::FakeProvider::default();
+    provider.retain(&r);
+    provider.retain(&a);
+    take(&mut l, &o, &a, &facts(), 3);
+    let acknowledged = l
+        .record_action_result(&a.id, ActionResult::Acknowledged, MonotonicMillis(4))
+        .unwrap();
+    assert_eq!(
+        l.begin_action_release(&a.id).unwrap_err(),
+        ErrorCategory::StateConflict
+    );
+    assert_eq!(
+        l.record_provider_audit(&a.id, vec![]),
+        Err(ErrorCategory::Busy)
+    );
+    assert_eq!(
+        l.record_provider_audit(&a.id, vec![0; 1025]),
+        Err(ErrorCategory::Busy)
+    );
+    let bytes = b"fake:v1:write-id=stable:ack".to_vec();
+    l.record_provider_audit(&a.id, bytes.clone()).unwrap();
+    l.record_provider_audit(&a.id, bytes.clone()).unwrap();
+    assert_eq!(
+        l.record_provider_audit(&a.id, b"mutated".to_vec()),
+        Err(ErrorCategory::IntegrityFailure)
+    );
+    assert_eq!(
+        l.record_provider_audit(&r.id, bytes.clone()),
+        Err(ErrorCategory::StateConflict)
+    );
+    assert_eq!(l.reap(MonotonicMillis(100)), 0);
+    let permit = l.begin_action_release(&a.id).unwrap();
+    assert!(permit.resource().is_none());
+    assert_eq!(permit.actions().len(), 1);
+    assert_eq!(permit.actions()[0].snapshot(), &acknowledged);
+    assert_eq!(
+        permit.actions()[0].audit_digest(),
+        Some(Sha256Digest::of_bytes(&bytes))
+    );
+    let confirmation = provider.release(permit);
+    assert_eq!(provider.len(), 1); // Only the receipt was freed; parent is still physically live.
+    l.record_provider_release(confirmation).unwrap();
+    assert_eq!(l.provider_audit(&a.id), Some(bytes.as_slice()));
+    assert_eq!(
+        l.inspect(&o, &a.id, a.payload_digest).unwrap(),
+        acknowledged
+    );
+    assert!(
+        matches!(l.dispatch(&o, &a.id, a.payload_digest, &facts(), MonotonicMillis(5)).unwrap(), DispatchDisposition::Existing(s) if s == acknowledged)
+    );
+    assert_eq!(
+        l.inspect(&o, &r.id, r.payload_digest).unwrap().liveness,
+        ExecutionLiveness::Running
+    );
+    assert_eq!(l.reap(MonotonicMillis(13)), 0);
+    assert_eq!(l.reap(MonotonicMillis(14)), 1);
+    assert_eq!(l.provider_audit(&a.id), None);
+    assert_eq!(
+        l.dispatch(&o, &a.id, a.payload_digest, &facts(), MonotonicMillis(15)),
+        Err(ErrorCategory::StaleOperation)
+    );
+    assert_eq!(provider.len(), 1);
+}
+
+#[test]
+fn unknown_audit_requires_exact_ended_drained_bundle_and_revocation_does_not_block_cleanup() {
+    let (mut l, o, r) = setup();
+    let a = prepare(&mut l, &o, &r);
+    let mut provider = support::FakeProvider::default();
+    provider.retain(&r);
+    provider.retain(&a);
+    take(&mut l, &o, &a, &facts(), 3);
+    let unknown = l
+        .record_action_result(&a.id, ActionResult::Unknown, MonotonicMillis(4))
+        .unwrap();
+    support::audit(&mut l, &a);
+    assert_eq!(
+        l.begin_action_release(&a.id).unwrap_err(),
+        ErrorCategory::StateConflict
+    );
+    assert_eq!(
+        l.begin_resource_release(&target(&r)).unwrap_err(),
+        ErrorCategory::StateConflict
+    );
+    l.record_executor_fact(
+        &r.id,
+        ExecutorFact::Exited { successful: true },
+        MonotonicMillis(5),
+    )
+    .unwrap();
+    assert_eq!(
+        l.begin_resource_release(&target(&r)).unwrap_err(),
+        ErrorCategory::StateConflict
+    );
+    l.record_executor_fact(&r.id, ExecutorFact::OutputDrained, MonotonicMillis(6))
+        .unwrap();
+    let ended = l.inspect(&o, &r.id, r.payload_digest).unwrap();
+    let mut wrong = target(&r);
+    wrong.payload_digest = Sha256Digest::of_bytes(b"changed target");
+    assert_eq!(
+        l.begin_resource_release(&wrong).unwrap_err(),
+        ErrorCategory::IntegrityFailure
+    );
+    l.revoke_owner(&o).unwrap();
+    let replacement = l.register_verified_owner(id("owner"), id("epoch")).unwrap();
+    assert_ne!(replacement, o);
+    assert_eq!(
+        l.inspect(&replacement, &r.id, r.payload_digest),
+        Err(ErrorCategory::Unauthorized)
+    );
+    let permit = l.begin_resource_release(&target(&r)).unwrap();
+    assert_eq!(permit.resource().unwrap().owner(), &o);
+    assert_eq!(permit.resource().unwrap().snapshot(), &ended);
+    assert_eq!(permit.actions().len(), 1);
+    assert_eq!(permit.actions()[0].owner(), &o);
+    assert_eq!(permit.actions()[0].snapshot(), &unknown);
+    let confirmation = provider.release(permit);
+    assert_eq!(provider.len(), 0);
+    l.record_provider_release(confirmation).unwrap();
+    // Physical cleanup cannot rewrite the ambiguous historical effect.
+    assert_eq!(
+        l.record_action_result(&a.id, ActionResult::Acknowledged, MonotonicMillis(7))
+            .unwrap(),
+        unknown
+    );
+    assert!(l.provider_audit(&a.id).is_some());
+    assert_eq!(l.reap(MonotonicMillis(15)), 0);
+    assert_eq!(l.reap(MonotonicMillis(16)), 2);
+}
+
+#[test]
+fn inflight_action_and_missing_audit_block_resource_release_without_partial_fencing() {
+    let (mut l, o, r) = setup();
+    let a = prepare(&mut l, &o, &r);
+    take(&mut l, &o, &a, &facts(), 3);
+    l.record_executor_fact(
+        &r.id,
+        ExecutorFact::Exited { successful: true },
+        MonotonicMillis(4),
+    )
+    .unwrap();
+    l.record_executor_fact(&r.id, ExecutorFact::OutputDrained, MonotonicMillis(5))
+        .unwrap();
+    assert_eq!(
+        l.begin_resource_release(&target(&r)).unwrap_err(),
+        ErrorCategory::Busy
+    );
+    assert_eq!(
+        l.record_provider_audit(&a.id, b"premature".to_vec()),
+        Err(ErrorCategory::StateConflict)
+    );
+    l.record_action_result(&a.id, ActionResult::Unknown, MonotonicMillis(6))
+        .unwrap();
+    assert_eq!(
+        l.begin_resource_release(&target(&r)).unwrap_err(),
+        ErrorCategory::StateConflict
+    );
+    assert_eq!(l.retained_provider_records().len(), 2);
+    support::audit(&mut l, &a);
+    support::release_resource(&mut l, &r, &[&a]);
+    assert_eq!(l.retained_provider_records().len(), 0);
+    assert_eq!(l.reap(MonotonicMillis(15)), 0);
+    assert_eq!(l.reap(MonotonicMillis(16)), 2);
+}
+
+#[test]
+fn ended_resource_release_fences_reserved_actions_and_output_but_keeps_audit_history() {
+    let (mut l, o, r) = setup();
+    let reserved_action = prepare(&mut l, &o, &r);
+    let acknowledged_action = prepare(&mut l, &o, &r);
+    take(&mut l, &o, &acknowledged_action, &facts(), 3);
+    let ack = l
+        .record_action_result(
+            &acknowledged_action.id,
+            ActionResult::Acknowledged,
+            MonotonicMillis(4),
+        )
+        .unwrap();
+    support::audit(&mut l, &acknowledged_action);
+    l.record_executor_fact(
+        &r.id,
+        ExecutorFact::Exited { successful: true },
+        MonotonicMillis(5),
+    )
+    .unwrap();
+    l.record_executor_fact(&r.id, ExecutorFact::OutputDrained, MonotonicMillis(6))
+        .unwrap();
+    support::release_resource(&mut l, &r, &[&acknowledged_action]);
+    assert_eq!(
+        l.authorize_resource_access(
+            &o,
+            &r.id,
+            r.payload_digest,
+            &context(),
+            &facts(),
+            MonotonicMillis(7)
+        ),
+        Err(ErrorCategory::StateConflict)
+    );
+    assert_eq!(
+        l.dispatch(
+            &o,
+            &reserved_action.id,
+            reserved_action.payload_digest,
+            &facts(),
+            MonotonicMillis(7)
+        ),
+        Err(ErrorCategory::StateConflict)
+    );
+    assert_eq!(
+        l.prepare_targeted(&o, target(&r), context(), vec![], MonotonicMillis(7)),
+        Err(ErrorCategory::StateConflict)
+    );
+    assert_eq!(
+        l.inspect(
+            &o,
+            &acknowledged_action.id,
+            acknowledged_action.payload_digest
+        )
+        .unwrap(),
+        ack
+    );
+    assert!(l.provider_audit(&acknowledged_action.id).is_some());
+    assert_eq!(l.reap(MonotonicMillis(20)), 1); // Reserved action still pins the parent metadata.
+    assert!(l.inspect(&o, &r.id, r.payload_digest).is_ok());
+    l.request_cancel(
+        &o,
+        &reserved_action.id,
+        reserved_action.payload_digest,
+        MonotonicMillis(21),
+    )
+    .unwrap();
+    assert_eq!(l.reap(MonotonicMillis(30)), 0);
+    assert_eq!(l.reap(MonotonicMillis(31)), 2);
+}
+
+#[test]
+fn strict_pre_io_refusal_settles_unknown_child_retention_only_after_full_interval() {
+    let mut l = OperationLedger::with_budget(id("host"), 1_000_000, 10);
+    let o = l.register_verified_owner(id("owner"), id("epoch")).unwrap();
+    let r = l
+        .prepare(&o, context(), b"never started".to_vec(), MonotonicMillis(0))
+        .unwrap();
+    take(&mut l, &o, &r, &facts(), 1);
+    let a = prepare(&mut l, &o, &r);
+    take(&mut l, &o, &a, &facts(), 3);
+    let unknown = l
+        .record_action_result(&a.id, ActionResult::Unknown, MonotonicMillis(4))
+        .unwrap();
+    l.record_executor_fact(&r.id, ExecutorFact::NotDispatched, MonotonicMillis(20))
+        .unwrap();
+    assert_eq!(
+        l.begin_action_release(&a.id).unwrap_err(),
+        ErrorCategory::StateConflict
+    );
+    assert_eq!(l.reap(MonotonicMillis(29)), 0); // Policy never substitutes for physical release.
+    support::release_resource(&mut l, &r, &[&a]);
+    assert_eq!(l.inspect(&o, &a.id, a.payload_digest).unwrap(), unknown);
+    assert!(l.provider_audit(&a.id).is_some());
+    assert_eq!(l.reap(MonotonicMillis(29)), 0); // max(unknown=4, no-I/O proof=20) + 10.
+    assert_eq!(l.reap(MonotonicMillis(30)), 2);
+    assert_eq!(
+        l.inspect(&o, &a.id, a.payload_digest),
+        Err(ErrorCategory::StaleOperation)
     );
 }

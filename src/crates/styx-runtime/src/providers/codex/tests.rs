@@ -465,6 +465,7 @@ fn fixture_adapter(
         owner,
         handle: handle.clone(),
         state: Arc::new(tokio::sync::Mutex::new(Record {
+            retired: false,
             read_mode: None,
             cursor: None,
             gaps: 0,
@@ -1537,4 +1538,169 @@ async fn real_codex_continuation_permit_focused_scenario() {
         "budget returns only after owned execution/reader/stderr/resource lifetime ends"
     );
     outcome.unwrap();
+}
+
+/// Mock stdio/control-boundary regression only; never a native Codex claim.
+#[tokio::test]
+async fn archival_strict_not_sent_related_unknown_uuid_and_negative_bundle_batch() {
+    use styx_core::operations::{ActionResult, ExecutorFact};
+    use tokio::io::AsyncReadExt;
+    for case in 0..3 {
+        let mut auth = authority();
+        let (start_permit, start, digest) =
+            auth.issue(spec(&std::env::temp_dir(), "never dispatched", false));
+        let (adapter, placeholder, mut peer) = fixture_adapter(auth.owner.clone(), start.clone());
+        adapter.discard_unstarted(&placeholder);
+        // Mock-only transport backpressure occupies the private RPC writer.
+        // It emits partial fixture-control bytes, never a process action frame.
+        let barrier_method = "fixture_writer_barrier".repeat(4096);
+        let mut writer_barrier = Box::pin(adapter.rpc.notify(&barrier_method));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(10), &mut writer_barrier)
+                .await
+                .is_err()
+        );
+        let starter = adapter.clone();
+        let starting = tokio::spawn(async move { starter.start(start_permit).await });
+        let handle = tokio::time::timeout(Duration::from_millis(100), async {
+            loop {
+                if let Ok(handle) = adapter.lookup_operation(&auth.owner, &start).await {
+                    break handle;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        let resource_guard = adapter.owned(&auth.owner, &handle).await.unwrap();
+        let (permit, action) = auth.action(&handle, digest, &write_action(b"MUST_NOT_SEND"));
+        let (sender, owned_handle) = (adapter.clone(), handle.clone());
+        let pending = tokio::spawn(async move { sender.write(permit, &owned_handle).await });
+        let receipt = tokio::time::timeout(Duration::from_millis(100), async {
+            loop {
+                if let Ok(receipt) = adapter.lookup_action(&auth.owner, &action.id) {
+                    break receipt;
+                }
+                tokio::task::yield_now().await;
+            }
+        })
+        .await
+        .unwrap();
+        pending.abort();
+        assert!(pending.await.unwrap_err().is_cancelled());
+        assert_eq!(receipt.evidence, ActionEvidence::Unknown);
+        assert!(receipt.write_id.is_some());
+        assert!(resource_guard.input_unknown.is_none()); // Wait was before the first native write.
+        drop(resource_guard);
+        let unknown = auth
+            .ledger
+            .record_action_result(&action.id, ActionResult::Unknown, MonotonicMillis(4))
+            .unwrap();
+        let audit_before = adapter.action_audit(&receipt).unwrap();
+        let parsed: Value = serde_json::from_slice(&audit_before).unwrap();
+        assert_eq!(
+            parsed["native_process_uuid"].as_str(),
+            Some(handle.process_id.as_str())
+        );
+        assert_eq!(parsed["write_id"].as_str(), receipt.write_id.as_deref());
+        adapter.rpc.fail(ExecError::TransportLost);
+        drop(writer_barrier);
+        let failure = starting.await.unwrap().unwrap_err();
+        assert_eq!(failure.evidence, DispatchEvidence::NotDispatched);
+        assert_eq!(failure.error, ExecError::NotSent);
+        auth.ledger
+            .record_executor_fact(&start, ExecutorFact::NotDispatched, MonotonicMillis(5))
+            .unwrap();
+        assert!(adapter.records.lock().unwrap().is_empty());
+        assert!(adapter.operations.lock().unwrap().is_empty());
+        assert_eq!(adapter.action_audit(&receipt).unwrap(), audit_before);
+        let audit = if case == 2 {
+            b"bad audit must not authorize deletion".to_vec()
+        } else {
+            audit_before.clone()
+        };
+        auth.ledger
+            .record_provider_audit(&action.id, audit)
+            .unwrap();
+        if case == 1 {
+            let mut extra = receipt.clone();
+            extra.operation.sequence += 10000;
+            adapter.actions.lock().unwrap().insert(
+                extra.operation.clone(),
+                continuation::StoredAction {
+                    native_process_uuid: handle.process_id.clone(),
+                    owner: auth.owner.clone(),
+                    payload_digest: action.payload_digest,
+                    receipt: extra,
+                },
+            );
+        }
+        let target = ResourceTarget {
+            operation_id: start.clone(),
+            payload_digest: digest,
+        };
+        let permit = auth.ledger.begin_resource_release(&target).unwrap();
+        assert_eq!(permit.actions().len(), 1);
+        assert_eq!(permit.actions()[0].snapshot(), &unknown);
+        let result =
+            tokio::time::timeout(Duration::from_millis(100), adapter.release_resource(permit))
+                .await
+                .unwrap();
+        if case == 0 {
+            auth.ledger
+                .record_provider_release(result.unwrap())
+                .unwrap();
+            assert!(adapter.actions.lock().unwrap().is_empty());
+            assert_eq!(auth.ledger.unreleased_provider_records(), 0);
+            assert_eq!(
+                auth.ledger.provider_audit(&action.id),
+                Some(audit_before.as_slice())
+            );
+        } else {
+            assert_eq!(
+                result.unwrap_err(),
+                if case == 1 {
+                    ExecError::ResourceUnsettled
+                } else {
+                    ExecError::InvalidFrame
+                }
+            );
+            assert_eq!(
+                adapter.actions.lock().unwrap().len(),
+                if case == 1 { 2 } else { 1 }
+            );
+            assert_eq!(auth.ledger.unreleased_provider_records(), 2);
+            assert_eq!(auth.ledger.reap(MonotonicMillis(1_000_000)), 0);
+        }
+        assert_eq!(
+            auth.ledger
+                .inspect(&auth.owner, &action.id, action.payload_digest)
+                .unwrap(),
+            unknown
+        );
+        assert!(matches!(
+            adapter.owned(&auth.owner, &handle).await,
+            Err(ExecError::UnknownHandle)
+        ));
+        let mut wire = Vec::new();
+        loop {
+            let mut bytes = [0u8; 8192];
+            match tokio::time::timeout(Duration::from_millis(10), peer.read(&mut bytes)).await {
+                Ok(Ok(n)) if n > 0 => wire.extend_from_slice(&bytes[..n]),
+                Err(_) => break,
+                other => panic!("unexpected mock peer state: {other:?}"),
+            }
+        }
+        assert!(!wire.is_empty());
+        let wire = std::str::from_utf8(&wire).unwrap();
+        assert!(wire.contains("fixture_writer_barrier"));
+        assert!(!wire.contains("process/start"));
+        assert!(!wire.contains("process/write"));
+        drop(peer);
+        let cleanup = adapter.shutdown_owned(Duration::from_secs(1)).await;
+        assert!(cleanup.processes.is_empty());
+        assert!(cleanup.reader_task_reaped);
+        assert!(cleanup.stderr_task_reaped);
+        assert!(adapter.rpc.observation(&handle.process_id).is_none());
+    }
 }

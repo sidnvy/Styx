@@ -3,6 +3,7 @@
 //! It is a fake executor; these tests do not claim real Codex/Cua/Browser acceptance.
 use styx_contracts::{capability::*, error::*, identity::*, operation::*, session::*};
 use styx_core::{operations::*, policy::*};
+mod support;
 
 fn id<T: TryFrom<&'static str>>(value: &'static str) -> T
 where
@@ -230,6 +231,7 @@ fn live_unknown_is_not_evicted_and_ended_unknown_can_expire_without_replay() {
     assert_eq!(l.reap(MonotonicMillis(61)), 0); // exit alone cannot discard retained output
     l.record_executor_fact(&r.id, ExecutorFact::OutputDrained, MonotonicMillis(61))
         .unwrap();
+    support::release_resource(&mut l, &r, &[]);
     assert_eq!(l.reap(MonotonicMillis(61)), 1);
     assert_eq!(
         l.dispatch(&a, &r.id, r.payload_digest, &facts(), MonotonicMillis(62)),
@@ -521,6 +523,7 @@ fn proven_pre_dispatch_refusal_settles_without_permitting_replay_or_rewriting_ru
     l.begin_maintenance();
     assert!(l.maintenance_settled());
     l.end_maintenance();
+    support::release_resource(&mut l, &refused, &[]);
     assert_eq!(l.reap(MonotonicMillis(12)), 1);
     assert_eq!(
         l.dispatch(
@@ -793,6 +796,7 @@ fn repeated_exit_observations_cannot_keep_ended_unknown_resources_forever() {
             )
             .unwrap();
         assert_eq!(again.state, OperationState::Unknown);
+        support::release_resource(&mut l, &r, &[]);
         assert_eq!(l.reap(MonotonicMillis(15)), 1);
         assert_eq!(
             l.inspect(&a, &r.id, r.payload_digest),

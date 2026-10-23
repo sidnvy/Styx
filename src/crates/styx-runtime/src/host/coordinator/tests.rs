@@ -744,3 +744,417 @@ async fn real_host_action_nonce_drop_ticket_and_terminate_scenario() {
     );
     outcome.unwrap();
 }
+
+/// A real, single-process 257-write journey exercises provider metadata turnover,
+/// then an actual queued native ACK timeout exercises Unknown archival. No Core
+/// facts or provider receipts are injected to manufacture settlement.
+#[tokio::test]
+#[ignore = "requires STYX_TEST_CODEX/STYX_TEST_EXEC_ROOT; M5 physical retention native scenario"]
+async fn real_host_physical_retention_and_unknown_archival_scenario() {
+    use crate::providers::codex::ActionAcknowledgment;
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    let root = std::path::PathBuf::from(std::env::var("STYX_TEST_EXEC_ROOT").unwrap())
+        .join(uuid::Uuid::new_v4().to_string());
+    std::fs::create_dir_all(root.join("codex-home")).unwrap();
+    let adapter = CodexStdio::spawn_owned(OwnedExecutorConfig {
+        binary: std::env::var("STYX_TEST_CODEX").unwrap().into(),
+        cwd: root.clone(),
+        environment: BTreeMap::from([
+            ("PATH".into(), "/usr/bin:/bin".into()),
+            ("HOME".into(), root.display().to_string()),
+            (
+                "CODEX_HOME".into(),
+                root.join("codex-home").display().to_string(),
+            ),
+        ]),
+        rpc_timeout: Duration::from_millis(300),
+        retained_process_limit: 1,
+    })
+    .await
+    .unwrap();
+    let (host, authority) = HostCoordinator::new_owned(
+        adapter,
+        OperationLedger::new(
+            HostGeneration::try_from("host-physical-retention-generation").unwrap(),
+        ),
+        facts(),
+        2,
+    )
+    .unwrap();
+    let authority = Arc::new(authority);
+    let worker_authority = authority.clone();
+    let fixture_root = root.clone();
+    let worker = tokio::spawn(async move {
+        let authority = worker_authority;
+        let root = fixture_root;
+        let owner = authority
+            .register_verified_owner(
+                OwnerId::try_from("host-retention:a").unwrap(),
+                OwnerEpoch::try_from("epoch-a").unwrap(),
+            )
+            .unwrap();
+        let nonce = uuid::Uuid::new_v4().to_string();
+        let stop = format!("STOP-{nonce}");
+        let mut process = spec(&root, "unused", "unused");
+        process.argv = vec![
+            "/bin/sh".into(),
+            "-c".into(),
+            format!(
+                "while IFS= read -r line; do printf '%s\\n' \"$line\" >> archival-effects; if [ \"$line\" = '{stop}' ]; then printf COMPLETE; exit 0; fi; done"
+            ),
+        ];
+        let resource = host
+            .prepare_start(&owner, context(&host, 1), &process)
+            .unwrap();
+        assert_eq!(
+            submitted(&host, &owner, &resource)
+                .wait()
+                .await
+                .unwrap()
+                .dispatch,
+            DispatchEvidence::Started
+        );
+        let make_write = |line: &str| {
+            host.prepare_action(
+                &owner,
+                resource_target(&resource),
+                context(&host, 1),
+                &ProcessAction::WriteStdin {
+                    input_base64: STANDARD.encode(format!("{line}\n")),
+                },
+            )
+            .unwrap()
+        };
+        let first = make_write(&format!("{nonce}:0"));
+
+        // A real read has completed native I/O but still owns its delivery/read
+        // lease. Fair maintenance admission must wait, fencing a fresh commit.
+        let arrived = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        *host.inner.delivery_gate.lock().unwrap() = Some((arrived.clone(), release.clone()));
+        let read_host = host.clone();
+        let read_owner = owner.clone();
+        let read_resource = resource.clone();
+        let held_read = tokio::spawn(async move {
+            read_host
+                .read(
+                    &read_owner,
+                    &read_resource.id,
+                    read_resource.payload_digest,
+                    &context(&read_host, 1),
+                    1024,
+                    Duration::ZERO,
+                )
+                .await
+        });
+        tokio::time::timeout(Duration::from_secs(2), arrived.notified())
+            .await
+            .unwrap();
+        let collect_authority = authority.clone();
+        let waiting_collection = tokio::spawn(async move {
+            collect_authority
+                .collect_provider_retention(Duration::from_secs(2))
+                .await
+        });
+        for _ in 0..100 {
+            if host.inner.execution_gate.clone().try_read_owned().is_err() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(
+            host.inner.execution_gate.clone().try_read_owned().is_err(),
+            "collector is queued behind the actual read lease"
+        );
+        assert!(!waiting_collection.is_finished());
+        assert!(matches!(
+            host.dispatch_action(&owner, &first.id, first.payload_digest),
+            Err(CoordinatorError::Busy)
+        ));
+        assert_eq!(
+            host.inspect_action(&owner, &first.id, first.payload_digest)
+                .unwrap()
+                .state,
+            OperationState::Reserved
+        );
+        release.notify_one();
+        assert_eq!(
+            held_read.await.unwrap().unwrap().liveness,
+            ExecutionLiveness::Running
+        );
+        let early = waiting_collection.await.unwrap().unwrap();
+        assert_eq!(early.resources_released, 0);
+        assert!(!early.deadline_exhausted);
+
+        let mut audit = Vec::new();
+        for index in 0..257 {
+            let action = if index == 0 {
+                first.clone()
+            } else {
+                make_write(&format!("{nonce}:{index}"))
+            };
+            let completion = submitted_action(&host, &owner, &action)
+                .wait()
+                .await
+                .unwrap();
+            assert_eq!(completion.snapshot.state, OperationState::Succeeded);
+            assert_eq!(completion.receipt.evidence, ActionEvidence::Acknowledged);
+            assert_eq!(
+                completion.receipt.acknowledgment,
+                Some(ActionAcknowledgment::WriteAccepted)
+            );
+            assert!(completion.retention_error.is_none(), "{completion:?}");
+            let write_id = completion.receipt.write_id.clone().unwrap();
+            assert!(
+                matches!(
+                    host.inner.adapter.lookup_action(&owner, &action.id),
+                    Err(ExecError::UnknownHandle)
+                ),
+                "known provider receipt was physically released"
+            );
+            let historical = host
+                .lookup_action(&owner, &action.id, action.payload_digest)
+                .unwrap()
+                .unwrap();
+            assert_eq!(historical.write_id.as_ref(), Some(&write_id));
+            assert_eq!(historical.acknowledgment, completion.receipt.acknowledgment);
+            audit.push(serde_json::json!({"operation":action.id,"writeId":write_id}));
+        }
+        let expected: Vec<_> = (0..257).map(|n| format!("{nonce}:{n}")).collect();
+        for _ in 0..100 {
+            if std::fs::read_to_string(root.join("archival-effects"))
+                .unwrap_or_default()
+                .lines()
+                .count()
+                == 257
+            {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        assert_eq!(
+            std::fs::read_to_string(root.join("archival-effects"))
+                .unwrap()
+                .lines()
+                .collect::<Vec<_>>(),
+            expected.iter().map(String::as_str).collect::<Vec<_>>()
+        );
+        let first_history = host
+            .lookup_action(&owner, &first.id, first.payload_digest)
+            .unwrap()
+            .unwrap();
+        assert_eq!(
+            first_history.write_id.as_ref().unwrap(),
+            audit[0]["writeId"].as_str().unwrap()
+        );
+
+        // Native exec-server serializes its long read ahead of process/write.
+        // The local read timeout is NOT process exit and does not restart it.
+        let unknown = make_write(&stop);
+        std::fs::write(
+            root.join("archival-before-unknown.json"),
+            serde_json::to_vec_pretty(&serde_json::json!({
+                "resource":resource.id,"unknownAction":unknown.id,"knownActions":audit,"nonce":nonce
+            }))
+            .unwrap(),
+        )
+        .unwrap();
+        let read_host = host.clone();
+        let read_owner = owner.clone();
+        let read_resource = resource.clone();
+        let queued_read = tokio::spawn(async move {
+            read_host
+                .read(
+                    &read_owner,
+                    &read_resource.id,
+                    read_resource.payload_digest,
+                    &context(&read_host, 1),
+                    1024,
+                    Duration::from_millis(1000),
+                )
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(30)).await;
+        let ticket = submitted_action(&host, &owner, &unknown);
+        assert_eq!(
+            host.inspect_action(&owner, &unknown.id, unknown.payload_digest)
+                .unwrap()
+                .state,
+            OperationState::Dispatched
+        );
+        // Receiver loss does not drop the supervised action or its execution
+        // lease. Collection waits for that job, then sees its honest Unknown.
+        drop(ticket);
+        let collect_authority = authority.clone();
+        let during_unknown = tokio::spawn(async move {
+            collect_authority
+                .collect_provider_retention(Duration::from_secs(2))
+                .await
+        });
+        for _ in 0..100 {
+            if host.inner.execution_gate.clone().try_read_owned().is_err() {
+                break;
+            }
+            tokio::task::yield_now().await;
+        }
+        assert!(host.inner.execution_gate.clone().try_read_owned().is_err());
+        assert!(
+            !during_unknown.is_finished(),
+            "collector cannot pass the real outstanding read/action job"
+        );
+        let read_error = queued_read.await.unwrap().unwrap_err();
+        assert!(
+            matches!(
+                read_error,
+                CoordinatorError::Executor(ExecError::TimeoutUnknown)
+            ),
+            "{read_error:?}"
+        );
+        let during_unknown = during_unknown.await.unwrap().unwrap();
+        assert_eq!(during_unknown.resources_released, 0);
+        let unknown_snapshot = host
+            .inspect_action(&owner, &unknown.id, unknown.payload_digest)
+            .unwrap();
+        assert_eq!(unknown_snapshot.state, OperationState::Unknown);
+        let unknown_receipt = host
+            .lookup_action(&owner, &unknown.id, unknown.payload_digest)
+            .unwrap()
+            .unwrap();
+        assert_eq!(unknown_receipt.evidence, ActionEvidence::Unknown);
+        assert!(matches!(
+            unknown_receipt.cause,
+            Some(ExecError::TimeoutUnknown)
+        ));
+        let unknown_write_id = unknown_receipt.write_id.clone().unwrap();
+        assert!(matches!(
+            host.dispatch_action(&owner, &unknown.id, unknown.payload_digest)
+                .unwrap(),
+            ActionSubmission::Existing(_)
+        ));
+        // Allow the one already queued native action to settle, never resend it.
+        tokio::time::sleep(Duration::from_millis(1100)).await;
+        drain(&host, &owner, &resource, 1).await;
+        let mut expected = expected;
+        expected.push(stop);
+        assert_eq!(
+            std::fs::read_to_string(root.join("archival-effects"))
+                .unwrap()
+                .lines()
+                .collect::<Vec<_>>(),
+            expected.iter().map(String::as_str).collect::<Vec<_>>()
+        );
+        let collection = authority
+            .collect_provider_retention(Duration::from_secs(2))
+            .await
+            .unwrap();
+        assert_eq!(collection.resources_released, 1, "{collection:?}");
+        assert_eq!(collection.unreleased_records, 0, "{collection:?}");
+        assert_eq!(
+            collection.metadata_reaped, 0,
+            "Core's retention window has not elapsed"
+        );
+        assert!(collection.blocked.is_empty(), "{collection:?}");
+        assert!(matches!(
+            host.inner
+                .adapter
+                .lookup_operation(&owner, &resource.id)
+                .await,
+            Err(ExecError::UnknownHandle)
+        ));
+        assert!(
+            host.read(
+                &owner,
+                &resource.id,
+                resource.payload_digest,
+                &context(&host, 1),
+                1024,
+                Duration::ZERO
+            )
+            .await
+            .is_err()
+        );
+        assert_eq!(
+            host.inspect_start(&owner, &resource.id, resource.payload_digest)
+                .unwrap()
+                .liveness,
+            ExecutionLiveness::Exited
+        );
+        assert_eq!(
+            host.inspect_action(&owner, &unknown.id, unknown.payload_digest)
+                .unwrap()
+                .state,
+            OperationState::Unknown
+        );
+        let archived = host
+            .lookup_action(&owner, &unknown.id, unknown.payload_digest)
+            .unwrap()
+            .unwrap();
+        assert_eq!(archived.write_id.as_ref(), Some(&unknown_write_id));
+        assert_eq!(archived.evidence, ActionEvidence::Unknown);
+        assert_eq!(
+            host.lookup_action(&owner, &first.id, first.payload_digest)
+                .unwrap()
+                .unwrap()
+                .write_id,
+            first_history.write_id
+        );
+        assert!(matches!(
+            host.inner.adapter.lookup_action(&owner, &unknown.id),
+            Err(ExecError::UnknownHandle)
+        ));
+        let next_nonce = uuid::Uuid::new_v4().to_string();
+        let next = host
+            .prepare_start(
+                &owner,
+                context(&host, 1),
+                &spec(&root, "after-release", &next_nonce),
+            )
+            .unwrap();
+        assert_eq!(
+            submitted(&host, &owner, &next)
+                .wait()
+                .await
+                .unwrap()
+                .dispatch,
+            DispatchEvidence::Started
+        );
+        drain(&host, &owner, &next, 1).await;
+        assert_eq!(
+            std::fs::read_to_string(root.join("after-release")).unwrap(),
+            format!("{next_nonce}\n")
+        );
+        assert_eq!(
+            authority
+                .collect_provider_retention(Duration::from_secs(2))
+                .await
+                .unwrap()
+                .resources_released,
+            1
+        );
+        println!(
+            "HOST_ARCHIVAL_OBSERVATION {}",
+            serde_json::json!({
+                "root":root,"knownAcknowledgedWrites":257,"independentEffectLines":258,
+                "unknownAction":unknown.id,"unknownWriteId":unknown_write_id,
+                "unknownOutcomePreservedAfterExitAndDrain":true,"unknownAutomaticallyReplayed":false,
+                "firstKnownWriteId":first_history.write_id,"providerProcessLimit":1,
+                "newProcessAfterPhysicalRelease":next.id,"retainedCoreHistory":true,
+                "collectorWaitedRealRead":true,"busyPreservedReserved":true,
+                "droppedActionTicketDidNotReleaseExecutionLeaseEarly":true
+            })
+        );
+    });
+    let outcome = worker.await;
+    let cleanup = authority
+        .shutdown_owned(Duration::from_secs(5))
+        .await
+        .unwrap();
+    println!("HOST_ARCHIVAL_CLEANUP {cleanup:?}");
+    assert!(
+        cleanup.supervised_jobs_joined
+            && cleanup.native.executor_exited
+            && cleanup.native.reader_task_reaped
+            && cleanup.native.stderr_task_reaped
+    );
+    outcome.unwrap();
+}

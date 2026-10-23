@@ -4,6 +4,10 @@ use crate::policy::{AdmissionFacts, check_admission};
 use std::collections::BTreeMap;
 use styx_contracts::{error::ErrorCategory, identity::*, operation::*};
 
+mod retention;
+use retention::PhysicalRetention;
+pub use retention::{ProviderRecordKey, ProviderReleaseConfirmation, ProviderReleasePermit};
+
 const RECORD_ACCOUNTING_OVERHEAD: usize = 4096;
 const OWNER_ACCOUNTING_OVERHEAD: usize = 1024;
 
@@ -41,13 +45,17 @@ struct Record {
     terminal_at: Option<MonotonicMillis>,
     resource_settled_at: Option<MonotonicMillis>,
     accounting_bytes: usize,
+    physical: PhysicalRetention,
+    provider_audit: Option<Box<[u8]>>,
 }
 impl Record {
     fn note_resource_settled(&mut self, now: MonotonicMillis) {
-        if self.snapshot.target.is_none()
-            && self.snapshot.liveness == ExecutionLiveness::Exited
-            && self.snapshot.output_drain == OutputDrain::Drained
-        {
+        let exited_and_drained = self.snapshot.liveness == ExecutionLiveness::Exited
+            && self.snapshot.output_drain == OutputDrain::Drained;
+        let strictly_not_dispatched = self.snapshot.state == OperationState::Failed
+            && self.snapshot.liveness == ExecutionLiveness::NotStarted
+            && self.snapshot.output_drain == OutputDrain::NotOpened;
+        if self.snapshot.target.is_none() && (exited_and_drained || strictly_not_dispatched) {
             self.resource_settled_at.get_or_insert(now);
         }
     }
@@ -233,6 +241,10 @@ impl OperationLedger {
     ) -> Result<(), ErrorCategory> {
         let record = self.record_for(owner, &target.operation_id, target.payload_digest)?;
         if record.snapshot.target.is_some()
+            || matches!(
+                record.physical,
+                PhysicalRetention::ReleasePending | PhysicalRetention::Released
+            )
             || !matches!(
                 record.snapshot.liveness,
                 ExecutionLiveness::Running | ExecutionLiveness::Unknown
@@ -303,6 +315,8 @@ impl OperationLedger {
                 terminal_at: None,
                 resource_settled_at: None,
                 accounting_bytes,
+                physical: PhysicalRetention::NotOpened,
+                provider_audit: None,
             },
         );
         self.next_sequence = next;
@@ -336,6 +350,7 @@ impl OperationLedger {
             .get_mut(id)
             .expect("record checked above with exclusive ledger access");
         record.snapshot.state = OperationState::Dispatched;
+        record.physical = PhysicalRetention::Retained;
         if record.snapshot.target.is_none() {
             record.snapshot.liveness = ExecutionLiveness::Unknown;
             record.snapshot.output_drain = OutputDrain::Unknown;
@@ -371,6 +386,10 @@ impl OperationLedger {
     ) -> Result<OperationSnapshot, ErrorCategory> {
         let record = self.record_for(owner, id, digest)?;
         if record.snapshot.target.is_some()
+            || matches!(
+                record.physical,
+                PhysicalRetention::ReleasePending | PhysicalRetention::Released
+            )
             || record.snapshot.liveness == ExecutionLiveness::NotStarted
         {
             return Err(ErrorCategory::StateConflict);
@@ -575,6 +594,9 @@ impl OperationLedger {
             .records
             .iter()
             .filter_map(|(id, record)| {
+                if !record.physical.collectible() {
+                    return None;
+                }
                 let target = record.snapshot.target.as_ref()?;
                 let since = if record.snapshot.state == OperationState::Unknown {
                     let action_at = record.terminal_at?;
@@ -624,7 +646,7 @@ impl OperationLedger {
                 record.snapshot.output_drain,
                 OutputDrain::NotOpened | OutputDrain::Drained
             );
-            if ended && drained && expired {
+            if ended && drained && expired && record.physical.collectible() {
                 removed_bytes += record.accounting_bytes;
                 removed += 1;
                 false

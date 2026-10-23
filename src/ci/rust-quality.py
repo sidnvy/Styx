@@ -27,6 +27,7 @@ CODEX_TESTS = [
     ("host-coordinator", "host::coordinator::tests::real_owned_start_read_and_dropped_response_scenario"),
     ("codex-continuations", "providers::codex::tests::real_codex_continuation_permit_focused_scenario"),
     ("host-actions", "host::coordinator::tests::real_host_action_nonce_drop_ticket_and_terminate_scenario"),
+    ("host-archival", "host::coordinator::tests::real_host_physical_retention_and_unknown_archival_scenario"),
 ]
 
 TLS_TESTS = [
