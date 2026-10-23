@@ -148,6 +148,10 @@ namespace StyxNative {
   internal static string ReconnectResult(object data){string state=Json.Str(data,"status","foreground","status"),exec=Json.Str(data,"status","foreground","execConnection");return state=="connected"&&exec=="connected"?"Reconnected. The Exec transport is online; tool execution and your ChatGPT account confirmation are checked separately.":state=="started"?"Reconnect requested. The connection is still starting. Refresh status to confirm the result.":"Reconnect has not established an Exec connection. Review the current state before retrying.";}
   internal async Task Refresh(){if(busy||starting||core==null)return;int revision=mutationRevision;try{await ObserveStatus();}catch{if(revision==mutationRevision)settings.ObservationFailed("Connection status could not refresh. You can keep editing and retry. Your last confirmed state is retained.");}}
   internal Task RefreshAfterMutation(){return ObserveStatus();}
+  internal void ApplyPreparationResult(object latest){
+   if(Json.Get(latest,"status")==null)throw new IOException();
+   snapshot=latest;settings.ClearPreparationFeedback();PublishStatus();
+  }
   async Task ObserveStatus(){
    if(observation!=null){await observation;return;}
    int revision=mutationRevision;var pending=Call("status");observation=pending;
@@ -161,6 +165,7 @@ namespace StyxNative {
    startupHostUpdateAttempted=true;await UpdateRuntime(false);
   }
   void PublishStatus(){
+   if(Json.Yes(snapshot,"status","joinRecovery","rollbackRequired")){message.Text="Joining needs recovery. Open Settings to continue.";tray.Text="Styx — joining needs recovery";settings.ShowPage("join-interrupted");return;}
    if(ManagementOnly){message.Text="Reading connection settings… Component update and recovery are available.";tray.Text="Styx — connection not checked";settings.ShowPage("component-start");return;}
    if(Json.Str(snapshot,"status","nativeStartup","status")=="reconciliation_required"&&Json.Str(snapshot,"status","nativeStartup","reason").StartsWith("host_payload_")){message.Text="The installed Styx update needs its components reconciled.";tray.Text="Styx — component update";settings.ShowPage("update-recovery");return;}
    if(Json.Get(snapshot,"componentRecovery")!=null){message.Text="A component update needs review. Your settings and recovery record are retained.";tray.Text="Styx — update needs review";settings.ShowPage("update-recovery");if(settings.HasFeedback(""))settings.Feedback(message.Text);return;}
@@ -210,6 +215,40 @@ namespace StyxNative {
   }
   void Action(string title,Func<Task> action,bool mutation=true){StyxContext.Button(content,title,()=>mutation?owner.Run(action):owner.Read(action));}
   void RefreshAction(){Action("Refresh status",owner.Refresh,false);}
+  const string PreparationMessage="Preparing this computer…";
+  internal void ClearPreparationFeedback(){if(HasFeedback(PreparationMessage)||HasFeedback("Preparing signed components…"))Feedback("");}
+  static bool PendingJoin(object data){
+   if(Json.Str(data,"status","deployment","mode")!="join-existing")return false;
+   var steps=Json.Get(data,"status","deployment","steps") as object[];if(steps==null)return true;
+   foreach(string id in new[]{"host.prepare","host.request","host.claim","host.doctor"}){
+    bool complete=false;foreach(var step in steps)if(Json.Str(step,"id")==id&&Json.Str(step,"status")=="succeeded")complete=true;
+    if(!complete)return true;
+   }return false;
+  }
+  void PreparationAction(string title,Func<Task> before=null){
+   Action(title,()=>owner.Run(async()=>{
+    Exception failure=null;try{
+     if(before!=null)await before();
+     var prepared=await owner.Call("prepare");owner.ApplyPreparationResult(prepared);
+     if(!PendingJoin(prepared)){await owner.Call("connect");ShowPage("overview");await owner.RefreshAfterMutation();}
+    }catch(Exception error){failure=error;}
+    if(failure!=null){
+     // Read the saved result after a failure; never replay preparation.
+     try{await owner.RefreshAfterMutation();}catch{}
+     throw failure;
+    }
+   },PreparationMessage,"Connection not completed. Check your main computer or use a new invitation."),false);
+  }
+  Task ContinueJoiningView(){ShowPage("overview");ShowStatus(owner.CurrentStatus);return Task.FromResult(0);}
+  static bool CanRecoverJoin(object data){return Json.Yes(data,"session","joinRecoverySupported")&&Json.Yes(data,"status","joinRecovery","canRecover");}
+  void ReviewInvitationAction(){
+   joinOrigin="";joinCa="";link=Input("Invitation link",true);
+   Action("Review invitation",async()=>{
+    joinOrigin="";joinCa="";var result=await owner.Call("inspectJoin",Json.Obj("link",link.Text));link.Clear();
+    joinOrigin=Json.Str(result,"preview","origin");joinCa=Json.Str(result,"preview","caSha256");
+    Feedback("Main computer: "+joinOrigin+"\nCertificate: "+(joinCa.Length>0?joinCa:"system trust")+"\nConfirm that these match your main computer.");
+   });
+  }
   TextBox Input(string title,bool secret=false){StyxContext.Text(content,title,22);var box=new TextBox {Width=490,UseSystemPasswordChar=secret,Margin=new Padding(0,0,0,12)};content.Controls.Add(box);return box;}
   void Explain(string text,int height=65){StyxContext.Text(content,text,height);}
   void Capabilities(){
@@ -224,11 +263,35 @@ namespace StyxNative {
   static bool InvitationPage(string name){return name=="add-computer"||name=="pending-computers";}
   async Task ReadLogin(){ApplyLogin(await owner.Call("appLifecycle"));}
   void ApplyLogin(object response){string state=Json.Str(response,"lifecycle","status");Feedback(state=="not_registered"?"Login startup is off.":state=="registered_unverified"?"Login startup is registered. Windows can disable it independently; check Windows startup settings.":"The last startup change is not confirmed. Check Windows startup settings, or choose Enable or Disable again.");}
-  internal void ShowPage(string name){if(owner.ManagementOnly&&name!="update-recovery"){if(name!="component-start")requestedPage=name;name="component-start";}if(InvitationPage(page)&&!InvitationPage(name))owner.FinishInviting();page=name;updateRuntime=null;desktopInput=null;desktopInputLabel=null;challengePrompt=null;confirmChat=null;var previous=new Control[content.Controls.Count];content.Controls.CopyTo(previous,0);foreach(var item in previous)if(item!=feedback&&item!=statusReadout&&item!=observationError){var picture=item as PictureBox;if(picture!=null&&picture.Image!=null)picture.Image.Dispose();item.Dispose();}content.Controls.Clear();Status("");owner.Logo(content,48);StyxContext.Heading(content,name=="chat"?"Connect ChatGPT":(name=="overview"||name=="component-start"||name=="update-recovery")?"This computer":"Get started with Styx");
-   if(name=="welcome"){Explain("Set up this computer, or join a Gateway you already own.");Action("Set up this computer",()=>{ShowPage("create");return Task.FromResult(0);},false);Action("Join an existing Gateway",()=>{ShowPage("join");return Task.FromResult(0);},false);if(Json.Get(owner.CurrentStatus,"status","deployment")!=null)Action("Login startup",async()=>{ShowPage("login-startup");await ReadLogin();});}
+  internal void ShowPage(string name){if(Json.Yes(owner.CurrentStatus,"status","joinRecovery","rollbackRequired"))name="join-interrupted";if(owner.ManagementOnly&&name!="update-recovery"){if(name!="component-start")requestedPage=name;name="component-start";}if(InvitationPage(page)&&!InvitationPage(name))owner.FinishInviting();page=name;updateRuntime=null;desktopInput=null;desktopInputLabel=null;challengePrompt=null;confirmChat=null;var previous=new Control[content.Controls.Count];content.Controls.CopyTo(previous,0);foreach(var item in previous)if(item!=feedback&&item!=statusReadout&&item!=observationError){var picture=item as PictureBox;if(picture!=null&&picture.Image!=null)picture.Image.Dispose();item.Dispose();}content.Controls.Clear();Status("");owner.Logo(content,48);StyxContext.Heading(content,name=="chat"?"Connect ChatGPT":(name=="overview"||name=="component-start"||name=="update-recovery")?"This computer":"Get started with Styx");
+   if(name=="welcome"){
+    if(Json.Get(owner.CurrentStatus,"status","deployment")!=null){
+     bool joining=PendingJoin(owner.CurrentStatus);Explain(joining?"Continue joining your main computer. Your identity and preparation are saved.":"This computer is already configured.");
+     Action(joining?"Continue joining":"Open this computer",ContinueJoiningView,false);
+     Action("Login startup",async()=>{ShowPage("login-startup");await ReadLogin();});
+    }else{Explain("Set up this computer, or join a Gateway you already own.");Action("Set up this computer",()=>{ShowPage("create");return Task.FromResult(0);},false);Action("Join an existing Gateway",()=>{ShowPage("join");return Task.FromResult(0);},false);}
+   }
    else if(name=="login-startup"){Explain("Start Styx in the system tray when you sign in. Quitting Styx stops this session only.",70);Action("Enable login startup",async()=>{ApplyLogin(await owner.Call("appLogin",Json.Obj("enabled",true)));});Action("Disable login startup",async()=>{ApplyLogin(await owner.Call("appLogin",Json.Obj("enabled",false)));});Action("Windows startup settings",()=>{Process.Start("ms-settings:startupapps");return Task.FromResult(0);},false);Action("Check status",ReadLogin);}
-   else if(name=="create"||name=="join"){Capabilities();if(name=="join"){link=Input("Private pairing link");link.UseSystemPasswordChar=true;Action("Review pairing link",async()=>{var r=await owner.Call("inspectJoin",Json.Obj("link",link.Text));link.Clear();joinOrigin=Json.Str(r,"preview","origin");joinCa=Json.Str(r,"preview","caSha256");Feedback("Gateway: "+joinOrigin+"\nCertificate SHA-256: "+(joinCa.Length>0?joinCa:"system trust")+"\nSelect Approve and prepare only if these match your Gateway.");});}Action(name=="join"?"Approve and prepare":"Prepare this computer",async()=>{var choice=Choice();if(name=="join"){if(String.IsNullOrEmpty(joinOrigin))throw new InvalidOperationException();choice["approvedGatewayOrigin"]=joinOrigin;if(!String.IsNullOrEmpty(joinCa))choice["approvedCaSha256"]=joinCa;}await owner.Call(name=="join"?"join":"create",choice);ShowPage("overview");Feedback("Preparing signed components…");var prepared=await owner.Call("prepare");if(!ShowJoinProgress(prepared)){await owner.Call("connect");await owner.RefreshAfterMutation();}});Action("Return",()=>{ShowPage("welcome");return Task.FromResult(0);},false);}
-   else if(name=="overview"){updateRuntime=StyxContext.Button(content,"Update and reopen Styx",owner.UpdateRuntime);updateRuntime.Visible=CanUpdateRuntime(owner.CurrentStatus);if(Json.Yes(owner.CurrentStatus,"session","hostPayloadHandoffSupported"))StyxContext.Button(content,"Review component update",owner.ReviewRuntime);Explain("Connection and account checks are observed separately. Styx runs in your signed-in Windows session. Lock, logout, UAC and elevated applications can limit desktop control.",88);RefreshAction();Action("Continue preparation",async()=>{var r=await owner.Call("prepare");if(!ShowJoinProgress(r))await owner.RefreshAfterMutation();});Action("Reconnect",owner.Reconnect,false);Action("Pause",async()=>{await owner.Call("disconnect");await owner.RefreshAfterMutation();});Action("Add computer",async()=>{var r=await owner.Call("inviteComputer");ShowInvitation(r);});Action("Confirm joining computer",async()=>{ShowPendingComputers(await owner.Call("pendingComputers"));});Action("Paired computers",async()=>{var r=await owner.Call("devices");ShowDevices(r);});Action("Edit capabilities",()=>{ShowPage("capabilities");return Task.FromResult(0);},false);}
+   else if(name=="create"||name=="join"){Capabilities();if(name=="join"){link=Input("Private pairing link");link.UseSystemPasswordChar=true;Action("Review pairing link",async()=>{joinOrigin="";joinCa="";var r=await owner.Call("inspectJoin",Json.Obj("link",link.Text));link.Clear();joinOrigin=Json.Str(r,"preview","origin");joinCa=Json.Str(r,"preview","caSha256");Feedback("Gateway: "+joinOrigin+"\nCertificate SHA-256: "+(joinCa.Length>0?joinCa:"system trust")+"\nSelect Approve and prepare only if these match your Gateway.");});}PreparationAction(name=="join"?"Approve and prepare":"Prepare this computer",async()=>{var choice=Choice();if(name=="join"){if(String.IsNullOrEmpty(joinOrigin))throw new InvalidOperationException();choice["approvedGatewayOrigin"]=joinOrigin;if(!String.IsNullOrEmpty(joinCa))choice["approvedCaSha256"]=joinCa;}await owner.Call(name=="join"?"join":"create",choice);ShowPage("overview");});Action("Return",()=>{ShowPage("welcome");return Task.FromResult(0);},false);}
+   else if(name=="join-interrupted"){
+    Explain("Changing the invitation was interrupted. Restore the previous invitation before continuing.",75);
+    string transaction=Json.Str(owner.CurrentStatus,"status","joinRecovery","transactionId");
+    if(Json.Yes(owner.CurrentStatus,"session","joinRecoverySupported")&&Json.Yes(owner.CurrentStatus,"status","joinRecovery","rollbackRequired")&&System.Text.RegularExpressions.Regex.IsMatch(transaction,"\\A[a-f0-9]{32}\\z"))Action("Restore previous invitation",async()=>{
+     await owner.Call("rollbackJoin",Json.Obj("transactionId",transaction));await owner.RefreshAfterMutation();ShowPage("overview");ShowStatus(owner.CurrentStatus);
+    });
+    RefreshAction();
+   }
+   else if(name=="join-recover"){
+    Explain("Use a new invitation from your main computer. Your capabilities and prepared components are kept.",70);
+    ReviewInvitationAction();
+    PreparationAction("Accept and continue",async()=>{
+     if(!CanRecoverJoin(owner.CurrentStatus)||String.IsNullOrEmpty(joinOrigin))throw new InvalidOperationException();
+     var confirmation=Json.Obj("approvedGatewayOrigin",joinOrigin);if(!String.IsNullOrEmpty(joinCa))confirmation["approvedCaSha256"]=joinCa;
+     await owner.Call("recoverJoin",confirmation);joinOrigin="";joinCa="";Feedback(PreparationMessage);ShowPage("overview");
+    });
+    Action("Cancel",()=>{joinOrigin="";joinCa="";link.Clear();Feedback("");return ContinueJoiningView();},false);
+   }
+   else if(name=="overview"){updateRuntime=StyxContext.Button(content,"Update and reopen Styx",owner.UpdateRuntime);updateRuntime.Visible=CanUpdateRuntime(owner.CurrentStatus);if(Json.Yes(owner.CurrentStatus,"session","hostPayloadHandoffSupported"))StyxContext.Button(content,"Review component update",owner.ReviewRuntime);Explain("Connection and account checks are observed separately. Styx runs in your signed-in Windows session. Lock, logout, UAC and elevated applications can limit desktop control.",88);RefreshAction();PreparationAction("Continue preparation");Action("Reconnect",owner.Reconnect,false);Action("Pause",async()=>{await owner.Call("disconnect");await owner.RefreshAfterMutation();});Action("Add computer",async()=>{var r=await owner.Call("inviteComputer");ShowInvitation(r);});Action("Confirm joining computer",async()=>{ShowPendingComputers(await owner.Call("pendingComputers"));});Action("Paired computers",async()=>{var r=await owner.Call("devices");ShowDevices(r);});Action("Edit capabilities",()=>{ShowPage("capabilities");return Task.FromResult(0);},false);}
    else if(name=="component-start"){Explain("Reading connection settings… Component update and recovery remain available while this check completes.",65);updateRuntime=StyxContext.Button(content,"Update and reopen Styx",owner.UpdateRuntime);updateRuntime.Visible=CanUpdateRuntime(owner.CurrentStatus);if(Json.Yes(owner.CurrentStatus,"session","hostPayloadHandoffSupported"))StyxContext.Button(content,"Review component update",owner.ReviewRuntime);RefreshAction();Status(ComponentNotice(owner.CurrentStatus));}
    else if(name=="update-recovery"){Explain("Styx must finish updating its components before reconnecting this computer. If the update needs attention, review it below. Your identity and pairing are retained.",90);updateRuntime=StyxContext.Button(content,"Update and reopen Styx",owner.UpdateRuntime);updateRuntime.Visible=CanUpdateRuntime(owner.CurrentStatus);StyxContext.Button(content,"Review component update",owner.ReviewRuntime);}
    else if(name=="join-waiting"){Explain("Join your main computer",40);}
@@ -253,7 +316,7 @@ namespace StyxNative {
    object incomplete=null,requested=null;byId.TryGetValue("host.request",out requested);
    foreach(string id in new[]{"host.prepare","host.request","host.claim","host.doctor"}){object step;if(!byId.TryGetValue(id,out step)){ShowPage("join-waiting");Status("This joining request needs review. Your identity and progress have been retained.");RefreshAction();return true;}if(Json.Str(step,"status")!="succeeded"){incomplete=step;break;}}
    if(incomplete==null)return false;
-   ShowPage("join-waiting");string state=Json.Str(incomplete,"status"),stepId=Json.Str(incomplete,"id"),code=Json.Str(requested,"comparison_code");bool retry=false;
+   ClearPreparationFeedback();ShowPage("join-waiting");string state=Json.Str(incomplete,"status"),stepId=Json.Str(incomplete,"id"),code=Json.Str(requested,"comparison_code");bool retry=false;
    if(stepId=="host.claim"&&state=="awaiting_approval"){
     Status(String.IsNullOrEmpty(code)?"This request was created by an earlier version. Use advanced device review on your main computer to confirm this full fingerprint before continuing:\n\n"+Json.Str(requested,"fingerprint")+"":"Your confirmation code: "+code+"\n\nConfirm the same code on your main computer, then check here.");retry=true;
    }else if(state=="pending"){
@@ -262,9 +325,12 @@ namespace StyxNative {
     Status("The confirmation result could not be checked. Check the connection to your main computer, then try again. This does not mean approval is still pending.");retry=true;
    }else if(stepId=="host.doctor"&&state=="blocked"){
     Status("Your main computer has confirmed this device. A local component check needs attention. Review this computer before checking again.");retry=Json.Yes(incomplete,"retryable");
+   }else if(stepId=="host.request"&&state=="uncertain"){
+    Status("Connection not completed. Check your main computer’s address or use a new invitation.");
    }else if(state=="running")Status("Preparation is in progress, or its result has not been recorded. Refresh status to check. The operation will not be repeated automatically.");
    else Status("Preparation needs attention. Refresh status to review the result. Your identity and progress have been retained; failed or interrupted installation and enrollment steps will not be repeated automatically.");
-   if(retry)Action(stepId=="host.doctor"?"Check this computer again":state=="pending"?"Continue preparation":"Check confirmation",async()=>{var r=await owner.Call("prepare");if(!ShowJoinProgress(r)){await owner.Call("connect");ShowPage("overview");await owner.RefreshAfterMutation();}});
+   if(retry)PreparationAction(stepId=="host.doctor"?"Check this computer again":state=="pending"?"Continue preparation":"Check confirmation");
+   if(CanRecoverJoin(snapshot))Action("Use a new invitation",()=>{Feedback("");ShowPage("join-recover");return Task.FromResult(0);},false);
    RefreshAction();return true;
   }
   void ShowInvitation(object result){
@@ -315,6 +381,7 @@ namespace StyxNative {
    catch(NativeOperationException error){readbackSubmitted=id+":"+window;Feedback(error.Code=="desktop_acceptance_native_app_changed"?"The native Styx app changed. Create a new desktop test before continuing.":"The desktop readback could not be confirmed. Refresh status and create a new test before retrying.");}catch{readbackSubmitted=id+":"+window;Feedback("The desktop readback could not be confirmed. Refresh status and create a new test before retrying.");}finally{readbackInFlight=false;}
   }
   internal void ShowStatus(object data){
+   if(page=="join-interrupted"&&!Json.Yes(data,"status","joinRecovery","rollbackRequired"))ShowPage("overview");
    if(page=="component-start"&&!owner.ManagementOnly)ShowPage(requestedPage);
    if(updateRuntime!=null)updateRuntime.Visible=CanUpdateRuntime(data);
    SetText(observationError,"",0);var latest=Json.Get(data,"acceptance");
@@ -335,6 +402,21 @@ namespace StyxNative {
    steps[0]=Json.Obj("id","host.prepare","status","uncertain");ShowJoinProgress(Json.Codec.DeserializeObject(Json.Codec.Serialize(response)));
    int actions=0;foreach(Control control in content.Controls)if(control is Button)actions++;
    if(actions!=1||statusReadout.Text.Contains("confirmation code"))throw new Exception("failed_preparation_misreported_as_waiting");
+   steps[0]=Json.Obj("id","host.prepare","status","succeeded");steps[1]=Json.Obj("id","host.request","status","uncertain");
+   Feedback("Preparing signed components…");owner.ApplyPreparationResult(Json.Codec.DeserializeObject(Json.Codec.Serialize(response)));
+   if(!PendingJoin(owner.CurrentStatus)||HasFeedback("Preparing signed components…")||!statusReadout.Text.Contains("Connection not completed"))throw new Exception("join_result_not_adopted_or_progress_stale");
+   ShowPage("welcome");bool continued=false;foreach(Control control in content.Controls)if(control is Button){if(control.Text=="Set up this computer"||control.Text=="Join an existing Gateway")throw new Exception("existing_join_offered_recreation");if(control.Text=="Continue joining"){continued=true;break;}}
+   ContinueJoiningView();if(!continued||page!="join-waiting"||HasFeedback("Preparing signed components…"))throw new Exception("existing_join_cannot_resume_view");
+   ((Dictionary<string,object>)response["status"])["joinRecovery"]=Json.Obj("canRecover",true);
+   response["session"]=Json.Obj("joinRecoverySupported",true);owner.ApplyPreparationResult(Json.Codec.DeserializeObject(Json.Codec.Serialize(response)));
+   bool recoveryVisible=false;foreach(Control control in content.Controls)if(control is Button&&control.Text=="Use a new invitation")recoveryVisible=true;
+   if(!recoveryVisible)throw new Exception("join_recovery_not_visible");ShowPage("join-recover");
+   foreach(Control control in content.Controls)if(control is CheckBox||control is ComboBox)throw new Exception("join_recovery_reselects_capabilities");
+   ContinueJoiningView();if(page!="join-waiting")throw new Exception("join_review_cancel_lost_progress");
+   owner.ApplyPreparationResult(Json.Obj("session",Json.Obj("joinRecoverySupported",true),"status",Json.Obj("joinRecovery",Json.Obj("rollbackRequired",true,"transactionId",new string('a',32)))));
+   ShowPage("welcome");bool restoreVisible=false;foreach(Control control in content.Controls)if(control is Button){if(control.Text=="Set up this computer")throw new Exception("interrupted_join_offered_create");if(control.Text=="Restore previous invitation")restoreVisible=true;}
+   if(page!="join-interrupted"||!restoreVisible)throw new Exception("interrupted_join_has_no_recovery");
+   owner.ApplyPreparationResult(Json.Obj("status",Json.Obj()));
    // Exercise actual controls and response application without a desktop session.
    ShowPage("chat");tunnel.Text="tunnel_draft_fixture";key.Text="draft-runtime-key";Feedback("Keep this operation failure");ShowStatus(Json.Obj("status",Json.Obj()));
    if(!Enabled||owner.MutationBusy||key.Text!="draft-runtime-key"||tunnel.Text!="tunnel_draft_fixture"||feedback.Text!="Keep this operation failure")throw new Exception("refresh_discarded_tunnel_draft_or_error");

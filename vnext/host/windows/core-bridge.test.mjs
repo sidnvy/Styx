@@ -112,3 +112,45 @@ test('login preference uses the same narrow Core API without accepting authority
  await client.dispatch(req('appLogin',{enabled:true}));assert.equal(f.requests.at(-1).route,'app/login');assert.deepEqual(f.requests.at(-1).body,{authorize:true,enabled:true});
  await assert.rejects(client.dispatch(req('appLogin',{enabled:true,resourceRoot:'C:\\Foreign'})),/invalid_native_request/);
 });
+
+test('join recovery accepts a freshly reviewed invitation without creating or replaying a deployment',async()=>{
+ const f=fixture(),client=await createClient({url},{fetchImpl:async(address,options)=>{
+  const result=await f.fetchImpl(address,options);if(new URL(address).pathname==='/api/session'){const value=JSON.parse(await result.text());value.joinRecoverySupported=true;return {...result,text:async()=>JSON.stringify(value)};}return result;
+ }});
+ await assert.rejects(client.dispatch(req('recoverJoin',{approvedGatewayOrigin:'https://owner.example'})),/explicit_join_confirmation_required/);
+ await client.dispatch(req('inspectJoin',{link:'fresh-private-invitation'}));
+ await assert.rejects(client.dispatch(req('recoverJoin',{approvedGatewayOrigin:'https://wrong.example',approvedCaSha256:'c'.repeat(64)})),/explicit_join_confirmation_required/);
+ await client.dispatch(req('recoverJoin',{approvedGatewayOrigin:'https://owner.example',approvedCaSha256:'c'.repeat(64),computer:true,browser:true,force:true}));
+ assert.deepEqual(f.requests.at(-1).body,{authorize:true,joinLinkId:'accepted'});assert.equal(f.requests.at(-1).route,'join/recover');
+ assert(!f.requests.some(x=>['create','advance','local-setup','capabilities','foreground'].includes(x.route)));
+ await assert.rejects(client.dispatch(req('recoverJoin',{approvedGatewayOrigin:'https://owner.example',approvedCaSha256:'c'.repeat(64)})),/explicit_join_confirmation_required/);
+ assert.equal((await client.dispatch(req('status'))).session.joinRecoverySupported,true);
+});
+
+test('failed new invitation review discards the previous approval and unsupported Core cannot recover',async()=>{
+ const f=fixture();let failed=false;const client=await createClient({url},{fetchImpl:async(address,options)=>{if(failed&&new URL(address).pathname==='/api/pairing-link/inspect')throw Error('invalid new link');return f.fetchImpl(address,options);}});
+ await client.dispatch(req('inspectJoin',{link:'first'}));failed=true;await assert.rejects(client.dispatch(req('inspectJoin',{link:'invalid'})));
+ await assert.rejects(client.dispatch(req('join',{approvedGatewayOrigin:'https://owner.example',approvedCaSha256:'c'.repeat(64)})),/explicit_join_confirmation_required/);
+ await assert.rejects(client.dispatch(req('recoverJoin',{approvedGatewayOrigin:'https://owner.example',approvedCaSha256:'c'.repeat(64)})),/join_recovery_unavailable/);
+ assert(!f.requests.some(x=>['create','pairing-link/accept','join/recover'].includes(x.route)));
+});
+
+test('preparation publishes the saved uncertain join and recovery capability without retrying its request',async()=>{
+ const calls=[],deployment={mode:'join-existing',steps:[{id:'host.prepare',status:'succeeded'},{id:'host.request',status:'uncertain'},{id:'host.claim',status:'pending'},{id:'host.doctor',status:'pending'}]},joinRecovery={canRecover:true,previousRequestOutcome:'unknown'};
+ const client=await createClient({url},{fetchImpl:async(address,options)=>{const route=new URL(address).pathname.slice(5);calls.push(route);const data=route==='session'?{csrf:'B'.repeat(43),joinRecoverySupported:true}:route==='snapshot'?{status:{deployment,joinRecovery}}:{deployment,joinRecovery};return {ok:true,headers:new Headers({'content-type':'application/json'}),text:async()=>JSON.stringify(data)};}});
+ const observed=await client.dispatch(req('prepare'));assert.equal(observed.session.joinRecoverySupported,true);assert.deepEqual(observed.status.deployment,deployment);assert.equal(observed.status.joinRecovery.canRecover,true);assert(!calls.includes('advance'));assert(!calls.includes('create'));
+});
+
+test('interrupted join is observable before full startup and rolls back only the Core transaction',async()=>{
+ const calls=[],transactionId='d'.repeat(32);let rollbackRequired=true;
+ const client=await createClient({url},{fetchImpl:async(address,options)=>{
+  const route=new URL(address).pathname.slice(5),body=options.body?JSON.parse(options.body):null;calls.push({route,body});
+  if(route==='components'||route==='snapshot')throw Error('interrupted deployment');
+  const data=route==='session'?{csrf:'B'.repeat(43),joinRecoverySupported:true}:route==='join/recovery'?{recovery:{rollbackRequired,transactionId}}:{};
+  return {ok:true,headers:new Headers({'content-type':'application/json'}),text:async()=>JSON.stringify(data)};
+ }});
+ for(const operation of ['startupStatus','status'])assert.equal((await client.dispatch(req(operation))).status.joinRecovery.transactionId,transactionId);
+ await assert.rejects(client.dispatch(req('rollbackJoin',{transactionId:'../forged'})),/join_recovery_unavailable/);
+ await client.dispatch(req('rollbackJoin',{transactionId,force:true}));assert.deepEqual(calls.at(-1),{route:'join/rollback',body:{authorize:true,transactionId}});assert(!calls.some(x=>['create','advance','local-setup'].includes(x.route)));
+ rollbackRequired=false;await assert.rejects(client.dispatch(req('startupStatus')),/interrupted deployment/);await assert.rejects(client.dispatch(req('status')),/interrupted deployment/);
+});
