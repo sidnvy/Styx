@@ -27,6 +27,11 @@ function verified(d){
  requirePrivateDirectory(d.installRoot);requirePrivateFile(d.hostConfigFile);requirePrivateFile(d.trustPublicKeyFile);
  const cfg=readConfig(d.hostConfigFile);assert(typeof cfg.host_id==='string'&&cfg.exec&&typeof cfg.exec==='object','invalid_host_config');
  requirePrivateFile(cfg.token_file);
+ return verifiedRuntime(d);
+}
+function verifiedRuntime(d){
+ for(const key of ['installRoot','hostConfigFile','trustPublicKeyFile','nodeBinary'])assert(absolute(d[key]),'invalid_service_path');
+ requirePrivateDirectory(d.installRoot);requirePrivateFile(d.trustPublicKeyFile);
  const pub=fs.readFileSync(d.trustPublicKeyFile,'utf8');
  const selected=activeRelease(d.installRoot,pub);assert(selected,'no_active_release');
  const release=verifySignedRelease(selected.release_root,pub);
@@ -121,4 +126,26 @@ export async function observeHostService({serviceConfigFile}={},options={}){
    ...(d.restartSec!==undefined?{restartSec:d.restartSec}:{}),...(d.nativeApp!==undefined?{nativeApp:d.nativeApp}:{})
   }},options);
  }catch{return {status:'blocked',action:'status',role:'host',reason:'service_scope_or_native_operation_refused'}}
+}
+
+// A never-enrolled Host cannot satisfy the normal service contract (which
+// correctly requires credentials). This read-only branch proves absence only;
+// it never adopts an installed task/unit, even if that task is stopped.
+export async function observeUnenrolledHostService({serviceConfigFile}={}, {home=os.homedir(),run=execFileSync}={}){
+ try{
+  const d=descriptor(readConfig(serviceConfigFile)),base=path.dirname(serviceConfigFile),platform=process.platform;
+  assert(d.id===serviceIds[platform]&&d.installRoot===path.join(base,'install')&&d.hostConfigFile===path.join(base,'device','host.json')&&d.trustPublicKeyFile===path.join(base,'publisher.pem'),'unenrolled_service_scope_invalid');
+  const absent=file=>{try{fs.lstatSync(file);return false}catch(e){if(e.code==='ENOENT')return true;throw e}};
+  for(const name of ['host.json','host.token','pending.json'])assert(absent(path.join(base,'device',name)),'unenrolled_service_credentials_present');
+  const release=verifiedRuntime(d);let missing=false;
+  if(platform==='linux'){
+   assert(absent(path.join(home,'.config/systemd/user',d.id)),'unenrolled_service_already_installed');
+   const n=statusUserService(d.id,{run});missing=n.status==='reported'&&n.load==='not-found'&&n.active==='inactive'&&n.pid===0;
+  }else if(platform==='darwin'){
+   assert(absent(path.join(home,'Library/LaunchAgents',d.id+'.plist')),'unenrolled_service_already_installed');
+   const n=statusMacLaunchAgent(d.id,{run});missing=n.status==='not_loaded'&&n.loaded===false;
+  }else if(platform==='win32')missing=fixedWindows(run,d,release,'status').status==='not_installed';
+  assert(missing,'unenrolled_service_absence_unconfirmed');
+  return {status:'reported',action:'status',role:'host',manager:managers[platform],serviceId:d.id,state:'not_installed',installed:false,persistence:'none',health:'not_checked',scope:'unenrolled_host_absence_only'};
+ }catch{return {status:'blocked',action:'status',role:'host',reason:'unenrolled_service_absence_unconfirmed'}}
 }

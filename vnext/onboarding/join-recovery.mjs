@@ -4,7 +4,7 @@ import path from 'node:path';
 import {createHash,createPublicKey,randomBytes,X509Certificate} from 'node:crypto';
 import {requirePrivateDirectory,requirePrivateFile,ensurePrivateDirectory,openPrivateFile,writePrivateFile} from '../host/private-storage.mjs';
 import {validateDeployment} from './deployment-config.mjs';
-import {observeHostService} from './service-lifecycle.mjs';
+import {observeUnenrolledHostService} from './service-lifecycle.mjs';
 import {acquireRecoveryGuard} from './recovery-guard.mjs';
 const kind='uncompleted-join-recovery-v1',sha=b=>createHash('sha256').update(b).digest('hex');
 const fail=c=>{throw Error(c)},encode=x=>Buffer.from(JSON.stringify(x,null,2)+'\n');
@@ -21,7 +21,7 @@ function idle(d,base){
  for(const name of ['pending.json','host.token','host.json'])if(exists(path.join(base,'device',name)))fail('join_recovery_existing_enrollment_refused');
  for(const name of ['.health-update-lock','.health-operation-lock','.health-recovery-guard'])if(exists(path.join(base,'install',name)))fail('join_recovery_runtime_busy');
 }
-async function stopped(base,operations){const r=await (operations.observeHostService??observeHostService)({serviceConfigFile:path.join(base,'service.json')});if(r.status!=='reported'||!['not_installed','stopped'].includes(r.state))fail('join_recovery_service_not_quiescent');return r}
+async function stopped(base,operations){const r=await (operations.observeHostService??observeUnenrolledHostService)({serviceConfigFile:path.join(base,'service.json')});if(r.status!=='reported'||r.state!=='not_installed')fail('join_recovery_service_not_quiescent');return r}
 function scope(d){
  directory(d);const config=read(path.join(d,'deployment.json')),state=read(path.join(d,'state.json'));validateDeployment(config,{checkNetwork:false});
  if(config.mode!=='join-existing'||!config.host||state.mode!==config.mode||state.schema!==1||state.configSha256!==sha(bytes(path.join(d,'deployment.json'))))fail('join_recovery_scope_invalid');

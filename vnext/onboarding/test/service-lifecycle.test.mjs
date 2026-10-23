@@ -3,11 +3,12 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
-import {createHash,generateKeyPairSync,sign,randomBytes} from 'node:crypto';
+import {createHash,generateKeyPairSync,sign,randomBytes,createPublicKey} from 'node:crypto';
 import {execFileSync} from 'node:child_process';
-import {hostServiceAction,serviceIds} from '../service-lifecycle.mjs';
+import {hostServiceAction,serviceIds,observeHostService,observeUnenrolledHostService} from '../service-lifecycle.mjs';
 import {ensurePrivateDirectory} from '../../host/private-storage.mjs';
 import {stageSignedRelease,activateRelease,refreshVerifiedBootstrap} from '../../host/installer.mjs';
+import {prepareNativeSetup} from '../../host/setup-native.mjs';
 import {removeLinuxService} from '../../host/linux-service.mjs';
 const linux=process.platform==='linux';
 const sum=b=>createHash('sha256').update(b).digest('hex');
@@ -27,7 +28,7 @@ function fixture(t){
  const service={unitName:id,installRoot:installed,hostConfigFile:host,trustPublicKeyFile:trust,nodeBinary:path.join(installed,'node')};fs.writeFileSync(config,JSON.stringify(service),{mode:0o600});
  const request=action=>({action,role:'host',serviceConfigFile:config,authorization:{approved:true,action,role:'host',serviceConfigFile:config,serviceId:id,installRoot:installed,hostConfigFile:host,trustPublicKeyFile:trust,nodeBinary:service.nodeBinary}});
  const home=path.join(root,'home');fs.mkdirSync(home,{mode:0o700});
- return {root,home,id,config,host,installed,request,service};
+ return {root,home,id,config,host,installed,request,service,source,keys,pub};
 }
 function manager(){let enabled=false,active=false,installed=false;const calls=[];return {calls,run(binary,args){assert.equal(binary,'/usr/bin/systemctl');assert.equal(args[0],'--user');calls.push([...args]);if(args[1]==='daemon-reload')installed=true;if(args[1]==='enable')enabled=true;if(args[1]==='disable')enabled=false;if(args[1]==='start')active=true;if(args[1]==='stop')active=false;return 'LoadState='+(installed?'loaded':'not-found')+'\nActiveState='+(active?'active':'inactive')+'\nSubState='+(active?'running':'dead')+'\nUnitFileState='+(enabled?'enabled':'disabled')+'\nMainPID='+(active?123:0)+'\nNRestarts=0\n'}}}
 test('gateway persistence is explicitly not implemented; no native command',async()=>{
@@ -67,7 +68,6 @@ test('opt-in actual isolated Linux user service lifecycle',{skip:!linux||process
  removeLinuxService(f.id);t.diagnostic('exact owned unit removed; signed fixture is not a native Host tool health claim');assert.equal(execFileSync('/usr/bin/systemctl',['--user','show',f.id,'-p','LoadState','--value'],{encoding:'utf8'}).trim(),'not-found');
 });
 
-import {observeHostService} from '../service-lifecycle.mjs';
 test('read-only service observation constructs fixed scope and never mutates native service',{skip:!linux},async t=>{
  const f=fixture(t),native=manager();
  const result=await observeHostService({serviceConfigFile:f.config},{home:f.home,run:native.run});
@@ -81,4 +81,24 @@ test('known legacy simple unit remains manageable without rewriting its installe
  assert.equal((await hostServiceAction(f.request('start'),options)).state,'running');
  assert.equal((await hostServiceAction(f.request('stop'),options)).state,'stopped');
  assert.equal(fs.readFileSync(unit,'utf8'),legacy);
+});
+
+
+test('actual native preparation without credentials observes only raw native service absence; normal lifecycle stays credential-gated',{skip:!linux},async t=>{
+ const f=fixture(t),names=['enroll.mjs','setup-native.mjs','doctor.mjs','linux-service.mjs'];
+ for(const name of names)fs.copyFileSync(new URL('../../host/'+name,import.meta.url),path.join(f.source,'host',name));
+ for(const name of ['codex','cua-driver'])fs.writeFileSync(path.join(f.source,'bin',name),'fixture; never executed');
+ const manifest=JSON.parse(fs.readFileSync(path.join(f.source,'manifest.json')));
+ for(const name of [...names.map(n=>'host/'+n),'bin/codex','bin/cua-driver']){const b=fs.readFileSync(path.join(f.source,name));manifest.files.push({path:name,sha256:sum(b),size:b.length,executable:name.startsWith('bin/')})}
+ const raw=JSON.stringify(manifest)+'\n';fs.writeFileSync(path.join(f.source,'manifest.json'),raw);fs.writeFileSync(path.join(f.source,'manifest.sig'),sign(null,Buffer.from(raw),f.keys.privateKey).toString('base64url'));
+ const base=path.join(f.root,'fresh'),key=path.join(f.root,'publisher.pub');
+ prepareNativeSetup({bundle:f.source,publisherKeyFile:key,publisherSha256:sum(createPublicKey(f.pub).export({type:'spki',format:'der'})),baseDir:base,gatewayUrl:'https://127.0.0.1:1',label:'join-recovery',computer:false});
+ const serviceConfigFile=path.join(base,'service.json');assert.equal(fs.existsSync(path.join(base,'setup-state.json')),true);
+ for(const n of ['host.json','host.token','pending.json'])assert.equal(fs.existsSync(path.join(base,'device',n)),false);
+ let calls=0,mode='absent';const run=(binary,args)=>{calls++;assert.equal(binary,'/usr/bin/systemctl');assert.deepEqual(args.slice(0,3),['--user','show','styx-host.service']);if(mode==='unavailable')throw Error('manager unavailable');return `LoadState=${mode==='absent'?'not-found':'loaded'}\nActiveState=${mode==='running'?'active':'inactive'}\nMainPID=${mode==='running'?123:0}\n`;};
+ assert.equal((await observeHostService({serviceConfigFile},{home:f.home,run})).status,'blocked');assert.equal(calls,0);
+ const observed=await observeUnenrolledHostService({serviceConfigFile},{home:f.home,run});assert.equal(observed.state,'not_installed');assert.equal(observed.scope,'unenrolled_host_absence_only');assert.equal(calls,1);
+ for(mode of ['stopped','running','unavailable'])assert.equal((await observeUnenrolledHostService({serviceConfigFile},{home:f.home,run})).status,'blocked');
+ mode='absent';const unit=path.join(f.home,'.config/systemd/user');fs.mkdirSync(unit,{recursive:true,mode:0o700});fs.writeFileSync(path.join(unit,'styx-host.service'),'foreign definition');const before=calls;assert.equal((await observeUnenrolledHostService({serviceConfigFile},{home:f.home,run})).status,'blocked');assert.equal(calls,before);
+ fs.rmSync(path.join(unit,'styx-host.service'));fs.appendFileSync(path.join(base,'install/launch.mjs'),'unsigned');assert.equal((await observeUnenrolledHostService({serviceConfigFile},{home:f.home,run})).status,'blocked');assert.equal(calls,before);
 });
