@@ -13,15 +13,24 @@ const hex=value=>typeof value==='string'&&/^[a-f0-9]{64}$/.test(value);
 const same=(a,b)=>hex(a)&&hex(b)&&timingSafeEqual(Buffer.from(a,'hex'),Buffer.from(b,'hex'));
 const receiptFile=d=>path.join(d,'foreground-observer.json');
 function privateSnapshot(file){
- const stat=requirePrivateFile(file);if(stat.size>32768)fail('foreground_observation_file_too_large');
- return {bytes:fs.readFileSync(file,'utf8'),ino:stat.ino,dev:stat.dev};
+ requirePrivateFile(file);const stat=fs.lstatSync(file,{bigint:true});
+ if(!stat.isFile()||stat.isSymbolicLink())fail('foreground_observation_file_not_regular');
+ if(stat.size>32768n)fail('foreground_observation_file_too_large');
+ return {bytes:fs.readFileSync(file,'utf8'),ino:stat.ino.toString(),dev:stat.dev.toString()};
 }
 const equalSnapshot=(a,b)=>a.bytes===b.bytes&&a.ino===b.ino&&a.dev===b.dev;
 function lockIdentity(d){const value=privateSnapshot(path.join(d,'foreground.lock'));return {ino:value.ino,dev:value.dev,sha256:sha(value.bytes)}}
-const lockMatches=(d,expected)=>JSON.stringify(lockIdentity(d))===JSON.stringify(expected);
+const lockMatches=(d,expected)=>{const actual=lockIdentity(d);return actual.ino===expected.ino&&actual.dev===expected.dev&&actual.sha256===expected.sha256};
+// NTFS file IDs routinely exceed Number.MAX_SAFE_INTEGER. New receipts use
+// decimal strings; legacy numbers are accepted only when still lossless.
+function fileIdentity(value){
+ if(typeof value==='number'&&Number.isSafeInteger(value)&&value>=0)return String(value);
+ if(typeof value==='string'&&/^(0|[1-9][0-9]{0,19})$/.test(value)&&BigInt(value)<=18446744073709551615n)return value;
+ fail('foreground_observation_invalid');
+}
 function validateReceipt(value){
- if(!value||value.schema!==1||Object.keys(value).some(k=>!['schema','host','port','pid','generation','configurationHash','secret','lock'].includes(k))||value.host!=='127.0.0.1'||!Number.isInteger(value.port)||value.port<1||value.port>65535||!Number.isSafeInteger(value.pid)||value.pid<1||![value.generation,value.configurationHash,value.secret,value.lock?.sha256].every(hex)||!Number.isSafeInteger(value.lock?.ino)||!Number.isSafeInteger(value.lock?.dev))fail('foreground_observation_invalid');
- return value;
+ if(!value||value.schema!==1||Object.keys(value).some(k=>!['schema','host','port','pid','generation','configurationHash','secret','lock'].includes(k))||value.host!=='127.0.0.1'||!Number.isInteger(value.port)||value.port<1||value.port>65535||!Number.isSafeInteger(value.pid)||value.pid<1||![value.generation,value.configurationHash,value.secret,value.lock?.sha256].every(hex)||!value.lock||Object.keys(value.lock).some(k=>!['ino','dev','sha256'].includes(k)))fail('foreground_observation_invalid');
+ return {...value,lock:{ino:fileIdentity(value.lock.ino),dev:fileIdentity(value.lock.dev),sha256:value.lock.sha256}};
 }
 function missing(d,reason){return {schema:1,status:reason==='not_running'?'not_running':'needs_attention',observation:'cross_process',host:'not_owned',gateway:'not_owned',execConnection:'not_observed',desktopConnection:'not_observed',browserConnection:'not_observed',toolHealth:'not_verified',accountAcceptance:'NOT RUN',...(reason==='not_running'?{}:{reason})}}
 function project(value){
@@ -56,8 +65,8 @@ export async function startForegroundObservation({stateDir,configurationHash,pro
   server.on('error',()=>{});
   if(!lockMatches(stateDir,lock))fail('foreground_observation_lock_changed');
   const value={schema:1,host:'127.0.0.1',port:server.address().port,pid:process.pid,generation,configurationHash,secret,lock};
-  fd=openPrivateFile(file);const bytes=JSON.stringify(value)+'\n',stat=fs.fstatSync(fd);
-  fs.writeFileSync(fd,bytes);fs.fsyncSync(fd);ownedReceipt={bytes,ino:stat.ino,dev:stat.dev};
+  fd=openPrivateFile(file);const bytes=JSON.stringify(value)+'\n',stat=fs.fstatSync(fd,{bigint:true});
+  fs.writeFileSync(fd,bytes);fs.fsyncSync(fd);ownedReceipt={bytes,ino:stat.ino.toString(),dev:stat.dev.toString()};
   // The native Windows private-file helper already establishes SID ownership.
   if(process.platform!=='win32'){const dir=fs.openSync(stateDir,'r');try{fs.fsyncSync(dir)}finally{fs.closeSync(dir)}}
   return {generation,async close(){
