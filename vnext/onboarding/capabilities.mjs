@@ -1,4 +1,4 @@
-// Owner-local capability changes reuse the enrolled identity, never a new invitation.
+// Capability changes reuse the enrolled identity; joined Hosts use only their own credential.
 import fs from 'node:fs';
 import path from 'node:path';
 import {pathToFileURL} from 'node:url';
@@ -10,6 +10,7 @@ import {activeHostConfig} from '../host/launch.mjs';
 import {validateDeployment} from './deployment-config.mjs';
 import {assertMacPreviewContinuity,verifyMacPreviewApp} from '../host/macos-preview-trust.mjs';
 import {capabilityPayload} from '../shared/enrollment-protocol.mjs';
+import {enrollmentHttpRequest} from '../host/enroll.mjs';
 import {ownerCommand} from '../gateway/enroll-admin.mjs';
 import {readDeployment,controlDeploymentHostService} from './core.mjs';
 import {observeHostService} from './service-lifecycle.mjs';
@@ -28,10 +29,37 @@ function write(file,data){
  try{fs.renameSync(temp,file)}finally{if(fs.existsSync(temp))fs.unlinkSync(temp)}
  if(process.platform!=='win32'){const dir=fs.openSync(path.dirname(file),'r');try{fs.fsyncSync(dir)}finally{fs.closeSync(dir)}}
 }
+// The credential remains device-scoped; the generic HTTP transport calls its
+// Authorization header option adminToken, but no admin credential is read here.
+async function capabilityCommand(access,command,args=[]){
+ if(access.kind!=='self-device')return ownerCommand(access,command,args);
+ assert(['devices','capabilities'].includes(command),'invalid_self_capability_command');
+ const token=privateBytes(access.token_file).toString('utf8').trim();
+ assert(/^[A-Za-z0-9_-]{32,}$/.test(token),'invalid_host_token');
+ const body=command==='capabilities'?args[0]:undefined;
+ if(body)assert(body.device_id===access.device_id&&body.fingerprint===access.fingerprint,'capability_identity_mismatch');
+ const result=(await enrollmentHttpRequest(access,'self/'+encodeURIComponent(access.device_id)+'/capabilities',body,{adminToken:token})).body;
+ if(command==='capabilities')return result;
+ assert(result.status==='approved'&&result.device_id===access.device_id&&result.fingerprint===access.fingerprint&&typeof result.generation==='string','capability_self_reply_invalid');
+ assert(['exec','computer','browser'].every(lane=>['connected','offline','unknown'].includes(result.connections?.[lane])),'capability_self_reply_invalid');
+ return [{...result,online:Object.values(result.connections).some(v=>v!=='offline'),connections:Object.fromEntries(Object.entries(result.connections).map(([lane,value])=>[lane,value==='offline'?false:value==='connected'?true:null]))}];
+}
+function capabilityAccess(d,config,identity,host){
+ if(config.mode==='join-existing'){
+  assert(host.host_id===identity.device_id&&host.token_file===path.join(config.host.baseDir,'device/host.token'),'capability_host_token_binding_changed');
+  assert(host.gateway_ca_file===config.gateway.caFile,'capability_gateway_binding_changed');
+  if(host.gateway_ca_file)privateBytes(host.gateway_ca_file);
+  privateBytes(host.token_file);
+  return {kind:'self-device',device_id:identity.device_id,fingerprint:identity.fingerprint,gateway_url:config.gateway.url,gateway_ca_file:host.gateway_ca_file,token_file:host.token_file};
+ }
+ const owner=read(path.join(d,'gateway/owner.json'));
+ assert(owner.gateway_url===config.gateway.url&&owner.gateway_ca_file===path.join(d,'gateway/certificate.pem')&&owner.admin_token_file===path.join(d,'gateway/admin.token'),'capability_owner_binding_changed');
+ return owner;
+}
 function prepare(d,enable,trustedMacPreviewApp){
  const state=readDeployment(d),config=read(path.join(d,'deployment.json'));
  const selectedPreview=selectMacPreviewForCapabilities(config.host?.macPreviewApp,trustedMacPreviewApp);
- assert(state.mode==='create-local'&&config.mode==='create-local','local_owner_capability_change_only');
+ assert(state.mode===config.mode&&['create-local','join-existing'].includes(config.mode),'capability_mode_mismatch');
  assert(state.steps.some(s=>['host.pair','host.claim'].includes(s.id)&&s.status==='succeeded'),'paired_host_required');
  assert(!state.steps.some(s=>['running','uncertain'].includes(s.status)),'onboarding_uncertain_requires_reconciliation');
  const base=config.host.baseDir,device=path.join(base,'device'),hostFile=path.join(device,'host.json');
@@ -39,8 +67,7 @@ function prepare(d,enable,trustedMacPreviewApp){
  requirePrivateFile(path.join(device,'identity.pem'));const key=fs.readFileSync(path.join(device,'identity.pem'),'utf8');
  const pub=createPublicKey(key);assert(hash(pub.export({type:'spki',format:'der'}))===identity.fingerprint&&host.host_id===identity.device_id,'capability_identity_mismatch');
  assert(host.token_file===path.join(device,'host.token'),'capability_host_token_binding_changed');requirePrivateFile(host.token_file);
- const owner=read(path.join(d,'gateway','owner.json'));
- assert(owner.gateway_url===config.gateway.url&&owner.gateway_ca_file===path.join(d,'gateway','certificate.pem')&&owner.admin_token_file===path.join(d,'gateway','admin.token'),'capability_owner_binding_changed');
+ const owner=capabilityAccess(d,config,identity,host);
  let computer;
  if(enable){
   const publisher=path.join(base,'publisher.pem');requirePrivateFile(publisher);
@@ -63,14 +90,14 @@ function prepare(d,enable,trustedMacPreviewApp){
  return {identity,key,publicKey:pub.export({type:'spki',format:'pem'}),host,hostFile,computer,owner,serviceConfigFile:path.join(base,'service.json')};
 }
 function publicStatus(j){return {status:j.status,observation:'last_recorded',computer:j.computer??null,browser:j.browser??null,requestedComputer:j.requestedComputer,
- phase:j.phase,observedAt:j.updatedAt,...(j.transactionId?{transactionId:j.transactionId,rollbackAvailable:['complete','needs_reconciliation'].includes(j.phase)}:{}),...(j.requestedBrowser!==undefined?{requestedBrowser:j.requestedBrowser}:{}),foregroundRestartRequired:j.foregroundRestartRequired===true,nativePermissions:'not_checked',accountAcceptance:'NOT RUN',...(j.reason?{reason:j.reason}:{})}}
+ phase:j.phase,observedAt:j.updatedAt,...(j.transactionId?{transactionId:j.transactionId,rollbackAvailable:['complete','needs_reconciliation'].includes(j.phase)}:{}),...(j.requestedBrowser!==undefined?{requestedBrowser:j.requestedBrowser}:{}),...(j.reconciliation?{reconciliation:j.reconciliation}:{}),...(j.remoteOutcome?{remoteOutcome:j.remoteOutcome}:{}),foregroundRestartRequired:j.foregroundRestartRequired===true,nativePermissions:'not_checked',accountAcceptance:'NOT RUN',...(j.reason?{reason:j.reason}:{})}}
 export function readDeploymentCapabilities(d){
  requirePrivateDirectory(d);const file=path.join(d,'capabilities.json');
  if(!fs.existsSync(file))return {status:'not_changed',computer:null,browser:null};
  const journal=read(file);assert(journal.schema===1&&journal.configSha256===hash(fs.readFileSync(path.join(d,'deployment.json'))),'capability_scope_changed');
  return publicStatus(journal);
 }
-export async function changeDeploymentCapabilities(d,{authorize=false,computer,browser,browserChannel,persistLogin}={},operations={}){
+export function validateDeploymentCapabilityOptions({authorize=false,computer,browser,browserChannel,persistLogin}={}){
  if(browserChannel!==undefined||persistLogin!==undefined){
   assert(browser===true&&authorize===true,'explicit_browser_selection_authorization_required');
   assert(browserChannel===undefined||['auto','chrome','msedge'].includes(browserChannel),'invalid_browser_channel');
@@ -79,11 +106,15 @@ export async function changeDeploymentCapabilities(d,{authorize=false,computer,b
  if(browser!==undefined){
   assert(authorize===true&&typeof browser==='boolean','explicit_browser_capability_authorization_required');
   assert(computer===undefined||typeof computer==='boolean','explicit_desktop_capability_authorization_required');
-  return changeBrowserCapabilities(d,{browser,computer,browserChannel,persistLogin},operations);
- }
- assert(authorize===true&&typeof computer==='boolean','explicit_desktop_capability_authorization_required');
+ }else assert(authorize===true&&typeof computer==='boolean','explicit_desktop_capability_authorization_required');
+ return {authorize,computer,browser,browserChannel,persistLogin};
+}
+export async function changeDeploymentCapabilities(d,options={},operations={}){
+ const {computer,browser,browserChannel,persistLogin}=validateDeploymentCapabilityOptions(options);
+ if(browser!==undefined)return changeBrowserCapabilities(d,{browser,computer,browserChannel,persistLogin},operations);
  requirePrivateDirectory(d);
- const ops={prepare:(dir,enabled)=>prepare(dir,enabled,operations.trustedMacPreviewApp),owner:ownerCommand,hostStatus:observeHostService,hostControl:controlDeploymentHostService,stopOwnedForeground:stopDeploymentForeground,readForeground:readDeploymentForeground,...operations};
+ if(read(path.join(d,'deployment.json')).mode==='join-existing')return changeBrowserCapabilities(d,{computer},operations);
+ const ops={prepare:(dir,enabled)=>prepare(dir,enabled,operations.trustedMacPreviewApp),owner:capabilityCommand,hostStatus:observeHostService,hostControl:controlDeploymentHostService,stopOwnedForeground:stopDeploymentForeground,readForeground:readDeploymentForeground,...operations};
  const lock=path.join(d,'capabilities.lock');let fd;
  try{fd=openPrivateFile(lock,0o600)}catch{throw Error('capability_busy_or_interrupted_lock')}
  const file=path.join(d,'capabilities.json');let journal,scope,observed,wasRunning=false,foregroundRestartRequired=false;
@@ -189,12 +220,11 @@ function browserLocks(d,id,{recover=false}={}){
  }catch(error){for(const item of held.reverse()){fs.closeSync(item.fd);try{if(fs.readFileSync(item.file).equals(item.bytes))fs.unlinkSync(item.file)}catch{}}throw error}
 }
 function browserIdentity(d,config){
- assert(config.mode==='create-local'&&config.host&&absolute(config.host.baseDir),'local_owner_capability_change_only');
+ assert(['create-local','join-existing'].includes(config.mode)&&config.host&&absolute(config.host.baseDir),'capability_mode_mismatch');
  const base=config.host.baseDir,device=path.join(base,'device');for(const directory of [base,device,path.join(base,'install')])requirePrivateDirectory(directory);
  const identity=read(path.join(device,'identity.json')),key=privateBytes(path.join(device,'identity.pem')),pub=createPublicKey(key),hostFile=path.join(device,'host.json');
  assert(hash(pub.export({type:'spki',format:'der'}))===identity.fingerprint,'capability_identity_mismatch');
- const owner=read(path.join(d,'gateway/owner.json'));
- assert(owner.gateway_url===config.gateway.url&&owner.gateway_ca_file===path.join(d,'gateway/certificate.pem')&&owner.admin_token_file===path.join(d,'gateway/admin.token'),'capability_owner_binding_changed');
+ const owner=capabilityAccess(d,config,identity,read(hostFile));
  return {base,identity,key,publicKey:pub.export({type:'spki',format:'pem'}),owner,hostFile,serviceConfigFile:path.join(base,'service.json')};
 }
 function browserSnapshot(d,selection,ops){
@@ -212,6 +242,7 @@ function browserSnapshot(d,selection,ops){
  const publisher=path.join(scope.base,'publisher.pem'),pem=privateBytes(publisher),publicKey=createPublicKey(pem);
  assert(publicKey.asymmetricKeyType==='ed25519'&&hash(publicKey.export({type:'spki',format:'der'}))===config.host.publisherSha256,'browser_publisher_binding_changed');
  const active=activeRelease(path.join(scope.base,'install'),pem);assert(active,'signed_release_required');
+ selection={...selection,browser:selection.browser??host.browser?.enabled===true};
  const requestedComputer=selection.computer??host.computer?.enabled===true;
  let computer=host.computer;
  if(selection.computer===true&&host.computer?.enabled!==true)computer=ops.prepare(d,true).computer;
@@ -238,7 +269,7 @@ function browserSnapshot(d,selection,ops){
  for(const step of state.steps.filter(x=>x.status==='succeeded'))for(const value of Object.values(step.evidence??{})){
   if(value&&typeof value==='object'&&absolute(value.path)&&typeof value.sha256==='string')assert(hash(privateBytes(value.path))===value.sha256,'capability_completed_evidence_changed');
  }
- const preserve=[path.join(scope.base,'device/identity.json'),path.join(scope.base,'device/identity.pem'),host.token_file,publisher,path.join(scope.base,'install/active.json'),scope.serviceConfigFile,path.join(d,'gateway/certificate.pem'),path.join(d,'gateway/owner.json'),ownerFile(scope.owner)];
+ const preserve=[path.join(scope.base,'device/identity.json'),path.join(scope.base,'device/identity.pem'),host.token_file,publisher,path.join(scope.base,'install/active.json'),scope.serviceConfigFile,...(scope.owner.kind==='self-device'?[]:[path.join(d,'gateway/certificate.pem'),path.join(d,'gateway/owner.json'),ownerFile(scope.owner)])];
  for(const optional of [host.gateway_ca_file,path.join(d,'gateway/private-key.pem'),path.join(d,'gateway/model.token'),path.join(d,'onboarding-plugin.json')])if(optional&&fs.existsSync(optional))preserve.push(optional);
  const preserved=preserve.map(file=>({path:file,sha256:hash(privateBytes(file))}));
  const profileIdentity=fs.existsSync(profileRoot)?(()=>{const info=requirePrivateDirectory(profileRoot);return {dev:info.dev,ino:info.ino}})():null;
@@ -310,14 +341,14 @@ function restoreBrowserFiles(scope){unchangedBrowserScope(scope,{allowAfter:true
 async function changeBrowserCapabilities(d,selection,operations){
  assert(absolute(d),'absolute_state_directory_required');requirePrivateDirectory(d);
  const id=randomBytes(16).toString('hex'),release=browserLocks(d,id),file=path.join(d,'capabilities.json');
- const ops={prepare:(dir,enabled)=>prepare(dir,enabled,operations.trustedMacPreviewApp),owner:ownerCommand,hostStatus:observeHostService,readForeground:readDeploymentForeground,prepareBrowser:prepareSignedBrowser,...operations};
+ const ops={prepare:(dir,enabled)=>prepare(dir,enabled,operations.trustedMacPreviewApp),owner:capabilityCommand,hostStatus:observeHostService,readForeground:readDeploymentForeground,prepareBrowser:prepareSignedBrowser,...operations};
  let scope,journal,attemptedRemote=false;
  const persist=()=>{journal.updatedAt=new Date().toISOString();write(file,journal)};
  try{
   if(fs.existsSync(file)){const prior=read(file);assert(prior.configSha256===hash(privateBytes(path.join(d,'deployment.json'))),'capability_scope_changed');assert(!['running','uncertain'].includes(prior.status),'capability_uncertain_requires_reconciliation')}
-  scope=browserSnapshot(d,selection,ops);const observed=await quietBrowserScope(d,scope,ops);unchangedBrowserScope(scope);
+  scope=browserSnapshot(d,selection,ops);selection={...selection,browser:scope.requestedBrowser};const observed=await quietBrowserScope(d,scope,ops);unchangedBrowserScope(scope);
   assert(observed.capabilities.browser===(scope.host.browser?.enabled===true)&&observed.capabilities.computer===(scope.host.computer?.enabled===true),'capability_host_gateway_disagree');
-  scope.priorCapabilities={computer:observed.capabilities.computer,browser:observed.capabilities.browser};
+  scope.priorCapabilities={computer:observed.capabilities.computer,browser:observed.capabilities.browser};scope.priorGeneration=observed.generation;
   const record=saveBrowserTransaction(d,scope,id,observed);
   journal={schema:1,kind:BROWSER_CHANGE,transactionId:id,configSha256:hash(scope.files[0].before),status:'running',phase:'prepared',requestedComputer:scope.requestedComputer,requestedBrowser:selection.browser,computer:observed.capabilities.computer,browser:observed.capabilities.browser,foregroundRestartRequired:true};persist();
   if(selection.browser){journal.phase='prepare_browser';persist();journal.preparation=await ops.prepareBrowser(scope);unchangedBrowserScope(scope);}
@@ -333,8 +364,21 @@ async function changeBrowserCapabilities(d,selection,operations){
   journal.status='updated';journal.phase='complete';journal.rollbackAvailable=true;journal.previousCapabilities=record.prior;persist();return publicStatus(journal);
  }catch(error){
   if(journal&&scope){
+   if(attemptedRemote&&scope.owner.kind==='self-device'){
+    journal.remoteOutcome='unknown';
+    // Read, never replay. A matching fresh state proves current configuration,
+    // not whether the original mutation's response was delivered.
+    try{
+     const now=await quietBrowserScope(d,scope,ops);unchangedBrowserScope(scope,{allowAfter:true});
+     if(now.generation!==scope.priorGeneration&&now.capabilities.computer===scope.requestedComputer&&now.capabilities.browser===scope.requestedBrowser){
+      assert(scope.files.every(item=>hash(privateBytes(item.path))===hash(item.after)),'capability_reconciliation_local_state_mismatch');
+      journal.computer=now.capabilities.computer;journal.browser=now.capabilities.browser;
+      journal.status='updated';journal.phase='complete';journal.remoteOutcome='unknown';journal.reconciliation='current_self_state_matches_requested';persist();return publicStatus(journal);
+     }
+    }catch{}
+   }
    let restored=false;try{restoreBrowserFiles(scope);restored=true}catch{}
-   if(attemptedRemote){
+   if(attemptedRemote&&scope.owner.kind!=='self-device'){
     // A lost response is reconciled with a fresh generation before a deny.
     // This never replays the uncertain enable and never auto-restores a grant.
     try{const now=await quietBrowserScope(d,scope,ops);const denied=await signedBrowserUpdate(scope,now,{browser:false,...(scope.requestedComputer!==scope.priorCapabilities.computer?{computer:false}:{})},ops);journal.browser=denied.capabilities.browser;journal.computer=denied.capabilities.computer}catch{}
@@ -352,7 +396,7 @@ async function changeBrowserCapabilities(d,selection,operations){
 export async function rollbackDeploymentCapabilities(d,{authorize=false,transactionId}={},operations={}){
  assert(authorize===true&&/^[a-f0-9]{32}$/.test(transactionId??''),'explicit_capability_rollback_authorization_required');assert(absolute(d),'absolute_state_directory_required');requirePrivateDirectory(d);
  const file=path.join(d,'capabilities.json'),journal=read(file);assert(journal.kind===BROWSER_CHANGE&&journal.transactionId===transactionId&&journal.phase!=='rolled_back','capability_rollback_binding_changed');
- const release=browserLocks(d,transactionId,{recover:true}),ops={owner:ownerCommand,hostStatus:observeHostService,readForeground:readDeploymentForeground,...operations};
+ const release=browserLocks(d,transactionId,{recover:true}),ops={owner:capabilityCommand,hostStatus:observeHostService,readForeground:readDeploymentForeground,...operations};
  const persist=()=>{journal.updatedAt=new Date().toISOString();write(file,journal)};
  try{
   const directory=path.join(d,'capability-transactions',transactionId);requirePrivateDirectory(directory);const record=read(path.join(directory,'transaction.json'));

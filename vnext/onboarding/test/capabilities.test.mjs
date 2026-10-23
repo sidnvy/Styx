@@ -3,10 +3,14 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import os from 'node:os';
 import path from 'node:path';
-import {spawnSync} from 'node:child_process';
+import {execFileSync,spawnSync} from 'node:child_process';
 import {generateKeyPairSync,createHash,verify,constants,sign} from 'node:crypto';
 import {capabilityPayload} from '../../shared/enrollment-protocol.mjs';
 import {changeDeploymentCapabilities,readDeploymentCapabilities,rollbackDeploymentCapabilities} from '../capabilities.mjs';
+import {createStyxGateway} from '../../gateway/index.mjs';
+import {createGatewayHttp} from '../../gateway/http.mjs';
+import {EnrollmentController} from '../../gateway/enrollment.mjs';
+import {requestEnrollment,claimEnrollment} from '../../host/enroll.mjs';
 import {stageSignedRelease,activateRelease} from '../../host/installer.mjs';
 function fixture(t){
  const dir=fs.mkdtempSync(path.join(os.tmpdir(),'styx-capabilities-'));fs.chmodSync(dir,0o700);t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
@@ -71,7 +75,7 @@ test('Browser changes require explicit authorization before any transaction',asy
 const digest=bytes=>createHash('sha256').update(bytes).digest('hex');
 const writeJSON=(file,value)=>fs.writeFileSync(file,JSON.stringify(value,null,2)+'\n',{mode:0o600});
 const signedPreparation=`import fs from 'node:fs';import path from 'node:path';
-import {spawnSync} from 'node:child_process';
+import {execFileSync,spawnSync} from 'node:child_process';
 export const readManagedBrowser=()=>({status:'prepared'});
 export async function prepareManagedBrowser({profileRoot,authorize}){if(authorize!==true)throw Error('authorization_required');fs.writeFileSync(path.join(profileRoot,'fixture-receipt.json'),JSON.stringify({scope:'unit_fixture_only'}),{mode:0o600});return {status:'prepared',playwright:'signed-fixture',executablePath:'/not-an-acceptance-result'};}`;
 function browserFixture(t,{withBrowser=true,headless=true}={}){
@@ -263,4 +267,60 @@ test('installed browser selection requires explicit Browser intent and rejects u
  const f=browserFixture(t);
  for(const selection of [{authorize:true,browserChannel:'chrome'},{authorize:true,browser:false,persistLogin:true},{authorize:true,browser:true,browserChannel:'firefox'},{authorize:true,browser:true,persistLogin:'yes'}])await assert.rejects(changeDeploymentCapabilities(f.dir,selection,f.ops));
  assert.equal(f.calls.length,0);assert.equal(fs.existsSync(path.join(f.dir,'capabilities.json')),false);
+});
+
+async function joinedFixture(t){
+ const f=browserFixture(t),cert=path.join(f.root,'ca.pem'),tlsKey=path.join(f.root,'tls.pem'),admin=path.join(f.root,'admin.token');
+ fs.writeFileSync(admin,'a'.repeat(48),{mode:0o600});
+ execFileSync('openssl',['req','-x509','-newkey','rsa:2048','-nodes','-sha256','-days','1','-keyout',tlsKey,'-out',cert,'-subj','/CN=capabilities-test','-addext','subjectAltName=IP:127.0.0.1'],{stdio:'ignore'});fs.chmodSync(cert,0o600);
+ const gateway=createStyxGateway({catalog:{version:1,targets:[]}}),controller=new EnrollmentController({rootDir:path.join(f.root,'gateway-state'),adminTokenFile:admin,registry:gateway.registry,relay:gateway.relay}),hosts=[];
+ const server=await createGatewayHttp(gateway,{token:'m'.repeat(48),port:0,allowedHosts:hosts,enrollment:controller,tlsCertificateFile:cert,tlsPrivateKeyFile:tlsKey});hosts.push('127.0.0.1:'+server.address.port);t.after(()=>server.close());
+ const origin='https://127.0.0.1:'+server.address.port,device=path.join(f.base,'device');
+ for(const n of ['identity.json','identity.pem','host.token','host.json'])fs.unlinkSync(path.join(device,n));
+ const enrollment={gateway_url:origin,gateway_ca_file:cert,storage_dir:device,label:'Joined fixture',cwd:f.root,shell:'/bin/sh',exec_binary:path.join(f.base,'install/releases/browser-cap-test/bin/codex'),computer_requested:false,browser_requested:false};
+ const invitation=controller.invite({}),pending=await requestEnrollment(enrollment,invitation.invitation);
+ controller.approve({request_id:pending.request_id,fingerprint:pending.fingerprint,enable_computer:false,enable_browser:false});await claimEnrollment(enrollment);
+ f.config={...f.config,mode:'join-existing',gateway:{url:origin,caFile:cert}};writeJSON(path.join(f.dir,'deployment.json'),f.config);writeJSON(path.join(f.base,'enrollment.json'),enrollment);
+ const state=JSON.parse(fs.readFileSync(path.join(f.dir,'state.json')));state.mode='join-existing';state.configSha256=digest(fs.readFileSync(path.join(f.dir,'deployment.json')));
+ for(const step of state.steps){if(step.id==='host.pair')step.id='host.claim';for(const item of Object.values(step.evidence??{}))if(item.path)item.sha256=digest(fs.readFileSync(item.path));}
+ writeJSON(path.join(f.dir,'state.json'),state);writeJSON(path.join(f.dir,'background.json'),{schema:1,status:'not_configured',configSha256:state.configSha256,operations:[]});
+ // A joined device has no local Gateway owner credential, even in the fixture.
+ fs.rmSync(path.join(f.dir,'gateway'),{recursive:true});delete f.ops.owner;
+ const preserved=['identity.json','identity.pem','host.token'].map(n=>[path.join(device,n),fs.readFileSync(path.join(device,n))]);
+ return {...f,controller,gateway,preserved,unchanged:()=>{for(const [file,bytes]of preserved)assert.deepEqual(fs.readFileSync(file),bytes)}};
+}
+test('joined Host uses real TLS self-device capabilities without admin credentials or new pairing',async t=>{
+ const f=await joinedFixture(t),first=await changeDeploymentCapabilities(f.dir,{authorize:true,computer:true},f.ops);
+ assert.equal(first.status,'updated');assert.equal(first.computer,true);assert.equal(first.browser,false);
+ assert.equal(first.nativePermissions,'not_checked');assert.equal(first.foregroundRestartRequired,true);f.unchanged();
+ const config=JSON.parse(fs.readFileSync(path.join(f.dir,'deployment.json')));assert.equal(config.mode,'join-existing');assert.equal(config.host.computer,true);
+ const both=await changeDeploymentCapabilities(f.dir,{authorize:true,browser:true},f.ops);assert.equal(both.browser,true);assert.equal(both.computer,true);f.unchanged();
+ const back=await rollbackDeploymentCapabilities(f.dir,{authorize:true,transactionId:both.transactionId},f.ops);assert.equal(back.status,'rolled_back');assert.equal(back.computer,true);assert.equal(back.browser,false);f.unchanged();
+});
+test('joined self-device denied token and connected lane reject before configuration mutation',async t=>{
+ const f=await joinedFixture(t),before=fs.readFileSync(path.join(f.dir,'deployment.json')),token=f.preserved.at(-1)[0],original=fs.readFileSync(token);
+ fs.writeFileSync(token,'x'.repeat(48),{mode:0o600});await assert.rejects(changeDeploymentCapabilities(f.dir,{authorize:true,browser:true},f.ops),/device_unauthorized/);assert.deepEqual(fs.readFileSync(path.join(f.dir,'deployment.json')),before);fs.writeFileSync(token,original);
+ f.ops.readForeground=()=>({status:'running'});await assert.rejects(changeDeploymentCapabilities(f.dir,{authorize:true,computer:true},f.ops),/foreground_must_be_stopped/);assert.deepEqual(fs.readFileSync(path.join(f.dir,'deployment.json')),before);f.unchanged();
+});
+test('joined accepted response lost is reconciled by authenticated read, never replayed, rollback preserves identity',async t=>{
+ const f=await joinedFixture(t),original=f.controller.selfCapabilities.bind(f.controller);let posts=0;
+ f.controller.selfCapabilities=(id,auth,body)=>{const result=original(id,auth,body);if(body){posts++;throw Error('response_lost_after_commit')}return result;};
+ const result=await changeDeploymentCapabilities(f.dir,{authorize:true,browser:true},f.ops);
+ assert.equal(result.status,'updated');assert.equal(result.reconciliation,'current_self_state_matches_requested');assert.equal(result.remoteOutcome,'unknown');assert.equal(posts,1);f.unchanged();
+ f.controller.selfCapabilities=original;const back=await rollbackDeploymentCapabilities(f.dir,{authorize:true,transactionId:result.transactionId},f.ops);assert.equal(back.browser,false);f.unchanged();
+});
+test('joined lost response with unavailable reconciliation remains uncertain without compensation or replay',async t=>{
+ const f=await joinedFixture(t),original=f.controller.selfCapabilities.bind(f.controller);let posts=0,lost=false;
+ f.controller.selfCapabilities=(id,auth,body)=>{if(lost)throw Error('gateway_unavailable');const result=original(id,auth,body);if(body){posts++;lost=true;throw Error('response_lost_after_commit')}return result;};
+ await assert.rejects(changeDeploymentCapabilities(f.dir,{authorize:true,browser:true},f.ops),/enrollment_internal_error/);
+ const state=readDeploymentCapabilities(f.dir);assert.equal(state.status,'uncertain');assert.equal(posts,1);assert.equal(JSON.parse(fs.readFileSync(f.hostFile)).browser,undefined);f.unchanged();
+ f.controller.selfCapabilities=original;const back=await rollbackDeploymentCapabilities(f.dir,{authorize:true,transactionId:state.transactionId},f.ops);assert.equal(back.status,'rolled_back');assert.equal(back.browser,false);f.unchanged();
+});
+
+test('joined local preparation failure restores bytes without sending capability mutation',async t=>{
+ const f=await joinedFixture(t),files=['deployment.json','state.json'].map(n=>[path.join(f.dir,n),fs.readFileSync(path.join(f.dir,n))]);let posts=0;
+ const original=f.controller.selfCapabilities.bind(f.controller);f.controller.selfCapabilities=(id,auth,body)=>{if(body)posts++;return original(id,auth,body)};
+ f.ops.prepareBrowser=async()=>{throw Error('browser_runtime_download_failed')};
+ await assert.rejects(changeDeploymentCapabilities(f.dir,{authorize:true,browser:true},f.ops),/browser_runtime_download_failed/);
+ assert.equal(readDeploymentCapabilities(f.dir).status,'rolled_back');assert.equal(posts,0);for(const [file,bytes]of files)assert.deepEqual(fs.readFileSync(file),bytes);f.unchanged();
 });
