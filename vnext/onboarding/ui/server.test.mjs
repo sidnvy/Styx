@@ -530,3 +530,18 @@ test('Host payload API uses bundled candidate and a one-shot reviewed plan; it c
   assert.notEqual((await f.post('/api/host-payload/apply',{authorize:true})).status,200);assert.equal(applied,1);
  }finally{await f.cleanup()}
 });
+
+test('failed join recovery requires fresh inspected acceptance, consumes it once, and never creates or advances',async()=>{
+ const origin='https://replacement.invalid',expiresAt=Date.now()+60000;let recovered=0;
+ const pairingLinks={inspectPairingLink(){return{origin,expiresAt,requiresCertificateApproval:false}},acceptPairingLink(_link,{stateDir}){fs.mkdirSync(stateDir,{mode:0o700});fs.writeFileSync(path.join(stateDir,'pairing.json'),JSON.stringify({schema:1,gatewayOrigin:origin,expiresAt}),{mode:0o600});return{status:'pairing_material_saved',origin,expiresAt}}};
+ const f=await fixture({pairingLinks,core:{recoverDeploymentJoin(_d,o){assert.equal(o.authorize,true);assert.equal(JSON.parse(fs.readFileSync(o.pairingFile)).gatewayOrigin,origin);recovered++;return{status:'recovered',transactionId:'a'.repeat(32),previousRequestOutcome:'unknown',nextStep:'host.request'}},readDeploymentJoinRecovery(){return{canRecover:true,previousRequestOutcome:'unknown'}}}});
+ try{
+  assert.equal(f.session.joinRecoverySupported,true);
+  assert.equal((await f.post('/api/join/recover',{authorize:true,joinLinkId:'stale'})).status,409);
+  const inspected=await(await f.post('/api/pairing-link/inspect',{link:'fixture-private-link'})).json();
+  const accepted=await(await f.post('/api/pairing-link/accept',{inspectionId:inspected.inspectionId,approvedGatewayOrigin:origin})).json();
+  const response=await f.post('/api/join/recover',{authorize:true,joinLinkId:accepted.joinLinkId});assert.equal(response.status,200);assert.equal((await response.json()).recovery.status,'recovered');assert.equal(recovered,1);assert.equal(f.calls,0);
+  assert.equal((await f.post('/api/join/recover',{authorize:true,joinLinkId:accepted.joinLinkId})).status,409);assert.equal(recovered,1);
+  assert.equal((await(await f.get('/api/join/recovery')).json()).recovery.canRecover,true);
+ }finally{await f.cleanup()}
+});
