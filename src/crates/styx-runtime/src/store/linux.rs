@@ -103,6 +103,28 @@ impl Root {
             identity,
         })
     }
+    /// Store-internal mutation port. No descriptor or path is exposed through
+    /// the public store API; configuration and execution ownership stay distinct.
+    pub(super) fn with_configuration_writer_directory<T>(
+        &self,
+        guard: &ConfigurationWriterGuard,
+        operation: impl FnOnce(&File) -> Result<T>,
+    ) -> Result<T> {
+        if guard.identity().resource != LockResource::ConfigurationWriter
+            || guard.identity().root != self.identity()
+            || guard.identity().process != ProcessIdentity::current()?
+        {
+            return Err(StoreError::Changed);
+        }
+        self.validate_root()?;
+        guard.validate()?;
+        let result = operation(&self.directory);
+        // Validate even after an operation returned an error. A replaced root or
+        // ownership resource cannot become a successful persistence receipt.
+        self.validate_root()?;
+        guard.validate()?;
+        result
+    }
     pub(super) fn identity(&self) -> RootIdentity {
         self.identity.clone()
     }

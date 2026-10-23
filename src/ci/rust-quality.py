@@ -20,6 +20,9 @@ from datetime import datetime, timezone
 
 ROOT = Path(__file__).resolve().parents[2]
 POLICY = Path(__file__).with_name("rust-dependency-policy.json")
+ENROLLMENT_RECOVERY_TEST = "enrollment::recovery::tests::linux::actual_core_journal_recovery_safety_scenario"
+ENROLLMENT_CLOCK_TEST = "store::enrollment::clock::tests::durable_floor_atomic_updates_reopen_and_shared_budget_refuse_unsafe_state"
+ENROLLMENT_STORE_TEST = "store::enrollment::tests::linux::immutable_material_commit_chain_and_process_crash_recovery"
 CRYPTO_TEST = "crypto::tests::legacy_node22_bidirectional_crypto_batch"
 CODEX_TESTS = [
     ("real-codex", "providers::codex::tests::real_codex_native_stdio_complete_scenario_batch"),
@@ -238,6 +241,26 @@ def execute(args):
                 extra_env={"STYX_TEST_HTTP_ROOT": str(http_root)})
             gate.semantic(http, [] if "1 passed; 0 failed" in gate.read(name) else ["exact_official_http_case_not_executed"])
             receipt["official_http_sdk"]["checks"][name] = http["status"]
+        receipt["enrollment_store"] = "NOT_RUN_explicit_linux_gnu_slice_not_requested"
+        if args.enrollment_store:
+            owned_root = evidence / "owned-enrollment-store"
+            owned_root.mkdir(mode=0o700)
+            check = gate.run("enrollment-store", ["cargo", "test", "-p", "styx-runtime", "--locked", "--offline", ENROLLMENT_STORE_TEST, "--", "--ignored", "--exact", "--nocapture"], timeout=120,
+                extra_env={"STYX_TEST_ENROLLMENT_ROOT": str(owned_root)})
+            gate.semantic(check, [] if "1 passed; 0 failed" in gate.read("enrollment-store") else ["exact_linux_gnu_enrollment_store_case_not_executed"])
+            receipt["enrollment_store"] = check["status"]
+            clock_root = evidence / "owned-enrollment-clock"
+            clock_root.mkdir(mode=0o700)
+            clock_check = gate.run("enrollment-clock", ["cargo", "test", "-p", "styx-runtime", "--locked", "--offline", ENROLLMENT_CLOCK_TEST, "--", "--ignored", "--exact", "--nocapture"], timeout=120,
+                extra_env={"STYX_TEST_ENROLLMENT_CLOCK_ROOT": str(clock_root)})
+            gate.semantic(clock_check, [] if "1 passed; 0 failed" in gate.read("enrollment-clock") else ["exact_linux_gnu_enrollment_clock_case_not_executed"])
+            receipt["enrollment_clock"] = clock_check["status"]
+            recovery_root = evidence / "owned-enrollment-recovery"
+            recovery_root.mkdir(mode=0o700)
+            recovery_check = gate.run("enrollment-recovery", ["cargo", "test", "-p", "styx-runtime", "--locked", "--offline", ENROLLMENT_RECOVERY_TEST, "--", "--ignored", "--exact", "--nocapture"], timeout=120,
+                extra_env={"STYX_TEST_ENROLLMENT_RECOVERY_ROOT": str(recovery_root)})
+            gate.semantic(recovery_check, [] if "1 passed; 0 failed" in gate.read("enrollment-recovery") else ["exact_linux_gnu_enrollment_recovery_case_not_executed"])
+            receipt["enrollment_recovery"] = recovery_check["status"]
         receipt["legacy_node22_interop"] = "NOT_RUN_explicit_node22_not_supplied"
         if args.node22:
             node = Path(args.node22)
@@ -319,6 +342,8 @@ def execute(args):
                 receipt["tls_stability"] = "FAIL"
         required = {"git-head", "git-status", "git-head-end", "git-status-end", "rustc-version", "cargo-version", "dependency-metadata", "format", "clippy", "workspace-tests", "ignored-inventory", "official-http-sdk", "python-oracles", "cli-build", "cli-help", "cli-version", "cli-build-info", "cli-unimplemented-reject"}
         required |= {name for name, _ in HTTP_TESTS}
+        if args.enrollment_store:
+            required |= {"enrollment-store", "enrollment-clock", "enrollment-recovery"}
         if args.node22:
             required |= {"node22-version", "node22-crypto"}
         if args.codex_bin:
@@ -339,6 +364,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--evidence", required=True, help="fresh absolute external evidence directory")
     parser.add_argument("--target-dir", help="absolute external Cargo build cache; reused only by explicit choice")
+    parser.add_argument("--enrollment-store", action="store_true", help="run the Linux GNU owned private-file/process-crash journal slice")
     parser.add_argument("--node22", help="absolute explicit Node22 executable for real legacy crypto interop")
     parser.add_argument("--tls-fixtures", help="explicit external test-only PKI directory; never product identity material")
     parser.add_argument("--codex-bin", help="explicit native Codex binary for the Linux owned-executor slice; not platform release acceptance")

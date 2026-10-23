@@ -6,6 +6,8 @@
 //! are implemented in this slice; other platforms explicitly return Unsupported.
 //! Secrets are not included in Debug output or preservation manifests.
 
+pub mod enrollment;
+
 use serde::{
     Serialize,
     de::{self, IgnoredAny, MapAccess, Visitor},

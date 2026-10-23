@@ -160,6 +160,25 @@
       "kind": "owned_loopback_sdk_fixture",
       "input": "fresh external STYX_TEST_HTTP_ROOT allocated by gate",
       "required_for": "actual slowPOST pressure, bodyless GET/DELETE separate admissions, two control permits and exact quota return; no native/account claim"
+    },
+    "store::enrollment::tests::linux::journal_crash_child": {
+      "kind": "owned_subprocess_helper",
+      "parent": "store::enrollment::tests::linux::immutable_material_commit_chain_and_process_crash_recovery"
+    },
+    "store::enrollment::tests::linux::immutable_material_commit_chain_and_process_crash_recovery": {
+      "kind": "owned_private_filesystem_crash_fixture",
+      "input": "fresh external STYX_TEST_ENROLLMENT_ROOT allocated by gate --enrollment-store",
+      "required_for": "Linux GNU immutable journal/material/commit/crash slice; synthetic credentials, not enrollment or platform acceptance"
+    },
+    "store::enrollment::clock::tests::durable_floor_atomic_updates_reopen_and_shared_budget_refuse_unsafe_state": {
+      "kind": "owned_private_filesystem_fixture",
+      "input": "fresh external STYX_TEST_ENROLLMENT_CLOCK_ROOT allocated by gate --enrollment-store",
+      "required_for": "Linux GNU literal floor/atomic replacement/reopen/rollback/budget slice; not powerloss or clock-crash acceptance"
+    },
+    "enrollment::recovery::tests::linux::actual_core_journal_recovery_safety_scenario": {
+      "kind": "owned_private_core_journal_fixture",
+      "input": "fresh external STYX_TEST_ENROLLMENT_RECOVERY_ROOT allocated by gate --enrollment-store",
+      "required_for": "Linux GNU actual protected journal + Core closed bootstrap/recovery; not signed crypto/TLS/native enrollment acceptance"
     }
   },
   "change_policy": "dependency or ignored-test additions require explicit policy review; preserve mature Cargo tooling rather than replacing its resolver/compiler/lints"

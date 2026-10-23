@@ -63,6 +63,8 @@ identity!(SessionId, 256, ":._-");
 identity!(SessionGeneration, 128, "._-");
 identity!(AgentInstanceId, 128, "._-");
 identity!(ObservationId, 128, "._-");
+identity!(PairingIngressGeneration, 128, "._-");
+identity!(PairingWindowId, 128, "._-");
 identity!(RequestId, 128, "._-");
 identity!(TransactionId, 128, "._-");
 identity!(ReleaseId, 128, "._-");
