@@ -1,3 +1,4 @@
+import {assertDeploymentRuntimeReady} from './runtime-guard.mjs';
 import {createHostWorkAdmission} from '../shared/work-admission.mjs';
 import {deploymentConnectionHash} from '../shared/deployment-scope.mjs';
 // Process-owned foreground lifecycle. No wrapper, service installation,
@@ -76,6 +77,7 @@ function scope(d,state,config){
 
 export async function startDeploymentForeground(d,options={},operations={}){
  absolute(d);if(!options||Object.keys(options).some(k=>k!=='authorize')||options.authorize!==true)fail('explicit_foreground_authorization_required');
+ await assertDeploymentRuntimeReady(d,{action:'foreground',stepId:'host.service.start'});
  if(starting.has(d))return starting.get(d).promise;
  if(owners.has(d)){const entry=owners.get(d),observed=readDeploymentForeground(d);if(observed.status==='needs_attention')fail('foreground_scope_changed');if(entry.desktopConnection==='session_unavailable_or_unobserved')await entry.resumeComputer?.();return projection(entry)}
  const abort=new AbortController(),task=start(d,operations,abort);starting.set(d,{promise:task,abort});try{return await task}finally{starting.delete(d)}

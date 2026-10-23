@@ -1,3 +1,4 @@
+import {assertDeploymentRuntimeReady} from './runtime-guard.mjs';
 // Fixed owner-local handoff from setup's foreground Gateway to user services.
 // The journal records intent before every mutation; interrupted work never replays.
 import fs from 'node:fs';
@@ -73,6 +74,7 @@ export async function enableDeploymentBackground(d,{authorize=false}={},operatio
   if(journal.operations.some(x=>['running','uncertain'].includes(x.status)))fail('background_uncertain_requires_reconciliation');
   const state=ops.read(d);
   const hasHost=state.roles?.host!=='disabled';
+  if(hasHost)await assertDeploymentRuntimeReady(d,{action:'background',stepId:'host.service.start'});
   if(hasHost&&state.steps.find(x=>x.id==='host.doctor')?.status!=='succeeded')fail('successful_host_doctor_required');
   if(state.steps.some(x=>['uncertain','running'].includes(x.status)))fail('onboarding_uncertain_requires_reconciliation');
   journal.status='configuring';delete journal.reason;

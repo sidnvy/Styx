@@ -1,3 +1,4 @@
+import {assertDeploymentRuntimeReady} from './runtime-guard.mjs';
 import {assertJoinRecoverySettled} from './join-recovery.mjs';
 import {assertHostPayloadMigrationSettled} from './host-payload-start-guard.mjs';
 import {assertGatewayRuntimeStartAllowed} from './gateway-runtime-start-guard.mjs';
@@ -139,6 +140,7 @@ export async function controlDeploymentHostService(d,{action,authorize=false}={}
   const {config,state}=load(d);if(!config.host)fail('local_host_not_configured');verifyEvidence(state,{role:'host'});
   if(['install','start'].includes(action)&&state.steps.find(s=>s.id==='host.doctor')?.status!=='succeeded')fail('successful_host_doctor_required');
   guardServiceMutation(state,action);
+  if(['install','start'].includes(action))await assertDeploymentRuntimeReady(d,{action:'host-service',stepId:'host.service.'+action});
   const authorization=serviceScope(config,action),entry={action,status:'running',at:new Date().toISOString()};
   state.maintenance=[...(state.maintenance??[]).slice(-49),entry];write(filename(d,'state.json'),state);
   let result;try{const {hostServiceAction}=await import('./service-lifecycle.mjs');result=await hostServiceAction({action,role:'host',serviceConfigFile:authorization.serviceConfigFile,authorization});}
@@ -352,6 +354,7 @@ export async function advanceDeployment(d,{authorize=[],ownerApproval}={}){
    if(!authorize.includes(step.id))break;
    if(['running','uncertain'].includes(step.status))fail('uncertain_step_requires_manual_reconciliation');
    if(step.id.startsWith('host.service.'))guardServiceMutation(state,step.id.slice('host.service.'.length));
+   if(['host.doctor','host.service.install','host.service.start'].includes(step.id))await assertDeploymentRuntimeReady(d,{action:'advance',stepId:step.id});
    step.status='running';delete step.error;write(filename(d,'state.json'),state);
    try{
     step.updatedAt=new Date().toISOString();
