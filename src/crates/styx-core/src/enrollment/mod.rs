@@ -161,6 +161,19 @@ pub struct ConnectionLease {
     generation: ConnectionGeneration,
     capability_generation: String,
 }
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ConfirmationTarget {
+    pub device: DeviceId,
+    pub credential: CredentialRef,
+    pub already_confirmed: bool,
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionObservation {
+    Connected,
+    Offline,
+    Unknown,
+}
+
 #[derive(Debug, PartialEq, Eq)]
 pub enum ClaimView {
     Pending,
@@ -796,6 +809,90 @@ impl EnrollmentLedger {
             }
             _ => Err(EnrollmentError::Expired),
         }
+    }
+    /// Claim authentication for confirmation also works after a lost successful
+    /// confirmation response; it does not re-expose a removed sealed credential.
+    pub fn confirmation_target(
+        &self,
+        proof: &VerifiedClaim,
+        now: u64,
+    ) -> Result<ConfirmationTarget> {
+        let p = self.verified_claim(proof, now)?;
+        let PendingStatus::Approved {
+            credential,
+            claim_expires,
+            claimed,
+            ..
+        } = &p.status
+        else {
+            return Err(EnrollmentError::Proof);
+        };
+        if *claim_expires <= now {
+            return Err(EnrollmentError::Expired);
+        }
+        let d = self
+            .devices
+            .get(&p.facts.device)
+            .filter(|d| !d.revoked && d.credential == *credential)
+            .ok_or(EnrollmentError::Proof)?;
+        Ok(ConfirmationTarget {
+            device: d.id.clone(),
+            credential: credential.clone(),
+            already_confirmed: *claimed,
+        })
+    }
+    pub fn pending_for_admin(
+        &self,
+        admin: &EnrollmentAdminAuthority,
+        now: u64,
+    ) -> Result<Vec<Pending>> {
+        self.available()?;
+        self.brand(&admin.brand)?;
+        self.observe_time(now)?;
+        Ok(self
+            .pending
+            .values()
+            .filter(|p| p.status == PendingStatus::Pending && p.expires > now)
+            .cloned()
+            .collect())
+    }
+    pub fn devices_for_admin(&self, admin: &EnrollmentAdminAuthority) -> Result<Vec<Device>> {
+        self.available()?;
+        self.brand(&admin.brand)?;
+        Ok(self.devices.values().cloned().collect())
+    }
+    /// Full bounded private boot inventory, never an ordinary MCP/admin DTO.
+    pub fn recovery_pending(&self, control: &EnrollmentControl) -> Result<Vec<Pending>> {
+        self.brand(&control.brand)?;
+        Ok(self.pending.values().cloned().collect())
+    }
+    /// Protected-reader lookup only. Possession of this DTO is not device auth;
+    /// runtime must verify the actual bearer before calling attest_device.
+    pub fn authentication_target(
+        &self,
+        control: &EnrollmentControl,
+        id: &DeviceId,
+    ) -> Result<Device> {
+        self.available()?;
+        self.brand(&control.brand)?;
+        self.devices
+            .get(id)
+            .filter(|d| !d.revoked)
+            .cloned()
+            .ok_or(EnrollmentError::Proof)
+    }
+    pub fn connection_observations(
+        &self,
+        proof: &DeviceSelfProof,
+    ) -> Result<[ConnectionObservation; 3]> {
+        let d = self.device_proof(proof)?;
+        Ok([Lane::Exec, Lane::Computer, Lane::Browser].map(|lane| {
+            match self.lanes.get(&(d.id.clone(), lane)) {
+                Some(LaneState::Connected(_)) => ConnectionObservation::Connected,
+                Some(LaneState::Offline) => ConnectionObservation::Offline,
+                _ => ConnectionObservation::Unknown,
+            }
+        }))
     }
     pub fn confirm(&mut self, proof: VerifiedConfirmation, now: u64) -> Result<PendingIntent> {
         self.ready(now)?;

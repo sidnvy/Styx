@@ -17,3 +17,6 @@
 本地一手证据：44cf147源码；`src/docs/architecture-boundaries.md`；工作区`outputs/architecture-review-20261024`的四个模拟probe/57项受影响Exec通过/完整quality收据；`outputs/release-convergence-20261024`的旧候选build/sign/install状态。旧测试通过不代表Rust已有实现。
 
 实施选型补充（2026-10-24）：[encoding_rs Decoder 0.8.35](https://docs.rs/encoding_rs/0.8.35/encoding_rs/struct.Decoder.html)用于增量文本解码；[tokio-util LinesCodec](https://docs.rs/tokio-util/0.7.20/tokio_util/codec/struct.LinesCodec.html)采用显式长度上限。Linux标准File::try_lock实际调用和nix/getrandom安全接口按本机1.94.1与固定crate源码核实；不把Linux行为推断成macOS/Windows已测试。
+
+
+Enrollment profile validation uses pinned `regex = 1.12.4` for the existing Unicode Letter/Number label and cross-platform path/shell patterns, rather than a hand-maintained Unicode classifier. One OnceLock compiles constant bounded patterns; request values are never patterns. See [upstream Unicode conformance](https://github.com/rust-lang/regex/blob/master/UNICODE.md) and [pinned crate documentation](https://docs.rs/regex/1.12.4/regex/). Cargo.lock pins the added transitive closure; this is not a claim that the newest release was required or that regex validates OS authorization.

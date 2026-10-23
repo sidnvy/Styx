@@ -792,3 +792,7 @@ mod tests;
 
 #[path = "enrollment/clock.rs"]
 mod clock;
+
+#[path = "enrollment/owned.rs"]
+mod owned;
+pub use owned::OwnedEnrollmentJournal;

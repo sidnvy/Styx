@@ -1,7 +1,10 @@
 //! Protected enrollment bootstrap. This is not a network listener or an
 //! administrator factory. Recovery of file/Core facts does not prove profile
 //! crypto semantics, original transport quiescence or OS/native readiness.
+pub mod http;
+mod profile;
 mod recovery;
+pub mod service;
 
 use crate::store::{
     ConfigurationWriterGuard, PrivateRoot,

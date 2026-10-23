@@ -20,6 +20,10 @@ from datetime import datetime, timezone
 
 ROOT = Path(__file__).resolve().parents[2]
 POLICY = Path(__file__).with_name("rust-dependency-policy.json")
+ENROLLMENT_OWNED_TEST = "store::enrollment::owned::tests::owned_journal_thread_move_keeps_writer_and_initial_namespace_identity"
+ENROLLMENT_PROFILE_TEST = "enrollment::profile::tests::actual_node22_profile_join_and_capability_proofs"
+ENROLLMENT_SERVICE_TEST = "enrollment::service::tests::actual_strict_tls_enrollment_service_full_journey"
+ENROLLMENT_CONTROLLER_TEST = "enrollment::service::controller_tests::expired_pending_collection_and_observed_store_failure_sticky_fence"
 ENROLLMENT_RECOVERY_TEST = "enrollment::recovery::tests::linux::actual_core_journal_recovery_safety_scenario"
 ENROLLMENT_CLOCK_TEST = "store::enrollment::clock::tests::durable_floor_atomic_updates_reopen_and_shared_budget_refuse_unsafe_state"
 ENROLLMENT_STORE_TEST = "store::enrollment::tests::linux::immutable_material_commit_chain_and_process_crash_recovery"
@@ -266,6 +270,12 @@ def execute(args):
                 extra_env={"STYX_TEST_ENROLLMENT_RECOVERY_ROOT": str(recovery_root)})
             gate.semantic(recovery_check, [] if "1 passed; 0 failed" in gate.read("enrollment-recovery") else ["exact_linux_gnu_enrollment_recovery_case_not_executed"])
             receipt["enrollment_recovery"] = recovery_check["status"]
+            owned_owner = evidence / "owned-enrollment-owner"
+            owned_owner.mkdir(mode=0o700)
+            owned_check = gate.run("enrollment-owned", ["cargo", "test", "-p", "styx-runtime", "--locked", "--offline", ENROLLMENT_OWNED_TEST, "--", "--ignored", "--exact", "--nocapture"], timeout=120,
+                extra_env={"STYX_TEST_ENROLLMENT_OWNED_ROOT": str(owned_owner)})
+            gate.semantic(owned_check, [] if "1 passed; 0 failed" in gate.read("enrollment-owned") else ["exact_enrollment_owned_case_not_executed"])
+            receipt["enrollment_owned"] = owned_check["status"]
         receipt["legacy_node22_interop"] = "NOT_RUN_explicit_node22_not_supplied"
         if args.node22:
             node = Path(args.node22)
@@ -278,6 +288,26 @@ def execute(args):
                 crypto = gate.run("node22-crypto", ["cargo", "test", "-p", "styx-runtime", "--locked", "--offline", CRYPTO_TEST, "--", "--ignored", "--exact"], extra_env={"STYX_TEST_NODE22": str(node)})
                 gate.semantic(crypto, [] if "1 passed; 0 failed" in gate.read("node22-crypto") else ["exact_crypto_case_not_executed"])
                 receipt["legacy_node22_interop"] = crypto["status"]
+        receipt["signed_enrollment_service"] = "NOT_RUN_explicit_complete_inputs_not_requested"
+        if args.enrollment_service:
+            if not args.enrollment_store or not args.node22 or not args.tls_fixtures or receipt.get("legacy_node22_interop") != "PASS":
+                raise ValueError("enrollment_service_requires_store_node22_tls_inputs_and_valid_node22")
+            receipt["tls_fixture_inputs"] = tls_inputs(args.tls_fixtures)
+            receipt["tls_fixture_root"] = args.tls_fixtures
+            receipt["signed_enrollment_service"] = {}
+            for name, test_case, variable in (
+                ("enrollment-profile", ENROLLMENT_PROFILE_TEST, None),
+                ("enrollment-controller", ENROLLMENT_CONTROLLER_TEST, "STYX_TEST_ENROLLMENT_CONTROLLER_ROOT"),
+                ("enrollment-service", ENROLLMENT_SERVICE_TEST, "STYX_TEST_ENROLLMENT_SERVICE_ROOT"),
+            ):
+                env = {"STYX_TEST_NODE22": str(Path(args.node22)), "STYX_TEST_TLS_FIXTURES": args.tls_fixtures}
+                if variable:
+                    owned = evidence / ("owned-" + name)
+                    owned.mkdir(mode=0o700)
+                    env[variable] = str(owned)
+                check = gate.run(name, ["cargo", "test", "-p", "styx-runtime", "--locked", "--offline", test_case, "--", "--ignored", "--exact", "--nocapture"], timeout=180, extra_env=env)
+                gate.semantic(check, [] if "1 passed; 0 failed" in gate.read(name) else ["exact_signed_enrollment_case_not_executed"])
+                receipt["signed_enrollment_service"][name] = check["status"]
         receipt["tls_transport_interop"] = "NOT_RUN_explicit_test_pki_not_supplied"
         if args.tls_fixtures:
             receipt["tls_fixture_inputs"] = tls_inputs(args.tls_fixtures)
@@ -348,7 +378,9 @@ def execute(args):
         required = {"git-head", "git-status", "git-head-end", "git-status-end", "rustc-version", "cargo-version", "dependency-metadata", "format", "clippy", "workspace-tests", "ignored-inventory", "official-http-sdk", "python-oracles", "cli-build", "cli-help", "cli-version", "cli-build-info", "cli-unimplemented-reject"}
         required |= {name for name, _ in HTTP_TESTS}
         if args.enrollment_store:
-            required |= {"enrollment-store", "enrollment-clock", "enrollment-recovery"}
+            required |= {"enrollment-store", "enrollment-clock", "enrollment-recovery", "enrollment-owned"}
+        if args.enrollment_service:
+            required |= {"enrollment-profile", "enrollment-controller", "enrollment-service"}
         if args.node22:
             required |= {"node22-version", "node22-crypto"}
         if args.codex_bin:
@@ -369,6 +401,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--evidence", required=True, help="fresh absolute external evidence directory")
     parser.add_argument("--target-dir", help="absolute external Cargo build cache; reused only by explicit choice")
+    parser.add_argument("--enrollment-service", action="store_true", help="run actual signed enrollment TLS service; requires --enrollment-store, --node22 and --tls-fixtures")
     parser.add_argument("--enrollment-store", action="store_true", help="run the Linux GNU owned private-file/process-crash journal slice")
     parser.add_argument("--node22", help="absolute explicit Node22 executable for real legacy crypto interop")
     parser.add_argument("--tls-fixtures", help="explicit external test-only PKI directory; never product identity material")

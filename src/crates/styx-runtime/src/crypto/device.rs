@@ -131,6 +131,11 @@ impl DevicePublicKey {
             .verify(payload.0, signature)
             .map_err(|_| CryptoError::InvalidProof)
     }
+    /// RSA modulus ciphertext width, not proof that a stored ciphertext decrypts
+    /// to a particular credential. Initial wrapping remains a separate fact.
+    pub fn credential_ciphertext_size(&self) -> usize {
+        self.encryptor.ciphertext_size()
+    }
     pub fn wrap_credential(&self, plaintext: &[u8]) -> Result<Vec<u8>, CryptoError> {
         let mut ciphertext = vec![0; self.encryptor.ciphertext_size()];
         let length = self

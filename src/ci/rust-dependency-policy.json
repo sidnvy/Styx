@@ -57,7 +57,8 @@
         "hyper",
         "hyper-util",
         "tower",
-        "reqwest"
+        "reqwest",
+        "regex"
       ]
     },
     "styx": {
@@ -179,6 +180,26 @@
       "kind": "owned_private_core_journal_fixture",
       "input": "fresh external STYX_TEST_ENROLLMENT_RECOVERY_ROOT allocated by gate --enrollment-store",
       "required_for": "Linux GNU actual protected journal + Core closed bootstrap/recovery; not signed crypto/TLS/native enrollment acceptance"
+    },
+    "store::enrollment::owned::tests::owned_journal_thread_move_keeps_writer_and_initial_namespace_identity": {
+      "kind": "owned_private_filesystem_fixture",
+      "input": "fresh STYX_TEST_ENROLLMENT_OWNED_ROOT",
+      "required_for": "static owner move, writer exclusion, namespace pin failure; Linux GNU development only"
+    },
+    "enrollment::profile::tests::actual_node22_profile_join_and_capability_proofs": {
+      "kind": "explicit_external_runtime",
+      "input": "fixed STYX_TEST_NODE22",
+      "required_for": "independent actual Node PSS join/CAS profiles; no native identity migration claim"
+    },
+    "enrollment::service::tests::actual_strict_tls_enrollment_service_full_journey": {
+      "kind": "owned_tls_crypto_journal_fixture",
+      "input": "fresh STYX_TEST_ENROLLMENT_SERVICE_ROOT + explicit TLS fixtures and Node22",
+      "required_for": "actual TLS HTTP Core journal crypto enrollment/self/restart; Core lease test is NOT Host WSS or real Exec"
+    },
+    "enrollment::service::controller_tests::expired_pending_collection_and_observed_store_failure_sticky_fence": {
+      "kind": "owned_private_core_journal_fixture",
+      "input": "fresh STYX_TEST_ENROLLMENT_CONTROLLER_ROOT + fixed Node22",
+      "required_for": "durable expired pending collection and sticky observed material failure; trusted historical fixtures, not TLS pairing acceptance"
     }
   },
   "change_policy": "dependency or ignored-test additions require explicit policy review; preserve mature Cargo tooling rather than replacing its resolver/compiler/lints"
