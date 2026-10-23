@@ -76,6 +76,14 @@ import SwiftUI
             try require(model.runtimeKey.isEmpty)
         }
         try require(secure is NSSecureTextField)
+        guard let fileMenu = menu.items.compactMap(\.submenu).first(where: { $0.items.contains(where: { $0.action == #selector(NSWindow.performClose(_:)) }) }),
+              let close = fileMenu.items.first(where: { $0.action == #selector(NSWindow.performClose(_:)) }),
+              let closeEvent = NSEvent.keyEvent(with: .keyDown, location: .zero, modifierFlags: .command, timestamp: 0, windowNumber: window.windowNumber, context: nil, characters: "w", charactersIgnoringModifiers: "w", isARepeat: false, keyCode: 13) else { throw ProductCoreError.invalidResponse }
+        try require(close.target == nil && close.keyEquivalent == "w" && close.keyEquivalentModifierMask == .command)
+        fileMenu.autoenablesItems = true
+        try require(window.isVisible && menu.performKeyEquivalent(with: closeEvent))
+        try require(!window.isVisible && app.isRunning)
+        print("PASS: Command-W closes the key window through AppKit while the application keeps running.")
         print("PASS: hosted Tunnel and secure Runtime Key fields accept private-pasteboard input; Command-V routes through the standard edit menu. General clipboard, credentials, permissions and network untouched.")
     }
     let runState = ProductEditTestState()

@@ -428,6 +428,10 @@ final class SetupWindowController: NSWindowController, WKNavigationDelegate, WKU
     #endif
     appMenu.addItem(NSMenuItem.separator())
     appMenu.addItem(withTitle: text("退出 Styx", "Quit Styx"), action: #selector(StyxDelegate.quit), keyEquivalent: "q").target = actionTarget
+    let fileItem = NSMenuItem(title: text("文件", "File"), action: nil, keyEquivalent: ""); main.addItem(fileItem)
+    let fileMenu = NSMenu(title: text("文件", "File")); fileItem.submenu = fileMenu
+    // AppKit routes Close to the key window; closing a window does not quit Styx.
+    fileMenu.addItem(withTitle: text("关闭窗口", "Close Window"), action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
     let editItem = NSMenuItem(title: text("编辑", "Edit"), action: nil, keyEquivalent: ""); main.addItem(editItem)
     let edit = NSMenu(title: text("编辑", "Edit")); editItem.submenu = edit
     edit.addItem(withTitle: text("撤销", "Undo"), action: Selector(("undo:")), keyEquivalent: "z")
