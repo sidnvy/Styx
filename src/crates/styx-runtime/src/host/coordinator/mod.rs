@@ -1,7 +1,9 @@
 //! Host-owned start/read/targeted-action composition.
 //! No network DTO can construct control authority. Physical retention is Core-
 //! attested; legacy raw-wire mode remains outside this composition.
+mod legacy;
 mod owner_cleanup;
+pub(crate) use legacy::{LegacyActionSubmission, LegacyStartSubmission};
 mod retention;
 pub use owner_cleanup::{OwnerCleanupFacts, OwnerCleanupHandle, OwnerCleanupTicket};
 pub use retention::{RetentionBlock, RetentionCollection};

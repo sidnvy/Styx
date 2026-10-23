@@ -72,6 +72,17 @@ impl OwnedExecHost {
         trusted_facts: AdmissionFacts,
         max_jobs: usize,
     ) -> Result<Self, BootstrapError> {
+        Self::reserve(generation, trusted_facts, max_jobs)?
+            .spawn(executor)
+            .await
+    }
+    /// Reserve all partitions before connecting. A strict TLS/WSS rejection can
+    /// therefore occur before spawning native code, without a second byte budget.
+    pub fn reserve(
+        generation: HostGeneration,
+        trusted_facts: AdmissionFacts,
+        max_jobs: usize,
+    ) -> Result<ExecHostReservation, BootstrapError> {
         // Refuse invalid composition before spawning native code or transferring
         // adapter ownership to a constructor that could reject it.
         if max_jobs == 0
@@ -81,21 +92,11 @@ impl OwnedExecHost {
         {
             return Err(BootstrapError::InvalidConfiguration);
         }
-        let partitions = Partitions::reserve()?;
-        let adapter =
-            CodexStdio::spawn_owned_with_reserved_budget(executor, partitions.rpc).await?;
-        let (coordinator, authority) = HostCoordinator::new_owned(
-            adapter,
-            OperationLedger::new(generation),
+        Ok(ExecHostReservation {
+            partitions: Partitions::reserve()?,
+            generation,
             trusted_facts,
             max_jobs,
-        )?;
-        Ok(Self {
-            coordinator,
-            authority,
-            link: partitions.link,
-            _protocol: partitions.protocol,
-            budget: partitions.source,
         })
     }
     pub fn coordinator(&self) -> &HostCoordinator {
@@ -119,12 +120,53 @@ impl OwnedExecHost {
     ) -> Result<HostProtocol<'_>, ProtocolError> {
         HostProtocol::new_paired(profile, self.coordinator.clone(), &self.authority)
     }
+    /// Explicit old Gateway mode; keep this same session across reconnects.
+    pub fn legacy_session(
+        &self,
+        profile: super::legacy::TrustedLegacyGateway,
+    ) -> Result<super::legacy::LegacyExecSession<'_>, super::legacy::LegacyError> {
+        super::legacy::LegacyExecSession::new(profile, self.coordinator.clone(), &self.authority)
+    }
     /// Remaining logical queued-I/O capacity, never total resident memory.
     pub fn unreserved_queued_bytes(&self) -> usize {
         self.budget.available_permits()
     }
     pub async fn shutdown_owned(&self, budget: Duration) -> Result<HostCleanup, CoordinatorError> {
         self.authority.shutdown_owned(budget).await
+    }
+}
+
+/// Move-only bootstrap resources; neither a transport nor a request can create
+/// another executor from this reservation.
+pub struct ExecHostReservation {
+    partitions: Partitions,
+    generation: HostGeneration,
+    trusted_facts: AdmissionFacts,
+    max_jobs: usize,
+}
+impl ExecHostReservation {
+    pub fn link_budget(&self) -> Arc<HostLinkBudget> {
+        self.partitions.link.clone()
+    }
+    pub async fn spawn(
+        self,
+        executor: OwnedExecutorConfig,
+    ) -> Result<OwnedExecHost, BootstrapError> {
+        let adapter =
+            CodexStdio::spawn_owned_with_reserved_budget(executor, self.partitions.rpc).await?;
+        let (coordinator, authority) = HostCoordinator::new_owned(
+            adapter,
+            OperationLedger::new(self.generation),
+            self.trusted_facts,
+            self.max_jobs,
+        )?;
+        Ok(OwnedExecHost {
+            coordinator,
+            authority,
+            link: self.partitions.link,
+            _protocol: self.partitions.protocol,
+            budget: self.partitions.source,
+        })
     }
 }
 

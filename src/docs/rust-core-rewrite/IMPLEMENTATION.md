@@ -13,10 +13,11 @@ Owner-authorized goal is active. The plan at a21ea75 remains the scope baseline;
 | R06 storage | Linux protected raw reads/locks plus bounded immutable enrollment material/intent/prepared/commit journal, exact-chain reconciliation and durable fixed-size clock floor | New checkpoint verification is recorded externally; native Mac/Windows secure store, durable abort/allocation, retention, migration and original owner coordination remain required |
 | R07 operations | Reserved-only dispatch; owner incarnation; immutable payload; bounded accounting; explicit unknown/cancel/liveness/drain and maintenance fence; nonauthor scenario review | Move-only start/action permits connect the same owned executor through Host and negotiated WSS; Core-attested physical retention with actual quiescence is now implemented; persistent collection scheduling, durable restart recovery and full remote owner issuance still required |
 | R08 IPC | Linux private UDS/kernel peer read scope, bounded frames/stdio, deadline and no-replay fixture journeys | Management mutation, Desktop authentication, Mac/Windows, actual Core/GUI binding |
-| R09 Exec | Real owned Codex PTY/Unicode/exit/drain/cancel; Unknown start reconciled by independent effect, no replay; normal retirement | Host/WSS action binding implemented; Gateway concrete backend, Core-attested physical retirement implemented; legacy wire translation and final native Windows/macOS release still required |
+| R09 Exec | Real owned Codex PTY/Unicode/exit/drain/cancel, Core-bound continuations and physical retirement; original native UUID/writeId/raw-page translation is now implemented | Final legacy CLI journey evidence, native Windows/macOS release and durable restart recovery still required |
 | R10 Host | One owned Codex executor, Core admission, supervised start/read/targeted actions, canonical shared-budget bootstrap, strict TLS/WSS explicit generation negotiation; real local action effects and duplicate negatives | Gateway-issued owner coordination, persistent collection scheduling/durable audit, reconnect policy, legacy frontend and native platform lifecycle |
 | R11 SDK/HTTP | Official SDK five-version/38-tool surface, Hyper loopback listener, authenticated session ownership, bounded bodies/queues, synchronous close fence and observed owned backend cleanup | Concrete native backend/remote registry, TLS listener composition, real account, POST cancellation under body/connection pressure and SDK detached-task observability limits |
-| R12 enrollment | Rust Core target-bound approval, same-credential claim/confirmation, generated capability CAS/revoke, per-frame grants; closed-phase original-byte recovery and protected Linux boot adapter | Signed crypto/typed Profile + bounded strictTLS HTTP service and same-credential confirmation/restart are implemented (ADR-005), evidence remains external; actual paired Host WSS/Exec routing, defaults/ingress, original pair, multiple Desktop connections and cross-platform recovery remain required |
+| R12 enrollment | Rust Core target-bound approval, same-credential confirmation/CAS/revoke, signed strictTLS journal service, same-authority paired Host WSS and real MCP-to-Codex owner isolation/physical cleanup checkpoint | Defaults/ingress, original credential/pair migration, transport epoch/dropresponse faults, multiple Desktop connections and cross-platform recovery remain required |
+| R13 legacy CLI | Explicit `host run --legacy-gateway`, read-only doctor/status, original publisher/raw-manifest exact member closure and native file pin; same-budget WSS-before-executor bootstrap and Host-owned cleanup | Actual immutable old Gateway journey, original certificate compatibility and startup timing have distinct external receipts; synthetic profiles do not prove onboarding, original pair or service/App cutover |
 
 No Rust candidate has been packaged, signed, installed or accepted on the three platforms. Existing signed packages and original device identities/pairing/permissions have not been modified. Historical JS test counts are not Rust completion evidence. Stable remains NO-GO.
 
@@ -35,3 +36,28 @@ Enrollment recovery (ADR-004) is an incremental Core/store checkpoint, not compl
 
 
 Signed enrollment service (ADR-005) now composes Core, owned single-writer journal, AWS-LC proofs, original-token idempotent confirmation, self API and strict Hyper/TLS admission. New independent tests and failure receipts are external. Expired pending collection is itself a durable Core mutation; observed material uncertainty becomes sticky admission failure. Public blocking-job reconciliation cannot claim quiescence while the listener remains active. This service is not yet the complete CLI/Gateway/Host distribution: the existing inspection-only BootstrapDiagnostics continues to report network_ready=false; it must not be interpreted as a global capability result for another composed object.
+
+
+Legacy foreground (ADR-006) is an explicit compatibility slice. `foreground/profile.rs`
+reads original deployment/state, publisher pin, raw signed manifest, active release,
+RSA identity, host credential and CA binding. Mutable `host.exec.binary` never selects
+native code. `store/payload.rs` streams exact closure hashes and retains the original
+ELF descriptor through native cleanup; no arbitrary `--codex-bin`/token override exists
+in the product CLI. macOS/Windows protected filesystem launch remains unsupported in
+this slice; synthetic Linux bootstrap is not a platform migration.
+
+`host/bootstrap::ExecHostReservation` reserves RPC/protocol/WSS from one byte source
+before strict WSS admission, and moves that reservation into the one native executor.
+`host/legacy::LegacyExecSession` translates original UUID/writeId/raw cursor frames
+through the same Core permits. Old frames cannot provide v3 per-chat grants; a lost
+start/ACK remains Unknown, never an invented definite RPC rejection. One session and
+executor survive network loss; explicit Host stop joins their actual cleanup.
+
+Foreground refuses known original owner/health resources, and refuses `service.json`
+without an actual OS stopped-service observer. Its Rust execution lease protects Rust
+workers only; it is not proof that an old JS/App/service owner was stopped. Public
+`host_run` is a waiter for an owned Tokio worker: waiter drop signals the official
+CancellationToken drop guard and does not drop the worker's lease or native child.
+Cleanup tracks original operation exit evidence independently from executor exit,
+I/O joins and supervised jobs. An original Unknown cannot disappear through a later
+empty inventory. Native API-waiter-drop fault injection is still NOT TESTED.

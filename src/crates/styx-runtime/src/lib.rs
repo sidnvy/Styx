@@ -4,6 +4,7 @@ pub const IMPLEMENTATION_STAGE: &str = "foundation; not a deployed Host or Gatew
 
 pub mod crypto;
 pub mod enrollment;
+pub mod foreground;
 pub mod gateway;
 pub mod host;
 pub mod ipc;

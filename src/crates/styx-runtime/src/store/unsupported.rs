@@ -8,6 +8,9 @@ impl Root {
     pub(super) fn identity(&self) -> RootIdentity {
         match *self {}
     }
+    pub(super) fn ensure_absent(&self, _: &Path) -> Result<()> {
+        match *self {}
+    }
     pub(super) fn read_raw(&self, _: &Path, _: usize) -> Result<RawFile> {
         match *self {}
     }

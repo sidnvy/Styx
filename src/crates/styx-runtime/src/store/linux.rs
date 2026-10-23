@@ -153,6 +153,32 @@ impl Root {
         }
         Err(StoreError::InvalidRelativePath)
     }
+    pub(super) fn ensure_absent(&self, relative: &Path) -> Result<()> {
+        self.validate_root()?;
+        let absent = match self.parent(relative) {
+            Ok((parent, name)) => match nix::sys::stat::fstatat(
+                &parent,
+                name.as_os_str(),
+                nix::fcntl::AtFlags::AT_SYMLINK_NOFOLLOW,
+            ) {
+                Err(nix::errno::Errno::ENOENT) => true,
+                Ok(_) => false,
+                Err(error) => {
+                    return Err(StoreError::Io(std::io::Error::from_raw_os_error(
+                        error as i32,
+                    )));
+                }
+            },
+            Err(StoreError::Io(error)) if error.kind() == std::io::ErrorKind::NotFound => true,
+            Err(error) => return Err(error),
+        };
+        self.validate_root()?;
+        if absent {
+            Ok(())
+        } else {
+            Err(StoreError::Changed)
+        }
+    }
     pub(super) fn read_raw(&self, relative: &Path, max_bytes: usize) -> Result<RawFile> {
         self.read_raw_observing(relative, max_bytes, || Ok(()))
     }
@@ -352,3 +378,7 @@ pub(super) fn process_matches(identity: &ProcessIdentity) -> Result<bool> {
         Err(error) => Err(error),
     }
 }
+
+#[path = "linux_payload.rs"]
+mod payload;
+pub(super) use payload::{PayloadSnapshot, PinnedImage};

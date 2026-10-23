@@ -7,6 +7,8 @@
 //! Secrets are not included in Debug output or preservation manifests.
 
 pub mod enrollment;
+mod payload;
+pub use payload::{PayloadInventory, PayloadLimits, PayloadMember, PinnedExecutable};
 
 use serde::{
     Serialize,
@@ -281,6 +283,13 @@ impl PrivateRoot {
     }
     pub fn identity(&self) -> RootIdentity {
         self.inner.identity()
+    }
+    /// Read-only, descriptor-relative absence check. An existing file, directory,
+    /// symlink or special node refuses admission; only ENOENT proves absence.
+    /// This is an observation, never a lock against an uncoordinated legacy writer.
+    pub fn ensure_absent(&self, relative: impl AsRef<Path>) -> Result<()> {
+        self.inner
+            .ensure_absent(&checked_relative(relative.as_ref())?)
     }
     pub fn read_raw(&self, relative: impl AsRef<Path>, max_bytes: usize) -> Result<RawFile> {
         let path = checked_relative(relative.as_ref())?;

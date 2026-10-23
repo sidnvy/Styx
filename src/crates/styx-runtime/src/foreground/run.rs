@@ -1,0 +1,447 @@
+//! Explicit legacy foreground, not a migration/service manager. All ownership
+//! refusals are conservative observations; the Rust lease cannot lock old JS.
+use super::{ForegroundError, ForegroundEvent, ForegroundOutcome, HostWireMode, profile};
+use crate::{
+    host::{
+        bootstrap::OwnedExecHost,
+        legacy::TrustedLegacyGateway,
+        link::{HostLinkBudget, HostWssLink, LinkAuthentication},
+    },
+    providers::codex::TerminationEvidence,
+    store::{ExecutionLeaseGuard, PrivateRoot},
+};
+use std::{collections::BTreeMap, path::Path, sync::Arc, time::Duration};
+use styx_contracts::{
+    capability::{Authorization, Availability, CapabilityDescriptor, CapabilityId, Scope},
+    error::Recovery,
+    identity::{ConnectionGeneration, DeviceId, HostGeneration, Sha256Digest},
+};
+use styx_core::policy::AdmissionFacts;
+use tokio::{net::TcpStream, sync::mpsc};
+use tokio_util::sync::CancellationToken;
+
+const STATE_OWNERS: &[&str] = &[
+    "foreground.lock",
+    "foreground-recovery.lock",
+    "background.lock",
+    "advance.lock",
+    "capabilities.lock",
+];
+const HEALTH_OWNERS: &[&str] = &[
+    "install/.health-update-lock",
+    "install/.health-operation-lock",
+    "install/.health-recovery-guard",
+];
+struct Admitted {
+    profile: profile::LoadedLegacyProfile,
+    state: PrivateRoot,
+    base: PrivateRoot,
+    lease: ExecutionLeaseGuard,
+}
+impl Admitted {
+    fn validate_ownership(&self) -> Result<(), ForegroundError> {
+        for name in STATE_OWNERS {
+            self.state
+                .ensure_absent(name)
+                .map_err(|_| ForegroundError("legacy_owner_reconciliation_required"))?;
+        }
+        // No OS service observer is available in this slice. Even a reportedly
+        // stopped service configuration therefore requires explicit reconciliation.
+        self.base
+            .ensure_absent("service.json")
+            .map_err(|_| ForegroundError("legacy_service_observation_required"))?;
+        for name in HEALTH_OWNERS {
+            self.base
+                .ensure_absent(name)
+                .map_err(|_| ForegroundError("legacy_update_reconciliation_required"))?;
+        }
+        self.lease
+            .validate()
+            .map_err(|_| ForegroundError("execution_lease_changed"))?;
+        Ok(())
+    }
+    fn validate(&self) -> Result<(), ForegroundError> {
+        self.validate_ownership()?;
+        self.profile.revalidate()?;
+        Ok(())
+    }
+}
+fn event(
+    events: &mpsc::Sender<ForegroundEvent>,
+    cancel: &CancellationToken,
+    name: &'static str,
+    device: &DeviceId,
+    generation: Option<&ConnectionGeneration>,
+) {
+    if events
+        .try_send(ForegroundEvent {
+            schema: 1,
+            event: name,
+            device_id: Some(device.clone()),
+            connection_generation: generation.cloned(),
+        })
+        .is_err()
+    {
+        // Output loss cannot block cleanup or silently detach an owned executor.
+        cancel.cancel();
+    }
+}
+async fn validate(admitted: &Arc<Admitted>) -> Result<(), ForegroundError> {
+    let retained = admitted.clone();
+    tokio::task::spawn_blocking(move || retained.validate())
+        .await
+        .map_err(|_| ForegroundError("profile_reader_failed"))?
+}
+async fn connect(
+    profile: &profile::LoadedLegacyProfile,
+    generation: ConnectionGeneration,
+    budget: Arc<HostLinkBudget>,
+) -> Result<HostWssLink, ForegroundError> {
+    let endpoint = profile.endpoint();
+    let url = url::Url::parse(endpoint.as_str())
+        .map_err(|_| ForegroundError("invalid_gateway_endpoint"))?;
+    let hostname = match url
+        .host()
+        .ok_or(ForegroundError("invalid_gateway_endpoint"))?
+    {
+        url::Host::Domain(v) => v.to_owned(),
+        url::Host::Ipv4(v) => v.to_string(),
+        url::Host::Ipv6(v) => v.to_string(),
+    };
+    let port = url
+        .port_or_known_default()
+        .ok_or(ForegroundError("invalid_gateway_endpoint"))?;
+    let tcp = tokio::time::timeout(
+        Duration::from_secs(5),
+        TcpStream::connect((hostname.as_str(), port)),
+    )
+    .await
+    .map_err(|_| ForegroundError("gateway_connect_timeout"))?
+    .map_err(|_| ForegroundError("gateway_connect_failed"))?;
+    HostWssLink::connect(
+        endpoint,
+        profile.tls(),
+        tcp,
+        LinkAuthentication::Bearer(profile.bearer()),
+        generation,
+        budget,
+    )
+    .await
+    .map_err(|_| ForegroundError("gateway_tls_or_upgrade_rejected"))
+}
+fn facts(device: &DeviceId) -> AdmissionFacts {
+    // These are bootstrap-local facts after the original credential's strict
+    // WSS admission, not v3 per-chat grants or client-supplied tool authority.
+    AdmissionFacts {
+        device_id: device.clone(),
+        grant_revision: 1,
+        local_policy_allowed: true,
+        descriptor: CapabilityDescriptor {
+            contract_version: styx_contracts::CONTRACT_VERSION,
+            capability_id: CapabilityId::ExecRun,
+            scope: Scope::Host,
+            provider_id: "codex".try_into().expect("static provider identity"),
+            configured: true,
+            remote_grant: true,
+            availability: Availability::Available,
+            authorization: Authorization::Granted,
+            target_session: None,
+            reason: None,
+            observed_at: 0,
+            observation_generation: 1,
+            recovery: Recovery::None,
+        },
+        session_state: None,
+        current_observation: None,
+    }
+}
+fn empty_outcome() -> ForegroundOutcome {
+    ForegroundOutcome {
+        schema: 1,
+        executor_exited: true,
+        processes_exited: true,
+        io_tasks_joined: true,
+        supervised_jobs_joined: true,
+    }
+}
+pub async fn host_run(
+    state_dir: &Path,
+    mode: HostWireMode,
+    cancel: CancellationToken,
+    events: mpsc::Sender<ForegroundEvent>,
+) -> Result<ForegroundOutcome, ForegroundError> {
+    let state = state_dir.to_path_buf();
+    let stop = cancel.child_token();
+    // A caller timeout/aborted waiter signals the owned worker instead of dropping
+    // its lease, pinned payload or native supervisor. Tokio detaches the worker
+    // JoinHandle on waiter drop; the running runtime must remain alive for cleanup.
+    let _cancel_on_waiter_drop = stop.clone().drop_guard();
+    tokio::spawn(async move { run_owned(&state, mode, stop, events).await })
+        .await
+        .map_err(|_| ForegroundError("foreground_worker_failed"))?
+}
+async fn run_owned(
+    state_dir: &Path,
+    mode: HostWireMode,
+    cancel: CancellationToken,
+    events: mpsc::Sender<ForegroundEvent>,
+) -> Result<ForegroundOutcome, ForegroundError> {
+    if mode != HostWireMode::LegacyExplicit {
+        return Err(ForegroundError("paired_profile_not_implemented"));
+    }
+    let path = state_dir.to_path_buf();
+    // Never abandon a blocking reader/lease acquisition on signal. Join it,
+    // then observe cancellation before any native executable is started.
+    let admitted = tokio::task::spawn_blocking(move || {
+        let profile = profile::load_legacy(&path)?;
+        let state = PrivateRoot::open(&path).map_err(|_| ForegroundError("state_root_refused"))?;
+        let base = PrivateRoot::open(profile.host_base_dir())
+            .map_err(|_| ForegroundError("host_root_refused"))?;
+        let lease = base
+            .try_execution_lease()
+            .map_err(|_| ForegroundError("execution_lease_busy"))?;
+        let admitted = Arc::new(Admitted {
+            profile,
+            state,
+            base,
+            lease,
+        });
+        admitted.validate()?;
+        Ok::<_, ForegroundError>(admitted)
+    })
+    .await
+    .map_err(|_| ForegroundError("profile_reader_failed"))??;
+    let device = admitted.profile.device_id().clone();
+    if cancel.is_cancelled() {
+        return Ok(empty_outcome());
+    }
+    let generation: HostGeneration = uuid::Uuid::new_v4()
+        .to_string()
+        .try_into()
+        .expect("UUID identity");
+    let reservation = OwnedExecHost::reserve(generation, facts(&device), 16)
+        .map_err(|_| ForegroundError("host_reservation_refused"))?;
+    let connection: ConnectionGeneration = uuid::Uuid::new_v4()
+        .to_string()
+        .try_into()
+        .expect("UUID identity");
+    event(&events, &cancel, "connecting", &device, Some(&connection));
+    let mut link = tokio::select! {
+        _=cancel.cancelled()=>return Ok(empty_outcome()),
+        result=connect(&admitted.profile,connection,reservation.link_budget())=>result?,
+    };
+    // Run blocking filesystem work on the blocking pool. executor_config itself
+    // revalidates the entire signed inventory/raw profile at this spawn boundary;
+    // avoid repeating the same full walk immediately before it on an I/O thread.
+    let retained = admitted.clone();
+    let prepared = tokio::task::spawn_blocking(move || {
+        retained.validate_ownership()?;
+        retained
+            .profile
+            .executor_config()
+            .map_err(ForegroundError::from)
+    })
+    .await;
+    let config = match prepared {
+        Ok(Ok(v)) => v,
+        result => {
+            let _ = link.shutdown(Duration::from_secs(3)).await;
+            return Err(match result {
+                Ok(Err(error)) => error,
+                _ => ForegroundError("profile_reader_failed"),
+            });
+        }
+    };
+    if cancel.is_cancelled() {
+        link.shutdown(Duration::from_secs(3))
+            .await
+            .map_err(|_| ForegroundError("link_cleanup_unknown"))?;
+        return Ok(empty_outcome());
+    }
+    // Spawn is joined even on signal; cancelling initialization cannot orphan a
+    // partially started child. The bounded provider owns its startup cleanup.
+    let host = match reservation.spawn(config).await {
+        Ok(v) => v,
+        Err(_) => {
+            let _ = link.shutdown(Duration::from_secs(3)).await;
+            return Err(ForegroundError("executor_start_failed"));
+        }
+    };
+    let namespace = format!(
+        "legacy.{}",
+        Sha256Digest::of_bytes(admitted.profile.endpoint().as_str().as_bytes()).to_hex()
+    );
+    let session = host.legacy_session(TrustedLegacyGateway {
+        endpoint: admitted.profile.endpoint().as_str().to_owned(),
+        gateway_namespace: namespace.try_into().expect("bounded namespace"),
+    });
+    let mut failure = None;
+    if let Ok(session) = session {
+        event(
+            &events,
+            &cancel,
+            "connected",
+            &device,
+            Some(link.generation()),
+        );
+        loop {
+            // This trusted collector runs alongside the SAME pinned connection
+            // future; a timer must not drop an in-flight request and invent EOF.
+            let housekeeping = async {
+                loop {
+                    tokio::time::sleep(Duration::from_secs(5)).await;
+                    let _ = host
+                        .authority()
+                        .collect_provider_retention(Duration::from_secs(1))
+                        .await;
+                }
+            };
+            let disconnected = tokio::select! {
+                _=cancel.cancelled()=>false,
+                _=housekeeping=>unreachable!("collector loop does not return"),
+                result=session.run_connection(&mut link)=>{
+                    event(&events,&cancel,if result.is_ok(){"disconnected"}else{"connection_result_unknown"},&device,Some(link.generation()));
+                    true
+                },
+            };
+            // The executor and supervised operations are NOT stopped by EOF.
+            // shutdown joins all I/O tasks even when graceful-close times out;
+            // Deadline is not evidence of a still-detached transport task.
+            if link.shutdown(Duration::from_secs(3)).await.is_err() {
+                event(&events, &cancel, "link_close_deadline", &device, None);
+            }
+            if !disconnected || cancel.is_cancelled() {
+                break;
+            }
+            let mut next = None;
+            loop {
+                tokio::select! {
+                    _=cancel.cancelled()=>break,
+                    _=tokio::time::sleep(Duration::from_secs(2))=>{},
+                }
+                if cancel.is_cancelled() {
+                    break;
+                }
+                if let Err(error) = validate(&admitted).await {
+                    failure = Some(error);
+                    break;
+                }
+                let generation: ConnectionGeneration = uuid::Uuid::new_v4()
+                    .to_string()
+                    .try_into()
+                    .expect("UUID identity");
+                event(&events, &cancel, "reconnecting", &device, Some(&generation));
+                let attempt = tokio::select! {
+                    _=cancel.cancelled()=>break,
+                    result=connect(&admitted.profile,generation,host.link_budget())=>result,
+                };
+                match attempt {
+                    Ok(v) => {
+                        next = Some(v);
+                        break;
+                    }
+                    Err(_) => event(&events, &cancel, "disconnected", &device, None),
+                }
+            }
+            let Some(connected) = next else {
+                break;
+            };
+            link = connected;
+            event(
+                &events,
+                &cancel,
+                "connected",
+                &device,
+                Some(link.generation()),
+            );
+        }
+    } else {
+        let _ = link.shutdown(Duration::from_secs(3)).await;
+        failure = Some(ForegroundError("legacy_bootstrap_refused"));
+    }
+    event(&events, &cancel, "stopping", &device, None);
+    let mut outcome = ForegroundOutcome {
+        schema: 1,
+        executor_exited: false,
+        processes_exited: false,
+        io_tasks_joined: false,
+        supervised_jobs_joined: false,
+    };
+    let mut process_exits = BTreeMap::new();
+    // Unknown cleanup retains the SAME owner, pin and supervisor. Never release
+    // the lease on a timer while the native child might still execute signed code.
+    loop {
+        if let Ok(cleanup) = host.shutdown_owned(Duration::from_secs(10)).await {
+            for (process, evidence) in &cleanup.native.processes {
+                record_process_exit(&mut process_exits, process.operation().clone(), *evidence);
+            }
+            outcome.processes_exited = process_exits.values().all(|exited| *exited);
+            outcome.executor_exited |= cleanup.native.executor_exited;
+            outcome.io_tasks_joined =
+                cleanup.native.reader_task_reaped && cleanup.native.stderr_task_reaped;
+            outcome.supervised_jobs_joined = cleanup.supervised_jobs_joined;
+        }
+        if outcome.is_complete() {
+            break;
+        }
+        event(&events, &cancel, "cleanup_unknown", &device, None);
+        tokio::time::sleep(Duration::from_secs(1)).await;
+    }
+    event(&events, &cancel, "stopped", &device, None);
+    // Explicit drop order: observed signed files / lease outlive native cleanup.
+    drop(host);
+    drop(admitted);
+    if let Some(error) = failure {
+        Err(error)
+    } else {
+        Ok(outcome)
+    }
+}
+
+/// Keep original resource identities even if a later cleanup inventory is empty.
+/// Server exit and joined I/O are independent from each command's real exit.
+fn record_process_exit(
+    records: &mut BTreeMap<styx_contracts::operation::OperationId, bool>,
+    operation: styx_contracts::operation::OperationId,
+    evidence: TerminationEvidence,
+) {
+    let previous = records.entry(operation).or_insert(false);
+    *previous |= matches!(evidence, TerminationEvidence::ProcessExited(_));
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn cleanup_unknown_original_resource_cannot_be_erased_by_server_exit_or_empty_inventory() {
+        let operation = styx_contracts::operation::OperationId {
+            host_generation: "test-host".try_into().unwrap(),
+            owner_epoch: "test-owner".try_into().unwrap(),
+            sequence: 1,
+        };
+        let mut records = BTreeMap::new();
+        record_process_exit(
+            &mut records,
+            operation.clone(),
+            TerminationEvidence::Unknown,
+        );
+        let mut outcome = empty_outcome();
+        outcome.processes_exited = records.values().all(|exited| *exited);
+        assert!(
+            !outcome.is_complete(),
+            "joined server/I/O/jobs cannot stand in for original command exit"
+        );
+        // A second empty inventory does not remove the original Unknown identity.
+        assert!(!records.values().all(|exited| *exited));
+        record_process_exit(
+            &mut records,
+            operation.clone(),
+            TerminationEvidence::ProcessExited(137),
+        );
+        record_process_exit(&mut records, operation, TerminationEvidence::Unknown);
+        outcome.processes_exited = records.values().all(|exited| *exited);
+        assert!(
+            outcome.is_complete(),
+            "independently known exit is monotonic, not operation success"
+        );
+    }
+}

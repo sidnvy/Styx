@@ -79,6 +79,9 @@ pub enum LinkAuthentication<'a> {
 #[derive(Debug)]
 pub struct LinkEndpoint(url::Url);
 impl LinkEndpoint {
+    pub fn as_str(&self) -> &str {
+        self.0.as_str()
+    }
     pub fn parse(value: &str) -> Result<Self, LinkError> {
         if value.len() > 4096 {
             return Err(LinkError::InvalidEndpoint);

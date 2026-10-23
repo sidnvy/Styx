@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 
 ROOT = Path(__file__).resolve().parents[2]
 POLICY = Path(__file__).with_name("rust-dependency-policy.json")
+PAYLOAD_TEST = "store::payload::tests::payload_inventory_stream_pin_and_replacement_alias_budget_negatives"
 ENROLLMENT_OWNED_TEST = "store::enrollment::owned::tests::owned_journal_thread_move_keeps_writer_and_initial_namespace_identity"
 ENROLLMENT_PROFILE_TEST = "enrollment::profile::tests::actual_node22_profile_join_and_capability_proofs"
 ENROLLMENT_SERVICE_TEST = "enrollment::service::tests::actual_strict_tls_enrollment_service_full_journey"
@@ -89,7 +90,7 @@ def private_new_dir(path):
 
 def source_inputs(root):
     files = [root / "Cargo.toml", root / "Cargo.lock", root / "rust-toolchain.toml", POLICY, Path(__file__).resolve()]
-    for base in (root / "src/crates", root / "src/acceptance/oracles"):
+    for base in (root / "src/crates", root / "src/acceptance/oracles", root / "src/acceptance/interop-exec"):
         files += [p for p in base.rglob("*") if p.is_file() and p.suffix in {".rs", ".toml", ".py", ".json", ".mjs"}]
     files += [root / "src/shared/enrollment-protocol.mjs", *[root / "src/docs/rust-core-rewrite" / name for name in ("LEGACY-WIRE-VECTORS-V1.json", "CONTRACT-V1.json", "FEATURE-INVENTORY-V1.json", "PUBLIC-MCP-V1.json")]]
     return {str(p.relative_to(root)): sha(p) for p in sorted(set(files))}
@@ -253,6 +254,11 @@ def execute(args):
             receipt["official_http_sdk"]["checks"][name] = http["status"]
         receipt["enrollment_store"] = "NOT_RUN_explicit_linux_gnu_slice_not_requested"
         if args.enrollment_store:
+            payload_root = evidence / "owned-payload-store"
+            payload_root.mkdir(mode=0o700)
+            payload = gate.run("payload-store", ["cargo", "test", "-p", "styx-runtime", "--locked", "--offline", PAYLOAD_TEST, "--", "--ignored", "--exact", "--nocapture"], timeout=120,
+                extra_env={"STYX_TEST_PAYLOAD_ROOT":str(payload_root)})
+            gate.semantic(payload, [] if "1 passed; 0 failed" in gate.read("payload-store") else ["exact_payload_inventory_case_not_executed"])
             owned_root = evidence / "owned-enrollment-store"
             owned_root.mkdir(mode=0o700)
             check = gate.run("enrollment-store", ["cargo", "test", "-p", "styx-runtime", "--locked", "--offline", ENROLLMENT_STORE_TEST, "--", "--ignored", "--exact", "--nocapture"], timeout=120,
@@ -389,7 +395,7 @@ def execute(args):
         required = {"git-head", "git-status", "git-head-end", "git-status-end", "rustc-version", "cargo-version", "dependency-metadata", "format", "clippy", "workspace-tests", "ignored-inventory", "official-http-sdk", "python-oracles", "cli-build", "cli-help", "cli-version", "cli-build-info", "cli-unimplemented-reject"}
         required |= {name for name, _ in HTTP_TESTS}
         if args.enrollment_store:
-            required |= {"enrollment-store", "enrollment-clock", "enrollment-recovery", "enrollment-owned"}
+            required |= {"payload-store", "enrollment-store", "enrollment-clock", "enrollment-recovery", "enrollment-owned"}
         if args.enrollment_service:
             required |= {"enrollment-profile", "enrollment-controller", "enrollment-service"}
         if args.paired_host:

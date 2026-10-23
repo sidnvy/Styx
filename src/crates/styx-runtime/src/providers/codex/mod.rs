@@ -6,6 +6,11 @@
 //! executor. `spawn_owned` starts a NEW caller-owned executor; no live executor
 //! is discovered, adopted, restarted or replaced.
 mod continuation;
+mod legacy;
+pub use legacy::{
+    LegacyAction, LegacyActionReceipt, LegacyEnvPolicy, LegacyStartProcess, LegacyStartReceipt,
+    LegacyWrite,
+};
 mod output;
 mod retention;
 mod rpc;
@@ -14,6 +19,7 @@ pub use continuation::{ActionAcknowledgment, ActionEvidence, ActionReceipt, Proc
 pub use output::OutputChunk;
 use output::{OutputDecoder, ReadPage};
 use rpc::Rpc;
+pub(crate) use rpc::TerminalEvent;
 use serde_json::{Value, json};
 use std::{
     collections::{BTreeMap, HashMap},
@@ -242,6 +248,7 @@ pub struct CodexStdio {
     limit: usize,
     session_id: String,
     provider_id: String,
+    initialization: Value,
 }
 impl CodexStdio {
     pub fn session_id(&self) -> &str {
@@ -350,6 +357,7 @@ impl CodexStdio {
             limit: config.retained_process_limit,
             session_id,
             provider_id,
+            initialization: initialized,
         })
     }
     pub async fn start(&self, permit: DispatchPermit) -> Result<StartReceipt, StartFailure> {

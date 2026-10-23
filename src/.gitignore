@@ -15,3 +15,6 @@ __pycache__/
 # Local acceptance evidence is uploaded by CI, not committed.
 /acceptance/*
 !/acceptance/oracles/
+
+!/acceptance/interop-exec/
+!/acceptance/interop-exec/**

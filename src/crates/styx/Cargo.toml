@@ -9,6 +9,10 @@ license.workspace = true
 styx-contracts.workspace = true
 styx-runtime.workspace = true
 clap.workspace = true
+tokio.workspace = true
+tokio-util.workspace = true
+serde.workspace = true
+serde_json.workspace = true
 
 [lints]
 workspace = true
