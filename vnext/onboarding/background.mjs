@@ -191,6 +191,12 @@ export async function observeDeploymentBackground(d,operations={}){
   if(hasHost)try{const connection=await ops.hostConnection(d);result.hostConnection=connection.status==='observed'?(connection.online?'exec_connected':'not_connected'):'unknown'}catch{result.hostConnection='unknown'}
  }
  if(hasHost)try{result.desktop=(await ops.desktopRecovery(d,'status')).status}catch{result.desktop='unknown'}else result.desktop='not_applicable';
+ if(process.platform==='linux'){
+  const {projectLinuxBoot}=await import('./linux-boot.mjs');
+  result.linuxBoot=projectLinuxBoot(d,state,result,{...(operations.linuxUserManager?{manager:operations.linuxUserManager()}:{}),...(operations.uid!==undefined?{uid:operations.uid}:{})});
+  result.systemBootWithoutLogin=result.linuxBoot.status;
+  result.startup=result.linuxBoot.linger==='enabled'?'user_manager_at_boot':result.linuxBoot.linger==='disabled'?'current_user_login':'unknown';
+ }
  result.status=!['needs_attention','unknown'].includes(result.desktop)&&(!hasHost||result.host==='running')&&['running','external'].includes(result.gateway)&&(!hasHost||state.mode!=='create-local'||result.hostConnection==='exec_connected')?'running':'needs_attention';
  return result;
 }
