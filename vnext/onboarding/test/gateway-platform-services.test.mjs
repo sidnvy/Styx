@@ -52,3 +52,21 @@ test('opt-in isolated native per-user Gateway manager lifecycle',{
   if(clean||!attempted)fs.rmSync(root,{recursive:true,force:true});
  }
 });
+
+test('Windows owner status works outside a desktop and never treats scheduler failure as absence',{
+ skip:process.platform!=='win32',timeout:45000
+},async()=>{
+ const {execFileSync}=await import('node:child_process');
+ // No task registration, process start, service mutation or GUI session needed.
+ const stateDir=path.join(os.tmpdir(),'styx-status-only-'+randomBytes(12).toString('hex'));
+ const d={stateDir,nodeBinary:process.execPath,runner:path.join(stateDir,'never-executed.mjs'),identityHash:createHash('sha256').update(stateDir).digest('hex')};
+ const script=platformGatewayDefinition(d,{platform:'win32'}).powershell;
+ const run=prefix=>execFileSync('powershell.exe',['-NoLogo','-NoProfile','-NonInteractive','-EncodedCommand',Buffer.from("$ProgressPreference='SilentlyContinue';\n"+prefix+script,'utf16le').toString('base64')],{env:{...process.env,STYX_GATEWAY_SERVICE_JSON:JSON.stringify(d),STYX_GATEWAY_SERVICE_ACTION:'status'},encoding:'utf8',timeout:15000,maxBuffer:4096,windowsHide:true,stdio:['ignore','pipe','pipe']});
+ const absent=JSON.parse(run(''));assert.equal(absent.status,'not_installed');assert.equal(absent.active,'inactive');
+ // Execute the actual PowerShell error boundary. Denied access, null output and
+ // non-matching missing errors must remain unknown rather than release ownership.
+ for(const prefix of ["function Get-ScheduledTask {throw [UnauthorizedAccessException]::new('access denied fixture')}\n","function Get-ScheduledTask {return $null}\n","function Get-ScheduledTask {throw [IO.FileNotFoundException]::new('different missing error')}\n"]){
+  assert.throws(()=>run(prefix),error=>error.status===2&&String(error.stderr)==='styx_gateway_task_refused'&&!String(error.stdout).includes('not_installed'));
+ }
+ assert.equal(fs.existsSync(stateDir),false);
+});

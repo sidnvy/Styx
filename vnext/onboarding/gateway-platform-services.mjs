@@ -78,11 +78,17 @@ $d=$env:STYX_GATEWAY_SERVICE_JSON|ConvertFrom-Json;$action=$env:STYX_GATEWAY_SER
 if($action -notin @('install','status','start','stop','enable','disable','uninstall')){throw 'action'}
 $name='StyxGateway-'+$d.identityHash.Substring(0,12);$marker='Styx-VNext-Gateway-v1:'+$d.identityHash
 $current=[Security.Principal.WindowsIdentity]::GetCurrent();$sid=$current.User.Value;$session=[Diagnostics.Process]::GetCurrentProcess().SessionId
-if($session -eq 0 -or -not [Environment]::UserInteractive -or $sid -eq 'S-1-5-18'){throw 'interactive_owner_required'}
+# Owner-local read-only status is also used by CLI/SSH and headless Gateway planning.
+# Only mutations require a logged-in desktop; status never adopts a task.
+if($sid -eq 'S-1-5-18' -or ($action -ne 'status' -and ($session -eq 0 -or -not [Environment]::UserInteractive))){throw 'interactive_owner_required'}
 $arguments='"'+$d.runner+'" "'+$d.stateDir+'"'
 function Owned {
- $t=Get-ScheduledTask -TaskName $name -ErrorAction SilentlyContinue
- if($null -eq $t){return $null}
+ try{$t=Get-ScheduledTask -TaskName $name -ErrorAction Stop}
+ catch{
+  if($_.CategoryInfo.Category -eq [Management.Automation.ErrorCategory]::ObjectNotFound -and $_.FullyQualifiedErrorId -eq 'CmdletizationQuery_NotFound_TaskName,Get-ScheduledTask'){return $null}
+  throw
+ }
+ if($null -eq $t){throw 'task_query_returned_no_state'}
  $who=[string]$t.Principal.UserId;if($who -notmatch '^S-1-'){$who=(New-Object Security.Principal.NTAccount($who)).Translate([Security.Principal.SecurityIdentifier]).Value}
  if($t.Description -ne $marker -or $who -ne $sid -or $t.Principal.LogonType -notin @('Interactive','InteractiveToken') -or $t.Principal.RunLevel -ne 'Limited'){throw 'foreign_task'}
  if(@($t.Actions).Count -ne 1 -or $t.Actions.Execute -cne $d.nodeBinary -or $t.Actions.Arguments -cne $arguments -or $t.Actions.WorkingDirectory -cne $d.stateDir){throw 'changed_action'}
