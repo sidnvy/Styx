@@ -95,3 +95,30 @@ test('a native server refreshes the runtime barrier after claim and releases own
  }finally{await assert.rejects(server.close(),/cleanup_failed/);}
  await assertDeploymentRuntimeReady(stateDir,{action:'foreground.start'});
 });
+
+
+test('Pause accepts only a current verified native owner and requires its foreground stop receipt',async t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'styx-native-pause-'));t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
+ for(const source of ['current_windows_native_app','unverified_windows_app',null]){
+  const stateDir=path.join(root,source??'generic');fs.mkdirSync(stateDir,{mode:0o700});
+  let authority=source,stops=0,confirmed=true;
+  const core={stopOwnedDeploymentForeground:async(d,options)=>{
+   assert.equal(d,stateDir);assert.deepEqual(options,{authorize:true});stops++;
+   return {status:confirmed?'stopped':'uncertain',observation:'current_process',foregroundRestartRequired:true};
+  }};
+  const instance=await createOnboardingServer({stateDir,core,...(source?{nativeAppAuthority:()=>({source:authority})}:{})});
+  try{
+   const headers={Authorization:'Bearer '+new URL(instance.url).hash.slice(9),Origin:instance.origin};
+   const session=await(await fetch(instance.origin+'/api/session',{headers})).json();
+   const pause=(body={authorize:true},extra={})=>fetch(instance.origin+'/api/foreground/stop',{method:'POST',headers:{...headers,'Content-Type':'application/json','X-Styx-CSRF':session.csrf,...extra},body:JSON.stringify(body)});
+   assert.equal((await pause({authorize:false})).status,409);assert.equal(stops,0);
+   assert.equal((await pause({authorize:true},{'X-Styx-CSRF':'wrong'})).status,403);assert.equal(stops,0);
+   const result=await pause();assert.equal(result.status,source==='current_windows_native_app'?200:409);
+   if(source==='current_windows_native_app'){
+    assert.equal((await result.json()).foreground.status,'stopped');assert.equal(stops,1);
+    authority='unverified_windows_app';assert.equal((await pause()).status,409);assert.equal(stops,1);
+    authority=source;confirmed=false;const uncertain=await pause();assert.equal(uncertain.status,409);assert.equal((await uncertain.json()).error,'foreground_stop_unconfirmed');assert.equal(stops,2);
+   }else{assert.equal((await result.json()).error,'native_owned_foreground_control_required');assert.equal(stops,0);}
+  }finally{await instance.close();}
+ }
+});

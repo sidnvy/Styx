@@ -353,7 +353,8 @@ export async function createOnboardingServer({stateDir,port=0,trustedForwardOrig
     res.writeHead(200,{'Content-Type':'application/zip','Content-Disposition':'attachment; filename="styx-native.zip"','Content-Length':result.archive.length});res.end(result.archive);return;
    }else if(url.pathname==='/api/foreground/stop'){
     keys(data,['authorize']);
-    if(!macPreviewApp||data.authorize!==true||typeof api.stopOwnedDeploymentForeground!=='function')fail('native_owned_foreground_control_required');
+    const currentNativeOwner=!!macPreviewApp||(nativeAppOwned&&typeof nativeAppAuthority==='function'&&nativeAppAuthority()?.source==='current_windows_native_app');
+    if(!currentNativeOwner||data.authorize!==true||typeof api.stopOwnedDeploymentForeground!=='function')fail('native_owned_foreground_control_required');
     const result=await api.stopOwnedDeploymentForeground(stateDir,{authorize:true});
     if(result?.status!=='stopped'||result.observation!=='current_process'||result.foregroundRestartRequired!==true)fail('foreground_stop_unconfirmed');
     send(200,{foreground:result});return;
