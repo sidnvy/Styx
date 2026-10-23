@@ -46,8 +46,21 @@ function material(file){
 }
 function unchanged(j){for(const f of j.preserved)if(sha(bytes(f.path))!==f.sha256)fail('join_recovery_preserved_state_changed')}
 function result(j,status){return {schema:1,status,transactionId:j.transactionId,nextStep:status==='recovered'?'host.request':null,previousRequestOutcome:'unknown',identityMutation:'NONE',serviceMutation:'NONE'}}
+// Before journal publication this transaction cannot have changed authoritative
+// files. Reclaim only its proven-dead guard, after rechecking the whole scope;
+// leave any orphan private material as evidence. Never adopt another operation.
+async function recoverPreJournalGuard(d,operations){
+ const file=path.join(d,'advance.lock');if(!exists(file))return;
+ const original=bytes(file),owner=JSON.parse(original);
+ if(owner.kind!==kind||! /^[a-f0-9]{32}$/.test(owner.transactionId??''))fail('join_recovery_foreign_guard');
+ if(exists(journalFile(d))&&read(journalFile(d)).transactionId===owner.transactionId)fail('join_recovery_rollback_required');
+ const s=scope(d);await stopped(s.base,operations);scope(d);unchanged({preserved:s.bindings});
+ if(!bytes(file).equals(original))fail('join_recovery_guard_changed');
+ const guard=acquireRecoveryGuard(file,{kind,transactionId:owner.transactionId});
+ guard.close();
+}
 export async function recoverDeploymentJoin(d,o={},operations={}){
- options(o,['authorize','pairingFile']);directory(d);assertJoinRecoverySettled(d);
+ options(o,['authorize','pairingFile']);directory(d);assertJoinRecoverySettled(d);await recoverPreJournalGuard(d,operations);
  const transactionId=randomBytes(16).toString('hex'),guard=acquireRecoveryGuard(path.join(d,'advance.lock'),{kind,transactionId});let j;
  try{
   const s=scope(d),m=material(o.pairingFile),service=await stopped(s.base,operations);scope(d);unchanged({preserved:s.bindings});guard.assertOwned();if(m.p.expiresAt<=Date.now())fail('join_recovery_invitation_expired');

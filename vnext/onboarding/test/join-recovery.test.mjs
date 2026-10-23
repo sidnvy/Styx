@@ -5,7 +5,8 @@ import os from 'node:os';
 import path from 'node:path';
 import https from 'node:https';
 import net from 'node:net';
-import {execFileSync} from 'node:child_process';
+import {execFileSync,spawnSync} from 'node:child_process';
+import {acquireRecoveryGuard} from '../recovery-guard.mjs';
 import {createHash,generateKeyPairSync,randomBytes} from 'node:crypto';
 import {recoverDeploymentJoin,rollbackDeploymentJoin,readDeploymentJoinRecovery} from '../join-recovery.mjs';
 import {inspectPairingLink,acceptPairingLink,createPairingLink} from '../pairing-links.mjs';
@@ -74,4 +75,17 @@ for(const lostResponse of [false,true])test(lostResponse?'accepted request with 
  acceptPairingLink(link,{stateDir:accepted,approvedGatewayOrigin:origin,approvedCaSha256:preview.caSha256});await recoverDeploymentJoin(f.d,{authorize:true,pairingFile:path.join(accepted,'pairing.json')},inactive);
  const c=read(path.join(f.base,'enrollment.json')),inv=fs.readFileSync(read(path.join(f.d,'deployment.json')).invitationFile,'utf8').trim();if(lostResponse){await assert.rejects(requestEnrollment(c,inv),/device_identity_conflict/);assert.equal(fs.existsSync(path.join(f.base,'device/pending.json')),false);}else await requestEnrollment(c,inv);
  assert.deepEqual(fs.readFileSync(path.join(f.base,'device/identity.json')),id);assert.deepEqual(fs.readFileSync(path.join(f.base,'device/identity.pem')),priv);assert.equal(controller.listPending().length,1);assert.equal(fs.existsSync(path.join(f.base,'device/pending.json')),!lostResponse);
+});
+
+
+test('real child death after guard acquisition before journal does not strand recovery',async t=>{
+ const f=fixture(t),lock=path.join(f.d,'advance.lock'),transactionId='b'.repeat(32);
+ const script=`import {acquireRecoveryGuard} from ${JSON.stringify(new URL('../recovery-guard.mjs',import.meta.url).href)};acquireRecoveryGuard(process.argv[1],{kind:'uncompleted-join-recovery-v1',transactionId:process.argv[2]});process.exit(0);`;
+ const child=spawnSync(process.execPath,['--input-type=module','-e',script,lock,transactionId],{encoding:'utf8'});assert.equal(child.status,0,child.stderr);
+ assert.equal(fs.existsSync(lock),true);assert.equal(fs.existsSync(path.join(f.d,'join-recovery.json')),false);
+ const result=await recoverDeploymentJoin(f.d,{authorize:true,pairingFile:f.pairingFile},inactive);assert.equal(result.status,'recovered');assert.notEqual(result.transactionId,transactionId);assert.equal(fs.existsSync(lock),false);assert.equal(readDeployment(f.d).steps[1].status,'pending');
+});
+test('pre-journal reclamation refuses a live owner and preserves the guard',async t=>{
+ const f=fixture(t),lock=path.join(f.d,'advance.lock'),guard=acquireRecoveryGuard(lock,{kind:'uncompleted-join-recovery-v1',transactionId:'c'.repeat(32)}),before=fs.readFileSync(lock);
+ try{await assert.rejects(recoverDeploymentJoin(f.d,{authorize:true,pairingFile:f.pairingFile},inactive),/owner_alive_or_unknown/);assert.deepEqual(fs.readFileSync(lock),before)}finally{guard.close()}
 });
