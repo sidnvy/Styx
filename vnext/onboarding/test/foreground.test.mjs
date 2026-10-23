@@ -240,3 +240,23 @@ test('offline owned foreground has complete pre-dispatch coverage without transp
  const ticketId='e'.repeat(32);assert.equal(admission.begin({ticketId}).status,'ready');assert.equal(admission.commit(ticketId).status,'ready');
  await stopDeploymentForeground(f.stateDir);assert.equal(readDeploymentForeground(f.stateDir).status,'not_running');assert.equal(ownedForegroundAdmission(f.stateDir),null);
 });
+
+test('trusted App startup retires prior boot receipt then starts one fresh connector without changing credentials',{skip:process.platform!=='linux'},async t=>{
+ const {registerDeploymentRuntimeGuard}=await import('../runtime-guard.mjs');
+ const {currentForegroundBoot}=await import('../foreground-boot-recovery.mjs');
+ const f=await fixture(t),releaseGuard=registerDeploymentRuntimeGuard(f.stateDir,async()=>{});t.after(releaseGuard);
+ const lockFile=path.join(f.stateDir,'foreground.lock'),ownerFile=path.join(f.stateDir,'foreground-owner.json'),observerFile=path.join(f.stateDir,'foreground-observer.json');
+ await startDeploymentForeground(f.stateDir,{authorize:true},f.ops);
+ const oldOwner=JSON.parse(fs.readFileSync(ownerFile)),observer=JSON.parse(fs.readFileSync(observerFile)),lock=fs.readFileSync(lockFile);
+ assert.equal(oldOwner.kind,'native_app');await stopDeploymentForeground(f.stateDir);
+ const currentBoot=currentForegroundBoot(),oldTime=currentBoot.startedAt-10000;
+ writePrivateFile(lockFile,lock);const id=fs.lstatSync(lockFile,{bigint:true});
+ const previous={...oldOwner,pid:2147483646,boot:{platform:process.platform,id:'prior-test-boot',startedAt:oldTime-10000},createdAt:oldTime,lock:{ino:id.ino.toString(),dev:id.dev.toString(),sha256:sha(lock)}};
+ writePrivateFile(ownerFile,JSON.stringify(previous));writePrivateFile(observerFile,JSON.stringify({...observer,pid:previous.pid,lock:previous.lock}));
+ for(const file of [lockFile,ownerFile,observerFile])fs.utimesSync(file,new Date(oldTime),new Date(oldTime));
+ const identity=fs.readFileSync(path.join(f.base,'device/identity.json')),token=fs.readFileSync(path.join(f.base,'device/host.token'));
+ await startDeploymentForeground(f.stateDir,{authorize:true},f.ops);
+ assert.equal(f.runCalls.length,2);assert.deepEqual(fs.readFileSync(path.join(f.base,'device/identity.json')),identity);assert.deepEqual(fs.readFileSync(path.join(f.base,'device/host.token')),token);
+ assert.equal(fs.readdirSync(path.join(f.stateDir,'foreground-recovery')).length,1);
+ assert.equal(JSON.parse(fs.readFileSync(ownerFile)).boot.id,currentBoot.id);
+});

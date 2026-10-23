@@ -1,4 +1,4 @@
-import {assertDeploymentRuntimeReady} from './runtime-guard.mjs';
+import {assertDeploymentRuntimeReady,hasDeploymentRuntimeGuard} from './runtime-guard.mjs';
 import {createHostWorkAdmission} from '../shared/work-admission.mjs';
 import {deploymentConnectionHash} from '../shared/deployment-scope.mjs';
 // Process-owned foreground lifecycle. No wrapper, service installation,
@@ -14,6 +14,7 @@ import {normalizeConnector,runHostConnector} from '../host/connect.mjs';
 import {computerConfig,runComputerConnectors} from '../host/computer.mjs';
 import {observeHostService} from './service-lifecycle.mjs';
 import {startForegroundObservation,observeForegroundOwner} from './foreground-observation.mjs';
+import {recordForegroundOwner,recoverForegroundAfterBoot} from './foreground-boot-recovery.mjs';
 
 const owners=new Map(),starting=new Map();
 const fail=code=>{throw Error(code)};
@@ -21,17 +22,18 @@ const sha=value=>createHash('sha256').update(value).digest('hex');
 const absolute=d=>{if(typeof d!=='string'||!path.isAbsolute(d)||path.normalize(d)!==d)fail('absolute_state_directory_required');return d};
 function read(file){if(requirePrivateFile(file).size>1024*1024)fail('foreground_private_state_too_large');return JSON.parse(fs.readFileSync(file,'utf8'));}
 const lockFile=d=>path.join(d,'foreground.lock');
-function claim(d){
+function claim(d,configurationHash){
+ if(fs.existsSync(path.join(d,'foreground-recovery.lock')))fail('foreground_recovery_requires_review');
  const file=lockFile(d);let fd;try{fd=openPrivateFile(file)}catch{fail('foreground_owned_or_interrupted_do_not_take_over')}
- const identity=fs.fstatSync(fd),token=randomBytes(32).toString('hex');let initialized=false;
+ const identity=fs.fstatSync(fd,{bigint:true}),token=randomBytes(32).toString('hex');let initialized=false,releaseReceipt;
  const release=()=>{
   try{
-   const current=requirePrivateFile(file);
+   requirePrivateFile(file);const current=fs.lstatSync(file,{bigint:true});
    if(current.ino!==identity.ino||current.dev!==identity.dev||fs.readFileSync(file,'utf8')!==token)fail('foreground_lock_ownership_changed');
-   fs.unlinkSync(file);
+   releaseReceipt?.();fs.unlinkSync(file);
   }finally{fs.closeSync(fd)}
  };
- try{fs.writeFileSync(fd,token);fs.fsyncSync(fd);initialized=true;return release;}
+ try{fs.writeFileSync(fd,token);fs.fsyncSync(fd);if(fs.existsSync(path.join(d,'foreground-recovery.lock')))fail('foreground_recovery_requires_review');releaseReceipt=recordForegroundOwner(d,{configurationHash,appOwned:hasDeploymentRuntimeGuard(d)});initialized=true;return release;}
  finally{if(!initialized)fs.closeSync(fd)}
 }
 function projection(entry){
@@ -96,7 +98,9 @@ async function start(d,operations,abort){
  }
  if(selected.unchanged&&!selected.unchanged()||deploymentConnectionHash(fs.readFileSync(path.join(d,'deployment.json')))!==configurationHash)fail('foreground_scope_changed');
  if(abort.signal.aborted)fail('foreground_start_cancelled');
- const release=claim(d);
+ recoverForegroundAfterBoot(d,{configurationHash,appOwned:hasDeploymentRuntimeGuard(d)});
+ if(selected.unchanged&&!selected.unchanged()||deploymentConnectionHash(fs.readFileSync(path.join(d,'deployment.json')))!==configurationHash)fail('foreground_scope_changed');
+ const release=claim(d,configurationHash);
  const entry={abort,release,host:selected.host?hostStatus.state==='running'?'service':'foreground':'disabled',gateway:config.mode==='join-existing'?'external':gatewayServiceRunning?'service':'foreground',execConnection:selected.host?'connecting':'not_required',desktopConnection:'not_requested',browserConnection:selected.host?.browser?.enabled?'connecting':'not_requested',browserRequested:selected.host?.browser?.enabled===true,computerRequested:selected.host?.computer?.enabled===true,startedGateway:false,stopping:false,failed:false,tasks:[],api,scopeValid:()=>deploymentConnectionHash(fs.readFileSync(path.join(d,'deployment.json')))===configurationHash&&(!selected.unchanged||selected.unchanged())};
  // Attest only our fresh connector lifetime, after ownership checks and before
  // any lane dispatch. Never derive this contract from UI input or service ready.

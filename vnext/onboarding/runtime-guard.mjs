@@ -5,6 +5,7 @@ import fs from 'node:fs';
 import {requirePrivateFile} from '../host/private-storage.mjs';
 const guards=new Map();
 const valid=d=>typeof d==='string'&&path.isAbsolute(d)&&path.normalize(d)===d;
+export function hasDeploymentRuntimeGuard(d){return valid(d)&&guards.has(d);}
 export function registerDeploymentRuntimeGuard(d,guard){
  if(!valid(d)||typeof guard!=='function')throw Error('invalid_runtime_guard');
  if(guards.has(d))throw Error('runtime_guard_already_owned');
