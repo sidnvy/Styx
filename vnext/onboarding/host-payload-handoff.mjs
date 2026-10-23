@@ -7,7 +7,6 @@ import {inspectHostPayloadCandidate,planHostPayloadMigration,applyHostPayloadMig
 import {verifyMacPreviewApp} from '../host/macos-preview-trust.mjs';
 import {requirePrivateDirectory,requirePrivateFile,requirePrivatePaths,ensurePrivateDirectory,openPrivateFile,configureWindowsAclHelper} from '../host/private-storage.mjs';
 import {acquireRecoveryGuard} from './recovery-guard.mjs';
-import {coreRuntimeExecutable,MAC_CORE_RELATIVE,MAC_CORE_EXECUTABLE} from '../host/macos/core-helper.mjs';
 const KIND='host-payload-handoff-v1',FILE='host-payload-handoff.json',PREPARE='host-payload-handoff-prepare.lock',EXECUTE='host-payload-handoff-execute.lock',TTL=15*60*1000;
 const id=x=>/^[a-f0-9]{32}$/.test(x??''),digest=x=>/^[a-f0-9]{64}$/.test(x??''),sha=b=>createHash('sha256').update(b).digest('hex');
 const fail=c=>{throw Error(c)},assert=(ok,c)=>{if(!ok)fail(c)},encode=x=>Buffer.from(JSON.stringify(x,null,2)+'\n');
@@ -26,7 +25,9 @@ function runtimeDirectory(t){return path.join(path.dirname(t.stateDir),'host-pay
 function inventory(source,relative,files){const s=fs.lstatSync(source);assert(!s.isSymbolicLink(),'handoff_source_redirected');if(s.isDirectory()){for(const n of fs.readdirSync(source).sort())inventory(path.join(source,n),path.posix.join(relative,n),files)}else{assert(s.isFile(),'handoff_source_not_regular');files.push({source,relative,executable:!!(s.mode&0o111)})}}
 async function resolveApp({stateDir,config}){
  if(process.platform==='win32')return(await import('../host/windows/host-payload-handoff.mjs')).resolveWindowsHostPayloadHandoffApp({stateDir,config});
- assert(process.platform==='darwin','handoff_native_app_platform_required');const app=verifyMacPreviewApp(config.host?.macPreviewApp),resources=path.join(app.path,'Contents/Resources'),files=[];
+ assert(process.platform==='darwin','handoff_native_app_platform_required');
+ const {coreRuntimeExecutable,MAC_CORE_RELATIVE,MAC_CORE_EXECUTABLE}=await import('../host/macos/core-helper.mjs');
+ const app=verifyMacPreviewApp(config.host?.macPreviewApp),resources=path.join(app.path,'Contents/Resources'),files=[];
  inventory(path.join(app.path,'Contents/MacOS/StyxUpdater'),'StyxUpdater',files);
  const node=coreRuntimeExecutable(app.path);
  // Keep the helper's Info.plist and resource seal with its executable when the
