@@ -551,7 +551,7 @@ func productSystemQuitReason(_ reason: OSType?) -> Bool {
         #endif
         statusItem = item
         if let resources = Bundle.main.resourceURL,
-           FileManager.default.isExecutableFile(atPath: resources.appendingPathComponent("runtime/node").path),
+           FileManager.default.isExecutableFile(atPath: bundledCoreExecutable(resources).path),
            Bundle.main.bundleURL.standardizedFileURL.path != "/Applications/Styx.app" {
             let alert = NSAlert(); alert.messageText = "Move Styx to Applications first"
             alert.informativeText = "Drag the complete Styx.app to /Applications, then open it there. Do not replace an existing Styx installation without reviewing it first. Settings and permissions need a stable app location."
@@ -565,17 +565,24 @@ func productSystemQuitReason(_ reason: OSType?) -> Bool {
         #endif
         // A competing Cua owner does not prevent opening this app's setup UI.
         if let resources = Bundle.main.resourceURL,
-           FileManager.default.isExecutableFile(atPath: resources.appendingPathComponent("runtime/node").path) {
+           FileManager.default.isExecutableFile(atPath: bundledCoreExecutable(resources).path) {
             do { try startSetup(openWindow: !UserDefaults.standard.bool(forKey: setupPreference)) }
             catch { setupStatusLine?.title = "Local setup unavailable; reopen Settings" }
         }
+    }
+    private func bundledCoreExecutable(_ resources: URL) -> URL {
+        let helper = resources.deletingLastPathComponent().appendingPathComponent("Helpers/Styx Core.app")
+        if FileManager.default.fileExists(atPath: helper.path) {
+            return helper.appendingPathComponent("Contents/MacOS/Styx Core")
+        }
+        return resources.appendingPathComponent("runtime/node")
     }
     func startSetup(openWindow: Bool) throws {
         setupOpenRequested = setupOpenRequested || openWindow
         if let url = setupURL { if setupOpenRequested { showSetup(url) }; return }
         guard setupProcess == nil else { return }
         guard let resources = Bundle.main.resourceURL else { throw HostError.daemonUnavailable }
-        let node = resources.appendingPathComponent("runtime/node")
+        let node = bundledCoreExecutable(resources)
         let launcher = resources.appendingPathComponent("onboarding/vnext/host/macos/setup-launcher.mjs")
         guard FileManager.default.isExecutableFile(atPath: node.path),
               FileManager.default.fileExists(atPath: launcher.path) else { throw HostError.daemonUnavailable }

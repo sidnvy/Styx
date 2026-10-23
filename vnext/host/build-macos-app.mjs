@@ -8,6 +8,8 @@ import {fileURLToPath} from 'node:url';
 import {crc32,normalizePresentation} from '../plugin/package.mjs';
 import {normalizeMacPlatformUpdate,stageMacSparkle,sparkleDistributionSigningPlan} from './macos/platform-update/sparkle-build.mjs';
 
+import {MAC_CORE_IDENTIFIER,MAC_CORE_RELATIVE,MAC_CORE_EXECUTABLE} from './macos/core-helper.mjs';
+
 export const MAC_BUNDLE_ID='app.styx.host';
 const SOURCE=fileURLToPath(new URL('./macos/Styx.swift',import.meta.url));
 const UPDATER=fileURLToPath(new URL('./macos/StyxUpdater.swift',import.meta.url));
@@ -117,7 +119,7 @@ export function macAdhocSigningPlan({app,files=[],sealApp=true}={}){
   // Signing the main executable also validates its enclosing bundle. Sign helpers first.
   const main=path.posix.join(app,'Contents/MacOS/Styx');
   const ordered=[...files].sort((a,b)=>Number(a===main)-Number(b===main)||b.split('/').length-a.split('/').length||a.localeCompare(b));
-  const steps=ordered.map(file=>['/usr/bin/codesign',['--force','--timestamp=none','--sign','-',file]]);
+  const steps=ordered.flatMap(file=>[file,...(file===path.posix.join(app,MAC_CORE_EXECUTABLE)?[path.posix.join(app,MAC_CORE_RELATIVE)]:[])].map(target=>['/usr/bin/codesign',['--force','--timestamp=none','--sign','-',target]]));
   if(sealApp)steps.push(['/usr/bin/codesign',['--force','--timestamp=none','--sign','-',app]],['/usr/bin/codesign',['--verify','--deep','--strict','--verbose=2',app]]);
   return steps;
 }
@@ -157,13 +159,14 @@ export function macLocalSigningPlan({app,localSigning,files=[],sealApp=true}={})
   const add=file=>{
     const relative=path.posix.relative(app,file);
     const identifier=file===app||relative==='Contents/MacOS/Styx'?MAC_BUNDLE_ID:
+      [MAC_CORE_RELATIVE,MAC_CORE_EXECUTABLE].includes(relative)?MAC_CORE_IDENTIFIER:
       MAC_BUNDLE_ID+'.code.'+createHash('sha256').update(relative).digest('hex').slice(0,32);
     const requirement=`identifier "${identifier}" and certificate leaf = H"${local.identitySha1}"`;
     steps.push(['/usr/bin/codesign',['--force','--timestamp=none','--keychain',local.keychain,'--sign',local.identitySha1,
       '--identifier',identifier,'--requirements','=designated => '+requirement,file]],
       ['/usr/bin/codesign',['--verify','--strict','-R','='+requirement,file]]);
   };
-  for(const file of ordered)add(file);
+  for(const file of ordered){add(file);if(file===path.posix.join(app,MAC_CORE_EXECUTABLE))add(path.posix.join(app,MAC_CORE_RELATIVE));}
   if(sealApp){add(app);steps.push(['/usr/bin/codesign',['--verify','--deep','--strict','--verbose=2',app]]);}
   return steps;
 }

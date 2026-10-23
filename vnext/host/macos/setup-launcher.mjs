@@ -7,6 +7,7 @@ import {spawnSync} from 'node:child_process';
 import {createHash} from 'node:crypto';
 import {fileURLToPath,pathToFileURL} from 'node:url';
 import {readLocalCertificatePin,verifyLocalCertificate} from '../macos-local-signing.mjs';
+import {coreRuntimeExecutable} from './core-helper.mjs';
 const assert=(ok,code)=>{if(!ok)throw Error(code)};
 function regular(file){const s=fs.lstatSync(file);assert(s.isFile()&&!s.isSymbolicLink(),'bundled_setup_regular_file_required');return file}
 function within(root,relative){
@@ -23,7 +24,7 @@ export function previewLayout(resourceRoot){
  assert(defaults&&Object.keys(defaults).length===3&&Object.keys(defaults).every(k=>['bundle','publisherKeyFile','publisherSha256'].includes(k))&&/^[a-f0-9]{64}$/.test(defaults.publisherSha256??''),'bundled_setup_artifact_defaults_invalid');
  assert(defaults.bundle==='host-bundle'&&defaults.publisherKeyFile==='publisher.pem','bundled_setup_artifact_locations_invalid');
  const bundle=within(resources,defaults.bundle);assert(fs.lstatSync(bundle).isDirectory(),'bundled_host_directory_required');
- return{resources,app,node:regular(within(resources,'runtime/node')),server:regular(within(resources,'onboarding/vnext/onboarding/server.mjs')),
+ return{resources,app,node:coreRuntimeExecutable(app),server:regular(within(resources,'onboarding/vnext/onboarding/server.mjs')),
   artifacts:{bundle,publisherKeyFile:regular(within(resources,defaults.publisherKeyFile)),publisherSha256:defaults.publisherSha256}};
 }
 export function previewTunnelClient(layout,{arch=process.arch}={}){

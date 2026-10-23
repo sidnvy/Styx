@@ -7,6 +7,7 @@ import {inspectHostPayloadCandidate,planHostPayloadMigration,applyHostPayloadMig
 import {verifyMacPreviewApp} from '../host/macos-preview-trust.mjs';
 import {requirePrivateDirectory,requirePrivateFile,requirePrivatePaths,ensurePrivateDirectory,openPrivateFile,configureWindowsAclHelper} from '../host/private-storage.mjs';
 import {acquireRecoveryGuard} from './recovery-guard.mjs';
+import {coreRuntimeExecutable,MAC_CORE_RELATIVE,MAC_CORE_EXECUTABLE} from '../host/macos/core-helper.mjs';
 const KIND='host-payload-handoff-v1',FILE='host-payload-handoff.json',PREPARE='host-payload-handoff-prepare.lock',EXECUTE='host-payload-handoff-execute.lock',TTL=15*60*1000;
 const id=x=>/^[a-f0-9]{32}$/.test(x??''),digest=x=>/^[a-f0-9]{64}$/.test(x??''),sha=b=>createHash('sha256').update(b).digest('hex');
 const fail=c=>{throw Error(c)},assert=(ok,c)=>{if(!ok)fail(c)},encode=x=>Buffer.from(JSON.stringify(x,null,2)+'\n');
@@ -26,7 +27,13 @@ function inventory(source,relative,files){const s=fs.lstatSync(source);assert(!s
 async function resolveApp({stateDir,config}){
  if(process.platform==='win32')return(await import('../host/windows/host-payload-handoff.mjs')).resolveWindowsHostPayloadHandoffApp({stateDir,config});
  assert(process.platform==='darwin','handoff_native_app_platform_required');const app=verifyMacPreviewApp(config.host?.macPreviewApp),resources=path.join(app.path,'Contents/Resources'),files=[];
- inventory(path.join(app.path,'Contents/MacOS/StyxUpdater'),'StyxUpdater',files);inventory(path.join(resources,'runtime/node'),'node',files);inventory(path.join(resources,'onboarding/vnext'),'vnext',files);
+ inventory(path.join(app.path,'Contents/MacOS/StyxUpdater'),'StyxUpdater',files);
+ const node=coreRuntimeExecutable(app.path);
+ // Keep the helper's Info.plist and resource seal with its executable when the
+ // updater leaves the original App. Legacy standalone runtimes stay supported.
+ if(node===path.join(app.path,MAC_CORE_EXECUTABLE))inventory(path.join(app.path,MAC_CORE_RELATIVE),'Styx Core.app',files);
+ else inventory(node,'node',files);
+ inventory(path.join(resources,'onboarding/vnext'),'vnext',files);
  return{appPath:app.path,bundle:path.join(resources,'host-bundle'),identity:app,files};
 }
 function safeFiles(app){assert(path.isAbsolute(app.appPath)&&path.isAbsolute(app.bundle)&&Array.isArray(app.files)&&app.files.length>0&&app.files.length<=12000,'handoff_updater_sources_invalid');const names=new Set();for(const f of app.files){assert(path.isAbsolute(f.source)&&typeof f.relative==='string'&&!path.posix.isAbsolute(f.relative)&&!f.relative.includes('\\')&&f.relative.split('/').every(p=>p&&p!=='.'&&p!=='..')&&!names.has(f.relative),'handoff_updater_source_invalid');names.add(f.relative)}return app}

@@ -8,6 +8,7 @@ import {createHash,generateKeyPairSync,createPublicKey,createPrivateKey,sign} fr
 import {fileURLToPath} from 'node:url';
 import {buildMacApp,macAppBuildMetadata,macAdhocSigningPlan,macLocalSigningPlan,normalizeMacLocalSigning,publicMacLocalSigning} from './build-macos-app.mjs';
 import {isSparkleFrameworkLink} from './macos/platform-update/sparkle-build.mjs';
+import {prepareCoreHelper} from './macos/core-helper.mjs';
 import {buildHostRelease} from './build-host-release.mjs';
 import {verifySignedRelease} from './installer.mjs';
 import {requirePrivateFile} from './private-storage.mjs';
@@ -167,7 +168,8 @@ export function buildMacPreview(config){
   for(const name of sourceFiles)tree(path.join(sourceRoot,...name.split('/')),path.join(source,...name.split('/')));
   fs.writeFileSync(path.join(resources,'source-files.json'),JSON.stringify({schema:1,revision:sourceRevision,files:sourceFiles.map(name=>({path:name,sha256:sha(path.join(sourceRoot,...name.split('/')))}))},null,2)+'\n');
   const dependencies=copyPreviewDependencies({sourceRoot,dependenciesDir,destination:source});
-  const runtime=path.join(resources,'runtime');fs.mkdirSync(runtime);fs.copyFileSync(nodeBinary,path.join(runtime,'node'));fs.chmodSync(path.join(runtime,'node'),0o755);
+  const runtime=path.join(resources,'runtime');fs.mkdirSync(runtime);
+  const coreHelper=prepareCoreHelper({app,nodeBinary,version,buildNumber:String(appMetadata.buildNumber)});
   fs.copyFileSync(path.join(path.dirname(nodeBinary),'LICENSE'),path.join(runtime,'LICENSE'));fs.copyFileSync(path.join(path.dirname(nodeBinary),'node-provenance.json'),path.join(runtime,'node-upstream.json'));
   const bundle=path.join(resources,'host-bundle');buildHostRelease({destination:bundle,version:releaseVersion,privateKeyFile:privateFile,codexBinary,cuaBinary,nodeBinary,sourceRoot,browserRuntime:true});
   fs.writeFileSync(path.join(resources,'publisher.pem'),publicPem);fs.writeFileSync(path.join(resources,'artifact-defaults.json'),JSON.stringify({bundle:'host-bundle',publisherKeyFile:'publisher.pem',publisherSha256:fingerprint},null,2)+'\n');
@@ -183,11 +185,11 @@ export function buildMacPreview(config){
   const plan=options=>localSigning===undefined?macAdhocSigningPlan(options):macLocalSigningPlan({...options,localSigning});
   const native=machOFiles(app,{preserveSparkle:platformUpdate!==undefined});for(const [command,args]of plan({app,files:native,sealApp:false}))execFileSync(command,args,{stdio:'pipe',timeout:30000});
   const transformation=localSigning===undefined?'macos_adhoc_codesign':'macos_local_certificate_codesign';
-  fs.writeFileSync(path.join(runtime,'node-provenance.json'),JSON.stringify({...nodeRecord,upstream_binary_sha256:nodeRecord.binary_sha256,binary_sha256:sha(path.join(runtime,'node')),transformation,upstream_verification_record:'node-upstream.json'},null,2)+'\n');
+  fs.writeFileSync(path.join(runtime,'node-provenance.json'),JSON.stringify({...nodeRecord,upstream_binary_sha256:nodeRecord.binary_sha256,binary_sha256:sha(coreHelper.executable),transformation,upstream_verification_record:'node-upstream.json'},null,2)+'\n');
   if(tunnelRecord)fs.writeFileSync(path.join(resources,'tunnel-client.json'),JSON.stringify({...tunnelRecord,path:'runtime/tunnel-client',upstream_binary_sha256:tunnelRecord.binary_sha256,binary_sha256:sha(path.join(runtime,'tunnel-client')),transformation},null,2)+'\n');
   finalizePreviewHostBundle(bundle,privateKey,{localSigning,publisherMode});verifySignedRelease(bundle,publicPem);
   scanPrivateMaterial(app,{allowSparkle:platformUpdate!==undefined});publicModes(app,{allowSparkle:platformUpdate!==undefined});for(const [command,args]of plan({app,files:[],sealApp:true}))execFileSync(command,args,{stdio:'pipe',timeout:30000});
-  execFileSync(path.join(runtime,'node'),['--version'],{stdio:'pipe',timeout:10000});
+  execFileSync(coreHelper.executable,['--version'],{stdio:'pipe',timeout:10000});
   fs.writeFileSync(path.join(image,'READ-ME.txt'),'Styx developer preview — '+(localSigning===undefined?'ad-hoc signed':'signed with a persistent local development certificate')+', NOT notarized.\nMove Styx.app to /Applications before launching. macOS may require an explicit Open Anyway action.\nNo Apple Developer identity, automatic TCC grants, paid signing or public account connection is claimed.\nThe app includes runtime, offline dependencies and a local-build signed Host payload.\n');
   fs.symlinkSync('/Applications',path.join(image,'Applications'));
   const zip='Styx-'+releaseVersion+'-macos-'+arch+'.zip';execFileSync('/usr/bin/ditto',['-c','-k','--keepParent',app,path.join(destination,zip)],{stdio:'pipe',timeout:180000});

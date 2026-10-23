@@ -40,7 +40,9 @@ final class UpdateController: NSObject, NSApplicationDelegate {
     }
     @objc private func retry() { guard !running else { return }; running = true; started = Date(); button.isHidden = true; cancelButton.isHidden = true; rollbackButton.isHidden = true; openButton.isHidden = true; spinner.startAnimation(nil); label.stringValue = text("正在完成更新", "Finishing the update"); detail.stringValue = text("正在等待 Styx 退出…", "Waiting for Styx to quit…"); execute() }
     private func command(_ arguments: [String], completion: @escaping (Int32, [String: Any]?) -> Void) {
-        let executable = directory.appendingPathComponent("node"), cli = directory.appendingPathComponent("vnext/onboarding/cli.mjs")
+        let helper = directory.appendingPathComponent("Styx Core.app")
+        let executable = FileManager.default.fileExists(atPath: helper.path) ? helper.appendingPathComponent("Contents/MacOS/Styx Core") : directory.appendingPathComponent("node")
+        let cli = directory.appendingPathComponent("vnext/onboarding/cli.mjs")
         DispatchQueue.global(qos: .userInitiated).async {
             let process = Process(), output = Pipe(), errors = Pipe()
             process.executableURL = executable; process.arguments = [cli.path] + arguments
