@@ -123,7 +123,7 @@ export function observeOwnedHostSettlement(controller,ticketId,{gatewayAdmission
 export function verifyOwnedHostSettlement(proof,{deviceId,lanes,ticketId,gatewayAdmission}={}){
  const record=settlementProofs.get(proof);if(!record)return false;
  const {controller,owner,fence,identity}=record;
- if(record.gatewayAdmission!==gatewayAdmission||(gatewayAdmission&&gatewayAdmission.tickets?.get(ticketId)!==record.gatewayFence))return false;
+ if(record.gatewayAdmission!==gatewayAdmission||(gatewayAdmission&&(gatewayAdmission.tickets?.get(ticketId)!==record.gatewayFence||record.gatewayFence.scope!=='all')))return false;
  if(deviceId!==owner.deviceId||ticketId!==proof.ticketId||!Array.isArray(lanes)||!lanes.length||lanes.some(l=>!owner.lanes.has(l))||
     controller.tickets.get(ticketId)!==fence||fence.scope!=='all')return false;
  try{return controller.status(ticketId).status==='ready'&&controller.observe('all').identity===identity}catch{return false}
