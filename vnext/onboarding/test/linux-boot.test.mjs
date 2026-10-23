@@ -55,3 +55,16 @@ test('CLI and background share one read-only projection; no contradictory boot f
  assert.deepEqual(actual,await readDeploymentLinuxBoot(state));
  assert.equal(actual.physicalPreloginAcceptance,'NOT RUN');
 });
+
+test('slow native logind observation times out without blocking UI timers or claiming configuration',{skip:process.platform!=='linux'},async()=>{
+ const {observeLinuxBootManager}=await import('../linux-boot.mjs');
+ const {execFile}=await import('node:child_process');
+ let ticks=0;const timer=setInterval(()=>ticks++,10),start=performance.now();
+ try{
+  const result=await observeLinuxBootManager({timeout:80,run(binary,args,options,callback){
+   assert.equal(binary,'/usr/bin/loginctl');assert.equal(options.killSignal,'SIGKILL');
+   return execFile(process.execPath,['-e','setInterval(()=>{},1000)'],options,callback);
+  }});
+  assert.equal(result.systemBootWithoutLogin,'unknown');assert.equal(result.status,'unavailable');assert.ok(ticks>1,'event loop must stay responsive');assert.ok(performance.now()-start<2000);
+ }finally{clearInterval(timer);}
+});

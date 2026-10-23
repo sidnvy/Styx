@@ -1,4 +1,5 @@
 // Read-only deployment projection. Linger is OS policy, never another role config.
+import {execFile} from 'node:child_process';
 import {linuxUserManagerStatus} from '../host/linux-service.mjs';
 
 export async function readDeploymentLinuxBoot(stateDir,operations={}){
@@ -8,7 +9,15 @@ export async function readDeploymentLinuxBoot(stateDir,operations={}){
  return observed.linuxBoot;
 }
 
-export function projectLinuxBoot(stateDir,deployment,observed,{manager=linuxUserManagerStatus(),uid=process.getuid()}={}){
+// Bound each refresh without blocking the HTTP/UI event loop. No cached success.
+export async function observeLinuxBootManager({uid=process.getuid(),run=execFile,timeout=750}={}){
+ if(!Number.isInteger(uid)||uid<0)throw Error('invalid_user_id');
+ let output,error;
+ await new Promise(resolve=>{run('/usr/bin/loginctl',['show-user',String(uid),'-p','Linger','-p','State','-p','RuntimePath','--no-pager'],{encoding:'utf8',timeout,killSignal:'SIGKILL',maxBuffer:8192},(e,text)=>{error=e;output=text;resolve()});});
+ return linuxUserManagerStatus({uid,run(){if(error)throw error;return output;}});
+}
+
+export function projectLinuxBoot(stateDir,deployment,observed,{manager,uid=process.getuid()}={}){
  const roles={};const plan=[];
  for(const [role,requested] of [['gateway',deployment.mode==='create-local'],['host',deployment.roles?.host!=='disabled']]){
   if(!requested){roles[role]={startup:'not_applicable'};continue;}
