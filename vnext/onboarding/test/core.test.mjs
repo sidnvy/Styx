@@ -377,3 +377,25 @@ test('join keeps Exec available when the owner declines requested Browser and Co
  assert.equal(state.roles.browser,'requested');assert.equal(state.steps.some(step=>step.id.startsWith('gateway.')),false);
  assert.equal(fs.existsSync(path.join(f.stateDir,'gateway')),false);
 });
+
+test('a real claim in a multi-step batch stops before doctor when the trusted runtime target needs reconciliation',{skip:process.platform!=='linux',timeout:30000},async t=>{
+ const {registerDeploymentRuntimeGuard}=await import('../runtime-guard.mjs');
+ const f=await fixture(t);createDeployment(f.configFile,{stateDir:f.stateDir});
+ const initial=await advanceDeployment(f.stateDir,{authorize:['gateway.prepare','gateway.start','gateway.verify','host.prepare','host.invite','host.request','host.claim']});
+ const pending=steps(initial)['host.request'].evidence;
+ const owner=JSON.parse(fs.readFileSync(path.join(f.stateDir,'gateway/owner.json')));
+ await ownerCommand(owner,'approve',[pending.request_id,pending.fingerprint]);
+ const identity=fs.readFileSync(path.join(f.config.host.baseDir,'device/identity.json'));
+ let observations=0;
+ const dispose=registerDeploymentRuntimeGuard(f.stateDir,async({stepId})=>{
+  observations++;assert.equal(stepId,'host.doctor');
+  assert.equal(steps(readDeployment(f.stateDir))['host.claim'].status,'succeeded');
+  throw Error('host_payload_update_required');
+ });t.after(dispose);
+ await assert.rejects(advanceDeployment(f.stateDir,{authorize:['host.claim','host.doctor','host.service.install','host.service.start']}),/host_payload_update_required/);
+ const state=steps(readDeployment(f.stateDir));assert.equal(observations,1);
+ assert.equal(state['host.claim'].status,'succeeded');
+ for(const id of ['host.doctor','host.service.install','host.service.start'])assert.equal(state[id].status,'pending');
+ assert.deepEqual(fs.readFileSync(path.join(f.config.host.baseDir,'device/identity.json')),identity);
+ assert.equal(fs.existsSync(path.join(f.stateDir,'advance.lock')),false);
+});

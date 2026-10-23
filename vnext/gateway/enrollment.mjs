@@ -297,6 +297,8 @@ export class EnrollmentController {
     assert(req&&req.claim_hash===sha(claim_secret) &&
       (req.status==='approved'||req.status==='claimed') &&
       req.claim_expires_at>this.now(),'claim_unavailable',403);
+    const device=this.db.devices.find(x=>x.id===req.device_id);
+    assert(device?.status==='approved','device_revoked',403);
     const tokenFile=path.join(this.root,'tokens',req.device_id+'.token');
     const capability=secretFile(tokenFile);
     const expected=createHmac('sha256',capability)
@@ -309,7 +311,9 @@ export class EnrollmentController {
       req.claimed_at=this.now();
       this.save();
     }
-    return {status:'ready_to_connect',device_id:req.device_id};
+    return {status:'ready_to_connect',device_id:req.device_id,
+      approved_capabilities:{exec:true,computer:device.target.computer.enabled,
+        browser:device.target.browser?.enabled===true}};
   }
   devices(){
     return this.db.devices.map(x=>({

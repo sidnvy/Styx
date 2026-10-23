@@ -1,4 +1,5 @@
 import fs from 'node:fs';
+import {isDeepStrictEqual} from 'node:util';
 import {requirePrivateFile,ensurePrivateDirectory,writePrivateFile} from '../shared/private-file.mjs';
 import path from 'node:path';
 import {
@@ -167,27 +168,39 @@ export async function requestEnrollment(config,invitation){
     fingerprint:identity.fingerprint,status:'pending',expires_at:response.body.expires_at,
     comparison_code:pairingComparisonCode({gatewayOrigin:new URL(cfg.gateway_url).origin,certificateSha256:response.tlsCertificateSha256,requestId:response.body.request_id,deviceFingerprint:identity.fingerprint})};
 }
+function validateCapabilities(capabilities,cfg){
+  assert(capabilities?.exec===true&&typeof capabilities.computer==='boolean'&&
+    (!capabilities.computer||cfg.computer_requested===true)&&
+    (capabilities.browser===undefined||typeof capabilities.browser==='boolean')&&
+    (!capabilities.browser||cfg.browser_requested===true),'invalid_claim_capabilities');
+}
 export async function claimEnrollment(config){
   const cfg=configOf(config);
   protectedDir(cfg.storage_dir);
   const record=JSON.parse(protectedRead(path.join(cfg.storage_dir,'identity.json')));
   const request=JSON.parse(protectedRead(path.join(cfg.storage_dir,'pending.json')));
   const body={request_id:request.request_id,claim_secret:request.claim_secret};
-  const answer=await enrollmentRequest(cfg,'claim',body);
-  if(answer.body.status==='pending')return {status:'pending'};
-  assert(answer.body.status==='approved'&&
-    answer.body.device_id===record.device_id&&
-    answer.body.crypto==='RSA-OAEP-SHA256','invalid_claim_identity');
-  assert(answer.body.approved_capabilities?.exec===true&&typeof answer.body.approved_capabilities.computer==='boolean'&&(answer.body.approved_capabilities.browser===undefined||typeof answer.body.approved_capabilities.browser==='boolean')&&(!answer.body.approved_capabilities.browser||cfg.browser_requested===true),'invalid_claim_capabilities');
-  const privateKey=protectedRead(path.join(cfg.storage_dir,'identity.pem'));
-  const token=privateDecrypt({key:privateKey,padding:constants.RSA_PKCS1_OAEP_PADDING,
-    oaepHash:'sha256'},Buffer.from(answer.body.encrypted_credential,'base64url'))
-    .toString('utf8');
-  assert(TOKEN.test(token),'invalid_unwrapped_token');
   const tokenFile=path.join(cfg.storage_dir,'host.token');
-  if(fs.existsSync(tokenFile)) {
-    assert(protectedRead(tokenFile).trim()===token,'approved_token_changed');
-  } else {
+  let token,approvedCapabilities;
+  if(fs.existsSync(tokenFile)){
+    // A previous attempt may have confirmed remotely before its response was
+    // received. Prove possession of the same credential through the existing
+    // confirmation endpoint; never request a replacement identity or token.
+    token=protectedRead(tokenFile).trim();
+    assert(TOKEN.test(token),'invalid_stored_token');
+  }else{
+    const answer=await enrollmentRequest(cfg,'claim',body);
+    if(answer.body.status==='pending')return {status:'pending'};
+    assert(answer.body.status==='approved'&&
+      answer.body.device_id===record.device_id&&
+      answer.body.crypto==='RSA-OAEP-SHA256','invalid_claim_identity');
+    approvedCapabilities=answer.body.approved_capabilities;
+    validateCapabilities(approvedCapabilities,cfg);
+    const privateKey=protectedRead(path.join(cfg.storage_dir,'identity.pem'));
+    token=privateDecrypt({key:privateKey,padding:constants.RSA_PKCS1_OAEP_PADDING,
+      oaepHash:'sha256'},Buffer.from(answer.body.encrypted_credential,'base64url'))
+      .toString('utf8');
+    assert(TOKEN.test(token),'invalid_unwrapped_token');
     privateWrite(tokenFile,token+'\n');
   }
   const signature=createHmac('sha256',token).update(
@@ -197,6 +210,12 @@ export async function claimEnrollment(config){
   });
   assert(confirmed.body.status==='ready_to_connect' &&
     confirmed.body.device_id===record.device_id,'claim_not_confirmed');
+  // Older Gateways can complete a first claim using the encrypted response.
+  // Recovery needs authenticated capabilities from confirm; never infer them
+  // from requested capabilities or a partially written local configuration.
+  approvedCapabilities=confirmed.body.approved_capabilities??approvedCapabilities;
+  assert(approvedCapabilities,'claim_recovery_gateway_upgrade_required');
+  validateCapabilities(approvedCapabilities,cfg);
   const gatewayURL=new URL(cfg.gateway_url);
   gatewayURL.protocol='wss:';
   const hostConfig={
@@ -206,8 +225,8 @@ export async function claimEnrollment(config){
     ...(cfg.gateway_ca_file?{gateway_ca_file:cfg.gateway_ca_file}:{}),
     exec:{binary:cfg.exec_binary,cwd:cfg.cwd,
       ...(cfg.codex_home?{env:{CODEX_HOME:cfg.codex_home}}:{})},
-    ...(answer.body.approved_capabilities.browser?{browser:{...cfg.browser_config}}:{}),
-    ...(answer.body.approved_capabilities.computer?{
+    ...(approvedCapabilities.browser?{browser:{...cfg.browser_config}}:{}),
+    ...(approvedCapabilities.computer?{
       computer:{
         enabled:true,binary:cfg.computer_binary,
         connections:1,
@@ -219,12 +238,12 @@ export async function claimEnrollment(config){
   const hostFile=path.join(cfg.storage_dir,'host.json');
   if(fs.existsSync(hostFile)){
     const prior=JSON.parse(protectedRead(hostFile));
-    assert(prior.host_id===hostConfig.host_id,'existing_host_config_mismatch');
+    assert(isDeepStrictEqual(prior,hostConfig),'existing_host_config_mismatch');
   } else {
     privateWrite(hostFile,JSON.stringify(hostConfig,null,2)+'\n');
   }
   return {status:'ready_to_connect',device_id:record.device_id,
-    capabilities:answer.body.approved_capabilities,
+    capabilities:approvedCapabilities,
     local_host_config:hostFile};
 }
 

@@ -667,3 +667,62 @@ test('Browser-only v2 grant preserves desktop grant, identity and credentials; v
  const restored=new EnrollmentController({rootDir:f.enrollDir,adminTokenFile:path.join(f.tmp,'admin.token'),registry:new TargetRegistry({version:1,targets:[]})});
  assert.equal(restored.devices()[0].capabilities.browser,true);assert.equal(restored.devices()[0].capabilities.computer,false);
 });
+
+for(const fault of ['before-confirm','after-confirm'])test(`same-identity enrollment recovers ${fault} without another claim or credential`,{timeout:25000},async t=>{
+ const f=await fixture(t),cfg=f.config('recover-'+fault,false);
+ const invite=(await f.admin('invitations',{})).body;
+ const pending=await requestEnrollment(cfg,invite.invitation);
+ await f.admin('approve',{request_id:pending.request_id,fingerprint:pending.fingerprint,enable_computer:false});
+ const identity=await fs.readFile(path.join(cfg.storage_dir,'identity.json'));
+ const confirm=f.controller.confirm.bind(f.controller);
+ f.controller.confirm=body=>{if(fault==='after-confirm')confirm(body);throw Error('injected_confirmation_response_loss')};
+ await assert.rejects(claimEnrollment(cfg));
+ const token=await fs.readFile(path.join(cfg.storage_dir,'host.token'));
+ await assert.rejects(fs.stat(path.join(cfg.storage_dir,'host.json')),e=>e.code==='ENOENT');
+ f.controller.confirm=confirm;
+ const claim=f.controller.claim.bind(f.controller);let newClaims=0;
+ f.controller.claim=body=>{newClaims++;return claim(body)};
+ const recovered=await claimEnrollment(cfg);
+ assert.equal(recovered.status,'ready_to_connect');assert.equal(recovered.device_id,pending.device_id);
+ assert.equal(newClaims,0,'local token resumes authenticated confirmation, not encrypted claim');
+ assert.deepEqual(await fs.readFile(path.join(cfg.storage_dir,'identity.json')),identity);
+ assert.deepEqual(await fs.readFile(path.join(cfg.storage_dir,'host.token')),token);
+ const configBytes=await fs.readFile(recovered.local_host_config);
+ // Also covers host.json committed before the enclosing Core journal commit.
+ assert.equal((await claimEnrollment(cfg)).status,'ready_to_connect');
+ assert.deepEqual(await fs.readFile(recovered.local_host_config),configBytes);
+ assert.equal(f.controller.db.devices.length,1);
+ f.controller.revoke({device_id:pending.device_id});
+ await assert.rejects(claimEnrollment(cfg),/claim_unavailable|device_revoked/);
+ assert.deepEqual(await fs.readFile(recovered.local_host_config),configBytes,'rejection does not mutate local committed config');
+});
+
+test('enrollment recovery rejects wrong token, expired confirmation and mismatched local config',{timeout:25000},async t=>{
+ const f=await fixture(t),cfg=f.config('recovery-negative',false);
+ const invite=(await f.admin('invitations',{})).body,pending=await requestEnrollment(cfg,invite.invitation);
+ await f.admin('approve',{request_id:pending.request_id,fingerprint:pending.fingerprint,enable_computer:false});
+ const ready=await claimEnrollment(cfg),tokenFile=path.join(cfg.storage_dir,'host.token'),token=await fs.readFile(tokenFile);
+ await fs.writeFile(tokenFile,randomBytes(32).toString('base64url')+'\n');
+ await assert.rejects(claimEnrollment(cfg),/confirmation_failed/);
+ await fs.writeFile(tokenFile,token);
+ const bytes=await fs.readFile(ready.local_host_config),changed=JSON.parse(bytes);changed.gateway_ws_url='wss://example.invalid/';
+ await fs.writeFile(ready.local_host_config,JSON.stringify(changed));
+ await assert.rejects(claimEnrollment(cfg),/existing_host_config_mismatch/);
+ assert.equal(JSON.parse(await fs.readFile(ready.local_host_config)).gateway_ws_url,changed.gateway_ws_url);
+ await fs.writeFile(ready.local_host_config,bytes);
+ f.controller.now=()=>Date.now()+24*60*60*1000;
+ await assert.rejects(claimEnrollment(cfg),/claim_unavailable/);
+});
+
+test('legacy Gateway confirmation supports first claim but never guesses recovery capabilities',{timeout:25000},async t=>{
+ const f=await fixture(t),cfg=f.config('legacy-confirm',false);
+ const invite=(await f.admin('invitations',{})).body,pending=await requestEnrollment(cfg,invite.invitation);
+ await f.admin('approve',{request_id:pending.request_id,fingerprint:pending.fingerprint,enable_computer:false});
+ const confirm=f.controller.confirm.bind(f.controller);
+ f.controller.confirm=body=>{const result=confirm(body);delete result.approved_capabilities;return result};
+ const first=await claimEnrollment(cfg);assert.equal(first.status,'ready_to_connect');
+ const config=await fs.readFile(first.local_host_config),identity=await fs.readFile(path.join(cfg.storage_dir,'identity.json'));
+ await assert.rejects(claimEnrollment(cfg),/claim_recovery_gateway_upgrade_required/);
+ assert.deepEqual(await fs.readFile(first.local_host_config),config);
+ assert.deepEqual(await fs.readFile(path.join(cfg.storage_dir,'identity.json')),identity);
+});
