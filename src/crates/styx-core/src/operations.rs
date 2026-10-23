@@ -40,12 +40,52 @@ struct Record {
     terminal_at: Option<MonotonicMillis>,
     accounting_bytes: usize,
 }
+/// One admission decision, consumed by an executor adapter. No public
+/// constructor, Clone or Deserialize: an old ID cannot manufacture new authority.
+///
+/// ```compile_fail
+/// fn duplicate(permit: styx_core::operations::DispatchPermit) {
+///     let _another = permit.clone();
+/// }
+/// ```
+/// ```compile_fail
+/// fn requires_copy<T: Copy>() {}
+/// requires_copy::<styx_core::operations::DispatchPermit>();
+/// ```
+#[derive(PartialEq, Eq)]
+pub struct DispatchPermit {
+    id: OperationId,
+    owner: OwnerLease,
+    context: PreparedContext,
+    payload: Box<[u8]>,
+}
+impl DispatchPermit {
+    pub fn id(&self) -> &OperationId {
+        &self.id
+    }
+    pub fn owner(&self) -> &OwnerLease {
+        &self.owner
+    }
+    pub fn context(&self) -> &PreparedContext {
+        &self.context
+    }
+    /// Exact prepared bytes. Deliberately omitted from Debug/serialization.
+    pub fn payload(&self) -> &[u8] {
+        &self.payload
+    }
+}
+impl std::fmt::Debug for DispatchPermit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("DispatchPermit")
+            .field("operation", &self.id)
+            .field("capability", &self.context.capability)
+            .field("payload", &"[REDACTED]")
+            .finish()
+    }
+}
 #[derive(Debug, PartialEq, Eq)]
 pub enum DispatchDisposition {
-    ExecuteOnce {
-        payload: Box<[u8]>,
-        context: PreparedContext,
-    },
+    ExecuteOnce(DispatchPermit),
     Existing(OperationSnapshot),
 }
 
@@ -226,10 +266,12 @@ impl OperationLedger {
         record.snapshot.state = OperationState::Dispatched;
         record.snapshot.liveness = ExecutionLiveness::Unknown;
         record.snapshot.output_drain = OutputDrain::Unknown;
-        Ok(DispatchDisposition::ExecuteOnce {
+        Ok(DispatchDisposition::ExecuteOnce(DispatchPermit {
+            id: id.clone(),
+            owner: owner.clone(),
             payload: record.payload.clone(),
             context: record.context.clone(),
-        })
+        }))
     }
     pub fn inspect(
         &self,
@@ -289,6 +331,18 @@ impl OperationLedger {
             return Err(ErrorCategory::StateConflict);
         }
         match fact {
+            ExecutorFact::NotDispatched => {
+                if record.snapshot.state != OperationState::Dispatched
+                    || record.snapshot.liveness != ExecutionLiveness::Unknown
+                    || record.snapshot.output_drain != OutputDrain::Unknown
+                {
+                    return Err(ErrorCategory::StateConflict);
+                }
+                record.snapshot.state = OperationState::Failed;
+                record.snapshot.liveness = ExecutionLiveness::NotStarted;
+                record.snapshot.output_drain = OutputDrain::NotOpened;
+                record.terminal_at = Some(now);
+            }
             ExecutorFact::OutputDrained => unreachable!("handled above"),
             ExecutorFact::Running => {
                 if record.snapshot.liveness == ExecutionLiveness::Exited {
@@ -419,8 +473,13 @@ impl OperationLedger {
 
 #[derive(Debug, Clone, Copy)]
 pub enum ExecutorFact {
+    /// Adapter proves refusal before sending any start/action bytes; never infer
+    /// this from an acknowledgement timeout or a generic remote error response.
+    NotDispatched,
     OutputDrained,
     Running,
-    Exited { successful: bool },
+    Exited {
+        successful: bool,
+    },
     TerminationConfirmed,
 }

@@ -30,5 +30,14 @@ futures-util.workspace = true
 
 encoding_rs.workspace = true
 
+rmcp.workspace = true
+http.workspace = true
+http-body.workspace = true
+http-body-util.workspace = true
+bytes.workspace = true
+
+[dev-dependencies]
+rmcp = { workspace = true, features = ["client"] }
+
 [lints]
 workspace = true

@@ -56,8 +56,8 @@ fn ledger() -> (OperationLedger, OwnerLease) {
 struct EffectProbe(Vec<Vec<u8>>);
 impl EffectProbe {
     fn deliver(&mut self, instruction: DispatchDisposition) {
-        if let DispatchDisposition::ExecuteOnce { payload, .. } = instruction {
-            self.0.push(payload.into_vec());
+        if let DispatchDisposition::ExecuteOnce(permit) = instruction {
+            self.0.push(permit.payload().to_vec());
         }
     }
 }
@@ -473,5 +473,98 @@ fn maintenance_fences_new_work_but_permits_cancellation_and_real_settlement() {
     assert!(
         l.prepare(&a, context(), b"resumed".to_vec(), MonotonicMillis(5))
             .is_ok()
+    );
+}
+
+#[test]
+fn proven_pre_dispatch_refusal_settles_without_permitting_replay_or_rewriting_running_work() {
+    let (mut l, a) = ledger();
+    let refused = l
+        .prepare(
+            &a,
+            context(),
+            b"refused-before-send".to_vec(),
+            MonotonicMillis(0),
+        )
+        .unwrap();
+    let permit = l
+        .dispatch(
+            &a,
+            &refused.id,
+            refused.payload_digest,
+            &facts(),
+            MonotonicMillis(1),
+        )
+        .unwrap();
+    // Independent fake backend deliberately emits no action bytes. Its pre-send
+    // refusal is distinct from a remote error or a lost acknowledgement.
+    assert!(matches!(permit, DispatchDisposition::ExecuteOnce(_)));
+    drop(permit);
+    let settled = l
+        .record_executor_fact(&refused.id, ExecutorFact::NotDispatched, MonotonicMillis(2))
+        .unwrap();
+    assert_eq!(settled.state, OperationState::Failed);
+    assert_eq!(settled.liveness, ExecutionLiveness::NotStarted);
+    assert_eq!(settled.output_drain, OutputDrain::NotOpened);
+    let mut probe = EffectProbe::default();
+    probe.deliver(
+        l.dispatch(
+            &a,
+            &refused.id,
+            refused.payload_digest,
+            &facts(),
+            MonotonicMillis(3),
+        )
+        .unwrap(),
+    );
+    assert!(probe.0.is_empty());
+    l.begin_maintenance();
+    assert!(l.maintenance_settled());
+    l.end_maintenance();
+    assert_eq!(l.reap(MonotonicMillis(12)), 1);
+    assert_eq!(
+        l.dispatch(
+            &a,
+            &refused.id,
+            refused.payload_digest,
+            &facts(),
+            MonotonicMillis(13)
+        ),
+        Err(ErrorCategory::StaleOperation)
+    );
+    for already_unknown in [false, true] {
+        let active = l
+            .prepare(&a, context(), b"already-sent".to_vec(), MonotonicMillis(14))
+            .unwrap();
+        probe.deliver(
+            l.dispatch(
+                &a,
+                &active.id,
+                active.payload_digest,
+                &facts(),
+                MonotonicMillis(15),
+            )
+            .unwrap(),
+        );
+        if already_unknown {
+            l.mark_result_unknown(&active.id).unwrap();
+        } else {
+            l.record_executor_fact(&active.id, ExecutorFact::Running, MonotonicMillis(15))
+                .unwrap();
+        }
+        assert_eq!(
+            l.record_executor_fact(&active.id, ExecutorFact::NotDispatched, MonotonicMillis(16)),
+            Err(ErrorCategory::StateConflict)
+        );
+        assert_ne!(
+            l.inspect(&a, &active.id, active.payload_digest)
+                .unwrap()
+                .liveness,
+            ExecutionLiveness::NotStarted
+        );
+    }
+    assert_eq!(
+        probe.0,
+        [b"already-sent".to_vec(), b"already-sent".to_vec()]
     );
 }

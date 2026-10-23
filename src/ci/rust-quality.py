@@ -21,6 +21,7 @@ from datetime import datetime, timezone
 ROOT = Path(__file__).resolve().parents[2]
 POLICY = Path(__file__).with_name("rust-dependency-policy.json")
 CRYPTO_TEST = "crypto::tests::legacy_node22_bidirectional_crypto_batch"
+CODEX_TEST = "providers::codex::tests::real_codex_native_stdio_complete_scenario_batch"
 
 
 def sha(path):
@@ -44,7 +45,7 @@ def source_inputs(root):
     files = [root / "Cargo.toml", root / "Cargo.lock", root / "rust-toolchain.toml", POLICY, Path(__file__).resolve()]
     for base in (root / "src/crates", root / "src/acceptance/oracles"):
         files += [p for p in base.rglob("*") if p.is_file() and p.suffix in {".rs", ".toml", ".py", ".json", ".mjs"}]
-    files += [root / "src/shared/enrollment-protocol.mjs", *[root / "src/docs/rust-core-rewrite" / name for name in ("LEGACY-WIRE-VECTORS-V1.json", "CONTRACT-V1.json", "FEATURE-INVENTORY-V1.json")]]
+    files += [root / "src/shared/enrollment-protocol.mjs", *[root / "src/docs/rust-core-rewrite" / name for name in ("LEGACY-WIRE-VECTORS-V1.json", "CONTRACT-V1.json", "FEATURE-INVENTORY-V1.json", "PUBLIC-MCP-V1.json")]]
     return {str(p.relative_to(root)): sha(p) for p in sorted(set(files))}
 
 
@@ -198,6 +199,19 @@ def execute(args):
                 crypto = gate.run("node22-crypto", ["cargo", "test", "-p", "styx-runtime", "--locked", "--offline", CRYPTO_TEST, "--", "--ignored", "--exact"], extra_env={"STYX_TEST_NODE22": str(node)})
                 gate.semantic(crypto, [] if "1 passed; 0 failed" in gate.read("node22-crypto") else ["exact_crypto_case_not_executed"])
                 receipt["legacy_node22_interop"] = crypto["status"]
+        receipt["real_codex_interop"] = "NOT_RUN_explicit_codex_not_supplied"
+        if args.codex_bin:
+            codex = Path(args.codex_bin)
+            if sys.platform != "linux" or not codex.is_absolute() or not codex.is_file() or not os.access(codex, os.X_OK):
+                raise ValueError("linux_slice_requires_explicit_absolute_codex_executable")
+            receipt["codex_input"] = {"path": str(codex), "sha256": sha(codex)}
+            gate.run("codex-version", [str(codex), "--version"], timeout=30)
+            exec_root = evidence / "owned-native-exec"
+            exec_root.mkdir(mode=0o700)
+            native = gate.run("real-codex", ["cargo", "test", "-p", "styx-runtime", "--locked", "--offline", CODEX_TEST, "--", "--ignored", "--exact", "--nocapture"], timeout=120,
+                extra_env={"STYX_TEST_CODEX": str(codex), "STYX_TEST_EXEC_ROOT": str(exec_root)})
+            gate.semantic(native, [] if "1 passed; 0 failed" in gate.read("real-codex") else ["exact_real_codex_case_not_executed"])
+            receipt["real_codex_interop"] = native["status"]
         gate.run("python-oracles", [sys.executable, "-W", "error::ResourceWarning", "-m", "unittest", "discover", "-s", "src/acceptance/oracles", "-p", "test_oracles.py", "-v"], timeout=120)
         build = gate.run("cli-build", ["cargo", "build", "-p", "styx", "--locked", "--offline"])
         if build["status"] == "PASS":
@@ -230,13 +244,17 @@ def execute(args):
             receipt["changed_inputs"] = sorted(k for k in set(initial or {}) | set(final) if (initial or {}).get(k) != final.get(k))
             if args.node22 and "node22_input" in receipt:
                 receipt["node22_stability"] = "PASS" if sha(args.node22) == receipt["node22_input"]["sha256"] else "FAIL"
+            if args.codex_bin and "codex_input" in receipt:
+                receipt["codex_stability"] = "PASS" if sha(args.codex_bin) == receipt["codex_input"]["sha256"] else "FAIL"
         except OSError:
             receipt["input_stability"] = "FAIL"
         required = {"git-head", "git-status", "git-head-end", "git-status-end", "rustc-version", "cargo-version", "dependency-metadata", "format", "clippy", "workspace-tests", "python-oracles", "cli-build", "cli-help", "cli-version", "cli-build-info", "cli-unimplemented-reject"}
         if args.node22:
             required |= {"node22-version", "node22-crypto"}
+        if args.codex_bin:
+            required |= {"codex-version", "real-codex"}
         receipt["missing_required_checks"] = sorted(required - {x["name"] for x in gate.checks})
-        receipt["status"] = "PASS" if not receipt["missing_required_checks"] and gate.checks and all(x["status"] == "PASS" for x in gate.checks) and receipt.get("input_stability") == "PASS" and receipt.get("git_stability") == "PASS" and receipt.get("node22_stability", "PASS") == "PASS" and "failure" not in receipt else "FAIL"
+        receipt["status"] = "PASS" if not receipt["missing_required_checks"] and gate.checks and all(x["status"] == "PASS" for x in gate.checks) and receipt.get("input_stability") == "PASS" and receipt.get("git_stability") == "PASS" and receipt.get("node22_stability", "PASS") == "PASS" and receipt.get("codex_stability", "PASS") == "PASS" and "failure" not in receipt else "FAIL"
         receipt["completed_at"] = now()
         (evidence / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
         print(json.dumps({"status": receipt["status"], "receipt": str(evidence / "receipt.json"), "scope": "foundation_development_only"}), flush=True)
@@ -248,6 +266,7 @@ def main():
     parser.add_argument("--evidence", required=True, help="fresh absolute external evidence directory")
     parser.add_argument("--target-dir", help="absolute external Cargo build cache; reused only by explicit choice")
     parser.add_argument("--node22", help="absolute explicit Node22 executable for real legacy crypto interop")
+    parser.add_argument("--codex-bin", help="explicit native Codex binary for the Linux owned-executor slice; not platform release acceptance")
     args = parser.parse_args()
     path = Path(args.evidence)
     if path.is_relative_to(ROOT) or not path.is_absolute():

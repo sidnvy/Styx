@@ -75,6 +75,10 @@ pub enum ProcessIdentity {
 }
 
 impl ProcessIdentity {
+    /// Observe kernel birth identity; callers must still bind it to an authenticated OS peer.
+    pub fn observe(pid: u32) -> Result<Self> {
+        platform::process_identity(pid)
+    }
     pub fn current() -> Result<Self> {
         platform::process_identity(std::process::id())
     }

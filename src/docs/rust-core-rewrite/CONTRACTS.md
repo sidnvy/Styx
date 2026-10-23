@@ -82,6 +82,7 @@ Operation outcome、进程liveness和输出drained分别记录。`Cancelled`只�
 - readonly观察可以在明确错误类别下重新观察；click/type/write/process-start等不能因timeout/IPC断线自动重放。
 - 新协议先由Host `prepare_operation`签发token并登记Reserved，再`dispatch_operation`；不允许client自造一个未见ID就触发执行。token包含随机HostGeneration、OwnerEpoch和单调sequence，绑定owner/payload digest；counter溢出须换epoch，不能回绕复用。prepare不派发副作用，丢回复可安全查询/放弃reservation。
 - 重复token+同owner+同payload只返回既有记录/Unknown，不再次派发；payload不同拒绝。只有当前ledger的Reserved可首次dispatch。终态记录有界保留后淘汰，淘汰token不再Reserved，后续一律Expired/Stale而非“新请求”；这样不需要无限保存used-ID集合。Host重启生成新HostGeneration，所有旧token失效；旧操作可协调结果但不能自动创建新token重放。活工作或执行liveness仍Unknown的记录不能为腾位置静默淘汰，容量不足先拒绝新reservation。结果Unknown但已证明执行终止的记录可按已声明audit/retention政策归档；过期后仍不能重新dispatch该token。
+- Rust内部首次dispatch返回不可Clone、不可Deserialize、无公开构造器的`DispatchPermit`；executor按值消费并仅执行其中prepared payload，不接受另一个raw operation ID/payload作为start后门。Core保留token状态权威；provider在已确认exit且drain后可退休实际资源，不能自行重新签发许可。该所有权约束不替代运行时撤权协调及独立副作用验收。
 - prepare/dispatch为受信内部协议，不强加给公开MCP原生工具。legacy单帧路径通过明确compatibility adapter提供旧语义，不能宣称旧端具有新token去重保证。R00/R05冻结token格式、ledger容量/retention、owner lease结束与重启拒绝规则。
 - 序列化到正确资源粒度（目标桌面/窗口、owner Browser context、Exec stdin），避免一个owner长期饿死其他owner。队列是有界资源，拥塞显式返回Busy及可安全建议；不驱逐运行任务来伪造空闲。
 - cancel只作用于原owner有权控制的操作；管理者另需明确授权。接收取消请求不等于已取消。

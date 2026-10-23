@@ -34,7 +34,8 @@
     "dispatch_uses_prepared_immutable_payload": true,
     "duplicate_returns_record_without_dispatch": true,
     "expired_or_unknown_token_never_dispatches": true,
-    "new_host_generation_rejects_old_tokens": true
+    "new_host_generation_rejects_old_tokens": true,
+    "rust_dispatch_permit": "Core-issued non-Clone/non-Deserialize consumed once with immutable prepared payload; provider resource retirement cannot mint another permit"
   },
   "trust_rules": [
     "OwnerId DTO never grants authority",
@@ -47,6 +48,7 @@
   "change_process": "Integrator records reason, callers, compatibility and scenario impact before changing frozen public types/limits.",
   "review_corrections": [
     "Independent source review restored all five legacy MCP negotiation versions; no intentional protocol support removal.",
-    "Corrected public tool inventory at Gateway wrapping boundary, not upstream provider schema."
+    "Corrected public tool inventory at Gateway wrapping boundary, not upstream provider schema.",
+    "R09 resource-retirement review tightened Rust Core/adapter admission seam with a consumed DispatchPermit; internal callers R07/R09 migrate together, public MCP unchanged."
   ]
 }
