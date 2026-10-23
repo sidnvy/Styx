@@ -47,8 +47,14 @@ async function capabilityCommand(access,command,args=[]){
 function capabilityAccess(d,config,identity,host){
  if(config.mode==='join-existing'){
   assert(host.host_id===identity.device_id&&host.token_file===path.join(config.host.baseDir,'device/host.token'),'capability_host_token_binding_changed');
-  assert(host.gateway_ca_file===config.gateway.caFile,'capability_gateway_binding_changed');
-  if(host.gateway_ca_file)privateBytes(host.gateway_ca_file);
+  const sourceCa=config.gateway.caFile,hostCa=host.gateway_ca_file;
+  // Native preparation keeps a private local copy of a paired Gateway CA.
+  // Both absent retains the system CA store; an explicit trust file must stay
+  // bound to the configured source or this one fixed native copy location.
+  if(sourceCa!==undefined||hostCa!==undefined){
+   assert(absolute(sourceCa)&&absolute(hostCa)&&(hostCa===sourceCa||hostCa===path.join(config.host.baseDir,'gateway-ca.pem')),'capability_gateway_binding_changed');
+   assert(hash(privateBytes(sourceCa))===hash(privateBytes(hostCa)),'capability_gateway_binding_changed');
+  }
   privateBytes(host.token_file);
   return {kind:'self-device',device_id:identity.device_id,fingerprint:identity.fingerprint,gateway_url:config.gateway.url,gateway_ca_file:host.gateway_ca_file,token_file:host.token_file};
  }
@@ -277,7 +283,8 @@ function browserSnapshot(d,selection,ops){
  }
  const preserve=[path.join(scope.base,'device/identity.json'),path.join(scope.base,'device/identity.pem'),host.token_file,publisher,path.join(scope.base,'install/active.json'),scope.serviceConfigFile,...(scope.owner.kind==='self-device'?[]:[path.join(d,'gateway/certificate.pem'),path.join(d,'gateway/owner.json'),ownerFile(scope.owner)])];
  for(const optional of [host.gateway_ca_file,path.join(d,'gateway/private-key.pem'),path.join(d,'gateway/model.token'),path.join(d,'onboarding-plugin.json')])if(optional&&fs.existsSync(optional))preserve.push(optional);
- const preserved=preserve.map(file=>({path:file,sha256:hash(privateBytes(file))}));
+ if(scope.owner.kind==='self-device'&&config.gateway.caFile!==undefined)preserve.push(config.gateway.caFile);
+ const preserved=[...new Set(preserve)].map(file=>({path:file,sha256:hash(privateBytes(file))}));
  const profileIdentity=fs.existsSync(profileRoot)?(()=>{const info=requirePrivateDirectory(profileRoot);return {dev:info.dev,ino:info.ino}})():null;
  const nextConfig={...config,host:{...config.host,computer:requestedComputer,browser:desiredBrowser}};validateDeployment(nextConfig,{checkNetwork:false});
  const nextHost={...host};delete nextHost.computer;delete nextHost.browser;if(computer)nextHost.computer=computer;if(selection.browser)nextHost.browser=browser;

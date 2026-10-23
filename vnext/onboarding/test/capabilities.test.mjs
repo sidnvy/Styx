@@ -290,7 +290,7 @@ test('installed browser selection requires explicit Browser intent and rejects u
  assert.equal(f.calls.length,0);assert.equal(fs.existsSync(path.join(f.dir,'capabilities.json')),false);
 });
 
-async function joinedFixture(t){
+async function joinedFixture(t,{nativeCaCopy=false}={}){
  const f=browserFixture(t),cert=path.join(f.root,'ca.pem'),tlsKey=path.join(f.root,'tls.pem'),admin=path.join(f.root,'admin.token');
  fs.writeFileSync(admin,'a'.repeat(48),{mode:0o600});
  execFileSync('openssl',['req','-x509','-newkey','rsa:2048','-nodes','-sha256','-days','1','-keyout',tlsKey,'-out',cert,'-subj','/CN=capabilities-test','-addext','subjectAltName=IP:127.0.0.1'],{stdio:'ignore'});fs.chmodSync(cert,0o600);
@@ -298,7 +298,8 @@ async function joinedFixture(t){
  const server=await createGatewayHttp(gateway,{token:'m'.repeat(48),port:0,allowedHosts:hosts,enrollment:controller,tlsCertificateFile:cert,tlsPrivateKeyFile:tlsKey});hosts.push('127.0.0.1:'+server.address.port);t.after(()=>server.close());
  const origin='https://127.0.0.1:'+server.address.port,device=path.join(f.base,'device');
  for(const n of ['identity.json','identity.pem','host.token','host.json'])fs.unlinkSync(path.join(device,n));
- const enrollment={gateway_url:origin,gateway_ca_file:cert,storage_dir:device,label:'Joined fixture',cwd:f.root,shell:'/bin/sh',exec_binary:path.join(f.base,'install/releases/browser-cap-test/bin/codex'),computer_requested:false,browser_requested:false};
+ const hostCa=nativeCaCopy?path.join(f.base,'gateway-ca.pem'):cert;if(nativeCaCopy)fs.writeFileSync(hostCa,fs.readFileSync(cert),{mode:0o600});
+ const enrollment={gateway_url:origin,gateway_ca_file:hostCa,storage_dir:device,label:'Joined fixture',cwd:f.root,shell:'/bin/sh',exec_binary:path.join(f.base,'install/releases/browser-cap-test/bin/codex'),computer_requested:false,browser_requested:false};
  const invitation=controller.invite({}),pending=await requestEnrollment(enrollment,invitation.invitation);
  controller.approve({request_id:pending.request_id,fingerprint:pending.fingerprint,enable_computer:false,enable_browser:false});await claimEnrollment(enrollment);
  f.config={...f.config,mode:'join-existing',gateway:{url:origin,caFile:cert}};writeJSON(path.join(f.dir,'deployment.json'),f.config);writeJSON(path.join(f.base,'enrollment.json'),enrollment);
@@ -308,7 +309,7 @@ async function joinedFixture(t){
  // A joined device has no local Gateway owner credential, even in the fixture.
  fs.rmSync(path.join(f.dir,'gateway'),{recursive:true});delete f.ops.owner;
  const preserved=['identity.json','identity.pem','host.token'].map(n=>[path.join(device,n),fs.readFileSync(path.join(device,n))]);
- return {...f,controller,gateway,preserved,unchanged:()=>{for(const [file,bytes]of preserved)assert.deepEqual(fs.readFileSync(file),bytes)}};
+ return {...f,controller,gateway,sourceCa:cert,hostCa,preserved,unchanged:()=>{for(const [file,bytes]of preserved)assert.deepEqual(fs.readFileSync(file),bytes)}};
 }
 test('joined Host uses real TLS self-device capabilities without admin credentials or new pairing',async t=>{
  const f=withFixtureComputerPreparation(await joinedFixture(t)),first=await changeDeploymentCapabilities(f.dir,{authorize:true,computer:true},f.ops);
@@ -358,4 +359,46 @@ test('canonical Computer-only local transaction retains Browser selection and su
  assert.equal(result.status,'updated');assert.equal(result.computer,true);assert.equal(result.browser,false);
  assert.equal(JSON.parse(fs.readFileSync(path.join(f.dir,'deployment.json'))).host.computer,true);
  assert.equal((await rollbackDeploymentCapabilities(f.dir,{authorize:true,transactionId:result.transactionId},f.ops)).computer,false);
+});
+
+
+test('joined native fixed CA copy uses real TLS self-device CAS and preserves both trust files',async t=>{
+ const f=withFixtureComputerPreparation(await joinedFixture(t,{nativeCaCopy:true}));
+ const caBefore=[f.sourceCa,f.hostCa].map(file=>[file,fs.readFileSync(file)]);
+ const result=await changeDeploymentCapabilitiesOffline(f.dir,{authorize:true,computer:true,browser:true},f.ops);
+ assert.equal(result.status,'updated');assert.equal(result.computer,true);assert.equal(result.browser,true);f.unchanged();
+ const tx=JSON.parse(fs.readFileSync(path.join(f.dir,'capability-transactions',result.transactionId,'transaction.json')));
+ for(const [file,bytes]of caBefore){assert.deepEqual(fs.readFileSync(file),bytes);assert.deepEqual(tx.preserved.filter(item=>item.path===file),[{path:file,sha256:digest(bytes)}]);}
+ assert.equal(new Set(tx.preserved.map(item=>item.path)).size,tx.preserved.length);
+ const back=await rollbackDeploymentCapabilities(f.dir,{authorize:true,transactionId:result.transactionId},f.ops);
+ assert.equal(back.status,'rolled_back');assert.equal(back.browser,false);assert.equal(back.computer,false);f.unchanged();
+});
+
+test('joined native CA binding rejects different bytes, arbitrary same-byte path, missing side and symlink before CAS',async t=>{
+ for(const variant of ['different-bytes','arbitrary-path','missing-host','missing-source',...(process.platform==='win32'?[]:['symlink'])])await t.test(variant,async t=>{
+  const f=await joinedFixture(t,{nativeCaCopy:true});let posts=0;
+  const original=f.controller.selfCapabilities.bind(f.controller);f.controller.selfCapabilities=(id,auth,body)=>{if(body)posts++;return original(id,auth,body)};
+  const host=JSON.parse(fs.readFileSync(f.hostFile)),config=JSON.parse(fs.readFileSync(path.join(f.dir,'deployment.json')));
+  if(variant==='different-bytes')fs.writeFileSync(f.hostCa,Buffer.concat([fs.readFileSync(f.hostCa),Buffer.from('\n')]),{mode:0o600});
+  if(variant==='arbitrary-path'){host.gateway_ca_file=path.join(f.root,'arbitrary-ca.pem');fs.writeFileSync(host.gateway_ca_file,fs.readFileSync(f.sourceCa),{mode:0o600});}
+  if(variant==='missing-host')delete host.gateway_ca_file;
+  if(variant==='missing-source')delete config.gateway.caFile;
+  if(variant==='symlink'){fs.unlinkSync(f.hostCa);fs.symlinkSync(f.sourceCa,f.hostCa);}
+  writeJSON(f.hostFile,host);writeJSON(path.join(f.dir,'deployment.json'),config);
+  const state=JSON.parse(fs.readFileSync(path.join(f.dir,'state.json')));state.configSha256=digest(fs.readFileSync(path.join(f.dir,'deployment.json')));
+  for(const step of state.steps)for(const item of Object.values(step.evidence??{}))if(item.path)item.sha256=digest(fs.readFileSync(item.path));
+  writeJSON(path.join(f.dir,'state.json'),state);
+  const before=fs.readFileSync(path.join(f.dir,'deployment.json'));
+  await assert.rejects(changeDeploymentCapabilitiesOffline(f.dir,{authorize:true,browser:true},f.ops));
+  assert.equal(posts,0);assert.equal(fs.existsSync(path.join(f.dir,'capabilities.json')),false);assert.deepEqual(fs.readFileSync(path.join(f.dir,'deployment.json')),before);f.unchanged();
+ });
+});
+
+test('joined native source CA change during preparation is detected before CAS despite unchanged local copy',async t=>{
+ const f=await joinedFixture(t,{nativeCaCopy:true});let posts=0;
+ const original=f.controller.selfCapabilities.bind(f.controller);f.controller.selfCapabilities=(id,auth,body)=>{if(body)posts++;return original(id,auth,body)};
+ const before=fs.readFileSync(path.join(f.dir,'deployment.json')),copy=fs.readFileSync(f.hostCa),source=fs.readFileSync(f.sourceCa);
+ f.ops.prepareBrowser=async()=>{fs.writeFileSync(f.sourceCa,Buffer.concat([source,Buffer.from('\n')]),{mode:0o600});return {status:'prepared'}};
+ await assert.rejects(changeDeploymentCapabilitiesOffline(f.dir,{authorize:true,browser:true},f.ops),/capability_preserved_identity_changed/);
+ assert.equal(posts,0);assert.deepEqual(fs.readFileSync(f.hostCa),copy);assert.deepEqual(fs.readFileSync(path.join(f.dir,'deployment.json')),before);assert.notDeepEqual(fs.readFileSync(f.sourceCa),source);f.unchanged();
 });
