@@ -17,7 +17,10 @@ const specific = {
   win32: ['managed-windows-pilot', 'windows-stage-fast-path', 'windows-task-private'],
 };
 const owner = new Map(Object.entries(specific).flatMap(([platform, names]) =>
-  names.map(name => [`host/test/${name}.test.mjs`, platform])));
+  names.map(name => [`host/test/${name}.test.mjs`, [platform]])));
+// This fixture runs Python fcntl/flock, but never invokes codesign or Keychain.
+// Keep its real POSIX lock coverage on Linux as well as macOS.
+owner.set('host/test/macos-signing-session.test.mjs', ['linux', 'darwin']);
 
 export function hostContractSelection(platform, {sourceRoot = root} = {}) {
   if (!platforms.includes(platform)) throw Error('unsupported_host_contract_platform');
@@ -29,9 +32,9 @@ export function hostContractSelection(platform, {sourceRoot = root} = {}) {
     if (!files.includes(file)) throw Error(`stale_host_contract_classification: ${file}`);
   }
   const inventory = files.sort().map(file => {
-    const nativePlatform = owner.get(file) ?? (file.startsWith('host/windows/') ? 'win32' : null);
-    return {file, platforms: nativePlatform ? [nativePlatform] : platforms,
-      reason: nativePlatform ? `${nativePlatform} implementation/fixture contract` : 'shared Host contract'};
+    const applicablePlatforms = owner.get(file) ?? (file.startsWith('host/windows/') ? ['win32'] : null);
+    return {file, platforms: applicablePlatforms ?? platforms,
+      reason: applicablePlatforms ? `${applicablePlatforms.join('/')} implementation/fixture contract` : 'shared Host contract'};
   });
   return {schema: 1, platform, inventory,
     selected: inventory.filter(entry => entry.platforms.includes(platform)).map(entry => entry.file),

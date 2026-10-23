@@ -18,7 +18,15 @@ test('each existing Host contract is scheduled on every applicable OS without lo
     }
     for(const entry of plan.inventory)assert.equal(plan.selected.includes(entry.file),entry.platforms.includes(plan.platform));
   }
-  assert(!plans[2].selected.some(file=>file.includes('/macos-')||file.includes('/linux-')));
+  // Names describe the implementation being tested, not necessarily fixture OS needs.
+  for(const file of ['macos-app','macos-local-signing','macos-native-launcher',
+    'macos-preview','linux-service','linux-desktop','linux-cli-acceptance']){
+    assert(!plans[2].selected.includes(`host/test/${file}.test.mjs`),`Windows cannot run ${file} fixture`);
+  }
+  const signingSession='host/test/macos-signing-session.test.mjs';
+  assert(plans[0].selected.includes(signingSession),'POSIX signing-session lock coverage belongs on Linux');
+  assert(plans[1].selected.includes(signingSession));
+  assert(!plans[2].selected.includes(signingSession),'Python fcntl fixture is not available on Windows');
   assert(plans[2].selected.includes('host/windows/private-storage-native.test.mjs'));
   assert(plans[2].selected.includes('host/windows/platform-update/product.test.mjs'));
   assert.throws(()=>hostContractSelection('unsupported'),/unsupported_host_contract_platform/);
