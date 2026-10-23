@@ -726,3 +726,36 @@ test('legacy Gateway confirmation supports first claim but never guesses recover
  assert.deepEqual(await fs.readFile(first.local_host_config),config);
  assert.deepEqual(await fs.readFile(path.join(cfg.storage_dir,'identity.json')),identity);
 });
+
+test('joined device self capability TLS read/update uses its token and signed generation without owner credentials', {timeout:30000}, async t=>{
+ const f=await fixture(t);
+ const {createPublicKey,sign,constants}=await import('node:crypto');
+ const {capabilityPayload}=await import('../../shared/enrollment-protocol.mjs');
+ const {handleEnrollment}=await import('../enrollment.mjs');
+ async function join(label){const cfg=f.config(label,false),invite=(await f.admin('invitations',{})).body;
+  const pending=await requestEnrollment(cfg,invite.invitation);await f.admin('approve',{request_id:pending.request_id,fingerprint:pending.fingerprint});
+  const claimed=await claimEnrollment(cfg),host=JSON.parse(await fs.readFile(claimed.local_host_config,'utf8'));
+  return {cfg,id:claimed.device_id,token:(await fs.readFile(host.token_file,'utf8')).trim(),key:await fs.readFile(path.join(cfg.storage_dir,'identity.pem'),'utf8')};}
+ const a=await join('self-a'),b=await join('self-b');
+ // Use the actual additional-listener adapter policy: owner routes disabled.
+ const hosts=[],extra=https.createServer({cert:await fs.readFile(f.cert),key:await fs.readFile(path.join(f.tmp,'gateway-key.pem'))},(req,res)=>{void handleEnrollment(req,res,{controller:f.controller,allowedHosts:hosts,allowAdmin:false});});
+ await new Promise(r=>extra.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>extra.close(r)));hosts.push('127.0.0.1:'+extra.address().port);
+ const ca=await fs.readFile(f.cert);
+ const request=(id,token,body,route)=>new Promise((resolve,reject)=>{const req=https.request({hostname:'127.0.0.1',port:extra.address().port,path:route??'/styx/enroll/self/'+id+'/capabilities',method:body===undefined?'GET':'POST',ca,headers:{authorization:'Bearer '+token,'content-type':'application/json'}},res=>{let text='';res.on('data',b=>text+=b);res.on('end',()=>resolve({status:res.statusCode,body:JSON.parse(text)}));});req.on('error',reject);req.end(body===undefined?undefined:JSON.stringify(body));});
+ const current=await request(a.id,a.token);assert.equal(current.status,200);assert.equal(current.body.device_id,a.id);assert.deepEqual(current.body.capabilities,{exec:true,computer:false,browser:false});assert.equal(current.body.connections.exec,'offline');
+ for(const token of [b.token,f.mcpToken,f.adminToken,'x'.repeat(48)])assert.equal((await request(a.id,token)).status,403);
+ assert.equal((await request(a.id,a.token,{},'/styx/enroll/capabilities')).status,404,'self credential never enables owner routes');
+ const signed=(generation,selection={enable_computer:true,enable_browser:true})=>{const body={device_id:a.id,fingerprint:current.body.fingerprint,generation,...selection,public_key_pem:createPublicKey(a.key).export({type:'spki',format:'pem'})};body.signature=sign('sha256',Buffer.from(capabilityPayload(body)),{key:a.key,padding:constants.RSA_PKCS1_PSS_PADDING,saltLength:32}).toString('base64url');return body;};
+ const update=signed(current.body.generation);
+ assert.equal((await request(b.id,b.token,update)).status,403,'path/body identity binding');
+ assert.equal((await request(a.id,a.token,{...update,signature:'invalid'})).status,403);
+ assert.equal((await request(a.id,b.token,update)).status,403);
+ const result=await request(a.id,a.token,update);assert.equal(result.status,200);assert.equal(result.body.status,'updated');assert.deepEqual(result.body.capabilities,{exec:true,computer:true,browser:true});
+ assert.equal((await request(a.id,a.token,update)).status,409,'stale generation cannot replay');
+ const observed=await request(a.id,a.token);assert.equal(observed.body.generation,result.body.generation);assert.deepEqual(observed.body.capabilities,result.body.capabilities,'lost-response reconciliation can read actual committed state');
+ assert.equal((await fs.readFile(f.gateway.registry.resolve(a.id).exec.token_file,'utf8')).trim(),a.token,'existing token preserved');
+ const adminResult=await f.admin('capabilities',signed(result.body.generation,{enable_computer:false,enable_browser:false}));assert.equal(adminResult.body.status,'updated','existing admin API preserved');
+ await f.admin('revoke',{device_id:a.id});
+ assert.equal((await request(a.id,a.token)).status,403);assert.equal((await request(a.id,a.token,signed(adminResult.body.generation))).status,403);
+ assert.equal((await request(b.id,b.token)).status,200,'another device is unaffected');
+});

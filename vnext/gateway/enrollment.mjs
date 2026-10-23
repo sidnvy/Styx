@@ -338,6 +338,31 @@ export class EnrollmentController {
     this.registry.setDefault(body.device_id);
     return {status:'updated',default_environment_id:body.device_id};
   }
+  selfDevice(deviceId,authorization){
+    const match=ADMIN_HEADER.exec(authorization??'');
+    const record=ID.test(deviceId??'')&&this.db.devices.find(x=>x.id===deviceId&&x.status==='approved');
+    assert(record&&match,'device_unauthorized',403);
+    const tokenFile=path.join(this.root,'tokens',deviceId+'.token');
+    assert(record.target.exec?.token_file===tokenFile,'device_unauthorized',403);
+    const expected=Buffer.from(sha(secretFile(tokenFile)),'hex'),given=Buffer.from(sha(match[1]),'hex');
+    assert(timingSafeEqual(expected,given),'device_unauthorized',403);
+    this.registry.resolve(deviceId);
+    return record;
+  }
+  selfCapabilities(deviceId,authorization,body){
+    // Called after the HTTP body has been read: revocation cannot race an earlier
+    // authorization check. The existing signed generation CAS stays authoritative.
+    const record=this.selfDevice(deviceId,authorization);
+    if(body!==undefined){
+      assert(body?.device_id===deviceId,'device_unauthorized',403);
+      return this.capabilities(body);
+    }
+    const target=record.target,observed=this.relay?.status?.(target);
+    return {status:'approved',device_id:record.id,fingerprint:record.fingerprint,
+      generation:target.generation,capabilities:{exec:true,computer:target.computer?.enabled===true,browser:target.browser?.enabled===true},
+      connections:Object.fromEntries(['exec','computer','browser'].map(lane=>[lane,
+        ['connected','offline'].includes(observed?.[lane])?observed[lane]:'unknown']))};
+  }
   capabilities(body={}){
     exact(body,['device_id','fingerprint','generation','enable_computer','enable_browser','public_key_pem','signature']);
     assert(typeof body.device_id==='string'&&ID.test(body.device_id),'invalid_device_id');
@@ -445,6 +470,16 @@ export async function handleEnrollment(req,res,{controller,allowedHosts,allowAdm
     assert(allowedHosts.includes(req.headers.host),'host_not_allowed',403);
     assert(req.headers.origin===undefined,'origin_not_allowed',403);
     assert(req.socket.encrypted||isLoopback(req),'enrollment_requires_tls',403);
+    const selfRoute=/^\/styx\/enroll\/self\/(styx-[a-f0-9]{24})\/capabilities$/.exec(req.url);
+    if(selfRoute){
+      assert(req.socket.encrypted,'enrollment_requires_tls',403);
+      assert(['GET','POST'].includes(req.method),'method_not_allowed',405);
+      const headers=(req.rawHeaders??[]).filter((_,i)=>i%2===0).filter(name=>name.toLowerCase()==='authorization');
+      assert(headers.length===1,'device_unauthorized',403);
+      const body=req.method==='POST'?await jsonBody(req):undefined;
+      send(res,200,controller.selfCapabilities(selfRoute[1],req.headers.authorization,body));
+      return true;
+    }
     const routes={
       '/styx/enroll/invitations':['POST',true,'invite'],
       '/styx/enroll/invitations/close':['POST',true,'closePrimaryPairing'],
