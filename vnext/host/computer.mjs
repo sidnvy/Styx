@@ -145,7 +145,7 @@ export async function connectComputerOnce(config,{signal,onReady,workAdmission}=
       if(ws.readyState===WebSocket.OPEN) open();
     });
     if(closed || signal?.aborted)throw Error('computer_connector_closed');
-    onReady?.({host_id:c.host_id,lane:'computer'});
+    onReady?.({host_id:c.host_id,lane:'computer'},{isCurrent:()=>!closed&&!childExited&&!signal?.aborted&&ws.readyState===WebSocket.OPEN});
     await new Promise(resolve=>{
       const complete=()=>resolve();
       ws.once('close',complete);

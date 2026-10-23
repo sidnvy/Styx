@@ -28,9 +28,9 @@ export async function runWindowsDesktopLifecycle({probe,connect,signal,onReady,o
  return runObservedDesktopLifecycle({signal,onStatus,resolveSession,pollMs,once,
   connect:(session,{signal:sessionSignal})=>{
    const abort=new AbortController(),cancel=()=>abort.abort();sessionSignal.addEventListener('abort',cancel,{once:true});if(sessionSignal.aborted)cancel();
-   const ready=async info=>{
+   const ready=async(info,connection)=>{
     let current;try{current=await resolveSession()}catch{}
-    if(abort.signal.aborted)return;
+    if(abort.signal.aborted||connection?.isCurrent?.()!==true)return;
     if(!current?.available||current.key!==session.key){abort.abort();onStatus?.('unavailable',{lane:'computer',reason:current?.reason??'windows_session_probe_unavailable'});return;}
     onReady?.(info);
    };

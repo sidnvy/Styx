@@ -18,7 +18,7 @@ test('Windows desktop requires a pinned helper and actual nonzero interactive De
 test('Windows session lifecycle drains locked Computer then reconnects without replay or other-lane ownership',async()=>{
  const abort=new AbortController(),events=[],statuses=[];let state={available:false,reason:'windows_interactive_desktop_unavailable'},starts=0;
  const until=async predicate=>{const end=Date.now()+2000;while(!predicate()&&Date.now()<end)await new Promise(r=>setTimeout(r,5));assert(predicate());};
- const task=runWindowsDesktopLifecycle({signal:abort.signal,pollMs:10,resolveSession:async()=>state,onStatus:(s,m)=>statuses.push([s,m?.reason]),onReady:()=>events.push('ready'),connect:({signal,onReady})=>{starts++;events.push('start');onReady({});return new Promise(resolve=>{const finish=()=>{events.push('stop');resolve();};if(signal.aborted)finish();else signal.addEventListener('abort',finish,{once:true});});}});
+ const task=runWindowsDesktopLifecycle({signal:abort.signal,pollMs:10,resolveSession:async()=>state,onStatus:(s,m)=>statuses.push([s,m?.reason]),onReady:()=>events.push('ready'),connect:({signal,onReady})=>{starts++;events.push('start');onReady({},{isCurrent:()=>!signal.aborted});return new Promise(resolve=>{const finish=()=>{events.push('stop');resolve();};if(signal.aborted)finish();else signal.addEventListener('abort',finish,{once:true});});}});
  await new Promise(r=>setTimeout(r,25));assert.equal(starts,0);state={available:true,key:'1'};await until(()=>events.includes('ready'));
  state={available:false,reason:'windows_interactive_desktop_unavailable'};await until(()=>events.includes('stop'));assert.equal(starts,1);
  state={available:true,key:'1'};await until(()=>starts===2);abort.abort();await task;
@@ -26,7 +26,7 @@ test('Windows session lifecycle drains locked Computer then reconnects without r
 });
 test('a lock during connection prevents a stale ready notification',async()=>{
  const abort=new AbortController();let state={available:true,key:'1'},ready=0;
- const task=runWindowsDesktopLifecycle({signal:abort.signal,pollMs:10,resolveSession:()=>state,onReady:()=>ready++,connect:async({signal,onReady})=>{state={available:false,reason:'windows_interactive_desktop_unavailable'};await onReady({});assert(signal.aborted);abort.abort();}});
+ const task=runWindowsDesktopLifecycle({signal:abort.signal,pollMs:10,resolveSession:()=>state,onReady:()=>ready++,connect:async({signal,onReady})=>{state={available:false,reason:'windows_interactive_desktop_unavailable'};await onReady({},{isCurrent:()=>!signal.aborted});assert(signal.aborted);abort.abort();}});
  await task;assert.equal(ready,0);
 });
 test('Windows native helper reports the caller session; missing probe never starts a Computer connector',{skip:process.platform!=='win32'||!process.env.STYX_TEST_WINDOWS_SESSION_PROBE},async()=>{
