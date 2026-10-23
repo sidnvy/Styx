@@ -96,7 +96,9 @@ async function start(d,operations,abort){
  if(abort.signal.aborted)fail('foreground_start_cancelled');
  const release=claim(d);
  const entry={abort,release,host:selected.host?hostStatus.state==='running'?'service':'foreground':'disabled',gateway:config.mode==='join-existing'?'external':gatewayServiceRunning?'service':'foreground',execConnection:selected.host?'connecting':'not_required',desktopConnection:'not_requested',browserConnection:selected.host?.browser?.enabled?'connecting':'not_requested',browserRequested:selected.host?.browser?.enabled===true,computerRequested:selected.host?.computer?.enabled===true,startedGateway:false,stopping:false,failed:false,tasks:[],api,scopeValid:()=>deploymentConnectionHash(fs.readFileSync(path.join(d,'deployment.json')))===configurationHash&&(!selected.unchanged||selected.unchanged())};
- entry.workAdmission=entry.host==='foreground'?createHostWorkAdmission(selected.host.host_id):null;
+ // Attest only our fresh connector lifetime, after ownership checks and before
+ // any lane dispatch. Never derive this contract from UI input or service ready.
+ entry.workAdmission=entry.host==='foreground'?createHostWorkAdmission(selected.host.host_id,{runtime:'fresh_owned',scope:'complete_from_creation',ownerGeneration:randomBytes(16).toString('hex'),lanes:['exec',...(entry.browserRequested?['browser']:[]),...(entry.computerRequested?['computer']:[])]}):null;
  owners.set(d,entry);
  try{
   entry.observer=await startForegroundObservation({stateDir:d,configurationHash,projection:()=>readDeploymentForeground(d)});

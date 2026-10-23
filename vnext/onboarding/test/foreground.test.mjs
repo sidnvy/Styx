@@ -9,7 +9,7 @@ import {createHash,createPublicKey,generateKeyPairSync,sign,randomBytes} from 'n
 import {fileURLToPath} from 'node:url';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StreamableHTTPClientTransport} from '@modelcontextprotocol/sdk/client/streamableHttp.js';
-import {startDeploymentForeground,stopDeploymentForeground,stopOwnedDeploymentForeground,readDeploymentForeground,observeDeploymentForeground} from '../foreground.mjs';
+import {startDeploymentForeground,stopDeploymentForeground,stopOwnedDeploymentForeground,readDeploymentForeground,observeDeploymentForeground,ownedForegroundAdmission} from '../foreground.mjs';
 import {createDeployment,advanceDeployment,planDeployment,readDeployment,stopDeploymentGateway} from '../core.mjs';
 import {stageSignedRelease,activateRelease} from '../../host/installer.mjs';
 import {ensurePrivateDirectory,writePrivateFile} from '../../host/private-storage.mjs';
@@ -228,4 +228,15 @@ test('Windows CLI foreground reaches the signed session gate and preserves expli
  await stopDeploymentForeground(f.stateDir);let called=0;
  await startDeploymentForeground(f.stateDir,{authorize:true},{...ops,guiAvailable:async()=>false,runComputer:async()=>{called++}});
  assert.equal(called,0);assert.equal(readDeploymentForeground(f.stateDir).desktopConnection,'session_unavailable_or_unobserved');
+});
+
+test('offline owned foreground has complete pre-dispatch coverage without transport ready',{skip:process.platform!=='linux'},async t=>{
+ const f=await fixture(t);let admission;
+ await startDeploymentForeground(f.stateDir,{authorize:true},{...f.ops,runHost:async(_config,{signal,workAdmission})=>{
+  admission=workAdmission;const peer=workAdmission.openPeer('exec');
+  await new Promise(resolve=>{if(signal.aborted)resolve();else signal.addEventListener('abort',resolve,{once:true})});peer.close();
+ }});
+ assert.equal(readDeploymentForeground(f.stateDir).execConnection,'connecting');assert.equal(ownedForegroundAdmission(f.stateDir),admission);
+ const ticketId='e'.repeat(32);assert.equal(admission.begin({ticketId}).status,'ready');assert.equal(admission.commit(ticketId).status,'ready');
+ await stopDeploymentForeground(f.stateDir);assert.equal(readDeploymentForeground(f.stateDir).status,'not_running');assert.equal(ownedForegroundAdmission(f.stateDir),null);
 });

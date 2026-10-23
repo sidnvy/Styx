@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 import {WorkAdmission,createHostWorkAdmission} from '../work-admission.mjs';
 import {prepareHostUpdateAdmission,readHostUpdateAdmission,commitHostUpdateAdmission,cancelHostUpdateAdmission} from '../../onboarding/host-update-admission.mjs';
 const ticket='a'.repeat(32);
+const ownedFresh=id=>createHostWorkAdmission(id,{runtime:'fresh_owned',scope:'complete_from_creation',ownerGeneration:'b'.repeat(32),lanes:['exec','computer','browser']});
 test('fence precedes observation; active and unsettled work wait; continuation stays admitted',()=>{
  let retained=1,identity='one';const a=new WorkAdmission({observe:()=>({identity,retained,unknown:false})}),done=a.enter('one','exec');
  assert.equal(a.begin({ticketId:ticket}).status,'waiting');assert.throws(()=>a.enter('two','exec'),/maintenance/);
@@ -10,13 +11,13 @@ test('fence precedes observation; active and unsettled work wait; continuation s
  identity='two';assert.equal(a.status(ticket).status,'unknown');assert.throws(()=>a.commit(ticket),/not_settled/);a.cancel(ticket);a.enter('one','exec')();
 });
 test('Host-only admits terminal execution independently of result drain and Gateway owner credentials',()=>{
- const a=createHostWorkAdmission('host'),p=a.openPeer('exec');p.ready();p.request({id:1,method:'process/start',params:{processId:'process'}});p.response({id:1,result:{processId:'process'}});
+ const a=ownedFresh('host'),p=a.openPeer('exec');p.ready();p.request({id:1,method:'process/start',params:{processId:'process'}});p.response({id:1,result:{processId:'process'}});
  assert.equal(a.begin({ticketId:ticket}).status,'waiting');assert.throws(()=>p.request({id:2,method:'process/start',params:{processId:'other'}}),/maintenance/);
  p.request({id:3,method:'process/read',params:{processId:'process'}});p.response({id:3,result:{exited:true,closed:true,exitCode:0,nextSeq:4,chunks:[{seq:1,stream:'stdout',chunk:'cmVzdWx0'}]}});assert.equal(a.status(ticket).status,'ready');
  p.request({id:4,method:'process/read',params:{processId:'process'}});assert.equal(a.status(ticket).status,'waiting');p.response({id:4,result:{exited:true,closed:true,exitCode:0,nextSeq:4,chunks:[]}});assert.equal(a.commit(ticket).status,'ready');p.close();assert.equal(a.status(ticket).status,'unknown');
 });
 test('Host terminal notifications require the owning peer, exit and later EOF; no polling is required',()=>{
- const a=createHostWorkAdmission('host'),p=a.openPeer('exec'),other=a.openPeer('exec');p.ready();
+ const a=ownedFresh('host'),p=a.openPeer('exec'),other=a.openPeer('exec');p.ready();
  p.request({id:1,method:'process/start',params:{processId:'p'}});p.response({id:1,result:{processId:'p'}});
  const event=(method,seq,extra={})=>({method,params:{processId:'p',seq,...extra}});
  a.begin({ticketId:ticket});
@@ -31,15 +32,15 @@ test('malformed or contradictory terminal evidence cannot admit unfinished Host 
   [{method:'process/exited',params:{processId:'p',seq:2,exitCode:0}},{method:'process/closed',params:{processId:'p',seq:1}}],
   [{method:'process/exited',params:{processId:'p',seq:2,exitCode:0}},{method:'process/exited',params:{processId:'p',seq:2,exitCode:1}}]
  ]){
-  const a=createHostWorkAdmission('host'),p=a.openPeer('exec');p.ready();p.request({id:1,method:'process/start',params:{processId:'p'}});p.response({id:1,result:{processId:'p'}});
+  const a=ownedFresh('host'),p=a.openPeer('exec');p.ready();p.request({id:1,method:'process/start',params:{processId:'p'}});p.response({id:1,result:{processId:'p'}});
   for(const event of events)p.response(event);assert.equal(a.begin({ticketId:ticket}).status,'unknown');
  }
 });
-test('lost execution outcome never becomes ready on a new peer; never observed old runtime is unknown',()=>{
- const a=createHostWorkAdmission('host');assert.equal(a.begin({ticketId:ticket}).status,'unknown');a.cancel(ticket);const p=a.openPeer('exec');p.ready();p.request({id:1,method:'process/start',params:{processId:'p'}});p.close();a.openPeer('exec').ready();assert.equal(a.begin({ticketId:ticket}).status,'unknown');
+test('lost execution outcome never becomes ready on a new peer',()=>{
+ const a=ownedFresh('host');const p=a.openPeer('exec');p.ready();p.request({id:1,method:'process/start',params:{processId:'p'}});p.close();a.openPeer('exec').ready();assert.equal(a.begin({ticketId:ticket}).status,'unknown');
 });
 test('coordinator reuses update ticket for Quit and checks every owned scope before commit',()=>{
- const a=new WorkAdmission(),b=createHostWorkAdmission('host');b.openPeer('exec').ready();const active=a.enter('remote','browser'),stateDir='/tmp/styx-admission-coordinator';
+ const a=new WorkAdmission(),b=ownedFresh('host');b.openPeer('exec').ready();const active=a.enter('remote','browser'),stateDir='/tmp/styx-admission-coordinator';
  const p=prepareHostUpdateAdmission({stateDir,purpose:'host-update'},{gateway:{workAdmission:a},localHost:b,ownsGateway:true});assert.equal(p.status,'waiting');
  assert.equal(prepareHostUpdateAdmission({stateDir,purpose:'quit'},{gateway:{workAdmission:a},localHost:b,ownsGateway:true}).ticketId,p.ticketId);assert.throws(()=>commitHostUpdateAdmission({stateDir,ticketId:p.ticketId}),/not_settled/);active();assert.equal(readHostUpdateAdmission({stateDir,ticketId:p.ticketId}).status,'ready');assert.equal(commitHostUpdateAdmission({stateDir,ticketId:p.ticketId}).exitAuthorized,true);cancelHostUpdateAdmission({stateDir,ticketId:p.ticketId});a.enter('remote','browser')();
  assert.throws(()=>prepareHostUpdateAdmission({stateDir,purpose:'quit'},{localHost:null}),/unsupported/);
@@ -48,9 +49,46 @@ test('coordinator reuses update ticket for Quit and checks every owned scope bef
 
 test('terminal Browser/Cua errors release work; loss with pending request remains unknown',()=>{
  for(const lane of ['computer','browser']){
-  const a=createHostWorkAdmission('host');a.openPeer('exec').ready();const p=a.openPeer(lane);
+  const a=ownedFresh('host');a.openPeer('exec').ready();const p=a.openPeer(lane);
   p.request({id:1,method:'tools/call',params:{}});p.response({id:1,result:{isError:true,content:[]}});assert.equal(a.begin({ticketId:ticket}).status,'ready');a.cancel(ticket);
   p.request({id:2,method:'tools/call',params:{}});p.response({id:2,error:{code:-32602,message:'invalid parameters'}});assert.equal(a.begin({ticketId:ticket}).status,'ready');a.cancel(ticket);
   p.request({id:3,method:'tools/call',params:{}});p.close();assert.equal(a.begin({ticketId:ticket}).status,'unknown');
  }
+});
+
+test('owned offline Host can quit without first connecting; its fence still rejects new work',()=>{
+ const stateDir='/tmp/styx-offline-owned-quit',a=ownedFresh('host');
+ const idle=prepareHostUpdateAdmission({stateDir,purpose:'quit'},{localHost:a});
+ assert.equal(idle.status,'ready');assert.equal(commitHostUpdateAdmission({stateDir,ticketId:idle.ticketId}).exitAuthorized,true);
+ for(const lane of ['exec','browser','computer']){
+  const peer=a.openPeer(lane);
+  assert.throws(()=>peer.request({id:1,method:lane==='exec'?'process/start':'tools/call',params:{processId:'blocked'}}),/device_in_maintenance/);
+  peer.close();
+ }
+ cancelHostUpdateAdmission({stateDir,ticketId:idle.ticketId});
+});
+test('failed initial connections with no dispatched work remain safely empty; explicit uncertainty does not',()=>{
+ const a=ownedFresh('host');
+ for(let i=0;i<3;i++){const p=a.openPeer('exec');p.close();}
+ assert.equal(a.begin({ticketId:ticket}).status,'ready');assert.equal(a.commit(ticket).status,'ready');a.cancel(ticket);
+ a.markUnknown();assert.equal(a.begin({ticketId:ticket}).status,'unknown');assert.throws(()=>a.commit(ticket),/not_settled/);
+});
+test('work dispatched before readiness is tracked, retained and never cleared by reconnect',()=>{
+ const a=ownedFresh('host'),p=a.openPeer('exec');
+ p.request({id:1,method:'process/start',params:{processId:'p'}});p.response({id:1,result:{processId:'p'}});
+ assert.equal(a.begin({ticketId:ticket}).status,'waiting');assert.equal(a.status(ticket).retained,1);a.cancel(ticket);
+ p.close();a.openPeer('exec').ready();assert.equal(a.begin({ticketId:ticket}).status,'unknown');assert.throws(()=>a.commit(ticket),/not_settled/);
+});
+
+test('missing coverage remains unknown after ready; malformed or unregistered coverage is not trusted',()=>{
+ const a=createHostWorkAdmission('unverified');a.openPeer('exec').ready();assert.equal(a.begin({ticketId:ticket}).status,'unknown');assert.throws(()=>a.commit(ticket),/not_settled/);
+ assert.throws(()=>createHostWorkAdmission('host',{runtime:'adopted'}),/coverage_contract/);
+ const b=createHostWorkAdmission('host',{runtime:'fresh_owned',scope:'complete_from_creation',ownerGeneration:'c'.repeat(32),lanes:['exec']});
+ assert.throws(()=>b.openPeer('browser'),/lane_not_covered/);assert.equal(b.begin({ticketId:ticket}).status,'unknown');
+});
+test('a peer replacement after prepare invalidates commit and still cannot dispatch through the fence',()=>{
+ const a=ownedFresh('host'),old=a.openPeer('exec');assert.equal(a.begin({ticketId:ticket}).status,'ready');old.close();const next=a.openPeer('exec');next.ready();
+ assert.equal(a.status(ticket).reason,'work_peer_changed');assert.throws(()=>a.commit(ticket),/not_settled/);
+ assert.throws(()=>next.request({id:1,method:'process/start',params:{processId:'blocked'}}),/maintenance/);
+ a.cancel(ticket);assert.equal(a.begin({ticketId:ticket}).status,'ready');
 });

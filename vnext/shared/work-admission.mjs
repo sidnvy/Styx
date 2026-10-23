@@ -30,16 +30,29 @@ export class WorkAdmission {
 
 // Host-only deployments cannot depend on the remote Gateway's admin token.
 // Observe the existing authenticated protocol at the actual local dispatch point.
-export function createHostWorkAdmission(deviceId){
- const peers=new Map(),processes=new Map();let sequence=0,unknown=false,execObserved=false;
+export function createHostWorkAdmission(deviceId,coverage){
+ // Only the lifecycle owner may attest coverage before starting its connectors.
+ // An omitted contract stays unverified, including after transport ready.
+ const complete=coverage!==undefined;
+ if(complete&&(!coverage||Object.keys(coverage).sort().join(',')!=='lanes,ownerGeneration,runtime,scope'||
+  coverage.runtime!=='fresh_owned'||coverage.scope!=='complete_from_creation'||
+  !/^[a-f0-9]{32}$/.test(coverage.ownerGeneration??'')||!Array.isArray(coverage.lanes)||
+  !coverage.lanes.includes('exec')||new Set(coverage.lanes).size!==coverage.lanes.length||
+  coverage.lanes.some(lane=>!['exec','computer','browser'].includes(lane))))throw Error('invalid_work_coverage_contract');
+ const ownerGeneration=complete?coverage.ownerGeneration:'unverified',lanes=new Set(coverage?.lanes??[]);
+ const peers=new Map(),processes=new Map();let sequence=0,unknown=false;
+ // This controller observes only this owner's freshly created local connectors;
+ // it does not adopt independent runtimes. A Gateway that never connected cannot
+ // have dispatched work here. Actual lost requests/outcomes remain sticky unknown.
  // Output handles belong to their callers until drained. They are not running
  // work once this authenticated Exec peer proves both process exit and EOF.
  // Admission does not read, consume, or delete any native output.
- const admission=new WorkAdmission({observe:()=>({identity:[...peers.keys()].sort().join(','),retained:[...processes.values()].filter(p=>!p.executionSettled).length,unknown:unknown||!execObserved})});
+ const admission=new WorkAdmission({observe:()=>({identity:ownerGeneration+':'+[...peers.keys()].sort().join(','),retained:[...processes.values()].filter(p=>!p.executionSettled).length,unknown:unknown||!complete})});
  admission.openPeer=lane=>{
+  if(complete&&!lanes.has(lane)){unknown=true;throw Error('work_lane_not_covered')}
   const id=String(++sequence),requests=new Map();peers.set(id,lane);let closed=false;
   return{
-   ready(){if(lane==='exec')execObserved=true},
+   ready(){/* Transport readiness is not evidence of dispatched work. */},
    request(message){
     if(closed)throw Error('maintenance_peer_closed');
     const work=lane==='exec'?message.method==='process/start':message.method==='tools/call';
