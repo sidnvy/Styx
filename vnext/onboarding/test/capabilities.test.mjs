@@ -6,7 +6,7 @@ import path from 'node:path';
 import {execFileSync,spawnSync} from 'node:child_process';
 import {generateKeyPairSync,createHash,verify,constants,sign} from 'node:crypto';
 import {capabilityPayload} from '../../shared/enrollment-protocol.mjs';
-import {changeDeploymentCapabilities,readDeploymentCapabilities,rollbackDeploymentCapabilities} from '../capabilities.mjs';
+import {changeDeploymentCapabilitiesOffline,changeDeploymentCapabilities,readDeploymentCapabilities,rollbackDeploymentCapabilities} from '../capabilities.mjs';
 import {createStyxGateway} from '../../gateway/index.mjs';
 import {createGatewayHttp} from '../../gateway/http.mjs';
 import {EnrollmentController} from '../../gateway/enrollment.mjs';
@@ -323,4 +323,18 @@ test('joined local preparation failure restores bytes without sending capability
  f.ops.prepareBrowser=async()=>{throw Error('browser_runtime_download_failed')};
  await assert.rejects(changeDeploymentCapabilities(f.dir,{authorize:true,browser:true},f.ops),/browser_runtime_download_failed/);
  assert.equal(readDeploymentCapabilities(f.dir).status,'rolled_back');assert.equal(posts,0);for(const [file,bytes]of files)assert.deepEqual(fs.readFileSync(file),bytes);f.unchanged();
+});
+
+test('canonical Computer-only local selection refuses independent running service without stop/restart',async t=>{
+ const f=browserFixture(t),before=fs.readFileSync(f.hostFile);let mutations=0;
+ f.ops.hostStatus=async()=>({status:'reported',state:'running',installed:true,persistence:'enabled'});
+ f.ops.hostControl=async()=>{mutations++;throw Error('must_not_take_over_service')};
+ await assert.rejects(changeDeploymentCapabilitiesOffline(f.dir,{authorize:true,computer:true},f.ops),/host_must_be_stopped/);
+ assert.equal(mutations,0);assert.deepEqual(fs.readFileSync(f.hostFile),before);assert.equal(f.calls.length,0);
+});
+test('canonical Computer-only local transaction retains Browser selection and supports journal rollback',async t=>{
+ const f=browserFixture(t),result=await changeDeploymentCapabilitiesOffline(f.dir,{authorize:true,computer:true},f.ops);
+ assert.equal(result.status,'updated');assert.equal(result.computer,true);assert.equal(result.browser,false);
+ assert.equal(JSON.parse(fs.readFileSync(path.join(f.dir,'deployment.json'))).host.computer,true);
+ assert.equal((await rollbackDeploymentCapabilities(f.dir,{authorize:true,transactionId:result.transactionId},f.ops)).computer,false);
 });

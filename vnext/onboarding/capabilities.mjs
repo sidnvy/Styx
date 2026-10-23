@@ -109,6 +109,12 @@ export function validateDeploymentCapabilityOptions({authorize=false,computer,br
  }else assert(authorize===true&&typeof computer==='boolean','explicit_desktop_capability_authorization_required');
  return {authorize,computer,browser,browserChannel,persistLogin};
 }
+// Canonical managed entry: every capability selection uses the same offline
+// journal. Lifecycle ownership/admission belongs to the calling Core wrapper.
+export async function changeDeploymentCapabilitiesOffline(d,options={},operations={}){
+ const {computer,browser,browserChannel,persistLogin}=validateDeploymentCapabilityOptions(options);
+ return changeBrowserCapabilities(d,{computer,browser,browserChannel,persistLogin},operations);
+}
 export async function changeDeploymentCapabilities(d,options={},operations={}){
  const {computer,browser,browserChannel,persistLogin}=validateDeploymentCapabilityOptions(options);
  if(browser!==undefined)return changeBrowserCapabilities(d,{browser,computer,browserChannel,persistLogin},operations);
