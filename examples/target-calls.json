@@ -1,8 +1,0 @@
-{
-  "environment_create": {"environment":"dev"},
-  "environment_start": {"environment":"dev"},
-  "target_exec_environment": {"target":{"kind":"environment","id":"dev"},"command":"node --test"},
-  "target_exec_host_optional": {"target":{"kind":"host","id":"local"},"command":"git status"},
-  "environment_stop": {"environment":"dev"},
-  "environment_delete": {"environment":"dev"}
-}

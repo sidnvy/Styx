@@ -1,56 +1,18 @@
 {
-  "name": "chat-codex",
+  "name": "styx",
   "version": "0.3.0",
   "private": true,
-  "description": "ChatGPT-native MCP development workspace with typed Hosts and disposable Docker Environments",
+  "description": "Styx native Gateway, Host and shared Core; canonical source is src/",
   "type": "module",
   "license": "MIT",
   "engines": {
     "node": ">=22"
   },
   "scripts": {
-    "start": "node src/server.mjs",
-    "setup": "node scripts/setup.mjs",
-    "doctor": "node scripts/doctor.mjs",
-    "test": "node --test test/*.test.mjs",
-    "test:integration": "node test/integration.mjs",
-    "test:host": "node --test test/host.test.mjs",
-    "test:all": "npm test && npm run test:integration",
-    "test:plugin": "node --test test/plugin.test.mjs",
-    "test:provider": "node --test test/provider-contract.test.mjs",
-    "test:contracts": "node --test test/mcp-contract-conformance.test.mjs",
-    "test:package": "node --test test/package-artifact.test.mjs",
-    "verify": "node scripts/verify.mjs",
-    "test:onboarding": "STYX_VERIFY_DOCKER=1 node --test test/onboarding-verifier.test.mjs",
-    "onboard": "node scripts/onboard.mjs"
-  },
-  "dependencies": {
-    "@modelcontextprotocol/sdk": "1.31.0",
-    "zod": "4.4.3"
-  },
-  "devDependencies": {
-    "ajv": "8.18.0"
-  },
-  "exports": {
-    "./desktop/core": "./src/desktop/core.mjs",
-    "./desktop/contract": "./src/desktop/contract.mjs",
-    "./desktop/hyprland-worker": "./src/desktop/hyprland-worker.mjs",
-    "./desktop/peekaboo-worker": "./src/desktop/peekaboo-worker.mjs",
-    "./desktop/macos-session": "./src/desktop/macos-session.mjs",
-    "./desktop/windows-worker": "./src/desktop/windows-worker.mjs"
-  },
-  "files": [
-    "src/",
-    "app/",
-    "scripts/",
-    "schemas/",
-    "contracts/",
-    "examples/",
-    "skills/",
-    "docs/",
-    "plugin.json",
-    "mcp.json",
-    "THIRD_PARTY.md",
-    "INSTALL.md"
-  ]
+    "test": "npm --prefix src run test:all",
+    "quality": "node src/ci/quality.mjs",
+    "build:checked": "node src/ci/build-checked.mjs",
+    "styx": "node src/onboarding/cli.mjs",
+    "gateway": "node src/gateway/cli.mjs"
+  }
 }

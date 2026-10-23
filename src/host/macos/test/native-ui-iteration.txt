@@ -1,0 +1,56 @@
+Local macOS native UI workflow
+
+From repository root:
+  ../vendor/node-22.23.3/node ../fast-native-build.mjs
+  ../vendor/node-22.23.3/node src/host/macos/test/preview-native.mjs
+
+The preview launcher selects a passing, resource-bearing STYX_TESTING App whose
+recorded Swift hashes match the checkout. It opens --ui-preview, never ordinary
+startup. The settings and menu fixture is interactive and explicitly synthetic:
+no Core, TCC, account, identity or credential operation is performed. Cmd-Q exits.
+Connection dialogs can be edited; saves/connections are deliberately refused.
+For an exact build, pass its absolute Styx.app path to preview-native.mjs.
+
+Set APP to the absolute LOCAL_NATIVE_APP value from the build output. Checks:
+  "$APP/Contents/MacOS/Styx" --self-test
+  "$APP/Contents/MacOS/Styx" --permission-state-self-test
+  "$APP/Contents/MacOS/Styx" --presentation-snapshots /absolute/fresh/screenshots
+  open -W -n -a "$APP" --args --edit-menu-self-test
+  STYX_NATIVE_TEST_BINARY="$APP/Contents/MacOS/Styx" ../vendor/node-22.23.3/node --test src/host/macos/test/observation-native.test.mjs
+  STYX_LOCAL_SIGNING_APP="$APP" ../vendor/node-22.23.3/node --test src/host/macos/test/local-signing-native.test.mjs
+
+presentation-snapshots presses actual SwiftUI accessibility controls in the
+fixture process, checks settings-owned sheets and retained editor/focus/scroll,
+and exports each settings section, menu, invitation and connection editor.
+Its in-process AXEnhancedUserInterface flag only materializes that fixture's
+SwiftUI accessibility nodes; it neither requests nor grants Accessibility access.
+
+observation-native.test.mjs uses an isolated private HTTP Core server. It checks
+slow observation/reconnect ordering, exactly one rejected tunnel/start request,
+no busy pulses from reads, no repeated identical publication, retained drafts,
+and one polling loop for simultaneous visible surfaces. A second test uses real
+Core with a fresh directory and verifies native welcome without deployment creation.
+These are not successful real OpenAI tunnel connections or ChatGPT acceptance.
+
+Manual acceptance on an integrated candidate:
+- Open onboarding's connection-details sheet while status is refreshing.
+- Edit Tunnel ID; refresh or switch focus; verify the draft and focus survive.
+- Reconnect once; verify stable progress followed by observed readiness or failure.
+- Open Computers, ChatGPT and General from the menu, including the same section
+  twice after scrolling away; each explicit request locates its section.
+- Add computer from Settings; verify invitation and identity confirmation remain
+  in its sheet. Menu invitation remains in the popover. Check real blocked ingress.
+- Exercise real pairing/approval only with isolated Core and test devices.
+- System permission prompts and account sign-in are completed by the user.
+
+The fast App reuses baseline Core/resources, keeps the existing signing identity,
+and does not update /Applications, build a DMG, or integrate newer shared code.
+Final integrated packaging and real TCC/account/upgrade checks remain separate.
+
+Recorded menu jitter regression (2026-10-21):
+The expanded invitation previously used global busy, so periodic reads replaced
+the unreachable-entry message with a spinner and moved the settings row. Reads
+no longer pulse busy; invitation progress now belongs only to invitation creation.
+Existing blocked-entry content stays visible during other operations. Native
+presentation checks toggle busy four times, compare fitting size, reject a spinner,
+and capture menu-invitation-blocked / menu-invitation-unrelated-busy screenshots.
