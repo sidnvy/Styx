@@ -181,3 +181,11 @@ test('journey and diagnostics retain authenticated cross-process browser transpo
  assert.equal(j.acceptance.browser.status,'pending');assert.equal(j.acceptance.complete,false);
  assert.doesNotMatch(JSON.stringify({j,d}),/SECRET_OWNER_TOKEN|ownerGeneration|12345/);assert.deepEqual(snapshot(root),before);
 });
+
+ test('current Linux boot prerequisites reach journey without claiming boot acceptance',()=>{
+  const background={observation:'current',startup:'user_manager_at_boot',linuxBoot:{schema:1,status:'configured_unverified'}};
+  let j=projectOnboardingJourney({deployment:ready(),background});
+  assert.equal(j.background.startup,'user_manager_at_boot');assert.equal(j.background.systemBootWithoutLogin,'configured_unverified');
+  background.linuxBoot.status='unexpected';j=projectOnboardingJourney({deployment:ready(),background});assert.equal(j.background.systemBootWithoutLogin,'unknown');
+  background.observation='last_recorded';j=projectOnboardingJourney({deployment:ready(),background});assert.notEqual(j.background.systemBootWithoutLogin,'configured_unverified');
+ });

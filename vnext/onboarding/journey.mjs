@@ -83,6 +83,10 @@ export function projectOnboardingJourney({deployment,background,foreground,capab
  const p=preference?.configurationBound===true?choose(preference.background,['foreground','login'],'not_decided'):'foreground';
  const loginReady=current&&background.status==='running'&&(!hasHost||background.host==='running')&&(!local||background.gateway==='running')&&(!hasHost||!local||background.hostConnection==='exec_connected');
  const b={status:current?background.status==='running'&&!loginReady?'needs_attention':choose(background.status,['running','needs_attention','not_configured','unknown'],'unknown'):'not_observed',observation:current?'current':'not_observed',preference:p,startup:'current_user_login',systemBootWithoutLogin:'not_configured',appExit:p==='foreground'?'connection_may_stop':'not_verified'};
+ if(current&&background.linuxBoot?.schema===1){
+  b.startup=choose(background.startup,['user_manager_at_boot','current_user_login','unknown'],'unknown');
+  b.systemBootWithoutLogin=choose(background.linuxBoot.status,['configured_unverified','not_configured','unknown'],'unknown');
+ }
  const t={status:choose(tunnel?.status,['running','configured','not_configured','interrupted','unknown'],'not_configured'),transport:choose(tunnel?.transport,['ready','starting','unavailable','not_running','not_observed'],'not_observed'),observation:tunnel?.observation==='configuration_only'?'configuration_only':'current_app'};
  const nativePermission=key=>!desktopRequested?'not_required':permissionObservation?.source==='current_native_app_preflight'?choose(permissionObservation[key],['granted','denied'],'not_observed'):'not_observed';
  const permissions=[{id:'accessibility',label:'辅助功能',status:nativePermission('accessibility')},{id:'screen_recording',label:'屏幕录制',status:nativePermission('screenRecording')},{id:'automation',label:'应用脚本自动化',status:'not_required',reason:'explicit_app_scripts_may_require_separate_authorization'}];
