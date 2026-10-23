@@ -284,7 +284,7 @@ async fn journey(
 #[test]
 fn raw_spec_and_response_writer_have_explicit_bounds() {
     let raw = r#"{"request_id":"r","connection_generation":"g","call":{"prepare_start":{"owner":{"owner_id":"o","owner_epoch":"e"},"grant_revision":1,"timeout_ms":100,"spec":{"nested":[1,2,3]}}}}"#.to_owned();
-    let parsed: Request<'_> = serde_json::from_str(&raw).unwrap();
+    let parsed: Request = serde_json::from_str(&raw).unwrap();
     match parsed.call {
         Call::PrepareStart { spec, .. } => assert_eq!(spec.get(), r#"{"nested":[1,2,3]}"#),
         _ => panic!(),

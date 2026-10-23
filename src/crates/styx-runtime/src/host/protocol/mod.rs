@@ -1,10 +1,11 @@
 //! Private, explicitly negotiated Host protocol slice. Not public MCP and not
-//! complete Host v2: owners are still bootstrap-preverified; resource reads
-//! are not resumable. Every mutation uses separate Host prepare/dispatch.
+//! complete public protocol: v2 uses bootstrap owners; v3 accepts owner control
+//! only from the fixed authenticated paired Gateway. Reads are not resumable. Every mutation uses separate Host prepare/dispatch.
 //! Connection loss never shuts down the coordinator/executor or replays reads.
 use super::{
     coordinator::{
-        ActionSubmission, CoordinatorError, HostAuthority, HostCoordinator, StartSubmission,
+        ActionSubmission, CoordinatorError, HostAuthority, HostCoordinator, OwnerCleanupHandle,
+        StartSubmission,
     },
     link::{HostWssLink, LinkEndpoint},
 };
@@ -12,8 +13,14 @@ use crate::providers::codex::{
     ActionAcknowledgment, ActionEvidence, ActionReceipt, DispatchEvidence, ProcessAction,
     StartProcess,
 };
-use serde::{Deserialize, Serialize};
-use std::{collections::BTreeMap, io::Write, time::Duration};
+pub mod wire;
+use futures_util::{StreamExt, stream::FuturesUnordered};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    io::Write,
+    sync::Mutex,
+    time::Duration,
+};
 use styx_contracts::{
     capability::CapabilityId,
     error::{ErrorCategory, ExecutionCertainty},
@@ -21,6 +28,7 @@ use styx_contracts::{
     operation::*,
 };
 use styx_core::operations::{OperationSnapshot, OwnerLease};
+use wire::*;
 
 const FRAME_LIMIT: usize = 256 * 1024;
 const SPEC_LIMIT: usize = 128 * 1024;
@@ -35,6 +43,54 @@ pub struct TrustedProfile {
     pub gateway_epoch: GatewayEpoch,
     pub device_id: DeviceId,
     pub host_generation: HostGeneration,
+}
+/// Protected pairing bootstrap: the authenticated fixed Gateway endpoint is
+/// trusted to announce its process epoch, never an ordinary MCP client.
+pub struct PairedTrustedProfile {
+    pub endpoint: String,
+    pub gateway_namespace: GatewayId,
+    pub device_id: DeviceId,
+    pub host_generation: HostGeneration,
+}
+struct ProfileBinding {
+    endpoint: String,
+    gateway_namespace: GatewayId,
+    gateway_epoch: Option<GatewayEpoch>,
+    device_id: DeviceId,
+    host_generation: HostGeneration,
+}
+impl From<TrustedProfile> for ProfileBinding {
+    fn from(p: TrustedProfile) -> Self {
+        Self {
+            endpoint: p.endpoint,
+            gateway_namespace: p.gateway_namespace,
+            gateway_epoch: Some(p.gateway_epoch),
+            device_id: p.device_id,
+            host_generation: p.host_generation,
+        }
+    }
+}
+impl From<PairedTrustedProfile> for ProfileBinding {
+    fn from(p: PairedTrustedProfile) -> Self {
+        Self {
+            endpoint: p.endpoint,
+            gateway_namespace: p.gateway_namespace,
+            gateway_epoch: None,
+            device_id: p.device_id,
+            host_generation: p.host_generation,
+        }
+    }
+}
+struct OwnerRecord {
+    lease: Option<OwnerLease>,
+    revision: u64,
+    cleanup: Option<OwnerCleanupHandle>,
+}
+#[derive(Default)]
+struct OwnerRegistry {
+    owners: BTreeMap<(OwnerId, OwnerEpoch), OwnerRecord>,
+    active_epoch: Option<GatewayEpoch>,
+    retired_epochs: BTreeSet<GatewayEpoch>,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ProtocolError {
@@ -51,88 +107,6 @@ pub enum ProtocolError {
     #[error("verified bootstrap owner registration rejected")]
     OwnerRegistrationRejected,
 }
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Request<'a> {
-    request_id: RequestId,
-    #[serde(default)]
-    connection_generation: Option<ConnectionGeneration>,
-    #[serde(borrow)]
-    call: Call<'a>,
-}
-#[derive(Deserialize)]
-#[serde(rename_all = "snake_case", deny_unknown_fields)]
-enum Call<'a> {
-    Negotiate {
-        version: u16,
-        challenge: String,
-        gateway_namespace: GatewayId,
-        gateway_epoch: GatewayEpoch,
-    },
-    PrepareStart {
-        owner: OwnerRef,
-        grant_revision: u64,
-        timeout_ms: u32,
-        #[serde(borrow)]
-        spec: &'a serde_json::value::RawValue,
-    },
-    DispatchStart {
-        owner: OwnerRef,
-        target: ResourceTarget,
-    },
-    InspectStart {
-        owner: OwnerRef,
-        target: ResourceTarget,
-    },
-    Read {
-        owner: OwnerRef,
-        target: ResourceTarget,
-        grant_revision: u64,
-        timeout_ms: u32,
-        max_bytes: u32,
-        wait_ms: u32,
-    },
-    PrepareAction {
-        owner: OwnerRef,
-        target: ResourceTarget,
-        grant_revision: u64,
-        timeout_ms: u32,
-        #[serde(borrow)]
-        action: &'a serde_json::value::RawValue,
-    },
-    DispatchAction {
-        owner: OwnerRef,
-        action: ActionRef,
-    },
-    InspectAction {
-        owner: OwnerRef,
-        action: ActionRef,
-    },
-    // Direct native mutations have no authority; use Host prepare+dispatch.
-    Write {},
-    Terminate {},
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct OwnerRef {
-    owner_id: OwnerId,
-    owner_epoch: OwnerEpoch,
-}
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ActionRef {
-    operation_id: OperationId,
-    payload_digest: Sha256Digest,
-}
-#[derive(Serialize)]
-struct Snapshot {
-    operation_id: OperationId,
-    payload_digest: Sha256Digest,
-    target: Option<ResourceTarget>,
-    state: OperationState,
-    liveness: ExecutionLiveness,
-    output_drain: OutputDrain,
-}
 impl From<OperationSnapshot> for Snapshot {
     fn from(value: OperationSnapshot) -> Self {
         Self {
@@ -144,65 +118,6 @@ impl From<OperationSnapshot> for Snapshot {
             output_drain: value.output_drain,
         }
     }
-}
-#[derive(Serialize)]
-struct Chunk {
-    stream: String,
-    text: String,
-}
-#[derive(Serialize)]
-#[serde(tag = "status", rename_all = "snake_case")]
-enum Reply {
-    Negotiated {
-        version: u16,
-        challenge: String,
-        device_id: DeviceId,
-        host_generation: HostGeneration,
-        connection_generation: ConnectionGeneration,
-        features: &'static [&'static str],
-        write: bool,
-        terminate: bool,
-        read_resume: bool,
-        owner_issuance: &'static str,
-    },
-    Prepared {
-        snapshot: Snapshot,
-    },
-    Start {
-        snapshot: Snapshot,
-        dispatch: &'static str,
-    },
-    Inspected {
-        snapshot: Snapshot,
-    },
-    Read {
-        chunks: Vec<Chunk>,
-        liveness: ExecutionLiveness,
-        output_drain: OutputDrain,
-        exit_code: Option<i32>,
-        read_resume: bool,
-    },
-    Action {
-        snapshot: Snapshot,
-        dispatch: &'static str,
-        acknowledgment: Option<ActionAcknowledgmentDto>,
-        write_id: Option<String>,
-    },
-    Unsupported {
-        feature: &'static str,
-    },
-    Error {
-        category: ErrorCategory,
-        certainty: ExecutionCertainty,
-        cursor_may_be_consumed: bool,
-    },
-}
-#[derive(Serialize)]
-#[serde(tag = "kind", rename_all = "snake_case")]
-enum ActionAcknowledgmentDto {
-    WriteAccepted,
-    // Request acknowledgment, never process-exit proof.
-    TerminateRequested { was_running: bool },
 }
 fn action_reply(
     snapshot: OperationSnapshot,
@@ -231,25 +146,19 @@ fn action_reply(
         });
     Reply::Action {
         snapshot: snapshot.into(),
-        dispatch,
+        dispatch: dispatch.into(),
         acknowledgment,
         write_id: receipt.and_then(|r| r.write_id),
     }
 }
-#[derive(Serialize)]
-struct Response {
-    request_id: RequestId,
-    connection_generation: ConnectionGeneration,
-    reply: Reply,
-}
-
-/// This registry's authority is established only through bootstrap calls. JSON
-/// can reference an existing lease but never construct, register or renew one.
+/// v2 authority comes only from bootstrap; v3 owner-control DTOs are admitted
+/// only after fixed-endpoint TLS and explicit Gateway namespace negotiation.
 pub struct HostProtocol<'a> {
-    profile: TrustedProfile,
+    profile: ProfileBinding,
     coordinator: HostCoordinator,
     authority: &'a HostAuthority,
-    owners: BTreeMap<(OwnerId, OwnerEpoch), OwnerLease>,
+    owners: Mutex<OwnerRegistry>,
+    paired: bool,
     connection_slot: tokio::sync::Semaphore,
 }
 impl<'a> HostProtocol<'a> {
@@ -257,6 +166,21 @@ impl<'a> HostProtocol<'a> {
         profile: TrustedProfile,
         coordinator: HostCoordinator,
         authority: &'a HostAuthority,
+    ) -> Result<Self, ProtocolError> {
+        Self::build(profile.into(), coordinator, authority, false)
+    }
+    pub fn new_paired(
+        profile: PairedTrustedProfile,
+        coordinator: HostCoordinator,
+        authority: &'a HostAuthority,
+    ) -> Result<Self, ProtocolError> {
+        Self::build(profile.into(), coordinator, authority, true)
+    }
+    fn build(
+        profile: ProfileBinding,
+        coordinator: HostCoordinator,
+        authority: &'a HostAuthority,
+        paired: bool,
     ) -> Result<Self, ProtocolError> {
         let (device, generation) = coordinator.bootstrap_identity();
         if &profile.device_id != device
@@ -279,7 +203,8 @@ impl<'a> HostProtocol<'a> {
             profile,
             coordinator,
             authority,
-            owners: BTreeMap::new(),
+            owners: Mutex::new(OwnerRegistry::default()),
+            paired,
             connection_slot: tokio::sync::Semaphore::new(1),
         })
     }
@@ -288,24 +213,154 @@ impl<'a> HostProtocol<'a> {
         owner: OwnerId,
         epoch: OwnerEpoch,
     ) -> Result<(), ProtocolError> {
+        if self.paired {
+            return Err(ProtocolError::OwnerRegistrationRejected);
+        }
+        let mut registry = self.owners.lock().expect("owner registry");
         let key = (owner.clone(), epoch.clone());
-        if self.owners.contains_key(&key) {
+        if registry.owners.contains_key(&key) {
             return Ok(());
         }
-        if self.owners.len() >= OWNER_LIMIT {
+        if registry.owners.len() >= OWNER_LIMIT {
             return Err(ProtocolError::Busy);
         }
         let lease = self
             .authority
             .register_verified_owner(owner, epoch)
             .map_err(|_| ProtocolError::OwnerRegistrationRejected)?;
-        self.owners.insert(key, lease);
+        registry.owners.insert(
+            key,
+            OwnerRecord {
+                lease: Some(lease),
+                revision: self.coordinator.grant_revision(),
+                cleanup: None,
+            },
+        );
         Ok(())
     }
-    fn owner(&self, reference: &OwnerRef) -> Result<&OwnerLease, ErrorCategory> {
+    fn owner(&self, reference: &OwnerRef) -> Result<OwnerLease, ErrorCategory> {
         self.owners
+            .lock()
+            .expect("owner registry")
+            .owners
             .get(&(reference.owner_id.clone(), reference.owner_epoch.clone()))
+            .and_then(|entry| entry.lease.clone())
             .ok_or(ErrorCategory::Unauthorized)
+    }
+    fn accept_epoch(&self, epoch: &GatewayEpoch) -> Result<(), ProtocolError> {
+        if !self.paired {
+            return if self.profile.gateway_epoch.as_ref() == Some(epoch) {
+                Ok(())
+            } else {
+                Err(ProtocolError::NegotiationRejected)
+            };
+        }
+        let mut registry = self.owners.lock().expect("owner registry");
+        if registry.active_epoch.as_ref() == Some(epoch) {
+            return Ok(());
+        }
+        if registry.retired_epochs.contains(epoch)
+            || (registry.active_epoch.is_some() && registry.retired_epochs.len() >= 64)
+        {
+            return Err(ProtocolError::NegotiationRejected);
+        }
+        // Fence all old scope leases before accepting a new authenticated server epoch.
+        for entry in registry.owners.values_mut() {
+            if let Some(lease) = entry.lease.as_ref() {
+                let cleanup = self
+                    .authority
+                    .fence_owner_for_cleanup(lease)
+                    .map_err(|_| ProtocolError::OwnerRegistrationRejected)?;
+                entry.cleanup = Some(cleanup);
+                entry.lease = None;
+            }
+        }
+        if let Some(old) = registry.active_epoch.replace(epoch.clone()) {
+            registry.retired_epochs.insert(old);
+        }
+        Ok(())
+    }
+    fn control(&self, call: &Call) -> Option<Reply> {
+        let (owner, revision) = match call {
+            Call::OwnerOpen {
+                owner,
+                grant_revision,
+            } => (owner, Some(*grant_revision)),
+            Call::OwnerRevoke { owner } => (owner, None),
+            _ => return None,
+        };
+        if !self.paired {
+            return Some(Reply::Unsupported {
+                feature: "gateway_owner_control".into(),
+            });
+        }
+        let mut registry = self.owners.lock().expect("owner registry");
+        let key = (owner.owner_id.clone(), owner.owner_epoch.clone());
+        if let Some(revision) = revision {
+            if revision != self.coordinator.grant_revision() {
+                return Some(rejection(ErrorCategory::StateConflict));
+            }
+            if let Some(entry) = registry.owners.get(&key) {
+                return Some(if entry.lease.is_some() && entry.revision == revision {
+                    Reply::OwnerOpened {
+                        owner: owner.clone(),
+                        grant_revision: revision,
+                    }
+                } else {
+                    rejection(ErrorCategory::Unauthorized)
+                });
+            }
+            if registry.owners.len() >= OWNER_LIMIT {
+                return Some(rejection(ErrorCategory::Busy));
+            }
+            match self
+                .authority
+                .register_verified_owner(owner.owner_id.clone(), owner.owner_epoch.clone())
+            {
+                Ok(lease) => {
+                    registry.owners.insert(
+                        key,
+                        OwnerRecord {
+                            lease: Some(lease),
+                            revision,
+                            cleanup: None,
+                        },
+                    );
+                }
+                Err(e) => return Some(coordinator_error(e, false)),
+            }
+            Some(Reply::OwnerOpened {
+                owner: owner.clone(),
+                grant_revision: revision,
+            })
+        } else {
+            if let Some(entry) = registry.owners.get_mut(&key) {
+                if let Some(lease) = entry.lease.as_ref() {
+                    match self.authority.fence_owner_for_cleanup(lease) {
+                        Ok(cleanup) => entry.cleanup = Some(cleanup),
+                        Err(e) => return Some(coordinator_error(e, false)),
+                    }
+                    entry.lease = None;
+                }
+            } else {
+                if registry.owners.len() >= OWNER_LIMIT {
+                    return Some(rejection(ErrorCategory::Busy));
+                }
+                registry.owners.insert(
+                    key,
+                    OwnerRecord {
+                        lease: None,
+                        revision: self.coordinator.grant_revision(),
+                        cleanup: None,
+                    },
+                );
+            }
+            Some(Reply::OwnerRevoked {
+                owner: owner.clone(),
+                fenced: true,
+                cleanup: "unknown".into(),
+            })
+        }
     }
     fn context(&self, revision: u64, timeout_ms: u32) -> Result<PreparedContext, ErrorCategory> {
         if timeout_ms == 0 || timeout_ms > 10_000 {
@@ -326,8 +381,34 @@ impl<'a> HostProtocol<'a> {
             disconnect_policy: DisconnectPolicy::RetainForOwner,
         })
     }
-    async fn handle(&self, call: Call<'_>) -> Reply {
+    async fn handle(&self, call: Call) -> Reply {
         match call {
+            Call::OwnerCleanup { owner, timeout_ms } => {
+                if !self.paired || timeout_ms == 0 || timeout_ms > 5000 {
+                    return invalid();
+                }
+                let cleanup = self
+                    .owners
+                    .lock()
+                    .expect("owner registry")
+                    .owners
+                    .get(&(owner.owner_id.clone(), owner.owner_epoch.clone()))
+                    .and_then(|entry| entry.cleanup.clone());
+                let Some(cleanup) = cleanup else {
+                    return rejection(ErrorCategory::Unauthorized);
+                };
+                let complete = match self
+                    .authority
+                    .cleanup_owner(&cleanup, Duration::from_millis(u64::from(timeout_ms)))
+                {
+                    Ok(ticket) => ticket
+                        .wait()
+                        .await
+                        .is_ok_and(|facts| facts.physical_complete),
+                    Err(_) => false,
+                };
+                Reply::OwnerCleanup { owner, complete }
+            }
             Call::PrepareStart {
                 owner,
                 grant_revision,
@@ -349,7 +430,7 @@ impl<'a> HostProtocol<'a> {
                     Ok(v) => v,
                     Err(_) => return invalid(),
                 };
-                match self.coordinator.prepare_start(owner, context, &spec) {
+                match self.coordinator.prepare_start(&owner, context, &spec) {
                     Ok(v) => Reply::Prepared { snapshot: v.into() },
                     Err(e) => coordinator_error(e, false),
                 }
@@ -360,13 +441,13 @@ impl<'a> HostProtocol<'a> {
                     Err(e) => return rejection(e),
                 };
                 match self.coordinator.dispatch_start(
-                    owner,
+                    &owner,
                     &target.operation_id,
                     target.payload_digest,
                 ) {
                     Ok(StartSubmission::Existing(v)) => Reply::Start {
                         snapshot: v.into(),
-                        dispatch: "existing_no_replay",
+                        dispatch: "existing_no_replay".into(),
                     },
                     Ok(StartSubmission::Submitted(ticket)) => match ticket.wait().await {
                         Ok(v) => Reply::Start {
@@ -375,7 +456,8 @@ impl<'a> HostProtocol<'a> {
                                 DispatchEvidence::NotDispatched => "not_dispatched",
                                 DispatchEvidence::Started => "started",
                                 DispatchEvidence::Unknown => "unknown",
-                            },
+                            }
+                            .into(),
                         },
                         Err(e) => coordinator_error(e, false),
                     },
@@ -388,7 +470,7 @@ impl<'a> HostProtocol<'a> {
                     Err(e) => return rejection(e),
                 };
                 match self.coordinator.inspect_start(
-                    owner,
+                    &owner,
                     &target.operation_id,
                     target.payload_digest,
                 ) {
@@ -418,7 +500,7 @@ impl<'a> HostProtocol<'a> {
                 match self
                     .coordinator
                     .read(
-                        owner,
+                        &owner,
                         &target.operation_id,
                         target.payload_digest,
                         &context,
@@ -468,7 +550,7 @@ impl<'a> HostProtocol<'a> {
                 };
                 match self
                     .coordinator
-                    .prepare_action(owner, target, context, &action)
+                    .prepare_action(&owner, target, context, &action)
                 {
                     Ok(v) => Reply::Prepared { snapshot: v.into() },
                     Err(e) => coordinator_error(e, false),
@@ -480,13 +562,13 @@ impl<'a> HostProtocol<'a> {
                     Err(e) => return rejection(e),
                 };
                 match self.coordinator.dispatch_action(
-                    owner,
+                    &owner,
                     &action.operation_id,
                     action.payload_digest,
                 ) {
                     Ok(ActionSubmission::Existing(snapshot)) => {
                         match self.coordinator.lookup_action(
-                            owner,
+                            &owner,
                             &action.operation_id,
                             action.payload_digest,
                         ) {
@@ -507,12 +589,12 @@ impl<'a> HostProtocol<'a> {
                     Err(e) => return rejection(e),
                 };
                 match self.coordinator.inspect_action(
-                    owner,
+                    &owner,
                     &action.operation_id,
                     action.payload_digest,
                 ) {
                     Ok(snapshot) => match self.coordinator.lookup_action(
-                        owner,
+                        &owner,
                         &action.operation_id,
                         action.payload_digest,
                     ) {
@@ -522,17 +604,17 @@ impl<'a> HostProtocol<'a> {
                     Err(e) => coordinator_error(e, false),
                 }
             }
-            Call::Write {} => Reply::Unsupported { feature: "write" },
-            Call::Terminate {} => Reply::Unsupported {
-                feature: "terminate",
+            Call::Write {} => Reply::Unsupported {
+                feature: "write".into(),
             },
-            Call::Negotiate { .. } => invalid(),
+            Call::Terminate {} => Reply::Unsupported {
+                feature: "terminate".into(),
+            },
+            Call::Negotiate { .. } | Call::OwnerOpen { .. } | Call::OwnerRevoke { .. } => invalid(),
         }
     }
-    /// Does not send until the Gateway's explicit side-effect-free challenge.
-    /// One bounded business handler; the transport's reader still handles pings.
-    /// Response loss ends this link only. Starts remain supervised by Host and
-    /// consumed read cursors are explicitly not resumable by this first slice.
+    /// Scoped business waiters never own the native executor. Control admission
+    /// remains live while at most two business handlers await upstream work.
     pub async fn run_connection(&self, link: &mut HostWssLink) -> Result<(), ProtocolError> {
         let _slot = self
             .connection_slot
@@ -542,62 +624,61 @@ impl<'a> HostProtocol<'a> {
             return Err(ProtocolError::BootstrapMismatch);
         }
         let generation = link.generation().clone();
+        let sender = link.sender();
         let mut negotiated = false;
-        while let Some(frame) = link.recv().await {
-            if frame.generation != generation || frame.as_str().len() > FRAME_LIMIT {
-                return Err(ProtocolError::InvalidFrame);
-            }
-            let request: Request<'_> =
-                serde_json::from_str(frame.as_str()).map_err(|_| ProtocolError::InvalidFrame)?;
-            if (!negotiated && request.connection_generation.is_some())
-                || (negotiated && request.connection_generation.as_ref() != Some(&generation))
-            {
-                return Err(ProtocolError::NegotiationRejected);
-            }
-            let reply = if !negotiated {
-                match request.call {
-                    Call::Negotiate {
-                        version: 2,
-                        challenge,
-                        gateway_namespace,
-                        gateway_epoch,
-                    } if gateway_namespace == self.profile.gateway_namespace
-                        && gateway_epoch == self.profile.gateway_epoch
-                        && challenge.len() >= 16
-                        && challenge.len() <= 128
-                        && challenge
-                            .bytes()
-                            .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b)) =>
-                    {
-                        negotiated = true;
-                        Reply::Negotiated {
-                            version: 2,
-                            challenge,
-                            device_id: self.profile.device_id.clone(),
-                            host_generation: self.profile.host_generation.clone(),
-                            connection_generation: generation.clone(),
-                            features: &[
-                                "prepare_start",
-                                "dispatch_start",
-                                "inspect_start",
-                                "read",
-                                "prepare_action",
-                                "dispatch_action",
-                                "inspect_action",
-                            ],
-                            write: true,
-                            terminate: true,
-                            read_resume: false,
-                            owner_issuance: "bootstrap_preverified_only",
-                        }
+        let mut pending: FuturesUnordered<
+            futures_util::future::BoxFuture<'_, (RequestId, Option<OwnerRef>, Reply)>,
+        > = FuturesUnordered::new();
+        loop {
+            let (request_id, reply) = tokio::select! {
+                finished = pending.next(), if !pending.is_empty() => {
+                    let Some((id, owner, mut reply)) = finished else { continue; };
+                    // A revoked owner may not receive an in-flight result.
+                    if owner.as_ref().is_some_and(|owner| self.owner(owner).is_err()) {
+                        reply = Reply::Error { category: ErrorCategory::Unauthorized, certainty: ExecutionCertainty::Unknown, cursor_may_be_consumed: true };
                     }
-                    _ => return Err(ProtocolError::NegotiationRejected),
+                    (id, reply)
                 }
-            } else {
-                self.handle(request.call).await
+                frame = link.recv() => {
+                    let Some(frame) = frame else { break; };
+                    if frame.generation != generation || frame.as_str().len() > FRAME_LIMIT { return Err(ProtocolError::InvalidFrame); }
+                    let request: Request = serde_json::from_str(frame.as_str()).map_err(|_| ProtocolError::InvalidFrame)?;
+                    if (!negotiated && request.connection_generation.is_some()) ||
+                       (negotiated && request.connection_generation.as_ref() != Some(&generation)) {
+                        return Err(ProtocolError::NegotiationRejected);
+                    }
+                    let reply = if !negotiated {
+                        match request.call {
+                            Call::Negotiate { version, challenge, gateway_namespace, gateway_epoch }
+                                if version == (if self.paired { 3 } else { 2 })
+                                && gateway_namespace == self.profile.gateway_namespace
+                                && (16..=128).contains(&challenge.len())
+                                && challenge.bytes().all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b)) => {
+                                self.accept_epoch(&gateway_epoch)?;
+                                negotiated = true;
+                                Reply::Negotiated {
+                                    version, challenge, device_id: self.profile.device_id.clone(),
+                                    host_generation: self.profile.host_generation.clone(), connection_generation: generation.clone(),
+                                    features: ["prepare_start", "dispatch_start", "inspect_start", "read", "prepare_action", "dispatch_action", "inspect_action"].into_iter().chain(if self.paired { vec!["owner_open", "owner_revoke", "owner_cleanup"] } else { vec![] }).map(str::to_owned).collect(),
+                                    write: true, terminate: true, read_resume: false,
+                                    owner_issuance: if self.paired { "gateway_authenticated" } else { "bootstrap_preverified_only" }.into(),
+                                    grant_revision: self.paired.then(|| self.coordinator.grant_revision()),
+                                }
+                            }
+                            _ => return Err(ProtocolError::NegotiationRejected),
+                        }
+                    } else if let Some(reply) = self.control(&request.call) { reply }
+                    else if pending.len() >= 2 { rejection(ErrorCategory::Busy) }
+                    else {
+                        let owner = call_owner(&request.call).cloned();
+                        pending.push(Box::pin(async move { (request.request_id, owner, self.handle(request.call).await) }));
+                        continue;
+                    };
+                    (request.request_id, reply)
+                }
             };
             let response = Response {
-                request_id: request.request_id,
+                request_id,
                 connection_generation: generation.clone(),
                 reply,
             };
@@ -605,14 +686,28 @@ impl<'a> HostProtocol<'a> {
             serde_json::to_writer(&mut bytes, &response)
                 .map_err(|_| ProtocolError::ResponseLost)?;
             let text = String::from_utf8(bytes.0).map_err(|_| ProtocolError::ResponseLost)?;
-            link.sender()
+            sender
                 .send_text(text, Duration::from_secs(5))
                 .await
                 .map_err(|_| ProtocolError::ResponseLost)?;
         }
+        // Dropping scoped waiters does not cancel supervised Host work or replay it.
         Ok(())
     }
 }
+fn call_owner(call: &Call) -> Option<&OwnerRef> {
+    match call {
+        Call::PrepareStart { owner, .. }
+        | Call::DispatchStart { owner, .. }
+        | Call::InspectStart { owner, .. }
+        | Call::Read { owner, .. }
+        | Call::PrepareAction { owner, .. }
+        | Call::DispatchAction { owner, .. }
+        | Call::InspectAction { owner, .. } => Some(owner),
+        _ => None,
+    }
+}
+
 fn invalid() -> Reply {
     rejection(ErrorCategory::InvalidRequest)
 }
@@ -656,3 +751,6 @@ impl Write for BoundedJson {
 }
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod paired_tests;

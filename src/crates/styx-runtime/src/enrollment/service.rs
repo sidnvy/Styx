@@ -877,6 +877,63 @@ impl EnrollmentService {
             }
         }
     }
+    pub(crate) fn exec_profiles(&mut self) -> Result<Vec<GatewayExecProfile>, ServiceError> {
+        self.healthy()?;
+        self.ledger
+            .devices_for_admin(&self.control.admin())?
+            .into_iter()
+            .filter(|d| !d.revoked)
+            .map(|d| {
+                let verified = self.load_profile(&d.profile, &d.id, d.fingerprint)?;
+                let p = verified.profile();
+                Ok(GatewayExecProfile {
+                    device_id: d.id,
+                    capability_generation: d.generation,
+                    platform: p.platform.clone(),
+                    cwd: p.cwd.clone(),
+                    shell: p.shell.clone(),
+                    allowed_shells: vec![p.shell.clone()],
+                    environment: std::collections::BTreeMap::new(),
+                })
+            })
+            .collect()
+    }
+    pub(crate) fn profile_is_current(
+        &self,
+        id: &DeviceId,
+        generation: &str,
+    ) -> Result<(), ServiceError> {
+        self.healthy()?;
+        if self
+            .ledger
+            .devices_for_admin(&self.control.admin())?
+            .iter()
+            .any(|d| &d.id == id && !d.revoked && d.generation == generation)
+        {
+            Ok(())
+        } else {
+            Err(ServiceError::transport_unauthorized())
+        }
+    }
+    pub(crate) fn admit_upgrade(
+        &mut self,
+        headers: &HeaderMap,
+        id: &DeviceId,
+        generation: ConnectionGeneration,
+    ) -> Result<ConnectionLease, ServiceError> {
+        if headers.get_all(HOST).iter().count() != 1
+            || headers.contains_key(ORIGIN)
+            || headers.contains_key("x-styx-tunnel-context")
+            || !headers
+                .get(HOST)
+                .and_then(|v| v.to_str().ok())
+                .is_some_and(|h| self.hosts.contains(h))
+        {
+            return Err(ServiceError::new(403, "host_or_origin_not_allowed"));
+        }
+        let token = bearer(headers)?;
+        self.admit_host(id, token, Lane::Exec, generation)
+    }
     /// Host transport adapters retain the nonserializable lease and recheck it
     /// per frame. This is not a native operation/owner authorization substitute.
     pub fn admit_host(
@@ -914,3 +971,21 @@ mod tests;
 #[cfg(test)]
 #[path = "controller_tests.rs"]
 mod controller_tests;
+
+/// Verified enrollment metadata; never inferred from Gateway OS/environment.
+#[derive(Clone, Debug)]
+pub struct GatewayExecProfile {
+    pub device_id: DeviceId,
+    pub capability_generation: String,
+    pub platform: String,
+    pub cwd: String,
+    pub shell: String,
+    pub allowed_shells: Vec<String>,
+    pub environment: std::collections::BTreeMap<String, String>,
+}
+
+impl ServiceError {
+    pub(crate) fn transport_unauthorized() -> Self {
+        Self::new(403, "device_unauthorized")
+    }
+}

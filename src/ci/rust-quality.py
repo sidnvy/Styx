@@ -45,6 +45,7 @@ HTTP_TESTS = [
     ("official-http-sdk", "gateway::http::tests::official_sdk_tcp_auth_sessions_limits_and_pending_close"),
     ("http-control-pressure", "gateway::http::tests::actual_tcp_slow_post_readers_do_not_starve_bodyless_control"),
 ]
+PAIRED_HOST_TEST = "enrollment::service::tests::paired_journey::actual_paired_tls_mcp_codex_nonce_owner_and_revocation_journey"
 HOST_ACTION_WIRE_TEST = "host::protocol::tests::actual_canonical_tls_wss_host_action_journey"
 HOST_WIRE_TEST = "host::protocol::tests::actual_tls_wss_codex_start_read_duplicate_and_lost_response_batch"
 
@@ -335,6 +336,16 @@ def execute(args):
                         **({"STYX_TEST_TLS_FIXTURES": args.tls_fixtures} if args.tls_fixtures else {})})
                 gate.semantic(native, [] if "1 passed; 0 failed" in gate.read(name) else ["exact_real_codex_case_not_executed"])
                 receipt["real_codex_interop"][name] = native["status"]
+        receipt["paired_host_native"] = "NOT_RUN_explicit_inputs_not_requested"
+        if args.paired_host:
+            if not args.codex_bin or not args.enrollment_service or not args.node22 or not args.tls_fixtures:
+                raise ValueError("paired_host_requires_codex_enrollment_service_node22_tls")
+            owned = evidence / "owned-paired-host"
+            owned.mkdir(mode=0o700)
+            check = gate.run("paired-host", ["cargo", "test", "-p", "styx-runtime", "--locked", "--offline", PAIRED_HOST_TEST, "--", "--ignored", "--exact", "--nocapture"], timeout=180,
+                extra_env={"STYX_TEST_CODEX_BIN": str(Path(args.codex_bin)), "STYX_TEST_NODE22": str(Path(args.node22)), "STYX_TEST_TLS_FIXTURES": args.tls_fixtures, "STYX_TEST_PAIRED_ROOT": str(owned)})
+            gate.semantic(check, [] if "1 passed; 0 failed" in gate.read("paired-host") else ["exact_paired_native_case_not_executed"])
+            receipt["paired_host_native"] = check["status"]
         gate.run("python-oracles", [sys.executable, "-W", "error::ResourceWarning", "-m", "unittest", "discover", "-s", "src/acceptance/oracles", "-p", "test_oracles.py", "-v"], timeout=120)
         build = gate.run("cli-build", ["cargo", "build", "-p", "styx", "--locked", "--offline"])
         if build["status"] == "PASS":
@@ -381,6 +392,8 @@ def execute(args):
             required |= {"enrollment-store", "enrollment-clock", "enrollment-recovery", "enrollment-owned"}
         if args.enrollment_service:
             required |= {"enrollment-profile", "enrollment-controller", "enrollment-service"}
+        if args.paired_host:
+            required |= {"paired-host"}
         if args.node22:
             required |= {"node22-version", "node22-crypto"}
         if args.codex_bin:
@@ -401,6 +414,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--evidence", required=True, help="fresh absolute external evidence directory")
     parser.add_argument("--target-dir", help="absolute external Cargo build cache; reused only by explicit choice")
+    parser.add_argument("--paired-host", action="store_true", help="actual paired TLS/MCP/WSS/native scene; requires Codex, Node22, TLS and enrollment service inputs")
     parser.add_argument("--enrollment-service", action="store_true", help="run actual signed enrollment TLS service; requires --enrollment-store, --node22 and --tls-fixtures")
     parser.add_argument("--enrollment-store", action="store_true", help="run the Linux GNU owned private-file/process-crash journal slice")
     parser.add_argument("--node22", help="absolute explicit Node22 executable for real legacy crypto interop")

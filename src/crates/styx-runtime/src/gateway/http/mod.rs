@@ -1,7 +1,7 @@
 //! Bounded development HTTP/MCP slice. Official SDK owns HTTP MCP and SSE.
 //! No native tools, real-account identity or production TLS acceptance is implied.
 mod backend;
-mod body;
+pub(crate) mod body;
 pub mod lifecycle;
 mod session;
 use crate::gateway::{
@@ -219,7 +219,7 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayHttp<B> {
         // Arc<Life> retains the real reservation until the last owner drops.
         self.budget.capacity - self.budget.sessions.available_permits()
     }
-    async fn handle(
+    pub(crate) async fn handle(
         self: Arc<Self>,
         request: Request<hyper::body::Incoming>,
     ) -> Result<Response<HeldBody>, Infallible> {
@@ -506,6 +506,15 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayHttp<B> {
             held.delivery_allowed = Some(Arc::new(move || life.is_active()));
         }
         Response::from_parts(parts, held)
+    }
+    /// Lifecycle shutdown for the external strict-TLS listener. This handle
+    /// owns no socket; its connections_joined field is not transport evidence.
+    pub(crate) fn paired_shutdown_handle(self: &Arc<Self>) -> Arc<HttpServer<B>> {
+        Arc::new(HttpServer {
+            app: self.clone(),
+            listener_task: Mutex::new(None),
+            shutdown_lock: tokio::sync::Mutex::new(()),
+        })
     }
     /// Only loopback cleartext is supported by this development listener. TLS
     /// profile/listener composition is separate and never silently downgraded.

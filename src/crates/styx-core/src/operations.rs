@@ -4,7 +4,9 @@ use crate::policy::{AdmissionFacts, check_admission};
 use std::collections::BTreeMap;
 use styx_contracts::{error::ErrorCategory, identity::*, operation::*};
 
+mod owner_cleanup;
 mod retention;
+pub use owner_cleanup::OwnerCleanupAuthority;
 use retention::PhysicalRetention;
 pub use retention::{ProviderRecordKey, ProviderReleaseConfirmation, ProviderReleasePermit};
 

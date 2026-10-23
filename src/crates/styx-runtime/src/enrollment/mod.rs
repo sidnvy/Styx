@@ -5,6 +5,7 @@ pub mod http;
 mod profile;
 mod recovery;
 pub mod service;
+pub mod shared;
 
 use crate::store::{
     ConfigurationWriterGuard, PrivateRoot,

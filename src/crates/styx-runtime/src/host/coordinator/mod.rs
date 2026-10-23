@@ -1,7 +1,9 @@
 //! Host-owned start/read/targeted-action composition.
 //! No network DTO can construct control authority. Physical retention is Core-
 //! attested; legacy raw-wire mode remains outside this composition.
+mod owner_cleanup;
 mod retention;
+pub use owner_cleanup::{OwnerCleanupFacts, OwnerCleanupHandle, OwnerCleanupTicket};
 pub use retention::{RetentionBlock, RetentionCollection};
 
 use crate::providers::codex::{
@@ -157,6 +159,15 @@ impl HostCoordinator {
     /// Prevent cross-wiring independent Host instances with identical public IDs.
     pub fn shares_authority(&self, authority: &HostAuthority) -> bool {
         Arc::ptr_eq(&self.inner, &authority.inner)
+    }
+    /// Host-local policy revision; never derived from Gateway enrollment generations.
+    pub(crate) fn grant_revision(&self) -> u64 {
+        self.inner
+            .state
+            .lock()
+            .expect("Host state mutex")
+            .facts
+            .grant_revision
     }
     pub fn now(&self) -> MonotonicMillis {
         self.inner.now()

@@ -10,7 +10,7 @@ use std::{
 };
 use tokio::sync::OwnedSemaphorePermit;
 /// Holds admissions through actual SSE/body EOF or drop, not just response headers.
-pub(super) struct HeldBody {
+pub(crate) struct HeldBody {
     pub inner: BoxBody<Bytes, Infallible>,
     pub until: Pin<Box<tokio::time::Sleep>>,
     pub _permits: Vec<OwnedSemaphorePermit>,

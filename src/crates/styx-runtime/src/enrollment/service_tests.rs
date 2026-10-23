@@ -1125,3 +1125,6 @@ async fn actual_strict_tls_enrollment_service_full_journey() {
     node.lock().await.stop().await;
     outcome.unwrap();
 }
+
+#[path = "paired_journey.rs"]
+mod paired_journey;

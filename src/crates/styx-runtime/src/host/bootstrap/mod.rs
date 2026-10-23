@@ -3,7 +3,7 @@
 use super::{
     coordinator::{CoordinatorError, HostAuthority, HostCleanup, HostCoordinator},
     link::{HostLinkBudget, LINK_BYTES},
-    protocol::{HostProtocol, ProtocolError, TrustedProfile},
+    protocol::{HostProtocol, PairedTrustedProfile, ProtocolError, TrustedProfile},
 };
 use crate::providers::codex::{CodexStdio, ExecError, OwnedExecutorConfig};
 use std::{sync::Arc, time::Duration};
@@ -111,6 +111,13 @@ impl OwnedExecHost {
     /// this Host. A protocol cannot outlive its bootstrap's reserved partition.
     pub fn protocol(&self, profile: TrustedProfile) -> Result<HostProtocol<'_>, ProtocolError> {
         HostProtocol::new(profile, self.coordinator.clone(), &self.authority)
+    }
+    /// Same executor and authority, with protected pairing bootstrap.
+    pub fn paired_protocol(
+        &self,
+        profile: PairedTrustedProfile,
+    ) -> Result<HostProtocol<'_>, ProtocolError> {
+        HostProtocol::new_paired(profile, self.coordinator.clone(), &self.authority)
     }
     /// Remaining logical queued-I/O capacity, never total resident memory.
     pub fn unreserved_queued_bytes(&self) -> usize {

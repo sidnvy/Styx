@@ -200,6 +200,11 @@
       "kind": "owned_private_core_journal_fixture",
       "input": "fresh STYX_TEST_ENROLLMENT_CONTROLLER_ROOT + fixed Node22",
       "required_for": "durable expired pending collection and sticky observed material failure; trusted historical fixtures, not TLS pairing acceptance"
+    },
+    "enrollment::service::tests::paired_journey::actual_paired_tls_mcp_codex_nonce_owner_and_revocation_journey": {
+      "kind": "owned_tls_mcp_wss_native_fixture",
+      "input": "--paired-host --codex-bin --node22 --tls-fixtures --enrollment-service and fresh owned root",
+      "required_for": "actual signed synthetic pairing, official MCP TLS client, outbound paired Host WSS, native Codex nonce/stdin, cross-owner rejection and device revoke; not installed platform/account acceptance"
     }
   },
   "change_policy": "dependency or ignored-test additions require explicit policy review; preserve mature Cargo tooling rather than replacing its resolver/compiler/lints"

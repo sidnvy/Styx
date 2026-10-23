@@ -193,6 +193,11 @@ pub enum TerminationEvidence {
     ProcessExited(i32),
     Unknown,
 }
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct CleanupReadEvidence {
+    pub exit_code: Option<i32>,
+    pub drained: bool,
+}
 #[derive(Debug)]
 pub struct CleanupReceipt {
     pub processes: Vec<(ProcessHandle, TerminationEvidence)>,
@@ -680,6 +685,79 @@ impl CodexStdio {
                 Err(ExecError::InputUnknown)
             }
         }
+    }
+    /// Cleanup-only ownership port. It cannot start/write or deliver output.
+    pub(crate) async fn lookup_for_cleanup(
+        &self,
+        authority: &styx_core::operations::OwnerCleanupAuthority,
+        id: &OperationId,
+    ) -> Result<ProcessHandle, ExecError> {
+        self.lookup_operation(authority.owner(), id).await
+    }
+    pub(crate) async fn cancel_for_cleanup(
+        &self,
+        authority: &styx_core::operations::OwnerCleanupAuthority,
+        handle: &ProcessHandle,
+        budget: Duration,
+    ) -> Result<TerminationEvidence, ExecError> {
+        self.cancel(authority.owner(), handle, budget).await
+    }
+    /// Discard validated bytes without granting the revoked caller a read.
+    /// Existing raw/decoded consumers are quiescent before this port is used.
+    /// input_unknown is preserved; drain never replays or clears a stdin action.
+    pub(crate) async fn discard_for_cleanup(
+        &self,
+        authority: &styx_core::operations::OwnerCleanupAuthority,
+        handle: &ProcessHandle,
+    ) -> Result<CleanupReadEvidence, ExecError> {
+        use zeroize::Zeroize;
+        let mut record = self.owned(authority.owner(), handle).await?;
+        if !record.drained {
+            let reply = self.rpc.request("process/read", json!({"processId":handle.process_id,"afterSeq":record.cursor,"maxBytes":65536,"waitMs":50})).await?;
+            let page: ReadPage =
+                serde_json::from_value(reply).map_err(|_| ExecError::InvalidFrame)?;
+            let mut validated = output::validate(&page, record.cursor, record.gaps, 65536)?;
+            for (_, bytes) in &mut validated.chunks {
+                bytes.zeroize();
+            }
+            if page.failure.is_some() {
+                return Err(ExecError::ProcessFailure);
+            }
+            let observation = self
+                .rpc
+                .observation(&handle.process_id)
+                .ok_or(ExecError::UnknownHandle)?;
+            if observation.invalid
+                || page
+                    .exit_code
+                    .zip(record.last_exit)
+                    .is_some_and(|(a, b)| a != b)
+                || page
+                    .exit_code
+                    .zip(observation.exited.map(|(_, code)| code))
+                    .is_some_and(|(a, b)| a != b)
+            {
+                return Err(ExecError::InvalidFrame);
+            }
+            record.cursor = Some(validated.cursor);
+            record.gaps = validated.gaps;
+            record.drained = page.closed && page.chunks.is_empty();
+            record.last_exit = record
+                .last_exit
+                .or(page.exit_code)
+                .or(observation.exited.map(|(_, code)| code));
+        } else if let Some(observation) = self.rpc.observation(&handle.process_id) {
+            if observation.invalid {
+                return Err(ExecError::InvalidFrame);
+            }
+            record.last_exit = record
+                .last_exit
+                .or(observation.exited.map(|(_, code)| code));
+        }
+        Ok(CleanupReadEvidence {
+            exit_code: record.last_exit,
+            drained: record.drained,
+        })
     }
     async fn cancel(
         &self,

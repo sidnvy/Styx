@@ -1,10 +1,16 @@
 //! Strict TLS enrollment transport. Service owns all role/domain authorization.
 //! Counts bound this listener's work, not native RSS or a shared Host partition.
-use super::service::EnrollmentService;
+use super::{service::EnrollmentService, shared::SharedEnrollment};
+use crate::gateway::{
+    http::GatewayHttp, http::lifecycle::GatewayOwnerLifecycle, mcp::GatewayToolBackend,
+    paired::RelayHandle,
+};
 use crate::tls::GatewayServerTls;
 use bytes::Bytes;
+use futures_util::future::BoxFuture;
 use http::{Method, Request, Response, StatusCode};
 use http_body::Body;
+use http_body_util::combinators::BoxBody;
 use http_body_util::{BodyExt, Full, Limited};
 use std::{
     collections::BTreeSet,
@@ -34,6 +40,13 @@ const RESPONSE_BYTES: usize = 1024 * 1024;
 const IO_TIMEOUT: Duration = Duration::from_secs(5);
 const WORK_WAIT: Duration = Duration::from_secs(30);
 type HttpResponse = Response<Full<Bytes>>;
+type McpRouter = Arc<
+    dyn Fn(
+            Request<hyper::body::Incoming>,
+        ) -> BoxFuture<'static, Response<BoxBody<Bytes, Infallible>>>
+        + Send
+        + Sync,
+>;
 type PublicFailure = (u16, &'static str);
 
 #[derive(Debug, thiserror::Error)]
@@ -48,12 +61,20 @@ pub struct ShutdownFacts {
     pub connections_joined: bool,
     pub blocking_jobs_joined: bool,
     pub blocking_slots_in_use: usize,
+    pub profile_jobs_in_use: usize,
     pub worker_failure_observed: bool,
     pub listener_error_observed: bool,
+    pub mcp_lifecycle_jobs_joined: Option<bool>,
+    pub sdk_detached_tasks_joined: Option<bool>,
 }
 pub struct EnrollmentHttp {
     tls: Arc<GatewayServerTls>,
-    service: Arc<Mutex<EnrollmentService>>,
+    service: SharedEnrollment,
+    relay: Option<RelayHandle>,
+    mcp_stop: Option<
+        Arc<dyn Fn() -> BoxFuture<'static, crate::gateway::http::HttpShutdown> + Send + Sync>,
+    >,
+    mcp: Option<McpRouter>,
     allowed_hosts: BTreeSet<String>,
     leaf: Sha256Digest,
     ingress: PairingIngressGeneration,
@@ -68,10 +89,25 @@ pub struct EnrollmentHttp {
     run_once: AtomicBool,
     transport_quiescent: AtomicBool,
 }
+struct RunFence(Option<RelayHandle>);
+impl Drop for RunFence {
+    fn drop(&mut self) {
+        if let Some(relay) = &self.0 {
+            relay.fence_transport()
+        }
+    }
+}
 impl EnrollmentHttp {
     pub fn new(
         tls: Arc<GatewayServerTls>,
         service: EnrollmentService,
+        allowed_hosts: Vec<String>,
+    ) -> Result<Arc<Self>, HttpError> {
+        Self::from_shared(tls, SharedEnrollment::new(service), allowed_hosts)
+    }
+    fn from_shared(
+        tls: Arc<GatewayServerTls>,
+        service: SharedEnrollment,
         allowed_hosts: Vec<String>,
     ) -> Result<Arc<Self>, HttpError> {
         if allowed_hosts.is_empty()
@@ -89,7 +125,10 @@ impl EnrollmentHttp {
         .map_err(|_| HttpError::Configuration)?;
         Ok(Arc::new(Self {
             tls,
-            service: Arc::new(Mutex::new(service)),
+            service,
+            relay: None,
+            mcp: None,
+            mcp_stop: None,
             allowed_hosts: allowed_hosts.into_iter().collect(),
             leaf,
             ingress,
@@ -103,10 +142,57 @@ impl EnrollmentHttp {
             transport_quiescent: AtomicBool::new(false),
         }))
     }
+    pub fn new_paired<B: GatewayToolBackend + GatewayOwnerLifecycle>(
+        tls: Arc<GatewayServerTls>,
+        service: SharedEnrollment,
+        relay: RelayHandle,
+        mcp: Arc<GatewayHttp<B>>,
+        allowed_hosts: Vec<String>,
+    ) -> Result<Arc<Self>, HttpError> {
+        if !service.same_authority(&relay.inner.shared) {
+            return Err(HttpError::Configuration);
+        }
+        let mut app = Self::from_shared(tls, service, allowed_hosts)?;
+        let inner = Arc::get_mut(&mut app).ok_or(HttpError::Configuration)?;
+        inner.relay = Some(relay);
+        let stop_mcp = mcp.paired_shutdown_handle();
+        inner.mcp_stop = Some(Arc::new(move || {
+            let mcp = stop_mcp.clone();
+            Box::pin(async move { mcp.shutdown(Duration::from_secs(5)).await })
+        }));
+        inner.mcp = Some(Arc::new(move |request| {
+            let mcp = mcp.clone();
+            Box::pin(async move {
+                match mcp.handle(request).await {
+                    Ok(response) => response.map(BodyExt::boxed),
+                    Err(never) => match never {},
+                }
+            })
+        }));
+        Ok(app)
+    }
+    async fn route(
+        self: Arc<Self>,
+        request: Request<hyper::body::Incoming>,
+        slot: Arc<OwnedSemaphorePermit>,
+    ) -> Response<BoxBody<Bytes, Infallible>> {
+        if request.uri().path().starts_with("/styx/host/") {
+            return match &self.relay {
+                Some(relay) => relay.upgrade(request, slot).await.map(BodyExt::boxed),
+                None => failure(404, "not_found", true).map(BodyExt::boxed),
+            };
+        }
+        if request.uri().path() == "/mcp"
+            && let Some(mcp) = &self.mcp
+        {
+            return mcp(request).await;
+        }
+        self.handle(request).await.map(BodyExt::boxed)
+    }
     /// Test-only same-state observation/admission seam; never an HTTP route.
     #[cfg(test)]
     pub(super) fn with_service<T>(&self, operation: impl FnOnce(&mut EnrollmentService) -> T) -> T {
-        operation(&mut self.service.lock().expect("test-only enrollment service"))
+        self.service.test_with(operation)
     }
     fn spawn_work(self: &Arc<Self>, work: impl FnOnce() + Send + 'static) {
         use futures_util::FutureExt;
@@ -179,12 +265,14 @@ impl EnrollmentHttp {
             pairing.clone(),
         );
         self.spawn_work(move || {
-            let result = match app.service.lock() {
-                Ok(service) => service
-                    .preflight(&pre_method, &pre_path, &pre_headers, &pre_pairing)
-                    .map_err(|e| (e.status(), e.code())),
-                Err(_) => Err((503, "enrollment_outcome_unknown")),
-            };
+            let result = app
+                .service
+                .blocking(|service| {
+                    service
+                        .preflight(&pre_method, &pre_path, &pre_headers, &pre_pairing)
+                        .map_err(|e| (e.status(), e.code()))
+                })
+                .unwrap_or(Err((503, "enrollment_outcome_unknown")));
             let _ = send.send((permit, result));
         });
         let permit = match tokio::time::timeout(IO_TIMEOUT, receive).await {
@@ -225,12 +313,14 @@ impl EnrollmentHttp {
         self.spawn_work(move || {
             // Permit remains with actual work even if its HTTP waiter vanishes.
             let _permit: OwnedSemaphorePermit = permit;
-            let result: Result<(u16, serde_json::Value), PublicFailure> = match app.service.lock() {
-                Ok(mut service) => service
-                    .request(&method, &path, &headers, &bytes, &pairing)
-                    .map_err(|e| (e.status(), e.code())),
-                Err(_) => Err((503, "enrollment_outcome_unknown")),
-            };
+            let result: Result<(u16, serde_json::Value), PublicFailure> = app
+                .service
+                .blocking(|service| {
+                    service
+                        .request(&method, &path, &headers, &bytes, &pairing)
+                        .map_err(|e| (e.status(), e.code()))
+                })
+                .unwrap_or(Err((503, "enrollment_outcome_unknown")));
             let response = match result {
                 Ok((status, value)) => match encode_response(&value) {
                     Ok(bytes) => response(status, bytes, false),
@@ -254,6 +344,7 @@ impl EnrollmentHttp {
         if self.run_once.swap(true, Ordering::AcqRel) {
             return Err(HttpError::AlreadyRun);
         }
+        let _fence = RunFence(self.relay.clone());
         let mut connections = tokio::task::JoinSet::new();
         loop {
             while let Some(result) = connections.try_join_next() {
@@ -277,12 +368,12 @@ impl EnrollmentHttp {
             let app = self.clone();
             let stop = cancel.clone();
             connections.spawn(async move {
-                let _slot = slot;
+                let slot = Arc::new(slot);
                 let tls = tokio::select! { _ = stop.cancelled() => return, result = app.tls.accept(tcp, IO_TIMEOUT) => match result { Ok(tls) => tls, Err(_) => return } };
-                let service = hyper::service::service_fn(move |request| { let app=app.clone(); async move { Ok::<_, Infallible>(app.handle(request).await) } });
+                let service = hyper::service::service_fn(move |request| { let app=app.clone(); let slot=slot.clone(); async move { Ok::<_, Infallible>(app.route(request,slot).await) } });
                 let mut builder = hyper::server::conn::http1::Builder::new();
                 builder.max_headers(64).max_buf_size(16*1024).header_read_timeout(IO_TIMEOUT).timer(hyper_util::rt::TokioTimer::new());
-                let connection = builder.serve_connection(hyper_util::rt::TokioIo::new(tls), service);
+                let connection = builder.serve_connection(hyper_util::rt::TokioIo::new(tls), service).with_upgrades();
                 tokio::pin!(connection);
                 tokio::select! {
                     _ = stop.cancelled() => { connection.as_mut().graceful_shutdown(); let _=tokio::time::timeout(Duration::from_secs(2), &mut connection).await; },
@@ -298,9 +389,19 @@ impl EnrollmentHttp {
         }
         // No new worker can register only AFTER every connection future ended.
         // Cancellation alone is not quiescence; the one-shot run cannot reopen.
+        let mcp_facts = match &self.mcp_stop {
+            Some(stop) => Some(stop().await),
+            None => None,
+        };
+        if let Some(relay) = &self.relay {
+            joined &= relay.shutdown().await.is_ok();
+        }
+        self.service.close_readers();
         self.transport_quiescent.store(true, Ordering::Release);
         let mut facts = self.wait_for_blocking(Duration::from_secs(10)).await;
         facts.connections_joined = joined;
+        facts.mcp_lifecycle_jobs_joined = mcp_facts.as_ref().map(|f| f.lifecycle_jobs_joined);
+        facts.sdk_detached_tasks_joined = mcp_facts.and_then(|f| f.sdk_detached_tasks_joined);
         Ok(facts)
     }
     /// Explicit reconciliation may be called again after bounded shutdown. It
@@ -328,10 +429,12 @@ impl EnrollmentHttp {
                 }
             }
         }
-        let mut workers = self.workers.lock().expect("enrollment workers");
-        workers.extend(retained);
-        joined &= workers.is_empty();
-        drop(workers);
+        {
+            let mut workers = self.workers.lock().expect("enrollment workers");
+            workers.extend(retained);
+            joined &= workers.is_empty();
+        }
+        joined &= self.service.wait_readers(until).await;
         self.shutdown_facts(joined)
     }
     fn shutdown_facts(&self, joined: bool) -> ShutdownFacts {
@@ -339,8 +442,11 @@ impl EnrollmentHttp {
             connections_joined: false,
             blocking_jobs_joined: joined,
             blocking_slots_in_use: REQUESTS - self.requests.available_permits(),
+            profile_jobs_in_use: self.service.reader_jobs_in_use(),
             worker_failure_observed: self.worker_failure.load(Ordering::Acquire),
             listener_error_observed: self.listener_failure.load(Ordering::Acquire),
+            mcp_lifecycle_jobs_joined: None,
+            sdk_detached_tasks_joined: None,
         }
     }
 }
