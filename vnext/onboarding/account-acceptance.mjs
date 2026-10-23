@@ -14,6 +14,11 @@ function windowsNativeApp(provider,code){
  if(value?.source!=='current_windows_native_app'||!Number.isSafeInteger(value.nativeAppPid)||value.nativeAppPid<1||typeof value.nativeAppGeneration!=='string'||!(/^[1-9][0-9]{0,18}$/).test(value.nativeAppGeneration))fail(code);
  return value;
 }
+function linuxNativeWindow(provider,code){
+ let value;try{value=typeof provider==='function'?provider():null}catch{fail(code)}
+ if(value?.source!=='current_linux_acceptance_window'||!Number.isSafeInteger(value.nativeAppPid)||value.nativeAppPid<1||!/^[a-f0-9]{32}$/.test(value.nativeAppGeneration??''))fail(code);
+ return value;
+}
 function projection(record){
  const proof=record.requestProof?.status==='verified',desktop=desktopVerified(record),browser=browserAcceptanceVerified(record),confirmed=record.targetChatConfirmation?.status==='user_confirmed';
  return {schema:1,status:proof&&desktop&&browser&&confirmed?'user_confirmed_with_mcp_evidence':proof||record.browserRequired&&browser?'request_observed':'awaiting_chat_request',
@@ -33,11 +38,12 @@ export function beginDeploymentAcceptance(stateDir,options={},{nativeDesktopApp}
   const command=target.platform==='win32'?"Write-Output '"+marker+"'":"printf '%s\\n' '"+marker+"'";
   const desktopRequired=target.computer?.enabled===true,browserRequired=target.browser?.enabled===true;
   const browser=browserRequired?browserAcceptanceChallenge(nonce):null;
-  const windowsDesktop=desktopRequired&&target.platform==='win32';
-  const native=windowsDesktop?windowsNativeApp(nativeDesktopApp,'windows_native_app_binding_required'):desktopRequired?readDeploymentPermissions(stateDir):null;
-  const appPid=['current_native_app_preflight','current_windows_native_app'].includes(native?.source)?native.nativeAppPid:null;
-  const prompt='请通过当前 Styx 插件验收设备 '+target.id+'。先用 exec_command 执行 '+JSON.stringify({cmd:command,environment_id:target.id,login:false,yield_time_ms:1000})+'，若返回 session_id，仅用 write_stdin 空输入轮询到退出，核对输出标记及退出码0。'+(browserRequired?'然后使用 browser_navigate '+JSON.stringify({url:browser.url,environment_id:target.id})+' 打开一次性验收页面，再单独调用 browser_snapshot '+JSON.stringify({environment_id:target.id})+'，在实际网页快照正文中读到标题 '+browser.marker+'。导航返回、URL包含标记、Browser已启用或进程就绪均不算读回证据；若原生工具拒绝data URL请报告具体错误，不换用脚本或模拟结果。':'')+(desktopRequired?'然后仅使用 Styx Cua 桌面工具，用 get_window_state 观察 Styx 原生设置窗口'+(appPid?'（pid '+appPid+'）':'')+'，找到“桌面验收输入框”，通过该快照的 element_token 或同一 pid/window_id 输入 '+desktopValue+'，再次用 get_window_state 观察同一窗口核对读回值；禁止用终端、JavaScript、AppleScript 或系统脚本替代桌面操作。':'')+'不要请求、读取或输出任何密钥。完成后告诉我实际结果；若失败请说明具体环节，不要宣称通过。';
-  const record={schema:1,id,nonce,binding,environmentId:target.id,createdAt:Date.now(),expiresAt:Date.now()+30*60*1000,marker,command,prompt,browserRequired,...(browser?{browserUrl:browser.url,browserMarker:browser.marker}:{}),desktopRequired,desktopValue,desktopAppPid:appPid,...(windowsDesktop?{desktopAppGeneration:native.nativeAppGeneration}:{}),requestProof:{status:'pending'},targetChatConfirmation:{status:'pending'}};
+  const windowsDesktop=desktopRequired&&target.platform==='win32',linuxDesktop=desktopRequired&&target.platform==='linux';
+  const native=windowsDesktop?windowsNativeApp(nativeDesktopApp,'windows_native_app_binding_required'):linuxDesktop?linuxNativeWindow(nativeDesktopApp,'linux_owned_acceptance_window_required'):desktopRequired?readDeploymentPermissions(stateDir):null;
+  const appPid=['current_native_app_preflight','current_windows_native_app','current_linux_acceptance_window'].includes(native?.source)?native.nativeAppPid:null;
+  const desktopInstructions=!desktopRequired?'':linuxDesktop?'然后仅使用 Styx Cua 桌面工具，用 list_windows 查找本次 Styx 桌面验收临时窗口（pid '+appPid+'）。使用 get_window_state，明确传入同一 pid/window_id 和 include_screenshot:true，观察输入框；用该快照的 element_token 输入 '+desktopValue+'。再次 get_window_state（同一 pid/window_id、include_screenshot:true）核对实际值，然后通过 Cua 点击该窗口的 Confirm 按钮提交。提交会关闭这个临时窗口，CLI 从其真实标准输出独立读回。不要提前提交；禁止终端、JavaScript、系统脚本代替桌面输入。':'然后仅使用 Styx Cua 桌面工具，用 get_window_state 观察 Styx 原生设置窗口'+(appPid?'（pid '+appPid+'）':'')+'，找到“桌面验收输入框”，通过该快照的 element_token 或同一 pid/window_id 输入 '+desktopValue+'，再次用 get_window_state 观察同一窗口核对读回值；禁止用终端、JavaScript、AppleScript 或系统脚本替代桌面操作。';
+  const prompt='请通过当前 Styx 插件验收设备 '+target.id+'。先用 exec_command 执行 '+JSON.stringify({cmd:command,environment_id:target.id,login:false,yield_time_ms:1000})+'，若返回 session_id，仅用 write_stdin 空输入轮询到退出，核对输出标记及退出码0。'+(browserRequired?'然后使用 browser_navigate '+JSON.stringify({url:browser.url,environment_id:target.id})+' 打开一次性验收页面，再单独调用 browser_snapshot '+JSON.stringify({environment_id:target.id})+'，在实际网页快照正文中读到标题 '+browser.marker+'。导航返回、URL包含标记、Browser已启用或进程就绪均不算读回证据；若原生工具拒绝data URL请报告具体错误，不换用脚本或模拟结果。':'')+desktopInstructions+'不要请求、读取或输出任何密钥。完成后告诉我实际结果；若失败请说明具体环节，不要宣称通过。';
+  const record={schema:1,id,nonce,binding,environmentId:target.id,createdAt:Date.now(),expiresAt:Date.now()+30*60*1000,marker,command,prompt,browserRequired,...(browser?{browserUrl:browser.url,browserMarker:browser.marker}:{}),desktopRequired,desktopValue,desktopAppPid:appPid,...(windowsDesktop||linuxDesktop?{desktopAppGeneration:native.nativeAppGeneration}:{}),requestProof:{status:'pending'},targetChatConfirmation:{status:'pending'}};
   writeAcceptanceEvidence(stateDir,record);return projection(record);
  });
 }
@@ -49,6 +55,11 @@ export function recordDeploymentDesktopReadback(stateDir,options={},{nativeDeskt
   if(ctx.target.platform==='win32'){
    native=windowsNativeApp(nativeDesktopApp,'desktop_acceptance_native_app_changed');
    if(native.nativeAppPid!==record.desktopAppPid||native.nativeAppGeneration!==record.desktopAppGeneration)fail('desktop_acceptance_native_app_changed');
+  }
+  if(ctx.target.platform==='linux'){
+   native=linuxNativeWindow(nativeDesktopApp,'desktop_acceptance_native_window_changed');
+   if(native.nativeAppPid!==record.desktopAppPid||native.nativeAppGeneration!==record.desktopAppGeneration||native.submitted!==true||native.readbackValue!==options.value||native.challengeId!==record.id||native.windowId!==options.windowId)fail('desktop_acceptance_native_window_changed');
+   if(record.desktop?.after!==true||record.desktop?.actionVerified!==true||!record.desktop.actionOwner||record.desktop.actionAttempt?.pid!==native.nativeAppPid||record.desktop.actionAttempt?.window!==options.windowId)fail('actual_desktop_action_evidence_required');
   }
   record.desktop={...record.desktop,readback:options.value===record.desktopValue,readbackPid:options.pid,readbackWindow:options.windowId,...(native?{readbackGeneration:native.nativeAppGeneration}:{})};writeAcceptanceEvidence(stateDir,record);return projection(record);
  });

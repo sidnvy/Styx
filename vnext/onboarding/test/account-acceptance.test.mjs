@@ -7,11 +7,13 @@ import {createHash} from 'node:crypto';
 import {beginDeploymentAcceptance,readDeploymentAcceptance,confirmDeploymentAcceptance,recordDeploymentDesktopReadback,readDeploymentConnectionHandoff,prepareDeploymentConnectionHandoff} from '../account-acceptance.mjs';
 import {createAcceptanceObserver} from '../../shared/onboarding-evidence.mjs';
 import {fileURLToPath} from 'node:url';
+import {spawn} from 'node:child_process';
+import {runLinuxDesktopAcceptance} from '../linux-desktop-acceptance.mjs';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StreamableHTTPClientTransport} from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 import {createStyxGateway} from '../../gateway/index.mjs';
 import {createGatewayHttp} from '../../gateway/http.mjs';
-function fixture(t,{desktop=false,browser=false,platform='linux'}={}){
+function fixture(t,{desktop=false,browser=false,platform=desktop?'darwin':'linux'}={}){
  const root=fs.mkdtempSync(path.join(os.tmpdir(),'styx-account-acceptance-'));t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
  const stateDir=path.join(root,'state'),base=path.join(root,'host');
  for(const dir of [stateDir,base,path.join(base,'device'),path.join(stateDir,'gateway'),path.join(stateDir,'gateway/enrollment'),path.join(stateDir,'tunnel')])fs.mkdirSync(dir,{mode:0o700});
@@ -55,6 +57,78 @@ test('real authenticated HTTP MCP dispatch and real Codex output record executio
  const proof=readDeploymentAcceptance(f.stateDir);assert.equal(proof.requestProof.status,'verified');assert.equal(proof.complete,false);assert.equal(proof.targetChatConfirmation.providerIdentity,'not_verified');
  const confirmed=confirmDeploymentAcceptance(f.stateDir,{authorize:true,challengeId:a.challenge.id,observedInTargetChat:true});
  assert.equal(confirmed.complete,true);assert.equal(confirmed.targetChatConfirmation.source,'user_attested');
+});
+
+test('Linux desktop challenge requires owned runtime authority and cannot accept caller readback',t=>{
+ const f=fixture(t,{desktop:true,platform:'linux'});
+ assert.throws(()=>f.begin(),/linux_owned_acceptance_window_required/);
+ assert.throws(()=>beginDeploymentAcceptance(f.stateDir,{authorize:true,pid:123}),/invalid_acceptance_options/);
+ const identity={source:'current_linux_acceptance_window',nativeAppPid:123,nativeAppGeneration:'a'.repeat(32)};
+ const a=beginDeploymentAcceptance(f.stateDir,{authorize:true},{nativeDesktopApp:()=>identity});
+ assert.match(a.challenge.prompt,/include_screenshot:true/);assert.match(a.challenge.prompt,/Confirm/);
+ assert.doesNotMatch(a.challenge.prompt,/原生设置窗口/);
+ const readback={authorize:true,challengeId:a.challenge.id,value:a.challenge.desktopValue,pid:123,windowId:45};
+ assert.throws(()=>recordDeploymentDesktopReadback(f.stateDir,readback),/desktop_acceptance_native_window_changed/);
+ assert.throws(()=>recordDeploymentDesktopReadback(f.stateDir,readback,{nativeDesktopApp:()=>identity}),/desktop_acceptance_native_window_changed/);
+ const submitted={...identity,submitted:true,challengeId:a.challenge.id,readbackValue:a.challenge.desktopValue,windowId:45};
+ assert.throws(()=>recordDeploymentDesktopReadback(f.stateDir,readback,{nativeDesktopApp:()=>submitted}),/actual_desktop_action_evidence_required/);
+ assert.equal(readDeploymentAcceptance(f.stateDir).desktop.status,'pending');
+});
+
+test('Linux desktop CLI never spawns on headless or non-local target and leaves old evidence intact',async t=>{
+ const f=fixture(t,{desktop:true,platform:'linux'});let spawned=0;
+ const deps={platform:'linux',resolveSession:()=>({available:false,reason:'no_active_graphical_session'}),spawnWindow:()=>{spawned++;throw Error('must not spawn')}};
+ const result=await runLinuxDesktopAcceptance(f.stateDir,{authorize:true},deps);
+ assert.equal(result.status,'blocked');assert.equal(result.reason,'no_active_graphical_session');assert.equal(spawned,0);
+ assert.equal(fs.existsSync(path.join(f.stateDir,'account-acceptance.json')),false);
+ const cfg=JSON.parse(fs.readFileSync(path.join(f.stateDir,'deployment.json')));delete cfg.host;f.put(path.join(f.stateDir,'deployment.json'),cfg);
+ await assert.rejects(runLinuxDesktopAcceptance(f.stateDir,{authorize:true},deps),/acceptance_requires_owned_gateway_and_host/);assert.equal(spawned,0);
+});
+
+test('Linux CLI owned child stdout complements same-scope MCP evidence; manual-only submission cannot pass',async t=>{
+ for(const observed of [false,true]){
+  const f=fixture(t,{desktop:true,platform:'linux'});let child;
+  const result=runLinuxDesktopAcceptance(f.stateDir,{authorize:true},{platform:'linux',
+   resolveSession:()=>({available:true,type:'wayland',key:'fixture-session',env:{HYPRLAND_INSTANCE_SIGNATURE:'fixture'}}),
+   spawnWindow:(binary,args)=>{
+    assert.equal(binary,'/usr/bin/zenity');assert.ok(!args.some(x=>x.includes('STYX_GUI_')));
+    child=spawn(process.execPath,['-e',"process.stdin.once('data',b=>{process.stdout.write(b);process.exitCode=0;process.stdin.pause()})"],{stdio:['pipe','pipe','ignore']});return child;
+   },onChallenge:a=>{
+    if(observed){
+     const observation={name:'get_window_state',args:{pid:child.pid,window_id:45},result:{content:[{type:'image',data:'contract-only',mimeType:'image/png'}],structuredContent:{snapshot_id:'s00000001'}}};
+     const action={name:'type_text',args:{element_token:'s00000001:7',text:a.challenge.desktopValue},operationId:'contract-linux-action',result:{content:[]}};
+     f.observer(f.event(a.challenge,observation));f.observer.before(f.event(a.challenge,action));f.observer(f.event(a.challenge,action));f.observer(f.event(a.challenge,observation));
+    }
+    child.stdin.end(a.challenge.desktopValue+'\n');
+   }});
+  if(observed){const proof=await result;assert.equal(proof.desktop.status,'verified');assert.equal(proof.complete,false,'no account confirmation was produced');}
+  else await assert.rejects(result,/actual_desktop_action_evidence_required/);
+  assert.throws(()=>process.kill(child.pid,0),{code:'ESRCH'});
+ }
+});
+
+test('Linux CLI cancellation and deadline reap only the owned child without completion',async t=>{
+ for(const mode of ['cancel','timeout']){
+  const f=fixture(t,{desktop:true,platform:'linux'}),abort=new AbortController();let child;
+  const result=await runLinuxDesktopAcceptance(f.stateDir,{authorize:true},{platform:'linux',signal:abort.signal,timeoutMs:100,
+   resolveSession:()=>({available:true,type:'wayland',key:'fixture-session',env:{HYPRLAND_INSTANCE_SIGNATURE:'fixture'}}),
+   spawnWindow:()=>{child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:['ignore','pipe','ignore']});return child;},
+   onChallenge:()=>{if(mode==='cancel')abort.abort();}});
+  assert.equal(result.status,mode==='cancel'?'cancelled':'timed_out');assert.equal(readDeploymentAcceptance(f.stateDir).desktop.status,'pending');
+  assert.throws(()=>process.kill(child.pid,0),{code:'ESRCH'});
+ }
+});
+
+test('Linux CLI stops its owned window when a challenge is replaced or the session probe fails',async t=>{
+ for(const mode of ['replaced','probe-failed']){
+  const f=fixture(t,{desktop:true,platform:'linux'});let child,probes=0;
+  const result=await runLinuxDesktopAcceptance(f.stateDir,{authorize:true},{platform:'linux',pollMs:25,
+   resolveSession:()=>{if(++probes>1&&mode==='probe-failed')throw Error('probe failed');return {available:true,type:'wayland',key:'fixture-session',env:{HYPRLAND_INSTANCE_SIGNATURE:'fixture'}};},
+   spawnWindow:()=>{child=spawn(process.execPath,['-e','setInterval(()=>{},1000)'],{stdio:['ignore','pipe','ignore']});return child;},
+   onChallenge:()=>{if(mode==='replaced'){const file=path.join(f.stateDir,'account-acceptance.json'),record=JSON.parse(fs.readFileSync(file));record.id='f'.repeat(32);f.put(file,record);}}});
+  assert.equal(result.status,mode==='replaced'?'challenge_replaced':'acceptance_context_or_session_unavailable');
+  assert.throws(()=>process.kill(child.pid,0),{code:'ESRCH'});assert.equal(readDeploymentAcceptance(f.stateDir).desktop.status,'pending');
+ }
 });
 test('a user click cannot manufacture an executed request or export any administrative credential',t=>{
  const f=fixture(t);assert.throws(()=>beginDeploymentAcceptance(f.stateDir),/explicit_acceptance_authorization/);

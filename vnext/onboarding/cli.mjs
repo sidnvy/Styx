@@ -61,7 +61,18 @@ export async function main(args){
  if(cmd==='journey'&&rest.length===1)return readOnboardingJourney(rest[0]);
  if(cmd==='diagnostics'&&rest.length===1)return readOnboardingDiagnostics(rest[0]);
  if(cmd==='acceptance'&&rest.length===1){const api=await import('./core.mjs');return publicAcceptance(await api.readDeploymentAcceptance(rest[0]),{includeChallenge:true});}
- if(cmd==='acceptance-begin'&&rest.length===2&&rest[1]==='--authorize'){const api=await import('./core.mjs');return publicAcceptance(await api.beginDeploymentAcceptance(rest[0],{authorize:true}),{includeChallenge:true});}
+ if(cmd==='acceptance-begin'&&rest.length===2&&rest[1]==='--authorize'){
+  if(process.platform==='linux'){
+   const {runLinuxDesktopAcceptance}=await import('./linux-desktop-acceptance.mjs');
+   const result=await runLinuxDesktopAcceptance(rest[0],{authorize:true},{onChallenge:value=>{
+    process.stdout.write(JSON.stringify(publicAcceptance(value,{includeChallenge:true}))+'\n');
+    process.stderr.write('Keep this terminal open for the owned desktop acceptance window. Ctrl-C cancels; submit only after the chat observes the entered value.\n');
+   }});
+   if(!result.challenge){process.exitCode=2;return result;}
+   return publicAcceptance(result,{includeChallenge:true});
+  }
+  const api=await import('./core.mjs');return publicAcceptance(await api.beginDeploymentAcceptance(rest[0],{authorize:true}),{includeChallenge:true});
+ }
  if(cmd==='acceptance-confirm'&&rest.length===3&&rest[2]==='--authorize'){
   const input=privateJson(rest[1]);if(!input||Object.keys(input).some(k=>!['challengeId','observedInTargetChat'].includes(k))||input.observedInTargetChat!==true)throw Error('explicit_target_chat_confirmation_required');
   const api=await import('./core.mjs');return publicAcceptance(await api.confirmDeploymentAcceptance(rest[0],{...input,authorize:true}),{includeChallenge:true});

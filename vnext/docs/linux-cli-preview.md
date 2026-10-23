@@ -251,6 +251,24 @@ Local Tunnel startup, fixture tests, and ZIP generation do not establish those
 account-side results. A Gateway-only deployment has no local Host challenge;
 verify its selected enrolled Host separately.
 
+For a local combined deployment with Hyprland Computer Use selected,
+`acceptance-begin` requires an eligible unlocked session and installed
+`/usr/bin/zenity`. It opens one temporary entry window and prints the challenge;
+keep that CLI terminal open. Follow the generated prompt: observe this exact
+window with `include_screenshot:true`, enter the marker through Cua, observe
+the same window again with a screenshot, then click **Confirm** through Cua.
+The owned window's successful exit and actual standard output provide the
+independent readback; neither a caller-supplied PID nor text alone is proof.
+The CLI then prints the observed result. Account confirmation remains separate.
+
+No GUI session means blocked without launching a window. Ctrl-C, cancellation,
+session loss, a replacement challenge, or the ten-minute deadline closes only
+this command's owned window and does not grant acceptance; these outcomes exit
+with code 2. No deployment role, service, identity, or system permission is
+changed. This local-window flow cannot validate an arbitrarily selected remote
+Host or a Gateway-only deployment. Headless deployments with Computer Use
+unselected keep the existing immediate Exec/Browser challenge flow.
+
 ## Repeatable acceptance, without production mutation
 
 Use a fresh private test root and an available loopback port. Record artifact
