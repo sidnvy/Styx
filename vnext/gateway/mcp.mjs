@@ -63,7 +63,8 @@ export function createGatewayMcp({exec, computer, browser, gui, registry, owner,
     return result;
   }
 
-  server.setRequestHandler(CallToolRequestSchema, async ({params}) => withOwner(params._meta,async owner => {
+  server.setRequestHandler(CallToolRequestSchema, async ({params}) => {
+    const result = await withOwner(params._meta,async owner => {
     const {name, arguments: args = {}} = params;
     if (cas && CAS_TOOLS.some(tool => tool.name === name))
       return casCall(cas, name, args);
@@ -113,6 +114,14 @@ export function createGatewayMcp({exec, computer, browser, gui, registry, owner,
     }
     return {isError: true, content: [{type: 'text', text: 'unknown_tool'}]};
     } finally {release?.();}
-  }));
+  });
+    // Keep structured diagnostics internally for work observation. MCP errors are
+    // text results: the SDK validates any structuredContent against the success schema.
+    if (execTools.some(tool => tool.name === params.name) && result?.isError && result.structuredContent) {
+      const {structuredContent, ...errorResult} = result;
+      return {...errorResult, content: [{type: 'text', text: JSON.stringify(structuredContent)}]};
+    }
+    return result;
+  });
   return server;
 }

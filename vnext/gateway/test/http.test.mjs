@@ -100,7 +100,7 @@ test('authenticated HTTP MCP transport, Codex tools and session isolation', asyn
     session_id: running.structuredContent.session_id, chars: 'x', yield_time_ms: 0
   }});
   assert.equal(stolen.isError, true);
-  assert.equal(stolen.structuredContent.error, 'unknown_session');
+  assert.equal(JSON.parse(stolen.content[0].text).error, 'unknown_session');
 });
 
 test('Exec target-selection errors remain actionable before connecting a native runtime',async()=>{
@@ -139,15 +139,44 @@ test('trusted Tunnel conversation survives HTTP reconnects without merging users
  assert.equal((await call(b,'browser_probe')).content[0].text,browserA.content[0].text);
  assert.equal((await call(b,'computer_probe')).content[0].text,browserA.content[0].text);
  for(const change of [{'openai/session':'chat-b'},{'openai/subject':'user-b'},{'openai/organization':'org-b'}]) {
-  assert.equal((await call(b,'write_stdin',{session_id:id,chars:'x',yield_time_ms:0},{...meta,...change})).structuredContent.error,'unknown_session');
+  assert.equal(JSON.parse((await call(b,'write_stdin',{session_id:id,chars:'x',yield_time_ms:0},{...meta,...change})).content[0].text).error,'unknown_session');
  }
  const plain=await client(null);
- assert.equal((await call(plain,'write_stdin',{session_id:id,chars:'',yield_time_ms:0})).structuredContent.error,'unknown_session');
- assert.equal((await call(b,'exec_command',{cmd:'test'},{})).structuredContent.error,'trusted_conversation_metadata_required');
- assert.equal((await call(b,'exec_command',{cmd:'test'},{...meta,'openai/session':{bad:true}})).structuredContent.error,'trusted_conversation_metadata_required');
+ assert.equal(JSON.parse((await call(plain,'write_stdin',{session_id:id,chars:'',yield_time_ms:0})).content[0].text).error,'unknown_session');
+ assert.equal(JSON.parse((await call(b,'exec_command',{cmd:'test'},{})).content[0].text).error,'trusted_conversation_metadata_required');
+ assert.equal(JSON.parse((await call(b,'exec_command',{cmd:'test'},{...meta,'openai/session':{bad:true}})).content[0].text).error,'trusted_conversation_metadata_required');
  await assert.rejects(client('c'.repeat(64)));
  await call(b,'browser_probe',{}, {...meta,'openai/subject':'user-b'});
  const profiles=browserOwners.filter(x=>x.owner.startsWith('tunnel-conversation:'));
  assert.notEqual(profiles[0].principal,profiles.at(-1).principal);
  assert.equal(computerOwners[0],browserA.content[0].text);
+});
+
+
+test('SDK validates success schemas while empty Gateway, unknown target and maintenance errors stay actionable', async t => {
+ for (const empty of [true, false]) {
+  const hosts=[], token='isolated-error-contract-'+ 'x'.repeat(32);
+  let connections=0;
+  const gateway=createStyxGateway({catalog:empty?{version:1,targets:[]}:catalog(),connect:async()=>{connections++;return fakeRuntime()}});
+  const server=await createGatewayHttp(gateway,{token,port:0,allowedHosts:hosts});
+  const address='http://127.0.0.1:'+server.address.port+'/mcp';hosts.push('127.0.0.1:'+server.address.port);
+  const client=new Client({name:'error-contract',version:'1'});
+  try {
+   await client.connect(new StreamableHTTPClientTransport(new URL(address),{requestInit:{headers:{Authorization:'Bearer '+token}}}));
+   const tools=await client.listTools();assert.ok(tools.tools.find(t=>t.name==='exec_command').outputSchema);
+   const check=async(args,code)=>{const result=await client.callTool({name:'exec_command',arguments:args});assert.equal(result.isError,true);assert.equal(result.structuredContent,undefined);assert.equal(JSON.parse(result.content[0].text).error,code);};
+   if(empty) await check({cmd:'never-run'},'default_environment_required');
+   await check({cmd:'never-run',environment_id:'absent'},'environment_not_found');
+   if(!empty){gateway.workAdmission.begin({ticketId:'f'.repeat(32),scope:'all'});await check({cmd:'never-run'},'device_in_maintenance');gateway.workAdmission.cancel('f'.repeat(32));}
+   assert.equal(connections,0);
+   if(!empty){
+    const diagnostic={error:'transport_lost',session_id:123,uncertain:true};
+    gateway.exec.callTool=async()=>({isError:true,structuredContent:diagnostic,content:[{type:'text',text:JSON.stringify(diagnostic)}]});
+    const result=await client.callTool({name:'exec_command',arguments:{cmd:'injected-terminal-transport-error'}});
+    assert.equal(result.isError,true);assert.equal(result.structuredContent,undefined);
+    assert.deepEqual(JSON.parse(result.content[0].text),diagnostic);
+    assert.equal(gateway.uncertainWorkHistory().length,1,'internal uncertain observation precedes wire projection');
+   }
+  } finally {await client.close();await server.close();}
+ }
 });
