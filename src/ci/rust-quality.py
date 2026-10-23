@@ -120,7 +120,12 @@ def metadata_errors(metadata, policy, root):
         # Ignore comments/strings for this narrow lint to avoid error-message false positives.
         code = re.sub(r'//[^\n]*|/\*.*?\*/|"(?:\\.|[^"\\])*"', '', text, flags=re.S)
         for item in forbidden:
-            if re.search(r"\b" + re.escape(item).replace("::", r"\s*::\s*") + r"\b", code):
+            escaped = re.escape(item).replace("::", r"\s*::\s*")
+            # Bare crate names must be path/import references. A Rust slice's
+            # .windows() method is not an import of the Windows OS bindings.
+            pattern = (r"\b" + escaped + r"\b" if "::" in item else
+                       r"\b" + escaped + r"\s*::|\b(?:use|extern\s+crate)\s+(?:::)?" + escaped + r"(?:\s|;)")
+            if re.search(pattern, code):
                 errors.append(f"core_forbidden_path:{path.relative_to(root)}:{item}")
         if re.search(r"std\s*::\s*\{[^;]*\b(fs|net|os|process)\b", code):
             errors.append(f"core_grouped_std_io_import:{path.relative_to(root)}")
