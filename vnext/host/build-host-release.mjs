@@ -9,7 +9,7 @@ import {requirePrivateFile} from './private-storage.mjs';
 
 const ROOT=fileURLToPath(new URL('../',import.meta.url));
 const STATIC=Object.freeze([
-  'host/connect.mjs','host/computer.mjs','host/linux-desktop.mjs',
+  'host/connect.mjs','host/computer.mjs','host/linux-desktop.mjs','host/windows-session.mjs',
   'host/launch.mjs','host/installer.mjs','host/health-update.mjs','host/service-update.mjs',
   'host/enroll.mjs','host/setup-native.mjs','host/macos-preview-trust.mjs','host/macos-local-signing.mjs','host/doctor.mjs','host/linux-service.mjs',
   'host/macos-launchagent.mjs','host/macos-native-launcher.mjs','host/windows-task.ps1',
@@ -109,6 +109,14 @@ export function buildHostRelease({destination,version,privateKeyFile,
       copy(path.join(dependencies,name),path.join(destination,'node_modules/ws',name));
     copy(codexBinary,path.join(destination,'bin',names.codex));
     copy(cuaBinary,path.join(destination,'bin',names.cua));
+    if(platform==='win32'){
+      const source=path.join(sourceRoot,'host/windows/SessionProbe.cs');
+      copy(source,path.join(destination,'host/windows/SessionProbe.cs'));
+      const compiler=path.join(process.env.SystemRoot??process.env.WINDIR??'C:\\Windows','Microsoft.NET/Framework64/v4.0.30319/csc.exe');
+      regular(compiler);
+      execFileSync(compiler,['/nologo','/warnaserror+','/target:exe','/out:'+path.join(destination,'bin/StyxSessionProbe.exe'),source],{timeout:30000,windowsHide:true,stdio:'pipe'});
+      regular(path.join(destination,'bin/StyxSessionProbe.exe'));
+    }
     if(nodeBinary){
       copy(nodeBinary,path.join(destination,'bin',platform==='win32'?'node.exe':'node'));
       copy(path.join(path.dirname(nodeBinary),'LICENSE'),path.join(destination,'licenses/node-LICENSE'));

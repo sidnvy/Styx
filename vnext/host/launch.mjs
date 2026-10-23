@@ -20,6 +20,13 @@ export function activeHostConfig(raw,releaseRoot) {
   if(raw.computer?.enabled){
     if(!fs.statSync(cua).isFile())throw Error('signed_cua_binary_missing');
     updated.computer={...raw.computer,binary:cua};
+    if(process.platform==='win32'){
+      // Pin comes from the already verified signed generation, never from Host
+      // preferences. Legacy generations remain explicitly unavailable for Cua.
+      const manifest=JSON.parse(fs.readFileSync(path.join(releaseRoot,'manifest.json'),'utf8'));
+      const probe=manifest.files?.find(entry=>entry.path==='bin/StyxSessionProbe.exe'&&entry.executable===true);
+      updated.computer.sessionProbe=probe?{binary:path.join(releaseRoot,'bin','StyxSessionProbe.exe'),sha256:probe.sha256}:null;
+    }
   }
   if(raw.browser?.enabled){for(const name of ['host/browser.mjs','packages/styx-browser-provider/host.mjs','packages/styx-browser-provider/config.mjs','packages/styx-browser-provider/prepare.mjs','packages/styx-browser-provider/contract.mjs','packages/styx-browser-provider/playwright-contract-0.0.83.json','packages/styx-browser-provider/node_modules/@playwright/mcp/package.json']){if(!fs.existsSync(path.join(releaseRoot,...name.split('/'))))throw Error('signed_browser_runtime_missing');}}
   if(raw.browser?.enabled&&(raw.browser.channel||raw.browser.persistLogin)){

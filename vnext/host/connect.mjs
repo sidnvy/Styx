@@ -159,9 +159,9 @@ async function runCommandLine() {
   const abort=new AbortController();
   process.once('SIGINT',()=>abort.abort());
   process.once('SIGTERM',()=>abort.abort());
-  const status=(state,{lane='exec',slot}={})=>
+  const status=(state,{lane='exec',slot,reason}={})=>
     process.stdout.write(JSON.stringify({host:config.host_id,lane,
-      ...(slot!==undefined?{slot}:{}),status:state})+'\n');
+      ...(slot!==undefined?{slot}:{}),...(typeof reason==='string'&&/^[a-z_]{1,80}$/.test(reason)?{reason}:{}),status:state})+'\n');
   try { await Promise.all([
     runHostConnector(config,{signal:abort.signal,
       onStatus:state=>status(state),

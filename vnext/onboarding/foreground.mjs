@@ -35,7 +35,7 @@ function claim(d){
 }
 function projection(entry){
  const connected=entry.execConnection==='connected';
- return {schema:1,status:entry.stopping?'stopping':entry.failed?'needs_attention':connected?'connected':entry.host==='service'?'using_service':'started',observation:'current_process',host:entry.host,gateway:entry.gateway,execConnection:entry.execConnection,desktopConnection:entry.desktopConnection,browserConnection:entry.browserConnection,browserRequested:entry.browserRequested,computerRequested:entry.computerRequested,toolHealth:'not_verified',accountAcceptance:'NOT RUN',appExit:'owned_foreground_connections_stop',serviceMutation:'NOT RUN'};
+ return {schema:1,status:entry.stopping?'stopping':entry.failed?'needs_attention':connected?'connected':entry.host==='service'?'using_service':'started',observation:'current_process',host:entry.host,gateway:entry.gateway,execConnection:entry.execConnection,desktopConnection:entry.desktopConnection,...(entry.desktopUnavailableReason?{desktopUnavailableReason:entry.desktopUnavailableReason}:{}),browserConnection:entry.browserConnection,browserRequested:entry.browserRequested,computerRequested:entry.computerRequested,toolHealth:'not_verified',accountAcceptance:'NOT RUN',appExit:'owned_foreground_connections_stop',serviceMutation:'NOT RUN'};
 }
 export function readDeploymentForeground(d){
  absolute(d);if(starting.has(d)&&!owners.has(d))return{schema:1,status:'needs_attention',host:'not_owned',reason:'foreground_start_in_progress',observation:'current_process'};const entry=owners.get(d);if(entry){try{if(!entry.scopeValid())return {...projection(entry),status:'needs_attention',execConnection:'not_observed',desktopConnection:'not_observed',browserConnection:'not_observed',reason:'foreground_scope_changed'}}catch{return {...projection(entry),status:'needs_attention',execConnection:'not_observed',desktopConnection:'not_observed',browserConnection:'not_observed',reason:'foreground_scope_changed'}}return projection(entry)}
@@ -47,9 +47,9 @@ export function ownedForegroundAdmission(d){absolute(d);const e=owners.get(d);if
 async function guiAvailable(api,d){
  if(process.platform==='darwin')return (await api.readDeploymentPermissions?.(d))?.source==='current_native_app_preflight';
  if(process.platform==='linux')return !!(process.env.DISPLAY||process.env.WAYLAND_DISPLAY);
- // This independent Core payload has no packaged Windows input-desktop probe.
- // Windows foreground remains Exec-only until that native adapter is admitted.
- return false;
+ // Windows delegates to the signed Host's live session gate. This only
+ // starts observation: no Computer readiness is inferred from this value.
+ return process.platform==='win32';
 }
 function scope(d,state,config){
  if(state.mode!==config.mode)fail('foreground_configuration_changed');
@@ -140,7 +140,7 @@ async function start(d,operations,abort){
       entry.desktopConnection=gui?'connecting':'session_unavailable_or_unobserved';
       if(gui){
        entry.computerStarted=true;
-       track(operations.runComputer??runComputerConnectors,selected.host,{signal,retryMinMs,retryMaxMs,workAdmission,onReady:()=>{entry.desktopConnection='connected'},onStatus:()=>{entry.desktopConnection='disconnected'}});
+       track(operations.runComputer??runComputerConnectors,selected.host,{signal,retryMinMs,retryMaxMs,workAdmission,onReady:()=>{entry.desktopConnection='connected';delete entry.desktopUnavailableReason},onStatus:(state,meta)=>{entry.desktopConnection=state==='unavailable'?'session_unavailable_or_unobserved':'disconnected';if(meta?.reason)entry.desktopUnavailableReason=meta.reason;else delete entry.desktopUnavailableReason}});
       }
      })();entry.computerStarting=attempt;try{await attempt}finally{entry.computerStarting=null}
     };

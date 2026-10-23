@@ -18,15 +18,23 @@ This does not authorize installation or start from that session.
 
 The App passes a package-pinned `StyxSessionProbe.exe` result into Core before
 starting Computer Use. It checks the actual nonzero session, `UserInteractive`,
-`WinSta0` and accessible `Default` input desktop. The independent Core defaults
-to unavailable when it has no such Windows probe. A connected Cua transport is
+`WinSta0` and accessible `Default` input desktop. The independent Core delegates to the signed Host probe, including when managed
+through CLI. Missing probes remain unavailable. A connected Cua transport is
 not evidence that observation/actions are possible.
 
-The lower-level signed `host/connect.mjs` launcher still starts the Windows Cua
-lane when configured, relying on its interactive task caller. It must not be
-reused unchanged for a future unattended Host service. The capability preference
-should remain intact while session availability gates the lane; headless Exec
-and headless Browser should not inherit desktop permissions or elevated tokens.
+The signed Host generation also includes this existing native probe. The launcher
+selects its hash from the verified release manifest; Computer Use checks it in
+its own caller session. Session 0, a locked/inaccessible desktop, a changed probe
+or a legacy release missing the probe leaves Computer Use unavailable with an
+explicit reason. The capability preference is retained. The existing desktop
+lifecycle loop cancels and drains that lane when the desktop disappears and
+reconnects when the same user has an accessible desktop again. Exec and Browser
+ownership are separate and are not cancelled by this gate. A fresh probe is also
+required before publishing a new Computer connection as ready.
+
+This gate does not claim a completed tool test. Native observation/action,
+lock/unlock recovery and remote tool acceptance must be verified separately;
+unit lifecycle fixtures are not native desktop acceptance.
 
 ## Future unattended Gateway prerequisite
 

@@ -165,6 +165,14 @@ export async function runComputerConnectors(config,{signal,once=false,
   retryMinMs=500,retryMaxMs=15000,onReady,onStatus,workAdmission}={}) {
   const c=computerConfig(config);
   if(!c)return;
+  if(process.platform==='win32'){
+    const {runWindowsDesktopLifecycle}=await import('./windows-session.mjs');
+    return runWindowsDesktopLifecycle({probe:c.computer.sessionProbe,signal,onReady,onStatus,once,
+      connect:session=>runComputerLanes(c,{signal:session.signal,once,retryMinMs,retryMaxMs,onReady:session.onReady,onStatus,workAdmission})});
+  }
+  return runComputerLanes(c,{signal,once,retryMinMs,retryMaxMs,onReady,onStatus,workAdmission});
+}
+async function runComputerLanes(c,{signal,once,retryMinMs,retryMaxMs,onReady,onStatus,workAdmission}){
   const one=async slot=>{
     let failed=0;
     while(!signal?.aborted) {

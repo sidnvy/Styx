@@ -27,8 +27,8 @@ async function fixture(t,{mode='join-existing',live=false,computer=false}={}){
   for(const f of ['private-storage.mjs','installer.mjs','launch.mjs'])contents['host/'+f]=fs.readFileSync(new URL('../../host/'+f,import.meta.url));
   for(const f of ['enroll.mjs','doctor.mjs','setup-native.mjs','linux-service.mjs'])contents['host/'+f]=Buffer.from('// signed test helper, not executed');
   contents['bin/node']=fs.readFileSync(process.execPath);contents['bin/codex']=fs.readFileSync(new URL('../../packages/styx-exec-adapter/.runtime/codex',import.meta.url));
- }else contents['bin/codex']=Buffer.from('#!/bin/sh\nexit 0\n');
- contents['bin/cua-driver']=Buffer.from('#!/bin/sh\nexit 0\n');
+ }else contents[process.platform==='win32'?'bin/codex.exe':'bin/codex']=Buffer.from('#!/bin/sh\nexit 0\n');
+ contents[process.platform==='win32'?'bin/cua-driver.exe':'bin/cua-driver']=Buffer.from('#!/bin/sh\nexit 0\n');
  const manifest={schema:1,version:'0.1.0-foreground-test',platform:process.platform,arch:process.arch,files:Object.entries(contents).map(([name,bytes])=>{writePrivateFile(path.join(bundle,name),bytes,{mode:name.startsWith('bin/')?0o700:0o600});return {path:name,size:bytes.length,sha256:sha(bytes),executable:name.startsWith('bin/')};})};
  const bytes=JSON.stringify(manifest);writePrivateFile(path.join(bundle,'manifest.json'),bytes);writePrivateFile(path.join(bundle,'manifest.sig'),sign(null,Buffer.from(bytes),privateKey).toString('base64url'));
  const reserve=net.createServer();await new Promise(r=>reserve.listen(0,'127.0.0.1',r));const port=reserve.address().port;await new Promise(r=>reserve.close(r));
@@ -218,4 +218,14 @@ test('Linux desktop loss and return drain only Computer while foreground Exec an
  await until(()=>readDeploymentForeground(f.stateDir).desktopConnection==='connected');
  assert.equal(f.runCalls.length,3);assert.deepEqual(fs.readFileSync(identityFile),before);
  await stopDeploymentForeground(f.stateDir);assert.equal(execStopped,true);
+});
+
+test('Windows CLI foreground reaches the signed session gate and preserves explicit GUI override',{skip:process.platform!=='win32'},async t=>{
+ const f=await fixture(t,{computer:true});const {guiAvailable,runComputer,...ops}=f.ops;
+ await startDeploymentForeground(f.stateDir,{authorize:true},ops);
+ await until(()=>readDeploymentForeground(f.stateDir).desktopUnavailableReason==='windows_session_probe_missing');
+ const status=readDeploymentForeground(f.stateDir);assert.equal(status.execConnection,'connected');assert.equal(status.computerRequested,true);assert.equal(status.desktopConnection,'session_unavailable_or_unobserved');assert.equal(f.runCalls.length,1);
+ await stopDeploymentForeground(f.stateDir);let called=0;
+ await startDeploymentForeground(f.stateDir,{authorize:true},{...ops,guiAvailable:async()=>false,runComputer:async()=>{called++}});
+ assert.equal(called,0);assert.equal(readDeploymentForeground(f.stateDir).desktopConnection,'session_unavailable_or_unobserved');
 });
