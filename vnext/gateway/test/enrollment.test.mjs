@@ -742,7 +742,7 @@ test('joined device self capability TLS read/update uses its token and signed ge
  await new Promise(r=>extra.listen(0,'127.0.0.1',r));t.after(()=>new Promise(r=>extra.close(r)));hosts.push('127.0.0.1:'+extra.address().port);
  const ca=await fs.readFile(f.cert);
  const request=(id,token,body,route)=>new Promise((resolve,reject)=>{const req=https.request({hostname:'127.0.0.1',port:extra.address().port,path:route??'/styx/enroll/self/'+id+'/capabilities',method:body===undefined?'GET':'POST',ca,headers:{authorization:'Bearer '+token,'content-type':'application/json'}},res=>{let text='';res.on('data',b=>text+=b);res.on('end',()=>resolve({status:res.statusCode,body:JSON.parse(text)}));});req.on('error',reject);req.end(body===undefined?undefined:JSON.stringify(body));});
- const current=await request(a.id,a.token);assert.equal(current.status,200);assert.equal(current.body.device_id,a.id);assert.deepEqual(current.body.capabilities,{exec:true,computer:false,browser:false});assert.equal(current.body.connections.exec,'offline');
+ const current=await request(a.id,a.token);assert.equal(current.status,200);assert.equal(current.body.device_id,a.id);assert.deepEqual(current.body.capabilities,{exec:true,computer:false,browser:false});assert.deepEqual(current.body.connections,{exec:'offline',computer:'offline',browser:'offline'});
  for(const token of [b.token,f.mcpToken,f.adminToken,'x'.repeat(48)])assert.equal((await request(a.id,token)).status,403);
  assert.equal((await request(a.id,a.token,{},'/styx/enroll/capabilities')).status,404,'self credential never enables owner routes');
  const signed=(generation,selection={enable_computer:true,enable_browser:true})=>{const body={device_id:a.id,fingerprint:current.body.fingerprint,generation,...selection,public_key_pem:createPublicKey(a.key).export({type:'spki',format:'pem'})};body.signature=sign('sha256',Buffer.from(capabilityPayload(body)),{key:a.key,padding:constants.RSA_PKCS1_PSS_PADDING,saltLength:32}).toString('base64url');return body;};
@@ -750,6 +750,15 @@ test('joined device self capability TLS read/update uses its token and signed ge
  assert.equal((await request(b.id,b.token,update)).status,403,'path/body identity binding');
  assert.equal((await request(a.id,a.token,{...update,signature:'invalid'})).status,403);
  assert.equal((await request(a.id,b.token,update)).status,403);
+ // A real relay's observed residual peer must not be hidden by disabled config.
+ const residual={closed:false,ws:{readyState:WebSocket.OPEN}};
+ f.gateway.relay.computerPeers.set(a.id,new Set([residual]));
+ assert.equal((await request(a.id,a.token)).body.connections.computer,'connected');
+ assert.equal((await request(a.id,a.token,update)).status,409);
+ residual.ws.readyState=WebSocket.CLOSING;
+ assert.equal((await request(a.id,a.token)).body.connections.computer,'unknown');
+ assert.equal((await request(a.id,a.token,update)).status,409);
+ f.gateway.relay.computerPeers.delete(a.id);
  const result=await request(a.id,a.token,update);assert.equal(result.status,200);assert.equal(result.body.status,'updated');assert.deepEqual(result.body.capabilities,{exec:true,computer:true,browser:true});
  assert.equal((await request(a.id,a.token,update)).status,409,'stale generation cannot replay');
  const observed=await request(a.id,a.token);assert.equal(observed.body.generation,result.body.generation);assert.deepEqual(observed.body.capabilities,result.body.capabilities,'lost-response reconciliation can read actual committed state');

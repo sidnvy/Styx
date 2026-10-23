@@ -278,6 +278,18 @@ export class OutboundHostRelay {
         : 'unknown'
     };
   }
+  capabilityStatus(target) {
+    const observed=this.status(target);
+    for(const lane of ['computer','browser']){
+      if(target[lane]?.enabled===true||observed[lane]==='connected')continue;
+      const peers=lane==='computer'?this.computerPeers.get(target.id):this.browserPeers.get(target.id);
+      const entries=lane==='computer'?(peers instanceof Set?[...peers]:peers===undefined?[]:null):peers===undefined?[]:[peers];
+      // Configuration alone cannot prove absence: residual peers still matter.
+      observed[lane]=entries===null?'unknown':entries.length===0?'offline':
+        entries.some(entry=>entry&&!entry.closed&&entry.ws?.readyState===WebSocket.OPEN)?'connected':'unknown';
+    }
+    return observed;
+  }
   computerConnected(id) {
     return [...(this.computerPeers.get(id)??[])].filter(
       e=>!e.closed && e.ws?.readyState===WebSocket.OPEN).length;
