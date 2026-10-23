@@ -5,7 +5,7 @@ import os from 'node:os';
 import path from 'node:path';
 import net from 'node:net';
 import {spawn} from 'node:child_process';
-import {createHash,createPublicKey,generateKeyPairSync,sign} from 'node:crypto';
+import {createHash,createPublicKey,generateKeyPairSync,sign,randomBytes} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
 import {Client} from '@modelcontextprotocol/sdk/client/index.js';
 import {StreamableHTTPClientTransport} from '@modelcontextprotocol/sdk/client/streamableHttp.js';
@@ -18,7 +18,7 @@ const sha=v=>createHash('sha256').update(v).digest('hex');
 const wait=ms=>new Promise(r=>setTimeout(r,ms));
 async function until(check){const end=Date.now()+10000;while(Date.now()<end){if(await check())return;await wait(30)}throw Error('foreground_connection_timeout')}
 async function fixture(t,{mode='join-existing',live=false,computer=false}={}){
- const root=fs.mkdtempSync(path.join(os.tmpdir(),'styx-foreground-'));ensurePrivateDirectory(root);const stateDir=path.join(root,'state'),base=path.join(root,'host'),bundle=path.join(root,'bundle'),publisher=path.join(root,'publisher.pem');
+ const root=path.join(os.tmpdir(),'styx-foreground-'+randomBytes(12).toString('hex'));ensurePrivateDirectory(root);const stateDir=path.join(root,'state'),base=path.join(root,'host'),bundle=path.join(root,'bundle'),publisher=path.join(root,'publisher.pem');
  t.after(async()=>{await stopDeploymentForeground(stateDir);await stopDeploymentGateway(stateDir);fs.rmSync(root,{recursive:true,force:true})});
  for(const d of [bundle,path.join(bundle,'bin'),path.join(bundle,'host')])ensurePrivateDirectory(d);
  const {privateKey,publicKey}=generateKeyPairSync('ed25519'),pem=publicKey.export({type:'spki',format:'pem'});writePrivateFile(publisher,pem);
