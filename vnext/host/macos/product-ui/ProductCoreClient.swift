@@ -44,7 +44,7 @@ indirect enum ProductJSON: Codable, Equatable {
     var object: [String: ProductJSON] { if case .object(let v) = self { return v }; return [:] }
 }
 
-enum ProductCoreError: Error { case invalidBootstrap, unavailable, rejected, invalidResponse, workInProgress, workStateUnknown }
+enum ProductCoreError: Error { case invalidBootstrap, unavailable, rejected, invalidResponse, workInProgress, workStateUnknown; case insufficientSpace(ProductJSON, Bool) }
 
 final class ProductRedirectBlocker: NSObject, URLSessionTaskDelegate {
     func urlSession(_ session: URLSession, task: URLSessionTask,
@@ -140,6 +140,7 @@ final class ProductCoreClient {
         guard let response = response as? HTTPURLResponse,
               response.url == url else { throw ProductCoreError.rejected }
         if response.statusCode == 409, data.count <= 4096, let failure = try? JSONDecoder().decode(ProductJSON.self, from: data) {
+            if failure["error"].string == "host_payload_insufficient_space" { throw ProductCoreError.insufficientSpace(failure["budget"], route == "host-payload/handoff/prepare" && failure["preflight"].bool) }
             if failure["error"].string == "work_in_progress" { throw ProductCoreError.workInProgress }
             if failure["error"].string == "work_state_unknown" { throw ProductCoreError.workStateUnknown }
         }

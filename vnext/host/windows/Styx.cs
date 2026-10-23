@@ -17,7 +17,7 @@ namespace StyxNative {
   internal static string Str(object obj,params string[] keys){return Get(obj,keys) as string??"";}
   internal static bool Yes(object obj,params string[] keys){return Equals(Get(obj,keys),true);}
  }
- sealed class NativeOperationException:IOException { internal readonly string Code;internal NativeOperationException(string code){Code=code;} }
+ sealed class NativeOperationException:IOException { internal readonly string Code;internal readonly object Budget;internal readonly bool Preflight;internal NativeOperationException(string code,object budget=null,bool preflight=false){Code=code;Budget=budget;Preflight=preflight;} }
  sealed class Core:IDisposable {
   readonly SemaphoreSlim gate=new SemaphoreSlim(1,1); Process child;CancellationTokenRegistration cancellationRegistration;int sequence;
   internal static string VerifiedNodeBinary(string root){
@@ -40,7 +40,7 @@ namespace StyxNative {
     // Mutations are not replayed after a lost response. The user returns to Settings.
     var read=child.StandardOutput.ReadLineAsync();if(operation!="prepare"&&operation!="runtimeUpgradePrepare"&&operation!="runtimeUpgradeLaunch"&&operation!="runtimeUpgradeRollback"&&await Task.WhenAny(read,Task.Delay(150000))!=read){Dispose();throw new IOException();}
     var line=await read;if(line==null||line.Length>2097152)throw new IOException();var response=Json.Codec.DeserializeObject(line);
-    if(Convert.ToInt32(Json.Get(response,"id"))!=id)throw new IOException();if(!Json.Yes(response,"ok"))throw new NativeOperationException(Json.Str(response,"error"));return Json.Get(response,"result");
+    if(Convert.ToInt32(Json.Get(response,"id"))!=id)throw new IOException();if(!Json.Yes(response,"ok"))throw new NativeOperationException(Json.Str(response,"error"),Json.Get(response,"budget"),Json.Yes(response,"preflight"));return Json.Get(response,"result");
    }finally{gate.Release();}
   }
   public void Dispose(){var p=Interlocked.Exchange(ref child,null);if(p==null)return;try{p.StandardInput.Close();if(!p.WaitForExit(10000))p.Kill();}catch{}p.Dispose();cancellationRegistration.Dispose();}
@@ -148,7 +148,7 @@ namespace StyxNative {
   internal async Task Run(Func<Task> action,string pending="Working…",string failure="The operation could not be confirmed. Refresh to review current state. Completed steps are retained; an interrupted operation is not automatically repeated."){
    if(busy||starting||core==null)return;string previousMessage=message.Text;busy=true;mutationDone=new TaskCompletionSource<bool>();mutationRevision++;settings.Enabled=false;message.Text=pending;settings.Feedback(pending);
    try{var reading=observation;if(reading!=null){try{await reading;}catch{}if(observation==reading)observation=null;}await action();if(settings.HasFeedback(pending))settings.Feedback("Operation completed. Review the current connection and test evidence below.");}
-   catch(Exception error){string text=failure;var native=error as NativeOperationException;if(native!=null&&native.Code=="windows_native_app_binding_required")text="The desktop test could not start. This package could not verify the current native Styx app. Your settings are retained.";else if(native!=null&&native.Code=="desktop_acceptance_native_app_changed")text="The native Styx app changed during this desktop test. Create a new test in this app before continuing.";else if(native!=null&&native.Code=="work_in_progress")text="A task is still running. Wait for it to finish before quitting or updating Styx.";else if(native!=null&&native.Code=="work_state_unknown")text="Styx could not confirm whether tasks are running. Keep it open and try again after checking the connection.";message.Text="Connection needs attention. Open Settings to review the last result.";settings.Feedback(text);}
+   catch(Exception error){string text=failure;var native=error as NativeOperationException;if(native!=null&&native.Code=="host_payload_insufficient_space")text=SpaceFeedback(native.Budget,native.Preflight);else if(native!=null&&native.Code=="windows_native_app_binding_required")text="The desktop test could not start. This package could not verify the current native Styx app. Your settings are retained.";else if(native!=null&&native.Code=="desktop_acceptance_native_app_changed")text="The native Styx app changed during this desktop test. Create a new test in this app before continuing.";else if(native!=null&&native.Code=="work_in_progress")text="A task is still running. Wait for it to finish before quitting or updating Styx.";else if(native!=null&&native.Code=="work_state_unknown")text="Styx could not confirm whether tasks are running. Keep it open and try again after checking the connection.";message.Text="Connection needs attention. Open Settings to review the last result.";settings.Feedback(text);}
    finally{if(message.Text==pending)message.Text=previousMessage;settings.Enabled=true;busy=false;mutationDone.TrySetResult(true);}
    // A mutation invalidates an in-flight startup observation. Resume only that
    // read after settling; never replay the mutation or block the ready controls.
@@ -186,6 +186,12 @@ namespace StyxNative {
    tray.Text=f=="connected"&&exec=="connected"?"Styx — connected":"Styx — needs attention";settings.ShowStatus(snapshot);
   }
   internal async Task<object> Call(string op,Dictionary<string,object> input=null){if(core==null)throw new IOException();return await core.Call(op,input??Json.Obj());}
+  internal static string SpaceFeedback(object budget,bool preflight){
+   string text=preflight?"Not enough disk space. The upgrade has not started.":"Not enough disk space. The update remains incomplete; review recovery before continuing.";
+   var volumes=Json.Get(budget,"volumes") as object[];
+   if(volumes!=null)foreach(var volume in volumes){double required,available;if(!Double.TryParse(Convert.ToString(Json.Get(volume,"requiredBytes")),out required)||!Double.TryParse(Convert.ToString(Json.Get(volume,"availableBytes")),out available)||Double.IsNaN(required)||Double.IsNaN(available)||Double.IsInfinity(required)||Double.IsInfinity(available)||required<0||available<0||required>9007199254740991d||available>9007199254740991d)continue;text+="\nRequired: "+(required/1073741824d).ToString("0.00")+" GB; available: "+(available/1073741824d).ToString("0.00")+" GB.";}
+   return text+"\nFree up disk space, then retry.";
+  }
   internal Task UpdateRuntime(){return UpdateRuntime(true);}
   Task UpdateRuntime(bool confirm){return Run(async()=>{
    startupHostUpdateAttempted=true;
@@ -213,7 +219,7 @@ namespace StyxNative {
    OpenSettings();return Run(async()=>{await AdmitQuit();settings.BeginInvoke(new Action(Quit));},"Checking running tasks…","Styx could not confirm that it is ready to quit. Keep it open and try again after checking the connection.");
   }
   internal void Quit(){if(closing)return;closing=true;startupTimer.Stop();startupTimer.Dispose();startupCancellation.Cancel();tray.Visible=false;settings.Close();settings.Dispose();panel.Close();if(core!=null)core.Dispose();tray.Dispose();icon.Dispose();ExitThread();}
-  internal void Verify(){if(panel.Controls.Count!=1||settings.Controls.Count!=1||icon.Width<16)throw new Exception("native_shell_failed");settings.Verify();}
+  internal void Verify(){var budget=Json.Obj("volumes",new object[]{Json.Obj("requiredBytes",2147483648d,"availableBytes",1073741824d)});if(!SpaceFeedback(budget,true).Contains("upgrade has not started")||SpaceFeedback(budget,false).Contains("upgrade has not started")||!SpaceFeedback(budget,true).Contains("Required:"))throw new Exception("space_feedback_failed");if(panel.Controls.Count!=1||settings.Controls.Count!=1||icon.Width<16)throw new Exception("native_shell_failed");settings.Verify();}
  }
  sealed class Settings:Form {
   sealed class CapabilityDraft {internal string Label=Environment.MachineName;internal bool Computer=true,Browser;internal int Channel;internal CheckState Persist=CheckState.Checked;}

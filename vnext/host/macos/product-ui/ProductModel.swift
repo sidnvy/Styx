@@ -539,6 +539,7 @@ enum ProductRestorationPolicy {
             catch { payloadUpdateStatus = try await client.write("host-payload/handoff/cancel", ["authorize": .bool(true), "ticketId": .string(ticket)])["handoff"]; throw error }
         } catch {
             switch error as? ProductCoreError {
+            case .insufficientSpace(let budget, let preflight): self.error = productSpaceFeedback(budget, preflight: preflight)
             case .workInProgress: self.error = productText("有任务仍在运行。请完成后再更新。", "Tasks are still running. Finish them before updating.")
             case .workStateUnknown: self.error = productText("暂时无法确认任务状态。请稍后重试。", "The task state could not be confirmed. Try again shortly.")
             default: self.error = productText("更新尚未完成。请检查更新状态后重试。", "The update has not finished. Check update status and retry.")
@@ -893,4 +894,15 @@ enum ProductRestorationPolicy {
         guard official || system else { return }
         NSWorkspace.shared.open(url)
     }
+}
+
+func productSpaceFeedback(_ budget: ProductJSON, preflight: Bool) -> String {
+    var message = preflight ? productText("空间不足，升级未开始。", "Not enough disk space. The upgrade has not started.") : productText("空间不足，更新尚未完成。请先检查恢复状态。", "Not enough disk space. The update remains incomplete; review recovery before continuing.")
+    for volume in budget["volumes"].array {
+        guard let required = volume["requiredBytes"].number, let available = volume["availableBytes"].number,
+              required.isFinite, available.isFinite, required >= 0, available >= 0, required <= 9007199254740991, available <= 9007199254740991 else { continue }
+        let need = String(format: "%.2f", required / 1073741824), free = String(format: "%.2f", available / 1073741824)
+        message += "\n" + productText("需要 \(need) GB；可用 \(free) GB。", "Required: \(need) GB; available: \(free) GB.")
+    }
+    return message + "\n" + productText("释放空间后重试。", "Free up disk space, then retry.")
 }

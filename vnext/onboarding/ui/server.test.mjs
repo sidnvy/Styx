@@ -545,3 +545,10 @@ test('failed join recovery requires fresh inspected acceptance, consumes it once
   assert.equal((await(await f.get('/api/join/recovery')).json()).recovery.canRecover,true);
  }finally{await f.cleanup()}
 });
+
+test('Host preflight exposes only bounded numeric space budget and does not launch update',async t=>{
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'styx-space-api-'));t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
+ const defaults=path.join(root,'artifacts.json');fs.writeFileSync(defaults,JSON.stringify({bundle:'/fixture/bundle',publisherKeyFile:'/fixture/key',publisherSha256:'a'.repeat(64)}),{mode:0o600});
+ let cancelled=0;const f=await fixture({artifactDefaultsFile:defaults,core:{prepareHostPayloadHandoff(){const e=Error('host_payload_insufficient_space');e.budget={schema:1,secret:'/private/secret',volumes:[{requiredBytes:200,availableBytes:100,shortfallBytes:100,path:'/private/secret'}]};throw e},prepareDeploymentWorkAdmission(){return {status:'ready',ticketId:'a'.repeat(32)}},commitDeploymentWorkAdmission(){throw Error('must_not_commit')},cancelDeploymentWorkAdmission(){cancelled++}}});t.after(()=>f.cleanup());
+ const response=await f.post('/api/host-payload/handoff/prepare',{authorize:true});assert.equal(response.status,409);const body=await response.json();assert.deepEqual(body,{error:'host_payload_insufficient_space',preflight:true,budget:{schema:1,volumes:[{requiredBytes:200,availableBytes:100,shortfallBytes:100}]}});assert(!JSON.stringify(body).includes('private'));assert.equal(cancelled,1);
+});

@@ -204,3 +204,10 @@ test('join preparation stops after claim when the current native bundle needs re
  assert.deepEqual(advanced,['host.claim']);assert.equal(latest.status.nativeStartup.reason,'host_payload_update_required');
  assert.equal(latest.status.deployment.steps.at(-1).status,'pending');
 });
+
+test('space preflight travels from HTTP through native bridge without private details or launch',async()=>{
+ const calls=[],budget={schema:1,volumes:[{requiredBytes:200,availableBytes:100,shortfallBytes:100,path:'/secret'}]};
+ const client=await createClient({url},{fetchImpl:async address=>{const route=new URL(address).pathname.slice(5);calls.push(route);const data=route==='session'?{csrf:'B'.repeat(43)}:{error:'host_payload_insufficient_space',budget,preflight:true};return {ok:route==='session',headers:new Headers({'content-type':'application/json'}),text:async()=>JSON.stringify(data)}}});
+ const input=new PassThrough(),output=new PassThrough();let data='';output.on('data',part=>data+=part);input.end(JSON.stringify(req('runtimeUpgradePrepare'))+'\n');await serve({input,output,instance:{url,close:async()=>{}},client});
+ const result=JSON.parse(data);assert.equal(result.error,'host_payload_insufficient_space');assert.equal(result.preflight,true);assert.deepEqual(result.budget,{schema:1,volumes:[{requiredBytes:200,availableBytes:100,shortfallBytes:100}]});assert(!data.includes('secret'));assert.deepEqual(calls,['session','host-payload/handoff/prepare']);
+});

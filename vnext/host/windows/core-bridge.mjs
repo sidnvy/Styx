@@ -1,5 +1,6 @@
 // The native shell uses the same private HTTP Core API as the Mac app.
 import fs from 'node:fs';
+import {publicSpaceBudget} from '../../onboarding/server.mjs';
 import path from 'node:path';
 import readline from 'node:readline';
 import {fileURLToPath} from 'node:url';
@@ -9,12 +10,12 @@ import {ensurePrivateDirectory,writePrivateFile,requirePrivateDirectory,configur
 import {launchWindowsHostPayloadHandoff} from './host-payload-handoff.mjs';
 import {writeStartupDiagnostics} from './startup-diagnostics.mjs';
 import {observeWindowsNativeAppAuthority} from './native-app-authority.mjs';
-const SAFE_NATIVE_ERRORS=new Set(['windows_native_app_binding_required','desktop_acceptance_native_app_changed','work_in_progress','work_state_unknown']);
+const SAFE_NATIVE_ERRORS=new Set(['host_payload_insufficient_space','windows_native_app_binding_required','desktop_acceptance_native_app_changed','work_in_progress','work_state_unknown']);
 export const OPERATIONS=Object.freeze(['status','create','inspectJoin','join','recoverJoin','rollbackJoin','prepare','connect','disconnect','setCapabilities','tunnelSave','tunnelStart','tunnelStop','acceptanceBegin','acceptanceConfirm','acceptanceDesktopReadback','devices','setDefault','revokeDevice','inviteComputer','closePairing','recoverIngress','pendingComputers','approveComputer','runtimeUpgradePrepare','runtimeUpgradeLaunch','runtimeUpgradeStatus','runtimeUpgradeCancel','quitAdmission','runtimeUpgradeRollback','startupStatus','startupDiagnostics','appLifecycle','appLogin']);
 export function bootstrap(url){const u=new URL(url);if(u.protocol!=='http:'||u.hostname!=='127.0.0.1'||!u.port||u.pathname!=='/'||u.search||u.username||u.password||!/^#session=[A-Za-z0-9_-]{43}$/.test(u.hash))throw Error('invalid_bootstrap');const token=u.hash.slice(9);u.hash='';return {origin:u.origin,token};}
 export async function createClient(instance,{fetchImpl=fetch}={}){
  const {origin,token}=bootstrap(instance.url);let csrf;
- const call=async(route,body)=>{const response=await fetchImpl(origin+'/api/'+route,{method:body?'POST':'GET',redirect:'error',headers:{Authorization:'Bearer '+token,Origin:origin,...(body?{'Content-Type':'application/json','X-Styx-CSRF':csrf}:{})},...(body?{body:JSON.stringify(body)}:{}),...(['advance','local-setup','browser/prepare','host-payload/handoff/prepare'].includes(route)?{}:{signal:AbortSignal.timeout(body||route==='snapshot'?120000:20000)})});if(!response.headers.get('content-type')?.startsWith('application/json'))throw Error('core_rejected');const text=await response.text();if(Buffer.byteLength(text)>2*1024*1024)throw Error('core_response_too_large');const value=JSON.parse(text);if(!response.ok)throw Error(SAFE_NATIVE_ERRORS.has(value?.error)?value.error:'core_rejected');return value;};
+ const call=async(route,body)=>{const response=await fetchImpl(origin+'/api/'+route,{method:body?'POST':'GET',redirect:'error',headers:{Authorization:'Bearer '+token,Origin:origin,...(body?{'Content-Type':'application/json','X-Styx-CSRF':csrf}:{})},...(body?{body:JSON.stringify(body)}:{}),...(['advance','local-setup','browser/prepare','host-payload/handoff/prepare'].includes(route)?{}:{signal:AbortSignal.timeout(body||route==='snapshot'?120000:20000)})});if(!response.headers.get('content-type')?.startsWith('application/json'))throw Error('core_rejected');const text=await response.text();if(Buffer.byteLength(text)>2*1024*1024)throw Error('core_response_too_large');const value=JSON.parse(text);if(!response.ok){const error=Error(SAFE_NATIVE_ERRORS.has(value?.error)?value.error:'core_rejected');if(error.message==='host_payload_insufficient_space'){error.budget=publicSpaceBudget(value.budget);error.preflight=route==='host-payload/handoff/prepare'&&value.preflight===true}throw error;}return value;};
  const session=await call('session');csrf=session.csrf;if(!/^[A-Za-z0-9_-]{43}$/.test(csrf??''))throw Error('invalid_csrf');let inspected,accepted,observation;
  const interruptedJoin=async()=>{
   if(session.joinRecoverySupported!==true)return null;
@@ -148,6 +149,6 @@ export async function serve({input=process.stdin,output=process.stdout,instance,
  let owned=instance,client;
  try{owned??=await startWindowsCore(process.env.STYX_NATIVE_RESOURCES,process.env.STYX_NATIVE_STATE);client=providedClient??await createClient(owned);}catch{}
  const lines=readline.createInterface({input,crlfDelay:Infinity});
- try{for await(const line of lines){let request;try{if(Buffer.byteLength(line)>65536)throw Error('oversize');request=JSON.parse(line);if(!client)throw Error('unavailable');const result=await client.dispatch(request);output.write(JSON.stringify({schema:1,id:request.id,ok:true,result})+'\n');}catch(error){output.write(JSON.stringify({schema:1,id:Number.isSafeInteger(request?.id)?request.id:0,ok:false,error:client?(SAFE_NATIVE_ERRORS.has(error?.message)?error.message:'operation_failed_review_settings'):'native_core_unavailable'})+'\n');}}}finally{await owned?.close();}
+ try{for await(const line of lines){let request;try{if(Buffer.byteLength(line)>65536)throw Error('oversize');request=JSON.parse(line);if(!client)throw Error('unavailable');const result=await client.dispatch(request);output.write(JSON.stringify({schema:1,id:request.id,ok:true,result})+'\n');}catch(error){output.write(JSON.stringify({schema:1,id:Number.isSafeInteger(request?.id)?request.id:0,ok:false,...(client&&error?.message==='host_payload_insufficient_space'?{budget:publicSpaceBudget(error.budget),preflight:error.preflight===true}:{}),error:client?(SAFE_NATIVE_ERRORS.has(error?.message)?error.message:'operation_failed_review_settings'):'native_core_unavailable'})+'\n');}}}finally{await owned?.close();}
 }
 if(process.argv[1]&&path.resolve(process.argv[1])===fileURLToPath(import.meta.url))await serve();
