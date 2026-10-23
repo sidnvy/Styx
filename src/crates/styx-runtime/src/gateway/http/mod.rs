@@ -12,6 +12,7 @@ use backend::BackendBridge;
 use body::HeldBody;
 use bytes::Bytes;
 use http::{Method, Request, Response, StatusCode};
+use http_body::Body;
 use http_body_util::{BodyExt, Full, Limited};
 use lifecycle::{CloseFacts, GatewayOwnerLifecycle, Life, Supervisor};
 use rmcp::{
@@ -90,6 +91,14 @@ pub struct GatewayHttp<B: GatewayToolBackend + GatewayOwnerLifecycle> {
     stop: CancellationToken,
     #[cfg(test)]
     oldest_methods: std::sync::atomic::AtomicU8,
+    #[cfg(test)]
+    admission_probe: Mutex<Option<Arc<AdmissionProbe>>>,
+}
+#[cfg(test)]
+struct AdmissionProbe {
+    body_entered: Semaphore,
+    control_entered: Semaphore,
+    release_controls: Semaphore,
 }
 #[derive(Debug)]
 pub struct HttpShutdown {
@@ -122,6 +131,8 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayHttp<B> {
             stop: CancellationToken::new(),
             #[cfg(test)]
             oldest_methods: std::sync::atomic::AtomicU8::new(0),
+            #[cfg(test)]
+            admission_probe: Mutex::new(None),
         })
     }
     fn collect_closed(&self) {
@@ -261,21 +272,52 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayHttp<B> {
             },
             None => None,
         };
-        let body_permit = match self.body_readers.clone().try_acquire_owned() {
-            Ok(p) => p,
-            Err(_) => return plain(StatusCode::TOO_MANY_REQUESTS),
+        // Bodyless verbs never queue behind a POST sender. Hyper owns framing;
+        // uncertain/positive framing is refused rather than drained indefinitely.
+        let bytes = if parts.method != Method::POST {
+            let empty_length = parts
+                .headers
+                .get_all(http::header::CONTENT_LENGTH)
+                .iter()
+                .all(|v| v == "0");
+            if parts.headers.contains_key(http::header::TRANSFER_ENCODING)
+                || !empty_length
+                || body.size_hint().exact() != Some(0)
+                || !body.is_end_stream()
+            {
+                let mut response = plain(StatusCode::BAD_REQUEST);
+                response.headers_mut().insert(
+                    http::header::CONNECTION,
+                    http::HeaderValue::from_static("close"),
+                );
+                return response;
+            }
+            Bytes::new()
+        } else {
+            let _body_permit = match self.body_readers.clone().try_acquire_owned() {
+                Ok(p) => p,
+                Err(_) => return plain(StatusCode::TOO_MANY_REQUESTS),
+            };
+            #[cfg(test)]
+            if let Some(probe) = self
+                .admission_probe
+                .lock()
+                .expect("admission probe")
+                .clone()
+            {
+                probe.body_entered.add_permits(1);
+            }
+            match tokio::time::timeout(
+                Duration::from_secs(5),
+                Limited::new(body, MESSAGE_BYTES).collect(),
+            )
+            .await
+            {
+                Ok(Ok(b)) => b.to_bytes(),
+                Ok(Err(_)) => return plain(StatusCode::PAYLOAD_TOO_LARGE),
+                Err(_) => return plain(StatusCode::REQUEST_TIMEOUT),
+            }
         };
-        let bytes = match tokio::time::timeout(
-            Duration::from_secs(5),
-            Limited::new(body, MESSAGE_BYTES).collect(),
-        )
-        .await
-        {
-            Ok(Ok(b)) => b.to_bytes(),
-            Ok(Err(_)) => return plain(StatusCode::PAYLOAD_TOO_LARGE),
-            Err(_) => return plain(StatusCode::REQUEST_TIMEOUT),
-        };
-        drop(body_permit);
         let mut initialize_version = None;
         let mut cancel = false;
         if parts.method == Method::POST {
@@ -309,15 +351,20 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayHttp<B> {
             return plain(StatusCode::BAD_REQUEST);
         }
         let is_control = parts.method == Method::DELETE || cancel;
-        let request_permit = match (if is_control {
-            self.control.clone()
+        // Exactly one global control reservation. GET is bounded separately by
+        // one stream per retained session and does not consume POST capacity.
+        let request_permit = if parts.method == Method::GET {
+            None
         } else {
-            self.requests.clone()
-        })
-        .try_acquire_owned()
-        {
-            Ok(p) => p,
-            Err(_) => return plain(StatusCode::TOO_MANY_REQUESTS),
+            let semaphore = if is_control {
+                self.control.clone()
+            } else {
+                self.requests.clone()
+            };
+            match semaphore.try_acquire_owned() {
+                Ok(p) => Some(p),
+                Err(_) => return plain(StatusCode::TOO_MANY_REQUESTS),
+            }
         };
         if sid.is_none() {
             session = match self.create_session(principal.new_mcp_session_owner()) {
@@ -375,16 +422,34 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayHttp<B> {
             return plain(StatusCode::BAD_REQUEST);
         }
         let session_permit = if parts.method == Method::GET {
-            session.get.clone().try_acquire_owned()
-        } else if parts.method == Method::POST && !cancel {
-            session.post.clone().try_acquire_owned()
+            Some(session.get.clone().try_acquire_owned())
+        } else if !is_control {
+            Some(session.post.clone().try_acquire_owned())
         } else {
-            self.control.clone().try_acquire_owned()
+            None
         };
         let session_permit = match session_permit {
-            Ok(p) => p,
-            Err(_) => return plain(StatusCode::TOO_MANY_REQUESTS),
+            Some(Ok(p)) => Some(p),
+            Some(Err(_)) => return plain(StatusCode::TOO_MANY_REQUESTS),
+            None => None,
         };
+        #[cfg(test)]
+        if is_control {
+            let probe = self
+                .admission_probe
+                .lock()
+                .expect("admission probe")
+                .clone();
+            if let Some(probe) = probe {
+                probe.control_entered.add_permits(1);
+                probe
+                    .release_controls
+                    .acquire()
+                    .await
+                    .expect("probe release")
+                    .forget();
+            }
+        }
         let delete = parts.method == Method::DELETE;
         let new_session = sid.is_none();
         let response = match tokio::time::timeout(
@@ -433,7 +498,7 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayHttp<B> {
         let (parts, body) = response.into_parts();
         let mut held = HeldBody::new(
             body,
-            vec![request_permit, session_permit],
+            request_permit.into_iter().chain(session_permit).collect(),
             Some(session.clone()),
         );
         if !delete {

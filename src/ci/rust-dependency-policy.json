@@ -155,6 +155,11 @@
       "kind": "explicit_external_runtime",
       "input": "--codex-bin and fresh owned evidence root",
       "required_for": "actual single-process action capacity reuse, ambiguous input/no replay, exit/drain and Core-attested physical archival; not native package acceptance"
+    },
+    "gateway::http::tests::actual_tcp_slow_post_readers_do_not_starve_bodyless_control": {
+      "kind": "owned_loopback_sdk_fixture",
+      "input": "fresh external STYX_TEST_HTTP_ROOT allocated by gate",
+      "required_for": "actual slowPOST pressure, bodyless GET/DELETE separate admissions, two control permits and exact quota return; no native/account claim"
     }
   },
   "change_policy": "dependency or ignored-test additions require explicit policy review; preserve mature Cargo tooling rather than replacing its resolver/compiler/lints"

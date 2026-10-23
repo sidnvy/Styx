@@ -339,3 +339,126 @@ async fn close_fences_late_admission_retries_fence_and_double_shutdown_keeps_own
         styx_contracts::HOST_QUEUED_BYTES
     );
 }
+
+/// Actual HTTP transport pressure. The barrier only holds already-admitted
+/// controls; it does not bypass policy, manufacture SDK replies or execute tools.
+#[tokio::test]
+#[ignore = "requires STYX_TEST_HTTP_ROOT; owned actual TCP admission-pressure fixture"]
+async fn actual_tcp_slow_post_readers_do_not_starve_bodyless_control() {
+    use tokio::io::AsyncWriteExt;
+    tokio::time::timeout(Duration::from_secs(20), async {
+        let root = std::path::PathBuf::from(std::env::var("STYX_TEST_HTTP_ROOT").unwrap())
+            .join(uuid::Uuid::new_v4().to_string());
+        std::fs::create_dir_all(&root).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let uri = format!("http://{address}/mcp");
+        let token = "owned-admission-pressure-token-aaaaaaaaaaaa";
+        let policy = Arc::new(GatewayBearerPolicy::new(token.as_bytes(), vec![address.to_string()], vec![]).unwrap());
+        let backend = Arc::new(CounterBackend {
+            tools: vec![], fenced: Mutex::new(BTreeSet::new()), calls: Mutex::new(vec![]),
+            pending: AtomicUsize::new(0), attempts: AtomicUsize::new(0),
+            fail_fence_once: std::sync::atomic::AtomicBool::new(false),
+            arrived: tokio::sync::Notify::new(), pending_owners: Mutex::new(BTreeMap::new()),
+            path: root.join("unused-effects.txt"),
+        });
+        let shared = Arc::new(Semaphore::new(styx_contracts::HOST_QUEUED_BYTES));
+        let budget = HttpBudget::from_reserved_partition(shared.clone().try_acquire_many_owned(32 * 1024 * 1024).unwrap()).unwrap();
+        let app = GatewayHttp::new(policy, backend.clone(), budget.clone());
+        let server = app.clone().serve_owned(listener).await.unwrap();
+        let client = reqwest::Client::new();
+        let mut ids = vec![];
+        // Official SDK model serialization over real HTTP; no background client
+        // GET is opened, so the dedicated GET slot is not accidentally occupied.
+        for id in 0..4 {
+            let initialize: ClientJsonRpcMessage = serde_json::from_value(serde_json::json!({
+                "jsonrpc":"2.0", "id":id, "method":"initialize", "params":{
+                    "protocolVersion":"2025-11-25", "capabilities":{},
+                    "clientInfo":{"name":"owned-pressure-fixture","version":"1"}
+                }
+            })).unwrap();
+            let response = client.post(&uri).bearer_auth(token)
+                .header(http::header::ACCEPT, "application/json, text/event-stream")
+                .json(&initialize).send().await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let sid = response.headers()[SID].to_str().unwrap().to_owned();
+            assert!(!response.bytes().await.unwrap().is_empty());
+            let initialized: ClientJsonRpcMessage = serde_json::from_value(serde_json::json!({
+                "jsonrpc":"2.0", "method":"notifications/initialized"
+            })).unwrap();
+            assert_eq!(client.post(&uri).bearer_auth(token).header(SID, &sid)
+                .header(VERSION, "2025-11-25")
+                .header(http::header::ACCEPT, "application/json, text/event-stream")
+                .json(&initialized).send().await.unwrap().status(), StatusCode::ACCEPTED);
+            ids.push(sid);
+        }
+        let probe = Arc::new(AdmissionProbe {
+            body_entered: Semaphore::new(0), control_entered: Semaphore::new(0),
+            release_controls: Semaphore::new(0),
+        });
+        *app.admission_probe.lock().unwrap() = Some(probe.clone());
+        let mut slow = vec![];
+        for _ in 0..16 {
+            let mut socket = tokio::net::TcpStream::connect(address).await.unwrap();
+            let headers = format!("POST /mcp HTTP/1.1\r\nHost: {address}\r\nAuthorization: Bearer {token}\r\nMcp-Session-Id: {}\r\nContent-Length: {MESSAGE_BYTES}\r\nContent-Type: application/json\r\n\r\nx", ids[0]);
+            socket.write_all(headers.as_bytes()).await.unwrap();
+            slow.push(socket);
+        }
+        tokio::time::timeout(Duration::from_secs(2), probe.body_entered.acquire_many(16)).await.unwrap().unwrap().forget();
+        assert_eq!(app.body_readers.available_permits(), 0);
+        let get = client.get(&uri).bearer_auth(token).header(SID, &ids[0])
+            .header(VERSION, "2025-11-25").header(http::header::ACCEPT, "text/event-stream")
+            .send().await.unwrap();
+        assert_eq!(get.status(), StatusCode::OK, "GET must enter while all slow bodies remain held");
+        drop(get);
+        let mut controls = vec![];
+        for sid in [&ids[1], &ids[2]] {
+            let request = client.delete(&uri).bearer_auth(token).header(SID, sid)
+                .header(VERSION, "2025-11-25");
+            controls.push(tokio::spawn(async move { request.send().await.unwrap() }));
+        }
+        tokio::time::timeout(Duration::from_secs(2), probe.control_entered.acquire_many(2)).await.unwrap().unwrap().forget();
+        assert_eq!(app.control.available_permits(), 0);
+        assert_eq!(app.body_readers.available_permits(), 0);
+        assert_eq!(client.delete(&uri).bearer_auth(token).header(SID, &ids[3])
+            .header(VERSION, "2025-11-25").send().await.unwrap().status(), StatusCode::TOO_MANY_REQUESTS);
+        assert!(backend.fenced.lock().unwrap().is_empty(), "barrier is before the SDK close effect");
+        probe.release_controls.add_permits(2);
+        for task in controls {
+            let response = task.await.unwrap();
+            assert_eq!(response.status(), StatusCode::ACCEPTED);
+            response.bytes().await.unwrap();
+        }
+        assert_eq!(backend.fenced.lock().unwrap().len(), 2);
+        assert!(backend.calls.lock().unwrap().is_empty());
+        assert_eq!(app.body_readers.available_permits(), 0, "success must precede pressure release");
+        *app.admission_probe.lock().unwrap() = None;
+        // Nonempty/uncertain framing is rejected promptly, never read on the
+        // POST queue. Connection-close prevents reusing an unread request body.
+        for method in [reqwest::Method::GET, reqwest::Method::DELETE] {
+            let response = client.request(method, &uri).bearer_auth(token).header(SID, &ids[0])
+                .header(VERSION, "2025-11-25").body("x").send().await.unwrap();
+            assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+            assert_eq!(response.headers()[http::header::CONNECTION], "close");
+        }
+        drop(slow);
+        for sid in [&ids[0], &ids[3]] {
+            assert_eq!(client.delete(&uri).bearer_auth(token).header(SID, sid)
+                .header(VERSION, "2025-11-25").send().await.unwrap().status(), StatusCode::ACCEPTED);
+        }
+        collected(&app).await;
+        let report = server.shutdown(Duration::from_secs(5)).await;
+        assert!(report.connections_joined && report.lifecycle_jobs_joined);
+        assert_eq!(report.unresolved_sessions, 0);
+        assert_eq!(report.sdk_detached_tasks_joined, None);
+        assert_eq!(app.body_readers.available_permits(), 16);
+        assert_eq!(app.control.available_permits(), 2);
+        assert_eq!(app.requests.available_permits(), 16);
+        assert_eq!(app.connections.available_permits(), 32);
+        assert_eq!(backend.fenced.lock().unwrap().len(), 4);
+        assert_eq!(backend.attempts.load(Ordering::Acquire), 0);
+        drop(server); drop(app); drop(budget);
+        assert_eq!(shared.available_permits(), styx_contracts::HOST_QUEUED_BYTES);
+        println!("actual TCP pressure PASS fixture={}: 16 observed slow POST readers held; GET entered; two independent DELETE controls simultaneously admitted before SDK effect; third429; two202 and exact fences before pressure release; all owned admissions/connections/partition returned. No native/TLS/account evidence. POST cancel still shares body capacity; SDK detached joins unknown", root.display());
+    }).await.unwrap();
+}

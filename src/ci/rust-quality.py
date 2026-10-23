@@ -34,7 +34,10 @@ TLS_TESTS = [
     ("tls-loopback", "tls::tests::aws_lc_owned_loopback_tls_full_scenario_batch"),
     ("wss-loopback", "host::link::tests::strict_tls_wss_data_heartbeat_limits_close_cleanup_batch"),
 ]
-HTTP_TEST = "gateway::http::tests::official_sdk_tcp_auth_sessions_limits_and_pending_close"
+HTTP_TESTS = [
+    ("official-http-sdk", "gateway::http::tests::official_sdk_tcp_auth_sessions_limits_and_pending_close"),
+    ("http-control-pressure", "gateway::http::tests::actual_tcp_slow_post_readers_do_not_starve_bodyless_control"),
+]
 HOST_ACTION_WIRE_TEST = "host::protocol::tests::actual_canonical_tls_wss_host_action_journey"
 HOST_WIRE_TEST = "host::protocol::tests::actual_tls_wss_codex_start_read_duplicate_and_lost_response_batch"
 
@@ -134,8 +137,8 @@ class Gate:
         path = self.directory / "progress.json"
         path.write_text(json.dumps(data, indent=2) + "\n")
 
-    def run(self, name, command, *, timeout=900, extra_env=None):
-        entry = {"name": name, "command": command, "cwd": str(ROOT), "started_at": now()}
+    def run(self, name, command, *, timeout=900, extra_env=None, expected_exit=0):
+        entry = {"name": name, "command": command, "cwd": str(ROOT), "started_at": now(), "expected_exit_code": expected_exit}
         started = time.monotonic()
         logs = {}
         with (self.directory / (name + ".stdout.log")).open("xb") as stdout, (self.directory / (name + ".stderr.log")).open("xb") as stderr:
@@ -145,7 +148,7 @@ class Gate:
             try:
                 proc = subprocess.Popen(command, cwd=ROOT, env=env, stdin=subprocess.DEVNULL, stdout=stdout, stderr=stderr, start_new_session=os.name == "posix")
                 entry["exit_code"] = proc.wait(timeout)
-                entry["status"] = "PASS" if entry["exit_code"] == 0 else "FAIL"
+                entry["status"] = "PASS" if entry["exit_code"] == expected_exit else "FAIL"
             except subprocess.TimeoutExpired:
                 entry.update(status="FAIL", reason="command_timeout", exit_code=None)
                 if os.name == "posix" and proc:
@@ -227,12 +230,14 @@ def execute(args):
             receipt["ignored_inventory_source"] = "official_libtest_list_only_no_test_execution"
             receipt["ignored_tests"] = [{"test": name, **policy["known_ignored"].get(name, {"kind": "UNREVIEWED"})} for name in ignored]
             gate.semantic(inventory, ["unreviewed_ignored_test:" + name for name in ignored if name not in policy["known_ignored"]])
-        http_root = evidence / "owned-http-sdk"
-        http_root.mkdir(mode=0o700)
-        http = gate.run("official-http-sdk", ["cargo", "test", "-p", "styx-runtime", "--locked", "--offline", HTTP_TEST, "--", "--ignored", "--exact", "--nocapture"], timeout=120,
-            extra_env={"STYX_TEST_HTTP_ROOT": str(http_root)})
-        gate.semantic(http, [] if "1 passed; 0 failed" in gate.read("official-http-sdk") else ["exact_official_http_case_not_executed"])
-        receipt["official_http_sdk"] = {"status": http["status"], "backend": "owned_counter_fixture_not_native_exec_or_account"}
+        receipt["official_http_sdk"] = {"backend": "owned_counter_fixture_not_native_exec_or_account", "checks": {}}
+        for name, test_case in HTTP_TESTS:
+            http_root = evidence / ("owned-" + name)
+            http_root.mkdir(mode=0o700)
+            http = gate.run(name, ["cargo", "test", "-p", "styx-runtime", "--locked", "--offline", test_case, "--", "--ignored", "--exact", "--nocapture"], timeout=120,
+                extra_env={"STYX_TEST_HTTP_ROOT": str(http_root)})
+            gate.semantic(http, [] if "1 passed; 0 failed" in gate.read(name) else ["exact_official_http_case_not_executed"])
+            receipt["official_http_sdk"]["checks"][name] = http["status"]
         receipt["legacy_node22_interop"] = "NOT_RUN_explicit_node22_not_supplied"
         if args.node22:
             node = Path(args.node22)
@@ -284,7 +289,7 @@ def execute(args):
                 step = gate.run(name, [str(binary), *argv], timeout=30)
                 gate.semantic(step, [] if valid(gate.read(name)) else ["cli_response_not_expected"])
             # A skeleton must reject unimplemented business, never return empty success.
-            reject = gate.run("cli-unimplemented-reject", [str(binary), "exec", "--command", "never-run"], timeout=30)
+            reject = gate.run("cli-unimplemented-reject", [str(binary), "exec", "--command", "never-run"], timeout=30, expected_exit=2)
             if reject["exit_code"] is not None and reject["exit_code"] == 2 and "unrecognized subcommand" in gate.read("cli-unimplemented-reject", "stderr"):
                 reject.update(status="PASS", expected_nonzero=True)
             else:
@@ -313,6 +318,7 @@ def execute(args):
             if args.tls_fixtures:
                 receipt["tls_stability"] = "FAIL"
         required = {"git-head", "git-status", "git-head-end", "git-status-end", "rustc-version", "cargo-version", "dependency-metadata", "format", "clippy", "workspace-tests", "ignored-inventory", "official-http-sdk", "python-oracles", "cli-build", "cli-help", "cli-version", "cli-build-info", "cli-unimplemented-reject"}
+        required |= {name for name, _ in HTTP_TESTS}
         if args.node22:
             required |= {"node22-version", "node22-crypto"}
         if args.codex_bin:
