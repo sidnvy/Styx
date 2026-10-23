@@ -282,10 +282,17 @@ export class ExecAdapter {
             processId: r.process, afterSeq: null, maxBytes: 1,
             waitMs: Math.max(0, Math.min(300, Math.ceil(deadline - performance.now())))
           });
-          if (final.exited === true || final.closed === true) {
+          // Each cleanup poll starts at the beginning of the output stream.
+          // Validate it with an independent cursor; never advance or drain the
+          // caller's retained output merely to establish process termination.
+          this.decode(final, {id: r.id, cursor: null, terminalSeqSlots: 0, decoders: new Map()});
+          if (final.failure !== null && final.failure !== undefined) break;
+          if (final.exited === true) {
             confirmed = true;
             break;
           }
+          // EOF without an independently reported process exit is unknown.
+          if (final.closed === true) break;
           if (performance.now() < deadline) await delay(20);
         } while (performance.now() < deadline);
       } catch {

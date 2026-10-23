@@ -187,6 +187,26 @@ test('cleanup checks exit evidence instead of equating terminate acknowledgement
   assert.deepEqual((await f.adapter.cleanup()).map(x => x.confirmed), [true]);
   assert.equal(f.adapter.sessions.size, 0);
 });
+test('cleanup does not confirm stop from a closed stream, malformed exit, or executor failure', async () => {
+  for (const reply of [
+    {chunks: [], nextSeq: 2, exited: false, closed: true, exitCode: null},
+    {chunks: [], nextSeq: 3, exited: true, closed: true, exitCode: null},
+    {chunks: [], nextSeq: 3, exited: true, closed: true, exitCode: 143, failure: 'private executor failure'},
+    {exited: true, closed: true, exitCode: 143}
+  ]) {
+    const f = fixture(); await f.start(); f.options.reply = reply;
+    const results = await f.adapter.cleanup();
+    assert.deepEqual(results.map(x => x.confirmed), [false]);
+    assert.equal(f.calls.filter(x => x.method === 'process/terminate').length, 1);
+  }
+});
+test('cleanup can confirm a validated process exit before output EOF without replaying work', async () => {
+  const f = fixture(); await f.start();
+  f.options.reply = {chunks: [], nextSeq: 2, exited: true, closed: false, exitCode: 143};
+  assert.deepEqual((await f.adapter.cleanup()).map(x => x.confirmed), [true]);
+  assert.equal(f.calls.filter(x => x.method === 'process/start').length, 1);
+  assert.equal(f.calls.filter(x => x.method === 'process/terminate').length, 1);
+});
 test('RPC timeout rejects pending work and never retries a mutation', async () => {
   const channel = new EventEmitter(); let sends = 0;
   channel.send = () => sends++; channel.close = () => channel.emit('closed');
