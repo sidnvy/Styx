@@ -61,3 +61,23 @@ Linux 的 linger 与 enabled unit 只证明开机启动前提；物理注销/重
 - [Apple：SMAppService](https://developer.apple.com/documentation/servicemanagement/smappservice)
 - [Microsoft：Interactive Services / Session 0](https://learn.microsoft.com/en-us/windows/win32/services/interactive-services)
 - [systemd：loginctl enable-linger](https://www.freedesktop.org/software/systemd/man/latest/loginctl.html)
+
+## 2026-10-23 生命周期收敛补充
+
+原生管理入口现在在本Core进程绑定可信随包目标；未完整领取配对凭据时继续原加入，
+不进入要求完整凭据的Host迁移。领取成功后，在doctor、服务启动和foreground前重新
+对账版本，包括同一批次内连续推进的情况。CLI独立运行仍以其已有可信配置为准。
+失败的准备票据保留：preflight-only取消不等于可以自动重放；有未结束更新锁仍须恢复。
+
+领取中断恢复复用原请求、claim secret及现有token的确认协议，新Gateway返回已批准
+能力。原有效期、撤销和HMAC检查不变；超出领取有效期仍拒绝，不能称无限期恢复。
+旧Gateway支持首次领取；若恢复时未提供确认能力，明确要求Gateway升级而不猜授权。
+
+退出观察独立于连接ready：只有Core在验证所有权之后、派发任何工作之前创建的完整
+观察范围，才可由空任务表证明离线空闲。未覆盖范围、结果丢失、owner变化仍拒绝。
+此修复不实现CAS退出交接、系统注销续作或任意长期任务跨执行器重启恢复。
+
+Mac ARM与Intel收敛到同一个builder收尾。prepareOnly是不可交付的原生中间产物，
+由外部固定摘要验证后在新的目录完成签名；签名机不执行另一架构的二进制。
+run-local-signing.py只使用既有身份，持有签名会话锁覆盖准备、签名、封装；缺少身份
+拒绝创建。最终包仍需对应架构执行、原生权限和账号验收，不由验签推导这些结论。
