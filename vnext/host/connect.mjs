@@ -103,9 +103,10 @@ export async function connectHostOnce(config, {signal,onReady,workAdmission}={})
         catch(error){if(error.message==='device_in_maintenance'){const message=JSON.parse(String(data));ws.send(JSON.stringify({jsonrpc:'2.0',id:message.id,error:{code:-32001,message:'device_in_maintenance'}}));return}ws.terminate()}
       });
       channel.on('message', data=>{
+        if (Buffer.byteLength(data)>2*1024*1024) {workAdmission?.markUnknown();ws.terminate();return}
+        try{workPeer?.response(JSON.parse(String(data)))}catch{workAdmission?.markUnknown();ws.terminate();return}
         if (ws.readyState!==WebSocket.OPEN) return;
-        if (Buffer.byteLength(data)>2*1024*1024) {ws.terminate();return}
-        ws.send(String(data),{binary:false},err=>{if(err){workAdmission?.markUnknown();ws.terminate()}else{try{workPeer?.response(JSON.parse(String(data)))}catch{workAdmission?.markUnknown()}}});
+        ws.send(String(data),{binary:false},err=>{if(err)ws.terminate()});
       });
       workPeer?.ready();onReady?.({host_id:c.host_id});
     });

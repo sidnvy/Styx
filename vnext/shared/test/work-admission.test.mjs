@@ -1,6 +1,6 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import {WorkAdmission,createHostWorkAdmission} from '../work-admission.mjs';
+import {WorkAdmission,createHostWorkAdmission,observeOwnedHostSettlement,verifyOwnedHostSettlement} from '../work-admission.mjs';
 import {prepareHostUpdateAdmission,readHostUpdateAdmission,commitHostUpdateAdmission,cancelHostUpdateAdmission} from '../../onboarding/host-update-admission.mjs';
 const ticket='a'.repeat(32);
 const ownedFresh=id=>createHostWorkAdmission(id,{runtime:'fresh_owned',scope:'complete_from_creation',ownerGeneration:'b'.repeat(32),lanes:['exec','computer','browser']});
@@ -91,4 +91,35 @@ test('a peer replacement after prepare invalidates commit and still cannot dispa
  assert.equal(a.status(ticket).reason,'work_peer_changed');assert.throws(()=>a.commit(ticket),/not_settled/);
  assert.throws(()=>next.request({id:1,method:'process/start',params:{processId:'blocked'}}),/maintenance/);
  a.cancel(ticket);assert.equal(a.begin({ticketId:ticket}).status,'ready');
+});
+
+test('owned settlement proof is private, fenced, complete and revoked by changed peers or cancellation',()=>{
+ const a=ownedFresh('host'),p=a.openPeer('computer');a.begin({ticketId:ticket});
+ const proof=observeOwnedHostSettlement(a,ticket),verify=value=>verifyOwnedHostSettlement(value,{deviceId:'host',lanes:['computer','browser'],ticketId:ticket});
+ assert.equal(verify(proof),true);assert.equal(verify({...proof}),false);assert.equal(verify(JSON.parse(JSON.stringify(proof))),false);
+ assert.equal(verifyOwnedHostSettlement(proof,{deviceId:'other',lanes:['computer'],ticketId:ticket}),false);
+ a.cancel(ticket);assert.equal(verify(proof),false);a.begin({ticketId:ticket});assert.equal(verify(proof),false);
+ const fresh=observeOwnedHostSettlement(a,ticket);p.close();assert.equal(verify(fresh),false);
+ const partial=createHostWorkAdmission('host',{runtime:'fresh_owned',scope:'complete_from_creation',ownerGeneration:'c'.repeat(32),lanes:['exec']});partial.begin({ticketId:ticket});
+ assert.equal(verifyOwnedHostSettlement(observeOwnedHostSettlement(partial,ticket),{deviceId:'host',lanes:['computer'],ticketId:ticket}),false);
+ for(const controller of [new WorkAdmission(),createHostWorkAdmission('host')]){controller.begin({ticketId:ticket});assert.throws(()=>observeOwnedHostSettlement(controller,ticket),/unavailable/)}
+ const scoped=ownedFresh('host');scoped.begin({ticketId:ticket,scope:'host'});assert.throws(()=>observeOwnedHostSettlement(scoped,ticket),/unavailable/);
+});
+test('terminal local response settles GUI work, malformed or disconnected pending work does not',()=>{
+ for(const outcome of ['terminal','malformed','lost']){
+  const a=ownedFresh('host'),p=a.openPeer('computer');p.request({id:1,method:'tools/call'});
+  if(outcome==='terminal')p.response({id:1,result:{content:[]}});
+  if(outcome==='malformed')p.response({id:1});
+  p.close();assert.equal(a.begin({ticketId:ticket}).status,outcome==='terminal'?'ready':'unknown');
+  if(outcome!=='terminal')assert.throws(()=>observeOwnedHostSettlement(a,ticket),/unavailable/);
+ }
+});
+
+test('joint settlement proof binds both actual fences and rejects Gateway ticket recreation',()=>{
+ const host=ownedFresh('host'),gateway=new WorkAdmission();host.begin({ticketId:ticket});gateway.begin({ticketId:ticket});
+ const proof=observeOwnedHostSettlement(host,ticket,{gatewayAdmission:gateway});
+ const options={deviceId:'host',lanes:['computer'],ticketId:ticket,gatewayAdmission:gateway};
+ assert.equal(verifyOwnedHostSettlement(proof,options),true);
+ assert.equal(verifyOwnedHostSettlement(observeOwnedHostSettlement(host,ticket),options),false);
+ gateway.cancel(ticket);assert.equal(verifyOwnedHostSettlement(proof,options),false);gateway.begin({ticketId:ticket});assert.equal(verifyOwnedHostSettlement(proof,options),false);
 });

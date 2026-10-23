@@ -1,3 +1,4 @@
+const ownedControllers=new WeakMap(),settlementProofs=new WeakMap();
 // Process-owned maintenance fence. This is lifecycle admission, not tool routing.
 // Enter is synchronous and must precede the first await or native dispatch.
 export class WorkAdmission {
@@ -83,6 +84,10 @@ export function createHostWorkAdmission(deviceId,coverage){
      return;
     }
     const request=requests.get(message.id);if(!request)return;
+    const terminal=message.method===undefined&&
+      ((message.error===undefined&&message.result&&typeof message.result==='object'&&!Array.isArray(message.result))||
+       (message.result===undefined&&message.error&&Number.isInteger(message.error.code)&&typeof message.error.message==='string'));
+    if(!terminal){unknown=true;return}
     requests.delete(message.id);request.release();const process=processes.get(request.processId);
     // A valid terminal tool error is completed work, not a lost reply.
     if(lane!=='exec')return
@@ -101,6 +106,25 @@ export function createHostWorkAdmission(deviceId,coverage){
    close(){if(closed)return;closed=true;if(requests.size||[...processes.values()].some(p=>p.peer===id&&!p.executionSettled))unknown=true;for(const r of requests.values())r.release();requests.clear();for(const [key,p]of processes)if(p.peer===id&&p.executionSettled)processes.delete(key);peers.delete(id)}
   };
  };
+ if(complete)ownedControllers.set(admission,{deviceId,ownerGeneration,lanes});
  admission.markUnknown=()=>{unknown=true};
  return admission;
+}
+
+// In-process evidence only. Serialized fields are descriptive, never authority.
+export function observeOwnedHostSettlement(controller,ticketId,{gatewayAdmission}={}){
+ const owner=ownedControllers.get(controller),fence=controller?.tickets?.get(ticketId);
+ if(!owner||!fence||fence.scope!=='all'||controller.status(ticketId).status!=='ready')throw Error('owned_host_settlement_unavailable');
+ const gatewayFence=gatewayAdmission?.tickets?.get(ticketId);
+ if(gatewayAdmission&&(!gatewayFence||gatewayFence.scope!=='all'))throw Error('owned_host_settlement_unavailable');
+ const proof=Object.freeze({deviceId:owner.deviceId,ownerGeneration:owner.ownerGeneration,ticketId});
+ settlementProofs.set(proof,{controller,owner,fence,gatewayAdmission,gatewayFence,identity:controller.observe('all').identity});return proof;
+}
+export function verifyOwnedHostSettlement(proof,{deviceId,lanes,ticketId,gatewayAdmission}={}){
+ const record=settlementProofs.get(proof);if(!record)return false;
+ const {controller,owner,fence,identity}=record;
+ if(record.gatewayAdmission!==gatewayAdmission||(gatewayAdmission&&gatewayAdmission.tickets?.get(ticketId)!==record.gatewayFence))return false;
+ if(deviceId!==owner.deviceId||ticketId!==proof.ticketId||!Array.isArray(lanes)||!lanes.length||lanes.some(l=>!owner.lanes.has(l))||
+    controller.tickets.get(ticketId)!==fence||fence.scope!=='all')return false;
+ try{return controller.status(ticketId).status==='ready'&&controller.observe('all').identity===identity}catch{return false}
 }

@@ -112,10 +112,11 @@ export async function connectComputerOnce(config,{signal,onReady,workAdmission}=
         try {
           const obj=JSON.parse(line);
           if(!obj || typeof obj!=='object' || Array.isArray(obj))throw Error();
+          workPeer?.response(obj);
         }catch{stop();return}
         if(ws.readyState!==WebSocket.OPEN){stop();return}
         if(ws.bufferedAmount>2*MAX_COMPUTER_FRAME){stop();return}
-        ws.send(line,{binary:false},err=>{if(err){workAdmission?.markUnknown();stop()}else{try{workPeer?.response(JSON.parse(line))}catch{workAdmission?.markUnknown()}}});
+        ws.send(line,{binary:false},err=>{if(err)stop()});
       }
     });
     ws.on('message',(payload,isBinary)=>{
