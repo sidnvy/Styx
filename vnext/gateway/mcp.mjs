@@ -52,14 +52,14 @@ export function createGatewayMcp({exec, computer, browser, gui, registry, owner,
     });
   }
   server.setRequestHandler(ListToolsRequestSchema, async () => ({tools: await definitions()}));
-  async function observed(owner,name,args,operation){
+  async function observed(owner,name,args,lane,operation){
     let target=null;
     try{const execution=name==='write_stdin'?exec.sessions?.get(args.session_id):null;target=registry.resolve(execution?.environment??args.environment_id);}catch{}
     const operationId=randomUUID();
-    if(target&&typeof onToolResult?.before==='function')try{await onToolResult.before({name,args,owner,target,operationId})}catch{}
+    if(target&&typeof onToolResult?.before==='function')try{await onToolResult.before({name,args,owner,target,operationId,lane})}catch{}
     const result=await operation();
-    if(target&&result?.structuredContent?.uncertain)workAdmission?.markUnknown?.(target.id);
-    if(onToolResult&&target)try{const current=registry.resolve(target.id);if(current.generation===target.generation)await onToolResult({name,args,result,owner,target:current,operationId});}catch{/* Observation never changes/replays an executed request. */}
+    if(target&&result?.structuredContent?.uncertain)workAdmission?.markUnknown?.({deviceId:target.id,deviceGeneration:target.generation,lane,operationId});
+    if(onToolResult&&target)try{const current=registry.resolve(target.id);if(current.generation===target.generation)await onToolResult({name,args,result,owner,target:current,operationId,lane});}catch{/* Observation never changes/replays an executed request. */}
     return result;
   }
 
@@ -102,14 +102,14 @@ export function createGatewayMcp({exec, computer, browser, gui, registry, owner,
       if(workAdmission){const record=name==='write_stdin'?exec.sessions.get(args.session_id):null;const target=registry.resolve(record?.environment??args.environment_id);release=workAdmission.enter(target.id,name,{continuation:name==='write_stdin'});}
     }catch(error){return {isError:true,structuredContent:{error:error.message},content:[{type:'text',text:error.message}]};}
     try {
-    if(browser&&(await browser.listTools()).some(tool=>tool.name===name))return await observed(owner,name,args,()=>browser.callTool(name,args,owner));
-    if (execTools.some(t => t.name === name)) return await observed(owner,name,args,()=>exec.callTool(name, args, owner));
+    if(browser&&(await browser.listTools()).some(tool=>tool.name===name))return await observed(owner,name,args,'browser',()=>browser.callTool(name,args,owner));
+    if (execTools.some(t => t.name === name)) return await observed(owner,name,args,'exec',()=>exec.callTool(name, args, owner));
     if (computer && computerAllowed() &&
       (await computer.listTools()).some(t => t.name === name)) {
-      return await observed(owner,name,args,()=>computer.callTool(name,args,owner));
+      return await observed(owner,name,args,'computer',()=>computer.callTool(name,args,owner));
     }
     if (gui && !computer && computerAllowed() && guiTools.some(t => t.name === name)) {
-      return await gui.callTool(name, args, owner);
+      return await observed(owner,name,args,'computer',()=>gui.callTool(name,args,owner));
     }
     return {isError: true, content: [{type: 'text', text: 'unknown_tool'}]};
     } finally {release?.();}
