@@ -16,6 +16,40 @@ import AppKit
         }
         throw ProductCoreError.unavailable
     }
+    if mode == "join-rollback" {
+        try require(model.joinRollbackRequired && model.page == .preparation, "Interrupted recovery was hidden by a failed snapshot")
+        model.rollbackJoinRecovery(); try await settled()
+        try require(!model.joinRollbackRequired && model.canRecoverJoin && model.page == .preparation, "Explicit rollback did not restore the retained setup")
+        print("PASS: native joined recovery reads interrupted transaction independently and explicitly rolls back without recreating deployment.")
+        return
+    }
+    if mode.hasPrefix("join-") {
+        try require(model.deployment?.joined == true, "Recovery lost the existing joined deployment")
+        model.createAndPrepare(); try await settled()
+        try require(model.page == .preparation, "Existing deployment was sent to create")
+        try require(model.canRecoverJoin, "Core recovery projection was not presented")
+        model.beginJoinRecovery()
+        try require(model.recoveringJoin && model.page == .invitation, "Recovery did not reuse invitation review")
+        model.cancelInvitationReview()
+        try require(!model.recoveringJoin && model.page == .preparation, "Cancel recovery escaped to fresh setup")
+        model.beginJoinRecovery(); model.invite = "isolated-invitation"
+        model.inspectInvitation(); try await settled()
+        try require(model.invite.isEmpty && model.inspection["preview"]["origin"].string != nil, "Recovery invitation was not inspected")
+        if mode == "join-denied" {
+            model.joinRecovery = .object(["canRecover": .bool(false), "reason": .string("pending_request_exists")])
+            model.acceptInvitation(); try await settled()
+            try require(model.error != nil && model.page == .invitation, "Changed Core eligibility still accepted the invitation")
+        } else {
+            model.acceptInvitation(); try await settled()
+            try require(model.error == nil && model.page == .preparation && !model.recoveringJoin, "Same-identity recovery did not return to retained preparation")
+            try require(model.deployment?.steps.first(where: { $0.id == "host.prepare" })?.complete == true, "Recovery discarded prepared components")
+            try require(model.deployment?.steps.first(where: { $0.id == "host.request" })?.status == "pending", "Recovery implicitly replayed a request")
+            model.continuePreparation(); try await settled()
+            try require(model.deployment?.steps.first(where: { $0.id == "host.claim" })?.status == "awaiting_approval", "Explicit continuation did not reach existing claim wait")
+        }
+        print("PASS: native joined recovery uses inspect, explicit trust, same-deployment recovery and separately authorized continuation; cancellation and changed eligibility never create a deployment.")
+        return
+    }
     model.beginDeviceInvitation(); try await settled()
     try require(model.ingressCandidates.count == 2 && model.createdInvitation == .null && !model.invitationWindowOpen, "Multiple interfaces opened an unselected listener")
     model.selectedIngressAddress = "0.0.0.0"

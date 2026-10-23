@@ -202,6 +202,8 @@ enum ProductRestorationPolicy {
     @Published var inspection: ProductJSON = .null
     @Published var joinAcceptance: ProductJSON = .null
     @Published var joining = false
+    @Published var recoveringJoin = false
+    @Published var joinRecovery: ProductJSON = .null
     @Published var tunnelID = ""
     @Published var runtimeKey = ""
     @Published var pluginMode = "create"
@@ -312,6 +314,8 @@ enum ProductRestorationPolicy {
         default: return productText("本机连接未能恢复。可以重试连接；若仍失败，请保留现有设置并检查诊断记录。", "This computer's connection could not resume. Retry the connection; if it still fails, preserve your settings and inspect diagnostics.")
         }
     }
+    var canRecoverJoin: Bool { session["joinRecoverySupported"].bool && joinRecovery["canRecover"] == .bool(true) }
+    var joinRollbackRequired: Bool { session["joinRecoverySupported"].bool && joinRecovery["rollbackRequired"] == .bool(true) }
     var retryableCommandCheck: ProductStep? { ProductPreparationPolicy.retryableCommandCheck(deployment) }
     var preparationBlocker: ProductStep? { ProductPreparationPolicy.blockingStep(deployment) }
     var preparationConnectionNeedsReview: Bool {
@@ -406,6 +410,10 @@ enum ProductRestorationPolicy {
         let snapshot: ProductJSON
         do { snapshot = try await client.read("snapshot") }
         catch {
+            if session["joinRecoverySupported"].bool, let recovery = try? await client.read("join/recovery")["recovery"] {
+                publish(\.joinRecovery, recovery)
+                if joinRollbackRequired { page = .preparation; loaded = true; return }
+            }
             if signingUpgradeNeedsReview { page = .preparation; loaded = true; return }
             throw error
         }
@@ -414,6 +422,7 @@ enum ProductRestorationPolicy {
     }
     func applySnapshot(_ snapshot: ProductJSON) {
         publish(\.status, snapshot["status"])
+        publish(\.joinRecovery, snapshot["status"]["joinRecovery"])
         publish(\.journey, snapshot["journey"]); publish(\.tunnelObservationStale, false)
         if deployment != nil {
             if localPrepared && deployment?.browserRequested == true {
@@ -538,7 +547,9 @@ enum ProductRestorationPolicy {
         }
     }
     func createAndPrepare() {
+        guard status["deployment"] == .null else { page = .preparation; return }
         perform { [self] in
+            guard status["deployment"] == .null else { throw ProductCoreError.rejected }
             let defaults = session["defaults"]
             var host = defaults.object.filter { ["bundle", "publisherKeyFile", "publisherSha256", "baseDir"].contains($0.key) }
             guard host.count == 4, !label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else { throw ProductCoreError.unavailable }
@@ -632,17 +643,44 @@ enum ProductRestorationPolicy {
         observePermissions()
     }
     func openPermission(_ screen: Bool) { permissionActions.open(screen) }
+    func beginJoinRecovery() {
+        guard canRecoverJoin, !busy else { return }
+        invite = ""; inspection = .null; joinAcceptance = .null
+        recoveringJoin = true; page = .invitation
+    }
+    func cancelInvitationReview() {
+        invite = ""; inspection = .null; joinAcceptance = .null
+        page = recoveringJoin || status["deployment"] != .null ? .preparation : .welcome
+        recoveringJoin = false
+    }
+    func rollbackJoinRecovery() {
+        guard joinRollbackRequired, let transaction = joinRecovery["transactionId"].string else { return }
+        perform { [self] in
+            _ = try await client.write("join/rollback", ["authorize": .bool(true), "transactionId": .string(transaction)])
+            recoveringJoin = false; inspection = .null; joinAcceptance = .null; page = .preparation
+        }
+    }
     func inspectInvitation() {
         let input = invite; invite = ""; inspection = .null; joinAcceptance = .null
         perform { [self] in inspection = try await client.write("pairing-link/inspect", ["link": .string(input)]) }
     }
     func acceptInvitation() {
         perform { [self] in
+            // Existing deployments may only use the Core-admitted recovery path.
+            guard recoveringJoin ? canRecoverJoin : status["deployment"] == .null else { throw ProductCoreError.rejected }
             let p = inspection["preview"]
             var payload: [String: ProductJSON] = ["inspectionId": inspection["inspectionId"], "approvedGatewayOrigin": p["origin"]]
             if p["caSha256"].string != nil { payload["approvedCaSha256"] = p["caSha256"] }
             joinAcceptance = try await client.write("pairing-link/accept", payload)
-            inspection = .null; joining = true; page = .capabilities
+            if recoveringJoin {
+                guard let id = joinAcceptance["joinLinkId"].string else { throw ProductCoreError.rejected }
+                _ = try await client.write("join/recover", ["authorize": .bool(true), "joinLinkId": .string(id)])
+                inspection = .null; joinAcceptance = .null; recoveringJoin = false; page = .preparation
+                // Recovery updates trust and resets the uncertain request only.
+                // The user explicitly continues the retained setup from this page.
+            } else {
+                inspection = .null; joining = true; page = .capabilities
+            }
         }
     }
     func configureTunnel() {

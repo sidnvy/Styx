@@ -129,7 +129,10 @@ struct ProductView: View {
                     }.padding(.vertical, 4)
                 }
             }
-            if model.signingUpgradeIncomplete {
+            if model.joinRollbackRequired {
+                Text(productText("更换邀请未完成。先恢复上次设置，再重试。", "The invitation change was interrupted. Restore the previous setup before retrying.")).foregroundStyle(.secondary)
+                Button(productText("恢复上次设置", "Restore previous setup")) { model.rollbackJoinRecovery() }.buttonStyle(.borderedProminent)
+            } else if model.signingUpgradeIncomplete {
                 Text(productText("发现旧版设置。先核对本次升级，再保留设置并恢复连接。", "Settings from an earlier version were found. Review this upgrade, then preserve your settings and resume the connection.")).foregroundStyle(.secondary)
                 if model.signingUpgrade["status"].string == "reviewable" {
                     Text(productText("本次只更新 App 的签名登记，并保存回滚记录。电脑身份、配对、聊天凭据和系统权限保持不变；不会替换或停止已有后台服务。", "This updates only the App signing registration and saves a rollback record. Computer identity, pairing, chat credentials and system permissions are preserved. Existing background services are not replaced or stopped.")).font(.callout)
@@ -145,6 +148,9 @@ struct ProductView: View {
             } else if model.preparationConnectionNeedsReview {
                 Text(model.connectionReviewMessage).foregroundStyle(.secondary)
                 Button(productText("重试本机连接", "Retry this computer's connection")) { model.resumeForeground() }
+            } else if model.canRecoverJoin {
+                Text(productText("未能加入管理电脑。请使用这台电脑能够访问的地址重新获取邀请。", "Could not join the main computer. Get a new invitation using an address this computer can reach.")).foregroundStyle(.secondary)
+                Button(productText("更换邀请", "Use a new invitation")) { model.beginJoinRecovery() }.buttonStyle(.borderedProminent)
             } else if let blocked = model.preparationBlocker {
                 if blocked.status == "awaiting_approval" || ProductPreparationPolicy.canCheckOwnerApproval(model.deployment) {
                     Text(productText("请在发出邀请的电脑核对下方配对码并确认连接。", "Compare this pairing code on the inviting computer and confirm the connection.")).foregroundStyle(.secondary)
@@ -154,7 +160,7 @@ struct ProductView: View {
                     Text(blocked.status == "uncertain" ? productText("上次准备的结果尚未确认。请刷新并核对详细信息；安装和配对不会自动重试。", "The previous setup result is unconfirmed. Refresh and review details; installation and pairing will not be retried automatically.") : productText("准备暂时停止。请刷新状态并核对详细信息，再继续处理。", "Setup has paused. Refresh the status and review details before continuing.")).foregroundStyle(.secondary)
                 }
             } else if !model.busy {
-                Button(productText("继续准备", "Continue setup")) { model.continuePreparation() }.buttonStyle(.borderedProminent)
+                Button(model.joined ? productText("继续加入", "Continue joining") : productText("继续准备", "Continue setup")) { model.continuePreparation() }.buttonStyle(.borderedProminent)
             }
             DisclosureGroup(productText("详细信息", "Details")) {
                 VStack(alignment: .leading, spacing: 10) {
@@ -225,7 +231,7 @@ struct ProductView: View {
                     Button(productText("已核对，继续", "Details match — continue")) { model.acceptInvitation() }.buttonStyle(.borderedProminent)
                 }
             }
-            Button(productText("返回", "Back")) { model.page = .welcome; model.invite = "" }
+            Button(productText("返回", "Back")) { model.cancelInvitationReview() }
         }
     }
     private var chat: some View {
