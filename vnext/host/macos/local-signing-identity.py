@@ -68,7 +68,9 @@ def unlock_existing_keychain(keychain, password):
         core.CFRelease(handle)
 
 
-def prepare(root):
+def prepare(root, *, existing_only=False):
+    if existing_only and (not root.is_dir() or not (root / 'identity.json').is_file()):
+        raise RuntimeError('existing signing identity required; creation disabled')
     root.mkdir(mode=0o700, parents=False, exist_ok=True)
     st = root.lstat()
     if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o077:
@@ -96,6 +98,8 @@ def prepare(root):
                 run(['/usr/bin/security', 'list-keychains', '-d', 'user', '-s', *current, str(keychain)])
             unlock_existing_keychain(keychain, password)
             return value
+        if existing_only:
+            raise RuntimeError('existing signing identity required; creation disabled')
         # Never silently replace a partially prepared key or keychain.
         if any(file.exists() for file in [password_file, keychain, cert]):
             raise RuntimeError('incomplete identity requires review; refusing to generate another key')
