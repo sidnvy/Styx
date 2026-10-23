@@ -82,7 +82,18 @@ async function makePlan(input,options,full){
  return {schema:1,kind:'windows-app-login-plan',action:input.enabled?(c.observed.present?'none':'create'):(c.observed.present?'remove':'none'),before:c.observed,registration:input.enabled?c.current:c.registration,context:input};
 }
 export async function planWindowsAppLogin(input,options={}){const plan=await makePlan(input,options,true);validatedPlans.add(plan);return plan;}
-export async function reconcileWindowsAppLogin(input,options={}){assert(input.trustedApp,'app_login_native_app_required');const c=await context(input,options,true);return view(c);}
+export async function reconcileWindowsAppLogin(input,options={}){
+ assert(input.trustedApp,'app_login_native_app_required');
+ const current=await context(input,options);
+ // The native App has already completed its startup package verification.
+ // An identical registration needs no write. Still observe the current native
+ // owner, manifest/executable pins and actual shortcut on every invocation.
+ if(current.registration&&keys.every(key=>current.registration[key]===current.current[key])&&current.owned&&matches(current.observed,current.current)){
+  const {reconciledRegistration,...unchanged}=view(current);return unchanged;
+ }
+ // A changed registration or shortcut retains the full rebind verification.
+ return view(await context(input,options,true));
+}
 export async function controlWindowsAppLogin(plan,{authorize,...options}={}){
  assert(authorize===true&&plan?.schema===1&&plan.kind==='windows-app-login-plan','app_login_authorization_required');assert(validatedPlans.has(plan),'app_login_current_plan_required');validatedPlans.delete(plan);
  // This process just verified the full closure; revalidate manifest, live App,
