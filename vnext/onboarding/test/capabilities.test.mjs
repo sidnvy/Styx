@@ -112,6 +112,27 @@ function browserFixture(t,{withBrowser=true,headless=true}={}){
  return {root,dir,base,hostFile,config,ops,calls,snapshot,identity,profile:path.join(base,'browser/profiles/existing-login')};
 }
 
+
+// Transaction fixtures inject only native Computer preparation. They still exercise
+// signed release/config/identity checks and Gateway grants, not installed App trust.
+function withFixtureComputerPreparation(f){
+ const binary=path.join(f.base,'install/releases/browser-cap-test/bin/cua-driver');
+ f.ops.prepare=(dir,enabled)=>{
+  assert.equal(dir,f.dir);assert.equal(enabled,true);
+  assert.equal(fs.readFileSync(binary,'utf8'),'fixture-never-executed');
+  return {computer:{enabled:true,binary,connections:1}};
+ };
+ return f;
+}
+
+test('macOS Computer enable without registered signed App fails before transaction mutation',{skip:process.platform!=='darwin'},async t=>{
+ const f=browserFixture(t),before=fs.readFileSync(f.hostFile);
+ await assert.rejects(changeDeploymentCapabilitiesOffline(f.dir,{authorize:true,computer:true},f.ops),/verified_macos_app_required/);
+ assert.deepEqual(fs.readFileSync(f.hostFile),before);assert.deepEqual(f.calls,[]);
+ assert.equal(fs.existsSync(path.join(f.dir,'capabilities.json')),false);
+ assert.equal(fs.existsSync(path.join(f.dir,'capability-transactions')),false);
+});
+
 test('real Browser capability scope rejects changed native signer before capability or profile mutations',async t=>{
  const f=browserFixture(t),app={path:'/Applications/Styx.app',cdhash:'a'.repeat(40)},local={...app,certificateSha1:'b'.repeat(40),certificateSha256:'c'.repeat(64)};
  const configFile=path.join(f.dir,'deployment.json'),hostBefore=fs.readFileSync(f.hostFile),profileBefore=fs.readFileSync(f.profile);
@@ -290,7 +311,7 @@ async function joinedFixture(t){
  return {...f,controller,gateway,preserved,unchanged:()=>{for(const [file,bytes]of preserved)assert.deepEqual(fs.readFileSync(file),bytes)}};
 }
 test('joined Host uses real TLS self-device capabilities without admin credentials or new pairing',async t=>{
- const f=await joinedFixture(t),first=await changeDeploymentCapabilities(f.dir,{authorize:true,computer:true},f.ops);
+ const f=withFixtureComputerPreparation(await joinedFixture(t)),first=await changeDeploymentCapabilities(f.dir,{authorize:true,computer:true},f.ops);
  assert.equal(first.status,'updated');assert.equal(first.computer,true);assert.equal(first.browser,false);
  assert.equal(first.nativePermissions,'not_checked');assert.equal(first.foregroundRestartRequired,true);f.unchanged();
  const config=JSON.parse(fs.readFileSync(path.join(f.dir,'deployment.json')));assert.equal(config.mode,'join-existing');assert.equal(config.host.computer,true);
@@ -298,7 +319,7 @@ test('joined Host uses real TLS self-device capabilities without admin credentia
  const back=await rollbackDeploymentCapabilities(f.dir,{authorize:true,transactionId:both.transactionId},f.ops);assert.equal(back.status,'rolled_back');assert.equal(back.computer,true);assert.equal(back.browser,false);f.unchanged();
 });
 test('joined self-device denied token and connected lane reject before configuration mutation',async t=>{
- const f=await joinedFixture(t),before=fs.readFileSync(path.join(f.dir,'deployment.json')),token=f.preserved.at(-1)[0],original=fs.readFileSync(token);
+ const f=withFixtureComputerPreparation(await joinedFixture(t)),before=fs.readFileSync(path.join(f.dir,'deployment.json')),token=f.preserved.at(-1)[0],original=fs.readFileSync(token);
  fs.writeFileSync(token,'x'.repeat(48),{mode:0o600});await assert.rejects(changeDeploymentCapabilities(f.dir,{authorize:true,browser:true},f.ops),/device_unauthorized/);assert.deepEqual(fs.readFileSync(path.join(f.dir,'deployment.json')),before);fs.writeFileSync(token,original);
  f.ops.readForeground=()=>({status:'running'});await assert.rejects(changeDeploymentCapabilities(f.dir,{authorize:true,computer:true},f.ops),/foreground_must_be_stopped/);assert.deepEqual(fs.readFileSync(path.join(f.dir,'deployment.json')),before);f.unchanged();
 });
@@ -326,14 +347,14 @@ test('joined local preparation failure restores bytes without sending capability
 });
 
 test('canonical Computer-only local selection refuses independent running service without stop/restart',async t=>{
- const f=browserFixture(t),before=fs.readFileSync(f.hostFile);let mutations=0;
+ const f=withFixtureComputerPreparation(browserFixture(t)),before=fs.readFileSync(f.hostFile);let mutations=0;
  f.ops.hostStatus=async()=>({status:'reported',state:'running',installed:true,persistence:'enabled'});
  f.ops.hostControl=async()=>{mutations++;throw Error('must_not_take_over_service')};
  await assert.rejects(changeDeploymentCapabilitiesOffline(f.dir,{authorize:true,computer:true},f.ops),/host_must_be_stopped/);
  assert.equal(mutations,0);assert.deepEqual(fs.readFileSync(f.hostFile),before);assert.equal(f.calls.length,0);
 });
 test('canonical Computer-only local transaction retains Browser selection and supports journal rollback',async t=>{
- const f=browserFixture(t),result=await changeDeploymentCapabilitiesOffline(f.dir,{authorize:true,computer:true},f.ops);
+ const f=withFixtureComputerPreparation(browserFixture(t)),result=await changeDeploymentCapabilitiesOffline(f.dir,{authorize:true,computer:true},f.ops);
  assert.equal(result.status,'updated');assert.equal(result.computer,true);assert.equal(result.browser,false);
  assert.equal(JSON.parse(fs.readFileSync(path.join(f.dir,'deployment.json'))).host.computer,true);
  assert.equal((await rollbackDeploymentCapabilities(f.dir,{authorize:true,transactionId:result.transactionId},f.ops)).computer,false);
