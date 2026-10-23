@@ -2,7 +2,7 @@
 
 2026-10-24 · Owner-directed implementation choice: **Rust is the final Styx core runtime**.
 
-状态：本轮只制定并核验spec/plan，没有开始Rust实现。行为/迁移参考基线为 `44cf1470e6b0cfdfd2c2372e54e84ebd279c59c3`；既有date24.1安装包仍属于`8e4e645`，不包含后续修复。旧测试总数不作为Rust重写完成度。
+状态：owner已于2026-10-24授权执行，goal为active。四crate基础实现、精确legacy codec、独立Core准入/操作ledger、crypto互通和Linux只读私有store正在落地；尚未完成Rust Host/Gateway、跨平台包或真实迁移验收。实现状态与计划状态分开，见[IMPLEMENTATION.md](IMPLEMENTATION.md)。行为/迁移参考基线为 `44cf1470e6b0cfdfd2c2372e54e84ebd279c59c3`；既有date24.1安装包仍属于`8e4e645`，不包含后续修复。旧测试总数不作为Rust重写完成度。
 
 阅读顺序：
 

@@ -1,0 +1,99 @@
+{
+  "schema": 1,
+  "baseline": "44cf1470e6b0cfdfd2c2372e54e84ebd279c59c3",
+  "classification": "normative exact bytes, synthetic public inputs only",
+  "vectors": [
+    {
+      "id": "join-v1-browser-absent",
+      "kind": "join",
+      "input": {
+        "invitation": "synthetic-invitation",
+        "device_id": "fixture-device-1",
+        "label": "Styx 合同 🧪",
+        "platform": "linux",
+        "cwd": "/tmp/styx-fixture",
+        "shell": "/bin/sh",
+        "computer_requested": false,
+        "public_key_pem": "SYNTHETIC PUBLIC KEY"
+      },
+      "payload": "{\"invitation\":\"synthetic-invitation\",\"device_id\":\"fixture-device-1\",\"label\":\"Styx 合同 🧪\",\"platform\":\"linux\",\"cwd\":\"/tmp/styx-fixture\",\"shell\":\"/bin/sh\",\"computer_requested\":false,\"public_key_pem\":\"SYNTHETIC PUBLIC KEY\"}"
+    },
+    {
+      "id": "join-v1-browser-false",
+      "kind": "join",
+      "input": {
+        "invitation": "synthetic-invitation",
+        "device_id": "fixture-device-1",
+        "label": "Styx 合同 🧪",
+        "platform": "linux",
+        "cwd": "/tmp/styx-fixture",
+        "shell": "/bin/sh",
+        "computer_requested": false,
+        "public_key_pem": "SYNTHETIC PUBLIC KEY",
+        "browser_requested": false
+      },
+      "payload": "{\"invitation\":\"synthetic-invitation\",\"device_id\":\"fixture-device-1\",\"label\":\"Styx 合同 🧪\",\"platform\":\"linux\",\"cwd\":\"/tmp/styx-fixture\",\"shell\":\"/bin/sh\",\"computer_requested\":false,\"public_key_pem\":\"SYNTHETIC PUBLIC KEY\",\"browser_requested\":false}"
+    },
+    {
+      "id": "join-v1-browser-true",
+      "kind": "join",
+      "input": {
+        "invitation": "synthetic-invitation",
+        "device_id": "fixture-device-1",
+        "label": "Styx 合同 🧪",
+        "platform": "linux",
+        "cwd": "/tmp/styx-fixture",
+        "shell": "/bin/sh",
+        "computer_requested": false,
+        "public_key_pem": "SYNTHETIC PUBLIC KEY",
+        "browser_requested": true
+      },
+      "payload": "{\"invitation\":\"synthetic-invitation\",\"device_id\":\"fixture-device-1\",\"label\":\"Styx 合同 🧪\",\"platform\":\"linux\",\"cwd\":\"/tmp/styx-fixture\",\"shell\":\"/bin/sh\",\"computer_requested\":false,\"public_key_pem\":\"SYNTHETIC PUBLIC KEY\",\"browser_requested\":true}"
+    },
+    {
+      "id": "capability-v1",
+      "kind": "capability",
+      "input": {
+        "device_id": "fixture-device-1",
+        "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "generation": "fixture-generation",
+        "enable_computer": false
+      },
+      "payload": "[\"styx-device-capabilities-v1\",\"fixture-device-1\",\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"fixture-generation\",false]"
+    },
+    {
+      "id": "capability-v2-browser-and-computer",
+      "kind": "capability",
+      "input": {
+        "device_id": "fixture-device-1",
+        "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "generation": "fixture-generation",
+        "enable_computer": false,
+        "enable_browser": true
+      },
+      "payload": "[\"styx-device-capabilities-v2\",\"fixture-device-1\",\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"fixture-generation\",{\"browser\":true,\"computer\":false}]"
+    },
+    {
+      "id": "capability-v2-browser-only",
+      "kind": "capability",
+      "input": {
+        "device_id": "fixture-device-1",
+        "fingerprint": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        "generation": "fixture-generation",
+        "enable_browser": true
+      },
+      "payload": "[\"styx-device-capabilities-v2\",\"fixture-device-1\",\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"fixture-generation\",{\"browser\":true}]"
+    },
+    {
+      "id": "comparison-v1",
+      "kind": "comparison",
+      "input": {
+        "gatewayOrigin": "https://styx-fixture.invalid:8443",
+        "certificateSha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        "requestId": "cccccccccccccccccccccccccccccccc",
+        "deviceFingerprint": "dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd"
+      },
+      "value": "8A13-9C58-E1B6-D2B2"
+    }
+  ]
+}

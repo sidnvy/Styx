@@ -15,3 +15,5 @@
 - [Apple launch daemons and agents guide](https://developer.apple.com/library/archive/documentation/MacOSX/Conceptual/BPSystemStartup/Chapters/CreatingLaunchdJobs.html)：历史官方资料说明用户agent随登录存在/注销结束；当前API与注册方式在目标macOS上验证，不能据老文档宣称新系统已验收。
 
 本地一手证据：44cf147源码；`src/docs/architecture-boundaries.md`；工作区`outputs/architecture-review-20261024`的四个模拟probe/57项受影响Exec通过/完整quality收据；`outputs/release-convergence-20261024`的旧候选build/sign/install状态。旧测试通过不代表Rust已有实现。
+
+实施选型补充（2026-10-24）：[encoding_rs Decoder 0.8.35](https://docs.rs/encoding_rs/0.8.35/encoding_rs/struct.Decoder.html)用于增量文本解码；[tokio-util LinesCodec](https://docs.rs/tokio-util/0.7.20/tokio_util/codec/struct.LinesCodec.html)采用显式长度上限。Linux标准File::try_lock实际调用和nix/getrandom安全接口按本机1.94.1与固定crate源码核实；不把Linux行为推断成macOS/Windows已测试。

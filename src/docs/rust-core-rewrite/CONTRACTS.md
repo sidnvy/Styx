@@ -1,6 +1,6 @@
-# Rust core contracts · revision draft-1
+# Rust core contracts · semantic revision 1
 
-这些是实施要求，不是已实现的API。R00冻结v1；此后变更须提交兼容影响、调用方清单、迁移方式和场景更新。不得由某agent在其实现中私自改变共享类型。
+语义v1已由R00冻结，见CONTRACT-V1.json；这些是实施要求，不是已实现的API。此后变更须提交兼容影响、调用方清单、迁移方式和场景更新。不得由某agent在其实现中私自改变共享类型。
 
 ## C01 · Identities and authority
 

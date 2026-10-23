@@ -13,4 +13,5 @@ __pycache__/
 *.pyc
 
 # Local acceptance evidence is uploaded by CI, not committed.
-acceptance/
+/acceptance/*
+!/acceptance/oracles/

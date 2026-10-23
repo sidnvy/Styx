@@ -13,6 +13,17 @@
 - D09 既有App-managed Quit语义迁移不变；persistent模式GUI detach与Stop Host明确分离，不凭实现方便切换管理模式。
 - D10 Browser attach、新UI、租户、通用自主任务不纳入本轮；旧CAS实验保存原ref和证据，后续需要时明确Rust迁移。
 
+- D11 依用户2026-10-24补充，通用机制优先标准库/成熟依赖：Tokio异步/进程/同步、tokio-util有限codec与取消、Serde、Clap、官方rmcp、rustls、AWS-LC/Ed25519、UUID、encoding_rs、nix安全OS接口及标准文件锁。Styx自研只承载领域政策、资源绑定和事务语义。每项依赖固定版本/features/lock和许可证；SDK默认新增功能不能自动扩大公开协议。
+
+## Implementation decisions from first source/OS review
+
+- I01 恢复旧SDK全部五个MCP协商版本；R00初稿只列两版是遗漏，不作为兼容性裁剪。rmcp需显式method/capability allowlist、legacy session mode及2024-10适配，未实现前不标兼容完成。
+- I02 public工具库存从Gateway包装后的schema冻结：Cua内部session不向模型暴露，Cua/Browser公开environment_id保留。provider manifest不是公开wire的替代品。
+- I03 Host内owner注册加入不回绕incarnation，并绑定lease及reservation；同epoch重注册不复活旧lease/旧操作。Owner DTO仍不认证。
+- I04 token sequence接近u64耗尽时直接fence新prepare，必须显式建立新HostGeneration；不在旧generation内循环序列或复用epoch。调用方为Host/token issuer，公开MCP无变化。此为C04“不得回绕”的保守实现，溢出拒绝源审，尚无运行至耗尽的验收宣称。
+- I05 output drain与outcome/liveness独立；维护fence只拒绝新副作用，查询、取消和执行器结算继续。已退出但未drain不能作为完全settled或可清退资源。
+- I06 Linux writer/execution锁只是各自资源；不声称它们能协调尚未接入该锁的旧JS进程。live迁移仍须R26，Mac/Windows私有store未实现时显式Unsupported。
+
 ## Must resolve with short executable spikes in M0
 
 这些不是无限期TBD；每项有产物/失败边界和不影响的并行任务。

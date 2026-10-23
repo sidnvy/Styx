@@ -1,0 +1,89 @@
+{
+  "schema": 1,
+  "scope": "foundation_development_gate_not_final_release",
+  "toolchain": "1.94.1",
+  "members": {
+    "styx-contracts": {
+      "workspace_allowed": [],
+      "external_allowed": [
+        "serde",
+        "serde_json",
+        "thiserror",
+        "sha2",
+        "url"
+      ]
+    },
+    "styx-core": {
+      "workspace_allowed": [
+        "styx-contracts"
+      ],
+      "external_allowed": [
+        "thiserror"
+      ]
+    },
+    "styx-runtime": {
+      "workspace_allowed": [
+        "styx-contracts",
+        "styx-core"
+      ],
+      "external_allowed": [
+        "serde",
+        "serde_json",
+        "sha2",
+        "thiserror",
+        "libc",
+        "getrandom",
+        "tokio",
+        "aws-lc-rs",
+        "ed25519-dalek",
+        "base64",
+        "hex",
+        "zeroize",
+        "url",
+        "nix",
+        "uuid",
+        "tokio-util",
+        "futures-util",
+        "encoding_rs"
+      ]
+    },
+    "styx": {
+      "workspace_allowed": [
+        "styx-contracts",
+        "styx-runtime"
+      ],
+      "external_allowed": [
+        "clap"
+      ]
+    }
+  },
+  "pure_core_forbidden_paths": [
+    "std::fs",
+    "std::net",
+    "std::os",
+    "std::process",
+    "tokio",
+    "libc",
+    "nix",
+    "windows",
+    "objc",
+    "playwright"
+  ],
+  "source_guard_limit": "lexical defense in depth; imports/aliases/macros/FFI still need review; not a Rust sandbox or a proof of no IO",
+  "known_ignored": {
+    "crypto::tests::legacy_node22_bidirectional_crypto_batch": {
+      "kind": "explicit_external_runtime",
+      "input": "--node22 absolute binary",
+      "required_for": "legacy_crypto_interop_not_base_foundation"
+    },
+    "store::tests::linux::raw_change_child_probe": {
+      "kind": "owned_subprocess_helper",
+      "parent": "store::tests::linux::concurrent_independent_writer_change_is_detected_after_read"
+    },
+    "store::tests::linux::lock_child_probe": {
+      "kind": "owned_subprocess_helper",
+      "parent": "store::tests::linux::independent_process_observes_kernel_writer_exclusion_then_release"
+    }
+  },
+  "change_policy": "dependency or ignored-test additions require explicit policy review; preserve mature Cargo tooling rather than replacing its resolver/compiler/lints"
+}

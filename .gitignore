@@ -15,3 +15,5 @@ config.json
 audit.jsonl
 *.pem
 *.key
+
+/target/

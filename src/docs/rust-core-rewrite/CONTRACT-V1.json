@@ -1,0 +1,52 @@
+{
+  "schema": 1,
+  "revision": 1,
+  "status": "FROZEN_FOR_IMPLEMENTATION",
+  "scope": "C01-C08 semantic v1; runtime-format details gated by R24 and service principal by R38",
+  "plan": "a21ea757ca9f9ca96769941a31e3f2cb3daab766",
+  "mcp_supported_baseline": [
+    "2024-10-07",
+    "2024-11-05",
+    "2025-03-26",
+    "2025-06-18",
+    "2025-11-25"
+  ],
+  "limits": {
+    "control_frame_bytes": 1048576,
+    "exec_frame_bytes": 2097152,
+    "desktop_browser_frame_bytes": 8388608,
+    "per_peer_queued_bytes": 16777216,
+    "host_queued_bytes": 67108864,
+    "terminal_operation_retention_ms": 600000,
+    "terminal_operation_metadata_bytes": 16777216,
+    "rpc_response_wait_ms": 35000
+  },
+  "limit_policy": "bounded initial compatibility defaults, not arbitrary conversation counts; R03 measured tuning must be explicit; no active work eviction",
+  "operation_token": {
+    "issuer": "Host",
+    "parts": [
+      "host_generation",
+      "owner_epoch",
+      "sequence"
+    ],
+    "prepare_records_reserved": true,
+    "dispatch_requires_existing_reserved": true,
+    "dispatch_uses_prepared_immutable_payload": true,
+    "duplicate_returns_record_without_dispatch": true,
+    "expired_or_unknown_token_never_dispatches": true,
+    "new_host_generation_rejects_old_tokens": true
+  },
+  "trust_rules": [
+    "OwnerId DTO never grants authority",
+    "explicit target failure never falls back",
+    "availability never grants permission",
+    "scope/identity violation stops owner; routine provider loss stays local",
+    "Unknown outcome and ExecutionLiveness are separate",
+    "configuration writer lease is distinct from execution lease"
+  ],
+  "change_process": "Integrator records reason, callers, compatibility and scenario impact before changing frozen public types/limits.",
+  "review_corrections": [
+    "Independent source review restored all five legacy MCP negotiation versions; no intentional protocol support removal.",
+    "Corrected public tool inventory at Gateway wrapping boundary, not upstream provider schema."
+  ]
+}
