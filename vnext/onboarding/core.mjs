@@ -566,7 +566,8 @@ export {readDeploymentAppLifecycle,controlDeploymentAppLifecycle,reconcileDeploy
 
 export {planDeviceIngressChange,applyDeviceIngressChange,rollbackDeviceIngressChange} from './device-ingress-change.mjs';
 
-export {changeDeploymentCapabilities,readDeploymentCapabilities,rollbackDeploymentCapabilities} from './capabilities.mjs';
+export {readDeploymentCapabilities,rollbackDeploymentCapabilities} from './capabilities.mjs';
+export {changeManagedDeploymentCapabilities as changeDeploymentCapabilities} from './capability-lifecycle.mjs';
 
 export {readDeploymentComponents} from './components.mjs';
 export {planHostPublisherTransition,inspectHostPayloadCandidate,planHostPayloadMigration,applyHostPayloadMigration,rollbackHostPayloadMigration,readHostPayloadMigration} from './host-payload-migration.mjs';

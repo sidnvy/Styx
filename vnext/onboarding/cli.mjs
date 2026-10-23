@@ -2,7 +2,7 @@ import fs from 'node:fs';
 import {requirePrivateFile,requirePrivateDirectory,writePrivateFile} from '../host/private-storage.mjs';
 import path from 'node:path';
 import {fileURLToPath} from 'node:url';
-import {createDeployment,readDeployment,planDeployment,advanceDeployment,startDeploymentGateway,stopDeploymentGateway,controlDeploymentHostService,controlDeploymentService,inspectDeployment} from './core.mjs';
+import {createDeployment,readDeployment,planDeployment,advanceDeployment,startDeploymentGateway,stopDeploymentGateway,controlDeploymentHostService,controlDeploymentService,inspectDeployment,changeDeploymentCapabilities} from './core.mjs';
 import {readOnboardingJourney,readOnboardingDiagnostics,publicAcceptance} from './journey.mjs';
 function privateJson(file){if(!path.isAbsolute(file)||requirePrivateFile(file).size>1024*1024)throw Error('invalid_private_cli_input');return JSON.parse(fs.readFileSync(file,'utf8'));}
 export async function main(args){
@@ -17,7 +17,6 @@ export async function main(args){
    computerUse:'not_verified',userManager:linuxUserManagerStatus()};
  }
  if(cmd==='browser-select'&&rest.length===3&&['chrome','msedge','auto'].includes(rest[1])&&rest[2]==='--authorize'){
-  const {changeDeploymentCapabilities}=await import('./capabilities.mjs');
   return changeDeploymentCapabilities(rest[0],{authorize:true,browser:true,browserChannel:rest[1],persistLogin:true});
  }
  if(cmd==='foreground'&&rest.length===2&&rest[1]==='--authorize'){
@@ -142,7 +141,7 @@ export async function main(args){
  if(cmd==='local-setup'&&rest.length===2&&rest[1]==='--approve-local-device'){const api=await import('./core.mjs');const {completeLocalSetup}=await import('./local-setup.mjs');return completeLocalSetup(api,rest[0],{approve:true,...planDeployment(rest[0]).ownerPairingScope});}
  if(cmd==='capabilities-rollback'&&rest.length===3&&rest[2]==='--authorize'){const api=await import('./core.mjs');return api.rollbackDeploymentCapabilities(rest[0],{transactionId:rest[1],authorize:true});}
  if(cmd==='capabilities'&&rest.length===1){const {readDeploymentCapabilities}=await import('./capabilities.mjs');return readDeploymentCapabilities(rest[0]);}
- if(cmd==='capabilities'&&rest.length===3&&['computer-on','computer-off','browser-on','browser-off'].includes(rest[1])&&rest[2]==='--authorize'){const {changeDeploymentCapabilities}=await import('./capabilities.mjs');return changeDeploymentCapabilities(rest[0],{[rest[1].startsWith('browser-')?'browser':'computer']:rest[1].endsWith('-on'),authorize:true});}
+ if(cmd==='capabilities'&&rest.length===3&&['computer-on','computer-off','browser-on','browser-off'].includes(rest[1])&&rest[2]==='--authorize'){return changeDeploymentCapabilities(rest[0],{[rest[1].startsWith('browser-')?'browser':'computer']:rest[1].endsWith('-on'),authorize:true});}
  if(cmd==='plan'&&rest.length===1)return planDeployment(rest[0]);
  if(['advance','resume'].includes(cmd)&&rest.length>=2){
   const approve=rest.includes('--approve-local-device');
