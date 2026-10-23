@@ -174,3 +174,18 @@ test('preparation and rollback never adopt an observation begun before their mut
   assert.equal((await client.dispatch(req('status'))).status.observed,'current');
  }
 });
+
+test('native startup diagnostics stay local, bounded and reject nonnumeric/private fields',async t=>{
+ const fs=await import('node:fs'),os=await import('node:os'),path=await import('node:path');
+ const {writeStartupDiagnostics}=await import('./startup-diagnostics.mjs');
+ const root=fs.mkdtempSync(path.join(os.tmpdir(),'styx-startup-record-')),state=path.join(root,'state');t.after(()=>fs.rmSync(root,{recursive:true,force:true}));
+ const {ensurePrivateDirectory}=await import('../private-storage.mjs');ensurePrivateDirectory(state);
+ const value={schema:1,verification:{nodeReadyMilliseconds:40,childStartedMilliseconds:50,childExitedMilliseconds:3000,progress:[{phase:'files',completed:0,total:8018,elapsedMilliseconds:60},{phase:'files',completed:8018,total:8018,elapsedMilliseconds:2500},{phase:'signed_host',completed:0,total:1,elapsedMilliseconds:2501},{phase:'signed_host',completed:1,total:1,elapsedMilliseconds:2990}]},startup:{verificationStartedMilliseconds:400,verifiedMilliseconds:3400,readyMilliseconds:5000}};
+ const calls=[],client=await createClient({url,writeStartupDiagnostics:v=>writeStartupDiagnostics(state,v)},{fetchImpl:async(address)=>{calls.push(address);return {ok:true,headers:new Headers({'content-type':'application/json'}),text:async()=>JSON.stringify({csrf:'B'.repeat(43)})};}});
+ fs.writeFileSync(path.join(state,'native-startup-self-test.json'),'unchanged');
+ await client.dispatch(req('startupDiagnostics',value));await client.dispatch(req('startupDiagnostics',value));
+ const file=path.join(state,'native-startup.json'),before=fs.readFileSync(file,'utf8');assert.deepEqual(JSON.parse(before),value);assert.equal(calls.length,1);assert.equal(fs.readFileSync(path.join(state,'native-startup-self-test.json'),'utf8'),'unchanged');
+ const bad=[{...value,path:'/private/user'}, {...value,startup:{...value.startup,readyMilliseconds:Infinity}}, {...value,verification:{...value.verification,progress:Array(161).fill(value.verification.progress[0])}}, {...value,verification:{...value.verification,progress:[{...value.verification.progress[0],phase:'user supplied'},value.verification.progress[1]]}}];
+ for(const input of bad)await assert.rejects(client.dispatch(req('startupDiagnostics',input)),/invalid_native_startup_diagnostics/);
+ assert.equal(fs.readFileSync(file,'utf8'),before);assert.deepEqual(fs.readdirSync(state).sort(),['native-startup-self-test.json','native-startup.json']);
+});

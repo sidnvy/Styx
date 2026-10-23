@@ -7,9 +7,10 @@ import {createHash} from 'node:crypto';
 import {execFileSync} from 'node:child_process';
 import {ensurePrivateDirectory,writePrivateFile,requirePrivateDirectory,configureWindowsAclHelper} from '../private-storage.mjs';
 import {launchWindowsHostPayloadHandoff} from './host-payload-handoff.mjs';
+import {writeStartupDiagnostics} from './startup-diagnostics.mjs';
 import {observeWindowsNativeAppAuthority} from './native-app-authority.mjs';
 const SAFE_NATIVE_ERRORS=new Set(['windows_native_app_binding_required','desktop_acceptance_native_app_changed','work_in_progress','work_state_unknown']);
-export const OPERATIONS=Object.freeze(['status','create','inspectJoin','join','recoverJoin','rollbackJoin','prepare','connect','disconnect','setCapabilities','tunnelSave','tunnelStart','tunnelStop','acceptanceBegin','acceptanceConfirm','acceptanceDesktopReadback','devices','setDefault','revokeDevice','inviteComputer','closePairing','recoverIngress','pendingComputers','approveComputer','runtimeUpgradePrepare','runtimeUpgradeLaunch','runtimeUpgradeStatus','runtimeUpgradeCancel','quitAdmission','runtimeUpgradeRollback','startupStatus','appLifecycle','appLogin']);
+export const OPERATIONS=Object.freeze(['status','create','inspectJoin','join','recoverJoin','rollbackJoin','prepare','connect','disconnect','setCapabilities','tunnelSave','tunnelStart','tunnelStop','acceptanceBegin','acceptanceConfirm','acceptanceDesktopReadback','devices','setDefault','revokeDevice','inviteComputer','closePairing','recoverIngress','pendingComputers','approveComputer','runtimeUpgradePrepare','runtimeUpgradeLaunch','runtimeUpgradeStatus','runtimeUpgradeCancel','quitAdmission','runtimeUpgradeRollback','startupStatus','startupDiagnostics','appLifecycle','appLogin']);
 export function bootstrap(url){const u=new URL(url);if(u.protocol!=='http:'||u.hostname!=='127.0.0.1'||!u.port||u.pathname!=='/'||u.search||u.username||u.password||!/^#session=[A-Za-z0-9_-]{43}$/.test(u.hash))throw Error('invalid_bootstrap');const token=u.hash.slice(9);u.hash='';return {origin:u.origin,token};}
 export async function createClient(instance,{fetchImpl=fetch}={}){
  const {origin,token}=bootstrap(instance.url);let csrf;
@@ -33,6 +34,7 @@ export async function createClient(instance,{fetchImpl=fetch}={}){
  return {async dispatch(request){
   if(!request||request.schema!==1||!Number.isSafeInteger(request.id)||!OPERATIONS.includes(request.operation)||!request.input||typeof request.input!=='object'||Array.isArray(request.input))throw Error('invalid_native_request');
   const i=request.input,op=request.operation;
+  if(op==='startupDiagnostics'){if(typeof instance.writeStartupDiagnostics!=='function')throw Error('startup_diagnostics_unavailable');return instance.writeStartupDiagnostics(i);}
   if(op==='startupStatus'){let value;try{value=await call('components');}catch(error){const interrupted=await interruptedJoin().catch(()=>null);if(interrupted)return {session:{joinRecoverySupported:true},...interrupted};throw error;}if(value.components?.host?.status==='not_configured')return observe();return {session:{joinRecoverySupported:session.joinRecoverySupported===true,localGatewayAvailable:session.localGatewayAvailable,tunnelSupported:session.tunnelSupported,artifactsAvailable:!!session.defaults?.bundle,desktopAcceptanceSupported:instance.desktopAcceptanceSupported===true,hostPayloadHandoffSupported:instance.hostPayloadHandoffSupported===true},status:{components:value.components},loadingDetails:true};}
   if(op==='rollbackJoin'){if(session.joinRecoverySupported!==true||!/^[a-f0-9]{32}$/.test(i.transactionId??''))throw Error('join_recovery_unavailable');try{return await call('join/rollback',{authorize:true,transactionId:i.transactionId});}finally{observation=undefined;}}
   if(op==='appLifecycle')return call('app/lifecycle');
@@ -139,7 +141,7 @@ export async function startWindowsCore(resourceRoot,stateRoot){
   if(cfg.openssl){const config=verifyOpenSslBundle(resourceRoot,cfg.openssl);options.trustedOpenSSL=member(cfg.openssl.path,cfg.openssl.sha256);if(config)options.trustedOpenSSLConfig=config;}
   if(cfg.tunnel)options.trustedTunnelClient={binary:member(cfg.tunnel.path,cfg.tunnel.sha256),sha256:cfg.tunnel.sha256};
  }
- const {createOnboardingServer}=await import('../../onboarding/server.mjs');const instance=await createOnboardingServer(options);return {...instance,desktopAcceptanceSupported,hostPayloadHandoffSupported,appLoginReconciliation,...(hostPayloadHandoffSupported?{launchHostPayloadHandoff:(ticketId,mode)=>launchWindowsHostPayloadHandoff({stateDir:options.stateDir,ticketId,mode})}:{})};
+ const {createOnboardingServer}=await import('../../onboarding/server.mjs');const instance=await createOnboardingServer(options);return {...instance,writeStartupDiagnostics:value=>writeStartupDiagnostics(stateRoot,value),desktopAcceptanceSupported,hostPayloadHandoffSupported,appLoginReconciliation,...(hostPayloadHandoffSupported?{launchHostPayloadHandoff:(ticketId,mode)=>launchWindowsHostPayloadHandoff({stateDir:options.stateDir,ticketId,mode})}:{})};
 }
 export async function serve({input=process.stdin,output=process.stdout,instance,client:providedClient}={}){
  let owned=instance,client;

@@ -48,11 +48,19 @@ namespace StyxNative {
  // The window is visible before this owned child scans the complete package.
  // Hash consistency is not a claim of Windows publisher authentication.
  sealed class PackageProgress {internal string Phase;internal int Completed,Total;}
+ sealed class VerificationTiming {
+  readonly Stopwatch clock=Stopwatch.StartNew();readonly List<object> progress=new List<object>();double nodeReady=-1,childStarted=-1,childExited=-1;
+  internal void NodeReady(){nodeReady=clock.Elapsed.TotalMilliseconds;}
+  internal void ChildStarted(){childStarted=clock.Elapsed.TotalMilliseconds;}
+  internal void ChildExited(){childExited=clock.Elapsed.TotalMilliseconds;}
+  internal void Record(string phase,int completed,int total){if(progress.Count<160)progress.Add(Json.Obj("phase",phase,"completed",completed,"total",total,"elapsedMilliseconds",clock.Elapsed.TotalMilliseconds));}
+  internal object Snapshot(){return Json.Obj("nodeReadyMilliseconds",nodeReady,"childStartedMilliseconds",childStarted,"childExitedMilliseconds",childExited,"progress",progress.ToArray());}
+ }
  static class PackageVerifier {
-  internal static void Verify(string root,IProgress<PackageProgress> progress,CancellationToken cancellation){
-   cancellation.ThrowIfCancellationRequested();var info=Core.NodeStartInfo(root,"\""+Path.Combine(root,"install-windows-preview.mjs")+"\" verify --progress");
+  internal static void Verify(string root,IProgress<PackageProgress> progress,CancellationToken cancellation,VerificationTiming timing){
+   cancellation.ThrowIfCancellationRequested();var info=Core.NodeStartInfo(root,"\""+Path.Combine(root,"install-windows-preview.mjs")+"\" verify --progress");timing.NodeReady();
    using(var child=new Process {StartInfo=info}){
-    child.ErrorDataReceived+=(s,e)=>{};cancellation.ThrowIfCancellationRequested();child.Start();child.BeginErrorReadLine();
+    child.ErrorDataReceived+=(s,e)=>{};cancellation.ThrowIfCancellationRequested();child.Start();timing.ChildStarted();child.BeginErrorReadLine();
     using(cancellation.Register(()=>{try{if(!child.HasExited)child.Kill();}catch{}})){
      var codec=new JavaScriptSerializer {MaxJsonLength=4096};bool verified=false;string line;
      try{
@@ -62,10 +70,10 @@ namespace StyxNative {
        else if(status=="verifying_package"){
         var completed=Json.Get(item,"completed");var total=Json.Get(item,"total");string phase=Json.Str(item,"phase");
         if(!(completed is int)||!(total is int)||(int)completed<0||(int)total<1||(int)completed>(int)total||(phase!="files"&&phase!="signed_host"))throw new IOException();
-        progress.Report(new PackageProgress {Phase=phase,Completed=(int)completed,Total=(int)total});
+        timing.Record(phase,(int)completed,(int)total);progress.Report(new PackageProgress {Phase=phase,Completed=(int)completed,Total=(int)total});
        }else throw new IOException();
       }
-      child.WaitForExit();cancellation.ThrowIfCancellationRequested();if(child.ExitCode!=0||!verified)throw new IOException();
+      child.WaitForExit();timing.ChildExited();cancellation.ThrowIfCancellationRequested();if(child.ExitCode!=0||!verified)throw new IOException();
      }finally{try{if(!child.HasExited){child.Kill();child.WaitForExit();}}catch{}}
     }
    }
@@ -73,7 +81,7 @@ namespace StyxNative {
  }
  sealed class StyxContext:ApplicationContext {
   readonly string root,state;readonly NotifyIcon tray;readonly Icon icon;readonly Form panel;readonly Settings settings;readonly CancellationTokenSource startupCancellation=new CancellationTokenSource();readonly Stopwatch startupClock=Stopwatch.StartNew();readonly bool startupTest,loginStartup;readonly System.Windows.Forms.Timer startupTimer;
-  Core core;bool busy,closing,starting,startupHostUpdateAttempted,actionsGatedDuringStartup=true;int mutationRevision,progressEvents;long firstPaintTicks=-1,verificationStartedTicks=-1,verifiedTicks=-1,readyTicks=-1;object snapshot;Task<object> observation;TaskCompletionSource<bool> mutationDone;readonly Label message;
+  VerificationTiming verificationTiming;Core core;bool busy,closing,starting,startupHostUpdateAttempted,actionsGatedDuringStartup=true;int mutationRevision,progressEvents;long firstPaintTicks=-1,verificationStartedTicks=-1,verifiedTicks=-1,readyTicks=-1;object snapshot;Task<object> observation;TaskCompletionSource<bool> mutationDone;readonly Label message;
   internal int ResultCode=2;
   internal object CurrentStatus { get { return snapshot; } }
   internal bool ManagementOnly { get { return Json.Yes(snapshot,"loadingDetails"); } }
@@ -101,16 +109,16 @@ namespace StyxNative {
   internal async Task InitializeCore(){
    if(closing||core!=null)return;starting=true;settings.Startup("Checking app files…",true,false);message.Text="Checking app files…";Core pending=null;bool packageVerified=false;
    try{
-    actionsGatedDuringStartup&=settings.StartupActionsGated;if(!actionsGatedDuringStartup)throw new IOException();verificationStartedTicks=startupClock.ElapsedTicks;
+    actionsGatedDuringStartup&=settings.StartupActionsGated;if(!actionsGatedDuringStartup)throw new IOException();verificationStartedTicks=startupClock.ElapsedTicks;verificationTiming=new VerificationTiming();
     var progress=new Progress<PackageProgress>(value=>{if(closing||!starting)return;progressEvents++;actionsGatedDuringStartup&=settings.StartupActionsGated;settings.Startup(value.Phase=="files"?"Checking app files… "+value.Completed+" / "+value.Total:"Checking components…",true,false);});
-    await Task.Run(()=>PackageVerifier.Verify(root,progress,startupCancellation.Token));packageVerified=true;verifiedTicks=startupClock.ElapsedTicks;
+    await Task.Run(()=>PackageVerifier.Verify(root,progress,startupCancellation.Token,verificationTiming));packageVerified=true;verifiedTicks=startupClock.ElapsedTicks;
     if(closing)return;settings.Startup("Opening connection settings…",true,false);
     pending=await Task.Run(()=>new Core(root,state,startupCancellation.Token));if(closing){pending.Dispose();pending=null;return;}
     // Do not enable any action until the real Core answers its first status read.
     var latest=await pending.Call("startupStatus",Json.Obj());if(closing){pending.Dispose();pending=null;return;}
     core=pending;pending=null;snapshot=latest;starting=false;readyTicks=startupClock.ElapsedTicks;PublishStatus();settings.Startup("",false,false);ResultCode=0;
     if(ManagementOnly){if(startupTest)await ObserveStatus();else LoadInitialDetails();}
-    if(startupTest){WriteStartupReceipt(true,packageVerified);Quit();}return;
+    if(startupTest){WriteStartupReceipt(true,packageVerified);Quit();}else RecordStartupDiagnostics();return;
    }catch{}
    // Framework's C# compiler cannot await inside catch. Dispose the failed
    // owned child here without blocking the native window or replaying work.
@@ -119,11 +127,15 @@ namespace StyxNative {
    settings.Startup(packageVerified?"Connection settings could not open. Retry to reconnect; your settings are retained.":"Styx could not finish checking the app. Keep the app folder intact, then retry.",false,true);
    if(startupTest){WriteStartupReceipt(false,packageVerified);Quit();}
   }
+  object StartupTiming(){return Json.Obj("schema",1,"verification",verificationTiming.Snapshot(),"startup",Json.Obj("verificationStartedMilliseconds",(double)verificationStartedTicks*1000/Stopwatch.Frequency,"verifiedMilliseconds",(double)verifiedTicks*1000/Stopwatch.Frequency,"readyMilliseconds",(double)readyTicks*1000/Stopwatch.Frequency));}
+  // Optional local diagnostics cannot delay enablement, fail startup, or execute
+  // an unverified package. Before Core is trusted, timings remain in memory.
+  async void RecordStartupDiagnostics(){try{if(core!=null)await Call("startupDiagnostics",(Dictionary<string,object>)StartupTiming());}catch{}}
   void WriteStartupReceipt(bool success,bool packageVerified){
    bool paintedFirst=firstPaintTicks>=0&&verificationStartedTicks>=firstPaintTicks;
    bool gated=core==null||verifiedTicks>=verificationStartedTicks&&readyTicks>=verifiedTicks;
    ResultCode=success&&paintedFirst&&gated&&actionsGatedDuringStartup&&progressEvents>0?0:2;
-   Directory.CreateDirectory(state);File.WriteAllText(Path.Combine(state,"native-startup-self-test.json"),Json.Codec.Serialize(Json.Obj("status",ResultCode==0?"PASS":"FAIL","windowPaintedBeforeVerification",paintedFirst,"packageVerified",packageVerified,"coreReady",core!=null,"coreGatedByVerification",gated,"controlsGatedWhileChecking",actionsGatedDuringStartup,"retryAvailable",settings.StartupRetryAvailable,"progressEvents",progressEvents,"firstPaintMilliseconds",firstPaintTicks<0?-1:(double)firstPaintTicks*1000/Stopwatch.Frequency,"verificationStartedMilliseconds",verificationStartedTicks<0?-1:(double)verificationStartedTicks*1000/Stopwatch.Frequency,"verifiedMilliseconds",verifiedTicks<0?-1:(double)verifiedTicks*1000/Stopwatch.Frequency,"readyMilliseconds",readyTicks<0?-1:(double)readyTicks*1000/Stopwatch.Frequency,"interactiveDesktopAcceptance","NOT RUN","serviceMutation","NOT RUN")));
+   Directory.CreateDirectory(state);File.WriteAllText(Path.Combine(state,"native-startup-self-test.json"),Json.Codec.Serialize(Json.Obj("status",ResultCode==0?"PASS":"FAIL","windowPaintedBeforeVerification",paintedFirst,"packageVerified",packageVerified,"coreReady",core!=null,"coreGatedByVerification",gated,"controlsGatedWhileChecking",actionsGatedDuringStartup,"retryAvailable",settings.StartupRetryAvailable,"progressEvents",progressEvents,"verificationTiming",verificationTiming==null?null:verificationTiming.Snapshot(),"firstPaintMilliseconds",firstPaintTicks<0?-1:(double)firstPaintTicks*1000/Stopwatch.Frequency,"verificationStartedMilliseconds",verificationStartedTicks<0?-1:(double)verificationStartedTicks*1000/Stopwatch.Frequency,"verifiedMilliseconds",verifiedTicks<0?-1:(double)verifiedTicks*1000/Stopwatch.Frequency,"readyMilliseconds",readyTicks<0?-1:(double)readyTicks*1000/Stopwatch.Frequency,"interactiveDesktopAcceptance","NOT RUN","serviceMutation","NOT RUN")));
   }
   internal static Form Window(string title,Size size){return new Form { Text=title,ClientSize=size,StartPosition=FormStartPosition.CenterScreen,BackColor=Color.FromArgb(249,249,247),Font=new Font("Segoe UI",10),AutoScaleMode=AutoScaleMode.Dpi,MinimumSize=size };}
   internal static FlowLayoutPanel Stack(Control parent){var p=new FlowLayoutPanel { Dock=DockStyle.Fill,FlowDirection=FlowDirection.TopDown,WrapContents=false,AutoScroll=true,Padding=new Padding(24) };parent.Controls.Add(p);return p;}
