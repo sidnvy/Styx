@@ -17,7 +17,7 @@ Owner-authorized goal is active. The plan at a21ea75 remains the scope baseline;
 | R10 Host | One owned Codex executor, Core admission, supervised start/read/targeted actions, canonical shared-budget bootstrap, strict TLS/WSS explicit generation negotiation; real local action effects and duplicate negatives | Gateway-issued owner coordination, persistent collection scheduling/durable audit, reconnect policy, legacy frontend and native platform lifecycle |
 | R11 SDK/HTTP | Official SDK five-version/38-tool surface, Hyper loopback listener, authenticated session ownership, bounded bodies/queues, synchronous close fence and observed owned backend cleanup | Concrete native backend/remote registry, TLS listener composition, real account, POST cancellation under body/connection pressure and SDK detached-task observability limits |
 | R12 enrollment | Rust Core target-bound approval, same-credential confirmation/CAS/revoke, signed strictTLS journal service, same-authority paired Host WSS and real MCP-to-Codex owner isolation/physical cleanup checkpoint | Defaults/ingress, original credential/pair migration, transport epoch/dropresponse faults, multiple Desktop connections and cross-platform recovery remain required |
-| R13 legacy CLI | Explicit `host run --legacy-gateway`, read-only doctor/status, original publisher/raw-manifest exact member closure and native file pin; same-budget WSS-before-executor bootstrap and Host-owned cleanup | Actual immutable old Gateway journey, original certificate compatibility and startup timing have distinct external receipts; synthetic profiles do not prove onboarding, original pair or service/App cutover |
+| R13 legacy CLI | Explicit `host run --legacy-gateway`, read-only doctor/status, original publisher/raw-manifest exact member closure and native file pin; same-budget WSS-before-executor bootstrap and Host-owned cleanup | Immutable old Gateway44cf147 + same Rust release CLI passed standard-CA/leaf real pipe/PTY/stdin/cross-owner/no-replay/disconnect/SIGTERM scenes; original-default-style self-signed TLS admission FAILED separately. Synthetic profiles do not prove onboarding, original pair or service/App cutover |
 
 No Rust candidate has been packaged, signed, installed or accepted on the three platforms. Existing signed packages and original device identities/pairing/permissions have not been modified. Historical JS test counts are not Rust completion evidence. Stable remains NO-GO.
 
@@ -61,3 +61,18 @@ CancellationToken drop guard and does not drop the worker's lease or native chil
 Cleanup tracks original operation exit evidence independently from executor exit,
 I/O joins and supervised jobs. An original Unknown cannot disappear through a later
 empty inventory. Native API-waiter-drop fault injection is still NOT TESTED.
+
+
+The be6b585 product checkpoint has actual isolated old-Gateway receipts: standard
+CA/leaf A/B journeys passed with original signed payload bytes and independent file
+and kernel process observers. Both ended with no owned process residual/fallback
+kill. Original Gateway MCP DELETE retains Exec as an explicitly observed legacy
+limitation; its SIGTERM, then explicit Rust Host SIGTERM, exercised actual cleanup.
+The network-loss case SIGKILLed the owned Gateway and retained the same native
+executor/one-effect command until Host stop. Its original-default-style self-signed
+TLS fixture failed admission before any native executor start and remains FAIL.
+Release-mode full 507MB closure verification completed around 0.55s/Host connected
+around 0.65s in these fixtures; debug profiling's 12.39s was mainly SHA CPU. These
+observations are not a final platform startup SLA or a fix to historical Windows
+login recovery. The same product SHA also compiled natively offline on pho x64;
+native tests/App/signing/TCC/account acceptance were not run.
