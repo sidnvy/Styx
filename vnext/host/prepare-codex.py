@@ -29,6 +29,11 @@ ARTIFACTS = {
         "61c4d9a92521bdb42b0c1d9f87c673f6da628a06de5945cbdd9a0010632f6d10",
         "codex",
     ),
+    ("Darwin", "x86_64"): (
+        "codex-x86_64-apple-darwin.tar.gz",
+        "562a1aea0e5686283a467687d268ae33705f02fd4d40f1bc4110a415c5c1c7b1",
+        "codex",
+    ),
     ("Windows", "AMD64"): (
         "codex-x86_64-pc-windows-msvc.exe.tar.gz",
         "dbdd5ab5ecce1358e69fac8db1cb3538659c48e99498f3d2ea0e3e7ae878ef8c",

@@ -7,7 +7,7 @@ import {execFileSync,spawnSync} from 'node:child_process';
 import {fileURLToPath} from 'node:url';
 import {createHash,generateKeyPairSync} from 'node:crypto';
 import {macAdhocSigningPlan,macSigningPlan,macLocalSigningPlan,publicMacLocalSigning} from '../build-macos-app.mjs';
-import {buildMacPreview,copyOfflineDependencies,copyPreviewDependencies,finalizePreviewHostBundle,machOFiles,previewSourceFiles,verifyPreviewTunnelInput,previewSigningReceipt,withPreviewHostPublisher,previewReleasePublisher} from '../build-macos-preview.mjs';
+import {macPreviewInputs,buildMacPreview,copyOfflineDependencies,copyPreviewDependencies,finalizePreviewHostBundle,machOFiles,previewSourceFiles,verifyPreviewTunnelInput,previewSigningReceipt,withPreviewHostPublisher,previewReleasePublisher} from '../build-macos-preview.mjs';
 import {verifySignedRelease} from '../installer.mjs';
 import {verifyMacPreviewApp} from '../macos-preview-trust.mjs';
 const hash=b=>createHash('sha256').update(b).digest('hex');
@@ -185,4 +185,12 @@ test('preview update releases reject missing or invalid build sequence before na
  assert.throws(()=>buildMacPreview(base),/macos_update_release_build_number_required/);
  assert.throws(()=>buildMacPreview({...base,buildNumber:base.releaseVersion}),/invalid_macos_build_number/);
  assert.throws(()=>buildMacPreview({...base,buildNumber:'1008',updateRelease:'true'}),/invalid_macos_update_release/);
+});
+
+test('Mac preview selects distinct pinned Intel inputs without changing arm64 pins',()=>{
+ const arm=macPreviewInputs('arm64'),intel=macPreviewInputs('x64');
+ assert.equal(arm.tunnel.arch,'arm64');assert.equal(intel.tunnel.arch,'x64');
+ assert.notEqual(arm.nodeArchive,intel.nodeArchive);assert.notEqual(arm.tunnel.binary_sha256,intel.tunnel.binary_sha256);
+ assert.equal(Object.keys(intel.notices).filter(n=>n.includes('amd64')).length,2);
+ assert.throws(()=>macPreviewInputs('ia32'),/unsupported_macos_preview_arch/);
 });
