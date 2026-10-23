@@ -43,8 +43,8 @@ test('optional bundled tunnel is fixed-path and verifies signed-resource content
   const layout=previewLayout(f.resources);assert.equal(previewTunnelClient(layout),undefined);
   const binary=path.join(f.resources,'runtime/tunnel-client');fs.writeFileSync(binary,'pinned fixture');
   const sha256=createHash('sha256').update('pinned fixture').digest('hex'),record=path.join(f.resources,'tunnel-client.json');
-  fs.writeFileSync(record,JSON.stringify({version:'0.0.16',platform:'darwin',arch:'arm64',path:'runtime/tunnel-client',binary_sha256:sha256}));
-  assert.deepEqual(previewTunnelClient(layout),{binary,sha256});fs.appendFileSync(binary,'tamper');assert.throws(()=>previewTunnelClient(layout),/integrity_failed/);
-  fs.writeFileSync(record,JSON.stringify({version:'0.0.16',platform:'darwin',arch:'arm64',path:'../untrusted',binary_sha256:sha256}));assert.throws(()=>previewTunnelClient(layout),/record_invalid/);
+  fs.writeFileSync(record,JSON.stringify({version:'0.0.16',platform:'darwin',arch:process.arch,path:'runtime/tunnel-client',binary_sha256:sha256}));
+  assert.deepEqual(previewTunnelClient(layout),{binary,sha256});assert.throws(()=>previewTunnelClient(layout,{arch:process.arch==='x64'?'arm64':'x64'}),/record_invalid/);fs.appendFileSync(binary,'tamper');assert.throws(()=>previewTunnelClient(layout),/integrity_failed/);
+  fs.writeFileSync(record,JSON.stringify({version:'0.0.16',platform:'darwin',arch:process.arch,path:'../untrusted',binary_sha256:sha256}));assert.throws(()=>previewTunnelClient(layout),/record_invalid/);
  }finally{fs.rmSync(f.root,{recursive:true,force:true});}
 });

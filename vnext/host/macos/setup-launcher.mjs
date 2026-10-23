@@ -26,10 +26,10 @@ export function previewLayout(resourceRoot){
  return{resources,app,node:regular(within(resources,'runtime/node')),server:regular(within(resources,'onboarding/vnext/onboarding/server.mjs')),
   artifacts:{bundle,publisherKeyFile:regular(within(resources,defaults.publisherKeyFile)),publisherSha256:defaults.publisherSha256}};
 }
-export function previewTunnelClient(layout){
+export function previewTunnelClient(layout,{arch=process.arch}={}){
  const record=path.join(layout.resources,'tunnel-client.json');if(!fs.existsSync(record))return undefined;
  const pin=JSON.parse(fs.readFileSync(regular(record),'utf8'));
- assert(pin.version==='0.0.16'&&pin.platform==='darwin'&&pin.arch==='arm64'&&pin.path==='runtime/tunnel-client'&&/^[a-f0-9]{64}$/.test(pin.binary_sha256??''),'bundled_tunnel_record_invalid');
+ assert(pin.version==='0.0.16'&&pin.platform==='darwin'&&['arm64','x64'].includes(arch)&&pin.arch===arch&&pin.path==='runtime/tunnel-client'&&/^[a-f0-9]{64}$/.test(pin.binary_sha256??''),'bundled_tunnel_record_invalid');
  const binary=regular(within(layout.resources,pin.path));
  assert(createHash('sha256').update(fs.readFileSync(binary)).digest('hex')===pin.binary_sha256,'bundled_tunnel_integrity_failed');
  return {binary,sha256:pin.binary_sha256};
