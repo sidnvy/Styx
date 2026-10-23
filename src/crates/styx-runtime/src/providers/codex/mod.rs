@@ -5,9 +5,11 @@
 //! and OperationId, reports facts, and never replays a mutation or respawns an
 //! executor. `spawn_owned` starts a NEW caller-owned executor; no live executor
 //! is discovered, adopted, restarted or replaced.
+mod continuation;
 mod output;
 mod rpc;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+pub use continuation::{ActionAcknowledgment, ActionEvidence, ActionReceipt, ProcessAction};
 pub use output::OutputChunk;
 use output::{OutputDecoder, ReadPage};
 use rpc::Rpc;
@@ -18,6 +20,7 @@ use std::{
     sync::{Arc, Mutex},
     time::Duration,
 };
+use styx_contracts::identity::Sha256Digest;
 use styx_contracts::operation::{ExecutionLiveness, OperationId, OutputDrain};
 use styx_core::operations::{DispatchPermit, OwnerLease};
 use tokio::process::{Child, Command};
@@ -55,6 +58,8 @@ pub enum ExecError {
     SpawnFailed,
     #[error("resource is live, unread, or has unknown mutations")]
     ResourceUnsettled,
+    #[error("raw and decoded reads cannot consume the same process")]
+    ReadModeMismatch,
 }
 /// This configuration is from the native Host, never tool/network parameters.
 pub struct OwnedExecutorConfig {
@@ -162,6 +167,26 @@ pub struct ProcessOutput {
     pub drain: OutputDrain,
     pub exit_code: Option<i32>,
 }
+/// A validated native process/read response, including its original base64,
+/// sequence numbers, optional-field presence and unknown extension fields.
+/// This is not an arbitrary executor RPC capability.
+#[derive(Debug)]
+pub struct RawProcessPage {
+    native: Value,
+}
+impl RawProcessPage {
+    pub fn as_native(&self) -> &Value {
+        &self.native
+    }
+    pub fn into_native(self) -> Value {
+        self.native
+    }
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum ReadMode {
+    Decoded,
+    Raw,
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TerminationEvidence {
     ProcessExited(i32),
@@ -175,14 +200,25 @@ pub struct CleanupReceipt {
     pub stderr_task_reaped: bool,
 }
 struct Record {
+    read_mode: Option<ReadMode>,
     cursor: Option<u64>,
     gaps: u64,
     decoder: OutputDecoder,
     drained: bool,
-    input_unknown: bool,
+    input_unknown: Option<OperationId>,
     last_exit: Option<i32>,
 }
+impl Record {
+    fn select_read_mode(&mut self, mode: ReadMode) -> Result<(), ExecError> {
+        if self.read_mode.is_some_and(|current| current != mode) {
+            return Err(ExecError::ReadModeMismatch);
+        }
+        self.read_mode = Some(mode);
+        Ok(())
+    }
+}
 struct Resource {
+    start_digest: Sha256Digest,
     owner: OwnerLease,
     handle: ProcessHandle,
     state: Arc<tokio::sync::Mutex<Record>>,
@@ -190,9 +226,11 @@ struct Resource {
 type Records = HashMap<String, Arc<Resource>>;
 pub struct CodexStdio {
     rpc: Arc<Rpc>,
+    _rpc_partition: Arc<tokio::sync::OwnedSemaphorePermit>,
     child: tokio::sync::Mutex<Option<Child>>,
     stderr_task: tokio::sync::Mutex<Option<tokio::task::JoinHandle<()>>>,
     records: Mutex<Records>,
+    actions: Mutex<continuation::ActionRecords>,
     operations: Mutex<BTreeMap<OperationId, ProcessHandle>>,
     limit: usize,
     session_id: String,
@@ -205,7 +243,23 @@ impl CodexStdio {
     pub fn provider_id(&self) -> &str {
         &self.provider_id
     }
+    /// Standalone adapter convenience. Host composition must provide its own
+    /// reserved partition through spawn_owned_with_reserved_budget instead.
     pub async fn spawn_owned(config: OwnedExecutorConfig) -> Result<Self, ExecError> {
+        let partition = Arc::new(tokio::sync::Semaphore::new(16 * 1024 * 1024))
+            .try_acquire_many_owned(16 * 1024 * 1024)
+            .map_err(|_| ExecError::Capacity)?;
+        Self::spawn_owned_with_reserved_budget(config, partition).await
+    }
+    /// One exclusive, conservatively sized RPC partition from the Host budget.
+    pub async fn spawn_owned_with_reserved_budget(
+        config: OwnedExecutorConfig,
+        partition: tokio::sync::OwnedSemaphorePermit,
+    ) -> Result<Self, ExecError> {
+        if partition.num_permits() != 16 * 1024 * 1024 {
+            return Err(ExecError::InvalidRequest);
+        }
+        let partition = Arc::new(partition);
         if !config.binary.is_absolute()
             || !config.cwd.is_absolute()
             || config.rpc_timeout.is_zero()
@@ -229,15 +283,18 @@ impl CodexStdio {
         let stdin = child.stdin.take().ok_or(ExecError::SpawnFailed)?;
         let stdout = child.stdout.take().ok_or(ExecError::SpawnFailed)?;
         let stderr_task = child.stderr.take().map(|mut stderr| {
+            let stderr_partition = partition.clone();
             tokio::spawn(async move {
+                let _partition = stderr_partition;
                 let _ = tokio::io::copy(&mut stderr, &mut tokio::io::sink()).await;
             })
         });
-        let rpc = Rpc::new(
+        let rpc = Rpc::new_with_reserved_partition(
             stdin,
             stdout,
             config.rpc_timeout,
             config.retained_process_limit,
+            partition.clone(),
         );
         let initialized = match rpc
             .request("initialize", json!({"clientName":"styx-rust-native-host"}))
@@ -277,9 +334,11 @@ impl CodexStdio {
         }
         Ok(Self {
             rpc,
+            _rpc_partition: partition,
             child: tokio::sync::Mutex::new(Some(child)),
             stderr_task: tokio::sync::Mutex::new(stderr_task),
             records: Mutex::new(HashMap::new()),
+            actions: Mutex::new(BTreeMap::new()),
             operations: Mutex::new(BTreeMap::new()),
             limit: config.retained_process_limit,
             session_id,
@@ -293,7 +352,11 @@ impl CodexStdio {
             evidence: DispatchEvidence::NotDispatched,
             error,
         };
-        if permit.context().capability != styx_contracts::capability::CapabilityId::ExecRun {
+        if permit.target().is_some()
+            || permit.context().capability != styx_contracts::capability::CapabilityId::ExecRun
+        {
+            // A continuation owns no new process. Even a valid StartProcess
+            // payload cannot turn a target-bound action permit into a start.
             return Err(not_dispatched(ExecError::InvalidRequest));
         }
         if permit.payload().len() > styx_contracts::EXEC_FRAME_BYTES {
@@ -322,14 +385,16 @@ impl CodexStdio {
             operations.insert(operation.clone(), handle.clone());
         }
         let resource = Arc::new(Resource {
+            start_digest: Sha256Digest::of_bytes(permit.payload()),
             owner,
             handle: handle.clone(),
             state: Arc::new(tokio::sync::Mutex::new(Record {
+                read_mode: None,
                 cursor: None,
                 gaps: 0,
                 decoder: OutputDecoder::default(),
                 drained: false,
-                input_unknown: false,
+                input_unknown: None,
                 last_exit: None,
             })),
         });
@@ -434,6 +499,7 @@ impl CodexStdio {
             return Err(ExecError::InvalidRequest);
         }
         let mut record = self.owned(owner, handle).await?;
+        record.select_read_mode(ReadMode::Decoded)?;
         if record.drained {
             if let Some(observation) = self.rpc.observation(&handle.process_id) {
                 if observation.invalid {
@@ -504,7 +570,71 @@ impl CodexStdio {
             exit_code: record.last_exit,
         })
     }
-    pub async fn write_stdin(
+    /// Read the native page using the caller's cursor, never the decoded
+    /// consumer's cursor or a synthesized drained cache. The Core coordinator
+    /// must still validate current authority on every continuation.
+    pub async fn read_raw(
+        &self,
+        owner: &OwnerLease,
+        handle: &ProcessHandle,
+        after_seq: Option<u64>,
+        max_bytes: usize,
+        wait: Duration,
+    ) -> Result<RawProcessPage, ExecError> {
+        if max_bytes == 0 || max_bytes > 65536 || wait > Duration::from_secs(1) {
+            return Err(ExecError::InvalidRequest);
+        }
+        let mut record = self.owned(owner, handle).await?;
+        // Select before the first await that can emit an RPC. Cancelling a
+        // waiting read does not grant another consumer access to this process.
+        record.select_read_mode(ReadMode::Raw)?;
+        let native = self
+            .rpc
+            .request(
+                "process/read",
+                json!({
+                    "processId": handle.process_id, "afterSeq": after_seq,
+                    "maxBytes": max_bytes, "waitMs": wait.as_millis() as u64
+                }),
+            )
+            .await?;
+        let page: ReadPage =
+            serde::Deserialize::deserialize(&native).map_err(|_| ExecError::InvalidFrame)?;
+        // Validation is per request: repeats and earlier cursors remain native
+        // read-only operations, not consumption of the decoded stream.
+        output::validate(&page, after_seq, 0, max_bytes)?;
+        let observation = self
+            .rpc
+            .observation(&handle.process_id)
+            .ok_or(ExecError::UnknownHandle)?;
+        if observation.invalid {
+            return Err(ExecError::InvalidFrame);
+        }
+        let observed_exit = observation.exited.map(|(_, code)| code);
+        if page
+            .exit_code
+            .zip(observed_exit)
+            .is_some_and(|(a, b)| a != b)
+        {
+            return Err(ExecError::InvalidFrame);
+        }
+        let exit = page.exit_code.or(observed_exit);
+        if record
+            .last_exit
+            .zip(exit)
+            .is_some_and(|(old, new)| old != new)
+        {
+            return Err(ExecError::InvalidFrame);
+        }
+        record.last_exit = record.last_exit.or(exit);
+        record.drained |= page.closed && page.chunks.is_empty();
+        // Keep the bounded observer until explicit retirement/cleanup. A caller
+        // may still request a real earlier page after EOF. Failure is preserved
+        // in the page, never recast as a fabricated success or generic RPC error.
+        Ok(RawProcessPage { native })
+    }
+    #[cfg(test)]
+    async fn write_stdin(
         &self,
         owner: &OwnerLease,
         handle: &ProcessHandle,
@@ -514,7 +644,7 @@ impl CodexStdio {
             return Err(ExecError::InvalidRequest);
         }
         let mut record = self.owned(owner, handle).await?;
-        if record.input_unknown {
+        if record.input_unknown.is_some() {
             return Err(ExecError::InputUnknown);
         }
         if record.last_exit.is_some() || record.drained {
@@ -522,11 +652,11 @@ impl CodexStdio {
         }
         // Set before the mutation's first await. Dropping this future after
         // dispatch must preserve uncertainty instead of permitting another write.
-        record.input_unknown = true;
+        record.input_unknown = Some(handle.operation.clone());
         let result=self.rpc.request("process/write",json!({"processId":handle.process_id,"writeId":Uuid::new_v4().to_string(),"chunk":STANDARD.encode(input)})).await;
         match result {
             Ok(v) if v.get("status").and_then(Value::as_str) == Some("accepted") => {
-                record.input_unknown = false;
+                record.input_unknown = None;
                 Ok(())
             }
             Err(
@@ -535,16 +665,16 @@ impl CodexStdio {
                 | ExecError::InvalidRequest
                 | ExecError::NotSent),
             ) => {
-                record.input_unknown = false;
+                record.input_unknown = None;
                 Err(e)
             }
             _ => {
-                record.input_unknown = true;
+                record.input_unknown = Some(handle.operation.clone());
                 Err(ExecError::InputUnknown)
             }
         }
     }
-    pub async fn cancel(
+    async fn cancel(
         &self,
         owner: &OwnerLease,
         handle: &ProcessHandle,
@@ -606,7 +736,7 @@ impl CodexStdio {
         handle: &ProcessHandle,
     ) -> Result<(), ExecError> {
         let record = self.owned(owner, handle).await?;
-        if !record.drained || record.last_exit.is_none() || record.input_unknown {
+        if !record.drained || record.last_exit.is_none() || record.input_unknown.is_some() {
             return Err(ExecError::ResourceUnsettled);
         }
         self.records

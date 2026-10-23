@@ -25,6 +25,7 @@ impl OwnerLease {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct OperationSnapshot {
     pub id: OperationId,
+    pub target: Option<ResourceTarget>,
     pub state: OperationState,
     pub liveness: ExecutionLiveness,
     pub output_drain: OutputDrain,
@@ -38,7 +39,18 @@ struct Record {
     payload: Box<[u8]>,
     snapshot: OperationSnapshot,
     terminal_at: Option<MonotonicMillis>,
+    resource_settled_at: Option<MonotonicMillis>,
     accounting_bytes: usize,
+}
+impl Record {
+    fn note_resource_settled(&mut self, now: MonotonicMillis) {
+        if self.snapshot.target.is_none()
+            && self.snapshot.liveness == ExecutionLiveness::Exited
+            && self.snapshot.output_drain == OutputDrain::Drained
+        {
+            self.resource_settled_at.get_or_insert(now);
+        }
+    }
 }
 /// One admission decision, consumed by an executor adapter. No public
 /// constructor, Clone or Deserialize: an old ID cannot manufacture new authority.
@@ -57,11 +69,15 @@ pub struct DispatchPermit {
     id: OperationId,
     owner: OwnerLease,
     context: PreparedContext,
+    target: Option<ResourceTarget>,
     payload: Box<[u8]>,
 }
 impl DispatchPermit {
     pub fn id(&self) -> &OperationId {
         &self.id
+    }
+    pub fn target(&self) -> Option<&ResourceTarget> {
+        self.target.as_ref()
     }
     pub fn owner(&self) -> &OwnerLease {
         &self.owner
@@ -101,6 +117,10 @@ pub struct OperationLedger {
     maintenance_fenced: bool,
 }
 impl OperationLedger {
+    /// Actual Host generation of this ledger, never a registry generation.
+    pub fn host_generation(&self) -> &HostGeneration {
+        &self.host
+    }
     pub fn new(host: HostGeneration) -> Self {
         Self::with_budget(
             host,
@@ -190,6 +210,49 @@ impl OperationLedger {
         payload: Vec<u8>,
         now: MonotonicMillis,
     ) -> Result<OperationSnapshot, ErrorCategory> {
+        self.prepare_record(owner, None, context, payload, now)
+    }
+    /// Reserve an independent request-level action on an exact existing
+    /// resource. Core proves committed dispatch, not native start success.
+    pub fn prepare_targeted(
+        &mut self,
+        owner: &OwnerLease,
+        target: ResourceTarget,
+        context: PreparedContext,
+        payload: Vec<u8>,
+        now: MonotonicMillis,
+    ) -> Result<OperationSnapshot, ErrorCategory> {
+        self.verify_target(owner, &target, &context)?;
+        self.prepare_record(owner, Some(target), context, payload, now)
+    }
+    fn verify_target(
+        &self,
+        owner: &OwnerLease,
+        target: &ResourceTarget,
+        context: &PreparedContext,
+    ) -> Result<(), ErrorCategory> {
+        let record = self.record_for(owner, &target.operation_id, target.payload_digest)?;
+        if record.snapshot.target.is_some()
+            || !matches!(
+                record.snapshot.liveness,
+                ExecutionLiveness::Running | ExecutionLiveness::Unknown
+            )
+            || record.context.device_id != context.device_id
+            || record.context.capability != context.capability
+            || record.context.session != context.session
+        {
+            return Err(ErrorCategory::StateConflict);
+        }
+        Ok(())
+    }
+    fn prepare_record(
+        &mut self,
+        owner: &OwnerLease,
+        target: Option<ResourceTarget>,
+        context: PreparedContext,
+        payload: Vec<u8>,
+        now: MonotonicMillis,
+    ) -> Result<OperationSnapshot, ErrorCategory> {
         self.verify_owner(owner)?;
         if self.maintenance_fenced {
             return Err(ErrorCategory::Busy);
@@ -218,8 +281,13 @@ impl OperationLedger {
         };
         let snapshot = OperationSnapshot {
             id: id.clone(),
+            target: target.clone(),
             state: OperationState::Reserved,
-            liveness: ExecutionLiveness::NotStarted,
+            liveness: if target.is_some() {
+                ExecutionLiveness::NotApplicable
+            } else {
+                ExecutionLiveness::NotStarted
+            },
             output_drain: OutputDrain::NotOpened,
             cancellation: None,
             payload_digest: Sha256Digest::of_bytes(&payload),
@@ -233,6 +301,7 @@ impl OperationLedger {
                 payload: payload.into_boxed_slice(),
                 snapshot: snapshot.clone(),
                 terminal_at: None,
+                resource_settled_at: None,
                 accounting_bytes,
             },
         );
@@ -258,19 +327,25 @@ impl OperationLedger {
         if self.maintenance_fenced {
             return Err(ErrorCategory::Busy);
         }
+        if let Some(target) = &record.snapshot.target {
+            self.verify_target(owner, target, &record.context)?;
+        }
         check_admission(&record.context, facts, now)?;
         let record = self
             .records
             .get_mut(id)
             .expect("record checked above with exclusive ledger access");
         record.snapshot.state = OperationState::Dispatched;
-        record.snapshot.liveness = ExecutionLiveness::Unknown;
-        record.snapshot.output_drain = OutputDrain::Unknown;
+        if record.snapshot.target.is_none() {
+            record.snapshot.liveness = ExecutionLiveness::Unknown;
+            record.snapshot.output_drain = OutputDrain::Unknown;
+        }
         Ok(DispatchDisposition::ExecuteOnce(DispatchPermit {
             id: id.clone(),
             owner: owner.clone(),
             payload: record.payload.clone(),
             context: record.context.clone(),
+            target: record.snapshot.target.clone(),
         }))
     }
     pub fn inspect(
@@ -280,6 +355,34 @@ impl OperationLedger {
         digest: Sha256Digest,
     ) -> Result<OperationSnapshot, ErrorCategory> {
         Ok(self.record_for(owner, id, digest)?.snapshot.clone())
+    }
+    /// Authorize a fresh access to an existing resource under current policy.
+    /// The start deadline is deliberately not reused for a long-lived process.
+    /// Fresh policy can change, but device/capability/session binding cannot.
+    /// A DTO target ID or a retained start permit is never access authority.
+    pub fn authorize_resource_access(
+        &self,
+        owner: &OwnerLease,
+        id: &OperationId,
+        digest: Sha256Digest,
+        fresh_context: &PreparedContext,
+        facts: &AdmissionFacts,
+        now: MonotonicMillis,
+    ) -> Result<OperationSnapshot, ErrorCategory> {
+        let record = self.record_for(owner, id, digest)?;
+        if record.snapshot.target.is_some()
+            || record.snapshot.liveness == ExecutionLiveness::NotStarted
+        {
+            return Err(ErrorCategory::StateConflict);
+        }
+        if fresh_context.device_id != record.context.device_id
+            || fresh_context.capability != record.context.capability
+            || fresh_context.session != record.context.session
+        {
+            return Err(ErrorCategory::StateConflict);
+        }
+        check_admission(fresh_context, facts, now)?;
+        Ok(record.snapshot.clone())
     }
     pub fn request_cancel(
         &mut self,
@@ -314,7 +417,7 @@ impl OperationLedger {
             .records
             .get_mut(id)
             .ok_or(ErrorCategory::StaleOperation)?;
-        if record.snapshot.state == OperationState::Reserved {
+        if record.snapshot.target.is_some() || record.snapshot.state == OperationState::Reserved {
             return Err(ErrorCategory::StateConflict);
         }
         if matches!(fact, ExecutorFact::OutputDrained) {
@@ -322,6 +425,7 @@ impl OperationLedger {
                 return Err(ErrorCategory::StateConflict);
             }
             record.snapshot.output_drain = OutputDrain::Drained;
+            record.note_resource_settled(now);
             return Ok(record.snapshot.clone());
         }
         if matches!(
@@ -366,7 +470,7 @@ impl OperationLedger {
                         OperationState::Failed
                     };
                 }
-                record.terminal_at = Some(now);
+                record.terminal_at.get_or_insert(now);
             }
             ExecutorFact::TerminationConfirmed => {
                 if record.snapshot.cancellation != Some(Cancellation::Requested) {
@@ -377,9 +481,10 @@ impl OperationLedger {
                     record.snapshot.state = OperationState::Cancelled;
                 }
                 record.snapshot.cancellation = Some(Cancellation::TerminationConfirmed);
-                record.terminal_at = Some(now);
+                record.terminal_at.get_or_insert(now);
             }
         }
+        record.note_resource_settled(now);
         Ok(record.snapshot.clone())
     }
     pub fn mark_result_unknown(
@@ -390,6 +495,9 @@ impl OperationLedger {
             .records
             .get_mut(id)
             .ok_or(ErrorCategory::StaleOperation)?;
+        if record.snapshot.target.is_some() {
+            return Err(ErrorCategory::StateConflict);
+        }
         if matches!(
             record.snapshot.state,
             OperationState::Reserved
@@ -402,6 +510,43 @@ impl OperationLedger {
         record.snapshot.state = OperationState::Unknown;
         if record.snapshot.liveness != ExecutionLiveness::Exited {
             record.snapshot.liveness = ExecutionLiveness::Unknown;
+        }
+        Ok(record.snapshot.clone())
+    }
+    /// Trusted request-level facts only. These never settle the target process.
+    pub fn record_action_result(
+        &mut self,
+        id: &OperationId,
+        result: ActionResult,
+        now: MonotonicMillis,
+    ) -> Result<OperationSnapshot, ErrorCategory> {
+        let record = self
+            .records
+            .get_mut(id)
+            .ok_or(ErrorCategory::StaleOperation)?;
+        if record.snapshot.target.is_none()
+            || !matches!(
+                record.snapshot.state,
+                OperationState::Dispatched | OperationState::Unknown
+            )
+        {
+            return Err(ErrorCategory::StateConflict);
+        }
+        match result {
+            ActionResult::NotDispatched if record.snapshot.state == OperationState::Dispatched => {
+                record.snapshot.state = OperationState::Failed;
+                record.terminal_at = Some(now);
+            }
+            ActionResult::NotDispatched => return Err(ErrorCategory::StateConflict),
+            ActionResult::Acknowledged if record.snapshot.state == OperationState::Dispatched => {
+                record.snapshot.state = OperationState::Succeeded;
+                record.terminal_at = Some(now);
+            }
+            ActionResult::Acknowledged => {} // Unknown history is never rewritten.
+            ActionResult::Unknown => {
+                record.snapshot.state = OperationState::Unknown;
+                record.terminal_at.get_or_insert(now);
+            }
         }
         Ok(record.snapshot.clone())
     }
@@ -423,9 +568,51 @@ impl OperationLedger {
                 record.terminal_at = Some(now);
             }
         }
+        // Actions settle before their parent can be collected. Unknown needs
+        // a full retention interval after BOTH ambiguity and proven resource
+        // settlement, never merely after the original process exit timestamp.
+        let action_candidates: Vec<_> = self
+            .records
+            .iter()
+            .filter_map(|(id, record)| {
+                let target = record.snapshot.target.as_ref()?;
+                let since = if record.snapshot.state == OperationState::Unknown {
+                    let action_at = record.terminal_at?;
+                    let parent_at = self
+                        .records
+                        .get(&target.operation_id)?
+                        .resource_settled_at?;
+                    Some(std::cmp::max(action_at, parent_at))
+                } else if matches!(
+                    record.snapshot.state,
+                    OperationState::Succeeded | OperationState::Failed | OperationState::Cancelled
+                ) {
+                    record.terminal_at
+                } else {
+                    None
+                };
+                since
+                    .filter(|at| now.0.saturating_sub(at.0) >= self.retention_ms)
+                    .map(|_| id.clone())
+            })
+            .collect();
+        let mut removed = 0;
+        for id in action_candidates {
+            if let Some(record) = self.records.remove(&id) {
+                self.retained_bytes -= record.accounting_bytes;
+                removed += 1;
+            }
+        }
+        let parents: std::collections::BTreeSet<_> = self
+            .records
+            .values()
+            .filter_map(|r| r.snapshot.target.as_ref().map(|t| t.operation_id.clone()))
+            .collect();
         let mut removed_bytes = 0;
-        let before = self.records.len();
-        self.records.retain(|_, record| {
+        self.records.retain(|id, record| {
+            if record.snapshot.target.is_some() || parents.contains(id) {
+                return true;
+            }
             let ended = matches!(
                 record.snapshot.liveness,
                 ExecutionLiveness::NotStarted | ExecutionLiveness::Exited
@@ -439,13 +626,14 @@ impl OperationLedger {
             );
             if ended && drained && expired {
                 removed_bytes += record.accounting_bytes;
+                removed += 1;
                 false
             } else {
                 true
             }
         });
         self.retained_bytes -= removed_bytes;
-        before - self.records.len()
+        removed
     }
     /// Fences new side effects, while reads, cancellation and executor settlement continue.
     pub fn begin_maintenance(&mut self) {
@@ -457,6 +645,19 @@ impl OperationLedger {
     pub fn maintenance_settled(&self) -> bool {
         self.maintenance_fenced
             && self.records.values().all(|r| {
+                if let Some(target) = &r.snapshot.target {
+                    return match r.snapshot.state {
+                        OperationState::Reserved
+                        | OperationState::Succeeded
+                        | OperationState::Failed
+                        | OperationState::Cancelled => true,
+                        OperationState::Unknown => self
+                            .records
+                            .get(&target.operation_id)
+                            .is_some_and(|parent| parent.resource_settled_at.is_some()),
+                        _ => false,
+                    };
+                }
                 matches!(
                     r.snapshot.liveness,
                     ExecutionLiveness::NotStarted | ExecutionLiveness::Exited
@@ -482,4 +683,13 @@ pub enum ExecutorFact {
         successful: bool,
     },
     TerminationConfirmed,
+}
+
+/// Request-level evidence; never process completion or permission authority.
+#[derive(Debug, Clone, Copy)]
+pub enum ActionResult {
+    Acknowledged,
+    /// Trusted adapter proves no action bytes could have been emitted.
+    NotDispatched,
+    Unknown,
 }

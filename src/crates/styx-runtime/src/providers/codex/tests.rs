@@ -2,7 +2,7 @@ use super::*;
 use styx_contracts::identity::*;
 use styx_contracts::{capability::*, error::Recovery, operation::*};
 use styx_core::{
-    operations::{DispatchDisposition, DispatchPermit, OperationLedger},
+    operations::{DispatchDisposition, DispatchPermit, OperationLedger, OperationSnapshot},
     policy::AdmissionFacts,
 };
 struct Authority {
@@ -448,29 +448,39 @@ fn fixture_adapter(
 ) -> (Arc<CodexStdio>, ProcessHandle, tokio::io::DuplexStream) {
     let (client, server) = tokio::io::duplex(65536);
     let (r, w) = tokio::io::split(client);
-    let rpc = Rpc::new(w, r, Duration::from_millis(200), 4);
+    let partition = Arc::new(
+        Arc::new(tokio::sync::Semaphore::new(16 * 1024 * 1024))
+            .try_acquire_many_owned(16 * 1024 * 1024)
+            .unwrap(),
+    );
+    let rpc =
+        Rpc::new_with_reserved_partition(w, r, Duration::from_millis(200), 4, partition.clone());
     let handle = ProcessHandle {
         process_id: Uuid::new_v4().to_string(),
         operation: operation.clone(),
     };
     rpc.register(&handle.process_id).unwrap();
     let resource = Arc::new(Resource {
+        start_digest: Sha256Digest::of_bytes(b"fixture-start"),
         owner,
         handle: handle.clone(),
         state: Arc::new(tokio::sync::Mutex::new(Record {
+            read_mode: None,
             cursor: None,
             gaps: 0,
             decoder: OutputDecoder::default(),
             drained: false,
-            input_unknown: false,
+            input_unknown: None,
             last_exit: None,
         })),
     });
     let adapter = Arc::new(CodexStdio {
+        _rpc_partition: partition,
         rpc,
         child: tokio::sync::Mutex::new(None),
         stderr_task: tokio::sync::Mutex::new(None),
         records: Mutex::new(HashMap::from([(handle.process_id.clone(), resource)])),
+        actions: Mutex::new(BTreeMap::new()),
         operations: Mutex::new(BTreeMap::from([(operation, handle.clone())])),
         limit: 4,
         session_id: "fixture-session".into(),
@@ -674,4 +684,857 @@ async fn start_local_rejection_has_not_dispatched_proof_but_remote_error_remains
         receipt.handle
     );
     worker.await.unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires isolated STYX_TEST_CODEX and STYX_TEST_EXEC_ROOT; focused raw-page native scenario"]
+async fn real_codex_raw_page_focused_scenario() {
+    let binary = PathBuf::from(std::env::var("STYX_TEST_CODEX").unwrap());
+    let root = PathBuf::from(std::env::var("STYX_TEST_EXEC_ROOT").unwrap())
+        .join(Uuid::new_v4().to_string());
+    std::fs::create_dir_all(root.join("codex-home")).unwrap();
+    let adapter = Arc::new(
+        CodexStdio::spawn_owned(OwnedExecutorConfig {
+            binary,
+            cwd: root.clone(),
+            environment: BTreeMap::from([
+                ("PATH".into(), "/usr/bin:/bin".into()),
+                ("HOME".into(), root.display().to_string()),
+                (
+                    "CODEX_HOME".into(),
+                    root.join("codex-home").display().to_string(),
+                ),
+            ]),
+            rpc_timeout: Duration::from_secs(2),
+            retained_process_limit: 2,
+        })
+        .await
+        .unwrap(),
+    );
+    let worker_adapter = adapter.clone();
+    // Panic isolation guarantees that the fixture still performs owned cleanup.
+    let worker = tokio::spawn(async move {
+        let adapter = worker_adapter;
+        let mut auth = authority();
+        let owner = auth.owner.clone();
+        let started = auth.run(&adapter, spec(&root,
+            "printf '\\344\\275'; read -r release; printf '\\240'; printf RAW_EFFECT > raw-effect; exit 7", false)).await;
+        assert_eq!(started.dispatch, DispatchEvidence::Started);
+        let handle = started.handle;
+        assert_eq!(
+            adapter
+                .read_raw(&auth.foreign, &handle, None, 2, Duration::ZERO)
+                .await
+                .unwrap_err(),
+            ExecError::OwnerMismatch
+        );
+        let mut first = None;
+        for _ in 0..30 {
+            let page = adapter
+                .read_raw(&owner, &handle, None, 2, Duration::from_millis(20))
+                .await
+                .unwrap()
+                .into_native();
+            if !page["chunks"].as_array().unwrap().is_empty() {
+                first = Some(page);
+                break;
+            }
+        }
+        let first = first.expect("initial native bytes must arrive while stdin is gated");
+        assert_eq!(first["chunks"][0]["seq"], 1);
+        assert_eq!(first["chunks"][0]["chunk"], "5L0=");
+        assert!(!first["exited"].as_bool().unwrap());
+        let repeat = adapter
+            .read_raw(&owner, &handle, None, 2, Duration::ZERO)
+            .await
+            .unwrap()
+            .into_native();
+        assert_eq!(repeat, first, "same native readonly cursor before release");
+        assert_eq!(
+            adapter
+                .read(&owner, &handle, 65536, Duration::ZERO)
+                .await
+                .unwrap_err(),
+            ExecError::ReadModeMismatch
+        );
+        assert!(!root.join("raw-effect").exists());
+        adapter
+            .write_stdin(&owner, &handle, b"release\n")
+            .await
+            .unwrap();
+        let mut pages = vec![first.clone(), repeat];
+        let mut cursor = first["nextSeq"].as_u64().unwrap() - 1;
+        let mut tail = vec![];
+        let mut ended = false;
+        for _ in 0..60 {
+            let page = adapter
+                .read_raw(
+                    &owner,
+                    &handle,
+                    Some(cursor),
+                    65536,
+                    Duration::from_millis(20),
+                )
+                .await
+                .unwrap()
+                .into_native();
+            for chunk in page["chunks"].as_array().unwrap() {
+                tail.extend(STANDARD.decode(chunk["chunk"].as_str().unwrap()).unwrap());
+            }
+            cursor = page["nextSeq"].as_u64().unwrap() - 1;
+            ended = page["closed"] == true
+                && page["exited"] == true
+                && page["chunks"].as_array().unwrap().is_empty();
+            pages.push(page);
+            if ended {
+                break;
+            }
+        }
+        assert!(ended, "native exit and empty closed page required");
+        assert_eq!(tail, [0xa0]);
+        assert_eq!(
+            std::fs::read(root.join("raw-effect")).unwrap(),
+            b"RAW_EFFECT"
+        );
+        assert_eq!(pages.last().unwrap()["exitCode"], 7);
+        // Even after settled EOF, the raw API must return an actual earlier
+        // native page, never the decoded API's synthesized empty drained page.
+        let historical = adapter
+            .read_raw(&owner, &handle, None, 65536, Duration::ZERO)
+            .await
+            .unwrap()
+            .into_native();
+        assert!(!historical["chunks"].as_array().unwrap().is_empty());
+        assert_eq!(historical["chunks"][0]["chunk"], "5L0=");
+        pages.push(historical);
+        assert_eq!(
+            adapter
+                .read(&owner, &handle, 1, Duration::ZERO)
+                .await
+                .unwrap_err(),
+            ExecError::ReadModeMismatch
+        );
+        adapter.retire(&owner, &handle).await.unwrap();
+        let decoded = auth
+            .run(&adapter, spec(&root, "printf DECODED; exit 0", false))
+            .await;
+        assert_eq!(
+            drain(&adapter, &owner, &decoded.handle).await,
+            ("DECODED".into(), 0)
+        );
+        assert_eq!(
+            adapter
+                .read_raw(&owner, &decoded.handle, None, 65536, Duration::ZERO)
+                .await
+                .unwrap_err(),
+            ExecError::ReadModeMismatch
+        );
+        adapter.retire(&owner, &decoded.handle).await.unwrap();
+        println!(
+            "RAW_NATIVE_OBSERVATION {}",
+            json!({"root":root,"pages":pages,"foreignOwnerDenied":true,"bothModeDirectionsDenied":true,"independentEffect":"RAW_EFFECT","nativeExit":7})
+        );
+    });
+    let outcome = worker.await;
+    let cleanup = adapter.shutdown_owned(Duration::from_secs(5)).await;
+    println!("RAW_CLEANUP {:?}", cleanup);
+    assert!(cleanup.executor_exited && cleanup.reader_task_reaped && cleanup.stderr_task_reaped);
+    outcome.unwrap();
+}
+
+#[tokio::test]
+async fn raw_pages_preserve_failure_extensions_and_cancelled_read_mode() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let mut auth = authority();
+    let (_, id, _) = auth.issue(spec(&std::env::temp_dir(), "unused", false));
+    let (adapter, handle, server) = fixture_adapter(auth.owner.clone(), id);
+    let native = json!({"chunks":[],"nextSeq":1,"exited":false,"closed":false,"failure":{"code":"native_failure"},"extension":{"kept":true}});
+    let expected = native.clone();
+    let worker = tokio::spawn(async move {
+        let (r, mut w) = tokio::io::split(server);
+        let mut lines = BufReader::new(r).lines();
+        let request: Value =
+            serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        assert_eq!(request["params"]["afterSeq"], 0);
+        // The first read is cancelled without receiving a page. Its mode must
+        // already be irrevocably selected, independent of response success.
+        tokio::time::sleep(Duration::from_millis(50)).await;
+        let request: Value =
+            serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        assert_eq!(request["params"]["afterSeq"], 0);
+        w.write_all(format!("{}\n", json!({"id":request["id"],"result":native})).as_bytes())
+            .await
+            .unwrap();
+    });
+    assert_eq!(
+        adapter
+            .read(&auth.owner, &handle, 0, Duration::ZERO)
+            .await
+            .unwrap_err(),
+        ExecError::InvalidRequest
+    );
+    let pending = adapter.read_raw(&auth.owner, &handle, Some(0), 1, Duration::ZERO);
+    assert!(
+        tokio::time::timeout(Duration::from_millis(10), pending)
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        adapter
+            .read(&auth.owner, &handle, 1, Duration::ZERO)
+            .await
+            .unwrap_err(),
+        ExecError::ReadModeMismatch
+    );
+    assert_eq!(
+        adapter
+            .read_raw(&auth.owner, &handle, Some(0), 1, Duration::ZERO)
+            .await
+            .unwrap()
+            .into_native(),
+        expected
+    );
+    worker.await.unwrap();
+}
+
+#[tokio::test]
+async fn targeted_action_permit_cannot_start_another_process_even_with_valid_start_bytes() {
+    // Isolated protocol fixture, not a native process acceptance claim.
+    let mut auth = authority();
+    let start_spec = spec(std::path::Path::new("/tmp"), "printf forbidden", false);
+    let (_original_permit, parent, digest) = auth.issue(start_spec.clone());
+    let (adapter, _, mut native_peer) = fixture_adapter(auth.owner.clone(), parent.clone());
+    let action = auth
+        .ledger
+        .prepare_targeted(
+            &auth.owner,
+            ResourceTarget {
+                operation_id: parent,
+                payload_digest: digest,
+            },
+            PreparedContext {
+                device_id: auth.facts.device_id.clone(),
+                grant_revision: 1,
+                session: None,
+                observation: None,
+                capability: CapabilityId::ExecRun,
+                deadline: MonotonicMillis(100000),
+                disconnect_policy: DisconnectPolicy::RetainForOwner,
+            },
+            start_spec.to_operation_payload().unwrap(),
+            MonotonicMillis(2),
+        )
+        .unwrap();
+    let DispatchDisposition::ExecuteOnce(permit) = auth
+        .ledger
+        .dispatch(
+            &auth.owner,
+            &action.id,
+            action.payload_digest,
+            &auth.facts,
+            MonotonicMillis(3),
+        )
+        .unwrap()
+    else {
+        panic!("new targeted permit required")
+    };
+    let refused = adapter.start(permit).await.unwrap_err();
+    assert_eq!(refused.operation, action.id);
+    assert_eq!(refused.evidence, DispatchEvidence::NotDispatched);
+    assert_eq!(refused.error, ExecError::InvalidRequest);
+    assert_eq!(
+        adapter.lookup_operation(&auth.owner, &action.id).await,
+        Err(ExecError::UnknownHandle)
+    );
+    use tokio::io::AsyncReadExt;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), native_peer.read_u8())
+            .await
+            .is_err()
+    );
+    // Close the fixture's owned peer before requesting normal reader cleanup.
+    // Keeping a silent fake peer open would spend the entire shutdown budget
+    // waiting for its deliberately absent terminate response.
+    drop(native_peer);
+    let cleanup = adapter.shutdown_owned(Duration::from_secs(1)).await;
+    assert!(cleanup.reader_task_reaped);
+}
+
+impl Authority {
+    fn action(
+        &mut self,
+        handle: &ProcessHandle,
+        digest: Sha256Digest,
+        action: &ProcessAction,
+    ) -> (DispatchPermit, OperationSnapshot) {
+        let snapshot = self
+            .ledger
+            .prepare_targeted(
+                &self.owner,
+                ResourceTarget {
+                    operation_id: handle.operation.clone(),
+                    payload_digest: digest,
+                },
+                PreparedContext {
+                    device_id: self.facts.device_id.clone(),
+                    grant_revision: 1,
+                    session: None,
+                    observation: None,
+                    capability: CapabilityId::ExecRun,
+                    deadline: MonotonicMillis(100000),
+                    disconnect_policy: DisconnectPolicy::RetainForOwner,
+                },
+                action.to_operation_payload().unwrap(),
+                MonotonicMillis(2),
+            )
+            .unwrap();
+        let DispatchDisposition::ExecuteOnce(permit) = self
+            .ledger
+            .dispatch(
+                &self.owner,
+                &snapshot.id,
+                snapshot.payload_digest,
+                &self.facts,
+                MonotonicMillis(3),
+            )
+            .unwrap()
+        else {
+            panic!("fresh action permit")
+        };
+        (permit, snapshot)
+    }
+}
+fn write_action(bytes: &[u8]) -> ProcessAction {
+    ProcessAction::WriteStdin {
+        input_base64: STANDARD.encode(bytes),
+    }
+}
+fn bind_fixture_digest(adapter: &CodexStdio, handle: &ProcessHandle, digest: Sha256Digest) {
+    let mut records = adapter.records.lock().unwrap();
+    Arc::get_mut(records.get_mut(&handle.process_id).unwrap())
+        .unwrap()
+        .start_digest = digest;
+}
+#[tokio::test]
+async fn continuation_target_owner_kind_and_digest_refuse_without_any_native_io() {
+    use tokio::io::AsyncReadExt;
+    let mut auth = authority();
+    let (_, id, digest) = auth.issue(spec(&std::env::temp_dir(), "unused", false));
+    let (adapter, handle, mut server) = fixture_adapter(auth.owner.clone(), id);
+    bind_fixture_digest(&adapter, &handle, digest);
+    let (permit, _) = auth.action(&handle, digest, &write_action(b"MUST_NOT_SEND"));
+    let refused = adapter.terminate(permit, &handle).await;
+    assert_eq!(refused.evidence, ActionEvidence::NotDispatched);
+    assert_eq!(refused.cause, Some(ExecError::InvalidRequest));
+    let (_, different, _) = auth.issue(spec(&std::env::temp_dir(), "different", false));
+    let mut false_handle = handle.clone();
+    false_handle.operation = different;
+    let (permit, _) = auth.action(&handle, digest, &write_action(b"MUST_NOT_SEND"));
+    assert_eq!(
+        adapter.write(permit, &false_handle).await.cause,
+        Some(ExecError::OwnerMismatch)
+    );
+    // Same opaque handle, mismatched original-start digest must also reject.
+    bind_fixture_digest(&adapter, &handle, Sha256Digest::of_bytes(b"substituted"));
+    let (permit, _) = auth.action(&handle, digest, &write_action(b"MUST_NOT_SEND"));
+    assert_eq!(
+        adapter.write(permit, &handle).await.cause,
+        Some(ExecError::InvalidRequest)
+    );
+    bind_fixture_digest(&adapter, &handle, digest);
+    let (permit, _) = auth.action(&handle, digest, &write_action(b"MUST_NOT_SEND"));
+    {
+        let mut records = adapter.records.lock().unwrap();
+        Arc::get_mut(records.get_mut(&handle.process_id).unwrap())
+            .unwrap()
+            .owner = auth.foreign.clone();
+    }
+    assert_eq!(
+        adapter.write(permit, &handle).await.cause,
+        Some(ExecError::OwnerMismatch)
+    );
+    assert!(
+        tokio::time::timeout(Duration::from_millis(20), server.read_u8())
+            .await
+            .is_err()
+    );
+    assert_eq!(adapter.actions.lock().unwrap().len(), 0);
+    let printed = format!("{:?}", write_action(b"PRIVATE_INPUT"));
+    assert!(!printed.contains("PRIVATE_INPUT"));
+    assert!(!printed.contains(&STANDARD.encode(b"PRIVATE_INPUT")));
+}
+#[tokio::test]
+async fn continuation_dropped_write_retains_exact_action_write_id_and_never_replays() {
+    use tokio::io::{AsyncBufReadExt, BufReader};
+    let mut auth = authority();
+    let (_, id, digest) = auth.issue(spec(&std::env::temp_dir(), "unused", false));
+    let owner = auth.owner.clone();
+    let (adapter, handle, server) = fixture_adapter(owner.clone(), id);
+    bind_fixture_digest(&adapter, &handle, digest);
+    let (permit, snapshot) = auth.action(&handle, digest, &write_action(b"ONCE"));
+    let (seen, observed) = tokio::sync::oneshot::channel();
+    let worker = tokio::spawn(async move {
+        let (r, _w) = tokio::io::split(server);
+        let mut lines = BufReader::new(r).lines();
+        let q: Value = serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        assert_eq!(q["method"], "process/write");
+        seen.send(q).unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(80), lines.next_line())
+                .await
+                .is_err()
+        );
+    });
+    let (a, h) = (adapter.clone(), handle.clone());
+    let pending = tokio::spawn(async move { a.write(permit, &h).await });
+    let frame = observed.await.unwrap();
+    pending.abort();
+    let _ = pending.await;
+    let receipt = adapter.lookup_action(&owner, &snapshot.id).unwrap();
+    assert_eq!(receipt.evidence, ActionEvidence::Unknown);
+    assert_eq!(
+        receipt.write_id.as_deref(),
+        frame["params"]["writeId"].as_str()
+    );
+    assert_eq!(
+        adapter.owned(&owner, &handle).await.unwrap().input_unknown,
+        Some(snapshot.id.clone())
+    );
+    assert_eq!(
+        adapter
+            .lookup_action(&auth.foreign, &snapshot.id)
+            .unwrap_err(),
+        ExecError::OwnerMismatch
+    );
+    let (permit, _) = auth.action(&handle, digest, &write_action(b"MUST_NOT_SEND"));
+    let refused = adapter.write(permit, &handle).await;
+    assert_eq!(refused.evidence, ActionEvidence::NotDispatched);
+    assert_eq!(refused.cause, Some(ExecError::InputUnknown));
+    assert_eq!(
+        adapter
+            .lookup_action(&owner, &snapshot.id)
+            .unwrap()
+            .write_id,
+        receipt.write_id
+    );
+    assert!(matches!(
+        auth.ledger
+            .dispatch(
+                &owner,
+                &snapshot.id,
+                snapshot.payload_digest,
+                &auth.facts,
+                MonotonicMillis(4)
+            )
+            .unwrap(),
+        DispatchDisposition::Existing(_)
+    ));
+    {
+        let mut record = adapter.owned(&owner, &handle).await.unwrap();
+        record.last_exit = Some(0);
+        record.drained = true;
+    }
+    assert_eq!(
+        adapter.retire(&owner, &handle).await.unwrap_err(),
+        ExecError::ResourceUnsettled
+    );
+    worker.await.unwrap();
+}
+#[tokio::test]
+async fn continuation_terminate_ack_is_not_process_exit_or_drain() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let mut auth = authority();
+    let (_, id, digest) = auth.issue(spec(&std::env::temp_dir(), "unused", false));
+    let (adapter, handle, server) = fixture_adapter(auth.owner.clone(), id);
+    bind_fixture_digest(&adapter, &handle, digest);
+    let (permit, action) = auth.action(&handle, digest, &ProcessAction::Terminate {});
+    let worker = tokio::spawn(async move {
+        let (r, mut w) = tokio::io::split(server);
+        let mut lines = BufReader::new(r).lines();
+        let q: Value = serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        assert_eq!(q["method"], "process/terminate");
+        w.write_all(format!("{}\n", json!({"id":q["id"],"result":{"running":true}})).as_bytes())
+            .await
+            .unwrap();
+        tokio::time::sleep(Duration::from_millis(30)).await;
+    });
+    let before = auth
+        .ledger
+        .inspect(&auth.owner, &handle.operation, digest)
+        .unwrap();
+    let receipt = adapter.terminate(permit, &handle).await;
+    assert_eq!(receipt.evidence, ActionEvidence::Acknowledged);
+    assert_eq!(
+        receipt.acknowledgment,
+        Some(ActionAcknowledgment::TerminateRequested { was_running: true })
+    );
+    auth.ledger
+        .record_action_result(
+            &action.id,
+            styx_core::operations::ActionResult::Acknowledged,
+            MonotonicMillis(4),
+        )
+        .unwrap();
+    assert_eq!(
+        auth.ledger
+            .inspect(&auth.owner, &handle.operation, digest)
+            .unwrap(),
+        before
+    );
+    let state = adapter.owned(&auth.owner, &handle).await.unwrap();
+    assert_eq!(state.last_exit, None);
+    assert!(!state.drained);
+    drop(state);
+    assert_eq!(
+        adapter.retire(&auth.owner, &handle).await.unwrap_err(),
+        ExecError::ResourceUnsettled
+    );
+    worker.await.unwrap();
+}
+#[tokio::test]
+async fn continuation_local_metadata_is_bounded_and_survives_resource_retirement() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let mut auth = authority();
+    let (_, id, digest) = auth.issue(spec(&std::env::temp_dir(), "unused", false));
+    let (adapter, handle, server) = fixture_adapter(auth.owner.clone(), id);
+    bind_fixture_digest(&adapter, &handle, digest);
+    let worker = tokio::spawn(async move {
+        let (r, mut w) = tokio::io::split(server);
+        let mut lines = BufReader::new(r).lines();
+        let mut seen = std::collections::BTreeSet::new();
+        for _ in 0..256 {
+            let q: Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(q["method"], "process/write");
+            assert!(seen.insert(q["params"]["writeId"].as_str().unwrap().to_owned()));
+            w.write_all(
+                format!("{}\n", json!({"id":q["id"],"result":{"status":"accepted"}})).as_bytes(),
+            )
+            .await
+            .unwrap();
+        }
+        assert!(
+            tokio::time::timeout(Duration::from_millis(20), lines.next_line())
+                .await
+                .is_err()
+        );
+    });
+    let mut last = None;
+    for _ in 0..256 {
+        let (permit, a) = auth.action(&handle, digest, &write_action(b"x"));
+        assert_eq!(
+            adapter.write(permit, &handle).await.evidence,
+            ActionEvidence::Acknowledged
+        );
+        last = Some(a.id);
+    }
+    let (permit, _) = auth.action(&handle, digest, &write_action(b"MUST_NOT_SEND"));
+    let receipt = adapter.write(permit, &handle).await;
+    assert_eq!(receipt.evidence, ActionEvidence::NotDispatched);
+    assert_eq!(receipt.cause, Some(ExecError::Capacity));
+    {
+        let mut r = adapter.owned(&auth.owner, &handle).await.unwrap();
+        r.last_exit = Some(0);
+        r.drained = true;
+    }
+    adapter.retire(&auth.owner, &handle).await.unwrap();
+    assert_eq!(adapter.actions.lock().unwrap().len(), 256);
+    // Defensive producer-reconstruction control, not a claim that clients can
+    // create a Core permit or that a real Host may reuse its generation.
+    let mut reconstructed = authority();
+    let (_, parent, old_digest) = reconstructed.issue(spec(&std::env::temp_dir(), "unused", false));
+    assert_eq!(parent, handle.operation);
+    let (duplicate, _) = reconstructed.action(&handle, old_digest, &write_action(b"x"));
+    let refused = adapter.write(duplicate, &handle).await;
+    assert_eq!(refused.cause, Some(ExecError::AlreadyDispatched));
+    assert_eq!(refused.evidence, ActionEvidence::Acknowledged);
+    assert_eq!(
+        refused.acknowledgment,
+        Some(ActionAcknowledgment::WriteAccepted)
+    );
+    assert_eq!(
+        adapter
+            .lookup_action(&auth.owner, &refused.operation)
+            .unwrap()
+            .write_id,
+        refused.write_id
+    );
+    assert!(refused.write_id.is_some());
+    assert_eq!(
+        adapter
+            .lookup_action(&auth.owner, &last.unwrap())
+            .unwrap()
+            .evidence,
+        ActionEvidence::Acknowledged
+    );
+    worker.await.unwrap();
+}
+#[tokio::test]
+async fn externally_reserved_rpc_partition_outlives_helper_and_reader_cleanup() {
+    let budget = Arc::new(tokio::sync::Semaphore::new(16 * 1024 * 1024));
+    let (client, server) = tokio::io::duplex(128);
+    let (r, w) = tokio::io::split(client);
+    let partition = Arc::new(
+        budget
+            .clone()
+            .try_acquire_many_owned(16 * 1024 * 1024)
+            .unwrap(),
+    );
+    let rpc =
+        Rpc::new_with_reserved_partition(w, r, Duration::from_millis(100), 1, partition.clone());
+    drop(partition);
+    drop(rpc); // reader still waiting on its owned stdout
+    assert_eq!(budget.available_permits(), 0);
+    drop(server);
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while budget.available_permits() != 16 * 1024 * 1024 {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "requires isolated STYX_TEST_CODEX/STYX_TEST_EXEC_ROOT; focused permit stdin/terminate/unknown only"]
+async fn real_codex_continuation_permit_focused_scenario() {
+    let binary = PathBuf::from(std::env::var("STYX_TEST_CODEX").unwrap());
+    let root = PathBuf::from(std::env::var("STYX_TEST_EXEC_ROOT").unwrap())
+        .join(Uuid::new_v4().to_string());
+    std::fs::create_dir_all(root.join("codex-home")).unwrap();
+    let global = Arc::new(tokio::sync::Semaphore::new(64 * 1024 * 1024));
+    let partition = global
+        .clone()
+        .try_acquire_many_owned(16 * 1024 * 1024)
+        .unwrap();
+    let adapter = Arc::new(
+        CodexStdio::spawn_owned_with_reserved_budget(
+            OwnedExecutorConfig {
+                binary,
+                cwd: root.clone(),
+                environment: BTreeMap::from([
+                    ("PATH".into(), "/usr/bin:/bin".into()),
+                    ("HOME".into(), root.display().to_string()),
+                    (
+                        "CODEX_HOME".into(),
+                        root.join("codex-home").display().to_string(),
+                    ),
+                ]),
+                rpc_timeout: Duration::from_millis(300),
+                retained_process_limit: 4,
+            },
+            partition,
+        )
+        .await
+        .unwrap(),
+    );
+    assert_eq!(global.available_permits(), 48 * 1024 * 1024);
+    let a = adapter.clone();
+    let worker = tokio::spawn(async move {
+        let adapter = a;
+        let mut auth = authority();
+        let owner = auth.owner.clone();
+        let process_spec = spec(
+            &root,
+            "read -r line; printf '%s\\n' \"$line\" >> stdin-effect; printf ACK; read -r hold",
+            false,
+        );
+        let digest = Sha256Digest::of_bytes(&process_spec.to_operation_payload().unwrap());
+        let process = auth.run(&adapter, process_spec).await;
+        assert_eq!(process.dispatch, DispatchEvidence::Started);
+        let handle = process.handle;
+        let nonce = Uuid::new_v4().to_string();
+        let (permit, action) = auth.action(
+            &handle,
+            digest,
+            &write_action(format!("{nonce}\n").as_bytes()),
+        );
+        let receipt = adapter.write(permit, &handle).await;
+        assert_eq!(receipt.evidence, ActionEvidence::Acknowledged);
+        assert_eq!(
+            receipt.acknowledgment,
+            Some(ActionAcknowledgment::WriteAccepted)
+        );
+        auth.ledger
+            .record_action_result(
+                &action.id,
+                styx_core::operations::ActionResult::Acknowledged,
+                MonotonicMillis(4),
+            )
+            .unwrap();
+        assert!(matches!(
+            auth.ledger
+                .dispatch(
+                    &owner,
+                    &action.id,
+                    action.payload_digest,
+                    &auth.facts,
+                    MonotonicMillis(5)
+                )
+                .unwrap(),
+            DispatchDisposition::Existing(_)
+        ));
+        let page = adapter
+            .read(&owner, &handle, 65536, Duration::from_millis(50))
+            .await
+            .unwrap();
+        assert_eq!(page.liveness, ExecutionLiveness::Running);
+        assert_eq!(page.exit_code, None);
+        assert_eq!(
+            page.chunks
+                .iter()
+                .map(|c| c.text.as_str())
+                .collect::<String>(),
+            "ACK"
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("stdin-effect")).unwrap(),
+            format!("{nonce}\n")
+        );
+        let original = auth
+            .ledger
+            .inspect(&owner, handle.operation(), digest)
+            .unwrap();
+        let (permit, terminate_action) = auth.action(&handle, digest, &ProcessAction::Terminate {});
+        let termination_request = adapter.terminate(permit, &handle).await;
+        println!("NATIVE_TERMINATE_REQUEST {:?}", termination_request);
+        assert_eq!(termination_request.evidence, ActionEvidence::Acknowledged);
+        auth.ledger
+            .record_action_result(
+                &terminate_action.id,
+                styx_core::operations::ActionResult::Acknowledged,
+                MonotonicMillis(6),
+            )
+            .unwrap();
+        assert_eq!(
+            auth.ledger
+                .inspect(&owner, handle.operation(), digest)
+                .unwrap(),
+            original
+        );
+        assert_eq!(
+            adapter.owned(&owner, &handle).await.unwrap().last_exit,
+            None,
+            "request ACK never sets exit"
+        );
+        let (_, exit) = drain(&adapter, &owner, &handle).await;
+        adapter.retire(&owner, &handle).await.unwrap();
+        assert_eq!(
+            adapter.lookup_action(&owner, &action.id).unwrap().write_id,
+            receipt.write_id
+        );
+
+        let process_spec = spec(
+            &root,
+            "read -r line; printf '%s\\n' \"$line\" >> uncertain-effect; printf LATE_ACK; read -r hold",
+            false,
+        );
+        let digest = Sha256Digest::of_bytes(&process_spec.to_operation_payload().unwrap());
+        let process = auth.run(&adapter, process_spec).await;
+        assert_eq!(process.dispatch, DispatchEvidence::Started);
+        let handle = process.handle;
+        let (aa, oo, hh) = (adapter.clone(), owner.clone(), handle.clone());
+        // Upstream stdio serializes this long native wait ahead of the write.
+        let read = tokio::spawn(async move {
+            aa.read_raw(&oo, &hh, None, 65536, Duration::from_secs(1))
+                .await
+        });
+        tokio::time::sleep(Duration::from_millis(40)).await;
+        let unknown_nonce = Uuid::new_v4().to_string();
+        let (permit, unknown_action) = auth.action(
+            &handle,
+            digest,
+            &write_action(format!("{unknown_nonce}\n").as_bytes()),
+        );
+        let unknown = adapter.write(permit, &handle).await;
+        assert_eq!(unknown.evidence, ActionEvidence::Unknown);
+        auth.ledger
+            .record_action_result(
+                &unknown_action.id,
+                styx_core::operations::ActionResult::Unknown,
+                MonotonicMillis(7),
+            )
+            .unwrap();
+        assert_eq!(read.await.unwrap().unwrap_err(), ExecError::TimeoutUnknown);
+        tokio::time::timeout(Duration::from_secs(3), async {
+            while std::fs::read_to_string(root.join("uncertain-effect")).ok()
+                != Some(format!("{unknown_nonce}\n"))
+            {
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
+        })
+        .await
+        .unwrap();
+        assert_eq!(
+            std::fs::read_to_string(root.join("uncertain-effect")).unwrap(),
+            format!("{unknown_nonce}\n")
+        );
+        let (permit, _) = auth.action(&handle, digest, &write_action(b"NO_REPLAY\n"));
+        let blocked = adapter.write(permit, &handle).await;
+        assert_eq!(blocked.evidence, ActionEvidence::NotDispatched);
+        assert_eq!(blocked.cause, Some(ExecError::InputUnknown));
+        assert_eq!(
+            adapter
+                .lookup_action(&owner, &unknown_action.id)
+                .unwrap()
+                .write_id,
+            unknown.write_id
+        );
+        assert_eq!(
+            adapter.owned(&owner, &handle).await.unwrap().input_unknown,
+            Some(unknown_action.id.clone())
+        );
+        let (permit, _) = auth.action(&handle, digest, &ProcessAction::Terminate {});
+        let terminated = adapter.terminate(permit, &handle).await;
+        assert_eq!(terminated.evidence, ActionEvidence::Acknowledged);
+        let mut cursor = None;
+        let mut ended = false;
+        for _ in 0..60 {
+            let page = adapter
+                .read_raw(&owner, &handle, cursor, 65536, Duration::from_millis(20))
+                .await
+                .unwrap()
+                .into_native();
+            cursor = page["nextSeq"].as_u64().map(|s| s - 1);
+            ended = page["closed"] == true
+                && page["exited"] == true
+                && page["chunks"].as_array().unwrap().is_empty();
+            if ended {
+                break;
+            }
+        }
+        assert!(ended);
+        assert_eq!(
+            adapter.retire(&owner, &handle).await.unwrap_err(),
+            ExecError::ResourceUnsettled
+        );
+        assert_eq!(
+            auth.ledger
+                .inspect(&owner, &unknown_action.id, unknown_action.payload_digest)
+                .unwrap()
+                .state,
+            OperationState::Unknown
+        );
+        assert_eq!(
+            std::fs::read_to_string(root.join("uncertain-effect")).unwrap(),
+            format!("{unknown_nonce}\n")
+        );
+        println!(
+            "NATIVE_CONTINUATION_OBSERVATION {}",
+            json!({"root":root,"stdinEffect":nonce,"stdinCount":1,"nativeExitAfterRead":exit,
+            "ackWriteId":receipt.write_id,"unknownAction":unknown_action.id,"unknownWriteId":unknown.write_id,"unknownEffect":unknown_nonce,"unknownEffectCount":1,
+            "unknownPreservedAfterTargetExitDrain":true,"forceArchiveUsed":false,"metadataSurvivedRetire":true})
+        );
+    });
+    let outcome = worker.await;
+    let cleanup = adapter.shutdown_owned(Duration::from_secs(5)).await;
+    println!("NATIVE_CONTINUATION_CLEANUP {:?}", cleanup);
+    assert!(cleanup.executor_exited && cleanup.reader_task_reaped && cleanup.stderr_task_reaped);
+    drop(adapter);
+    assert_eq!(
+        global.available_permits(),
+        64 * 1024 * 1024,
+        "budget returns only after owned execution/reader/stderr/resource lifetime ends"
+    );
+    outcome.unwrap();
 }

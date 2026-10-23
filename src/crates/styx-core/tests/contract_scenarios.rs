@@ -568,3 +568,235 @@ fn proven_pre_dispatch_refusal_settles_without_permitting_replay_or_rewriting_ru
         [b"already-sent".to_vec(), b"already-sent".to_vec()]
     );
 }
+
+#[test]
+fn degraded_session_admits_available_capture_but_not_unsupported_input_or_stale_binding() {
+    let binding = SessionBinding {
+        id: id("desktop-1"),
+        generation: id("generation-1"),
+    };
+    let mut capture = context();
+    capture.capability = CapabilityId::DesktopCapture;
+    capture.session = Some(binding.clone());
+    let mut live = facts();
+    live.session_state = Some(SessionState::Degraded);
+    live.descriptor.capability_id = CapabilityId::DesktopCapture;
+    live.descriptor.scope = Scope::Session;
+    live.descriptor.target_session = Some(binding);
+    assert_eq!(check_admission(&capture, &live, MonotonicMillis(1)), Ok(()));
+
+    // Aggregate degradation never supplies a missing permission or provider.
+    let mut input = capture.clone();
+    input.capability = CapabilityId::DesktopPointer;
+    input.observation = Some(id("snapshot-1"));
+    let mut unavailable = live.clone();
+    unavailable.descriptor.capability_id = CapabilityId::DesktopPointer;
+    unavailable.descriptor.availability = Availability::Unavailable;
+    unavailable.descriptor.reason = Some(ErrorCategory::CapabilityUnsupported);
+    unavailable.current_observation = input.observation.clone();
+    assert_eq!(
+        check_admission(&input, &unavailable, MonotonicMillis(1)),
+        Err(ErrorCategory::CapabilityUnsupported)
+    );
+
+    live.descriptor.authorization = Authorization::Revoked;
+    assert_eq!(
+        check_admission(&capture, &live, MonotonicMillis(1)),
+        Err(ErrorCategory::PermissionDenied)
+    );
+    live.descriptor.authorization = Authorization::Granted;
+    live.descriptor.target_session.as_mut().unwrap().generation = id("generation-2");
+    assert_eq!(
+        check_admission(&capture, &live, MonotonicMillis(1)),
+        Err(ErrorCategory::SessionDisconnected)
+    );
+    live.descriptor.target_session = capture.session.clone();
+    live.session_state = Some(SessionState::Locked);
+    assert_eq!(
+        check_admission(&capture, &live, MonotonicMillis(1)),
+        Err(ErrorCategory::SessionLocked)
+    );
+    // Host-level work remains independent of a degraded or absent desktop.
+    assert_eq!(
+        check_admission(&context(), &facts(), MonotonicMillis(1)),
+        Ok(())
+    );
+}
+
+#[test]
+fn resource_access_uses_fresh_policy_without_rebinding_or_reusing_start_deadline() {
+    let (mut l, a) = ledger();
+    let other = l
+        .register_verified_owner(id("owner-B"), id("epoch-B"))
+        .unwrap();
+    let start = l
+        .prepare(&a, context(), b"resource".to_vec(), MonotonicMillis(0))
+        .unwrap();
+    let mut fresh = context();
+    fresh.deadline = MonotonicMillis(3000);
+    assert_eq!(
+        l.authorize_resource_access(
+            &a,
+            &start.id,
+            start.payload_digest,
+            &fresh,
+            &facts(),
+            MonotonicMillis(1)
+        ),
+        Err(ErrorCategory::StateConflict)
+    );
+    assert!(matches!(
+        l.dispatch(
+            &a,
+            &start.id,
+            start.payload_digest,
+            &facts(),
+            MonotonicMillis(1)
+        )
+        .unwrap(),
+        DispatchDisposition::ExecuteOnce(_)
+    ));
+    l.record_executor_fact(&start.id, ExecutorFact::Running, MonotonicMillis(2))
+        .unwrap();
+    // Start admission expired at1000; a new read at2000 remains possible.
+    assert!(
+        l.authorize_resource_access(
+            &a,
+            &start.id,
+            start.payload_digest,
+            &fresh,
+            &facts(),
+            MonotonicMillis(2000)
+        )
+        .is_ok()
+    );
+    assert_eq!(
+        l.authorize_resource_access(
+            &other,
+            &start.id,
+            start.payload_digest,
+            &fresh,
+            &facts(),
+            MonotonicMillis(2000)
+        ),
+        Err(ErrorCategory::Unauthorized)
+    );
+    let mut denied = facts();
+    denied.local_policy_allowed = false;
+    assert_eq!(
+        l.authorize_resource_access(
+            &a,
+            &start.id,
+            start.payload_digest,
+            &fresh,
+            &denied,
+            MonotonicMillis(2000)
+        ),
+        Err(ErrorCategory::PermissionDenied)
+    );
+    let mut changed = fresh.clone();
+    changed.capability = CapabilityId::BrowserHeadless;
+    let mut browser = facts();
+    browser.descriptor.capability_id = CapabilityId::BrowserHeadless;
+    assert_eq!(
+        l.authorize_resource_access(
+            &a,
+            &start.id,
+            start.payload_digest,
+            &changed,
+            &browser,
+            MonotonicMillis(2000)
+        ),
+        Err(ErrorCategory::StateConflict)
+    );
+    let mut revised = facts();
+    revised.grant_revision = 8;
+    fresh.grant_revision = 8;
+    assert!(
+        l.authorize_resource_access(
+            &a,
+            &start.id,
+            start.payload_digest,
+            &fresh,
+            &revised,
+            MonotonicMillis(2000)
+        )
+        .is_ok()
+    );
+    l.begin_maintenance();
+    assert!(
+        l.authorize_resource_access(
+            &a,
+            &start.id,
+            start.payload_digest,
+            &fresh,
+            &revised,
+            MonotonicMillis(2000)
+        )
+        .is_ok()
+    );
+    l.revoke_owner(&a).unwrap();
+    assert_eq!(
+        l.authorize_resource_access(
+            &a,
+            &start.id,
+            start.payload_digest,
+            &fresh,
+            &revised,
+            MonotonicMillis(2000)
+        ),
+        Err(ErrorCategory::Unauthorized)
+    );
+}
+
+#[test]
+fn repeated_exit_observations_cannot_keep_ended_unknown_resources_forever() {
+    for terminated in [false, true] {
+        let (mut l, a) = ledger();
+        let r = l
+            .prepare(
+                &a,
+                context(),
+                b"unknown-effect".to_vec(),
+                MonotonicMillis(0),
+            )
+            .unwrap();
+        let _permit = l
+            .dispatch(&a, &r.id, r.payload_digest, &facts(), MonotonicMillis(1))
+            .unwrap();
+        l.mark_result_unknown(&r.id).unwrap();
+        if terminated {
+            l.request_cancel(&a, &r.id, r.payload_digest, MonotonicMillis(2))
+                .unwrap();
+            l.record_executor_fact(
+                &r.id,
+                ExecutorFact::TerminationConfirmed,
+                MonotonicMillis(3),
+            )
+            .unwrap();
+        } else {
+            l.record_executor_fact(
+                &r.id,
+                ExecutorFact::Exited { successful: true },
+                MonotonicMillis(3),
+            )
+            .unwrap();
+        }
+        l.record_executor_fact(&r.id, ExecutorFact::OutputDrained, MonotonicMillis(4))
+            .unwrap();
+        // Polling the same native exit is an observation, not a new terminal event.
+        let again = l
+            .record_executor_fact(
+                &r.id,
+                ExecutorFact::Exited { successful: false },
+                MonotonicMillis(14),
+            )
+            .unwrap();
+        assert_eq!(again.state, OperationState::Unknown);
+        assert_eq!(l.reap(MonotonicMillis(15)), 1);
+        assert_eq!(
+            l.inspect(&a, &r.id, r.payload_digest),
+            Err(ErrorCategory::StaleOperation)
+        );
+    }
+}

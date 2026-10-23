@@ -53,6 +53,7 @@ macro_rules! identity {
 }
 identity!(DeviceId, 128, "._-");
 identity!(GatewayId, 128, "._-");
+identity!(GatewayEpoch, 128, "._-");
 // A wire identity is not authentication evidence.
 identity!(OwnerId, 256, ":._-");
 identity!(HostGeneration, 128, "._-");

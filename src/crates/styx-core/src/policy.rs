@@ -56,7 +56,9 @@ pub fn check_admission(
             return Err(ErrorCategory::SessionDisconnected);
         }
         match facts.session_state {
-            Some(SessionState::Ready) => {}
+            // Degraded is an aggregate session state: another provider may be
+            // unavailable while this exact descriptor is Available + Granted.
+            Some(SessionState::Ready | SessionState::Degraded) => {}
             Some(SessionState::Locked) => return Err(ErrorCategory::SessionLocked),
             Some(SessionState::AuthorizationRequired) => {
                 return Err(ErrorCategory::PermissionRequired);

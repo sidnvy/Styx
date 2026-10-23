@@ -36,6 +36,11 @@ http-body.workspace = true
 http-body-util.workspace = true
 bytes.workspace = true
 
+rustls.workspace = true
+tokio-rustls.workspace = true
+rustls-pemfile.workspace = true
+tokio-tungstenite.workspace = true
+
 [dev-dependencies]
 rmcp = { workspace = true, features = ["client"] }
 

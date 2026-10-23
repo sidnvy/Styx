@@ -2,6 +2,7 @@
 
 - The owner has chosen a Rust rewrite of the Styx-owned core. The execution baseline is `src/docs/rust-core-rewrite/README.md`; the earlier no-Rust decision is superseded. Do not reopen the language choice or keep a hidden JS Gateway/Host/Core as the final runtime.
 - Rewrite by frozen contracts and vertical slices. Mature Codex/Cua/Playwright executors and native Swift/C# OS/UI bridges may remain; Node is allowed only for an explicitly bounded Browser worker, never a second management/policy authority.
+- Follow official Rust/library idioms and use mature dependencies for async I/O, crypto, TLS, HTTP/MCP, serialization and OS bindings. Keep Styx code focused on domain boundaries and adapters; do not hand-roll standard protocols or replace upstream executors. Dependency choice still requires pinned inputs and scenario evidence.
 - Quality is required scenario closure with independent effects, negative controls, recovery and exact artifact evidence. Test/assertion counts and mocks are not platform acceptance. Plan files do not mean implementation or verification has happened.
 - Parallel agents/threads must lease disjoint paths and devices. The integrator owns shared contracts, manifests/locks and Git integration; use the work-item DAG, single writer and immutable candidate policy.
 

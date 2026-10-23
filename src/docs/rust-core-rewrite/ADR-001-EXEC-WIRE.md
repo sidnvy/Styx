@@ -1,6 +1,6 @@
 # ADR-001 · Host admission and legacy Codex wire compatibility
 
-Status: implementation decision after source review, 2026-10-24. The first Rust adapters are real local slices; neither Host v2 nor the legacy frontend below is implemented yet. This does not lower final native or security acceptance.
+Status: implementation decision after source review, 2026-10-24. The Rust Host now has a tested local TLS/WSS start/read slice with bootstrap-preverified owners and explicit negotiation. Full Gateway-issued owner coordination, mutation routes and the legacy frontend below remain incomplete. This does not lower final native or security acceptance.
 
 ## Evidence
 

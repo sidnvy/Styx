@@ -49,7 +49,11 @@
         "http",
         "http-body",
         "http-body-util",
-        "bytes"
+        "bytes",
+        "rustls",
+        "tokio-rustls",
+        "rustls-pemfile",
+        "tokio-tungstenite"
       ]
     },
     "styx": {
@@ -97,6 +101,36 @@
     "ipc::tests::linux::client_child_probe": {
       "kind": "owned_subprocess_helper",
       "parent": "ipc::tests::linux::independent_process_peer_is_kernel_bound_not_client_instance_claim"
+    },
+    "providers::codex::tests::real_codex_raw_page_focused_scenario": {
+      "kind": "explicit_external_runtime",
+      "input": "--codex-bin absolute binary and isolated evidence root",
+      "required_for": "original native cursor/base64 read semantics; not complete Host interop"
+    },
+    "host::coordinator::tests::real_owned_start_read_and_dropped_response_scenario": {
+      "kind": "explicit_external_runtime",
+      "input": "--codex-bin absolute binary and isolated evidence root",
+      "required_for": "Host-owned supervised start/read, dropped response, current authorization; not network/platform acceptance"
+    },
+    "providers::codex::tests::real_codex_continuation_permit_focused_scenario": {
+      "kind": "explicit_external_runtime",
+      "input": "--codex-bin",
+      "required_for": "permit-consuming stdin/termination request and unknown outcome; not Host endpoint acceptance"
+    },
+    "host::protocol::tests::actual_tls_wss_codex_start_read_duplicate_and_lost_response_batch": {
+      "kind": "explicit_external_runtime",
+      "input": "--codex-bin + --tls-fixtures",
+      "required_for": "real local TLS/WSS-to-Host-to-Codex; bootstrap-only owners, read resume unsupported"
+    },
+    "tls::tests::aws_lc_owned_loopback_tls_full_scenario_batch": {
+      "kind": "explicit_test_pki",
+      "input": "--tls-fixtures",
+      "required_for": "strict real TLS connections and pin/name negative controls; no product identity changes"
+    },
+    "host::link::tests::strict_tls_wss_data_heartbeat_limits_close_cleanup_batch": {
+      "kind": "explicit_test_pki",
+      "input": "--tls-fixtures",
+      "required_for": "real WSS framing/heartbeats/capacity/cleanup; not full native platform acceptance"
     }
   },
   "change_policy": "dependency or ignored-test additions require explicit policy review; preserve mature Cargo tooling rather than replacing its resolver/compiler/lints"

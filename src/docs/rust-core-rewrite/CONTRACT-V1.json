@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "revision": 1,
+  "revision": 2,
   "status": "FROZEN_FOR_IMPLEMENTATION",
   "scope": "C01-C08 semantic v1; runtime-format details gated by R24 and service principal by R38",
   "plan": "a21ea757ca9f9ca96769941a31e3f2cb3daab766",
@@ -49,6 +49,7 @@
   "review_corrections": [
     "Independent source review restored all five legacy MCP negotiation versions; no intentional protocol support removal.",
     "Corrected public tool inventory at Gateway wrapping boundary, not upstream provider schema.",
-    "R09 resource-retirement review tightened Rust Core/adapter admission seam with a consumed DispatchPermit; internal callers R07/R09 migrate together, public MCP unchanged."
+    "R09 resource-retirement review tightened Rust Core/adapter admission seam with a consumed DispatchPermit; internal callers R07/R09 migrate together, public MCP unchanged.",
+    "R10 continuation seam: explicit ResourceTarget and not_applicable liveness for request-level actions; ACK never fabricates target process exit. Internal Rust contracts only; public MCP/native Codex unchanged. ADR-002 defines action settlement/retention."
   ]
 }

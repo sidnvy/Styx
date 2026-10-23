@@ -21,7 +21,38 @@ from datetime import datetime, timezone
 ROOT = Path(__file__).resolve().parents[2]
 POLICY = Path(__file__).with_name("rust-dependency-policy.json")
 CRYPTO_TEST = "crypto::tests::legacy_node22_bidirectional_crypto_batch"
-CODEX_TEST = "providers::codex::tests::real_codex_native_stdio_complete_scenario_batch"
+CODEX_TESTS = [
+    ("real-codex", "providers::codex::tests::real_codex_native_stdio_complete_scenario_batch"),
+    ("raw-codex", "providers::codex::tests::real_codex_raw_page_focused_scenario"),
+    ("host-coordinator", "host::coordinator::tests::real_owned_start_read_and_dropped_response_scenario"),
+    ("codex-continuations", "providers::codex::tests::real_codex_continuation_permit_focused_scenario"),
+]
+
+TLS_TESTS = [
+    ("tls-loopback", "tls::tests::aws_lc_owned_loopback_tls_full_scenario_batch"),
+    ("wss-loopback", "host::link::tests::strict_tls_wss_data_heartbeat_limits_close_cleanup_batch"),
+]
+HOST_WIRE_TEST = "host::protocol::tests::actual_tls_wss_codex_start_read_duplicate_and_lost_response_batch"
+
+
+def tls_inputs(directory):
+    root = Path(directory)
+    if not root.is_absolute() or root.resolve() != root or root.is_relative_to(ROOT) or not root.is_dir():
+        raise ValueError("external_test_only_tls_fixtures_required")
+    result = {}
+    for name in ("cert-a.pem", "cert-b.pem", "ca-a.pem", "ca-b.pem", "key-a.pem"):
+        path = root / name
+        if path.is_symlink() or not path.is_file() or path.stat().st_size > 131072:
+            raise ValueError("bounded_regular_test_tls_fixture_required")
+        if name.startswith("key-"):
+            stat = path.stat()
+            if stat.st_mode & 0o077:
+                raise ValueError("private_test_fixture_mode_required")
+            # No private bytes/hashes in the receipt. Tests own private-key parsing.
+            result[name] = {"inode": stat.st_ino, "bytes": stat.st_size, "mtime_ns": stat.st_mtime_ns}
+        else:
+            result[name] = {"sha256": sha(path), "bytes": path.stat().st_size}
+    return result
 
 
 def sha(path):
@@ -199,6 +230,16 @@ def execute(args):
                 crypto = gate.run("node22-crypto", ["cargo", "test", "-p", "styx-runtime", "--locked", "--offline", CRYPTO_TEST, "--", "--ignored", "--exact"], extra_env={"STYX_TEST_NODE22": str(node)})
                 gate.semantic(crypto, [] if "1 passed; 0 failed" in gate.read("node22-crypto") else ["exact_crypto_case_not_executed"])
                 receipt["legacy_node22_interop"] = crypto["status"]
+        receipt["tls_transport_interop"] = "NOT_RUN_explicit_test_pki_not_supplied"
+        if args.tls_fixtures:
+            receipt["tls_fixture_inputs"] = tls_inputs(args.tls_fixtures)
+            receipt["tls_fixture_root"] = args.tls_fixtures
+            receipt["tls_transport_interop"] = {}
+            for name, test_case in TLS_TESTS:
+                check = gate.run(name, ["cargo", "test", "-p", "styx-runtime", "--locked", "--offline", test_case, "--", "--ignored", "--exact", "--nocapture"], timeout=120,
+                    extra_env={"STYX_TEST_TLS_FIXTURES": args.tls_fixtures})
+                gate.semantic(check, [] if "1 passed; 0 failed" in gate.read(name) else ["exact_tls_case_not_executed"])
+                receipt["tls_transport_interop"][name] = check["status"]
         receipt["real_codex_interop"] = "NOT_RUN_explicit_codex_not_supplied"
         if args.codex_bin:
             codex = Path(args.codex_bin)
@@ -206,12 +247,16 @@ def execute(args):
                 raise ValueError("linux_slice_requires_explicit_absolute_codex_executable")
             receipt["codex_input"] = {"path": str(codex), "sha256": sha(codex)}
             gate.run("codex-version", [str(codex), "--version"], timeout=30)
-            exec_root = evidence / "owned-native-exec"
-            exec_root.mkdir(mode=0o700)
-            native = gate.run("real-codex", ["cargo", "test", "-p", "styx-runtime", "--locked", "--offline", CODEX_TEST, "--", "--ignored", "--exact", "--nocapture"], timeout=120,
-                extra_env={"STYX_TEST_CODEX": str(codex), "STYX_TEST_EXEC_ROOT": str(exec_root)})
-            gate.semantic(native, [] if "1 passed; 0 failed" in gate.read("real-codex") else ["exact_real_codex_case_not_executed"])
-            receipt["real_codex_interop"] = native["status"]
+            receipt["real_codex_interop"] = {}
+            native_cases = CODEX_TESTS + ([("host-wire", HOST_WIRE_TEST)] if args.tls_fixtures else [])
+            for name, test_case in native_cases:
+                exec_root = evidence / ("owned-native-" + name)
+                exec_root.mkdir(mode=0o700)
+                native = gate.run(name, ["cargo", "test", "-p", "styx-runtime", "--locked", "--offline", test_case, "--", "--ignored", "--exact", "--nocapture"], timeout=120,
+                    extra_env={"STYX_TEST_CODEX": str(codex), "STYX_TEST_EXEC_ROOT": str(exec_root),
+                        **({"STYX_TEST_TLS_FIXTURES": args.tls_fixtures} if args.tls_fixtures else {})})
+                gate.semantic(native, [] if "1 passed; 0 failed" in gate.read(name) else ["exact_real_codex_case_not_executed"])
+                receipt["real_codex_interop"][name] = native["status"]
         gate.run("python-oracles", [sys.executable, "-W", "error::ResourceWarning", "-m", "unittest", "discover", "-s", "src/acceptance/oracles", "-p", "test_oracles.py", "-v"], timeout=120)
         build = gate.run("cli-build", ["cargo", "build", "-p", "styx", "--locked", "--offline"])
         if build["status"] == "PASS":
@@ -246,15 +291,23 @@ def execute(args):
                 receipt["node22_stability"] = "PASS" if sha(args.node22) == receipt["node22_input"]["sha256"] else "FAIL"
             if args.codex_bin and "codex_input" in receipt:
                 receipt["codex_stability"] = "PASS" if sha(args.codex_bin) == receipt["codex_input"]["sha256"] else "FAIL"
-        except OSError:
+            if args.tls_fixtures and "tls_fixture_inputs" in receipt:
+                receipt["tls_stability"] = "PASS" if tls_inputs(args.tls_fixtures) == receipt["tls_fixture_inputs"] else "FAIL"
+        except (OSError, ValueError):
             receipt["input_stability"] = "FAIL"
+            if args.tls_fixtures:
+                receipt["tls_stability"] = "FAIL"
         required = {"git-head", "git-status", "git-head-end", "git-status-end", "rustc-version", "cargo-version", "dependency-metadata", "format", "clippy", "workspace-tests", "python-oracles", "cli-build", "cli-help", "cli-version", "cli-build-info", "cli-unimplemented-reject"}
         if args.node22:
             required |= {"node22-version", "node22-crypto"}
         if args.codex_bin:
-            required |= {"codex-version", "real-codex"}
+            required |= {"codex-version"} | {name for name, _ in CODEX_TESTS}
+        if args.tls_fixtures:
+            required |= {name for name, _ in TLS_TESTS}
+            if args.codex_bin:
+                required.add("host-wire")
         receipt["missing_required_checks"] = sorted(required - {x["name"] for x in gate.checks})
-        receipt["status"] = "PASS" if not receipt["missing_required_checks"] and gate.checks and all(x["status"] == "PASS" for x in gate.checks) and receipt.get("input_stability") == "PASS" and receipt.get("git_stability") == "PASS" and receipt.get("node22_stability", "PASS") == "PASS" and receipt.get("codex_stability", "PASS") == "PASS" and "failure" not in receipt else "FAIL"
+        receipt["status"] = "PASS" if not receipt["missing_required_checks"] and gate.checks and all(x["status"] == "PASS" for x in gate.checks) and receipt.get("input_stability") == "PASS" and receipt.get("git_stability") == "PASS" and receipt.get("node22_stability", "PASS") == "PASS" and receipt.get("codex_stability", "PASS") == "PASS" and receipt.get("tls_stability", "PASS") == "PASS" and "failure" not in receipt else "FAIL"
         receipt["completed_at"] = now()
         (evidence / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
         print(json.dumps({"status": receipt["status"], "receipt": str(evidence / "receipt.json"), "scope": "foundation_development_only"}), flush=True)
@@ -266,6 +319,7 @@ def main():
     parser.add_argument("--evidence", required=True, help="fresh absolute external evidence directory")
     parser.add_argument("--target-dir", help="absolute external Cargo build cache; reused only by explicit choice")
     parser.add_argument("--node22", help="absolute explicit Node22 executable for real legacy crypto interop")
+    parser.add_argument("--tls-fixtures", help="explicit external test-only PKI directory; never product identity material")
     parser.add_argument("--codex-bin", help="explicit native Codex binary for the Linux owned-executor slice; not platform release acceptance")
     args = parser.parse_args()
     path = Path(args.evidence)

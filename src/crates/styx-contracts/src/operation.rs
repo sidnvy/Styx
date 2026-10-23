@@ -29,6 +29,9 @@ pub enum ExecutionLiveness {
     Running,
     Exited,
     Unknown,
+    /// A request-level action owns no process resource. Never means that its
+    /// target process exited or that an unknown action was rolled back.
+    NotApplicable,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -43,6 +46,14 @@ pub enum Cancellation {
 pub enum DisconnectPolicy {
     RetainForOwner,
     TerminateOnOwnerEnd,
+}
+
+/// Exact original resource reservation. This DTO alone grants no authority.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct ResourceTarget {
+    pub operation_id: OperationId,
+    pub payload_digest: Sha256Digest,
 }
 
 /// A monotonic time relative to the current Host generation; never wall-clock boot time.
