@@ -1,9 +1,10 @@
 // One private maintenance ticket joins a native App to an independent updater.
 // The existing migration owns configuration, trust, native absence and rollback.
 import fs from 'node:fs';
+import {inspectHostPayloadSpace} from './host-payload-space.mjs';
 import path from 'node:path';
 import {createHash,randomBytes} from 'node:crypto';
-import {inspectHostPayloadCandidate,planHostPayloadMigration,applyHostPayloadMigration} from './host-payload-migration.mjs';
+import {inspectHostPayloadCandidate,inspectHostPayloadSpaceItems,planHostPayloadMigration,applyHostPayloadMigration} from './host-payload-migration.mjs';
 import {verifyMacPreviewApp} from '../host/macos-preview-trust.mjs';
 import {requirePrivateDirectory,requirePrivateFile,requirePrivatePaths,ensurePrivateDirectory,openPrivateFile,configureWindowsAclHelper} from '../host/private-storage.mjs';
 import {acquireRecoveryGuard} from './recovery-guard.mjs';
@@ -16,7 +17,7 @@ function syncParent(file){if(process.platform==='win32')return;const fd=fs.openS
 function write(file,value){const tmp=file+'.'+randomBytes(8).toString('hex')+'.tmp',fd=openPrivateFile(tmp);try{fs.writeFileSync(fd,encode(value));fs.fsyncSync(fd)}finally{fs.closeSync(fd)}try{fs.renameSync(tmp,file);syncParent(file)}finally{if(fs.existsSync(tmp))fs.unlinkSync(tmp)}}
 function ticket(d){const f=path.join(root(d),FILE);if(!fs.existsSync(f))return null;const t=read(f);assert(t.schema===1&&t.kind===KIND&&t.stateDir===d&&id(t.ticketId)&&digest(t.token)&&Number.isSafeInteger(t.ownerPid)&&t.ownerPid>0&&Number.isFinite(t.expiresAt),'handoff_invalid_ticket');if(t.preparationOnly===true){assert(['preparing','cancelled'].includes(t.status)&&t.candidate===undefined&&t.candidateBinding===undefined&&t.appPath===undefined,'handoff_invalid_preparation');}else{assert(t.preparationOnly===undefined&&digest(t.candidateBinding)&&t.candidate&&typeof t.candidate==='object','handoff_invalid_ticket');}return t}
 function orphan(d){const f=path.join(d,PREPARE);if(!fs.existsSync(f))return null;const r=read(f);assert(r.kind===KIND&&id(r.transactionId),'handoff_unknown_preparation');return{schema:1,ticketId:r.transactionId,status:'preparing',reason:'handoff_preparation_interrupted',nativeHealth:'NOT RUN',accountAcceptance:'NOT RUN'}}
-function publicTicket(t){return t?{schema:1,ticketId:t.ticketId,status:t.status,phase:t.preparationOnly?'preflight_only':'candidate_bound',...(t.reason?{reason:t.reason}:{}),...(t.preparationOnly?{}:{current:t.candidate.current,target:t.candidate.target}),expiresAt:t.expiresAt,...(t.transactionId?{transactionId:t.transactionId}:{}),nativeHealth:'NOT RUN',accountAcceptance:'NOT RUN',...(t.status==='applied_stopped'?{appPath:t.appPath}: {})}:{schema:1,status:'not_started'}}
+function publicTicket(t){return t?{schema:1,ticketId:t.ticketId,status:t.status,phase:t.preparationOnly?'preflight_only':'candidate_bound',...(t.reason?{reason:t.reason}:{}),...(t.spaceBudget?{spaceBudget:t.spaceBudget}:{}),...(t.preparationOnly?{}:{current:t.candidate.current,target:t.candidate.target}),expiresAt:t.expiresAt,...(t.transactionId?{transactionId:t.transactionId}:{}),nativeHealth:'NOT RUN',accountAcceptance:'NOT RUN',...(t.status==='applied_stopped'?{appPath:t.appPath}: {})}:{schema:1,status:'not_started'}}
 function admission(t){return{schema:1,kind:KIND,stateDir:t.stateDir,ticketId:t.ticketId,token:t.token,pid:t.ownerPid,candidateBinding:t.candidateBinding}}
 function owns(t){const f=path.join(t.stateDir,'advance.lock');let observed;try{observed=read(f)}catch{fail('handoff_admission_changed')}assert(JSON.stringify(observed)===JSON.stringify(admission(t)),'handoff_admission_changed');return f}
 function dead(pid){try{process.kill(pid,0);return false}catch(e){return e.code==='ESRCH'}}
@@ -67,10 +68,15 @@ export async function prepareHostPayloadHandoff({stateDir,bundle,authorize=false
  try{const latest=ticket(stateDir),latestStatus=rolledBack(latest)?.status??latest?.status;assert(!latest||['cancelled','applied_stopped','rolled_back'].includes(latestStatus),'handoff_requires_recovery');save(t);recorded=true;adapters.onPhase?.('preparation_recorded',t);
   const config=read(path.join(stateDir,'deployment.json')),resolve=adapters.resolveApp??resolveApp,app=safeFiles(await resolve({stateDir,config}));assert(bundle===undefined||bundle===app.bundle,'handoff_registered_payload_required');
   const inspect=adapters.inspectCandidate??inspectHostPayloadCandidate,candidate=await inspect({stateDir,bundle:app.bundle});assert(['darwin','win32'].includes(candidate.platform)&&digest(candidate.bindingSha256),'handoff_candidate_invalid');
-  Object.assign(t,{candidateBinding:candidate.bindingSha256,candidate,appPath:app.appPath});delete t.preparationOnly;save(t);adapters.onPhase?.('ticket_prepared',t);try{fd=openPrivateFile(lock)}catch{fail('handoff_management_busy')}fs.writeFileSync(fd,encode(admission(t)));fs.fsyncSync(fd);syncParent(lock);hasAdmission=true;adapters.onPhase?.('admitted',t);
+  const runtimeItems=app.files.map(f=>({path:path.join(runtimeDirectory(t),...f.relative.split('/')),bytes:fs.lstatSync(f.source).size,kind:'updater_runtime'}));
+  const migrationItems=(adapters.inspectSpaceItems??inspectHostPayloadSpaceItems)({stateDir,bundle:app.bundle});
+  const metadataBytes=encode(app.files.map(f=>({...f,sha256:'0'.repeat(64)}))).length+encode(candidate).length;
+  runtimeItems.push({path:path.join(runtimeDirectory(t),'runtime-manifest.json'),bytes:metadataBytes*2,kind:'updater_metadata'});
+  const spaceBudget=inspectHostPayloadSpace([...runtimeItems,...migrationItems],adapters.spaceOptions);
+  Object.assign(t,{spaceBudget,candidateBinding:candidate.bindingSha256,candidate,appPath:app.appPath});delete t.preparationOnly;save(t);adapters.onPhase?.('ticket_prepared',t);try{fd=openPrivateFile(lock)}catch{fail('handoff_management_busy')}fs.writeFileSync(fd,encode(admission(t)));fs.fsyncSync(fd);syncParent(lock);hasAdmission=true;adapters.onPhase?.('admitted',t);
   const next=await inspect({stateDir,bundle:app.bundle});assert(next.bindingSha256===t.candidateBinding,'handoff_candidate_changed');const files=stage(t,app);adapters.onPhase?.('copied',t);
   const verified=safeFiles(await resolve({stateDir,config}));assert(JSON.stringify(verified)===JSON.stringify(app),'handoff_app_changed');checkFiles(t,files,{source:true});const manifest=path.join(runtimeDirectory(t),'runtime-manifest.json');write(manifest,files);t.runtimeManifestSha256=sha(fs.readFileSync(manifest));owns(t);t.status='awaiting_exit';save(t);return publicTicket(t);
- }catch(error){try{if(hasAdmission){owns(t);fs.unlinkSync(lock);syncParent(lock)}if(recorded){t.status='cancelled';t.reason='handoff_preparation_failed';save(t)}}catch{}throw error}finally{if(fd!==undefined)fs.closeSync(fd);guard.close()}
+ }catch(error){try{if(hasAdmission){owns(t);fs.unlinkSync(lock);syncParent(lock)}if(recorded){t.status='cancelled';t.reason=error.code==='host_payload_insufficient_space'?error.code:'handoff_preparation_failed';if(error.budget)t.spaceBudget=error.budget;save(t)}}catch{}throw error}finally{if(fd!==undefined)fs.closeSync(fd);guard.close()}
 }
 export async function executeHostPayloadHandoff({stateDir,ticketId,authorize=false}={},adapters={}){
  assert(authorize===true&&id(ticketId),'explicit_handoff_authorization_required');let t=ticket(stateDir);assert(t?.ticketId===ticketId,'handoff_ticket_changed');if(['applied_stopped','rolled_back'].includes(t.status))return publicTicket(t);assert(['awaiting_exit','blocked','needs_recovery'].includes(t.status),'handoff_requires_recovery');if(!(adapters.ownerDead??dead)(t.ownerPid))return{...publicTicket(t),status:'waiting_for_exit'};

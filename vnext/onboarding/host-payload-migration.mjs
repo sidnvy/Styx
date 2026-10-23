@@ -1,6 +1,7 @@
 // Explicit offline Host payload migration. No process start, credential change,
 // permission grant or automatic publisher adoption is performed here.
 import fs from 'node:fs';
+import {inspectHostPayloadSpace} from './host-payload-space.mjs';
 import path from 'node:path';
 import {createHash,createPublicKey,randomBytes} from 'node:crypto';
 import {validateDeployment} from './deployment-config.mjs';
@@ -152,6 +153,24 @@ function candidateInspection(s,t){
 export function inspectHostPayloadCandidate({stateDir,bundle}={},adapters={}){
  const s=snapshot(stateDir,platformOf(adapters),adapters);return candidateInspection(s,target(s,bundle,adapters));
 }
+// Same verified candidate and managed files as execution, without requiring App exit.
+function migrationSpaceItems(s,t,files){
+ const items=[],destination=path.join(s.root,'releases',t.release.version);
+ if(fs.existsSync(destination)){
+  requirePrivateDirectory(destination);
+  assert(verifySignedRelease(destination,t.pem,{platform:s.platform,arch:process.arch}).sha256===t.release.sha256,'existing_release_conflict');
+ }else for(const relative of [...t.release.manifest.files.map(f=>f.path),'manifest.json','manifest.sig'])items.push({path:path.join(destination,relative),bytes:fs.statSync(path.join(t.bundle,relative)).size,kind:'host_release_stage'});
+ const snapshots=path.join(s.d,'host-payload-migration-snapshots','space-preflight');
+ for(const f of files){items.push({path:path.join(snapshots,f.name+'.before'),bytes:f.before.length,kind:'rollback_before'},{path:path.join(snapshots,f.name+'.after'),bytes:f.after.length,kind:'rollback_after'},{path:f.path+'.atomic-preflight',bytes:f.after.length,kind:'managed_atomic_write'});}
+ const previous=path.join(s.d,JOURNAL);if(fs.existsSync(previous))items.push({path:path.join(snapshots,'previous-journal.json'),bytes:fs.statSync(previous).size,kind:'previous_journal'});
+ // Journals contain the complete candidate and before/after digests, never payload bytes.
+ const metadata=encode({candidate:candidateInspection(s,t),changes:files.map(f=>({name:f.name,path:f.path,beforeSha256:sha(f.before),afterSha256:sha(f.after),beforeMode:f.mode,afterMode:f.afterMode}))}).length;
+ for(const name of [JOURNAL,...LOCKS])items.push({path:path.join(s.d,name+'.atomic-preflight'),bytes:metadata*2,kind:'transaction_metadata'});
+ return items;
+}
+export function inspectHostPayloadSpaceItems({stateDir,bundle}={},adapters={}){
+ const s=snapshot(stateDir,platformOf(adapters),adapters),t=target(s,bundle,adapters);return migrationSpaceItems(s,t,proposed(s,t));
+}
 function checkHandoffAdmission(d,admission){
  assert(admission&&id(admission.ticketId)&&digest(admission.token)&&digest(admission.candidateBinding)&&Number.isSafeInteger(admission.ownerPid)&&admission.ownerPid>1,'host_payload_handoff_admission_invalid');
  const file=path.join(d,'advance.lock'),raw=bytes(file),record=JSON.parse(raw),info=requirePrivateFile(file);
@@ -220,6 +239,7 @@ export async function applyHostPayloadMigration({stateDir,plan,authorize=false}=
  if(plan.publisherReview)adapters={...adapters,publisherReview:plan.publisherReview};
  assert(!fs.existsSync(path.join(stateDir,RECOVERY)),'host_payload_recovery_in_progress');
  const initial=await build(stateDir,plan.bundle,adapters);assert(JSON.stringify(initial.plan)===JSON.stringify(plan),'host_payload_review_stale');
+ inspectHostPayloadSpace(migrationSpaceItems(initial.s,initial.t,initial.files),adapters.spaceOptions);
  const transactionId=randomBytes(16).toString('hex'),held=locks(stateDir,transactionId,{plan,handoffAdmission:adapters.handoffAdmission});let pending=true,j=journal(stateDir);
  try{
   adapters.onPhase?.('locked');

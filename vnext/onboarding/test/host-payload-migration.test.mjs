@@ -14,7 +14,7 @@ import {macLoginRecoveryPlan} from '../macos-login-recovery.mjs';
 import {observeMacHostPayloadAbsence} from '../host-payload-native.mjs';
 import {observeLinuxHostPayloadAbsence} from '../host-payload-linux.mjs';
 import {stageSignedRelease,activateRelease,refreshVerifiedBootstrap,activeRelease} from '../../host/installer.mjs';
-import {planHostPublisherTransition,planHostPayloadMigration,applyHostPayloadMigration,rollbackHostPayloadMigration,readHostPayloadMigration,inspectHostPayloadCandidate} from '../host-payload-migration.mjs';
+import {planHostPublisherTransition,planHostPayloadMigration,applyHostPayloadMigration,rollbackHostPayloadMigration,readHostPayloadMigration,inspectHostPayloadCandidate,inspectHostPayloadSpaceItems} from '../host-payload-migration.mjs';
 const sha=x=>createHash('sha256').update(x).digest('hex');
 const key=()=>generateKeyPairSync('ed25519');
 const pem=k=>k.publicKey.export({type:'spki',format:'pem'});
@@ -290,4 +290,20 @@ test('macOS login absence is review-bound and mid-transaction preference drift r
  await assert.rejects(applyHostPayloadMigration({stateDir:f.stateDir,plan,authorize:true},{...f.adapters,onPhase:phase=>{if(phase==='written_pointer')f.override(true)}}),/explicit_rollback_required/);
  const j=readHostPayloadMigration({stateDir:f.stateDir});assert.equal(j.status,'uncertain');assert(fs.existsSync(path.join(f.stateDir,'advance.lock')));
  await assert.rejects(rollback(f,j.transactionId),/rollback_interrupted/);f.override(false);await rollback(f,j.transactionId);unchanged(before);
+});
+test('insufficient migration space refuses before staging or active pointer writes',async t=>{
+ const f=fixture(t),before=fs.readFileSync(path.join(f.root,'active.json')),plan=await planHostPayloadMigration({stateDir:f.stateDir,bundle:f.candidate},f.adapters);
+ await assert.rejects(applyHostPayloadMigration({stateDir:f.stateDir,plan,authorize:true},{...f.adapters,spaceOptions:{observeVolume:()=>({volumeId:'small',blockSize:4096,availableBytes:0})}}),e=>e.code==='host_payload_insufficient_space');
+ assert.deepEqual(fs.readFileSync(path.join(f.root,'active.json')),before);assert.equal(fs.existsSync(path.join(f.root,'releases','0.2.0-next')),false);assert.equal(fs.existsSync(path.join(f.stateDir,'advance.lock')),false);
+});
+
+test('verified already-staged target is reused in the incremental disk budget',async t=>{
+ const f=fixture(t);const before=inspectHostPayloadSpaceItems({stateDir:f.stateDir,bundle:f.candidate},f.adapters);assert.ok(before.some(i=>i.kind==='host_release_stage'));
+ stageSignedRelease({sourceDir:f.candidate,installRoot:f.root,publicKeyPem:pem(f.nextKey),...f.opts});
+ const after=inspectHostPayloadSpaceItems({stateDir:f.stateDir,bundle:f.candidate},f.adapters);assert.ok(!after.some(i=>i.kind==='host_release_stage'));assert.ok(after.some(i=>i.kind==='rollback_before'));
+});
+test('space lost after preflight preserves the existing transaction and allows explicit rollback',async t=>{
+ const f=fixture(t),before=fs.readFileSync(path.join(f.root,'active.json')),plan=await planHostPayloadMigration({stateDir:f.stateDir,bundle:f.candidate},f.adapters);
+ await assert.rejects(applyHostPayloadMigration({stateDir:f.stateDir,plan,authorize:true},{...f.adapters,onPhase:phase=>{if(phase==='prepared')t.mock.method(fs,'writeFileSync',()=>{throw Object.assign(Error('disk full'),{code:'ENOSPC'})},{times:1})}}),/host_payload_interrupted_explicit_rollback_required/);
+ const journal=readHostPayloadMigration({stateDir:f.stateDir});assert.equal(journal.status,'uncertain');assert.equal(fs.existsSync(path.join(f.stateDir,'advance.lock')),true);await rollback(f,journal.transactionId);assert.deepEqual(fs.readFileSync(path.join(f.root,'active.json')),before);
 });
