@@ -1,6 +1,6 @@
 # ADR-002 · Continuation authority and action settlement
 
-Status: accepted implementation decision, 2026-10-24. The first Host slice is start/read. Core target-bound actions and Codex permit-consuming continuation adapters are implemented; their Host routes and physical resource archival remain incomplete.
+Status: accepted implementation decision, 2026-10-24. Core target-bound actions, Codex permit-consuming continuation adapters and Host/WSS prepare-dispatch-inspect routes are implemented. Physical resource archival remains incomplete.
 
 ## Problem and decision
 
@@ -20,7 +20,7 @@ Core-attested physical retirement of provider buffers after ambiguous stdin is a
 
 ## Callers and verification impact
 
-Core gains additive targeted prepare/dispatch/action-fact APIs. Codex continuation APIs must later consume the target-bound permit and exact immutable action bytes; current owner-only write/cancel helpers are not advertised as the completed strong boundary. Host start/read composition remains unchanged and cannot expose a continuation prematurely.
+Core gains additive targeted prepare/dispatch/action-fact APIs. Codex continuation APIs consume the target-bound permit and exact immutable action bytes; legacy owner-only write helpers are test-private. Host-owned jobs consume permits and preserve independent action ACK versus process exit/drain. Bootstrap fixture owners do not discharge Gateway-issued owner coordination.
 
 Required counterexamples: A-owner action on B-resource, same-epoch re-registration, target action mistaken for a process, changed payload or target, grant revoked between prepare/dispatch, duplicate action, ACK while target still runs, unknown action followed by target exit with unknown history unchanged, retention while target live, and metadata/resource archival ordering. Mock contract checks do not replace real stdin effect and cancellation observations through the eventual integrated Host.
 

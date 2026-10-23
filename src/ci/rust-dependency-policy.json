@@ -53,7 +53,11 @@
         "rustls",
         "tokio-rustls",
         "rustls-pemfile",
-        "tokio-tungstenite"
+        "tokio-tungstenite",
+        "hyper",
+        "hyper-util",
+        "tower",
+        "reqwest"
       ]
     },
     "styx": {
@@ -131,6 +135,21 @@
       "kind": "explicit_test_pki",
       "input": "--tls-fixtures",
       "required_for": "real WSS framing/heartbeats/capacity/cleanup; not full native platform acceptance"
+    },
+    "gateway::http::tests::official_sdk_tcp_auth_sessions_limits_and_pending_close": {
+      "kind": "owned_loopback_sdk_fixture",
+      "input": "fresh external STYX_TEST_HTTP_ROOT allocated by gate",
+      "required_for": "official Streamable HTTP session/auth/close; counter backend only, not native/account acceptance"
+    },
+    "host::coordinator::tests::real_host_action_nonce_drop_ticket_and_terminate_scenario": {
+      "kind": "explicit_external_runtime",
+      "input": "--codex-bin and owned evidence root",
+      "required_for": "Core-admitted Host stdin/termination and dropped ticket; actual native effect and separate exit/drain"
+    },
+    "host::protocol::tests::actual_canonical_tls_wss_host_action_journey": {
+      "kind": "explicit_external_runtime",
+      "input": "--codex-bin + --tls-fixtures",
+      "required_for": "canonical OwnedExecHost WSS action path; bootstrap owner only, no final account/pairing claim"
     }
   },
   "change_policy": "dependency or ignored-test additions require explicit policy review; preserve mature Cargo tooling rather than replacing its resolver/compiler/lints"

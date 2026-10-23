@@ -3,6 +3,7 @@
 //! bounded-body/method admission, and coordinate owner shutdown. This module
 //! alone does not claim a deployed Gateway, WSS relay or persistent enrollment.
 pub mod auth;
+pub mod http;
 pub mod mcp;
 
 use auth::{GatewayAuthError, GatewayBearerPolicy};
@@ -26,7 +27,7 @@ static INSTRUCTIONS: LazyLock<String> = LazyLock::new(|| {
 /// one. No socket, native executor or desktop operation starts here.
 pub fn authenticated_mcp_session<B: GatewayToolBackend>(
     policy: &GatewayBearerPolicy,
-    headers: &http::HeaderMap,
+    headers: &::http::HeaderMap,
     backend: Arc<B>,
 ) -> Result<GatewayMcp<B>, GatewayAuthError> {
     let principal = policy.authorize(headers)?;

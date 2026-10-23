@@ -65,6 +65,10 @@ impl VerifiedGatewayOwner {
     }
 }
 impl AuthenticatedGatewayPrincipal {
+    /// Exact service-principal binding, not a client-supplied owner claim.
+    pub fn matches_owner(&self, owner: &VerifiedGatewayOwner) -> bool {
+        verify_slices_are_equal(self.digest.as_bytes(), owner.principal.as_bytes()).is_ok()
+    }
     /// Factory is confined to Gateway adapters after an authenticated ingress.
     pub(super) fn new_mcp_session_owner(&self) -> VerifiedGatewayOwner {
         VerifiedGatewayOwner {

@@ -1,11 +1,17 @@
 //! Private, explicitly negotiated Host protocol slice. Not public MCP and not
-//! complete Host v2: only bootstrap-preverified owners and prepare/start/read.
+//! complete Host v2: owners are still bootstrap-preverified; resource reads
+//! are not resumable. Every mutation uses separate Host prepare/dispatch.
 //! Connection loss never shuts down the coordinator/executor or replays reads.
 use super::{
-    coordinator::{CoordinatorError, HostAuthority, HostCoordinator, StartSubmission},
+    coordinator::{
+        ActionSubmission, CoordinatorError, HostAuthority, HostCoordinator, StartSubmission,
+    },
     link::{HostWssLink, LinkEndpoint},
 };
-use crate::providers::codex::{DispatchEvidence, StartProcess};
+use crate::providers::codex::{
+    ActionAcknowledgment, ActionEvidence, ActionReceipt, DispatchEvidence, ProcessAction,
+    StartProcess,
+};
 use serde::{Deserialize, Serialize};
 use std::{collections::BTreeMap, io::Write, time::Duration};
 use styx_contracts::{
@@ -86,6 +92,23 @@ enum Call<'a> {
         max_bytes: u32,
         wait_ms: u32,
     },
+    PrepareAction {
+        owner: OwnerRef,
+        target: ResourceTarget,
+        grant_revision: u64,
+        timeout_ms: u32,
+        #[serde(borrow)]
+        action: &'a serde_json::value::RawValue,
+    },
+    DispatchAction {
+        owner: OwnerRef,
+        action: ActionRef,
+    },
+    InspectAction {
+        owner: OwnerRef,
+        action: ActionRef,
+    },
+    // Direct native mutations have no authority; use Host prepare+dispatch.
     Write {},
     Terminate {},
 }
@@ -95,10 +118,17 @@ struct OwnerRef {
     owner_id: OwnerId,
     owner_epoch: OwnerEpoch,
 }
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ActionRef {
+    operation_id: OperationId,
+    payload_digest: Sha256Digest,
+}
 #[derive(Serialize)]
 struct Snapshot {
     operation_id: OperationId,
     payload_digest: Sha256Digest,
+    target: Option<ResourceTarget>,
     state: OperationState,
     liveness: ExecutionLiveness,
     output_drain: OutputDrain,
@@ -108,6 +138,7 @@ impl From<OperationSnapshot> for Snapshot {
         Self {
             operation_id: value.id,
             payload_digest: value.payload_digest,
+            target: value.target,
             state: value.state,
             liveness: value.liveness,
             output_drain: value.output_drain,
@@ -128,7 +159,7 @@ enum Reply {
         device_id: DeviceId,
         host_generation: HostGeneration,
         connection_generation: ConnectionGeneration,
-        features: [&'static str; 4],
+        features: &'static [&'static str],
         write: bool,
         terminate: bool,
         read_resume: bool,
@@ -151,6 +182,12 @@ enum Reply {
         exit_code: Option<i32>,
         read_resume: bool,
     },
+    Action {
+        snapshot: Snapshot,
+        dispatch: &'static str,
+        acknowledgment: Option<ActionAcknowledgmentDto>,
+        write_id: Option<String>,
+    },
     Unsupported {
         feature: &'static str,
     },
@@ -159,6 +196,45 @@ enum Reply {
         certainty: ExecutionCertainty,
         cursor_may_be_consumed: bool,
     },
+}
+#[derive(Serialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+enum ActionAcknowledgmentDto {
+    WriteAccepted,
+    // Request acknowledgment, never process-exit proof.
+    TerminateRequested { was_running: bool },
+}
+fn action_reply(
+    snapshot: OperationSnapshot,
+    receipt: Option<ActionReceipt>,
+    existing: bool,
+) -> Reply {
+    let dispatch = if existing {
+        "existing_no_replay"
+    } else {
+        match receipt.as_ref().map(|r| r.evidence) {
+            Some(ActionEvidence::Acknowledged) => "acknowledged",
+            Some(ActionEvidence::NotDispatched) => "not_dispatched",
+            Some(ActionEvidence::Unknown) | None => "unknown",
+        }
+    };
+    let acknowledgment = receipt
+        .as_ref()
+        .and_then(|r| r.acknowledgment.as_ref())
+        .map(|ack| match ack {
+            ActionAcknowledgment::WriteAccepted => ActionAcknowledgmentDto::WriteAccepted,
+            ActionAcknowledgment::TerminateRequested { was_running } => {
+                ActionAcknowledgmentDto::TerminateRequested {
+                    was_running: *was_running,
+                }
+            }
+        });
+    Reply::Action {
+        snapshot: snapshot.into(),
+        dispatch,
+        acknowledgment,
+        write_id: receipt.and_then(|r| r.write_id),
+    }
 }
 #[derive(Serialize)]
 struct Response {
@@ -368,6 +444,84 @@ impl<'a> HostProtocol<'a> {
                     Err(e) => coordinator_error(e, true),
                 }
             }
+            Call::PrepareAction {
+                owner,
+                target,
+                grant_revision,
+                timeout_ms,
+                action,
+            } => {
+                if action.get().len() > SPEC_LIMIT {
+                    return invalid();
+                }
+                let owner = match self.owner(&owner) {
+                    Ok(v) => v,
+                    Err(e) => return rejection(e),
+                };
+                let context = match self.context(grant_revision, timeout_ms) {
+                    Ok(v) => v,
+                    Err(e) => return rejection(e),
+                };
+                let action: ProcessAction = match serde_json::from_str(action.get()) {
+                    Ok(v) => v,
+                    Err(_) => return invalid(),
+                };
+                match self
+                    .coordinator
+                    .prepare_action(owner, target, context, &action)
+                {
+                    Ok(v) => Reply::Prepared { snapshot: v.into() },
+                    Err(e) => coordinator_error(e, false),
+                }
+            }
+            Call::DispatchAction { owner, action } => {
+                let owner = match self.owner(&owner) {
+                    Ok(v) => v,
+                    Err(e) => return rejection(e),
+                };
+                match self.coordinator.dispatch_action(
+                    owner,
+                    &action.operation_id,
+                    action.payload_digest,
+                ) {
+                    Ok(ActionSubmission::Existing(snapshot)) => {
+                        match self.coordinator.lookup_action(
+                            owner,
+                            &action.operation_id,
+                            action.payload_digest,
+                        ) {
+                            Ok(receipt) => action_reply(snapshot, receipt, true),
+                            Err(e) => coordinator_error(e, false),
+                        }
+                    }
+                    Ok(ActionSubmission::Submitted(ticket)) => match ticket.wait().await {
+                        Ok(v) => action_reply(v.snapshot, Some(v.receipt), false),
+                        Err(e) => coordinator_error(e, false),
+                    },
+                    Err(e) => coordinator_error(e, false),
+                }
+            }
+            Call::InspectAction { owner, action } => {
+                let owner = match self.owner(&owner) {
+                    Ok(v) => v,
+                    Err(e) => return rejection(e),
+                };
+                match self.coordinator.inspect_action(
+                    owner,
+                    &action.operation_id,
+                    action.payload_digest,
+                ) {
+                    Ok(snapshot) => match self.coordinator.lookup_action(
+                        owner,
+                        &action.operation_id,
+                        action.payload_digest,
+                    ) {
+                        Ok(receipt) => action_reply(snapshot, receipt, true),
+                        Err(e) => coordinator_error(e, false),
+                    },
+                    Err(e) => coordinator_error(e, false),
+                }
+            }
             Call::Write {} => Reply::Unsupported { feature: "write" },
             Call::Terminate {} => Reply::Unsupported {
                 feature: "terminate",
@@ -422,9 +576,17 @@ impl<'a> HostProtocol<'a> {
                             device_id: self.profile.device_id.clone(),
                             host_generation: self.profile.host_generation.clone(),
                             connection_generation: generation.clone(),
-                            features: ["prepare_start", "dispatch_start", "inspect_start", "read"],
-                            write: false,
-                            terminate: false,
+                            features: &[
+                                "prepare_start",
+                                "dispatch_start",
+                                "inspect_start",
+                                "read",
+                                "prepare_action",
+                                "dispatch_action",
+                                "inspect_action",
+                            ],
+                            write: true,
+                            terminate: true,
                             read_resume: false,
                             owner_issuance: "bootstrap_preverified_only",
                         }

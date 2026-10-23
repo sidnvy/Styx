@@ -1,8 +1,9 @@
-//! Host-owned start/read composition. No network DTO can construct control authority.
-//! Continuation mutations, resource archival and legacy raw-wire mode are not exposed.
+//! Host-owned start/read/targeted-action composition.
+//! No network DTO can construct control authority. Resource archival and legacy
+//! raw-wire mode remain outside this composition.
 use crate::providers::codex::{
-    CleanupReceipt, CodexStdio, DispatchEvidence, ExecError, ProcessOutput, StartProcess,
-    TerminationEvidence,
+    ActionEvidence, ActionReceipt, CleanupReceipt, CodexStdio, DispatchEvidence, ExecError,
+    ProcessAction, ProcessOutput, StartProcess, TerminationEvidence,
 };
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
@@ -81,6 +82,25 @@ impl StartTicket {
 }
 pub enum StartSubmission {
     Submitted(StartTicket),
+    Existing(OperationSnapshot),
+}
+#[derive(Debug)]
+pub struct ActionCompletion {
+    pub snapshot: OperationSnapshot,
+    pub receipt: ActionReceipt,
+}
+pub struct ActionTicket {
+    response: oneshot::Receiver<Result<ActionCompletion, CoordinatorError>>,
+}
+impl ActionTicket {
+    pub async fn wait(self) -> Result<ActionCompletion, CoordinatorError> {
+        self.response
+            .await
+            .map_err(|_| CoordinatorError::ResponseLost)?
+    }
+}
+pub enum ActionSubmission {
+    Submitted(ActionTicket),
     Existing(OperationSnapshot),
 }
 #[derive(Debug)]
@@ -247,6 +267,138 @@ impl HostCoordinator {
             response: receiver,
         }))
     }
+    /// Reserve an independent, immutable action against an exact original
+    /// resource. First dispatch rechecks fresh policy, target and deadline.
+    pub fn prepare_action(
+        &self,
+        owner: &OwnerLease,
+        target: ResourceTarget,
+        context: PreparedContext,
+        action: &ProcessAction,
+    ) -> Result<OperationSnapshot, CoordinatorError> {
+        let payload = action.to_operation_payload()?;
+        let mut state = self.inner.state.lock().expect("Host state mutex");
+        if state.shutting_down {
+            return Err(CoordinatorError::Busy);
+        }
+        Ok(state
+            .ledger
+            .prepare_targeted(owner, target, context, payload, self.now())?)
+    }
+    /// Commit one action before returning a response ticket. Receiver loss does
+    /// not cancel the supervised job or permit a second dispatch.
+    pub fn dispatch_action(
+        &self,
+        owner: &OwnerLease,
+        id: &OperationId,
+        digest: Sha256Digest,
+    ) -> Result<ActionSubmission, CoordinatorError> {
+        {
+            let state = self.inner.state.lock().expect("Host state mutex");
+            let snapshot = state.ledger.inspect(owner, id, digest)?;
+            if snapshot.target.is_none() {
+                return Err(ErrorCategory::StateConflict.into());
+            }
+            if snapshot.state != OperationState::Reserved {
+                return Ok(ActionSubmission::Existing(snapshot));
+            }
+        }
+        let runtime = tokio::runtime::Handle::try_current().map_err(|_| CoordinatorError::Busy)?;
+        let slot = self
+            .inner
+            .slots
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| CoordinatorError::Busy)?;
+        let mut state = self.inner.state.lock().expect("Host state mutex");
+        if state.shutting_down {
+            return Err(CoordinatorError::Busy);
+        }
+        let facts = state.facts.clone();
+        let permit = match state
+            .ledger
+            .dispatch(owner, id, digest, &facts, self.now())?
+        {
+            DispatchDisposition::Existing(snapshot) => {
+                return Ok(ActionSubmission::Existing(snapshot));
+            }
+            DispatchDisposition::ExecuteOnce(permit) => permit,
+        };
+        let (response, receiver) = oneshot::channel();
+        let inner = self.inner.clone();
+        let operation = id.clone();
+        let mut guard = UnsettledAction {
+            inner: inner.clone(),
+            operation: operation.clone(),
+            settled: false,
+        };
+        let mut jobs = self.inner.jobs.lock().expect("Host jobs mutex");
+        while jobs.try_join_next().is_some() {}
+        jobs.spawn_on(
+            async move {
+                let _slot = slot;
+                let receipt = run_action(&inner.adapter, permit).await;
+                let fact = match receipt.evidence {
+                    ActionEvidence::Acknowledged => ActionResult::Acknowledged,
+                    ActionEvidence::NotDispatched => ActionResult::NotDispatched,
+                    ActionEvidence::Unknown => ActionResult::Unknown,
+                };
+                let mut state = inner.state.lock().expect("Host state mutex");
+                let settled = state
+                    .ledger
+                    .record_action_result(&operation, fact, inner.now());
+                guard.settled = settled.is_ok();
+                drop(state);
+                // Explicitly move/drop the WHOLE guard inside this supervised task;
+                // Rust disjoint-field capture must not leave the guard in the caller.
+                drop(guard);
+                let _ = response.send(
+                    settled
+                        .map(|snapshot| ActionCompletion { snapshot, receipt })
+                        .map_err(CoordinatorError::from),
+                );
+            },
+            &runtime,
+        );
+        drop(jobs);
+        drop(state);
+        Ok(ActionSubmission::Submitted(ActionTicket {
+            response: receiver,
+        }))
+    }
+    /// Read existing action history, never another dispatch instruction.
+    pub fn inspect_action(
+        &self,
+        owner: &OwnerLease,
+        id: &OperationId,
+        digest: Sha256Digest,
+    ) -> Result<OperationSnapshot, CoordinatorError> {
+        let state = self.inner.state.lock().expect("Host state mutex");
+        let snapshot = state.ledger.inspect(owner, id, digest)?;
+        if snapshot.target.is_none() {
+            return Err(ErrorCategory::StateConflict.into());
+        }
+        Ok(snapshot)
+    }
+    /// Optional provider receipt under current Core owner authority. None only
+    /// means no retained provider receipt; it never proves that I/O did not occur.
+    pub fn lookup_action(
+        &self,
+        owner: &OwnerLease,
+        id: &OperationId,
+        digest: Sha256Digest,
+    ) -> Result<Option<ActionReceipt>, CoordinatorError> {
+        let state = self.inner.state.lock().expect("Host state mutex");
+        let snapshot = state.ledger.inspect(owner, id, digest)?;
+        if snapshot.target.is_none() {
+            return Err(ErrorCategory::StateConflict.into());
+        }
+        match self.inner.adapter.lookup_action(owner, id) {
+            Ok(receipt) => Ok(Some(receipt)),
+            Err(ExecError::UnknownHandle) => Ok(None),
+            Err(error) => Err(error.into()),
+        }
+    }
     pub fn inspect_start(
         &self,
         owner: &OwnerLease,
@@ -355,6 +507,55 @@ impl HostCoordinator {
             .authorize_resource_access(owner, id, digest, context, &state.facts, self.now())
             .map_err(CoordinatorError::OutputDeliveryDenied)?;
         Ok(output)
+    }
+}
+async fn run_action(adapter: &CodexStdio, permit: DispatchPermit) -> ActionReceipt {
+    let refused = |error| ActionReceipt {
+        operation: permit.id().clone(),
+        target: permit.target().cloned(),
+        evidence: ActionEvidence::NotDispatched,
+        write_id: None,
+        acknowledgment: None,
+        cause: Some(error),
+    };
+    let Some(target) = permit.target() else {
+        return refused(ExecError::InvalidRequest);
+    };
+    if permit.payload().len() > 131072 {
+        return refused(ExecError::InvalidRequest);
+    }
+    let action: ProcessAction = match serde_json::from_slice(permit.payload()) {
+        Ok(action) => action,
+        Err(_) => return refused(ExecError::InvalidRequest),
+    };
+    let handle = match adapter
+        .lookup_operation(permit.owner(), &target.operation_id)
+        .await
+    {
+        Ok(handle) if handle.operation() == &target.operation_id => handle,
+        Ok(_) => return refused(ExecError::OwnerMismatch),
+        Err(error) => return refused(error),
+    };
+    match action {
+        ProcessAction::WriteStdin { .. } => adapter.write(permit, &handle).await,
+        ProcessAction::Terminate {} => adapter.terminate(permit, &handle).await,
+    }
+}
+struct UnsettledAction {
+    inner: Arc<Inner>,
+    operation: OperationId,
+    settled: bool,
+}
+impl Drop for UnsettledAction {
+    fn drop(&mut self) {
+        if !self.settled {
+            let mut state = self.inner.state.lock().expect("Host state mutex");
+            let _ = state.ledger.record_action_result(
+                &self.operation,
+                ActionResult::Unknown,
+                self.inner.now(),
+            );
+        }
     }
 }
 struct UnsettledStart {

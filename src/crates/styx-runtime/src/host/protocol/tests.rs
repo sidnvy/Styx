@@ -459,3 +459,343 @@ async fn actual_tls_wss_codex_start_read_duplicate_and_lost_response_batch() {
         "actual TLS/WSS→HostCoordinator→same owned Codex batch PASS: no unsolicited hello/version1 rejected; bootstrap-only owner; normal nonce+exit0/drain; duplicate/digest/owner negative controls; actual start/read response disconnects retained no-replay, fresh connections same Host/executor; lost read output not claimed restored; independent two nonce files append exactly once; owned cleanup reaped+joined; all Host bytes returned; fixture preverified owners are not real-account issuance"
     );
 }
+
+/// New targeted-action journey only. Owners are explicitly preverified by this
+/// isolated bootstrap; this is not real-account issuance or legacy compatibility.
+#[tokio::test]
+#[ignore = "requires isolated STYX_TEST_CODEX/STYX_TEST_EXEC_ROOT/STYX_TEST_TLS_FIXTURES; new canonical WSS action journey only"]
+async fn actual_canonical_tls_wss_host_action_journey() {
+    use crate::host::bootstrap::OwnedExecHost;
+    use base64::{Engine as _, engine::general_purpose::STANDARD};
+    let root = PathBuf::from(std::env::var("STYX_TEST_EXEC_ROOT").unwrap())
+        .join(uuid::Uuid::new_v4().to_string());
+    std::fs::create_dir_all(root.join("codex-home")).unwrap();
+    let host = Arc::new(
+        OwnedExecHost::spawn(
+            OwnedExecutorConfig {
+                binary: std::env::var("STYX_TEST_CODEX").unwrap().into(),
+                cwd: root.clone(),
+                environment: BTreeMap::from([
+                    ("PATH".into(), "/usr/bin:/bin".into()),
+                    ("HOME".into(), root.display().to_string()),
+                    (
+                        "CODEX_HOME".into(),
+                        root.join("codex-home").display().to_string(),
+                    ),
+                ]),
+                rpc_timeout: Duration::from_secs(2),
+                retained_process_limit: 4,
+            },
+            HostGeneration::try_from("protocol-action-host-generation").unwrap(),
+            facts(),
+            2,
+        )
+        .await
+        .unwrap(),
+    );
+    let expected_unreserved =
+        styx_contracts::HOST_QUEUED_BYTES - 16 * 1024 * 1024 - 8 * 1024 * 1024 - LINK_BYTES;
+    assert_eq!(host.unreserved_queued_bytes(), expected_unreserved);
+    let worker_host = host.clone();
+    let worker_root = root.clone();
+    // The test retains bootstrap authority outside the worker, so an assertion
+    // failure still reaches explicit owned executor cleanup.
+    let worker = tokio::spawn(async move {
+        let host = worker_host;
+        let root = worker_root;
+        let pkidir = PathBuf::from(std::env::var("STYX_TEST_TLS_FIXTURES").unwrap());
+        let ca = std::fs::read(pkidir.join("ca-a.pem")).unwrap();
+        let cert = std::fs::read(pkidir.join("cert-a.pem")).unwrap();
+        let key = PrivateKeyPem::from_protected_reader_bytes(
+            std::fs::read(pkidir.join("key-a.pem")).unwrap(),
+        )
+        .unwrap();
+        let ca_der = rustls_pemfile::certs(&mut std::io::Cursor::new(&ca))
+            .next()
+            .unwrap()
+            .unwrap();
+        let leaf_der = rustls_pemfile::certs(&mut std::io::Cursor::new(&cert))
+            .next()
+            .unwrap()
+            .unwrap();
+        let leaf = GatewayLeafPin::from_certificate_der(&leaf_der);
+        let server = Arc::new(GatewayServerTls::from_pem(&cert, &key, leaf.clone()).unwrap());
+        drop(key);
+        let listener = Arc::new(TcpListener::bind("127.0.0.1:0").await.unwrap());
+        let endpoint = format!(
+            "wss://localhost:{}/host-actions",
+            listener.local_addr().unwrap().port()
+        );
+        let mut protocol = host
+            .protocol(TrustedProfile {
+                endpoint: endpoint.clone(),
+                gateway_namespace: GatewayId::try_from("gateway-fixture-a").unwrap(),
+                gateway_epoch: GatewayEpoch::try_from("gateway-epoch-a").unwrap(),
+                device_id: facts().device_id,
+                host_generation: HostGeneration::try_from("protocol-action-host-generation")
+                    .unwrap(),
+            })
+            .unwrap();
+        protocol
+            .register_bootstrap_verified_owner(
+                OwnerId::try_from("fixture:owner-a").unwrap(),
+                OwnerEpoch::try_from("owner-epoch-a").unwrap(),
+            )
+            .unwrap();
+        let fixture = Fixture {
+            listener,
+            server,
+            tls: GatewayClientTls::from_pinned_ca_pem(
+                &ca,
+                TrustAnchorPin::from_certificate_der(&ca_der),
+                Some(leaf),
+            )
+            .unwrap(),
+            endpoint: LinkEndpoint::parse(&endpoint).unwrap(),
+            bearer: SecretBearer::from_protected_reader("isolated-action-fixture-bearer".into())
+                .unwrap(),
+            budget: host.link_budget(),
+            root: root.clone(),
+            nonce: uuid::Uuid::new_v4().to_string(),
+        };
+        let listener = fixture.listener.clone();
+        let server = fixture.server.clone();
+        let root = fixture.root.clone();
+        let nonce = fixture.nonce.clone();
+        let gateway = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let tls = server.accept(tcp, Duration::from_secs(2)).await.unwrap();
+            let mut ws = accept_async(tls).await.unwrap();
+            assert!(
+                tokio::time::timeout(Duration::from_millis(30), ws.next())
+                    .await
+                    .is_err()
+            );
+            // The Gateway receives neither the Host's local generation nor a
+            // clone; only the actual negotiation response can supply it.
+            ws.send(envelope("",json!({"method":"negotiate","version":2,"challenge":"action-wire-fixture-challenge","gateway_namespace":"gateway-fixture-a","gateway_epoch":"gateway-epoch-a"}))).await.unwrap();
+            let negotiated = tokio::time::timeout(Duration::from_secs(3), ws.next())
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap();
+            let negotiated: Value = serde_json::from_str(negotiated.to_text().unwrap()).unwrap();
+            let generation = negotiated["reply"]["connection_generation"]
+                .as_str()
+                .unwrap()
+                .to_owned();
+            assert_eq!(negotiated["connection_generation"], generation);
+            assert_eq!(
+                negotiated["reply"]["challenge"],
+                "action-wire-fixture-challenge"
+            );
+            assert_eq!(
+                negotiated["reply"]["host_generation"],
+                "protocol-action-host-generation"
+            );
+            assert_eq!(
+                negotiated["reply"]["owner_issuance"],
+                "bootstrap_preverified_only"
+            );
+            assert_eq!(negotiated["reply"]["write"], true);
+            assert_eq!(negotiated["reply"]["terminate"], true);
+            let mut process = spec(&root, "unused", "unused");
+            process["argv"] = json!([
+                "/bin/sh",
+                "-c",
+                "read -r line; printf '%s\\n' \"$line\" >> wss-action-effect; printf WSS_ACTION_ACK; read -r hold"
+            ]);
+            let prepared=call(&mut ws,&generation,json!({"method":"prepare_start","owner":owner(),"grant_revision":1,"timeout_ms":10000,"spec":process})).await;
+            assert_eq!(prepared["status"], "prepared");
+            let resource = json!({"operation_id":prepared["snapshot"]["operation_id"],"payload_digest":prepared["snapshot"]["payload_digest"]});
+            let started = call(
+                &mut ws,
+                &generation,
+                json!({"method":"dispatch_start","owner":owner(),"target":resource}),
+            )
+            .await;
+            assert_eq!(started["dispatch"], "started");
+            assert!(!root.join("wss-action-effect").exists());
+            let input =
+                json!({"kind":"write_stdin","input_base64":STANDARD.encode(format!("{nonce}\n"))});
+            let unknown = json!({"owner_id":"unregistered-owner","owner_epoch":"owner-epoch-a"});
+            let denied=call(&mut ws,&generation,json!({"method":"prepare_action","owner":unknown,"target":resource,"grant_revision":1,"timeout_ms":10000,"action":input})).await;
+            assert_eq!(denied["category"], "UNAUTHORIZED");
+            let mut bad_target = resource.clone();
+            bad_target["payload_digest"] = json!("a".repeat(64));
+            let denied=call(&mut ws,&generation,json!({"method":"prepare_action","owner":owner(),"target":bad_target,"grant_revision":1,"timeout_ms":10000,"action":input})).await;
+            assert_eq!(denied["category"], "INTEGRITY_FAILURE");
+            let mut bad_target = resource.clone();
+            bad_target["operation_id"]["sequence"] = json!(999999);
+            let denied=call(&mut ws,&generation,json!({"method":"prepare_action","owner":owner(),"target":bad_target,"grant_revision":1,"timeout_ms":10000,"action":input})).await;
+            assert_eq!(denied["category"], "STALE_OPERATION");
+            // Prepare only reserves: a wrong grant revision is denied at the
+            // first dispatch, where fresh trusted facts are actually available.
+            let stale_grant=call(&mut ws,&generation,json!({"method":"prepare_action","owner":owner(),"target":resource,"grant_revision":2,"timeout_ms":10000,"action":input})).await;
+            assert_eq!(stale_grant["status"], "prepared");
+            let stale_grant_ref = json!({"operation_id":stale_grant["snapshot"]["operation_id"],"payload_digest":stale_grant["snapshot"]["payload_digest"]});
+            let denied = call(
+                &mut ws,
+                &generation,
+                json!({"method":"dispatch_action","owner":owner(),"action":stale_grant_ref}),
+            )
+            .await;
+            assert_eq!(denied["category"], "STATE_CONFLICT");
+            assert!(!root.join("wss-action-effect").exists());
+            let prepared=call(&mut ws,&generation,json!({"method":"prepare_action","owner":owner(),"target":resource,"grant_revision":1,"timeout_ms":10000,"action":input})).await;
+            assert_eq!(prepared["status"], "prepared");
+            assert!(!root.join("wss-action-effect").exists());
+            assert_eq!(prepared["snapshot"]["target"], resource);
+            assert_eq!(prepared["snapshot"]["liveness"], "not_applicable");
+            let action = json!({"operation_id":prepared["snapshot"]["operation_id"],"payload_digest":prepared["snapshot"]["payload_digest"]});
+            assert_ne!(action["operation_id"], resource["operation_id"]);
+            let denied = call(
+                &mut ws,
+                &generation,
+                json!({"method":"dispatch_action","owner":unknown,"action":action}),
+            )
+            .await;
+            assert_eq!(denied["category"], "UNAUTHORIZED");
+            let mut altered = action.clone();
+            altered["payload_digest"] = json!("b".repeat(64));
+            let denied = call(
+                &mut ws,
+                &generation,
+                json!({"method":"dispatch_action","owner":owner(),"action":altered}),
+            )
+            .await;
+            assert_eq!(denied["category"], "INTEGRITY_FAILURE");
+            assert!(!root.join("wss-action-effect").exists());
+            let wrote = call(
+                &mut ws,
+                &generation,
+                json!({"method":"dispatch_action","owner":owner(),"action":action}),
+            )
+            .await;
+            assert_eq!(wrote["status"], "action");
+            assert_eq!(wrote["dispatch"], "acknowledged");
+            assert_eq!(wrote["snapshot"]["state"], "succeeded");
+            assert_eq!(wrote["snapshot"]["liveness"], "not_applicable");
+            assert_eq!(wrote["acknowledgment"]["kind"], "write_accepted");
+            let duplicate = call(
+                &mut ws,
+                &generation,
+                json!({"method":"dispatch_action","owner":owner(),"action":action}),
+            )
+            .await;
+            assert_eq!(duplicate["dispatch"], "existing_no_replay");
+            assert_eq!(duplicate["snapshot"], wrote["snapshot"]);
+            assert_eq!(duplicate["write_id"], wrote["write_id"]);
+            assert_eq!(duplicate["acknowledgment"], wrote["acknowledgment"]);
+            let inspected = call(
+                &mut ws,
+                &generation,
+                json!({"method":"inspect_action","owner":owner(),"action":action}),
+            )
+            .await;
+            assert_eq!(inspected["snapshot"], wrote["snapshot"]);
+            assert_eq!(inspected["dispatch"], "existing_no_replay");
+            let mut output = String::new();
+            for _ in 0..30 {
+                let page=call(&mut ws,&generation,json!({"method":"read","owner":owner(),"target":resource,"grant_revision":1,"timeout_ms":10000,"max_bytes":16384,"wait_ms":100})).await;
+                assert_eq!(page["status"], "read");
+                assert_eq!(page["liveness"], "running");
+                for chunk in page["chunks"].as_array().unwrap() {
+                    output.push_str(chunk["text"].as_str().unwrap());
+                }
+                if output == "WSS_ACTION_ACK" {
+                    break;
+                }
+            }
+            assert_eq!(output, "WSS_ACTION_ACK");
+            assert_eq!(
+                std::fs::read_to_string(root.join("wss-action-effect")).unwrap(),
+                format!("{nonce}\n")
+            );
+            let before = call(
+                &mut ws,
+                &generation,
+                json!({"method":"inspect_start","owner":owner(),"target":resource}),
+            )
+            .await;
+            assert_eq!(before["snapshot"]["liveness"], "running");
+            let prepared=call(&mut ws,&generation,json!({"method":"prepare_action","owner":owner(),"target":resource,"grant_revision":1,"timeout_ms":10000,"action":{"kind":"terminate"}})).await;
+            assert_eq!(prepared["status"], "prepared");
+            let terminate = json!({"operation_id":prepared["snapshot"]["operation_id"],"payload_digest":prepared["snapshot"]["payload_digest"]});
+            let terminated = call(
+                &mut ws,
+                &generation,
+                json!({"method":"dispatch_action","owner":owner(),"action":terminate}),
+            )
+            .await;
+            assert_eq!(terminated["dispatch"], "acknowledged");
+            assert_eq!(terminated["snapshot"]["liveness"], "not_applicable");
+            assert_eq!(terminated["acknowledgment"]["kind"], "terminate_requested");
+            let after = call(
+                &mut ws,
+                &generation,
+                json!({"method":"inspect_start","owner":owner(),"target":resource}),
+            )
+            .await;
+            assert_eq!(
+                after["snapshot"], before["snapshot"],
+                "request ACK cannot rewrite original process lifecycle"
+            );
+            let mut exit = None;
+            for _ in 0..50 {
+                let page=call(&mut ws,&generation,json!({"method":"read","owner":owner(),"target":resource,"grant_revision":1,"timeout_ms":10000,"max_bytes":16384,"wait_ms":100})).await;
+                assert_eq!(page["status"], "read");
+                if page["output_drain"] == "drained" {
+                    assert_eq!(page["liveness"], "exited");
+                    exit = page["exit_code"].as_i64();
+                    break;
+                }
+            }
+            assert!(exit.is_some());
+            assert_eq!(
+                std::fs::read_to_string(root.join("wss-action-effect")).unwrap(),
+                format!("{nonce}\n")
+            );
+            ws.close(None).await.unwrap();
+            json!({"root":root,"nonce":nonce,"effectCount":1,"writeAction":action,"writeId":wrote["write_id"],"terminateAction":terminate,
+                "nativeExitAfterRead":exit,"generationObservedOnlyFromNegotiation":true,"bootstrapPreverifiedOnly":true,
+                "canonicalOwnedExecHostUsed":true,"sameSharedRootBudget":true,"prepareZeroEffect":true,"duplicateNoReplay":true,
+                "unknownOwnerChangedDigestTargetGrantDenied":true,"terminateAckDidNotRewriteParent":true})
+        });
+        let tcp = TcpStream::connect(fixture.listener.local_addr().unwrap())
+            .await
+            .unwrap();
+        // Random connection generation exists only on the Host side until the
+        // protocol returns it as part of authenticated negotiation.
+        let mut link = HostWssLink::connect(
+            &fixture.endpoint,
+            &fixture.tls,
+            tcp,
+            LinkAuthentication::Bearer(&fixture.bearer),
+            ConnectionGeneration::try_from(format!("host-action-link-{}", uuid::Uuid::new_v4()))
+                .unwrap(),
+            fixture.budget.clone(),
+        )
+        .await
+        .unwrap();
+        let result = protocol.run_connection(&mut link).await;
+        let stopped = link.shutdown(Duration::from_secs(2)).await;
+        let gateway = tokio::time::timeout(Duration::from_secs(3), gateway).await;
+        result.unwrap();
+        stopped.unwrap();
+        let observation = gateway.unwrap().unwrap();
+        assert_eq!(host.unreserved_queued_bytes(), expected_unreserved);
+        println!("WSS_ACTION_OBSERVATION {}", observation);
+    });
+    let outcome = worker.await;
+    let cleanup = host.shutdown_owned(Duration::from_secs(5)).await.unwrap();
+    println!("WSS_ACTION_CLEANUP {:?}", cleanup);
+    assert!(
+        cleanup.supervised_jobs_joined
+            && cleanup.native.executor_exited
+            && cleanup.native.reader_task_reaped
+            && cleanup.native.stderr_task_reaped
+    );
+    assert_eq!(host.unreserved_queued_bytes(), expected_unreserved);
+    outcome.unwrap();
+}

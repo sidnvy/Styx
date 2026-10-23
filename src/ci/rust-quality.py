@@ -26,12 +26,15 @@ CODEX_TESTS = [
     ("raw-codex", "providers::codex::tests::real_codex_raw_page_focused_scenario"),
     ("host-coordinator", "host::coordinator::tests::real_owned_start_read_and_dropped_response_scenario"),
     ("codex-continuations", "providers::codex::tests::real_codex_continuation_permit_focused_scenario"),
+    ("host-actions", "host::coordinator::tests::real_host_action_nonce_drop_ticket_and_terminate_scenario"),
 ]
 
 TLS_TESTS = [
     ("tls-loopback", "tls::tests::aws_lc_owned_loopback_tls_full_scenario_batch"),
     ("wss-loopback", "host::link::tests::strict_tls_wss_data_heartbeat_limits_close_cleanup_batch"),
 ]
+HTTP_TEST = "gateway::http::tests::official_sdk_tcp_auth_sessions_limits_and_pending_close"
+HOST_ACTION_WIRE_TEST = "host::protocol::tests::actual_canonical_tls_wss_host_action_journey"
 HOST_WIRE_TEST = "host::protocol::tests::actual_tls_wss_codex_start_read_duplicate_and_lost_response_batch"
 
 
@@ -214,10 +217,21 @@ def execute(args):
         gate.run("format", ["cargo", "fmt", "--all", "--", "--check"], timeout=120)
         gate.run("clippy", ["cargo", "clippy", "--workspace", "--all-targets", "--locked", "--offline", "--", "-D", "warnings"])
         tests = gate.run("workspace-tests", ["cargo", "test", "--workspace", "--locked", "--offline"])
-        if tests["status"] == "PASS":
-            ignored = sorted(set(re.findall(r"test ([\w:]+) \.\.\. ignored", gate.read("workspace-tests"))))
+        # Child helper stdout can interleave with libtest's progress output.
+        # The official list-only pass executes nothing and gives a complete,
+        # stable ignored inventory without inferring it from progress lines.
+        inventory = gate.run("ignored-inventory", ["cargo", "test", "--workspace", "--locked", "--offline", "--", "--ignored", "--list"])
+        if inventory["status"] == "PASS":
+            ignored = sorted(set(re.findall(r"^(.+): test$", gate.read("ignored-inventory"), re.MULTILINE)))
+            receipt["ignored_inventory_source"] = "official_libtest_list_only_no_test_execution"
             receipt["ignored_tests"] = [{"test": name, **policy["known_ignored"].get(name, {"kind": "UNREVIEWED"})} for name in ignored]
-            gate.semantic(tests, ["unreviewed_ignored_test:" + name for name in ignored if name not in policy["known_ignored"]])
+            gate.semantic(inventory, ["unreviewed_ignored_test:" + name for name in ignored if name not in policy["known_ignored"]])
+        http_root = evidence / "owned-http-sdk"
+        http_root.mkdir(mode=0o700)
+        http = gate.run("official-http-sdk", ["cargo", "test", "-p", "styx-runtime", "--locked", "--offline", HTTP_TEST, "--", "--ignored", "--exact", "--nocapture"], timeout=120,
+            extra_env={"STYX_TEST_HTTP_ROOT": str(http_root)})
+        gate.semantic(http, [] if "1 passed; 0 failed" in gate.read("official-http-sdk") else ["exact_official_http_case_not_executed"])
+        receipt["official_http_sdk"] = {"status": http["status"], "backend": "owned_counter_fixture_not_native_exec_or_account"}
         receipt["legacy_node22_interop"] = "NOT_RUN_explicit_node22_not_supplied"
         if args.node22:
             node = Path(args.node22)
@@ -248,7 +262,7 @@ def execute(args):
             receipt["codex_input"] = {"path": str(codex), "sha256": sha(codex)}
             gate.run("codex-version", [str(codex), "--version"], timeout=30)
             receipt["real_codex_interop"] = {}
-            native_cases = CODEX_TESTS + ([("host-wire", HOST_WIRE_TEST)] if args.tls_fixtures else [])
+            native_cases = CODEX_TESTS + ([("host-wire", HOST_WIRE_TEST), ("host-action-wire", HOST_ACTION_WIRE_TEST)] if args.tls_fixtures else [])
             for name, test_case in native_cases:
                 exec_root = evidence / ("owned-native-" + name)
                 exec_root.mkdir(mode=0o700)
@@ -297,7 +311,7 @@ def execute(args):
             receipt["input_stability"] = "FAIL"
             if args.tls_fixtures:
                 receipt["tls_stability"] = "FAIL"
-        required = {"git-head", "git-status", "git-head-end", "git-status-end", "rustc-version", "cargo-version", "dependency-metadata", "format", "clippy", "workspace-tests", "python-oracles", "cli-build", "cli-help", "cli-version", "cli-build-info", "cli-unimplemented-reject"}
+        required = {"git-head", "git-status", "git-head-end", "git-status-end", "rustc-version", "cargo-version", "dependency-metadata", "format", "clippy", "workspace-tests", "ignored-inventory", "official-http-sdk", "python-oracles", "cli-build", "cli-help", "cli-version", "cli-build-info", "cli-unimplemented-reject"}
         if args.node22:
             required |= {"node22-version", "node22-crypto"}
         if args.codex_bin:
@@ -305,7 +319,7 @@ def execute(args):
         if args.tls_fixtures:
             required |= {name for name, _ in TLS_TESTS}
             if args.codex_bin:
-                required.add("host-wire")
+                required |= {"host-wire", "host-action-wire"}
         receipt["missing_required_checks"] = sorted(required - {x["name"] for x in gate.checks})
         receipt["status"] = "PASS" if not receipt["missing_required_checks"] and gate.checks and all(x["status"] == "PASS" for x in gate.checks) and receipt.get("input_stability") == "PASS" and receipt.get("git_stability") == "PASS" and receipt.get("node22_stability", "PASS") == "PASS" and receipt.get("codex_stability", "PASS") == "PASS" and receipt.get("tls_stability", "PASS") == "PASS" and "failure" not in receipt else "FAIL"
         receipt["completed_at"] = now()

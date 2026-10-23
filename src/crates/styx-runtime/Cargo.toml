@@ -32,6 +32,9 @@ encoding_rs.workspace = true
 
 rmcp.workspace = true
 http.workspace = true
+hyper.workspace = true
+hyper-util.workspace = true
+tower.workspace = true
 http-body.workspace = true
 http-body-util.workspace = true
 bytes.workspace = true
@@ -42,7 +45,9 @@ rustls-pemfile.workspace = true
 tokio-tungstenite.workspace = true
 
 [dev-dependencies]
-rmcp = { workspace = true, features = ["client"] }
+rmcp = { workspace = true, features = ["client", "transport-streamable-http-client-reqwest"] }
+
+reqwest.workspace = true
 
 [lints]
 workspace = true
