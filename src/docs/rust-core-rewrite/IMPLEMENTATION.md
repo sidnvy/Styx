@@ -152,3 +152,32 @@ A subsequent liveness correction publishes monotonic owner poison/fence facts wi
 
 
 Paired foreground CLI composition is in progress under [ADR-014](ADR-014-PAIRED-FOREGROUND-COMPOSITION.md). Existing protected worker/identity inputs remain an explicit compatibility bootstrap, not completed native package or same-identity cutover. Gateway requires an already initialized native journal. No product fresh-onboarding writer or durable cross-process Stop is claimed by synthetic fixture imports and TERM cleanup. Read the external Owner Control Report for exact tested versus working source.
+
+## Original Linux Gateway settlement boundary
+
+`platform/linux/manager/legacy_gateway.rs` authenticates the installed Gateway
+independently of the Host descriptor: its original deployment root, Gateway
+publisher pin, active raw manifest/signature, complete signed application
+inventory, stable Node and original generated user unit. The two installation
+shims imported outside the Gateway application are checked against the retained
+original Host signed members. Source contracts 2/3/4 are supported; unversioned
+signed applications and source-checkout previews remain explicit migration
+compatibility gaps, rather than acquiring trust from a signed Node executable.
+
+`migration::legacy_service::RetiredLegacyCredential::prepare_gateway` keeps the
+same original Host retirement proof, configuration writer, maintenance and
+candidate. The existing manager owns Gateway capture, fresh systemd facts,
+once-only pidfd TERM, original invocation/cgroup settlement and actual task joins.
+One original Host permits one associated Gateway capture. The two-action budget
+is unchanged: consume the capture before starting Gateway settlement while the
+Host proof remains held. `SettledLegacyRuntime::revalidate` samples both original
+scopes and the retirement binding; cached observations cannot authorize commit.
+
+The explicit external scene is
+`migration::legacy_service::gateway::tests::actual_original_host_and_gateway_scope_settlement`.
+It requires real old-Core preparation/pairing/doctor, owned installed signed units
+and an independent original-birth/cgroup observer barrier. Default unit-suite
+skipping is not acceptance. This increment does not retire launch definitions,
+commit C07, publish native admission, prove Gateway-only migration, preserve the
+complete final permission/account set, or complete platform/package acceptance.
+Exact executions and failures belong to the external Owner Control Report.

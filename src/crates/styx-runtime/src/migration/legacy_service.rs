@@ -448,3 +448,7 @@ impl RetiredCredentialReadBinding {
         self.original.original.target.clone()
     }
 }
+
+#[path = "legacy_gateway.rs"]
+mod gateway;
+pub use gateway::{LegacyGatewayTransition, SettledLegacyRuntime};

@@ -80,6 +80,9 @@ struct Frozen {
     length: usize,
 }
 
+#[path = "legacy_gateway.rs"]
+mod gateway;
+
 pub(crate) struct VerifiedLegacyServiceInputs {
     protected_descriptor: Arc<LegacyServiceDescriptor>,
     profile: Arc<Profile>,
@@ -458,11 +461,114 @@ fn image_sha(f: &mut File) -> LegacyResult<Sha256Digest> {
     Ok(Sha256Digest::from_bytes(hash.finalize().into()))
 }
 
+// Closed, locally verified inputs only: neither a remote UnitSpec nor Host
+// argv/descriptor reuse can manufacture Gateway control authority. Both kinds
+// retain the original Host fence, but authenticate their own installed launch.
+enum ScopeInputs {
+    Host(Arc<VerifiedLegacyServiceInputs>),
+    Gateway {
+        host: Arc<VerifiedLegacyServiceInputs>,
+        gateway: Arc<gateway::VerifiedGatewayInputs>,
+    },
+}
+pub(crate) struct VerifiedGatewayCaptureInputs(Arc<ScopeInputs>);
+impl ScopeInputs {
+    fn host(&self) -> &Arc<VerifiedLegacyServiceInputs> {
+        match self {
+            Self::Host(host) | Self::Gateway { host, .. } => host,
+        }
+    }
+    fn unit_name(&self) -> &str {
+        match self {
+            Self::Host(host) => &host.descriptor.unit_name,
+            Self::Gateway { gateway, .. } => &gateway.unit_name,
+        }
+    }
+    fn unit_file(&self) -> &Path {
+        match self {
+            Self::Host(host) => &host.unit_file,
+            Self::Gateway { gateway, .. } => &gateway.unit_file,
+        }
+    }
+    fn unit_bytes(&self) -> &[u8] {
+        match self {
+            Self::Host(host) => &host.unit_bytes,
+            Self::Gateway { gateway, .. } => &gateway.unit_bytes,
+        }
+    }
+    fn argv(&self) -> Vec<String> {
+        match self {
+            Self::Host(host) => {
+                let d = &host.descriptor;
+                vec![
+                    d.node_binary.to_string_lossy().into_owned(),
+                    d.install_root
+                        .join("launch.mjs")
+                        .to_string_lossy()
+                        .into_owned(),
+                    d.install_root.to_string_lossy().into_owned(),
+                    d.host_config_file.to_string_lossy().into_owned(),
+                    d.trust_public_key_file.to_string_lossy().into_owned(),
+                ]
+            }
+            Self::Gateway { gateway, .. } => gateway.expected_argv.clone(),
+        }
+    }
+    fn node_sha(&self) -> Sha256Digest {
+        match self {
+            Self::Host(host) => host.node_sha,
+            Self::Gateway { gateway, .. } => gateway.node_sha,
+        }
+    }
+    fn cwd(&self) -> LegacyResult<&str> {
+        match self {
+            Self::Host(host) => host
+                .descriptor
+                .install_root
+                .to_str()
+                .ok_or(LegacyError::Invalid),
+            Self::Gateway { .. } => Ok(""),
+        }
+    }
+    fn stop_usec(&self) -> u64 {
+        match self {
+            Self::Host(_) => 12_000_000,
+            Self::Gateway { .. } => 15_000_000,
+        }
+    }
+    fn restart_usec(&self) -> u64 {
+        match self {
+            Self::Host(host) => u64::from(host.descriptor.restart_sec) * 1_000_000,
+            Self::Gateway { .. } => 3_000_000,
+        }
+    }
+    fn revalidate(&self) -> LegacyResult<()> {
+        match self {
+            Self::Host(host) => host.revalidate(),
+            // Host's original credential has already been retired. Its same
+            // writer/fence is checked separately, never via an ordinary loader.
+            Self::Gateway { gateway, .. } => gateway.revalidate(),
+        }
+    }
+    fn verify_fence(&self, fence: &LegacyWriterFence) -> LegacyResult<()> {
+        let host = self.host();
+        fence
+            .verify_service_descriptor(&host.protected_descriptor)
+            .map_err(conflict)?;
+        if fence.configuration_root().identity().map_err(conflict)? != host.profile.root.identity()
+        {
+            return Err(LegacyError::Conflict);
+        }
+        Ok(())
+    }
+}
+
 /// Never Clone/Deserialize. Scope is retained through original-ID settlement;
 /// even a confirmed physical stop is NOT a writer/activation handoff proof.
 pub(crate) struct LegacyManagedScope {
-    inputs: Arc<VerifiedLegacyServiceInputs>,
+    inputs: Arc<ScopeInputs>,
     fence: Arc<LegacyWriterFence>,
+    gateway_registered: Mutex<bool>,
     connection: zbus::Connection,
     manager_owner: String,
     manager_birth: ProcessIdentity,
@@ -554,36 +660,24 @@ pub(crate) async fn verify_candidate(
     .await
 }
 async fn capture_checked(
-    inputs: Arc<VerifiedLegacyServiceInputs>,
+    inputs: Arc<ScopeInputs>,
     fence: Arc<LegacyWriterFence>,
 ) -> LegacyResult<Arc<LegacyManagedScope>> {
     let check = fence.clone();
-    let descriptor = inputs.protected_descriptor.clone();
-    let expected_root = inputs.profile.root.identity();
-    legacy_blocking(move || {
-        check
-            .verify_service_descriptor(&descriptor)
-            .map_err(conflict)?;
-        if check.configuration_root().identity().map_err(conflict)? != expected_root {
-            return Err(LegacyError::Conflict);
-        }
-        Ok(())
-    })
-    .await?;
+    let original = inputs.clone();
+    legacy_blocking(move || original.verify_fence(&check)).await?;
     let c = capture_exact(&inputs, Instant::now() + Duration::from_secs(20)).await?;
     let check = fence.clone();
-    let descriptor = inputs.protected_descriptor.clone();
     let original = inputs.clone();
     legacy_blocking(move || {
-        check
-            .verify_service_descriptor(&descriptor)
-            .map_err(conflict)?;
+        original.verify_fence(&check)?;
         original.revalidate()
     })
     .await?;
     Ok(Arc::new(LegacyManagedScope {
         inputs,
         fence,
+        gateway_registered: Mutex::new(false),
         connection: c.connection,
         manager_owner: c.manager_owner,
         manager_birth: c.manager_birth,
@@ -602,10 +696,7 @@ async fn capture_checked(
 // Official systemd Service.ExecStart: a(sasbttttuii). No parsing formatted
 // systemctl ExecStart strings, shell splitting, request argv or env authority.
 type ExecStart = (String, Vec<String>, bool, u64, u64, u64, u64, u32, i32, i32);
-async fn capture_exact(
-    i: &Arc<VerifiedLegacyServiceInputs>,
-    end: Instant,
-) -> LegacyResult<Captured> {
+async fn capture_exact(i: &Arc<ScopeInputs>, end: Instant) -> LegacyResult<Captured> {
     timeout_at(end, capture_exact_inner(i))
         .await
         .map_err(unknown)?
@@ -628,9 +719,8 @@ async fn live_proxy<'a>(
         .await
 }
 
-async fn capture_exact_inner(i: &Arc<VerifiedLegacyServiceInputs>) -> LegacyResult<Captured> {
-    let p = &i.profile;
-    let d = &i.descriptor;
+async fn capture_exact_inner(i: &Arc<ScopeInputs>) -> LegacyResult<Captured> {
+    let p = &i.host().profile;
     let stream = tokio::net::UnixStream::connect(p.runtime.join("bus"))
         .await
         .map_err(unavailable)?;
@@ -679,11 +769,11 @@ async fn capture_exact_inner(i: &Arc<VerifiedLegacyServiceInputs>) -> LegacyResu
     .await
     .map_err(unavailable)?;
     let unit_object: zbus::zvariant::OwnedObjectPath = manager
-        .call("GetUnit", &(d.unit_name.as_str(),))
+        .call("GetUnit", &(i.unit_name(),))
         .await
         .map_err(unavailable)?;
     let _: () = manager
-        .call("RefUnit", &(d.unit_name.as_str(),))
+        .call("RefUnit", &(i.unit_name(),))
         .await
         .map_err(unknown)?;
     // Reference is connection-scoped. No signal/StopUnit has occurred.
@@ -704,13 +794,13 @@ async fn capture_exact_inner(i: &Arc<VerifiedLegacyServiceInputs>) -> LegacyResu
     .await
     .map_err(unavailable)?;
     for (key, wanted) in [
-        ("Id", d.unit_name.as_str()),
+        ("Id", i.unit_name()),
         ("LoadState", "loaded"),
         ("ActiveState", "active"),
         ("SubState", "running"),
         (
             "FragmentPath",
-            i.unit_file.to_str().ok_or(LegacyError::Invalid)?,
+            i.unit_file().to_str().ok_or(LegacyError::Invalid)?,
         ),
         ("SourcePath", ""),
         ("Following", ""),
@@ -726,7 +816,7 @@ async fn capture_exact_inner(i: &Arc<VerifiedLegacyServiceInputs>) -> LegacyResu
         .await
         .map_err(unknown)?;
     let transient: bool = unit.get_property("Transient").await.map_err(unknown)?;
-    if names != [d.unit_name.clone()] || !dropins.is_empty() || reload || transient {
+    if names != [i.unit_name().to_owned()] || !dropins.is_empty() || reload || transient {
         return Err(LegacyError::Conflict);
     }
     let invocation_bytes: Vec<u8> = unit.get_property("InvocationID").await.map_err(unknown)?;
@@ -737,7 +827,7 @@ async fn capture_exact_inner(i: &Arc<VerifiedLegacyServiceInputs>) -> LegacyResu
         .iter()
         .map(|v| format!("{v:02x}"))
         .collect::<String>();
-    let raw_type = if i.unit_bytes.windows(13).any(|s| s == b"\nType=simple\n") {
+    let raw_type = if i.unit_bytes().windows(13).any(|s| s == b"\nType=simple\n") {
         "simple"
     } else {
         "exec"
@@ -746,10 +836,7 @@ async fn capture_exact_inner(i: &Arc<VerifiedLegacyServiceInputs>) -> LegacyResu
         ("Type", raw_type),
         ("Restart", "on-failure"),
         ("KillMode", "control-group"),
-        (
-            "WorkingDirectory",
-            d.install_root.to_str().ok_or(LegacyError::Invalid)?,
-        ),
+        ("WorkingDirectory", i.cwd()?),
     ] {
         if property_string(&service, key).await? != wanted {
             return Err(LegacyError::Conflict);
@@ -766,25 +853,12 @@ async fn capture_exact_inner(i: &Arc<VerifiedLegacyServiceInputs>) -> LegacyResu
         .await
         .map_err(unknown)?;
     let send_kill: bool = service.get_property("SendSIGKILL").await.map_err(unknown)?;
-    if timeout != 12_000_000
-        || restart != u64::from(d.restart_sec) * 1_000_000
-        || mask != 0o77
-        || !nnp
-        || !send_kill
+    if timeout != i.stop_usec() || restart != i.restart_usec() || mask != 0o77 || !nnp || !send_kill
     {
         return Err(LegacyError::Conflict);
     }
     let execs: Vec<ExecStart> = service.get_property("ExecStart").await.map_err(unknown)?;
-    let expected = [
-        d.node_binary.to_string_lossy().into_owned(),
-        d.install_root
-            .join("launch.mjs")
-            .to_string_lossy()
-            .into_owned(),
-        d.install_root.to_string_lossy().into_owned(),
-        d.host_config_file.to_string_lossy().into_owned(),
-        d.trust_public_key_file.to_string_lossy().into_owned(),
-    ];
+    let expected = i.argv();
     if execs.len() != 1 || execs[0].0 != expected[0] || execs[0].1 != expected || execs[0].2 {
         return Err(LegacyError::Conflict);
     }
@@ -794,7 +868,7 @@ async fn capture_exact_inner(i: &Arc<VerifiedLegacyServiceInputs>) -> LegacyResu
         return Err(LegacyError::Conflict);
     }
     let uid = p.identity.uid;
-    let sha = i.node_sha;
+    let sha = i.node_sha();
     let argv = expected.clone();
     let (main, main_image, main_image_stat) = legacy_blocking(move || {
         let main = ProcessIdentity::observe(pid).map_err(unknown)?;
@@ -826,7 +900,7 @@ async fn capture_exact_inner(i: &Arc<VerifiedLegacyServiceInputs>) -> LegacyResu
     })
     .await?;
     let cgroup_path = property_string(&service, "ControlGroup").await?;
-    let path = super::cgroup_path(p, &d.unit_name, &cgroup_path).map_err(conflict)?;
+    let path = super::cgroup_path(p, i.unit_name(), &cgroup_path).map_err(conflict)?;
     let cgroup = open_checked(&path, true)?;
     if nix::sys::statfs::fstatfs(&cgroup)
         .map_err(unavailable)?
@@ -957,7 +1031,12 @@ pub(crate) fn capture(
     inputs: Arc<VerifiedLegacyServiceInputs>,
     fence: LegacyWriterFence,
 ) -> std::result::Result<LegacyCaptureTicket, LegacyCaptureFailure> {
-    let fence = Arc::new(fence);
+    capture_owned(Arc::new(ScopeInputs::Host(inputs)), Arc::new(fence))
+}
+fn capture_owned(
+    inputs: Arc<ScopeInputs>,
+    fence: Arc<LegacyWriterFence>,
+) -> std::result::Result<LegacyCaptureTicket, LegacyCaptureFailure> {
     let capacity = ACTIONS
         .clone()
         .try_acquire_owned()
@@ -1101,9 +1180,80 @@ pub(crate) struct LegacySettlementProof {
     _capacity: OwnedSemaphorePermit,
 }
 impl LegacySettlementProof {
+    /// Independently authenticate Gateway launch inputs under this SAME original
+    /// Host retirement authority. This does not reload an ordinary Host profile.
+    pub(crate) async fn load_gateway_inputs(
+        &self,
+        candidate: Arc<crate::release::VerifiedNativeRelease>,
+    ) -> LegacyResult<VerifiedGatewayCaptureInputs> {
+        let ScopeInputs::Host(host) = self.scope.inputs.as_ref() else {
+            return Err(LegacyError::Conflict);
+        };
+        self.verify_original_still_settled().await?;
+        self.credential_retirement_observation()?;
+        let host = host.clone();
+        let inputs = legacy_blocking(move || {
+            let gateway = gateway::VerifiedGatewayInputs::derive(&host)?;
+            if candidate.report().publisher_spki_sha256 != gateway.publisher_sha256 {
+                return Err(LegacyError::Conflict);
+            }
+            candidate.revalidate().map_err(conflict)?;
+            gateway.revalidate()?;
+            Ok(Arc::new(ScopeInputs::Gateway {
+                host,
+                gateway: Arc::new(gateway),
+            }))
+        })
+        .await?;
+        self.verify_original_still_settled().await?;
+        self.credential_retirement_observation()?;
+        Ok(VerifiedGatewayCaptureInputs(inputs))
+    }
+    /// The original Host owns one Gateway capture slot. A Busy capacity refusal
+    /// before registration is retryable; any registered job (including Unknown)
+    /// permanently occupies this slot. A second waiter cannot issue another TERM.
+    pub(crate) fn capture_gateway(
+        &self,
+        inputs: VerifiedGatewayCaptureInputs,
+    ) -> std::result::Result<LegacyCaptureTicket, LegacyCaptureFailure> {
+        let inputs = inputs.0;
+        let fail = |cause| LegacyCaptureFailure {
+            cause,
+            retained: self.scope.fence.clone(),
+        };
+        let ScopeInputs::Gateway { host, .. } = inputs.as_ref() else {
+            return Err(fail(LegacyError::Conflict));
+        };
+        if !matches!(self.scope.inputs.as_ref(), ScopeInputs::Host(original) if Arc::ptr_eq(original, host))
+        {
+            return Err(fail(LegacyError::Conflict));
+        }
+        let mut registered = self
+            .scope
+            .gateway_registered
+            .lock()
+            .map_err(|_| fail(LegacyError::Unknown))?;
+        if *registered {
+            return Err(fail(LegacyError::Conflict));
+        }
+        let result = capture_owned(inputs, self.scope.fence.clone());
+        if !matches!(&result, Err(error) if error.cause == LegacyError::Busy) {
+            *registered = true;
+        }
+        result
+    }
     /// Recheck the original pinned invocation while its reference is retained.
     /// A different invocation, owner or leftover process is never adopted.
     pub(crate) async fn verify_original_still_settled(&self) -> LegacyResult<()> {
+        if matches!(self.scope.inputs.as_ref(), ScopeInputs::Gateway { .. }) {
+            let inputs = self.scope.inputs.clone();
+            let fence = self.scope.fence.clone();
+            legacy_blocking(move || {
+                inputs.verify_fence(&fence)?;
+                inputs.revalidate()
+            })
+            .await?;
+        }
         let facts = tokio::time::timeout(Duration::from_secs(8), observe_original(&self.scope))
             .await
             .map_err(unknown)??;
@@ -1146,10 +1296,22 @@ impl LegacySettlementProof {
         &self.scope.fence
     }
     pub(crate) fn service_descriptor(&self) -> &LegacyServiceDescriptor {
-        &self.scope.inputs.protected_descriptor
+        &self.scope.inputs.host().protected_descriptor
     }
 }
 impl LegacyManagedScope {
+    pub(crate) fn is_gateway_of(&self, original: &LegacySettlementProof) -> bool {
+        matches!((self.inputs.as_ref(), original.scope.inputs.as_ref()),
+            (ScopeInputs::Gateway { host, .. }, ScopeInputs::Host(expected)) if Arc::ptr_eq(host, expected))
+            && Arc::ptr_eq(&self.fence, &original.scope.fence)
+            && self.inputs.unit_name() != original.scope.inputs.unit_name()
+            && self.invocation != original.scope.invocation
+            && (self.cgroup_stat.dev, self.cgroup_stat.ino)
+                != (
+                    original.scope.cgroup_stat.dev,
+                    original.scope.cgroup_stat.ino,
+                )
+    }
     pub(crate) fn begin_settlement(
         self: &Arc<Self>,
         budget: Duration,
@@ -1250,10 +1412,7 @@ async fn run_settlement(
     // control. No asynchronous request provides a replacement executable path.
     let check = scope.clone();
     legacy_blocking(move || {
-        check
-            .fence
-            .verify_service_descriptor(&check.inputs.protected_descriptor)
-            .map_err(conflict)?;
+        check.inputs.verify_fence(&check.fence)?;
         check.inputs.revalidate()?;
         if check.main.still_current().map_err(unknown)? {
             check_live_image(&check)?;
@@ -1321,10 +1480,8 @@ async fn run_settlement(
         if observed.confirmed() {
             let check = scope.clone();
             legacy_blocking(move || {
-                check
-                    .fence
-                    .verify_service_descriptor(&check.inputs.protected_descriptor)
-                    .map_err(conflict)
+                check.inputs.verify_fence(&check.fence)?;
+                check.inputs.revalidate()
             })
             .await?;
             if Instant::now() >= deadline || cancel.is_cancelled() {
@@ -1402,7 +1559,7 @@ async fn observe_original(scope: &Arc<LegacyManagedScope>) -> LegacyResult<Origi
         || property_string(&unit, "FragmentPath").await?
             != scope
                 .inputs
-                .unit_file
+                .unit_file()
                 .to_str()
                 .ok_or(LegacyError::Invalid)?
     {
@@ -1431,10 +1588,7 @@ async fn observe_original(scope: &Arc<LegacyManagedScope>) -> LegacyResult<Origi
         .map_err(unknown)?;
     let source = scope.clone();
     let (original_main_exited, original_cgroup_empty) = legacy_blocking(move || {
-        source
-            .fence
-            .verify_service_descriptor(&source.inputs.protected_descriptor)
-            .map_err(conflict)?;
+        source.inputs.verify_fence(&source.fence)?;
         let exited = !source.main.still_current().map_err(unknown)?;
         if !exited {
             require_process_cgroup(original_pid, &source.cgroup_path, &source.cgroup_stat)?;
@@ -1478,17 +1632,7 @@ fn check_live_image(scope: &LegacyManagedScope) -> LegacyResult<()> {
     {
         return Err(LegacyError::Conflict);
     }
-    let d = &scope.inputs.descriptor;
-    let expected = [
-        d.node_binary.to_string_lossy().into_owned(),
-        d.install_root
-            .join("launch.mjs")
-            .to_string_lossy()
-            .into_owned(),
-        d.install_root.to_string_lossy().into_owned(),
-        d.host_config_file.to_string_lossy().into_owned(),
-        d.trust_public_key_file.to_string_lossy().into_owned(),
-    ];
+    let expected = scope.inputs.argv();
     let mut file = File::open(format!("/proc/{pid}/cmdline")).map_err(unknown)?;
     let raw = read_file(&mut file, 16 * 1024)?;
     if raw
