@@ -310,7 +310,7 @@ async fn actual_original_host_gateway_history_under_same_writer() {
     );
     // Compose actual original dual-scope settlement and projection under the
     // SAME owner/maintenance. The old enrollment directory stays a source.
-    let old_enrollment = PrivateRoot::open(&fixture.state_dir.join("gateway/enrollment")).unwrap();
+    let old_enrollment = PrivateRoot::open(fixture.state_dir.join("gateway/enrollment")).unwrap();
     old_enrollment
         .ensure_absent(".styx-configuration-writer.lock")
         .unwrap();
@@ -435,7 +435,7 @@ fn original_settled_history_reopens_same_state_writer_fenced() {
         "PASS_ORIGINAL_HOST_GATEWAY_HISTORY_WITH_EXTERNAL_ACK"
     );
     let original_enrollment =
-        PrivateRoot::open(&fixture.state_dir.join("gateway/enrollment")).unwrap();
+        PrivateRoot::open(fixture.state_dir.join("gateway/enrollment")).unwrap();
     original_enrollment
         .ensure_absent(".styx-configuration-writer.lock")
         .unwrap();
