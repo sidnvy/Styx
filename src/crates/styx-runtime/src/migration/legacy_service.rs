@@ -82,6 +82,9 @@ pub struct SettlementObservation {
     pub original_cgroup_empty: bool,
     pub manager_reported_success: bool,
     pub worker_joined: bool,
+    pub checkpoint: &'static str,
+    pub elapsed_millis: u64,
+    pub failure: Option<TransitionError>,
 }
 fn observe(value: legacy::LegacySettlementObservation) -> SettlementObservation {
     SettlementObservation {
@@ -98,6 +101,9 @@ fn observe(value: legacy::LegacySettlementObservation) -> SettlementObservation 
         original_cgroup_empty: value.original_cgroup_empty,
         manager_reported_success: value.manager_reported_success,
         worker_joined: value.worker_joined,
+        checkpoint: value.checkpoint,
+        elapsed_millis: value.elapsed_millis,
+        failure: value.failure.map(classify),
     }
 }
 /// Trusted in-process migration resource. Dropping a waiter never declares the

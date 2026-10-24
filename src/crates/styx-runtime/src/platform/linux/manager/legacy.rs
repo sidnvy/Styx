@@ -25,7 +25,8 @@ const MANIFEST_CAP: usize = 1024 * 1024;
 const UNIT_CAP: usize = 32 * 1024;
 const IMAGE_CAP: u64 = 1024 * 1024 * 1024;
 type LegacyResult<T> = std::result::Result<T, LegacyError>;
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
 pub(crate) enum LegacyError {
     Invalid,
     Busy,
@@ -547,6 +548,14 @@ impl ScopeInputs {
             Self::Host(host) => host.revalidate(),
             // Host's original credential has already been retired. Its same
             // writer/fence is checked separately, never via an ordinary loader.
+            Self::Gateway { gateway, .. } => gateway.revalidate(),
+        }
+    }
+    fn revalidate_after_settlement(&self) -> LegacyResult<()> {
+        match self {
+            // Preserve the original Host settlement contract: the original
+            // fence/descriptor is rechecked, not a second whole-profile load.
+            Self::Host(_) => Ok(()),
             Self::Gateway { gateway, .. } => gateway.revalidate(),
         }
     }
@@ -1152,6 +1161,9 @@ pub(crate) struct LegacySettlementObservation {
     pub original_cgroup_empty: bool,
     pub manager_reported_success: bool,
     pub worker_joined: bool,
+    pub checkpoint: &'static str,
+    pub elapsed_millis: u64,
+    pub failure: Option<LegacyError>,
 }
 impl LegacySettlementObservation {
     fn registered() -> Self {
@@ -1163,8 +1175,21 @@ impl LegacySettlementObservation {
             original_cgroup_empty: false,
             manager_reported_success: false,
             worker_joined: false,
+            checkpoint: "registered",
+            elapsed_millis: 0,
+            failure: None,
         }
     }
+}
+fn publish_checkpoint(
+    fact: &mut LegacySettlementObservation,
+    checkpoint: &'static str,
+    started: Instant,
+    tx: &watch::Sender<LegacySettlementObservation>,
+) {
+    fact.checkpoint = checkpoint;
+    fact.elapsed_millis = u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
+    tx.send_replace(*fact);
 }
 struct SettlementTask {
     worker: Option<tokio::task::JoinHandle<()>>,
@@ -1189,6 +1214,11 @@ impl LegacySettlementProof {
         let ScopeInputs::Host(host) = self.scope.inputs.as_ref() else {
             return Err(LegacyError::Conflict);
         };
+        // A denial needs no repeated inventory scan. Registration still checks
+        // the same slot atomically after verification, including racing callers.
+        if *self.scope.gateway_registered.lock().map_err(unknown)? {
+            return Err(LegacyError::Conflict);
+        }
         self.verify_original_still_settled().await?;
         self.credential_retirement_observation()?;
         let host = host.clone();
@@ -1331,6 +1361,7 @@ impl LegacyManagedScope {
         let (tx, state) = watch::channel(LegacySettlementObservation::registered());
         let owned = self.clone();
         let guard = self.clone();
+        let started = Instant::now();
         let worker = tokio::spawn(async move {
             let result = AssertUnwindSafe(run_settlement(owned, budget, cancel, tx.clone()))
                 .catch_unwind()
@@ -1338,6 +1369,12 @@ impl LegacyManagedScope {
             if !matches!(result, Ok(Ok(()))) {
                 let mut current = *tx.borrow();
                 current.phase = SettlementPhase::Unknown;
+                current.failure = Some(match result {
+                    Ok(Err(error)) => error,
+                    _ => LegacyError::Unknown,
+                });
+                current.elapsed_millis =
+                    u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX);
                 tx.send_replace(current);
             }
             // guard also survives panic handling. The record's explicit retained
@@ -1403,13 +1440,15 @@ async fn run_settlement(
     cancel: CancellationToken,
     tx: watch::Sender<LegacySettlementObservation>,
 ) -> LegacyResult<()> {
-    let deadline = Instant::now() + budget;
+    let started = Instant::now();
+    let deadline = started + budget;
     let mut fact = LegacySettlementObservation::registered();
     if cancel.is_cancelled() {
         return Err(LegacyError::Unknown);
     }
     // Revalidate complete signed bootstrap and same descriptor/fence before any
     // control. No asynchronous request provides a replacement executable path.
+    publish_checkpoint(&mut fact, "validating_inputs", started, &tx);
     let check = scope.clone();
     legacy_blocking(move || {
         check.inputs.verify_fence(&check.fence)?;
@@ -1422,6 +1461,7 @@ async fn run_settlement(
         Ok(())
     })
     .await?;
+    publish_checkpoint(&mut fact, "observing_original", started, &tx);
     let before = observe_original(&scope).await?;
     if cancel.is_cancelled() || Instant::now() >= deadline {
         return Err(LegacyError::Unknown);
@@ -1437,6 +1477,7 @@ async fn run_settlement(
     if before.original_main_exited || cancel.is_cancelled() || Instant::now() >= deadline {
         return Err(LegacyError::Unknown);
     }
+    publish_checkpoint(&mut fact, "opening_pidfd", started, &tx);
     let pid = match &scope.main {
         ProcessIdentity::Linux { pid, .. } => *pid,
     };
@@ -1450,6 +1491,7 @@ async fn run_settlement(
     if before.original_main_exited || cancel.is_cancelled() || Instant::now() >= deadline {
         return Err(LegacyError::Unknown);
     }
+    publish_checkpoint(&mut fact, "signalling_original", started, &tx);
     fact.term_attempted = true;
     fact.signal_accepted = pidfd_send_signal(&pidfd, Signal::TERM).is_ok();
     fact.phase = if fact.signal_accepted {
@@ -1464,6 +1506,7 @@ async fn run_settlement(
     // Exactly one signal. Unknown is sticky: no automatic reconciliation or
     // replay; the original record/fence/capacity remains retained for original-ID
     // management recovery. Stopping is only the bounded live observation phase.
+    publish_checkpoint(&mut fact, "waiting_original_exit", started, &tx);
     loop {
         if Instant::now() >= deadline || cancel.is_cancelled() {
             return Err(LegacyError::Unknown);
@@ -1478,10 +1521,11 @@ async fn run_settlement(
             return Err(LegacyError::Unknown);
         }
         if observed.confirmed() {
+            publish_checkpoint(&mut fact, "verifying_settled_inputs", started, &tx);
             let check = scope.clone();
             legacy_blocking(move || {
                 check.inputs.verify_fence(&check.fence)?;
-                check.inputs.revalidate()
+                check.inputs.revalidate_after_settlement()
             })
             .await?;
             if Instant::now() >= deadline || cancel.is_cancelled() {
@@ -1490,7 +1534,7 @@ async fn run_settlement(
                 return Err(LegacyError::Unknown);
             }
             fact.phase = SettlementPhase::Confirmed;
-            tx.send_replace(fact);
+            publish_checkpoint(&mut fact, "confirmed", started, &tx);
             return Ok(());
         }
         tx.send_replace(fact);

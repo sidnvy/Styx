@@ -71,6 +71,8 @@ fn observation(fact: SettlementObservation) -> Value {
         "term_attempted":fact.term_attempted,"signal_accepted":fact.signal_accepted,
         "original_main_exited":fact.original_main_exited,"original_cgroup_empty":fact.original_cgroup_empty,
         "manager_reported_success":fact.manager_reported_success,"worker_joined":fact.worker_joined,
+        "checkpoint":fact.checkpoint,"elapsed_millis":fact.elapsed_millis,
+        "failure":fact.failure.map(|error| error.to_string()),
     })
 }
 fn assert_consumed(fact: SettlementObservation) {
@@ -131,7 +133,7 @@ async fn settle_host(t: &LegacyServiceTransition) -> SettledLegacyService {
                 .expect("registered Host settlement");
             match fact.status {
                 SettlementStatus::Unknown => {
-                    panic!("Host settlement Unknown; retain original scope")
+                    panic!("Host settlement Unknown; retain original scope: {fact:?}")
                 }
                 SettlementStatus::Confirmed => match t.consume_settlement() {
                     Ok(proof) => return proof,
@@ -155,7 +157,7 @@ async fn settle_gateway(t: &LegacyGatewayTransition) -> SettledLegacyRuntime {
                 .expect("registered Gateway settlement");
             match fact.status {
                 SettlementStatus::Unknown => {
-                    panic!("Gateway settlement Unknown; retain original scope")
+                    panic!("Gateway settlement Unknown; retain original scope: {fact:?}")
                 }
                 SettlementStatus::Confirmed => match t.consume_settlement() {
                     Ok(proof) => return proof,
