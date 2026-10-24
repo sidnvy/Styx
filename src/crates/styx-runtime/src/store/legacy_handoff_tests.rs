@@ -333,6 +333,68 @@ async fn actual_legacy_writer_exclusion_and_original_material_batch() {
     assert_eq!(failure.retained_lock_count(), 0);
     assert_eq!(fs::read(f.host.join("service.json")).unwrap(), b"{}");
 
+    // A service descriptor is only protected material. The platform manager
+    // must still verify its signed bootstrap/unit/live process before control.
+    // Two byte-identical descriptors in different Host roots cannot substitute.
+    let a = fixture(&base);
+    let b = fixture(&base);
+    let service_bytes = br#"{"unitName":"styx-owned-material.service"}"#;
+    raw(&a.host.join("service.json"), service_bytes);
+    raw(&b.host.join("service.json"), service_bytes);
+    let descriptor =
+        Arc::new(LegacyServiceDescriptor::capture(&PrivateRoot::open(&a.host).unwrap()).unwrap());
+    let foreign = LegacyWriterFence::acquire_with_service_descriptor(
+        b.owner.clone(),
+        b.owner
+            .begin_maintenance("service-foreign".try_into().unwrap())
+            .unwrap(),
+        PrivateRoot::open(&b.host).unwrap(),
+        &inputs(),
+        descriptor.clone(),
+    )
+    .unwrap_err();
+    assert_eq!(foreign.error(), LegacyFenceError::InvalidMaterials);
+    assert_eq!(foreign.retained_lock_count(), 0);
+    assert!(!b.configuration.join("advance.lock").exists());
+    let fence = LegacyWriterFence::acquire_with_service_descriptor(
+        a.owner.clone(),
+        a.owner
+            .begin_maintenance("service-original".try_into().unwrap())
+            .unwrap(),
+        PrivateRoot::open(&a.host).unwrap(),
+        &inputs(),
+        descriptor.clone(),
+    )
+    .unwrap();
+    fence.verify_service_descriptor(&descriptor).unwrap();
+    assert_eq!(descriptor.raw_bytes(), service_bytes);
+    assert_eq!(
+        descriptor.host_root_identity(),
+        PrivateRoot::open(&a.host).unwrap().identity()
+    );
+    assert_busy(&a);
+    let old = OldWriter::start(&node, &a.configuration.join("advance.lock"), false).await;
+    assert_eq!(old.line, "REFUSED\n");
+    old.finish(false, 23).await;
+    // Same-content replacement is a different original file. Neither an intact
+    // signature elsewhere nor a known pathname permits silently adopting it.
+    raw(&a.host.join("service-replacement"), service_bytes);
+    fs::rename(
+        a.host.join("service-replacement"),
+        a.host.join("service.json"),
+    )
+    .unwrap();
+    assert_eq!(
+        fs::read(a.host.join("service.json")).unwrap(),
+        service_bytes
+    );
+    assert!(fence.validate().is_err());
+    assert!(fence.verify_service_descriptor(&descriptor).is_err());
+    assert_busy(&a);
+    for name in LOCKS {
+        assert!(a.configuration.join(name).exists());
+    }
+
     // Closed path/role vocabulary rejects before any file is created.
     let f = fixture(&base);
     let maintenance = f

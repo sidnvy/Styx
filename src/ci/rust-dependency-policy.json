@@ -65,7 +65,8 @@
         "security-framework",
         "security-framework-sys",
         "core-foundation",
-        "core-foundation-sys"
+        "core-foundation-sys",
+        "rustix"
       ]
     },
     "styx": {
@@ -325,6 +326,11 @@
       "kind": "owned_subprocess_helper",
       "parent": "platform::macos_spawn::tests::actual_suspended_image_barrier_wrong_cdhash_and_original_wait",
       "required_for": "child-only create_new nonce effect in owned copied image; not independently run or counted as platform acceptance"
+    },
+    "migration::legacy_service::tests::actual_original_service_scope_settlement": {
+      "kind": "explicit_owned_original_linux_user_services",
+      "input": "STYX_TEST_LEGACY_SERVICE_FIXTURE + STYX_TEST_LEGACY_SERVICE_NATIVE_PAYLOAD + STYX_TEST_LEGACY_SERVICE_PUBLISHER; external owner registers only exact normal/side fixture units",
+      "required_for": "original signed bootstrap/manager Invocation/main birth/image/cgroup physical settlement and side survival; not original deployment migration, native activation or rollback"
     }
   },
   "change_policy": "dependency or ignored-test additions require explicit policy review; preserve mature Cargo tooling rather than replacing its resolver/compiler/lints"

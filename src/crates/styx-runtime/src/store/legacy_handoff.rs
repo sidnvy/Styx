@@ -20,6 +20,7 @@ use std::{
     io::Write,
     os::unix::fs::{FileExt, MetadataExt},
     path::PathBuf,
+    sync::Arc,
 };
 use zeroize::Zeroizing;
 
@@ -34,6 +35,7 @@ const LOCKS: &[&str] = &[
 const MAX_FILES: usize = 32;
 const MAX_FILE_BYTES: usize = 1024 * 1024;
 const MAX_MATERIAL_BYTES: usize = 2 * 1024 * 1024;
+const MAX_SERVICE_DESCRIPTOR_BYTES: usize = 64 * 1024;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LegacyFenceError {
     InvalidMaterials,
@@ -71,6 +73,48 @@ struct PinnedLegacyLock {
     raw: Vec<u8>,
     stamp: Option<FileObservation>,
 }
+/// Protected material selection only. This is NOT a signed service proof,
+/// execution authority, unit selection or evidence that any runtime has stopped.
+/// The platform manager must separately authenticate the original publisher,
+/// bootstrap closure, unit, manager, invocation and live process before control.
+/// No caller-supplied DTO or boolean can reconstruct this original observation.
+pub struct LegacyServiceDescriptor {
+    host: RootIdentity,
+    raw: RawFile,
+}
+impl LegacyServiceDescriptor {
+    pub fn capture(host: &PrivateRoot) -> Result<Self, LegacyFenceError> {
+        let raw = host
+            .read_raw("service.json", MAX_SERVICE_DESCRIPTOR_BYTES)
+            .map_err(|_| LegacyFenceError::InvalidMaterials)?;
+        Ok(Self {
+            host: host.identity(),
+            raw,
+        })
+    }
+    pub fn host_root_identity(&self) -> RootIdentity {
+        self.host.clone()
+    }
+    /// Private configuration material: do not log these bytes by default.
+    pub fn raw_bytes(&self) -> &[u8] {
+        self.raw.bytes()
+    }
+    pub fn raw_sha256(&self) -> styx_contracts::identity::Sha256Digest {
+        styx_contracts::identity::Sha256Digest::of_bytes(self.raw.bytes())
+    }
+    fn revalidate(&self, host: &PrivateRoot) -> Result<(), LegacyFenceError> {
+        if self.host != host.identity() {
+            return Err(LegacyFenceError::InvalidMaterials);
+        }
+        let now = host
+            .read_raw("service.json", MAX_SERVICE_DESCRIPTOR_BYTES)
+            .map_err(|_| LegacyFenceError::BusyOrUnresolved)?;
+        if now.observation() != self.raw.observation() || now.bytes() != self.raw.bytes() {
+            return Err(LegacyFenceError::BusyOrUnresolved);
+        }
+        Ok(())
+    }
+}
 /// Never Clone/Deserialize. Dropping leaves every created guard name intact;
 /// absent/dead process or file absence is never interpreted as quiescence.
 pub struct LegacyWriterFence {
@@ -80,6 +124,7 @@ pub struct LegacyWriterFence {
     host_identity: RootIdentity,
     locks: Vec<PinnedLegacyLock>,
     frozen: Vec<FrozenFile>,
+    service: Option<Arc<LegacyServiceDescriptor>>,
 }
 impl std::fmt::Debug for LegacyWriterFence {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -131,6 +176,26 @@ impl LegacyWriterFence {
         host: PrivateRoot,
         inputs: &[LegacyMaterialInput],
     ) -> Result<Self, LegacyFenceFailure> {
+        Self::acquire_selected(owner, maintenance, host, inputs, None)
+    }
+    /// Explicit protected service-material branch, never a stopped-service or
+    /// handoff grant. The default acquire path still requires service absence.
+    pub fn acquire_with_service_descriptor(
+        owner: OwnedConfigurationRoot,
+        maintenance: ConfigurationMaintenance,
+        host: PrivateRoot,
+        inputs: &[LegacyMaterialInput],
+        descriptor: Arc<LegacyServiceDescriptor>,
+    ) -> Result<Self, LegacyFenceFailure> {
+        Self::acquire_selected(owner, maintenance, host, inputs, Some(descriptor))
+    }
+    fn acquire_selected(
+        owner: OwnedConfigurationRoot,
+        maintenance: ConfigurationMaintenance,
+        host: PrivateRoot,
+        inputs: &[LegacyMaterialInput],
+        service: Option<Arc<LegacyServiceDescriptor>>,
+    ) -> Result<Self, LegacyFenceFailure> {
         let mut fence = Self {
             host_identity: host.identity(),
             owner,
@@ -138,6 +203,7 @@ impl LegacyWriterFence {
             host,
             locks: Vec::with_capacity(LOCKS.len()),
             frozen: Vec::new(),
+            service,
         };
         let outcome = fence.acquire_inner(inputs);
         match outcome {
@@ -150,7 +216,7 @@ impl LegacyWriterFence {
     }
     fn acquire_inner(&mut self, inputs: &[LegacyMaterialInput]) -> Result<(), LegacyFenceError> {
         if inputs.is_empty()
-            || inputs.len() > MAX_FILES
+            || inputs.len() + usize::from(self.service.is_some()) > MAX_FILES
             || inputs
                 .iter()
                 .any(|i| i.max_bytes == 0 || i.max_bytes > MAX_FILE_BYTES)
@@ -167,10 +233,8 @@ impl LegacyWriterFence {
         {
             return Err(LegacyFenceError::InvalidMaterials);
         }
-        // This absence is only a selection restriction; NOT stopped-service proof.
-        self.host
-            .ensure_absent("service.json")
-            .map_err(|_| LegacyFenceError::BusyOrUnresolved)?;
+        // Selection only: neither branch proves service quiescence.
+        self.validate_service_selection()?;
         let mut entropy = [0u8; 32];
         getrandom::fill(&mut entropy).map_err(|_| LegacyFenceError::Unknown)?;
         let root = self
@@ -239,7 +303,10 @@ impl LegacyWriterFence {
                     .map_err(|_| JournalError::Unknown)?
             })
             .map_err(classify)?;
-        let mut total = 0usize;
+        let mut total = self
+            .service
+            .as_ref()
+            .map_or(0, |service| service.raw.bytes().len());
         for input in inputs {
             let raw = self
                 .owner
@@ -289,8 +356,7 @@ impl LegacyWriterFence {
         }
         self.owner
             .with_maintenance(&self.maintenance, |state| {
-                self.host
-                    .ensure_absent("service.json")
+                self.validate_service_selection()
                     .map_err(|_| JournalError::Conflict)?;
                 state
                     .root
@@ -321,6 +387,35 @@ impl LegacyWriterFence {
                 Ok(())
             })
             .map_err(classify)
+    }
+    fn validate_service_selection(&self) -> Result<(), LegacyFenceError> {
+        match &self.service {
+            Some(descriptor) => descriptor.revalidate(&self.host),
+            None => self
+                .host
+                .ensure_absent("service.json")
+                .map_err(|_| LegacyFenceError::BusyOrUnresolved),
+        }
+    }
+    /// The SAME continuously validated configuration writer and original Host
+    /// material must match the manager's independently verified service inputs.
+    /// This does not promote descriptor bytes to service control authority.
+    pub fn verify_service_descriptor(
+        &self,
+        descriptor: &LegacyServiceDescriptor,
+    ) -> Result<(), LegacyFenceError> {
+        self.validate()?;
+        let held = self
+            .service
+            .as_ref()
+            .ok_or(LegacyFenceError::InvalidMaterials)?;
+        if held.host != descriptor.host
+            || held.raw.observation() != descriptor.raw.observation()
+            || held.raw.bytes() != descriptor.raw.bytes()
+        {
+            return Err(LegacyFenceError::InvalidMaterials);
+        }
+        descriptor.revalidate(&self.host)
     }
     pub fn configuration_root(&self) -> &OwnedConfigurationRoot {
         &self.owner
