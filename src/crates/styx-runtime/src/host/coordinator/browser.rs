@@ -305,8 +305,43 @@ impl HostCoordinator {
             return Err(CoordinatorError::Busy);
         }
         let config = profile(browser, owner)?.config.clone();
-        let slot = browser.worker.try_reserve_open()?;
         let facts = browser.facts.clone();
+        let slot = match browser.worker.try_reserve_open() {
+            Ok(slot) => slot,
+            Err(BrowserError::Busy) => {
+                // The physical slot refused before spawn/config/native I/O.
+                // Consume this exact Reserved operation under the same Core
+                // lock: its permit must never become usable on a later retry.
+                let permit = match state
+                    .ledger
+                    .dispatch(owner, id, digest, &facts, self.now())?
+                {
+                    DispatchDisposition::Existing(snapshot) => {
+                        return Ok(BrowserOpenSubmission::Existing(snapshot));
+                    }
+                    DispatchDisposition::ExecuteOnce(permit) => permit,
+                };
+                drop(permit); // Never passed to the native provider.
+                let snapshot = state.ledger.record_executor_fact(
+                    id,
+                    ExecutorFact::NotDispatched,
+                    self.now(),
+                )?;
+                let (response, receiver) = oneshot::channel();
+                // Submitted is a ready logical completion here, not evidence
+                // of native submission or a worker which requires cleanup.
+                let _ = response.send(Ok(BrowserOpenCompletion {
+                    snapshot,
+                    evidence: BrowserActionEvidence::NotDispatched,
+                    cause: Some(BrowserError::Busy),
+                    cleanup_required: false,
+                }));
+                return Ok(BrowserOpenSubmission::Submitted(BrowserOpenTicket {
+                    response: receiver,
+                }));
+            }
+            Err(error) => return Err(error.into()),
+        };
         let permit = match state
             .ledger
             .dispatch(owner, id, digest, &facts, self.now())?

@@ -1,0 +1,13 @@
+# ADR-020 — same owner and resource across an authenticated WSS replacement
+
+Status: implementation in progress; exact socket/ordinary CLI acceptance pending. This closes the existing C04 continuity gap. It introduces no public tools, new owner authority, interpreter or management state.
+
+A Binding retains its original identity anchor, OwnerRef, target kinds/digests and admission history. A bounded route cache may follow a current authenticated Entry only inside the same Gateway instance/epoch, for the same verified principal/OwnerId/device, HostGeneration, grant revision, capability generation and local execution profile. Current Core lane admission remains required before enqueue, native send and delivery. A different Host, changed grant/profile or fenced owner is refused.
+
+The new transport must actually acknowledge OwnerOpen with the original OwnerRef and revision before the route cache changes. Lost acknowledgment remains Unknown. Explicit reconciliation of this idempotent control is distinct from replaying a business operation. The one rebind try-lock does not create an unbounded waiter queue. The original target map and dispatch history are never cleared or re-created. Active requests may continue or remain Unknown; transport replacement is not rollback, cancellation or result recovery.
+
+Revocation and cleanup use only a same-identity current authenticated connection and never send OwnerOpen to revive a fenced owner. If identity/grant continuity cannot be established, cleanup remains unconfirmed. A successful process exit is still separate from remote cleanup facts. The original resource/Browser context, cookies and native executor must remain; reopening a context or resending a command cannot satisfy continuity.
+
+The Browser trusted link fence invalidates old references and late snapshot minting. An explicit fresh observation is a new logical operation. A previously unknown Browser action remains blocked; this change does not invent its result. The private request waiter and wire watchdog both consume the bounded Call response budget; only the existing wait tool gets its longer response bound. Exec and cleanup limits remain unchanged.
+
+Actual evidence must use one exact owned Host socket shutdown after pidfd/birth/inode/domain/type/tuple validation, then prove a new connection generation, unchanged original Codex/Chrome/context, rejected old references, a fresh snapshot with one independent effect, original Exec resource stdin continuation exactly once and real final cleanup. Permission refusal or ambiguous socket identity must stop the injection without changing host permissions. Source review, a synthetic acknowledgment and a standalone socket probe are not product recovery acceptance.
