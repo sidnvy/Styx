@@ -273,6 +273,21 @@ mod linux {
     }
     #[test]
     fn lock_resources_are_distinct_exclusive_and_release_without_unlink() {
+        // This scene asserts immediate last-description close, so isolate it
+        // from unrelated parallel tests spawning processes. CLOEXEC does not
+        // close an inherited description until that child has actually exec'd.
+        // Keep the immediate assertion and production close-only lock contract;
+        // do not mask Busy with a retry or explicitly unlock an inherited lease.
+        const OWNED: &str = "STYX_TEST_OWNED_LOCK_RELEASE";
+        if std::env::var_os(OWNED).as_deref() != Some(std::ffi::OsStr::new("1")) {
+            let status = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "store::tests::linux::lock_resources_are_distinct_exclusive_and_release_without_unlink", "--nocapture"])
+                .env(OWNED, "1")
+                .status()
+                .unwrap();
+            assert!(status.success(), "owned isolated lock-release scene failed");
+            return;
+        }
         let scratch = Scratch::new();
         let root = scratch.open();
         let writer = root.try_configuration_writer().unwrap();
