@@ -192,6 +192,7 @@ async fn actual_snapshot_refs_navigation_tabs_owner_and_reopen_batch() {
         .unwrap();
     let effects = Arc::new(Mutex::new(Vec::<String>::new()));
     let ready = Arc::new(Mutex::new(Vec::<String>::new()));
+    let link_probes = Arc::new(Mutex::new(Vec::<(String, String)>::new()));
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
     let navigation_gate = CancellationToken::new();
@@ -200,15 +201,17 @@ async fn actual_snapshot_refs_navigation_tabs_owner_and_reopen_batch() {
     let stop_server = stop.clone();
     let server_effects = effects.clone();
     let server_ready = ready.clone();
+    let server_link_probes = link_probes.clone();
     let server = tokio::spawn(async move {
         let mut connections = JoinSet::new();
         loop {
             let stream = tokio::select! {_=stop_server.cancelled()=>break,result=listener.accept()=>result.unwrap().0};
             let effects = server_effects.clone();
             let ready = server_ready.clone();
+            let link_probes = server_link_probes.clone();
             let navigation_gate = server_navigation_gate.clone();
             connections.spawn(async move {
-                let service=service_fn(move |request:Request<Incoming>|{let effects=effects.clone();let ready=ready.clone();let navigation_gate=navigation_gate.clone();async move {
+                let service=service_fn(move |request:Request<Incoming>|{let effects=effects.clone();let ready=ready.clone();let link_probes=link_probes.clone();let navigation_gate=navigation_gate.clone();async move {
                     let path=request.uri().path().to_owned();
                     let response=if let Some(page)=path.strip_prefix("/page/") {
                         assert!(["a","b","tab"].contains(&page));
@@ -220,6 +223,7 @@ async fn actual_snapshot_refs_navigation_tabs_owner_and_reopen_batch() {
                         let body=if navigation_gate.is_cancelled(){b"go".as_slice()}else{b"wait".as_slice()};
                         Response::new(Full::new(Bytes::copy_from_slice(body)))
                     } else if let Some(page)=path.strip_prefix("/ready/") {ready.lock().unwrap().push(page.to_owned());Response::new(Full::new(Bytes::new()))}
+                    else if path=="/link-probe" {let cookie=request.headers().get("cookie").and_then(|v|v.to_str().ok()).unwrap_or("").to_owned();let body=Limited::new(request.into_body(),4096).collect().await.unwrap().to_bytes();link_probes.lock().unwrap().push((String::from_utf8(body.to_vec()).unwrap(),cookie));Response::new(Full::new(Bytes::from_static(b"recorded")))}
                     else if path=="/effect" {let body=Limited::new(request.into_body(),4096).collect().await.unwrap().to_bytes();effects.lock().unwrap().push(String::from_utf8(body.to_vec()).unwrap());Response::new(Full::new(Bytes::from_static(b"recorded")))}
                     else {Response::builder().status(204).body(Full::new(Bytes::new())).unwrap()};
                     Ok::<_,std::convert::Infallible>(response)
@@ -254,6 +258,21 @@ async fn actual_snapshot_refs_navigation_tabs_owner_and_reopen_batch() {
         let intermediate=snapshot_ref(&fresh,"Owned commit a");assert_ne!(intermediate,old);
         stale(&execute(&host,&owner,&open,tool("browser_click",json!({"target":old})),&mut observations).await);
         assert!(effects.lock().unwrap().is_empty());
+        stage="trusted_link_boundary_preserves_context_rejects_refs";
+        acknowledged(&execute(&host,&owner,&open,BrowserAction::Evaluate{function:format!("()=>{{window.__styx_link_guard={};document.cookie='styx_link_cookie='+window.__styx_link_guard+'; path=/';return true}}",serde_json::to_string(&nonce).unwrap())},&mut observations).await);
+        let before_link=execute(&host,&owner,&open,tool("browser_snapshot",json!({})),&mut observations).await;
+        let link_old=snapshot_ref(&before_link,"Owned commit a");
+        // Exact trusted HostProtocol boundary port, not a simulated network
+        // result and not evidence that a real WSS socket was disconnected.
+        host.invalidate_browser_link_references();
+        host.invalidate_browser_link_references();
+        stale(&execute(&host,&owner,&open,tool("browser_click",json!({"target":link_old})),&mut observations).await);
+        assert!(effects.lock().unwrap().is_empty());
+        acknowledged(&execute(&host,&owner,&open,BrowserAction::Evaluate{function:"async()=>{await fetch('/link-probe',{method:'POST',body:String(window.__styx_link_guard)});return true}".into()},&mut observations).await);
+        let probes=link_probes.lock().unwrap().clone();
+        assert_eq!(probes.len(),1);assert_eq!(probes[0].0,nonce);
+        assert!(probes[0].1.split(';').any(|v|v.trim()==format!("styx_link_cookie={nonce}")));
+        observations.push(json!({"trusted_link_boundary":"end_and_begin","same_resource":open.id,"retained_window_nonce":true,"retained_http_cookie":true,"rejected_click_effects":0,"actual_wss_reconnect":"NOT_RUN"}));
         // The rejected stale request invalidates all refs. This is a new user
         // observation, not a retry of the failed click or its old reference.
         let fresh=execute(&host,&owner,&open,tool("browser_snapshot",json!({})),&mut observations).await;
@@ -324,7 +343,7 @@ async fn actual_snapshot_refs_navigation_tabs_owner_and_reopen_batch() {
             && f.native.stderr_task_reaped
             && f.browser.as_ref().is_some_and(|b| b.complete)
     });
-    let receipt = json!({"schema":1,"status":if scenario.is_ok()&&host_browser_cleanup_complete&&http_server_joined{"PASS"}else{"FAIL"},"scope":"actual owned serial Rust Host/Node/Chrome references; synthetic bootstrap authority, not paired/account/GUI/file-transfer acceptance","last_stage":stage,"nonce":nonce,"http_effects":effects.lock().unwrap().clone(),"http_ready_pages":ready.lock().unwrap().clone(),"core_observations":observations,"retirement":retirements,"host_browser_cleanup_complete":host_browser_cleanup_complete,"http_server_joined":http_server_joined,"internal_ref_retries":0,"unknown_policy":"unexpected Unknown fails and preserves history; no reset or replay","source_sha256":hex::encode(<sha2::Sha256 as sha2::Digest>::digest(include_bytes!("browser_reference_tests.rs")))});
+    let receipt = json!({"schema":1,"status":if scenario.is_ok()&&host_browser_cleanup_complete&&http_server_joined{"PASS"}else{"FAIL"},"scope":"actual owned serial Rust Host/Node/Chrome references; synthetic bootstrap authority, not paired/account/GUI/file-transfer acceptance","last_stage":stage,"nonce":nonce,"http_effects":effects.lock().unwrap().clone(),"http_ready_pages":ready.lock().unwrap().clone(),"trusted_link_http_probes":link_probes.lock().unwrap().clone(),"actual_wss_reconnect":"NOT_RUN","core_observations":observations,"retirement":retirements,"host_browser_cleanup_complete":host_browser_cleanup_complete,"http_server_joined":http_server_joined,"internal_ref_retries":0,"unknown_policy":"unexpected Unknown fails and preserves history; no reset or replay","source_sha256":hex::encode(<sha2::Sha256 as sha2::Digest>::digest(include_bytes!("browser_reference_tests.rs")))});
     std::fs::write(
         root.join("receipt.json"),
         serde_json::to_vec_pretty(&receipt).unwrap(),

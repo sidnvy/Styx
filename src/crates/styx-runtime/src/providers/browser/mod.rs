@@ -1,5 +1,6 @@
 //! One external Browser executor lane. Core permits, owner/profile/reference
 //! policy and operation outcomes stay in Rust; this module creates no ledger.
+use futures_util::FutureExt;
 use rmcp::{
     ClientHandler, RoleClient, ServiceExt,
     model::{CallToolRequestParams, CallToolResponse, CallToolResult},
@@ -180,12 +181,35 @@ impl BrowserIoBudget {
 pub struct BrowserWorker {
     inner: Arc<Inner>,
 }
+// Local trusted link-boundary fence, not a wire value or a second operation
+// ledger. Zero is permanent exhaustion; references can never wrap back to life.
+struct ReferenceLink {
+    revision: u64,
+}
+impl ReferenceLink {
+    fn advance(&mut self) {
+        self.revision = if self.revision == 0 {
+            0
+        } else {
+            self.revision.checked_add(1).unwrap_or(0)
+        };
+    }
+    fn current(&self) -> Result<u64> {
+        if self.revision == 0 {
+            Err(BrowserError::StaleObservation)
+        } else {
+            Ok(self.revision)
+        }
+    }
+}
 struct Inner {
+    reference_link: Arc<Mutex<ReferenceLink>>,
     budget: Arc<BrowserIoBudget>,
     resources: Mutex<BTreeMap<OperationId, Arc<Resource>>>,
     metadata: Arc<Semaphore>,
 }
 struct Resource {
+    reference_link: Arc<Mutex<ReferenceLink>>,
     metadata_record: Mutex<Option<OwnedSemaphorePermit>>,
     metadata: Arc<Semaphore>,
     stop: CancellationToken,
@@ -204,6 +228,7 @@ struct Live {
     io_join_failed: bool,
     retired: bool,
     references: styx_core::browser::BrowserReferenceScope,
+    reference_revision: u64,
     workspace: PathBuf,
     output: PathBuf,
     slot: Option<OwnedSemaphorePermit>,
@@ -258,6 +283,7 @@ pub struct BrowserOpenSlot {
     metadata: OwnedSemaphorePermit,
 }
 pub struct BrowserActionSlot {
+    captured_reference_revision: u64,
     resource: Arc<Resource>,
     state: OwnedMutexGuard<Live>,
 }
@@ -265,11 +291,20 @@ impl BrowserWorker {
     pub fn new(budget: Arc<BrowserIoBudget>) -> Self {
         Self {
             inner: Arc::new(Inner {
+                reference_link: Arc::new(Mutex::new(ReferenceLink { revision: 1 })),
                 budget,
                 resources: Mutex::new(BTreeMap::new()),
                 metadata: Arc::new(Semaphore::new(MAX_RECORDS)),
             }),
         }
+    }
+    /// Trusted local Host link lifecycle only. Never accepts a remote epoch or
+    /// target and never waits for/cancels an in-flight Browser/native operation.
+    pub(crate) fn invalidate_link_references(&self) {
+        if let Ok(mut link) = self.inner.reference_link.lock() {
+            link.advance();
+        }
+        // Poisoned mutex already makes every resolution/mint fail closed.
     }
     pub fn try_reserve_open(&self) -> Result<BrowserOpenSlot> {
         if self
@@ -308,7 +343,7 @@ impl BrowserWorker {
         if handle.resource.stop.is_cancelled() {
             return Err(BrowserError::Unknown);
         }
-        let state = handle
+        let mut state = handle
             .resource
             .state
             .clone()
@@ -317,7 +352,15 @@ impl BrowserWorker {
         if state.retired {
             return Err(BrowserError::PermissionDenied);
         }
+        let link = self
+            .inner
+            .reference_link
+            .lock()
+            .map_err(|_| BrowserError::Unknown)?;
+        let captured_reference_revision = link.current()?;
+        synchronize_reference_revision(&mut state, captured_reference_revision, &link)?;
         Ok(BrowserActionSlot {
+            captured_reference_revision,
             resource: handle.resource.clone(),
             state,
         })
@@ -534,6 +577,7 @@ impl BrowserOpenSlot {
             entropy,
         );
         let resource = Arc::new(Resource {
+            reference_link: self.worker.inner.reference_link.clone(),
             metadata_record: Mutex::new(Some(self.metadata)),
             metadata: self.worker.inner.metadata.clone(),
             stop: CancellationToken::new(),
@@ -549,6 +593,7 @@ impl BrowserOpenSlot {
                 io_join_failed: false,
                 retired: false,
                 references,
+                reference_revision: 0,
                 workspace: config.workspace_dir.clone(),
                 output: config.output_dir.clone(),
                 slot: Some(self.slot),
@@ -715,6 +760,42 @@ fn pin(path: &Path, pins: &mut Vec<File>) -> Result<PathBuf> {
     pins.push(file);
     Ok(path)
 }
+fn synchronize_reference_revision(
+    live: &mut Live,
+    captured: u64,
+    link: &ReferenceLink,
+) -> Result<()> {
+    if captured == 0 || link.current().ok() != Some(captured) {
+        live.references.invalidate();
+        return Err(BrowserError::StaleObservation);
+    }
+    if live.reference_revision != captured {
+        live.references.invalidate();
+        live.reference_revision = captured;
+    }
+    Ok(())
+}
+fn finish_reference_result(
+    live: &mut Live,
+    captured: u64,
+    link: Option<&ReferenceLink>,
+    result: &mut CallToolResult,
+    snapshot: bool,
+    native: &references::NativeFact,
+) -> Result<bool> {
+    let current = link.is_some_and(|l| l.current().is_ok_and(|v| v == captured));
+    if !current {
+        live.references.invalidate();
+    }
+    let stale_snapshot = snapshot && (!current || native.before != native.after);
+    references::result_refs(
+        result,
+        &mut live.references,
+        snapshot && !stale_snapshot,
+        native,
+    )?;
+    Ok(stale_snapshot)
+}
 impl BrowserActionSlot {
     pub async fn call_once(self, permit: DispatchPermit) -> BrowserActionReceipt {
         let operation = permit.id().clone();
@@ -796,6 +877,20 @@ impl BrowserActionSlot {
         {
             return refuse(error);
         }
+        {
+            let reference_link = self.resource.reference_link.clone();
+            let link = match reference_link.lock() {
+                Ok(v) => v,
+                Err(_) => return refuse(BrowserError::Unknown),
+            };
+            if let Err(error) = synchronize_reference_revision(
+                &mut self.state,
+                self.captured_reference_revision,
+                &link,
+            ) {
+                return refuse(error);
+            }
+        }
         let until = Instant::now() + self.state.timeout;
         // This read is a native epoch observation, not Core authorization and
         // not an atomic browser navigation lock. It never starts the context.
@@ -842,68 +937,97 @@ impl BrowserActionSlot {
             self.state.uncertain = true;
             return refuse(BrowserError::StaleObservation);
         }
-        let mut targets = serde_json::Value::Object(arguments);
-        let resolved = references::resolve_targets(
-            &mut targets,
-            &self.state.references,
-            permit.owner(),
-            target,
-            epoch,
-        );
-        // Native-ref safety is conditional on snapshot mode none plus this
-        // complete resource mutex. Never start a concurrent snapshot while a
-        // lazy upstream locator is pending. Native errors remain Unknown and
-        // poison all later actions except terminal Close.
-        if let Err(error) = resolved {
-            self.state.references.invalidate();
-            return refuse(error);
-        }
-        arguments = targets.as_object().cloned().unwrap_or_default();
-        if policy::invalidates(&tool_name, &arguments) {
-            self.state.references.invalidate();
-        }
         let snapshot = policy::snapshot(&tool_name, &arguments);
-        let mut params = CallToolRequestParams::new(tool_name).with_arguments(arguments);
-        // A never-created context has no stable page observation to guard.
-        // Existing opaque tokens were still resolved above and cannot take this
-        // path without a scope. Do not manufacture epoch equality across init.
-        if ready {
-            params.meta = Some(
-                serde_json::Map::from_iter([(
-                    references::META.into(),
-                    serde_json::json!({"schema":1,"expected_epoch":epoch}),
-                )])
-                .into(),
+        let reference_link = self.resource.reference_link.clone();
+        let (mut native_call, immediate) = {
+            let link = match reference_link.lock() {
+                Ok(v) => v,
+                Err(_) => return refuse(BrowserError::Unknown),
+            };
+            if let Err(error) = synchronize_reference_revision(
+                &mut self.state,
+                self.captured_reference_revision,
+                &link,
+            ) {
+                return refuse(error);
+            }
+            let mut targets = serde_json::Value::Object(arguments);
+            let resolved = references::resolve_targets(
+                &mut targets,
+                &self.state.references,
+                permit.owner(),
+                target,
+                epoch,
             );
-        }
-        let metadata = match self.resource.metadata.clone().try_acquire_owned() {
-            Ok(permit) => permit,
-            Err(_) => return refuse(BrowserError::Busy),
+            // Native-ref safety is conditional on snapshot mode none plus this
+            // complete resource mutex. Never start a concurrent snapshot while a
+            // lazy upstream locator is pending. Native errors remain Unknown and
+            // poison all later actions except terminal Close.
+            if let Err(error) = resolved {
+                self.state.references.invalidate();
+                return refuse(error);
+            }
+            arguments = targets.as_object().cloned().unwrap_or_default();
+            if policy::invalidates(&tool_name, &arguments) {
+                self.state.references.invalidate();
+            }
+            let mut params = CallToolRequestParams::new(tool_name).with_arguments(arguments);
+            // A never-created context has no stable page observation to guard.
+            // Existing opaque tokens were still resolved above and cannot take this
+            // path without a scope. Do not manufacture epoch equality across init.
+            if ready {
+                params.meta = Some(
+                    serde_json::Map::from_iter([(
+                        references::META.into(),
+                        serde_json::json!({"schema":1,"expected_epoch":epoch}),
+                    )])
+                    .into(),
+                );
+            }
+            let metadata = match self.resource.metadata.clone().try_acquire_owned() {
+                Ok(permit) => permit,
+                Err(_) => return refuse(BrowserError::Busy),
+            };
+            self.state.actions.insert(
+                operation.clone(),
+                (
+                    digest,
+                    BrowserActionEvidence::Unknown,
+                    Some(BrowserError::Unknown),
+                    metadata,
+                ),
+            );
+            let peer = match &self.state.client {
+                Some(client) => client.peer().clone(),
+                None => {
+                    self.state.uncertain = true;
+                    return BrowserActionReceipt {
+                        operation,
+                        evidence: BrowserActionEvidence::Unknown,
+                        result: None,
+                        cause: Some(BrowserError::Unknown),
+                    };
+                }
+            };
+            // Linearize trusted reference resolution and SDK request submission.
+            // First poll does NOT prove Chrome execution/stdio byte delivery; after
+            // submission any loss remains possibly executed, never NotDispatched.
+            let mut native_call = Box::pin(async move { peer.call_tool_once(params).await });
+            let immediate = native_call.as_mut().now_or_never();
+            (native_call, immediate)
         };
-        self.state.actions.insert(
-            operation.clone(),
-            (
-                digest,
-                BrowserActionEvidence::Unknown,
-                Some(BrowserError::Unknown),
-                metadata,
-            ),
-        );
-        let response = match &self.state.client {
-            Some(client) => tokio::select! {
+        let response = if let Some(value) = immediate {
+            Some(Ok(value))
+        } else {
+            tokio::select! {
                 _=self.resource.stop.cancelled()=>None,
-                result=timeout_at(until,client.call_tool_once(params))=>Some(result),
-            },
-            None => {
-                self.state.uncertain = true;
-                return BrowserActionReceipt {
-                    operation,
-                    evidence: BrowserActionEvidence::Unknown,
-                    result: None,
-                    cause: Some(BrowserError::Unknown),
-                };
+                result=timeout_at(until,&mut native_call)=>Some(result),
             }
         };
+        // This synchronous lock also serializes completion mint with link end.
+        // An old waiter cannot adopt the next connection's revision and remint.
+        let reference_link = self.resource.reference_link.clone();
+        let completion_link = reference_link.lock().ok();
         let (evidence, result, cause) = match response {
             Some(Ok(Ok(CallToolResponse::Complete(mut result)))) => {
                 match references::fact(&result) {
@@ -950,13 +1074,15 @@ impl BrowserActionSlot {
                         // and change epoch. It completed as a read, but cannot
                         // mint stable refs. Return ACK + stale warning and scrub
                         // native refs; do not retry or poison a healthy context.
-                        let stale_snapshot = snapshot && native.before != native.after;
-                        let refs = references::result_refs(
+                        let refs = finish_reference_result(
+                            &mut self.state,
+                            self.captured_reference_revision,
+                            completion_link.as_deref(),
                             &mut result,
-                            &mut self.state.references,
-                            snapshot && !stale_snapshot,
+                            snapshot,
                             &native,
                         );
+                        let stale_snapshot = refs.as_ref().is_ok_and(|stale| *stale);
                         if valid_close && refs.is_ok() {
                             (
                                 BrowserActionEvidence::Acknowledged,
@@ -1150,3 +1276,7 @@ impl BrowserWorker {
 }
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+#[path = "link_reference_tests.rs"]
+mod link_reference_tests;

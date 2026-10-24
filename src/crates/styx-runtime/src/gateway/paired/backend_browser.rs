@@ -2,84 +2,64 @@
 //! This is not a Browser authority, grant, profile selector or retry engine.
 use super::*;
 use crate::{
-    host::protocol::wire::{BrowserCommand, Snapshot},
+    host::protocol::wire::{
+        BROWSER_WAIT_PREPARE_TIMEOUT_MS, BROWSER_WAIT_RESPONSE_SECS, BrowserCommand, Snapshot,
+    },
     providers::browser::BrowserAction,
 };
 use styx_contracts::error::{ErrorCategory, ExecutionCertainty};
 const MAX_BROWSER_CONTEXTS: usize = 16;
 const MAX_BROWSER_RESULT_BYTES: usize = 128 * 1024;
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct NavigateArgs {
-    url: String,
-    environment_id: Option<String>,
+/// Only Browser tools already present in the frozen public contract are routed.
+/// Provider validation below independently requires the pinned native schema.
+pub(super) fn is_public_browser_tool(name: &str) -> bool {
+    name.starts_with("browser_") && PUBLIC.iter().any(|tool| tool.name == name)
 }
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct EvaluateArgs {
-    function: String,
-    element: Option<String>,
-    target: Option<String>,
-    filename: Option<String>,
-    environment_id: Option<String>,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct BrowserBudget {
+    host_timeout_ms: u32,
+    response_secs: u64,
 }
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct CloseArgs {
-    environment_id: Option<String>,
+impl BrowserBudget {
+    fn for_tool(name: &str) -> Self {
+        if name == "browser_wait_for" {
+            Self {
+                host_timeout_ms: BROWSER_WAIT_PREPARE_TIMEOUT_MS,
+                response_secs: BROWSER_WAIT_RESPONSE_SECS,
+            }
+        } else {
+            Self {
+                host_timeout_ms: 5_000,
+                response_secs: 5,
+            }
+        }
+    }
 }
 struct BrowserRequest {
     environment_id: Option<String>,
     action: BrowserAction,
+    budget: BrowserBudget,
 }
 impl BrowserRequest {
     fn parse(name: &str, args: Option<Map<String, Value>>) -> Result<Self, &'static str> {
-        let value = match name {
-            "browser_navigate" => {
-                let a: NavigateArgs = decode(args)?;
-                Self {
-                    environment_id: a.environment_id,
-                    action: BrowserAction::Navigate { url: a.url },
-                }
-            }
-            "browser_evaluate" => {
-                let a: EvaluateArgs = decode(args)?;
-                let mut arguments =
-                    Map::from_iter([("function".into(), Value::String(a.function))]);
-                for (key, value) in [
-                    ("element", a.element),
-                    ("target", a.target),
-                    ("filename", a.filename),
-                ] {
-                    if let Some(value) = value {
-                        arguments.insert(key.into(), Value::String(value));
-                    }
-                }
-                Self {
-                    environment_id: a.environment_id,
-                    action: BrowserAction::Tool {
-                        name: name.into(),
-                        arguments,
-                    },
-                }
-            }
-            "browser_close" => {
-                let a: CloseArgs = decode(Some(args.unwrap_or_default()))?;
-                Self {
-                    environment_id: a.environment_id,
-                    action: BrowserAction::Close,
-                }
-            }
-            _ => return Err("unsupported"),
-        };
-        if value
-            .environment_id
-            .as_ref()
-            .is_some_and(|v| v.is_empty() || v.len() > 128)
-        {
-            return Err("invalid_arguments");
+        if !is_public_browser_tool(name) {
+            return Err("unsupported");
         }
+        let mut arguments = args.unwrap_or_default();
+        let environment_id = match arguments.remove("environment_id") {
+            None => None,
+            Some(Value::String(value)) if !value.is_empty() && value.len() <= 128 => Some(value),
+            _ => return Err("invalid_arguments"),
+        };
+        let value = Self {
+            environment_id,
+            budget: BrowserBudget::for_tool(name),
+            action: BrowserAction::Tool {
+                name: name.into(),
+                arguments,
+            },
+        };
         // Reuse the frozen mature-tool schema + actual provider policy, including
         // URL/path/ref restrictions. No public metadata can create an owner.
         value
@@ -241,17 +221,22 @@ impl PairedGatewayBackend {
         &self,
         binding: &BoundOwner,
         command: BrowserCommand,
+        budget: BrowserBudget,
     ) -> Result<Reply, super::super::RelayError> {
-        self.exchange(
-            binding,
-            Call::Browser {
-                owner: binding.owner_ref(),
-                grant_revision: binding.grant_revision(),
-                timeout_ms: 5_000,
-                command,
-            },
+        tokio::time::timeout(
+            Duration::from_secs(budget.response_secs),
+            self.relay.call(
+                binding,
+                Call::Browser {
+                    owner: binding.owner_ref(),
+                    grant_revision: binding.grant_revision(),
+                    timeout_ms: budget.host_timeout_ms,
+                    command,
+                },
+            ),
         )
         .await
+        .unwrap_or(Err(super::super::RelayError::Unknown))
     }
     pub(super) async fn browser_call(
         &self,
@@ -328,7 +313,7 @@ impl PairedGatewayBackend {
             // and dropped futures cannot cause a later automatic reopen.
             record.phase = Phase::Opening;
             let prepared = self
-                .browser_exchange(&binding, BrowserCommand::PrepareOpen)
+                .browser_exchange(&binding, BrowserCommand::PrepareOpen, request.budget)
                 .await;
             let snapshot = match prepared {
                 Ok(Reply::Prepared { snapshot }) => snapshot,
@@ -364,6 +349,7 @@ impl PairedGatewayBackend {
                     BrowserCommand::DispatchOpen {
                         target: target.clone(),
                     },
+                    request.budget,
                 )
                 .await
             {
@@ -419,6 +405,7 @@ impl PairedGatewayBackend {
                     target: target.clone(),
                     action: raw,
                 },
+                request.budget,
             )
             .await;
         let snapshot = match prepared {
@@ -454,7 +441,11 @@ impl PairedGatewayBackend {
             return failure("permission_denied", None, true);
         }
         let reply = self
-            .browser_exchange(&binding, BrowserCommand::DispatchAction { action })
+            .browser_exchange(
+                &binding,
+                BrowserCommand::DispatchAction { action },
+                request.budget,
+            )
             .await;
         if !self.active(owner) {
             return failure("permission_denied", None, true);

@@ -38,7 +38,7 @@ impl Drop for Fixture {
         std::fs::remove_dir_all(&self.0).unwrap();
     }
 }
-fn permit(
+pub(super) fn permit(
     payload: Vec<u8>,
     capability: CapabilityId,
 ) -> (
@@ -270,6 +270,7 @@ async fn missing_unknown_requires_exact_ended_bundle_and_audit() {
                 worker.inner.metadata.clone().try_acquire_owned().unwrap(),
             )),
             metadata: worker.inner.metadata.clone(),
+            reference_link: worker.inner.reference_link.clone(),
             stop: CancellationToken::new(),
             cleanup_job: Mutex::new(None),
             operation: parent.id().clone(),
@@ -283,6 +284,7 @@ async fn missing_unknown_requires_exact_ended_bundle_and_audit() {
                 client_close: None,
                 io_join_failed: false,
                 retired: false,
+                reference_revision: 0,
                 references: styx_core::browser::BrowserReferenceScope::new(
                     owner.clone(),
                     target.clone(),

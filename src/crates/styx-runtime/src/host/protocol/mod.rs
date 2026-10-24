@@ -83,6 +83,14 @@ impl From<PairedTrustedProfile> for ProfileBinding {
         }
     }
 }
+#[cfg(target_os = "linux")]
+struct BrowserLinkReferences<'a>(&'a HostCoordinator);
+#[cfg(target_os = "linux")]
+impl Drop for BrowserLinkReferences<'_> {
+    fn drop(&mut self) {
+        self.0.invalidate_browser_link_references();
+    }
+}
 struct OwnerRecord {
     lease: Option<OwnerLease>,
     revision: u64,
@@ -674,6 +682,13 @@ impl<'a> HostProtocol<'a> {
         if link.endpoint() != self.profile.endpoint {
             return Err(ProtocolError::BootstrapMismatch);
         }
+        #[cfg(target_os = "linux")]
+        let _browser_references = if self.paired {
+            self.coordinator.invalidate_browser_link_references();
+            Some(BrowserLinkReferences(&self.coordinator))
+        } else {
+            None
+        };
         let generation = link.generation().clone();
         let sender = link.sender();
         let mut negotiated = false;

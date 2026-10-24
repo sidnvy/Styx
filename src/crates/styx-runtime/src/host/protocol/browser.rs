@@ -161,11 +161,18 @@ impl HostProtocol<'_> {
             Ok(v) => v,
             Err(e) => return rejection(e),
         };
-        let mut context = match self.context(revision, timeout) {
+        if timeout > wire::BROWSER_WAIT_PREPARE_TIMEOUT_MS {
+            return rejection(ErrorCategory::InvalidRequest);
+        }
+        // Exec's ten-second admission bound remains unchanged. Only this
+        // independently authorized Browser context may admit a native wait.
+        let mut context = match self.context(revision, timeout.min(10_000)) {
             Ok(v) => v,
             Err(e) => return rejection(e),
         };
         context.capability = CapabilityId::BrowserHeadless;
+        context.deadline =
+            MonotonicMillis(self.coordinator.now().0.saturating_add(u64::from(timeout)));
         match command {
             BrowserCommand::PrepareOpen => {
                 let bound = owner.clone();

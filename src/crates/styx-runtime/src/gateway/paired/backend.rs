@@ -949,7 +949,7 @@ impl GatewayToolBackend for PairedGatewayBackend {
                 Err(e) => failure(e, None, false),
             },
             #[cfg(target_os = "linux")]
-            "browser_navigate" | "browser_evaluate" | "browser_close" => {
+            name if browser::is_public_browser_tool(name) => {
                 self.browser_call(owner, request.name.as_ref(), request.arguments)
                     .await
             }

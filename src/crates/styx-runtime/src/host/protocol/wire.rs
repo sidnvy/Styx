@@ -81,7 +81,22 @@ pub enum Call {
     Terminate {},
 }
 pub const BROWSER_HEADLESS_V1: &str = "browser_headless_v1";
+/// Existing wait_for permits thirty seconds. Keep an explicit bounded margin
+/// for provider settlement; ordinary operations and owner cleanup are unchanged.
+pub(crate) const BROWSER_WAIT_PREPARE_TIMEOUT_MS: u32 = 35_000;
+#[cfg(target_os = "linux")]
+pub(crate) const BROWSER_WAIT_RESPONSE_SECS: u64 = 40;
 impl Call {
+    pub(crate) fn response_budget(&self) -> std::time::Duration {
+        match self {
+            Self::Browser { timeout_ms, .. } if *timeout_ms > 10_000 => {
+                std::time::Duration::from_millis(
+                    u64::from((*timeout_ms).min(BROWSER_WAIT_PREPARE_TIMEOUT_MS)) + 10_000,
+                )
+            }
+            _ => std::time::Duration::from_secs(35),
+        }
+    }
     pub(crate) fn is_browser(&self) -> bool {
         matches!(self, Self::Browser { .. })
     }

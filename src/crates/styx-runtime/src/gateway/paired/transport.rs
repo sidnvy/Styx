@@ -215,6 +215,7 @@ impl RelayHandle {
                                         if (!control&&business>=2)||pending.len()>=3 {
                                             let _=command.result.send(Err(RelayError::Busy));continue
                                         }
+                                        let response_budget=command.call.response_budget();
                                         let request=WireRequest{request_id:request_id()?,connection_generation:Some(e.host_connection.clone()),call:command.call};
                                         let locked=if browser{e.browser_lease.lock().await}else{e.lease.lock().await};
                                         let Some(l)=locked.as_ref() else {
@@ -226,7 +227,7 @@ impl RelayHandle {
                                         // Drop sensitive request payload after send, keep its exact lane.
                                         let command=Command{call:Call::Write{},result:command.result,gate:command.gate};
                                         match result {
-                                            Ok(())=>{pending.insert(request.request_id,Pending{command,control,browser,deadline:tokio::time::Instant::now()+Duration::from_secs(35)});},
+                                            Ok(())=>{pending.insert(request.request_id,Pending{command,control,browser,deadline:tokio::time::Instant::now()+response_budget});},
                                             Err(error)=>{
                                                 let _=command.result.send(Err(error));
                                                 // Refusal before start_send is local to Browser. Actual

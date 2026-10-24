@@ -40,7 +40,12 @@ fn browser_arguments_reuse_real_policy_without_owner_or_internal_metadata() {
     assert_eq!(navigate.environment_id.as_deref(), Some("owned-device"));
     let value: Value =
         serde_json::from_slice(&navigate.action.to_operation_payload().unwrap()).unwrap();
-    assert_eq!(value["kind"], "navigate");
+    assert_eq!(value["kind"], "tool");
+    assert_eq!(value["name"], "browser_navigate");
+    assert_eq!(
+        value["arguments"],
+        json!({"url":"http://127.0.0.1:31415/nonce"})
+    );
     assert!(value.get("environment_id").is_none());
     let evaluate = BrowserRequest::parse(
         "browser_evaluate",
@@ -74,7 +79,78 @@ fn browser_arguments_reuse_real_policy_without_owner_or_internal_metadata() {
         )
         .is_err()
     );
-    assert!(BrowserRequest::parse("browser_snapshot", args(json!({}))).is_err());
+    assert!(BrowserRequest::parse("browser_snapshot", args(json!({}))).is_ok());
+    for name in ["browser_future_tool", "styx_browser_state", "exec_command"] {
+        assert!(!is_public_browser_tool(name));
+        assert!(BrowserRequest::parse(name, args(json!({}))).is_err());
+    }
+    for value in [
+        json!({"environment_id":null}),
+        json!({"environment_id":""}),
+        json!({"environment_id":"x".repeat(129)}),
+        json!({"_meta":{"expected_epoch":1}}),
+        json!({"unknown_argument":true}),
+    ] {
+        assert!(BrowserRequest::parse("browser_snapshot", args(value)).is_err());
+    }
+    // Wait's bounded duration applies to all frozen wait forms, not to an
+    // arbitrary caller-provided timeout. All other Browser calls retain 5s.
+    for value in [
+        json!({"time":30}),
+        json!({"text":"nonce"}),
+        json!({"textGone":"nonce"}),
+    ] {
+        let wait = BrowserRequest::parse("browser_wait_for", args(value)).unwrap();
+        assert_eq!(wait.budget.host_timeout_ms, BROWSER_WAIT_PREPARE_TIMEOUT_MS);
+        assert_eq!(wait.budget.response_secs, BROWSER_WAIT_RESPONSE_SECS);
+    }
+    assert!(BrowserRequest::parse("browser_wait_for", args(json!({"time":31}))).is_err());
+    assert!(
+        BrowserRequest::parse(
+            "browser_wait_for",
+            args(json!({"time":1,"timeout_ms":u64::MAX}))
+        )
+        .is_err()
+    );
+    // Public routing is exactly the existing 24-tool contract. Remove only the
+    // routing field; all native validation comes from the pinned real schemas.
+    let native: Value = serde_json::from_str(include_str!(
+        "../../../../../packages/styx-browser-provider/playwright-contract-0.0.83.json"
+    ))
+    .unwrap();
+    let native_tools = native["tools"].as_array().unwrap();
+    let public_browser: Vec<_> = PUBLIC
+        .iter()
+        .filter(|tool| is_public_browser_tool(tool.name.as_ref()))
+        .collect();
+    assert_eq!(native_tools.len(), 24);
+    assert_eq!(public_browser.len(), native_tools.len());
+    for native_tool in native_tools {
+        let name = native_tool["name"].as_str().unwrap();
+        assert!(is_public_browser_tool(name));
+        if name != "browser_wait_for" {
+            assert_eq!(
+                BrowserBudget::for_tool(name),
+                BrowserBudget {
+                    host_timeout_ms: 5_000,
+                    response_secs: 5
+                }
+            );
+        }
+        let public = public_browser
+            .iter()
+            .find(|tool| tool.name == name)
+            .unwrap();
+        let mut schema = serde_json::to_value(public).unwrap()["inputSchema"].clone();
+        assert!(
+            schema["properties"]
+                .as_object_mut()
+                .unwrap()
+                .remove("environment_id")
+                .is_some()
+        );
+        assert_eq!(schema, native_tool["inputSchema"], "schema drift: {name}");
+    }
 }
 #[test]
 fn browser_original_open_and_action_receipts_cannot_be_replaced_by_existing_or_other_tokens() {

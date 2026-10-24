@@ -214,6 +214,14 @@ impl HostAuthority {
     }
 }
 impl HostCoordinator {
+    /// Local paired transport lifecycle, not a caller-provided generation or
+    /// operation cancellation. Contexts/owners/native work remain unchanged.
+    pub(crate) fn invalidate_browser_link_references(&self) {
+        let state = self.inner.state.lock().expect("Host state mutex");
+        if let Some(browser) = &state.browser {
+            browser.worker.invalidate_link_references();
+        }
+    }
     pub(crate) fn browser_configured(&self) -> bool {
         self.inner
             .state

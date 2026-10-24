@@ -304,7 +304,9 @@ impl BrowserBootstrap for LocalBrowser {
             workspace_dir: self.workspace.clone(),
             profile_dir: private.path().into(),
             output_dir: output.path().into(),
-            rpc_timeout: Duration::from_secs(30),
+            rpc_timeout: Duration::from_millis(u64::from(
+                crate::host::protocol::wire::BROWSER_WAIT_PREPARE_TIMEOUT_MS,
+            )),
         };
         private.revalidate().map_err(map_error)?;
         output.revalidate().map_err(map_error)?;
