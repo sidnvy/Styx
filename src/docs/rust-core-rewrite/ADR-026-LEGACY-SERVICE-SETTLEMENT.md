@@ -70,3 +70,8 @@ before mutation and returns Unsupported otherwise; no current-thread panic.
 This hands unrelated tasks to other workers and does not claim cancellable OS
 filesystem calls. Read/hash work stays in the existing bounded blocking pool.
 See [pinned Tokio behavior](https://docs.rs/tokio/1.52.3/tokio/task/fn.block_in_place.html).
+
+Capture and settlement Unit/Service proxies disable zbus property caching. The
+pinned generic builder defaults to Lazy caching; a required second live identity
+sample must issue another DBus read rather than reuse a property snapshot. The
+manager unique-owner, kernel birth and retained cgroup checks remain mandatory.

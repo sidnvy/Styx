@@ -610,6 +610,24 @@ async fn capture_exact(
         .await
         .map_err(unknown)?
 }
+// Authorization and settlement samples must be fresh DBus reads. The pinned
+// generic Proxy builder otherwise defaults to lazy property caching, which can
+// make a second read an old snapshot rather than the required second sample.
+async fn live_proxy<'a>(
+    connection: &zbus::Connection,
+    destination: &'a str,
+    path: &'a str,
+    interface: &'a str,
+) -> zbus::Result<zbus::Proxy<'a>> {
+    zbus::proxy::Builder::new(connection)
+        .destination(destination)?
+        .path(path)?
+        .interface(interface)?
+        .cache_properties(zbus::proxy::CacheProperties::No)
+        .build()
+        .await
+}
+
 async fn capture_exact_inner(i: &Arc<VerifiedLegacyServiceInputs>) -> LegacyResult<Captured> {
     let p = &i.profile;
     let d = &i.descriptor;
@@ -669,7 +687,7 @@ async fn capture_exact_inner(i: &Arc<VerifiedLegacyServiceInputs>) -> LegacyResu
         .await
         .map_err(unknown)?;
     // Reference is connection-scoped. No signal/StopUnit has occurred.
-    let unit = zbus::Proxy::new(
+    let unit = live_proxy(
         &connection,
         owner.as_str(),
         unit_object.as_str(),
@@ -677,7 +695,7 @@ async fn capture_exact_inner(i: &Arc<VerifiedLegacyServiceInputs>) -> LegacyResu
     )
     .await
     .map_err(unavailable)?;
-    let service = zbus::Proxy::new(
+    let service = live_proxy(
         &connection,
         owner.as_str(),
         unit_object.as_str(),
@@ -1308,7 +1326,7 @@ async fn observe_original(scope: &Arc<LegacyManagedScope>) -> LegacyResult<Origi
     {
         return Err(LegacyError::Conflict);
     }
-    let unit = zbus::Proxy::new(
+    let unit = live_proxy(
         &scope.connection,
         scope.manager_owner.as_str(),
         scope.unit_object.as_str(),
@@ -1316,7 +1334,7 @@ async fn observe_original(scope: &Arc<LegacyManagedScope>) -> LegacyResult<Origi
     )
     .await
     .map_err(unknown)?;
-    let service = zbus::Proxy::new(
+    let service = live_proxy(
         &scope.connection,
         scope.manager_owner.as_str(),
         scope.unit_object.as_str(),
