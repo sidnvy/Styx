@@ -1,6 +1,6 @@
 //! A bounded reservation ledger. Only a recorded, current reservation may dispatch.
 //! It owns immutable request bytes, not executor I/O. Outcome and liveness differ.
-use crate::policy::{AdmissionFacts, check_admission};
+use crate::policy::{AdmissionFacts, check_admission, check_desktop_read_acquisition};
 use std::collections::BTreeMap;
 use styx_contracts::{capability::CapabilityId, error::ErrorCategory, identity::*, operation::*};
 
@@ -46,6 +46,13 @@ pub enum ResourceDomain {
     Capability,
     DesktopAgent,
 }
+/// Immutable request purpose, issued only by the dedicated Core prepare port.
+/// It is not a capability grant and cannot be supplied by a network DTO.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OperationPurpose {
+    Execute,
+    DesktopAccessibilityReadAcquisition,
+}
 fn desktop_capability(capability: CapabilityId) -> bool {
     matches!(
         capability,
@@ -75,6 +82,7 @@ fn resource_binding(
 }
 
 struct Record {
+    purpose: OperationPurpose,
     domain: ResourceDomain,
     owner: OwnerId,
     owner_incarnation: u64,
@@ -113,6 +121,7 @@ impl Record {
 /// ```
 #[derive(PartialEq, Eq)]
 pub struct DispatchPermit {
+    purpose: OperationPurpose,
     domain: ResourceDomain,
     id: OperationId,
     owner: OwnerLease,
@@ -121,6 +130,9 @@ pub struct DispatchPermit {
     payload: Box<[u8]>,
 }
 impl DispatchPermit {
+    pub fn purpose(&self) -> OperationPurpose {
+        self.purpose
+    }
     /// Class of the resource, or of the exact target for a targeted action.
     /// The requested capability and all fresh policy checks remain independent.
     pub fn resource_domain(&self) -> ResourceDomain {
@@ -316,6 +328,39 @@ impl OperationLedger {
         let domain = self.verify_target(owner, &target, &context)?;
         self.prepare_record(owner, Some(target), domain, context, payload, now)
     }
+    /// Reserve a fixed native AX read against an existing exact Desktop agent.
+    /// Runtime must validate the immutable read-only payload before dispatch;
+    /// other prepare ports cannot inherit or manufacture this purpose.
+    pub fn prepare_desktop_read_acquisition(
+        &mut self,
+        owner: &OwnerLease,
+        target: ResourceTarget,
+        context: PreparedContext,
+        payload: Vec<u8>,
+        now: MonotonicMillis,
+    ) -> Result<OperationSnapshot, ErrorCategory> {
+        if context.capability != CapabilityId::DesktopAccessibility
+            || context.session.is_none()
+            || context.observation.is_some()
+            || self.verify_target(owner, &target, &context)? != ResourceDomain::DesktopAgent
+        {
+            return Err(ErrorCategory::StateConflict);
+        }
+        let snapshot = self.prepare_record(
+            owner,
+            Some(target),
+            ResourceDomain::DesktopAgent,
+            context,
+            payload,
+            now,
+        )?;
+        // Still under exclusive ledger access, before publishing the reservation.
+        self.records
+            .get_mut(&snapshot.id)
+            .ok_or(ErrorCategory::StateConflict)?
+            .purpose = OperationPurpose::DesktopAccessibilityReadAcquisition;
+        Ok(snapshot)
+    }
     fn verify_target(
         &self,
         owner: &OwnerLease,
@@ -389,6 +434,7 @@ impl OperationLedger {
         self.records.insert(
             id,
             Record {
+                purpose: OperationPurpose::Execute,
                 domain,
                 owner: owner.owner.clone(),
                 owner_incarnation: owner.incarnation,
@@ -429,7 +475,12 @@ impl OperationLedger {
         {
             return Err(ErrorCategory::StateConflict);
         }
-        check_admission(&record.context, facts, now)?;
+        match record.purpose {
+            OperationPurpose::Execute => check_admission(&record.context, facts, now)?,
+            OperationPurpose::DesktopAccessibilityReadAcquisition => {
+                check_desktop_read_acquisition(&record.context, facts, now)?
+            }
+        }
         let record = self
             .records
             .get_mut(id)
@@ -441,6 +492,7 @@ impl OperationLedger {
             record.snapshot.output_drain = OutputDrain::Unknown;
         }
         Ok(DispatchDisposition::ExecuteOnce(DispatchPermit {
+            purpose: record.purpose,
             domain: record.domain,
             id: id.clone(),
             owner: owner.clone(),
@@ -517,6 +569,37 @@ impl OperationLedger {
             return Err(ErrorCategory::StateConflict);
         }
         check_admission(fresh_context, facts, now)?;
+        Ok(record.snapshot.clone())
+    }
+    /// Deliver only the original acknowledged acquisition action's read result.
+    /// This does not establish provider authorization or an input observation.
+    pub fn authorize_desktop_read_result(
+        &self,
+        owner: &OwnerLease,
+        action_id: &OperationId,
+        digest: Sha256Digest,
+        facts: &AdmissionFacts,
+        now: MonotonicMillis,
+    ) -> Result<OperationSnapshot, ErrorCategory> {
+        let record = self.record_for(owner, action_id, digest)?;
+        if record.purpose != OperationPurpose::DesktopAccessibilityReadAcquisition
+            || record.domain != ResourceDomain::DesktopAgent
+            || record.snapshot.state != OperationState::Succeeded
+        {
+            return Err(ErrorCategory::StateConflict);
+        }
+        if self.maintenance_fenced {
+            return Err(ErrorCategory::Busy);
+        }
+        let target = record
+            .snapshot
+            .target
+            .as_ref()
+            .ok_or(ErrorCategory::StateConflict)?;
+        if self.verify_target(owner, target, &record.context)? != ResourceDomain::DesktopAgent {
+            return Err(ErrorCategory::StateConflict);
+        }
+        check_desktop_read_acquisition(&record.context, facts, now)?;
         Ok(record.snapshot.clone())
     }
     pub fn request_cancel(

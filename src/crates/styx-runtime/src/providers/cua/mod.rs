@@ -22,8 +22,11 @@ use styx_contracts::{
     operation::{OperationId, ResourceTarget},
     session::SessionBinding,
 };
-use styx_core::operations::{DispatchPermit, OwnerLease, ResourceDomain};
+use styx_core::operations::{DispatchPermit, OperationPurpose, OwnerLease, ResourceDomain};
 mod admission;
+pub(crate) mod ax_snapshot;
+mod ax_target;
+pub(crate) use ax_target::{AxReadRequest, AxReadTarget};
 mod retention;
 mod transport;
 use tokio::{
@@ -204,6 +207,11 @@ impl CuaAction {
     pub(crate) fn requires_observed_target(&self) -> Result<bool> {
         self.validate()?;
         Ok(admission::classify(&self.name, &self.arguments)?.requires_observed_target)
+    }
+    /// Fixed read-only native branch; never selected by a serialized purpose flag.
+    pub(crate) fn ax_read_request(&self) -> Result<Option<AxReadRequest>> {
+        self.validate()?;
+        AxReadRequest::classify(&self.name, &self.arguments)
     }
     fn mutates(&self) -> bool {
         admission::classify(&self.name, &self.arguments).map_or(true, |r| r.side_effecting)
@@ -549,7 +557,8 @@ impl CuaOpenSlot {
         let operation = permit.id().clone();
         let validation = (|| {
             config.validate()?;
-            if permit.resource_domain() != ResourceDomain::DesktopAgent
+            if permit.purpose() != OperationPurpose::Execute
+                || permit.resource_domain() != ResourceDomain::DesktopAgent
                 || permit.target().is_some()
                 || permit.context().capability != CapabilityId::DesktopWindowsRead
                 || permit.context().session.as_ref() != Some(&config.launch.session)
@@ -761,6 +770,11 @@ impl CuaActionSlot {
             capability,
         ) {
             return refused(e);
+        }
+        if permit.purpose() == OperationPurpose::DesktopAccessibilityReadAcquisition
+            && !matches!(action.ax_read_request(), Ok(Some(_)))
+        {
+            return refused(CuaError::PermissionDenied);
         }
         if action.mutates() && permit.context().observation.is_none() {
             return refused(CuaError::PermissionDenied);

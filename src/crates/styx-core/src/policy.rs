@@ -18,6 +18,34 @@ pub fn check_admission(
     facts: &AdmissionFacts,
     now: MonotonicMillis,
 ) -> Result<(), ErrorCategory> {
+    check_admission_inner(context, facts, now, false)
+}
+
+/// A single explicitly prepared AX read may obtain evidence while OS permission
+/// is still unknown. This never authorizes AX mutation, capture or native input,
+/// and never changes any descriptor to Granted. Runtime must additionally prove
+/// the immutable payload is the fixed, screenshot-free native AX read route.
+pub fn check_desktop_read_acquisition(
+    context: &PreparedContext,
+    facts: &AdmissionFacts,
+    now: MonotonicMillis,
+) -> Result<(), ErrorCategory> {
+    if context.capability != CapabilityId::DesktopAccessibility
+        || context.session.is_none()
+        || context.observation.is_some()
+        || facts.descriptor.scope != Scope::Session
+    {
+        return Err(ErrorCategory::StateConflict);
+    }
+    check_admission_inner(context, facts, now, true)
+}
+
+fn check_admission_inner(
+    context: &PreparedContext,
+    facts: &AdmissionFacts,
+    now: MonotonicMillis,
+    read_acquisition: bool,
+) -> Result<(), ErrorCategory> {
     let d = &facts.descriptor;
     if now >= context.deadline {
         return Err(ErrorCategory::OperationTimeout);
@@ -38,13 +66,16 @@ pub fn check_admission(
     }
     match d.authorization {
         Authorization::Granted => {}
+        Authorization::Required | Authorization::Unknown if read_acquisition => {}
         Authorization::Required => return Err(ErrorCategory::PermissionRequired),
         Authorization::Denied | Authorization::Revoked => {
             return Err(ErrorCategory::PermissionDenied);
         }
         Authorization::Unknown => return Err(ErrorCategory::PermissionRequired),
     }
-    if d.availability != Availability::Available {
+    if d.availability != Availability::Available
+        && !(read_acquisition && d.availability == Availability::Unavailable)
+    {
         return Err(d.reason.unwrap_or(ErrorCategory::CapabilityUnsupported));
     }
     if context.capability.requires_session() {

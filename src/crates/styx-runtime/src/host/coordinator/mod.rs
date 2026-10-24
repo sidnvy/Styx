@@ -8,6 +8,8 @@ pub use browser::*;
 #[cfg(target_os = "linux")]
 mod desktop;
 #[cfg(target_os = "linux")]
+mod desktop_read;
+#[cfg(target_os = "linux")]
 pub(crate) use desktop::*;
 #[cfg(target_os = "linux")]
 mod desktop_source;

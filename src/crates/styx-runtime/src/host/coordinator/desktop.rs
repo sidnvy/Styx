@@ -26,7 +26,8 @@ pub(super) struct DesktopLane {
     pub(super) worker: CuaWorker,
     pub(super) source: DesktopSource,
     pub(super) binding: SessionBinding,
-    grants: BTreeMap<CapabilityId, DesktopGrant>,
+    pub(super) grants: BTreeMap<CapabilityId, DesktopGrant>,
+    pub(super) next_read_alias: u32,
     profiles: BTreeMap<OwnerId, DesktopProfile>,
     pub(super) handles: BTreeMap<OperationId, CuaHandle>,
 }
@@ -48,7 +49,7 @@ pub(crate) enum DesktopActionSubmission {
     Completed(DesktopActionCompletion),
     Existing(OperationSnapshot),
 }
-fn desktop(state: &State) -> Result<&DesktopLane, CoordinatorError> {
+pub(super) fn desktop(state: &State) -> Result<&DesktopLane, CoordinatorError> {
     state
         .desktop
         .as_ref()
@@ -233,6 +234,7 @@ impl HostAuthority {
             source,
             binding: binding.clone(),
             grants,
+            next_read_alias: 0,
             profiles: BTreeMap::new(),
             handles: BTreeMap::new(),
         });
@@ -512,13 +514,20 @@ impl HostCoordinator {
             return Err(ErrorCategory::ProtocolMismatch.into());
         }
         handle(desktop(&state)?, owner, &target)?;
-        Ok(state.ledger.prepare_targeted(
-            owner,
-            target,
-            context,
-            action.to_operation_payload()?,
-            self.now(),
-        )?)
+        let payload = action.to_operation_payload()?;
+        if action.ax_read_request()?.is_some() {
+            Ok(state.ledger.prepare_desktop_read_acquisition(
+                owner,
+                target,
+                context,
+                payload,
+                self.now(),
+            )?)
+        } else {
+            Ok(state
+                .ledger
+                .prepare_targeted(owner, target, context, payload, self.now())?)
+        }
     }
     pub(crate) async fn dispatch_desktop_action(
         &self,
@@ -560,8 +569,19 @@ impl HostCoordinator {
             let action: CuaAction =
                 serde_json::from_slice(state.ledger.inspect_payload(owner, id, digest)?)
                     .map_err(|_| CuaError::InvalidRequest)?;
-            let primary = facts(&state, context.capability)?;
+            let acquisition = action.ax_read_request()?;
+            let primary = if acquisition.is_some() {
+                super::desktop_read::acquisition_facts(&state)?
+            } else {
+                facts(&state, context.capability)?
+            };
+            if acquisition.is_some() {
+                styx_core::policy::check_desktop_read_acquisition(&context, &primary, self.now())?;
+            }
             for cap in action.required_capabilities()? {
+                if acquisition.is_some() {
+                    continue;
+                }
                 let required = facts(&state, cap)?;
                 let mut requested = context.clone();
                 requested.capability = cap;
@@ -577,6 +597,10 @@ impl HostCoordinator {
                 // stays closed until a real native snapshot is installed below.
                 return Err(ErrorCategory::StaleObservation.into());
             }
+            let acquired_target = acquisition
+                .map(crate::providers::cua::AxReadTarget::acquire)
+                .transpose()?;
+            let acquired_epoch = desktop(&state)?.source.epoch();
             let worker = desktop(&state)?.worker.clone();
             let slot = worker.try_reserve_action(&bound)?;
             let permit = match state
@@ -604,7 +628,7 @@ impl HostCoordinator {
             jobs.spawn_on(
                 async move {
                     let _slot = job_slot;
-                    let receipt = slot.call_once(permit).await;
+                    let mut receipt = slot.call_once(permit).await;
                     // A late response cannot mint observations or be delivered into a
                     // replaced/locked source, even if the original native call ACKed.
                     let fresh = coordinator.refresh_desktop_source().await;
@@ -630,7 +654,25 @@ impl HostCoordinator {
                     let delivery = if fresh.is_err() {
                         Err(ErrorCategory::SessionDisconnected.into())
                     } else {
-                        facts(&state, delivery_context.capability).and_then(|f| {
+                        let f = if acquired_target.is_some() {
+                            super::desktop_read::acquisition_facts(&state)
+                        } else {
+                            facts(&state, delivery_context.capability)
+                        };
+                        f.and_then(|f| {
+                            if acquired_target.is_some() {
+                                return state
+                                    .ledger
+                                    .authorize_desktop_read_result(
+                                        bound.owner(),
+                                        &operation,
+                                        digest,
+                                        &f,
+                                        inner.now(),
+                                    )
+                                    .map(|_| ())
+                                    .map_err(CoordinatorError::from);
+                            }
                             state
                                 .ledger
                                 .authorize_resource_access(
@@ -645,6 +687,16 @@ impl HostCoordinator {
                                 .map_err(CoordinatorError::from)
                         })
                     };
+                    let delivery = delivery.and_then(|()| {
+                        if let Some(target) = acquired_target.as_ref() {
+                            let lane = state.desktop.as_mut().ok_or(CuaError::Unsupported)?;
+                            if lane.source.fenced() || lane.source.epoch() != acquired_epoch {
+                                return Err(ErrorCategory::SessionDisconnected.into());
+                            }
+                            super::desktop_read::settle_acquired_read(lane, target, &mut receipt);
+                        }
+                        Ok(())
+                    });
                     drop(state);
                     drop(guard);
                     let response = result.map_err(CoordinatorError::from).and_then(|snapshot| {
