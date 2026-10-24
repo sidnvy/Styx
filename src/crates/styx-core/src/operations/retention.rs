@@ -26,8 +26,12 @@ pub struct ProviderRecordKey {
     owner: OwnerLease,
     snapshot: OperationSnapshot,
     audit_digest: Option<Sha256Digest>,
+    capability: styx_contracts::capability::CapabilityId,
 }
 impl ProviderRecordKey {
+    pub fn capability(&self) -> styx_contracts::capability::CapabilityId {
+        self.capability
+    }
     pub fn owner(&self) -> &OwnerLease {
         &self.owner
     }
@@ -80,6 +84,7 @@ fn key(host: &HostGeneration, record: &Record) -> ProviderRecordKey {
         },
         snapshot: record.snapshot.clone(),
         audit_digest: record.provider_audit.as_deref().map(Sha256Digest::of_bytes),
+        capability: record.context.capability,
     }
 }
 impl OperationLedger {

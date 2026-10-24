@@ -1,6 +1,10 @@
 //! Host-owned start/read/targeted-action composition.
 //! No network DTO can construct control authority. Physical retention is Core-
 //! attested; legacy raw-wire mode remains outside this composition.
+#[cfg(target_os = "linux")]
+mod browser;
+#[cfg(target_os = "linux")]
+pub use browser::*;
 mod legacy;
 mod owner_cleanup;
 mod session;
@@ -26,6 +30,9 @@ pub enum CoordinatorError {
     Admission(ErrorCategory),
     #[error("executor refused or could not resolve resource")]
     Executor(#[from] ExecError),
+    #[cfg(target_os = "linux")]
+    #[error("Browser executor refused or has an unknown outcome")]
+    Browser(#[from] crate::providers::browser::BrowserError),
     #[error("Host work budget exhausted or maintenance is active")]
     Busy,
     #[error("Host response delivery ended; reconcile original operation without replay")]
@@ -45,6 +52,8 @@ struct State {
     facts: AdmissionFacts,
     shutting_down: bool,
     sessions: crate::session::HostSessions,
+    #[cfg(target_os = "linux")]
+    browser: Option<browser::BrowserLane>,
 }
 impl State {
     fn new(ledger: OperationLedger, facts: AdmissionFacts, origin: Instant) -> Self {
@@ -54,6 +63,8 @@ impl State {
             ledger,
             facts,
             sessions,
+            #[cfg(target_os = "linux")]
+            browser: None,
             shutting_down: false,
         }
     }
@@ -208,6 +219,21 @@ pub enum ActionSubmission {
 pub struct HostCleanup {
     pub native: CleanupReceipt,
     pub supervised_jobs_joined: bool,
+    #[cfg(target_os = "linux")]
+    pub browser: Option<BrowserLaneCleanup>,
+}
+impl HostCleanup {
+    /// Native Codex facts and Browser process-tree facts are independent.
+    pub fn ancillary_providers_settled(&self) -> bool {
+        #[cfg(target_os = "linux")]
+        {
+            self.browser.as_ref().is_none_or(|facts| facts.complete)
+        }
+        #[cfg(not(target_os = "linux"))]
+        {
+            true
+        }
+    }
 }
 
 impl HostCoordinator {
@@ -286,6 +312,7 @@ impl HostCoordinator {
         // Existing requests do not need another worker slot, but remain owner/digest checked.
         {
             let state = self.inner.state.lock().expect("Host state mutex");
+            validate_exec_context(&state.ledger.inspect_context(owner, id, digest)?)?;
             let snapshot = state.ledger.inspect(owner, id, digest)?;
             if snapshot.target.is_some() {
                 return Err(ErrorCategory::StateConflict.into());
@@ -404,6 +431,7 @@ impl HostCoordinator {
     ) -> Result<ActionSubmission, CoordinatorError> {
         {
             let state = self.inner.state.lock().expect("Host state mutex");
+            validate_exec_context(&state.ledger.inspect_context(owner, id, digest)?)?;
             let snapshot = state.ledger.inspect(owner, id, digest)?;
             if snapshot.target.is_none() {
                 return Err(ErrorCategory::StateConflict.into());
@@ -501,6 +529,7 @@ impl HostCoordinator {
         digest: Sha256Digest,
     ) -> Result<OperationSnapshot, CoordinatorError> {
         let state = self.inner.state.lock().expect("Host state mutex");
+        validate_exec_context(&state.ledger.inspect_context(owner, id, digest)?)?;
         let snapshot = state.ledger.inspect(owner, id, digest)?;
         if snapshot.target.is_none() {
             return Err(ErrorCategory::StateConflict.into());
@@ -516,6 +545,7 @@ impl HostCoordinator {
         digest: Sha256Digest,
     ) -> Result<Option<ActionReceipt>, CoordinatorError> {
         let state = self.inner.state.lock().expect("Host state mutex");
+        validate_exec_context(&state.ledger.inspect_context(owner, id, digest)?)?;
         let snapshot = state.ledger.inspect(owner, id, digest)?;
         if snapshot.target.is_none() {
             return Err(ErrorCategory::StateConflict.into());
@@ -807,9 +837,17 @@ impl HostAuthority {
                     );
             }
         }
+        #[cfg(target_os = "linux")]
+        let browser = browser::cleanup_browser_lane(
+            self.inner.clone(),
+            until.saturating_duration_since(tokio::time::Instant::now()),
+        )
+        .await;
         Ok(HostCleanup {
             native,
             supervised_jobs_joined: joined,
+            #[cfg(target_os = "linux")]
+            browser,
         })
     }
 }

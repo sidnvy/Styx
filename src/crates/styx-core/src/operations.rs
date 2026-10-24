@@ -128,6 +128,11 @@ pub struct OperationLedger {
 }
 impl OperationLedger {
     /// Actual Host generation of this ledger, never a registry generation.
+    /// Read-only check of this exact current opaque owner lease. It neither
+    /// creates an operation nor grants a capability or a native OS permission.
+    pub fn validate_owner(&self, owner: &OwnerLease) -> Result<(), ErrorCategory> {
+        self.verify_owner(owner)
+    }
     pub fn host_generation(&self) -> &HostGeneration {
         &self.host
     }
@@ -364,6 +369,16 @@ impl OperationLedger {
             context: record.context.clone(),
             target: record.snapshot.target.clone(),
         }))
+    }
+    /// Immutable origin metadata for typed runtime routing. The same current
+    /// opaque owner and original payload digest checks precede this read.
+    pub fn inspect_context(
+        &self,
+        owner: &OwnerLease,
+        id: &OperationId,
+        digest: Sha256Digest,
+    ) -> Result<PreparedContext, ErrorCategory> {
+        Ok(self.record_for(owner, id, digest)?.context.clone())
     }
     pub fn inspect(
         &self,

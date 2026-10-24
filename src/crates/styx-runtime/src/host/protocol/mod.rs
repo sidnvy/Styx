@@ -740,6 +740,10 @@ fn coordinator_error(error: CoordinatorError, read: bool) -> Reply {
         CoordinatorError::ResponseLost | CoordinatorError::Executor(_) => {
             (ErrorCategory::ResultUnknown, ExecutionCertainty::Unknown)
         }
+        // This Exec wire does not dispatch Browser operations. Preserve uncertainty
+        // if a Browser failure reaches the shared coordinator boundary.
+        #[cfg(target_os = "linux")]
+        CoordinatorError::Browser(_) => (ErrorCategory::ResultUnknown, ExecutionCertainty::Unknown),
     };
     Reply::Error {
         category,

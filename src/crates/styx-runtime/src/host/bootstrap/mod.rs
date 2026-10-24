@@ -127,6 +127,20 @@ impl OwnedExecHost {
     ) -> Result<super::legacy::LegacyExecSession<'_>, super::legacy::LegacyError> {
         super::legacy::LegacyExecSession::new(profile, self.coordinator.clone(), &self.authority)
     }
+    /// Explicit Browser lane allocation from this SAME Host budget. This does
+    /// not enable a capability or create a worker; trusted policy does that.
+    #[cfg(target_os = "linux")]
+    pub fn reserve_browser_io(
+        &self,
+    ) -> Result<Arc<crate::providers::browser::BrowserIoBudget>, BootstrapError> {
+        let partition = self
+            .budget
+            .clone()
+            .try_acquire_many_owned((16 * 1024 * 1024) as u32)
+            .map_err(|_| BootstrapError::Capacity)?;
+        crate::providers::browser::BrowserIoBudget::from_reserved(partition)
+            .map_err(|_| BootstrapError::InvalidConfiguration)
+    }
     /// Remaining logical queued-I/O capacity, never total resident memory.
     pub fn unreserved_queued_bytes(&self) -> usize {
         self.budget.available_permits()

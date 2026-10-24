@@ -231,6 +231,11 @@
       "kind": "owned_child_only_fixture",
       "parent": "session_probe::tests::owned_worker_bounds_cancel_and_reap_batch",
       "required_for": "Child-only actual prepare_worker_limits allocation failure; invoked by parent scenario, not independent Desktop acceptance"
+    },
+    "host::coordinator::browser::browser_tests::actual_owned_browser_host_nonce_policy_drop_and_cleanup": {
+      "kind": "explicit_external_runtime",
+      "input": "--browser-host --node22 --codex-bin --browser-executable and fresh owned evidence root",
+      "required_for": "actual Linux headless owned Host Browser nonce/profile/policy/unknown/no-replay and physical cleanup; not paired-network, desktop, account or signed package acceptance"
     }
   },
   "change_policy": "dependency or ignored-test additions require explicit policy review; preserve mature Cargo tooling rather than replacing its resolver/compiler/lints"

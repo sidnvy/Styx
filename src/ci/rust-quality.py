@@ -12,6 +12,7 @@ import os
 from pathlib import Path
 import re
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -50,6 +51,7 @@ HTTP_TESTS = [
 ]
 PAIRED_HOST_TEST = "enrollment::service::tests::paired_journey::actual_paired_tls_mcp_codex_nonce_owner_and_revocation_journey"
 HOST_ACTION_WIRE_TEST = "host::protocol::tests::actual_canonical_tls_wss_host_action_journey"
+BROWSER_HOST_TEST = "host::coordinator::browser::browser_tests::actual_owned_browser_host_nonce_policy_drop_and_cleanup"
 HOST_WIRE_TEST = "host::protocol::tests::actual_tls_wss_codex_start_read_duplicate_and_lost_response_batch"
 
 
@@ -92,10 +94,55 @@ def private_new_dir(path):
 
 def source_inputs(root):
     files = [root / "Cargo.toml", root / "Cargo.lock", root / "rust-toolchain.toml", POLICY, Path(__file__).resolve()]
-    for base in (root / "src/crates", root / "src/acceptance/oracles", root / "src/acceptance/interop-exec"):
-        files += [p for p in base.rglob("*") if p.is_file() and p.suffix in {".rs", ".toml", ".py", ".json", ".mjs"}]
+    for base in (root / "src/crates", root / "src/acceptance/oracles", root / "src/acceptance/interop-exec", root / "src/providers/browser-worker"):
+        files += [p for p in base.rglob("*") if p.is_file() and "node_modules" not in p.parts and p.suffix in {".rs", ".toml", ".py", ".json", ".mjs"}]
     files += [root / "src/shared/enrollment-protocol.mjs", *[root / "src/docs/rust-core-rewrite" / name for name in ("LEGACY-WIRE-VECTORS-V1.json", "CONTRACT-V1.json", "FEATURE-INVENTORY-V1.json", "PUBLIC-MCP-V1.json")]]
     return {str(p.relative_to(root)): sha(p) for p in sorted(set(files))}
+
+
+
+def browser_inputs(executable):
+    """Identity inventory of actual development closure; not npm authenticity proof."""
+    worker_root = ROOT / "src/providers/browser-worker"
+    modules = worker_root / "node_modules"
+    browser = Path(executable)
+    if not browser.is_absolute() or browser.resolve() != browser or not browser.is_file() or not os.access(browser, os.X_OK):
+        raise ValueError("canonical_absolute_browser_executable_required")
+    if modules.is_symlink() or modules.resolve() != modules or not modules.is_dir():
+        raise ValueError("adjacent_browser_dependency_closure_required")
+    package = json.loads((worker_root / "package.json").read_text())
+    lock = json.loads((worker_root / "package-lock.json").read_text())
+    if lock["packages"][""]["dependencies"] != package["dependencies"]:
+        raise ValueError("browser_dependency_lock_mismatch")
+    for name, version in package["dependencies"].items():
+        if lock["packages"]["node_modules/" + name]["version"] != version or json.loads((modules / name / "package.json").read_text())["version"] != version:
+            raise ValueError("browser_dependency_version_mismatch")
+    inventory = {}
+    total = 0
+    for path in sorted(modules.rglob("*")):
+        relative = str(path.relative_to(modules))
+        info = path.lstat()
+        if stat.S_ISLNK(info.st_mode):
+            target = path.resolve(strict=True)
+            if not target.is_relative_to(modules) or not target.is_file():
+                raise ValueError("browser_dependency_external_or_directory_alias")
+            inventory[relative] = {"link": os.readlink(path)}
+        elif stat.S_ISREG(info.st_mode):
+            total += info.st_size
+            if total > 256 * 1024 * 1024 or info.st_size > 32 * 1024 * 1024:
+                raise ValueError("browser_dependency_inventory_byte_limit")
+            inventory[relative] = {"sha256": sha(path), "bytes": info.st_size}
+        elif not stat.S_ISDIR(info.st_mode):
+            raise ValueError("browser_dependency_special_file")
+        if len(inventory) > 10000:
+            raise ValueError("browser_dependency_inventory_entry_limit")
+    return {
+        "worker": str(worker_root / "worker.mjs"),
+        "browser": {"path": str(browser), "sha256": sha(browser)},
+        "closure": inventory,
+        "closure_bytes": total,
+        "scope": "actual local bytes and locked versions; not registry authenticity or signed package proof",
+    }
 
 
 def metadata_errors(metadata, policy, root):
@@ -344,6 +391,29 @@ def execute(args):
                         **({"STYX_TEST_TLS_FIXTURES": args.tls_fixtures} if args.tls_fixtures else {})})
                 gate.semantic(native, [] if "1 passed; 0 failed" in gate.read(name) else ["exact_real_codex_case_not_executed"])
                 receipt["real_codex_interop"][name] = native["status"]
+        receipt["browser_host_native"] = "NOT_RUN_explicit_inputs_not_requested"
+        if args.browser_host:
+            if sys.platform != "linux" or not args.node22 or not args.codex_bin or not args.browser_executable or receipt.get("legacy_node22_interop") != "PASS":
+                raise ValueError("browser_host_requires_linux_node22_codex_browser_executable")
+            browser = browser_inputs(args.browser_executable)
+            receipt["browser_inputs"] = browser
+            check = gate.run("browser-worker-config", [args.node22, "--test", "src/providers/browser-worker/config.test.mjs"], timeout=30)
+            version = gate.run("browser-version", [args.browser_executable, "--version"], timeout=30)
+            owned = evidence / "owned-browser-host"
+            owned.mkdir(mode=0o700)
+            check = gate.run("browser-host", ["cargo", "test", "-p", "styx-runtime", "--locked", "--offline", BROWSER_HOST_TEST, "--", "--ignored", "--exact", "--nocapture"], timeout=180,
+                extra_env={"STYX_TEST_CODEX": args.codex_bin, "STYX_TEST_BROWSER_ROOT": str(owned), "STYX_TEST_BROWSER_NODE": args.node22,
+                           "STYX_TEST_BROWSER_WORKER": browser["worker"], "STYX_TEST_BROWSER_EXECUTABLE": args.browser_executable})
+            gate.semantic(check, [] if "1 passed; 0 failed" in gate.read("browser-host") else ["exact_actual_browser_host_case_not_executed"])
+            try:
+                receipts = list(owned.glob("*/receipt.json"))
+                if len(receipts) != 1 or receipts[0].is_symlink() or receipts[0].resolve() != receipts[0]:
+                    raise ValueError("unique_owned_browser_receipt_required")
+                scenario = json.loads(receipts[0].read_text())
+                gate.semantic(check, [] if scenario.get("status") == "PASS" and scenario.get("host_browser_cleanup_complete") is True and scenario.get("http_server_joined") is True else ["browser_independent_effect_or_cleanup_receipt_failed"])
+            except (OSError, ValueError):
+                gate.semantic(check, ["browser_scenario_receipt_missing_or_invalid"])
+            receipt["browser_host_native"] = check["status"]
         receipt["paired_host_native"] = "NOT_RUN_explicit_inputs_not_requested"
         if args.paired_host:
             if not args.codex_bin or not args.enrollment_service or not args.node22 or not args.tls_fixtures:
@@ -408,6 +478,8 @@ def execute(args):
                 receipt["node22_stability"] = "PASS" if sha(args.node22) == receipt["node22_input"]["sha256"] else "FAIL"
             if args.codex_bin and "codex_input" in receipt:
                 receipt["codex_stability"] = "PASS" if sha(args.codex_bin) == receipt["codex_input"]["sha256"] else "FAIL"
+            if args.browser_host and "browser_inputs" in receipt:
+                receipt["browser_input_stability"] = "PASS" if browser_inputs(args.browser_executable) == receipt["browser_inputs"] else "FAIL"
             if args.tls_fixtures and "tls_fixture_inputs" in receipt:
                 receipt["tls_stability"] = "PASS" if tls_inputs(args.tls_fixtures) == receipt["tls_fixture_inputs"] else "FAIL"
         except (OSError, ValueError):
@@ -424,6 +496,8 @@ def execute(args):
             required |= {"enrollment-profile", "enrollment-controller", "enrollment-service"}
         if args.paired_host:
             required |= {"paired-host"}
+        if args.browser_host:
+            required |= {"browser-worker-config", "browser-version", "browser-host"}
         if args.node22:
             required |= {"node22-version", "node22-crypto"}
         if args.codex_bin:
@@ -433,7 +507,7 @@ def execute(args):
             if args.codex_bin:
                 required |= {"host-wire", "host-action-wire"}
         receipt["missing_required_checks"] = sorted(required - {x["name"] for x in gate.checks})
-        receipt["status"] = "PASS" if not receipt["missing_required_checks"] and gate.checks and all(x["status"] == "PASS" for x in gate.checks) and receipt.get("input_stability") == "PASS" and receipt.get("git_stability") == "PASS" and receipt.get("node22_stability", "PASS") == "PASS" and receipt.get("codex_stability", "PASS") == "PASS" and receipt.get("tls_stability", "PASS") == "PASS" and "failure" not in receipt else "FAIL"
+        receipt["status"] = "PASS" if not receipt["missing_required_checks"] and gate.checks and all(x["status"] == "PASS" for x in gate.checks) and receipt.get("input_stability") == "PASS" and receipt.get("git_stability") == "PASS" and receipt.get("node22_stability", "PASS") == "PASS" and receipt.get("codex_stability", "PASS") == "PASS" and receipt.get("tls_stability", "PASS") == "PASS" and receipt.get("browser_input_stability", "PASS") == "PASS" and "failure" not in receipt else "FAIL"
         receipt["completed_at"] = now()
         (evidence / "receipt.json").write_text(json.dumps(receipt, indent=2) + "\n")
         print(json.dumps({"status": receipt["status"], "receipt": str(evidence / "receipt.json"), "scope": "foundation_development_only"}), flush=True)
@@ -444,6 +518,8 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--evidence", required=True, help="fresh absolute external evidence directory")
     parser.add_argument("--target-dir", help="absolute external Cargo build cache; reused only by explicit choice")
+    parser.add_argument("--browser-host", action="store_true", help="actual Linux headless Browser Host scenario; requires Node22, Codex and browser executable; no desktop/account/package claim")
+    parser.add_argument("--browser-executable", help="canonical explicit Chrome/Chromium binary; no download or installed profile is opened")
     parser.add_argument("--linux-discovery", action="store_true", help="actual read-only fixed system-bus candidate snapshot plus CLI; no desktop authorization")
     parser.add_argument("--paired-host", action="store_true", help="actual paired TLS/MCP/WSS/native scene; requires Codex, Node22, TLS and enrollment service inputs")
     parser.add_argument("--enrollment-service", action="store_true", help="run actual signed enrollment TLS service; requires --enrollment-store, --node22 and --tls-fixtures")

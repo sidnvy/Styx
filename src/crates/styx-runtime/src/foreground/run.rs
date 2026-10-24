@@ -386,10 +386,12 @@ async fn run_owned(
             for (process, evidence) in &cleanup.native.processes {
                 record_process_exit(&mut process_exits, process.operation().clone(), *evidence);
             }
-            outcome.processes_exited = process_exits.values().all(|exited| *exited);
+            outcome.processes_exited = process_exits.values().all(|exited| *exited)
+                && cleanup.ancillary_providers_settled();
             outcome.executor_exited |= cleanup.native.executor_exited;
-            outcome.io_tasks_joined =
-                cleanup.native.reader_task_reaped && cleanup.native.stderr_task_reaped;
+            outcome.io_tasks_joined = cleanup.native.reader_task_reaped
+                && cleanup.native.stderr_task_reaped
+                && cleanup.ancillary_providers_settled();
             outcome.supervised_jobs_joined = cleanup.supervised_jobs_joined;
         }
         if outcome.is_complete() {

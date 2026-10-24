@@ -88,3 +88,18 @@ precisely classified by the unchanged verifier as `tls_certificate_ca_used_as_le
 that diagnosis does not fix original Gateway compatibility or the separately
 unresolved authenticated self API401. No trust anchor, device credential, original
 signed artifact or installed runtime was replaced to obtain a successful result.
+
+
+Browser implementation is in progress on771188e; see [ADR-008](ADR-008-BROWSER-OWNERSHIP.md).
+The first unified compile FAIL is preserved externally. Its missing protocol mapping
+has been corrected, and exact profile isolation, idempotent physical settlement,
+Core-attested provider release and owned Linux scope budgets are pending unified
+compile/native verification. Only Navigate/Evaluate/Close are being integrated.
+No claim of complete R19, Browser refs/login/headed/network routing, native platform
+or signed-candidate acceptance follows from these source changes.
+
+Browser's initial real Linux headless Host batch now passes with an independent
+HTTP and kernel cgroup/PID observer after fixing Chromium's Unix socket path limit.
+It proves the narrow nonce/profile/Unknown/no-replay/cleanup/physical archival journey;
+original failures remain FAIL. It is not completion of the whole Browser or any
+platform candidate. Complete local regression/integration evidence follows separately.

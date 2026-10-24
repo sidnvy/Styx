@@ -110,6 +110,16 @@ async fn run_cleanup(
     let _cleanup = tokio::time::timeout_at(until, inner.cleanup_lock.lock())
         .await
         .map_err(|_| CoordinatorError::Busy)?;
+    // Browser ownership ends independently of Codex resources. Cancel its
+    // in-flight wait before seeking global I/O quiescence; the original action
+    // remains Unknown, and only exact native scope evidence settles liveness.
+    #[cfg(target_os = "linux")]
+    let _browser = super::browser::cleanup_browser_owner(
+        inner.clone(),
+        handle.authority.owner(),
+        until.saturating_duration_since(tokio::time::Instant::now()),
+    )
+    .await;
     // Existing fair global gate provides real quiescence. Other owners' I/O can
     // briefly wait, but no other owner's resource/action is cancelled or released.
     let _quiescent = tokio::time::timeout_at(until, inner.execution_gate.clone().write_owned())
@@ -126,10 +136,10 @@ async fn run_cleanup(
     };
     // Persist whitelist action evidence first, including original Unknown/writeId.
     // This never sends a stdin mutation or retries an action.
-    for key in owner_inventory(handle)?
-        .iter()
-        .filter(|key| key.snapshot().target.is_some())
-    {
+    for key in owner_inventory(handle)?.iter().filter(|key| {
+        key.capability() == styx_contracts::capability::CapabilityId::ExecRun
+            && key.snapshot().target.is_some()
+    }) {
         if tokio::time::Instant::now() >= until {
             facts.deadline_exhausted = true;
             break;
@@ -173,10 +183,10 @@ async fn run_cleanup(
             });
         }
     }
-    for key in owner_inventory(handle)?
-        .iter()
-        .filter(|key| key.snapshot().target.is_none())
-    {
+    for key in owner_inventory(handle)?.iter().filter(|key| {
+        key.capability() == styx_contracts::capability::CapabilityId::ExecRun
+            && key.snapshot().target.is_none()
+    }) {
         let snapshot = key.snapshot();
         if tokio::time::Instant::now() >= until {
             facts.deadline_exhausted = true;
@@ -191,12 +201,28 @@ async fn run_cleanup(
             }),
         }
     }
+    #[cfg(target_os = "linux")]
+    {
+        let browser =
+            super::browser::collect_browser_retention(inner, Some(handle.authority.owner()), until)
+                .await;
+        facts.resources_released += browser.resources_released;
+        facts.deadline_exhausted |= browser.deadline_exhausted;
+        facts.blocked.extend(browser.blocked);
+    }
     let state = inner.state.lock().expect("Host state mutex");
     facts.unreleased_records = state
         .ledger
         .owner_unreleased_provider_records(&handle.authority)?;
     facts.deadline_exhausted |= tokio::time::Instant::now() >= until;
     facts.physical_complete = facts.unreleased_records == 0 && facts.blocked.is_empty();
+    drop(state);
+    #[cfg(target_os = "linux")]
+    if facts.physical_complete {
+        // Core includes ReleasePending in the original owner's inventory.
+        // Only its empty cleanup proof permits retiring this scope metadata.
+        super::browser::release_browser_profile(inner, handle.authority.owner());
+    }
     Ok(facts)
 }
 async fn settle_resource(

@@ -47,7 +47,10 @@ impl HostAuthority {
             .expect("Host state mutex")
             .ledger
             .retained_provider_records();
-        for key in inventory.iter().filter(|k| k.snapshot().target.is_some()) {
+        for key in inventory.iter().filter(|k| {
+            k.capability() == styx_contracts::capability::CapabilityId::ExecRun
+                && k.snapshot().target.is_some()
+        }) {
             if tokio::time::Instant::now() >= until {
                 receipt.deadline_exhausted = true;
                 break;
@@ -115,7 +118,10 @@ impl HostAuthority {
             .expect("Host state mutex")
             .ledger
             .retained_provider_records();
-        for key in resources.iter().filter(|k| k.snapshot().target.is_none()) {
+        for key in resources.iter().filter(|k| {
+            k.capability() == styx_contracts::capability::CapabilityId::ExecRun
+                && k.snapshot().target.is_none()
+        }) {
             if tokio::time::Instant::now() >= until {
                 receipt.deadline_exhausted = true;
                 break;
@@ -171,6 +177,14 @@ impl HostAuthority {
                     error,
                 }),
             }
+        }
+        #[cfg(target_os = "linux")]
+        {
+            let browser = super::browser::collect_browser_retention(&self.inner, None, until).await;
+            receipt.actions_released += browser.actions_released;
+            receipt.resources_released += browser.resources_released;
+            receipt.deadline_exhausted |= browser.deadline_exhausted;
+            receipt.blocked.extend(browser.blocked);
         }
         let mut state = self.inner.state.lock().expect("Host state mutex");
         receipt.metadata_reaped = state.ledger.reap(self.inner.now());
