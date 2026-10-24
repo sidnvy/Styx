@@ -277,6 +277,13 @@ fn accept_event(
         }
     }
 }
+fn source_fault(reason: &'static str) {
+    // Diagnostic only; never consumed as authorization or native outcome proof.
+    eprintln!(
+        "{}",
+        serde_json::json!({"schema":1,"event":"desktop_source_fenced","reason":reason})
+    );
+}
 async fn supervise(
     selected: LinuxCandidate,
     state: Arc<State>,
@@ -305,22 +312,34 @@ async fn supervise(
                 Some(event) => match accept_event(&selected, &mut owner, &mut instance, &event) {
                     Ok(true) if ready.is_some() && pending.is_none() => pending = Some(begin_probe(&selected, &state, ready.take().expect("initial reply"))),
                     Ok(_) => {},
-                    Err(_) => { state.fence(); break None; }
+                    Err(_) => {
+                        source_fault("watch_selected_source_invalidated");
+                        state.fence(); break None;
+                    }
                 },
-                None => { state.fence(); break None; }
+                None => { source_fault("watch_stream_ended"); state.fence(); break None; }
             },
-            report = &mut producer => { state.fence(); break Some(report); },
+            report = &mut producer => {
+                // Only bounded typed reasons: no app titles, native content,
+                // selectors, paths, user input or credentials enter diagnostics.
+                if let Ok(value) = &report {
+                    eprintln!("{}", serde_json::json!({"schema":1,"event":"desktop_source_fenced","watch_reason":value.reason}));
+                } else {
+                    source_fault("watch_supervisor_failed");
+                }
+                state.fence(); break Some(report);
+            },
             result = async { (&mut pending.as_mut().expect("guarded pending").job).await }, if pending.is_some() => {
                 let pending = pending.take().expect("completed probe");
                 let result = match result {
                     Ok(Ok(fresh)) if !state.fenced.load(Ordering::Acquire) && pending.epoch == state.epoch.load(Ordering::Acquire) && owner.as_deref() == Some(fresh.login_unique_owner()) => {
                         match state.lease.lock() {
                             Ok(mut held) if held.as_ref().is_none_or(|original| original.same_source(&fresh)) => { *held = Some(fresh); Ok(()) },
-                            _ => { state.fence(); Err(DesktopSourceError::Fenced) }
+                            _ => { source_fault("association_source_identity_changed"); state.fence(); Err(DesktopSourceError::Fenced) }
                         }
                     },
-                    Ok(Err(error)) => { state.fence(); Err(DesktopSourceError::Acquisition(error)) },
-                    _ => { state.fence(); Err(DesktopSourceError::Fenced) }
+                    Ok(Err(error)) => { source_fault(error.code()); state.fence(); Err(DesktopSourceError::Acquisition(error)) },
+                    _ => { source_fault("association_epoch_owner_or_job_changed"); state.fence(); Err(DesktopSourceError::Fenced) }
                 };
                 let failed = result.is_err();
                 if !failed { initialized = true; }

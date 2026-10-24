@@ -1312,7 +1312,20 @@ fn validate_kernel(facts: &AssociationFacts) -> Result<Vec<File>> {
     }
     same(&facts.sources, &sources()?)?;
     for old in [&facts.wayland, &facts.hyprland, &facts.hyprland_events] {
-        let m = std::fs::symlink_metadata(&old.path).map_err(|_| AssociationError::Changed)?;
+        // Pin the original named socket node independently of its connected
+        // protocol. In particular a Hyprland command connection must not be
+        // retained idle: its server can wait for that client's request before
+        // servicing the next query. O_PATH also prevents inode reuse while the
+        // association is retained; a new connection is never adopted by name.
+        let node = File::from(
+            open(
+                &old.path,
+                OFlag::O_PATH | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
+                Mode::empty(),
+            )
+            .map_err(|_| AssociationError::Changed)?,
+        );
+        let m = node.metadata().map_err(|_| AssociationError::Changed)?;
         if !m.file_type().is_socket()
             || m.uid() != facts.uid
             || m.dev() != old.device
@@ -1320,6 +1333,7 @@ fn validate_kernel(facts: &AssociationFacts) -> Result<Vec<File>> {
         {
             return Err(AssociationError::Changed);
         }
+        pins.push(node);
     }
     Ok(pins)
 }
@@ -1346,7 +1360,7 @@ pub struct AssociationInspection {
 /// another Desktop dispatch. Revalidation is not an atomic OS action lock.
 pub(crate) struct LinuxAssociationLease {
     facts: AssociationFacts,
-    _processes: Vec<File>,
+    _kernel_pins: Vec<File>,
     _endpoints: Vec<UnixStream>,
 }
 impl LinuxAssociationLease {
@@ -1374,7 +1388,19 @@ impl LinuxAssociationLease {
         for original in [&facts.wayland, &facts.hyprland, &facts.hyprland_events] {
             let (socket, actual) = endpoint(&original.path, facts.uid, end).await?;
             same(original, &actual)?;
-            endpoints.push(socket);
+            if original.path == facts.hyprland.path {
+                // SO_PEERCRED and original node/process pins remain attested.
+                // Close only this owned idle control connection before any
+                // subsequent collector or Cua request needs the command server.
+                let raw = socket
+                    .into_std()
+                    .map_err(|_| AssociationError::Unavailable)?;
+                raw.shutdown(Shutdown::Both)
+                    .map_err(|_| AssociationError::CloseUnconfirmed)?;
+                drop(raw);
+            } else {
+                endpoints.push(socket);
+            }
         }
         let final_facts = facts.clone();
         tokio::task::spawn_blocking(move || validate_kernel(&final_facts))
@@ -1385,7 +1411,7 @@ impl LinuxAssociationLease {
         }
         Ok(Self {
             facts,
-            _processes: pins,
+            _kernel_pins: pins,
             _endpoints: endpoints,
         })
     }
