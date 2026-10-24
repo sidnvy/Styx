@@ -366,6 +366,7 @@ async fn actual_original_runtime_cutover_preparation_probe_and_application() {
         )
         .unwrap();
     assert!(!cutover.report().migration_committed && !cutover.report().network_ready);
+    let network_plan = cutover.prepare_gateway_validation(history_journal).unwrap();
     let probe = combined
         .validate_candidate_exec(&fixture.state_dir)
         .await
@@ -375,10 +376,15 @@ async fn actual_original_runtime_cutover_preparation_probe_and_application() {
         combined.validate_candidate_exec(&fixture.state_dir).await,
         Err(TransitionError::Busy)
     ));
-    cutover.apply_candidate(probe).unwrap();
+    let network = network_plan.validate(probe).await.unwrap();
+    let network_report = serde_json::to_value(network.report()).unwrap();
+    assert!(network.report().validation_task_joined);
+    assert!(!network.report().migration_committed && !network.report().ordinary_admission_open);
+    cutover.apply_gateway_validated_candidate(network).unwrap();
     assert!(cutover.report().applied_sha256.is_some());
     assert!(cutover.report().candidate_exec_validation_sha256.is_some());
-    assert!(!cutover.report().migration_committed && !cutover.report().network_ready);
+    assert!(!cutover.report().migration_committed && cutover.report().network_ready);
+    assert!(cutover.report().paired_validation_sha256.is_some());
     combined.revalidate().await.unwrap();
     assert!(combined.configuration_root().ensure_admission().is_err());
     let marker_raw = configuration
@@ -397,7 +403,7 @@ async fn actual_original_runtime_cutover_preparation_probe_and_application() {
     let facts = json!({
         "schema":1,"status":"ORIGINAL_CUTOVER_APPLIED_PROBE_OBSERVER_REQUIRED",
         "scope":"actual original signed scopes to same-writer cutover preparation, candidate Core Exec and canonical application; final Gateway validation/C07 commit/ordinary startup still required",
-        "cutover":cutover.report(),"candidate_probe":probe_report,
+        "cutover":cutover.report(),"candidate_probe":probe_report,"paired_network":network_report,
         "host":observation(combined.host_observation()),"gateway":observation(combined.gateway_observation()),
         "configuration_root":original_root,
         "history":{"schema":history.schema,"baseline_sha256":history.prepared.baseline_digest.to_hex(),
@@ -450,16 +456,7 @@ async fn actual_original_runtime_cutover_preparation_probe_and_application() {
     result["host"] = observation(combined.host_observation());
     result["gateway"] = observation(combined.gateway_observation());
     save(&root, "native-result.json", &result);
-    drop((
-        cutover,
-        history_journal,
-        combined,
-        gateway,
-        host,
-        binding,
-        retired,
-        original,
-    ));
+    drop((cutover, combined, gateway, host, binding, retired, original));
 }
 
 /// Independent process only, after the original test actually exited and

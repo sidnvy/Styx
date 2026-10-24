@@ -172,6 +172,11 @@ certificate_pin!(GatewayLeafPin);
 /// The original input is moved and zeroized on drop rather than copied/logged.
 pub struct PrivateKeyPem(Zeroizing<Vec<u8>>);
 impl PrivateKeyPem {
+    /// Borrow only for the protected reader / same-transaction private writer.
+    /// Never serialize, log, or use this as proof of writer or source authority.
+    pub(crate) fn as_protected_bytes(&self) -> &[u8] {
+        &self.0
+    }
     pub fn from_protected_reader_bytes(bytes: Vec<u8>) -> Result<Self, TlsError> {
         let bytes = Zeroizing::new(bytes);
         if bytes.is_empty() {
@@ -311,6 +316,14 @@ impl GatewayClientTls {
             anchor_pins: expected_anchors.to_vec(),
         })
     }
+    /// Exact configured trust set; never derived from an observed peer leaf.
+    pub(crate) fn configured_anchors(&self) -> &[TrustAnchorPin] {
+        &self.anchor_pins
+    }
+    /// Separate optional endpoint pin. Migration must not silently replace it.
+    pub(crate) fn configured_leaf(&self) -> Option<&GatewayLeafPin> {
+        self.leaf_pin.as_ref()
+    }
     /// Returns a stream only after normal chain+hostname validation and any
     /// configured leaf pin. No application bytes may precede this return.
     /// `server_name` is a DNS name or unbracketed IP literal, not a URL.
@@ -401,3 +414,6 @@ impl GatewayServerTls {
 }
 #[cfg(test)]
 mod tests;
+
+mod issuer;
+pub(crate) use issuer::{IssuerError, issue_server_leaf};

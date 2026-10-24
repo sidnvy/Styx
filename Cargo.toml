@@ -42,6 +42,9 @@ bytes = "=1.12.1"
 rustls = { version = "=0.23.46", default-features = false, features = ["std", "aws_lc_rs", "tls12"] }
 tokio-rustls = { version = "=0.26.4", default-features = false, features = ["aws_lc_rs", "tls12"] }
 rustls-pemfile = "=2.2.0"
+rcgen = { version = "=0.14.10", default-features = false, features = ["aws_lc_rs", "pem", "x509-parser", "zeroize"] }
+x509-parser = { version = "=0.18.1", default-features = false, features = ["verify-aws"] }
+time = "=0.3.47"
 webpki = { package = "rustls-webpki", version = "=0.103.16", default-features = false, features = ["std"] }
 tokio-tungstenite = { version = "=0.30.0", default-features = false, features = ["handshake"] }
 zeroize = "=1.9.1"

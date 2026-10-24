@@ -549,7 +549,7 @@ pub(crate) use retirement::CredentialRetirementObservation;
 
 #[path = "legacy_cutover.rs"]
 mod cutover;
-pub(crate) use super::management::cutover::CutoverInputs;
+pub(crate) use super::management::cutover::{CutoverEndpointInputs, CutoverInputs};
 pub use cutover::PendingNativeCutoverReport;
 pub(crate) use cutover::inspect_pending_native_cutover;
 pub(crate) use cutover::{AppliedNativeCutover, PreparedNativeCutover};

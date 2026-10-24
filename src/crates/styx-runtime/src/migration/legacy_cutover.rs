@@ -24,6 +24,7 @@ pub struct LegacyCutoverReport {
     pub prepared_sha256: Sha256Digest,
     pub applied_sha256: Option<Sha256Digest>,
     pub candidate_exec_validation_sha256: Option<Sha256Digest>,
+    pub paired_validation_sha256: Option<Sha256Digest>,
     pub preservation: PreservationReport,
     pub network_ready: bool,
     pub migration_committed: bool,
@@ -32,12 +33,14 @@ pub struct LegacyCutoverReport {
 /// Errors leave the original resources in this object; apply cannot be retried.
 #[must_use]
 pub struct PreparedLegacyCutover {
-    original: Arc<SettledLegacyRuntime>,
-    _state_dir: PathBuf,
-    preservation: OriginalPreservation,
-    prepared: PreparedNativeCutover,
+    pub(super) original: Arc<SettledLegacyRuntime>,
+    pub(super) _state_dir: PathBuf,
+    pub(super) preservation: Arc<OriginalPreservation>,
+    pub(super) prepared: Arc<PreparedNativeCutover>,
     applied: Option<AppliedNativeCutover>,
-    probe: Option<MigrationValidationProbe>,
+    probe: Option<Arc<MigrationValidationProbe>>,
+    network: Option<PairedGatewayValidation>,
+    pub(super) validation_prepared: std::sync::atomic::AtomicBool,
     report: LegacyCutoverReport,
 }
 impl SettledLegacyRuntime {
@@ -148,6 +151,30 @@ impl SettledLegacyRuntime {
                     .to_owned(),
             )
             .map_err(|_| TransitionError::Conflict)?;
+            let endpoint = if desired.gateway.is_some() {
+                Some(super::endpoint::issue_original_endpoint(
+                    &root,
+                    &profile,
+                    &marker,
+                    maintenance.transaction_id(),
+                    candidate.manifest_sha256,
+                )?)
+            } else {
+                None
+            };
+            preservation.revalidate()?;
+            let mut extensions = BTreeMap::from([("original_legacy_state".into(), original)]);
+            if let Some(endpoint) = &endpoint {
+                extensions.insert(
+                    "gateway_endpoint_v1".into(),
+                    serde_json::value::RawValue::from_string(
+                        std::str::from_utf8(&endpoint.binding)
+                            .map_err(|_| TransitionError::Conflict)?
+                            .to_owned(),
+                    )
+                    .map_err(|_| TransitionError::Conflict)?,
+                );
+            }
             let target = NativeState {
                 schema: NATIVE_STATE_SCHEMA,
                 kind: NativeStateKind::StyxDesiredState,
@@ -163,12 +190,13 @@ impl SettledLegacyRuntime {
                 }),
                 desired,
                 migration: Some(migration),
-                extensions: BTreeMap::from([("original_legacy_state".into(), original)]),
+                extensions,
             };
             let target = serde_json::to_vec(&target).map_err(|_| TransitionError::Conflict)?;
             let prepared = self
                 .original_fence()
                 .prepare_native_cutover(CutoverInputs {
+                    endpoint,
                     history_baseline_sha256: observation.digest,
                     history_committed_sha256: committed
                         .digest()
@@ -189,6 +217,7 @@ impl SettledLegacyRuntime {
                 prepared_sha256: prepared.prepared_sha256(),
                 applied_sha256: None,
                 candidate_exec_validation_sha256: None,
+                paired_validation_sha256: None,
                 preservation: preservation.report(),
                 network_ready: false,
                 migration_committed: false,
@@ -196,10 +225,12 @@ impl SettledLegacyRuntime {
             Ok(PreparedLegacyCutover {
                 original: self.clone(),
                 _state_dir: state_dir.to_owned(),
-                preservation,
-                prepared,
+                preservation: Arc::new(preservation),
+                prepared: Arc::new(prepared),
                 applied: None,
                 probe: None,
+                network: None,
+                validation_prepared: std::sync::atomic::AtomicBool::new(false),
                 report,
             })
         })
@@ -221,7 +252,41 @@ impl PreparedLegacyCutover {
         {
             return Err(TransitionError::Conflict);
         }
-        self.probe = Some(probe);
+        self.probe = Some(Arc::new(probe));
+        self.apply_stored_probe()
+    }
+    /// Preserve the actual paired proof, including the one recovered journal.
+    /// Network readiness never itself grants final commit or ordinary startup.
+    pub fn apply_gateway_validated_candidate(
+        &mut self,
+        proof: PairedGatewayValidation,
+    ) -> Result<(), TransitionError> {
+        if self.probe.is_some()
+            || self.applied.is_some()
+            || self.network.is_some()
+            || !proof.matches(&self.original, &self.prepared)
+        {
+            return Err(TransitionError::Conflict);
+        }
+        let handle =
+            tokio::runtime::Handle::try_current().map_err(|_| TransitionError::Unsupported)?;
+        if handle.runtime_flavor() != tokio::runtime::RuntimeFlavor::MultiThread {
+            return Err(TransitionError::Unsupported);
+        }
+        tokio::task::block_in_place(|| handle.block_on(proof.revalidate(None)))?;
+        self.probe = Some(proof.local_probe());
+        self.network = Some(proof);
+        self.apply_stored_probe()?;
+        let applied = self.applied.as_ref().ok_or(TransitionError::Unknown)?;
+        let proof = self.network.as_ref().ok_or(TransitionError::Unknown)?;
+        tokio::task::block_in_place(|| handle.block_on(proof.revalidate(Some(applied))))?;
+        let raw = serde_json::to_vec(proof.report()).map_err(|_| TransitionError::Unknown)?;
+        self.report.paired_validation_sha256 = Some(Sha256Digest::of_bytes(&raw));
+        self.report.network_ready = true;
+        self.report.stage = "applied_original_pair_network_validated_final_commit_required";
+        Ok(())
+    }
+    fn apply_stored_probe(&mut self) -> Result<(), TransitionError> {
         let handle =
             tokio::runtime::Handle::try_current().map_err(|_| TransitionError::Unsupported)?;
         if handle.runtime_flavor() != tokio::runtime::RuntimeFlavor::MultiThread {

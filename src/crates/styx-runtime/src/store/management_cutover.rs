@@ -15,17 +15,31 @@ use std::{
 };
 use styx_contracts::{
     management::ReaderContract,
-    native_management::{NativeDeploymentMode, NativeRootIdentity},
+    native_management::{NativeDeploymentMode, NativeGatewayEndpointBinding, NativeRootIdentity},
 };
 use styx_core::management::transaction::{
     AppliedFacts, CommitFacts, ManagementTransaction, PreparedFacts, VerificationFacts,
 };
+
+use zeroize::Zeroizing;
 
 const MAX_RAW: usize = 1024 * 1024;
 const MAX_INTENT: usize = 16 * 1024;
 const MAX_VALIDATION: usize = 16 * 1024;
 const MARKER: &str = ".styx-native-root-v1.json";
 const ATTACHMENTS: [&str; 5] = ["preservation", "scopes", "marker", "before", "target"];
+
+pub(crate) struct CutoverEndpointInputs {
+    pub binding: Vec<u8>,
+    pub chain: Vec<u8>,
+    pub key: Zeroizing<Vec<u8>>,
+}
+#[derive(Clone)]
+pub(in crate::store) struct CutoverEndpointMaterials {
+    binding: Vec<u8>,
+    chain: Vec<u8>,
+    key: Zeroizing<Vec<u8>>,
+}
 
 pub(crate) struct CutoverInputs {
     pub history_baseline_sha256: Sha256Digest,
@@ -35,6 +49,7 @@ pub(crate) struct CutoverInputs {
     pub marker: Vec<u8>,
     pub before: Vec<u8>,
     pub target: Vec<u8>,
+    pub endpoint: Option<CutoverEndpointInputs>,
 }
 #[derive(Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -63,6 +78,12 @@ pub(in crate::store) struct CutoverIntent {
     pub marker_sha256: Sha256Digest,
     pub history_baseline_sha256: Sha256Digest,
     pub history_committed_sha256: Sha256Digest,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint_binding_sha256: Option<Sha256Digest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint_chain_sha256: Option<Sha256Digest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint_key_sha256: Option<Sha256Digest>,
 }
 impl CutoverIntent {
     pub(in crate::store) fn management_intent(&self) -> DesiredStateCommit {
@@ -90,6 +111,7 @@ pub(in crate::store) struct OriginalCutover {
     pub last_stage: DurableStage,
     pub validation: Option<Vec<u8>>,
     pub validation_sha256: Option<Sha256Digest>,
+    pub endpoint: Option<CutoverEndpointMaterials>,
 }
 impl OriginalCutover {
     pub(in crate::store) fn validation_report(&self) -> Option<&[u8]> {
@@ -121,6 +143,24 @@ impl PreparedCutover {
     }
     pub(in crate::store) fn marker(&self) -> &[u8] {
         &self.original.marker
+    }
+    pub(in crate::store) fn endpoint_binding(&self) -> Option<&[u8]> {
+        self.original
+            .endpoint
+            .as_ref()
+            .map(|e| e.binding.as_slice())
+    }
+    pub(in crate::store) fn endpoint_chain(&self) -> Option<&[u8]> {
+        self.original.endpoint.as_ref().map(|e| e.chain.as_slice())
+    }
+    pub(in crate::store) fn endpoint_key(&self) -> Option<&[u8]> {
+        self.original.endpoint.as_ref().map(|e| e.key.as_slice())
+    }
+    pub(in crate::store) fn history_baseline_sha256(&self) -> Sha256Digest {
+        self.original.intent.history_baseline_sha256
+    }
+    pub(in crate::store) fn history_committed_sha256(&self) -> Sha256Digest {
+        self.original.intent.history_committed_sha256
     }
     pub(in crate::store) fn journal(&self) -> &JournalReceipt {
         &self.original.phases[0]
@@ -250,7 +290,7 @@ fn root_matches(expected: &handoff::RetirementLinuxRoot, actual: RootIdentity) -
 }
 fn validate_materials(original: &OriginalCutover) -> JournalResult<()> {
     let i = &original.intent;
-    if i.schema != 1
+    if !matches!(i.schema, 1 | 2)
         || i.kind != CutoverKind::LegacyRuntimeCutover
         || i.sequence == 0
         || i.config_root.inode == 0
@@ -294,6 +334,51 @@ fn validate_materials(original: &OriginalCutover) -> JournalResult<()> {
             .is_none_or(|tx| tx.transaction_id != i.transaction_id || tx.sequence != i.sequence)
     {
         return Err(JournalError::Conflict);
+    }
+    let extension = state.extensions.get("gateway_endpoint_v1");
+    match (i.schema, original.endpoint.as_ref()) {
+        (1, None) => {
+            if extension.is_some()
+                || i.endpoint_binding_sha256.is_some()
+                || i.endpoint_chain_sha256.is_some()
+                || i.endpoint_key_sha256.is_some()
+            {
+                return Err(JournalError::Conflict);
+            }
+        }
+        (2, Some(endpoint)) => {
+            if [
+                endpoint.binding.as_slice(),
+                endpoint.chain.as_slice(),
+                endpoint.key.as_slice(),
+            ]
+            .iter()
+            .any(|raw| raw.is_empty() || raw.len() > MAX_RAW)
+                || i.endpoint_binding_sha256 != Some(Sha256Digest::of_bytes(&endpoint.binding))
+                || i.endpoint_chain_sha256 != Some(Sha256Digest::of_bytes(&endpoint.chain))
+                || i.endpoint_key_sha256 != Some(Sha256Digest::of_bytes(&endpoint.key))
+                || state.desired.gateway.is_none()
+                || extension.is_none_or(|raw| raw.get().as_bytes() != endpoint.binding.as_slice())
+            {
+                return Err(JournalError::Conflict);
+            }
+            // Typed data links only. Certificate issuance, trust, key matching,
+            // hostname/time verification and native TLS admission belong upstream.
+            let binding: NativeGatewayEndpointBinding =
+                serde_json::from_slice(&endpoint.binding).map_err(|_| JournalError::Conflict)?;
+            if binding.schema != 1
+                || binding.transaction_id != i.transaction_id
+                || binding.root_identity != marker.root_identity
+                || binding.candidate_manifest_sha256 != i.candidate_manifest_sha256
+                || binding.chain_sha256 != Sha256Digest::of_bytes(&endpoint.chain)
+                || binding.not_before_unix >= binding.not_after_unix
+                || binding.origin.is_empty()
+                || binding.origin.len() > 4096
+            {
+                return Err(JournalError::Conflict);
+            }
+        }
+        _ => return Err(JournalError::Conflict),
     }
     let migration = state.migration.as_ref().ok_or(JournalError::Conflict)?;
     if migration.transaction_id != i.transaction_id
@@ -428,6 +513,15 @@ pub(in crate::store) fn scan_cutovers(
             used.insert(n);
             Ok(raw.to_vec())
         };
+        let endpoint = match intent.schema {
+            1 => None,
+            2 => Some(CutoverEndpointMaterials {
+                binding: read("endpoint-binding")?,
+                chain: read("endpoint-chain")?,
+                key: Zeroizing::new(read("endpoint-key")?),
+            }),
+            _ => return Err(JournalError::Unknown),
+        };
         let mut original = OriginalCutover {
             intent: intent.clone(),
             raw_intent: file.bytes().to_vec(),
@@ -440,6 +534,7 @@ pub(in crate::store) fn scan_cutovers(
             last_stage: DurableStage::Planned,
             validation: None,
             validation_sha256: None,
+            endpoint,
         };
         validate_materials(&original)?;
         let validation_name = name(&intent.transaction_id, "validation");
@@ -458,6 +553,13 @@ pub(in crate::store) fn scan_cutovers(
         ] {
             let n = name(&intent.transaction_id, stage_name(stage)?);
             if let Some(bytes) = by_name.get(n.as_str()) {
+                // schema2 has endpoint data but no paired-validation proof port
+                // yet. A local Exec report cannot become a complete verdict.
+                if intent.schema == 2
+                    && matches!(stage, DurableStage::Verified | DurableStage::Committed)
+                {
+                    return Err(JournalError::Unknown);
+                }
                 if missing || bytes.len() > MAX_INTENT {
                     return Err(JournalError::Unknown);
                 }
@@ -602,24 +704,25 @@ pub(in crate::store) fn check_canonical(
     }
     Ok(())
 }
-fn preflight(
+fn preflight<B: AsRef<[u8]>>(
     state: &ConfigurationState,
     scan: &JournalObservation,
-    entries: &[(String, Vec<u8>)],
+    entries: &[(String, B)],
     budget: JournalBudget,
 ) -> JournalResult<()> {
     preflight_with_root_growth(state, scan, entries, budget, 0)
 }
-fn preflight_with_root_growth(
+fn preflight_with_root_growth<B: AsRef<[u8]>>(
     state: &ConfigurationState,
     scan: &JournalObservation,
-    entries: &[(String, Vec<u8>)],
+    entries: &[(String, B)],
     budget: JournalBudget,
     root_growth: usize,
 ) -> JournalResult<()> {
     let mut count = scan.files.len();
     let mut bytes = scan.total_bytes;
     for (n, b) in entries {
+        let b = b.as_ref();
         if b.is_empty() || b.len() > budget.max_file_bytes {
             return Err(JournalError::BudgetExceeded);
         }
@@ -698,7 +801,7 @@ impl OwnedManagementJournal {
                 let target = decode_state(&inputs.target, &marker)
                     .map_err(|_| JournalError::InvalidInput)?;
                 let intent = CutoverIntent {
-                    schema: 1,
+                    schema: if inputs.endpoint.is_some() { 2 } else { 1 },
                     kind: CutoverKind::LegacyRuntimeCutover,
                     transaction_id: r.transaction_id.clone(),
                     sequence: r.sequence,
@@ -717,6 +820,18 @@ impl OwnedManagementJournal {
                     marker_sha256: Sha256Digest::of_bytes(&inputs.marker),
                     history_baseline_sha256: inputs.history_baseline_sha256,
                     history_committed_sha256: inputs.history_committed_sha256,
+                    endpoint_binding_sha256: inputs
+                        .endpoint
+                        .as_ref()
+                        .map(|e| Sha256Digest::of_bytes(&e.binding)),
+                    endpoint_chain_sha256: inputs
+                        .endpoint
+                        .as_ref()
+                        .map(|e| Sha256Digest::of_bytes(&e.chain)),
+                    endpoint_key_sha256: inputs
+                        .endpoint
+                        .as_ref()
+                        .map(|e| Sha256Digest::of_bytes(&e.key)),
                 };
                 let raw = serde_json::to_vec(&intent).map_err(|_| JournalError::InvalidInput)?;
                 let mut data = OriginalCutover {
@@ -731,6 +846,11 @@ impl OwnedManagementJournal {
                     last_stage: DurableStage::Planned,
                     validation: None,
                     validation_sha256: None,
+                    endpoint: inputs.endpoint.map(|e| CutoverEndpointMaterials {
+                        binding: e.binding,
+                        chain: e.chain,
+                        key: e.key,
+                    }),
                 };
                 validate_materials(&data)?;
                 check_canonical(state, &data, false)?;
@@ -747,7 +867,7 @@ impl OwnedManagementJournal {
                     .map_err(|_| JournalError::Conflict)?;
                 let mut entries = vec![(
                     name(&data.intent.transaction_id, "intent"),
-                    data.raw_intent.clone(),
+                    Zeroizing::new(data.raw_intent.clone()),
                 )];
                 for (suffix, bytes) in ATTACHMENTS.iter().zip([
                     &data.preservation,
@@ -756,8 +876,26 @@ impl OwnedManagementJournal {
                     &data.before,
                     &data.target,
                 ]) {
-                    entries.push((name(&data.intent.transaction_id, suffix), bytes.clone()));
+                    entries.push((
+                        name(&data.intent.transaction_id, suffix),
+                        Zeroizing::new(bytes.clone()),
+                    ));
                 }
+                if let Some(endpoint) = &data.endpoint {
+                    entries.push((
+                        name(&data.intent.transaction_id, "endpoint-binding"),
+                        Zeroizing::new(endpoint.binding.clone()),
+                    ));
+                    entries.push((
+                        name(&data.intent.transaction_id, "endpoint-chain"),
+                        Zeroizing::new(endpoint.chain.clone()),
+                    ));
+                    entries.push((
+                        name(&data.intent.transaction_id, "endpoint-key"),
+                        endpoint.key.clone(),
+                    ));
+                }
+                let initial_count = entries.len() + 1; // plus actual Prepared below
                 let mut reserved = data.clone();
                 // Fixed-size digest placeholders reserve bytes only. No future
                 // phase or synthetic validation report is written by prepare.
@@ -772,24 +910,27 @@ impl OwnedManagementJournal {
                     let raw = phase_bytes(&reserved, stage, previous)?;
                     let r = receipt(&data.intent, stage, previous, &raw);
                     previous = Some(r.record_sha256);
-                    entries.push((name(&data.intent.transaction_id, stage_name(stage)?), raw));
+                    entries.push((
+                        name(&data.intent.transaction_id, stage_name(stage)?),
+                        Zeroizing::new(raw),
+                    ));
                 }
                 entries.push((
                     name(&data.intent.transaction_id, "validation"),
-                    vec![0; MAX_VALIDATION],
+                    Zeroizing::new(vec![0; MAX_VALIDATION]),
                 ));
                 preflight(state, &scan, &entries, self.budget)?;
                 // Apply temporarily retains another target inside this namespace
                 // while creating the canonical marker at the root. Check that
                 // separate peak, rather than adding it to all future phases:
                 // the temporary is renamed out before those phases are written.
-                let mut apply_peak = entries[..7].to_vec();
+                let mut apply_peak = entries[..initial_count].to_vec();
                 apply_peak.push((
                     format!(
                         "txn-{}.state-temporary",
                         data.intent.transaction_id.as_str()
                     ),
-                    data.target.clone(),
+                    Zeroizing::new(data.target.clone()),
                 ));
                 preflight_with_root_growth(
                     state,
@@ -798,8 +939,8 @@ impl OwnedManagementJournal {
                     self.budget,
                     data.marker.len(),
                 )?;
-                // Seven initial files. Later phases are reserved, NEVER created.
-                for (n, b) in entries.iter().take(7) {
+                // Seven schema1 or ten schema2 initial files. Future phases are NEVER created.
+                for (n, b) in entries.iter().take(initial_count) {
                     files::immutable(dir, n, b, self.budget, &|_| {})?;
                 }
                 let after = files::scan(dir, self.budget)?;
@@ -880,6 +1021,11 @@ impl OwnedManagementJournal {
         if !prepared.matches_owner(&self.owner)
             || prepared.namespace != self.namespace
             || maintenance.transaction_id() != &prepared.intent().transaction_id
+        {
+            return Err(JournalError::Conflict);
+        }
+        if prepared.intent().schema == 2
+            && matches!(stage, DurableStage::Verified | DurableStage::Committed)
         {
             return Err(JournalError::Conflict);
         }

@@ -155,3 +155,20 @@ pub struct NativeConfigurationPlan {
     pub intent: crate::management::DesiredStateCommit,
     pub target: Box<serde_json::value::RawValue>,
 }
+
+/// Versioned DATA only: the original cutover journal and retained maintenance
+/// custody select it. Private endpoint key hashes remain in the private journal.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeGatewayEndpointBinding {
+    pub schema: u16,
+    pub transaction_id: TransactionId,
+    pub root_identity: NativeRootIdentity,
+    pub candidate_manifest_sha256: Sha256Digest,
+    pub origin: String,
+    pub anchor_sha256: Sha256Digest,
+    pub leaf_sha256: Sha256Digest,
+    pub chain_sha256: Sha256Digest,
+    pub not_before_unix: i64,
+    pub not_after_unix: i64,
+}

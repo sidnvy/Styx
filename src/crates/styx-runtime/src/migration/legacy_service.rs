@@ -470,3 +470,16 @@ pub use preservation::{OriginalPreservation, PreservationReport};
 #[path = "legacy_cutover.rs"]
 mod cutover;
 pub use cutover::{LegacyCutoverReport, PreparedLegacyCutover, inspect_pending_cutover};
+
+#[path = "legacy_endpoint.rs"]
+mod endpoint;
+#[path = "legacy_validation.rs"]
+mod validation;
+pub(crate) use validation::GatewayMaintenanceBinding;
+pub use validation::PreparedGatewayValidation;
+
+#[path = "legacy_network.rs"]
+mod network;
+#[path = "legacy_network_client.rs"]
+mod network_client;
+pub use network::{PairedGatewayValidation, PairedGatewayValidationReport};

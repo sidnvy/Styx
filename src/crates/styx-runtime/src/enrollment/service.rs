@@ -365,6 +365,8 @@ pub struct EnrollmentService {
     uncertain: bool,
     // A historical enrollment commit does not commit the enclosing C07 handoff.
     historical_migration_pending: bool,
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    migration_binding: Option<crate::migration::legacy_service::GatewayMaintenanceBinding>,
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     startup_transport_reconciled: bool,
 }
@@ -402,6 +404,8 @@ impl EnrollmentService {
             clock: Clock::new(now),
             uncertain: false,
             historical_migration_pending: recovered.facts.historical_baseline.is_some(),
+            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            migration_binding: None,
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             startup_transport_reconciled: false,
         };
@@ -496,10 +500,17 @@ impl EnrollmentService {
         kind: MaterialKind,
         digest: Sha256Digest,
     ) -> Result<Zeroizing<Vec<u8>>, ServiceError> {
-        match self
-            .store
-            .with_journal(|j| j.read_material(&MaterialRef { kind, digest }))
-        {
+        let read = |j: &mut crate::store::enrollment::EnrollmentJournal<'_>| {
+            j.read_material(&MaterialRef { kind, digest })
+        };
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        let result = match self.migration_binding.as_ref() {
+            Some(binding) => binding.with_journal(&mut self.store, read),
+            None => self.store.with_journal(read),
+        };
+        #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+        let result = self.store.with_journal(read);
+        match result {
             Ok(bytes) => Ok(Zeroizing::new(bytes)),
             Err(error) => {
                 self.uncertain = true;
@@ -558,6 +569,15 @@ impl EnrollmentService {
     }
     fn authenticate(&self, id: &DeviceId, token: &[u8]) -> Result<DeviceSelfProof, ServiceError> {
         self.ordinary_admission()?;
+        self.authenticate_device(id, token)
+    }
+    // Token/Core checks are shared, but only the trusted transport path may
+    // select the separate maintenance gate. HTTP/self/admin keep ordinary gate.
+    fn authenticate_device(
+        &self,
+        id: &DeviceId,
+        token: &[u8],
+    ) -> Result<DeviceSelfProof, ServiceError> {
         if !(32..=4096).contains(&token.len()) {
             return Err(ServiceError::new(403, "device_unauthorized"));
         }
@@ -964,18 +984,19 @@ impl EnrollmentService {
         }
     }
     pub(crate) fn exec_profiles(&mut self) -> Result<Vec<GatewayExecProfile>, ServiceError> {
-        self.ordinary_admission()?;
+        let selected = self.transport_admission(None, Lane::Exec)?;
+        let maintenance_only = selected.is_some();
         self.ledger
             .devices_for_admin(&self.control.admin())?
             .into_iter()
-            .filter(|d| !d.revoked)
+            .filter(|d| !d.revoked && selected.as_ref().is_none_or(|id| &d.id == id))
             .map(|d| {
                 let verified = self.load_profile(&d.profile, &d.id, d.fingerprint)?;
                 let p = verified.profile();
                 Ok(GatewayExecProfile {
                     device_id: d.id,
-                    browser_approved: d.grant.browser,
-                    computer_approved: d.grant.computer,
+                    browser_approved: !maintenance_only && d.grant.browser,
+                    computer_approved: !maintenance_only && d.grant.computer,
                     capability_generation: d.generation,
                     platform: p.platform.clone(),
                     cwd: p.cwd.clone(),
@@ -991,7 +1012,7 @@ impl EnrollmentService {
         id: &DeviceId,
         generation: &str,
     ) -> Result<(), ServiceError> {
-        self.ordinary_admission()?;
+        self.transport_admission(Some(id), Lane::Exec)?;
         if self
             .ledger
             .devices_for_admin(&self.control.admin())?
@@ -1040,13 +1061,15 @@ impl EnrollmentService {
         lane: Lane,
         generation: ConnectionGeneration,
     ) -> Result<ConnectionLease, ServiceError> {
-        let proof = self.authenticate(id, token)?;
+        self.transport_admission(Some(id), lane)?;
+        let proof = self.authenticate_device(id, token)?;
         self.ledger
             .admit_connection(proof, lane, generation)
             .map_err(Into::into)
     }
     pub fn authorize_host_frame(&self, lease: &ConnectionLease) -> Result<(), ServiceError> {
         self.healthy()?;
+        self.validate_migration_binding()?;
         self.ledger.authorize_connection(lease)?;
         Ok(())
     }
@@ -1055,9 +1078,41 @@ impl EnrollmentService {
         lease: ConnectionLease,
         certainly_closed: bool,
     ) -> Result<(), ServiceError> {
-        self.ledger
-            .connection_ended(lease, certainly_closed)
-            .map_err(Into::into)
+        // A lost binding cannot authorize frames, but must not prevent the
+        // existing Core lease from being fenced/closed during owned cleanup.
+        let binding = self.validate_migration_binding();
+        self.ledger.connection_ended(lease, certainly_closed)?;
+        binding
+    }
+    fn validate_migration_binding(&self) -> Result<(), ServiceError> {
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        if let Some(binding) = &self.migration_binding {
+            binding.validate_owner(&self.store.configuration_root())?;
+        }
+        Ok(())
+    }
+    fn transport_admission(
+        &self,
+        id: Option<&DeviceId>,
+        lane: Lane,
+    ) -> Result<Option<DeviceId>, ServiceError> {
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        if let Some(binding) = &self.migration_binding {
+            self.healthy()?;
+            binding.validate_owner(&self.store.configuration_root())?;
+            let selected = binding.selected_device();
+            if lane != Lane::Exec || id.is_some_and(|id| id != selected) {
+                return Err(ServiceError::transport_unauthorized());
+            }
+            // Always refresh the original device's current Core metadata. No
+            // caller-provided generation or grant creates this selected scope.
+            self.ledger.authentication_target(&self.control, selected)?;
+            return Ok(Some(selected.clone()));
+        }
+        #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+        let _ = (id, lane);
+        self.ordinary_admission()?;
+        Ok(None)
     }
 }
 
@@ -1090,3 +1145,7 @@ impl ServiceError {
         Self::new(403, "device_unauthorized")
     }
 }
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[path = "service_maintenance.rs"]
+mod maintenance;

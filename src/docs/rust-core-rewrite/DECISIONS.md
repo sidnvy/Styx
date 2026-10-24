@@ -45,3 +45,16 @@
 ## Why this plan does not freeze legacy architecture
 
 旧实现只约束外部可信合同，不约束Rust内部目录、状态类型、async模型或包成员路径。允许删除低价值测试、收拢冗余状态、替换内部协议/loader和过度耦合，只要迁移及授权语义明确。保留Codex/Cua/Playwright是复用执行器，而不是为JS Core保留产品权威。
+
+
+## ADR-029 — Original CA continuity for a bounded maintenance endpoint
+
+Status: accepted implementation boundary, 2026-10-25. R33 source is being integrated; real paired network validation has **not** passed. This entry does not promote the migration to Verified/Committed or ordinary runtime readiness.
+
+Keep the original protected CA certificate/key, publisher pin and paired identities/credentials unchanged. A CA certificate cannot be used as an ordinary server leaf to bypass strict TLS. The maintenance issuer creates a separate `CA:false` server-auth leaf/key, binds its SAN/origin to the original configured endpoint, and retains the original CA PEM bytes in the chain. It does not install a trust root or change an explicitly pinned old leaf; such a profile is refused by this slice. Expiry is no later than issuance time plus 24 hours or the original CA expiry, with only the existing 60-second not-before skew allowance. This is a maintenance certificate, not an implemented ordinary-runtime renewal policy.
+
+The same original C07 owner, mutex, writer, maintenance transaction and management namespace retain the endpoint. Cutover intent schema2 binds fixed `endpoint-binding`, `endpoint-chain` and `endpoint-key` attachments by hashes, exact root/transaction/candidate and target extension `gateway_endpoint_v1`. Key bytes are private 0600 journal material, not public binding/diagnostics. Endpoint data is not TLS or admission authority. Schema1 without endpoint retains its original serialized shape and behavior; a schema1 target cannot smuggle the endpoint extension. Unknown/partial data and old readers fail closed. Original signed package bytes are never edited to assert newer reader support.
+
+Construct the maintenance validation plan while the original canonical state/profile is still readable, **before canonical apply**. The retained original plan/profile/dual-scope proof must survive apply and actual cleanup; no second writer, journal, fresh enrollment snapshot or post-apply reconstruction substitutes for them. Ordinary admission remains fenced. Schema2 currently rejects Verified/Committed because local candidate Exec validation is not a paired Gateway verdict. Actual paired network validation, final migration commit/activation and ordinary certificate lifecycle remain unfinished.
+
+Implementation and exact scope: [R33 original-CA maintenance notes](r33-original-ca-maintenance.md).

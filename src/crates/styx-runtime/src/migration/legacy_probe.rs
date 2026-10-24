@@ -144,6 +144,14 @@ impl MigrationValidationProbe {
     pub(crate) fn original_runtime(&self) -> &Arc<SettledLegacyRuntime> {
         &self.custody.original
     }
+    /// The local executor has actually exited; retain its existing Host lease
+    /// while a fresh network validation executor is owned by the coordinator.
+    pub(super) fn validate_host_lease(&self) -> Result<(), TransitionError> {
+        self.custody
+            .lease
+            .validate()
+            .map_err(|_| TransitionError::Unknown)
+    }
     /// Only the exact opaque canonical effect may select this variant. Full
     /// pre-cutover profile checks remain in revalidate(); the coordinator must
     /// revalidate every other captured preservation input after replacement.
@@ -214,7 +222,7 @@ impl SettledLegacyRuntime {
     }
 }
 
-fn facts(device: DeviceId) -> AdmissionFacts {
+pub(super) fn facts(device: DeviceId) -> AdmissionFacts {
     // Local, fixed validation only. This private Core authority is never a
     // Gateway-issued owner/grant and is never exposed to ordinary dispatch.
     AdmissionFacts {

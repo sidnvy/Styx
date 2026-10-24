@@ -181,7 +181,48 @@ fn inputs(f: &Fixture) -> CutoverInputs {
         marker: f.marker.clone(),
         before: BEFORE.to_vec(),
         target: f.target.clone(),
+        endpoint: None,
     }
+}
+// Endpoint bytes here are synthetic storage inputs, NOT certificates/TLS proof.
+fn endpoint_inputs(f: &Fixture) -> CutoverInputs {
+    let mut result = inputs(f);
+    let marker = decode_marker(&f.marker).unwrap();
+    let chain = b"synthetic chain bytes, no TLS assertion".to_vec();
+    let binding = NativeGatewayEndpointBinding {
+        schema: 1,
+        transaction_id: f.retired.transaction_id.clone(),
+        root_identity: marker.root_identity,
+        candidate_manifest_sha256: f.retired.candidate_manifest_sha256,
+        origin: "https://127.0.0.1:8443".to_owned(),
+        anchor_sha256: Sha256Digest::of_bytes(b"synthetic anchor"),
+        leaf_sha256: Sha256Digest::of_bytes(b"synthetic leaf"),
+        chain_sha256: Sha256Digest::of_bytes(&chain),
+        not_before_unix: 1,
+        not_after_unix: 2,
+    };
+    let binding = serde_json::to_vec(&binding).unwrap();
+    result.endpoint = Some(CutoverEndpointInputs {
+        binding,
+        chain,
+        key: Zeroizing::new(b"synthetic key bytes, not production".to_vec()),
+    });
+    bind_endpoint_target(&mut result);
+    result
+}
+fn bind_endpoint_target(inputs: &mut CutoverInputs) {
+    let marker = decode_marker(&inputs.marker).unwrap();
+    let mut target = decode_state(&inputs.target, &marker)
+        .unwrap()
+        .state()
+        .clone();
+    let binding = &inputs.endpoint.as_ref().unwrap().binding;
+    target.extensions.insert(
+        "gateway_endpoint_v1".to_owned(),
+        serde_json::value::RawValue::from_string(String::from_utf8(binding.clone()).unwrap())
+            .unwrap(),
+    );
+    inputs.target = serde_json::to_vec(&target).unwrap();
 }
 fn synthetic_validation(f: &Fixture) -> Vec<u8> {
     serde_json::to_vec(&serde_json::json!({
@@ -240,6 +281,21 @@ fn same_original_cutover_chain_files_and_interruption_boundaries() {
     assert_eq!(prepared.target(), f.target);
     assert_eq!(prepared.marker(), f.marker);
     assert_eq!(prepared.journal().stage, DurableStage::Prepared);
+    assert_eq!(prepared.intent().schema, 1);
+    assert!(prepared.endpoint_binding().is_none());
+    let legacy_shape: serde_json::Value =
+        serde_json::from_slice(&prepared.original.raw_intent).unwrap();
+    for key in [
+        "endpoint_binding_sha256",
+        "endpoint_chain_sha256",
+        "endpoint_key_sha256",
+    ] {
+        assert!(legacy_shape.get(key).is_none());
+    }
+    assert_eq!(
+        serde_json::to_vec(prepared.intent()).unwrap(),
+        prepared.original.raw_intent
+    );
     assert_eq!(fs::read(f.path.join("state.json")).unwrap(), BEFORE);
     assert!(matches!(
         f.journal.prepare_cutover(&f.maintenance, inputs(&f)),
@@ -606,4 +662,131 @@ fn same_original_cutover_chain_files_and_interruption_boundaries() {
     );
     assert!(interrupted.owner.ensure_usable().is_err());
     cleanup(interrupted);
+    // Complete endpoint attachments share the exact original namespace/owner.
+    let mut endpoint = fixture(&parent, JournalBudget::default());
+    let data = endpoint_inputs(&endpoint);
+    let expected_binding = data.endpoint.as_ref().unwrap().binding.clone();
+    let expected_chain = data.endpoint.as_ref().unwrap().chain.clone();
+    let expected_key = data.endpoint.as_ref().unwrap().key.clone();
+    let p = endpoint
+        .journal
+        .prepare_cutover(&endpoint.maintenance, data)
+        .unwrap();
+    assert_eq!(p.intent().schema, 2);
+    assert_eq!(p.endpoint_binding(), Some(expected_binding.as_slice()));
+    assert_eq!(p.endpoint_chain(), Some(expected_chain.as_slice()));
+    assert!(p.endpoint_key() == Some(expected_key.as_slice()));
+    assert_eq!(p.history_baseline_sha256(), Sha256Digest::of_bytes(HISTORY));
+    assert_eq!(
+        p.history_committed_sha256(),
+        Sha256Digest::of_bytes(COMMITTED)
+    );
+    assert_eq!(scan_cutovers(&scan(&endpoint)).unwrap().used.len(), 10);
+    assert!(matches!(
+        endpoint
+            .journal
+            .append_cutover_phase(&endpoint.maintenance, &p, DurableStage::Verified),
+        Err(JournalError::Conflict)
+    ));
+    let namespace = endpoint.path.join(NamespaceName::ManagementV1.as_str());
+    fs::write(
+        namespace.join(name(&endpoint.retired.transaction_id, "endpoint-chain")),
+        b"changed chain",
+    )
+    .unwrap();
+    assert!(
+        endpoint
+            .journal
+            .resync_original_cutover(&endpoint.maintenance, &endpoint.retired.transaction_id)
+            .is_err()
+    );
+    cleanup(endpoint);
+
+    let mut missing = fixture(&parent, JournalBudget::default());
+    let data = endpoint_inputs(&missing);
+    missing
+        .journal
+        .prepare_cutover(&missing.maintenance, data)
+        .unwrap();
+    fs::remove_file(
+        missing
+            .path
+            .join(NamespaceName::ManagementV1.as_str())
+            .join(name(&missing.retired.transaction_id, "endpoint-key")),
+    )
+    .unwrap();
+    assert!(
+        missing
+            .journal
+            .resync_original_cutover(&missing.maintenance, &missing.retired.transaction_id)
+            .is_err()
+    );
+    cleanup(missing);
+
+    // Refusals are checked before the first immutable cutover write.
+    for variant in 0..4 {
+        let mut rejected = fixture(&parent, JournalBudget::default());
+        let before = scan(&rejected);
+        let mut data = endpoint_inputs(&rejected);
+        match variant {
+            0 => data.endpoint = None, // old intent cannot carry the new extension
+            1 => data.endpoint.as_mut().unwrap().binding.push(b' '), // same JSON, wrong exact raw binding
+            2 => data.endpoint.as_mut().unwrap().key.clear(),
+            _ => {
+                let endpoint = data.endpoint.as_mut().unwrap();
+                let mut binding: NativeGatewayEndpointBinding =
+                    serde_json::from_slice(&endpoint.binding).unwrap();
+                binding.transaction_id = "foreign-endpoint-transaction".try_into().unwrap();
+                endpoint.binding = serde_json::to_vec(&binding).unwrap();
+                bind_endpoint_target(&mut data);
+            }
+        }
+        assert!(
+            rejected
+                .journal
+                .prepare_cutover(&rejected.maintenance, data)
+                .is_err()
+        );
+        // Input rejection never publishes intent/material/Prepared, even if its
+        // conservative error leaves this synthetic owner's admission poisoned.
+        let root = PrivateRoot::open(&rejected.path).unwrap();
+        for suffix in [
+            "intent",
+            "endpoint-binding",
+            "endpoint-chain",
+            "endpoint-key",
+            "prepared",
+        ] {
+            root.ensure_absent(
+                Path::new(NamespaceName::ManagementV1.as_str())
+                    .join(name(&rejected.retired.transaction_id, suffix)),
+            )
+            .unwrap();
+        }
+        assert!(!before.files.iter().any(|f| f.name.contains(".cutover-")));
+        cleanup(rejected);
+    }
+    // Original retired records + all schema1 future records fit16 files; the
+    // schema2 endpoint bundle needs three MORE before any file is written.
+    let mut endpoint_budget = fixture(
+        &parent,
+        JournalBudget {
+            max_files: 16,
+            ..JournalBudget::default()
+        },
+    );
+    let data = endpoint_inputs(&endpoint_budget);
+    assert!(matches!(
+        endpoint_budget
+            .journal
+            .prepare_cutover(&endpoint_budget.maintenance, data),
+        Err(JournalError::BudgetExceeded)
+    ));
+    let root = PrivateRoot::open(&endpoint_budget.path).unwrap();
+    root.ensure_absent(
+        Path::new(NamespaceName::ManagementV1.as_str())
+            .join(name(&endpoint_budget.retired.transaction_id, "intent")),
+    )
+    .unwrap();
+    cleanup(endpoint_budget);
 }

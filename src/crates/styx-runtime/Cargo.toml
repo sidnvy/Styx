@@ -32,7 +32,7 @@ encoding_rs.workspace = true
 regex.workspace = true
 jsonschema.workspace = true
 
-rmcp.workspace = true
+rmcp = { workspace = true, features = ["transport-streamable-http-client-reqwest"] }
 http.workspace = true
 hyper.workspace = true
 hyper-util.workspace = true
@@ -44,11 +44,11 @@ bytes.workspace = true
 rustls.workspace = true
 tokio-rustls.workspace = true
 rustls-pemfile.workspace = true
+rcgen.workspace = true
+x509-parser.workspace = true
+time.workspace = true
 webpki.workspace = true
 tokio-tungstenite.workspace = true
-
-[dev-dependencies]
-rmcp = { workspace = true, features = ["client", "transport-streamable-http-client-reqwest"] }
 
 reqwest = { workspace = true, features = ["rustls"] }
 

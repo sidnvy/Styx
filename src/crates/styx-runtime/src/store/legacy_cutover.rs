@@ -40,6 +40,21 @@ impl PreparedNativeCutover {
     pub(crate) fn prepared_sha256(&self) -> Sha256Digest {
         self.prepared.journal().record_sha256
     }
+    pub(crate) fn endpoint_binding(&self) -> Option<&[u8]> {
+        self.prepared.endpoint_binding()
+    }
+    pub(crate) fn endpoint_chain(&self) -> Option<&[u8]> {
+        self.prepared.endpoint_chain()
+    }
+    pub(crate) fn endpoint_key(&self) -> Option<&[u8]> {
+        self.prepared.endpoint_key()
+    }
+    pub(crate) fn history_baseline_sha256(&self) -> Sha256Digest {
+        self.prepared.history_baseline_sha256()
+    }
+    pub(crate) fn history_committed_sha256(&self) -> Sha256Digest {
+        self.prepared.history_committed_sha256()
+    }
 }
 impl AppliedNativeCutover {
     pub(crate) fn transaction_id(&self) -> &TransactionId {
@@ -118,6 +133,28 @@ pub(super) fn validate_canonical_replacement(
     Ok(true)
 }
 impl LegacyWriterFence {
+    /// Borrow the exact retained preparation, never reconstruct it from a DTO.
+    pub(crate) fn validate_prepared_cutover(
+        &self,
+        prepared: &PreparedNativeCutover,
+    ) -> JournalResult<()> {
+        self.validate().map_err(|_| JournalError::Unknown)?;
+        {
+            let slot = self.retirement.lock().map_err(|_| JournalError::Unknown)?;
+            matching(&slot, &prepared.prepared)?;
+        }
+        let original = self
+            .original_journal()?
+            .lock()
+            .map_err(|_| JournalError::Unknown)?
+            .resync_original_cutover(&self.maintenance, prepared.transaction_id())?;
+        if &original.intent != prepared.prepared.intent()
+            || original.phases.first() != Some(prepared.prepared.journal())
+        {
+            return Err(JournalError::Unknown);
+        }
+        self.validate().map_err(|_| JournalError::Unknown)
+    }
     pub(crate) fn cutover_sequence(&self) -> JournalResult<u64> {
         self.validate().map_err(|_| JournalError::Conflict)?;
         self.original_journal()?
