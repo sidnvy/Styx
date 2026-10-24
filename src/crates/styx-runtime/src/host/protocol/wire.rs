@@ -65,6 +65,12 @@ pub enum Call {
         timeout_ms: u32,
         command: BrowserCommand,
     },
+    Computer {
+        owner: OwnerRef,
+        grant_revision: u64,
+        timeout_ms: u32,
+        command: ComputerCommand,
+    },
     OwnerOpen {
         owner: OwnerRef,
         grant_revision: u64,
@@ -81,6 +87,7 @@ pub enum Call {
     Terminate {},
 }
 pub const BROWSER_HEADLESS_V1: &str = "browser_headless_v1";
+pub const COMPUTER_V1: &str = "computer_v1";
 /// Existing wait_for permits thirty seconds. Keep an explicit bounded margin
 /// for provider settlement; ordinary operations and owner cleanup are unchanged.
 pub(crate) const BROWSER_WAIT_PREPARE_TIMEOUT_MS: u32 = 35_000;
@@ -100,12 +107,36 @@ impl Call {
     pub(crate) fn is_browser(&self) -> bool {
         matches!(self, Self::Browser { .. })
     }
+    pub(crate) fn is_computer(&self) -> bool {
+        matches!(self, Self::Computer { .. })
+    }
 }
 /// Additive private v3 feature. No paths, credentials or native profile choices
 /// are accepted from a wire peer; prepare/dispatch stay distinct Core actions.
 #[derive(Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum BrowserCommand {
+    PrepareOpen,
+    DispatchOpen {
+        target: ResourceTarget,
+    },
+    InspectOpen {
+        target: ResourceTarget,
+    },
+    PrepareAction {
+        target: ResourceTarget,
+        action: Box<serde_json::value::RawValue>,
+    },
+    DispatchAction {
+        action: ActionRef,
+    },
+    InspectAction {
+        action: ActionRef,
+    },
+}
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum ComputerCommand {
     PrepareOpen,
     DispatchOpen {
         target: ResourceTarget,
@@ -204,6 +235,13 @@ pub enum Reply {
         write_id: Option<String>,
     },
     BrowserAction {
+        snapshot: Snapshot,
+        dispatch: String,
+        result: Option<serde_json::Value>,
+        cause: Option<ErrorCategory>,
+        cleanup_complete: Option<bool>,
+    },
+    ComputerAction {
         snapshot: Snapshot,
         dispatch: String,
         result: Option<serde_json::Value>,

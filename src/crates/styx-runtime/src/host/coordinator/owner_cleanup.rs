@@ -120,6 +120,13 @@ async fn run_cleanup(
         until.saturating_duration_since(tokio::time::Instant::now()),
     )
     .await;
+    #[cfg(target_os = "linux")]
+    let _desktop = super::desktop_cleanup::cleanup_desktop_owner(
+        inner.clone(),
+        handle.authority.owner(),
+        until.saturating_duration_since(tokio::time::Instant::now()),
+    )
+    .await;
     // Existing fair global gate provides real quiescence. Other owners' I/O can
     // briefly wait, but no other owner's resource/action is cancelled or released.
     let _quiescent = tokio::time::timeout_at(until, inner.execution_gate.clone().write_owned())
@@ -200,6 +207,18 @@ async fn run_cleanup(
                 error,
             }),
         }
+    }
+    #[cfg(target_os = "linux")]
+    {
+        let desktop = super::desktop_cleanup::collect_desktop_retention(
+            inner,
+            Some(handle.authority.owner()),
+            until,
+        )
+        .await;
+        facts.resources_released += desktop.resources_released;
+        facts.deadline_exhausted |= desktop.deadline_exhausted;
+        facts.blocked.extend(desktop.blocked);
     }
     #[cfg(target_os = "linux")]
     {

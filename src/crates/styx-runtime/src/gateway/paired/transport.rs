@@ -1,7 +1,7 @@
 //! Owned Hyper upgrades. Registry routes; Core lease and owner gates authorize.
 use super::relay::{Command, Entry, RelayError, RelayHandle};
 use crate::host::protocol::wire::{
-    BROWSER_HEADLESS_V1, Call, Reply, Request as WireRequest, Response as WireResponse,
+    BROWSER_HEADLESS_V1, COMPUTER_V1, Call, Reply, Request as WireRequest, Response as WireResponse,
 };
 use bytes::Bytes;
 use futures_util::{Sink, SinkExt, StreamExt};
@@ -29,7 +29,8 @@ use tokio_tungstenite::{
     },
 };
 use tokio_util::sync::CancellationToken;
-const FRAME: usize = 256 * 1024;
+// Fits the existing16MiB paired reservation: two business replies plus control.
+const FRAME: usize = 2 * 1024 * 1024;
 const RETAINED_CONNECTIONS: usize = 128;
 pub(crate) fn device_path(path: &str) -> Option<DeviceId> {
     let s = path.strip_prefix("/styx/host/v3/")?.strip_suffix("/exec")?;
@@ -61,7 +62,7 @@ impl Drop for LiveFence {
 struct Pending {
     command: Command,
     control: bool,
-    browser: bool,
+    lane: Lane,
     deadline: tokio::time::Instant,
 }
 impl RelayHandle {
@@ -143,6 +144,7 @@ impl RelayHandle {
                         let _connection = connection;
                         let mut lease = Some(lease);
                         let mut browser_lease: Option<ConnectionLease> = None;
+                        let mut computer_lease: Option<ConnectionLease> = None;
                         let mut entry: Option<Arc<Entry>> = None;
                         let result=async {
                             let io=tokio::select! {
@@ -161,14 +163,14 @@ impl RelayHandle {
                                 r=tokio::time::timeout(Duration::from_secs(5),read_response(&mut source))=>r.map_err(|_|RelayError::Unknown)??,
                             };
                             if response.request_id!=request.request_id{return Err(RelayError::Invalid)}
-                            let(host_generation,host_connection,grant_revision,browser_feature)=match response.reply {
+                            let(host_generation,host_connection,grant_revision,browser_feature,computer_feature)=match response.reply {
                                 Reply::Negotiated{version:3,challenge:got,device_id,host_generation,connection_generation,grant_revision:Some(rev),owner_issuance,
                                     features,write:true,terminate:true,read_resume:false,..}
                                     if ["prepare_start","dispatch_start","inspect_start","read","prepare_action","dispatch_action","inspect_action","owner_open","owner_revoke","owner_cleanup"]
                                         .iter().all(|f|features.iter().any(|v|v==f)) && got==challenge && device_id==device
                                         && connection_generation==response.connection_generation && owner_issuance=="gateway_authenticated" => {
                                             let browser=features.iter().any(|v|v==BROWSER_HEADLESS_V1);
-                                            (host_generation,connection_generation,rev,browser)
+                                            (host_generation,connection_generation,rev,browser,features.iter().any(|v|v==COMPUTER_V1))
                                         },
                                 _=>return Err(RelayError::Unauthorized),
                             };
@@ -183,11 +185,17 @@ impl RelayHandle {
                                     _=>None,
                                 }
                             } else {None};
+                            computer_lease=if computer_feature && profile.computer_approved {
+                                match relay.inner.shared.with(|s| {
+                                    s.profile_is_current(&device,&profile.capability_generation)?;
+                                    s.admit_upgrade_for_lane(&upgrade_headers,&device,generation.clone(),Lane::Computer)
+                                }).await {Ok(Ok(admitted))=>Some(admitted),_=>None}
+                            }else{None};
                             drop(upgrade_headers);
                             let(tx,mut rx)=mpsc::channel::<Command>(3);
                             let e=Arc::new(Entry{device:device.clone(),transport_generation:generation.clone(),host_connection,host_generation,grant_revision,profile,
-                                tx,stop:task_stop.clone(),live:AtomicBool::new(true),lease:tokio::sync::Mutex::new(lease.take()),browser_feature,
-                                browser_lease:tokio::sync::Mutex::new(browser_lease.take())});
+                                tx,stop:task_stop.clone(),live:AtomicBool::new(true),lease:tokio::sync::Mutex::new(lease.take()),browser_feature,computer_feature,
+                                browser_lease:tokio::sync::Mutex::new(browser_lease.take()),computer_lease:tokio::sync::Mutex::new(computer_lease.take())});
                             entry=Some(e.clone());let _fence=LiveFence(e.clone());
                             {
                                 let mut state=relay.inner.state.lock().map_err(|_|RelayError::Unknown)?;
@@ -207,7 +215,7 @@ impl RelayHandle {
                                     command=rx.recv()=>{
                                         let Some(command)=command else{break};
                                         let control=matches!(command.call,Call::OwnerOpen{..}|Call::OwnerRevoke{..}|Call::OwnerCleanup{..});
-                                        let browser=match relay.authorization_lane(&e,&command.call).await {
+                                        let lane=match relay.authorization_lane(&e,&command.call).await {
                                             Ok(lane)=>lane,
                                             Err(error)=>{let _=command.result.send(Err(error));continue},
                                         };
@@ -217,22 +225,22 @@ impl RelayHandle {
                                         }
                                         let response_budget=command.call.response_budget();
                                         let request=WireRequest{request_id:request_id()?,connection_generation:Some(e.host_connection.clone()),call:command.call};
-                                        let locked=if browser{e.browser_lease.lock().await}else{e.lease.lock().await};
+                                        let locked=e.lease_for(lane).await;
                                         let Some(l)=locked.as_ref() else {
-                                            let _=command.result.send(Err(if browser{RelayError::Unauthorized}else{RelayError::Offline}));
-                                            if browser{continue}else{return Err(RelayError::Offline)}
+                                            let _=command.result.send(Err(if lane!=Lane::Exec{RelayError::Unauthorized}else{RelayError::Offline}));
+                                            if lane!=Lane::Exec{continue}else{return Err(RelayError::Offline)}
                                         };
                                         let result=guarded_send(&relay,l,command.gate.as_deref(),&mut sink,&request,&task_stop).await;
                                         drop(locked);
                                         // Drop sensitive request payload after send, keep its exact lane.
                                         let command=Command{call:Call::Write{},result:command.result,gate:command.gate};
                                         match result {
-                                            Ok(())=>{pending.insert(request.request_id,Pending{command,control,browser,deadline:tokio::time::Instant::now()+response_budget});},
+                                            Ok(())=>{pending.insert(request.request_id,Pending{command,control,lane,deadline:tokio::time::Instant::now()+response_budget});},
                                             Err(error)=>{
                                                 let _=command.result.send(Err(error));
                                                 // Refusal before start_send is local to Browser. Actual
                                                 // socket/write uncertainty still invalidates the physical WS.
-                                                if browser && matches!(error,RelayError::Unauthorized|RelayError::Unsupported|RelayError::Invalid){continue}
+                                                if lane!=Lane::Exec && matches!(error,RelayError::Unauthorized|RelayError::Unsupported|RelayError::Invalid){continue}
                                                 return Err(error)
                                             },
                                         }
@@ -241,10 +249,10 @@ impl RelayHandle {
                                         let response=response?;
                                         if response.connection_generation!=e.host_connection{return Err(RelayError::Invalid)}
                                         let Some(p)=pending.remove(&response.request_id) else{return Err(RelayError::Invalid)};
-                                        let locked=if p.browser{e.browser_lease.lock().await}else{e.lease.lock().await};
+                                        let locked=e.lease_for(p.lane).await;
                                         let Some(l)=locked.as_ref() else {
-                                            let _=p.command.result.send(Err(if p.browser{RelayError::Unauthorized}else{RelayError::Offline}));
-                                            if p.browser{continue}else{return Err(RelayError::Offline)}
+                                            let _=p.command.result.send(Err(if p.lane!=Lane::Exec{RelayError::Unauthorized}else{RelayError::Offline}));
+                                            if p.lane!=Lane::Exec{continue}else{return Err(RelayError::Offline)}
                                         };
                                         relay.inner.shared.with(|s| {
                                             let allowed=s.authorize_host_frame(l).is_ok();
@@ -271,10 +279,11 @@ impl RelayHandle {
                             }
                             lease = e.lease.lock().await.take();
                             browser_lease = e.browser_lease.lock().await.take();
+                            computer_lease = e.computer_lease.lock().await.take();
                         }
                         // This task has dropped its socket halves (also on Err).
                         // No logical offline inference from a timeout alone.
-                        for lease in [lease, browser_lease].into_iter().flatten() {
+                        for lease in [lease, browser_lease, computer_lease].into_iter().flatten() {
                             let _ = relay
                                 .inner
                                 .shared

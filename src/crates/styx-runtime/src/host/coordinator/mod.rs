@@ -5,6 +5,18 @@
 mod browser;
 #[cfg(target_os = "linux")]
 pub use browser::*;
+#[cfg(target_os = "linux")]
+mod desktop;
+#[cfg(target_os = "linux")]
+pub(crate) use desktop::*;
+#[cfg(target_os = "linux")]
+mod desktop_source;
+#[cfg(target_os = "linux")]
+pub(crate) use desktop_source::DesktopSource;
+#[cfg(target_os = "linux")]
+mod desktop_cleanup;
+#[cfg(target_os = "linux")]
+pub use desktop_cleanup::DesktopLaneCleanup;
 mod legacy;
 mod owner_cleanup;
 mod session;
@@ -33,6 +45,9 @@ pub enum CoordinatorError {
     #[cfg(target_os = "linux")]
     #[error("Browser executor refused or has an unknown outcome")]
     Browser(#[from] crate::providers::browser::BrowserError),
+    #[cfg(target_os = "linux")]
+    #[error("Desktop executor refused or has an unknown outcome")]
+    Desktop(#[from] crate::providers::cua::CuaError),
     #[error("Host work budget exhausted or maintenance is active")]
     Busy,
     #[error("Host response delivery ended; reconcile original operation without replay")]
@@ -54,6 +69,8 @@ struct State {
     sessions: crate::session::HostSessions,
     #[cfg(target_os = "linux")]
     browser: Option<browser::BrowserLane>,
+    #[cfg(target_os = "linux")]
+    desktop: Option<desktop::DesktopLane>,
 }
 impl State {
     fn new(ledger: OperationLedger, facts: AdmissionFacts, origin: Instant) -> Self {
@@ -65,6 +82,8 @@ impl State {
             sessions,
             #[cfg(target_os = "linux")]
             browser: None,
+            #[cfg(target_os = "linux")]
+            desktop: None,
             shutting_down: false,
         }
     }
@@ -221,6 +240,8 @@ pub struct HostCleanup {
     pub supervised_jobs_joined: bool,
     #[cfg(target_os = "linux")]
     pub browser: Option<BrowserLaneCleanup>,
+    #[cfg(target_os = "linux")]
+    pub desktop: Option<DesktopLaneCleanup>,
 }
 impl HostCleanup {
     /// Native Codex facts and Browser process-tree facts are independent.
@@ -228,6 +249,7 @@ impl HostCleanup {
         #[cfg(target_os = "linux")]
         {
             self.browser.as_ref().is_none_or(|facts| facts.complete)
+                && self.desktop.as_ref().is_none_or(|facts| facts.complete)
         }
         #[cfg(not(target_os = "linux"))]
         {
@@ -796,6 +818,12 @@ impl HostAuthority {
             state.shutting_down = true;
             state.ledger.begin_maintenance();
         }
+        #[cfg(target_os = "linux")]
+        let desktop = desktop_cleanup::cleanup_desktop_lane(
+            self.inner.clone(),
+            until.saturating_duration_since(tokio::time::Instant::now()),
+        )
+        .await;
         let mut jobs = std::mem::replace(
             &mut *self.inner.jobs.lock().expect("Host jobs mutex"),
             JoinSet::new(),
@@ -848,6 +876,8 @@ impl HostAuthority {
             supervised_jobs_joined: joined,
             #[cfg(target_os = "linux")]
             browser,
+            #[cfg(target_os = "linux")]
+            desktop,
         })
     }
 }

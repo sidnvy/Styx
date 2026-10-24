@@ -1,6 +1,8 @@
 //! Foreground composition; CLI and later native UI share these authority ports.
 #[cfg(target_os = "linux")]
 mod browser;
+#[cfg(target_os = "linux")]
+mod computer;
 pub mod profile;
 pub use profile::ProfileDiagnostics;
 use serde::Serialize;

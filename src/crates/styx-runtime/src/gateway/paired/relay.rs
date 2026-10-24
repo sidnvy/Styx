@@ -2,7 +2,7 @@ use super::GatewayExecProfile;
 use crate::{
     enrollment::shared::SharedEnrollment,
     gateway::auth::VerifiedGatewayOwner,
-    host::protocol::wire::{BrowserCommand, Call, OwnerRef, Reply},
+    host::protocol::wire::{BrowserCommand, Call, ComputerCommand, OwnerRef, Reply},
 };
 use std::{
     collections::BTreeMap,
@@ -13,7 +13,7 @@ use std::{
     time::Duration,
 };
 use styx_contracts::{identity::*, operation::OperationId};
-use styx_core::enrollment::ConnectionLease;
+use styx_core::enrollment::{ConnectionLease, Lane};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 #[derive(Debug, Clone, Copy, thiserror::Error)]
@@ -48,6 +48,7 @@ pub struct DeviceStatus {
     pub device_id: DeviceId,
     pub online: bool,
     pub browser_online: bool,
+    pub computer_online: bool,
     pub capability_generation: String,
     pub host_generation: Option<HostGeneration>,
     pub grant_revision: Option<u64>,
@@ -69,7 +70,21 @@ pub(crate) struct Entry {
     pub live: AtomicBool,
     pub lease: tokio::sync::Mutex<Option<ConnectionLease>>,
     pub browser_feature: bool,
+    pub computer_feature: bool,
     pub browser_lease: tokio::sync::Mutex<Option<ConnectionLease>>,
+    pub computer_lease: tokio::sync::Mutex<Option<ConnectionLease>>,
+}
+impl Entry {
+    pub(crate) async fn lease_for(
+        &self,
+        lane: Lane,
+    ) -> tokio::sync::MutexGuard<'_, Option<ConnectionLease>> {
+        match lane {
+            Lane::Exec => self.lease.lock().await,
+            Lane::Browser => self.browser_lease.lock().await,
+            Lane::Computer => self.computer_lease.lock().await,
+        }
+    }
 }
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum TargetKind {
@@ -77,6 +92,8 @@ enum TargetKind {
     ExecAction,
     BrowserResource,
     BrowserAction,
+    ComputerResource,
+    ComputerAction,
 }
 struct Binding {
     owner: VerifiedGatewayOwner,
@@ -176,24 +193,22 @@ impl RelayHandle {
         })
     }
     pub(crate) async fn authorize(&self, e: &Entry) -> Result<(), RelayError> {
-        self.authorize_for(e, false).await
+        self.authorize_for(e, Lane::Exec).await
     }
-    pub(crate) async fn authorize_for(&self, e: &Entry, browser: bool) -> Result<(), RelayError> {
+    pub(crate) async fn authorize_for(&self, e: &Entry, lane: Lane) -> Result<(), RelayError> {
         if !e.live.load(Ordering::Acquire) || e.stop.is_cancelled() {
             return Err(RelayError::Offline);
         }
-        if browser && !e.browser_feature {
+        if (lane == Lane::Browser && !e.browser_feature)
+            || (lane == Lane::Computer && !e.computer_feature)
+        {
             return Err(RelayError::Unsupported);
         }
-        let lease = if browser {
-            e.browser_lease.lock().await
-        } else {
-            e.lease.lock().await
-        };
-        let lease = lease.as_ref().ok_or(if browser {
-            RelayError::Unauthorized
-        } else {
+        let held = e.lease_for(lane).await;
+        let lease = held.as_ref().ok_or(if lane == Lane::Exec {
             RelayError::Offline
+        } else {
+            RelayError::Unauthorized
         })?;
         self.inner
             .shared
@@ -209,24 +224,33 @@ impl RelayHandle {
         &self,
         e: &Entry,
         call: &Call,
-    ) -> Result<bool, RelayError> {
+    ) -> Result<Lane, RelayError> {
         if matches!(
             call,
             Call::OwnerOpen { .. } | Call::OwnerRevoke { .. } | Call::OwnerCleanup { .. }
         ) {
             self.control_lane(e).await
         } else {
-            let browser = call.is_browser();
-            self.authorize_for(e, browser).await?;
-            Ok(browser)
+            let lane = if call.is_computer() {
+                Lane::Computer
+            } else if call.is_browser() {
+                Lane::Browser
+            } else {
+                Lane::Exec
+            };
+            self.authorize_for(e, lane).await?;
+            Ok(lane)
         }
     }
-    pub(crate) async fn control_lane(&self, e: &Entry) -> Result<bool, RelayError> {
+    pub(crate) async fn control_lane(&self, e: &Entry) -> Result<Lane, RelayError> {
         if self.authorize(e).await.is_ok() {
-            return Ok(false);
+            return Ok(Lane::Exec);
         }
-        self.authorize_for(e, true).await?;
-        Ok(true)
+        if self.authorize_for(e, Lane::Browser).await.is_ok() {
+            return Ok(Lane::Browser);
+        }
+        self.authorize_for(e, Lane::Computer).await?;
+        Ok(Lane::Computer)
     }
     pub async fn devices(&self) -> Result<Vec<DeviceStatus>, RelayError> {
         let profiles = self
@@ -253,13 +277,20 @@ impl RelayHandle {
                 None => false,
             };
             let browser_online = match e {
-                Some(e) if p.browser_approved => self.authorize_for(e, true).await.is_ok(),
+                Some(e) if p.browser_approved => self.authorize_for(e, Lane::Browser).await.is_ok(),
+                _ => false,
+            };
+            let computer_online = match e {
+                Some(e) if p.computer_approved => {
+                    self.authorize_for(e, Lane::Computer).await.is_ok()
+                }
                 _ => false,
             };
             devices.push(DeviceStatus {
                 device_id: p.device_id,
                 online,
                 browser_online,
+                computer_online,
                 capability_generation: p.capability_generation,
                 host_generation: e.map(|e| e.host_generation.clone()),
                 grant_revision: e.map(|e| e.grant_revision),
@@ -310,6 +341,7 @@ impl RelayHandle {
             || current.profile.capability_generation != old.profile.capability_generation
             || current.profile.device_id != old.profile.device_id
             || current.profile.browser_approved != old.profile.browser_approved
+            || current.profile.computer_approved != old.profile.computer_approved
             || current.profile.platform != old.profile.platform
             || current.profile.cwd != old.profile.cwd
             || current.profile.shell != old.profile.shell
@@ -332,11 +364,11 @@ impl RelayHandle {
     async fn route_binding(
         &self,
         binding: &Arc<Binding>,
-        browser: bool,
+        lane: Lane,
     ) -> Result<Arc<Entry>, RelayError> {
         self.active_binding(binding)?;
         let current = self.current_binding_entry(binding, false)?;
-        self.authorize_for(&current, browser).await?;
+        self.authorize_for(&current, lane).await?;
         let already_confirmed = {
             let route = binding.route.lock().map_err(|_| RelayError::Unknown)?;
             Arc::ptr_eq(&route, &current)
@@ -349,7 +381,7 @@ impl RelayHandle {
         let _admission = binding.rebind.try_lock().map_err(|_| RelayError::Busy)?;
         self.active_binding(binding)?;
         let current = self.current_binding_entry(binding, false)?;
-        self.authorize_for(&current, browser).await?;
+        self.authorize_for(&current, lane).await?;
         let already_confirmed = {
             let route = binding.route.lock().map_err(|_| RelayError::Unknown)?;
             Arc::ptr_eq(&route, &current)
@@ -373,7 +405,7 @@ impl RelayHandle {
                 return Err(RelayError::Unauthorized);
             }
             self.active_binding(binding)?;
-            self.authorize_for(&current, browser).await?;
+            self.authorize_for(&current, lane).await?;
             if !Arc::ptr_eq(&self.current_binding_entry(binding, false)?, &current) {
                 return Err(RelayError::Offline);
             }
@@ -396,20 +428,27 @@ impl RelayHandle {
         owner: &VerifiedGatewayOwner,
         device: &DeviceId,
     ) -> Result<BoundOwner, RelayError> {
-        self.bind_for(owner, device, false).await
+        self.bind_for(owner, device, Lane::Exec).await
     }
     pub async fn bind_browser(
         &self,
         owner: &VerifiedGatewayOwner,
         device: &DeviceId,
     ) -> Result<BoundOwner, RelayError> {
-        self.bind_for(owner, device, true).await
+        self.bind_for(owner, device, Lane::Browser).await
+    }
+    pub async fn bind_computer(
+        &self,
+        owner: &VerifiedGatewayOwner,
+        device: &DeviceId,
+    ) -> Result<BoundOwner, RelayError> {
+        self.bind_for(owner, device, Lane::Computer).await
     }
     async fn bind_for(
         &self,
         owner: &VerifiedGatewayOwner,
         device: &DeviceId,
-        browser: bool,
+        lane: Lane,
     ) -> Result<BoundOwner, RelayError> {
         if self.is_fenced(owner)? {
             return Err(RelayError::Unauthorized);
@@ -423,7 +462,7 @@ impl RelayHandle {
             .get(device)
             .cloned()
             .ok_or(RelayError::Offline)?;
-        self.authorize_for(&entry, browser).await?;
+        self.authorize_for(&entry, lane).await?;
         let existing = {
             let bindings = self
                 .inner
@@ -447,7 +486,7 @@ impl RelayHandle {
             if !binding.ready.load(Ordering::Acquire) {
                 return Err(RelayError::Busy);
             }
-            self.route_binding(&binding, browser).await?;
+            self.route_binding(&binding, lane).await?;
             return Ok(BoundOwner { inner: binding });
         }
         let reference = OwnerRef {
@@ -537,10 +576,16 @@ impl RelayHandle {
                 return Err(RelayError::Unauthorized);
             }
         }
-        let browser = call.is_browser();
+        let lane = if call.is_computer() {
+            Lane::Computer
+        } else if call.is_browser() {
+            Lane::Browser
+        } else {
+            Lane::Exec
+        };
         // A denied lane cannot consume the shared routing-record allowance.
         // exchange/actual-send/delivery still repeat the current authorization.
-        let entry = self.route_binding(&b.inner, browser).await?;
+        let entry = self.route_binding(&b.inner, lane).await?;
         let (owner, target, revision, new_record, record_kind) = match &call {
             Call::PrepareStart {
                 owner,
@@ -656,6 +701,55 @@ impl RelayHandle {
                     TargetKind::BrowserAction,
                 ),
             },
+            Call::Computer {
+                owner,
+                grant_revision,
+                command,
+                ..
+            } => match command {
+                ComputerCommand::PrepareOpen => (
+                    owner,
+                    None,
+                    Some(*grant_revision),
+                    true,
+                    TargetKind::ComputerResource,
+                ),
+                ComputerCommand::DispatchOpen { target }
+                | ComputerCommand::InspectOpen { target } => (
+                    owner,
+                    Some((
+                        target.operation_id.clone(),
+                        target.payload_digest,
+                        TargetKind::ComputerResource,
+                    )),
+                    Some(*grant_revision),
+                    false,
+                    TargetKind::ComputerResource,
+                ),
+                ComputerCommand::PrepareAction { target, .. } => (
+                    owner,
+                    Some((
+                        target.operation_id.clone(),
+                        target.payload_digest,
+                        TargetKind::ComputerResource,
+                    )),
+                    Some(*grant_revision),
+                    true,
+                    TargetKind::ComputerAction,
+                ),
+                ComputerCommand::DispatchAction { action }
+                | ComputerCommand::InspectAction { action } => (
+                    owner,
+                    Some((
+                        action.operation_id.clone(),
+                        action.payload_digest,
+                        TargetKind::ComputerAction,
+                    )),
+                    Some(*grant_revision),
+                    false,
+                    TargetKind::ComputerAction,
+                ),
+            },
             _ => return Err(RelayError::Unsupported),
         };
         if owner != &b.inner.reference || revision.is_some_and(|r| r != b.grant_revision()) {
@@ -692,12 +786,13 @@ impl RelayHandle {
         {
             return Err(RelayError::Unauthorized);
         }
-        self.authorize_for(&entry, browser).await?;
+        self.authorize_for(&entry, lane).await?;
         if let Reply::Prepared { snapshot }
         | Reply::Start { snapshot, .. }
         | Reply::Inspected { snapshot }
         | Reply::Action { snapshot, .. }
-        | Reply::BrowserAction { snapshot, .. } = &reply
+        | Reply::BrowserAction { snapshot, .. }
+        | Reply::ComputerAction { snapshot, .. } = &reply
         {
             let mut targets = b.inner.targets.lock().map_err(|_| RelayError::Unknown)?;
             if let Some(existing) = targets.get(&snapshot.operation_id) {

@@ -3,7 +3,7 @@
 use crate::platform::linux::{self, Association, DiscoveryError, LinuxDiscoverySnapshot};
 use std::{
     fs::File,
-    os::fd::AsRawFd,
+    os::{fd::AsRawFd, unix::fs::MetadataExt},
     path::PathBuf,
     process::Stdio,
     sync::{Arc, LazyLock},
@@ -174,6 +174,24 @@ pub async fn probe_current_user() -> Result<LinuxDiscoverySnapshot, ProbeError> 
     .await
 }
 async fn run(image: PinnedWorker, uid: u32) -> Result<LinuxDiscoverySnapshot, ProbeError> {
+    run_with(image, move |output, _end| async move {
+        decode_snapshot(output, uid)
+    })
+    .await
+}
+/// Raw output can only be minted after this exact owned child was waited.
+/// Private completion keeps the original image pin and shared slot until any
+/// bounded native revalidation is joined; it is not a network decoder port.
+struct WorkerOutput {
+    bytes: Vec<u8>,
+    status: std::process::ExitStatus,
+}
+async fn run_with<T, F, Fut>(image: PinnedWorker, complete: F) -> Result<T, ProbeError>
+where
+    T: Send + 'static,
+    F: FnOnce(WorkerOutput, Instant) -> Fut + Send + 'static,
+    Fut: std::future::Future<Output = Result<T, ProbeError>> + Send + 'static,
+{
     let permit = SLOT
         .clone()
         .try_acquire_owned()
@@ -189,6 +207,13 @@ async fn run(image: PinnedWorker, uid: u32) -> Result<LinuxDiscoverySnapshot, Pr
             respond(&mut reply, Err(ProbeError::Cancelled));
             return;
         }
+        let image_before = match image._image.metadata() {
+            Ok(metadata) => metadata,
+            Err(_) => {
+                respond(&mut reply, Err(ProbeError::Spawn));
+                return;
+            }
+        };
         let parent = match crate::store::ProcessIdentity::current() {
             Ok(parent) => parent,
             Err(_) => {
@@ -230,7 +255,7 @@ async fn run(image: PinnedWorker, uid: u32) -> Result<LinuxDiscoverySnapshot, Pr
         };
         let result = tokio::select! {
             _ = stop.cancelled() => Err(ProbeError::Cancelled),
-            result = timeout_at(started + WORK_TIME, collect(&mut child, &mut stdout, uid)) =>
+            result = timeout_at(started + WORK_TIME, collect_output(&mut child, &mut stdout)) =>
                 result.unwrap_or(Err(ProbeError::Deadline)),
         };
         drop(stdout);
@@ -244,6 +269,33 @@ async fn run(image: PinnedWorker, uid: u32) -> Result<LinuxDiscoverySnapshot, Pr
         {
             *observed = Some(status);
         }
+        let result = match result {
+            Ok(output) => complete(output, started + WORK_TIME + CLEANUP_TIME).await,
+            Err(error) => Err(error),
+        };
+        let result = if image._image.metadata().is_ok_and(|after| {
+            (
+                after.dev(),
+                after.ino(),
+                after.size(),
+                after.mtime(),
+                after.mtime_nsec(),
+                after.ctime(),
+                after.ctime_nsec(),
+            ) == (
+                image_before.dev(),
+                image_before.ino(),
+                image_before.size(),
+                image_before.mtime(),
+                image_before.mtime_nsec(),
+                image_before.ctime(),
+                image_before.ctime_nsec(),
+            )
+        }) {
+            result
+        } else {
+            Err(ProbeError::InvalidFacts)
+        };
         respond(&mut reply, result);
         // image remains in this task until actual child wait/cleanup finishes.
         drop(image);
@@ -252,18 +304,18 @@ async fn run(image: PinnedWorker, uid: u32) -> Result<LinuxDiscoverySnapshot, Pr
     guard.disarm();
     result
 }
-fn respond(
-    reply: &mut Option<oneshot::Sender<Result<LinuxDiscoverySnapshot, ProbeError>>>,
-    result: Result<LinuxDiscoverySnapshot, ProbeError>,
+fn respond<T>(
+    reply: &mut Option<oneshot::Sender<Result<T, ProbeError>>>,
+    result: Result<T, ProbeError>,
 ) {
     if let Some(tx) = reply.take() {
         let _ = tx.send(result);
     }
 }
-async fn cleanup(
+async fn cleanup<T>(
     child: &mut Child,
     end: Instant,
-    reply: &mut Option<oneshot::Sender<Result<LinuxDiscoverySnapshot, ProbeError>>>,
+    reply: &mut Option<oneshot::Sender<Result<T, ProbeError>>>,
 ) {
     let _ = child.start_kill();
     if matches!(timeout_at(end, child.wait()).await, Ok(Ok(_))) {
@@ -280,11 +332,10 @@ async fn cleanup(
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
-async fn collect(
+async fn collect_output(
     child: &mut Child,
     stdout: &mut tokio::process::ChildStdout,
-    uid: u32,
-) -> Result<LinuxDiscoverySnapshot, ProbeError> {
+) -> Result<WorkerOutput, ProbeError> {
     let mut bytes = vec![0u8; MAX_OUTPUT + 1];
     let mut used = 0;
     loop {
@@ -304,20 +355,38 @@ async fn collect(
         .wait()
         .await
         .map_err(|_| ProbeError::CleanupUnconfirmed)?;
+    bytes.truncate(used);
+    Ok(WorkerOutput { bytes, status })
+}
+fn decode_snapshot(output: WorkerOutput, uid: u32) -> Result<LinuxDiscoverySnapshot, ProbeError> {
+    let WorkerOutput { bytes, status } = output;
     if !status.success() {
         if status.code() == Some(2)
-            && let Ok(refusal) = serde_json::from_slice::<WorkerRefusal>(&bytes[..used])
+            && let Ok(refusal) = serde_json::from_slice::<WorkerRefusal>(&bytes)
             && refusal.schema == 1
         {
             return Err(ProbeError::Discovery(refusal.error));
         }
         return Err(ProbeError::WorkerFailed);
     }
-    let snapshot = serde_json::from_slice(&bytes[..used]).map_err(|_| ProbeError::InvalidFacts)?;
+    let snapshot = serde_json::from_slice(&bytes).map_err(|_| ProbeError::InvalidFacts)?;
     validate(snapshot, uid)
 }
 fn field(s: &str) -> bool {
     s.len() <= 256 && !s.chars().any(char::is_control)
+}
+fn candidate_shape(c: &linux::LinuxCandidate, uid: u32) -> bool {
+    c.uid == uid
+        && !c.session_id.is_empty()
+        && field(&c.session_id)
+        && c.leader_pid != 0
+        && c.leader_birth != 0
+        && matches!(c.backend.as_str(), "wayland" | "x11")
+        && field(&c.state)
+        && !c.state.is_empty()
+        && c.seat.as_ref().is_none_or(|s| !s.is_empty() && field(s))
+        && c.agent_association == Association::Unknown
+        && c.compositor_association == Association::Unknown
 }
 fn validate(
     snapshot: LinuxDiscoverySnapshot,
@@ -333,19 +402,7 @@ fn validate(
     }
     let mut ids = std::collections::BTreeSet::new();
     for c in &snapshot.candidates {
-        if c.uid != uid
-            || c.session_id.is_empty()
-            || !field(&c.session_id)
-            || !ids.insert(c.session_id.clone())
-            || c.leader_pid == 0
-            || c.leader_birth == 0
-            || !matches!(c.backend.as_str(), "wayland" | "x11")
-            || !field(&c.state)
-            || c.state.is_empty()
-            || c.seat.as_ref().is_some_and(|s| s.is_empty() || !field(s))
-            || c.agent_association != Association::Unknown
-            || c.compositor_association != Association::Unknown
-        {
+        if !candidate_shape(c, uid) || !ids.insert(c.session_id.clone()) {
             return Err(ProbeError::InvalidFacts);
         }
     }
@@ -355,3 +412,6 @@ fn validate(
 mod tests;
 
 pub mod watch;
+
+/// Same-image read-only selected Desktop association worker.
+pub mod association;

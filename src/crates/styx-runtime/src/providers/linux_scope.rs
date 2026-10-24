@@ -1,12 +1,13 @@
 //! Linux headless process-tree ownership, not a desktop/session grant or sandbox.
-//! A random transient user service contains Node and Chromium even if Chromium
-//! detaches its process group. No direct-launch fallback or PID-name killing.
+//! One random transient user service owns either the fixed Browser worker or
+//! fixed Cua MCP driver launch. Native descendants must remain in that cgroup;
+//! normal-lifecycle containment is not a hostile same-UID sandbox.
+//! No direct-launch fallback, external-scope adoption or PID-name killing.
 //! Defaults bound aggregate cgroup charged memory to 2GiB, swap to zero and
 //! tasks (including threads) to256; not Host RSS/CPU performance guarantees.
 //! Missing delegated controllers fail closed; no user-manager reconfiguration.
 //! StopUnit has no InvocationID CAS: guard the original unique manager/unit and
 //! document that a compromised same-UID account is outside this trust boundary.
-use super::BrowserError;
 use crate::store::ProcessIdentity;
 use std::{
     ffi::OsString,
@@ -30,19 +31,112 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-type Result<T> = std::result::Result<T, BrowserError>;
+type Result<T> = std::result::Result<T, ScopeError>;
 const STDOUT_BYTES: usize = 64 * 1024;
 const STDERR_BYTES: usize = 8 * 1024;
 static TOOL_SLOT: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(Semaphore::new(1)));
 
-pub(super) struct ScopeCommand {
-    pub node: PathBuf,
-    pub worker: PathBuf,
-    pub config: PathBuf,
-    pub workspace: PathBuf,
-    pub home: PathBuf,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub(crate) enum ScopeError {
+    #[error("scope_busy")]
+    Busy,
+    #[error("scope_invalid_request")]
+    InvalidRequest,
+    #[error("scope_permission_denied")]
+    PermissionDenied,
+    #[error("scope_unsupported")]
+    Unsupported,
+    #[error("scope_outcome_unknown")]
+    Unknown,
+    #[error("scope_cleanup_unconfirmed")]
+    CleanupUnconfirmed,
 }
-pub(super) struct ScopeCleanup {
+/// Fixed trusted launch forms only. Paths/display names are not OS authority:
+/// callers retain verified image/config pins and an authenticated session lease.
+pub(crate) struct ScopeCommand {
+    executable: PathBuf,
+    workspace: PathBuf,
+    home: PathBuf,
+    launch: Launch,
+}
+enum Launch {
+    Browser {
+        worker: PathBuf,
+        config: PathBuf,
+    },
+    Cua {
+        wayland_display: String,
+        hyprland_instance: String,
+    },
+}
+impl ScopeCommand {
+    pub(crate) fn browser(
+        node: PathBuf,
+        worker: PathBuf,
+        config: PathBuf,
+        workspace: PathBuf,
+        home: PathBuf,
+    ) -> Result<Self> {
+        let value = Self {
+            executable: node,
+            workspace,
+            home,
+            launch: Launch::Browser { worker, config },
+        };
+        value.validate()?;
+        Ok(value)
+    }
+    pub(crate) fn cua(
+        driver: PathBuf,
+        workspace: PathBuf,
+        home: PathBuf,
+        wayland_display: String,
+        hyprland_instance: String,
+    ) -> Result<Self> {
+        // These bounded names come from the trusted association lease, not a
+        // request/environment lookup. Shape checks do not authenticate a seat.
+        if !wayland_display.strip_prefix("wayland-").is_some_and(|v| {
+            !v.is_empty() && v.len() <= 16 && v.bytes().all(|b| b.is_ascii_digit())
+        }) || hyprland_instance.is_empty()
+            || hyprland_instance.len() > 256
+            || !hyprland_instance
+                .bytes()
+                .all(|b| b.is_ascii_alphanumeric() || b"-_.".contains(&b))
+        {
+            return Err(ScopeError::InvalidRequest);
+        }
+        let value = Self {
+            executable: driver,
+            workspace,
+            home,
+            launch: Launch::Cua {
+                wayland_display,
+                hyprland_instance,
+            },
+        };
+        value.validate()?;
+        Ok(value)
+    }
+    fn validate(&self) -> Result<()> {
+        let mut paths = vec![&self.executable, &self.workspace, &self.home];
+        if let Launch::Browser { worker, config } = &self.launch {
+            paths.extend([worker, config]);
+        }
+        for path in paths {
+            if !path.is_absolute()
+                || path.as_os_str().len() > 4096
+                || path.to_str().is_none_or(|text| text.contains('\0'))
+                || path
+                    .components()
+                    .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
+            {
+                return Err(ScopeError::InvalidRequest);
+            }
+        }
+        Ok(())
+    }
+}
+pub(crate) struct ScopeCleanup {
     pub wrapper_exited: bool,
     pub confirmed: bool,
     pub exit_success: Option<bool>,
@@ -67,12 +161,12 @@ struct Stamp {
     invocation: String,
     cgroup: Cgroup,
 }
-pub(super) struct LinuxOwnedScope {
+pub(crate) struct LinuxOwnedScope {
     unit: String,
     uid: u32,
     runtime: PathBuf,
     private_tmp: PathBuf,
-    node: PathBuf,
+    executable: PathBuf,
     stamp: Option<Stamp>,
     wrapper_exit: Option<ExitStatus>,
 }
@@ -85,30 +179,18 @@ impl std::fmt::Debug for LinuxOwnedScope {
     }
 }
 impl LinuxOwnedScope {
-    /// The provider retains verified node/worker/config fd pins and stores this
+    /// The provider retains verified executable/worker/config fd pins and stores this
     /// scope BEFORE spawning/awaiting. Failed first attestation stays owned and
     /// Unknown; no tool or MCP initialize is permitted before it succeeds.
-    pub(super) fn command(input: ScopeCommand) -> Result<(Command, Self)> {
-        for path in [
-            &input.node,
-            &input.worker,
-            &input.config,
-            &input.workspace,
-            &input.home,
-        ] {
-            if !path.is_absolute()
-                || path.as_os_str().len() > 4096
-                || path.to_str().is_none_or(|text| text.contains('\0'))
-                || path
-                    .components()
-                    .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
-            {
-                return Err(BrowserError::InvalidRequest);
-            }
-        }
+    pub(crate) fn command(input: ScopeCommand) -> Result<(Command, Self)> {
+        input.validate()?;
         let uid = nix::unistd::Uid::current().as_raw();
         let runtime = PathBuf::from(format!("/run/user/{uid}"));
-        let unit_stem = format!("styx-browser-{}", uuid::Uuid::new_v4().simple());
+        let prefix = match &input.launch {
+            Launch::Browser { .. } => "styx-browser",
+            Launch::Cua { .. } => "styx-cua",
+        };
+        let unit_stem = format!("{prefix}-{}", uuid::Uuid::new_v4().simple());
         let unit = format!("{unit_stem}.service");
         let private_tmp = runtime.join(&unit_stem);
         // Never ask systemd to chmod/adopt a pre-existing directory. The name
@@ -116,8 +198,8 @@ impl LinuxOwnedScope {
         // normal-lifecycle trust boundary, as for unit query/StopUnit itself.
         match std::fs::symlink_metadata(&private_tmp) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Ok(_) => return Err(BrowserError::InvalidRequest),
-            Err(_) => return Err(BrowserError::Unsupported),
+            Ok(_) => return Err(ScopeError::InvalidRequest),
+            Err(_) => return Err(ScopeError::Unsupported),
         }
         let mut command = Command::new("/usr/bin/systemd-run");
         fixed_environment(&mut command, &runtime);
@@ -161,7 +243,6 @@ impl LinuxOwnedScope {
                 "-i",
                 "PATH=/usr/bin:/bin",
                 "LANG=C.UTF-8",
-                "PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1",
             ])
             .arg(format!("HOME={}", input.home.display()))
             .arg(format!("TMPDIR={}", private_tmp.display()))
@@ -169,11 +250,32 @@ impl LinuxOwnedScope {
             .arg(format!(
                 "DBUS_SESSION_BUS_ADDRESS=unix:path={}/bus",
                 runtime.display()
-            ))
-            .arg(&input.node)
-            .arg(&input.worker)
-            .arg("--config")
-            .arg(&input.config)
+            ));
+        match &input.launch {
+            Launch::Browser { worker, config } => {
+                command
+                    .arg("PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1")
+                    .arg(&input.executable)
+                    .arg(worker)
+                    .arg("--config")
+                    .arg(config);
+            }
+            Launch::Cua {
+                wayland_display,
+                hyprland_instance,
+            } => {
+                // This fixed form is selected only by trusted, explicitly
+                // enabled Desktop bootstrap. Opt-in selects the native backend;
+                // it is not evidence of a capture/input permission grant.
+                command
+                    .arg("CUA_DRIVER_RS_ENABLE_WAYLAND=1")
+                    .arg(format!("WAYLAND_DISPLAY={wayland_display}"))
+                    .arg(format!("HYPRLAND_INSTANCE_SIGNATURE={hyprland_instance}"))
+                    .arg(&input.executable)
+                    .arg("mcp");
+            }
+        }
+        command
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
             .stderr(Stdio::piped())
@@ -185,13 +287,13 @@ impl LinuxOwnedScope {
                 uid,
                 runtime,
                 private_tmp,
-                node: input.node,
+                executable: input.executable,
                 stamp: None,
                 wrapper_exit: None,
             },
         ))
     }
-    pub(super) async fn attest_started(&mut self, end: Instant) -> Result<()> {
+    pub(crate) async fn attest_started(&mut self, end: Instant) -> Result<()> {
         if let Some(stamp) = &self.stamp {
             self.check_manager(end).await?;
             stamp.cgroup.attest_resource_limits()?;
@@ -205,7 +307,7 @@ impl LinuxOwnedScope {
             // deadline; never resend its start or infer cleanup from absence.
             if properties.load == "not-found" {
                 if Instant::now() >= end {
-                    return Err(BrowserError::Unknown);
+                    return Err(ScopeError::Unknown);
                 }
                 tokio::time::sleep_until(end.min(Instant::now() + Duration::from_millis(10))).await;
                 continue;
@@ -214,44 +316,45 @@ impl LinuxOwnedScope {
             if properties.load != "loaded"
                 || !matches!(properties.active.as_str(), "activating" | "active")
             {
-                return Err(BrowserError::Unknown);
+                return Err(ScopeError::Unknown);
             }
             if properties.kill_mode != "control-group"
                 || properties.delegate != "no"
                 || properties.restart != "no"
                 || !invocation(&properties.invocation)
             {
-                return Err(BrowserError::Unsupported);
+                return Err(ScopeError::Unsupported);
             }
             if properties.main_pid != 0 {
                 let process = ProcessIdentity::observe(properties.main_pid)
-                    .map_err(|_| BrowserError::Unknown)?;
+                    .map_err(|_| ScopeError::Unknown)?;
                 let proc = PathBuf::from(format!("/proc/{}", properties.main_pid));
-                let node = std::fs::metadata(&self.node).map_err(|_| BrowserError::Unknown)?;
+                let executable =
+                    std::fs::metadata(&self.executable).map_err(|_| ScopeError::Unknown)?;
                 if let Ok(image) = std::fs::metadata(proc.join("exe"))
-                    && image.dev() == node.dev()
-                    && image.ino() == node.ino()
+                    && image.dev() == executable.dev()
+                    && image.ino() == executable.ino()
                 {
                     if std::fs::metadata(&proc)
-                        .map_err(|_| BrowserError::Unknown)?
+                        .map_err(|_| ScopeError::Unknown)?
                         .uid()
                         != self.uid
                     {
-                        return Err(BrowserError::PermissionDenied);
+                        return Err(ScopeError::PermissionDenied);
                     }
                     let cgroup = self.open_cgroup(&properties.control_group)?;
                     let membership = std::fs::read_to_string(proc.join("cgroup"))
-                        .map_err(|_| BrowserError::Unknown)?;
+                        .map_err(|_| ScopeError::Unknown)?;
                     if !membership
                         .lines()
                         .any(|line| line == format!("0::{}", properties.control_group))
-                        || !process.still_current().map_err(|_| BrowserError::Unknown)?
+                        || !process.still_current().map_err(|_| ScopeError::Unknown)?
                     {
-                        return Err(BrowserError::Unknown);
+                        return Err(ScopeError::Unknown);
                     }
                     let after = self.manager(end).await?;
                     if !manager.same(&after) {
-                        return Err(BrowserError::Unknown);
+                        return Err(ScopeError::Unknown);
                     }
                     self.stamp = Some(Stamp {
                         manager,
@@ -263,7 +366,7 @@ impl LinuxOwnedScope {
                     // until the original kernel cgroup proves all limits.
                     self.stamp
                         .as_ref()
-                        .ok_or(BrowserError::Unknown)?
+                        .ok_or(ScopeError::Unknown)?
                         .cgroup
                         .attest_resource_limits()?;
                     self.attest_private_tmp()?;
@@ -271,14 +374,14 @@ impl LinuxOwnedScope {
                 }
             }
             if Instant::now() >= end {
-                return Err(BrowserError::Unknown);
+                return Err(ScopeError::Unknown);
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
     }
     /// Actual wrapper wait and original cgroup emptiness are both necessary.
-    /// ACK/job acceptance alone never releases the physical Browser lane.
-    pub(super) async fn stop_and_confirm(
+    /// ACK/job acceptance alone never releases the physical executor lane.
+    pub(crate) async fn stop_and_confirm(
         &mut self,
         child: &mut Child,
         budget: Duration,
@@ -286,7 +389,7 @@ impl LinuxOwnedScope {
         let end = Instant::now() + budget.min(Duration::from_secs(30));
         if let Some(status) = child
             .try_wait()
-            .map_err(|_| BrowserError::CleanupUnconfirmed)?
+            .map_err(|_| ScopeError::CleanupUnconfirmed)?
         {
             self.wrapper_exit = Some(status);
         }
@@ -310,7 +413,7 @@ impl LinuxOwnedScope {
                 || properties.delegate != "no"
                 || properties.restart != "no"
             {
-                return Err(BrowserError::CleanupUnconfirmed);
+                return Err(ScopeError::CleanupUnconfirmed);
             }
             if !inactive(&properties.active) {
                 // Address the pinned unique owner, not a replacement manager.
@@ -331,20 +434,17 @@ impl LinuxOwnedScope {
                     // A captured cgroup.kill file can only address the original
                     // kernel cgroup. Never reopen a path or kill a guessed PID.
                     if !stamp.cgroup.kill_original()? {
-                        return Err(BrowserError::CleanupUnconfirmed);
+                        return Err(ScopeError::CleanupUnconfirmed);
                     }
                 }
             }
         }
         loop {
             let properties = self.properties(end).await?;
-            let stamp = self
-                .stamp
-                .as_ref()
-                .ok_or(BrowserError::CleanupUnconfirmed)?;
+            let stamp = self.stamp.as_ref().ok_or(ScopeError::CleanupUnconfirmed)?;
             let gone = properties.load == "not-found";
             if !gone && properties.invocation != stamp.invocation {
-                return Err(BrowserError::CleanupUnconfirmed);
+                return Err(ScopeError::CleanupUnconfirmed);
             }
             let quiescent = gone || (inactive(&properties.active) && properties.main_pid == 0);
             if quiescent && stamp.cgroup.empty()? {
@@ -362,7 +462,7 @@ impl LinuxOwnedScope {
             if Instant::now() >= end {
                 if let Some(status) = child
                     .try_wait()
-                    .map_err(|_| BrowserError::CleanupUnconfirmed)?
+                    .map_err(|_| ScopeError::CleanupUnconfirmed)?
                 {
                     self.wrapper_exit = Some(status);
                 }
@@ -379,95 +479,91 @@ impl LinuxOwnedScope {
         // This path is generated only from actual UID and the same random
         // unit stem, never from a request or a long workspace/output path.
         let before =
-            std::fs::symlink_metadata(&self.private_tmp).map_err(|_| BrowserError::Unsupported)?;
+            std::fs::symlink_metadata(&self.private_tmp).map_err(|_| ScopeError::Unsupported)?;
         if !before.is_dir()
             || before.uid() != self.uid
             || before.mode() & 0o777 != 0o700
-            || std::fs::canonicalize(&self.private_tmp).map_err(|_| BrowserError::Unsupported)?
+            || std::fs::canonicalize(&self.private_tmp).map_err(|_| ScopeError::Unsupported)?
                 != self.private_tmp
         {
-            return Err(BrowserError::Unsupported);
+            return Err(ScopeError::Unsupported);
         }
         let directory = open_directory(&self.private_tmp)?;
-        let opened = directory.metadata().map_err(|_| BrowserError::Unknown)?;
+        let opened = directory.metadata().map_err(|_| ScopeError::Unknown)?;
         if opened.dev() != before.dev()
             || opened.ino() != before.ino()
             || opened.uid() != self.uid
             || opened.mode() & 0o777 != 0o700
         {
-            return Err(BrowserError::Unknown);
+            return Err(ScopeError::Unknown);
         }
         Ok(())
     }
     async fn check_manager(&self, end: Instant) -> Result<()> {
-        let stamp = self
-            .stamp
-            .as_ref()
-            .ok_or(BrowserError::CleanupUnconfirmed)?;
+        let stamp = self.stamp.as_ref().ok_or(ScopeError::CleanupUnconfirmed)?;
         if stamp.manager.same(&self.manager(end).await?) {
             Ok(())
         } else {
-            Err(BrowserError::CleanupUnconfirmed)
+            Err(ScopeError::CleanupUnconfirmed)
         }
     }
     async fn manager(&self, end: Instant) -> Result<Manager> {
-        let dir =
-            std::fs::symlink_metadata(&self.runtime).map_err(|_| BrowserError::Unsupported)?;
+        let dir = std::fs::symlink_metadata(&self.runtime).map_err(|_| ScopeError::Unsupported)?;
         if !dir.is_dir() || dir.uid() != self.uid || dir.mode() & 0o077 != 0 {
-            return Err(BrowserError::Unsupported);
+            return Err(ScopeError::Unsupported);
         }
         let bus_path = self.runtime.join("bus");
-        let before = std::fs::symlink_metadata(&bus_path).map_err(|_| BrowserError::Unsupported)?;
+        let before = std::fs::symlink_metadata(&bus_path).map_err(|_| ScopeError::Unsupported)?;
         use std::os::unix::fs::FileTypeExt;
         if !before.file_type().is_socket() || before.uid() != self.uid {
-            return Err(BrowserError::Unsupported);
+            return Err(ScopeError::Unsupported);
         }
         let stream = timeout_at(end, UnixStream::connect(&bus_path))
             .await
-            .map_err(|_| BrowserError::Unknown)?
-            .map_err(|_| BrowserError::Unsupported)?;
-        let credential = stream.peer_cred().map_err(|_| BrowserError::Unsupported)?;
+            .map_err(|_| ScopeError::Unknown)?
+            .map_err(|_| ScopeError::Unsupported)?;
+        let credential = stream.peer_cred().map_err(|_| ScopeError::Unsupported)?;
         if credential.uid() != self.uid {
-            return Err(BrowserError::Unsupported);
+            return Err(ScopeError::Unsupported);
         }
         let bus_pid = credential
             .pid()
             .and_then(|pid| u32::try_from(pid).ok())
-            .ok_or(BrowserError::Unsupported)?;
-        let bus_peer = ProcessIdentity::observe(bus_pid).map_err(|_| BrowserError::Unsupported)?;
+            .ok_or(ScopeError::Unsupported)?;
+        let bus_peer = ProcessIdentity::observe(bus_pid).map_err(|_| ScopeError::Unsupported)?;
         drop(stream);
-        let after = std::fs::symlink_metadata(&bus_path).map_err(|_| BrowserError::Unknown)?;
+        let after = std::fs::symlink_metadata(&bus_path).map_err(|_| ScopeError::Unknown)?;
         if before.dev() != after.dev() || before.ino() != after.ino() {
-            return Err(BrowserError::Unknown);
+            return Err(ScopeError::Unknown);
         }
         let owner = self
             .bus("GetNameOwner", "s", "org.freedesktop.systemd1", end)
             .await?;
         let owner: String =
-            serde_json::from_str(owner.strip_prefix("s ").ok_or(BrowserError::Unsupported)?)
-                .map_err(|_| BrowserError::Unsupported)?;
+            serde_json::from_str(owner.strip_prefix("s ").ok_or(ScopeError::Unsupported)?)
+                .map_err(|_| ScopeError::Unsupported)?;
         if owner.len() > 128
             || !owner.starts_with(':')
             || !owner[1..].bytes().all(|b| b.is_ascii_digit() || b == b'.')
         {
-            return Err(BrowserError::Unsupported);
+            return Err(ScopeError::Unsupported);
         }
         let uid = self.bus("GetConnectionUnixUser", "s", &owner, end).await?;
         if number(&uid)? != self.uid {
-            return Err(BrowserError::Unsupported);
+            return Err(ScopeError::Unsupported);
         }
         let pid = number(
             &self
                 .bus("GetConnectionUnixProcessID", "s", &owner, end)
                 .await?,
         )?;
-        let process = ProcessIdentity::observe(pid).map_err(|_| BrowserError::Unsupported)?;
+        let process = ProcessIdentity::observe(pid).map_err(|_| ScopeError::Unsupported)?;
         if std::fs::metadata(format!("/proc/{pid}"))
-            .map_err(|_| BrowserError::Unsupported)?
+            .map_err(|_| ScopeError::Unsupported)?
             .uid()
             != self.uid
         {
-            return Err(BrowserError::Unsupported);
+            return Err(ScopeError::Unsupported);
         }
         Ok(Manager {
             owner,
@@ -499,11 +595,11 @@ impl LinuxOwnedScope {
         .collect();
         let output = tool("/usr/bin/busctl", args, &self.runtime, end).await?;
         if !output.status.success() {
-            return Err(BrowserError::Unsupported);
+            return Err(ScopeError::Unsupported);
         }
         String::from_utf8(output.stdout)
             .map(|s| s.trim().to_owned())
-            .map_err(|_| BrowserError::Unsupported)
+            .map_err(|_| ScopeError::Unsupported)
     }
     async fn properties(&self, end: Instant) -> Result<Properties> {
         let args = vec![
@@ -519,7 +615,7 @@ impl LinuxOwnedScope {
         // nonzero. No stderr phrase or exit code is interpreted as absence.
         let properties = parse_properties(&output.stdout)?;
         if !output.status.success() && properties.load != "not-found" {
-            return Err(BrowserError::Unknown);
+            return Err(ScopeError::Unknown);
         }
         Ok(properties)
     }
@@ -527,16 +623,12 @@ impl LinuxOwnedScope {
         let path = checked_cgroup(control_group, self.uid, &self.unit)?;
         let root = open_directory(Path::new("/sys/fs/cgroup"))?;
         if nix::sys::statfs::fstatfs(&root)
-            .map_err(|_| BrowserError::Unsupported)?
+            .map_err(|_| ScopeError::Unsupported)?
             .filesystem_type()
             != nix::sys::statfs::CGROUP2_SUPER_MAGIC
-            || root
-                .metadata()
-                .map_err(|_| BrowserError::Unsupported)?
-                .uid()
-                != 0
+            || root.metadata().map_err(|_| ScopeError::Unsupported)?.uid() != 0
         {
-            return Err(BrowserError::Unsupported);
+            return Err(ScopeError::Unsupported);
         }
         let mut current = PathBuf::from("/sys/fs/cgroup");
         for component in Path::new(control_group).components() {
@@ -547,13 +639,13 @@ impl LinuxOwnedScope {
         }
         let directory = open_directory(&path)?;
         if nix::sys::statfs::fstatfs(&directory)
-            .map_err(|_| BrowserError::Unsupported)?
+            .map_err(|_| ScopeError::Unsupported)?
             .filesystem_type()
             != nix::sys::statfs::CGROUP2_SUPER_MAGIC
         {
-            return Err(BrowserError::Unsupported);
+            return Err(ScopeError::Unsupported);
         }
-        let meta = directory.metadata().map_err(|_| BrowserError::Unknown)?;
+        let meta = directory.metadata().map_err(|_| ScopeError::Unknown)?;
         let anchored = PathBuf::from(format!("/proc/self/fd/{}", directory.as_raw_fd()));
         let events = open_nofollow(&anchored.join("cgroup.events"), false)?;
         let kill = open_nofollow(&anchored.join("cgroup.kill"), true).ok();
@@ -579,17 +671,17 @@ impl Manager {
 impl Cgroup {
     fn attest_resource_limits(&self) -> Result<()> {
         if nix::sys::statfs::fstatfs(&self.directory)
-            .map_err(|_| BrowserError::Unsupported)?
+            .map_err(|_| ScopeError::Unsupported)?
             .filesystem_type()
             != nix::sys::statfs::CGROUP2_SUPER_MAGIC
             || self
                 .directory
                 .metadata()
-                .map_err(|_| BrowserError::Unknown)?
+                .map_err(|_| ScopeError::Unknown)?
                 .nlink()
                 == 0
         {
-            return Err(BrowserError::Unsupported);
+            return Err(ScopeError::Unsupported);
         }
         // Resolve each fixed kernel file through the captured original cgroup
         // directory, never an arbitrary/new cgroup path. Kernel files are tiny;
@@ -604,9 +696,9 @@ impl Cgroup {
             let mut bytes = Vec::with_capacity(65);
             file.take(65)
                 .read_to_end(&mut bytes)
-                .map_err(|_| BrowserError::Unknown)?;
+                .map_err(|_| ScopeError::Unknown)?;
             if bytes.as_slice() != expected.as_bytes() {
-                return Err(BrowserError::Unsupported);
+                return Err(ScopeError::Unsupported);
             }
         }
         Ok(())
@@ -615,41 +707,41 @@ impl Cgroup {
         self.path
             .strip_prefix("/sys/fs/cgroup")
             .map(|p| format!("/{}", p.display()))
-            .map_err(|_| BrowserError::CleanupUnconfirmed)
+            .map_err(|_| ScopeError::CleanupUnconfirmed)
     }
     fn empty(&self) -> Result<bool> {
         let metadata = self
             .directory
             .metadata()
-            .map_err(|_| BrowserError::CleanupUnconfirmed)?;
+            .map_err(|_| ScopeError::CleanupUnconfirmed)?;
         if metadata.dev() != self.device
             || metadata.ino() != self.inode
             || nix::sys::statfs::fstatfs(&self.directory)
-                .map_err(|_| BrowserError::CleanupUnconfirmed)?
+                .map_err(|_| ScopeError::CleanupUnconfirmed)?
                 .filesystem_type()
                 != nix::sys::statfs::CGROUP2_SUPER_MAGIC
         {
-            return Err(BrowserError::CleanupUnconfirmed);
+            return Err(ScopeError::CleanupUnconfirmed);
         }
         if metadata.nlink() == 0 {
             return Ok(true);
         }
         match std::fs::symlink_metadata(&self.path) {
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                return Err(BrowserError::CleanupUnconfirmed);
+                return Err(ScopeError::CleanupUnconfirmed);
             }
             Ok(current) if current.dev() == self.device && current.ino() == self.inode => {}
-            _ => return Err(BrowserError::CleanupUnconfirmed),
+            _ => return Err(ScopeError::CleanupUnconfirmed),
         }
         let mut file = &self.events;
         file.seek(SeekFrom::Start(0))
-            .map_err(|_| BrowserError::CleanupUnconfirmed)?;
+            .map_err(|_| ScopeError::CleanupUnconfirmed)?;
         let mut text = String::new();
         file.take(4097)
             .read_to_string(&mut text)
-            .map_err(|_| BrowserError::CleanupUnconfirmed)?;
+            .map_err(|_| ScopeError::CleanupUnconfirmed)?;
         if text.len() > 4096 {
-            return Err(BrowserError::CleanupUnconfirmed);
+            return Err(ScopeError::CleanupUnconfirmed);
         }
         match text
             .lines()
@@ -657,7 +749,7 @@ impl Cgroup {
         {
             Some("0") => Ok(true),
             Some("1") => Ok(false),
-            _ => Err(BrowserError::CleanupUnconfirmed),
+            _ => Err(ScopeError::CleanupUnconfirmed),
         }
     }
     fn kill_original(&self) -> Result<bool> {
@@ -665,16 +757,16 @@ impl Cgroup {
             return Ok(false);
         };
         if nix::sys::statfs::fstatfs(file)
-            .map_err(|_| BrowserError::CleanupUnconfirmed)?
+            .map_err(|_| ScopeError::CleanupUnconfirmed)?
             .filesystem_type()
             != nix::sys::statfs::CGROUP2_SUPER_MAGIC
         {
-            return Err(BrowserError::CleanupUnconfirmed);
+            return Err(ScopeError::CleanupUnconfirmed);
         }
         use std::io::Write;
         let mut file = file;
         file.write_all(b"1\n")
-            .map_err(|_| BrowserError::CleanupUnconfirmed)?;
+            .map_err(|_| ScopeError::CleanupUnconfirmed)?;
         Ok(true)
     }
 }
@@ -691,9 +783,9 @@ fn invocation(value: &str) -> bool {
 fn number(value: &str) -> Result<u32> {
     value
         .strip_prefix("u ")
-        .ok_or(BrowserError::Unsupported)?
+        .ok_or(ScopeError::Unsupported)?
         .parse()
-        .map_err(|_| BrowserError::Unsupported)
+        .map_err(|_| ScopeError::Unsupported)
 }
 fn checked_cgroup(value: &str, uid: u32, unit: &str) -> Result<PathBuf> {
     let prefix = format!("/user.slice/user-{uid}.slice/user@{uid}.service/");
@@ -706,7 +798,7 @@ fn checked_cgroup(value: &str, uid: u32, unit: &str) -> Result<PathBuf> {
             .components()
             .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
     {
-        return Err(BrowserError::Unsupported);
+        return Err(ScopeError::Unsupported);
     }
     Ok(Path::new("/sys/fs/cgroup").join(value.trim_start_matches('/')))
 }
@@ -715,7 +807,7 @@ fn open_directory(path: &Path) -> Result<File> {
         .read(true)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC | libc::O_DIRECTORY)
         .open(path)
-        .map_err(|_| BrowserError::Unsupported)
+        .map_err(|_| ScopeError::Unsupported)
 }
 fn open_nofollow(path: &Path, write: bool) -> Result<File> {
     OpenOptions::new()
@@ -723,7 +815,7 @@ fn open_nofollow(path: &Path, write: bool) -> Result<File> {
         .write(write)
         .custom_flags(libc::O_NOFOLLOW | libc::O_CLOEXEC)
         .open(path)
-        .map_err(|_| BrowserError::Unsupported)
+        .map_err(|_| ScopeError::Unsupported)
 }
 struct Properties {
     load: String,
@@ -736,21 +828,21 @@ struct Properties {
     restart: String,
 }
 fn parse_properties(bytes: &[u8]) -> Result<Properties> {
-    let text = std::str::from_utf8(bytes).map_err(|_| BrowserError::Unknown)?;
+    let text = std::str::from_utf8(bytes).map_err(|_| ScopeError::Unknown)?;
     let mut fields = std::collections::BTreeMap::new();
     for line in text.lines() {
-        let (key, value) = line.split_once('=').ok_or(BrowserError::Unknown)?;
+        let (key, value) = line.split_once('=').ok_or(ScopeError::Unknown)?;
         if fields.insert(key, value).is_some() {
-            return Err(BrowserError::Unknown);
+            return Err(ScopeError::Unknown);
         }
     }
-    let get = |key| fields.get(key).copied().ok_or(BrowserError::Unknown);
+    let get = |key| fields.get(key).copied().ok_or(ScopeError::Unknown);
     Ok(Properties {
         load: get("LoadState")?.into(),
         active: get("ActiveState")?.into(),
         invocation: get("InvocationID")?.into(),
         control_group: get("ControlGroup")?.into(),
-        main_pid: get("MainPID")?.parse().map_err(|_| BrowserError::Unknown)?,
+        main_pid: get("MainPID")?.parse().map_err(|_| ScopeError::Unknown)?,
         kill_mode: get("KillMode")?.into(),
         delegate: get("Delegate")?.into(),
         restart: get("Restart")?.into(),
@@ -781,12 +873,12 @@ async fn tool(
     end: Instant,
 ) -> Result<ToolOutput> {
     if Instant::now() >= end {
-        return Err(BrowserError::CleanupUnconfirmed);
+        return Err(ScopeError::CleanupUnconfirmed);
     }
     let permit = TOOL_SLOT
         .clone()
         .try_acquire_owned()
-        .map_err(|_| BrowserError::Busy)?;
+        .map_err(|_| ScopeError::Busy)?;
     let mut command = Command::new(binary);
     fixed_environment(&mut command, runtime);
     command
@@ -795,7 +887,7 @@ async fn tool(
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .kill_on_drop(true);
-    let mut child = command.spawn().map_err(|_| BrowserError::Unsupported)?;
+    let mut child = command.spawn().map_err(|_| ScopeError::Unsupported)?;
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
     let stop = CancellationToken::new();
@@ -809,11 +901,11 @@ async fn tool(
         let mut err = vec![0u8; STDERR_BYTES + 1];
         let until = end.min(Instant::now() + Duration::from_secs(2));
         let result = tokio::select! {
-            _=stop.cancelled()=>Err(BrowserError::CleanupUnconfirmed),
+            _=stop.cancelled()=>Err(ScopeError::CleanupUnconfirmed),
             result=timeout_at(until,async {
                 let (a,b,status)=tokio::join!(read_optional(&mut stdout,&mut out),read_optional(&mut stderr,&mut err),child.wait());
-                let used=a?;b?;let status=status.map_err(|_|BrowserError::Unknown)?;out.truncate(used);Ok(ToolOutput {status,stdout:out})
-            })=>result.unwrap_or(Err(BrowserError::CleanupUnconfirmed)),
+                let used=a?;b?;let status=status.map_err(|_|ScopeError::Unknown)?;out.truncate(used);Ok(ToolOutput {status,stdout:out})
+            })=>result.unwrap_or(Err(ScopeError::CleanupUnconfirmed)),
         };
         drop(stdout);
         drop(stderr);
@@ -823,7 +915,7 @@ async fn tool(
                 timeout_at(Instant::now() + Duration::from_millis(500), child.wait()).await,
                 Ok(Ok(_))
             ) {
-                let _ = tx.send(Err(BrowserError::CleanupUnconfirmed));
+                let _ = tx.send(Err(ScopeError::CleanupUnconfirmed));
                 // Retain the exact owned child and single command slot after
                 // returning Unknown, until actual kernel wait succeeds.
                 while child.wait().await.is_err() {
@@ -834,7 +926,7 @@ async fn tool(
         }
         let _ = tx.send(result);
     });
-    let result = rx.await.map_err(|_| BrowserError::CleanupUnconfirmed)?;
+    let result = rx.await.map_err(|_| ScopeError::CleanupUnconfirmed)?;
     guard.disarm();
     result
 }
@@ -844,7 +936,7 @@ async fn read_optional<R: tokio::io::AsyncRead + Unpin>(
 ) -> Result<usize> {
     match reader {
         Some(reader) => read_bounded(reader, bytes).await,
-        None => Err(BrowserError::Unknown),
+        None => Err(ScopeError::Unknown),
     }
 }
 async fn read_bounded(
@@ -856,13 +948,13 @@ async fn read_bounded(
         let n = reader
             .read(&mut bytes[used..])
             .await
-            .map_err(|_| BrowserError::Unknown)?;
+            .map_err(|_| ScopeError::Unknown)?;
         if n == 0 {
             return Ok(used);
         }
         used += n;
         if used == bytes.len() {
-            return Err(BrowserError::Unknown);
+            return Err(ScopeError::Unknown);
         }
     }
 }

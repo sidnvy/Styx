@@ -57,6 +57,8 @@ struct Deployment {
 #[derive(Deserialize)]
 struct HostLocator {
     #[cfg(target_os = "linux")]
+    computer: Option<serde_json::Value>,
+    #[cfg(target_os = "linux")]
     browser: Option<serde_json::Value>,
     #[serde(rename = "baseDir")]
     base_dir: PathBuf,
@@ -107,6 +109,8 @@ struct Identity {
 }
 #[derive(Deserialize)]
 struct HostProfile {
+    #[cfg(target_os = "linux")]
+    computer: Option<serde_json::Value>,
     #[cfg(target_os = "linux")]
     browser: Option<serde_json::Value>,
     host_id: DeviceId,
@@ -184,6 +188,56 @@ pub(super) struct BrowserSource<'a> {
     pub workspace: &'a Path,
     pub node_version: Option<&'a str>,
 }
+#[cfg(target_os = "linux")]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ComputerSelection {
+    enabled: bool,
+    // Mutable legacy spelling is never an executable-path authority.
+    #[serde(rename = "binary")]
+    _binary: Option<serde_json::Value>,
+    connections: Option<u32>,
+    socket: Option<serde_json::Value>,
+    env: Option<BTreeMap<String, String>>,
+}
+#[cfg(target_os = "linux")]
+fn computer_selected(
+    deployment: Option<&serde_json::Value>,
+    host: Option<&serde_json::Value>,
+) -> Result<bool, ProfileError> {
+    use serde_json::Value;
+    // Either explicit local disable or absence closes this lane. It must not
+    // invalidate the independent Exec loader or let the other side enable it.
+    if deployment.is_none()
+        || host.is_none()
+        || deployment == Some(&Value::Bool(false))
+        || host == Some(&Value::Bool(false))
+        || host.and_then(|v| v.get("enabled")).and_then(Value::as_bool) == Some(false)
+    {
+        return Ok(false);
+    }
+    if deployment != Some(&Value::Bool(true)) {
+        return Err(ProfileError::Unsupported);
+    }
+    let selected: ComputerSelection =
+        serde_json::from_value(host.cloned().ok_or(ProfileError::Unsupported)?)
+            .map_err(|_| ProfileError::Unsupported)?;
+    if !selected.enabled {
+        return Ok(false);
+    }
+    // This slice owns one fresh fixed stdio worker. No arbitrary socket attach,
+    // parallel old connectors or caller environment is silently adopted.
+    if selected.connections.is_some_and(|v| v != 1)
+        || selected.socket.is_some()
+        || selected.env.as_ref().is_some_and(|env| {
+            env.iter()
+                .any(|(key, value)| key != "CUA_DRIVER_RS_ENABLE_WAYLAND" || value != "1")
+        })
+    {
+        return Err(ProfileError::Unsupported);
+    }
+    Ok(true)
+}
 pub struct LoadedLegacyProfile {
     host_base_dir: PathBuf,
     device: DeviceId,
@@ -197,6 +251,12 @@ pub struct LoadedLegacyProfile {
     release_root: PathBuf,
     #[cfg(target_os = "linux")]
     browser_node_version: Option<String>,
+    #[cfg(target_os = "linux")]
+    cua_version: Option<String>,
+    #[cfg(target_os = "linux")]
+    deployment_computer: Option<serde_json::Value>,
+    #[cfg(target_os = "linux")]
+    host_computer: Option<serde_json::Value>,
     #[cfg(target_os = "linux")]
     deployment_browser: Option<serde_json::Value>,
     #[cfg(target_os = "linux")]
@@ -259,6 +319,35 @@ impl LoadedLegacyProfile {
         self.inventory
             .pin_executable("bin/node")
             .map_err(|_| ProfileError::UntrustedRelease)
+    }
+    /// Only the original publisher-verified, active-manifest exact member can
+    /// mint this pin. It is neither an OS permission nor Core dispatch grant.
+    /// Call on a bounded blocking worker: original closure revalidation hashes
+    /// signed bytes; no executable, subprocess or GUI is started here.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn pin_cua_driver(&self) -> Result<Option<PinnedExecutable>, ProfileError> {
+        self.revalidate_control()?;
+        if !computer_selected(
+            self.deployment_computer.as_ref(),
+            self.host_computer.as_ref(),
+        )? {
+            return Ok(None);
+        }
+        if self.cua_version.as_deref() != Some("cua-driver 0.36.0")
+            || !self.inventory.members().iter().any(|member| {
+                member.path == Path::new("bin/cua-driver") && member.executable && member.bytes > 0
+            })
+        {
+            return Err(ProfileError::UntrustedRelease);
+        }
+        self.revalidate()?;
+        let pinned = self
+            .inventory
+            .pin_executable("bin/cua-driver")
+            .map_err(|_| ProfileError::UntrustedRelease)?;
+        pinned.revalidate().map_err(|_| ProfileError::Changed)?;
+        self.revalidate_control()?;
+        Ok(Some(pinned))
     }
     pub fn executor_config(&self) -> Result<OwnedExecutorConfig, ProfileError> {
         self.revalidate()?;
@@ -697,6 +786,17 @@ fn load(state_dir: &Path, mode: GatewayWireMode) -> Result<LoadedLegacyProfile, 
             .and_then(|v| v.as_str())
             .map(str::to_owned),
         #[cfg(target_os = "linux")]
+        cua_version: manifest
+            .upstream
+            .as_ref()
+            .and_then(|v| v.get("cua"))
+            .and_then(|v| v.as_str())
+            .map(str::to_owned),
+        #[cfg(target_os = "linux")]
+        deployment_computer: deployment.host.computer,
+        #[cfg(target_os = "linux")]
+        host_computer: host.computer,
+        #[cfg(target_os = "linux")]
         deployment_browser: deployment.host.browser,
         #[cfg(target_os = "linux")]
         host_browser: host.browser,
@@ -727,3 +827,7 @@ fn load(state_dir: &Path, mode: GatewayWireMode) -> Result<LoadedLegacyProfile, 
 #[cfg(test)]
 #[path = "profile_tests.rs"]
 mod tests;
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "profile_cua_tests.rs"]
+mod cua_tests;

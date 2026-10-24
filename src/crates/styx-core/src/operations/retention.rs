@@ -23,12 +23,17 @@ impl PhysicalRetention {
 /// This is cleanup authority, never authority to execute or read process output.
 #[derive(Debug)]
 pub struct ProviderRecordKey {
+    domain: ResourceDomain,
     owner: OwnerLease,
     snapshot: OperationSnapshot,
     audit_digest: Option<Sha256Digest>,
     capability: styx_contracts::capability::CapabilityId,
 }
 impl ProviderRecordKey {
+    /// Original Core resource affinity, not an execution or permission grant.
+    pub fn resource_domain(&self) -> ResourceDomain {
+        self.domain
+    }
     pub fn capability(&self) -> styx_contracts::capability::CapabilityId {
         self.capability
     }
@@ -76,6 +81,7 @@ pub struct ProviderReleaseConfirmation {
 
 fn key(host: &HostGeneration, record: &Record) -> ProviderRecordKey {
     ProviderRecordKey {
+        domain: record.domain,
         owner: OwnerLease {
             owner: record.owner.clone(),
             epoch: record.snapshot.id.owner_epoch.clone(),

@@ -2,7 +2,7 @@
 //! It owns immutable request bytes, not executor I/O. Outcome and liveness differ.
 use crate::policy::{AdmissionFacts, check_admission};
 use std::collections::BTreeMap;
-use styx_contracts::{error::ErrorCategory, identity::*, operation::*};
+use styx_contracts::{capability::CapabilityId, error::ErrorCategory, identity::*, operation::*};
 
 mod owner_cleanup;
 mod retention;
@@ -38,7 +38,44 @@ pub struct OperationSnapshot {
     pub cancellation: Option<Cancellation>,
     pub payload_digest: Sha256Digest,
 }
+/// Native resource affinity, never a permission grant or network DTO.
+/// A Desktop agent may serve several separately authorized capabilities within
+/// its original session; ordinary Exec/Browser resources keep exact capability.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ResourceDomain {
+    Capability,
+    DesktopAgent,
+}
+fn desktop_capability(capability: CapabilityId) -> bool {
+    matches!(
+        capability,
+        CapabilityId::DesktopWindowsRead
+            | CapabilityId::DesktopWindowsControl
+            | CapabilityId::DesktopCapture
+            | CapabilityId::DesktopPointer
+            | CapabilityId::DesktopKeyboard
+            | CapabilityId::DesktopAccessibility
+    )
+}
+fn resource_binding(
+    domain: ResourceDomain,
+    original: &PreparedContext,
+    fresh: &PreparedContext,
+) -> bool {
+    original.device_id == fresh.device_id
+        && original.session == fresh.session
+        && match domain {
+            ResourceDomain::Capability => original.capability == fresh.capability,
+            ResourceDomain::DesktopAgent => {
+                original.capability == CapabilityId::DesktopWindowsRead
+                    && original.session.is_some()
+                    && desktop_capability(fresh.capability)
+            }
+        }
+}
+
 struct Record {
+    domain: ResourceDomain,
     owner: OwnerId,
     owner_incarnation: u64,
     context: PreparedContext,
@@ -76,6 +113,7 @@ impl Record {
 /// ```
 #[derive(PartialEq, Eq)]
 pub struct DispatchPermit {
+    domain: ResourceDomain,
     id: OperationId,
     owner: OwnerLease,
     context: PreparedContext,
@@ -83,6 +121,11 @@ pub struct DispatchPermit {
     payload: Box<[u8]>,
 }
 impl DispatchPermit {
+    /// Class of the resource, or of the exact target for a targeted action.
+    /// The requested capability and all fresh policy checks remain independent.
+    pub fn resource_domain(&self) -> ResourceDomain {
+        self.domain
+    }
     pub fn id(&self) -> &OperationId {
         &self.id
     }
@@ -225,7 +268,40 @@ impl OperationLedger {
         payload: Vec<u8>,
         now: MonotonicMillis,
     ) -> Result<OperationSnapshot, ErrorCategory> {
-        self.prepare_record(owner, None, context, payload, now)
+        self.prepare_record(
+            owner,
+            None,
+            ResourceDomain::Capability,
+            context,
+            payload,
+            now,
+        )
+    }
+    /// Reserve an owner-bound native Desktop agent in one explicit session.
+    /// This only marks resource affinity: dispatch still requires real current
+    /// WindowsRead admission facts. It never registers a session, creates Ready,
+    /// infers OS permissions, or authorizes any other Desktop capability.
+    pub fn prepare_desktop_agent(
+        &mut self,
+        owner: &OwnerLease,
+        context: PreparedContext,
+        payload: Vec<u8>,
+        now: MonotonicMillis,
+    ) -> Result<OperationSnapshot, ErrorCategory> {
+        if context.capability != CapabilityId::DesktopWindowsRead
+            || context.session.is_none()
+            || context.observation.is_some()
+        {
+            return Err(ErrorCategory::StateConflict);
+        }
+        self.prepare_record(
+            owner,
+            None,
+            ResourceDomain::DesktopAgent,
+            context,
+            payload,
+            now,
+        )
     }
     /// Reserve an independent request-level action on an exact existing
     /// resource. Core proves committed dispatch, not native start success.
@@ -237,15 +313,15 @@ impl OperationLedger {
         payload: Vec<u8>,
         now: MonotonicMillis,
     ) -> Result<OperationSnapshot, ErrorCategory> {
-        self.verify_target(owner, &target, &context)?;
-        self.prepare_record(owner, Some(target), context, payload, now)
+        let domain = self.verify_target(owner, &target, &context)?;
+        self.prepare_record(owner, Some(target), domain, context, payload, now)
     }
     fn verify_target(
         &self,
         owner: &OwnerLease,
         target: &ResourceTarget,
         context: &PreparedContext,
-    ) -> Result<(), ErrorCategory> {
+    ) -> Result<ResourceDomain, ErrorCategory> {
         let record = self.record_for(owner, &target.operation_id, target.payload_digest)?;
         if record.snapshot.target.is_some()
             || matches!(
@@ -256,18 +332,17 @@ impl OperationLedger {
                 record.snapshot.liveness,
                 ExecutionLiveness::Running | ExecutionLiveness::Unknown
             )
-            || record.context.device_id != context.device_id
-            || record.context.capability != context.capability
-            || record.context.session != context.session
+            || !resource_binding(record.domain, &record.context, context)
         {
             return Err(ErrorCategory::StateConflict);
         }
-        Ok(())
+        Ok(record.domain)
     }
     fn prepare_record(
         &mut self,
         owner: &OwnerLease,
         target: Option<ResourceTarget>,
+        domain: ResourceDomain,
         context: PreparedContext,
         payload: Vec<u8>,
         now: MonotonicMillis,
@@ -314,6 +389,7 @@ impl OperationLedger {
         self.records.insert(
             id,
             Record {
+                domain,
                 owner: owner.owner.clone(),
                 owner_incarnation: owner.incarnation,
                 context,
@@ -349,7 +425,9 @@ impl OperationLedger {
             return Err(ErrorCategory::Busy);
         }
         if let Some(target) = &record.snapshot.target {
-            self.verify_target(owner, target, &record.context)?;
+            if self.verify_target(owner, target, &record.context)? != record.domain {
+                return Err(ErrorCategory::StateConflict);
+            }
         }
         check_admission(&record.context, facts, now)?;
         let record = self
@@ -363,6 +441,7 @@ impl OperationLedger {
             record.snapshot.output_drain = OutputDrain::Unknown;
         }
         Ok(DispatchDisposition::ExecuteOnce(DispatchPermit {
+            domain: record.domain,
             id: id.clone(),
             owner: owner.clone(),
             payload: record.payload.clone(),
@@ -380,6 +459,27 @@ impl OperationLedger {
     ) -> Result<PreparedContext, ErrorCategory> {
         Ok(self.record_for(owner, id, digest)?.context.clone())
     }
+    /// Borrow immutable original input for trusted compound admission. The
+    /// authenticated owner and digest checks are identical to inspect_context;
+    /// this does not mint a permit or change dispatch state.
+    /// Historical affinity survives physical provider release. Uses the same
+    /// owner/digest check as inspect; physical inventory is not history.
+    pub fn inspect_domain(
+        &self,
+        owner: &OwnerLease,
+        id: &OperationId,
+        digest: Sha256Digest,
+    ) -> Result<ResourceDomain, ErrorCategory> {
+        Ok(self.record_for(owner, id, digest)?.domain)
+    }
+    pub fn inspect_payload(
+        &self,
+        owner: &OwnerLease,
+        id: &OperationId,
+        digest: Sha256Digest,
+    ) -> Result<&[u8], ErrorCategory> {
+        Ok(&self.record_for(owner, id, digest)?.payload)
+    }
     pub fn inspect(
         &self,
         owner: &OwnerLease,
@@ -390,7 +490,9 @@ impl OperationLedger {
     }
     /// Authorize a fresh access to an existing resource under current policy.
     /// The start deadline is deliberately not reused for a long-lived process.
-    /// Fresh policy can change, but device/capability/session binding cannot.
+    /// Ordinary device/capability/session binding is immutable. An explicit
+    /// DesktopAgent admits separately authorized Desktop capabilities only in
+    /// its exact original session; resource affinity grants no permission.
     /// A DTO target ID or a retained start permit is never access authority.
     pub fn authorize_resource_access(
         &self,
@@ -411,10 +513,7 @@ impl OperationLedger {
         {
             return Err(ErrorCategory::StateConflict);
         }
-        if fresh_context.device_id != record.context.device_id
-            || fresh_context.capability != record.context.capability
-            || fresh_context.session != record.context.session
-        {
+        if !resource_binding(record.domain, &record.context, fresh_context) {
             return Err(ErrorCategory::StateConflict);
         }
         check_admission(fresh_context, facts, now)?;

@@ -289,7 +289,7 @@ fn raw_spec_and_response_writer_have_explicit_bounds() {
         Call::PrepareStart { spec, .. } => assert_eq!(spec.get(), r#"{"nested":[1,2,3]}"#),
         _ => panic!(),
     }
-    let mut writer = BoundedJson(Vec::new());
+    let mut writer = BoundedJson(Vec::new(), RESPONSE_LIMIT);
     assert!(writer.write_all(&vec![0; RESPONSE_LIMIT + 1]).is_err());
     assert!(writer.0.is_empty());
 }

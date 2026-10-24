@@ -15,6 +15,8 @@ use crate::providers::codex::{
 };
 #[cfg(target_os = "linux")]
 pub(crate) mod browser;
+#[cfg(target_os = "linux")]
+pub(crate) mod computer;
 pub mod wire;
 use futures_util::{FutureExt, StreamExt, stream::FuturesUnordered};
 use std::{
@@ -172,6 +174,8 @@ pub struct HostProtocol<'a> {
     connection_slot: tokio::sync::Semaphore,
     #[cfg(target_os = "linux")]
     browser: Option<browser::BrowserInputs>,
+    #[cfg(target_os = "linux")]
+    computer: Option<computer::ComputerInputs>,
 }
 impl<'a> HostProtocol<'a> {
     pub fn new(
@@ -220,6 +224,8 @@ impl<'a> HostProtocol<'a> {
             connection_slot: tokio::sync::Semaphore::new(1),
             #[cfg(target_os = "linux")]
             browser: None,
+            #[cfg(target_os = "linux")]
+            computer: None,
         })
     }
     pub fn register_bootstrap_verified_owner(
@@ -413,6 +419,25 @@ impl<'a> HostProtocol<'a> {
                     let _ = (owner, grant_revision, timeout_ms, command);
                     Reply::Unsupported {
                         feature: BROWSER_HEADLESS_V1.into(),
+                    }
+                }
+            }
+            Call::Computer {
+                owner,
+                grant_revision,
+                timeout_ms,
+                command,
+            } => {
+                #[cfg(target_os = "linux")]
+                {
+                    self.handle_computer(owner, grant_revision, timeout_ms, command)
+                        .await
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    let _ = (owner, grant_revision, timeout_ms, command);
+                    Reply::Unsupported {
+                        feature: COMPUTER_V1.into(),
                     }
                 }
             }
@@ -670,6 +695,10 @@ impl<'a> HostProtocol<'a> {
         if self.paired && self.browser.is_some() {
             features.push(BROWSER_HEADLESS_V1.into());
         }
+        #[cfg(target_os = "linux")]
+        if self.paired && self.computer.is_some() {
+            features.push(COMPUTER_V1.into());
+        }
         features
     }
     /// Scoped business waiters never own the native executor. Control admission
@@ -759,7 +788,12 @@ impl<'a> HostProtocol<'a> {
                 connection_generation: generation.clone(),
                 reply,
             };
-            let mut bytes = BoundedJson(Vec::new());
+            let limit = if matches!(&response.reply, Reply::ComputerAction { .. }) {
+                1024 * 1024 + 64 * 1024
+            } else {
+                RESPONSE_LIMIT
+            };
+            let mut bytes = BoundedJson(Vec::new(), limit);
             serde_json::to_writer(&mut bytes, &response)
                 .map_err(|_| ProtocolError::ResponseLost)?;
             let text = String::from_utf8(bytes.0).map_err(|_| ProtocolError::ResponseLost)?;
@@ -781,7 +815,8 @@ fn call_owner(call: &Call) -> Option<&OwnerRef> {
         | Call::PrepareAction { owner, .. }
         | Call::DispatchAction { owner, .. }
         | Call::InspectAction { owner, .. }
-        | Call::Browser { owner, .. } => Some(owner),
+        | Call::Browser { owner, .. }
+        | Call::Computer { owner, .. } => Some(owner),
         _ => None,
     }
 }
@@ -811,6 +846,25 @@ fn coordinator_error(error: CoordinatorError, read: bool) -> Reply {
         // native dispatch did not happen; preserve uncertainty.
         #[cfg(target_os = "linux")]
         CoordinatorError::Browser(_) => (ErrorCategory::ResultUnknown, ExecutionCertainty::Unknown),
+        #[cfg(target_os = "linux")]
+        CoordinatorError::Desktop(error) => match error {
+            crate::providers::cua::CuaError::Busy => {
+                (ErrorCategory::Busy, ExecutionCertainty::NotDispatched)
+            }
+            crate::providers::cua::CuaError::InvalidRequest => (
+                ErrorCategory::InvalidRequest,
+                ExecutionCertainty::NotDispatched,
+            ),
+            crate::providers::cua::CuaError::PermissionDenied => (
+                ErrorCategory::PermissionDenied,
+                ExecutionCertainty::NotDispatched,
+            ),
+            crate::providers::cua::CuaError::Unsupported => (
+                ErrorCategory::CapabilityUnsupported,
+                ExecutionCertainty::NotDispatched,
+            ),
+            _ => (ErrorCategory::ResultUnknown, ExecutionCertainty::Unknown),
+        },
     };
     Reply::Error {
         category,
@@ -818,10 +872,10 @@ fn coordinator_error(error: CoordinatorError, read: bool) -> Reply {
         cursor_may_be_consumed: read,
     }
 }
-struct BoundedJson(Vec<u8>);
+struct BoundedJson(Vec<u8>, usize);
 impl Write for BoundedJson {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
-        if bytes.len() > RESPONSE_LIMIT.saturating_sub(self.0.len()) {
+        if bytes.len() > self.1.saturating_sub(self.0.len()) {
             return Err(std::io::Error::other("bounded response exceeded"));
         }
         self.0.extend_from_slice(bytes);

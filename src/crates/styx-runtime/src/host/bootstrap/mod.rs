@@ -141,6 +141,19 @@ impl OwnedExecHost {
         crate::providers::browser::BrowserIoBudget::from_reserved(partition)
             .map_err(|_| BootstrapError::InvalidConfiguration)
     }
+    /// Final8MiB native Desktop partition from the same64MiB Host allocator.
+    #[cfg(target_os = "linux")]
+    pub(crate) fn reserve_computer_io(
+        &self,
+    ) -> Result<Arc<crate::providers::cua::CuaIoBudget>, BootstrapError> {
+        let partition = self
+            .budget
+            .clone()
+            .try_acquire_many_owned((8 * 1024 * 1024) as u32)
+            .map_err(|_| BootstrapError::Capacity)?;
+        crate::providers::cua::CuaIoBudget::from_reserved(partition)
+            .map_err(|_| BootstrapError::InvalidConfiguration)
+    }
     /// Remaining logical queued-I/O capacity, never total resident memory.
     pub fn unreserved_queued_bytes(&self) -> usize {
         self.budget.available_permits()

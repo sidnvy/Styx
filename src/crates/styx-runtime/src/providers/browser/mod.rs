@@ -421,11 +421,22 @@ struct BrowserClient {
     _budget: Arc<BrowserIoBudget>,
 }
 impl ClientHandler for BrowserClient {}
-mod linux_scope;
 mod policy;
 mod references;
 mod retention;
-use linux_scope::{LinuxOwnedScope, ScopeCommand};
+use crate::providers::linux_scope::{LinuxOwnedScope, ScopeCommand, ScopeError};
+impl From<ScopeError> for BrowserError {
+    fn from(value: ScopeError) -> Self {
+        match value {
+            ScopeError::Busy => Self::Busy,
+            ScopeError::InvalidRequest => Self::InvalidRequest,
+            ScopeError::PermissionDenied => Self::PermissionDenied,
+            ScopeError::Unsupported => Self::Unsupported,
+            ScopeError::Unknown => Self::Unknown,
+            ScopeError::CleanupUnconfirmed => Self::CleanupUnconfirmed,
+        }
+    }
+}
 
 pub struct BrowserOpenFailure {
     pub operation: OperationId,
@@ -640,7 +651,7 @@ impl BrowserOpenSlot {
             file.write_all(&bytes).and_then(|_|file.sync_all()).map_err(|_|BrowserError::SpawnFailed)?;
             live.config_file = config_file;
             let cfg = fd_path(&file);live.pins.push(file);
-            let (mut command, scope) = LinuxOwnedScope::command(ScopeCommand { node,worker,config:cfg,workspace:config.workspace_dir.clone(),home:config.output_dir.clone() })?;
+            let (mut command, scope) = LinuxOwnedScope::command(ScopeCommand::browser(node,worker,cfg,config.workspace_dir.clone(),config.output_dir.clone())?)?;
             live.scope = Some(scope);
             live.child = Some(command.stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::piped()).kill_on_drop(true).spawn().map_err(|_|BrowserError::SpawnFailed)?);
             tokio::select! {

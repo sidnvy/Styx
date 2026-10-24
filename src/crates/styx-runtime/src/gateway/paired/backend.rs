@@ -10,6 +10,9 @@ use styx_contracts::identity::DeviceId;
 #[cfg(target_os = "linux")]
 #[path = "backend_browser.rs"]
 mod browser;
+#[cfg(target_os = "linux")]
+#[path = "backend_computer.rs"]
+mod computer;
 
 static PUBLIC: LazyLock<Vec<Tool>> = LazyLock::new(|| {
     let value: Value = serde_json::from_str(include_str!(
@@ -386,6 +389,8 @@ struct State {
     sessions: BTreeMap<u64, Entry>,
     #[cfg(target_os = "linux")]
     browsers: browser::BrowserContexts,
+    #[cfg(target_os = "linux")]
+    computers: computer::ComputerContexts,
 }
 /// No raw executor or network authority is exposed to the public tool adapter.
 pub struct PairedGatewayBackend {
@@ -408,6 +413,8 @@ impl PairedGatewayBackend {
                 sessions: BTreeMap::new(),
                 #[cfg(target_os = "linux")]
                 browsers: browser::BrowserContexts::default(),
+                #[cfg(target_os = "linux")]
+                computers: computer::ComputerContexts::default(),
             }),
         }
     }
@@ -949,6 +956,11 @@ impl GatewayToolBackend for PairedGatewayBackend {
                 Err(e) => failure(e, None, false),
             },
             #[cfg(target_os = "linux")]
+            #[cfg(target_os = "linux")]
+            name if computer::is_public_computer_tool(name) => {
+                self.computer_call(owner, request.name.as_ref(), request.arguments)
+                    .await
+            }
             name if browser::is_public_browser_tool(name) => {
                 self.browser_call(owner, request.name.as_ref(), request.arguments)
                     .await
@@ -963,7 +975,7 @@ impl GatewayToolBackend for PairedGatewayBackend {
                 }
                 match self.relay.devices().await {
                     Ok(devices) => success(
-                        json!({"environments":devices.iter().map(|d| json!({"environment_id":d.device_id.as_str(),"kind":"paired","connection":if d.online || d.browser_online {"connected"} else {"disconnected"}})).collect::<Vec<_>>()}),
+                        json!({"environments":devices.iter().map(|d| json!({"environment_id":d.device_id.as_str(),"kind":"paired","connection":if d.online || d.browser_online || d.computer_online {"connected"} else {"disconnected"}})).collect::<Vec<_>>()}),
                     ),
                     Err(e) => failure(e.code(), None, false),
                 }
@@ -982,7 +994,7 @@ impl GatewayToolBackend for PairedGatewayBackend {
                         .find(|d| d.device_id.as_str() == a.environment_id)
                     {
                         Some(d) => success(
-                            json!({"environment_id":a.environment_id,"kind":"paired","access":"allowed","exec":{"configured":true,"connection":if d.online {"connected"} else {"disconnected"},"readiness":"unknown","version":"unknown"},"browser":{"configured":"unknown","connection":if d.browser_online {"connected"} else {"disconnected"},"readiness":"unknown","version":"unknown"},"computer":{"configured":"unknown","connection":"unknown","permission":"unknown","readiness":"unknown","version":"unknown"}}),
+                            json!({"environment_id":a.environment_id,"kind":"paired","access":"allowed","exec":{"configured":true,"connection":if d.online {"connected"} else {"disconnected"},"readiness":"unknown","version":"unknown"},"browser":{"configured":"unknown","connection":if d.browser_online {"connected"} else {"disconnected"},"readiness":"unknown","version":"unknown"},"computer":{"configured":"unknown","connection":if d.computer_online {"connected"} else {"disconnected"},"permission":"unknown","readiness":"unknown","version":"unknown"}}),
                         ),
                         None => failure("environment_unavailable", None, false),
                     },
@@ -1031,6 +1043,7 @@ impl GatewayOwnerLifecycle for PairedGatewayBackend {
                 });
                 #[cfg(target_os = "linux")]
                 state.browsers.clear_owner(owner);
+                state.computers.clear_owner(owner);
                 OwnerCleanup::Complete
             }
             _ => OwnerCleanup::Unknown,

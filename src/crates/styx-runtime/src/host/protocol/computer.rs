@@ -1,0 +1,368 @@
+//! Protected local Computer inputs; no path or profile choice comes from WSS.
+//! Blocking validation jobs outlive dropped connection waiters and are joined
+//! before explicit Host shutdown can release its original input/lease owners.
+use super::*;
+use crate::{
+    host::coordinator::{DesktopActionSubmission, DesktopOpenSubmission},
+    providers::cua::{CuaAction, CuaError, CuaEvidence, OwnedCuaConfig},
+};
+use std::sync::Arc;
+use tokio_util::task::TaskTracker;
+
+pub(crate) trait ComputerBootstrap: Send + Sync {
+    fn prepare_profile(&self, owner: &OwnerLease) -> Result<OwnedCuaConfig, ErrorCategory>;
+    fn validate_before_spawn(&self) -> Result<(), ErrorCategory>;
+    fn validate_control(&self) -> Result<(), ErrorCategory>;
+}
+pub(super) struct ComputerInputs {
+    source: Arc<dyn ComputerBootstrap>,
+    tasks: TaskTracker,
+    slots: Arc<tokio::sync::Semaphore>,
+}
+impl HostProtocol<'_> {
+    pub(crate) fn with_computer_profiles(
+        mut self,
+        source: Arc<dyn ComputerBootstrap>,
+    ) -> Result<Self, ProtocolError> {
+        if !self.paired || !self.coordinator.desktop_configured() || self.computer.is_some() {
+            return Err(ProtocolError::BootstrapMismatch);
+        }
+        self.computer = Some(ComputerInputs {
+            source,
+            tasks: TaskTracker::new(),
+            slots: Arc::new(tokio::sync::Semaphore::new(2)),
+        });
+        Ok(self)
+    }
+    pub(crate) async fn drain_computer_inputs(&self) {
+        if let Some(inputs) = &self.computer {
+            inputs.tasks.close();
+            inputs.tasks.wait().await;
+        }
+    }
+    async fn computer_input<T: Send + 'static>(
+        &self,
+        work: impl FnOnce(Arc<dyn ComputerBootstrap>) -> Result<T, ErrorCategory> + Send + 'static,
+    ) -> Result<T, ErrorCategory> {
+        let inputs = self
+            .computer
+            .as_ref()
+            .ok_or(ErrorCategory::CapabilityUnsupported)?;
+        if inputs.tasks.is_closed() {
+            return Err(ErrorCategory::Busy);
+        }
+        let permit = inputs
+            .slots
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| ErrorCategory::Busy)?;
+        let source = inputs.source.clone();
+        inputs
+            .tasks
+            .spawn_blocking(move || {
+                let _permit = permit;
+                work(source)
+            })
+            .await
+            .map_err(|_| ErrorCategory::IntegrityFailure)?
+    }
+    fn existing_computer_dispatch(
+        &self,
+        owner: &OwnerLease,
+        id: &OperationId,
+        digest: Sha256Digest,
+        action: bool,
+    ) -> Result<Option<Reply>, CoordinatorError> {
+        let snapshot = self
+            .coordinator
+            .inspect_desktop(owner, id, digest, action)?;
+        if snapshot.state == OperationState::Reserved {
+            return Ok(None);
+        }
+        Ok(Some(if action {
+            Reply::ComputerAction {
+                snapshot: snapshot.into(),
+                dispatch: "existing_no_replay".into(),
+                result: None,
+                cause: None,
+                cleanup_complete: None,
+            }
+        } else {
+            Reply::Start {
+                snapshot: snapshot.into(),
+                dispatch: "existing_no_replay".into(),
+            }
+        }))
+    }
+    fn computer_dispatch_error(
+        &self,
+        owner: &OwnerLease,
+        id: &OperationId,
+        digest: Sha256Digest,
+        action: bool,
+        error: CoordinatorError,
+    ) -> Reply {
+        match self.existing_computer_dispatch(owner, id, digest, action) {
+            Ok(Some(reply)) => reply,
+            _ => coordinator_error(error, false),
+        }
+    }
+    async fn validate_computer_dispatch(
+        &self,
+        owner: &OwnerLease,
+        id: &OperationId,
+        digest: Sha256Digest,
+        action: bool,
+    ) -> Result<(), Reply> {
+        // Local input validation must never downgrade an original dispatched
+        // operation's history to NotDispatched after a file/permission change.
+        match self.existing_computer_dispatch(owner, id, digest, action) {
+            Ok(Some(reply)) => return Err(reply),
+            Ok(None) => {}
+            Err(e) => return Err(uncertain(coordinator_error(e, false))),
+        }
+        let validation = self
+            .computer_input(move |source| {
+                if action {
+                    source.validate_control()
+                } else {
+                    source.validate_before_spawn()
+                }
+            })
+            .await;
+        if let Err(category) = validation {
+            return Err(
+                match self.existing_computer_dispatch(owner, id, digest, action) {
+                    Ok(Some(reply)) => reply,
+                    // Another request may have consumed this original token while
+                    // the blocking validator ran. A local refusal is not proof of
+                    // its historical outcome, and never authorizes replay.
+                    _ => uncertain(rejection(category)),
+                },
+            );
+        }
+        Ok(())
+    }
+    pub(super) async fn handle_computer(
+        &self,
+        reference: OwnerRef,
+        revision: u64,
+        timeout: u32,
+        command: ComputerCommand,
+    ) -> Reply {
+        if !self.paired || self.computer.is_none() {
+            return Reply::Unsupported {
+                feature: COMPUTER_V1.into(),
+            };
+        }
+        let owner = match self.owner(&reference) {
+            Ok(v) => v,
+            Err(e) => return rejection(e),
+        };
+        let mut context = match self.context(revision, timeout) {
+            Ok(v) => v,
+            Err(e) => return rejection(e),
+        };
+        // Never import a SessionBinding/observation from the Gateway JSON. The
+        // source-backed Host owns session selection, generation and evidence.
+        // Resolve it only for new preparations; historical inspect/dispatch
+        // must remain readable after the live association becomes unavailable.
+        context.capability = CapabilityId::DesktopWindowsRead;
+        context.observation = None;
+        match command {
+            ComputerCommand::PrepareOpen => {
+                context.session = match self.coordinator.desktop_binding() {
+                    Ok(v) => Some(v),
+                    Err(e) => return coordinator_error(e, false),
+                };
+                let bound = owner.clone();
+                let config = match self
+                    .computer_input(move |source| {
+                        source.validate_control()?;
+                        source.prepare_profile(&bound)
+                    })
+                    .await
+                {
+                    Ok(v) => v,
+                    Err(e) => return rejection(e),
+                };
+                if self.owner(&reference).as_ref() != Ok(&owner) {
+                    return rejection(ErrorCategory::Unauthorized);
+                }
+                if let Err(e) = self.authority.register_desktop_profile(&owner, config) {
+                    return coordinator_error(e, false);
+                }
+                match self.coordinator.prepare_desktop_open(&owner, context) {
+                    Ok(snapshot) => Reply::Prepared {
+                        snapshot: snapshot.into(),
+                    },
+                    Err(e) => coordinator_error(e, false),
+                }
+            }
+            ComputerCommand::DispatchOpen { target } => {
+                if let Err(reply) = self
+                    .validate_computer_dispatch(
+                        &owner,
+                        &target.operation_id,
+                        target.payload_digest,
+                        false,
+                    )
+                    .await
+                {
+                    return reply;
+                }
+                match self
+                    .coordinator
+                    .dispatch_desktop_open(&owner, &target.operation_id, target.payload_digest)
+                    .await
+                {
+                    Ok(DesktopOpenSubmission::Existing(snapshot)) => Reply::Start {
+                        snapshot: snapshot.into(),
+                        dispatch: "existing_no_replay".into(),
+                    },
+                    Ok(DesktopOpenSubmission::Completed(done)) => Reply::Start {
+                        snapshot: done.snapshot.into(),
+                        dispatch: match done.evidence {
+                            CuaEvidence::Acknowledged => "started",
+                            CuaEvidence::NotDispatched => "not_dispatched",
+                            CuaEvidence::Unknown => "unknown",
+                        }
+                        .into(),
+                    },
+                    Err(e) => self.computer_dispatch_error(
+                        &owner,
+                        &target.operation_id,
+                        target.payload_digest,
+                        false,
+                        e,
+                    ),
+                }
+            }
+            ComputerCommand::InspectOpen { target } => match self.coordinator.inspect_desktop(
+                &owner,
+                &target.operation_id,
+                target.payload_digest,
+                false,
+            ) {
+                Ok(snapshot) => Reply::Inspected {
+                    snapshot: snapshot.into(),
+                },
+                Err(e) => coordinator_error(e, false),
+            },
+            ComputerCommand::PrepareAction { target, action } => {
+                context.session = match self.coordinator.desktop_binding() {
+                    Ok(v) => Some(v),
+                    Err(e) => return coordinator_error(e, false),
+                };
+                if action.get().len() > SPEC_LIMIT {
+                    return invalid();
+                }
+                let action: CuaAction = match serde_json::from_str(action.get()) {
+                    Ok(v) => v,
+                    Err(_) => return invalid(),
+                };
+                context.capability = match action.capability() {
+                    Ok(v) => v,
+                    Err(e) => return rejection(category(e)),
+                };
+                // Observation remains absent. Input requires the Coordinator's
+                // real native snapshot map; no token is invented to open it.
+                if let Err(e) = self
+                    .computer_input(|source| source.validate_control())
+                    .await
+                {
+                    return rejection(e);
+                }
+                match self
+                    .coordinator
+                    .prepare_desktop_action(&owner, target, context, &action)
+                {
+                    Ok(snapshot) => Reply::Prepared {
+                        snapshot: snapshot.into(),
+                    },
+                    Err(e) => coordinator_error(e, false),
+                }
+            }
+            ComputerCommand::DispatchAction { action } => {
+                if let Err(reply) = self
+                    .validate_computer_dispatch(
+                        &owner,
+                        &action.operation_id,
+                        action.payload_digest,
+                        true,
+                    )
+                    .await
+                {
+                    return reply;
+                }
+                match self
+                    .coordinator
+                    .dispatch_desktop_action(&owner, &action.operation_id, action.payload_digest)
+                    .await
+                {
+                    Ok(DesktopActionSubmission::Existing(snapshot)) => Reply::ComputerAction {
+                        snapshot: snapshot.into(),
+                        dispatch: "existing_no_replay".into(),
+                        result: None,
+                        cause: None,
+                        cleanup_complete: None,
+                    },
+                    Ok(DesktopActionSubmission::Completed(done)) => {
+                        let result = done
+                            .receipt
+                            .result
+                            .and_then(|value| serde_json::to_value(value).ok());
+                        Reply::ComputerAction {
+                            snapshot: done.snapshot.into(),
+                            dispatch: match done.receipt.evidence {
+                                CuaEvidence::Acknowledged => "acknowledged",
+                                CuaEvidence::NotDispatched => "not_dispatched",
+                                CuaEvidence::Unknown => "unknown",
+                            }
+                            .into(),
+                            result,
+                            cause: done.receipt.cause.map(category),
+                            // None of the ten native tools proves driver exit,
+                            // joined I/O and cgroup emptiness. No false Complete.
+                            cleanup_complete: None,
+                        }
+                    }
+                    Err(e) => self.computer_dispatch_error(
+                        &owner,
+                        &action.operation_id,
+                        action.payload_digest,
+                        true,
+                        e,
+                    ),
+                }
+            }
+            ComputerCommand::InspectAction { action } => match self.coordinator.inspect_desktop(
+                &owner,
+                &action.operation_id,
+                action.payload_digest,
+                true,
+            ) {
+                Ok(snapshot) => Reply::Inspected {
+                    snapshot: snapshot.into(),
+                },
+                Err(e) => coordinator_error(e, false),
+            },
+        }
+    }
+}
+fn category(error: CuaError) -> ErrorCategory {
+    match error {
+        CuaError::Busy => ErrorCategory::Busy,
+        CuaError::InvalidRequest => ErrorCategory::InvalidRequest,
+        CuaError::PermissionDenied => ErrorCategory::PermissionDenied,
+        CuaError::Unsupported => ErrorCategory::CapabilityUnsupported,
+        CuaError::ProtocolMismatch => ErrorCategory::ProtocolMismatch,
+        CuaError::Unknown | CuaError::CleanupUnconfirmed => ErrorCategory::ResultUnknown,
+    }
+}
+fn uncertain(mut reply: Reply) -> Reply {
+    if let Reply::Error { certainty, .. } = &mut reply {
+        *certainty = ExecutionCertainty::Unknown;
+    }
+    reply
+}

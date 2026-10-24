@@ -26,6 +26,16 @@ enum Command {
     LinuxDesktopProbe,
     #[command(name = "__linux-desktop-watch", hide = true)]
     LinuxDesktopWatch,
+    #[command(name = "__linux-desktop-association", hide = true)]
+    LinuxDesktopAssociation {
+        #[arg(long)]
+        candidate: String,
+    },
+    #[command(name = "__linux-desktop-association-check", hide = true)]
+    LinuxDesktopAssociationCheck {
+        #[arg(long)]
+        candidate: String,
+    },
     /// Print build and contract identity; never claims a running service.
     BuildInfo,
     /// Run the explicitly configured native Host in this foreground process.
@@ -162,7 +172,9 @@ impl Cli {
     pub(crate) fn is_desktop_probe_worker(&self) -> bool {
         matches!(
             self.command,
-            Command::LinuxDesktopProbe | Command::LinuxDesktopWatch
+            Command::LinuxDesktopProbe
+                | Command::LinuxDesktopWatch
+                | Command::LinuxDesktopAssociation { .. }
         )
     }
 }
@@ -310,6 +322,47 @@ impl NativeRunArg {
         }
     }
 }
+async fn desktop_association_check(candidate: &str) -> ExitCode {
+    #[cfg(target_os = "linux")]
+    {
+        match styx_runtime::session_probe::association::inspect_candidate_association(candidate)
+            .await
+        {
+            Ok(output) => match write_json(&output) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(_) => error("output_unavailable"),
+            },
+            Err(refusal) => error(refusal.code()),
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = candidate;
+        error("desktop_association_unsupported")
+    }
+}
+
+async fn desktop_association_worker(candidate: &str) -> ExitCode {
+    #[cfg(target_os = "linux")]
+    {
+        match styx_runtime::session_probe::association::worker_association(candidate).await {
+            Ok(output) => match write_json(&output) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(_) => error("output_unavailable"),
+            },
+            Err(refusal) => match write_json(&refusal) {
+                Ok(()) => ExitCode::from(2),
+                Err(_) => error("output_unavailable"),
+            },
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = candidate;
+        error("desktop_association_unsupported")
+    }
+}
+
 async fn desktop_probe_worker() -> ExitCode {
     #[cfg(target_os = "linux")]
     {
@@ -504,6 +557,12 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
     match cli.command {
         Command::LinuxDesktopProbe => desktop_probe_worker().await,
         Command::LinuxDesktopWatch => desktop_watch_worker().await,
+        Command::LinuxDesktopAssociation { candidate } => {
+            desktop_association_worker(&candidate).await
+        }
+        Command::LinuxDesktopAssociationCheck { candidate } => {
+            desktop_association_check(&candidate).await
+        }
         Command::Init {
             parent_dir,
             name,

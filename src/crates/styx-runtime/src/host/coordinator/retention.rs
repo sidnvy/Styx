@@ -186,6 +186,15 @@ impl HostAuthority {
             receipt.deadline_exhausted |= browser.deadline_exhausted;
             receipt.blocked.extend(browser.blocked);
         }
+        #[cfg(target_os = "linux")]
+        {
+            let desktop =
+                super::desktop_cleanup::collect_desktop_retention(&self.inner, None, until).await;
+            receipt.actions_released += desktop.actions_released;
+            receipt.resources_released += desktop.resources_released;
+            receipt.deadline_exhausted |= desktop.deadline_exhausted;
+            receipt.blocked.extend(desktop.blocked);
+        }
         let mut state = self.inner.state.lock().expect("Host state mutex");
         receipt.metadata_reaped = state.ledger.reap(self.inner.now());
         receipt.unreleased_records = state.ledger.unreleased_provider_records();

@@ -94,6 +94,108 @@ impl crate::host::protocol::browser::BrowserBootstrap for ForegroundBrowser {
         self.source.validate_control()
     }
 }
+#[cfg(target_os = "linux")]
+struct ForegroundComputer {
+    admitted: Arc<Admitted>,
+    source: Arc<dyn crate::host::protocol::computer::ComputerBootstrap>,
+}
+#[cfg(target_os = "linux")]
+impl crate::host::protocol::computer::ComputerBootstrap for ForegroundComputer {
+    fn prepare_profile(
+        &self,
+        owner: &styx_core::operations::OwnerLease,
+    ) -> Result<crate::providers::cua::OwnedCuaConfig, styx_contracts::error::ErrorCategory> {
+        self.admitted
+            .validate_ownership()
+            .map_err(|_| styx_contracts::error::ErrorCategory::StateConflict)?;
+        self.source.prepare_profile(owner)
+    }
+    fn validate_before_spawn(&self) -> Result<(), styx_contracts::error::ErrorCategory> {
+        self.admitted
+            .validate_ownership()
+            .map_err(|_| styx_contracts::error::ErrorCategory::StateConflict)?;
+        self.source.validate_before_spawn()
+    }
+    fn validate_control(&self) -> Result<(), styx_contracts::error::ErrorCategory> {
+        self.admitted
+            .validate_ownership()
+            .map_err(|_| styx_contracts::error::ErrorCategory::StateConflict)?;
+        self.source.validate_control()
+    }
+}
+#[cfg(target_os = "linux")]
+async fn prepare_computer(
+    admitted: &Arc<Admitted>,
+    host: &OwnedExecHost,
+) -> Result<Option<Arc<dyn crate::host::protocol::computer::ComputerBootstrap>>, ForegroundError> {
+    let retained = admitted.clone();
+    let enabled =
+        tokio::task::spawn_blocking(move || retained.profile.pin_cua_driver().map(|p| p.is_some()))
+            .await
+            .map_err(|_| ForegroundError("profile_reader_failed"))??;
+    if !enabled {
+        return Ok(None);
+    }
+    // Zero candidates is normal on a headless Host; multiple candidates are
+    // ambiguous. Never pick the first desktop or inherit stale SSH/tmux env.
+    let snapshot = super::discover_desktop_candidates().await?;
+    if snapshot.candidates.len() != 1 {
+        return Err(ForegroundError("desktop_selection_required"));
+    }
+    let source = crate::host::coordinator::DesktopSource::start(
+        snapshot.candidates.into_iter().next().expect("exactly one"),
+    )
+    .await
+    .map_err(|e| ForegroundError(e.code()))?;
+    let budget = match host.reserve_computer_io() {
+        Ok(v) => v,
+        Err(_) => {
+            let _ = source.stop().await;
+            return Err(ForegroundError("computer_capacity"));
+        }
+    };
+    let mut grants = BTreeMap::new();
+    for cap in [
+        CapabilityId::DesktopWindowsRead,
+        CapabilityId::DesktopWindowsControl,
+        CapabilityId::DesktopCapture,
+        CapabilityId::DesktopPointer,
+        CapabilityId::DesktopKeyboard,
+        CapabilityId::DesktopAccessibility,
+    ] {
+        grants.insert(
+            cap,
+            crate::host::coordinator::DesktopGrant {
+                configured: true,
+                remote_grant: true,
+                local_policy_allowed: true,
+            },
+        );
+    }
+    let binding = match host
+        .authority()
+        .configure_desktop(source.clone(), budget, grants)
+        .await
+    {
+        Ok(v) => v,
+        Err(_) => {
+            let _ = source.stop().await;
+            return Err(ForegroundError("computer_session_refused"));
+        }
+    };
+    let retained = admitted.clone();
+    let prepared = tokio::task::spawn_blocking(move || {
+        super::computer::prepare_computer_bootstrap(retained.profile.clone(), source, binding)
+    })
+    .await
+    .map_err(|_| ForegroundError("computer_bootstrap_failed"))??;
+    Ok(prepared.map(|source| {
+        Arc::new(ForegroundComputer {
+            admitted: admitted.clone(),
+            source,
+        }) as Arc<dyn crate::host::protocol::computer::ComputerBootstrap>
+    }))
+}
 fn event(
     events: &mpsc::Sender<ForegroundEvent>,
     cancel: &CancellationToken,
@@ -350,6 +452,18 @@ async fn run_owned(
         } else {
             None
         };
+    #[cfg(target_os = "linux")]
+    let computer = if mode == HostWireMode::PairedV3 {
+        match prepare_computer(&admitted, &host).await {
+            Ok(source) => source,
+            Err(_) => {
+                event(&events, &cancel, "computer_unavailable", &device, None);
+                None
+            }
+        }
+    } else {
+        None
+    };
     // Keep this SAME protocol and executor across transport reconnects. In v3,
     // per-chat owner admission comes only from the authenticated fixed Gateway;
     // loading a device credential does not register a bootstrap MCP owner.
@@ -375,9 +489,17 @@ async fn run_owned(
             })
             .and_then(|protocol| {
                 #[cfg(target_os = "linux")]
-                if let Some(source) = &browser {
-                    return protocol.with_browser_profiles(source.clone());
-                }
+                let protocol = if let Some(source) = &browser {
+                    protocol.with_browser_profiles(source.clone())?
+                } else {
+                    protocol
+                };
+                #[cfg(target_os = "linux")]
+                let protocol = if let Some(source) = &computer {
+                    protocol.with_computer_profiles(source.clone())?
+                } else {
+                    protocol
+                };
                 Ok(protocol)
             })
             .map(ConnectionSession::Paired)
@@ -509,6 +631,8 @@ async fn run_owned(
     drop(host);
     #[cfg(target_os = "linux")]
     drop(browser);
+    #[cfg(target_os = "linux")]
+    drop(computer);
     drop(admitted);
     if let Some(error) = failure {
         Err(error)
@@ -528,6 +652,7 @@ impl ConnectionSession<'_> {
     async fn drain_browser_inputs(&self) {
         if let Self::Paired(protocol) = self {
             protocol.drain_browser_inputs().await;
+            protocol.drain_computer_inputs().await;
         }
     }
     async fn run_connection(&self, link: &mut HostWssLink) -> Result<(), ()> {

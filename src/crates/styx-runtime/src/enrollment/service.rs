@@ -955,6 +955,7 @@ impl EnrollmentService {
                 Ok(GatewayExecProfile {
                     device_id: d.id,
                     browser_approved: d.grant.browser,
+                    computer_approved: d.grant.computer,
                     capability_generation: d.generation,
                     platform: p.platform.clone(),
                     cwd: p.cwd.clone(),
@@ -1054,6 +1055,8 @@ pub struct GatewayExecProfile {
     pub device_id: DeviceId,
     /// Recovered Core metadata only; a live Browser ConnectionLease authorizes.
     pub browser_approved: bool,
+    /// Metadata only; a live independent Computer ConnectionLease authorizes.
+    pub computer_approved: bool,
     pub capability_generation: String,
     pub platform: String,
     pub cwd: String,

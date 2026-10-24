@@ -2,6 +2,7 @@
 //! This first slice has no watcher, agent authentication, attachment or input API.
 //! The owned session_probe worker isolates SDK allocations; MAX_FACTS only
 //! bounds retained/serialized facts, not upstream DBus frame allocation.
+pub(crate) mod association;
 pub mod manager;
 
 use futures_util::{StreamExt, TryStreamExt, stream};
