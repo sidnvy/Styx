@@ -145,7 +145,7 @@ async fn original_rsa_ca_independent_leaf_and_strict_loopback_aggregate() {
         .unwrap(),
     );
     let strict = GatewayClientTls::from_pinned_ca_pem(&ca_pem, anchor.clone(), None).unwrap();
-    assert_eq!(strict.configured_anchors(), &[anchor.clone()]);
+    assert_eq!(strict.configured_anchors(), std::slice::from_ref(&anchor));
     assert!(strict.configured_leaf().is_none());
     let (accepted, bytes) = loopback(server.clone(), &strict, "127.0.0.1").await;
     assert!(accepted.is_ok());
