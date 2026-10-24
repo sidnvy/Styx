@@ -528,7 +528,7 @@ impl ScopeInputs {
                 .install_root
                 .to_str()
                 .ok_or(LegacyError::Invalid),
-            Self::Gateway { .. } => Ok(""),
+            Self::Gateway { gateway, .. } => Ok(&gateway.working_directory),
         }
     }
     fn stop_usec(&self) -> u64 {

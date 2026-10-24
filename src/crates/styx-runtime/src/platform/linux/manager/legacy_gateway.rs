@@ -106,6 +106,7 @@ pub(super) struct VerifiedGatewayInputs {
     pub(super) node_sha: Sha256Digest,
     pub(super) expected_argv: Vec<String>,
     pub(super) publisher_sha256: String,
+    pub(super) working_directory: String,
     configuration: PrivateRoot,
     configuration_identity: RootIdentity,
     deployment: RawFile,
@@ -453,6 +454,10 @@ impl VerifiedGatewayInputs {
             .map_err(unavailable)?
             .ok_or(LegacyError::Unavailable)?
             .dir;
+        // systemd's user manager fills an omitted WorkingDirectory with the
+        // owning user's home and missing-ok=true. The official DBus getter
+        // encodes that flag as `!`; the original unit itself stays unchanged.
+        let working_directory = format!("!{}", path_text(&home)?);
         let unit_file = home.join(".config/systemd/user").join(&unit_name);
         let mut unit_fd = open_checked(&unit_file, false)?;
         let unit_stat = stat(&unit_fd)?;
@@ -470,6 +475,7 @@ impl VerifiedGatewayInputs {
                 path_text(state)?.to_owned(),
             ],
             publisher_sha256: runtime.publisher_sha256,
+            working_directory,
             configuration,
             configuration_identity,
             deployment,
