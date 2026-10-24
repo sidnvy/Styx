@@ -363,6 +363,8 @@ pub struct EnrollmentService {
     hosts: BTreeSet<String>,
     clock: Clock,
     uncertain: bool,
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    startup_transport_reconciled: bool,
 }
 impl EnrollmentService {
     pub fn recover_existing(
@@ -397,9 +399,52 @@ impl EnrollmentService {
             hosts: allowed_hosts.into_iter().collect(),
             clock: Clock::new(now),
             uncertain: false,
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            startup_transport_reconciled: false,
         };
         service.verify_profiles()?;
         Ok(service)
+    }
+    /// Foreground bootstrap only, before SharedEnrollment/Relay/listener exists.
+    /// The sealed closure retains this exact owner's actual execution lease and
+    /// writer, not a caller's ready flag or evidence that Host commands exited.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    pub(crate) fn reconcile_recovered_foreground_transports(
+        &mut self,
+        closure: crate::foreground::StartupTransportClosure<'_>,
+    ) -> Result<(), ServiceError> {
+        self.healthy()?;
+        if self.startup_transport_reconciled {
+            return Err(ServiceError::new(
+                503,
+                "startup_transport_already_reconciled",
+            ));
+        }
+        let owner = self.store.configuration_root();
+        closure
+            .validate_for(&owner)
+            .map_err(|error| ServiceError::new(503, error.code()))?;
+        // Consume this service's one startup opportunity even if a later check
+        // fails. A partially reconciled object must never publish networking.
+        self.startup_transport_reconciled = true;
+        let result = (|| {
+            let devices = self.ledger.recovery_devices(&self.control)?;
+            for device in devices.into_iter().filter(|device| !device.revoked) {
+                for lane in [Lane::Exec, Lane::Computer, Lane::Browser] {
+                    self.ledger.reconcile_recovered_lane(
+                        self.control.attest_recovered_lane_closed(&device, lane),
+                    )?;
+                }
+            }
+            closure
+                .validate_for(&owner)
+                .map_err(|error| ServiceError::new(503, error.code()))?;
+            Ok(())
+        })();
+        if result.is_err() {
+            self.uncertain = true;
+        }
+        result
     }
     #[cfg(test)]
     pub(crate) fn configuration_root(&self) -> crate::store::OwnedConfigurationRoot {

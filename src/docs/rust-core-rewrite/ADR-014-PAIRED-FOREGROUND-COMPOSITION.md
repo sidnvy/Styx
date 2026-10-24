@@ -54,3 +54,31 @@ same executor and lease reuse after cleanup. Prepared fixture inputs are clearly
 test-owned imports, not evidence of product fresh onboarding/profile persistence.
 No system registration, root/SYSTEM workaround, original service disruption or
 final package/platform/account claim is authorized by this slice.
+
+## Startup transport reconciliation correction
+
+The first actual ordinary-CLI restart exposed a missing bootstrap composition:
+recovered devices intentionally retain RecoveredUnknown lanes, so the new Gateway
+cannot admit the retained Host until old transport authority is proven closed.
+Generic EnrollmentService::recover_existing continues to preserve Unknown.
+
+Only foreground startup can mint a non-Clone/non-Serde local closure borrowing the
+actual Admitted resources, before any SharedEnrollment/Relay/listener exists. It
+validates the original Gateway execution lock and protected roots/inputs, existing
+old-owner/service refusals and the exact same OwnedConfigurationRoot authority
+(Arc identity, not path spelling). The old cooperating Rust owner retains both
+execution lease and shared configuration writer through transport/blocking cleanup;
+new acquisition therefore excludes those old authority holders. Gateway transport
+is in process, not delegated to an untracked OS child; process death also closes
+its sockets. This is not evidence that a remote Host command exited.
+
+The private service port consumes the closure once, validates before and after,
+and reconciles only exact current nonrevoked device/fingerprint/credential-hash/
+capability-generation startup lanes through existing Core attest/reconcile ports.
+Core refuses Connected and later runtime Unknown. A failed partial reconciliation
+poisons this service instead of publishing a partly ready listener. No operation
+result, credential or journal is rewritten, and no side effect is replayed.
+
+These facts apply to the cooperating native foreground scope only. JS does not
+participate in Rust locks; nonempty old catalogs/enrollment and original owner
+resources still require migration, never an inferred cutover authorization.

@@ -56,6 +56,8 @@ pub async fn inspect(state_dir: &Path) -> Result<ProfileDiagnostics, ForegroundE
 mod run;
 pub use run::host_run;
 mod gateway;
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+pub(crate) use gateway::StartupTransportClosure;
 pub use gateway::{GatewayForegroundOutcome, gateway_run};
 
 /// Read OS candidates for the actual invoking user. No state/profile, environment

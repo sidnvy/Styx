@@ -52,6 +52,9 @@ pub async fn gateway_run(
 }
 
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+pub(crate) use platform::StartupTransportClosure;
+
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 mod platform {
     use super::*;
     use crate::{
@@ -224,6 +227,26 @@ mod platform {
         // Retains the SAME writer even if service boot fails after uncertain I/O.
         _configuration: OwnedConfigurationRoot,
         address: SocketAddr,
+    }
+    /// One-shot bootstrap evidence for this exact cooperating Rust foreground
+    /// scope. Not proof that a legacy writer stopped or a remote process exited.
+    /// The private borrow cannot outlive the actual execution/configuration owner.
+    pub(crate) struct StartupTransportClosure<'a> {
+        admitted: &'a Admitted,
+    }
+    impl StartupTransportClosure<'_> {
+        pub(crate) fn validate_for(
+            &self,
+            owner: &OwnedConfigurationRoot,
+        ) -> Result<(), ForegroundError> {
+            if !self.admitted._configuration.same_authority(owner) {
+                return Err(error("gateway_startup_authority_mismatch"));
+            }
+            self.admitted.validate()?;
+            owner
+                .ensure_admission()
+                .map_err(|_| error("gateway_startup_admission_unproven"))
+        }
     }
     impl Admitted {
         fn validate(&self) -> Result<(), ForegroundError> {
@@ -615,6 +638,28 @@ mod platform {
         if stop.is_cancelled() {
             return Err(error("gateway_start_cancelled"));
         }
+        // Before any new transport authority exists, reconcile only startup
+        // RecoveredUnknown lanes under the exact held owner. All protected reads
+        // stay on a bounded blocking worker, with its permit held until exit.
+        let checked = admitted.clone();
+        let permit = LOADERS
+            .try_acquire()
+            .map_err(|_| error("gateway_reader_busy"))?;
+        let service = tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let mut service = service;
+            service
+                .reconcile_recovered_foreground_transports(StartupTransportClosure {
+                    admitted: &checked,
+                })
+                .map_err(|e| error(e.code()))?;
+            Ok::<_, ForegroundError>(service)
+        })
+        .await
+        .map_err(|_| error("gateway_reader_failed"))??;
+        if stop.is_cancelled() {
+            return Err(error("gateway_start_cancelled"));
+        }
         let shared = SharedEnrollment::new(service);
         let partition = Arc::new(Semaphore::new(styx_contracts::HOST_QUEUED_BYTES));
         let relay = RelayHandle::new(
@@ -706,6 +751,78 @@ mod platform {
             Err(error("gateway_protected_input_changed"))
         } else {
             Ok(outcome)
+        }
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        use std::{fs, os::unix::fs::PermissionsExt};
+
+        #[test]
+        fn startup_closure_binds_actual_writer_lease_and_original_input() {
+            // Preserve this private fixture on assertion failure for inspection.
+            let path =
+                std::env::temp_dir().join(format!("styx-startup-closure-{}", uuid::Uuid::new_v4()));
+            fn directory(path: &Path) {
+                fs::create_dir(path).unwrap();
+                fs::set_permissions(path, fs::Permissions::from_mode(0o700)).unwrap();
+            }
+            fn configuration(path: &Path) -> OwnedConfigurationRoot {
+                directory(path);
+                let root = PrivateRoot::open(path).unwrap();
+                let writer = root.try_configuration_writer().unwrap();
+                OwnedConfigurationRoot::open_existing(root, writer).unwrap()
+            }
+            directory(&path);
+            let state_path = path.join("state");
+            directory(&state_path);
+            let gateway_path = state_path.join("gateway");
+            directory(&gateway_path);
+            let input = state_path.join("binding.json");
+            fs::write(&input, b"original").unwrap();
+            fs::set_permissions(&input, fs::Permissions::from_mode(0o600)).unwrap();
+            let state = Arc::new(PrivateRoot::open(&state_path).unwrap());
+            let gateway = Arc::new(PrivateRoot::open(&gateway_path).unwrap());
+            let owner = configuration(&path.join("enrollment"));
+            let foreign = configuration(&path.join("foreign-enrollment"));
+            let mut inputs = vec![];
+            read(&state, "binding.json", &mut inputs).unwrap();
+            let admitted = Admitted {
+                state,
+                gateway: gateway.clone(),
+                runtime_root: None,
+                inputs,
+                absent_inputs: vec![],
+                lease: gateway.try_execution_lease().unwrap(),
+                _configuration: owner.clone(),
+                address: "127.0.0.1:32651".parse().unwrap(),
+            };
+            let closure = StartupTransportClosure {
+                admitted: &admitted,
+            };
+            closure.validate_for(&owner).unwrap();
+            assert!(
+                closure.validate_for(&foreign).is_err(),
+                "an unrelated writer/root cannot authorize startup reconciliation"
+            );
+            assert!(
+                gateway.try_execution_lease().is_err(),
+                "validation retains the actual original execution lease"
+            );
+            fs::write(&input, b"changed").unwrap();
+            assert!(
+                closure.validate_for(&owner).is_err(),
+                "held locks cannot substitute for unchanged original protected input"
+            );
+            assert!(
+                gateway.try_execution_lease().is_err(),
+                "failed observation must not silently release ownership"
+            );
+            drop(admitted);
+            gateway.try_execution_lease().unwrap().validate().unwrap();
+            drop((owner, foreign, gateway));
+            fs::remove_dir_all(path).unwrap();
         }
     }
 }
