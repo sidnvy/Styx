@@ -102,6 +102,9 @@ async fn actual_original_service_scope_settlement() {
     let publisher = PathBuf::from(std::env::var("STYX_TEST_LEGACY_SERVICE_PUBLISHER").unwrap());
     let expected = PublisherFingerprint::parse(fixture["publisher_pin"].as_str().unwrap()).unwrap();
     let mut records = vec![];
+    // Keep both original manager references and fences until the independent
+    // controller has sampled terminal facts and its retained cgroups.
+    let mut retained_proofs = Vec::with_capacity(2);
     for role in ["normal", "side"] {
         let spec = &fixture["roles"][role];
         let state = PathBuf::from(spec["state_dir"].as_str().unwrap());
@@ -168,6 +171,7 @@ async fn actual_original_service_scope_settlement() {
             "candidate_manifest_sha256":proof.target().report().manifest_sha256.to_hex()});
         save(&root.join(format!("{role}-confirmed.json")), &row);
         records.push(row);
+        retained_proofs.push(proof);
         if role == "normal" {
             let deadline = Instant::now() + Duration::from_secs(10);
             while !root.join("side-independently-witnessed.json").exists() {
@@ -184,4 +188,14 @@ async fn actual_original_service_scope_settlement() {
         &json!({"schema":1,"status":"PASS_ORIGINAL_SERVICE_SETTLEMENT_ONLY",
         "records":records,"migration_committed":false,"native_activated":false,"runtime_ready":false}),
     );
+    let deadline = Instant::now() + Duration::from_secs(15);
+    while !root.join("settlement-independently-witnessed.json").exists() {
+        assert!(
+            Instant::now() < deadline,
+            "independent terminal manager and cgroup facts not acknowledged"
+        );
+        sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(retained_proofs.len(), 2);
+    drop(retained_proofs);
 }
