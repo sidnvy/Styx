@@ -20,7 +20,7 @@ use std::{
     io::Write,
     os::unix::fs::{FileExt, MetadataExt},
     path::PathBuf,
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 use zeroize::Zeroizing;
 
@@ -125,6 +125,7 @@ pub struct LegacyWriterFence {
     locks: Vec<PinnedLegacyLock>,
     frozen: Vec<FrozenFile>,
     service: Option<Arc<LegacyServiceDescriptor>>,
+    retirement: Mutex<retirement::RetirementSlot>,
 }
 impl std::fmt::Debug for LegacyWriterFence {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -204,6 +205,7 @@ impl LegacyWriterFence {
             locks: Vec::with_capacity(LOCKS.len()),
             frozen: Vec::new(),
             service,
+            retirement: Mutex::new(retirement::RetirementSlot::default()),
         };
         let outcome = fence.acquire_inner(inputs);
         match outcome {
@@ -369,7 +371,12 @@ impl LegacyWriterFence {
                         Ok(validate_locks(directory, &self.locks))
                     })
                     .map_err(|_| JournalError::Unknown)??;
+                let retirement = self.retirement.lock().map_err(|_| JournalError::Unknown)?;
+                retirement.require_complete_or_original()?;
                 for old in &self.frozen {
+                    if retirement.validate_relocated(&self.host, old)? {
+                        continue;
+                    }
                     let root = match old.binding.root {
                         LegacyMaterialRoot::Configuration => &state.root,
                         LegacyMaterialRoot::Host => &self.host,
@@ -519,3 +526,7 @@ fn validate_locks(directory: &File, locks: &[PinnedLegacyLock]) -> JournalResult
 #[cfg(test)]
 #[path = "legacy_handoff_tests.rs"]
 mod tests;
+
+#[path = "legacy_retirement.rs"]
+mod retirement;
+pub(crate) use retirement::CredentialRetirementObservation;

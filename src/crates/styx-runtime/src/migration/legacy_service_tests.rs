@@ -93,6 +93,14 @@ fn save(path: &Path, value: &serde_json::Value) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires fresh STYX_TEST_LEGACY_SERVICE_FIXTURE, native signed target and externally owned original user units; not migration/activation"]
 async fn actual_original_service_scope_settlement() {
+    original_service_scene(false).await;
+}
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires fresh externally owned original service fixture, candidate and explicit credential-retirement observer; not migration/activation"]
+async fn actual_original_service_scope_credential_retirement() {
+    original_service_scene(true).await;
+}
+async fn original_service_scene(retire_credential: bool) {
     let root = PathBuf::from(std::env::var("STYX_TEST_LEGACY_SERVICE_FIXTURE").unwrap());
     PrivateRoot::open(&root).unwrap();
     let fixture: serde_json::Value =
@@ -105,6 +113,7 @@ async fn actual_original_service_scope_settlement() {
     // Keep both original manager references and fences until the independent
     // controller has sampled terminal facts and its retained cgroups.
     let mut retained_proofs = Vec::with_capacity(2);
+    let mut retired_credentials = Vec::with_capacity(2);
     for role in ["normal", "side"] {
         let spec = &fixture["roles"][role];
         let state = PathBuf::from(spec["state_dir"].as_str().unwrap());
@@ -163,15 +172,38 @@ async fn actual_original_service_scope_settlement() {
         );
         assert!(proof.configuration_root().ensure_admission().is_err());
         proof.target().revalidate().unwrap();
-        let row = json!({"role":role,"unit":spec["unit"],"scope":"original managed service physical settlement only; not activation/handoff",
+        let mut row = json!({"role":role,"unit":spec["unit"],"scope":"original managed service physical settlement only; not activation/handoff",
             "term_attempted":fact.term_attempted,"signal_accepted":fact.signal_accepted,
             "original_main_exited":fact.original_main_exited,"original_cgroup_empty":fact.original_cgroup_empty,
             "systemd_parent_reported_exit0":fact.manager_reported_success,"settlement_worker_joined":fact.worker_joined,
             "writer_still_fenced":true,"descriptor_sha256":proof.descriptor_sha256().to_hex(),
             "candidate_manifest_sha256":proof.target().report().manifest_sha256.to_hex()});
+        if retire_credential {
+            let retired = match proof.retire_legacy_credential() {
+                Ok(value) => value,
+                Err(failure) => panic!(
+                    "original credential retirement refused: {:?}",
+                    failure.code()
+                ),
+            };
+            let observation = retired.observation().unwrap();
+            assert!(
+                observation.original_locator_absent
+                    && observation.original_inode_preserved
+                    && observation.original_bytes_preserved
+            );
+            assert!(retired.configuration_root().ensure_admission().is_err());
+            row["credential_retired"] = true.into();
+            row["transaction_id"] = observation.transaction_id.as_str().into();
+            row["retired_relative_path"] =
+                observation.retired_relative_path.to_str().unwrap().into();
+            row["retired_receipt_sha256"] = observation.retired_receipt_sha256.to_hex().into();
+            retired_credentials.push(retired);
+        } else {
+            retained_proofs.push(proof);
+        }
         save(&root.join(format!("{role}-confirmed.json")), &row);
         records.push(row);
-        retained_proofs.push(proof);
         if role == "normal" {
             let deadline = Instant::now() + Duration::from_secs(10);
             while !root.join("side-independently-witnessed.json").exists() {
@@ -185,10 +217,10 @@ async fn actual_original_service_scope_settlement() {
     }
     save(
         &root.join("service-settlement.json"),
-        &json!({"schema":1,"status":"PASS_ORIGINAL_SERVICE_SETTLEMENT_ONLY",
+        &json!({"schema":1,"status":if retire_credential {"PASS_ORIGINAL_SERVICE_CREDENTIAL_RETIREMENT_ONLY"} else {"PASS_ORIGINAL_SERVICE_SETTLEMENT_ONLY"},
         "records":records,"migration_committed":false,"native_activated":false,"runtime_ready":false}),
     );
-    let deadline = Instant::now() + Duration::from_secs(15);
+    let deadline = Instant::now() + Duration::from_secs(if retire_credential { 45 } else { 15 });
     while !root
         .join("settlement-independently-witnessed.json")
         .exists()
@@ -199,6 +231,7 @@ async fn actual_original_service_scope_settlement() {
         );
         sleep(Duration::from_millis(20)).await;
     }
-    assert_eq!(retained_proofs.len(), 2);
+    assert_eq!(retained_proofs.len() + retired_credentials.len(), 2);
     drop(retained_proofs);
+    drop(retired_credentials);
 }

@@ -269,3 +269,99 @@ impl SettledLegacyService {
 #[cfg(test)]
 #[path = "legacy_service_tests.rs"]
 mod tests;
+
+/// The same stopped-service proof, writer and signed candidate after the original
+/// credential locator was retired. This is NOT owner handoff or native admission.
+#[must_use = "retirement remains pending under original maintenance; no activation"]
+pub struct RetiredLegacyCredential {
+    original: SettledLegacyService,
+}
+#[must_use = "retain original writer/fence/FDs after an uncertain retirement"]
+pub struct CredentialRetirementFailure {
+    code: TransitionError,
+    retained: Box<SettledLegacyService>,
+}
+impl CredentialRetirementFailure {
+    pub fn code(&self) -> TransitionError {
+        self.code
+    }
+    pub fn configuration_root(&self) -> &OwnedConfigurationRoot {
+        self.retained.configuration_root()
+    }
+}
+pub struct CredentialRetirementObservation {
+    pub transaction_id: styx_contracts::identity::TransactionId,
+    pub retired_relative_path: std::path::PathBuf,
+    pub original_inode_preserved: bool,
+    pub original_bytes_preserved: bool,
+    pub original_locator_absent: bool,
+    pub retired_receipt_sha256: styx_contracts::identity::Sha256Digest,
+}
+impl SettledLegacyService {
+    /// A synchronous owned filesystem transition: no cancellation point can
+    /// abandon the original writer between Prepared, rename/fsync and receipt.
+    /// Multi-thread block_in_place yields unrelated tasks; DBus sampling uses the
+    /// SAME retained connection. No ordinary dispatch or execution lease opens.
+    pub fn retire_legacy_credential(
+        self,
+    ) -> Result<RetiredLegacyCredential, CredentialRetirementFailure> {
+        let handle = match tokio::runtime::Handle::try_current() {
+            Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+                handle
+            }
+            _ => {
+                return Err(CredentialRetirementFailure {
+                    code: TransitionError::Unsupported,
+                    retained: Box::new(self),
+                });
+            }
+        };
+        let result = tokio::task::block_in_place(|| {
+            handle
+                .block_on(self.proof.verify_original_still_settled())
+                .map_err(classify)?;
+            self.proof
+                .retire_credential_locator(&self.target)
+                .map_err(classify)?;
+            if handle
+                .block_on(self.proof.verify_original_still_settled())
+                .is_err()
+            {
+                self.proof.invalidate_credential_retirement();
+                return Err(TransitionError::Unknown);
+            }
+            Ok(())
+        });
+        match result {
+            Ok(()) => Ok(RetiredLegacyCredential { original: self }),
+            Err(code) => Err(CredentialRetirementFailure {
+                code,
+                retained: Box::new(self),
+            }),
+        }
+    }
+}
+impl RetiredLegacyCredential {
+    pub fn configuration_root(&self) -> &OwnedConfigurationRoot {
+        self.original.configuration_root()
+    }
+    pub fn target(&self) -> &VerifiedNativeRelease {
+        self.original.target()
+    }
+    /// Fresh preserved-material observation, never an admission/commit port.
+    pub fn observation(&self) -> Result<CredentialRetirementObservation, TransitionError> {
+        let value = self
+            .original
+            .proof
+            .credential_retirement_observation()
+            .map_err(classify)?;
+        Ok(CredentialRetirementObservation {
+            transaction_id: value.transaction_id,
+            retired_relative_path: value.retired_relative_path,
+            original_inode_preserved: value.original_inode_preserved,
+            original_bytes_preserved: value.original_bytes_preserved,
+            original_locator_absent: value.original_locator_absent,
+            retired_receipt_sha256: value.retired_receipt_sha256,
+        })
+    }
+}

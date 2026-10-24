@@ -374,6 +374,8 @@ def execute(args):
                 ("native-root", NATIVE_ROOT_TEST, "STYX_TEST_NATIVE_ROOT_ROOT"),
                 ("management-phases", MANAGEMENT_PHASE_TEST, "STYX_TEST_MANAGEMENT_PHASE_ROOT"),
                 ("native-transaction", NATIVE_TRANSACTION_TEST, "STYX_TEST_NATIVE_TRANSACTION_ROOT"),
+                ("credential-journal", "store::management::handoff::tests::credential_retirement_same_journal_and_pending_barrier_files_batch", "STYX_TEST_MANAGEMENT_HANDOFF_ROOT"),
+                ("credential-interrupted", "store::management::handoff::tests::credential_retirement_preflight_and_interrupted_originals_batch", "STYX_TEST_MANAGEMENT_HANDOFF_ROOT"),
             ):
                 check = gate.run(label, ["cargo", "test", "-p", "styx-runtime", "--locked", "--offline", test, "--", "--ignored", "--exact", "--nocapture"], timeout=120,
                     extra_env={env_name: str(evidence / ("owned-" + label))})
@@ -565,7 +567,7 @@ def execute(args):
         if args.linux_discovery:
             required |= {"linux-discovery", "cli-desktop-candidates"}
         if args.enrollment_store:
-            required |= {"payload-store", "enrollment-store", "enrollment-clock", "enrollment-recovery", "enrollment-owned", "configuration-owner", "configuration-maintenance", "management-preparation", "native-root", "management-phases", "native-transaction"}
+            required |= {"payload-store", "enrollment-store", "enrollment-clock", "enrollment-recovery", "enrollment-owned", "configuration-owner", "configuration-maintenance", "management-preparation", "native-root", "management-phases", "native-transaction", "credential-journal", "credential-interrupted"}
         if args.enrollment_service:
             required |= {"enrollment-profile", "enrollment-controller", "enrollment-service"}
         if args.paired_host:

@@ -335,6 +335,52 @@ impl OwnedConfigurationRoot {
             Ok(pin)
         })
     }
+    /// The original maintenance owner may initialize exactly its management
+    /// namespace for migration. No new writer, enrollment namespace or fresh
+    /// root authority is created; an unexpected existing name is not adopted.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    pub(super) fn claim_legacy_management_namespace(
+        &self,
+        maintenance: &ConfigurationMaintenance,
+        budget: JournalBudget,
+    ) -> JournalResult<(u64, u64)> {
+        if !budget.valid() {
+            return Err(JournalError::InvalidInput);
+        }
+        self.with_maintenance(maintenance, |state| {
+            let name = NamespaceName::ManagementV1;
+            if let Some(binding) = state
+                .namespaces
+                .iter_mut()
+                .find(|binding| binding.name.as_str() == name.as_str())
+            {
+                if binding.claimed {
+                    return Err(JournalError::Conflict);
+                }
+                binding.claimed = true;
+                binding.budget = budget;
+                return Ok(binding.pin);
+            }
+            state
+                .root
+                .ensure_absent(name.as_str())
+                .map_err(|_| JournalError::Conflict)?;
+            let pin = state
+                .root
+                .inner
+                .with_configuration_writer_directory(&state.writer, |directory| {
+                    Ok(files::create_new_namespace(directory, name))
+                })
+                .map_err(|_| JournalError::Unknown)??;
+            state.namespaces.push(NamespaceBinding {
+                name,
+                pin,
+                budget,
+                claimed: true,
+            });
+            Ok(pin)
+        })
+    }
     // Hot checks consume only published rejection facts. Actual store access
     // still validates the guarded root and full namespace inventory before/after.
     pub(crate) fn ensure_usable(&self) -> JournalResult<()> {

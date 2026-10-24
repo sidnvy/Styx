@@ -5,6 +5,11 @@ use super::configuration::{ConfigurationMaintenance, OwnedConfigurationRoot};
 use super::secure_journal::{JournalBudget, JournalError, JournalResult};
 use styx_contracts::identity::{Sha256Digest, TransactionId};
 use styx_core::management::transaction::{DesiredStateCommit, DurableStage, JournalReceipt};
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[path = "management_handoff.rs"]
+pub(in crate::store) mod handoff;
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+pub use handoff::{CredentialRetirementObservation, CredentialRetirementStage};
 
 pub struct PreparedPersistence {
     pub intent: DesiredStateCommit,
@@ -28,6 +33,9 @@ pub struct ManagementTransactionObservation {
 pub struct ManagementInventory {
     pub high_water: u64,
     pub transactions: Vec<ManagementTransactionObservation>,
+    /// Uncommitted legacy credential sub-stages; never admission/cutover proof.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    pub handoffs: Vec<CredentialRetirementObservation>,
     /// Retained unknown names/materials/temporary files; never silently deleted.
     pub orphans: Vec<String>,
 }
@@ -147,6 +155,7 @@ impl OwnedManagementJournal {
                 let scan = super::secure_journal::files::scan(dir, self.budget)?;
                 let inventory = platform::inventory(&scan)?;
                 if !inventory.orphans.is_empty()
+                    || !inventory.handoffs.is_empty()
                     || inventory
                         .transactions
                         .last()
@@ -485,6 +494,36 @@ mod platform {
             });
         }
         transactions.sort_by_key(|transaction| transaction.intent.sequence);
+        let handoff_inventory = handoff::scan_handoffs(scan)?;
+        let mut ids: BTreeSet<_> = transactions
+            .iter()
+            .map(|tx| tx.intent.transaction_id.clone())
+            .collect();
+        for record in &handoff_inventory.records {
+            if !ids.insert(record.intent.transaction_id.clone())
+                || !sequences.insert(record.intent.sequence)
+            {
+                return Err(JournalError::Conflict);
+            }
+            high_water = high_water.max(record.intent.sequence);
+            // There is deliberately no committed handoff stage yet. It must be
+            // the sole pending tail after all desired-state history committed.
+            if transactions.iter().any(|tx| {
+                tx.intent.sequence >= record.intent.sequence
+                    || !tx
+                        .phase_receipts
+                        .last()
+                        .is_some_and(|p| p.stage == DurableStage::Committed)
+            }) {
+                return Err(JournalError::Conflict);
+            }
+            if transactions.last().is_some_and(|tx| {
+                tx.intent.target_state_sha256 != record.intent.before_state_sha256
+            }) {
+                return Err(JournalError::Conflict);
+            }
+        }
+        used.extend(handoff_inventory.used);
         for (index, tx) in transactions.iter().enumerate() {
             let committed = tx
                 .phase_receipts
@@ -503,6 +542,11 @@ mod platform {
         Ok(ManagementInventory {
             high_water,
             transactions,
+            handoffs: handoff_inventory
+                .records
+                .iter()
+                .map(handoff::ObservedRetirement::observation)
+                .collect(),
             orphans: scan
                 .files
                 .iter()
@@ -582,7 +626,7 @@ mod platform {
             let receipt = with_directory(state, journal.namespace, |dir| {
                 let scan = files::scan(dir, journal.budget)?;
                 let inventory = inventory(&scan)?;
-                if !inventory.orphans.is_empty() {
+                if !inventory.orphans.is_empty() || !inventory.handoffs.is_empty() {
                     return Err(JournalError::Conflict);
                 }
                 let source = original(&scan, &intent.transaction_id)?;
@@ -733,7 +777,7 @@ mod platform {
             with_directory(state, journal.namespace, |dir| {
                 let scan = files::scan(dir, journal.budget)?;
                 let observed = inventory(&scan)?;
-                if !observed.orphans.is_empty() {
+                if !observed.orphans.is_empty() || !observed.handoffs.is_empty() {
                     return Err(JournalError::Conflict);
                 }
                 if let Some(existing) = observed

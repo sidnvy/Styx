@@ -1101,6 +1101,44 @@ pub(crate) struct LegacySettlementProof {
     _capacity: OwnedSemaphorePermit,
 }
 impl LegacySettlementProof {
+    /// Recheck the original pinned invocation while its reference is retained.
+    /// A different invocation, owner or leftover process is never adopted.
+    pub(crate) async fn verify_original_still_settled(&self) -> LegacyResult<()> {
+        let facts = tokio::time::timeout(Duration::from_secs(8), observe_original(&self.scope))
+            .await
+            .map_err(unknown)??;
+        if !facts.original_main_exited
+            || !facts.original_cgroup_empty
+            || !facts.manager_reported_success
+        {
+            return Err(LegacyError::Conflict);
+        }
+        Ok(())
+    }
+    pub(crate) fn retire_credential_locator(
+        &self,
+        target: &crate::release::VerifiedNativeRelease,
+    ) -> LegacyResult<()> {
+        self.scope
+            .fence
+            .retire_credential_locator(target)
+            .map_err(|error| match error {
+                crate::store::legacy_handoff::LegacyFenceError::Unknown => LegacyError::Unknown,
+                _ => LegacyError::Conflict,
+            })?;
+        Ok(())
+    }
+    pub(crate) fn credential_retirement_observation(
+        &self,
+    ) -> LegacyResult<crate::store::legacy_handoff::CredentialRetirementObservation> {
+        self.scope
+            .fence
+            .credential_retirement_observation()
+            .map_err(|_| LegacyError::Unknown)
+    }
+    pub(crate) fn invalidate_credential_retirement(&self) {
+        self.scope.fence.invalidate_credential_retirement();
+    }
     pub(crate) fn observation(&self) -> LegacySettlementObservation {
         self.observation
     }

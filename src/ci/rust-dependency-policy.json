@@ -331,6 +331,21 @@
       "kind": "explicit_owned_original_linux_user_services",
       "input": "STYX_TEST_LEGACY_SERVICE_FIXTURE + STYX_TEST_LEGACY_SERVICE_NATIVE_PAYLOAD + STYX_TEST_LEGACY_SERVICE_PUBLISHER; external owner registers only exact normal/side fixture units",
       "required_for": "original signed bootstrap/manager Invocation/main birth/image/cgroup physical settlement and side survival; not original deployment migration, native activation or rollback"
+    },
+    "store::management::handoff::tests::credential_retirement_same_journal_and_pending_barrier_files_batch": {
+      "kind": "explicit_owned_private_journal_files",
+      "input": "fresh STYX_TEST_MANAGEMENT_HANDOFF_ROOT",
+      "required_for": "same original management namespace/id/sequence and pending credential substage, immutable records and interrupted files; not service quiescence, power-loss, activation or complete migration"
+    },
+    "store::management::handoff::tests::credential_retirement_preflight_and_interrupted_originals_batch": {
+      "kind": "explicit_owned_private_journal_files",
+      "input": "fresh STYX_TEST_MANAGEMENT_HANDOFF_ROOT",
+      "required_for": "same original management namespace/id/sequence and pending credential substage, immutable records and interrupted files; not service quiescence, power-loss, activation or complete migration"
+    },
+    "migration::legacy_service::tests::actual_original_service_scope_credential_retirement": {
+      "kind": "explicit_owned_original_linux_user_service_retirement",
+      "input": "fresh external original-service fixture plus original publisher native target and independent old-entry/metadata controller",
+      "required_for": "actual physical settlement then same-inode credential retirement and original direct/stdin/stable entry refusal; not native validation, activation, rollback or full migration"
     }
   },
   "change_policy": "dependency or ignored-test additions require explicit policy review; preserve mature Cargo tooling rather than replacing its resolver/compiler/lints"
