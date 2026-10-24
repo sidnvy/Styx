@@ -6,7 +6,11 @@
 //! are implemented in this slice; other platforms explicitly return Unsupported.
 //! Secrets are not included in Debug output or preservation manifests.
 
+mod configuration;
 pub mod enrollment;
+pub mod management;
+mod secure_journal;
+pub use configuration::{ConfigurationMaintenance, OwnedConfigurationRoot};
 mod payload;
 pub use payload::{PayloadInventory, PayloadLimits, PayloadMember, PinnedExecutable};
 

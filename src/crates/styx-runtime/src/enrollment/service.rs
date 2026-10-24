@@ -401,8 +401,29 @@ impl EnrollmentService {
         service.verify_profiles()?;
         Ok(service)
     }
+    #[cfg(test)]
+    pub(crate) fn configuration_root(&self) -> crate::store::OwnedConfigurationRoot {
+        self.store.configuration_root()
+    }
+    pub(crate) fn begin_configuration_maintenance(
+        &self,
+        transaction: styx_contracts::identity::TransactionId,
+    ) -> Result<crate::store::ConfigurationMaintenance, ServiceError> {
+        self.healthy()?;
+        self.store
+            .configuration_root()
+            .begin_maintenance(transaction)
+            .map_err(|_| ServiceError::new(503, "configuration_maintenance_unavailable"))
+    }
+    fn ordinary_admission(&self) -> Result<(), ServiceError> {
+        self.healthy()?;
+        self.store
+            .configuration_root()
+            .ensure_admission()
+            .map_err(|_| ServiceError::new(503, "configuration_maintenance"))
+    }
     fn healthy(&self) -> Result<(), ServiceError> {
-        if self.uncertain {
+        if self.uncertain || self.store.configuration_root().ensure_usable().is_err() {
             Err(ServiceError::new(503, "enrollment_recovery_required"))
         } else {
             Ok(())
@@ -481,7 +502,7 @@ impl EnrollmentService {
         Ok(())
     }
     fn authenticate(&self, id: &DeviceId, token: &[u8]) -> Result<DeviceSelfProof, ServiceError> {
-        self.healthy()?;
+        self.ordinary_admission()?;
         if !(32..=4096).contains(&token.len()) {
             return Err(ServiceError::new(403, "device_unauthorized"));
         }
@@ -513,7 +534,7 @@ impl EnrollmentService {
         headers: &HeaderMap,
         pairing: &PairingContext,
     ) -> Result<(), ServiceError> {
-        self.healthy()?;
+        self.ordinary_admission()?;
         let r = route(method, path)?;
         if headers.get_all(HOST).iter().count() != 1
             || headers.contains_key(ORIGIN)
@@ -878,7 +899,7 @@ impl EnrollmentService {
         }
     }
     pub(crate) fn exec_profiles(&mut self) -> Result<Vec<GatewayExecProfile>, ServiceError> {
-        self.healthy()?;
+        self.ordinary_admission()?;
         self.ledger
             .devices_for_admin(&self.control.admin())?
             .into_iter()
@@ -903,7 +924,7 @@ impl EnrollmentService {
         id: &DeviceId,
         generation: &str,
     ) -> Result<(), ServiceError> {
-        self.healthy()?;
+        self.ordinary_admission()?;
         if self
             .ledger
             .devices_for_admin(&self.control.admin())?

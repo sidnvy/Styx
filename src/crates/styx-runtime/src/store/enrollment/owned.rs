@@ -3,61 +3,69 @@
 use super::*;
 
 pub struct OwnedEnrollmentJournal {
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    root: PrivateRoot,
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    writer: ConfigurationWriterGuard,
+    owner: crate::store::OwnedConfigurationRoot,
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     budget: JournalBudget,
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     namespace: (u64, u64),
 }
 impl OwnedEnrollmentJournal {
-    /// Takes, rather than duplicates, an existing private root and its exclusive
-    /// configuration writer. Existing namespace identity is pinned only once.
     pub fn open_existing(
         root: PrivateRoot,
-        mut writer: ConfigurationWriterGuard,
+        writer: ConfigurationWriterGuard,
+        budget: JournalBudget,
+    ) -> JournalResult<Self> {
+        Self::from_configuration(
+            crate::store::OwnedConfigurationRoot::open_existing(root, writer)?,
+            budget,
+        )
+    }
+    /// Trusted bootstrap composes typed adapters under one move-owned writer.
+    /// Only one enrollment handle/ledger can be minted by a configuration root.
+    pub fn from_configuration(
+        owner: crate::store::OwnedConfigurationRoot,
         budget: JournalBudget,
     ) -> JournalResult<Self> {
         #[cfg(all(target_os = "linux", target_env = "gnu"))]
         {
-            let namespace = {
-                let journal = EnrollmentJournal::open_existing(&root, &mut writer, budget)?;
-                journal.namespace
-            };
+            let namespace = owner.claim_namespace(
+                crate::store::secure_journal::NamespaceName::EnrollmentV1,
+                budget,
+            )?;
             Ok(Self {
-                root,
-                writer,
+                owner,
                 budget,
                 namespace,
             })
         }
         #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
         {
-            let _ = (root, &mut writer, budget);
+            let _ = (owner, budget);
             Err(JournalError::Unsupported)
         }
     }
-    /// Each synchronous closure borrows the same owned authority and original
-    /// namespace pin. Post-checks run even if the closure reports an error;
-    /// replacement/unsafe observations cannot be returned as a durable success.
+    pub(crate) fn configuration_root(&self) -> crate::store::OwnedConfigurationRoot {
+        self.owner.clone()
+    }
     pub fn with_journal<T>(
         &mut self,
         operation: impl FnOnce(&mut EnrollmentJournal<'_>) -> JournalResult<T>,
     ) -> JournalResult<T> {
         #[cfg(all(target_os = "linux", target_env = "gnu"))]
         {
-            let mut journal = EnrollmentJournal {
-                root: &self.root,
-                writer: &mut self.writer,
-                budget: self.budget,
-                namespace: self.namespace,
-            };
-            journal.scan()?;
-            let result = operation(&mut journal);
-            journal.scan()?;
-            result
+            self.owner.with_state(|state| {
+                state.ordinary_admission()?;
+                let mut journal = EnrollmentJournal {
+                    root: &state.root,
+                    writer: &mut state.writer,
+                    budget: self.budget,
+                    namespace: self.namespace,
+                };
+                journal.scan()?;
+                let result = operation(&mut journal);
+                journal.scan()?;
+                result
+            })
         }
         #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
         {

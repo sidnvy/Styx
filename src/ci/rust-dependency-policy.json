@@ -248,6 +248,25 @@
       "kind": "owned_private_raw_management_fixture",
       "input": "--management-import fresh STYX_TEST_MANAGEMENT_ROOT",
       "required_for": "actual Linux private raw config/state/unknown integer preservation and legacy guard/uncertain plan projection; not transactions, migration, native UI or platform acceptance"
+    },
+    "store::configuration::tests::shared_configuration_writer_fence_and_sticky_unknown_batch": {
+      "kind": "owned_filesystem_scenario",
+      "input": "fresh STYX_TEST_CONFIGURATION_ROOT",
+      "required_for": "shared configuration writer, namespace, restart fence and total budget"
+    },
+    "enrollment::shared::maintenance_tests::actual_configuration_maintenance_complete_gate_and_dropped_waiter": {
+      "kind": "owned_service_gate_scenario",
+      "input": "fresh nonexistent STYX_TEST_CONFIGURATION_ROOT",
+      "required_for": "same service complete-method gate, dropped waiter slot and admission fence"
+    },
+    "store::management::tests::durable_prepare_preserves_exact_bytes_and_unsettled_high_water_batch": {
+      "kind": "owned_filesystem_scenario",
+      "input": "fresh STYX_TEST_MANAGEMENT_ROOT",
+      "required_for": "exact C07 preparation and retained unresolved journal; not canonical apply"
+    },
+    "store::management::tests::management_preparation_child": {
+      "kind": "owned_subprocess_helper",
+      "parent": "independent r21-transactions/oracle/prepare_batch.py; no production CLI or apply authority"
     }
   },
   "change_policy": "dependency or ignored-test additions require explicit policy review; preserve mature Cargo tooling rather than replacing its resolver/compiler/lints"

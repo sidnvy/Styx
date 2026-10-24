@@ -128,3 +128,10 @@ fixing idle pipe closure detection; eight sampled original process identities
 were independently gone. Full regression evidence is recorded separately for the
 frozen resulting SHA. No real lock/logout/compositor change or authenticated Agent,
 HostRegistry/Cua, native Mac/Windows, migration, package or account claim follows.
+
+
+## R21 shared-writer / durable-Prepared increment (2026-10-24)
+
+The configuration owner now shares one move-owned writer with singleton typed enrollment/management handles. Management fences the existing full enrollment service gate before preparation; caller loss cannot release the actual blocking-job slot or implicitly resume admission. Both fixed namespaces participate in root pinning and the shared budget, including standalone management. Management persistence stores exact approved raw materials and durable Prepared only. Core owns the checked C07 phase protocol; observed Prepared bytes are not a new durability receipt.
+
+Related actual owned-file/service-gate cases and an independent five-scene process-exit/reopen batch passed at the recorded exact source inputs. These do not complete R21: no canonical apply/commit/recovery, native reader barrier or legacy handoff is implemented yet. Nonempty management journals remain fenced across reopen until that reconciliation exists. See [ADR-012](ADR-012-SHARED-CONFIGURATION-WRITER-PREPARATION.md); current frozen-gate/integration evidence remains in the external Owner Control Report. No Rust package/install/deployment or latest-platform acceptance is inferred.

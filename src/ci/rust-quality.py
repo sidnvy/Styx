@@ -23,6 +23,9 @@ ROOT = Path(__file__).resolve().parents[2]
 POLICY = Path(__file__).with_name("rust-dependency-policy.json")
 LINUX_DISCOVERY_TEST = "platform::linux::tests::actual_system_bus_snapshot_matches_independent_loginctl"
 PAYLOAD_TEST = "store::payload::tests::payload_inventory_stream_pin_and_replacement_alias_budget_negatives"
+CONFIGURATION_OWNER_TEST = "store::configuration::tests::shared_configuration_writer_fence_and_sticky_unknown_batch"
+CONFIGURATION_MAINTENANCE_TEST = "enrollment::shared::maintenance_tests::actual_configuration_maintenance_complete_gate_and_dropped_waiter"
+MANAGEMENT_PREPARATION_TEST = "store::management::tests::durable_prepare_preserves_exact_bytes_and_unsettled_high_water_batch"
 ENROLLMENT_OWNED_TEST = "store::enrollment::owned::tests::owned_journal_thread_move_keeps_writer_and_initial_namespace_identity"
 ENROLLMENT_PROFILE_TEST = "enrollment::profile::tests::actual_node22_profile_join_and_capability_proofs"
 ENROLLMENT_SERVICE_TEST = "enrollment::service::tests::actual_strict_tls_enrollment_service_full_journey"
@@ -353,6 +356,17 @@ def execute(args):
                 extra_env={"STYX_TEST_ENROLLMENT_OWNED_ROOT": str(owned_owner)})
             gate.semantic(owned_check, [] if "1 passed; 0 failed" in gate.read("enrollment-owned") else ["exact_enrollment_owned_case_not_executed"])
             receipt["enrollment_owned"] = owned_check["status"]
+            # Each case owns a distinct root; the gate-race case requires absence.
+            for label, test, env_name in (
+                ("configuration-owner", CONFIGURATION_OWNER_TEST, "STYX_TEST_CONFIGURATION_ROOT"),
+                ("configuration-maintenance", CONFIGURATION_MAINTENANCE_TEST, "STYX_TEST_CONFIGURATION_ROOT"),
+                ("management-preparation", MANAGEMENT_PREPARATION_TEST, "STYX_TEST_MANAGEMENT_ROOT"),
+            ):
+                check = gate.run(label, ["cargo", "test", "-p", "styx-runtime", "--locked", "--offline", test, "--", "--ignored", "--exact", "--nocapture"], timeout=120,
+                    extra_env={env_name: str(evidence / ("owned-" + label))})
+                gate.semantic(check, [] if "1 passed; 0 failed" in gate.read(label) else ["exact_" + label + "_case_not_executed"])
+                receipt[label.replace("-", "_")] = check["status"]
+
         receipt["legacy_node22_interop"] = "NOT_RUN_explicit_node22_not_supplied"
         if args.node22:
             node = Path(args.node22)

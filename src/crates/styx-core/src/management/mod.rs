@@ -3,3 +3,4 @@ pub mod deployment;
 pub mod plan;
 #[cfg(test)]
 mod tests;
+pub mod transaction;
