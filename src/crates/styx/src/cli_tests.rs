@@ -379,3 +379,70 @@ fn release_verification_requires_external_pin_and_has_no_execution_overrides() {
         .is_err()
     );
 }
+
+#[test]
+fn transient_manager_requires_explicit_mode_and_exact_stop_observation() {
+    assert!(Cli::try_parse_from(["styx", "host", "start", "--state-dir", "/owned/state"]).is_err());
+    assert!(
+        Cli::try_parse_from([
+            "styx",
+            "host",
+            "start",
+            "--transient",
+            "--state-dir",
+            "/owned/state",
+            "--json"
+        ])
+        .is_ok()
+    );
+    assert!(
+        Cli::try_parse_from([
+            "styx",
+            "host",
+            "status",
+            "--transient",
+            "--state-dir",
+            "/owned/state"
+        ])
+        .is_ok()
+    );
+    assert!(
+        Cli::try_parse_from([
+            "styx",
+            "host",
+            "stop",
+            "--transient",
+            "--state-dir",
+            "/owned/state"
+        ])
+        .is_err()
+    );
+    let stop = [
+        "styx",
+        "host",
+        "stop",
+        "--transient",
+        "--state-dir",
+        "/owned/state",
+        "--owner-file",
+        "/owned/owner.json",
+        "--expected-invocation",
+        "public-invocation",
+    ];
+    assert!(Cli::try_parse_from(stop).is_ok());
+    for option in ["--unit", "--pid", "--token", "--exec-bin", "--bus-address"] {
+        assert!(
+            Cli::try_parse_from([
+                "styx",
+                "host",
+                "start",
+                "--transient",
+                "--state-dir",
+                "/owned/state",
+                option,
+                "untrusted"
+            ])
+            .is_err()
+        );
+    }
+}

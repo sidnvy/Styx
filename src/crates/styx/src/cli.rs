@@ -168,6 +168,26 @@ impl Cli {
 }
 #[derive(Subcommand)]
 enum HostCommand {
+    /// Explicit current-user transient action; no autostart or installation.
+    Start {
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(long, required = true)]
+        transient: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Observe scoped user units; never starts or adopts one.
+    Status {
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(long, required = true)]
+        transient: bool,
+        #[arg(long)]
+        owner_file: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
     Run {
         #[arg(long)]
         state_dir: PathBuf,
@@ -177,6 +197,14 @@ enum HostCommand {
     Stop {
         #[arg(long)]
         state_dir: Option<PathBuf>,
+        #[arg(long, requires_all = ["state_dir", "owner_file", "expected_invocation"])]
+        transient: bool,
+        #[arg(long, requires = "transient")]
+        owner_file: Option<PathBuf>,
+        #[arg(long, requires = "transient")]
+        expected_invocation: Option<String>,
+        #[arg(long)]
+        json: bool,
     },
     Pause {
         #[arg(long)]
@@ -642,6 +670,30 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
             );
             ExitCode::SUCCESS
         }
+        Command::Host {
+            command: HostCommand::Start {
+                state_dir, json, ..
+            },
+        } => transient_manager::start(state_dir, json).await,
+        Command::Host {
+            command:
+                HostCommand::Status {
+                    state_dir,
+                    owner_file,
+                    json,
+                    ..
+                },
+        } => transient_manager::query(state_dir, owner_file, json).await,
+        Command::Host {
+            command:
+                HostCommand::Stop {
+                    state_dir: Some(state_dir),
+                    transient: true,
+                    owner_file: Some(owner_file),
+                    expected_invocation: Some(expected),
+                    json,
+                },
+        } => transient_manager::stop(state_dir, owner_file, expected, json).await,
         Command::Gateway {
             command: GatewayCommand::Run {
                 state_dir: Some(state_dir),
@@ -809,6 +861,9 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
         }
     }
 }
+#[path = "cli_manager.rs"]
+mod transient_manager;
+
 #[cfg(test)]
 #[path = "cli_tests.rs"]
 mod tests;

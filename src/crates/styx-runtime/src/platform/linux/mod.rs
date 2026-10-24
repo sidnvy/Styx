@@ -1,7 +1,9 @@
-//! Read-only Linux candidates, never Desktop authorization or Ready sessions.
+//! Linux adapters: read-only login candidates and explicit user-manager actions.
 //! This first slice has no watcher, agent authentication, attachment or input API.
 //! The owned session_probe worker isolates SDK allocations; MAX_FACTS only
 //! bounds retained/serialized facts, not upstream DBus frame allocation.
+pub mod manager;
+
 use futures_util::{StreamExt, TryStreamExt, stream};
 use serde::{Deserialize, Serialize};
 use std::{
