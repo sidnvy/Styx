@@ -57,3 +57,9 @@ workspace = true
 
 [target.'cfg(target_os = "linux")'.dependencies]
 zbus.workspace = true
+
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework.workspace = true
+security-framework-sys.workspace = true
+core-foundation.workspace = true
+core-foundation-sys.workspace = true

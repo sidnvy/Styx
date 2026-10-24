@@ -52,7 +52,7 @@ pub struct PayloadMember {
 /// tree. This is a detected-change observation, not an atomic filesystem snapshot.
 pub struct PayloadInventory {
     pub(super) members: Vec<PayloadMember>,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(super) inner: platform::PayloadSnapshot,
 }
 impl PayloadInventory {
@@ -60,68 +60,87 @@ impl PayloadInventory {
         &self.members
     }
     pub fn revalidate(&self) -> Result<()> {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             self.inner.revalidate()
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             Err(StoreError::Unsupported)
         }
     }
     pub fn pin_executable(&self, relative: impl AsRef<Path>) -> Result<PinnedExecutable> {
         let relative = checked_relative(relative.as_ref())?;
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             self.inner
                 .pin_executable(&relative)
                 .map(|inner| PinnedExecutable { inner })
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             let _ = relative;
             Err(StoreError::Unsupported)
         }
     }
 }
-/// A pinned observed ELF image, not a signature or execution grant. The owning
+/// A pinned observed native image, not a signature or execution grant. The owning
 /// bootstrap must retain this object until its child has actually been reaped.
 pub struct PinnedExecutable {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     inner: platform::PinnedImage,
 }
 impl PinnedExecutable {
     pub fn revalidate(&self) -> Result<()> {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             self.inner.revalidate()
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             Err(StoreError::Unsupported)
         }
     }
     /// Linux resolves this retained parent FD, never a freshly substituted path.
+    /// Darwin remains Unsupported here: it requires the verified suspended-spawn port.
     /// Script interpreters are deliberately unsupported by this native-image port.
     pub fn launch_path(&self) -> Result<PathBuf> {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             self.inner.launch_path()
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             Err(StoreError::Unsupported)
         }
     }
 }
+#[cfg(target_os = "macos")]
+impl PinnedExecutable {
+    /// Only the suspended native-child adapter may use this source locator.
+    /// Ordinary launch_path stays unsupported until loaded-image attestation.
+    pub(crate) fn source_path_for_suspended_spawn(&self) -> Result<PathBuf> {
+        self.inner.source_path_for_suspended_spawn()
+    }
+    pub(crate) fn expected_cdhash(&self) -> Result<Vec<u8>> {
+        self.inner.expected_cdhash()
+    }
+    pub(crate) fn expected_sha256(&self) -> Result<Sha256Digest> {
+        self.inner.expected_sha256()
+    }
+    pub(crate) fn retained_file(&self) -> Result<&std::fs::File> {
+        self.inner.retained_file()
+    }
+}
+
 impl PrivateRoot {
     pub fn payload_inventory(&self, limits: PayloadLimits) -> Result<PayloadInventory> {
         limits.validate()?;
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         {
             self.inner.payload_inventory(limits)
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
         {
             Err(StoreError::Unsupported)
         }

@@ -9,6 +9,8 @@
 
 mod configuration;
 pub mod enrollment;
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+pub mod legacy_handoff;
 pub mod management;
 pub mod native_root;
 pub mod native_state;

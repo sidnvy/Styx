@@ -422,7 +422,13 @@ async fn run_owned(
     }
     // Spawn is joined even on signal; cancelling initialization cannot orphan a
     // partially started child. The bounded provider owns its startup cleanup.
-    let host = match reservation.spawn_optional(config).await {
+    #[cfg(target_os = "macos")]
+    let started = reservation
+        .spawn_optional_pinned(config, admitted.profile.executor_image())
+        .await;
+    #[cfg(not(target_os = "macos"))]
+    let started = reservation.spawn_optional(config).await;
+    let host = match started {
         Ok(v) => v,
         Err(_) => {
             let _ = link.shutdown(Duration::from_secs(3)).await;

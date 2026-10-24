@@ -318,6 +318,11 @@ const config=JSON.stringify({schema:1,mode:'join-existing',gateway:{url:'https:/
         let identity = f.base.join("device/identity.json");
         let mut v: serde_json::Value =
             serde_json::from_slice(&fs::read(&identity).unwrap()).unwrap();
+        let original_identity = v.clone();
+        v["platform"] = serde_json::json!("darwin");
+        fs::write(&identity, serde_json::to_vec(&v).unwrap()).unwrap();
+        assert!(matches!(load_legacy(&f.state), Err(ProfileError::Invalid)));
+        v = original_identity;
         v["fingerprint"] = serde_json::json!("0".repeat(64));
         fs::write(&identity, serde_json::to_vec(&v).unwrap()).unwrap();
         assert!(matches!(load_legacy(&f.state), Err(ProfileError::Invalid)));
@@ -339,7 +344,7 @@ const config=JSON.stringify({schema:1,mode:'join-existing',gateway:{url:'https:/
         ));
     }
 }
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 #[test]
 fn unsupported_platform_does_not_read_or_fall_back() {
     assert!(matches!(
@@ -349,5 +354,18 @@ fn unsupported_platform_does_not_read_or_fall_back() {
     assert!(matches!(
         super::load_paired(std::path::Path::new("/nonexistent")),
         Err(super::ProfileError::Unsupported)
+    ));
+}
+
+#[cfg(target_os = "macos")]
+#[test]
+fn macos_only_admits_explicit_paired_profile_loading() {
+    assert!(matches!(
+        super::load_legacy(std::path::Path::new("/nonexistent")),
+        Err(super::ProfileError::Unsupported)
+    ));
+    assert!(matches!(
+        super::load_paired(std::path::Path::new("/nonexistent")),
+        Err(super::ProfileError::ProtectedRead)
     ));
 }

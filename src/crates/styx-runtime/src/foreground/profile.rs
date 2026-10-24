@@ -16,6 +16,7 @@ use std::{
     collections::{BTreeMap, BTreeSet},
     io::Cursor,
     path::{Component, Path, PathBuf},
+    sync::Arc,
     time::Duration,
 };
 use styx_contracts::identity::{DeviceId, GatewayId, Sha256Digest};
@@ -252,7 +253,7 @@ pub struct LoadedLegacyProfile {
     paired_namespace: GatewayId,
     tls: GatewayClientTls,
     bearer: SecretBearer,
-    executor: Option<PinnedExecutable>,
+    executor: Option<Arc<PinnedExecutable>>,
     inventory: PayloadInventory,
     #[cfg(target_os = "linux")]
     release_root: PathBuf,
@@ -359,15 +360,21 @@ impl LoadedLegacyProfile {
     pub fn executor_enabled(&self) -> bool {
         self.executor.is_some()
     }
+    #[cfg(target_os = "macos")]
+    pub(crate) fn executor_image(&self) -> Option<Arc<PinnedExecutable>> {
+        self.executor.clone()
+    }
     pub fn executor_config(&self) -> Result<OwnedExecutorConfig, ProfileError> {
         self.revalidate()?;
+        let image = self.executor.as_ref().ok_or(ProfileError::Unsupported)?;
+        #[cfg(target_os = "macos")]
+        let binary = image
+            .source_path_for_suspended_spawn()
+            .map_err(|_| ProfileError::Changed)?;
+        #[cfg(not(target_os = "macos"))]
+        let binary = image.launch_path().map_err(|_| ProfileError::Changed)?;
         Ok(OwnedExecutorConfig {
-            binary: self
-                .executor
-                .as_ref()
-                .ok_or(ProfileError::Unsupported)?
-                .launch_path()
-                .map_err(|_| ProfileError::Changed)?,
+            binary,
             cwd: self.cwd.clone(),
             environment: self.environment.clone(),
             rpc_timeout: self.rpc_timeout,
@@ -499,9 +506,18 @@ pub fn load_paired(state_dir: &Path) -> Result<LoadedLegacyProfile, ProfileError
     load(state_dir, GatewayWireMode::PairedV3)
 }
 fn load(state_dir: &Path, mode: GatewayWireMode) -> Result<LoadedLegacyProfile, ProfileError> {
-    if !cfg!(target_os = "linux") {
+    if !cfg!(any(target_os = "linux", target_os = "macos"))
+        || (cfg!(target_os = "macos") && !matches!(mode, GatewayWireMode::PairedV3))
+    {
         return Err(ProfileError::Unsupported);
     }
+    // Preserve the original Node platform spelling in identity and signed
+    // worker metadata; neither may impersonate a different native platform.
+    let legacy_platform = match std::env::consts::OS {
+        "linux" => "linux",
+        "macos" => "darwin",
+        _ => return Err(ProfileError::Unsupported),
+    };
     absolute(state_dir)?;
     let mut capture = Capture {
         observed: vec![],
@@ -564,7 +580,10 @@ fn load(state_dir: &Path, mode: GatewayWireMode) -> Result<LoadedLegacyProfile, 
     }
     let identity: Identity = decode(&capture.read(base, "device/identity.json", JSON_LIMIT)?)?;
     let host: HostProfile = decode(&capture.read(base, "device/host.json", JSON_LIMIT)?)?;
-    if identity.version != 1 || identity.platform != "linux" || identity.device_id != host.host_id {
+    if identity.version != 1
+        || identity.platform != legacy_platform
+        || identity.device_id != host.host_id
+    {
         return Err(ProfileError::Invalid);
     }
     if host.client_cert_file.is_some() || host.client_key_file.is_some() {
@@ -680,9 +699,11 @@ fn load(state_dir: &Path, mode: GatewayWireMode) -> Result<LoadedLegacyProfile, 
         "aarch64" => "arm64",
         _ => return Err(ProfileError::Unsupported),
     };
+    // Legacy signed manifests retain their original Node platform spelling.
+    // Mac execution still goes through the verified suspended native child port.
     if manifest.schema != 1
         || manifest.version != active.version
-        || manifest.platform != "linux"
+        || manifest.platform != legacy_platform
         || manifest.arch != arch
         || manifest.files.is_empty()
         || manifest.files.len() > 4096
@@ -752,11 +773,11 @@ fn load(state_dir: &Path, mode: GatewayWireMode) -> Result<LoadedLegacyProfile, 
         return Err(ProfileError::UntrustedRelease);
     }
     let executor = if exec_enabled {
-        Some(
+        Some(Arc::new(
             inventory
                 .pin_executable(Path::new("bin/codex"))
                 .map_err(|_| ProfileError::UntrustedRelease)?,
-        )
+        ))
     } else {
         None
     };

@@ -5,6 +5,7 @@
 //! and OperationId, reports facts, and never replays a mutation or respawns an
 //! executor. `spawn_owned` starts a NEW caller-owned executor; no live executor
 //! is discovered, adopted, restarted or replaced.
+mod child;
 mod continuation;
 mod legacy;
 pub use legacy::{
@@ -15,6 +16,7 @@ mod output;
 mod retention;
 mod rpc;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
+use child::Child;
 pub use continuation::{ActionAcknowledgment, ActionEvidence, ActionReceipt, ProcessAction};
 pub use output::OutputChunk;
 use output::{OutputDecoder, ReadPage};
@@ -30,7 +32,6 @@ use std::{
 use styx_contracts::identity::Sha256Digest;
 use styx_contracts::operation::{ExecutionLiveness, OperationId, OutputDrain};
 use styx_core::operations::{DispatchPermit, OwnerLease};
-use tokio::process::{Child, Command};
 use uuid::Uuid;
 
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
@@ -283,17 +284,33 @@ impl CodexStdio {
         {
             return Err(ExecError::InvalidRequest);
         }
-        let mut child = Command::new(&config.binary)
-            .args(["exec-server", "--listen", "stdio://"])
-            .current_dir(&config.cwd)
-            .env_clear()
-            .envs(config.environment)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .kill_on_drop(true)
-            .spawn()
-            .map_err(|_| ExecError::SpawnFailed)?;
+        let child = Child::spawn(&config)?;
+        Self::initialize_owned(config, partition, child).await
+    }
+    #[cfg(target_os = "macos")]
+    pub(crate) async fn spawn_pinned_with_reserved_budget(
+        config: OwnedExecutorConfig,
+        partition: tokio::sync::OwnedSemaphorePermit,
+        image: Arc<crate::store::PinnedExecutable>,
+    ) -> Result<Self, ExecError> {
+        if partition.num_permits() != 16 * 1024 * 1024
+            || !config.cwd.is_absolute()
+            || config.rpc_timeout.is_zero()
+            || config.rpc_timeout > Duration::from_secs(60)
+            || config.retained_process_limit == 0
+            || config.retained_process_limit > 4096
+        {
+            return Err(ExecError::InvalidRequest);
+        }
+        let partition = Arc::new(partition);
+        let child = Child::spawn_pinned(&config, image).await?;
+        Self::initialize_owned(config, partition, child).await
+    }
+    async fn initialize_owned(
+        config: OwnedExecutorConfig,
+        partition: Arc<tokio::sync::OwnedSemaphorePermit>,
+        mut child: Child,
+    ) -> Result<Self, ExecError> {
         let stdin = child.stdin.take().ok_or(ExecError::SpawnFailed)?;
         let stdout = child.stdout.take().ok_or(ExecError::SpawnFailed)?;
         let stderr_task = child.stderr.take().map(|mut stderr| {

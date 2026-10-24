@@ -61,7 +61,11 @@
         "regex",
         "rustls-webpki",
         "zbus",
-        "jsonschema"
+        "jsonschema",
+        "security-framework",
+        "security-framework-sys",
+        "core-foundation",
+        "core-foundation-sys"
       ]
     },
     "styx": {
@@ -301,6 +305,26 @@
     "store::platform::tests::macos_store_child": {
       "kind": "owned_subprocess_helper",
       "parent": "store::platform::tests::macos_raw_reads_and_distinct_leases_native"
+    },
+    "store::legacy_handoff::tests::actual_legacy_writer_exclusion_and_original_material_batch": {
+      "kind": "owned_private_filesystem_legacy_writer_fixture",
+      "input": "fresh STYX_TEST_LEGACY_HANDOFF_ROOT and fixed STYX_TEST_NODE22",
+      "required_for": "real legacy exclusive-file primitive, retained same writer/maintenance, exact material/lock revalidation; not runtime quiescence, migration or rollback"
+    },
+    "store::platform::payload_backend::tests::macos_payload_inventory_identity_acl_and_bounds_native": {
+      "kind": "explicit_macos_private_native_image_fixture",
+      "input": "pho fresh STYX_TEST_MACOS_PAYLOAD_ROOT and original read-only STYX_TEST_MACOS_PAYLOAD_EXECUTABLE",
+      "required_for": "native Darwin inventory, exact raw/hash/CDHash and ACL/alias/replacement/bounds; not process launch, Host readiness or installed signed package"
+    },
+    "platform::macos_spawn::tests::actual_suspended_image_barrier_wrong_cdhash_and_original_wait": {
+      "kind": "explicit_macos_native_suspended_spawn_fixture",
+      "input": "pho fresh nonexisting STYX_TEST_MACOS_SPAWN_ROOT; only test-owned copied image may be ad-hoc signed",
+      "required_for": "zero effects before resume/wrongCDHash, once after correct resume, retained cancellation and original actual wait; not Codex/Host/App/TCC or final platform acceptance"
+    },
+    "platform::macos_spawn::tests::suspended_fixture_child": {
+      "kind": "owned_subprocess_helper",
+      "parent": "platform::macos_spawn::tests::actual_suspended_image_barrier_wrong_cdhash_and_original_wait",
+      "required_for": "child-only create_new nonce effect in owned copied image; not independently run or counted as platform acceptance"
     }
   },
   "change_policy": "dependency or ignored-test additions require explicit policy review; preserve mature Cargo tooling rather than replacing its resolver/compiler/lints"

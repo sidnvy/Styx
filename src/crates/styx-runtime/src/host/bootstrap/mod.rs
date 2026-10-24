@@ -191,6 +191,34 @@ impl ExecHostReservation {
             budget: self.partitions.source,
         })
     }
+    #[cfg(target_os = "macos")]
+    pub(crate) async fn spawn_optional_pinned(
+        self,
+        executor: Option<OwnedExecutorConfig>,
+        image: Option<Arc<crate::store::PinnedExecutable>>,
+    ) -> Result<OwnedExecHost, BootstrapError> {
+        let (executor, image) = match (executor, image) {
+            (None, None) => return self.without_executor(),
+            (Some(executor), Some(image)) => (executor, image),
+            _ => return Err(BootstrapError::InvalidConfiguration),
+        };
+        let adapter =
+            CodexStdio::spawn_pinned_with_reserved_budget(executor, self.partitions.rpc, image)
+                .await?;
+        let (coordinator, authority) = HostCoordinator::new_owned(
+            adapter,
+            OperationLedger::new(self.generation),
+            self.trusted_facts,
+            self.max_jobs,
+        )?;
+        Ok(OwnedExecHost {
+            coordinator,
+            authority,
+            link: self.partitions.link,
+            _protocol: self.partitions.protocol,
+            budget: self.partitions.source,
+        })
+    }
     pub async fn spawn_optional(
         self,
         executor: Option<OwnedExecutorConfig>,

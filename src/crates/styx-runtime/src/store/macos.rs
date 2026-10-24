@@ -1,14 +1,17 @@
-//! macOS private raw reads and distinct ownership resources, not payload launch,
+//! macOS private raw reads, payload observations and distinct ownership resources, not payload launch,
 //! journal persistence or native-root creation. Uses the existing nix/std APIs.
 //! Extended ACLs are conservatively refused; original ACLs are never rewritten.
 #[path = "macos_ffi.rs"]
 mod ffi;
+#[path = "macos_payload.rs"]
+mod payload_backend;
 use super::*;
 use nix::{
     fcntl::{OFlag, openat},
     sys::stat::Mode,
     unistd::geteuid,
 };
+pub(in crate::store) use payload_backend::{PayloadSnapshot, PinnedImage};
 use std::{
     ffi::{OsStr, OsString},
     fs::{File, Metadata, TryLockError},
