@@ -3,6 +3,7 @@
 //! attested; legacy raw-wire mode remains outside this composition.
 mod legacy;
 mod owner_cleanup;
+mod session;
 pub(crate) use legacy::{LegacyActionSubmission, LegacyStartSubmission};
 mod retention;
 pub use owner_cleanup::{OwnerCleanupFacts, OwnerCleanupHandle, OwnerCleanupTicket};
@@ -43,7 +44,97 @@ struct State {
     ledger: OperationLedger,
     facts: AdmissionFacts,
     shutting_down: bool,
+    sessions: crate::session::HostSessions,
 }
+impl State {
+    fn new(ledger: OperationLedger, facts: AdmissionFacts, origin: Instant) -> Self {
+        let sessions =
+            crate::session::HostSessions::bootstrap(ledger.host_generation().clone(), origin);
+        Self {
+            ledger,
+            facts,
+            sessions,
+            shutting_down: false,
+        }
+    }
+    /// This coordinator owns only Codex Exec. Session facts have a separate
+    /// registry; accidentally replacing Exec policy with GUI facts is refused.
+    fn exec_facts(&self) -> Result<AdmissionFacts, ErrorCategory> {
+        if self.facts.descriptor.capability_id != styx_contracts::capability::CapabilityId::ExecRun
+        {
+            return Err(ErrorCategory::ProtocolMismatch);
+        }
+        if self.facts.descriptor.target_session.is_some()
+            || self.facts.session_state.is_some()
+            || self.facts.current_observation.is_some()
+            || self.facts.descriptor.scope != styx_contracts::capability::Scope::Host
+        {
+            return Err(ErrorCategory::StateConflict);
+        }
+        Ok(self.facts.clone())
+    }
+    fn reserve_exec(
+        &mut self,
+        owner: &OwnerLease,
+        context: PreparedContext,
+        payload: Vec<u8>,
+        target: Option<ResourceTarget>,
+        now: MonotonicMillis,
+    ) -> Result<OperationSnapshot, CoordinatorError> {
+        validate_exec_context(&context)?;
+        if self.shutting_down {
+            return Err(CoordinatorError::Busy);
+        }
+        self.exec_facts()?;
+        Ok(match target {
+            Some(target) => self
+                .ledger
+                .prepare_targeted(owner, target, context, payload, now)?,
+            None => self.ledger.prepare(owner, context, payload, now)?,
+        })
+    }
+    fn dispatch_exec(
+        &mut self,
+        owner: &OwnerLease,
+        id: &OperationId,
+        digest: Sha256Digest,
+        now: MonotonicMillis,
+    ) -> Result<DispatchDisposition, ErrorCategory> {
+        let facts = self.exec_facts()?;
+        self.ledger.dispatch(owner, id, digest, &facts, now)
+    }
+    fn authorize_exec_read(
+        &self,
+        owner: &OwnerLease,
+        id: &OperationId,
+        digest: Sha256Digest,
+        context: &PreparedContext,
+        now: MonotonicMillis,
+    ) -> Result<OperationSnapshot, ErrorCategory> {
+        validate_exec_context(context)?;
+        self.ledger
+            .authorize_resource_access(owner, id, digest, context, &self.exec_facts()?, now)
+    }
+    fn with_sessions<T>(
+        &mut self,
+        f: impl FnOnce(&mut crate::session::HostSessions) -> Result<T, crate::session::HostSessionError>,
+    ) -> Result<T, crate::session::HostSessionError> {
+        if self.shutting_down {
+            return Err(crate::session::HostSessionError::Stopping);
+        }
+        f(&mut self.sessions)
+    }
+}
+fn validate_exec_context(context: &PreparedContext) -> Result<(), ErrorCategory> {
+    if context.capability != styx_contracts::capability::CapabilityId::ExecRun {
+        return Err(ErrorCategory::ProtocolMismatch);
+    }
+    if context.session.is_some() || context.observation.is_some() {
+        return Err(ErrorCategory::StateConflict);
+    }
+    Ok(())
+}
+
 struct Inner {
     bootstrap_device: DeviceId,
     host_generation: HostGeneration,
@@ -130,20 +221,17 @@ impl HostCoordinator {
         if max_jobs == 0 || max_jobs > 64 {
             return Err(CoordinatorError::Busy);
         }
+        let origin = Instant::now();
         let inner = Arc::new(Inner {
             bootstrap_device: trusted_facts.device_id.clone(),
             host_generation: ledger.host_generation().clone(),
             adapter,
-            state: Mutex::new(State {
-                ledger,
-                facts: trusted_facts,
-                shutting_down: false,
-            }),
+            state: Mutex::new(State::new(ledger, trusted_facts, origin)),
             jobs: Mutex::new(JoinSet::new()),
             slots: Arc::new(Semaphore::new(max_jobs)),
             cleanup_lock: tokio::sync::Mutex::new(()),
             execution_gate: Arc::new(RwLock::new(())),
-            origin: Instant::now(),
+            origin,
             #[cfg(test)]
             delivery_gate: Mutex::new(None),
         });
@@ -186,7 +274,7 @@ impl HostCoordinator {
         if state.shutting_down {
             return Err(CoordinatorError::Busy);
         }
-        Ok(state.ledger.prepare(owner, context, payload, self.now())?)
+        state.reserve_exec(owner, context, payload, None, self.now())
     }
     /// Admission commits before returning a ticket. Dropping the ticket cannot drop the job.
     pub fn dispatch_start(
@@ -223,11 +311,7 @@ impl HostCoordinator {
         if state.shutting_down {
             return Err(CoordinatorError::Busy);
         }
-        let facts = state.facts.clone();
-        let permit = match state
-            .ledger
-            .dispatch(owner, id, digest, &facts, self.now())?
-        {
+        let permit = match state.dispatch_exec(owner, id, digest, self.now())? {
             DispatchDisposition::Existing(snapshot) => {
                 return Ok(StartSubmission::Existing(snapshot));
             }
@@ -308,9 +392,7 @@ impl HostCoordinator {
         if state.shutting_down {
             return Err(CoordinatorError::Busy);
         }
-        Ok(state
-            .ledger
-            .prepare_targeted(owner, target, context, payload, self.now())?)
+        state.reserve_exec(owner, context, payload, Some(target), self.now())
     }
     /// Commit one action before returning a response ticket. Receiver loss does
     /// not cancel the supervised job or permit a second dispatch.
@@ -347,11 +429,7 @@ impl HostCoordinator {
         if state.shutting_down {
             return Err(CoordinatorError::Busy);
         }
-        let facts = state.facts.clone();
-        let permit = match state
-            .ledger
-            .dispatch(owner, id, digest, &facts, self.now())?
-        {
+        let permit = match state.dispatch_exec(owner, id, digest, self.now())? {
             DispatchDisposition::Existing(snapshot) => {
                 return Ok(ActionSubmission::Existing(snapshot));
             }
@@ -493,14 +571,7 @@ impl HostCoordinator {
         let now = self.now();
         {
             let state = self.inner.state.lock().expect("Host state mutex");
-            let snapshot = state.ledger.authorize_resource_access(
-                owner,
-                id,
-                digest,
-                context,
-                &state.facts,
-                now,
-            )?;
+            let snapshot = state.authorize_exec_read(owner, id, digest, context, now)?;
             if snapshot.target.is_some() {
                 return Err(ErrorCategory::StateConflict.into());
             }
@@ -565,8 +636,7 @@ impl HostCoordinator {
         // However, sensitive output must not cross a now-invalid owner/policy
         // boundary. This explicit error acknowledges possible cursor consumption.
         state
-            .ledger
-            .authorize_resource_access(owner, id, digest, context, &state.facts, self.now())
+            .authorize_exec_read(owner, id, digest, context, self.now())
             .map_err(CoordinatorError::OutputDeliveryDenied)?;
         Ok(output)
     }

@@ -19,7 +19,7 @@ sha2 = "=0.10.9"
 url = "=2.5.8"
 libc = "=0.2.186"
 getrandom = "=0.3.4"
-nix = { version = "=0.31.3", features = ["fs", "user", "dir"] }
+nix = { version = "=0.31.3", features = ["fs", "user", "dir", "resource", "process", "signal"] }
 uuid = { version = "=1.29.0", features = ["v4"] }
 tokio-util = { version = "=0.7.20", features = ["codec", "rt"] }
 futures-util = { version = "=0.3.34", features = ["sink"] }
@@ -41,10 +41,12 @@ bytes = "=1.12.1"
 rustls = { version = "=0.23.46", default-features = false, features = ["std", "aws_lc_rs", "tls12"] }
 tokio-rustls = { version = "=0.26.4", default-features = false, features = ["aws_lc_rs", "tls12"] }
 rustls-pemfile = "=2.2.0"
+webpki = { package = "rustls-webpki", version = "=0.103.16", default-features = false, features = ["std"] }
 tokio-tungstenite = { version = "=0.30.0", default-features = false, features = ["handshake"] }
 zeroize = "=1.9.1"
 tokio = { version = "=1.52.3", features = ["rt-multi-thread", "macros", "net", "io-util", "time", "sync", "signal", "process"] }
 clap = { version = "=4.6.1", features = ["derive"] }
+zbus = { version = "=5.14.0", default-features = false, features = ["tokio"] }
 
 [workspace.lints.rust]
 unsafe_code = "deny"

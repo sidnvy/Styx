@@ -1,6 +1,6 @@
 //! Outbound WSS transport only: no owner authorization, RPC interpretation or
 //! executor lifecycle. Every failure is local to this connection generation.
-use crate::tls::GatewayClientTls;
+use crate::tls::{GatewayClientTls, TlsError};
 use futures_util::{SinkExt, StreamExt};
 use std::{
     fmt,
@@ -41,7 +41,9 @@ pub enum LinkError {
     UnsupportedMutualTls,
     #[error("transport capacity exhausted")]
     Capacity,
-    #[error("TLS or WSS handshake rejected")]
+    #[error(transparent)]
+    Tls(#[from] TlsError),
+    #[error("WSS handshake rejected")]
     HandshakeRejected,
     #[error("transport deadline expired")]
     Deadline,
@@ -217,7 +219,7 @@ impl HostWssLink {
             tokio::time::timeout_at(until, tls.connect(&host, tcp, Duration::from_secs(5)))
                 .await
                 .map_err(|_| LinkError::Deadline)?
-                .map_err(|_| LinkError::HandshakeRejected)?;
+                .map_err(LinkError::Tls)?;
         let mut request = endpoint
             .0
             .as_str()

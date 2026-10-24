@@ -19,6 +19,9 @@ Owner-authorized goal is active. The plan at a21ea75 remains the scope baseline;
 | R12 enrollment | Rust Core target-bound approval, same-credential confirmation/CAS/revoke, signed strictTLS journal service, same-authority paired Host WSS and real MCP-to-Codex owner isolation/physical cleanup checkpoint | Defaults/ingress, original credential/pair migration, transport epoch/dropresponse faults, multiple Desktop connections and cross-platform recovery remain required |
 | R13 legacy CLI | Explicit `host run --legacy-gateway`, read-only doctor/status, original publisher/raw-manifest exact member closure and native file pin; same-budget WSS-before-executor bootstrap and Host-owned cleanup | Immutable old Gateway44cf147 + same Rust release CLI passed standard-CA/leaf real pipe/PTY/stdin/cross-owner/no-replay/disconnect/SIGTERM scenes; original-default-style self-signed TLS admission FAILED separately. Synthetic profiles do not prove onboarding, original pair or service/App cutover |
 
+| R14 sessions | Bounded Core registry, fresh incarnation IDs, provider-specific facts, selection/expiry/revocation contracts; runtime Host admission-lock composition is under verification | Authenticated native association, actual Desktop dispatch, durable revocation, real platform lifecycle acceptance |
+| R15 Linux discovery | Typed kernel-authenticated system-login1 candidate probe and independent loginctl development evidence; Unknown association only | Worker isolation/candidate CLI and property consistency fixes under verification; watcher, native agent/compositor binding, Window/Capture/Input and real lifecycle acceptance |
+
 No Rust candidate has been packaged, signed, installed or accepted on the three platforms. Existing signed packages and original device identities/pairing/permissions have not been modified. Historical JS test counts are not Rust completion evidence. Stable remains NO-GO.
 
 Evidence tiers remain distinct: codec/fixture checks; real external executor interoperability; development vertical slice; exact final candidate native acceptance. Root integration commits alone cannot promote one tier into another.
@@ -76,3 +79,12 @@ around 0.65s in these fixtures; debug profiling's 12.39s was mainly SHA CPU. The
 observations are not a final platform startup SLA or a fix to historical Windows
 login recovery. The same product SHA also compiled natively offline on pho x64;
 native tests/App/signing/TCC/account acceptance were not run.
+
+
+Session authority and the necessary SDK allocation isolation boundary are described
+in [ADR-007](ADR-007-SESSION-FACTS.md). These changes are not automatically covered by
+the earlier 35a9fe3 gate or Mac compile. The original self-signed TLS failure is now
+precisely classified by the unchanged verifier as `tls_certificate_ca_used_as_leaf`;
+that diagnosis does not fix original Gateway compatibility or the separately
+unresolved authenticated self API401. No trust anchor, device credential, original
+signed artifact or installed runtime was replaced to obtain a successful result.

@@ -129,7 +129,7 @@ impl HostCoordinator {
         if state.shutting_down {
             return Err(CoordinatorError::Busy);
         }
-        let facts = state.facts.clone();
+        let facts = state.exec_facts()?;
         let permit = match state
             .ledger
             .dispatch(owner, id, digest, &facts, self.now())?
@@ -238,7 +238,7 @@ impl HostCoordinator {
         if state.shutting_down {
             return Err(CoordinatorError::Busy);
         }
-        let facts = state.facts.clone();
+        let facts = state.exec_facts()?;
         let permit = match state
             .ledger
             .dispatch(owner, id, digest, &facts, self.now())?
@@ -330,7 +330,7 @@ impl HostCoordinator {
                 &target.operation_id,
                 target.payload_digest,
                 &context,
-                &state.facts,
+                &state.exec_facts()?,
                 self.now(),
             )?;
         }
@@ -386,7 +386,9 @@ impl HostCoordinator {
                 &target.operation_id,
                 target.payload_digest,
                 &context,
-                &state.facts,
+                &state
+                    .exec_facts()
+                    .map_err(CoordinatorError::OutputDeliveryDenied)?,
                 self.now(),
             )
             .map_err(CoordinatorError::OutputDeliveryDenied)?;

@@ -51,3 +51,33 @@ fn cli_host_mode_requires_explicit_legacy_and_never_accepts_raw_credentials() {
     );
     assert!(Cli::try_parse_from(["styx", "gateway", "run"]).is_ok());
 }
+
+#[test]
+fn desktop_candidate_diagnostics_cannot_supply_authority_or_change_profile_mode() {
+    let cli = Cli::try_parse_from(["styx", "doctor", "--desktop-sessions", "--json"]).unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Doctor {
+            state_dir: None,
+            desktop_sessions: true,
+            json: true
+        }
+    ));
+    assert!(Cli::try_parse_from(["styx", "doctor"]).is_err());
+    assert!(
+        Cli::try_parse_from([
+            "styx",
+            "doctor",
+            "--desktop-sessions",
+            "--state-dir",
+            "/owned/private"
+        ])
+        .is_err()
+    );
+    for option in ["--uid", "--socket", "--session", "--display", "--grant"] {
+        assert!(
+            Cli::try_parse_from(["styx", "doctor", "--desktop-sessions", option, "untrusted"])
+                .is_err()
+        );
+    }
+}

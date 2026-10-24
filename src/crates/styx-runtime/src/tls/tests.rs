@@ -138,7 +138,9 @@ async fn aws_lc_owned_loopback_tls_full_scenario_batch() {
                 Duration::from_secs(2)
             )
             .await,
-        Err(TlsError::HandshakeRejected)
+        Err(TlsError::CertificateRejected(
+            CertificateFailure::NameMismatch
+        ))
     ));
     let untrusted = GatewayClientTls::from_pinned_ca_pem(&ca_b, anchor_b, Some(leaf_a)).unwrap();
     assert!(matches!(
@@ -149,7 +151,9 @@ async fn aws_lc_owned_loopback_tls_full_scenario_batch() {
                 Duration::from_secs(2)
             )
             .await,
-        Err(TlsError::HandshakeRejected)
+        Err(TlsError::CertificateRejected(
+            CertificateFailure::UnknownIssuer
+        ))
     ));
     let outcomes = tokio::time::timeout(Duration::from_secs(3), serving)
         .await
@@ -178,5 +182,154 @@ async fn aws_lc_owned_loopback_tls_full_scenario_batch() {
     );
     println!(
         "explicit AWS-LC Rustls local TLS batch PASS: CA+hostname legacy preserved; configured leaf pin enforced before app bytes; wrong anchor/leaf/name/untrusted CA and mismatched key rejected; independent server nonce echoes exactly2; listener and all5 workers joined; raw key Debug redacted"
+    );
+}
+
+#[test]
+fn typed_certificate_classification_never_parses_error_text() {
+    use rustls::CertificateError as C;
+    for (cause, expected) in [
+        (C::Expired, CertificateFailure::Expired),
+        (C::NotValidYet, CertificateFailure::NotYetValid),
+        (C::NotValidForName, CertificateFailure::NameMismatch),
+        (C::UnknownIssuer, CertificateFailure::UnknownIssuer),
+        (
+            C::Other(rustls::OtherError(Arc::new(
+                webpki::Error::CaUsedAsEndEntity,
+            ))),
+            CertificateFailure::InvalidCaAsLeaf,
+        ),
+        (
+            C::Other(rustls::OtherError(Arc::new(
+                webpki::Error::EndEntityUsedAsCa,
+            ))),
+            CertificateFailure::InvalidLeafAsCa,
+        ),
+    ] {
+        let wrapped = std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            rustls::Error::InvalidCertificate(cause),
+        );
+        assert_eq!(
+            classify_handshake(wrapped),
+            TlsError::CertificateRejected(expected)
+        );
+    }
+    let text = std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        "invalid peer certificate: CaUsedAsEndEntity",
+    );
+    assert_eq!(
+        classify_handshake(text),
+        TlsError::HandshakeIo(std::io::ErrorKind::InvalidData)
+    );
+    let unknown = rustls::CertificateError::Other(rustls::OtherError(Arc::new(
+        std::io::Error::other("CaUsedAsEndEntity"),
+    )));
+    assert_eq!(
+        CertificateFailure::from_rustls(&unknown),
+        CertificateFailure::Other
+    );
+    let protocol = std::io::Error::new(
+        std::io::ErrorKind::InvalidData,
+        rustls::Error::General("private peer context".into()),
+    );
+    let classified = classify_handshake(protocol);
+    assert_eq!(classified, TlsError::HandshakeRejected);
+    assert!(!format!("{classified:?}").contains("private peer context"));
+}
+
+/// New focused transport classifications, not a repeat of the full TLS journey.
+/// These are owned loopback fixtures, not the original installed Gateway.
+#[tokio::test]
+#[ignore = "requires STYX_TEST_TLS_FIXTURES with the owned original TLS fixtures"]
+async fn strict_verifier_certificate_classification_batch() {
+    let root = std::path::PathBuf::from(std::env::var("STYX_TEST_TLS_FIXTURES").unwrap());
+    let leaf = std::fs::read(root.join("cert-a.pem")).unwrap();
+    let ca = std::fs::read(root.join("ca-a.pem")).unwrap();
+    let foreign_ca = std::fs::read(root.join("ca-b.pem")).unwrap();
+    let leaf_key =
+        PrivateKeyPem::from_protected_reader_bytes(std::fs::read(root.join("key-a.pem")).unwrap())
+            .unwrap();
+    let ca_key = PrivateKeyPem::from_protected_reader_bytes(
+        std::fs::read(root.join("ca-key-a.pem")).unwrap(),
+    )
+    .unwrap();
+    let valid = Arc::new(
+        GatewayServerTls::from_pem(
+            &leaf,
+            &leaf_key,
+            GatewayLeafPin::from_certificate_der(&certificate_chain(&leaf).unwrap()[0]),
+        )
+        .unwrap(),
+    );
+    let invalid_ca_leaf = Arc::new(
+        GatewayServerTls::from_pem(
+            &ca,
+            &ca_key,
+            GatewayLeafPin::from_certificate_der(&certificate_chain(&ca).unwrap()[0]),
+        )
+        .unwrap(),
+    );
+    let trusted = GatewayClientTls::from_pinned_ca_pem(
+        &ca,
+        TrustAnchorPin::from_certificate_der(&certificate_chain(&ca).unwrap()[0]),
+        None,
+    )
+    .unwrap();
+    let foreign = GatewayClientTls::from_pinned_ca_pem(
+        &foreign_ca,
+        TrustAnchorPin::from_certificate_der(&certificate_chain(&foreign_ca).unwrap()[0]),
+        None,
+    )
+    .unwrap();
+    for (server, client, name, expected) in [
+        (valid.clone(), &trusted, "localhost", None),
+        (
+            valid.clone(),
+            &trusted,
+            "wrong.invalid",
+            Some(CertificateFailure::NameMismatch),
+        ),
+        (
+            valid,
+            &foreign,
+            "localhost",
+            Some(CertificateFailure::UnknownIssuer),
+        ),
+        (
+            invalid_ca_leaf,
+            &trusted,
+            "localhost",
+            Some(CertificateFailure::InvalidCaAsLeaf),
+        ),
+    ] {
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let serving = tokio::spawn(async move {
+            let (tcp, _) = listener.accept().await.unwrap();
+            let result = server.accept(tcp, Duration::from_secs(2)).await;
+            if let Ok(mut tls) = result {
+                let _ = tls.shutdown().await;
+            }
+        });
+        let result = client
+            .connect(
+                name,
+                TcpStream::connect(address).await.unwrap(),
+                Duration::from_secs(2),
+            )
+            .await;
+        match expected {
+            None => {
+                let mut tls = result.expect("ordinary CA-signed server chain must remain valid");
+                let _ = tls.shutdown().await;
+            }
+            Some(cause) => assert_eq!(result.err(), Some(TlsError::CertificateRejected(cause))),
+        }
+        serving.await.unwrap();
+    }
+    println!(
+        "focused actual strict TLS classification PASS: valid chain; wrong name; unknown issuer; CA-as-leaf; all4 owned listener/tasks joined; no verifier bypass or application request"
     );
 }

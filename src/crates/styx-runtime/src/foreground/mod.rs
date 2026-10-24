@@ -55,3 +55,13 @@ pub async fn inspect(state_dir: &Path) -> Result<ProfileDiagnostics, ForegroundE
 }
 mod run;
 pub use run::host_run;
+
+/// Read OS candidates for the actual invoking user. No state/profile, environment
+/// display hint, remote UID, registration authority or native executor is used.
+#[cfg(target_os = "linux")]
+pub async fn discover_desktop_candidates()
+-> Result<crate::platform::linux::LinuxDiscoverySnapshot, ForegroundError> {
+    crate::session_probe::probe_current_user()
+        .await
+        .map_err(|error| ForegroundError(error.code()))
+}

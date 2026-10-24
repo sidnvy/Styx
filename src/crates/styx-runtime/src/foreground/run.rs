@@ -5,7 +5,7 @@ use crate::{
     host::{
         bootstrap::OwnedExecHost,
         legacy::TrustedLegacyGateway,
-        link::{HostLinkBudget, HostWssLink, LinkAuthentication},
+        link::{HostLinkBudget, HostWssLink, LinkAuthentication, LinkError},
     },
     providers::codex::TerminationEvidence,
     store::{ExecutionLeaseGuard, PrivateRoot},
@@ -127,7 +127,18 @@ async fn connect(
         budget,
     )
     .await
-    .map_err(|_| ForegroundError("gateway_tls_or_upgrade_rejected"))
+    .map_err(|error| match error {
+        LinkError::Tls(crate::tls::TlsError::CertificateRejected(cause)) => {
+            ForegroundError(cause.code())
+        }
+        LinkError::Tls(crate::tls::TlsError::HandshakeTimeout) => {
+            ForegroundError("gateway_tls_timeout")
+        }
+        LinkError::Tls(_) => ForegroundError("gateway_tls_handshake_rejected"),
+        LinkError::HandshakeRejected => ForegroundError("gateway_wss_upgrade_rejected"),
+        LinkError::Deadline => ForegroundError("gateway_transport_deadline"),
+        _ => ForegroundError("gateway_transport_refused"),
+    })
 }
 fn facts(device: &DeviceId) -> AdmissionFacts {
     // These are bootstrap-local facts after the original credential's strict

@@ -20,6 +20,9 @@ pub(crate) struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
+    // Fixed read-only worker mode; there are no target/credential/path options.
+    #[command(name = "__linux-desktop-probe", hide = true)]
+    LinuxDesktopProbe,
     /// Print build and contract identity; never claims a running service.
     BuildInfo,
     /// Run the explicitly configured native Host in this foreground process.
@@ -39,13 +42,25 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Validate existing profile/release inputs without mutation or execution.
+    /// Validate a profile, or inspect OS desktop candidates without granting access.
     Doctor {
+        #[arg(
+            long,
+            required_unless_present = "desktop_sessions",
+            conflicts_with = "desktop_sessions"
+        )]
+        state_dir: Option<PathBuf>,
+        /// Linux OS candidates only; does not attach or authorize a desktop.
         #[arg(long)]
-        state_dir: PathBuf,
+        desktop_sessions: bool,
         #[arg(long)]
         json: bool,
     },
+}
+impl Cli {
+    pub(crate) fn is_desktop_probe_worker(&self) -> bool {
+        matches!(self.command, Command::LinuxDesktopProbe)
+    }
 }
 #[derive(Subcommand)]
 enum HostCommand {
@@ -88,6 +103,56 @@ fn write_json(value: &impl serde::Serialize) -> io::Result<()> {
     output.write_all(b"\n")?;
     output.flush()
 }
+async fn desktop_probe_worker() -> ExitCode {
+    #[cfg(target_os = "linux")]
+    {
+        match styx_runtime::session_probe::worker_snapshot().await {
+            Ok(snapshot) => match write_json(&snapshot) {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(_) => error("output_unavailable"),
+            },
+            Err(styx_runtime::session_probe::ProbeError::Discovery(value)) => {
+                let refusal = styx_runtime::session_probe::WorkerRefusal::from_error(value);
+                if write_json(&refusal).is_err() {
+                    error("output_unavailable")
+                } else {
+                    ExitCode::from(2)
+                }
+            }
+            Err(value) => error(value.code()),
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        error("desktop_discovery_unsupported")
+    }
+}
+
+async fn desktop_diagnostics(json: bool) -> ExitCode {
+    #[cfg(target_os = "linux")]
+    {
+        match styx_runtime::foreground::discover_desktop_candidates().await {
+            Ok(snapshot) => {
+                if !json {
+                    eprintln!(
+                        "OS desktop candidates; agent association and desktop authorization are unproven:"
+                    );
+                }
+                if write_json(&snapshot).is_err() {
+                    error("output_unavailable")
+                } else {
+                    ExitCode::SUCCESS
+                }
+            }
+            Err(value) => error(value.code()),
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = json;
+        error("desktop_discovery_unsupported")
+    }
+}
 #[cfg(unix)]
 async fn stop_signal() -> io::Result<()> {
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
@@ -101,6 +166,7 @@ async fn stop_signal() -> io::Result<()> {
 pub(crate) async fn run(cli: Cli) -> ExitCode {
     use styx_runtime::foreground::{self, HostWireMode};
     match cli.command {
+        Command::LinuxDesktopProbe => desktop_probe_worker().await,
         Command::BuildInfo => {
             println!(
                 "styx {} contract={} stage={}",
@@ -115,7 +181,17 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
             command:
                 HostCommand::Stop { .. } | HostCommand::Pause { .. } | HostCommand::Resume { .. },
         } => error("unsupported"),
-        Command::Status { state_dir, json } | Command::Doctor { state_dir, json } => {
+        Command::Doctor {
+            desktop_sessions: true,
+            json,
+            ..
+        } => desktop_diagnostics(json).await,
+        Command::Status { state_dir, json }
+        | Command::Doctor {
+            state_dir: Some(state_dir),
+            json,
+            ..
+        } => {
             match foreground::inspect(&state_dir).await {
                 Ok(diagnostics) => {
                     // The same redacted diagnostics are used in both modes;
@@ -131,6 +207,9 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
                 Err(error_value) => error(error_value.code()),
             }
         }
+        Command::Doctor {
+            state_dir: None, ..
+        } => error("doctor_input_required"),
         Command::Host {
             command:
                 HostCommand::Run {

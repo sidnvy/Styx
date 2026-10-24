@@ -3,3 +3,5 @@ pub mod operations;
 pub mod policy;
 
 pub mod enrollment;
+
+pub mod session;

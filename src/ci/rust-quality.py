@@ -20,6 +20,7 @@ from datetime import datetime, timezone
 
 ROOT = Path(__file__).resolve().parents[2]
 POLICY = Path(__file__).with_name("rust-dependency-policy.json")
+LINUX_DISCOVERY_TEST = "platform::linux::tests::actual_system_bus_snapshot_matches_independent_loginctl"
 PAYLOAD_TEST = "store::payload::tests::payload_inventory_stream_pin_and_replacement_alias_budget_negatives"
 ENROLLMENT_OWNED_TEST = "store::enrollment::owned::tests::owned_journal_thread_move_keeps_writer_and_initial_namespace_identity"
 ENROLLMENT_PROFILE_TEST = "enrollment::profile::tests::actual_node22_profile_join_and_capability_proofs"
@@ -39,6 +40,7 @@ CODEX_TESTS = [
 ]
 
 TLS_TESTS = [
+    ("tls-certificate-classification", "tls::tests::strict_verifier_certificate_classification_batch"),
     ("tls-loopback", "tls::tests::aws_lc_owned_loopback_tls_full_scenario_batch"),
     ("wss-loopback", "host::link::tests::strict_tls_wss_data_heartbeat_limits_close_cleanup_batch"),
 ]
@@ -56,11 +58,11 @@ def tls_inputs(directory):
     if not root.is_absolute() or root.resolve() != root or root.is_relative_to(ROOT) or not root.is_dir():
         raise ValueError("external_test_only_tls_fixtures_required")
     result = {}
-    for name in ("cert-a.pem", "cert-b.pem", "ca-a.pem", "ca-b.pem", "key-a.pem"):
+    for name in ("cert-a.pem", "cert-b.pem", "ca-a.pem", "ca-b.pem", "key-a.pem", "ca-key-a.pem"):
         path = root / name
         if path.is_symlink() or not path.is_file() or path.stat().st_size > 131072:
             raise ValueError("bounded_regular_test_tls_fixture_required")
-        if name.startswith("key-"):
+        if name.startswith(("key-", "ca-key-")):
             stat = path.stat()
             if stat.st_mode & 0o077:
                 raise ValueError("private_test_fixture_mode_required")
@@ -352,6 +354,15 @@ def execute(args):
                 extra_env={"STYX_TEST_CODEX_BIN": str(Path(args.codex_bin)), "STYX_TEST_NODE22": str(Path(args.node22)), "STYX_TEST_TLS_FIXTURES": args.tls_fixtures, "STYX_TEST_PAIRED_ROOT": str(owned)})
             gate.semantic(check, [] if "1 passed; 0 failed" in gate.read("paired-host") else ["exact_paired_native_case_not_executed"])
             receipt["paired_host_native"] = check["status"]
+        receipt["linux_discovery"] = "NOT_RUN_explicit_readonly_linux_snapshot_not_requested"
+        if args.linux_discovery:
+            if sys.platform != "linux":
+                raise ValueError("linux_discovery_requires_linux")
+            # Test creates its own leaf directory; no deployment/profile is opened.
+            check = gate.run("linux-discovery", ["cargo", "test", "-p", "styx-runtime", "--locked", "--offline", LINUX_DISCOVERY_TEST, "--", "--ignored", "--exact", "--nocapture"], timeout=120,
+                extra_env={"STYX_TEST_LINUX_DISCOVERY_ROOT": str(evidence / "owned-linux-discovery")})
+            gate.semantic(check, [] if "1 passed; 0 failed" in gate.read("linux-discovery") else ["exact_linux_discovery_case_not_executed"])
+            receipt["linux_discovery"] = check["status"]
         gate.run("python-oracles", [sys.executable, "-W", "error::ResourceWarning", "-m", "unittest", "discover", "-s", "src/acceptance/oracles", "-p", "test_oracles.py", "-v"], timeout=120)
         build = gate.run("cli-build", ["cargo", "build", "-p", "styx", "--locked", "--offline"])
         if build["status"] == "PASS":
@@ -363,6 +374,17 @@ def execute(args):
             for name, argv, valid in smoke:
                 step = gate.run(name, [str(binary), *argv], timeout=30)
                 gate.semantic(step, [] if valid(gate.read(name)) else ["cli_response_not_expected"])
+            if args.linux_discovery:
+                step = gate.run("cli-desktop-candidates", [str(binary), "doctor", "--desktop-sessions", "--json"], timeout=10,
+                    extra_env={"DBUS_SYSTEM_BUS_ADDRESS": "unix:path=/nonexistent-styx-negative-control", "WAYLAND_DISPLAY": "not-an-authorized-display", "HYPRLAND_INSTANCE_SIGNATURE": "not-an-authorized-compositor"})
+                try:
+                    snapshot = json.loads(gate.read("cli-desktop-candidates"))
+                    valid = snapshot["schema"] == 1 and snapshot["connection_closed"] is True and all(
+                        item["uid"] == os.getuid() and item["agent_association"] == "unknown" and item["compositor_association"] == "unknown"
+                        for item in snapshot["candidates"])
+                except (ValueError, KeyError, TypeError):
+                    valid = False
+                gate.semantic(step, [] if valid else ["candidate_diagnostics_not_unknown_only_actual_user"])
             # A skeleton must reject unimplemented business, never return empty success.
             reject = gate.run("cli-unimplemented-reject", [str(binary), "exec", "--command", "never-run"], timeout=30, expected_exit=2)
             if reject["exit_code"] is not None and reject["exit_code"] == 2 and "unrecognized subcommand" in gate.read("cli-unimplemented-reject", "stderr"):
@@ -394,6 +416,8 @@ def execute(args):
                 receipt["tls_stability"] = "FAIL"
         required = {"git-head", "git-status", "git-head-end", "git-status-end", "rustc-version", "cargo-version", "dependency-metadata", "format", "clippy", "workspace-tests", "ignored-inventory", "official-http-sdk", "python-oracles", "cli-build", "cli-help", "cli-version", "cli-build-info", "cli-unimplemented-reject"}
         required |= {name for name, _ in HTTP_TESTS}
+        if args.linux_discovery:
+            required |= {"linux-discovery", "cli-desktop-candidates"}
         if args.enrollment_store:
             required |= {"payload-store", "enrollment-store", "enrollment-clock", "enrollment-recovery", "enrollment-owned"}
         if args.enrollment_service:
@@ -420,6 +444,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--evidence", required=True, help="fresh absolute external evidence directory")
     parser.add_argument("--target-dir", help="absolute external Cargo build cache; reused only by explicit choice")
+    parser.add_argument("--linux-discovery", action="store_true", help="actual read-only fixed system-bus candidate snapshot plus CLI; no desktop authorization")
     parser.add_argument("--paired-host", action="store_true", help="actual paired TLS/MCP/WSS/native scene; requires Codex, Node22, TLS and enrollment service inputs")
     parser.add_argument("--enrollment-service", action="store_true", help="run actual signed enrollment TLS service; requires --enrollment-store, --node22 and --tls-fixtures")
     parser.add_argument("--enrollment-store", action="store_true", help="run the Linux GNU owned private-file/process-crash journal slice")

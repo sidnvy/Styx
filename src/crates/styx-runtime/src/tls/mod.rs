@@ -18,7 +18,7 @@ const MAX_CERTIFICATE_PEM_BYTES: usize = 128 * 1024;
 const MAX_PRIVATE_PEM_BYTES: usize = 64 * 1024;
 const MAX_CERTIFICATES: usize = 8;
 
-#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum TlsError {
     #[error("invalid TLS material or encoding")]
     InvalidMaterial,
@@ -32,6 +32,10 @@ pub enum TlsError {
     ConfigurationRejected,
     #[error("invalid TLS server hostname or IP literal")]
     InvalidServerName,
+    #[error("TLS certificate rejected: {0}")]
+    CertificateRejected(CertificateFailure),
+    #[error("TLS handshake transport error: {0:?}")]
+    HandshakeIo(std::io::ErrorKind),
     #[error("TLS handshake rejected")]
     HandshakeRejected,
     #[error("TLS handshake deadline expired")]
@@ -40,6 +44,104 @@ pub enum TlsError {
     MissingPeerCertificate,
     #[error("invalid TLS handshake deadline")]
     InvalidDeadline,
+}
+
+/// Sanitized classification of the existing Rustls verifier's rejection.
+/// No certificate names, peer-controlled strings or private material are retained.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CertificateFailure {
+    BadEncoding,
+    Expired,
+    NotYetValid,
+    NameMismatch,
+    UnknownIssuer,
+    Revoked,
+    UnhandledCriticalExtension,
+    BadSignature,
+    UnsupportedSignatureAlgorithm,
+    InvalidPurpose,
+    RevocationStatus,
+    InvalidOcspResponse,
+    ApplicationVerification,
+    InvalidCaAsLeaf,
+    InvalidLeafAsCa,
+    Other,
+}
+impl CertificateFailure {
+    pub fn code(self) -> &'static str {
+        match self {
+            Self::BadEncoding => "tls_certificate_bad_encoding",
+            Self::Expired => "tls_certificate_expired",
+            Self::NotYetValid => "tls_certificate_not_yet_valid",
+            Self::NameMismatch => "tls_certificate_name_mismatch",
+            Self::UnknownIssuer => "tls_certificate_unknown_issuer",
+            Self::Revoked => "tls_certificate_revoked",
+            Self::UnhandledCriticalExtension => "tls_certificate_unhandled_critical_extension",
+            Self::BadSignature => "tls_certificate_bad_signature",
+            Self::UnsupportedSignatureAlgorithm => {
+                "tls_certificate_unsupported_signature_algorithm"
+            }
+            Self::InvalidPurpose => "tls_certificate_invalid_purpose",
+            Self::RevocationStatus => "tls_certificate_revocation_status",
+            Self::InvalidOcspResponse => "tls_certificate_invalid_ocsp_response",
+            Self::ApplicationVerification => "tls_certificate_application_verification",
+            Self::InvalidCaAsLeaf => "tls_certificate_ca_used_as_leaf",
+            Self::InvalidLeafAsCa => "tls_certificate_leaf_used_as_ca",
+            Self::Other => "tls_certificate_other",
+        }
+    }
+    #[allow(deprecated)] // Rustls still exposes legacy variants alongside contextual ones.
+    fn from_rustls(error: &rustls::CertificateError) -> Self {
+        use rustls::CertificateError as C;
+        match error {
+            C::BadEncoding => Self::BadEncoding,
+            C::Expired | C::ExpiredContext { .. } => Self::Expired,
+            C::NotValidYet | C::NotValidYetContext { .. } => Self::NotYetValid,
+            C::NotValidForName | C::NotValidForNameContext { .. } => Self::NameMismatch,
+            C::UnknownIssuer => Self::UnknownIssuer,
+            C::Revoked => Self::Revoked,
+            C::UnhandledCriticalExtension => Self::UnhandledCriticalExtension,
+            C::BadSignature => Self::BadSignature,
+            C::UnsupportedSignatureAlgorithm
+            | C::UnsupportedSignatureAlgorithmContext { .. }
+            | C::UnsupportedSignatureAlgorithmForPublicKeyContext { .. } => {
+                Self::UnsupportedSignatureAlgorithm
+            }
+            C::InvalidPurpose | C::InvalidPurposeContext { .. } => Self::InvalidPurpose,
+            C::UnknownRevocationStatus
+            | C::ExpiredRevocationList
+            | C::ExpiredRevocationListContext { .. } => Self::RevocationStatus,
+            C::InvalidOcspResponse => Self::InvalidOcspResponse,
+            C::ApplicationVerificationFailure => Self::ApplicationVerification,
+            C::Other(other) => match other.0.downcast_ref::<webpki::Error>() {
+                Some(webpki::Error::CaUsedAsEndEntity) => Self::InvalidCaAsLeaf,
+                Some(webpki::Error::EndEntityUsedAsCa) => Self::InvalidLeafAsCa,
+                _ => Self::Other,
+            },
+            _ => Self::Other,
+        }
+    }
+}
+impl std::fmt::Display for CertificateFailure {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.code())
+    }
+}
+
+// Tokio-Rustls wraps process_new_packets' original Rustls error directly in
+// io::Error. Inspect that typed payload; do not parse Display/Debug or alter
+// validation. An unrecognized underlying certificate cause stays Other.
+fn classify_handshake(error: std::io::Error) -> TlsError {
+    match error
+        .get_ref()
+        .and_then(|inner| inner.downcast_ref::<rustls::Error>())
+    {
+        Some(rustls::Error::InvalidCertificate(cause)) => {
+            TlsError::CertificateRejected(CertificateFailure::from_rustls(cause))
+        }
+        Some(_) => TlsError::HandshakeRejected,
+        None => TlsError::HandshakeIo(error.kind()),
+    }
 }
 
 macro_rules! certificate_pin {
@@ -227,7 +329,7 @@ impl GatewayClientTls {
         let stream = tokio::time::timeout_at(until, self.connector.connect(name, tcp))
             .await
             .map_err(|_| TlsError::HandshakeTimeout)?
-            .map_err(|_| TlsError::HandshakeRejected)?;
+            .map_err(classify_handshake)?;
         if let Some(expected) = &self.leaf_pin {
             let peer = stream
                 .get_ref()
@@ -294,7 +396,7 @@ impl GatewayServerTls {
         tokio::time::timeout_at(until, self.acceptor.accept(tcp))
             .await
             .map_err(|_| TlsError::HandshakeTimeout)?
-            .map_err(|_| TlsError::HandshakeRejected)
+            .map_err(classify_handshake)
     }
 }
 #[cfg(test)]

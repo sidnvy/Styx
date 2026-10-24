@@ -43,6 +43,7 @@ bytes.workspace = true
 rustls.workspace = true
 tokio-rustls.workspace = true
 rustls-pemfile.workspace = true
+webpki.workspace = true
 tokio-tungstenite.workspace = true
 
 [dev-dependencies]
@@ -52,3 +53,6 @@ reqwest = { workspace = true, features = ["rustls"] }
 
 [lints]
 workspace = true
+
+[target.'cfg(target_os = "linux")'.dependencies]
+zbus.workspace = true

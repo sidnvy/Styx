@@ -8,6 +8,10 @@ pub mod foreground;
 pub mod gateway;
 pub mod host;
 pub mod ipc;
+pub mod platform;
 pub mod providers;
+pub mod session;
+#[cfg(target_os = "linux")]
+pub mod session_probe;
 pub mod store;
 pub mod tls;
