@@ -93,7 +93,109 @@ fn open_root(path: &Path) -> Result<File> {
     Ok(directory)
 }
 
+/// A mkdir may have happened even if opening/validation failed. Keep the
+/// parent locator and, when available, the new descriptor; never adopt/delete
+/// the orphan or classify a post-mkdir error as a clean refusal.
+pub(super) struct FreshChildError {
+    pub(super) cause: StoreError,
+    pub(super) created: bool,
+    pub(super) root: Option<Root>,
+}
+fn single_component(name: &OsStr) -> Result<()> {
+    use std::os::unix::ffi::OsStrExt;
+    // Path::components normalizes trailing separators and '/.'. Fresh creation
+    // accepts one original filename, never a normalized path spelling.
+    if name.as_bytes().contains(&b'/') || name.as_bytes().contains(&0) {
+        return Err(StoreError::InvalidRelativePath);
+    }
+    let mut components = Path::new(name).components();
+    if !matches!(components.next(), Some(Component::Normal(_))) || components.next().is_some() {
+        return Err(StoreError::InvalidRelativePath);
+    }
+    Ok(())
+}
+
 impl Root {
+    /// Strict fresh-child creation. Existing directories are never opened as
+    /// fresh. Caller retains an explicit orphan on every post-mkdir error.
+    pub(super) fn create_fresh_child(
+        &self,
+        name: &OsStr,
+    ) -> std::result::Result<Self, FreshChildError> {
+        let mut created = false;
+        let mut retained = None;
+        let result = (|| {
+            single_component(name)?;
+            self.validate_root()?;
+            nix::sys::stat::mkdirat(&*self.directory, name, Mode::S_IRWXU)
+                .map_err(|error| StoreError::Io(std::io::Error::from_raw_os_error(error as i32)))?;
+            created = true;
+            let directory = open_at(
+                &self.directory,
+                name,
+                OFlag::O_RDONLY | OFlag::O_DIRECTORY,
+                Mode::empty(),
+            )?;
+            let metadata = directory.metadata()?;
+            let child = Self {
+                directory: Arc::new(directory),
+                path: self.path.join(name),
+                identity: root_identity(&metadata),
+            };
+            retained = Some(child.clone());
+            private(&metadata)?;
+            if !metadata.is_dir() || metadata.mode() & 0o7777 != 0o700 {
+                return Err(StoreError::NotPrivate);
+            }
+            child.directory.sync_all()?;
+            self.directory.sync_all()?;
+            self.validate_root()?;
+            child.validate_root()?;
+            Ok(child)
+        })();
+        result.map_err(|cause| FreshChildError {
+            cause,
+            created,
+            root: retained,
+        })
+    }
+    /// Fixed single private file, exclusively created under the original writer.
+    /// No replacement, temporary-name adoption, missing-file repair or rollback.
+    pub(super) fn create_fixed(
+        &self,
+        guard: &ConfigurationWriterGuard,
+        name: &str,
+        bytes: &[u8],
+        observer: &dyn Fn(&str),
+    ) -> Result<()> {
+        single_component(OsStr::new(name))?;
+        if bytes.is_empty() || bytes.len() > 1024 * 1024 {
+            return Err(StoreError::TooLarge);
+        }
+        self.with_configuration_writer_directory(guard, |directory| {
+            use std::io::Write;
+            let mut file = open_at(
+                directory,
+                OsStr::new(name),
+                OFlag::O_WRONLY | OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_NONBLOCK,
+                Mode::S_IRUSR | Mode::S_IWUSR,
+            )?;
+            let metadata = private_file(&file)?;
+            if metadata.mode() & 0o7777 != 0o600 {
+                return Err(StoreError::NotPrivate);
+            }
+            file.write_all(bytes)?;
+            observer("write");
+            file.sync_all()?;
+            observer("file_sync");
+            directory.sync_all()?;
+            observer("directory_sync");
+            if self.read_raw(Path::new(name), bytes.len())?.bytes() != bytes {
+                return Err(StoreError::Changed);
+            }
+            Ok(())
+        })
+    }
     pub(super) fn open(path: &Path) -> Result<Self> {
         let directory = open_root(path)?;
         let identity = root_identity(&directory.metadata()?);

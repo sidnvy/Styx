@@ -10,7 +10,7 @@ use super::secure_journal::{JournalError, JournalResult};
 use super::{ConfigurationWriterGuard, PrivateRoot, RootIdentity};
 use std::sync::{
     Arc, Mutex,
-    atomic::{AtomicBool, Ordering},
+    atomic::{AtomicU8, Ordering},
 };
 use styx_contracts::identity::TransactionId;
 
@@ -25,19 +25,23 @@ pub struct OwnedConfigurationRoot {
 }
 struct ConfigurationOwner {
     state: Mutex<ConfigurationState>,
-    // Published monotonic rejection facts, not another policy/writer authority.
+    // Published rejection facts (poison monotonic), not another writer authority.
     // Hot async lease/admission checks never wait behind filesystem I/O.
-    poisoned: AtomicBool,
-    fenced: AtomicBool,
+    rejection: AtomicU8,
 }
+const POISONED: u8 = 1;
+const FENCED: u8 = 2;
 impl ConfigurationOwner {
     fn publish(&self, state: &ConfigurationState) {
-        if state.poisoned {
-            self.poisoned.store(true, Ordering::Release);
-        }
-        if state.recovery_required || state.fence.is_some() {
-            self.fenced.store(true, Ordering::Release);
-        }
+        let proposed = (u8::from(state.poisoned) * POISONED)
+            | (u8::from(state.recovery_required || state.fence.is_some()) * FENCED);
+        // A single coherent snapshot permits a verified commit to clear only
+        // FENCED; once published POISONED can never be cleared in this owner.
+        let _ = self
+            .rejection
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |old| {
+                Some(proposed | (old & POISONED))
+            });
     }
 }
 struct UnfinishedAccess<'a> {
@@ -47,7 +51,7 @@ struct UnfinishedAccess<'a> {
 impl Drop for UnfinishedAccess<'_> {
     fn drop(&mut self) {
         if !self.completed {
-            self.owner.poisoned.store(true, Ordering::Release);
+            self.owner.rejection.fetch_or(POISONED, Ordering::Release);
         }
     }
 }
@@ -141,6 +145,26 @@ impl ConfigurationState {
             })
             .map_err(|_| JournalError::Unknown)?
     }
+    pub(super) fn require_native_maintenance(
+        &self,
+        transaction: &TransactionId,
+    ) -> JournalResult<()> {
+        if self.fence.as_ref() != Some(transaction) {
+            return Err(JournalError::Conflict);
+        }
+        Ok(())
+    }
+    pub(super) fn finish_native(
+        &mut self,
+        proof: &super::native_transaction::NativeCommitProof,
+    ) -> JournalResult<()> {
+        if !proof.matches(&self.root.identity(), self.fence.as_ref()) {
+            return Err(JournalError::Conflict);
+        }
+        self.fence = None;
+        self.recovery_required = false;
+        Ok(())
+    }
     pub(super) fn ordinary_admission(&self) -> JournalResult<()> {
         if self.recovery_required || self.fence.is_some() {
             Err(JournalError::Conflict)
@@ -149,6 +173,11 @@ impl ConfigurationState {
         }
     }
 }
+pub(super) struct ConfigurationOpenFailure {
+    pub(super) error: JournalError,
+    pub(super) root: PrivateRoot,
+    pub(super) writer: ConfigurationWriterGuard,
+}
 impl OwnedConfigurationRoot {
     /// Moves an already acquired writer. This neither creates namespaces nor
     /// authorizes fresh bootstrap, legacy handoff, migration, or service changes.
@@ -156,6 +185,12 @@ impl OwnedConfigurationRoot {
         root: PrivateRoot,
         writer: ConfigurationWriterGuard,
     ) -> JournalResult<Self> {
+        Self::open_existing_retaining(root, writer).map_err(|failure| failure.error)
+    }
+    pub(super) fn open_existing_retaining(
+        root: PrivateRoot,
+        writer: ConfigurationWriterGuard,
+    ) -> Result<Self, Box<ConfigurationOpenFailure>> {
         let mut state = ConfigurationState {
             root,
             writer,
@@ -165,41 +200,55 @@ impl OwnedConfigurationRoot {
             #[cfg(all(target_os = "linux", target_env = "gnu"))]
             namespaces: Vec::with_capacity(2),
         };
-        #[cfg(all(target_os = "linux", target_env = "gnu"))]
-        for name in [NamespaceName::EnrollmentV1, NamespaceName::ManagementV1] {
-            if state.root.ensure_absent(name.as_str()).is_ok() {
-                continue;
+        let initialized: JournalResult<()> = (|| {
+            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            for name in [NamespaceName::EnrollmentV1, NamespaceName::ManagementV1] {
+                if state.root.ensure_absent(name.as_str()).is_ok() {
+                    continue;
+                }
+                let budget = JournalBudget::default();
+                let (pin, nonempty) = state
+                    .root
+                    .inner
+                    .with_configuration_writer_directory(&state.writer, |directory| {
+                        Ok((|| {
+                            let pin = files::existing_namespace(directory, name)?;
+                            let dir = files::directory(directory, name.as_str())?;
+                            Ok::<_, JournalError>((
+                                pin,
+                                !files::scan(&dir, budget)?.files.is_empty(),
+                            ))
+                        })())
+                    })
+                    .map_err(|_| JournalError::Unknown)??;
+                state.namespaces.push(NamespaceBinding {
+                    name,
+                    pin,
+                    budget,
+                    claimed: false,
+                });
+                // Both journals count against the total even in standalone
+                // management. Only enrollment's own ledger can reconcile enrollment;
+                // retained management bytes always require management reconciliation.
+                if name.as_str() == NamespaceName::ManagementV1.as_str() {
+                    state.recovery_required = nonempty;
+                }
             }
-            let budget = JournalBudget::default();
-            let (pin, nonempty) = state
-                .root
-                .inner
-                .with_configuration_writer_directory(&state.writer, |directory| {
-                    Ok((|| {
-                        let pin = files::existing_namespace(directory, name)?;
-                        let dir = files::directory(directory, name.as_str())?;
-                        Ok::<_, JournalError>((pin, !files::scan(&dir, budget)?.files.is_empty()))
-                    })())
-                })
-                .map_err(|_| JournalError::Unknown)??;
-            state.namespaces.push(NamespaceBinding {
-                name,
-                pin,
-                budget,
-                claimed: false,
-            });
-            // Both journals count against the total even in standalone
-            // management. Only enrollment's own ledger can reconcile enrollment;
-            // retained management bytes always require management reconciliation.
-            if name.as_str() == NamespaceName::ManagementV1.as_str() {
-                state.recovery_required = nonempty;
-            }
+            state.validate()
+        })();
+        if let Err(error) = initialized {
+            return Err(Box::new(ConfigurationOpenFailure {
+                error,
+                root: state.root,
+                writer: state.writer,
+            }));
         }
-        state.validate()?;
         Ok(Self {
             inner: Arc::new(ConfigurationOwner {
-                poisoned: AtomicBool::new(state.poisoned),
-                fenced: AtomicBool::new(state.recovery_required || state.fence.is_some()),
+                rejection: AtomicU8::new(
+                    (u8::from(state.poisoned) * POISONED)
+                        | (u8::from(state.recovery_required || state.fence.is_some()) * FENCED),
+                ),
                 state: Mutex::new(state),
             }),
         })
@@ -215,7 +264,7 @@ impl OwnedConfigurationRoot {
         operation: impl FnOnce(&mut ConfigurationState) -> JournalResult<T>,
     ) -> JournalResult<T> {
         let mut state = self.inner.state.lock().map_err(|_| {
-            self.inner.poisoned.store(true, Ordering::Release);
+            self.inner.rejection.fetch_or(POISONED, Ordering::Release);
             JournalError::Unknown
         })?;
         // Publish rejection even if a trusted store callback unwinds. No
@@ -289,19 +338,51 @@ impl OwnedConfigurationRoot {
     // Hot checks consume only published rejection facts. Actual store access
     // still validates the guarded root and full namespace inventory before/after.
     pub(crate) fn ensure_usable(&self) -> JournalResult<()> {
-        if self.inner.poisoned.load(Ordering::Acquire) {
+        if self.inner.rejection.load(Ordering::Acquire) & POISONED != 0 {
             Err(JournalError::Unknown)
         } else {
             Ok(())
         }
     }
     pub(crate) fn ensure_admission(&self) -> JournalResult<()> {
-        self.ensure_usable()?;
-        if self.inner.fenced.load(Ordering::Acquire) {
+        let rejection = self.inner.rejection.load(Ordering::Acquire);
+        if rejection & POISONED != 0 {
+            return Err(JournalError::Unknown);
+        }
+        if rejection & FENCED != 0 {
             Err(JournalError::Conflict)
         } else {
             Ok(())
         }
+    }
+    /// Only a native coordinator without an instantiated enrollment authority
+    /// may use this port. Otherwise the existing complete service gate is required.
+    pub(super) fn begin_standalone_native(
+        &self,
+        transaction: TransactionId,
+        recovery: bool,
+    ) -> JournalResult<ConfigurationMaintenance> {
+        self.with_state(|state| {
+            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            if state.namespaces.iter().any(|binding| {
+                binding.name.as_str() == NamespaceName::EnrollmentV1.as_str() && binding.claimed
+            }) {
+                return Err(JournalError::Conflict);
+            }
+            if recovery {
+                if !state.recovery_required || state.fence.is_some() {
+                    return Err(JournalError::Conflict);
+                }
+            } else {
+                state.ordinary_admission()?;
+            }
+            state.fence = Some(transaction.clone());
+            Ok(())
+        })?;
+        Ok(ConfigurationMaintenance {
+            owner: self.clone(),
+            transaction,
+        })
     }
     pub(super) fn with_maintenance<T>(
         &self,

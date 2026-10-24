@@ -26,6 +26,9 @@ PAYLOAD_TEST = "store::payload::tests::payload_inventory_stream_pin_and_replacem
 CONFIGURATION_OWNER_TEST = "store::configuration::tests::shared_configuration_writer_fence_and_sticky_unknown_batch"
 CONFIGURATION_MAINTENANCE_TEST = "enrollment::shared::maintenance_tests::actual_configuration_maintenance_complete_gate_and_dropped_waiter"
 MANAGEMENT_PREPARATION_TEST = "store::management::tests::durable_prepare_preserves_exact_bytes_and_unsettled_high_water_batch"
+NATIVE_ROOT_TEST = "store::native_root::tests::fresh_native_root_genesis_reopen_and_retained_unknown_batch"
+MANAGEMENT_PHASE_TEST = "store::management::phase_tests::original_phase_chain_and_unknown_orphans_are_preserved_batch"
+NATIVE_TRANSACTION_TEST = "store::native_transaction::tests::native_commit_reopen_and_scope_rejections_batch"
 ENROLLMENT_OWNED_TEST = "store::enrollment::owned::tests::owned_journal_thread_move_keeps_writer_and_initial_namespace_identity"
 ENROLLMENT_PROFILE_TEST = "enrollment::profile::tests::actual_node22_profile_join_and_capability_proofs"
 ENROLLMENT_SERVICE_TEST = "enrollment::service::tests::actual_strict_tls_enrollment_service_full_journey"
@@ -361,6 +364,9 @@ def execute(args):
                 ("configuration-owner", CONFIGURATION_OWNER_TEST, "STYX_TEST_CONFIGURATION_ROOT"),
                 ("configuration-maintenance", CONFIGURATION_MAINTENANCE_TEST, "STYX_TEST_CONFIGURATION_ROOT"),
                 ("management-preparation", MANAGEMENT_PREPARATION_TEST, "STYX_TEST_MANAGEMENT_ROOT"),
+                ("native-root", NATIVE_ROOT_TEST, "STYX_TEST_NATIVE_ROOT_ROOT"),
+                ("management-phases", MANAGEMENT_PHASE_TEST, "STYX_TEST_MANAGEMENT_PHASE_ROOT"),
+                ("native-transaction", NATIVE_TRANSACTION_TEST, "STYX_TEST_NATIVE_TRANSACTION_ROOT"),
             ):
                 check = gate.run(label, ["cargo", "test", "-p", "styx-runtime", "--locked", "--offline", test, "--", "--ignored", "--exact", "--nocapture"], timeout=120,
                     extra_env={env_name: str(evidence / ("owned-" + label))})
@@ -552,7 +558,7 @@ def execute(args):
         if args.linux_discovery:
             required |= {"linux-discovery", "cli-desktop-candidates"}
         if args.enrollment_store:
-            required |= {"payload-store", "enrollment-store", "enrollment-clock", "enrollment-recovery", "enrollment-owned"}
+            required |= {"payload-store", "enrollment-store", "enrollment-clock", "enrollment-recovery", "enrollment-owned", "configuration-owner", "configuration-maintenance", "management-preparation", "native-root", "management-phases", "native-transaction"}
         if args.enrollment_service:
             required |= {"enrollment-profile", "enrollment-controller", "enrollment-service"}
         if args.paired_host:

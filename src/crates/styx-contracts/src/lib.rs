@@ -20,3 +20,5 @@ pub const HOST_QUEUED_BYTES: usize = 67_108_864;
 pub mod enrollment;
 
 pub mod management;
+
+pub mod native_management;

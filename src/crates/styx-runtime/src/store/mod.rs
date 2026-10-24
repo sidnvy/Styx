@@ -9,6 +9,9 @@
 mod configuration;
 pub mod enrollment;
 pub mod management;
+pub mod native_root;
+pub mod native_state;
+pub mod native_transaction;
 mod secure_journal;
 pub use configuration::{ConfigurationMaintenance, OwnedConfigurationRoot};
 mod payload;

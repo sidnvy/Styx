@@ -1,0 +1,543 @@
+//! Native configuration transactions under one opaque root/writer binding.
+//! This changes desired configuration only; no OS service action, legacy owner
+//! cutover, pairing or execution lease is implied. Unknown native effects are
+//! never retried here. Recovery concerns the SAME pure configuration assignment.
+use super::management::{
+    ManagementTransactionObservation, OriginalManagementTransaction, OwnedManagementJournal,
+};
+use super::native_root::NativeRootBinding;
+use super::native_state::{self, ValidatedNativeState};
+use super::secure_journal::{JournalBudget, JournalError, JournalResult};
+use super::{ConfigurationMaintenance, OwnedConfigurationRoot, RootIdentity};
+use styx_contracts::identity::{Sha256Digest, TransactionId};
+use styx_core::management::{state::validate_transition, transaction::*};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
+pub enum NativeTransactionError {
+    #[error("native_transaction_invalid_input")]
+    InvalidInput,
+    #[error("native_transaction_conflict")]
+    Conflict,
+    #[error("native_transaction_unknown_inspect")]
+    UnknownInspect,
+    #[error("native_transaction_unsupported")]
+    Unsupported,
+}
+impl From<JournalError> for NativeTransactionError {
+    fn from(error: JournalError) -> Self {
+        match error {
+            JournalError::InvalidInput => Self::InvalidInput,
+            JournalError::Conflict => Self::Conflict,
+            JournalError::Unsupported => Self::Unsupported,
+            _ => Self::UnknownInspect,
+        }
+    }
+}
+#[must_use = "the original native binding still owns the configuration writer"]
+pub struct NativeTransactionOpenFailure {
+    error: NativeTransactionError,
+    binding: Box<NativeRootBinding>,
+}
+impl NativeTransactionOpenFailure {
+    pub fn error(&self) -> NativeTransactionError {
+        self.error
+    }
+    pub fn binding(&self) -> &NativeRootBinding {
+        &self.binding
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct NativeCommitResult {
+    pub transaction_id: TransactionId,
+    pub canonical_raw_sha256: Sha256Digest,
+    pub committed: JournalReceipt,
+    /// Explicit original configuration reconciliation, not native action replay.
+    pub recovered: bool,
+}
+/// Only this coordinator can mint proof, after actual formal read + complete
+/// original journal replay under the same owner lock. No DTO is a release port.
+pub(super) struct NativeCommitProof {
+    root: RootIdentity,
+    transaction: TransactionId,
+}
+impl NativeCommitProof {
+    pub(super) fn matches(&self, root: &RootIdentity, transaction: Option<&TransactionId>) -> bool {
+        &self.root == root && transaction == Some(&self.transaction)
+    }
+}
+pub struct NativeTransactions {
+    binding: NativeRootBinding,
+    journal: OwnedManagementJournal,
+    retained_maintenance: Option<ConfigurationMaintenance>,
+}
+impl NativeTransactions {
+    pub fn open(binding: NativeRootBinding) -> Result<Self, NativeTransactionOpenFailure> {
+        match OwnedManagementJournal::open_existing(
+            binding.configuration_root(),
+            JournalBudget::default(),
+        ) {
+            Ok(journal) => Ok(Self {
+                binding,
+                journal,
+                retained_maintenance: None,
+            }),
+            Err(error) => Err(NativeTransactionOpenFailure {
+                error: error.into(),
+                binding: Box::new(binding),
+            }),
+        }
+    }
+    pub fn configuration_root(&self) -> OwnedConfigurationRoot {
+        self.binding.configuration_root()
+    }
+    pub fn readstate(&self) -> Result<ValidatedNativeState, NativeTransactionError> {
+        self.binding
+            .validated_readstate()
+            .map_err(|_| NativeTransactionError::UnknownInspect)
+    }
+    /// Observation is neither a new durability receipt nor permission to replay.
+    pub fn query(
+        &self,
+        id: &TransactionId,
+    ) -> Result<Option<ManagementTransactionObservation>, NativeTransactionError> {
+        Ok(self
+            .journal
+            .observe()?
+            .transactions
+            .into_iter()
+            .find(|tx| &tx.intent.transaction_id == id))
+    }
+    /// Standalone startup only. If enrollment authority is instantiated, callers
+    /// must obtain its complete maintenance gate and use apply_with_maintenance.
+    pub fn apply_target(
+        &mut self,
+        target: &[u8],
+    ) -> Result<NativeCommitResult, NativeTransactionError> {
+        self.apply_observing(target, &|_, _| {})
+    }
+    fn apply_observing(
+        &mut self,
+        target: &[u8],
+        observer: &dyn Fn(&str, &str),
+    ) -> Result<NativeCommitResult, NativeTransactionError> {
+        let (before, intent) = self.plan(target)?;
+        let maintenance = self
+            .configuration_root()
+            .begin_standalone_native(intent.transaction_id.clone(), false)?;
+        let result = self.apply_prepared(&maintenance, &before, target, &intent, observer);
+        if result.is_err() {
+            self.retained_maintenance = Some(maintenance);
+        }
+        result
+    }
+    pub fn apply_with_maintenance(
+        &mut self,
+        maintenance: &ConfigurationMaintenance,
+        target: &[u8],
+    ) -> Result<NativeCommitResult, NativeTransactionError> {
+        let (before, intent) = self.plan(target)?;
+        self.apply_prepared(maintenance, &before, target, &intent, &|_, _| {})
+    }
+    fn plan(
+        &self,
+        target_raw: &[u8],
+    ) -> Result<(Vec<u8>, DesiredStateCommit), NativeTransactionError> {
+        let before = self.readstate()?;
+        let target = native_state::decode_state(target_raw, self.binding.marker())
+            .map_err(|_| NativeTransactionError::InvalidInput)?;
+        let tx = target
+            .state()
+            .last_transaction
+            .as_ref()
+            .ok_or(NativeTransactionError::InvalidInput)?;
+        let intent = DesiredStateCommit {
+            transaction_id: tx.transaction_id.clone(),
+            sequence: tx.sequence,
+            deployment_raw_sha256: before.state().deployment_raw_sha256,
+            before_state_sha256: before.raw_sha256(),
+            target_state_sha256: target.raw_sha256(),
+            reader: before.state().reader_contract,
+        };
+        validate_transition(
+            before.state(),
+            target.state(),
+            self.binding.marker(),
+            &intent,
+        )
+        .map_err(|_| NativeTransactionError::InvalidInput)?;
+        let inventory = self.journal.observe()?;
+        if !inventory.orphans.is_empty()
+            || intent.sequence <= inventory.high_water
+            || inventory.transactions.iter().any(|tx| {
+                tx.intent.transaction_id == intent.transaction_id
+                    || !tx
+                        .phase_receipts
+                        .last()
+                        .is_some_and(|r| r.stage == DurableStage::Committed)
+            })
+        {
+            return Err(NativeTransactionError::Conflict);
+        }
+        Ok((before.raw_bytes().to_vec(), intent))
+    }
+    fn apply_prepared(
+        &mut self,
+        maintenance: &ConfigurationMaintenance,
+        before: &[u8],
+        target: &[u8],
+        intent: &DesiredStateCommit,
+        observer: &dyn Fn(&str, &str),
+    ) -> Result<NativeCommitResult, NativeTransactionError> {
+        if maintenance.transaction_id() != &intent.transaction_id {
+            return Err(NativeTransactionError::Conflict);
+        }
+        let raw_intent =
+            serde_json::to_vec(intent).map_err(|_| NativeTransactionError::InvalidInput)?;
+        let prepared = self
+            .journal
+            .prepare(maintenance, &raw_intent, before, target)?;
+        observer("prepared", "persisted");
+        let mut transaction = ManagementTransaction::plan(intent.clone())
+            .map_err(|_| NativeTransactionError::InvalidInput)?;
+        transaction
+            .prepare(PreparedFacts {
+                intent: intent.clone(),
+                deployment_raw_sha256: intent.deployment_raw_sha256,
+                canonical_state_sha256: intent.before_state_sha256,
+                reader: intent.reader,
+                journal: prepared.journal,
+            })
+            .map_err(|_| NativeTransactionError::UnknownInspect)?;
+        self.replace_canonical(maintenance, before, target, intent, observer)?;
+        self.complete(maintenance, transaction, false, observer)
+    }
+    fn replace_canonical(
+        &self,
+        maintenance: &ConfigurationMaintenance,
+        before: &[u8],
+        target: &[u8],
+        intent: &DesiredStateCommit,
+        observer: &dyn Fn(&str, &str),
+    ) -> Result<(), NativeTransactionError> {
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        {
+            use super::secure_journal::files;
+            use nix::fcntl::{RenameFlags, renameat2};
+            self.binding.with_binding(|state, marker| {
+                self.configuration_root()
+                    .same_authority(&self.journal.configuration_root())
+                    .then_some(())
+                    .ok_or(JournalError::Conflict)?;
+                if !maintenance.matches(&self.configuration_root()) {
+                    return Err(JournalError::Conflict);
+                }
+                state.require_native_maintenance(maintenance.transaction_id())?;
+                let current = self.binding.read_locked(state)?;
+                let parsed_target = native_state::decode_state(target, marker)
+                    .map_err(|_| JournalError::InvalidInput)?;
+                validate_transition(current.state(), parsed_target.state(), marker, intent)
+                    .map_err(|_| JournalError::Conflict)?;
+                if current.raw_bytes() != before
+                    || current.raw_sha256() != intent.before_state_sha256
+                    || parsed_target.raw_sha256() != intent.target_state_sha256
+                {
+                    return Err(JournalError::Conflict);
+                }
+                let pin = state
+                    .root
+                    .read_raw(
+                        "state.json",
+                        styx_contracts::native_management::NATIVE_STATE_BYTES,
+                    )
+                    .map_err(|_| JournalError::Unknown)?;
+                state.preflight_growth(target.len())?;
+                self.journal.with_directory_locked(state, |directory| {
+                    let temporary =
+                        format!("txn-{}.state-temporary", intent.transaction_id.as_str());
+                    files::immutable(
+                        directory,
+                        &temporary,
+                        target,
+                        self.journal.budget(),
+                        &|phase| observer("canonical_temporary", phase),
+                    )?;
+                    // Cooperating writer conditional replacement. This is NOT an
+                    // atomic compare-and-swap against hostile same-UID writers.
+                    let now = state
+                        .root
+                        .read_raw(
+                            "state.json",
+                            styx_contracts::native_management::NATIVE_STATE_BYTES,
+                        )
+                        .map_err(|_| JournalError::Unknown)?;
+                    if now.observation() != pin.observation() || now.bytes() != before {
+                        return Err(JournalError::Unknown);
+                    }
+                    state
+                        .root
+                        .inner
+                        .with_configuration_writer_directory(&state.writer, |root_dir| {
+                            let result = (|| {
+                                renameat2(
+                                    directory,
+                                    temporary.as_str(),
+                                    root_dir,
+                                    "state.json",
+                                    RenameFlags::empty(),
+                                )
+                                .map_err(|_| JournalError::Unknown)?;
+                                observer("canonical", "rename");
+                                root_dir.sync_all().map_err(|_| JournalError::Unknown)?;
+                                directory.sync_all().map_err(|_| JournalError::Unknown)?;
+                                observer("canonical", "directory_sync");
+                                Ok(())
+                            })();
+                            Ok(result)
+                        })
+                        .map_err(|_| JournalError::Unknown)??;
+                    Ok(())
+                })?;
+                if self.binding.read_locked(state)?.raw_bytes() != target {
+                    return Err(JournalError::Unknown);
+                }
+                Ok(())
+            })?;
+            Ok(())
+        }
+        #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+        {
+            let _ = (maintenance, before, target, intent, observer);
+            Err(NativeTransactionError::Unsupported)
+        }
+    }
+    fn complete(
+        &mut self,
+        maintenance: &ConfigurationMaintenance,
+        mut transaction: ManagementTransaction,
+        recovered: bool,
+        observer: &dyn Fn(&str, &str),
+    ) -> Result<NativeCommitResult, NativeTransactionError> {
+        let intent = transaction.snapshot().intent;
+        for stage in [
+            DurableStage::Applied,
+            DurableStage::Verified,
+            DurableStage::Committed,
+        ] {
+            let last = transaction.snapshot().last_durable_stage;
+            if stage_rank(stage) <= stage_rank(last) {
+                continue;
+            }
+            self.binding.with_binding(|state, _| {
+                if self.binding.resync_locked(state)?.raw_sha256() != intent.target_state_sha256 {
+                    return Err(JournalError::Conflict);
+                }
+                Ok(())
+            })?;
+            let receipt = self.journal.append_phase(
+                maintenance,
+                &intent,
+                stage,
+                transaction
+                    .snapshot()
+                    .journal_head
+                    .ok_or(NativeTransactionError::UnknownInspect)?,
+                recovered,
+            )?;
+            advance(&mut transaction, &intent, receipt)?;
+            observer(stage_label(stage), "persisted");
+        }
+        // Verify actual complete original chain and canonical file again in the
+        // SAME short owner closure that mints proof and clears the fence.
+        let committed = self.binding.with_binding(|state, marker| {
+            state.require_native_maintenance(maintenance.transaction_id())?;
+            self.journal
+                .assert_complete_locked(state, &intent.transaction_id)?;
+            let canonical = self.binding.resync_locked(state)?;
+            let original = self
+                .journal
+                .read_original_locked(state, &intent.transaction_id)?;
+            validate_original(&original, marker)?;
+            let replay = replay(&original)?;
+            if original.intent != intent
+                || canonical.raw_sha256() != intent.target_state_sha256
+                || replay.snapshot().last_durable_stage != DurableStage::Committed
+            {
+                return Err(JournalError::Unknown);
+            }
+            let proof = NativeCommitProof {
+                root: state.root.identity(),
+                transaction: intent.transaction_id.clone(),
+            };
+            state.finish_native(&proof)?;
+            original.phases.last().cloned().ok_or(JournalError::Unknown)
+        })?;
+        observer("committed", "reply");
+        Ok(NativeCommitResult {
+            transaction_id: intent.transaction_id,
+            canonical_raw_sha256: intent.target_state_sha256,
+            committed,
+            recovered,
+        })
+    }
+    /// Explicit recovery of ORIGINAL pure configuration intent. An incomplete
+    /// journal, unknown orphan, changed canonical bytes, or Applied->before
+    /// contradiction remains fenced for inspection; no fresh transaction is made.
+    pub fn recover_original(
+        &mut self,
+        id: &TransactionId,
+    ) -> Result<NativeCommitResult, NativeTransactionError> {
+        let inventory = self.journal.observe()?;
+        if !inventory.orphans.is_empty()
+            || inventory
+                .transactions
+                .last()
+                .is_none_or(|tx| &tx.intent.transaction_id != id)
+        {
+            return Err(NativeTransactionError::UnknownInspect);
+        }
+        let original = self.journal.read_original(id)?;
+        validate_original(&original, self.binding.marker())?;
+        let transaction = replay(&original)?;
+        let canonical = self.readstate()?;
+        if transaction
+            .recovery_decision(
+                &original.intent,
+                canonical.state().deployment_raw_sha256,
+                canonical.raw_sha256(),
+            )
+            .map_err(|_| NativeTransactionError::UnknownInspect)?
+            == RecoveryDecision::UnknownInspect
+        {
+            return Err(NativeTransactionError::UnknownInspect);
+        }
+        let maintenance = match self.retained_maintenance.take() {
+            Some(maintenance) if maintenance.transaction_id() == id => maintenance,
+            Some(other) => {
+                self.retained_maintenance = Some(other);
+                return Err(NativeTransactionError::Conflict);
+            }
+            None => self
+                .configuration_root()
+                .begin_standalone_native(id.clone(), true)?,
+        };
+        let result = (|| {
+            let synced = self.journal.resync_original(&maintenance, id)?;
+            validate_original(&synced, self.binding.marker())?;
+            let transaction = replay(&synced)?;
+            let canonical = self
+                .binding
+                .with_binding(|state, _| self.binding.resync_locked(state))?;
+            let decision = transaction
+                .recovery_decision(
+                    &synced.intent,
+                    canonical.state().deployment_raw_sha256,
+                    canonical.raw_sha256(),
+                )
+                .map_err(|_| NativeTransactionError::UnknownInspect)?;
+            match decision {
+                RecoveryDecision::ResumePrepared => self.replace_canonical(
+                    &maintenance,
+                    &synced.before,
+                    &synced.target,
+                    &synced.intent,
+                    &|_, _| {},
+                )?,
+                RecoveryDecision::VerifyTarget
+                | RecoveryDecision::CommitVerified
+                | RecoveryDecision::AlreadyCommitted => (),
+                _ => return Err(NativeTransactionError::UnknownInspect),
+            }
+            self.complete(&maintenance, transaction, true, &|_, _| {})
+        })();
+        if result.is_err() {
+            self.retained_maintenance = Some(maintenance);
+        }
+        result
+    }
+}
+fn stage_rank(stage: DurableStage) -> u8 {
+    match stage {
+        DurableStage::Planned => 0,
+        DurableStage::Prepared => 1,
+        DurableStage::Applied => 2,
+        DurableStage::Verified => 3,
+        DurableStage::Committed => 4,
+    }
+}
+fn stage_label(stage: DurableStage) -> &'static str {
+    match stage {
+        DurableStage::Planned => "planned",
+        DurableStage::Prepared => "prepared",
+        DurableStage::Applied => "applied",
+        DurableStage::Verified => "verified",
+        DurableStage::Committed => "committed",
+    }
+}
+fn validate_original(
+    original: &OriginalManagementTransaction,
+    marker: &styx_contracts::native_management::NativeRootMarker,
+) -> JournalResult<()> {
+    let before =
+        native_state::decode_state(&original.before, marker).map_err(|_| JournalError::Unknown)?;
+    let target =
+        native_state::decode_state(&original.target, marker).map_err(|_| JournalError::Unknown)?;
+    if before.raw_sha256() != original.intent.before_state_sha256
+        || target.raw_sha256() != original.intent.target_state_sha256
+    {
+        return Err(JournalError::Unknown);
+    }
+    validate_transition(before.state(), target.state(), marker, &original.intent)
+        .map_err(|_| JournalError::Unknown)
+}
+fn replay(original: &OriginalManagementTransaction) -> JournalResult<ManagementTransaction> {
+    let intent = &original.intent;
+    let mut transaction =
+        ManagementTransaction::plan(intent.clone()).map_err(|_| JournalError::Unknown)?;
+    let first = original.phases.first().ok_or(JournalError::Unknown)?;
+    transaction
+        .prepare(PreparedFacts {
+            intent: intent.clone(),
+            deployment_raw_sha256: intent.deployment_raw_sha256,
+            canonical_state_sha256: intent.before_state_sha256,
+            reader: intent.reader,
+            journal: first.clone(),
+        })
+        .map_err(|_| JournalError::Unknown)?;
+    for receipt in original.phases.iter().skip(1) {
+        advance(&mut transaction, intent, receipt.clone()).map_err(|_| JournalError::Unknown)?;
+    }
+    Ok(transaction)
+}
+fn advance(
+    transaction: &mut ManagementTransaction,
+    intent: &DesiredStateCommit,
+    journal: JournalReceipt,
+) -> Result<(), NativeTransactionError> {
+    match journal.stage {
+        DurableStage::Applied => transaction.applied(AppliedFacts {
+            intent: intent.clone(),
+            deployment_raw_sha256: intent.deployment_raw_sha256,
+            canonical_state_sha256: intent.target_state_sha256,
+            journal,
+        }),
+        DurableStage::Verified => transaction.verified(VerificationFacts {
+            intent: intent.clone(),
+            deployment_raw_sha256: intent.deployment_raw_sha256,
+            canonical_state_sha256: intent.target_state_sha256,
+            reader: intent.reader,
+            journal,
+        }),
+        DurableStage::Committed => transaction.committed(CommitFacts {
+            intent: intent.clone(),
+            deployment_raw_sha256: intent.deployment_raw_sha256,
+            canonical_state_sha256: intent.target_state_sha256,
+            journal,
+        }),
+        _ => return Err(NativeTransactionError::UnknownInspect),
+    }
+    .map_err(|_| NativeTransactionError::UnknownInspect)
+}
+
+#[cfg(test)]
+#[path = "native_transaction_tests.rs"]
+mod tests;
