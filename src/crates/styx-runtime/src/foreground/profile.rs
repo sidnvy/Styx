@@ -1,25 +1,26 @@
 //! Read-only legacy foreground bootstrap. Signed payload authority is distinct
 //! from private mutable configuration; no credential, identity or pointer writes.
 use crate::{
-    crypto::{
-        DevicePrivateKey, DevicePublicKey, PublisherFingerprint, PublisherVerifyingKey,
-        RawReleaseManifest,
-    },
+    crypto::{DevicePrivateKey, DevicePublicKey, PublisherFingerprint, PublisherVerifyingKey},
     host::link::{LinkEndpoint, SecretBearer},
     providers::codex::OwnedExecutorConfig,
-    store::{PayloadInventory, PayloadLimits, PinnedExecutable, PrivateRoot},
+    store::{PinnedExecutable, PrivateRoot},
     tls::{GatewayClientTls, TrustAnchorPin},
 };
-use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{BTreeMap, BTreeSet},
+    collections::BTreeMap,
     io::Cursor,
     path::{Component, Path, PathBuf},
     sync::Arc,
     time::Duration,
 };
-use styx_contracts::identity::{DeviceId, GatewayId, Sha256Digest};
+use styx_contracts::{
+    identity::{DeviceId, GatewayId, Sha256Digest},
+    native_release::NativeExternalWorker,
+};
+#[path = "profile_release.rs"]
+mod release;
 const JSON_LIMIT: usize = 1024 * 1024;
 #[derive(Debug, Clone, Copy, thiserror::Error)]
 pub enum ProfileError {
@@ -143,6 +144,7 @@ struct Active {
     version: String,
     manifest_sha256: Sha256Digest,
     previous: Option<String>,
+    runtime_format: Option<String>,
 }
 #[derive(Deserialize)]
 struct Manifest {
@@ -254,7 +256,7 @@ pub struct LoadedLegacyProfile {
     tls: GatewayClientTls,
     bearer: SecretBearer,
     executor: Option<Arc<PinnedExecutable>>,
-    inventory: PayloadInventory,
+    inventory: release::ProfileRelease,
     #[cfg(target_os = "linux")]
     release_root: PathBuf,
     #[cfg(target_os = "linux")]
@@ -325,7 +327,7 @@ impl LoadedLegacyProfile {
     #[cfg(target_os = "linux")]
     pub(super) fn pin_browser_node(&self) -> Result<PinnedExecutable, ProfileError> {
         self.inventory
-            .pin_executable("bin/node")
+            .pin_worker(NativeExternalWorker::BrowserNode22)
             .map_err(|_| ProfileError::UntrustedRelease)
     }
     /// Only the original publisher-verified, active-manifest exact member can
@@ -342,16 +344,14 @@ impl LoadedLegacyProfile {
             return Ok(None);
         }
         if self.cua_version.as_deref() != Some("cua-driver 0.36.0")
-            || !self.inventory.members().iter().any(|member| {
-                member.path == Path::new("bin/cua-driver") && member.executable && member.bytes > 0
-            })
+            || !self.inventory.has_worker(NativeExternalWorker::CuaNative)
         {
             return Err(ProfileError::UntrustedRelease);
         }
         self.revalidate()?;
         let pinned = self
             .inventory
-            .pin_executable("bin/cua-driver")
+            .pin_worker(NativeExternalWorker::CuaNative)
             .map_err(|_| ProfileError::UntrustedRelease)?;
         pinned.revalidate().map_err(|_| ProfileError::Changed)?;
         self.revalidate_control()?;
@@ -661,126 +661,47 @@ fn load(state_dir: &Path, mode: GatewayWireMode) -> Result<LoadedLegacyProfile, 
     let tls = GatewayClientTls::from_pinned_ca_bundle(&ca, &pins, None)
         .map_err(|_| ProfileError::Invalid)?;
     let active: Active = decode(&capture.read(base, "install/active.json", JSON_LIMIT)?)?;
-    if active.schema != 1
-        || !version(&active.version)
-        || active.previous.as_ref().is_some_and(|v| !version(v))
-    {
+    let expected_format = match (active.schema, active.runtime_format.as_deref()) {
+        (1, None | Some("legacy_js_v1")) => "legacy_js_v1",
+        (2, Some("native_rust_v1")) => "native_rust_v1",
+        _ => return Err(ProfileError::Invalid),
+    };
+    if !version(&active.version) || active.previous.as_ref().is_some_and(|v| !version(v)) {
         return Err(ProfileError::Invalid);
     }
-    let release = base.join("install/releases").join(&active.version);
-    let manifest_raw = capture.read(&release, "manifest.json", JSON_LIMIT)?;
-    let signature = capture.read(&release, "manifest.sig", 256)?;
-    let signature = std::str::from_utf8(&signature)
-        .map_err(|_| ProfileError::UntrustedRelease)?
-        .trim();
-    if signature.len() != 86
-        || !signature
-            .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"_-".contains(&b))
-    {
+    let root = base.join("install/releases").join(&active.version);
+    let inventory = release::load(&mut capture, &root, &active, base, &publisher, &expected)?;
+    if inventory.runtime_format() != expected_format {
         return Err(ProfileError::UntrustedRelease);
-    }
-    let signature = URL_SAFE_NO_PAD
-        .decode(signature)
-        .map_err(|_| ProfileError::UntrustedRelease)?;
-    publisher
-        .verify_manifest(
-            &expected,
-            RawReleaseManifest::from_original_bytes(&manifest_raw),
-            &signature,
-        )
-        .map_err(|_| ProfileError::UntrustedRelease)?;
-    if Sha256Digest::of_bytes(&manifest_raw) != active.manifest_sha256 {
-        return Err(ProfileError::UntrustedRelease);
-    }
-    let manifest: Manifest = decode(&manifest_raw)?;
-    let arch = match std::env::consts::ARCH {
-        "x86_64" => "x64",
-        "aarch64" => "arm64",
-        _ => return Err(ProfileError::Unsupported),
-    };
-    // Legacy signed manifests retain their original Node platform spelling.
-    // Mac execution still goes through the verified suspended native child port.
-    if manifest.schema != 1
-        || manifest.version != active.version
-        || manifest.platform != legacy_platform
-        || manifest.arch != arch
-        || manifest.files.is_empty()
-        || manifest.files.len() > 4096
-    {
-        return Err(ProfileError::UntrustedRelease);
-    }
-    if manifest
-        .runtime_format
-        .as_ref()
-        .is_some_and(|f| f != "legacy_js_v1")
-    {
-        return Err(ProfileError::Unsupported);
-    }
-    let private_release = PrivateRoot::open(&release).map_err(|_| ProfileError::ProtectedRead)?;
-    let inventory = private_release
-        .payload_inventory(PayloadLimits::default())
-        .map_err(|_| ProfileError::UntrustedRelease)?;
-    let mut expected_members = BTreeMap::new();
-    for m in manifest.files {
-        if !relative(&m.path)
-            || m.path == "manifest.json"
-            || m.path == "manifest.sig"
-            || expected_members
-                .insert(PathBuf::from(&m.path), (m.size, m.sha256, m.executable))
-                .is_some()
-        {
-            return Err(ProfileError::UntrustedRelease);
-        }
-    }
-    expected_members.insert(
-        PathBuf::from("manifest.json"),
-        (
-            manifest_raw.len() as u64,
-            Sha256Digest::of_bytes(&manifest_raw),
-            false,
-        ),
-    );
-    let signature_raw = capture.read(&release, "manifest.sig", 256)?;
-    expected_members.insert(
-        PathBuf::from("manifest.sig"),
-        (
-            signature_raw.len() as u64,
-            Sha256Digest::of_bytes(&signature_raw),
-            false,
-        ),
-    );
-    let mut actual = BTreeSet::new();
-    for member in inventory.members() {
-        let Some((size, sha, executable)) = expected_members.get(&member.path) else {
-            return Err(ProfileError::UntrustedRelease);
-        };
-        if member.bytes != *size || member.sha256 != *sha || member.executable != *executable {
-            return Err(ProfileError::UntrustedRelease);
-        }
-        actual.insert(member.path.clone());
     }
     let exec_enabled = host.exec.as_ref().is_some_and(|exec| exec.enabled);
     if matches!(mode, GatewayWireMode::Legacy) && !exec_enabled {
         return Err(ProfileError::Unsupported);
     }
-    if actual.len() != expected_members.len()
-        || (exec_enabled
-            && !expected_members
-                .get(Path::new("bin/codex"))
-                .is_some_and(|(_, _, x)| *x))
-    {
+    if exec_enabled && !inventory.has_worker(NativeExternalWorker::CodexExec) {
         return Err(ProfileError::UntrustedRelease);
     }
     let executor = if exec_enabled {
         Some(Arc::new(
-            inventory
-                .pin_executable(Path::new("bin/codex"))
-                .map_err(|_| ProfileError::UntrustedRelease)?,
+            inventory.pin_worker(NativeExternalWorker::CodexExec)?,
         ))
     } else {
         None
     };
+    #[cfg(target_os = "linux")]
+    let release_root = inventory.browser_release_root();
+    #[cfg(target_os = "linux")]
+    let browser_node_version = inventory.browser_node_version();
+    #[cfg(target_os = "linux")]
+    let cua_version = inventory.cua_version();
+    let runtime_format = match (inventory.runtime_format(), exec_enabled) {
+        ("legacy_js_v1", true) => "legacy_js_v1_executor_only",
+        ("legacy_js_v1", false) => "legacy_js_v1_signed_worker_closure",
+        ("native_rust_v1", true) => "native_rust_v1_executor_only",
+        ("native_rust_v1", false) => "native_rust_v1_signed_worker_closure",
+        _ => return Err(ProfileError::Unsupported),
+    };
+    let signed_version = inventory.version().to_owned();
     // An absent Exec profile supplies no Browser workspace authority.
     let exec = host.exec.unwrap_or(ExecutorProfile {
         enabled: false,
@@ -837,21 +758,11 @@ fn load(state_dir: &Path, mode: GatewayWireMode) -> Result<LoadedLegacyProfile, 
         executor,
         inventory,
         #[cfg(target_os = "linux")]
-        release_root: release,
+        release_root,
         #[cfg(target_os = "linux")]
-        browser_node_version: manifest
-            .upstream
-            .as_ref()
-            .and_then(|v| v.get("node"))
-            .and_then(|v| v.as_str())
-            .map(str::to_owned),
+        browser_node_version,
         #[cfg(target_os = "linux")]
-        cua_version: manifest
-            .upstream
-            .as_ref()
-            .and_then(|v| v.get("cua"))
-            .and_then(|v| v.as_str())
-            .map(str::to_owned),
+        cua_version,
         #[cfg(target_os = "linux")]
         deployment_computer: deployment.host.computer,
         #[cfg(target_os = "linux")]
@@ -872,16 +783,12 @@ fn load(state_dir: &Path, mode: GatewayWireMode) -> Result<LoadedLegacyProfile, 
             schema: 1,
             device_id: identity.device_id,
             endpoint: endpoint_text,
-            runtime_format: if exec_enabled {
-                "legacy_js_v1_executor_only"
-            } else {
-                "legacy_js_v1_signed_worker_closure"
-            },
+            runtime_format,
             wire_mode: match mode {
                 GatewayWireMode::Legacy => "explicit_legacy_gateway",
                 GatewayWireMode::PairedV3 => "paired_v3",
             },
-            version: active.version,
+            version: signed_version,
             publisher_sha256: deployment.host.publisher,
             manifest_sha256: active.manifest_sha256,
             preservation: capture.public,

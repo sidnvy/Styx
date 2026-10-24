@@ -1,7 +1,8 @@
 //! Original signature/inventory + explicit protected selection integration.
 //! Disposable test publisher and /usr/bin/true payloads: no Cua/native readiness.
 use super::*;
-use crate::crypto::PublisherSigningKey;
+use crate::crypto::{PublisherSigningKey, RawReleaseManifest};
+use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 use std::{fs, os::unix::fs::PermissionsExt, process::Command};
 struct Fixture {
     root: PathBuf,

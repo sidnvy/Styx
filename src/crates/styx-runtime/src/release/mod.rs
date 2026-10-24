@@ -1,21 +1,42 @@
 //! Read-only C08 native release verification. No installation, migration,
 //! activation, service mutation or child execution. Publisher approval and a
 //! verified closure do not establish runtime health or final release acceptance.
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[cfg(any(
+    all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+    all(
+        target_os = "macos",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+))]
 use crate::store::PayloadLimits;
 use crate::{
     crypto::{PublisherFingerprint, PublisherVerifyingKey, RawReleaseManifest},
     store::{PayloadInventory, PinnedExecutable, PrivateRoot, RawFile, StoreError},
 };
 use serde::Serialize;
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[cfg(any(
+    all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+    all(
+        target_os = "macos",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+))]
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[cfg(any(
+    all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+    all(
+        target_os = "macos",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+))]
 use styx_contracts::native_release::NativeReleaseTarget;
 use styx_contracts::{
     identity::Sha256Digest,
-    native_release::{NATIVE_RELEASE_MANIFEST_BYTES, NativeReleaseManifest},
+    native_release::{
+        NATIVE_RELEASE_MANIFEST_BYTES, NativeExternalWorker, NativeReleaseManifest,
+        NativeReleaseScope,
+    },
 };
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
@@ -105,7 +126,7 @@ pub struct ReleaseReport {
     pub installed: bool,
     pub runtime_launched: bool,
 }
-/// Not Clone/Deserialize: this retains the original directory and ELF
+/// Not Clone/Deserialize: this retains the original directory and native image
 /// descriptions. A plain manifest DTO or launch pathname cannot reconstruct it.
 /// A caller launching this image must keep this object until real child reaping.
 pub struct VerifiedNativeRelease {
@@ -118,6 +139,7 @@ pub struct VerifiedNativeRelease {
     manifest: NativeReleaseManifest,
     inventory: PayloadInventory,
     executable: PinnedExecutable,
+    workers: Vec<(NativeExternalWorker, PinnedExecutable)>,
     report: ReleaseReport,
 }
 impl VerifiedNativeRelease {
@@ -149,6 +171,9 @@ impl VerifiedNativeRelease {
             .map_err(|_| ReleaseError::Untrusted)?;
         self.inventory.revalidate().map_err(ReleaseError::from)?;
         self.executable.revalidate().map_err(ReleaseError::from)?;
+        for (_, worker) in &self.workers {
+            worker.revalidate().map_err(ReleaseError::from)?;
+        }
         // No observations while streaming/revalidating may hide a moved name.
         reobserve(
             &self.root,
@@ -158,6 +183,34 @@ impl VerifiedNativeRelease {
         reobserve(&self.root, &self.signature_file, 64)?;
         reobserve(&self.publisher_root, &self.publisher_file, 4096)?;
         Ok(())
+    }
+    /// The fixed worker's image was admitted by the SAME approved publisher and
+    /// complete package inventory. This is neither a Core execution grant nor an
+    /// OS permission. Retain this release through actual child cleanup; Darwin
+    /// callers must use the verified suspended-spawn adapter, never a raw path.
+    pub fn worker_image(&self, kind: NativeExternalWorker) -> Result<&PinnedExecutable> {
+        self.revalidate()?;
+        self.workers
+            .iter()
+            .find(|(candidate, _)| *candidate == kind)
+            .map(|(_, image)| image)
+            .ok_or(ReleaseError::Unsupported)
+    }
+    /// Trusted profile bootstrap only. This creates another original image pin
+    /// from the same retained, approved inventory, never from a network path or
+    /// a worker descriptor supplied separately from the verified release.
+    pub(crate) fn pin_worker(&self, kind: NativeExternalWorker) -> Result<PinnedExecutable> {
+        self.revalidate()?;
+        let entry = &self
+            .manifest
+            .worker_closures
+            .iter()
+            .find(|worker| worker.kind == kind)
+            .ok_or(ReleaseError::Unsupported)?
+            .entrypoint;
+        let pinned = self.inventory.pin_executable(entry)?;
+        self.revalidate()?;
+        Ok(pinned)
     }
     /// Returns only the fixed, retained native image's kernel FD path. This
     /// function does not spawn, install, activate or authorize arbitrary commands.
@@ -178,7 +231,13 @@ fn reobserve(root: &PrivateRoot, original: &RawFile, limit: usize) -> Result<()>
     }
     Ok(())
 }
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[cfg(any(
+    all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+    all(
+        target_os = "macos",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+))]
 static INSPECTORS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 
 /// Async read-only client port. The actual blocking worker owns its permit;
@@ -188,7 +247,13 @@ pub async fn inspect(
     publisher_file: &Path,
     expected_pin: &str,
 ) -> Result<ReleaseReport> {
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(
+        all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+        all(
+            target_os = "macos",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    ))]
     {
         let expected =
             PublisherFingerprint::parse(expected_pin).map_err(|_| ReleaseError::Invalid)?;
@@ -204,7 +269,13 @@ pub async fn inspect(
         .await
         .map_err(|_| ReleaseError::Unknown)?
     }
-    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+    #[cfg(not(any(
+        all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+        all(
+            target_os = "macos",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    )))]
     {
         let _ = (payload, publisher_file, expected_pin);
         Err(ReleaseError::Unsupported)
@@ -218,18 +289,36 @@ pub fn verify(
     publisher_file: &Path,
     expected: &PublisherFingerprint,
 ) -> Result<VerifiedNativeRelease> {
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(
+        all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+        all(
+            target_os = "macos",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    ))]
     {
-        verify_linux(payload, publisher_file, expected)
+        verify_native(payload, publisher_file, expected)
     }
-    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+    #[cfg(not(any(
+        all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+        all(
+            target_os = "macos",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    )))]
     {
         let _ = (payload, publisher_file, expected);
         Err(ReleaseError::Unsupported)
     }
 }
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-fn verify_linux(
+#[cfg(any(
+    all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+    all(
+        target_os = "macos",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+))]
+fn verify_native(
     payload: &Path,
     publisher_path: &Path,
     expected: &PublisherFingerprint,
@@ -259,8 +348,24 @@ fn verify_linux(
     let manifest: NativeReleaseManifest =
         serde_json::from_slice(manifest_file.bytes()).map_err(|_| ReleaseError::Invalid)?;
     manifest.validate().map_err(|_| ReleaseError::Invalid)?;
-    if manifest.target != NativeReleaseTarget::LinuxX86_64Gnu {
+    let target = match (std::env::consts::OS, std::env::consts::ARCH) {
+        ("linux", "x86_64") => NativeReleaseTarget::LinuxX86_64Gnu,
+        ("macos", "x86_64") => NativeReleaseTarget::MacosX86_64,
+        ("macos", "aarch64") => NativeReleaseTarget::MacosAarch64,
+        _ => return Err(ReleaseError::Unsupported),
+    };
+    if manifest.target != target {
         return Err(ReleaseError::Unsupported);
+    }
+    // Signed worker provenance cannot silently introduce another publisher.
+    // Upstream source membership is attested by the build publisher; local
+    // admission still verifies every actual packaged byte and native image.
+    if manifest
+        .worker_closures
+        .iter()
+        .any(|worker| worker.source_publisher_spki_sha256.to_hex() != expected.as_hex())
+    {
+        return Err(ReleaseError::Untrusted);
     }
     let mut expected_members = BTreeMap::new();
     for member in &manifest.files {
@@ -309,14 +414,26 @@ fn verify_linux(
             .ok_or(ReleaseError::Capacity)?;
     }
     let executable = inventory.pin_executable(Path::new(&manifest.entrypoint))?;
+    let mut workers = Vec::with_capacity(manifest.worker_closures.len());
+    for worker in &manifest.worker_closures {
+        workers.push((worker.kind, inventory.pin_executable(&worker.entrypoint)?));
+    }
     let report = ReleaseReport {
         schema: 1,
-        scope: "configuration_preview",
+        scope: match manifest.scope {
+            NativeReleaseScope::ConfigurationPreview => "configuration_preview",
+            NativeReleaseScope::RuntimeCandidate => "runtime_candidate",
+        },
         runtime_format: "native_rust_v1",
         component: "styx",
         version: manifest.version.clone(),
-        target: "x86_64-unknown-linux-gnu",
-        entrypoint: "bin/styx",
+        target: match target {
+            NativeReleaseTarget::LinuxX86_64Gnu => "x86_64-unknown-linux-gnu",
+            NativeReleaseTarget::MacosX86_64 => "x86_64-apple-darwin",
+            NativeReleaseTarget::MacosAarch64 => "aarch64-apple-darwin",
+            NativeReleaseTarget::WindowsX86_64Msvc => return Err(ReleaseError::Unsupported),
+        },
+        entrypoint: target.entrypoint(),
         source_revision: manifest.source.revision.clone(),
         source_inputs_sha256: manifest.source.inputs_sha256,
         manifest_sha256: Sha256Digest::of_bytes(manifest_file.bytes()),
@@ -337,6 +454,7 @@ fn verify_linux(
         manifest,
         inventory,
         executable,
+        workers,
         report,
     };
     verified.revalidate()?;
