@@ -74,6 +74,12 @@ pub(super) struct BoundedManager<L: GatewayOwnerLifecycle> {
     pub negotiated: Mutex<Option<String>>,
 }
 impl<L: GatewayOwnerLifecycle> BoundedManager<L> {
+    /// Only a never-attempted transport is exempt from a join. Once creation
+    /// starts, a failed/unknown SDK result is not fabricated into quiescence.
+    pub(super) fn local_transport_quiescent(&self) -> bool {
+        let facts = self.life.facts.lock().expect("session lifetime");
+        !self.created.load(Ordering::Acquire) || facts.transport_joined
+    }
     pub fn new(life: Arc<Life<L>>) -> Self {
         let mut inner = LocalSessionManager::default();
         inner.session_config.channel_capacity = 1;
@@ -145,8 +151,13 @@ impl<L: GatewayOwnerLifecycle> SessionManager for BoundedManager<L> {
     type Error = SessionError;
     type Transport = ObservedTransport<L>;
     async fn create_session(&self) -> Result<(SessionId, Self::Transport), Self::Error> {
-        if !self.life.is_active() || self.created.swap(true, Ordering::AcqRel) {
-            return Err(SessionError::Refused);
+        {
+            // Register the attempt under the same synchronous close gate. A
+            // late SDK creation cannot race a never-attempted shutdown sample.
+            let facts = self.life.facts.lock().expect("session lifetime");
+            if facts.closing || self.created.swap(true, Ordering::AcqRel) {
+                return Err(SessionError::Refused);
+            }
         }
         let (id, transport) = self.inner.create_session().await?;
         *self.life.cancellation.lock().expect("session cancellation") =

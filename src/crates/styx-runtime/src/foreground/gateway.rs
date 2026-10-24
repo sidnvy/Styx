@@ -12,6 +12,8 @@ pub struct GatewayForegroundOutcome {
     pub connections_joined: bool,
     pub blocking_jobs_joined: bool,
     pub mcp_lifecycle_jobs_joined: bool,
+    pub mcp_session_transports_joined: bool,
+    pub unconfirmed_owner_cleanups: usize,
     pub sdk_detached_tasks_joined: Option<bool>,
     pub worker_failure_observed: bool,
     pub listener_error_observed: bool,
@@ -19,10 +21,15 @@ pub struct GatewayForegroundOutcome {
 impl GatewayForegroundOutcome {
     /// Tracked Styx work only. The SDK's unavailable detached-task join remains
     /// explicitly None, never a claim that all SDK internals were joined.
-    pub fn is_complete(&self) -> bool {
+    pub fn local_stop_complete(&self) -> bool {
         self.connections_joined
             && self.blocking_jobs_joined
             && self.mcp_lifecycle_jobs_joined
+            && self.mcp_session_transports_joined
+    }
+    pub fn is_complete(&self) -> bool {
+        self.local_stop_complete()
+            && self.unconfirmed_owner_cleanups == 0
             && !self.worker_failure_observed
             && !self.listener_error_observed
     }
@@ -730,20 +737,28 @@ mod platform {
             worker_failure |= next.worker_failure_observed;
         }
         let mut lifecycle = mcp_stop.shutdown(Duration::from_secs(5)).await;
-        while !lifecycle.lifecycle_jobs_joined || lifecycle.unresolved_sessions != 0 {
-            emit(&events, &stop, "gateway_waiting_for_owner_cleanup");
+        while !lifecycle.connections_joined
+            || !lifecycle.lifecycle_jobs_joined
+            || !lifecycle.session_transports_joined
+        {
+            emit(&events, &stop, "gateway_waiting_for_owned_lifecycle");
             tokio::time::sleep(Duration::from_secs(1)).await;
             lifecycle = mcp_stop.shutdown(Duration::from_secs(5)).await;
         }
         let outcome = GatewayForegroundOutcome {
             schema: 1,
-            connections_joined: facts.connections_joined,
+            connections_joined: facts.connections_joined && lifecycle.connections_joined,
             blocking_jobs_joined: joined,
             mcp_lifecycle_jobs_joined: lifecycle.lifecycle_jobs_joined,
+            mcp_session_transports_joined: lifecycle.session_transports_joined,
+            unconfirmed_owner_cleanups: lifecycle.unconfirmed_owner_cleanups,
             sdk_detached_tasks_joined: lifecycle.sdk_detached_tasks_joined,
-            worker_failure_observed: worker_failure,
+            worker_failure_observed: worker_failure || lifecycle.worker_failure_observed,
             listener_error_observed: facts.listener_error_observed,
         };
+        if outcome.unconfirmed_owner_cleanups != 0 {
+            emit(&events, &stop, "remote_owner_cleanup_unconfirmed");
+        }
         emit(&events, &stop, "gateway_stopped");
         // This explicit command-scope teardown follows actual owned-job waits.
         // None above is not silently promoted to an SDK join claim.

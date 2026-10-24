@@ -462,3 +462,184 @@ async fn actual_tcp_slow_post_readers_do_not_starve_bodyless_control() {
         println!("actual TCP pressure PASS fixture={}: 16 observed slow POST readers held; GET entered; two independent DELETE controls simultaneously admitted before SDK effect; third429; two202 and exact fences before pressure release; all owned admissions/connections/partition returned. No native/TLS/account evidence. POST cancel still shares body capacity; SDK detached joins unknown", root.display());
     }).await.unwrap();
 }
+
+/// Controlled remote-unavailable lifecycle, with the actual official SDK local
+/// worker. This is not native Host cleanup/TLS/account acceptance evidence.
+struct UnconfirmedRemoteBackend {
+    cleanup_attempts: AtomicUsize,
+    cleanup_arrived: Semaphore,
+    release_cleanup: Semaphore,
+}
+impl GatewayToolBackend for UnconfirmedRemoteBackend {
+    async fn list_tools(
+        &self,
+        _owner: &VerifiedGatewayOwner,
+        _request: Option<PaginatedRequestParams>,
+    ) -> Result<ListToolsResult, ErrorData> {
+        Ok(ListToolsResult::default())
+    }
+    async fn call_tool(
+        &self,
+        _owner: &VerifiedGatewayOwner,
+        _request: CallToolRequestParams,
+    ) -> Result<CallToolResult, ErrorData> {
+        Err(ErrorData::invalid_request(
+            "no native executor in lifecycle fixture",
+            None,
+        ))
+    }
+}
+impl GatewayOwnerLifecycle for UnconfirmedRemoteBackend {
+    fn fence_owner(&self, _owner: &VerifiedGatewayOwner) -> Result<(), OwnerFenceError> {
+        Ok(()) // Local admission fence only, never a remote termination proof.
+    }
+    async fn cleanup_owner(
+        &self,
+        _owner: &VerifiedGatewayOwner,
+        _budget: Duration,
+    ) -> OwnerCleanup {
+        self.cleanup_attempts.fetch_add(1, Ordering::AcqRel);
+        self.cleanup_arrived.add_permits(1);
+        self.release_cleanup.acquire().await.unwrap().forget();
+        OwnerCleanup::Unknown
+    }
+}
+
+#[tokio::test]
+async fn process_quit_joins_local_sdk_workers_without_forging_remote_owner_cleanup() {
+    use rmcp::transport::{Transport, streamable_http_server::SessionManager};
+    let backend = Arc::new(UnconfirmedRemoteBackend {
+        cleanup_attempts: AtomicUsize::new(0),
+        cleanup_arrived: Semaphore::new(0),
+        release_cleanup: Semaphore::new(0),
+    });
+    let token = "u".repeat(32);
+    let policy = Arc::new(
+        GatewayBearerPolicy::new(token.as_bytes(), vec!["localhost".into()], vec![]).unwrap(),
+    );
+    let mut headers = http::HeaderMap::new();
+    headers.insert(http::header::HOST, "localhost".parse().unwrap());
+    headers.insert(
+        http::header::AUTHORIZATION,
+        format!("Bearer {token}").parse().unwrap(),
+    );
+    let principal = policy.authorize(&headers).unwrap();
+    let partition = Arc::new(Semaphore::new(styx_contracts::HOST_QUEUED_BYTES));
+    let budget = HttpBudget::from_reserved_partition(
+        partition
+            .clone()
+            .try_acquire_many_owned(32 * 1024 * 1024)
+            .unwrap(),
+    )
+    .unwrap();
+    let app = GatewayHttp::new(policy, backend.clone(), budget.clone());
+    let attempted = app
+        .create_session(principal.new_mcp_session_owner())
+        .unwrap();
+    let untouched = app
+        .create_session(principal.new_mcp_session_owner())
+        .unwrap();
+    assert!(
+        untouched.manager.local_transport_quiescent(),
+        "never attempted, not a fabricated worker join"
+    );
+    let (_id, mut transport) = attempted.manager.create_session().await.unwrap();
+    assert!(
+        !attempted.manager.local_transport_quiescent(),
+        "a real attempted worker must be joined"
+    );
+    tokio::time::timeout(Duration::from_secs(5), transport.close())
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(
+        attempted.life.facts.lock().unwrap().transport_joined,
+        "official WorkerTransport.close actually awaited its worker"
+    );
+    untouched.life.close().unwrap();
+    tokio::time::timeout(
+        Duration::from_secs(1),
+        backend.cleanup_arrived.acquire_many(2),
+    )
+    .await
+    .unwrap()
+    .unwrap()
+    .forget();
+    let server = HttpServer {
+        app: app.clone(),
+        listener_task: Mutex::new(None),
+        shutdown_lock: tokio::sync::Mutex::new(()),
+    };
+    let blocked = server.shutdown(Duration::from_millis(20)).await;
+    assert!(blocked.session_transports_joined);
+    assert!(
+        !blocked.lifecycle_jobs_joined,
+        "a still-held local cleanup future is not joined"
+    );
+    assert_eq!(blocked.unconfirmed_owner_cleanups, 2);
+    assert_eq!(backend.cleanup_attempts.load(Ordering::Acquire), 2);
+    assert!(
+        app.retained_sessions() >= 2,
+        "normal Closing capacity remains retained"
+    );
+    assert!(
+        untouched.manager.create_session().await.is_err(),
+        "no late creation after the same close gate"
+    );
+    backend.release_cleanup.add_permits(2);
+    let stopped = server.shutdown(Duration::from_secs(1)).await;
+    assert!(
+        stopped.connections_joined
+            && stopped.lifecycle_jobs_joined
+            && stopped.session_transports_joined
+    );
+    assert_eq!(
+        stopped.unconfirmed_owner_cleanups, 2,
+        "remote Unknown does not become Complete"
+    );
+    assert_eq!(stopped.sdk_detached_tasks_joined, None);
+    assert!(!attempted.life.is_complete());
+    assert_eq!(
+        attempted.life.facts.lock().unwrap().cleanup,
+        Some(OwnerCleanup::Unknown)
+    );
+    assert!(
+        stopped.unresolved_sessions >= 2,
+        "process-level stop does not collect unknown sessions as successful"
+    );
+    let repeated = server.shutdown(Duration::from_secs(1)).await;
+    assert!(repeated.lifecycle_jobs_joined && repeated.session_transports_joined);
+    assert_eq!(repeated.unconfirmed_owner_cleanups, 2);
+    assert_eq!(
+        backend.cleanup_attempts.load(Ordering::Acquire),
+        2,
+        "observing stop must not replay cleanup/actions"
+    );
+
+    // A task that actually panicked is terminated, with a separate sticky
+    // failure. It must not leave an eternal 'still running' shutdown condition.
+    app.supervisor
+        .jobs
+        .lock()
+        .unwrap()
+        .spawn(async { panic!("owned lifecycle negative control") });
+    let failed = server.shutdown(Duration::from_secs(1)).await;
+    assert!(failed.lifecycle_jobs_joined);
+    assert!(failed.worker_failure_observed);
+    assert!(
+        server
+            .shutdown(Duration::from_secs(1))
+            .await
+            .worker_failure_observed
+    );
+    drop(transport);
+    drop(attempted);
+    drop(untouched);
+    drop(server);
+    drop(app);
+    drop(budget);
+    assert_eq!(
+        partition.available_permits(),
+        styx_contracts::HOST_QUEUED_BYTES
+    );
+}

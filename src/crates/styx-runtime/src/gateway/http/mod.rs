@@ -103,7 +103,13 @@ struct AdmissionProbe {
 #[derive(Debug)]
 pub struct HttpShutdown {
     pub connections_joined: bool,
+    /// Actual supervised task termination, independent of a remote result.
     pub lifecycle_jobs_joined: bool,
+    /// Official LocalSessionWorker close was actually joined (or never attempted).
+    pub session_transports_joined: bool,
+    /// Remote owner settlement is not a local task-liveness fact.
+    pub unconfirmed_owner_cleanups: usize,
+    pub worker_failure_observed: bool,
     pub unresolved_sessions: usize,
     /// Official SDK does not expose joins for its outer/handler tasks. None is
     /// deliberately distinct from the observed LocalSessionWorker join.
@@ -127,6 +133,8 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayHttp<B> {
             supervisor: Arc::new(Supervisor {
                 jobs: Mutex::new(JoinSet::new()),
                 parked: Mutex::new(vec![]),
+                worker_failure_observed: std::sync::atomic::AtomicBool::new(false),
+                accepting_cleanup_jobs: std::sync::atomic::AtomicBool::new(true),
             }),
             stop: CancellationToken::new(),
             #[cfg(test)]
@@ -218,6 +226,20 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayHttp<B> {
         // Registry removal is not proof detached SDK handlers ended. Their
         // Arc<Life> retains the real reservation until the last owner drops.
         self.budget.capacity - self.budget.sessions.available_permits()
+    }
+    fn session_shutdown_facts(&self) -> (bool, usize) {
+        let sessions = self.sessions.lock().expect("HTTP sessions");
+        let mut transports_joined = true;
+        let mut unconfirmed = 0;
+        for session in sessions.values() {
+            transports_joined &= session.manager.local_transport_quiescent();
+            if session.life.facts.lock().expect("session lifetime").cleanup
+                != Some(lifecycle::OwnerCleanup::Complete)
+            {
+                unconfirmed += 1;
+            }
+        }
+        (transports_joined, unconfirmed)
     }
     pub(crate) async fn handle(
         self: Arc<Self>,
@@ -576,6 +598,13 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> HttpServer<B> {
             return HttpShutdown {
                 connections_joined: false,
                 lifecycle_jobs_joined: false,
+                session_transports_joined: self.app.session_shutdown_facts().0,
+                unconfirmed_owner_cleanups: self.app.session_shutdown_facts().1,
+                worker_failure_observed: self
+                    .app
+                    .supervisor
+                    .worker_failure_observed
+                    .load(std::sync::atomic::Ordering::Acquire),
                 unresolved_sessions: self.app.retained_sessions(),
                 sdk_detached_tasks_joined: None,
             };
@@ -583,6 +612,15 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> HttpServer<B> {
         self.app.stop.cancel();
         for session in self.app.sessions.lock().expect("HTTP sessions").values() {
             let _ = session.life.close();
+        }
+        {
+            // All initial closes above registered under facts -> jobs. Prevent
+            // a late SDK close retry from spawning after the final join sample.
+            let _jobs = self.app.supervisor.jobs.lock().expect("HTTP cleanup jobs");
+            self.app
+                .supervisor
+                .accepting_cleanup_jobs
+                .store(false, std::sync::atomic::Ordering::Release);
         }
         let task = self
             .listener_task
@@ -593,7 +631,13 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> HttpServer<B> {
         if let Some(mut task) = task {
             match tokio::time::timeout_at(until, &mut task).await {
                 Ok(Ok(())) => {}
-                Ok(Err(_)) => joined = false,
+                Ok(Err(_)) => {
+                    // A panicked task terminated; its failure is not a live job.
+                    self.app
+                        .supervisor
+                        .worker_failure_observed
+                        .store(true, std::sync::atomic::Ordering::Release);
+                }
                 Err(_) => {
                     joined = false;
                     *self.listener_task.lock().expect("HTTP listener task") = Some(task);
@@ -618,6 +662,12 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> HttpServer<B> {
             while !jobs.is_empty() {
                 match tokio::time::timeout_at(until, jobs.join_next()).await {
                     Ok(Some(Ok(()))) => {}
+                    Ok(Some(Err(_))) => {
+                        self.app
+                            .supervisor
+                            .worker_failure_observed
+                            .store(true, std::sync::atomic::Ordering::Release);
+                    }
                     Ok(None) => break,
                     _ => {
                         jobs_joined = false;
@@ -641,18 +691,29 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> HttpServer<B> {
             let mut fresh = self.app.supervisor.jobs.lock().expect("HTTP cleanup jobs");
             while let Some(result) = fresh.try_join_next() {
                 if result.is_err() {
-                    jobs_joined = false;
+                    self.app
+                        .supervisor
+                        .worker_failure_observed
+                        .store(true, std::sync::atomic::Ordering::Release);
                 }
             }
             if !fresh.is_empty() {
                 jobs_joined = false;
             }
         }
+        let (session_transports_joined, unconfirmed_owner_cleanups) =
+            self.app.session_shutdown_facts();
         let unresolved = self.app.retained_sessions();
-        jobs_joined &= unresolved == 0;
         HttpShutdown {
             connections_joined: joined,
             lifecycle_jobs_joined: jobs_joined,
+            session_transports_joined,
+            unconfirmed_owner_cleanups,
+            worker_failure_observed: self
+                .app
+                .supervisor
+                .worker_failure_observed
+                .load(std::sync::atomic::Ordering::Acquire),
             unresolved_sessions: unresolved,
             sdk_detached_tasks_joined: None,
         }

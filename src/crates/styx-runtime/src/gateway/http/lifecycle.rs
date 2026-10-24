@@ -37,6 +37,8 @@ pub(super) struct CloseFacts {
 pub(super) struct Supervisor {
     pub jobs: Mutex<JoinSet<()>>,
     pub parked: Mutex<Vec<JoinSet<()>>>,
+    pub worker_failure_observed: std::sync::atomic::AtomicBool,
+    pub accepting_cleanup_jobs: std::sync::atomic::AtomicBool,
 }
 pub(super) struct Life<L: GatewayOwnerLifecycle> {
     pub owner: VerifiedGatewayOwner,
@@ -83,10 +85,25 @@ impl<L: GatewayOwnerLifecycle> Life<L> {
             if tokio::runtime::Handle::try_current().is_err() {
                 return Err(OwnerFenceError);
             }
+            let mut jobs = supervisor.jobs.lock().expect("cleanup supervisor");
+            if !supervisor
+                .accepting_cleanup_jobs
+                .load(std::sync::atomic::Ordering::Acquire)
+            {
+                // Process-level shutdown has fenced registration. A late SDK
+                // Drop cannot create a job after the final quiescence snapshot;
+                // no remote completion is inferred from refusing registration.
+                return Err(OwnerFenceError);
+            }
             f.cleanup_started = true;
             let this = self.clone();
-            let mut jobs = supervisor.jobs.lock().expect("cleanup supervisor");
-            while jobs.try_join_next().is_some() {}
+            while let Some(result) = jobs.try_join_next() {
+                if result.is_err() {
+                    supervisor
+                        .worker_failure_observed
+                        .store(true, std::sync::atomic::Ordering::Release);
+                }
+            }
             jobs.spawn(async move {
                 let result = this
                     .lifecycle

@@ -741,6 +741,18 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
                     }
                     if outcome.is_complete() {
                         ExitCode::SUCCESS
+                    } else if outcome.local_stop_complete()
+                        && outcome.unconfirmed_owner_cleanups > 0
+                        && !outcome.worker_failure_observed
+                        && !outcome.listener_error_observed
+                    {
+                        // A stopped local Gateway is not proof of remote native
+                        // cleanup. Keep that uncertainty visible and nonzero.
+                        eprintln!(
+                            "{}",
+                            serde_json::json!({"schema":1,"error":"remote_owner_cleanup_unconfirmed"})
+                        );
+                        ExitCode::from(4)
                     } else {
                         error("gateway_shutdown_unknown")
                     }
