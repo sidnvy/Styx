@@ -51,6 +51,7 @@ HTTP_TESTS = [
 ]
 PAIRED_HOST_TEST = "enrollment::service::tests::paired_journey::actual_paired_tls_mcp_codex_nonce_owner_and_revocation_journey"
 HOST_ACTION_WIRE_TEST = "host::protocol::tests::actual_canonical_tls_wss_host_action_journey"
+BROWSER_REFERENCE_TEST = "host::coordinator::browser::browser_tests::references::actual_snapshot_refs_navigation_tabs_owner_and_reopen_batch"
 BROWSER_HOST_TEST = "host::coordinator::browser::browser_tests::actual_owned_browser_host_nonce_policy_drop_and_cleanup"
 HOST_WIRE_TEST = "host::protocol::tests::actual_tls_wss_codex_start_read_duplicate_and_lost_response_batch"
 
@@ -96,7 +97,7 @@ def source_inputs(root):
     files = [root / "Cargo.toml", root / "Cargo.lock", root / "rust-toolchain.toml", POLICY, Path(__file__).resolve()]
     for base in (root / "src/crates", root / "src/acceptance/oracles", root / "src/acceptance/interop-exec", root / "src/providers/browser-worker"):
         files += [p for p in base.rglob("*") if p.is_file() and "node_modules" not in p.parts and p.suffix in {".rs", ".toml", ".py", ".json", ".mjs"}]
-    files += [root / "src/shared/enrollment-protocol.mjs", *[root / "src/docs/rust-core-rewrite" / name for name in ("LEGACY-WIRE-VECTORS-V1.json", "CONTRACT-V1.json", "FEATURE-INVENTORY-V1.json", "PUBLIC-MCP-V1.json")]]
+    files += [root / "src/packages/styx-browser-provider/playwright-contract-0.0.83.json", root / "src/shared/enrollment-protocol.mjs", *[root / "src/docs/rust-core-rewrite" / name for name in ("LEGACY-WIRE-VECTORS-V1.json", "CONTRACT-V1.json", "FEATURE-INVENTORY-V1.json", "PUBLIC-MCP-V1.json")]]
     return {str(p.relative_to(root)): sha(p) for p in sorted(set(files))}
 
 
@@ -262,6 +263,8 @@ def execute(args):
     receipt = {"schema": 1, "kind": "rust_foundation_development_quality", "started_at": now(), "status": "RUNNING", "root": str(ROOT), "target_dir": str(target), "checks": gate.checks, "native_platform_acceptance": "NOT_RUN", "package": "NOT_BUILT", "deployment": "NOT_RUN", "final_release_gate": False}
     initial = None
     try:
+        if args.browser_references and not args.browser_host:
+            raise ValueError("browser_references_requires_browser_host_inputs")
         initial = source_inputs(ROOT)
         receipt["inputs"] = initial
         head = gate.run("git-head", ["git", "rev-parse", "HEAD"], timeout=30)
@@ -414,6 +417,22 @@ def execute(args):
             except (OSError, ValueError):
                 gate.semantic(check, ["browser_scenario_receipt_missing_or_invalid"])
             receipt["browser_host_native"] = check["status"]
+            if args.browser_references:
+                refs = evidence / "owned-browser-references"
+                refs.mkdir(mode=0o700)
+                check = gate.run("browser-references", ["cargo", "test", "-p", "styx-runtime", "--locked", "--offline", BROWSER_REFERENCE_TEST, "--", "--ignored", "--exact", "--nocapture"], timeout=180,
+                    extra_env={"STYX_TEST_CODEX": args.codex_bin, "STYX_TEST_BROWSER_ROOT": str(refs), "STYX_TEST_BROWSER_NODE": args.node22,
+                               "STYX_TEST_BROWSER_WORKER": browser["worker"], "STYX_TEST_BROWSER_EXECUTABLE": args.browser_executable})
+                gate.semantic(check, [] if "1 passed; 0 failed" in gate.read("browser-references") else ["exact_actual_browser_reference_case_not_executed"])
+                try:
+                    receipts = list(refs.glob("*/receipt.json"))
+                    if len(receipts) != 1 or receipts[0].is_symlink() or receipts[0].resolve() != receipts[0]:
+                        raise ValueError("unique_owned_browser_reference_receipt_required")
+                    scenario = json.loads(receipts[0].read_text())
+                    gate.semantic(check, [] if scenario.get("status") == "PASS" and scenario.get("host_browser_cleanup_complete") is True and scenario.get("http_server_joined") is True else ["browser_reference_effect_or_cleanup_receipt_failed"])
+                except (OSError, ValueError):
+                    gate.semantic(check, ["browser_reference_receipt_missing_or_invalid"])
+                receipt["browser_references_native"] = check["status"]
         receipt["paired_host_native"] = "NOT_RUN_explicit_inputs_not_requested"
         if args.paired_host:
             if not args.codex_bin or not args.enrollment_service or not args.node22 or not args.tls_fixtures:
@@ -498,6 +517,8 @@ def execute(args):
             required |= {"paired-host"}
         if args.browser_host:
             required |= {"browser-worker-config", "browser-version", "browser-host"}
+        if args.browser_references:
+            required |= {"browser-references"}
         if args.node22:
             required |= {"node22-version", "node22-crypto"}
         if args.codex_bin:
@@ -518,6 +539,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--evidence", required=True, help="fresh absolute external evidence directory")
     parser.add_argument("--target-dir", help="absolute external Cargo build cache; reused only by explicit choice")
+    parser.add_argument("--browser-references", action="store_true", help="actual owned Browser opaque references/navigation/tab/reopen scene; requires --browser-host, not platform acceptance")
     parser.add_argument("--browser-host", action="store_true", help="actual Linux headless Browser Host scenario; requires Node22, Codex and browser executable; no desktop/account/package claim")
     parser.add_argument("--browser-executable", help="canonical explicit Chrome/Chromium binary; no download or installed profile is opened")
     parser.add_argument("--linux-discovery", action="store_true", help="actual read-only fixed system-bus candidate snapshot plus CLI; no desktop authorization")

@@ -495,3 +495,6 @@ async fn actual_owned_browser_host_nonce_policy_drop_and_cleanup() {
         std::panic::resume_unwind(panic);
     }
 }
+
+#[path = "browser_reference_tests.rs"]
+mod references;

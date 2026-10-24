@@ -5,3 +5,5 @@ pub mod policy;
 pub mod enrollment;
 
 pub mod session;
+
+pub mod browser;

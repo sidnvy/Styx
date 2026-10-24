@@ -283,6 +283,13 @@ async fn missing_unknown_requires_exact_ended_bundle_and_audit() {
                 client_close: None,
                 io_join_failed: false,
                 retired: false,
+                references: styx_core::browser::BrowserReferenceScope::new(
+                    owner.clone(),
+                    target.clone(),
+                    [9; 32],
+                ),
+                workspace: PathBuf::from("/synthetic-unused-workspace"),
+                output: PathBuf::from("/synthetic-unused-output"),
                 slot: None,
                 pins: vec![],
                 uncertain: true,
@@ -385,5 +392,129 @@ async fn missing_unknown_requires_exact_ended_bundle_and_audit() {
     }
     println!(
         "synthetic Core/provider bundle: missing Unknown retains Unknown; missing Failed accepts only canonical NotDispatched; ACK/Unknown/arbitrary audit and no physical cleanup refused; exact ended/drained bundle releases metadata; no native OS proof claimed"
+    );
+}
+
+/// Provider policy and opaque-ref plumbing only, not native browser acceptance.
+#[test]
+fn frozen_tools_paths_and_snapshot_reference_policy_batch() {
+    use serde_json::{Value, json};
+    let fixture = Fixture::new();
+    let config = fixture.config();
+    let tool = |name: &str, args: Value| BrowserAction::Tool {
+        name: name.to_owned(),
+        arguments: args.as_object().unwrap().clone(),
+    };
+    for (name, args) in [
+        ("browser_navigate", json!({"url":"https://example.invalid"})),
+        ("browser_tabs", json!({"action":"new"})),
+        ("browser_click", json!({"target":"button"})),
+        (
+            "browser_fill_form",
+            json!({"fields":[{"target":"#name","name":"name","type":"textbox","value":"x"}]}),
+        ),
+        ("browser_snapshot", json!({})),
+        ("browser_find", json!({"text":"nonce"})),
+    ] {
+        tool(name, args).to_operation_payload().unwrap();
+    }
+    for (name, args) in [
+        ("browser_navigate", json!({"url":"file:///private"})),
+        (
+            "browser_tabs",
+            json!({"action":"new","url":"javascript:alert(1)"}),
+        ),
+        ("browser_click", json!({"target":"e17"})),
+        ("browser_click", json!({"target":"f3e19"})),
+        (
+            "browser_click",
+            json!({"target":"css=button >> aria-ref=e17"}),
+        ),
+        ("browser_click", json!({"target":"button","_meta":{}})),
+        (
+            "browser_click",
+            json!({"target":"button","environment_id":"other"}),
+        ),
+        ("browser_close", json!({"unknown":true})),
+        ("styx_browser_state", json!({})),
+        ("browser_wait_for", json!({"time":31})),
+    ] {
+        assert!(tool(name, args).to_operation_payload().is_err(), "{name}");
+    }
+    let upload = config.workspace_dir.join("upload.txt");
+    std::fs::write(&upload, b"owned").unwrap();
+    let mut args = json!({"paths":[upload]}).as_object().unwrap().clone();
+    policy::check_files(&mut args, &config.workspace_dir, &config.output_dir).unwrap();
+    let link = config.workspace_dir.join("escape.txt");
+    std::os::unix::fs::symlink("/etc/passwd", &link).unwrap();
+    for args in [
+        json!({"paths":[link]}),
+        json!({"filename":"../other-owner.txt"}),
+        json!({"filename":"/etc/styx-no-write"}),
+    ] {
+        assert!(
+            policy::check_files(
+                &mut args.as_object().unwrap().clone(),
+                &config.workspace_dir,
+                &config.output_dir
+            )
+            .is_err()
+        );
+    }
+    let mut output = json!({"filename":"result.txt"})
+        .as_object()
+        .unwrap()
+        .clone();
+    policy::check_files(&mut output, &config.workspace_dir, &config.output_dir).unwrap();
+    assert_eq!(
+        output["filename"],
+        config.output_dir.join("result.txt").to_str().unwrap()
+    );
+    let (_, owner, parent, _, _) = permit(vec![1], CapabilityId::BrowserHeadless);
+    let target = ResourceTarget {
+        operation_id: parent.id().clone(),
+        payload_digest: Sha256Digest::of_bytes(parent.payload()),
+    };
+    let mut scope =
+        styx_core::browser::BrowserReferenceScope::new(owner.clone(), target.clone(), [33; 32]);
+    let result_value = json!({"content":[{"type":"text","text":"- button [ref=e17]\n- textbox [ref=f3e19]"}],
+        "_meta":{"app.styx/browser-native":{"schema":1,"before":7,"after":7,"dispatched":true}}});
+    let mut result: CallToolResult = serde_json::from_value(result_value).unwrap();
+    let fact = references::fact(&result).unwrap();
+    references::result_refs(&mut result, &mut scope, true, &fact).unwrap();
+    let text = result.content[0].as_text().unwrap().text.clone();
+    assert!(!text.contains("[ref=e17]"));
+    assert!(text.contains("[ref=styx-"));
+    let token = text
+        .split("[ref=")
+        .nth(1)
+        .unwrap()
+        .split(']')
+        .next()
+        .unwrap();
+    let mut nested = json!({"fields":[{"target":token}]});
+    assert!(references::resolve_targets(&mut nested, &scope, &owner, &target, 7).unwrap());
+    assert_eq!(nested["fields"][0]["target"], "e17");
+    assert!(
+        references::resolve_targets(&mut json!({"target":token}), &scope, &owner, &target, 8)
+            .is_err()
+    );
+    assert!(
+        references::resolve_targets(
+            &mut json!({"target":"styx-00000000000000000000000000000000"}),
+            &scope,
+            &owner,
+            &target,
+            7
+        )
+        .is_err()
+    );
+    scope.invalidate();
+    assert!(
+        references::resolve_targets(&mut json!({"target":token}), &scope, &owner, &target, 7)
+            .is_err()
+    );
+    println!(
+        "synthetic policy: frozen schemas + URL/path controls + opaque recursive ref binding; no Native element/atomic-navigation proof claimed"
     );
 }

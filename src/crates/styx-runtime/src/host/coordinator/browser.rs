@@ -409,10 +409,8 @@ impl HostCoordinator {
             DispatchDisposition::ExecuteOnce(permit) => permit,
         };
         let delivery_context = permit.context().clone();
-        let is_close = matches!(
-            serde_json::from_slice::<BrowserAction>(permit.payload()),
-            Ok(BrowserAction::Close)
-        );
+        let is_close = serde_json::from_slice::<BrowserAction>(permit.payload())
+            .is_ok_and(|action| action.is_close());
         let operation = id.clone();
         let inner = self.inner.clone();
         let (response, receiver) = oneshot::channel();

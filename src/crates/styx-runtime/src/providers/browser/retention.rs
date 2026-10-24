@@ -41,6 +41,7 @@ fn canonical_not_dispatched(digest: Option<Sha256Digest>) -> Result<bool> {
         Some(BrowserError::Unknown),
         Some(BrowserError::AlreadyDispatched),
         Some(BrowserError::CleanupUnconfirmed),
+        Some(BrowserError::StaleObservation),
     ] {
         if digest == Sha256Digest::of_bytes(&encode(BrowserActionEvidence::NotDispatched, cause)?) {
             return Ok(true);
@@ -248,6 +249,7 @@ impl BrowserWorker {
         // All validation precedes mutation. Ancient handles retain a retired
         // object and cannot acquire a new action even after map removal.
         live.retired = true;
+        live.references.clear();
         live.actions.clear();
         resource
             .metadata_record

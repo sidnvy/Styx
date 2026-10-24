@@ -51,6 +51,8 @@ pub enum BrowserError {
     AlreadyDispatched,
     #[error("browser_cleanup_unconfirmed")]
     CleanupUnconfirmed,
+    #[error("browser_stale_observation")]
+    StaleObservation,
 }
 type Result<T> = std::result::Result<T, BrowserError>;
 /// Trusted bootstrap input only, never a network DTO. Caller verifies release
@@ -86,9 +88,17 @@ impl BrowserOpenSpec {
 #[derive(Serialize, Deserialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub enum BrowserAction {
-    Navigate { url: String },
-    Evaluate { function: String },
+    Navigate {
+        url: String,
+    },
+    Evaluate {
+        function: String,
+    },
     Close,
+    Tool {
+        name: String,
+        arguments: serde_json::Map<String, serde_json::Value>,
+    },
 }
 impl BrowserAction {
     pub fn to_operation_payload(&self) -> Result<Vec<u8>> {
@@ -97,37 +107,19 @@ impl BrowserAction {
     }
     fn validate(&self) -> Result<()> {
         match self {
-            Self::Navigate { url } => {
-                let parsed = url::Url::parse(url).map_err(|_| BrowserError::InvalidRequest)?;
-                if url.len() > 8192
-                    || !matches!(parsed.scheme(), "http" | "https")
-                    || !parsed.username().is_empty()
-                    || parsed.password().is_some()
-                {
-                    return Err(BrowserError::Unsupported);
-                }
+            Self::Tool { name, arguments } => policy::validate(name, arguments),
+            Self::Navigate { url } if url.len() > 8192 => Err(BrowserError::InvalidRequest),
+            Self::Evaluate { function } if function.len() > 65536 => {
+                Err(BrowserError::InvalidRequest)
             }
-            Self::Evaluate { function } if function.is_empty() || function.len() > 65536 => {
-                return Err(BrowserError::InvalidRequest);
+            _ => {
+                let (name, args) = policy::tool(self);
+                policy::validate(&name, &args)
             }
-            _ => {}
         }
-        Ok(())
     }
-    fn params(&self) -> CallToolRequestParams {
-        match self {
-            Self::Navigate { url } => CallToolRequestParams::new("browser_navigate")
-                .with_arguments(serde_json::Map::from_iter([(
-                    "url".into(),
-                    serde_json::Value::String(url.clone()),
-                )])),
-            Self::Evaluate { function } => CallToolRequestParams::new("browser_evaluate")
-                .with_arguments(serde_json::Map::from_iter([(
-                    "function".into(),
-                    serde_json::Value::String(function.clone()),
-                )])),
-            Self::Close => CallToolRequestParams::new("browser_close"),
-        }
+    pub fn is_close(&self) -> bool {
+        matches!(self, Self::Close) || matches!(self,Self::Tool{name,..} if name=="browser_close")
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -209,6 +201,9 @@ struct Live {
     client_close: Option<JoinHandle<bool>>,
     io_join_failed: bool,
     retired: bool,
+    references: styx_core::browser::BrowserReferenceScope,
+    workspace: PathBuf,
+    output: PathBuf,
     slot: Option<OwnedSemaphorePermit>,
     pins: Vec<File>,
     uncertain: bool,
@@ -382,6 +377,8 @@ struct BrowserClient {
 }
 impl ClientHandler for BrowserClient {}
 mod linux_scope;
+mod policy;
+mod references;
 mod retention;
 use linux_scope::{LinuxOwnedScope, ScopeCommand};
 
@@ -517,6 +514,23 @@ impl BrowserOpenSlot {
         let operation = permit.id().clone();
         let digest = Sha256Digest::of_bytes(permit.payload());
         let owner = permit.owner().clone();
+        let mut entropy = [0_u8; 32];
+        if getrandom::fill(&mut entropy).is_err() {
+            return Err(BrowserOpenFailure {
+                operation,
+                handle: None,
+                evidence: BrowserActionEvidence::NotDispatched,
+                cause: BrowserError::Unknown,
+            });
+        }
+        let references = styx_core::browser::BrowserReferenceScope::new(
+            owner.clone(),
+            styx_contracts::operation::ResourceTarget {
+                operation_id: operation.clone(),
+                payload_digest: digest,
+            },
+            entropy,
+        );
         let resource = Arc::new(Resource {
             metadata_record: Mutex::new(Some(self.metadata)),
             metadata: self.worker.inner.metadata.clone(),
@@ -532,6 +546,9 @@ impl BrowserOpenSlot {
                 client_close: None,
                 io_join_failed: false,
                 retired: false,
+                references,
+                workspace: config.workspace_dir.clone(),
+                output: config.output_dir.clone(),
                 slot: Some(self.slot),
                 pins: Vec::new(),
                 uncertain: false,
@@ -597,6 +614,11 @@ impl BrowserOpenSlot {
                 result=timeout_at(until,handler.serve(transport))=>result.map_err(|_|BrowserError::Unknown)?.map_err(|_|BrowserError::ProtocolMismatch)?,
             };
             live.client = Some(client);
+            let info=live.client.as_ref().ok_or(BrowserError::Unknown)?.peer().peer_info()
+                .ok_or(BrowserError::ProtocolMismatch)?;
+            if !info.server_info.as_ref().is_some_and(|server|server.name=="styx-browser-native-worker" && server.version=="0.2.0") {
+                return Err(BrowserError::ProtocolMismatch);
+            }
             let listed = tokio::select! {
                 _=resource.stop.cancelled()=>return Err(BrowserError::Unknown),
                 result=timeout_at(until,live.client.as_ref().ok_or(BrowserError::Unknown)?.peer().list_all_tools())=>result.map_err(|_|BrowserError::Unknown)?.map_err(|_|BrowserError::ProtocolMismatch)?,
@@ -635,7 +657,15 @@ fn validate_tools(tools: &[rmcp::model::Tool]) -> Result<()> {
         .and_then(|v| v.as_array())
         .ok_or(BrowserError::ProtocolMismatch)?;
     let mut actual = BTreeMap::new();
+    let mut native_state = false;
     for tool in tools {
+        if tool.name.as_ref() == "styx_browser_state" {
+            if native_state {
+                return Err(BrowserError::ProtocolMismatch);
+            }
+            native_state = true;
+            continue;
+        }
         if omitted
             .iter()
             .any(|name| name.as_str() == Some(tool.name.as_ref()))
@@ -646,7 +676,7 @@ fn validate_tools(tools: &[rmcp::model::Tool]) -> Result<()> {
             return Err(BrowserError::ProtocolMismatch);
         }
     }
-    if actual.len() != expected.len() {
+    if !native_state || actual.len() != expected.len() {
         return Err(BrowserError::ProtocolMismatch);
     }
     for expected in expected {
@@ -731,6 +761,9 @@ impl BrowserActionSlot {
                 cause: *cause,
             };
         }
+        if permit.payload().len() > 128 * 1024 {
+            return refuse(BrowserError::InvalidRequest);
+        }
         let action = match serde_json::from_slice::<BrowserAction>(permit.payload()) {
             Ok(action) => action,
             Err(_) => return refuse(BrowserError::Unsupported),
@@ -741,7 +774,7 @@ impl BrowserActionSlot {
         if self.state.actions.len() >= MAX_RECORDS {
             return refuse(BrowserError::Busy);
         }
-        if self.state.uncertain && !matches!(action, BrowserAction::Close) {
+        if self.state.uncertain && !action.is_close() {
             return refuse(BrowserError::Unknown);
         }
         if self
@@ -754,6 +787,92 @@ impl BrowserActionSlot {
         {
             self.state.uncertain = true;
             return refuse(BrowserError::Unknown);
+        }
+        let (tool_name, mut arguments) = policy::tool(&action);
+        if let Err(error) =
+            policy::check_files(&mut arguments, &self.state.workspace, &self.state.output)
+        {
+            return refuse(error);
+        }
+        let until = Instant::now() + self.state.timeout;
+        // This read is a native epoch observation, not Core authorization and
+        // not an atomic browser navigation lock. It never starts the context.
+        let observed = match &self.state.client {
+            Some(client) => tokio::select! {
+                _=self.resource.stop.cancelled()=>None,
+                value=timeout_at(until,client.call_tool_once(CallToolRequestParams::new("styx_browser_state")))=>Some(value),
+            },
+            None => None,
+        };
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct ObservedState {
+            schema: u8,
+            epoch: u64,
+            ready: bool,
+            closed: bool,
+        }
+        let observed_state = match observed {
+            Some(Ok(Ok(CallToolResponse::Complete(value)))) if value.is_error != Some(true) => {
+                value
+                    .structured_content
+                    .and_then(|v| serde_json::from_value::<ObservedState>(v).ok())
+                    .filter(|s| s.schema == 1 && s.epoch > 0 && s.epoch <= 9_007_199_254_740_991)
+            }
+            _ => None,
+        };
+        let Some(observed_state) = observed_state else {
+            self.state.references.invalidate();
+            self.state.uncertain = true;
+            // The management observation is malformed/lost; no user tool was
+            // dispatched. Fence this executor rather than infer a false Ready.
+            return refuse(BrowserError::ProtocolMismatch);
+        };
+        if observed_state.closed {
+            self.state.references.invalidate();
+            self.state.uncertain = true;
+            return refuse(BrowserError::StaleObservation);
+        }
+        let epoch = observed_state.epoch;
+        let ready = observed_state.ready;
+        if !ready && self.state.references.current_epoch().is_some() {
+            self.state.references.invalidate();
+            self.state.uncertain = true;
+            return refuse(BrowserError::StaleObservation);
+        }
+        let mut targets = serde_json::Value::Object(arguments);
+        let resolved = references::resolve_targets(
+            &mut targets,
+            &self.state.references,
+            permit.owner(),
+            target,
+            epoch,
+        );
+        // Native-ref safety is conditional on snapshot mode none plus this
+        // complete resource mutex. Never start a concurrent snapshot while a
+        // lazy upstream locator is pending. Native errors remain Unknown and
+        // poison all later actions except terminal Close.
+        if let Err(error) = resolved {
+            self.state.references.invalidate();
+            return refuse(error);
+        }
+        arguments = targets.as_object().cloned().unwrap_or_default();
+        if policy::invalidates(&tool_name, &arguments) {
+            self.state.references.invalidate();
+        }
+        let snapshot = policy::snapshot(&tool_name, &arguments);
+        let mut params = CallToolRequestParams::new(tool_name).with_arguments(arguments);
+        // A never-created context has no stable page observation to guard.
+        // Existing opaque tokens were still resolved above and cannot take this
+        // path without a scope. Do not manufacture epoch equality across init.
+        if ready {
+            params.meta = Some(
+                serde_json::Map::from_iter([(
+                    references::META.into(),
+                    serde_json::json!({"schema":1,"expected_epoch":epoch}),
+                )])
+                .into(),
+            );
         }
         let metadata = match self.resource.metadata.clone().try_acquire_owned() {
             Ok(permit) => permit,
@@ -768,11 +887,10 @@ impl BrowserActionSlot {
                 metadata,
             ),
         );
-        let until = Instant::now() + self.state.timeout;
         let response = match &self.state.client {
             Some(client) => tokio::select! {
                 _=self.resource.stop.cancelled()=>None,
-                result=timeout_at(until,client.call_tool_once(action.params()))=>Some(result),
+                result=timeout_at(until,client.call_tool_once(params))=>Some(result),
             },
             None => {
                 self.state.uncertain = true;
@@ -785,33 +903,83 @@ impl BrowserActionSlot {
             }
         };
         let (evidence, result, cause) = match response {
-            Some(Ok(Ok(CallToolResponse::Complete(result)))) if result.is_error != Some(true) => {
-                if matches!(action, BrowserAction::Close) {
-                    if result
-                        .structured_content
-                        .as_ref()
-                        .and_then(|v| v.get("styx_context_closed"))
-                        .and_then(serde_json::Value::as_bool)
-                        != Some(true)
+            Some(Ok(Ok(CallToolResponse::Complete(mut result)))) => {
+                match references::fact(&result) {
+                    Ok(native)
+                        if !native.dispatched
+                            && result.is_error == Some(true)
+                            && native.before == native.after
+                            && matches!(native.reason.as_deref(), Some("stale" | "invalid")) =>
                     {
+                        self.state.references.invalidate();
                         (
-                            BrowserActionEvidence::Unknown,
-                            Some(result),
-                            Some(BrowserError::ProtocolMismatch),
+                            BrowserActionEvidence::NotDispatched,
+                            None,
+                            Some(if native.reason.as_deref() == Some("stale") {
+                                BrowserError::StaleObservation
+                            } else {
+                                BrowserError::InvalidRequest
+                            }),
                         )
-                    } else {
-                        self.state.context_closed = true;
-                        (BrowserActionEvidence::Acknowledged, Some(result), None)
                     }
-                } else {
-                    (BrowserActionEvidence::Acknowledged, Some(result), None)
+                    Ok(native)
+                        if native.dispatched
+                            && (if ready {
+                                native.before == epoch
+                            } else {
+                                native.before >= epoch
+                            })
+                            && result.is_error != Some(true) =>
+                    {
+                        let valid_close = !action.is_close()
+                            || result
+                                .structured_content
+                                .as_ref()
+                                .and_then(|v| v.get("styx_context_closed"))
+                                .and_then(serde_json::Value::as_bool)
+                                == Some(true);
+                        if action.is_close() && valid_close {
+                            self.state.context_closed = true;
+                        }
+                        if native.before != native.after {
+                            self.state.references.invalidate();
+                        }
+                        // A lazy first snapshot may itself create the context
+                        // and change epoch. It completed as a read, but cannot
+                        // mint stable refs. Return ACK + stale warning and scrub
+                        // native refs; do not retry or poison a healthy context.
+                        let stale_snapshot = snapshot && native.before != native.after;
+                        let refs = references::result_refs(
+                            &mut result,
+                            &mut self.state.references,
+                            snapshot && !stale_snapshot,
+                            &native,
+                        );
+                        if valid_close && refs.is_ok() {
+                            (
+                                BrowserActionEvidence::Acknowledged,
+                                Some(result),
+                                stale_snapshot.then_some(BrowserError::StaleObservation),
+                            )
+                        } else {
+                            (
+                                BrowserActionEvidence::Unknown,
+                                None,
+                                Some(if valid_close {
+                                    refs.err().unwrap_or(BrowserError::Unknown)
+                                } else {
+                                    BrowserError::ProtocolMismatch
+                                }),
+                            )
+                        }
+                    }
+                    _ => (
+                        BrowserActionEvidence::Unknown,
+                        None,
+                        Some(BrowserError::Unknown),
+                    ),
                 }
             }
-            Some(Ok(Ok(CallToolResponse::Complete(result)))) => (
-                BrowserActionEvidence::Unknown,
-                Some(result),
-                Some(BrowserError::Unknown),
-            ),
             _ => (
                 BrowserActionEvidence::Unknown,
                 None,
@@ -819,6 +987,7 @@ impl BrowserActionSlot {
             ),
         };
         if evidence == BrowserActionEvidence::Unknown {
+            self.state.references.invalidate();
             self.state.uncertain = true;
         }
         if let Some(record) = self.state.actions.get_mut(&operation) {
@@ -834,6 +1003,7 @@ impl BrowserActionSlot {
     }
 }
 async fn cleanup(live: &mut Live, budget: Duration) -> BrowserCleanup {
+    live.references.clear();
     if let Some(facts) = live.cleanup {
         return facts;
     }

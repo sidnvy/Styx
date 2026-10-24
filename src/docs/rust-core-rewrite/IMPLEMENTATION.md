@@ -85,21 +85,29 @@ Session authority and the necessary SDK allocation isolation boundary are descri
 in [ADR-007](ADR-007-SESSION-FACTS.md). These changes are not automatically covered by
 the earlier 35a9fe3 gate or Mac compile. The original self-signed TLS failure is now
 precisely classified by the unchanged verifier as `tls_certificate_ca_used_as_leaf`;
-that diagnosis does not fix original Gateway compatibility or the separately
-unresolved authenticated self API401. No trust anchor, device credential, original
+that diagnosis does not fix original Gateway compatibility. The historical self
+API401 statement was not supported by the located original receipt: that request
+sent no authorization and returned404. Originalrc12 lacked the self controller;
+original-pair authenticated self/CAS remains NOT_TESTED, not a diagnosed bad key
+or clock. No trust anchor, device credential, original
 signed artifact or installed runtime was replaced to obtain a successful result.
 
 
-Browser implementation is in progress on771188e; see [ADR-008](ADR-008-BROWSER-OWNERSHIP.md).
-The first unified compile FAIL is preserved externally. Its missing protocol mapping
-has been corrected, and exact profile isolation, idempotent physical settlement,
-Core-attested provider release and owned Linux scope budgets are pending unified
-compile/native verification. Only Navigate/Evaluate/Close are being integrated.
-No claim of complete R19, Browser refs/login/headed/network routing, native platform
-or signed-candidate acceptance follows from these source changes.
+Browser's initial real Linux headless Host batch passed with independent HTTP and
+kernel cgroup/PID observers after correcting Chromium's Unix socket path limit.
+The954becb frozen full local developer gate and same-SHA Mac x64 compile passed;
+the Mac result is compile only. Original failed attempts remain FAIL.
 
-Browser's initial real Linux headless Host batch now passes with an independent
-HTTP and kernel cgroup/PID observer after fixing Chromium's Unix socket path limit.
-It proves the narrow nonce/profile/Unknown/no-replay/cleanup/physical archival journey;
-original failures remain FAIL. It is not completion of the whole Browser or any
-platform candidate. Complete local regression/integration evidence follows separately.
+The subsequent Browser increment reuses all24 original frozen tool schemas through
+mature offline-only jsonschema validation. Core owns bounded opaque reference scope;
+the thin worker supplies native epochs and checks expected epoch immediately before
+one upstream call. Snapshot mode none and one in-flight request are safety invariants,
+not proof of an atomic navigation lock; see [ADR-010](ADR-010-BROWSER-REFERENCES.md).
+Focused pure-Core/provider cases and the actual Linux Host reference batch passed:
+first direct Snapshot, wrong-owner/raw/stale refusal, independent input/click nonce,
+autonomous navigation, tab changes and same-profile reopen invalidation. Two original
+cgroups and all25 sampled PID/birth identities were independently observed gone.
+The complete frozen integration gate is recorded separately for the resulting SHA.
+This does not accept every tool's behavior: file transfer, login continuity, headed
+ownership, public paired routing, native Mac/Windows lifecycle and signed candidates
+remain required. No installed runtime has been switched.
