@@ -361,6 +361,16 @@
       "kind": "explicit_owned_private_legacy_registry_snapshot",
       "input": "fresh STYX_TEST_LEGACY_IMPORT_ROOT and fixed STYX_TEST_NODE22",
       "required_for": "actual protected files and RSA association, current historical grants, revocation tombstone and source replacement/blocker checks; not real old enrollment, imported Core ledger, stopped Gateway or activation"
+    },
+    "enrollment::recovery::historical::tests::linux::historical_baseline_boot_chain_and_publication_fence": {
+      "kind": "explicit_owned_historical_journal_recovery",
+      "input": "fresh STYX_TEST_HISTORICAL_RECOVERY_ROOT",
+      "required_for": "actual baseline prepared refusal, committed native chain continuation/default/tokenless tombstone/Unknown lanes and service publication fence; synthetic historical profiles, not source crypto or C07 completion"
+    },
+    "enrollment::legacy_import::tests::original_history_persistence_and_process_reopen_remain_migration_fenced": {
+      "kind": "explicit_owned_original_history_projection_and_process_reopen",
+      "input": "fresh STYX_TEST_LEGACY_IMPORT_ROOT and fixed STYX_TEST_NODE22",
+      "required_for": "protected original source file/RSA association to same-root native history; independent process reopens original current grant/generation/default and no-token revoked, verifies real RSA/SPKI, and ordinary service execution remains migration_commit_required; not old Gateway settlement, onboarding, remote authentication or final migration"
     }
   },
   "change_policy": "dependency or ignored-test additions require explicit policy review; preserve mature Cargo tooling rather than replacing its resolver/compiler/lints"

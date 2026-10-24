@@ -363,6 +363,8 @@ pub struct EnrollmentService {
     hosts: BTreeSet<String>,
     clock: Clock,
     uncertain: bool,
+    // A historical enrollment commit does not commit the enclosing C07 handoff.
+    historical_migration_pending: bool,
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     startup_transport_reconciled: bool,
 }
@@ -399,6 +401,7 @@ impl EnrollmentService {
             hosts: allowed_hosts.into_iter().collect(),
             clock: Clock::new(now),
             uncertain: false,
+            historical_migration_pending: recovered.facts.historical_baseline.is_some(),
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             startup_transport_reconciled: false,
         };
@@ -462,6 +465,9 @@ impl EnrollmentService {
     }
     fn ordinary_admission(&self) -> Result<(), ServiceError> {
         self.healthy()?;
+        if self.historical_migration_pending {
+            return Err(ServiceError::new(503, "migration_commit_required"));
+        }
         self.store
             .configuration_root()
             .ensure_admission()
@@ -529,6 +535,10 @@ impl EnrollmentService {
             if Sha256Digest::of_bytes(&token) != d.credential_hash {
                 return Err(ServiceError::new(503, "stored_credential_invalid"));
             }
+        }
+        for d in self.ledger.historical_revoked_for_recovery(&self.control)? {
+            // A tombstone has no fabricated token and can never authenticate.
+            self.load_profile(&d.profile, &d.id, d.fingerprint)?;
         }
         for p in pending {
             let profile =
@@ -918,7 +928,13 @@ impl EnrollmentService {
             }
             Route::Devices => {
                 let devices = self.ledger.devices_for_admin(&self.control.admin())?;
-                let mut out = Vec::with_capacity(devices.len());
+                let tombstones = self
+                    .ledger
+                    .historical_revoked_for_admin(&self.control.admin())?;
+                let default_device = self
+                    .ledger
+                    .default_device_for_admin(&self.control.admin())?;
+                let mut out = Vec::with_capacity(devices.len() + tombstones.len());
                 for d in devices {
                     let profile = self.load_profile(&d.profile, &d.id, d.fingerprint)?;
                     let states = if d.revoked {
@@ -936,8 +952,12 @@ impl EnrollmentService {
                         Some(ConnectionObservation::Offline) => Some(false),
                         _ => None,
                     };
-                    out.push(json!({"device_id":d.id,"label":profile.profile().label,"platform":profile.profile().platform,"is_default":false,"capabilities":capabilities(d.grant,!d.revoked),
+                    out.push(json!({"device_id":d.id,"label":profile.profile().label,"platform":profile.profile().platform,"is_default":!d.revoked && default_device.as_ref()==Some(&d.id),"capabilities":capabilities(d.grant,!d.revoked),
                         "status":if d.revoked{"revoked"}else{"approved"},"generation":d.generation,"fingerprint":d.fingerprint,"online":boolstate(0)==Some(true),"connections":{"exec":boolstate(0),"computer":boolstate(1),"browser":boolstate(2)}}));
+                }
+                for d in tombstones {
+                    let profile = self.load_profile(&d.profile, &d.id, d.fingerprint)?;
+                    out.push(json!({"device_id":d.id,"label":profile.profile().label,"platform":profile.profile().platform,"is_default":false,"capabilities":capabilities(d.grant,false),"status":"revoked","generation":d.generation,"fingerprint":d.fingerprint,"online":false,"connections":{"exec":false,"computer":false,"browser":false}}));
                 }
                 Ok((200, Value::Array(out)))
             }

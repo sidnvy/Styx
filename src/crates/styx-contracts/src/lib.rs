@@ -24,3 +24,6 @@ pub mod management;
 pub mod native_management;
 
 pub mod native_release;
+
+/// Private historical journal codec; not a remote protocol extension.
+pub mod historical_enrollment;

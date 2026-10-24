@@ -376,6 +376,7 @@ def execute(args):
                 ("native-transaction", NATIVE_TRANSACTION_TEST, "STYX_TEST_NATIVE_TRANSACTION_ROOT"),
                 ("credential-journal", "store::management::handoff::tests::credential_retirement_same_journal_and_pending_barrier_files_batch", "STYX_TEST_MANAGEMENT_HANDOFF_ROOT"),
                 ("credential-interrupted", "store::management::handoff::tests::credential_retirement_preflight_and_interrupted_originals_batch", "STYX_TEST_MANAGEMENT_HANDOFF_ROOT"),
+                ("historical-recovery", "enrollment::recovery::historical::tests::linux::historical_baseline_boot_chain_and_publication_fence", "STYX_TEST_HISTORICAL_RECOVERY_ROOT"),
             ):
                 check = gate.run(label, ["cargo", "test", "-p", "styx-runtime", "--locked", "--offline", test, "--", "--ignored", "--exact", "--nocapture"], timeout=120,
                     extra_env={env_name: str(evidence / ("owned-" + label))})
@@ -398,6 +399,7 @@ def execute(args):
                     for label, test_case in (
                         ("legacy-registry", "enrollment::legacy_import::tests::original_registry_revocation_credentials_and_source_change_batch"),
                         ("legacy-registry-blockers", "enrollment::legacy_import::tests::original_unsettled_and_unsupported_sources_are_not_silently_imported_batch"),
+                        ("legacy-history-persistence", "enrollment::legacy_import::tests::original_history_persistence_and_process_reopen_remain_migration_fenced"),
                     ):
                         check = gate.run(label, ["cargo", "test", "-p", "styx-runtime", "--locked", "--offline", test_case, "--", "--ignored", "--exact", "--nocapture"], timeout=120,
                             extra_env={"STYX_TEST_NODE22": str(node), "STYX_TEST_LEGACY_IMPORT_ROOT": str(evidence / ("owned-" + label))})
@@ -576,7 +578,7 @@ def execute(args):
         if args.linux_discovery:
             required |= {"linux-discovery", "cli-desktop-candidates"}
         if args.enrollment_store:
-            required |= {"payload-store", "enrollment-store", "enrollment-clock", "enrollment-recovery", "enrollment-owned", "configuration-owner", "configuration-maintenance", "management-preparation", "native-root", "management-phases", "native-transaction", "credential-journal", "credential-interrupted"}
+            required |= {"payload-store", "enrollment-store", "enrollment-clock", "enrollment-recovery", "enrollment-owned", "configuration-owner", "configuration-maintenance", "management-preparation", "native-root", "management-phases", "native-transaction", "credential-journal", "credential-interrupted", "historical-recovery"}
         if args.enrollment_service:
             required |= {"enrollment-profile", "enrollment-controller", "enrollment-service"}
         if args.paired_host:
@@ -588,7 +590,7 @@ def execute(args):
         if args.node22:
             required |= {"node22-version", "node22-crypto"}
             if args.enrollment_store:
-                required |= {"legacy-registry", "legacy-registry-blockers"}
+                required |= {"legacy-registry", "legacy-registry-blockers", "legacy-history-persistence"}
         if args.codex_bin:
             required |= {"codex-version"} | {name for name, _ in CODEX_TESTS}
         if args.tls_fixtures:

@@ -49,6 +49,8 @@ pub(super) enum UnresolvedKind {
 }
 #[derive(Debug)]
 pub(super) struct InventoryFacts {
+    /// Enrollment-domain durable baseline only; never a C07 publication proof.
+    pub historical_baseline: Option<Sha256Digest>,
     pub head: Option<Sha256Digest>,
     pub revision: u64,
     /// Only identities observable in verified journal records. A never-written
@@ -157,6 +159,7 @@ pub(super) fn recover_journal(
     trusted_now: u64,
 ) -> Result<RecoveredEnrollment> {
     let observed = journal.scan()?;
+    let historical = historical::observe_committed(journal)?;
     let floor = journal
         .read_time_floor()?
         .ok_or(RecoveryBlocked::ClockUnproven)?;
@@ -194,6 +197,11 @@ pub(super) fn recover_journal(
                 return Err(RecoveryBlocked::InventoryChanged);
             }
             materials.insert(file.name.clone(), reference);
+            continue;
+        }
+        if historical::is_record_name(&file.name) {
+            historical::verify_record(historical.as_ref(), &file.name, file.bytes())?;
+            transaction_files += 1;
             continue;
         }
         let Some(raw) = file.name.strip_prefix("txn-") else {
@@ -247,8 +255,18 @@ pub(super) fn recover_journal(
     let mut referenced = BTreeSet::new();
     let mut commits = Vec::new();
     let mut unresolved = Vec::new();
-    let mut high_water = 0;
-    let mut highest_time = 0;
+    let mut high_water = if historical.is_some() { 1 } else { 0 };
+    let mut highest_time = historical.as_ref().map_or(0, |h| h.body.prepared_at);
+    if let Some(historical) = &historical {
+        sequences.insert(1);
+        for reference in &historical.body.required_materials {
+            let name = material_name(reference);
+            if materials.get(&name) != Some(reference) {
+                return Err(RecoveryBlocked::InvalidRecord);
+            }
+            referenced.insert(name);
+        }
+    }
     for (id, transaction) in &transactions {
         let intent = transaction
             .intent
@@ -296,6 +314,15 @@ pub(super) fn recover_journal(
     let mut revision = 0u64;
     let mut last_sequence = 0;
     let (mut ledger, control) = EnrollmentLedger::new_recovering(epoch, limits)?;
+    let historical_baseline = if let Some(historical) = historical {
+        let digest = historical::recover(journal, historical, &mut ledger, &control)?;
+        head = Some(digest);
+        revision = 1;
+        last_sequence = 1;
+        Some(digest)
+    } else {
+        None
+    };
     for (sequence, id, transaction) in commits {
         let intent = transaction
             .intent
@@ -387,6 +414,7 @@ pub(super) fn recover_journal(
         ledger,
         control,
         facts: InventoryFacts {
+            historical_baseline,
             head,
             revision,
             sequence_high_water: high_water,
@@ -403,3 +431,6 @@ pub(super) fn recover_journal(
 #[cfg(test)]
 #[path = "recovery_tests.rs"]
 mod tests;
+
+#[path = "recovery_historical.rs"]
+mod historical;

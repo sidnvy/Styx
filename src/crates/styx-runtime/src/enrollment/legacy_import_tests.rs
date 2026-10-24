@@ -273,3 +273,219 @@ fn original_unsettled_and_unsupported_sources_are_not_silently_imported_batch() 
     cleanup(other);
     cleanup(f);
 }
+
+#[test]
+#[ignore = "STYX_TEST_LEGACY_IMPORT_ROOT + STYX_TEST_NODE22; protected original RSA history projection and real process reopen; not original Gateway settlement or C07 admission"]
+fn original_history_persistence_and_process_reopen_remain_migration_fenced() {
+    use crate::{
+        migration::legacy_enrollment::LegacyEnrollmentSnapshot,
+        store::enrollment::{JournalBudget, OwnedEnrollmentJournal},
+    };
+    let base = PathBuf::from(std::env::var("STYX_TEST_LEGACY_IMPORT_ROOT").unwrap());
+    if let Some(path) = std::env::var_os("STYX_TEST_HISTORY_REOPEN_CHILD") {
+        let path = PathBuf::from(path);
+        assert!(path.starts_with(&base));
+        let root = PrivateRoot::open(&path).unwrap();
+        let writer = root.try_existing_configuration_writer().unwrap();
+        let mut journal =
+            OwnedEnrollmentJournal::open_existing(root, writer, JournalBudget::default()).unwrap();
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis() as u64;
+        journal
+            .with_journal(|j| {
+                let recovered = crate::enrollment::recovery::recover_journal(
+                    j,
+                    "actual-history-reopen".try_into().unwrap(),
+                    styx_core::enrollment::Limits::default(),
+                    now,
+                )
+                .unwrap();
+                let active = recovered
+                    .ledger
+                    .devices_for_admin(&recovered.control.admin())
+                    .unwrap();
+                let revoked = recovered
+                    .ledger
+                    .historical_revoked_for_recovery(&recovered.control)
+                    .unwrap();
+                assert_eq!(active.len(), 1);
+                assert_eq!(revoked.len(), 1);
+                assert_eq!(active[0].id.as_str(), APPROVED);
+                assert_eq!(revoked[0].id.as_str(), REVOKED);
+                assert_eq!(active[0].generation, "capability-0123456789abcdef");
+                assert!(active[0].grant.browser);
+                assert_eq!(
+                    recovered
+                        .ledger
+                        .default_device_for_admin(&recovered.control.admin())
+                        .unwrap()
+                        .as_ref()
+                        .map(|s| s.as_str()),
+                    Some(APPROVED)
+                );
+                assert!(
+                    recovered
+                        .ledger
+                        .authentication_target(&recovered.control, &revoked[0].id)
+                        .is_err()
+                );
+                let proof = recovered.control.attest_device(
+                    active[0].id.clone(),
+                    active[0].fingerprint,
+                    active[0].credential_hash,
+                );
+                assert_eq!(
+                    recovered.ledger.connection_observations(&proof).unwrap(),
+                    [styx_core::enrollment::ConnectionObservation::Unknown; 3]
+                );
+                assert_eq!(recovered.facts.revision, 1);
+                Ok(())
+            })
+            .unwrap();
+        // This exercises real RSA/SPKI material validation, unlike the separate
+        // synthetic recovery codec aggregate. No transport is published.
+        let mut service = crate::enrollment::service::EnrollmentService::recover_existing(
+            journal,
+            b"actual-owned-history-admin-1234567890",
+            Sha256Digest::of_bytes(b"different-owned-mcp"),
+            vec!["127.0.0.1:8443".to_owned()],
+            styx_core::enrollment::Limits::default(),
+        )
+        .unwrap();
+        let error = match service.exec_profiles() {
+            Ok(_) => panic!("pending migration must not publish exec profiles"),
+            Err(error) => error,
+        };
+        assert_eq!(error.code(), "migration_commit_required");
+        let report = PathBuf::from(std::env::var_os("STYX_TEST_HISTORY_REOPEN_REPORT").unwrap());
+        assert!(report.starts_with(&base));
+        write(&report,&serde_json::to_vec(&json!({"schema":1,"status":"PASS_ORIGINAL_HISTORY_REOPEN_ONLY","actual_rsa_spki_profiles_verified":true,"original_active_grant_generation_default_preserved":true,"tokenless_revoked_preserved_and_denied":true,"recovered_connections_unknown":true,"ordinary_execution_profiles_refused":"migration_commit_required","migration_committed":false,"network_published":false,"native_activated":false})).unwrap());
+        return;
+    }
+    fs::create_dir_all(&base).unwrap();
+    let keys = keys();
+    let f = fixture(&base, &keys);
+    let snapshot =
+        LegacyEnrollmentSnapshot::capture(&f.path, f.root.clone(), &f.maintenance).unwrap();
+    let source_files = [
+        "deployment.json",
+        "state.json",
+        "gateway/runtime.json",
+        "gateway/targets.json",
+        "gateway/enrollment/state.json",
+    ];
+    let original: Vec<_> = source_files
+        .iter()
+        .map(|p| {
+            (
+                (*p).to_owned(),
+                Sha256Digest::of_bytes(&fs::read(f.path.join(p)).unwrap()),
+            )
+        })
+        .collect();
+    let original_token = f
+        .path
+        .join(format!("gateway/enrollment/tokens/{APPROVED}.token"));
+    let before = fs::metadata(&original_token).unwrap();
+    let original_token_raw = zeroize::Zeroizing::new(fs::read(&original_token).unwrap());
+    let path = f.path.join("gateway/enrollment");
+    let root = PrivateRoot::open(&path).unwrap();
+    let writer = root.try_configuration_writer().unwrap();
+    let owner = OwnedConfigurationRoot::open_existing(root, writer).unwrap();
+    let maintenance = owner
+        .begin_maintenance(f.maintenance.transaction_id().clone())
+        .unwrap();
+    let mut journal = snapshot.claim_history_store(&owner, &maintenance).unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let committed = snapshot
+        .persist_candidate_history(
+            &mut journal,
+            &maintenance,
+            "original-history-epoch".try_into().unwrap(),
+            now,
+        )
+        .unwrap();
+    assert!(owner.ensure_admission().is_err());
+    assert!(journal.with_journal(|_| Ok(())).is_err());
+    assert!(
+        snapshot
+            .persist_candidate_history(
+                &mut journal,
+                &maintenance,
+                "original-history-epoch".try_into().unwrap(),
+                now
+            )
+            .is_err()
+    );
+    let observation = journal
+        .with_historical_journal(&maintenance, |j| j.resync_historical())
+        .unwrap()
+        .unwrap();
+    assert_eq!(observation.committed, Some(committed));
+    assert_eq!(observation.body.devices.len(), 1);
+    assert_eq!(observation.body.revoked.len(), 1);
+    assert_eq!(observation.body.token_bindings.len(), 1);
+    let binding = &observation.body.token_bindings[0];
+    assert_eq!(
+        binding.raw_material.digest,
+        Sha256Digest::of_bytes(&original_token_raw)
+    );
+    assert_ne!(
+        binding.raw_material.digest,
+        binding.normalized_material.digest
+    );
+    for (relative, digest) in &original {
+        assert_eq!(
+            Sha256Digest::of_bytes(&fs::read(f.path.join(relative)).unwrap()),
+            *digest
+        );
+    }
+    use std::os::unix::fs::MetadataExt;
+    let after = fs::metadata(&original_token).unwrap();
+    assert_eq!(
+        (
+            before.dev(),
+            before.ino(),
+            before.mode(),
+            before.mtime(),
+            before.ctime()
+        ),
+        (
+            after.dev(),
+            after.ino(),
+            after.mode(),
+            after.mtime(),
+            after.ctime()
+        )
+    );
+    assert!(!path.join(format!("tokens/{REVOKED}.token")).exists());
+    // End this enrollment writer before starting a genuinely independent process.
+    drop(journal);
+    drop(maintenance);
+    drop(owner);
+    let report = f.path.join("history-reopened.json");
+    let output=Command::new(std::env::current_exe().unwrap()).args(["--ignored","--exact","enrollment::legacy_import::tests::original_history_persistence_and_process_reopen_remain_migration_fenced","--nocapture"]).env("STYX_TEST_HISTORY_REOPEN_CHILD",&path).env("STYX_TEST_HISTORY_REOPEN_REPORT",&report).output().unwrap();
+    assert!(
+        output.status.success(),
+        "owned history reopen child failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let reopened: serde_json::Value = serde_json::from_slice(&fs::read(&report).unwrap()).unwrap();
+    assert_eq!(reopened["status"], "PASS_ORIGINAL_HISTORY_REOPEN_ONLY");
+    snapshot.revalidate().unwrap();
+    for (relative, digest) in &original {
+        assert_eq!(
+            Sha256Digest::of_bytes(&fs::read(f.path.join(relative)).unwrap()),
+            *digest
+        );
+    }
+    write(&base.join("original-history-effect-receipt.json"),&serde_json::to_vec(&json!({"schema":1,"status":"PASS_ORIGINAL_HISTORY_PERSISTENCE_AND_REOPEN_ONLY","fixture":f.path,"source_original_hashes":original,"original_token_raw_sha256":binding.raw_material.digest,"normalized_token_sha256":binding.normalized_material.digest,"original_token_inode":before.ino(),"original_token_device":before.dev(),"original_token_mode":before.mode(),"original_active_id":APPROVED,"original_revoked_id":REVOKED,"child_actual_wait_exit0":output.status.success(),"reopened":reopened,"scope":"protected legacy-file/RSA fixture and new process native recovery; no actual old Gateway settlement, first onboarding, C07 commit, remote authentication or activation"})).unwrap());
+    // Retain this one positive fixture for an independent post-test file oracle.
+    drop(snapshot);
+    drop(f);
+}

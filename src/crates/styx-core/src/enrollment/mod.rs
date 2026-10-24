@@ -195,6 +195,9 @@ pub struct EnrollmentLedger {
     invitations: Vec<Invitation>,
     pending: BTreeMap<RequestId, Pending>,
     devices: BTreeMap<DeviceId, Device>,
+    historical_revoked: BTreeMap<DeviceId, HistoricalRevoked>,
+    default_device: Option<DeviceId>,
+    historical_baseline: Option<HistoricalBaselineRecovery>,
     retired: Vec<Sha256Digest>,
     lanes: BTreeMap<(DeviceId, Lane), LaneState>,
     staged: Option<PendingIntent>,
@@ -412,6 +415,9 @@ impl EnrollmentLedger {
                 invitations: vec![],
                 pending: BTreeMap::new(),
                 devices: BTreeMap::new(),
+                historical_revoked: BTreeMap::new(),
+                default_device: None,
+                historical_baseline: None,
                 retired: vec![],
                 lanes: BTreeMap::new(),
                 staged: None,
@@ -642,10 +648,7 @@ impl EnrollmentLedger {
                 .pending
                 .values()
                 .any(|p| p.facts.device == f.device || p.facts.fingerprint == f.fingerprint)
-            || self
-                .devices
-                .values()
-                .any(|d| d.id == f.device || d.fingerprint == f.fingerprint)
+            || self.registered_identity_conflict(&f.device, f.fingerprint)
         {
             return Err(EnrollmentError::Conflict);
         }
@@ -737,7 +740,10 @@ impl EnrollmentLedger {
         // Reserve a retirement slot BEFORE publishing the new credential.
         // Every approved active key must remain revocable at full capacity.
         let active = self.devices.values().filter(|d| !d.revoked).count();
-        if self.devices.len() >= self.limits.devices
+        if self.registered_identity_conflict(&p.facts.device, fingerprint) {
+            return Err(EnrollmentError::Conflict);
+        }
+        if self.retained_device_count() >= self.limits.devices
             || self
                 .retired
                 .len()
@@ -1191,6 +1197,9 @@ impl EnrollmentLedger {
                 device,
                 fingerprint,
             } => {
+                if self.default_device.as_ref() == Some(device) {
+                    self.default_device = None;
+                }
                 if let Some(d) = self.devices.get_mut(device) {
                     d.revoked = true;
                 }
@@ -1223,6 +1232,8 @@ impl EnrollmentLedger {
         Ok(())
     }
 }
+mod historical;
+pub use historical::{HistoricalBaselineRecovery, HistoricalRevoked, validate_historical_baseline};
 mod recovery;
 pub use recovery::{RecoveredLaneClosure, RecoveryClosure, RecoveryRecord, RecoveryUnresolved};
 

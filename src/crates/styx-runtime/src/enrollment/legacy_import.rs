@@ -300,6 +300,7 @@ pub(crate) struct LegacyImportSnapshot<'a> {
     original: Vec<Frozen>,
     tokens: PayloadInventory,
     token_root: PrivateRoot,
+    enrollment_root: Arc<PrivateRoot>,
     pub(crate) devices: Vec<HistoricalDevice>,
     pub(crate) pending: Vec<HistoricalPending>,
     pub(crate) invitations: Vec<HistoricalInvitation>,
@@ -442,6 +443,13 @@ impl<'m> LegacyImportSnapshot<'m> {
             if now.bytes() != f.raw.bytes() || now.observation() != f.raw.observation() {
                 return Err(LegacyImportError::Changed);
             }
+        }
+        if PrivateRoot::open(self.path.join("gateway/enrollment"))
+            .map_err(|_| LegacyImportError::Changed)?
+            .identity()
+            != self.enrollment_root.identity()
+        {
+            return Err(LegacyImportError::Changed);
         }
         let current = PrivateRoot::open(self.path.join("gateway/enrollment/tokens"))
             .map_err(|_| LegacyImportError::Changed)?;
@@ -720,6 +728,9 @@ pub(crate) fn capture<'a>(
     {
         return Err(LegacyImportError::Unsupported);
     }
+    let enrollment_root = Arc::new(
+        PrivateRoot::open(&runtime.enrollment).map_err(|_| LegacyImportError::Unavailable)?,
+    );
     let catalog_i = read(&root, "gateway/targets.json", MAX_CATALOG, &mut original)?;
     let catalog: Catalog = parse(original[catalog_i].raw.bytes())?;
     let database_i = read(
@@ -1039,6 +1050,7 @@ pub(crate) fn capture<'a>(
         original,
         tokens,
         token_root,
+        enrollment_root,
         devices,
         pending: database.pending,
         invitations: database.invitations,
@@ -1195,3 +1207,7 @@ fn absolute(platform: &str, path: &str) -> bool {
 #[cfg(test)]
 #[path = "legacy_import_tests.rs"]
 mod tests;
+
+#[path = "legacy_import_historical.rs"]
+mod historical;
+pub(crate) use historical::HistoricalMaterialBundle;

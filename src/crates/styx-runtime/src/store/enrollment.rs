@@ -81,6 +81,8 @@ pub struct EnrollmentJournal<'a> {
     _borrow: std::marker::PhantomData<&'a mut ConfigurationWriterGuard>,
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     namespace: (u64, u64),
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    historical_transaction: Option<TransactionId>,
 }
 fn encode(value: &impl Serialize) -> JournalResult<Vec<u8>> {
     serde_json::to_vec(value).map_err(|_| JournalError::InvalidInput)
@@ -157,6 +159,7 @@ impl<'a> EnrollmentJournal<'a> {
                 writer,
                 budget,
                 namespace,
+                historical_transaction: None,
             };
             journal.scan()?; // An over-budget/unsafe namespace never becomes writable.
             Ok(journal)
@@ -205,6 +208,12 @@ impl<'a> EnrollmentJournal<'a> {
         previous_commit: Option<Sha256Digest>,
         fault: &impl Fn(&str, &str),
     ) -> JournalResult<PreparedReceipt> {
+        if self
+            .observe_historical()?
+            .is_some_and(|baseline| baseline.committed.is_none())
+        {
+            return Err(JournalError::Conflict);
+        }
         let body = contract::decode(original_bytes).map_err(|_| JournalError::InvalidInput)?;
         let binding = IntentBinding {
             transaction: body.transaction,
@@ -312,11 +321,9 @@ impl<'a> EnrollmentJournal<'a> {
     fn verify_predecessor(&self, binding: &IntentBinding) -> JournalResult<()> {
         let observation = self.scan()?;
         let mut commits = vec![];
-        for file in observation
-            .files
-            .iter()
-            .filter(|f| f.name.ends_with(".committed"))
-        {
+        for file in observation.files.iter().filter(|f| {
+            f.name.ends_with(".committed") && f.name != historical::HISTORICAL_COMMITTED
+        }) {
             let commit: CommittedReceipt =
                 serde_json::from_slice(file.bytes()).map_err(|_| JournalError::Unknown)?;
             if file.name != record_name(&commit.binding.transaction, "committed")
@@ -339,25 +346,24 @@ impl<'a> EnrollmentJournal<'a> {
             commits.push(commit);
         }
         commits.sort_by_key(|c| c.binding.sequence);
-        let mut prior: Option<&CommittedReceipt> = None;
+        let historical = self.observe_historical()?;
+        let (mut sequence, mut revision, mut head) = match historical {
+            Some(baseline) => {
+                let committed = baseline.committed.ok_or(JournalError::Conflict)?;
+                (committed.prepared.sequence, 1u64, Some(committed.digest()?))
+            }
+            None => (0, 0, None),
+        };
         for current in &commits {
-            let valid = match prior {
-                None => {
-                    current.binding.sequence > 0
-                        && current.binding.expected_revision == 0
-                        && current.binding.previous_commit.is_none()
-                }
-                Some(p) => {
-                    current.binding.sequence > p.binding.sequence
-                        && p.binding.expected_revision.checked_add(1)
-                            == Some(current.binding.expected_revision)
-                        && Some(p.digest()?) == current.binding.previous_commit
-                }
-            };
-            if !valid {
+            if current.binding.sequence <= sequence
+                || current.binding.expected_revision != revision
+                || current.binding.previous_commit != head
+            {
                 return Err(JournalError::Conflict);
             }
-            prior = Some(current);
+            sequence = current.binding.sequence;
+            revision = revision.checked_add(1).ok_or(JournalError::Conflict)?;
+            head = Some(current.digest()?);
         }
         if let Some(existing) = commits
             .iter()
@@ -369,24 +375,16 @@ impl<'a> EnrollmentJournal<'a> {
                 Err(JournalError::Conflict)
             };
         }
-        match prior {
-            None if binding.sequence > 0
-                && binding.expected_revision == 0
-                && binding.previous_commit.is_none() =>
-            {
-                Ok(())
-            }
-            Some(p)
-                if binding.sequence > p.binding.sequence
-                    && p.binding.expected_revision.checked_add(1)
-                        == Some(binding.expected_revision)
-                    && Some(p.digest()?) == binding.previous_commit =>
-            {
-                Ok(())
-            }
-            _ => Err(JournalError::Conflict),
+        if binding.sequence > sequence
+            && binding.expected_revision == revision
+            && binding.previous_commit == head
+        {
+            Ok(())
+        } else {
+            Err(JournalError::Conflict)
         }
     }
+
     /// Bounded observation, never an implicit sweep or automatic replay. A
     /// prepared-only intent remains Unknown; an orphan alone is not NotWritten.
     pub fn scan(&self) -> JournalResult<JournalObservation> {
@@ -506,3 +504,9 @@ mod clock;
 #[path = "enrollment/owned.rs"]
 mod owned;
 pub use owned::OwnedEnrollmentJournal;
+
+#[path = "enrollment/historical.rs"]
+mod historical;
+pub use historical::{
+    HistoricalCommittedReceipt, HistoricalObservation, HistoricalPreparedReceipt,
+};

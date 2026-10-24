@@ -317,10 +317,7 @@ impl EnrollmentLedger {
                         .pending
                         .values()
                         .any(|p| p.facts.device == f.device || p.facts.fingerprint == f.fingerprint)
-                    || self
-                        .devices
-                        .values()
-                        .any(|d| d.id == f.device || d.fingerprint == f.fingerprint)
+                    || self.registered_identity_conflict(&f.device, f.fingerprint)
                 {
                     return Err(invalid());
                 }
@@ -345,7 +342,8 @@ impl EnrollmentLedger {
                     || d.credential.0 != d.credential_hash
                     || d.generation != Self::historical_generation(body, &d.id)?
                     || *claim_expires != now.checked_add(1200000).ok_or_else(invalid)?
-                    || self.devices.len() >= self.limits.devices
+                    || self.registered_identity_conflict(&d.id, d.fingerprint)
+                    || self.retained_device_count() >= self.limits.devices
                     || self.retired.len().checked_add(active).ok_or_else(invalid)?
                         >= self.limits.retired
                 {
