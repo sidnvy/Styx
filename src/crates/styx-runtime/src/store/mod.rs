@@ -2,8 +2,9 @@
 //!
 //! Raw bytes are authoritative: this module never normalizes or rewrites legacy
 //! JSON. A preservation manifest is a per-file observation, not a transactional
-//! snapshot or permission to migrate. Only Linux secure filesystem/lock primitives
-//! are implemented in this slice; other platforms explicitly return Unsupported.
+//! snapshot or permission to migrate. Linux implements writable stores; macOS
+//! adds private raw reads and independent leases only. Other platform operations
+//! remain explicitly Unsupported; read/lease support is not migration authority.
 //! Secrets are not included in Debug output or preservation manifests.
 
 mod configuration;
@@ -31,7 +32,10 @@ use thiserror::Error;
 #[cfg(target_os = "linux")]
 #[path = "linux.rs"]
 mod platform;
-#[cfg(not(target_os = "linux"))]
+#[cfg(target_os = "macos")]
+#[path = "macos.rs"]
+mod platform;
+#[cfg(not(any(target_os = "linux", target_os = "macos")))]
 #[path = "unsupported.rs"]
 mod platform;
 
@@ -72,7 +76,17 @@ pub type Result<T> = std::result::Result<T, StoreError>;
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(tag = "platform", rename_all = "snake_case")]
 pub enum RootIdentity {
-    Linux { device: u64, inode: u64, uid: u32 },
+    Linux {
+        device: u64,
+        inode: u64,
+        uid: u32,
+    },
+    #[cfg(target_os = "macos")]
+    Macos {
+        device: u64,
+        inode: u64,
+        uid: u32,
+    },
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
@@ -82,6 +96,14 @@ pub enum ProcessIdentity {
         boot_id: String,
         pid: u32,
         start_ticks: u64,
+    },
+    #[cfg(target_os = "macos")]
+    Macos {
+        boot_session_id: String,
+        pid: u32,
+        start_seconds: u64,
+        start_microseconds: u64,
+        uid: u32,
     },
 }
 
@@ -364,7 +386,7 @@ impl PrivateRoot {
     /// Existing native ownership namespace only: never recreate a missing lock
     /// as a side effect of inspection/reopen. Fresh bootstrap uses the explicit
     /// creating acquisition above. Same validation/flock implementation.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub fn try_existing_configuration_writer(&self) -> Result<ConfigurationWriterGuard> {
         Ok(ConfigurationWriterGuard(
             self.inner

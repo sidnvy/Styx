@@ -255,14 +255,22 @@ impl NativeRootBinding {
     }
 }
 fn same_identity(root: &RootIdentity, marker: &NativeRootMarker) -> bool {
-    let RootIdentity::Linux { device, inode, uid } = root;
-    marker.root_identity
-        == styx_contracts::native_management::NativeRootIdentity::Linux {
-            device: *device,
-            inode: *inode,
-            uid: *uid,
+    match root {
+        RootIdentity::Linux { device, inode, uid } => {
+            marker.root_identity
+                == styx_contracts::native_management::NativeRootIdentity::Linux {
+                    device: *device,
+                    inode: *inode,
+                    uid: *uid,
+                }
         }
+        // Native writable roots/journals remain Linux-only. A Darwin read/lease
+        // identity must never be relabeled as a compatible native writer root.
+        #[cfg(target_os = "macos")]
+        RootIdentity::Macos { .. } => false,
+    }
 }
+
 fn verify_marker(
     root: &PrivateRoot,
     marker: &NativeRootMarker,
