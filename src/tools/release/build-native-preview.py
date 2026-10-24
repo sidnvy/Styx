@@ -11,6 +11,7 @@ import json
 import os
 from pathlib import Path
 import re
+import runpy
 import shutil
 import stat
 import struct
@@ -142,6 +143,13 @@ def validate_inputs(inputs, forbidden_private_identity):
         current = candidate.lstat()
         require((current.st_dev, current.st_ino) != forbidden_private_identity, 'private_key_cannot_be_source_input')
         require(digest_file(candidate) == expected, 'receipt_input_current_hash_mismatch')
+    # Share the gate's authoritative closure collector rather than inventing
+    # a reduced package-only proof. run_path does not execute its guarded main.
+    quality = runpy.run_path(str(REPO / 'src/ci/rust-quality.py'),
+                             run_name='styx_native_preview_quality_inputs')
+    collector = quality.get('source_inputs')
+    require(callable(collector), 'quality_input_collector_unavailable')
+    require(inputs == collector(REPO), 'receipt_complete_source_inputs_mismatch')
 
 
 def elf_header(fd):
@@ -267,10 +275,8 @@ def build(args):
         raw_receipt = read_bounded(args.build_receipt, 16 * 1024 * 1024)
         receipt = strict_json(raw_receipt)
         require(receipt.get('status') == 'PASS' and receipt.get('input_stability') == 'PASS', 'build_receipt_not_pass_stable')
-        if 'source_revision' in receipt:
-            require(receipt['source_revision'] == args.source_revision, 'receipt_revision_mismatch')
-        if 'target' in receipt:
-            require(receipt['target'] == TARGET, 'receipt_target_mismatch')
+        require(receipt.get('source_revision') == args.source_revision, 'receipt_revision_mismatch')
+        require(receipt.get('target') == TARGET, 'receipt_target_mismatch')
         inputs = receipt.get('inputs')
         validate_inputs(inputs, forbidden_private_identity)
         binary_hash = receipt.get('cli_binary_sha256')
