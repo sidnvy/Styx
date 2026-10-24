@@ -382,6 +382,21 @@ impl LoadedLegacyProfile {
             retained_process_limit: 128,
         })
     }
+    pub(super) fn validate_committed_ownership(
+        &self,
+        state: &PrivateRoot,
+        host: &PrivateRoot,
+    ) -> Result<bool, ProfileError> {
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        if let ProfileSource::Committed(binding) = &self.source {
+            binding
+                .validate_legacy_owners(state, host)
+                .map_err(|_| ProfileError::Changed)?;
+            return Ok(true);
+        }
+        let _ = (state, host);
+        Ok(false)
+    }
     pub fn revalidate(&self) -> Result<(), ProfileError> {
         self.inventory
             .revalidate()
@@ -504,6 +519,8 @@ enum ProfileSource {
     Ordinary,
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     Maintenance(Arc<crate::migration::legacy_service::RetiredCredentialReadBinding>),
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    Committed(Arc<crate::store::committed_runtime::CommittedRuntimeSnapshot>),
 }
 impl ProfileSource {
     fn revalidate(&self) -> Result<(), ProfileError> {
@@ -511,6 +528,8 @@ impl ProfileSource {
             Self::Ordinary => Ok(()),
             #[cfg(all(target_os = "linux", target_env = "gnu"))]
             Self::Maintenance(binding) => binding.revalidate().map_err(|_| ProfileError::Changed),
+            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            Self::Committed(binding) => binding.revalidate().map_err(|_| ProfileError::Changed),
         }
     }
 }
@@ -528,6 +547,31 @@ pub fn load_legacy(state_dir: &Path) -> Result<LoadedLegacyProfile, ProfileError
 /// Explicit paired-v3 bridge using the SAME protected original profile and
 /// signed legacy executor closure. No identity, pairing or native-format rewrite.
 pub fn load_paired(state_dir: &Path) -> Result<LoadedLegacyProfile, ProfileError> {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        let root = PrivateRoot::open(state_dir).map_err(|_| ProfileError::ProtectedRead)?;
+        if root.ensure_absent(".styx-native-root-v1.json").is_err() {
+            let committed =
+                crate::store::committed_runtime::CommittedRuntimeSnapshot::open(state_dir)
+                    .map_err(|_| ProfileError::Changed)?;
+            if !committed
+                .state()
+                .desired
+                .host
+                .as_ref()
+                .is_some_and(|desired| {
+                    desired.run == styx_contracts::native_management::NativeRunDesired::Running
+                })
+            {
+                return Err(ProfileError::Invalid);
+            }
+            return load_source(
+                state_dir,
+                GatewayWireMode::PairedV3,
+                ProfileSource::Committed(Arc::new(committed)),
+            );
+        }
+    }
     load(state_dir, GatewayWireMode::PairedV3)
 }
 fn load(state_dir: &Path, mode: GatewayWireMode) -> Result<LoadedLegacyProfile, ProfileError> {
@@ -563,7 +607,13 @@ fn load_source(
     {
         return Err(ProfileError::Invalid);
     }
-    let state: LegacyState = decode(&capture.read(state_dir, "state.json", JSON_LIMIT)?)?;
+    let canonical = capture.read(state_dir, "state.json", JSON_LIMIT)?;
+    let legacy_source = match &source {
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        ProfileSource::Committed(committed) => committed.before(),
+        _ => canonical.as_slice(),
+    };
+    let state: LegacyState = decode(legacy_source)?;
     if state.schema != 1
         || state.uncertain
         || state.mode != deployment.mode
@@ -651,6 +701,13 @@ fn load_source(
                 .read_token(&config_root, &host_root)
                 .map_err(|_| ProfileError::Changed)?
         }
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        ProfileSource::Committed(committed) => {
+            let root = PrivateRoot::open(base).map_err(|_| ProfileError::ProtectedRead)?;
+            committed
+                .read_retired_token(&root)
+                .map_err(|_| ProfileError::Changed)?
+        }
     };
     let token = std::str::from_utf8(&raw_token)
         .map_err(|_| ProfileError::Invalid)?
@@ -718,15 +775,30 @@ fn load_source(
         return Err(ProfileError::Invalid);
     }
     let root = base.join("install/releases").join(&active.version);
-    let inventory = release::load(&mut capture, &root, &active, base, &publisher, &expected)?;
-    if inventory.runtime_format() != expected_format {
-        return Err(ProfileError::UntrustedRelease);
-    }
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    // The preserved active pointer remains an observed original input. After
+    // migration it never selects workers; only the committed canonical selection
+    // and a fresh C08 verification may do that.
     let inventory = match &source {
-        ProfileSource::Ordinary => inventory,
-        ProfileSource::Maintenance(binding) => {
-            release::ProfileRelease::for_maintenance(inventory, binding.candidate(), &expected)?
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        ProfileSource::Committed(committed) => {
+            release::ProfileRelease::from_committed_selection(committed.selection(), &expected)?
+        }
+        _ => {
+            let inventory =
+                release::load(&mut capture, &root, &active, base, &publisher, &expected)?;
+            if inventory.runtime_format() != expected_format {
+                return Err(ProfileError::UntrustedRelease);
+            }
+            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            if let ProfileSource::Maintenance(binding) = &source {
+                release::ProfileRelease::for_maintenance(inventory, binding.candidate(), &expected)?
+            } else {
+                inventory
+            }
+            #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+            {
+                inventory
+            }
         }
     };
     let exec_enabled = host.exec.as_ref().is_some_and(|exec| exec.enabled);
@@ -766,6 +838,8 @@ fn load_source(
         ProfileSource::Ordinary => active.manifest_sha256,
         #[cfg(all(target_os = "linux", target_env = "gnu"))]
         ProfileSource::Maintenance(binding) => binding.candidate().report().manifest_sha256,
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        ProfileSource::Committed(committed) => committed.selection().manifest_sha256,
     };
     let signed_version = inventory.version().to_owned();
     // An absent Exec profile supplies no Browser workspace authority.

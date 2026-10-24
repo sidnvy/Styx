@@ -171,6 +171,16 @@ impl PairedGatewayValidation {
     pub fn report(&self) -> &PairedGatewayValidationReport {
         &self.report
     }
+    pub(super) async fn promote_committed(
+        &self,
+        proof: Arc<crate::store::legacy_handoff::CommittedNativeCutover>,
+    ) -> Result<SharedEnrollment, TransitionError> {
+        self.custody
+            ._shared
+            .promote_committed_migration(proof)
+            .await
+            .map_err(|_| TransitionError::Unknown)
+    }
     pub(super) fn local_probe(&self) -> Arc<MigrationValidationProbe> {
         self.custody.local.clone()
     }

@@ -5,6 +5,85 @@ use super::*;
 use crate::migration::legacy_service::GatewayMaintenanceBinding;
 
 impl EnrollmentService {
+    /// Promote the existing maintenance authority only after the same original
+    /// transaction has a durable committed proof. No ledger is reconstructed,
+    /// no owner history is discarded, and no recovered lane is made Offline.
+    pub(crate) fn promote_committed_migration(
+        &mut self,
+        proof: &crate::store::legacy_handoff::CommittedNativeCutover,
+    ) -> Result<(), ServiceError> {
+        self.healthy()?;
+        if !self.historical_migration_pending {
+            return Err(ServiceError::new(503, "migration_promotion_not_pending"));
+        }
+        let owner = self.store.configuration_root();
+        proof.validate_owner(&owner)?;
+        self.migration_binding
+            .as_ref()
+            .ok_or_else(|| ServiceError::new(503, "migration_binding_required"))?
+            .validate_committed(proof, &owner)?;
+        // The genuine committed proof has already closed the configuration
+        // maintenance fence. Material reads must now use ordinary journal
+        // admission, never the old binding's retired-fence validation path.
+        // The caller holds the complete service mutex throughout this change.
+        let binding = self
+            .migration_binding
+            .take()
+            .ok_or_else(|| ServiceError::new(503, "migration_binding_required"))?;
+        let verified = (|| {
+            self.verify_profiles()?;
+            proof.validate_owner(&owner)?;
+            binding.validate_committed(proof, &owner)?;
+            Ok::<(), ServiceError>(())
+        })();
+        if let Err(error) = verified {
+            self.migration_binding = Some(binding);
+            self.uncertain = true;
+            return Err(error);
+        }
+        self.historical_migration_pending = false;
+        Ok(())
+    }
+    /// A fresh process may accept the imported baseline only after the enclosing
+    /// original C07 Committed chain was re-synced by this same configuration owner.
+    /// Unknown transports/operations remain unknown until the separate actual
+    /// startup transport closure runs; history is never reset here.
+    pub(crate) fn accept_committed_recovery(
+        &mut self,
+        proof: &crate::store::committed_runtime::RecoveredCommittedRuntime,
+    ) -> Result<(), ServiceError> {
+        self.healthy()?;
+        if !self.historical_migration_pending || self.migration_binding.is_some() {
+            return Err(ServiceError::new(503, "committed_recovery_not_pending"));
+        }
+        let owner = self.store.configuration_root();
+        proof.validate_owner(&owner)?;
+        let expected = proof
+            .state()
+            .migration
+            .as_ref()
+            .ok_or_else(|| ServiceError::new(503, "committed_migration_binding_required"))?;
+        self.store.with_journal(|journal| {
+            let observed = journal.resync_historical()?.ok_or(JournalError::Conflict)?;
+            if observed.body.schema != 2
+                || observed.body.migration != expected.transaction_id
+                || observed.digest != expected.enrollment_baseline_sha256
+                || observed
+                    .committed
+                    .as_ref()
+                    .ok_or(JournalError::Conflict)?
+                    .digest()?
+                    != expected.enrollment_committed_sha256
+            {
+                return Err(JournalError::Conflict);
+            }
+            Ok(())
+        })?;
+        self.verify_profiles()?;
+        proof.validate_owner(&owner)?;
+        self.historical_migration_pending = false;
+        Ok(())
+    }
     pub(crate) fn recover_for_migration(
         mut store: OwnedEnrollmentJournal,
         binding: GatewayMaintenanceBinding,

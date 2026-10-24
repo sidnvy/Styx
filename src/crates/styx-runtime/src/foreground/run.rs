@@ -41,6 +41,15 @@ struct Admitted {
 }
 impl Admitted {
     fn validate_ownership(&self) -> Result<(), ForegroundError> {
+        if self
+            .profile
+            .validate_committed_ownership(&self.state, &self.base)?
+        {
+            self.lease
+                .validate()
+                .map_err(|_| ForegroundError("execution_lease_changed"))?;
+            return Ok(());
+        }
         for name in STATE_OWNERS {
             self.state
                 .ensure_absent(name)

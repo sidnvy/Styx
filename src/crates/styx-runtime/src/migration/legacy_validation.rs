@@ -48,6 +48,21 @@ impl GatewayMaintenanceBinding {
         }
         Ok(())
     }
+    /// After final commit the retired maintenance fence is intentionally no
+    /// longer usable. Match the retained preparation and same writer instead.
+    pub(crate) fn validate_committed(
+        &self,
+        proof: &crate::store::legacy_handoff::CommittedNativeCutover,
+        owner: &OwnedConfigurationRoot,
+    ) -> JournalResult<()> {
+        if !owner.same_authority(self.original.configuration_root())
+            || !proof.matches_prepared(&self.prepared)
+            || proof.transaction_id() != self.prepared.transaction_id()
+        {
+            return Err(JournalError::Conflict);
+        }
+        proof.validate_owner(owner)
+    }
     /// No second namespace/writer and no fresh legacy snapshot after canonical
     /// conversion. Recheck the original baseline on both sides of the operation.
     pub(crate) fn with_journal<T>(

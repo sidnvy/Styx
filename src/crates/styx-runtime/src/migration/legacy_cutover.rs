@@ -5,7 +5,9 @@ use super::*;
 use crate::store::{
     PrivateRoot, RootIdentity,
     enrollment::OwnedEnrollmentJournal,
-    legacy_handoff::{AppliedNativeCutover, CutoverInputs, PreparedNativeCutover},
+    legacy_handoff::{
+        AppliedNativeCutover, CommittedNativeCutover, CutoverInputs, PreparedNativeCutover,
+    },
 };
 use serde::Serialize;
 use std::{collections::BTreeMap, path::PathBuf};
@@ -28,6 +30,9 @@ pub struct LegacyCutoverReport {
     pub preservation: PreservationReport,
     pub network_ready: bool,
     pub migration_committed: bool,
+    pub verified_sha256: Option<Sha256Digest>,
+    pub committed_sha256: Option<Sha256Digest>,
+    pub ordinary_service_promoted: bool,
 }
 /// Owned intermediate state, never a deserializable commit/activation flag.
 /// Errors leave the original resources in this object; apply cannot be retried.
@@ -40,6 +45,8 @@ pub struct PreparedLegacyCutover {
     applied: Option<AppliedNativeCutover>,
     probe: Option<Arc<MigrationValidationProbe>>,
     network: Option<PairedGatewayValidation>,
+    committed: Option<Arc<CommittedNativeCutover>>,
+    ordinary: Option<crate::enrollment::shared::SharedEnrollment>,
     pub(super) validation_prepared: std::sync::atomic::AtomicBool,
     report: LegacyCutoverReport,
 }
@@ -164,6 +171,17 @@ impl SettledLegacyRuntime {
             };
             preservation.revalidate()?;
             let mut extensions = BTreeMap::from([("original_legacy_state".into(), original)]);
+            let selection = self
+                .target()
+                .runtime_selection()
+                .map_err(|_| TransitionError::Unknown)?;
+            extensions.insert(
+                "runtime_selection_v1".into(),
+                serde_json::value::RawValue::from_string(
+                    serde_json::to_string(&selection).map_err(|_| TransitionError::Conflict)?,
+                )
+                .map_err(|_| TransitionError::Conflict)?,
+            );
             if let Some(endpoint) = &endpoint {
                 extensions.insert(
                     "gateway_endpoint_v1".into(),
@@ -175,6 +193,21 @@ impl SettledLegacyRuntime {
                     .map_err(|_| TransitionError::Conflict)?,
                 );
             }
+            let gateway_runtime = deployment_mode
+                .get("gateway")
+                .and_then(|v| v.get("runtime"))
+                .and_then(|v| v.get("baseDir"))
+                .and_then(|v| v.as_str())
+                .map(Path::new);
+            extensions.insert(
+                "legacy_owner_bindings_v1".into(),
+                crate::store::committed_runtime::capture_legacy_owners(
+                    state_dir,
+                    profile.host_base_dir(),
+                    gateway_runtime,
+                )
+                .map_err(|_| TransitionError::Unknown)?,
+            );
             let target = NativeState {
                 schema: NATIVE_STATE_SCHEMA,
                 kind: NativeStateKind::StyxDesiredState,
@@ -221,6 +254,9 @@ impl SettledLegacyRuntime {
                 preservation: preservation.report(),
                 network_ready: false,
                 migration_committed: false,
+                verified_sha256: None,
+                committed_sha256: None,
+                ordinary_service_promoted: false,
             };
             Ok(PreparedLegacyCutover {
                 original: self.clone(),
@@ -230,6 +266,8 @@ impl SettledLegacyRuntime {
                 applied: None,
                 probe: None,
                 network: None,
+                committed: None,
+                ordinary: None,
                 validation_prepared: std::sync::atomic::AtomicBool::new(false),
                 report,
             })
@@ -237,6 +275,10 @@ impl SettledLegacyRuntime {
     }
 }
 impl PreparedLegacyCutover {
+    #[cfg(test)]
+    pub(super) fn promoted_service(&self) -> Option<&crate::enrollment::shared::SharedEnrollment> {
+        self.ordinary.as_ref()
+    }
     pub fn report(&self) -> &LegacyCutoverReport {
         &self.report
     }
@@ -284,6 +326,73 @@ impl PreparedLegacyCutover {
         self.report.paired_validation_sha256 = Some(Sha256Digest::of_bytes(&raw));
         self.report.network_ready = true;
         self.report.stage = "applied_original_pair_network_validated_final_commit_required";
+        Ok(())
+    }
+    /// Finish the already validated original transaction, then publish a new
+    /// reader epoch on the SAME enrollment service. No old request gate reopens.
+    /// A cancelled promotion waiter can retrieve the retained completed result
+    /// with the same proof; committed actions are never replayed.
+    pub async fn commit_gateway_validated_candidate(&mut self) -> Result<(), TransitionError> {
+        if self.ordinary.is_some() {
+            return Err(TransitionError::Conflict);
+        }
+        if self.committed.is_none() {
+            let handle =
+                tokio::runtime::Handle::try_current().map_err(|_| TransitionError::Unsupported)?;
+            if handle.runtime_flavor() != tokio::runtime::RuntimeFlavor::MultiThread {
+                return Err(TransitionError::Unsupported);
+            }
+            tokio::task::block_in_place(|| {
+                let applied = self.applied.as_ref().ok_or(TransitionError::Conflict)?;
+                let network = self.network.as_ref().ok_or(TransitionError::Conflict)?;
+                if !self.report.network_ready || !network.matches(&self.original, &self.prepared) {
+                    return Err(TransitionError::Conflict);
+                }
+                handle.block_on(network.revalidate(Some(applied)))?;
+                self.original
+                    .target()
+                    .runtime_selection()
+                    .map_err(|_| TransitionError::Unknown)?;
+                self.preservation.revalidate_except_canonical()?;
+                let raw =
+                    serde_json::to_vec(network.report()).map_err(|_| TransitionError::Unknown)?;
+                let fence = self.original.original_fence();
+                let paired = fence
+                    .record_cutover_paired_validation(applied, &raw)
+                    .map_err(|_| TransitionError::Unknown)?;
+                if self.report.paired_validation_sha256 != Some(paired) {
+                    return Err(TransitionError::Unknown);
+                }
+                let verified = fence
+                    .record_cutover_phase(applied, DurableStage::Verified)
+                    .map_err(|_| TransitionError::Unknown)?;
+                self.report.verified_sha256 = Some(verified.record_sha256);
+                // Recheck actual retained scopes/effects immediately before the
+                // last durable phase. Any uncertain cleanup leaves admission shut.
+                handle.block_on(network.revalidate(Some(applied)))?;
+                let committed = fence
+                    .record_cutover_phase(applied, DurableStage::Committed)
+                    .map_err(|_| TransitionError::Unknown)?;
+                self.report.committed_sha256 = Some(committed.record_sha256);
+                let proof = fence
+                    .finish_original_cutover(applied, committed)
+                    .map_err(|_| TransitionError::Unknown)?;
+                self.committed = Some(Arc::new(proof));
+                self.report.migration_committed = true;
+                self.report.stage = "committed_same_service_promotion_required";
+                Ok::<(), TransitionError>(())
+            })?;
+        }
+        let proof = self
+            .committed
+            .as_ref()
+            .ok_or(TransitionError::Unknown)?
+            .clone();
+        let network = self.network.as_ref().ok_or(TransitionError::Unknown)?;
+        let ordinary = network.promote_committed(proof).await?;
+        self.ordinary = Some(ordinary);
+        self.report.ordinary_service_promoted = true;
+        self.report.stage = "committed_same_service_promoted";
         Ok(())
     }
     fn apply_stored_probe(&mut self) -> Result<(), TransitionError> {

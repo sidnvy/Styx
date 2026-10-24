@@ -7,6 +7,8 @@
 //! remain explicitly Unsupported; read/lease support is not migration authority.
 //! Secrets are not included in Debug output or preservation manifests.
 
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+pub(crate) mod committed_runtime;
 mod configuration;
 pub mod enrollment;
 #[cfg(all(target_os = "linux", target_env = "gnu"))]

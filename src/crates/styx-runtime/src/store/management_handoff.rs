@@ -189,8 +189,8 @@ pub(in crate::store) struct OriginalCredentialRetirement {
     pub retired_sha256: Option<Sha256Digest>,
     pub post_stamp: Option<RetirementFileStamp>,
 }
-pub(super) struct ObservedRetirement {
-    pub(super) intent: LegacyCredentialRetirementIntent,
+pub(in crate::store) struct ObservedRetirement {
+    pub(in crate::store) intent: LegacyCredentialRetirementIntent,
     raw: Vec<u8>,
     prepared: Option<Sha256Digest>,
     retired: Option<Sha256Digest>,
@@ -213,7 +213,7 @@ impl ObservedRetirement {
             retired_sha256: self.retired,
         }
     }
-    fn original(&self) -> OriginalCredentialRetirement {
+    pub(in crate::store) fn original(&self) -> OriginalCredentialRetirement {
         OriginalCredentialRetirement {
             intent: self.intent.clone(),
             raw_intent: self.raw.clone(),
@@ -223,7 +223,7 @@ impl ObservedRetirement {
         }
     }
 }
-pub(super) struct HandoffInventory {
+pub(in crate::store) struct HandoffInventory {
     pub records: Vec<ObservedRetirement>,
     pub used: BTreeSet<String>,
 }
@@ -235,7 +235,9 @@ fn names(id: &TransactionId) -> [String; 3] {
         format!("txn-{id}.handoff-retired"),
     ]
 }
-pub(super) fn scan_handoffs(scan: &JournalObservation) -> JournalResult<HandoffInventory> {
+pub(in crate::store) fn scan_handoffs(
+    scan: &JournalObservation,
+) -> JournalResult<HandoffInventory> {
     let by_name: BTreeMap<_, _> = scan
         .files
         .iter()

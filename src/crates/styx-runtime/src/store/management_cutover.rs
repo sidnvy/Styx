@@ -111,11 +111,25 @@ pub(in crate::store) struct OriginalCutover {
     pub last_stage: DurableStage,
     pub validation: Option<Vec<u8>>,
     pub validation_sha256: Option<Sha256Digest>,
+    pub paired_validation: Option<Vec<u8>>,
+    pub paired_validation_sha256: Option<Sha256Digest>,
     pub endpoint: Option<CutoverEndpointMaterials>,
 }
 impl OriginalCutover {
+    pub(in crate::store) fn paired_validation_report(&self) -> Option<&[u8]> {
+        self.paired_validation.as_deref()
+    }
     pub(in crate::store) fn validation_report(&self) -> Option<&[u8]> {
         self.validation.as_deref()
+    }
+    pub(in crate::store) fn endpoint_binding(&self) -> Option<&[u8]> {
+        self.endpoint.as_ref().map(|e| e.binding.as_slice())
+    }
+    pub(in crate::store) fn endpoint_chain(&self) -> Option<&[u8]> {
+        self.endpoint.as_ref().map(|e| e.chain.as_slice())
+    }
+    pub(in crate::store) fn endpoint_key(&self) -> Option<&[u8]> {
+        self.endpoint.as_ref().map(|e| e.key.as_slice())
     }
 }
 pub(in crate::store) struct CutoverInventory {
@@ -178,6 +192,8 @@ struct PhaseRecord {
     canonical_raw_sha256: Sha256Digest,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     validation_sha256: Option<Sha256Digest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    paired_validation_sha256: Option<Sha256Digest>,
 }
 fn required_option<'de, D, T>(d: D) -> Result<Option<T>, D::Error>
 where
@@ -226,6 +242,79 @@ fn validate_report(raw: &[u8], intent: &CutoverIntent) -> JournalResult<()> {
     }
     Ok(())
 }
+/// Data-only receipt check; only the upper opaque validator attests execution.
+#[derive(Deserialize)]
+struct PairedValidationHeader {
+    schema: u8,
+    transaction_id: TransactionId,
+    candidate_manifest_sha256: Sha256Digest,
+    target_sha256: Sha256Digest,
+    endpoint: NativeGatewayEndpointBinding,
+    exit_code: i32,
+    drained: bool,
+    connections_joined: bool,
+    blocking_jobs_joined: bool,
+    mcp_lifecycle_jobs_joined: bool,
+    mcp_session_transports_joined: bool,
+    unconfirmed_owner_cleanups: usize,
+    sdk_service_joined: bool,
+    #[serde(deserialize_with = "required_option")]
+    sdk_detached_tasks_joined: Option<bool>,
+    host_protocol_joined: bool,
+    host_link_io_joined: bool,
+    executor_exited: bool,
+    processes_exited: bool,
+    reader_task_reaped: bool,
+    stderr_task_reaped: bool,
+    supervised_jobs_joined: bool,
+    validation_task_joined: bool,
+    migration_committed: bool,
+    ordinary_admission_open: bool,
+}
+fn validate_paired_report(raw: &[u8], original: &OriginalCutover) -> JournalResult<()> {
+    if raw.is_empty() || raw.len() > MAX_VALIDATION {
+        return Err(JournalError::BudgetExceeded);
+    }
+    let report: PairedValidationHeader =
+        serde_json::from_slice(raw).map_err(|_| JournalError::InvalidInput)?;
+    let endpoint: NativeGatewayEndpointBinding = serde_json::from_slice(
+        &original
+            .endpoint
+            .as_ref()
+            .ok_or(JournalError::Conflict)?
+            .binding,
+    )
+    .map_err(|_| JournalError::Conflict)?;
+    if original.intent.schema != 2
+        || report.schema != 1
+        || report.transaction_id != original.intent.transaction_id
+        || report.candidate_manifest_sha256 != original.intent.candidate_manifest_sha256
+        || report.target_sha256 != original.intent.target_state_sha256
+        || report.endpoint != endpoint
+        || report.exit_code != 0
+        || !report.drained
+        || !report.connections_joined
+        || !report.blocking_jobs_joined
+        || !report.mcp_lifecycle_jobs_joined
+        || !report.mcp_session_transports_joined
+        || report.unconfirmed_owner_cleanups != 0
+        || !report.sdk_service_joined
+        || report.sdk_detached_tasks_joined == Some(false)
+        || !report.host_protocol_joined
+        || !report.host_link_io_joined
+        || !report.executor_exited
+        || !report.processes_exited
+        || !report.reader_task_reaped
+        || !report.stderr_task_reaped
+        || !report.supervised_jobs_joined
+        || !report.validation_task_joined
+        || report.migration_committed
+        || report.ordinary_admission_open
+    {
+        return Err(JournalError::Conflict);
+    }
+    Ok(())
+}
 #[derive(Deserialize)]
 struct LegacyDeployment {
     schema: u32,
@@ -255,8 +344,24 @@ fn phase_bytes(
         }
         _ => None,
     };
+    let paired_validation_sha256 = if original.intent.schema == 2
+        && matches!(stage, DurableStage::Verified | DurableStage::Committed)
+    {
+        Some(
+            original
+                .paired_validation_sha256
+                .ok_or(JournalError::Conflict)?,
+        )
+    } else {
+        None
+    };
     serde_json::to_vec(&PhaseRecord {
-        schema: 1,
+        schema: if paired_validation_sha256.is_some() {
+            2
+        } else {
+            1
+        },
+        paired_validation_sha256,
         intent: original.intent.clone(),
         raw_intent_sha256: Sha256Digest::of_bytes(&original.raw_intent),
         validation_sha256,
@@ -534,6 +639,8 @@ pub(in crate::store) fn scan_cutovers(
             last_stage: DurableStage::Planned,
             validation: None,
             validation_sha256: None,
+            paired_validation: None,
+            paired_validation_sha256: None,
             endpoint,
         };
         validate_materials(&original)?;
@@ -542,6 +649,12 @@ pub(in crate::store) fn scan_cutovers(
             validate_report(raw, &intent).map_err(|_| JournalError::Unknown)?;
             original.validation = Some(raw.to_vec());
             original.validation_sha256 = Some(Sha256Digest::of_bytes(raw));
+        }
+        let paired_name = name(&intent.transaction_id, "paired-validation");
+        if let Some(raw) = by_name.get(paired_name.as_str()) {
+            validate_paired_report(raw, &original).map_err(|_| JournalError::Unknown)?;
+            original.paired_validation = Some(raw.to_vec());
+            original.paired_validation_sha256 = Some(Sha256Digest::of_bytes(raw));
         }
         let mut previous = None;
         let mut missing = false;
@@ -553,19 +666,22 @@ pub(in crate::store) fn scan_cutovers(
         ] {
             let n = name(&intent.transaction_id, stage_name(stage)?);
             if let Some(bytes) = by_name.get(n.as_str()) {
-                // schema2 has endpoint data but no paired-validation proof port
-                // yet. A local Exec report cannot become a complete verdict.
-                if intent.schema == 2
-                    && matches!(stage, DurableStage::Verified | DurableStage::Committed)
-                {
-                    return Err(JournalError::Unknown);
-                }
                 if missing || bytes.len() > MAX_INTENT {
                     return Err(JournalError::Unknown);
                 }
                 let record: PhaseRecord =
                     serde_json::from_slice(bytes).map_err(|_| JournalError::Unknown)?;
-                if record.schema != 1
+                let final_paired = intent.schema == 2
+                    && matches!(stage, DurableStage::Verified | DurableStage::Committed);
+                let expected_schema = if final_paired { 2 } else { 1 };
+                let invalid_paired = if final_paired {
+                    original.paired_validation_sha256.is_none()
+                        || record.paired_validation_sha256 != original.paired_validation_sha256
+                } else {
+                    record.paired_validation_sha256.is_some()
+                };
+                if record.schema != expected_schema
+                    || invalid_paired
                     || record.intent != intent
                     || record.raw_intent_sha256 != Sha256Digest::of_bytes(file.bytes())
                     || record.stage != stage
@@ -605,6 +721,17 @@ pub(in crate::store) fn scan_cutovers(
             }
             used.insert(validation_name);
         }
+        if original.paired_validation.is_some() {
+            if original.validation.is_none()
+                || !original
+                    .phases
+                    .iter()
+                    .any(|p| p.stage == DurableStage::Applied)
+            {
+                return Err(JournalError::Unknown);
+            }
+            used.insert(paired_name);
+        }
         replay(&original)?;
         records.push(original);
     }
@@ -621,7 +748,10 @@ pub(in crate::store) fn scan_cutovers(
     }
     Ok(CutoverInventory { used, records })
 }
-fn original(scan: &JournalObservation, id: &TransactionId) -> JournalResult<OriginalCutover> {
+pub(in crate::store) fn original(
+    scan: &JournalObservation,
+    id: &TransactionId,
+) -> JournalResult<OriginalCutover> {
     let inventory = super::platform::inventory(scan)?;
     if !inventory.orphans.is_empty() {
         return Err(JournalError::Conflict);
@@ -649,17 +779,22 @@ pub(in crate::store) fn check_canonical(
     original: &OriginalCutover,
     require_target: bool,
 ) -> JournalResult<()> {
+    check_canonical_root(&state.root, original, require_target)
+}
+pub(in crate::store) fn check_canonical_root(
+    root: &crate::store::PrivateRoot,
+    original: &OriginalCutover,
+    require_target: bool,
+) -> JournalResult<()> {
     let i = &original.intent;
-    if !root_matches(&i.config_root, state.root.identity()) {
+    if !root_matches(&i.config_root, root.identity()) {
         return Err(JournalError::Conflict);
     }
-    let deployment = state
-        .root
+    let deployment = root
         .read_raw("deployment.json", MAX_RAW)
         .map_err(|_| JournalError::Unknown)?;
     validate_roles(deployment.bytes(), original)?;
-    let current = state
-        .root
+    let current = root
         .read_raw("state.json", MAX_RAW)
         .map_err(|_| JournalError::Unknown)?;
     let hash = Sha256Digest::of_bytes(current.bytes());
@@ -675,9 +810,8 @@ pub(in crate::store) fn check_canonical(
     } else if hash != i.before_state_sha256 && hash != i.target_state_sha256 {
         return Err(JournalError::Conflict);
     }
-    if hash == i.target_state_sha256 || state.root.ensure_absent(MARKER).is_err() {
-        let marker = state
-            .root
+    if hash == i.target_state_sha256 || root.ensure_absent(MARKER).is_err() {
+        let marker = root
             .read_raw(MARKER, 4096)
             .map_err(|_| JournalError::Unknown)?;
         if marker.bytes() != original.marker {
@@ -694,8 +828,7 @@ pub(in crate::store) fn check_canonical(
             i.history_committed_sha256,
         ),
     ] {
-        let raw = state
-            .root
+        let raw = root
             .read_raw(path, MAX_RAW)
             .map_err(|_| JournalError::Unknown)?;
         if Sha256Digest::of_bytes(raw.bytes()) != expected {
@@ -846,6 +979,8 @@ impl OwnedManagementJournal {
                     last_stage: DurableStage::Planned,
                     validation: None,
                     validation_sha256: None,
+                    paired_validation: None,
+                    paired_validation_sha256: None,
                     endpoint: inputs.endpoint.map(|e| CutoverEndpointMaterials {
                         binding: e.binding,
                         chain: e.chain,
@@ -900,6 +1035,9 @@ impl OwnedManagementJournal {
                 // Fixed-size digest placeholders reserve bytes only. No future
                 // phase or synthetic validation report is written by prepare.
                 reserved.validation_sha256 = Some(Sha256Digest::from_bytes([0; 32]));
+                if reserved.intent.schema == 2 {
+                    reserved.paired_validation_sha256 = Some(Sha256Digest::from_bytes([0; 32]));
+                }
                 let mut previous = None;
                 for stage in [
                     DurableStage::Prepared,
@@ -919,6 +1057,12 @@ impl OwnedManagementJournal {
                     name(&data.intent.transaction_id, "validation"),
                     Zeroizing::new(vec![0; MAX_VALIDATION]),
                 ));
+                if data.intent.schema == 2 {
+                    entries.push((
+                        name(&data.intent.transaction_id, "paired-validation"),
+                        Zeroizing::new(vec![0; MAX_VALIDATION]),
+                    ));
+                }
                 preflight(state, &scan, &entries, self.budget)?;
                 // Apply temporarily retains another target inside this namespace
                 // while creating the canonical marker at the root. Check that
@@ -1012,6 +1156,58 @@ impl OwnedManagementJournal {
             })
         })
     }
+    /// Persist data supplied only by the upper retained opaque paired proof.
+    /// This port checks links and durability, never grants physical authority.
+    pub(in crate::store) fn record_cutover_paired_validation(
+        &mut self,
+        maintenance: &ConfigurationMaintenance,
+        prepared: &PreparedCutover,
+        report: &[u8],
+    ) -> JournalResult<Sha256Digest> {
+        if !prepared.matches_owner(&self.owner)
+            || prepared.namespace != self.namespace
+            || maintenance.transaction_id() != &prepared.intent().transaction_id
+        {
+            return Err(JournalError::Conflict);
+        }
+        self.owner.with_maintenance(maintenance, |state| {
+            self.with_directory_locked(state, |dir| {
+                let scan = files::scan(dir, self.budget)?;
+                let source = original(&scan, &prepared.intent().transaction_id)?;
+                if source.intent != *prepared.intent()
+                    || source.raw_intent != prepared.original.raw_intent
+                    || source.last_stage != DurableStage::Applied
+                {
+                    return Err(JournalError::Conflict);
+                }
+                if source.validation.is_none() {
+                    return Err(JournalError::Conflict);
+                }
+                validate_paired_report(report, &source)?;
+                check_canonical(state, &source, true)?;
+                let n = name(&source.intent.transaction_id, "paired-validation");
+                preflight(state, &scan, &[(n.clone(), report.to_vec())], self.budget)?;
+                let mut used = scan_cutovers(&scan)?.used;
+                used.extend(handoff::scan_handoffs(&scan)?.used);
+                sync_existing(dir, &scan, &used)?;
+                files::immutable(dir, &n, report, self.budget, &|_| {})?;
+                let after = original(
+                    &files::scan(dir, self.budget)?,
+                    &source.intent.transaction_id,
+                )
+                .map_err(|_| JournalError::Unknown)?;
+                let digest = Sha256Digest::of_bytes(report);
+                if after.paired_validation_report() != Some(report)
+                    || after.paired_validation_sha256 != Some(digest)
+                    || after.last_stage != DurableStage::Applied
+                {
+                    return Err(JournalError::Unknown);
+                }
+                check_canonical(state, &after, true).map_err(|_| JournalError::Unknown)?;
+                Ok(digest)
+            })
+        })
+    }
     pub(in crate::store) fn append_cutover_phase(
         &mut self,
         maintenance: &ConfigurationMaintenance,
@@ -1021,11 +1217,6 @@ impl OwnedManagementJournal {
         if !prepared.matches_owner(&self.owner)
             || prepared.namespace != self.namespace
             || maintenance.transaction_id() != &prepared.intent().transaction_id
-        {
-            return Err(JournalError::Conflict);
-        }
-        if prepared.intent().schema == 2
-            && matches!(stage, DurableStage::Verified | DurableStage::Committed)
         {
             return Err(JournalError::Conflict);
         }
@@ -1075,6 +1266,31 @@ impl OwnedManagementJournal {
             })
         })
     }
+    /// Read the exact completed successor under the retained configuration
+    /// lock. This does not clear a fence or reconstruct physical runtime proof.
+    pub(in crate::store) fn validate_committed_cutover_locked(
+        &self,
+        state: &ConfigurationState,
+        prepared: &PreparedCutover,
+        committed: &JournalReceipt,
+    ) -> JournalResult<()> {
+        self.with_directory_locked(state, |dir| {
+            let scan = files::scan(dir, self.budget)?;
+            let source = original(&scan, &prepared.intent().transaction_id)?;
+            if source.intent != *prepared.intent()
+                || source.raw_intent != prepared.original.raw_intent
+                || source.phases.first() != Some(prepared.journal())
+                || source.phases.last() != Some(committed)
+                || committed.stage != DurableStage::Committed
+                || source.last_stage != DurableStage::Committed
+                || source.validation_report().is_none()
+                || (source.intent.schema == 2 && source.paired_validation_report().is_none())
+            {
+                return Err(JournalError::Conflict);
+            }
+            check_canonical(state, &source, true)
+        })
+    }
     pub(in crate::store) fn resync_original_cutover(
         &self,
         maintenance: &ConfigurationMaintenance,
@@ -1101,6 +1317,8 @@ impl OwnedManagementJournal {
                     || before.phases != after.phases
                     || before.validation != after.validation
                     || before.validation_sha256 != after.validation_sha256
+                    || before.paired_validation != after.paired_validation
+                    || before.paired_validation_sha256 != after.paired_validation_sha256
                 {
                     return Err(JournalError::Unknown);
                 }

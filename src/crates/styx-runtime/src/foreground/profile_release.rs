@@ -58,6 +58,43 @@ fn load_error(error: ReleaseError) -> ProfileError {
     }
 }
 impl ProfileRelease {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    pub(super) fn from_committed_selection(
+        selection: &styx_contracts::native_management::NativeRuntimeSelection,
+        expected: &PublisherFingerprint,
+    ) -> Result<Self, ProfileError> {
+        if selection.publisher_spki_sha256.to_hex() != expected.as_hex() {
+            return Err(ProfileError::UntrustedRelease);
+        }
+        let verified = crate::release::verify_selected(selection).map_err(load_error)?;
+        let manifest = verified.manifest();
+        let node_version = manifest
+            .worker_closures
+            .iter()
+            .find(|w| w.kind == NativeExternalWorker::BrowserNode22)
+            .map(|w| w.version.clone());
+        let cua_version = manifest
+            .worker_closures
+            .iter()
+            .find(|w| w.kind == NativeExternalWorker::CuaNative)
+            .map(|w| {
+                format!(
+                    "cua-driver {}",
+                    w.version.strip_prefix("cua-driver ").unwrap_or(&w.version)
+                )
+            });
+        let version = manifest.version.clone();
+        let root = verified.runtime_root().map_err(load_error)?;
+        Ok(Self {
+            retained: RetainedRelease::Native {
+                verified: Box::new(verified),
+            },
+            root,
+            version,
+            node_version,
+            cua_version,
+        })
+    }
     /// Original active inventory remains an immutable preservation input. Only
     /// the already publisher-verified candidate supplies validation executors.
     #[cfg(all(target_os = "linux", target_env = "gnu"))]

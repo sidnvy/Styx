@@ -191,6 +191,34 @@ impl ConfigurationState {
         self.recovery_required = false;
         Ok(())
     }
+    /// Only the original completed cutover can retire this live maintenance
+    /// fence. The caller has re-read its final chain under this same lock.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    pub(super) fn finish_legacy_cutover(
+        &mut self,
+        proof: &super::legacy_handoff::CommittedNativeCutover,
+    ) -> JournalResult<()> {
+        if !proof.matches_fenced_root(&self.root.identity(), self.fence.as_ref()) {
+            return Err(JournalError::Conflict);
+        }
+        self.fence = None;
+        self.recovery_required = false;
+        Ok(())
+    }
+    /// Fresh boot reopens only the fully re-synced original committed successor.
+    /// An Applied/Verified transaction never reaches this capability.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    pub(super) fn finish_recovered_cutover(
+        &mut self,
+        proof: &super::committed_runtime::RecoveredCommittedRuntime,
+    ) -> JournalResult<()> {
+        self.require_recovery_inspection()?;
+        if !proof.matches_root(&self.root.identity()) {
+            return Err(JournalError::Conflict);
+        }
+        self.recovery_required = false;
+        Ok(())
+    }
     /// Existing pending management data can be inspected after a fresh boot,
     /// never used to reopen ordinary service or manufacture maintenance proof.
     pub(super) fn require_recovery_inspection(&self) -> JournalResult<()> {

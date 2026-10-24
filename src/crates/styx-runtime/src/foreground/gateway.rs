@@ -224,6 +224,12 @@ mod platform {
         root: Arc<PrivateRoot>,
         raw: RawFile,
     }
+    struct NativeCommittedAdmission {
+        snapshot: Arc<crate::store::committed_runtime::CommittedRuntimeSnapshot>,
+        host: PrivateRoot,
+        candidate: crate::release::VerifiedNativeRelease,
+        proof: crate::store::committed_runtime::RecoveredCommittedRuntime,
+    }
     struct Admitted {
         state: Arc<PrivateRoot>,
         gateway: Arc<PrivateRoot>,
@@ -234,6 +240,7 @@ mod platform {
         // Retains the SAME writer even if service boot fails after uncertain I/O.
         _configuration: OwnedConfigurationRoot,
         address: SocketAddr,
+        native: Option<NativeCommittedAdmission>,
     }
     /// One-shot bootstrap evidence for this exact cooperating Rust foreground
     /// scope. Not proof that a legacy writer stopped or a remote process exited.
@@ -257,7 +264,22 @@ mod platform {
     }
     impl Admitted {
         fn validate(&self) -> Result<(), ForegroundError> {
-            ownership(&self.state, &self.gateway, self.runtime_root.as_ref())?;
+            if let Some(native) = &self.native {
+                native
+                    .snapshot
+                    .validate_legacy_owners(&self.state, &native.host)
+                    .map_err(|_| error("committed_owner_binding_changed"))?;
+                native
+                    .candidate
+                    .revalidate()
+                    .map_err(|_| error("committed_candidate_changed"))?;
+                native
+                    .proof
+                    .validate_owner(&self._configuration)
+                    .map_err(|_| error("committed_configuration_changed"))?;
+            } else {
+                ownership(&self.state, &self.gateway, self.runtime_root.as_ref())?;
+            }
             self.lease
                 .validate()
                 .map_err(|_| error("execution_lease_changed"))?;
@@ -369,6 +391,9 @@ mod platform {
         let gateway = Arc::new(
             PrivateRoot::open(&gateway_path).map_err(|_| error("gateway_protected_read"))?,
         );
+        if state.ensure_absent(".styx-native-root-v1.json").is_err() {
+            return load_committed(path, state, gateway);
+        }
         let mut inputs = Vec::new();
         let deployment_i = read(&state, "deployment.json", &mut inputs)?;
         let state_i = read(&state, "state.json", &mut inputs)?;
@@ -585,6 +610,7 @@ mod platform {
             lease,
             _configuration: configuration,
             address,
+            native: None,
         });
         admitted.validate()?;
         Ok(Loaded {
@@ -593,6 +619,230 @@ mod platform {
             tls,
             policy,
             host,
+            gateway_id,
+        })
+    }
+    /// Ordinary native startup consumes a fresh complete committed chain. The
+    /// state-root writer remains the ONLY configuration writer; imported device
+    /// history is read there, never from the old child enrollment runtime.
+    fn load_committed(
+        path: &Path,
+        state: Arc<PrivateRoot>,
+        gateway: Arc<PrivateRoot>,
+    ) -> Result<Loaded, ForegroundError> {
+        use crate::store::committed_runtime::{
+            CommittedRuntimeSnapshot, RecoveredCommittedRuntime,
+        };
+        use styx_contracts::native_management::{NativeGatewayEndpointBinding, NativeRunDesired};
+        let snapshot = Arc::new(
+            CommittedRuntimeSnapshot::open(path)
+                .map_err(|_| error("committed_configuration_required"))?,
+        );
+        if !snapshot
+            .state()
+            .desired
+            .gateway
+            .as_ref()
+            .is_some_and(|desired| desired.run == NativeRunDesired::Running)
+        {
+            return Err(error("gateway_not_desired_running"));
+        }
+        let mut inputs = Vec::new();
+        let deployment_i = read(&state, "deployment.json", &mut inputs)?;
+        let config: Deployment = decode(&inputs[deployment_i])?;
+        if config.schema != 1
+            || config.mode != "create-local"
+            || config
+                .gateway
+                .device_ingress
+                .as_ref()
+                .is_some_and(|i| i.enabled)
+        {
+            return Err(error("gateway_deployment_state_invalid_or_unsupported"));
+        }
+        #[derive(Deserialize)]
+        struct HostBase {
+            #[serde(rename = "baseDir")]
+            base: PathBuf,
+        }
+        #[derive(Deserialize)]
+        struct WithHost {
+            host: HostBase,
+        }
+        let host_config: WithHost = decode(&inputs[deployment_i])?;
+        let host_root = PrivateRoot::open(&host_config.host.base)
+            .map_err(|_| error("gateway_protected_read"))?;
+        snapshot
+            .validate_legacy_owners(&state, &host_root)
+            .map_err(|_| error("committed_owner_binding_changed"))?;
+        let candidate = crate::release::verify_selected(snapshot.selection())
+            .map_err(|_| error("committed_candidate_untrusted"))?;
+        let endpoint: NativeGatewayEndpointBinding = serde_json::from_slice(
+            snapshot
+                .endpoint_binding()
+                .ok_or(error("committed_gateway_endpoint_required"))?,
+        )
+        .map_err(|_| error("committed_gateway_endpoint_invalid"))?;
+        let origin =
+            url::Url::parse(&endpoint.origin).map_err(|_| error("gateway_origin_invalid"))?;
+        let original =
+            url::Url::parse(&config.gateway.url).map_err(|_| error("gateway_origin_invalid"))?;
+        let ip: IpAddr = origin
+            .host_str()
+            .ok_or(error("gateway_loopback_required"))?
+            .parse()
+            .map_err(|_| error("gateway_loopback_required"))?;
+        let listen: IpAddr = config
+            .gateway
+            .listen_host
+            .as_deref()
+            .unwrap_or("127.0.0.1")
+            .parse()
+            .map_err(|_| error("gateway_loopback_required"))?;
+        let port = origin.port().ok_or(error("gateway_loopback_required"))?;
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .ok()
+            .and_then(|d| i64::try_from(d.as_secs()).ok())
+            .ok_or(error("gateway_clock_unproven"))?;
+        let migration = snapshot
+            .state()
+            .migration
+            .as_ref()
+            .ok_or(error("committed_migration_binding_required"))?;
+        if endpoint.schema != 1
+            || endpoint.transaction_id != migration.transaction_id
+            || endpoint.candidate_manifest_sha256 != snapshot.selection().manifest_sha256
+            || endpoint.root_identity
+                != match snapshot.root_identity() {
+                    crate::store::RootIdentity::Linux { device, inode, uid } => {
+                        styx_contracts::native_management::NativeRootIdentity::Linux {
+                            device,
+                            inode,
+                            uid,
+                        }
+                    }
+                }
+            || endpoint.origin != original.origin().ascii_serialization()
+            || origin.scheme() != "https"
+            || original.scheme() != "https"
+            || origin.path() != "/"
+            || origin.query().is_some()
+            || origin.fragment().is_some()
+            || !origin.username().is_empty()
+            || origin.password().is_some()
+            || !ip.is_ipv4()
+            || !ip.is_loopback()
+            || ip != listen
+            || port < 1024
+            || now < endpoint.not_before_unix
+            || now >= endpoint.not_after_unix
+        {
+            return Err(error("committed_gateway_endpoint_invalid"));
+        }
+        let chain = snapshot
+            .endpoint_chain()
+            .ok_or(error("committed_gateway_endpoint_invalid"))?;
+        let certs = rustls_pemfile::certs(&mut Cursor::new(chain))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| error("gateway_certificate_invalid"))?;
+        let cert_i = read(&gateway, "certificate.pem", &mut inputs)?;
+        let anchors = rustls_pemfile::certs(&mut Cursor::new(inputs[cert_i].raw.bytes()))
+            .collect::<Result<Vec<_>, _>>()
+            .map_err(|_| error("gateway_certificate_invalid"))?;
+        if certs.len() != 2
+            || anchors.len() != 1
+            || endpoint.chain_sha256 != Sha256Digest::of_bytes(chain)
+            || endpoint.leaf_sha256 != Sha256Digest::of_bytes(&certs[0])
+            || endpoint.anchor_sha256 != Sha256Digest::of_bytes(&certs[1])
+            || certs[1] != anchors[0]
+        {
+            return Err(error("gateway_tls_identity_invalid"));
+        }
+        let tls = Arc::new(
+            GatewayServerTls::from_pem(
+                chain,
+                &PrivateKeyPem::from_protected_reader_bytes(
+                    snapshot
+                        .endpoint_key()
+                        .ok_or(error("gateway_key_invalid"))?
+                        .to_vec(),
+                )
+                .map_err(|_| error("gateway_key_invalid"))?,
+                GatewayLeafPin::from_certificate_der(&certs[0]),
+            )
+            .map_err(|_| error("gateway_tls_identity_invalid"))?,
+        );
+        let model_i = read(&gateway, "model.token", &mut inputs)?;
+        let admin_i = read(&gateway, "admin.token", &mut inputs)?;
+        let authority = format!("{ip}:{port}");
+        let policy = Arc::new(
+            GatewayBearerPolicy::new(
+                token(&inputs[model_i])?,
+                vec![authority.clone()],
+                vec![endpoint.origin.clone()],
+            )
+            .map_err(|_| error("gateway_model_authority_invalid"))?,
+        );
+        let owned_root = PrivateRoot::open(path).map_err(|_| error("gateway_protected_read"))?;
+        if owned_root.identity() != snapshot.root_identity() {
+            return Err(error("gateway_protected_input_changed"));
+        }
+        let writer = owned_root
+            .try_existing_configuration_writer()
+            .map_err(|_| error("existing_native_configuration_writer_required"))?;
+        let configuration = OwnedConfigurationRoot::open_existing(owned_root, writer)
+            .map_err(|_| error("existing_native_configuration_required"))?;
+        let proof = RecoveredCommittedRuntime::reopen(configuration.clone(), snapshot.clone())
+            .map_err(|_| error("committed_configuration_reopen_failed"))?;
+        let journal = OwnedEnrollmentJournal::from_configuration(
+            configuration.clone(),
+            JournalBudget::default(),
+        )
+        .map_err(|_| error("existing_native_enrollment_required"))?;
+        let mut service = EnrollmentService::recover_existing(
+            journal,
+            token(&inputs[admin_i])?,
+            Sha256Digest::of_bytes(token(&inputs[model_i])?),
+            vec![authority.clone()],
+            Limits::default(),
+        )
+        .map_err(|e| error(e.code()))?;
+        service
+            .accept_committed_recovery(&proof)
+            .map_err(|e| error(e.code()))?;
+        let lease = gateway
+            .try_execution_lease()
+            .map_err(|_| error("gateway_execution_busy"))?;
+        let gateway_id = format!(
+            "paired.{}",
+            Sha256Digest::of_bytes(endpoint.origin.as_bytes()).to_hex()
+        )
+        .try_into()
+        .map_err(|_| error("gateway_namespace_invalid"))?;
+        let admitted = Arc::new(Admitted {
+            state,
+            gateway,
+            runtime_root: None,
+            inputs,
+            absent_inputs: vec![],
+            lease,
+            _configuration: configuration,
+            address: SocketAddr::new(ip, port),
+            native: Some(NativeCommittedAdmission {
+                snapshot,
+                host: host_root,
+                candidate,
+                proof,
+            }),
+        });
+        admitted.validate()?;
+        Ok(Loaded {
+            admitted,
+            service,
+            tls,
+            policy,
+            host: authority,
             gateway_id,
         })
     }
@@ -813,6 +1063,7 @@ mod platform {
                 lease: gateway.try_execution_lease().unwrap(),
                 _configuration: owner.clone(),
                 address: "127.0.0.1:32651".parse().unwrap(),
+                native: None,
             };
             let closure = StartupTransportClosure {
                 admitted: &admitted,

@@ -205,6 +205,18 @@ impl Root {
             identity,
         })
     }
+    /// Store-internal read-only observation. No writer is acquired and no
+    /// resource is created. The original descriptor/path binding is rechecked
+    /// even when the reader returns an error.
+    pub(super) fn with_readonly_directory<T>(
+        &self,
+        operation: impl FnOnce(&File) -> Result<T>,
+    ) -> Result<T> {
+        self.validate_root()?;
+        let result = operation(&self.directory);
+        self.validate_root()?;
+        result
+    }
     /// Store-internal mutation port. No descriptor or path is exposed through
     /// the public store API; configuration and execution ownership stay distinct.
     pub(super) fn with_configuration_writer_directory<T>(

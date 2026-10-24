@@ -552,4 +552,4 @@ mod cutover;
 pub(crate) use super::management::cutover::{CutoverEndpointInputs, CutoverInputs};
 pub use cutover::PendingNativeCutoverReport;
 pub(crate) use cutover::inspect_pending_native_cutover;
-pub(crate) use cutover::{AppliedNativeCutover, PreparedNativeCutover};
+pub(crate) use cutover::{AppliedNativeCutover, CommittedNativeCutover, PreparedNativeCutover};

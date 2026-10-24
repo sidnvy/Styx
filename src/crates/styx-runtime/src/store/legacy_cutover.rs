@@ -460,3 +460,7 @@ pub(crate) fn inspect_pending_native_cutover(
         })
     })
 }
+
+#[path = "legacy_committed.rs"]
+mod committed;
+pub(crate) use committed::CommittedNativeCutover;

@@ -172,3 +172,17 @@ pub struct NativeGatewayEndpointBinding {
     pub not_before_unix: i64,
     pub not_after_unix: i64,
 }
+
+/// Canonical configuration DATA selecting a retained publisher-verified runtime.
+/// Paths and kernel identity are locators/bindings, never execution, migration
+/// commit, installation or publisher approval authority by themselves.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeRuntimeSelection {
+    pub schema: u16,
+    pub payload_path: String,
+    pub payload_root: NativeRootIdentity,
+    pub manifest_sha256: Sha256Digest,
+    pub publisher_file: String,
+    pub publisher_spki_sha256: Sha256Digest,
+}

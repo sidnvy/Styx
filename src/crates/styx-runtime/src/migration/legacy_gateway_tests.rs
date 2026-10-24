@@ -451,10 +451,38 @@ async fn actual_original_runtime_cutover_preparation_probe_and_application() {
             == original_token.as_slice()
     );
     assert!(owner.ensure_admission().is_err());
+    let finalize = std::env::var("STYX_TEST_FINALIZE_CUTOVER").as_deref() == Ok("1");
+    if finalize {
+        cutover.commit_gateway_validated_candidate().await.unwrap();
+        assert!(cutover.report().migration_committed && cutover.report().ordinary_service_promoted);
+        owner.ensure_admission().unwrap();
+        assert_eq!(
+            cutover
+                .promoted_service()
+                .unwrap()
+                .profiles()
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        // The original maintenance reader is retired, while the normal profile
+        // independently rebuilds the committed candidate selection from disk.
+        assert!(binding.revalidate().is_err());
+        let profile = crate::foreground::profile::load_paired(&fixture.state_dir).unwrap();
+        profile.revalidate().unwrap();
+        assert_eq!(profile.host_base_dir(), fixture.host_base);
+    }
     let mut result = facts;
     result["status"] = json!("PASS_ORIGINAL_CUTOVER_APPLIED_PROBE_WITH_EXTERNAL_ACK");
     result["host"] = observation(combined.host_observation());
     result["gateway"] = observation(combined.gateway_observation());
+    if finalize {
+        result["status"] = json!("PASS_ORIGINAL_CUTOVER_COMMITTED_SAME_SERVICE_PROMOTED");
+        result["cutover"] = serde_json::to_value(cutover.report()).unwrap();
+        result["ordinary_profile_refused"] = json!(false);
+        result["ordinary_admission_refused"] = json!(false);
+    }
     save(&root, "native-result.json", &result);
     drop((cutover, combined, gateway, host, binding, retired, original));
 }
@@ -565,3 +593,6 @@ fn original_settled_history_reopens_same_state_writer_fenced() {
         }),
     );
 }
+
+#[path = "legacy_committed_tests.rs"]
+mod committed_tests;

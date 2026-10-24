@@ -235,6 +235,26 @@ fn synthetic_validation(f: &Fixture) -> Vec<u8> {
     }))
     .unwrap()
 }
+// Synthetic report bytes test storage validation, never physical execution.
+fn synthetic_paired(p: &PreparedCutover) -> Vec<u8> {
+    let endpoint: serde_json::Value =
+        serde_json::from_slice(p.endpoint_binding().unwrap()).unwrap();
+    serde_json::to_vec(&serde_json::json!({
+        "schema":1, "transaction_id":p.intent().transaction_id,
+        "candidate_manifest_sha256":p.intent().candidate_manifest_sha256,
+        "target_sha256":p.intent().target_state_sha256,"endpoint":endpoint,
+        "exit_code":0,"drained":true,"connections_joined":true,
+        "blocking_jobs_joined":true,"mcp_lifecycle_jobs_joined":true,
+        "mcp_session_transports_joined":true,"unconfirmed_owner_cleanups":0,
+        "sdk_service_joined":true,"sdk_detached_tasks_joined":null,
+        "host_protocol_joined":true,"host_link_io_joined":true,
+        "executor_exited":true,"processes_exited":true,"reader_task_reaped":true,
+        "stderr_task_reaped":true,"supervised_jobs_joined":true,
+        "validation_task_joined":true,"migration_committed":false,
+        "ordinary_admission_open":false
+    }))
+    .unwrap()
+}
 fn scan(f: &Fixture) -> JournalObservation {
     f.owner
         .with_state(|s| {
@@ -282,6 +302,15 @@ fn same_original_cutover_chain_files_and_interruption_boundaries() {
     assert_eq!(prepared.marker(), f.marker);
     assert_eq!(prepared.journal().stage, DurableStage::Prepared);
     assert_eq!(prepared.intent().schema, 1);
+    let original_phase = fs::read(
+        f.path
+            .join(NamespaceName::ManagementV1.as_str())
+            .join(name(&f.retired.transaction_id, "prepared")),
+    )
+    .unwrap();
+    let old_phase: serde_json::Value = serde_json::from_slice(&original_phase).unwrap();
+    assert_eq!(old_phase["schema"], 1);
+    assert!(old_phase.get("paired_validation_sha256").is_none());
     assert!(prepared.endpoint_binding().is_none());
     let legacy_shape: serde_json::Value =
         serde_json::from_slice(&prepared.original.raw_intent).unwrap();
@@ -688,6 +717,132 @@ fn same_original_cutover_chain_files_and_interruption_boundaries() {
             .append_cutover_phase(&endpoint.maintenance, &p, DurableStage::Verified),
         Err(JournalError::Conflict)
     ));
+    let pair = synthetic_paired(&p);
+    // Neither a Prepared record nor missing local evidence permits pair storage.
+    assert!(matches!(
+        endpoint
+            .journal
+            .record_cutover_paired_validation(&endpoint.maintenance, &p, &pair),
+        Err(JournalError::Conflict)
+    ));
+    write(&endpoint.path.join(MARKER), &endpoint.marker);
+    fs::write(endpoint.path.join("state.json"), p.target()).unwrap();
+    endpoint
+        .journal
+        .append_cutover_phase(&endpoint.maintenance, &p, DurableStage::Applied)
+        .unwrap();
+    assert!(matches!(
+        endpoint
+            .journal
+            .record_cutover_paired_validation(&endpoint.maintenance, &p, &pair),
+        Err(JournalError::Conflict)
+    ));
+    let local = synthetic_validation(&endpoint);
+    endpoint
+        .journal
+        .record_cutover_validation(&endpoint.maintenance, &p, &local)
+        .unwrap();
+    assert!(matches!(
+        endpoint
+            .journal
+            .append_cutover_phase(&endpoint.maintenance, &p, DurableStage::Verified),
+        Err(JournalError::Conflict)
+    ));
+    for field in [
+        "validation_task_joined",
+        "connections_joined",
+        "executor_exited",
+    ] {
+        let mut bad: serde_json::Value = serde_json::from_slice(&pair).unwrap();
+        bad[field] = false.into();
+        assert!(matches!(
+            endpoint.journal.record_cutover_paired_validation(
+                &endpoint.maintenance,
+                &p,
+                &serde_json::to_vec(&bad).unwrap()
+            ),
+            Err(JournalError::Conflict)
+        ));
+    }
+    for field in ["target_sha256", "candidate_manifest_sha256"] {
+        let mut bad: serde_json::Value = serde_json::from_slice(&pair).unwrap();
+        bad[field] = Sha256Digest::of_bytes(b"foreign binding").to_hex().into();
+        assert!(matches!(
+            endpoint.journal.record_cutover_paired_validation(
+                &endpoint.maintenance,
+                &p,
+                &serde_json::to_vec(&bad).unwrap()
+            ),
+            Err(JournalError::Conflict)
+        ));
+    }
+    let mut bad: serde_json::Value = serde_json::from_slice(&pair).unwrap();
+    bad["endpoint"]["root_identity"]["inode"] = 1.into();
+    assert!(matches!(
+        endpoint.journal.record_cutover_paired_validation(
+            &endpoint.maintenance,
+            &p,
+            &serde_json::to_vec(&bad).unwrap()
+        ),
+        Err(JournalError::Conflict)
+    ));
+    assert!(matches!(
+        endpoint.journal.record_cutover_paired_validation(
+            &endpoint.maintenance,
+            &p,
+            &vec![b' '; MAX_VALIDATION + 1]
+        ),
+        Err(JournalError::BudgetExceeded)
+    ));
+    let digest = endpoint
+        .journal
+        .record_cutover_paired_validation(&endpoint.maintenance, &p, &pair)
+        .unwrap();
+    assert_eq!(digest, Sha256Digest::of_bytes(&pair));
+    let mut previous = scan_cutovers(&scan(&endpoint)).unwrap().records[0]
+        .phases
+        .last()
+        .unwrap()
+        .record_sha256;
+    for stage in [DurableStage::Verified, DurableStage::Committed] {
+        let receipt = endpoint
+            .journal
+            .append_cutover_phase(&endpoint.maintenance, &p, stage)
+            .unwrap();
+        assert_eq!(receipt.previous, Some(previous));
+        previous = receipt.record_sha256;
+        let raw = fs::read(
+            endpoint
+                .path
+                .join(NamespaceName::ManagementV1.as_str())
+                .join(name(
+                    &endpoint.retired.transaction_id,
+                    stage_name(stage).unwrap(),
+                )),
+        )
+        .unwrap();
+        let phase: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        assert_eq!(phase["schema"], 2);
+        assert_eq!(phase["paired_validation_sha256"], digest.to_hex());
+    }
+    let observed = endpoint
+        .journal
+        .resync_original_cutover(&endpoint.maintenance, &endpoint.retired.transaction_id)
+        .unwrap();
+    assert_eq!(observed.paired_validation_report(), Some(pair.as_slice()));
+    assert_eq!(observed.last_stage, DurableStage::Committed);
+    let pairpath = endpoint
+        .path
+        .join(NamespaceName::ManagementV1.as_str())
+        .join(name(&endpoint.retired.transaction_id, "paired-validation"));
+    // Missing final-phase dependency and same-file tamper both fail the pure scan,
+    // without manufacturing a new phase or invoking recovery.
+    fs::remove_file(&pairpath).unwrap();
+    assert!(scan_cutovers(&scan(&endpoint)).is_err());
+    write(&pairpath, b"truncated");
+    assert!(scan_cutovers(&scan(&endpoint)).is_err());
+    fs::remove_file(&pairpath).unwrap();
+    write(&pairpath, &pair);
     let namespace = endpoint.path.join(NamespaceName::ManagementV1.as_str());
     fs::write(
         namespace.join(name(&endpoint.retired.transaction_id, "endpoint-chain")),

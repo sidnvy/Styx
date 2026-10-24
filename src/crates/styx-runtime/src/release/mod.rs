@@ -34,6 +34,7 @@ use styx_contracts::native_release::NativeReleaseTarget;
 use styx_contracts::{
     identity::Sha256Digest,
     management::ReaderContract,
+    native_management::{NativeRootIdentity, NativeRuntimeSelection},
     native_release::{
         NATIVE_RELEASE_MANIFEST_BYTES, NativeExternalWorker, NativeReleaseManifest,
         NativeReleaseReader, NativeReleaseScope,
@@ -133,8 +134,8 @@ pub struct ReleaseReport {
 /// A caller launching this image must keep this object until real child reaping.
 pub struct VerifiedNativeRelease {
     root: PrivateRoot,
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
     prefix: PathBuf,
+    publisher_locator: PathBuf,
     manifest_file: RawFile,
     signature_file: RawFile,
     publisher_root: PrivateRoot,
@@ -153,6 +154,64 @@ impl VerifiedNativeRelease {
     pub(crate) fn runtime_root(&self) -> Result<PathBuf> {
         self.revalidate()?;
         Ok(self.prefix.clone())
+    }
+    /// Derive only from the original verified roots and retained publisher
+    /// locator. The caller persists this inside its existing canonical target.
+    pub fn runtime_selection(&self) -> Result<NativeRuntimeSelection> {
+        self.revalidate()?;
+        let selection = self.selection_metadata()?;
+        self.revalidate()?;
+        Ok(selection)
+    }
+    fn selection_metadata(&self) -> Result<NativeRuntimeSelection> {
+        if self.manifest.scope != NativeReleaseScope::RuntimeCandidate
+            || !self
+                .manifest
+                .minimum_reader
+                .supports_state_reader(ReaderContract::NativeMigratedStateV1)
+        {
+            return Err(ReleaseError::Unsupported);
+        }
+        let payload_root = self.selection_root_identity()?;
+        if !self.prefix.is_absolute() || !self.publisher_locator.is_absolute() {
+            return Err(ReleaseError::Invalid);
+        }
+        let selection = NativeRuntimeSelection {
+            schema: 1,
+            payload_path: self
+                .prefix
+                .to_str()
+                .ok_or(ReleaseError::Invalid)?
+                .to_owned(),
+            payload_root,
+            manifest_sha256: self.report.manifest_sha256,
+            publisher_file: self
+                .publisher_locator
+                .to_str()
+                .ok_or(ReleaseError::Invalid)?
+                .to_owned(),
+            publisher_spki_sha256: self
+                .expected
+                .as_hex()
+                .to_owned()
+                .try_into()
+                .map_err(|_| ReleaseError::Invalid)?,
+        };
+        validate_selection_locator(&selection)?;
+        Ok(selection)
+    }
+    fn selection_root_identity(&self) -> Result<NativeRootIdentity> {
+        // The configuration root contract is Linux-only. Existing Mac C08
+        // release verification remains supported; no Darwin migration is implied.
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        {
+            let crate::store::RootIdentity::Linux { device, inode, uid } = self.root.identity();
+            Ok(NativeRootIdentity::Linux { device, inode, uid })
+        }
+        #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+        {
+            Err(ReleaseError::Unsupported)
+        }
     }
     pub fn report(&self) -> ReleaseReport {
         self.report.clone()
@@ -301,6 +360,43 @@ pub async fn inspect(
 
 /// The external public key must already have an independently approved pin.
 /// Bundling a new publisher.pem beside a package never supplies that trust.
+/// Re-open a canonical DATA selection through the existing C08 verifier. This
+/// neither admits ordinary traffic nor proves the cutover was committed.
+pub fn verify_selected(selection: &NativeRuntimeSelection) -> Result<VerifiedNativeRelease> {
+    validate_selection_locator(selection)?;
+    if !cfg!(all(
+        target_os = "linux",
+        target_arch = "x86_64",
+        target_env = "gnu"
+    )) {
+        return Err(ReleaseError::Unsupported);
+    }
+    let expected = PublisherFingerprint::parse(&selection.publisher_spki_sha256.to_hex())
+        .map_err(|_| ReleaseError::Invalid)?;
+    let verified = verify(
+        Path::new(&selection.payload_path),
+        Path::new(&selection.publisher_file),
+        &expected,
+    )?;
+    if verified.selection_metadata()? != *selection {
+        return Err(ReleaseError::Changed);
+    }
+    verified.revalidate()?;
+    Ok(verified)
+}
+fn validate_selection_locator(selection: &NativeRuntimeSelection) -> Result<()> {
+    if selection.schema != 1
+        || selection.payload_path.len() > 4096
+        || selection.publisher_file.len() > 4096
+        || selection.payload_path.contains('\0')
+        || selection.publisher_file.contains('\0')
+        || !Path::new(&selection.payload_path).is_absolute()
+        || !Path::new(&selection.publisher_file).is_absolute()
+    {
+        return Err(ReleaseError::Invalid);
+    }
+    Ok(())
+}
 pub fn verify(
     payload: &Path,
     publisher_file: &Path,
@@ -464,8 +560,8 @@ fn verify_native(
     };
     let verified = VerifiedNativeRelease {
         root,
-        #[cfg(all(target_os = "linux", target_env = "gnu"))]
         prefix: payload.to_path_buf(),
+        publisher_locator: publisher_path.to_owned(),
         manifest_file,
         signature_file,
         publisher_root,
@@ -479,4 +575,45 @@ fn verify_native(
     };
     verified.revalidate()?;
     Ok(verified)
+}
+
+#[cfg(test)]
+mod selection_tests {
+    use super::*;
+
+    #[test]
+    fn selection_refuses_unversioned_or_relative_locators_before_io() {
+        let mut selection = NativeRuntimeSelection {
+            schema: 1,
+            payload_path: "/not-opened-native-selection/payload".to_owned(),
+            payload_root: NativeRootIdentity::Linux {
+                device: 1,
+                inode: 2,
+                uid: 1000,
+            },
+            manifest_sha256: Sha256Digest::of_bytes(b"manifest"),
+            publisher_file: "/not-opened-native-selection/publisher.pem".to_owned(),
+            publisher_spki_sha256: Sha256Digest::of_bytes(b"publisher"),
+        };
+        selection.schema = 2;
+        assert!(matches!(
+            verify_selected(&selection),
+            Err(ReleaseError::Invalid)
+        ));
+        selection.schema = 1;
+        selection.payload_path = "relative/payload".to_owned();
+        assert!(matches!(
+            verify_selected(&selection),
+            Err(ReleaseError::Invalid)
+        ));
+        selection.payload_path = "/not-opened-native-selection/payload".to_owned();
+        selection.publisher_file = "publisher.pem".to_owned();
+        assert!(matches!(
+            verify_selected(&selection),
+            Err(ReleaseError::Invalid)
+        ));
+        let mut raw = serde_json::to_value(&selection).unwrap();
+        raw["verified"] = true.into();
+        assert!(serde_json::from_value::<NativeRuntimeSelection>(raw).is_err());
+    }
 }
