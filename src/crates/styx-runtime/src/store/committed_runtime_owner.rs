@@ -23,7 +23,7 @@ impl RecoveredCommittedRuntime {
         let proof = Self {
             owner,
             snapshot,
-            journal: journal,
+            journal,
         };
         proof.owner.with_state(|state| {
             state.require_recovery_inspection()?;
