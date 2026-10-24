@@ -69,12 +69,28 @@ pub(crate) struct Entry {
     pub stop: CancellationToken,
     pub live: AtomicBool,
     pub lease: tokio::sync::Mutex<Option<ConnectionLease>>,
+    // Initial authenticated transport admission only. If its lane was not
+    // negotiated, retain it solely for control until the physical WS ends.
+    pub bootstrap_lane: Lane,
+    pub bootstrap_lease: tokio::sync::Mutex<Option<ConnectionLease>>,
+    pub exec_feature: bool,
     pub browser_feature: bool,
     pub computer_feature: bool,
     pub browser_lease: tokio::sync::Mutex<Option<ConnectionLease>>,
     pub computer_lease: tokio::sync::Mutex<Option<ConnectionLease>>,
 }
 impl Entry {
+    pub(crate) async fn control_lease_for(
+        &self,
+        lane: Lane,
+    ) -> tokio::sync::MutexGuard<'_, Option<ConnectionLease>> {
+        let business = self.lease_for(lane).await;
+        if business.is_some() || lane != self.bootstrap_lane {
+            return business;
+        }
+        drop(business);
+        self.bootstrap_lease.lock().await
+    }
     pub(crate) async fn lease_for(
         &self,
         lane: Lane,
@@ -199,7 +215,8 @@ impl RelayHandle {
         if !e.live.load(Ordering::Acquire) || e.stop.is_cancelled() {
             return Err(RelayError::Offline);
         }
-        if (lane == Lane::Browser && !e.browser_feature)
+        if (lane == Lane::Exec && !e.exec_feature)
+            || (lane == Lane::Browser && !e.browser_feature)
             || (lane == Lane::Computer && !e.computer_feature)
         {
             return Err(RelayError::Unsupported);
@@ -243,14 +260,26 @@ impl RelayHandle {
         }
     }
     pub(crate) async fn control_lane(&self, e: &Entry) -> Result<Lane, RelayError> {
-        if self.authorize(e).await.is_ok() {
-            return Ok(Lane::Exec);
+        if !e.live.load(Ordering::Acquire) || e.stop.is_cancelled() {
+            return Err(RelayError::Offline);
         }
-        if self.authorize_for(e, Lane::Browser).await.is_ok() {
-            return Ok(Lane::Browser);
+        for lane in [Lane::Exec, Lane::Browser, Lane::Computer] {
+            let held = e.control_lease_for(lane).await;
+            let Some(lease) = held.as_ref() else {
+                continue;
+            };
+            if self
+                .inner
+                .shared
+                .with(|s| s.authorize_host_frame(lease))
+                .await
+                .map_err(|_| RelayError::Unknown)?
+                .is_ok()
+            {
+                return Ok(lane);
+            }
         }
-        self.authorize_for(e, Lane::Computer).await?;
-        Ok(Lane::Computer)
+        Err(RelayError::Unauthorized)
     }
     pub async fn devices(&self) -> Result<Vec<DeviceStatus>, RelayError> {
         let profiles = self

@@ -122,11 +122,25 @@ impl RelayHandle {
             .shared
             .with(|s| {
                 s.profile_is_current(&device, &profile.capability_generation)?;
-                s.admit_upgrade(req.headers(), &device, generation.clone())
+                // Each attempt is the same authenticated Core admission. A denied
+                // or occupied Exec lane cannot veto an independently granted lane.
+                let mut last_error = None;
+                for lane in [Lane::Exec, Lane::Browser, Lane::Computer] {
+                    let admission = if lane == Lane::Exec {
+                        s.admit_upgrade(req.headers(), &device, generation.clone())
+                    } else {
+                        s.admit_upgrade_for_lane(req.headers(), &device, generation.clone(), lane)
+                    };
+                    match admission {
+                        Ok(lease) => return Ok((lane, lease)),
+                        Err(error) => last_error = Some(error),
+                    }
+                }
+                Err(last_error.expect("three lane admission attempts"))
             })
             .await;
-        let lease = match admitted {
-            Ok(Ok(v)) => v,
+        let (initial_lane, lease) = match admitted {
+            Ok(Ok(value)) => value,
             _ => return reject(403),
         };
         let upgrade_headers = req.headers().clone();
@@ -142,7 +156,8 @@ impl RelayHandle {
                     let task = tokio::spawn(async move {
                         let _slot = slot;
                         let _connection = connection;
-                        let mut lease = Some(lease);
+                        let mut bootstrap_lease = Some(lease);
+                        let mut lease: Option<ConnectionLease> = None;
                         let mut browser_lease: Option<ConnectionLease> = None;
                         let mut computer_lease: Option<ConnectionLease> = None;
                         let mut entry: Option<Arc<Entry>> = None;
@@ -157,44 +172,45 @@ impl RelayHandle {
                             let challenge=format!("challenge-{}",uuid::Uuid::new_v4());
                             let request=WireRequest{request_id:request_id()?,connection_generation:None,call:Call::Negotiate{
                                 version:3,challenge:challenge.clone(),gateway_namespace:relay.inner.gateway.clone(),gateway_epoch:relay.inner.epoch.clone()}};
-                            guarded_send(&relay,lease.as_ref().expect("owned lease"),None,&mut sink,&request,&task_stop).await?;
+                            guarded_send(&relay,bootstrap_lease.as_ref().expect("initial admission"),None,&mut sink,&request,&task_stop).await?;
                             let response=tokio::select!{
                                 _=task_stop.cancelled()=>return Err(RelayError::Offline),
                                 r=tokio::time::timeout(Duration::from_secs(5),read_response(&mut source))=>r.map_err(|_|RelayError::Unknown)??,
                             };
                             if response.request_id!=request.request_id{return Err(RelayError::Invalid)}
-                            let(host_generation,host_connection,grant_revision,browser_feature,computer_feature)=match response.reply {
+                            let(host_generation,host_connection,grant_revision,exec_feature,browser_feature,computer_feature)=match response.reply {
                                 Reply::Negotiated{version:3,challenge:got,device_id,host_generation,connection_generation,grant_revision:Some(rev),owner_issuance,
-                                    features,write:true,terminate:true,read_resume:false,..}
-                                    if ["prepare_start","dispatch_start","inspect_start","read","prepare_action","dispatch_action","inspect_action","owner_open","owner_revoke","owner_cleanup"]
-                                        .iter().all(|f|features.iter().any(|v|v==f)) && got==challenge && device_id==device
+                                    features,write,terminate,read_resume,..}
+                                    if ["owner_open","owner_revoke","owner_cleanup"].iter().all(|f|features.iter().any(|v|v==f))
+                                        && got==challenge && device_id==device
                                         && connection_generation==response.connection_generation && owner_issuance=="gateway_authenticated" => {
+                                            let exec=exec_negotiated(&features,write,terminate,read_resume);
                                             let browser=features.iter().any(|v|v==BROWSER_HEADLESS_V1);
-                                            (host_generation,connection_generation,rev,browser,features.iter().any(|v|v==COMPUTER_V1))
+                                            (host_generation,connection_generation,rev,exec,browser,features.iter().any(|v|v==COMPUTER_V1))
                                         },
                                 _=>return Err(RelayError::Unauthorized),
                             };
-                            // One physical WS, two nonserializable Core lane leases.
-                            // Metadata/feature is necessary, never sufficient authorization.
-                            browser_lease=if browser_feature && profile.browser_approved {
-                                match relay.inner.shared.with(|s| {
-                                    s.profile_is_current(&device,&profile.capability_generation)?;
-                                    s.admit_upgrade_for_lane(&upgrade_headers,&device,generation.clone(),Lane::Browser)
-                                }).await {
-                                    Ok(Ok(admitted))=>Some(admitted),
-                                    _=>None,
-                                }
-                            } else {None};
-                            computer_lease=if computer_feature && profile.computer_approved {
-                                match relay.inner.shared.with(|s| {
-                                    s.profile_is_current(&device,&profile.capability_generation)?;
-                                    s.admit_upgrade_for_lane(&upgrade_headers,&device,generation.clone(),Lane::Computer)
-                                }).await {Ok(Ok(admitted))=>Some(admitted),_=>None}
-                            }else{None};
+                            // A negotiation admission is never business authority.
+                            // Move it once iff its exact lane was negotiated;
+                            // otherwise it stays control-only until actual WS end.
+                            for lane in [Lane::Exec,Lane::Browser,Lane::Computer] {
+                                let negotiated=match lane {Lane::Exec=>exec_feature,Lane::Browser=>browser_feature,Lane::Computer=>computer_feature};
+                                if !negotiated {continue}
+                                let admitted=if lane==initial_lane {
+                                    bootstrap_lease.take()
+                                } else {
+                                    match relay.inner.shared.with(|s| {
+                                        s.profile_is_current(&device,&profile.capability_generation)?;
+                                        s.admit_upgrade_for_lane(&upgrade_headers,&device,generation.clone(),lane)
+                                    }).await {Ok(Ok(value))=>Some(value),_=>None}
+                                };
+                                match lane {Lane::Exec=>lease=admitted,Lane::Browser=>browser_lease=admitted,Lane::Computer=>computer_lease=admitted}
+                            }
                             drop(upgrade_headers);
                             let(tx,mut rx)=mpsc::channel::<Command>(3);
                             let e=Arc::new(Entry{device:device.clone(),transport_generation:generation.clone(),host_connection,host_generation,grant_revision,profile,
-                                tx,stop:task_stop.clone(),live:AtomicBool::new(true),lease:tokio::sync::Mutex::new(lease.take()),browser_feature,computer_feature,
+                                tx,stop:task_stop.clone(),live:AtomicBool::new(true),lease:tokio::sync::Mutex::new(lease.take()),
+                                bootstrap_lane:initial_lane,bootstrap_lease:tokio::sync::Mutex::new(bootstrap_lease.take()),exec_feature,browser_feature,computer_feature,
                                 browser_lease:tokio::sync::Mutex::new(browser_lease.take()),computer_lease:tokio::sync::Mutex::new(computer_lease.take())});
                             entry=Some(e.clone());let _fence=LiveFence(e.clone());
                             {
@@ -225,10 +241,10 @@ impl RelayHandle {
                                         }
                                         let response_budget=command.call.response_budget();
                                         let request=WireRequest{request_id:request_id()?,connection_generation:Some(e.host_connection.clone()),call:command.call};
-                                        let locked=e.lease_for(lane).await;
+                                        let locked=if control {e.control_lease_for(lane).await}else{e.lease_for(lane).await};
                                         let Some(l)=locked.as_ref() else {
                                             let _=command.result.send(Err(if lane!=Lane::Exec{RelayError::Unauthorized}else{RelayError::Offline}));
-                                            if lane!=Lane::Exec{continue}else{return Err(RelayError::Offline)}
+                                            continue
                                         };
                                         let result=guarded_send(&relay,l,command.gate.as_deref(),&mut sink,&request,&task_stop).await;
                                         drop(locked);
@@ -238,9 +254,9 @@ impl RelayHandle {
                                             Ok(())=>{pending.insert(request.request_id,Pending{command,control,lane,deadline:tokio::time::Instant::now()+response_budget});},
                                             Err(error)=>{
                                                 let _=command.result.send(Err(error));
-                                                // Refusal before start_send is local to Browser. Actual
+                                                // Proven refusal before start_send is local to its lane. Actual
                                                 // socket/write uncertainty still invalidates the physical WS.
-                                                if lane!=Lane::Exec && matches!(error,RelayError::Unauthorized|RelayError::Unsupported|RelayError::Invalid){continue}
+                                                if known_pre_send_refusal(error){continue}
                                                 return Err(error)
                                             },
                                         }
@@ -249,10 +265,10 @@ impl RelayHandle {
                                         let response=response?;
                                         if response.connection_generation!=e.host_connection{return Err(RelayError::Invalid)}
                                         let Some(p)=pending.remove(&response.request_id) else{return Err(RelayError::Invalid)};
-                                        let locked=e.lease_for(p.lane).await;
+                                        let locked=if p.control {e.control_lease_for(p.lane).await}else{e.lease_for(p.lane).await};
                                         let Some(l)=locked.as_ref() else {
                                             let _=p.command.result.send(Err(if p.lane!=Lane::Exec{RelayError::Unauthorized}else{RelayError::Offline}));
-                                            if p.lane!=Lane::Exec{continue}else{return Err(RelayError::Offline)}
+                                            continue
                                         };
                                         relay.inner.shared.with(|s| {
                                             let allowed=s.authorize_host_frame(l).is_ok();
@@ -277,13 +293,17 @@ impl RelayHandle {
                             {
                                 state.entries.remove(&device);
                             }
+                            bootstrap_lease = e.bootstrap_lease.lock().await.take();
                             lease = e.lease.lock().await.take();
                             browser_lease = e.browser_lease.lock().await.take();
                             computer_lease = e.computer_lease.lock().await.take();
                         }
                         // This task has dropped its socket halves (also on Err).
                         // No logical offline inference from a timeout alone.
-                        for lease in [lease, browser_lease, computer_lease].into_iter().flatten() {
+                        for lease in [bootstrap_lease, lease, browser_lease, computer_lease]
+                            .into_iter()
+                            .flatten()
+                        {
                             let _ = relay
                                 .inner
                                 .shared
@@ -384,3 +404,33 @@ async fn read_response<
         }
     }
 }
+
+fn known_pre_send_refusal(error: RelayError) -> bool {
+    // guarded_send emits these only before start_send. Any write/flush/timeout
+    // uncertainty is Unknown and must still end the entire physical transport.
+    matches!(
+        error,
+        RelayError::Unauthorized | RelayError::Unsupported | RelayError::Invalid
+    )
+}
+// Exec's feature family is optional on a shared physical transport. Partial
+// support never authorizes Exec, and does not veto Browser/Computer features.
+fn exec_negotiated(features: &[String], write: bool, terminate: bool, read_resume: bool) -> bool {
+    write
+        && terminate
+        && !read_resume
+        && [
+            "prepare_start",
+            "dispatch_start",
+            "inspect_start",
+            "read",
+            "prepare_action",
+            "dispatch_action",
+            "inspect_action",
+        ]
+        .iter()
+        .all(|name| features.iter().any(|feature| feature == name))
+}
+#[cfg(test)]
+#[path = "lane_independence_tests.rs"]
+mod lane_independence_tests;
