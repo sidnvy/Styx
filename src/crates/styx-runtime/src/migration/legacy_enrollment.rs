@@ -59,7 +59,7 @@ impl LegacyEnrollmentSnapshot<'_> {
     ) -> Result<crate::store::enrollment::OwnedEnrollmentJournal, TransitionError> {
         self.original.revalidate().map_err(classify)?;
         if owner.identity().map_err(|_| TransitionError::Unknown)?
-            != self.original.original_enrollment_identity()
+            != self.original.original_source_identity()
             || maintenance.transaction_id() != self.original.transaction_id()
             || !maintenance.matches(owner)
         {
@@ -94,7 +94,7 @@ impl LegacyEnrollmentSnapshot<'_> {
             .map_err(|_| TransitionError::Conflict)?;
         let result = journal
             .with_historical_journal(maintenance, |j| {
-                if j.root_identity()? != self.original.original_enrollment_identity() {
+                if j.root_identity()? != self.original.original_source_identity() {
                     return Err(crate::store::enrollment::JournalError::Conflict);
                 }
                 j.preflight_historical_bundle(&bytes, &bundle.materials)?;
@@ -117,4 +117,52 @@ impl LegacyEnrollmentSnapshot<'_> {
             .map_err(|_| TransitionError::Unknown)?;
         result
     }
+}
+
+/// Storage-only boot observation. It is not a Core/admin capability, ordinary
+/// enrollment service, C07 commit proof or permission to launch either runtime.
+#[derive(Debug)]
+pub struct PendingHistoryInspection {
+    pub migration: styx_contracts::identity::TransactionId,
+    pub baseline_digest: styx_contracts::identity::Sha256Digest,
+    pub committed_digest: styx_contracts::identity::Sha256Digest,
+    pub source_root: styx_contracts::historical_enrollment::SourceRoot,
+    pub enrollment_root: styx_contracts::historical_enrollment::SourceRoot,
+    pub journal_root: styx_contracts::historical_enrollment::SourceRoot,
+    pub devices: usize,
+    pub revoked: usize,
+}
+/// Inspect/resync complete existing history after boot while management remains
+/// unresolved. No arbitrary journal callback, new phase, writer or clear port.
+pub fn inspect_pending_history(
+    journal: &mut crate::store::enrollment::OwnedEnrollmentJournal,
+) -> Result<PendingHistoryInspection, TransitionError> {
+    let observation = journal
+        .resync_pending_history()
+        .map_err(|error| match error {
+            crate::store::enrollment::JournalError::Unknown => TransitionError::Unknown,
+            crate::store::enrollment::JournalError::Unsupported => TransitionError::Unsupported,
+            _ => TransitionError::Conflict,
+        })?;
+    let journal_root = observation
+        .body
+        .journal_root()
+        .map_err(|_| TransitionError::Conflict)?
+        .clone();
+    let committed_digest = observation
+        .committed
+        .as_ref()
+        .ok_or(TransitionError::Conflict)?
+        .digest()
+        .map_err(|_| TransitionError::Unknown)?;
+    Ok(PendingHistoryInspection {
+        migration: observation.body.migration,
+        baseline_digest: observation.digest,
+        committed_digest,
+        source_root: observation.body.source_root,
+        enrollment_root: observation.body.enrollment_root,
+        journal_root,
+        devices: observation.body.devices.len(),
+        revoked: observation.body.revoked.len(),
+    })
 }

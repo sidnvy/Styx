@@ -78,6 +78,7 @@ fn baseline() -> HistoricalEnrollmentBaseline {
             inode: 3,
             uid: 1000,
         },
+        journal_root: None,
         default_device: Some(active.id.clone()),
         devices: vec![active],
         revoked: vec![revoked],

@@ -1,4 +1,4 @@
-//! Exact historical baseline data in the original enrollment namespace. These
+//! Exact versioned historical baseline data under the retained journal writer. These
 //! receipts are storage observations, never Core authorization or C07 proof.
 use super::*;
 use styx_contracts::historical_enrollment::{
@@ -16,6 +16,8 @@ pub struct HistoricalPreparedReceipt {
     pub schema: u8,
     pub migration: TransactionId,
     pub enrollment_root: SourceRoot,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub journal_root: Option<SourceRoot>,
     pub baseline_digest: Sha256Digest,
     pub sequence: u64,
     pub expected_revision: u64,
@@ -46,9 +48,10 @@ fn prepared_for(
     digest: Sha256Digest,
 ) -> HistoricalPreparedReceipt {
     HistoricalPreparedReceipt {
-        schema: SCHEMA,
+        schema: body.schema,
         migration: body.migration.clone(),
         enrollment_root: body.enrollment_root.clone(),
+        journal_root: body.journal_root.clone(),
         baseline_digest: digest,
         sequence: body.sequence,
         expected_revision: body.expected_revision,
@@ -58,7 +61,7 @@ fn committed_for(
     prepared: &HistoricalPreparedReceipt,
 ) -> JournalResult<HistoricalCommittedReceipt> {
     Ok(HistoricalCommittedReceipt {
-        schema: SCHEMA,
+        schema: prepared.schema,
         prepared: prepared.clone(),
         prepared_digest: Sha256Digest::of_bytes(&encode(prepared)?),
     })
@@ -159,7 +162,11 @@ impl EnrollmentJournal<'_> {
         #[cfg(all(target_os = "linux", target_env = "gnu"))]
         {
             let crate::store::RootIdentity::Linux { device, inode, uid } = self.root.identity();
-            if body.enrollment_root != (SourceRoot::Linux { device, inode, uid }) {
+            if body
+                .journal_root()
+                .map_err(|_| JournalError::InvalidInput)?
+                != &(SourceRoot::Linux { device, inode, uid })
+            {
                 return Err(JournalError::Conflict);
             }
             Ok(())

@@ -40,6 +40,7 @@ fn body(root: &PrivateRoot, required_materials: Vec<MaterialRef>) -> HistoricalE
             uid,
         },
         enrollment_root: root_binding(root),
+        journal_root: None,
         devices: vec![],
         revoked: vec![],
         default_device: None,
@@ -87,6 +88,17 @@ fn historical_original_bytes_incomplete_phases_and_native_head_are_distinct() {
     original.extend(historical_contract::encode(&baseline).unwrap());
     original.extend(b"\n ");
     let prepared = journal.prepare_historical(&original).unwrap();
+    // Literal pre-V2 phase representation; do not produce this expectation
+    // through prepared_for or serialize the new receipt struct.
+    let old_prepared = format!(
+        "{{\"schema\":1,\"migration\":\"historical-fixture\",\"enrollment_root\":{},\"baseline_digest\":\"{}\",\"sequence\":1,\"expected_revision\":0}}",
+        serde_json::to_string(&baseline.enrollment_root).unwrap(),
+        Sha256Digest::of_bytes(&original).to_hex(),
+    ).into_bytes();
+    assert_eq!(
+        journal.read(HISTORICAL_PREPARED).unwrap().unwrap(),
+        old_prepared
+    );
     assert_eq!(
         journal.prepare_historical(&original),
         Err(JournalError::Conflict)
@@ -105,6 +117,16 @@ fn historical_original_bytes_incomplete_phases_and_native_head_are_distinct() {
     let mut journal =
         EnrollmentJournal::open_existing(&root, &mut writer, JournalBudget::default()).unwrap();
     let committed = journal.commit_historical(&prepared).unwrap();
+    let old_committed = format!(
+        "{{\"schema\":1,\"prepared\":{},\"prepared_digest\":\"{}\"}}",
+        std::str::from_utf8(&old_prepared).unwrap(),
+        Sha256Digest::of_bytes(&old_prepared).to_hex(),
+    )
+    .into_bytes();
+    assert_eq!(
+        journal.read(HISTORICAL_COMMITTED).unwrap().unwrap(),
+        old_committed
+    );
     assert_eq!(
         committed.prepared.baseline_digest,
         Sha256Digest::of_bytes(&original)
@@ -142,6 +164,7 @@ fn historical_orphans_native_pending_wrong_root_and_budget_never_get_absorbed() 
         "commit-orphan",
         "native-pending",
         "foreign-root",
+        "v2-foreign-journal-root",
         "budget",
     ] {
         let fixture = Fixture::new();
@@ -195,6 +218,18 @@ fn historical_orphans_native_pending_wrong_root_and_budget_never_get_absorbed() 
                 baseline.enrollment_root = baseline.source_root.clone();
                 assert_eq!(
                     journal.prepare_historical(&historical_contract::encode(&baseline).unwrap()),
+                    Err(JournalError::Conflict)
+                );
+                assert!(journal.read(HISTORICAL_INTENT).unwrap().is_none());
+            }
+            "v2-foreign-journal-root" => {
+                // A valid V2 DTO with another state identity cannot write to
+                // this physical journal, even though old enrollment matches.
+                baseline.schema = 2;
+                baseline.journal_root = Some(baseline.source_root.clone());
+                let raw = historical_contract::encode(&baseline).unwrap();
+                assert_eq!(
+                    journal.prepare_historical(&raw),
                     Err(JournalError::Conflict)
                 );
                 assert!(journal.read(HISTORICAL_INTENT).unwrap().is_none());

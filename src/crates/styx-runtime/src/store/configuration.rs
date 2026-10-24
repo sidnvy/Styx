@@ -191,6 +191,14 @@ impl ConfigurationState {
         self.recovery_required = false;
         Ok(())
     }
+    /// Existing pending management data can be inspected after a fresh boot,
+    /// never used to reopen ordinary service or manufacture maintenance proof.
+    pub(super) fn require_recovery_inspection(&self) -> JournalResult<()> {
+        if !self.recovery_required || self.fence.is_some() {
+            return Err(JournalError::Conflict);
+        }
+        Ok(())
+    }
     pub(super) fn ordinary_admission(&self) -> JournalResult<()> {
         if self.recovery_required || self.fence.is_some() {
             Err(JournalError::Conflict)

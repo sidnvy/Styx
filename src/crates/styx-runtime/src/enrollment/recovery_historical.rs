@@ -68,8 +68,9 @@ pub(super) fn recover(
     control: &EnrollmentControl,
 ) -> Result<Sha256Digest> {
     // Resync only the already existing original baseline chain/materials. The
-    // store checks its enrollment_root against its original retained PrivateRoot;
-    // source_root is the distinct legacy configuration root, not this namespace.
+    // store checks the versioned journal_root against the retained PrivateRoot.
+    // Schema 1 uses the old enrollment root; schema 2 uses the original state
+    // root. The source enrollment identity remains separately preserved.
     let after = journal
         .resync_historical()?
         .ok_or(RecoveryBlocked::InventoryChanged)?;

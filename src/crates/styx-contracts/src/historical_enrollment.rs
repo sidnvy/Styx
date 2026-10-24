@@ -47,7 +47,16 @@ pub struct HistoricalEnrollmentBaseline {
     pub prepared_at: u64,
     pub source_bindings_sha256: Sha256Digest,
     pub source_root: SourceRoot,
+    /// Identity of the original enrollment source, never a target path.
     pub enrollment_root: SourceRoot,
+    /// Schema 1 omitted this field and stored history at enrollment_root.
+    /// Schema 2 writes history under the SAME original state-root writer.
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "explicit_journal_root"
+    )]
+    pub journal_root: Option<SourceRoot>,
     pub devices: Vec<Device>,
     pub revoked: Vec<HistoricalRevoked>,
     pub default_device: Option<DeviceId>,
@@ -57,8 +66,25 @@ pub struct HistoricalEnrollmentBaseline {
 #[derive(Debug, thiserror::Error)]
 #[error("invalid or unsupported historical enrollment baseline")]
 pub struct HistoricalDecodeError;
+fn explicit_journal_root<'de, D: serde::Deserializer<'de>>(
+    deserializer: D,
+) -> Result<Option<SourceRoot>, D::Error> {
+    // Absence is the old schema; an explicit null was never an old field.
+    SourceRoot::deserialize(deserializer).map(Some)
+}
+impl HistoricalEnrollmentBaseline {
+    /// Resolve only the explicitly versioned target. A malformed/new version
+    /// must not silently fall back to an old source directory or mint a writer.
+    pub fn journal_root(&self) -> Result<&SourceRoot, HistoricalDecodeError> {
+        match (self.schema, self.journal_root.as_ref()) {
+            (1, None) => Ok(&self.enrollment_root),
+            (2, Some(root)) if root == &self.source_root => Ok(root),
+            _ => Err(HistoricalDecodeError),
+        }
+    }
+}
 fn bounds(body: &HistoricalEnrollmentBaseline) -> Result<(), HistoricalDecodeError> {
-    if body.schema != 1
+    if body.journal_root().is_err()
         || body.sequence != 1
         || body.expected_revision != 0
         || body

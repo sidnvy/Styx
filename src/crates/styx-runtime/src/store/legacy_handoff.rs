@@ -427,6 +427,11 @@ impl LegacyWriterFence {
     pub fn configuration_root(&self) -> &OwnedConfigurationRoot {
         &self.owner
     }
+    /// Borrow the SAME opaque original fence; never clone/reconstruct it from
+    /// transaction/root descriptions or acquire a child writer.
+    pub(crate) fn maintenance(&self) -> &ConfigurationMaintenance {
+        &self.maintenance
+    }
     pub fn material_bindings(&self) -> impl Iterator<Item = &LegacyMaterialBinding> {
         self.frozen.iter().map(|v| &v.binding)
     }

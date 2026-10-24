@@ -181,3 +181,18 @@ skipping is not acceptance. This increment does not retire launch definitions,
 commit C07, publish native admission, prove Gateway-only migration, preserve the
 complete final permission/account set, or complete platform/package acceptance.
 Exact executions and failures belong to the external Owner Control Report.
+
+
+R31 single-writer historical projection removes the earlier enrollment-child
+owner incompatibility with original Host/Gateway settlement. New private history
+schema2 binds original source state, original enrollment source and native journal
+root separately; the new journal belongs to the original state-root owner and
+maintenance, shares its namespace budget and never acquires a child writer.
+Schema1 baseline/phase original bytes remain readable without relocation.
+`SettledLegacyRuntime::with_original_history` checks both original service scopes
+before and after the same-fence history operation. A closed pending-boot storage
+inspection can only resync an existing complete chain; it cannot perform Core
+recovery, complete C07, clear management recovery or publish ordinary access.
+Ordinary foreground's old enrollment startup remains unchanged until canonical
+C07 publication/recovery is implemented. This source change is not a new package,
+installation, original production cutover or completed platform acceptance.

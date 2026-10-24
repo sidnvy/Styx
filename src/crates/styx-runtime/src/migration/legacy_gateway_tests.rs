@@ -175,7 +175,7 @@ async fn settle_gateway(t: &LegacyGatewayTransition) -> SettledLegacyRuntime {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires STYX_TEST_LEGACY_GATEWAY_FIXTURE, external original Core preparation/pairing/doctor and owned installed signed systemd Host/Gateway units; not C07 activation or account acceptance"]
-async fn actual_original_host_and_gateway_scope_settlement() {
+async fn actual_original_host_gateway_history_under_same_writer() {
     let root = PathBuf::from(
         std::env::var_os("STYX_TEST_LEGACY_GATEWAY_FIXTURE").expect("explicit fresh fixture root"),
     );
@@ -308,11 +308,59 @@ async fn actual_original_host_and_gateway_scope_settlement() {
             .as_slice()
             == original_token.as_slice()
     );
+    // Compose actual original dual-scope settlement and projection under the
+    // SAME owner/maintenance. The old enrollment directory stays a source.
+    let old_enrollment = PrivateRoot::open(&fixture.state_dir.join("gateway/enrollment")).unwrap();
+    old_enrollment
+        .ensure_absent(".styx-configuration-writer.lock")
+        .unwrap();
+    old_enrollment
+        .ensure_absent(".styx-enrollment-journal-v1")
+        .unwrap();
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_millis() as u64;
+    let (mut history_journal, history) = combined
+        .with_original_history(
+            &fixture.state_dir,
+            |snapshot, same_owner, same_maintenance| {
+                snapshot.validate_preparation()?;
+                assert_eq!(same_owner.identity().unwrap(), original_root);
+                let mut journal = snapshot.claim_history_store(same_owner, same_maintenance)?;
+                let committed = snapshot.persist_candidate_history(
+                    &mut journal,
+                    same_maintenance,
+                    "original-settled-history".try_into().unwrap(),
+                    now,
+                )?;
+                Ok((journal, committed))
+            },
+        )
+        .unwrap();
+    assert!(history_journal.with_journal(|_| Ok(())).is_err());
+    // Boot inspection is not a bypass of the live original maintenance fence.
+    assert!(
+        crate::migration::legacy_enrollment::inspect_pending_history(&mut history_journal).is_err()
+    );
+    old_enrollment
+        .ensure_absent(".styx-configuration-writer.lock")
+        .unwrap();
+    old_enrollment
+        .ensure_absent(".styx-enrollment-journal-v1")
+        .unwrap();
+    combined.revalidate().await.unwrap();
     let facts = json!({
-        "schema":1,"status":"ORIGINAL_SCOPES_SETTLED_RETIRED_READER_OBSERVER_REQUIRED",
+        "schema":1,"status":"ORIGINAL_SCOPES_HISTORY_PERSISTED_OBSERVER_REQUIRED",
         "scope":"actual installed signed Host and Gateway physical settlement; no C07 commit/activation/account acceptance",
         "host":observation(combined.host_observation()),"gateway":observation(combined.gateway_observation()),
         "configuration_root":original_root,
+        "history":{"schema":history.schema,"baseline_sha256":history.prepared.baseline_digest.to_hex(),
+            "committed_sha256":history.digest().unwrap().to_hex(),"migration":history.prepared.migration.as_str(),
+            "source_enrollment_root":history.prepared.enrollment_root,"journal_root":history.prepared.journal_root,
+            "same_original_owner":true,"original_enrollment_writer_created":false,
+            "original_enrollment_namespace_created":false,"ordinary_admission_open":false,
+            "live_fence_inspection_refused":true,"c07_committed":false},
         "candidate_manifest_sha256":combined.target().report().manifest_sha256.to_hex(),
         "retirement_transaction":retirement.transaction_id.as_str(),
         "retired_receipt_sha256":retirement.retired_receipt_sha256.to_hex(),
@@ -353,10 +401,97 @@ async fn actual_original_host_and_gateway_scope_settlement() {
     );
     assert!(owner.ensure_admission().is_err());
     let mut result = facts;
-    result["status"] =
-        json!("PASS_ORIGINAL_HOST_GATEWAY_SETTLEMENT_RETIRED_READER_WITH_EXTERNAL_ACK");
+    result["status"] = json!("PASS_ORIGINAL_HOST_GATEWAY_HISTORY_WITH_EXTERNAL_ACK");
     result["host"] = observation(combined.host_observation());
     result["gateway"] = observation(combined.gateway_observation());
     save(&root, "native-result.json", &result);
-    drop((combined, gateway, host, binding, retired, original));
+    drop((
+        history_journal,
+        combined,
+        gateway,
+        host,
+        binding,
+        retired,
+        original,
+    ));
+}
+
+/// Independent process only, after the original test actually exited and
+/// released its writer. Pending management may be inspected, never bypassed.
+#[test]
+#[ignore = "requires STYX_TEST_LEGACY_GATEWAY_FIXTURE and completed externally observed original-scope history scene; pending storage inspection only, not Core/C07 recovery"]
+fn original_settled_history_reopens_same_state_writer_fenced() {
+    use crate::store::enrollment::{JournalBudget, OwnedEnrollmentJournal};
+    let root = PathBuf::from(std::env::var_os("STYX_TEST_LEGACY_GATEWAY_FIXTURE").unwrap());
+    let fixture_root = PrivateRoot::open(&root).unwrap();
+    let raw = fixture_root.read_raw("fixture.json", 32 * 1024).unwrap();
+    let fixture: Fixture = serde_json::from_slice(raw.bytes()).unwrap();
+    let result_raw = fixture_root
+        .read_raw("native-result.json", 32 * 1024)
+        .unwrap();
+    let result: Value = serde_json::from_slice(result_raw.bytes()).unwrap();
+    assert_eq!(
+        result["status"],
+        "PASS_ORIGINAL_HOST_GATEWAY_HISTORY_WITH_EXTERNAL_ACK"
+    );
+    let original_enrollment =
+        PrivateRoot::open(&fixture.state_dir.join("gateway/enrollment")).unwrap();
+    original_enrollment
+        .ensure_absent(".styx-configuration-writer.lock")
+        .unwrap();
+    original_enrollment
+        .ensure_absent(".styx-enrollment-journal-v1")
+        .unwrap();
+    let configuration = PrivateRoot::open(&fixture.state_dir).unwrap();
+    let writer = configuration.try_existing_configuration_writer().unwrap();
+    let owner = OwnedConfigurationRoot::open_existing(configuration, writer).unwrap();
+    assert_eq!(
+        serde_json::to_value(owner.identity().unwrap()).unwrap(),
+        result["configuration_root"]
+    );
+    assert!(owner.ensure_admission().is_err());
+    let mut journal =
+        OwnedEnrollmentJournal::from_configuration(owner.clone(), JournalBudget::default())
+            .unwrap();
+    assert!(journal.with_journal(|_| Ok(())).is_err());
+    let observation =
+        crate::migration::legacy_enrollment::inspect_pending_history(&mut journal).unwrap();
+    assert_eq!(
+        observation.baseline_digest.to_hex(),
+        result["history"]["baseline_sha256"]
+    );
+    assert_eq!(
+        observation.committed_digest.to_hex(),
+        result["history"]["committed_sha256"]
+    );
+    assert_eq!(
+        observation.migration.as_str(),
+        result["history"]["migration"]
+    );
+    assert_eq!(observation.source_root, observation.journal_root);
+    assert_ne!(observation.source_root, observation.enrollment_root);
+    assert_eq!(observation.devices, 1);
+    assert_eq!(observation.revoked, 0);
+    assert!(owner.ensure_admission().is_err());
+    assert!(journal.with_journal(|_| Ok(())).is_err());
+    assert!(crate::foreground::profile::load_paired(&fixture.state_dir).is_err());
+    original_enrollment
+        .ensure_absent(".styx-configuration-writer.lock")
+        .unwrap();
+    original_enrollment
+        .ensure_absent(".styx-enrollment-journal-v1")
+        .unwrap();
+    save(
+        &root,
+        "history-reopen.json",
+        &json!({
+            "schema":1,"status":"PASS_PENDING_HISTORY_STORAGE_INSPECTION_ONLY",
+            "baseline_sha256":observation.baseline_digest.to_hex(),
+            "committed_sha256":observation.committed_digest.to_hex(),
+            "single_state_writer":true,"original_enrollment_writer_created":false,
+            "original_enrollment_namespace_created":false,"ordinary_admission_open":false,
+            "ordinary_profile_refused":true,"core_recovery":false,"c07_committed":false,
+            "native_activated":false,
+        }),
+    );
 }

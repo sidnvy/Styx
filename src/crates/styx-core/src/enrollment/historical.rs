@@ -56,11 +56,10 @@ pub fn validate_historical_baseline(
     baseline: &HistoricalEnrollmentBaseline,
     limits: Limits,
 ) -> Result<()> {
-    if baseline.schema != 1
-        || baseline.sequence != 1
-        || baseline.expected_revision != 0
-        || baseline.prepared_at == 0
-    {
+    baseline
+        .journal_root()
+        .map_err(|_| EnrollmentError::DurableMismatch)?;
+    if baseline.sequence != 1 || baseline.expected_revision != 0 || baseline.prepared_at == 0 {
         return Err(EnrollmentError::DurableMismatch);
     }
     if limits.devices == 0
@@ -252,3 +251,7 @@ impl EnrollmentLedger {
 #[cfg(test)]
 #[path = "historical_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "historical_root_tests.rs"]
+mod root_tests;

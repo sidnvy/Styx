@@ -1,6 +1,7 @@
 //! Gateway-specific original service proof composed with the continuously held
 //! Host retirement authority. No new writer, service activation or C07 commit.
 use super::*;
+use crate::store::PrivateRoot;
 
 #[must_use = "retain the original Host retirement and registered Gateway capture"]
 pub struct LegacyGatewayTransition {
@@ -113,6 +114,45 @@ impl SettledLegacyRuntime {
     }
     pub fn gateway_observation(&self) -> SettlementObservation {
         observe(self.gateway.observation())
+    }
+    /// Execute a synchronous history step while retaining the SAME original
+    /// state-root writer and maintenance fence. Both settled scopes are freshly
+    /// checked before/after; this never opens ordinary startup or commits C07.
+    /// No configuration mutex spans the external manager observations.
+    pub fn with_original_history<T>(
+        &self,
+        state_dir: &Path,
+        operation: impl FnOnce(
+            &crate::migration::legacy_enrollment::LegacyEnrollmentSnapshot<'_>,
+            &OwnedConfigurationRoot,
+            &ConfigurationMaintenance,
+        ) -> Result<T, TransitionError>,
+    ) -> Result<T, TransitionError> {
+        let handle = match tokio::runtime::Handle::try_current() {
+            Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+                handle
+            }
+            _ => return Err(TransitionError::Unsupported),
+        };
+        tokio::task::block_in_place(|| {
+            handle.block_on(self.revalidate())?;
+            let fence = self.original.original.proof.fence();
+            let root =
+                Arc::new(PrivateRoot::open(state_dir).map_err(|_| TransitionError::Conflict)?);
+            let snapshot = crate::migration::legacy_enrollment::LegacyEnrollmentSnapshot::capture(
+                state_dir,
+                root,
+                fence.maintenance(),
+            )?;
+            let result = operation(&snapshot, self.configuration_root(), fence.maintenance());
+            // Even a failed write cannot hide changed source or resurrected
+            // services. Retained unresolved records never authorize replay.
+            let source = snapshot.revalidate();
+            let scopes = handle.block_on(self.revalidate());
+            scopes?;
+            source?;
+            result
+        })
     }
     /// Fresh original invocation/cgroup/manager facts for BOTH scopes. Changed
     /// sources or a restarted/replaced scope invalidate the maintenance reader;

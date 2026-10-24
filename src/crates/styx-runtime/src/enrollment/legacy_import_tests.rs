@@ -285,6 +285,16 @@ fn original_history_persistence_and_process_reopen_remain_migration_fenced() {
     if let Some(path) = std::env::var_os("STYX_TEST_HISTORY_REOPEN_CHILD") {
         let path = PathBuf::from(path);
         assert!(path.starts_with(&base));
+        assert!(
+            !path
+                .join("gateway/enrollment/.styx-configuration-writer.lock")
+                .exists()
+        );
+        assert!(
+            !path
+                .join("gateway/enrollment/.styx-enrollment-journal-v1")
+                .exists()
+        );
         let root = PrivateRoot::open(&path).unwrap();
         let writer = root.try_existing_configuration_writer().unwrap();
         let mut journal =
@@ -390,14 +400,15 @@ fn original_history_persistence_and_process_reopen_remain_migration_fenced() {
         .join(format!("gateway/enrollment/tokens/{APPROVED}.token"));
     let before = fs::metadata(&original_token).unwrap();
     let original_token_raw = zeroize::Zeroizing::new(fs::read(&original_token).unwrap());
-    let path = f.path.join("gateway/enrollment");
-    let root = PrivateRoot::open(&path).unwrap();
-    let writer = root.try_configuration_writer().unwrap();
-    let owner = OwnedConfigurationRoot::open_existing(root, writer).unwrap();
-    let maintenance = owner
-        .begin_maintenance(f.maintenance.transaction_id().clone())
+    let path = f.path.clone();
+    let original_enrollment = path.join("gateway/enrollment");
+    let child_writer = original_enrollment.join(".styx-configuration-writer.lock");
+    let child_namespace = original_enrollment.join(".styx-enrollment-journal-v1");
+    assert!(!child_writer.exists());
+    assert!(!child_namespace.exists());
+    let mut journal = snapshot
+        .claim_history_store(&f._owner, &f.maintenance)
         .unwrap();
-    let mut journal = snapshot.claim_history_store(&owner, &maintenance).unwrap();
     let now = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .unwrap()
@@ -405,25 +416,25 @@ fn original_history_persistence_and_process_reopen_remain_migration_fenced() {
     let committed = snapshot
         .persist_candidate_history(
             &mut journal,
-            &maintenance,
+            &f.maintenance,
             "original-history-epoch".try_into().unwrap(),
             now,
         )
         .unwrap();
-    assert!(owner.ensure_admission().is_err());
+    assert!(f._owner.ensure_admission().is_err());
     assert!(journal.with_journal(|_| Ok(())).is_err());
     assert!(
         snapshot
             .persist_candidate_history(
                 &mut journal,
-                &maintenance,
+                &f.maintenance,
                 "original-history-epoch".try_into().unwrap(),
                 now
             )
             .is_err()
     );
     let observation = journal
-        .with_historical_journal(&maintenance, |j| j.resync_historical())
+        .with_historical_journal(&f.maintenance, |j| j.resync_historical())
         .unwrap()
         .unwrap();
     assert_eq!(observation.committed, Some(committed));
@@ -441,7 +452,7 @@ fn original_history_persistence_and_process_reopen_remain_migration_fenced() {
     );
     for (relative, digest) in &original {
         assert_eq!(
-            Sha256Digest::of_bytes(&fs::read(f.path.join(relative)).unwrap()),
+            Sha256Digest::of_bytes(&fs::read(path.join(relative)).unwrap()),
             *digest
         );
     }
@@ -463,12 +474,30 @@ fn original_history_persistence_and_process_reopen_remain_migration_fenced() {
             after.ctime()
         )
     );
-    assert!(!path.join(format!("tokens/{REVOKED}.token")).exists());
-    // End this enrollment writer before starting a genuinely independent process.
+    assert!(
+        !original_enrollment
+            .join(format!("tokens/{REVOKED}.token"))
+            .exists()
+    );
+    assert_eq!(observation.body.schema, 2);
+    assert_eq!(
+        observation.body.journal_root,
+        Some(observation.body.source_root.clone())
+    );
+    assert_ne!(
+        observation.body.source_root,
+        observation.body.enrollment_root
+    );
+    assert!(!child_writer.exists());
+    assert!(!child_namespace.exists());
+    // Release the ONE original state-root owner before independent reopen.
+    // The source enrollment directory has never owned a Rust writer/journal.
+    snapshot.revalidate().unwrap();
+    let fixture_path = f.path.clone();
+    drop(snapshot);
     drop(journal);
-    drop(maintenance);
-    drop(owner);
-    let report = f.path.join("history-reopened.json");
+    drop(f);
+    let report = fixture_path.join("history-reopened.json");
     let output=Command::new(std::env::current_exe().unwrap()).args(["--ignored","--exact","enrollment::legacy_import::tests::original_history_persistence_and_process_reopen_remain_migration_fenced","--nocapture"]).env("STYX_TEST_HISTORY_REOPEN_CHILD",&path).env("STYX_TEST_HISTORY_REOPEN_REPORT",&report).output().unwrap();
     assert!(
         output.status.success(),
@@ -477,15 +506,14 @@ fn original_history_persistence_and_process_reopen_remain_migration_fenced() {
     );
     let reopened: serde_json::Value = serde_json::from_slice(&fs::read(&report).unwrap()).unwrap();
     assert_eq!(reopened["status"], "PASS_ORIGINAL_HISTORY_REOPEN_ONLY");
-    snapshot.revalidate().unwrap();
+    assert!(!child_writer.exists());
+    assert!(!child_namespace.exists());
     for (relative, digest) in &original {
         assert_eq!(
-            Sha256Digest::of_bytes(&fs::read(f.path.join(relative)).unwrap()),
+            Sha256Digest::of_bytes(&fs::read(path.join(relative)).unwrap()),
             *digest
         );
     }
-    write(&base.join("original-history-effect-receipt.json"),&serde_json::to_vec(&json!({"schema":1,"status":"PASS_ORIGINAL_HISTORY_PERSISTENCE_AND_REOPEN_ONLY","fixture":f.path,"source_original_hashes":original,"original_token_raw_sha256":binding.raw_material.digest,"normalized_token_sha256":binding.normalized_material.digest,"original_token_inode":before.ino(),"original_token_device":before.dev(),"original_token_mode":before.mode(),"original_active_id":APPROVED,"original_revoked_id":REVOKED,"child_actual_wait_exit0":output.status.success(),"reopened":reopened,"scope":"protected legacy-file/RSA fixture and new process native recovery; no actual old Gateway settlement, first onboarding, C07 commit, remote authentication or activation"})).unwrap());
+    write(&base.join("original-history-effect-receipt.json"),&serde_json::to_vec(&json!({"schema":1,"status":"PASS_ORIGINAL_HISTORY_PERSISTENCE_AND_REOPEN_ONLY","fixture":fixture_path,"journal_root":"original_state_root","original_enrollment_writer_created":false,"original_enrollment_namespace_created":false,"source_original_hashes":original,"original_token_raw_sha256":binding.raw_material.digest,"normalized_token_sha256":binding.normalized_material.digest,"original_token_inode":before.ino(),"original_token_device":before.dev(),"original_token_mode":before.mode(),"original_active_id":APPROVED,"original_revoked_id":REVOKED,"child_actual_wait_exit0":output.status.success(),"reopened":reopened,"scope":"protected legacy-file/RSA fixture and new process native recovery; no actual old Gateway settlement, first onboarding, C07 commit, remote authentication or activation"})).unwrap());
     // Retain this one positive fixture for an independent post-test file oracle.
-    drop(snapshot);
-    drop(f);
 }

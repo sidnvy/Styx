@@ -106,6 +106,43 @@ impl OwnedEnrollmentJournal {
             Err(JournalError::Unsupported)
         }
     }
+    /// Closed boot-inspection port. Only already-existing complete historical
+    /// bytes/materials are read and resynced; it cannot create/complete phases,
+    /// restore credentials, issue Core authority or release pending management.
+    pub(crate) fn resync_pending_history(&mut self) -> JournalResult<HistoricalObservation> {
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        {
+            self.owner.with_state(|state| {
+                state.require_recovery_inspection()?;
+                let mut journal = EnrollmentJournal {
+                    root: &state.root,
+                    writer: &mut state.writer,
+                    budget: self.budget,
+                    namespace: self.namespace,
+                    historical_transaction: None,
+                };
+                let before = journal
+                    .observe_historical()?
+                    .ok_or(JournalError::Conflict)?;
+                if before.prepared.is_none() || before.committed.is_none() {
+                    return Err(JournalError::Conflict);
+                }
+                let after = journal.resync_historical()?.ok_or(JournalError::Unknown)?;
+                if before.original_bytes != after.original_bytes
+                    || before.prepared != after.prepared
+                    || before.committed != after.committed
+                {
+                    return Err(JournalError::Unknown);
+                }
+                state.require_recovery_inspection()?;
+                Ok(after)
+            })
+        }
+        #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+        {
+            Err(JournalError::Unsupported)
+        }
+    }
     pub(crate) fn configuration_root(&self) -> crate::store::OwnedConfigurationRoot {
         self.owner.clone()
     }

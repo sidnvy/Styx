@@ -29,6 +29,9 @@ fn key(reference: &MaterialRef) -> (&'static str, String) {
     )
 }
 impl LegacyImportSnapshot<'_> {
+    pub(crate) fn original_source_identity(&self) -> RootIdentity {
+        self.identity.clone()
+    }
     pub(crate) fn original_enrollment_identity(&self) -> RootIdentity {
         self.enrollment_root.identity()
     }
@@ -112,14 +115,15 @@ impl LegacyImportSnapshot<'_> {
         }
         let materials: Vec<_> = materials.into_values().collect();
         let body = HistoricalEnrollmentBaseline {
-            schema: 1,
+            schema: 2,
             migration: self.transaction_id().clone(),
             gateway_epoch: epoch,
             sequence: 1,
             expected_revision: 0,
             prepared_at,
             source_bindings_sha256: summary.source_bindings_sha256,
-            source_root: root_id(self.identity.clone()),
+            source_root: root_id(self.original_source_identity()),
+            journal_root: Some(root_id(self.original_source_identity())),
             enrollment_root: root_id(self.original_enrollment_identity()),
             devices,
             revoked,

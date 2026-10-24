@@ -49,6 +49,7 @@ mod linux {
             ),
             source_root: SourceRoot::Linux { device, inode, uid },
             enrollment_root: SourceRoot::Linux { device, inode, uid },
+            journal_root: None,
             devices: vec![],
             revoked: vec![],
             default_device: None,
