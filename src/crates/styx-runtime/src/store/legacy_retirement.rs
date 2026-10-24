@@ -413,12 +413,24 @@ impl LegacyWriterFence {
             return Err(LegacyFenceError::InvalidMaterials);
         }
         // Also observe the supplied configuration locator, not just its cached
-        // identity. All selected configuration files must still be original.
+        // identity. Only the SAME retained cutover's exact canonical effect may
+        // replace the original state; every other selected file stays original.
         for old in self
             .frozen
             .iter()
             .filter(|file| file.binding.root == LegacyMaterialRoot::Configuration)
         {
+            let approved_canonical = {
+                let slot = self
+                    .retirement
+                    .lock()
+                    .map_err(|_| LegacyFenceError::Unknown)?;
+                super::cutover::validate_canonical_replacement(&slot, configuration, old)
+                    .map_err(classify)?
+            };
+            if approved_canonical {
+                continue;
+            }
             let now = configuration
                 .read_raw(&old.binding.relative_path, old.limit)
                 .map_err(|_| LegacyFenceError::Unknown)?;
