@@ -189,7 +189,10 @@ async fn actual_original_service_scope_settlement() {
         "records":records,"migration_committed":false,"native_activated":false,"runtime_ready":false}),
     );
     let deadline = Instant::now() + Duration::from_secs(15);
-    while !root.join("settlement-independently-witnessed.json").exists() {
+    while !root
+        .join("settlement-independently-witnessed.json")
+        .exists()
+    {
         assert!(
             Instant::now() < deadline,
             "independent terminal manager and cgroup facts not acknowledged"
