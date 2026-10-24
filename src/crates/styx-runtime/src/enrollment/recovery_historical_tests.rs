@@ -102,6 +102,16 @@ mod linux {
                 profile: OpaqueProfileRef(revoked_profile.digest),
             });
             b.required_materials = vec![profile, revoked_profile, raw, normalized];
+            b.required_materials.sort_by_key(|r| {
+                (
+                    match r.kind {
+                        MaterialKind::Profile => "profile",
+                        MaterialKind::Token => "token",
+                        MaterialKind::Sealed => "sealed",
+                    },
+                    r.digest.to_hex(),
+                )
+            });
         }
         b
     }
@@ -120,6 +130,11 @@ mod linux {
             std::env::var_os("STYX_TEST_HISTORICAL_RECOVERY_ROOT")
                 .expect("explicit owned fixture parent"),
         );
+        // The explicit test parent must be fresh; do not adopt an existing
+        // directory or require the gate to fabricate fixture initialization.
+        fs::create_dir(&parent).unwrap();
+        fs::set_permissions(&parent, fs::Permissions::from_mode(0o700)).unwrap();
+        PrivateRoot::open(&parent).unwrap();
         let p = child(&parent);
         {
             let root = PrivateRoot::open(&p).unwrap();

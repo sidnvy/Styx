@@ -149,7 +149,11 @@ pub fn validate_historical_baseline(
     Ok(())
 }
 impl EnrollmentLedger {
-    pub(super) fn registered_identity_conflict(&self, id: &DeviceId, fingerprint: Sha256Digest) -> bool {
+    pub(super) fn registered_identity_conflict(
+        &self,
+        id: &DeviceId,
+        fingerprint: Sha256Digest,
+    ) -> bool {
         self.devices
             .values()
             .any(|d| &d.id == id || d.fingerprint == fingerprint)
