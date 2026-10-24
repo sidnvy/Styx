@@ -1,4 +1,6 @@
 mod cli;
+#[cfg(target_os = "linux")]
+mod watch_output;
 use clap::Parser;
 use std::process::ExitCode;
 

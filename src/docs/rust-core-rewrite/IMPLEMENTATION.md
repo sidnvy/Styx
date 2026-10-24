@@ -111,3 +111,20 @@ The complete frozen integration gate is recorded separately for the resulting SH
 This does not accept every tool's behavior: file transfer, login continuity, headed
 ownership, public paired routing, native Mac/Windows lifecycle and signed candidates
 remain required. No installed runtime has been switched.
+
+
+R20 management intent and R15 Linux event watch now have an incremental checkpoint;
+see [ADR-011](ADR-011-MANAGEMENT-INSPECTION-SESSION-WATCH.md). Core owns explicit roles
+and deterministic review dependencies; the shared Runtime/CLI raw reader preserves
+both original hashes, unknown fields/large integers, awaiting approval, App login
+false and unresolved ownership. Missing manager/run/autostart is Unspecified, never
+an installation/start default. Known-field inspection is not complete legacy schema,
+credential or execute authority. No management write transaction has been added.
+
+Linux watch runs official zbus subscriptions/reconciliation only in the owned
+memory-limited same-image child. Parent sequence/stream identity/child birth and
+full-source fence are implemented. Four actual owned fault scenes passed after
+fixing idle pipe closure detection; eight sampled original process identities
+were independently gone. Full regression evidence is recorded separately for the
+frozen resulting SHA. No real lock/logout/compositor change or authenticated Agent,
+HostRegistry/Cua, native Mac/Windows, migration, package or account claim follows.

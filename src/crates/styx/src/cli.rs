@@ -23,6 +23,8 @@ enum Command {
     // Fixed read-only worker mode; there are no target/credential/path options.
     #[command(name = "__linux-desktop-probe", hide = true)]
     LinuxDesktopProbe,
+    #[command(name = "__linux-desktop-watch", hide = true)]
+    LinuxDesktopWatch,
     /// Print build and contract identity; never claims a running service.
     BuildInfo,
     /// Run the explicitly configured native Host in this foreground process.
@@ -34,6 +36,13 @@ enum Command {
     Gateway {
         #[command(subcommand)]
         command: GatewayCommand,
+    },
+    /// Review configuration intent and unresolved legacy steps without executing them.
+    Plan {
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(long)]
+        json: bool,
     },
     /// Inspect the existing deployment without connecting or starting services.
     Status {
@@ -53,13 +62,19 @@ enum Command {
         /// Linux OS candidates only; does not attach or authorize a desktop.
         #[arg(long)]
         desktop_sessions: bool,
+        /// Stream unverified Linux OS candidates; cancellation fences the source.
+        #[arg(long, requires = "desktop_sessions")]
+        watch: bool,
         #[arg(long)]
         json: bool,
     },
 }
 impl Cli {
     pub(crate) fn is_desktop_probe_worker(&self) -> bool {
-        matches!(self.command, Command::LinuxDesktopProbe)
+        matches!(
+            self.command,
+            Command::LinuxDesktopProbe | Command::LinuxDesktopWatch
+        )
     }
 }
 #[derive(Subcommand)]
@@ -128,6 +143,135 @@ async fn desktop_probe_worker() -> ExitCode {
     }
 }
 
+#[cfg(target_os = "linux")]
+async fn watch_write<T: serde::Serialize>(
+    output: &mut crate::watch_output::WatchOutput,
+    value: &T,
+) -> io::Result<()> {
+    tokio::time::timeout(
+        std::time::Duration::from_millis(250),
+        output.write_json(value),
+    )
+    .await
+    .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "watch output unavailable"))?
+}
+
+async fn desktop_watch_worker() -> ExitCode {
+    #[cfg(target_os = "linux")]
+    {
+        use styx_runtime::session_probe::watch::{self, Wire};
+        let mut output = match crate::watch_output::WatchOutput::open() {
+            Ok(value) => value,
+            Err(_) => return error("output_unavailable"),
+        };
+        let cancel = CancellationToken::new();
+        let (events, mut rx) = tokio::sync::mpsc::channel(8);
+        let watching = watch::worker_watch(events, cancel.clone());
+        tokio::pin!(watching);
+        let signal = stop_signal();
+        tokio::pin!(signal);
+        let mut output_ok = true;
+        let mut signal_ok = true;
+        let stopped = loop {
+            tokio::select! {
+                biased;
+                _=output.disconnected()=>{output_ok=false;cancel.cancel();break watching.await;},
+                result=&mut signal=>{signal_ok=result.is_ok();cancel.cancel();break watching.await;},
+                result=&mut watching=>break result,
+                event=rx.recv()=>if let Some(event)=event && watch_write(&mut output,&Wire::Event(event)).await.is_err(){output_ok=false;cancel.cancel();break watching.await;},
+            }
+        };
+        while let Ok(event) = rx.try_recv() {
+            if output_ok && watch_write(&mut output, &Wire::Event(event)).await.is_err() {
+                output_ok = false;
+            }
+        }
+        if output_ok
+            && watch_write(&mut output, &Wire::Shutdown(stopped))
+                .await
+                .is_err()
+        {
+            output_ok = false;
+        }
+        let finished = output.finish().await.is_ok();
+        if !output_ok || !finished {
+            return error("output_unavailable");
+        }
+        if signal_ok && stopped.connection_closed {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::from(2)
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        error("desktop_discovery_unsupported")
+    }
+}
+async fn desktop_watch_diagnostics(json: bool) -> ExitCode {
+    #[cfg(target_os = "linux")]
+    {
+        use styx_runtime::session_probe::watch::{self, ParentStop};
+        if !json {
+            eprintln!("Unverified OS candidates; this stream grants no Desktop access:");
+        }
+        let mut output = match crate::watch_output::WatchOutput::open() {
+            Ok(value) => value,
+            Err(_) => return error("output_unavailable"),
+        };
+        let cancel = CancellationToken::new();
+        let (events, mut rx) = tokio::sync::mpsc::channel(8);
+        let watching = watch::watch_current_user(events, cancel.clone());
+        tokio::pin!(watching);
+        let signal = stop_signal();
+        tokio::pin!(signal);
+        let mut output_ok = true;
+        let mut signal_ok = true;
+        let report = loop {
+            tokio::select! {
+                biased;
+                _=output.disconnected()=>{output_ok=false;cancel.cancel();break watching.await;},
+                result=&mut signal=>{signal_ok=result.is_ok();cancel.cancel();break watching.await;},
+                result=&mut watching=>break result,
+                event=rx.recv()=>if let Some(event)=event && watch_write(&mut output,&event).await.is_err(){output_ok=false;cancel.cancel();break watching.await;},
+            }
+        };
+        while let Ok(event) = rx.try_recv() {
+            if output_ok && watch_write(&mut output, &event).await.is_err() {
+                output_ok = false;
+            }
+        }
+        if output_ok
+            && watch_write(
+                &mut output,
+                &serde_json::json!({"schema":1,"watch_shutdown":report}),
+            )
+            .await
+            .is_err()
+        {
+            output_ok = false;
+        }
+        let finished = output.finish().await.is_ok();
+        if !output_ok || !finished {
+            return error("output_unavailable");
+        }
+        if signal_ok
+            && report.child_reaped
+            && report.stdout_joined
+            && report.reason == ParentStop::Cancelled
+        {
+            ExitCode::SUCCESS
+        } else {
+            ExitCode::from(2)
+        }
+    }
+    #[cfg(not(target_os = "linux"))]
+    {
+        let _ = json;
+        error("desktop_discovery_unsupported")
+    }
+}
+
 async fn desktop_diagnostics(json: bool) -> ExitCode {
     #[cfg(target_os = "linux")]
     {
@@ -167,6 +311,24 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
     use styx_runtime::foreground::{self, HostWireMode};
     match cli.command {
         Command::LinuxDesktopProbe => desktop_probe_worker().await,
+        Command::LinuxDesktopWatch => desktop_watch_worker().await,
+        Command::Plan { state_dir, json } => {
+            match styx_runtime::management::inspect_deployment(&state_dir).await {
+                Ok(plan) => {
+                    if !json {
+                        eprintln!(
+                            "Configuration intent; runtime health and management ownership are unobserved:"
+                        );
+                    }
+                    if write_json(&plan).is_err() {
+                        error("output_unavailable")
+                    } else {
+                        ExitCode::SUCCESS
+                    }
+                }
+                Err(value) => error(value.code()),
+            }
+        }
         Command::BuildInfo => {
             println!(
                 "styx {} contract={} stage={}",
@@ -181,6 +343,12 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
             command:
                 HostCommand::Stop { .. } | HostCommand::Pause { .. } | HostCommand::Resume { .. },
         } => error("unsupported"),
+        Command::Doctor {
+            desktop_sessions: true,
+            watch: true,
+            json,
+            ..
+        } => desktop_watch_diagnostics(json).await,
         Command::Doctor {
             desktop_sessions: true,
             json,

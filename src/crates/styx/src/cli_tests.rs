@@ -60,6 +60,7 @@ fn desktop_candidate_diagnostics_cannot_supply_authority_or_change_profile_mode(
         Command::Doctor {
             state_dir: None,
             desktop_sessions: true,
+            watch: false,
             json: true
         }
     ));

@@ -7,3 +7,5 @@ pub mod enrollment;
 pub mod session;
 
 pub mod browser;
+
+pub mod management;

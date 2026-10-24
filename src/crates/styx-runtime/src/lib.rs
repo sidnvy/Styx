@@ -8,6 +8,7 @@ pub mod foreground;
 pub mod gateway;
 pub mod host;
 pub mod ipc;
+pub mod management;
 pub mod platform;
 pub mod providers;
 pub mod session;

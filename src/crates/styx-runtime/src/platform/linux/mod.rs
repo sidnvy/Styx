@@ -446,3 +446,5 @@ pub async fn discover_candidates(uid: u32) -> Result<LinuxDiscoverySnapshot, Dis
 
 #[cfg(test)]
 mod tests;
+
+pub(crate) mod watch;
