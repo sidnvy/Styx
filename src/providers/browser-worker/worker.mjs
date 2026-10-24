@@ -91,6 +91,14 @@ async function main() {
     // or context recovery is replayed after transport errors or browser_close.
     contextPromise ??= chromium.launchPersistentContext(config.profile_dir, {
       headless: true, chromiumSandbox: true, executablePath: config.browser_executable,
+      // Headless Chrome has no desktop-portal/session-bus responsibility. Recent
+      // Chromium can ask the user manager to move its main PID to another scope,
+      // outside the Rust-owned resource/cleanup boundary. Keep the supervisor's
+      // real bus, but give only this native child an explicit non-socket address.
+      // An absent address could trigger libdbus auto-discovery instead.
+      ...(process.platform === 'linux' ? {
+        env: { ...process.env, DBUS_SESSION_BUS_ADDRESS: 'unix:path=/dev/null' },
+      } : {}),
       acceptDownloads: true, downloadsPath: config.output_dir,
       viewport: { width: 1280, height: 800 },
     }).then(async value => {
