@@ -293,8 +293,15 @@ def execute(args):
         if md["status"] == "PASS":
             gate.semantic(md, metadata_errors(json.loads(gate.read("dependency-metadata")), policy, ROOT))
         gate.run("format", ["cargo", "fmt", "--all", "--", "--check"], timeout=120)
-        gate.run("clippy", ["cargo", "clippy", "--workspace", "--all-targets", "--locked", "--offline", "--", "-D", "warnings"])
+        clippy = gate.run("clippy", ["cargo", "clippy", "--workspace", "--all-targets", "--locked", "--offline", "--", "-D", "warnings"])
+        # Later scenario commands compile this same workspace. Preserve the first
+        # failure and report required checks missing; do not repeatedly invoke a
+        # known failing build or spend native fixtures on an invalid baseline.
+        if clippy["status"] != "PASS":
+            raise ValueError("workspace_lint_or_compile_precondition_failed")
         tests = gate.run("workspace-tests", ["cargo", "test", "--workspace", "--locked", "--offline"])
+        if tests["status"] != "PASS":
+            raise ValueError("workspace_regression_precondition_failed")
         # Child helper stdout can interleave with libtest's progress output.
         # The official list-only pass executes nothing and gives a complete,
         # stable ignored inventory without inferring it from progress lines.

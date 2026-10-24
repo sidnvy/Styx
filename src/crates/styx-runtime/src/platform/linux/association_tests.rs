@@ -259,7 +259,7 @@ fn fresh_source_comparison_preserves_identity_but_not_window_contents() {
     // Synthetic source boundary only, not a native collector/Agent attestation.
     let lease = |facts| LinuxAssociationLease {
         facts,
-        _processes: vec![],
+        _kernel_pins: vec![],
         _endpoints: vec![],
     };
     let original = source_facts();
