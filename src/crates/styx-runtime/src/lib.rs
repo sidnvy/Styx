@@ -16,3 +16,5 @@ pub mod session;
 pub mod session_probe;
 pub mod store;
 pub mod tls;
+
+pub mod release;

@@ -306,3 +306,76 @@ fn native_management_explicit_inputs_and_legacy_routes_are_separate_batch() {
         .collect();
     assert!(Cli::try_parse_from(invalid_run).is_err());
 }
+
+#[test]
+fn release_verification_requires_external_pin_and_has_no_execution_overrides() {
+    let pin = "a".repeat(64);
+    let args = [
+        "styx",
+        "release",
+        "verify",
+        "--payload-dir",
+        "/owned/payload",
+        "--publisher-file",
+        "/owned/trusted-publisher.pem",
+        "--expected-publisher",
+        pin.as_str(),
+        "--json",
+    ];
+    assert!(matches!(
+        Cli::try_parse_from(args).unwrap().command,
+        Command::Release {
+            command: ReleaseCommand::Verify { json: true, .. }
+        }
+    ));
+    assert!(
+        Cli::try_parse_from([
+            "styx",
+            "release",
+            "verify",
+            "--payload-dir",
+            "/owned/payload",
+            "--publisher-file",
+            "/owned/trusted-publisher.pem"
+        ])
+        .is_err()
+    );
+    assert!(
+        Cli::try_parse_from([
+            "styx",
+            "release",
+            "verify",
+            "--payload-dir",
+            "/owned/payload",
+            "--expected-publisher",
+            pin.as_str()
+        ])
+        .is_err()
+    );
+    for option in [
+        "--key",
+        "--private-key",
+        "--entrypoint",
+        "--binary",
+        "--trust-package-key",
+        "--install",
+        "--run",
+    ] {
+        let mut invalid = args.to_vec();
+        invalid.extend([option, "untrusted"]);
+        assert!(Cli::try_parse_from(invalid).is_err());
+    }
+    // Release verification input is not a new Host publisher-policy override.
+    assert!(
+        Cli::try_parse_from([
+            "styx",
+            "host",
+            "run",
+            "--state-dir",
+            "/owned/private",
+            "--expected-publisher",
+            pin.as_str()
+        ])
+        .is_err()
+    );
+}

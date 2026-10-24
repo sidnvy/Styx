@@ -38,6 +38,11 @@ enum Command {
         #[command(subcommand)]
         command: GatewayCommand,
     },
+    /// Verify an offline release using an externally trusted public publisher pin.
+    Release {
+        #[command(subcommand)]
+        command: ReleaseCommand,
+    },
     /// Initialize a fresh native configuration root; never adopts legacy state.
     Init {
         #[arg(long)]
@@ -187,6 +192,22 @@ enum GatewayCommand {
     Run {
         #[arg(long)]
         state_dir: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ReleaseCommand {
+    /// Read-only signature and payload verification; never installs or runs it.
+    Verify {
+        #[arg(long)]
+        payload_dir: PathBuf,
+        #[arg(long)]
+        publisher_file: PathBuf,
+        /// Public SHA256 pin from trusted external policy, not from the payload.
+        #[arg(long)]
+        expected_publisher: String,
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -582,6 +603,36 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
             }
             Err(value) => error(value.code()),
         },
+        Command::Release {
+            command:
+                ReleaseCommand::Verify {
+                    payload_dir,
+                    publisher_file,
+                    expected_publisher,
+                    json,
+                },
+        } => {
+            match styx_runtime::release::inspect(&payload_dir, &publisher_file, &expected_publisher)
+                .await
+            {
+                Ok(report) => {
+                    if !json {
+                        eprintln!(
+                            "Offline release verification; no installation or runtime activation:"
+                        );
+                    }
+                    if write_json(&report).is_err() {
+                        error("output_unavailable")
+                    } else {
+                        ExitCode::SUCCESS
+                    }
+                }
+                Err(value) => {
+                    eprintln!("{}", serde_json::json!({"schema":1,"error":value.code()}));
+                    ExitCode::from(value.exit_code())
+                }
+            }
+        }
         Command::BuildInfo => {
             println!(
                 "styx {} contract={} stage={}",

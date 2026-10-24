@@ -22,3 +22,5 @@ pub mod enrollment;
 pub mod management;
 
 pub mod native_management;
+
+pub mod native_release;
