@@ -28,6 +28,8 @@ use tokio_util::sync::CancellationToken;
 pub(crate) enum DesktopSourceError {
     #[error("desktop source unavailable")]
     Unavailable,
+    #[error("desktop source association acquisition refused")]
+    Acquisition(crate::session_probe::association::AssociationProbeError),
     #[error("desktop source changed or ended")]
     Fenced,
     #[error("desktop source probe busy")]
@@ -39,6 +41,7 @@ impl DesktopSourceError {
     pub(crate) fn code(self) -> &'static str {
         match self {
             Self::Unavailable => "desktop_source_unavailable",
+            Self::Acquisition(error) => error.code(),
             Self::Fenced => "desktop_source_fenced",
             Self::Busy => "desktop_source_busy",
             Self::Supervisor => "desktop_source_supervisor_failed",
@@ -316,6 +319,7 @@ async fn supervise(
                             _ => { state.fence(); Err(DesktopSourceError::Fenced) }
                         }
                     },
+                    Ok(Err(error)) => { state.fence(); Err(DesktopSourceError::Acquisition(error)) },
                     _ => { state.fence(); Err(DesktopSourceError::Fenced) }
                 };
                 let failed = result.is_err();

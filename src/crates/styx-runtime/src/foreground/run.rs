@@ -203,10 +203,21 @@ fn event(
     device: &DeviceId,
     generation: Option<&ConnectionGeneration>,
 ) {
+    event_with_reason(events, cancel, name, device, generation, None);
+}
+fn event_with_reason(
+    events: &mpsc::Sender<ForegroundEvent>,
+    cancel: &CancellationToken,
+    name: &'static str,
+    device: &DeviceId,
+    generation: Option<&ConnectionGeneration>,
+    reason: Option<&'static str>,
+) {
     if events
         .try_send(ForegroundEvent {
             schema: 1,
             event: name,
+            reason,
             device_id: Some(device.clone()),
             connection_generation: generation.cloned(),
         })
@@ -456,8 +467,15 @@ async fn run_owned(
     let computer = if mode == HostWireMode::PairedV3 {
         match prepare_computer(&admitted, &host).await {
             Ok(source) => source,
-            Err(_) => {
-                event(&events, &cancel, "computer_unavailable", &device, None);
+            Err(error) => {
+                event_with_reason(
+                    &events,
+                    &cancel,
+                    "computer_unavailable",
+                    &device,
+                    None,
+                    Some(error.code()),
+                );
                 None
             }
         }

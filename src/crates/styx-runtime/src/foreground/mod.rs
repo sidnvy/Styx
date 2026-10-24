@@ -16,6 +16,9 @@ pub enum HostWireMode {
 pub struct ForegroundEvent {
     pub schema: u32,
     pub event: &'static str,
+    /// Fixed category only; never profile contents, native output or credentials.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reason: Option<&'static str>,
     pub device_id: Option<styx_contracts::identity::DeviceId>,
     pub connection_generation: Option<styx_contracts::identity::ConnectionGeneration>,
 }

@@ -601,6 +601,7 @@ mod platform {
             .try_send(ForegroundEvent {
                 schema: 1,
                 event: name,
+                reason: None,
                 device_id: None,
                 connection_generation: None,
             })
