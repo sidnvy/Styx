@@ -956,11 +956,11 @@ impl GatewayToolBackend for PairedGatewayBackend {
                 Err(e) => failure(e, None, false),
             },
             #[cfg(target_os = "linux")]
-            #[cfg(target_os = "linux")]
             name if computer::is_public_computer_tool(name) => {
                 self.computer_call(owner, request.name.as_ref(), request.arguments)
                     .await
             }
+            #[cfg(target_os = "linux")]
             name if browser::is_public_browser_tool(name) => {
                 self.browser_call(owner, request.name.as_ref(), request.arguments)
                     .await
@@ -1043,6 +1043,7 @@ impl GatewayOwnerLifecycle for PairedGatewayBackend {
                 });
                 #[cfg(target_os = "linux")]
                 state.browsers.clear_owner(owner);
+                #[cfg(target_os = "linux")]
                 state.computers.clear_owner(owner);
                 OwnerCleanup::Complete
             }
