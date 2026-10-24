@@ -112,6 +112,117 @@ const config=JSON.stringify({schema:1,mode:'join-existing',gateway:{url:'https:/
             Err(ProfileError::UntrustedRelease)
         ));
     }
+    /// Real disposable RSA/Ed25519/TLS fixture; only protected loading is
+    /// exercised. No native executor, Gateway request or account migration runs.
+    #[test]
+    fn paired_route_retains_original_trust_and_uses_configured_normalized_origin() {
+        let f = Fixture::new();
+        let protected = [
+            f.state.join("deployment.json"),
+            f.state.join("state.json"),
+            f.base.join("publisher.pem"),
+            f.base.join("device/identity.json"),
+            f.base.join("device/identity.pem"),
+            f.base.join("device/host.json"),
+            f.base.join("device/host.token"),
+            f.base.join("gateway-ca.pem"),
+            f.base.join("install/active.json"),
+            f.release().join("manifest.json"),
+            f.release().join("manifest.sig"),
+            f.release().join("bin/codex"),
+        ];
+        let originals: Vec<_> = protected
+            .iter()
+            .map(|path| Sha256Digest::of_bytes(&fs::read(path).unwrap()))
+            .collect();
+        let legacy = load_legacy(&f.state).unwrap();
+        let paired = load_paired(&f.state).unwrap();
+        assert_eq!(legacy.diagnostics().wire_mode, "explicit_legacy_gateway");
+        assert_eq!(paired.diagnostics().wire_mode, "paired_v3");
+        assert_eq!(
+            paired.diagnostics().runtime_format,
+            "legacy_js_v1_executor_only"
+        );
+        assert_eq!(
+            legacy.endpoint().as_str(),
+            "wss://127.0.0.1:37719/styx/hosts/styx-1234567890abcdef12345678/exec"
+        );
+        assert_eq!(
+            paired.endpoint().as_str(),
+            "wss://127.0.0.1:37719/styx/host/v3/styx-1234567890abcdef12345678/exec"
+        );
+        let expected = GatewayId::try_from(format!(
+            "paired.{}",
+            Sha256Digest::of_bytes(b"https://127.0.0.1:37719").to_hex()
+        ))
+        .unwrap();
+        assert_eq!(paired.paired_gateway_namespace(), expected);
+        assert_eq!(legacy.paired_gateway_namespace(), expected);
+        assert_eq!(paired.device_id(), legacy.device_id());
+        assert_eq!(
+            paired.diagnostics().manifest_sha256,
+            legacy.diagnostics().manifest_sha256
+        );
+        assert_eq!(
+            paired.executor_config().unwrap().environment,
+            legacy.executor_config().unwrap().environment
+        );
+        paired.revalidate().unwrap();
+        for (path, original) in protected.iter().zip(&originals) {
+            assert_eq!(Sha256Digest::of_bytes(&fs::read(path).unwrap()), *original);
+        }
+        // Explicit controlled fixture edits: a normalized origin, not spelling
+        // or a message-supplied namespace, is the stable Gateway authority key.
+        let config_file = f.state.join("deployment.json");
+        let state_file = f.state.join("state.json");
+        let host_file = f.base.join("device/host.json");
+        let mut config: serde_json::Value =
+            serde_json::from_slice(&fs::read(&config_file).unwrap()).unwrap();
+        let mut state: serde_json::Value =
+            serde_json::from_slice(&fs::read(&state_file).unwrap()).unwrap();
+        let mut host: serde_json::Value =
+            serde_json::from_slice(&fs::read(&host_file).unwrap()).unwrap();
+        config["gateway"]["url"] = serde_json::json!("https://LOCALHOST:443/");
+        host["gateway_ws_url"] = serde_json::json!("wss://localhost/");
+        let raw_config = serde_json::to_vec(&config).unwrap();
+        state["configSha256"] = serde_json::json!(Sha256Digest::of_bytes(&raw_config).to_hex());
+        fs::write(&config_file, raw_config).unwrap();
+        fs::write(&state_file, serde_json::to_vec(&state).unwrap()).unwrap();
+        fs::write(&host_file, serde_json::to_vec(&host).unwrap()).unwrap();
+        assert!(matches!(paired.revalidate(), Err(ProfileError::Changed)));
+        assert!(matches!(legacy.revalidate(), Err(ProfileError::Changed)));
+        let normalized = load_paired(&f.state).unwrap();
+        assert_eq!(
+            normalized.endpoint().as_str(),
+            "wss://localhost/styx/host/v3/styx-1234567890abcdef12345678/exec"
+        );
+        assert_eq!(
+            normalized.paired_gateway_namespace(),
+            GatewayId::try_from(format!(
+                "paired.{}",
+                Sha256Digest::of_bytes(b"https://localhost").to_hex()
+            ))
+            .unwrap()
+        );
+        host["gateway_ws_url"] = serde_json::json!("wss://localhost:444/");
+        fs::write(&host_file, serde_json::to_vec(&host).unwrap()).unwrap();
+        assert!(matches!(load_paired(&f.state), Err(ProfileError::Invalid)));
+        assert!(matches!(load_legacy(&f.state), Err(ProfileError::Invalid)));
+        host["gateway_ws_url"] = serde_json::json!("wss://localhost/");
+        host["host_id"] = serde_json::json!("styx-wrong-device");
+        fs::write(&host_file, serde_json::to_vec(&host).unwrap()).unwrap();
+        assert!(matches!(load_paired(&f.state), Err(ProfileError::Invalid)));
+        assert!(matches!(load_legacy(&f.state), Err(ProfileError::Invalid)));
+        host["host_id"] = serde_json::json!("styx-1234567890abcdef12345678");
+        fs::write(&host_file, serde_json::to_vec(&host).unwrap()).unwrap();
+        let identity_file = f.base.join("device/identity.json");
+        let mut identity: serde_json::Value =
+            serde_json::from_slice(&fs::read(&identity_file).unwrap()).unwrap();
+        identity["fingerprint"] = serde_json::json!("0".repeat(64));
+        fs::write(identity_file, serde_json::to_vec(&identity).unwrap()).unwrap();
+        assert!(matches!(load_paired(&f.state), Err(ProfileError::Invalid)));
+        assert!(matches!(load_legacy(&f.state), Err(ProfileError::Invalid)));
+    }
     #[test]
     fn state_transaction_and_publisher_pins_remain_authoritative() {
         let f = Fixture::new();
@@ -194,6 +305,10 @@ const config=JSON.stringify({schema:1,mode:'join-existing',gateway:{url:'https:/
 fn unsupported_platform_does_not_read_or_fall_back() {
     assert!(matches!(
         super::load_legacy(std::path::Path::new("/nonexistent")),
+        Err(super::ProfileError::Unsupported)
+    ));
+    assert!(matches!(
+        super::load_paired(std::path::Path::new("/nonexistent")),
         Err(super::ProfileError::Unsupported)
     ));
 }

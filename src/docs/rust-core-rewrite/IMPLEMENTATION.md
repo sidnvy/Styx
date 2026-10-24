@@ -34,7 +34,7 @@ Private plans and saved desired configuration do not imply OS service actions or
 identity creation. The current Owner Control Report carries exact integration and
 artifact evidence; prior per-area receipts are not inherited by later source.
 
-No Rust candidate has been packaged, signed, installed or accepted on the three platforms. Existing signed packages and original device identities/pairing/permissions have not been modified. Historical JS test counts are not Rust completion evidence. Stable remains NO-GO.
+An internal Linux configuration-preview archive has been built and signed with an explicit temporary test publisher at checkpoint8121ce1, with actual signature/tamper/old-reader/extracted CLI evidence. It is not a product installer or runtime deployment. No unified Rust candidate has been installed or accepted on the three platforms. Existing signed packages and original device identities/pairing/permissions have not been modified. Historical JS test counts are not Rust completion evidence. Stable remains NO-GO.
 
 Evidence tiers remain distinct: codec/fixture checks; real external executor interoperability; development vertical slice; exact final candidate native acceptance. Root integration commits alone cannot promote one tier into another.
 
@@ -149,3 +149,6 @@ The configuration owner now shares one move-owned writer with singleton typed en
 Related actual owned-file/service-gate cases and an independent five-scene process-exit/reopen batch passed at the recorded exact source inputs. These do not complete R21: no canonical apply/commit/recovery, native reader barrier or legacy handoff is implemented yet. Nonempty management journals remain fenced across reopen until that reconciliation exists. See [ADR-012](ADR-012-SHARED-CONFIGURATION-WRITER-PREPARATION.md); current frozen-gate/integration evidence remains in the external Owner Control Report. No Rust package/install/deployment or latest-platform acceptance is inferred.
 
 A subsequent liveness correction publishes monotonic owner poison/fence facts without taking the filesystem mutex on async enrollment/Host response checks. The real current-thread service/held-owner-lock case and the affected shared-writer plus process-exit/reopen batches passed at their exact inputs. Actual filesystem decisions remain under the single guarded writer; these published rejection bits cannot authorize apply or release maintenance. Mac native compile evidence at5fbb909 predates this correction and is not inherited by the newer source.
+
+
+Paired foreground CLI composition is in progress under [ADR-014](ADR-014-PAIRED-FOREGROUND-COMPOSITION.md). Existing protected worker/identity inputs remain an explicit compatibility bootstrap, not completed native package or same-identity cutover. Gateway requires an already initialized native journal. No product fresh-onboarding writer or durable cross-process Stop is claimed by synthetic fixture imports and TERM cleanup. Read the external Owner Control Report for exact tested versus working source.

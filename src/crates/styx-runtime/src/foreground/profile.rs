@@ -18,7 +18,7 @@ use std::{
     path::{Component, Path, PathBuf},
     time::Duration,
 };
-use styx_contracts::identity::{DeviceId, Sha256Digest};
+use styx_contracts::identity::{DeviceId, GatewayId, Sha256Digest};
 const JSON_LIMIT: usize = 1024 * 1024;
 #[derive(Debug, Clone, Copy, thiserror::Error)]
 pub enum ProfileError {
@@ -174,6 +174,7 @@ pub struct LoadedLegacyProfile {
     host_base_dir: PathBuf,
     device: DeviceId,
     endpoint: LinkEndpoint,
+    paired_namespace: GatewayId,
     tls: GatewayClientTls,
     bearer: SecretBearer,
     executor: PinnedExecutable,
@@ -201,6 +202,11 @@ impl LoadedLegacyProfile {
     }
     pub fn endpoint(&self) -> &LinkEndpoint {
         &self.endpoint
+    }
+    /// Configured normalized HTTPS origin, never a remote wire namespace.
+    /// This is a routing binding only, not a new publisher or device authority.
+    pub fn paired_gateway_namespace(&self) -> GatewayId {
+        self.paired_namespace.clone()
     }
     pub fn tls(&self) -> &GatewayClientTls {
         &self.tls
@@ -332,8 +338,21 @@ fn origin(raw: &str, scheme: &str) -> Result<url::Url, ProfileError> {
     }
     Ok(u)
 }
+#[derive(Clone, Copy)]
+enum GatewayWireMode {
+    Legacy,
+    PairedV3,
+}
 /// Reads the original deployment authority; does not initialize a new profile.
 pub fn load_legacy(state_dir: &Path) -> Result<LoadedLegacyProfile, ProfileError> {
+    load(state_dir, GatewayWireMode::Legacy)
+}
+/// Explicit paired-v3 bridge using the SAME protected original profile and
+/// signed legacy executor closure. No identity, pairing or native-format rewrite.
+pub fn load_paired(state_dir: &Path) -> Result<LoadedLegacyProfile, ProfileError> {
+    load(state_dir, GatewayWireMode::PairedV3)
+}
+fn load(state_dir: &Path, mode: GatewayWireMode) -> Result<LoadedLegacyProfile, ProfileError> {
     if !cfg!(target_os = "linux") {
         return Err(ProfileError::Unsupported);
     }
@@ -441,7 +460,17 @@ pub fn load_legacy(state_dir: &Path) -> Result<LoadedLegacyProfile, ProfileError
     if endpoint != expected_ws {
         return Err(ProfileError::Invalid);
     }
-    endpoint.set_path(&format!("/styx/hosts/{}/exec", identity.device_id.as_str()));
+    let normalized_origin = gateway.origin().ascii_serialization();
+    let paired_namespace = GatewayId::try_from(format!(
+        "paired.{}",
+        Sha256Digest::of_bytes(normalized_origin.as_bytes()).to_hex()
+    ))
+    .map_err(|_| ProfileError::Invalid)?;
+    let endpoint_path = match mode {
+        GatewayWireMode::Legacy => format!("/styx/hosts/{}/exec", identity.device_id.as_str()),
+        GatewayWireMode::PairedV3 => format!("/styx/host/v3/{}/exec", identity.device_id.as_str()),
+    };
+    endpoint.set_path(&endpoint_path);
     let endpoint_text = endpoint.to_string();
     let endpoint = LinkEndpoint::parse(endpoint.as_str()).map_err(|_| ProfileError::Invalid)?;
     let ca_file = host
@@ -608,6 +637,7 @@ pub fn load_legacy(state_dir: &Path) -> Result<LoadedLegacyProfile, ProfileError
         host_base_dir: base.clone(),
         device: identity.device_id.clone(),
         endpoint,
+        paired_namespace,
         tls,
         bearer,
         executor,
@@ -621,7 +651,10 @@ pub fn load_legacy(state_dir: &Path) -> Result<LoadedLegacyProfile, ProfileError
             device_id: identity.device_id,
             endpoint: endpoint_text,
             runtime_format: "legacy_js_v1_executor_only",
-            wire_mode: "explicit_legacy_gateway",
+            wire_mode: match mode {
+                GatewayWireMode::Legacy => "explicit_legacy_gateway",
+                GatewayWireMode::PairedV3 => "paired_v3",
+            },
             version: active.version,
             publisher_sha256: deployment.host.publisher,
             manifest_sha256: active.manifest_sha256,

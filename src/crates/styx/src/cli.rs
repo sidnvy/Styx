@@ -33,7 +33,7 @@ enum Command {
         #[command(subcommand)]
         command: HostCommand,
     },
-    /// Gateway foreground composition is not implemented by this CLI slice.
+    /// Run the protected paired Gateway in this foreground process.
     Gateway {
         #[command(subcommand)]
         command: GatewayCommand,
@@ -642,8 +642,64 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
             );
             ExitCode::SUCCESS
         }
-        Command::Gateway { .. }
-        | Command::Host {
+        Command::Gateway {
+            command: GatewayCommand::Run {
+                state_dir: Some(state_dir),
+            },
+        } => {
+            let cancel = CancellationToken::new();
+            let (events, mut received) = tokio::sync::mpsc::channel(16);
+            let event_cancel = cancel.clone();
+            let output = tokio::spawn(async move {
+                let mut healthy = true;
+                while let Some(event) = received.recv().await {
+                    if healthy && write_json(&event).is_err() {
+                        healthy = false;
+                        event_cancel.cancel();
+                    }
+                }
+                healthy
+            });
+            let mut signal_failed = false;
+            let outcome = {
+                let running = foreground::gateway_run(&state_dir, cancel.clone(), events);
+                tokio::pin!(running);
+                tokio::select! {
+                    result = &mut running => result,
+                    signal = stop_signal() => {
+                        signal_failed = signal.is_err();
+                        cancel.cancel();
+                        // The original owned future retains its leases until
+                        // tracked connections, native owners and workers settle.
+                        running.await
+                    },
+                }
+            };
+            let output_healthy = output.await.unwrap_or(false);
+            if signal_failed {
+                return error("signal_listener_failed");
+            }
+            if !output_healthy {
+                return error("output_unavailable");
+            }
+            match outcome {
+                Ok(outcome) => {
+                    if write_json(&outcome).is_err() {
+                        return error("output_unavailable");
+                    }
+                    if outcome.is_complete() {
+                        ExitCode::SUCCESS
+                    } else {
+                        error("gateway_shutdown_unknown")
+                    }
+                }
+                Err(error_value) => error(error_value.code()),
+            }
+        }
+        Command::Gateway {
+            command: GatewayCommand::Run { state_dir: None },
+        } => error("gateway_input_required"),
+        Command::Host {
             command:
                 HostCommand::Stop { .. } | HostCommand::Pause { .. } | HostCommand::Resume { .. },
         } => error("unsupported"),

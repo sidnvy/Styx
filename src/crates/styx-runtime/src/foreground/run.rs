@@ -1,11 +1,12 @@
-//! Explicit legacy foreground, not a migration/service manager. All ownership
+//! Protected foreground execution, not a migration/service manager. All ownership
 //! refusals are conservative observations; the Rust lease cannot lock old JS.
 use super::{ForegroundError, ForegroundEvent, ForegroundOutcome, HostWireMode, profile};
 use crate::{
     host::{
         bootstrap::OwnedExecHost,
-        legacy::TrustedLegacyGateway,
+        legacy::{LegacyExecSession, TrustedLegacyGateway},
         link::{HostLinkBudget, HostWssLink, LinkAuthentication, LinkError},
+        protocol::{HostProtocol, PairedTrustedProfile},
     },
     providers::codex::TerminationEvidence,
     store::{ExecutionLeaseGuard, PrivateRoot},
@@ -197,14 +198,14 @@ async fn run_owned(
     cancel: CancellationToken,
     events: mpsc::Sender<ForegroundEvent>,
 ) -> Result<ForegroundOutcome, ForegroundError> {
-    if mode != HostWireMode::LegacyExplicit {
-        return Err(ForegroundError("paired_profile_not_implemented"));
-    }
     let path = state_dir.to_path_buf();
     // Never abandon a blocking reader/lease acquisition on signal. Join it,
     // then observe cancellation before any native executable is started.
     let admitted = tokio::task::spawn_blocking(move || {
-        let profile = profile::load_legacy(&path)?;
+        let profile = match mode {
+            HostWireMode::LegacyExplicit => profile::load_legacy(&path)?,
+            HostWireMode::PairedV3 => profile::load_paired(&path)?,
+        };
         let state = PrivateRoot::open(&path).map_err(|_| ForegroundError("state_root_refused"))?;
         let base = PrivateRoot::open(profile.host_base_dir())
             .map_err(|_| ForegroundError("host_root_refused"))?;
@@ -230,7 +231,7 @@ async fn run_owned(
         .to_string()
         .try_into()
         .expect("UUID identity");
-    let reservation = OwnedExecHost::reserve(generation, facts(&device), 16)
+    let reservation = OwnedExecHost::reserve(generation.clone(), facts(&device), 16)
         .map_err(|_| ForegroundError("host_reservation_refused"))?;
     let connection: ConnectionGeneration = uuid::Uuid::new_v4()
         .to_string()
@@ -278,86 +279,35 @@ async fn run_owned(
             return Err(ForegroundError("executor_start_failed"));
         }
     };
-    let namespace = format!(
-        "legacy.{}",
-        Sha256Digest::of_bytes(admitted.profile.endpoint().as_str().as_bytes()).to_hex()
-    );
-    let session = host.legacy_session(TrustedLegacyGateway {
-        endpoint: admitted.profile.endpoint().as_str().to_owned(),
-        gateway_namespace: namespace.try_into().expect("bounded namespace"),
-    });
+    // Keep this SAME protocol and executor across transport reconnects. In v3,
+    // per-chat owner admission comes only from the authenticated fixed Gateway;
+    // loading a device credential does not register a bootstrap MCP owner.
+    let session = match mode {
+        HostWireMode::LegacyExplicit => {
+            let namespace = format!(
+                "legacy.{}",
+                Sha256Digest::of_bytes(admitted.profile.endpoint().as_str().as_bytes()).to_hex()
+            );
+            host.legacy_session(TrustedLegacyGateway {
+                endpoint: admitted.profile.endpoint().as_str().to_owned(),
+                gateway_namespace: namespace.try_into().expect("bounded namespace"),
+            })
+            .map(ConnectionSession::Legacy)
+            .map_err(|_| ForegroundError("legacy_bootstrap_refused"))
+        }
+        HostWireMode::PairedV3 => host
+            .paired_protocol(PairedTrustedProfile {
+                endpoint: admitted.profile.endpoint().as_str().to_owned(),
+                gateway_namespace: admitted.profile.paired_gateway_namespace(),
+                device_id: device.clone(),
+                host_generation: generation,
+            })
+            .map(ConnectionSession::Paired)
+            .map_err(|_| ForegroundError("paired_bootstrap_refused")),
+    };
     let mut failure = None;
-    if let Ok(session) = session {
-        event(
-            &events,
-            &cancel,
-            "connected",
-            &device,
-            Some(link.generation()),
-        );
-        loop {
-            // This trusted collector runs alongside the SAME pinned connection
-            // future; a timer must not drop an in-flight request and invent EOF.
-            let housekeeping = async {
-                loop {
-                    tokio::time::sleep(Duration::from_secs(5)).await;
-                    let _ = host
-                        .authority()
-                        .collect_provider_retention(Duration::from_secs(1))
-                        .await;
-                }
-            };
-            let disconnected = tokio::select! {
-                _=cancel.cancelled()=>false,
-                _=housekeeping=>unreachable!("collector loop does not return"),
-                result=session.run_connection(&mut link)=>{
-                    event(&events,&cancel,if result.is_ok(){"disconnected"}else{"connection_result_unknown"},&device,Some(link.generation()));
-                    true
-                },
-            };
-            // The executor and supervised operations are NOT stopped by EOF.
-            // shutdown joins all I/O tasks even when graceful-close times out;
-            // Deadline is not evidence of a still-detached transport task.
-            if link.shutdown(Duration::from_secs(3)).await.is_err() {
-                event(&events, &cancel, "link_close_deadline", &device, None);
-            }
-            if !disconnected || cancel.is_cancelled() {
-                break;
-            }
-            let mut next = None;
-            loop {
-                tokio::select! {
-                    _=cancel.cancelled()=>break,
-                    _=tokio::time::sleep(Duration::from_secs(2))=>{},
-                }
-                if cancel.is_cancelled() {
-                    break;
-                }
-                if let Err(error) = validate(&admitted).await {
-                    failure = Some(error);
-                    break;
-                }
-                let generation: ConnectionGeneration = uuid::Uuid::new_v4()
-                    .to_string()
-                    .try_into()
-                    .expect("UUID identity");
-                event(&events, &cancel, "reconnecting", &device, Some(&generation));
-                let attempt = tokio::select! {
-                    _=cancel.cancelled()=>break,
-                    result=connect(&admitted.profile,generation,host.link_budget())=>result,
-                };
-                match attempt {
-                    Ok(v) => {
-                        next = Some(v);
-                        break;
-                    }
-                    Err(_) => event(&events, &cancel, "disconnected", &device, None),
-                }
-            }
-            let Some(connected) = next else {
-                break;
-            };
-            link = connected;
+    match session {
+        Ok(session) => {
             event(
                 &events,
                 &cancel,
@@ -365,10 +315,82 @@ async fn run_owned(
                 &device,
                 Some(link.generation()),
             );
+            loop {
+                // This trusted collector runs alongside the SAME pinned connection
+                // future; a timer must not drop an in-flight request and invent EOF.
+                let housekeeping = async {
+                    loop {
+                        tokio::time::sleep(Duration::from_secs(5)).await;
+                        let _ = host
+                            .authority()
+                            .collect_provider_retention(Duration::from_secs(1))
+                            .await;
+                    }
+                };
+                let disconnected = tokio::select! {
+                    _=cancel.cancelled()=>false,
+                    _=housekeeping=>unreachable!("collector loop does not return"),
+                    result=session.run_connection(&mut link)=>{
+                        event(&events,&cancel,if result.is_ok(){"disconnected"}else{"connection_result_unknown"},&device,Some(link.generation()));
+                        true
+                    },
+                };
+                // The executor and supervised operations are NOT stopped by EOF.
+                // shutdown joins all I/O tasks even when graceful-close times out;
+                // Deadline is not evidence of a still-detached transport task.
+                if link.shutdown(Duration::from_secs(3)).await.is_err() {
+                    event(&events, &cancel, "link_close_deadline", &device, None);
+                }
+                if !disconnected || cancel.is_cancelled() {
+                    break;
+                }
+                let mut next = None;
+                loop {
+                    tokio::select! {
+                        _=cancel.cancelled()=>break,
+                        _=tokio::time::sleep(Duration::from_secs(2))=>{},
+                    }
+                    if cancel.is_cancelled() {
+                        break;
+                    }
+                    if let Err(error) = validate(&admitted).await {
+                        failure = Some(error);
+                        break;
+                    }
+                    let generation: ConnectionGeneration = uuid::Uuid::new_v4()
+                        .to_string()
+                        .try_into()
+                        .expect("UUID identity");
+                    event(&events, &cancel, "reconnecting", &device, Some(&generation));
+                    let attempt = tokio::select! {
+                        _=cancel.cancelled()=>break,
+                        result=connect(&admitted.profile,generation,host.link_budget())=>result,
+                    };
+                    match attempt {
+                        Ok(v) => {
+                            next = Some(v);
+                            break;
+                        }
+                        Err(_) => event(&events, &cancel, "disconnected", &device, None),
+                    }
+                }
+                let Some(connected) = next else {
+                    break;
+                };
+                link = connected;
+                event(
+                    &events,
+                    &cancel,
+                    "connected",
+                    &device,
+                    Some(link.generation()),
+                );
+            }
         }
-    } else {
-        let _ = link.shutdown(Duration::from_secs(3)).await;
-        failure = Some(ForegroundError("legacy_bootstrap_refused"));
+        Err(error) => {
+            let _ = link.shutdown(Duration::from_secs(3)).await;
+            failure = Some(error);
+        }
     }
     event(&events, &cancel, "stopping", &device, None);
     let mut outcome = ForegroundOutcome {
@@ -408,6 +430,21 @@ async fn run_owned(
         Err(error)
     } else {
         Ok(outcome)
+    }
+}
+
+/// A local composition choice, not a wire fallback. Protocol negotiation never
+/// silently switches to legacy mode if authenticated paired admission fails.
+enum ConnectionSession<'a> {
+    Legacy(LegacyExecSession<'a>),
+    Paired(HostProtocol<'a>),
+}
+impl ConnectionSession<'_> {
+    async fn run_connection(&self, link: &mut HostWssLink) -> Result<(), ()> {
+        match self {
+            Self::Legacy(session) => session.run_connection(link).await.map_err(|_| ()),
+            Self::Paired(protocol) => protocol.run_connection(link).await.map_err(|_| ()),
+        }
     }
 }
 

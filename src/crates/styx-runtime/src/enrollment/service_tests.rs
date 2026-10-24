@@ -471,6 +471,40 @@ pub(super) fn fresh_store(path: &Path) -> OwnedEnrollmentJournal {
     }
     OwnedEnrollmentJournal::open_existing(root, writer, JournalBudget::default()).unwrap()
 }
+/// External ordinary-CLI runtime acceptance imports a synthetic, already
+/// initialized journal. This producer is not a product onboarding/bootstrap API.
+/// It neither invents pair completion nor writes a device credential.
+#[test]
+#[ignore = "explicit fresh owned foreground fixture journal producer; not platform acceptance"]
+fn prepare_foreground_fixture_journal() {
+    let path = PathBuf::from(
+        std::env::var_os("STYX_TEST_FOREGROUND_JOURNAL").expect("explicit fresh journal path"),
+    );
+    assert!(path.is_absolute());
+    assert!(path.components().all(|part| !matches!(
+        part,
+        std::path::Component::ParentDir | std::path::Component::CurDir
+    )));
+    let parent = path.parent().expect("private existing fixture parent");
+    let parent_root = PrivateRoot::open(parent).expect("protected fixture parent");
+    std::fs::create_dir(&path).expect("fixture leaf must be fresh");
+    std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let root = PrivateRoot::open(&path).unwrap();
+    let mut writer = root.try_configuration_writer().unwrap();
+    {
+        let mut journal = EnrollmentJournal::open(&root, &mut writer, JournalBudget::default())
+            .expect("initialize only explicitly new test journal");
+        journal.record_time_floor(now()).unwrap();
+    }
+    let store = OwnedEnrollmentJournal::open_existing(root, writer, JournalBudget::default())
+        .expect("same actual journal must reopen");
+    drop(store);
+    drop(parent_root);
+    println!(
+        "{{\"scope\":\"synthetic_foreground_fixture_not_product_initialization\",\"status\":\"PASS\"}}"
+    );
+}
+
 fn reopen_store(path: &Path) -> OwnedEnrollmentJournal {
     let root = PrivateRoot::open(path).unwrap();
     let writer = root.try_configuration_writer().unwrap();

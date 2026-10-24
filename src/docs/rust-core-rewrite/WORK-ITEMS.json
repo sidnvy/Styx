@@ -771,8 +771,8 @@
         "A26"
       ],
       "shared_files_rule": "root manifest/lock/contract public surface由integrator独占；planned paths仅在领取lease后可写",
-      "status": "PLANNED",
-      "implementation_started": false,
+      "status": "IN_PROGRESS",
+      "implementation_started": true,
       "receipt_required": [
         "base_revision",
         "contract_revision",
@@ -780,7 +780,8 @@
         "relevant_checks",
         "known_failures",
         "cleanup_and_lease_return"
-      ]
+      ],
+      "implementation_note": "Ordinary CLI paired foreground composition being connected through existing runtime ports. Current UID owned fixtures only; persistent managers/principal, durable Stop, native App lifecycle and same-identity cutover remain unfinished. No acceptance claimed before actual receipts."
     },
     {
       "id": "R23",
@@ -854,7 +855,7 @@
         "known_failures",
         "cleanup_and_lease_return"
       ],
-      "implementation_note": "Minimal native_rust_v1 schema2 configuration-preview manifest/verifier/build tooling implemented with local compile/CLI argument checks; actual artifact acceptance pending external receipts. Product installer, verified Host activation/rollback, original publisher/TCC continuity and legacy bridge/migration remain unfinished."
+      "implementation_note": "Internal Linux configuration-preview native schema2 verifier/builder and actual signed artifact/extracted CLI acceptance PASS at8121ce1 (external receipts). Temporary test publisher only. Product installer, verified Host activation/rollback, original publisher/TCC continuity, legacy bridge/migration and unified targets remain unfinished."
     },
     {
       "id": "R25",
