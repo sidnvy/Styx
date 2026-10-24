@@ -23,3 +23,7 @@ No public MCP schemas/tool counts, wire DTOs, installed member bytes, publisher/
 ## Required evidence
 
 Meaningful Core scenarios cover once-only, ordinary execution remaining refused, grant/revocation/session/deadline negatives, parent/owner-bound delivery and Unknown no replay. Parser scenarios cover real fixed-source shape, degraded/partial/count/token contradictions and bounded alias projection. One actual ordinary CLI/TLS/WSS/MCP owned GTK journey must read the exact window tree/nonce, keep input/capture refused, preserve independent unchanged input events, continue Exec and confirm original owned cleanup. Mock/parser PASS is not native/platform acceptance. Cross-platform implementations and full release gates remain open.
+
+## Exact window capture extension
+
+The AX-only slice passed its actual owned GTK read/refusal/Exec journey at fc470e6. A second fixed purpose, `DesktopWindowCaptureReadAcquisition`, now applies the same Core acquisition/delivery rules only to an exact PID/window screenshot with AX disabled and explicit bounded image dimension/deadline. It never permits the whole desktop, file output, implicit targets, AX, pointer or keyboard. Both purposes revalidate their own immutable branch in the native adapter. PNG/schema projection is only a protocol check: actual acceptance requires independently calculated pixels in the owned fixture and confirmed original cleanup. Full-frame/AX+capture combinations and input remain closed. No descriptor is promoted to Granted by either read.

@@ -515,14 +515,27 @@ impl HostCoordinator {
         }
         handle(desktop(&state)?, owner, &target)?;
         let payload = action.to_operation_payload()?;
-        if action.ax_read_request()?.is_some() {
-            Ok(state.ledger.prepare_desktop_read_acquisition(
-                owner,
-                target,
-                context,
-                payload,
-                self.now(),
-            )?)
+        if let Some(read) = action.desktop_read_request()? {
+            Ok(match read {
+                crate::providers::cua::DesktopReadRequest::Accessibility(_) => {
+                    state.ledger.prepare_desktop_read_acquisition(
+                        owner,
+                        target,
+                        context,
+                        payload,
+                        self.now(),
+                    )?
+                }
+                crate::providers::cua::DesktopReadRequest::WindowCapture(_) => {
+                    state.ledger.prepare_desktop_window_capture_acquisition(
+                        owner,
+                        target,
+                        context,
+                        payload,
+                        self.now(),
+                    )?
+                }
+            })
         } else {
             Ok(state
                 .ledger
@@ -569,14 +582,32 @@ impl HostCoordinator {
             let action: CuaAction =
                 serde_json::from_slice(state.ledger.inspect_payload(owner, id, digest)?)
                     .map_err(|_| CuaError::InvalidRequest)?;
-            let acquisition = action.ax_read_request()?;
+            let acquisition = action.desktop_read_request()?;
             let primary = if acquisition.is_some() {
-                super::desktop_read::acquisition_facts(&state)?
+                super::desktop_read::acquisition_facts(&state, context.capability)?
             } else {
                 facts(&state, context.capability)?
             };
-            if acquisition.is_some() {
-                styx_core::policy::check_desktop_read_acquisition(&context, &primary, self.now())?;
+            if let Some(read) = acquisition {
+                if read.capability() != context.capability {
+                    return Err(ErrorCategory::StateConflict.into());
+                }
+                match read {
+                    crate::providers::cua::DesktopReadRequest::Accessibility(_) => {
+                        styx_core::policy::check_desktop_read_acquisition(
+                            &context,
+                            &primary,
+                            self.now(),
+                        )?
+                    }
+                    crate::providers::cua::DesktopReadRequest::WindowCapture(_) => {
+                        styx_core::policy::check_desktop_window_capture_acquisition(
+                            &context,
+                            &primary,
+                            self.now(),
+                        )?
+                    }
+                }
             }
             for cap in action.required_capabilities()? {
                 if acquisition.is_some() {
@@ -598,7 +629,7 @@ impl HostCoordinator {
                 return Err(ErrorCategory::StaleObservation.into());
             }
             let acquired_target = acquisition
-                .map(crate::providers::cua::AxReadTarget::acquire)
+                .map(crate::providers::cua::DesktopReadTarget::acquire)
                 .transpose()?;
             let acquired_epoch = desktop(&state)?.source.epoch();
             let worker = desktop(&state)?.worker.clone();
@@ -655,7 +686,10 @@ impl HostCoordinator {
                         Err(ErrorCategory::SessionDisconnected.into())
                     } else {
                         let f = if acquired_target.is_some() {
-                            super::desktop_read::acquisition_facts(&state)
+                            super::desktop_read::acquisition_facts(
+                                &state,
+                                delivery_context.capability,
+                            )
                         } else {
                             facts(&state, delivery_context.capability)
                         };

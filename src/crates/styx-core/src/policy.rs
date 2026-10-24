@@ -40,6 +40,23 @@ pub fn check_desktop_read_acquisition(
     check_admission_inner(context, facts, now, true)
 }
 
+/// A fixed exact-window screenshot attempt has the same acquisition boundary
+/// as AX reading, but never grants AX, pointer or keyboard authorization.
+pub fn check_desktop_window_capture_acquisition(
+    context: &PreparedContext,
+    facts: &AdmissionFacts,
+    now: MonotonicMillis,
+) -> Result<(), ErrorCategory> {
+    if context.capability != CapabilityId::DesktopCapture
+        || context.session.is_none()
+        || context.observation.is_some()
+        || facts.descriptor.scope != Scope::Session
+    {
+        return Err(ErrorCategory::StateConflict);
+    }
+    check_admission_inner(context, facts, now, true)
+}
+
 fn check_admission_inner(
     context: &PreparedContext,
     facts: &AdmissionFacts,

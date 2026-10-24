@@ -1,6 +1,9 @@
 //! A bounded reservation ledger. Only a recorded, current reservation may dispatch.
 //! It owns immutable request bytes, not executor I/O. Outcome and liveness differ.
-use crate::policy::{AdmissionFacts, check_admission, check_desktop_read_acquisition};
+use crate::policy::{
+    AdmissionFacts, check_admission, check_desktop_read_acquisition,
+    check_desktop_window_capture_acquisition,
+};
 use std::collections::BTreeMap;
 use styx_contracts::{capability::CapabilityId, error::ErrorCategory, identity::*, operation::*};
 
@@ -52,6 +55,7 @@ pub enum ResourceDomain {
 pub enum OperationPurpose {
     Execute,
     DesktopAccessibilityReadAcquisition,
+    DesktopWindowCaptureReadAcquisition,
 }
 fn desktop_capability(capability: CapabilityId) -> bool {
     matches!(
@@ -361,6 +365,37 @@ impl OperationLedger {
             .purpose = OperationPurpose::DesktopAccessibilityReadAcquisition;
         Ok(snapshot)
     }
+    /// A fixed exact-window screenshot only; never a desktop/input grant.
+    pub fn prepare_desktop_window_capture_acquisition(
+        &mut self,
+        owner: &OwnerLease,
+        target: ResourceTarget,
+        context: PreparedContext,
+        payload: Vec<u8>,
+        now: MonotonicMillis,
+    ) -> Result<OperationSnapshot, ErrorCategory> {
+        if context.capability != CapabilityId::DesktopCapture
+            || context.session.is_none()
+            || context.observation.is_some()
+            || self.verify_target(owner, &target, &context)? != ResourceDomain::DesktopAgent
+        {
+            return Err(ErrorCategory::StateConflict);
+        }
+        let snapshot = self.prepare_record(
+            owner,
+            Some(target),
+            ResourceDomain::DesktopAgent,
+            context,
+            payload,
+            now,
+        )?;
+        // Still under exclusive ledger access, before publishing the reservation.
+        self.records
+            .get_mut(&snapshot.id)
+            .ok_or(ErrorCategory::StateConflict)?
+            .purpose = OperationPurpose::DesktopWindowCaptureReadAcquisition;
+        Ok(snapshot)
+    }
     fn verify_target(
         &self,
         owner: &OwnerLease,
@@ -480,6 +515,9 @@ impl OperationLedger {
             OperationPurpose::DesktopAccessibilityReadAcquisition => {
                 check_desktop_read_acquisition(&record.context, facts, now)?
             }
+            OperationPurpose::DesktopWindowCaptureReadAcquisition => {
+                check_desktop_window_capture_acquisition(&record.context, facts, now)?
+            }
         }
         let record = self
             .records
@@ -582,8 +620,11 @@ impl OperationLedger {
         now: MonotonicMillis,
     ) -> Result<OperationSnapshot, ErrorCategory> {
         let record = self.record_for(owner, action_id, digest)?;
-        if record.purpose != OperationPurpose::DesktopAccessibilityReadAcquisition
-            || record.domain != ResourceDomain::DesktopAgent
+        if !matches!(
+            record.purpose,
+            OperationPurpose::DesktopAccessibilityReadAcquisition
+                | OperationPurpose::DesktopWindowCaptureReadAcquisition
+        ) || record.domain != ResourceDomain::DesktopAgent
             || record.snapshot.state != OperationState::Succeeded
         {
             return Err(ErrorCategory::StateConflict);
@@ -599,7 +640,15 @@ impl OperationLedger {
         if self.verify_target(owner, target, &record.context)? != ResourceDomain::DesktopAgent {
             return Err(ErrorCategory::StateConflict);
         }
-        check_desktop_read_acquisition(&record.context, facts, now)?;
+        match record.purpose {
+            OperationPurpose::DesktopAccessibilityReadAcquisition => {
+                check_desktop_read_acquisition(&record.context, facts, now)?
+            }
+            OperationPurpose::DesktopWindowCaptureReadAcquisition => {
+                check_desktop_window_capture_acquisition(&record.context, facts, now)?
+            }
+            OperationPurpose::Execute => return Err(ErrorCategory::StateConflict),
+        }
         Ok(record.snapshot.clone())
     }
     pub fn request_cancel(

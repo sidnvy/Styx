@@ -26,9 +26,10 @@ use styx_core::operations::{DispatchPermit, OperationPurpose, OwnerLease, Resour
 mod admission;
 pub(crate) mod ax_snapshot;
 mod ax_target;
-pub(crate) use ax_target::{AxReadRequest, AxReadTarget};
+pub(crate) use ax_target::{DesktopReadRequest, DesktopReadTarget};
 mod retention;
 mod transport;
+pub(crate) mod window_capture;
 use tokio::{
     process::Child,
     sync::{OwnedMutexGuard, OwnedSemaphorePermit, Semaphore},
@@ -209,9 +210,15 @@ impl CuaAction {
         Ok(admission::classify(&self.name, &self.arguments)?.requires_observed_target)
     }
     /// Fixed read-only native branch; never selected by a serialized purpose flag.
-    pub(crate) fn ax_read_request(&self) -> Result<Option<AxReadRequest>> {
+    pub(crate) fn desktop_read_request(&self) -> Result<Option<DesktopReadRequest>> {
         self.validate()?;
-        AxReadRequest::classify(&self.name, &self.arguments)
+        if let Some(value) = ax_target::AxReadRequest::classify(&self.name, &self.arguments)? {
+            return Ok(Some(DesktopReadRequest::Accessibility(value)));
+        }
+        Ok(
+            window_capture::WindowCaptureRequest::classify(&self.name, &self.arguments)?
+                .map(DesktopReadRequest::WindowCapture),
+        )
     }
     fn mutates(&self) -> bool {
         admission::classify(&self.name, &self.arguments).map_or(true, |r| r.side_effecting)
@@ -771,8 +778,8 @@ impl CuaActionSlot {
         ) {
             return refused(e);
         }
-        if permit.purpose() == OperationPurpose::DesktopAccessibilityReadAcquisition
-            && !matches!(action.ax_read_request(), Ok(Some(_)))
+        if permit.purpose() != OperationPurpose::Execute
+            && !matches!(action.desktop_read_request(), Ok(Some(request)) if request.purpose() == permit.purpose())
         {
             return refused(CuaError::PermissionDenied);
         }

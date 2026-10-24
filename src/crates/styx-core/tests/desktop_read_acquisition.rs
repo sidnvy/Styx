@@ -462,3 +462,92 @@ fn unknown_never_replays_or_delivers_and_other_domains_cannot_acquire() {
             .is_err()
     );
 }
+
+#[test]
+fn window_capture_purpose_cannot_be_used_for_ax_or_native_input() {
+    let (mut ledger, owner, parent, _, _) = setup();
+    let c = context(CapabilityId::DesktopCapture);
+    let f = facts(&c);
+    assert_eq!(
+        check_admission(&c, &f, MonotonicMillis(3)),
+        Err(ErrorCategory::PermissionRequired)
+    );
+    let action = ledger
+        .prepare_desktop_window_capture_acquisition(
+            &owner,
+            target(&parent),
+            c.clone(),
+            b"fixed-window-capture".to_vec(),
+            MonotonicMillis(3),
+        )
+        .unwrap();
+    let DispatchDisposition::ExecuteOnce(permit) = ledger
+        .dispatch(
+            &owner,
+            &action.id,
+            action.payload_digest,
+            &f,
+            MonotonicMillis(4),
+        )
+        .unwrap()
+    else {
+        panic!("first dispatch missing");
+    };
+    assert_eq!(
+        permit.purpose(),
+        OperationPurpose::DesktopWindowCaptureReadAcquisition
+    );
+    ledger
+        .record_action_result(&action.id, ActionResult::Acknowledged, MonotonicMillis(5))
+        .unwrap();
+    ledger
+        .authorize_desktop_read_result(
+            &owner,
+            &action.id,
+            action.payload_digest,
+            &f,
+            MonotonicMillis(6),
+        )
+        .unwrap();
+    assert!(matches!(
+        ledger
+            .dispatch(
+                &owner,
+                &action.id,
+                action.payload_digest,
+                &f,
+                MonotonicMillis(6)
+            )
+            .unwrap(),
+        DispatchDisposition::Existing(_)
+    ));
+    for capability in [
+        CapabilityId::DesktopAccessibility,
+        CapabilityId::DesktopPointer,
+        CapabilityId::DesktopKeyboard,
+    ] {
+        assert!(
+            ledger
+                .prepare_desktop_window_capture_acquisition(
+                    &owner,
+                    target(&parent),
+                    context(capability),
+                    b"bad-purpose".to_vec(),
+                    MonotonicMillis(7)
+                )
+                .is_err()
+        );
+    }
+    let mut revoked = f.clone();
+    revoked.descriptor.authorization = Authorization::Revoked;
+    assert_eq!(
+        ledger.authorize_desktop_read_result(
+            &owner,
+            &action.id,
+            action.payload_digest,
+            &revoked,
+            MonotonicMillis(8)
+        ),
+        Err(ErrorCategory::PermissionDenied)
+    );
+}

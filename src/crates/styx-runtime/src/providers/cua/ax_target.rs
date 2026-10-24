@@ -1,5 +1,5 @@
 //! Exact, bounded AX-only acquisition. This is not OS write authorization.
-use super::{CuaError, Result};
+use super::{CuaError, Result, window_capture::WindowCaptureRequest};
 use crate::store::ProcessIdentity;
 use serde_json::{Map, Value};
 use std::{
@@ -61,21 +61,52 @@ impl AxReadRequest {
         Ok(Some(Self { pid, window_id }))
     }
 }
+#[derive(Clone, Copy)]
+pub(crate) enum DesktopReadRequest {
+    Accessibility(AxReadRequest),
+    WindowCapture(WindowCaptureRequest),
+}
+impl DesktopReadRequest {
+    pub(crate) fn capability(self) -> styx_contracts::capability::CapabilityId {
+        match self {
+            Self::Accessibility(_) => {
+                styx_contracts::capability::CapabilityId::DesktopAccessibility
+            }
+            Self::WindowCapture(_) => styx_contracts::capability::CapabilityId::DesktopCapture,
+        }
+    }
+    pub(crate) fn purpose(self) -> styx_core::operations::OperationPurpose {
+        match self {
+            Self::Accessibility(_) => {
+                styx_core::operations::OperationPurpose::DesktopAccessibilityReadAcquisition
+            }
+            Self::WindowCapture(_) => {
+                styx_core::operations::OperationPurpose::DesktopWindowCaptureReadAcquisition
+            }
+        }
+    }
+    fn pid(self) -> u32 {
+        match self {
+            Self::Accessibility(v) => v.pid,
+            Self::WindowCapture(v) => v.pid,
+        }
+    }
+}
 /// Original proc directory stays pinned until the native reply is settled.
 /// PID alone and a remote window number never establish process ownership.
-pub(crate) struct AxReadTarget {
-    pub(crate) request: AxReadRequest,
+pub(crate) struct DesktopReadTarget {
+    pub(crate) request: DesktopReadRequest,
     identity: ProcessIdentity,
     directory: File,
 }
-impl AxReadTarget {
-    pub(crate) fn acquire(request: AxReadRequest) -> Result<Self> {
+impl DesktopReadTarget {
+    pub(crate) fn acquire(request: DesktopReadRequest) -> Result<Self> {
         let identity =
-            ProcessIdentity::observe(request.pid).map_err(|_| CuaError::PermissionDenied)?;
+            ProcessIdentity::observe(request.pid()).map_err(|_| CuaError::PermissionDenied)?;
         let directory = OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_PATH | libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_CLOEXEC)
-            .open(format!("/proc/{}", request.pid))
+            .open(format!("/proc/{}", request.pid()))
             .map_err(|_| CuaError::PermissionDenied)?;
         let value = Self {
             request,
