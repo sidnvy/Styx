@@ -195,6 +195,13 @@ impl Root {
             return Err(StoreError::TooLarge);
         }
         after_read()?;
+        let changed = file.metadata()?;
+        // An originally private file that is replaced/unlinked is a changed
+        // observation, not a newly supplied invalid file. Detect this before
+        // the regular-file nlink guard classifies the now-unlinked old fd.
+        if changed.nlink() != before.nlink() || observation(&changed) != observation(&before) {
+            return Err(StoreError::Changed);
+        }
         let after = private_file(&file)?;
         let current = open_at(
             &directory,
