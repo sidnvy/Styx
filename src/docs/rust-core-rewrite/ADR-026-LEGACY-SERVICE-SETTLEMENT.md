@@ -75,3 +75,8 @@ Capture and settlement Unit/Service proxies disable zbus property caching. The
 pinned generic builder defaults to Lazy caching; a required second live identity
 sample must issue another DBus read rather than reuse a property snapshot. The
 manager unique-owner, kernel birth and retained cgroup checks remain mandatory.
+
+`ControlGroup` is read on the systemd Service interface, including capture,
+second identity sample and settlement. It is not a Unit property. The installed
+official interface XML (`org.freedesktop.systemd1.Service.xml`) defines its `s`
+type; an interface error fails capture without signaling the service.

@@ -825,7 +825,7 @@ async fn capture_exact_inner(i: &Arc<VerifiedLegacyServiceInputs>) -> LegacyResu
         Ok((main, image, stamp))
     })
     .await?;
-    let cgroup_path = property_string(&unit, "ControlGroup").await?;
+    let cgroup_path = property_string(&service, "ControlGroup").await?;
     let path = super::cgroup_path(p, &d.unit_name, &cgroup_path).map_err(conflict)?;
     let cgroup = open_checked(&path, true)?;
     if nix::sys::statfs::fstatfs(&cgroup)
@@ -851,7 +851,7 @@ async fn capture_exact_inner(i: &Arc<VerifiedLegacyServiceInputs>) -> LegacyResu
     let now_inv: Vec<u8> = unit.get_property("InvocationID").await.map_err(unknown)?;
     if now_pid != pid
         || now_inv != invocation_bytes
-        || property_string(&unit, "ControlGroup").await? != cgroup_path
+        || property_string(&service, "ControlGroup").await? != cgroup_path
         || !main.still_current().map_err(unknown)?
         || !manager_birth.still_current().map_err(unknown)?
         || bus
@@ -1343,7 +1343,7 @@ async fn observe_original(scope: &Arc<LegacyManagedScope>) -> LegacyResult<Origi
     .await
     .map_err(unknown)?;
     let invocation: Vec<u8> = unit.get_property("InvocationID").await.map_err(unknown)?;
-    let current_cgroup = property_string(&unit, "ControlGroup").await?;
+    let current_cgroup = property_string(&service, "ControlGroup").await?;
     if invocation.len() != 16
         || invocation
             .iter()
