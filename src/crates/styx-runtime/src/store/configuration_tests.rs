@@ -154,6 +154,60 @@ fn shared_configuration_writer_fence_and_sticky_unknown_batch() {
     assert_eq!(fs::read(&retained).unwrap(), b"?");
     fs::remove_dir_all(&path).unwrap();
 
+    // A real owner critical section may perform slow filesystem work. The
+    // current-thread async service must still read published admission facts;
+    // waiting on the synchronous owner lock here would block its executor.
+    let (path, owner) = fixture(&base);
+    let store = OwnedEnrollmentJournal::from_configuration(owner.clone(), JournalBudget::default())
+        .unwrap();
+    let service = crate::enrollment::service::EnrollmentService::recover_existing(
+        store,
+        b"configuration-test-admin-token-only-000000000000",
+        styx_contracts::identity::Sha256Digest::of_bytes(b"distinct-mcp-test-token"),
+        vec!["configuration.fixture.invalid".into()],
+        styx_core::enrollment::Limits::default(),
+    )
+    .unwrap();
+    let shared = crate::enrollment::shared::SharedEnrollment::new(service);
+    let holder_owner = owner.clone();
+    let (entered_tx, entered_rx) = std::sync::mpsc::sync_channel(1);
+    let (release_tx, release_rx) = std::sync::mpsc::sync_channel(1);
+    let holder = std::thread::spawn(move || {
+        holder_owner.with_state(|_| {
+            entered_tx.send(()).unwrap();
+            release_rx
+                .recv_timeout(std::time::Duration::from_secs(5))
+                .expect("async hot check must finish before owner critical section is released");
+            Ok(())
+        })
+    });
+    entered_rx
+        .recv_timeout(std::time::Duration::from_secs(5))
+        .unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    let profiles = runtime.block_on(async {
+        tokio::time::timeout(
+            std::time::Duration::from_secs(2),
+            shared.with(|s| s.exec_profiles()),
+        )
+        .await
+        .unwrap()
+        .unwrap()
+        .unwrap()
+    });
+    assert!(profiles.is_empty());
+    // The owner lock is STILL held; no timed-release or elapsed-time heuristic
+    // can turn a blocked service call into success. Old locking hot checks fail.
+    release_tx.send(()).unwrap();
+    holder.join().unwrap().unwrap();
+    drop(runtime);
+    drop(shared);
+    drop(owner);
+    fs::remove_dir_all(&path).unwrap();
+
     // Corruption in either claimed namespace fences every handle. Restoring the
     // original directory pathname does not heal the in-process Unknown state.
     let (path, owner) = fixture(&base);

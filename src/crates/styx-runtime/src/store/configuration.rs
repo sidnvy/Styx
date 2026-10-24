@@ -8,7 +8,10 @@
 use super::secure_journal::{JournalBudget, NamespaceName, files};
 use super::secure_journal::{JournalError, JournalResult};
 use super::{ConfigurationWriterGuard, PrivateRoot, RootIdentity};
-use std::sync::{Arc, Mutex};
+use std::sync::{
+    Arc, Mutex,
+    atomic::{AtomicBool, Ordering},
+};
 use styx_contracts::identity::TransactionId;
 
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
@@ -18,7 +21,35 @@ const TOTAL_JOURNAL_BYTES: usize = 64 * 1024 * 1024;
 /// Enrollment's domain authority remains singleton; this does not clone it.
 #[derive(Clone)]
 pub struct OwnedConfigurationRoot {
-    inner: Arc<Mutex<ConfigurationState>>,
+    inner: Arc<ConfigurationOwner>,
+}
+struct ConfigurationOwner {
+    state: Mutex<ConfigurationState>,
+    // Published monotonic rejection facts, not another policy/writer authority.
+    // Hot async lease/admission checks never wait behind filesystem I/O.
+    poisoned: AtomicBool,
+    fenced: AtomicBool,
+}
+impl ConfigurationOwner {
+    fn publish(&self, state: &ConfigurationState) {
+        if state.poisoned {
+            self.poisoned.store(true, Ordering::Release);
+        }
+        if state.recovery_required || state.fence.is_some() {
+            self.fenced.store(true, Ordering::Release);
+        }
+    }
+}
+struct UnfinishedAccess<'a> {
+    owner: &'a ConfigurationOwner,
+    completed: bool,
+}
+impl Drop for UnfinishedAccess<'_> {
+    fn drop(&mut self) {
+        if !self.completed {
+            self.owner.poisoned.store(true, Ordering::Release);
+        }
+    }
 }
 pub(super) struct ConfigurationState {
     pub(super) root: PrivateRoot,
@@ -166,7 +197,11 @@ impl OwnedConfigurationRoot {
         }
         state.validate()?;
         Ok(Self {
-            inner: Arc::new(Mutex::new(state)),
+            inner: Arc::new(ConfigurationOwner {
+                poisoned: AtomicBool::new(state.poisoned),
+                fenced: AtomicBool::new(state.recovery_required || state.fence.is_some()),
+                state: Mutex::new(state),
+            }),
         })
     }
     pub fn identity(&self) -> JournalResult<RootIdentity> {
@@ -179,20 +214,35 @@ impl OwnedConfigurationRoot {
         &self,
         operation: impl FnOnce(&mut ConfigurationState) -> JournalResult<T>,
     ) -> JournalResult<T> {
-        let mut state = self.inner.lock().map_err(|_| JournalError::Unknown)?;
+        let mut state = self.inner.state.lock().map_err(|_| {
+            self.inner.poisoned.store(true, Ordering::Release);
+            JournalError::Unknown
+        })?;
+        // Publish rejection even if a trusted store callback unwinds. No
+        // authentication or memory-safety claim relies on advisory Mutex poison.
+        let mut access = UnfinishedAccess {
+            owner: &self.inner,
+            completed: false,
+        };
         if let Err(error) = state.validate() {
             state.poisoned = true;
+            self.inner.publish(&state);
+            access.completed = true;
             return Err(error);
         }
         let result = operation(&mut state);
         // Even an ordinary closure error cannot hide a replaced root/namespace.
         if let Err(error) = state.validate() {
             state.poisoned = true;
+            self.inner.publish(&state);
+            access.completed = true;
             return Err(error);
         }
         if matches!(result, Err(JournalError::Unknown)) {
             state.poisoned = true;
         }
+        self.inner.publish(&state);
+        access.completed = true;
         result
     }
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
@@ -236,22 +286,22 @@ impl OwnedConfigurationRoot {
             Ok(pin)
         })
     }
-    // Hot admission checks do not repeatedly scan entire journal inventories.
-    // Every actual store access still performs the full before/after checks.
+    // Hot checks consume only published rejection facts. Actual store access
+    // still validates the guarded root and full namespace inventory before/after.
     pub(crate) fn ensure_usable(&self) -> JournalResult<()> {
-        let state = self.inner.lock().map_err(|_| JournalError::Unknown)?;
-        if state.poisoned {
+        if self.inner.poisoned.load(Ordering::Acquire) {
             Err(JournalError::Unknown)
         } else {
             Ok(())
         }
     }
     pub(crate) fn ensure_admission(&self) -> JournalResult<()> {
-        let state = self.inner.lock().map_err(|_| JournalError::Unknown)?;
-        if state.poisoned {
-            return Err(JournalError::Unknown);
+        self.ensure_usable()?;
+        if self.inner.fenced.load(Ordering::Acquire) {
+            Err(JournalError::Conflict)
+        } else {
+            Ok(())
         }
-        state.ordinary_admission()
     }
     pub(super) fn with_maintenance<T>(
         &self,
