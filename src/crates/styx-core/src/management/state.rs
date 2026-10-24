@@ -36,10 +36,7 @@ pub fn validate_state(
                     == format!(
                         "device/.styx-retired-host-token-{}",
                         migration.transaction_id.as_str()
-                    ) =>
-        {
-            ()
-        }
+                    ) => {}
         _ => return Err(NativeStateRuleError::InvalidState),
     }
     match (state.revision, state.last_transaction.as_ref()) {

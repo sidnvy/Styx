@@ -356,10 +356,10 @@ pub(crate) fn capture(
     let mut trees = vec![token_tree];
     let mut absent = Vec::new();
     let mut browser_paths = vec![host.join("browser")];
-    if let Some(path) = host_json.browser.and_then(|b| b.profile_root) {
-        if !browser_paths.contains(&path) {
-            browser_paths.push(path);
-        }
+    if let Some(path) = host_json.browser.and_then(|b| b.profile_root)
+        && !browser_paths.contains(&path)
+    {
+        browser_paths.push(path);
     }
     for path in browser_paths {
         if !valid_path(&path) {
