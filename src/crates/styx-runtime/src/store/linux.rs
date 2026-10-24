@@ -353,11 +353,23 @@ impl Root {
         self.read_raw_observing(relative, max_bytes, after_read)
     }
     pub(super) fn try_lock(&self, resource: LockResource) -> Result<Lock> {
+        self.lock(resource, true)
+    }
+    pub(super) fn try_existing_lock(&self, resource: LockResource) -> Result<Lock> {
+        self.lock(resource, false)
+    }
+    fn lock(&self, resource: LockResource, create: bool) -> Result<Lock> {
         self.validate_root()?;
         let file = open_at(
             &self.directory,
             OsStr::new(resource.filename()),
-            OFlag::O_RDWR | OFlag::O_CREAT | OFlag::O_NONBLOCK,
+            OFlag::O_RDWR
+                | OFlag::O_NONBLOCK
+                | if create {
+                    OFlag::O_CREAT
+                } else {
+                    OFlag::empty()
+                },
             Mode::S_IRUSR | Mode::S_IWUSR,
         )?;
         private_file(&file)?;

@@ -361,6 +361,16 @@ impl PrivateRoot {
             self.inner.try_lock(LockResource::ConfigurationWriter)?,
         ))
     }
+    /// Existing native ownership namespace only: never recreate a missing lock
+    /// as a side effect of inspection/reopen. Fresh bootstrap uses the explicit
+    /// creating acquisition above. Same validation/flock implementation.
+    #[cfg(target_os = "linux")]
+    pub fn try_existing_configuration_writer(&self) -> Result<ConfigurationWriterGuard> {
+        Ok(ConfigurationWriterGuard(
+            self.inner
+                .try_existing_lock(LockResource::ConfigurationWriter)?,
+        ))
+    }
     /// Separate resource and type from configuration writer ownership. Neither
     /// lock grants authority over unknown legacy owners/journals or live jobs.
     pub fn try_execution_lease(&self) -> Result<ExecutionLeaseGuard> {

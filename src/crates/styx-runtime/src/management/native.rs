@@ -278,8 +278,8 @@ mod platform {
     }
     fn open(path: &Path) -> Result<NativeTransactions> {
         let root = PrivateRoot::open(path).map_err(store)?;
-        // Read-only format check before lock acquisition, which may create the
-        // fixed lock file. Never mutate a legacy root merely to refuse it.
+        // Read-only format check before existing-lock acquisition. A missing
+        // original lock is refused, never repaired while opening/querying.
         let raw = root
             .read_raw(native_root::NATIVE_MARKER_FILE, NATIVE_MARKER_BYTES)
             .map_err(store)?;
@@ -289,7 +289,7 @@ mod platform {
         if marker.root_identity != (NativeRootIdentity::Linux { device, inode, uid }) {
             return Err(NativeManagementError::new(ErrorKind::Conflict));
         }
-        let writer = root.try_configuration_writer().map_err(store)?;
+        let writer = root.try_existing_configuration_writer().map_err(store)?;
         let binding =
             native_root::reopen_native(root, writer).map_err(NativeManagementError::bootstrap)?;
         NativeTransactions::open(binding).map_err(NativeManagementError::open)
