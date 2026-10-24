@@ -119,15 +119,22 @@ struct HostProfile {
     gateway_ca_file: Option<PathBuf>,
     client_cert_file: Option<serde_json::Value>,
     client_key_file: Option<serde_json::Value>,
-    exec: ExecutorProfile,
+    exec: Option<ExecutorProfile>,
 }
 #[derive(Deserialize)]
 struct ExecutorProfile {
+    #[serde(default = "default_exec_enabled")]
+    enabled: bool,
+    #[serde(default)]
     binary: serde_json::Value,
+    #[serde(default)]
     cwd: PathBuf,
     #[serde(default)]
     env: BTreeMap<String, String>,
     timeout_ms: Option<u64>,
+}
+fn default_exec_enabled() -> bool {
+    true
 }
 #[derive(Deserialize)]
 struct Active {
@@ -245,7 +252,7 @@ pub struct LoadedLegacyProfile {
     paired_namespace: GatewayId,
     tls: GatewayClientTls,
     bearer: SecretBearer,
-    executor: PinnedExecutable,
+    executor: Option<PinnedExecutable>,
     inventory: PayloadInventory,
     #[cfg(target_os = "linux")]
     release_root: PathBuf,
@@ -349,11 +356,16 @@ impl LoadedLegacyProfile {
         self.revalidate_control()?;
         Ok(Some(pinned))
     }
+    pub fn executor_enabled(&self) -> bool {
+        self.executor.is_some()
+    }
     pub fn executor_config(&self) -> Result<OwnedExecutorConfig, ProfileError> {
         self.revalidate()?;
         Ok(OwnedExecutorConfig {
             binary: self
                 .executor
+                .as_ref()
+                .ok_or(ProfileError::Unsupported)?
                 .launch_path()
                 .map_err(|_| ProfileError::Changed)?,
             cwd: self.cwd.clone(),
@@ -371,9 +383,9 @@ impl LoadedLegacyProfile {
     /// Existing control does not load a new release/configuration snapshot.
     /// Original private observations and executable pin remain mandatory.
     pub(super) fn revalidate_control(&self) -> Result<(), ProfileError> {
-        self.executor
-            .revalidate()
-            .map_err(|_| ProfileError::Changed)?;
+        if let Some(executor) = &self.executor {
+            executor.revalidate().map_err(|_| ProfileError::Changed)?;
+        }
         for o in &self.observed {
             let root = PrivateRoot::open(&o.root).map_err(|_| ProfileError::Changed)?;
             let raw = root
@@ -727,43 +739,70 @@ fn load(state_dir: &Path, mode: GatewayWireMode) -> Result<LoadedLegacyProfile, 
         }
         actual.insert(member.path.clone());
     }
+    let exec_enabled = host.exec.as_ref().is_some_and(|exec| exec.enabled);
+    if matches!(mode, GatewayWireMode::Legacy) && !exec_enabled {
+        return Err(ProfileError::Unsupported);
+    }
     if actual.len() != expected_members.len()
-        || !expected_members
-            .get(Path::new("bin/codex"))
-            .is_some_and(|(_, _, x)| *x)
+        || (exec_enabled
+            && !expected_members
+                .get(Path::new("bin/codex"))
+                .is_some_and(|(_, _, x)| *x))
     {
         return Err(ProfileError::UntrustedRelease);
     }
-    let executor = inventory
-        .pin_executable(Path::new("bin/codex"))
-        .map_err(|_| ProfileError::UntrustedRelease)?;
-    absolute(&host.exec.cwd)?;
-    let _ignored_mutable_binary = host.exec.binary;
-    if host.exec.env.keys().any(|k| k != "CODEX_HOME") {
-        return Err(ProfileError::UnsupportedExecutorEnvironment);
+    let executor = if exec_enabled {
+        Some(
+            inventory
+                .pin_executable(Path::new("bin/codex"))
+                .map_err(|_| ProfileError::UntrustedRelease)?,
+        )
+    } else {
+        None
+    };
+    // An absent Exec profile supplies no Browser workspace authority.
+    let exec = host.exec.unwrap_or(ExecutorProfile {
+        enabled: false,
+        binary: serde_json::Value::Null,
+        cwd: PathBuf::new(),
+        env: BTreeMap::new(),
+        timeout_ms: None,
+    });
+    if exec_enabled || !exec.cwd.as_os_str().is_empty() {
+        absolute(&exec.cwd)?;
     }
-    if let Some(home) = host.exec.env.get("CODEX_HOME") {
-        let path = Path::new(home);
-        absolute(path)?;
-        if home.len() > 4096
-            || home.contains('\0')
-            || path.components().collect::<PathBuf>().as_os_str() != path.as_os_str()
-        {
+    let _ignored_mutable_binary = exec.binary;
+    if exec_enabled {
+        if exec.env.keys().any(|k| k != "CODEX_HOME") {
             return Err(ProfileError::UnsupportedExecutorEnvironment);
         }
+        if let Some(home) = exec.env.get("CODEX_HOME") {
+            let path = Path::new(home);
+            absolute(path)?;
+            if home.len() > 4096
+                || home.contains('\0')
+                || path.components().collect::<PathBuf>().as_os_str() != path.as_os_str()
+            {
+                return Err(ProfileError::UnsupportedExecutorEnvironment);
+            }
+        }
+        if exec.env.len() > 64
+            || exec.env.iter().any(|(k, v)| {
+                k.is_empty()
+                    || k.len() > 128
+                    || k.contains(['=', '\0'])
+                    || v.len() > 16384
+                    || v.contains('\0')
+            })
+        {
+            return Err(ProfileError::Invalid);
+        }
     }
-    if host.exec.env.len() > 64
-        || host.exec.env.iter().any(|(k, v)| {
-            k.is_empty()
-                || k.len() > 128
-                || k.contains(['=', '\0'])
-                || v.len() > 16384
-                || v.contains('\0')
-        })
-    {
-        return Err(ProfileError::Invalid);
-    }
-    let timeout = host.exec.timeout_ms.unwrap_or(35000);
+    let timeout = if exec_enabled {
+        exec.timeout_ms.unwrap_or(35000)
+    } else {
+        35000
+    };
     if !(1..=60000).contains(&timeout) {
         return Err(ProfileError::Invalid);
     }
@@ -800,15 +839,23 @@ fn load(state_dir: &Path, mode: GatewayWireMode) -> Result<LoadedLegacyProfile, 
         deployment_browser: deployment.host.browser,
         #[cfg(target_os = "linux")]
         host_browser: host.browser,
-        cwd: host.exec.cwd,
-        environment: host.exec.env,
+        cwd: exec.cwd,
+        environment: if exec_enabled {
+            exec.env
+        } else {
+            BTreeMap::new()
+        },
         rpc_timeout: Duration::from_millis(timeout),
         observed: capture.observed,
         diagnostics: ProfileDiagnostics {
             schema: 1,
             device_id: identity.device_id,
             endpoint: endpoint_text,
-            runtime_format: "legacy_js_v1_executor_only",
+            runtime_format: if exec_enabled {
+                "legacy_js_v1_executor_only"
+            } else {
+                "legacy_js_v1_signed_worker_closure"
+            },
             wire_mode: match mode {
                 GatewayWireMode::Legacy => "explicit_legacy_gateway",
                 GatewayWireMode::PairedV3 => "paired_v3",

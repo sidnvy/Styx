@@ -152,7 +152,17 @@ async fn run_cleanup(
             break;
         }
         let snapshot = key.snapshot();
-        let evidence = match inner.adapter.lookup_action(key.owner(), &snapshot.id) {
+        let adapter = match inner.exec_adapter() {
+            Ok(adapter) => adapter,
+            Err(error) => {
+                facts.blocked.push(RetentionBlock {
+                    operation: snapshot.id.clone(),
+                    error,
+                });
+                continue;
+            }
+        };
+        let evidence = match adapter.lookup_action(key.owner(), &snapshot.id) {
             Ok(receipt) => Ok(receipt),
             Err(ExecError::UnknownHandle)
                 if matches!(
@@ -178,7 +188,7 @@ async fn run_cleanup(
         let result = evidence.and_then(|receipt| {
             transfer_known_action(
                 &mut inner.state.lock().expect("Host state mutex").ledger,
-                &inner.adapter,
+                &adapter,
                 &receipt,
                 snapshot.state,
             )
@@ -250,15 +260,14 @@ async fn settle_resource(
     until: tokio::time::Instant,
 ) -> Result<(), CoordinatorError> {
     let inner = &handle.inner;
+    let adapter = inner.exec_adapter()?;
     let snapshot = key.snapshot();
     if !(snapshot.liveness == ExecutionLiveness::NotStarted
         && snapshot.output_drain == OutputDrain::NotOpened)
     {
         let process = tokio::time::timeout_at(
             until,
-            inner
-                .adapter
-                .lookup_for_cleanup(&handle.authority, &snapshot.id),
+            adapter.lookup_for_cleanup(&handle.authority, &snapshot.id),
         )
         .await
         .map_err(|_| CoordinatorError::Busy)??;
@@ -268,9 +277,7 @@ async fn settle_resource(
         }
         let termination = tokio::time::timeout_at(
             until,
-            inner
-                .adapter
-                .cancel_for_cleanup(&handle.authority, &process, remaining),
+            adapter.cancel_for_cleanup(&handle.authority, &process, remaining),
         )
         .await
         .map_err(|_| CoordinatorError::Busy)??;
@@ -282,9 +289,7 @@ async fn settle_resource(
         loop {
             let evidence = tokio::time::timeout_at(
                 until,
-                inner
-                    .adapter
-                    .discard_for_cleanup(&handle.authority, &process),
+                adapter.discard_for_cleanup(&handle.authority, &process),
             )
             .await
             .map_err(|_| CoordinatorError::Busy)??;
@@ -320,7 +325,7 @@ async fn settle_resource(
         .expect("Host state mutex")
         .ledger
         .begin_resource_release(&target)?;
-    let proof = tokio::time::timeout_at(until, inner.adapter.release_resource(permit))
+    let proof = tokio::time::timeout_at(until, adapter.release_resource(permit))
         .await
         .map_err(|_| CoordinatorError::Busy)??;
     inner

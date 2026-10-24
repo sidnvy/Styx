@@ -310,7 +310,8 @@ fn facts(device: &DeviceId) -> AdmissionFacts {
 fn empty_outcome() -> ForegroundOutcome {
     ForegroundOutcome {
         schema: 1,
-        executor_exited: true,
+        executor_started: false,
+        executor_exited: false,
         processes_exited: true,
         io_tasks_joined: true,
         supervised_jobs_joined: true,
@@ -388,10 +389,19 @@ async fn run_owned(
     let retained = admitted.clone();
     let prepared = tokio::task::spawn_blocking(move || {
         retained.validate_ownership()?;
-        retained
-            .profile
-            .executor_config()
-            .map_err(ForegroundError::from)
+        if retained.profile.executor_enabled() {
+            retained
+                .profile
+                .executor_config()
+                .map(Some)
+                .map_err(ForegroundError::from)
+        } else {
+            retained
+                .profile
+                .revalidate()
+                .map_err(ForegroundError::from)?;
+            Ok(None)
+        }
     })
     .await;
     let config = match prepared {
@@ -412,7 +422,7 @@ async fn run_owned(
     }
     // Spawn is joined even on signal; cancelling initialization cannot orphan a
     // partially started child. The bounded provider owns its startup cleanup.
-    let host = match reservation.spawn(config).await {
+    let host = match reservation.spawn_optional(config).await {
         Ok(v) => v,
         Err(_) => {
             let _ = link.shutdown(Duration::from_secs(3)).await;
@@ -617,6 +627,7 @@ async fn run_owned(
     event(&events, &cancel, "stopping", &device, None);
     let mut outcome = ForegroundOutcome {
         schema: 1,
+        executor_started: host.coordinator().exec_configured(),
         executor_exited: false,
         processes_exited: false,
         io_tasks_joined: false,
@@ -627,14 +638,20 @@ async fn run_owned(
     // the lease on a timer while the native child might still execute signed code.
     loop {
         if let Ok(cleanup) = host.shutdown_owned(Duration::from_secs(10)).await {
-            for (process, evidence) in &cleanup.native.processes {
-                record_process_exit(&mut process_exits, process.operation().clone(), *evidence);
+            if let Some(native) = &cleanup.native {
+                for (process, evidence) in &native.processes {
+                    record_process_exit(&mut process_exits, process.operation().clone(), *evidence);
+                }
             }
             outcome.processes_exited = process_exits.values().all(|exited| *exited)
                 && cleanup.ancillary_providers_settled();
-            outcome.executor_exited |= cleanup.native.executor_exited;
-            outcome.io_tasks_joined = cleanup.native.reader_task_reaped
-                && cleanup.native.stderr_task_reaped
+            if let Some(native) = &cleanup.native {
+                outcome.executor_exited |= native.executor_exited;
+            }
+            outcome.io_tasks_joined = cleanup
+                .native
+                .as_ref()
+                .is_none_or(|native| native.reader_task_reaped && native.stderr_task_reaped)
                 && cleanup.ancillary_providers_settled();
             outcome.supervised_jobs_joined = cleanup.supervised_jobs_joined;
         }

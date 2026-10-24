@@ -18,6 +18,9 @@ mod linux {
     }
     impl Fixture {
         fn new() -> Self {
+            Self::with_exec("enabled")
+        }
+        fn with_exec(exec_mode: &str) -> Self {
             let root = std::env::temp_dir().join(format!("styx-profile-{}", uuid::Uuid::new_v4()));
             fs::create_dir(&root).unwrap();
             fs::set_permissions(&root, fs::Permissions::from_mode(0o700)).unwrap();
@@ -35,9 +38,9 @@ const pub=publisher.publicKey.export({type:'spki',format:'pem'}),dp=device.publi
 put(path.join(base,'publisher.pem'),pub);put(path.join(base,'device/identity.pem'),device.privateKey.export({type:'pkcs8',format:'pem'}));
 const id='styx-1234567890abcdef12345678';put(path.join(base,'device/identity.json'),JSON.stringify({version:1,device_id:id,platform:'linux',fingerprint,public_key_pem:dp,created_at:'fixture'}));put(path.join(base,'device/host.token'),'a'.repeat(64)+'\n');
 const ca=fs.readFileSync(process.argv[2]);put(path.join(base,'gateway-ca.pem'),ca);
-put(path.join(base,'device/host.json'),JSON.stringify({host_id:id,gateway_ws_url:'wss://127.0.0.1:37719/',token_file:path.join(base,'device/host.token'),gateway_ca_file:path.join(base,'gateway-ca.pem'),exec:{binary:'/untrusted/config-selected-codex',cwd:root,env:{CODEX_HOME:path.join(root,'codex-home')}}}));
-const binary=fs.readFileSync('/usr/bin/true');put(path.join(release,'bin/codex'),binary,true);
-const manifest=JSON.stringify({schema:1,version:'fixture-1',platform:'linux',arch:process.arch,upstream:{fixture:true},files:[{path:'bin/codex',sha256:sha(binary),size:binary.length,executable:true}]},null,2)+'\n';put(path.join(release,'manifest.json'),manifest);put(path.join(release,'manifest.sig'),c.sign(null,Buffer.from(manifest),publisher.privateKey).toString('base64url')+'\n');
+put(path.join(base,'device/host.json'),JSON.stringify({host_id:id,gateway_ws_url:'wss://127.0.0.1:37719/',token_file:path.join(base,'device/host.token'),gateway_ca_file:path.join(base,'gateway-ca.pem'),exec:process.argv[3]==='absent'?null:{enabled:process.argv[3]==='enabled'?undefined:false,binary:'/untrusted/config-selected-codex',cwd:root,env:{CODEX_HOME:path.join(root,'codex-home')}}}));
+const member=process.argv[3]==='enabled'?'bin/codex':'bin/node',binary=fs.readFileSync('/usr/bin/true');put(path.join(release,member),binary,true);
+const manifest=JSON.stringify({schema:1,version:'fixture-1',platform:'linux',arch:process.arch,upstream:{fixture:true},files:[{path:member,sha256:sha(binary),size:binary.length,executable:true}]},null,2)+'\n';put(path.join(release,'manifest.json'),manifest);put(path.join(release,'manifest.sig'),c.sign(null,Buffer.from(manifest),publisher.privateKey).toString('base64url')+'\n');
 put(path.join(base,'install/active.json'),JSON.stringify({schema:1,version:'fixture-1',previous:null,manifest_sha256:sha(manifest)}));
 const config=JSON.stringify({schema:1,mode:'join-existing',gateway:{url:'https://127.0.0.1:37719/'},host:{baseDir:base,publisherSha256:sha(publisher.publicKey.export({type:'spki',format:'der'}))}});put(path.join(state,'deployment.json'),config);put(path.join(state,'state.json'),JSON.stringify({schema:1,mode:'join-existing',configSha256:sha(config),steps:['host.prepare','host.doctor','host.pair'].map(id=>({id,status:'succeeded'}))}));
 "#;
@@ -60,6 +63,7 @@ const config=JSON.stringify({schema:1,mode:'join-existing',gateway:{url:'https:/
                 .arg(script)
                 .arg(&root)
                 .arg(&ca)
+                .arg(exec_mode)
                 .output()
                 .unwrap();
             assert!(output.status.success(), "owned Node signed fixture failed");
@@ -67,6 +71,41 @@ const config=JSON.stringify({schema:1,mode:'join-existing',gateway:{url:'https:/
         }
         fn release(&self) -> PathBuf {
             self.base.join("install/releases/fixture-1")
+        }
+    }
+    /// Signed closure still validates without a Codex member; these fixtures
+    /// exercise configuration only and never start the dummy signed worker.
+    #[test]
+    fn paired_disabled_or_absent_exec_keeps_protected_worker_inputs() {
+        for mode in ["disabled", "absent"] {
+            let f = Fixture::with_exec(mode);
+            let raw = fs::read(f.base.join("device/host.json")).unwrap();
+            let paired = load_paired(&f.state).unwrap();
+            assert!(!paired.executor_enabled());
+            assert!(matches!(
+                paired.executor_config(),
+                Err(ProfileError::Unsupported)
+            ));
+            assert!(matches!(
+                load_legacy(&f.state),
+                Err(ProfileError::Unsupported)
+            ));
+            assert_eq!(
+                paired.cwd,
+                if mode == "disabled" {
+                    f.root.clone()
+                } else {
+                    PathBuf::new()
+                }
+            );
+            paired.revalidate().unwrap();
+            assert_eq!(fs::read(f.base.join("device/host.json")).unwrap(), raw);
+            fs::write(f.release().join("bin/node"), b"tampered worker").unwrap();
+            assert!(matches!(paired.revalidate(), Err(ProfileError::Changed)));
+            assert!(matches!(
+                load_paired(&f.state),
+                Err(ProfileError::UntrustedRelease)
+            ));
         }
     }
     #[test]

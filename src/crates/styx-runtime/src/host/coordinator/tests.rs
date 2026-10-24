@@ -358,9 +358,21 @@ async fn real_owned_start_read_and_dropped_response_scenario() {
         .unwrap();
     assert!(cleanup.supervised_jobs_joined);
     assert!(
-        cleanup.native.executor_exited
-            && cleanup.native.reader_task_reaped
-            && cleanup.native.stderr_task_reaped
+        cleanup
+            .native
+            .as_ref()
+            .expect("fixture configured Exec")
+            .executor_exited
+            && cleanup
+                .native
+                .as_ref()
+                .expect("fixture configured Exec")
+                .reader_task_reaped
+            && cleanup
+                .native
+                .as_ref()
+                .expect("fixture configured Exec")
+                .stderr_task_reaped
     );
     println!(
         "owned coordinator fixture={} PASS: actual nonce once, prepare zero effect, duplicate/altered/foreign/revoked denied, fresh grant/deadline, dropped response survives without replay, labelled injected-Unknown retains history after native exit/drain, deterministic post-native Core revoke refuses sensitive delivery, joined cleanup",
@@ -738,9 +750,21 @@ async fn real_host_action_nonce_drop_ticket_and_terminate_scenario() {
     println!("HOST_ACTION_CLEANUP {:?}", cleanup);
     assert!(
         cleanup.supervised_jobs_joined
-            && cleanup.native.executor_exited
-            && cleanup.native.reader_task_reaped
-            && cleanup.native.stderr_task_reaped
+            && cleanup
+                .native
+                .as_ref()
+                .expect("fixture configured Exec")
+                .executor_exited
+            && cleanup
+                .native
+                .as_ref()
+                .expect("fixture configured Exec")
+                .reader_task_reaped
+            && cleanup
+                .native
+                .as_ref()
+                .expect("fixture configured Exec")
+                .stderr_task_reaped
     );
     outcome.unwrap();
 }
@@ -907,7 +931,10 @@ async fn real_host_physical_retention_and_unknown_archival_scenario() {
             let write_id = completion.receipt.write_id.clone().unwrap();
             assert!(
                 matches!(
-                    host.inner.adapter.lookup_action(&owner, &action.id),
+                    host.inner
+                        .exec_adapter()
+                        .unwrap()
+                        .lookup_action(&owner, &action.id),
                     Err(ExecError::UnknownHandle)
                 ),
                 "known provider receipt was physically released"
@@ -1056,7 +1083,8 @@ async fn real_host_physical_retention_and_unknown_archival_scenario() {
         assert!(collection.blocked.is_empty(), "{collection:?}");
         assert!(matches!(
             host.inner
-                .adapter
+                .exec_adapter()
+                .unwrap()
                 .lookup_operation(&owner, &resource.id)
                 .await,
             Err(ExecError::UnknownHandle)
@@ -1099,7 +1127,10 @@ async fn real_host_physical_retention_and_unknown_archival_scenario() {
             first_history.write_id
         );
         assert!(matches!(
-            host.inner.adapter.lookup_action(&owner, &unknown.id),
+            host.inner
+                .exec_adapter()
+                .unwrap()
+                .lookup_action(&owner, &unknown.id),
             Err(ExecError::UnknownHandle)
         ));
         let next_nonce = uuid::Uuid::new_v4().to_string();
@@ -1152,9 +1183,73 @@ async fn real_host_physical_retention_and_unknown_archival_scenario() {
     println!("HOST_ARCHIVAL_CLEANUP {cleanup:?}");
     assert!(
         cleanup.supervised_jobs_joined
-            && cleanup.native.executor_exited
-            && cleanup.native.reader_task_reaped
-            && cleanup.native.stderr_task_reaped
+            && cleanup
+                .native
+                .as_ref()
+                .expect("fixture configured Exec")
+                .executor_exited
+            && cleanup
+                .native
+                .as_ref()
+                .expect("fixture configured Exec")
+                .reader_task_reaped
+            && cleanup
+                .native
+                .as_ref()
+                .expect("fixture configured Exec")
+                .stderr_task_reaped
     );
     outcome.unwrap();
+}
+
+/// Explicitly disabled Exec has no native receipt, yet the SAME Host ledger,
+/// owner authority and local session registry remain available. No native IO.
+#[tokio::test]
+async fn optional_executor_refuses_exec_without_fabricating_cleanup() {
+    let ledger = OperationLedger::new("host-no-executor".try_into().unwrap());
+    let (host, authority) = HostCoordinator::new_without_executor(ledger, facts(), 2).unwrap();
+    let owner = authority
+        .register_verified_owner(
+            "owner-no-executor".try_into().unwrap(),
+            "epoch-no-executor".try_into().unwrap(),
+        )
+        .unwrap();
+    assert!(!host.exec_configured());
+    {
+        let state = host.inner.state.lock().unwrap();
+        let local = state.exec_facts().unwrap();
+        assert!(!local.descriptor.configured);
+        assert_eq!(local.descriptor.availability, Availability::Unavailable);
+        assert_eq!(
+            local.descriptor.reason,
+            Some(ErrorCategory::CapabilityUnsupported)
+        );
+        assert!(state.ledger.retained_provider_records().is_empty());
+    }
+    let result = host.prepare_start(
+        &owner,
+        context(&host, 1),
+        &spec(std::path::Path::new("/tmp"), "not-created", "not-executed"),
+    );
+    assert!(matches!(
+        result,
+        Err(CoordinatorError::Admission(
+            ErrorCategory::CapabilityUnsupported
+        ))
+    ));
+    assert!(host.legacy_initialization().is_err());
+    assert!(host.legacy_terminal().is_err());
+    let collection = authority
+        .collect_provider_retention(Duration::from_millis(100))
+        .await
+        .unwrap();
+    assert_eq!(collection.unreleased_records, 0);
+    assert!(collection.blocked.is_empty());
+    let cleanup = authority
+        .shutdown_owned(Duration::from_millis(100))
+        .await
+        .unwrap();
+    assert!(cleanup.native.is_none());
+    assert!(cleanup.supervised_jobs_joined);
+    assert!(cleanup.ancillary_providers_settled());
 }

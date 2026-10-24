@@ -492,9 +492,21 @@ async fn actual_owned_browser_host_nonce_policy_drop_and_cleanup() {
     let server_complete = matches!(&server_join, Ok(Ok(())));
     let completed = cleanup.as_ref().ok().is_some_and(|facts| {
         facts.supervised_jobs_joined
-            && facts.native.executor_exited
-            && facts.native.reader_task_reaped
-            && facts.native.stderr_task_reaped
+            && facts
+                .native
+                .as_ref()
+                .expect("fixture configured Exec")
+                .executor_exited
+            && facts
+                .native
+                .as_ref()
+                .expect("fixture configured Exec")
+                .reader_task_reaped
+            && facts
+                .native
+                .as_ref()
+                .expect("fixture configured Exec")
+                .stderr_task_reaped
             && facts
                 .browser
                 .as_ref()

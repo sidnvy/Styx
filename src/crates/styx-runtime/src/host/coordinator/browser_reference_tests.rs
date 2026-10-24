@@ -338,9 +338,18 @@ async fn actual_snapshot_refs_navigation_tabs_owner_and_reopen_batch() {
     let http_server_joined = matches!(joined, Ok(Ok(())));
     let host_browser_cleanup_complete = cleanup.as_ref().ok().is_some_and(|f| {
         f.supervised_jobs_joined
-            && f.native.executor_exited
-            && f.native.reader_task_reaped
-            && f.native.stderr_task_reaped
+            && f.native
+                .as_ref()
+                .expect("fixture configured Exec")
+                .executor_exited
+            && f.native
+                .as_ref()
+                .expect("fixture configured Exec")
+                .reader_task_reaped
+            && f.native
+                .as_ref()
+                .expect("fixture configured Exec")
+                .stderr_task_reaped
             && f.browser.as_ref().is_some_and(|b| b.complete)
     });
     let receipt = json!({"schema":1,"status":if scenario.is_ok()&&host_browser_cleanup_complete&&http_server_joined{"PASS"}else{"FAIL"},"scope":"actual owned serial Rust Host/Node/Chrome references; synthetic bootstrap authority, not paired/account/GUI/file-transfer acceptance","last_stage":stage,"nonce":nonce,"http_effects":effects.lock().unwrap().clone(),"http_ready_pages":ready.lock().unwrap().clone(),"trusted_link_http_probes":link_probes.lock().unwrap().clone(),"actual_wss_reconnect":"NOT_RUN","core_observations":observations,"retirement":retirements,"host_browser_cleanup_complete":host_browser_cleanup_complete,"http_server_joined":http_server_joined,"internal_ref_retries":0,"unknown_policy":"unexpected Unknown fails and preserves history; no reset or replay","source_sha256":hex::encode(<sha2::Sha256 as sha2::Digest>::digest(include_bytes!("browser_reference_tests.rs")))});

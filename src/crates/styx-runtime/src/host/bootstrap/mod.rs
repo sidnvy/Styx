@@ -1,4 +1,4 @@
-//! Exec-only Host composition, with one shared logical queued-I/O budget.
+//! Optional Exec Host composition, with one shared logical queued-I/O budget.
 //! This is not a process RSS/native-executor limit or the persistent service manager.
 use super::{
     coordinator::{CoordinatorError, HostAuthority, HostCleanup, HostCoordinator},
@@ -174,6 +174,31 @@ pub struct ExecHostReservation {
 impl ExecHostReservation {
     pub fn link_budget(&self) -> Arc<HostLinkBudget> {
         self.partitions.link.clone()
+    }
+    /// Explicit protected configuration selected no Exec; not a spawn-failure fallback.
+    pub fn without_executor(self) -> Result<OwnedExecHost, BootstrapError> {
+        drop(self.partitions.rpc);
+        let (coordinator, authority) = HostCoordinator::new_without_executor(
+            OperationLedger::new(self.generation),
+            self.trusted_facts,
+            self.max_jobs,
+        )?;
+        Ok(OwnedExecHost {
+            coordinator,
+            authority,
+            link: self.partitions.link,
+            _protocol: self.partitions.protocol,
+            budget: self.partitions.source,
+        })
+    }
+    pub async fn spawn_optional(
+        self,
+        executor: Option<OwnedExecutorConfig>,
+    ) -> Result<OwnedExecHost, BootstrapError> {
+        match executor {
+            Some(config) => self.spawn(config).await,
+            None => self.without_executor(),
+        }
     }
     pub async fn spawn(
         self,

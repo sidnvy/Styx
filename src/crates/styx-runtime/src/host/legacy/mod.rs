@@ -115,6 +115,9 @@ impl<'a> LegacyExecSession<'a> {
             return Err(LegacyError::BootstrapMismatch);
         }
         drop(endpoint);
+        let initialization = coordinator
+            .legacy_initialization()
+            .map_err(|_| LegacyError::BootstrapMismatch)?;
         let owner = authority
             .register_verified_owner(
                 format!("legacy-gateway:{}", uuid::Uuid::new_v4())
@@ -126,7 +129,6 @@ impl<'a> LegacyExecSession<'a> {
                     .map_err(|_| LegacyError::BootstrapMismatch)?,
             )
             .map_err(|_| LegacyError::Busy)?;
-        let initialization = coordinator.legacy_initialization();
         Ok(Self {
             profile,
             coordinator,
@@ -426,7 +428,10 @@ impl<'a> LegacyExecSession<'a> {
         }
         let generation = link.generation().clone();
         let sender = link.sender();
-        let mut terminal = self.coordinator.legacy_terminal();
+        let mut terminal = self
+            .coordinator
+            .legacy_terminal()
+            .map_err(|_| LegacyError::BootstrapMismatch)?;
         let mut initialized = false;
         let mut handshake_done = false;
         let mut pending: FuturesUnordered<futures_util::future::BoxFuture<'_, Handled>> =

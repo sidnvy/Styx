@@ -168,7 +168,7 @@ fn validate_exec_context(context: &PreparedContext) -> Result<(), ErrorCategory>
 struct Inner {
     bootstrap_device: DeviceId,
     host_generation: HostGeneration,
-    adapter: CodexStdio,
+    adapter: Option<Arc<CodexStdio>>,
     state: Mutex<State>,
     jobs: Mutex<JoinSet<()>>,
     slots: Arc<Semaphore>,
@@ -236,7 +236,8 @@ pub enum ActionSubmission {
 }
 #[derive(Debug)]
 pub struct HostCleanup {
-    pub native: CleanupReceipt,
+    /// None means no Exec adapter was ever started, not an observed exit.
+    pub native: Option<CleanupReceipt>,
     pub supervised_jobs_joined: bool,
     #[cfg(target_os = "linux")]
     pub browser: Option<BrowserLaneCleanup>,
@@ -258,10 +259,39 @@ impl HostCleanup {
     }
 }
 
+impl Inner {
+    fn exec_adapter(&self) -> Result<Arc<CodexStdio>, CoordinatorError> {
+        self.adapter
+            .clone()
+            .ok_or_else(|| ErrorCategory::CapabilityUnsupported.into())
+    }
+}
 impl HostCoordinator {
     /// Takes exclusive ownership of one already-started executor, never spawns a second.
     pub fn new_owned(
         adapter: CodexStdio,
+        ledger: OperationLedger,
+        trusted_facts: AdmissionFacts,
+        max_jobs: usize,
+    ) -> Result<(Self, HostAuthority), CoordinatorError> {
+        Self::compose(Some(adapter), ledger, trusted_facts, max_jobs)
+    }
+    /// Explicit disabled Exec composition, with the same ledger and authority.
+    /// A configured executor's spawn failure must never call this as fallback.
+    pub fn new_without_executor(
+        ledger: OperationLedger,
+        mut trusted_facts: AdmissionFacts,
+        max_jobs: usize,
+    ) -> Result<(Self, HostAuthority), CoordinatorError> {
+        trusted_facts.descriptor.configured = false;
+        trusted_facts.descriptor.availability =
+            styx_contracts::capability::Availability::Unavailable;
+        trusted_facts.descriptor.authorization = styx_contracts::capability::Authorization::Unknown;
+        trusted_facts.descriptor.reason = Some(ErrorCategory::CapabilityUnsupported);
+        Self::compose(None, ledger, trusted_facts, max_jobs)
+    }
+    fn compose(
+        adapter: Option<CodexStdio>,
         ledger: OperationLedger,
         trusted_facts: AdmissionFacts,
         max_jobs: usize,
@@ -273,7 +303,7 @@ impl HostCoordinator {
         let inner = Arc::new(Inner {
             bootstrap_device: trusted_facts.device_id.clone(),
             host_generation: ledger.host_generation().clone(),
-            adapter,
+            adapter: adapter.map(Arc::new),
             state: Mutex::new(State::new(ledger, trusted_facts, origin)),
             jobs: Mutex::new(JoinSet::new()),
             slots: Arc::new(Semaphore::new(max_jobs)),
@@ -289,6 +319,10 @@ impl HostCoordinator {
             },
             HostAuthority { inner },
         ))
+    }
+    /// Configuration/presence only; never infer liveness from cached initialize.
+    pub fn exec_configured(&self) -> bool {
+        self.inner.adapter.is_some()
     }
     /// Immutable, non-secret bootstrap identity; policy refresh cannot rebind it.
     pub fn bootstrap_identity(&self) -> (&DeviceId, &HostGeneration) {
@@ -317,6 +351,7 @@ impl HostCoordinator {
         context: PreparedContext,
         spec: &StartProcess,
     ) -> Result<OperationSnapshot, CoordinatorError> {
+        let _adapter = self.inner.exec_adapter()?;
         let payload = spec.to_operation_payload()?;
         let mut state = self.inner.state.lock().expect("Host state mutex");
         if state.shutting_down {
@@ -343,6 +378,7 @@ impl HostCoordinator {
                 return Ok(StartSubmission::Existing(snapshot));
             }
         }
+        let adapter = self.inner.exec_adapter()?;
         let execution = self
             .inner
             .execution_gate
@@ -384,7 +420,7 @@ impl HostCoordinator {
         jobs.spawn_on(
             async move {
                 let _slot = slot;
-                let result = inner.adapter.start(permit).await;
+                let result = adapter.start(permit).await;
                 let (dispatch, cause) = match result {
                     Ok(receipt) => (receipt.dispatch, receipt.cause),
                     Err(failure) => (failure.evidence, Some(failure.error)),
@@ -436,6 +472,7 @@ impl HostCoordinator {
         context: PreparedContext,
         action: &ProcessAction,
     ) -> Result<OperationSnapshot, CoordinatorError> {
+        let _adapter = self.inner.exec_adapter()?;
         let payload = action.to_operation_payload()?;
         let mut state = self.inner.state.lock().expect("Host state mutex");
         if state.shutting_down {
@@ -462,6 +499,7 @@ impl HostCoordinator {
                 return Ok(ActionSubmission::Existing(snapshot));
             }
         }
+        let adapter = self.inner.exec_adapter()?;
         let execution = self
             .inner
             .execution_gate
@@ -499,7 +537,7 @@ impl HostCoordinator {
         jobs.spawn_on(
             async move {
                 let _slot = slot;
-                let receipt = run_action(&inner.adapter, permit).await;
+                let receipt = run_action(&adapter, permit).await;
                 let fact = match receipt.evidence {
                     ActionEvidence::Acknowledged => ActionResult::Acknowledged,
                     ActionEvidence::NotDispatched => ActionResult::NotDispatched,
@@ -511,13 +549,8 @@ impl HostCoordinator {
                     .record_action_result(&operation, fact, inner.now());
                 guard.settled = settled.is_ok();
                 let retention_error = if let Ok(snapshot) = &settled {
-                    transfer_known_action(
-                        &mut state.ledger,
-                        &inner.adapter,
-                        &receipt,
-                        snapshot.state,
-                    )
-                    .err()
+                    transfer_known_action(&mut state.ledger, &adapter, &receipt, snapshot.state)
+                        .err()
                 } else {
                     None
                 };
@@ -572,7 +605,7 @@ impl HostCoordinator {
         if snapshot.target.is_none() {
             return Err(ErrorCategory::StateConflict.into());
         }
-        match self.inner.adapter.lookup_action(owner, id) {
+        match self.inner.exec_adapter()?.lookup_action(owner, id) {
             Ok(receipt) => Ok(Some(receipt)),
             Err(ExecError::UnknownHandle) => match state.ledger.provider_audit(id) {
                 Some(bytes) => Ok(Some(CodexStdio::action_from_audit(
@@ -614,6 +647,7 @@ impl HostCoordinator {
         max_bytes: usize,
         wait: Duration,
     ) -> Result<ProcessOutput, CoordinatorError> {
+        let adapter = self.inner.exec_adapter()?;
         let _execution = self
             .inner
             .execution_gate
@@ -636,14 +670,11 @@ impl HostCoordinator {
             .map_err(|_| CoordinatorError::Busy)?;
         let budget = Duration::from_millis(context.deadline.0.saturating_sub(now.0));
         let output = tokio::time::timeout(budget, async {
-            let handle = self.inner.adapter.lookup_operation(owner, id).await?;
+            let handle = adapter.lookup_operation(owner, id).await?;
             if handle.operation() != id {
                 return Err(ExecError::OwnerMismatch);
             }
-            self.inner
-                .adapter
-                .read(owner, &handle, max_bytes, wait)
-                .await
+            adapter.read(owner, &handle, max_bytes, wait).await
         })
         .await
         .map_err(|_| CoordinatorError::ReadDeadline)??;
@@ -843,26 +874,31 @@ impl HostAuthority {
         // A JoinSet aborts on drop; preserve unfinished jobs rather than implicitly
         // canceling a possible native start while forgetting its result.
         *self.inner.jobs.lock().expect("Host jobs mutex") = jobs;
-        let native = self
-            .inner
-            .adapter
-            .shutdown_owned(until.saturating_duration_since(tokio::time::Instant::now()))
-            .await;
-        for (handle, evidence) in &native.processes {
-            if let TerminationEvidence::ProcessExited(code) = evidence {
-                let _ = self
-                    .inner
-                    .state
-                    .lock()
-                    .expect("Host state mutex")
-                    .ledger
-                    .record_executor_fact(
-                        handle.operation(),
-                        ExecutorFact::Exited {
-                            successful: *code == 0,
-                        },
-                        self.inner.now(),
-                    );
+        let native = match self.inner.adapter.as_ref() {
+            Some(adapter) => Some(
+                adapter
+                    .shutdown_owned(until.saturating_duration_since(tokio::time::Instant::now()))
+                    .await,
+            ),
+            None => None,
+        };
+        if let Some(receipt) = &native {
+            for (handle, evidence) in &receipt.processes {
+                if let TerminationEvidence::ProcessExited(code) = evidence {
+                    let _ = self
+                        .inner
+                        .state
+                        .lock()
+                        .expect("Host state mutex")
+                        .ledger
+                        .record_executor_fact(
+                            handle.operation(),
+                            ExecutorFact::Exited {
+                                successful: *code == 0,
+                            },
+                            self.inner.now(),
+                        );
+                }
             }
         }
         #[cfg(target_os = "linux")]

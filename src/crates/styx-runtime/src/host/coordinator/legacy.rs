@@ -46,13 +46,16 @@ pub(crate) enum LegacyActionSubmission {
     Existing(OperationSnapshot),
 }
 impl HostCoordinator {
-    pub(crate) fn legacy_initialization(&self) -> Value {
-        self.inner.adapter.initialization().clone()
+    pub(crate) fn legacy_initialization(&self) -> Result<Value, CoordinatorError> {
+        Ok(self.inner.exec_adapter()?.initialization().clone())
     }
     pub(crate) fn legacy_terminal(
         &self,
-    ) -> tokio::sync::broadcast::Receiver<crate::providers::codex::TerminalEvent> {
-        self.inner.adapter.legacy_terminal()
+    ) -> Result<
+        tokio::sync::broadcast::Receiver<crate::providers::codex::TerminalEvent>,
+        CoordinatorError,
+    > {
+        Ok(self.inner.exec_adapter()?.legacy_terminal())
     }
     pub(crate) fn legacy_context(&self) -> PreparedContext {
         let state = self.inner.state.lock().expect("Host state mutex");
@@ -71,6 +74,7 @@ impl HostCoordinator {
         owner: &OwnerLease,
         spec: &LegacyStartProcess,
     ) -> Result<OperationSnapshot, CoordinatorError> {
+        let _adapter = self.inner.exec_adapter()?;
         let context = self.legacy_context();
         let payload = spec.to_operation_payload()?;
         let mut state = self.inner.state.lock().expect("Host state mutex");
@@ -85,6 +89,7 @@ impl HostCoordinator {
         target: ResourceTarget,
         action: &LegacyAction,
     ) -> Result<OperationSnapshot, CoordinatorError> {
+        let _adapter = self.inner.exec_adapter()?;
         let context = self.legacy_context();
         let payload = action.to_operation_payload()?;
         let mut state = self.inner.state.lock().expect("Host state mutex");
@@ -112,6 +117,7 @@ impl HostCoordinator {
                 return Ok(LegacyStartSubmission::Existing(snapshot));
             }
         }
+        let adapter = self.inner.exec_adapter()?;
         let execution = self
             .inner
             .execution_gate
@@ -157,7 +163,7 @@ impl HostCoordinator {
         jobs.spawn_on(
             async move {
                 let _slot = slot;
-                let result = inner.adapter.start_legacy(permit).await;
+                let result = adapter.start_legacy(permit).await;
                 let (dispatch, cause, raw_result) = match result {
                     Ok(receipt) => (
                         receipt.start.dispatch,
@@ -221,6 +227,7 @@ impl HostCoordinator {
                 return Ok(LegacyActionSubmission::Existing(snapshot));
             }
         }
+        let adapter = self.inner.exec_adapter()?;
         let execution = self
             .inner
             .execution_gate
@@ -262,7 +269,7 @@ impl HostCoordinator {
         jobs.spawn_on(
             async move {
                 let _slot = slot;
-                let legacy = run_legacy_action(&inner.adapter, permit).await;
+                let legacy = run_legacy_action(&adapter, permit).await;
                 let receipt = legacy.action;
                 let fact = match receipt.evidence {
                     ActionEvidence::Acknowledged => ActionResult::Acknowledged,
@@ -275,13 +282,8 @@ impl HostCoordinator {
                     .record_action_result(&operation, fact, inner.now());
                 guard.settled = settled.is_ok();
                 let retention_error = if let Ok(snapshot) = &settled {
-                    transfer_known_action(
-                        &mut state.ledger,
-                        &inner.adapter,
-                        &receipt,
-                        snapshot.state,
-                    )
-                    .err()
+                    transfer_known_action(&mut state.ledger, &adapter, &receipt, snapshot.state)
+                        .err()
                 } else {
                     None
                 };
@@ -316,6 +318,7 @@ impl HostCoordinator {
         max_bytes: usize,
         wait: Duration,
     ) -> Result<RawProcessPage, CoordinatorError> {
+        let adapter = self.inner.exec_adapter()?;
         let _execution = self
             .inner
             .execution_gate
@@ -341,13 +344,10 @@ impl HostCoordinator {
             .try_acquire_owned()
             .map_err(|_| CoordinatorError::Busy)?;
         let page = tokio::time::timeout(Duration::from_secs(10), async {
-            let handle = self
-                .inner
-                .adapter
+            let handle = adapter
                 .lookup_operation(owner, &target.operation_id)
                 .await?;
-            self.inner
-                .adapter
+            adapter
                 .read_raw(owner, &handle, after_seq, max_bytes, wait)
                 .await
         })

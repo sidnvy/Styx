@@ -563,9 +563,21 @@ async fn actual_paired_tls_mcp_codex_nonce_owner_and_revocation_journey() {
     let cleanup = cleanup.unwrap();
     assert!(cleanup.supervised_jobs_joined);
     assert!(
-        cleanup.native.executor_exited
-            && cleanup.native.reader_task_reaped
-            && cleanup.native.stderr_task_reaped,
+        cleanup
+            .native
+            .as_ref()
+            .expect("fixture configured Exec")
+            .executor_exited
+            && cleanup
+                .native
+                .as_ref()
+                .expect("fixture configured Exec")
+                .reader_task_reaped
+            && cleanup
+                .native
+                .as_ref()
+                .expect("fixture configured Exec")
+                .stderr_task_reaped,
         "native executor and IO tasks actually reaped"
     );
     std::fs::write(

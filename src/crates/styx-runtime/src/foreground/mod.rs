@@ -25,6 +25,8 @@ pub struct ForegroundEvent {
 #[derive(Serialize)]
 pub struct ForegroundOutcome {
     pub schema: u32,
+    /// False means no executor was configured/started, never an inferred wait.
+    pub executor_started: bool,
     pub executor_exited: bool,
     pub processes_exited: bool,
     pub io_tasks_joined: bool,
@@ -32,7 +34,7 @@ pub struct ForegroundOutcome {
 }
 impl ForegroundOutcome {
     pub fn is_complete(&self) -> bool {
-        self.executor_exited
+        (!self.executor_started || self.executor_exited)
             && self.processes_exited
             && self.io_tasks_joined
             && self.supervised_jobs_joined

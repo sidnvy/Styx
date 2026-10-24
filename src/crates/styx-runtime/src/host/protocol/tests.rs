@@ -443,10 +443,28 @@ async fn actual_tls_wss_codex_start_read_duplicate_and_lost_response_batch() {
         .await
         .unwrap();
     assert!(cleanup.supervised_jobs_joined);
-    assert!(cleanup.native.executor_exited);
-    assert!(cleanup.native.reader_task_reaped);
-    assert!(cleanup.native.stderr_task_reaped);
-    std::fs::write(root.join("native-cleanup.json"), serde_json::to_vec_pretty(&json!({"supervised_jobs_joined":cleanup.supervised_jobs_joined,"executor_exited":cleanup.native.executor_exited,"reader_task_reaped":cleanup.native.reader_task_reaped,"stderr_task_reaped":cleanup.native.stderr_task_reaped,"native_receipt":format!("{:?}",cleanup.native)})).unwrap()).unwrap();
+    assert!(
+        cleanup
+            .native
+            .as_ref()
+            .expect("fixture configured Exec")
+            .executor_exited
+    );
+    assert!(
+        cleanup
+            .native
+            .as_ref()
+            .expect("fixture configured Exec")
+            .reader_task_reaped
+    );
+    assert!(
+        cleanup
+            .native
+            .as_ref()
+            .expect("fixture configured Exec")
+            .stderr_task_reaped
+    );
+    std::fs::write(root.join("native-cleanup.json"), serde_json::to_vec_pretty(&json!({"supervised_jobs_joined":cleanup.supervised_jobs_joined,"executor_exited":cleanup.native.as_ref().expect("fixture configured Exec").executor_exited,"reader_task_reaped":cleanup.native.as_ref().expect("fixture configured Exec").reader_task_reaped,"stderr_task_reaped":cleanup.native.as_ref().expect("fixture configured Exec").stderr_task_reaped,"native_receipt":format!("{:?}",cleanup.native)})).unwrap()).unwrap();
     drop(fixture);
     drop(protocol_partition);
     drop(protocol);
@@ -792,9 +810,21 @@ async fn actual_canonical_tls_wss_host_action_journey() {
     println!("WSS_ACTION_CLEANUP {:?}", cleanup);
     assert!(
         cleanup.supervised_jobs_joined
-            && cleanup.native.executor_exited
-            && cleanup.native.reader_task_reaped
-            && cleanup.native.stderr_task_reaped
+            && cleanup
+                .native
+                .as_ref()
+                .expect("fixture configured Exec")
+                .executor_exited
+            && cleanup
+                .native
+                .as_ref()
+                .expect("fixture configured Exec")
+                .reader_task_reaped
+            && cleanup
+                .native
+                .as_ref()
+                .expect("fixture configured Exec")
+                .stderr_task_reaped
     );
     assert_eq!(host.unreserved_queued_bytes(), expected_unreserved);
     outcome.unwrap();

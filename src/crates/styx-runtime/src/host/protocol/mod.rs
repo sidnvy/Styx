@@ -672,18 +672,22 @@ impl<'a> HostProtocol<'a> {
         }
     }
     fn features(&self) -> Vec<String> {
-        let mut features: Vec<String> = [
-            "prepare_start",
-            "dispatch_start",
-            "inspect_start",
-            "read",
-            "prepare_action",
-            "dispatch_action",
-            "inspect_action",
-        ]
-        .into_iter()
-        .map(str::to_owned)
-        .collect();
+        let mut features: Vec<String> = if self.coordinator.exec_configured() {
+            [
+                "prepare_start",
+                "dispatch_start",
+                "inspect_start",
+                "read",
+                "prepare_action",
+                "dispatch_action",
+                "inspect_action",
+            ]
+            .into_iter()
+            .map(str::to_owned)
+            .collect()
+        } else {
+            Vec::new()
+        };
         if self.paired {
             features.extend(
                 ["owner_open", "owner_revoke", "owner_cleanup"]
@@ -759,7 +763,7 @@ impl<'a> HostProtocol<'a> {
                                     version, challenge, device_id: self.profile.device_id.clone(),
                                     host_generation: self.profile.host_generation.clone(), connection_generation: generation.clone(),
                                     features: self.features(),
-                                    write: true, terminate: true, read_resume: false,
+                                    write: self.coordinator.exec_configured(), terminate: self.coordinator.exec_configured(), read_resume: false,
                                     owner_issuance: if self.paired { "gateway_authenticated" } else { "bootstrap_preverified_only" }.into(),
                                     grant_revision: self.paired.then(|| self.coordinator.grant_revision()),
                                 }

@@ -55,6 +55,16 @@ impl HostAuthority {
                 receipt.deadline_exhausted = true;
                 break;
             }
+            let adapter = match self.inner.exec_adapter() {
+                Ok(adapter) => adapter,
+                Err(error) => {
+                    receipt.blocked.push(RetentionBlock {
+                        operation: key.snapshot().id.clone(),
+                        error,
+                    });
+                    continue;
+                }
+            };
             let snapshot = key.snapshot();
             if matches!(
                 snapshot.state,
@@ -66,7 +76,7 @@ impl HostAuthority {
                 });
                 continue;
             }
-            let evidence = match self.inner.adapter.lookup_action(key.owner(), &snapshot.id) {
+            let evidence = match adapter.lookup_action(key.owner(), &snapshot.id) {
                 Ok(evidence) => Ok(evidence),
                 Err(ExecError::UnknownHandle)
                     if matches!(
@@ -93,12 +103,7 @@ impl HostAuthority {
             };
             let result = evidence.and_then(|evidence| {
                 let mut state = self.inner.state.lock().expect("Host state mutex");
-                transfer_known_action(
-                    &mut state.ledger,
-                    &self.inner.adapter,
-                    &evidence,
-                    snapshot.state,
-                )
+                transfer_known_action(&mut state.ledger, &adapter, &evidence, snapshot.state)
             });
             match result {
                 Ok(()) if snapshot.state != OperationState::Unknown => {
@@ -126,6 +131,16 @@ impl HostAuthority {
                 receipt.deadline_exhausted = true;
                 break;
             }
+            let adapter = match self.inner.exec_adapter() {
+                Ok(adapter) => adapter,
+                Err(error) => {
+                    receipt.blocked.push(RetentionBlock {
+                        operation: key.snapshot().id.clone(),
+                        error,
+                    });
+                    continue;
+                }
+            };
             let snapshot = key.snapshot();
             if !matches!(
                 snapshot.liveness,
@@ -149,26 +164,23 @@ impl HostAuthority {
                 .begin_resource_release(&target);
             let result = match permit {
                 Err(error) => Err(error.into()),
-                Ok(permit) => match tokio::time::timeout_at(
-                    until,
-                    self.inner.adapter.release_resource(permit),
-                )
-                .await
-                {
-                    Ok(Ok(proof)) => self
-                        .inner
-                        .state
-                        .lock()
-                        .expect("Host state mutex")
-                        .ledger
-                        .record_provider_release(proof)
-                        .map_err(CoordinatorError::from),
-                    Ok(Err(error)) => Err(error.into()),
-                    Err(_) => {
-                        receipt.deadline_exhausted = true;
-                        Err(CoordinatorError::Busy)
+                Ok(permit) => {
+                    match tokio::time::timeout_at(until, adapter.release_resource(permit)).await {
+                        Ok(Ok(proof)) => self
+                            .inner
+                            .state
+                            .lock()
+                            .expect("Host state mutex")
+                            .ledger
+                            .record_provider_release(proof)
+                            .map_err(CoordinatorError::from),
+                        Ok(Err(error)) => Err(error.into()),
+                        Err(_) => {
+                            receipt.deadline_exhausted = true;
+                            Err(CoordinatorError::Busy)
+                        }
                     }
-                },
+                }
             };
             match result {
                 Ok(()) => receipt.resources_released += 1,
