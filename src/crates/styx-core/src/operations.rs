@@ -424,10 +424,10 @@ impl OperationLedger {
         if self.maintenance_fenced {
             return Err(ErrorCategory::Busy);
         }
-        if let Some(target) = &record.snapshot.target {
-            if self.verify_target(owner, target, &record.context)? != record.domain {
-                return Err(ErrorCategory::StateConflict);
-            }
+        if let Some(target) = &record.snapshot.target
+            && self.verify_target(owner, target, &record.context)? != record.domain
+        {
+            return Err(ErrorCategory::StateConflict);
         }
         check_admission(&record.context, facts, now)?;
         let record = self

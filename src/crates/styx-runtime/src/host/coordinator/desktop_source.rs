@@ -354,7 +354,7 @@ async fn supervise(
             }
         },
     };
-    result.unwrap_or_else(|_| WatchReport {
+    result.unwrap_or(WatchReport {
         stream_instance: instance,
         owned_worker_identity: None,
         fenced: true,

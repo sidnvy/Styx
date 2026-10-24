@@ -95,10 +95,10 @@ fn target_shape(args: &Map<String, Value>, has_token: bool, has_pixel: bool) -> 
         }
         if !desktop {
             for key in ["pid", "window_id"] {
-                if let Some(outer) = args.get(key) {
-                    if target.get(key) != Some(outer) {
-                        return unsupported();
-                    }
+                if let Some(outer) = args.get(key)
+                    && target.get(key) != Some(outer)
+                {
+                    return unsupported();
                 }
             }
         }

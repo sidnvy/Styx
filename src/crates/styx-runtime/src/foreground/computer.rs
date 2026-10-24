@@ -62,7 +62,7 @@ pub(crate) fn prepare_computer_bootstrap(
     let uid = nix::unistd::Uid::current().as_raw();
     if source.fenced()
         || source.epoch() != epoch
-        || fields.runtime_dir != PathBuf::from(format!("/run/user/{uid}"))
+        || fields.runtime_dir != std::path::Path::new(&format!("/run/user/{uid}"))
     {
         return Err(ForegroundError("desktop_source_fenced"));
     }

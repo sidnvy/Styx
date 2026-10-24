@@ -47,6 +47,7 @@ const MAX_FIELD: usize = 256;
 const MAX_FACTS: usize = 64 * 1024 - 64;
 const MAX_PROC: usize = 8192;
 // systemd Manager.ListUnitsByPatterns: a(ssssssouso), including Following.
+type ExecStartRow = (String, Vec<String>, bool, u64, u64, u64, u64, u32, i32, i32);
 type UnitRow = (
     String,
     String,
@@ -144,7 +145,7 @@ struct UnitFact {
     restart: Option<String>,
     service_type: Option<String>,
     // Service.ExecStart: a(sasbttttuii), four real/monotonic start/end timestamps.
-    bind_start: Option<Vec<(String, Vec<String>, bool, u64, u64, u64, u64, u32, i32, i32)>>,
+    bind_start: Option<Vec<ExecStartRow>>,
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

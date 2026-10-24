@@ -833,10 +833,10 @@ impl CuaActionSlot {
 }
 async fn cleanup(live: &mut Live, budget: Duration) -> CuaCleanup {
     let until = Instant::now() + budget;
-    if live.close_job.is_none() {
-        if let Some(mut client) = live.client.take() {
-            live.close_job = Some(tokio::spawn(async move { client.close().await.is_ok() }));
-        }
+    if live.close_job.is_none()
+        && let Some(mut client) = live.client.take()
+    {
+        live.close_job = Some(tokio::spawn(async move { client.close().await.is_ok() }));
     }
     // Incomplete handshakes may leave endpoints owned directly by Child, not by
     // the SDK. Drop these before stopping the original unit; never replace it.
@@ -847,17 +847,16 @@ async fn cleanup(live: &mut Live, budget: Duration) -> CuaCleanup {
     }
     let mut exited = live.exit_success.is_some();
     if let Some(child) = live.child.as_mut() {
-        if let Some(scope) = live.scope.as_mut() {
-            if let Ok(facts) = scope
+        if let Some(scope) = live.scope.as_mut()
+            && let Ok(facts) = scope
                 .stop_and_confirm(child, until.saturating_duration_since(Instant::now()))
                 .await
-            {
-                exited = facts.wrapper_exited;
-                if let Some(success) = facts.exit_success {
-                    live.exit_success = Some(success)
-                }
-                live.scope_confirmed |= facts.confirmed;
+        {
+            exited = facts.wrapper_exited;
+            if let Some(success) = facts.exit_success {
+                live.exit_success = Some(success)
             }
+            live.scope_confirmed |= facts.confirmed;
         }
     } else {
         exited = true;
