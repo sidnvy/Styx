@@ -125,3 +125,16 @@ impl NativeState {
             })
     }
 }
+
+/// Explicit private configuration plan. This includes opaque target material;
+/// clients must store it privately, not treat it as a redacted status/log DTO.
+/// Parsing never supplies writer, root, maintenance or migration authority.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeConfigurationPlan {
+    pub schema: u16,
+    pub scope_generation: Sha256Digest,
+    pub root_identity: NativeRootIdentity,
+    pub intent: crate::management::DesiredStateCommit,
+    pub target: Box<serde_json::value::RawValue>,
+}

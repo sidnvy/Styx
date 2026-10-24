@@ -693,8 +693,8 @@
         "A39"
       ],
       "shared_files_rule": "root manifest/lock/contract public surface由integrator独占；planned paths仅在领取lease后可写",
-      "status": "PLANNED",
-      "implementation_started": false,
+      "status": "IN_PROGRESS",
+      "implementation_started": true,
       "receipt_required": [
         "base_revision",
         "contract_revision",
@@ -702,7 +702,8 @@
         "relevant_checks",
         "known_failures",
         "cleanup_and_lease_return"
-      ]
+      ],
+      "implementation_note": "Native-only configuration reader/root/commit/recovery verified at1abc5d0; public offline CLI/API create/private-plan/apply/query/original-recover has actual Linux process evidence on subsequent inputs (exact integration/evidence external). Not complete: original owner migration, native manager/UI/service activation, online Control API, update/rollback or final release acceptance."
     },
     {
       "id": "R21",
@@ -729,8 +730,8 @@
         "A39"
       ],
       "shared_files_rule": "root manifest/lock/contract public surface由integrator独占；planned paths仅在领取lease后可写",
-      "status": "PLANNED",
-      "implementation_started": false,
+      "status": "IN_PROGRESS",
+      "implementation_started": true,
       "receipt_required": [
         "base_revision",
         "contract_revision",
@@ -738,7 +739,8 @@
         "relevant_checks",
         "known_failures",
         "cleanup_and_lease_return"
-      ]
+      ],
+      "implementation_note": "Native-only configuration reader/root/commit/recovery verified at1abc5d0; public offline CLI/API create/private-plan/apply/query/original-recover has actual Linux process evidence on subsequent inputs (exact integration/evidence external). Not complete: original owner migration, native manager/UI/service activation, online Control API, update/rollback or final release acceptance."
     },
     {
       "id": "R22",

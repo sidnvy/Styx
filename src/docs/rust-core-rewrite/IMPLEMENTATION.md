@@ -19,8 +19,20 @@ Owner-authorized goal is active. The plan at a21ea75 remains the scope baseline;
 | R12 enrollment | Rust Core target-bound approval, same-credential confirmation/CAS/revoke, signed strictTLS journal service, same-authority paired Host WSS and real MCP-to-Codex owner isolation/physical cleanup checkpoint | Defaults/ingress, original credential/pair migration, transport epoch/dropresponse faults, multiple Desktop connections and cross-platform recovery remain required |
 | R13 legacy CLI | Explicit `host run --legacy-gateway`, read-only doctor/status, original publisher/raw-manifest exact member closure and native file pin; same-budget WSS-before-executor bootstrap and Host-owned cleanup | Immutable old Gateway44cf147 + same Rust release CLI passed standard-CA/leaf real pipe/PTY/stdin/cross-owner/no-replay/disconnect/SIGTERM scenes; original-default-style self-signed TLS admission FAILED separately. Synthetic profiles do not prove onboarding, original pair or service/App cutover |
 
-| R14 sessions | Bounded Core registry, fresh incarnation IDs, provider-specific facts, selection/expiry/revocation contracts; runtime Host admission-lock composition is under verification | Authenticated native association, actual Desktop dispatch, durable revocation, real platform lifecycle acceptance |
-| R15 Linux discovery | Typed kernel-authenticated system-login1 candidate probe and independent loginctl development evidence; Unknown association only | Worker isolation/candidate CLI and property consistency fixes under verification; watcher, native agent/compositor binding, Window/Capture/Input and real lifecycle acceptance |
+| R14 sessions | Bounded Core registry, fresh incarnation IDs, provider-specific facts, selection/expiry/revocation contracts; runtime Host admission-lock composition has development scenario evidence | Authenticated native association, actual Desktop dispatch, durable revocation, real platform lifecycle acceptance |
+| R15 Linux discovery | Typed kernel-authenticated system-login1 candidate probe and independent loginctl development evidence; Unknown association only | Bounded candidate worker/CLI and diagnostic watcher have actual Linux fault evidence; authenticated native agent/compositor binding, Window/Capture/Input and real lifecycle acceptance |
+
+| R19 Browser | Owned thin Playwright worker, actual Linux headless lifecycle/reference effects and nonreplay development evidence | Remaining full public tools, headed/login/file transfer/native platform/package and account acceptance |
+| R20 management | Shared read-only legacy role/plan projection and native configuration contracts | Native offline CLI/API create→plan→apply→query→recover now has actual Linux process evidence; actual manager/GUI/OS actions, online Control routing and migration remain unfinished |
+| R21 transactions | At `1abc5d0`: native-only fresh root, schema2 exact reader, conditional configuration commit, original recovery/query and verified fence release; full local gate and independent process-exit scenes passed | Legacy owner handoff, abort/update/rollback, actual execution maintenance, Mac/Windows store adapters and migration remain unfinished |
+
+Current native management CLI uses the shared API for the explicit offline
+configuration journey; see [command scope](NATIVE-CONFIGURATION-CLI.md).
+Next focus is native ownership/bootstrap/migration, rather than further generic
+store machinery.
+Private plans and saved desired configuration do not imply OS service actions or
+identity creation. The current Owner Control Report carries exact integration and
+artifact evidence; prior per-area receipts are not inherited by later source.
 
 No Rust candidate has been packaged, signed, installed or accepted on the three platforms. Existing signed packages and original device identities/pairing/permissions have not been modified. Historical JS test counts are not Rust completion evidence. Stable remains NO-GO.
 

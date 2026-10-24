@@ -1,7 +1,8 @@
 //! Process entry adapter. Runtime owns trusted profile admission and cleanup;
 //! command arguments never supply credentials, executor binaries or authority.
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 use std::{
+    ffi::OsString,
     io::{self, Write},
     path::PathBuf,
     process::ExitCode,
@@ -37,12 +38,72 @@ enum Command {
         #[command(subcommand)]
         command: GatewayCommand,
     },
+    /// Initialize a fresh native configuration root; never adopts legacy state.
+    Init {
+        #[arg(long)]
+        parent_dir: PathBuf,
+        #[arg(long)]
+        name: OsString,
+        #[arg(long)]
+        deployment_file: PathBuf,
+        #[arg(long, value_enum)]
+        mode: NativeModeArg,
+        #[arg(long, value_enum)]
+        manager: NativeManagerArg,
+        #[arg(long)]
+        host: bool,
+        #[arg(long)]
+        gateway: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Apply an exact reviewed native plan; no services are started here.
+    Apply {
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(long)]
+        plan_file: PathBuf,
+        #[arg(long, required = true)]
+        authorize: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Reconcile the original native transaction; never mint a replacement ID.
+    Recover {
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(long)]
+        transaction_id: String,
+        #[arg(long, required = true)]
+        authorize: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Inspect a native transaction without applying or recovering it.
+    Transaction {
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(long)]
+        transaction_id: String,
+        #[arg(long)]
+        json: bool,
+    },
     /// Review configuration intent and unresolved legacy steps without executing them.
     Plan {
         #[arg(long)]
         state_dir: PathBuf,
         #[arg(long)]
         json: bool,
+        #[arg(long,requires_all=["component","run","transaction_id","sequence"])]
+        native: bool,
+        #[arg(long, value_enum, requires = "native")]
+        component: Option<NativeComponentArg>,
+        #[arg(long, value_enum, requires = "native")]
+        run: Option<NativeRunArg>,
+        #[arg(long, requires = "native")]
+        transaction_id: Option<String>,
+        #[arg(long,requires="native",value_parser=clap::value_parser!(u64).range(1..))]
+        sequence: Option<u64>,
     },
     /// Inspect the existing deployment without connecting or starting services.
     Status {
@@ -50,6 +111,8 @@ enum Command {
         state_dir: PathBuf,
         #[arg(long)]
         json: bool,
+        #[arg(long)]
+        native: bool,
     },
     /// Validate a profile, or inspect OS desktop candidates without granting access.
     Doctor {
@@ -68,6 +131,27 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+}
+#[derive(Clone, Copy, ValueEnum)]
+enum NativeModeArg {
+    CreateLocal,
+    JoinExisting,
+}
+#[derive(Clone, Copy, ValueEnum)]
+enum NativeManagerArg {
+    ForegroundCli,
+    AppManaged,
+    PersistentService,
+}
+#[derive(Clone, Copy, ValueEnum)]
+enum NativeComponentArg {
+    Host,
+    Gateway,
+}
+#[derive(Clone, Copy, ValueEnum)]
+enum NativeRunArg {
+    Running,
+    Stopped,
 }
 impl Cli {
     pub(crate) fn is_desktop_probe_worker(&self) -> bool {
@@ -117,6 +201,65 @@ fn write_json(value: &impl serde::Serialize) -> io::Result<()> {
     serde_json::to_writer(&mut output, value)?;
     output.write_all(b"\n")?;
     output.flush()
+}
+fn native_result<T: serde::Serialize>(
+    result: Result<T, styx_runtime::management::native::NativeManagementError>,
+    json: bool,
+    summary: &'static str,
+) -> ExitCode {
+    match result {
+        Ok(value) => {
+            if !json {
+                eprintln!("{summary}");
+            }
+            if write_json(&value).is_err() {
+                error("output_unavailable")
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
+        Err(value) => {
+            eprintln!("{}", serde_json::json!({"schema":1,"error":value.code()}));
+            ExitCode::from(value.exit_code())
+        }
+    }
+}
+impl NativeModeArg {
+    fn native(self) -> styx_contracts::native_management::NativeDeploymentMode {
+        use styx_contracts::native_management::NativeDeploymentMode;
+        match self {
+            Self::CreateLocal => NativeDeploymentMode::CreateLocal,
+            Self::JoinExisting => NativeDeploymentMode::JoinExisting,
+        }
+    }
+}
+impl NativeManagerArg {
+    fn native(self) -> styx_contracts::native_management::NativeManager {
+        use styx_contracts::native_management::NativeManager;
+        match self {
+            Self::ForegroundCli => NativeManager::ForegroundCli,
+            Self::AppManaged => NativeManager::AppManaged,
+            Self::PersistentService => NativeManager::PersistentService,
+        }
+    }
+}
+impl NativeComponentArg {
+    fn native(self) -> styx_runtime::management::native::NativeComponent {
+        use styx_runtime::management::native::NativeComponent;
+        match self {
+            Self::Host => NativeComponent::Host,
+            Self::Gateway => NativeComponent::Gateway,
+        }
+    }
+}
+impl NativeRunArg {
+    fn native(self) -> styx_contracts::native_management::NativeRunDesired {
+        use styx_contracts::native_management::NativeRunDesired;
+        match self {
+            Self::Running => NativeRunDesired::Running,
+            Self::Stopped => NativeRunDesired::Stopped,
+        }
+    }
 }
 async fn desktop_probe_worker() -> ExitCode {
     #[cfg(target_os = "linux")]
@@ -312,23 +455,133 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
     match cli.command {
         Command::LinuxDesktopProbe => desktop_probe_worker().await,
         Command::LinuxDesktopWatch => desktop_watch_worker().await,
-        Command::Plan { state_dir, json } => {
-            match styx_runtime::management::inspect_deployment(&state_dir).await {
-                Ok(plan) => {
-                    if !json {
-                        eprintln!(
-                            "Configuration intent; runtime health and management ownership are unobserved:"
-                        );
-                    }
-                    if write_json(&plan).is_err() {
-                        error("output_unavailable")
-                    } else {
-                        ExitCode::SUCCESS
-                    }
-                }
-                Err(value) => error(value.code()),
-            }
+        Command::Init {
+            parent_dir,
+            name,
+            deployment_file,
+            mode,
+            manager,
+            host,
+            gateway,
+            json,
+        } => {
+            let options = styx_runtime::management::native::NativeCreateOptions {
+                mode: mode.native(),
+                manager: manager.native(),
+                host,
+                gateway,
+            };
+            native_result(
+                styx_runtime::management::native::initialize(
+                    &parent_dir,
+                    &name,
+                    &deployment_file,
+                    options,
+                )
+                .await,
+                json,
+                "Native configuration initialized with stopped/disabled intent; no service started:",
+            )
         }
+        Command::Plan {
+            native: true,
+            state_dir,
+            json,
+            component,
+            run,
+            transaction_id,
+            sequence,
+        } => {
+            let (Some(component), Some(run), Some(transaction_id), Some(sequence)) =
+                (component, run, transaction_id, sequence)
+            else {
+                return error("native_plan_arguments_required");
+            };
+            let Ok(transaction_id) =
+                styx_contracts::identity::TransactionId::try_from(transaction_id)
+            else {
+                return error("invalid_transaction_id");
+            };
+            let change = styx_runtime::management::native::NativeDesiredChange {
+                component: component.native(),
+                run: run.native(),
+                transaction_id,
+                sequence,
+            };
+            native_result(
+                styx_runtime::management::native::plan(&state_dir, change).await,
+                json,
+                "Native desired-state plan prepared for review; no service changed:",
+            )
+        }
+        Command::Apply {
+            state_dir,
+            plan_file,
+            authorize,
+            json,
+        } => {
+            if !authorize {
+                return error("authorization_required");
+            }
+            native_result(
+                styx_runtime::management::native::apply(&state_dir, &plan_file).await,
+                json,
+                "Native desired-state transaction; inspect report for completion:",
+            )
+        }
+        Command::Recover {
+            state_dir,
+            transaction_id,
+            authorize,
+            json,
+        } => {
+            if !authorize {
+                return error("authorization_required");
+            }
+            native_result(
+                styx_runtime::management::native::recover(&state_dir, &transaction_id).await,
+                json,
+                "Original native transaction reconciliation; no automatic service start:",
+            )
+        }
+        Command::Transaction {
+            state_dir,
+            transaction_id,
+            json,
+        } => native_result(
+            styx_runtime::management::native::inspect(&state_dir, Some(&transaction_id)).await,
+            json,
+            "Read-only native transaction report:",
+        ),
+        Command::Status {
+            native: true,
+            state_dir,
+            json,
+        } => native_result(
+            styx_runtime::management::native::inspect(&state_dir, None).await,
+            json,
+            "Read-only native configuration report:",
+        ),
+        Command::Plan {
+            native: false,
+            state_dir,
+            json,
+            ..
+        } => match styx_runtime::management::inspect_deployment(&state_dir).await {
+            Ok(plan) => {
+                if !json {
+                    eprintln!(
+                        "Configuration intent; runtime health and management ownership are unobserved:"
+                    );
+                }
+                if write_json(&plan).is_err() {
+                    error("output_unavailable")
+                } else {
+                    ExitCode::SUCCESS
+                }
+            }
+            Err(value) => error(value.code()),
+        },
         Command::BuildInfo => {
             println!(
                 "styx {} contract={} stage={}",
@@ -354,7 +607,11 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
             json,
             ..
         } => desktop_diagnostics(json).await,
-        Command::Status { state_dir, json }
+        Command::Status {
+            native: false,
+            state_dir,
+            json,
+        }
         | Command::Doctor {
             state_dir: Some(state_dir),
             json,

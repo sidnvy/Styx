@@ -4,6 +4,7 @@
 //! implicit recovery. A read is not a management-writer handoff. Private files
 //! are reobserved before returning; that is not a transactional snapshot against
 //! an uncoordinated legacy writer. CLI and future UI use this same entry point.
+pub mod native;
 use crate::store::{PrivateRoot, RawFile, StoreError};
 use serde::{
     Deserialize, Serialize,

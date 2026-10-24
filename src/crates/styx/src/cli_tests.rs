@@ -82,3 +82,227 @@ fn desktop_candidate_diagnostics_cannot_supply_authority_or_change_profile_mode(
         );
     }
 }
+
+#[test]
+fn native_management_explicit_inputs_and_legacy_routes_are_separate_batch() {
+    let init = Cli::try_parse_from([
+        "styx",
+        "init",
+        "--parent-dir",
+        "/owned/private",
+        "--name",
+        "fresh-native",
+        "--deployment-file",
+        "/owned/deployment.json",
+        "--mode",
+        "join-existing",
+        "--manager",
+        "foreground-cli",
+        "--host",
+        "--json",
+    ])
+    .unwrap();
+    assert!(matches!(
+        init.command,
+        Command::Init {
+            mode: NativeModeArg::JoinExisting,
+            manager: NativeManagerArg::ForegroundCli,
+            host: true,
+            gateway: false,
+            json: true,
+            ..
+        }
+    ));
+    let plan = [
+        "styx",
+        "plan",
+        "--native",
+        "--state-dir",
+        "/owned/private",
+        "--component",
+        "host",
+        "--run",
+        "stopped",
+        "--transaction-id",
+        "native-17",
+        "--sequence",
+        "17",
+        "--json",
+    ];
+    let parsed = Cli::try_parse_from(plan).unwrap();
+    assert!(matches!(
+        parsed.command,
+        Command::Plan {
+            native: true,
+            component: Some(NativeComponentArg::Host),
+            run: Some(NativeRunArg::Stopped),
+            sequence: Some(17),
+            ..
+        }
+    ));
+    for missing in ["--component", "--run", "--transaction-id", "--sequence"] {
+        let mut args = Vec::new();
+        let mut skip = false;
+        for arg in plan {
+            if skip {
+                skip = false;
+                continue;
+            }
+            if arg == missing {
+                skip = true;
+                continue;
+            }
+            args.push(arg);
+        }
+        assert!(Cli::try_parse_from(args).is_err());
+    }
+    let without_native: Vec<_> = plan.into_iter().filter(|arg| *arg != "--native").collect();
+    assert!(Cli::try_parse_from(without_native).is_err());
+    for sequence in ["0", "-1", "18446744073709551616"] {
+        let invalid: Vec<_> = plan
+            .into_iter()
+            .map(|arg| if arg == "17" { sequence } else { arg })
+            .collect();
+        assert!(Cli::try_parse_from(invalid).is_err());
+    }
+    assert!(
+        Cli::try_parse_from([
+            "styx",
+            "apply",
+            "--state-dir",
+            "/owned/private",
+            "--plan-file",
+            "/owned/plan.json"
+        ])
+        .is_err()
+    );
+    assert!(
+        Cli::try_parse_from([
+            "styx",
+            "recover",
+            "--state-dir",
+            "/owned/private",
+            "--transaction-id",
+            "native-17"
+        ])
+        .is_err()
+    );
+    let apply = Cli::try_parse_from([
+        "styx",
+        "apply",
+        "--state-dir",
+        "/owned/private",
+        "--plan-file",
+        "/owned/plan.json",
+        "--authorize",
+        "--json",
+    ])
+    .unwrap();
+    assert!(matches!(
+        apply.command,
+        Command::Apply {
+            authorize: true,
+            json: true,
+            ..
+        }
+    ));
+    let recover = Cli::try_parse_from([
+        "styx",
+        "recover",
+        "--state-dir",
+        "/owned/private",
+        "--transaction-id",
+        "native-17",
+        "--authorize",
+    ])
+    .unwrap();
+    assert!(matches!(
+        recover.command,
+        Command::Recover {
+            authorize: true,
+            ..
+        }
+    ));
+    assert!(matches!(
+        Cli::try_parse_from([
+            "styx",
+            "transaction",
+            "--state-dir",
+            "/owned/private",
+            "--transaction-id",
+            "native-17",
+            "--json"
+        ])
+        .unwrap()
+        .command,
+        Command::Transaction { json: true, .. }
+    ));
+    assert!(matches!(
+        Cli::try_parse_from([
+            "styx",
+            "status",
+            "--native",
+            "--state-dir",
+            "/owned/private"
+        ])
+        .unwrap()
+        .command,
+        Command::Status { native: true, .. }
+    ));
+    assert!(matches!(
+        Cli::try_parse_from(["styx", "status", "--state-dir", "/owned/private"])
+            .unwrap()
+            .command,
+        Command::Status { native: false, .. }
+    ));
+    assert!(matches!(
+        Cli::try_parse_from(["styx", "plan", "--state-dir", "/owned/private", "--json"])
+            .unwrap()
+            .command,
+        Command::Plan {
+            native: false,
+            component: None,
+            run: None,
+            transaction_id: None,
+            sequence: None,
+            ..
+        }
+    ));
+    for option in [
+        "--token",
+        "--bearer",
+        "--publisher-pin",
+        "--codex-bin",
+        "--writer-stopped",
+        "--adopt-legacy",
+    ] {
+        let mut args = vec![
+            "styx",
+            "apply",
+            "--state-dir",
+            "/owned/private",
+            "--plan-file",
+            "/owned/plan.json",
+            "--authorize",
+        ];
+        args.extend([option, "untrusted"]);
+        assert!(Cli::try_parse_from(args).is_err());
+    }
+    assert!(
+        Cli::try_parse_from([
+            "styx",
+            "transaction",
+            "--state-dir",
+            "/owned/private",
+            "--transaction-id",
+            "native-17",
+            "--authorize"
+        ])
+        .is_err()
+    );
+    let invalid_run: Vec<_> = plan
+        .into_iter()
+        .map(|arg| if arg == "stopped" { "auto" } else { arg })
+        .collect();
+    assert!(Cli::try_parse_from(invalid_run).is_err());
+}

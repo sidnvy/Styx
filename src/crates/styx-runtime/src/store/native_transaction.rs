@@ -87,6 +87,9 @@ impl NativeTransactions {
             }),
         }
     }
+    pub fn marker(&self) -> &styx_contracts::native_management::NativeRootMarker {
+        self.binding.marker()
+    }
     pub fn configuration_root(&self) -> OwnedConfigurationRoot {
         self.binding.configuration_root()
     }
@@ -137,6 +140,50 @@ impl NativeTransactions {
     ) -> Result<NativeCommitResult, NativeTransactionError> {
         let (before, intent) = self.plan(target)?;
         self.apply_prepared(maintenance, &before, target, &intent, &|_, _| {})
+    }
+    /// Typed preview under this opaque binding, not permission to apply later.
+    pub fn validate_target(
+        &self,
+        target: &[u8],
+    ) -> Result<DesiredStateCommit, NativeTransactionError> {
+        self.plan(target).map(|(_, intent)| intent)
+    }
+    /// Save an explicitly requested private review artifact without modifying
+    /// canonical state or journal. Name is fixed by a validated transaction ID.
+    /// Existing files are never replaced; no network/filepath authority is minted.
+    pub fn save_plan(
+        &self,
+        id: &TransactionId,
+        bytes: &[u8],
+    ) -> Result<String, NativeTransactionError> {
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        {
+            if bytes.is_empty()
+                || bytes.len() > styx_contracts::native_management::NATIVE_STATE_BYTES
+            {
+                return Err(NativeTransactionError::InvalidInput);
+            }
+            let name = format!("plan-{}.json", id.as_str());
+            self.binding.with_binding(|state, _| {
+                state.ordinary_admission()?;
+                match state.root.ensure_absent(&name) {
+                    Ok(()) => (),
+                    Err(super::StoreError::Changed) => return Err(JournalError::Conflict),
+                    Err(_) => return Err(JournalError::Unknown),
+                }
+                state
+                    .root
+                    .inner
+                    .create_fixed(&state.writer, &name, bytes, &|_| {})
+                    .map_err(|_| JournalError::Unknown)
+            })?;
+            Ok(name)
+        }
+        #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+        {
+            let _ = (id, bytes);
+            Err(NativeTransactionError::Unsupported)
+        }
     }
     fn plan(
         &self,
