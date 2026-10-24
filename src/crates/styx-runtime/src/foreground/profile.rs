@@ -276,6 +276,7 @@ pub struct LoadedLegacyProfile {
     rpc_timeout: Duration,
     observed: Vec<Observed>,
     diagnostics: ProfileDiagnostics,
+    source: ProfileSource,
 }
 impl std::fmt::Debug for LoadedLegacyProfile {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -390,6 +391,7 @@ impl LoadedLegacyProfile {
     /// Existing control does not load a new release/configuration snapshot.
     /// Original private observations and executable pin remain mandatory.
     pub(super) fn revalidate_control(&self) -> Result<(), ProfileError> {
+        self.source.revalidate()?;
         if let Some(executor) = &self.executor {
             executor.revalidate().map_err(|_| ProfileError::Changed)?;
         }
@@ -496,6 +498,29 @@ enum GatewayWireMode {
     Legacy,
     PairedV3,
 }
+// The maintenance variant is never obtainable through ordinary load entry
+// points. Its profile remains private inside a non-convertible wrapper.
+enum ProfileSource {
+    Ordinary,
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    Maintenance(Arc<crate::migration::legacy_service::RetiredCredentialReadBinding>),
+}
+impl ProfileSource {
+    fn revalidate(&self) -> Result<(), ProfileError> {
+        match self {
+            Self::Ordinary => Ok(()),
+            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            Self::Maintenance(binding) => binding.revalidate().map_err(|_| ProfileError::Changed),
+        }
+    }
+}
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[path = "profile_migration.rs"]
+mod migration;
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+pub use migration::LoadedMaintenanceProfile;
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+pub(crate) use migration::load_for_migration_validation;
 /// Reads the original deployment authority; does not initialize a new profile.
 pub fn load_legacy(state_dir: &Path) -> Result<LoadedLegacyProfile, ProfileError> {
     load(state_dir, GatewayWireMode::Legacy)
@@ -506,6 +531,14 @@ pub fn load_paired(state_dir: &Path) -> Result<LoadedLegacyProfile, ProfileError
     load(state_dir, GatewayWireMode::PairedV3)
 }
 fn load(state_dir: &Path, mode: GatewayWireMode) -> Result<LoadedLegacyProfile, ProfileError> {
+    load_source(state_dir, mode, ProfileSource::Ordinary)
+}
+fn load_source(
+    state_dir: &Path,
+    mode: GatewayWireMode,
+    source: ProfileSource,
+) -> Result<LoadedLegacyProfile, ProfileError> {
+    source.revalidate()?;
     if !cfg!(any(target_os = "linux", target_os = "macos"))
         || (cfg!(target_os = "macos") && !matches!(mode, GatewayWireMode::PairedV3))
     {
@@ -603,7 +636,22 @@ fn load(state_dir: &Path, mode: GatewayWireMode) -> Result<LoadedLegacyProfile, 
     if host.token_file != base.join("device/host.token") {
         return Err(ProfileError::Invalid);
     }
-    let raw_token = zeroize::Zeroizing::new(capture.read(base, "device/host.token", 4096)?);
+    let raw_token = match &source {
+        ProfileSource::Ordinary => {
+            zeroize::Zeroizing::new(capture.read(base, "device/host.token", 4096)?)
+        }
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        ProfileSource::Maintenance(binding) => {
+            let config_root =
+                PrivateRoot::open(state_dir).map_err(|_| ProfileError::ProtectedRead)?;
+            let host_root = PrivateRoot::open(base).map_err(|_| ProfileError::ProtectedRead)?;
+            // This proof is minted only from the original joined service,
+            // writer, maintenance and durable retirement. No alias from JSON.
+            binding
+                .read_token(&config_root, &host_root)
+                .map_err(|_| ProfileError::Changed)?
+        }
+    };
     let token = std::str::from_utf8(&raw_token)
         .map_err(|_| ProfileError::Invalid)?
         .trim();
@@ -674,6 +722,13 @@ fn load(state_dir: &Path, mode: GatewayWireMode) -> Result<LoadedLegacyProfile, 
     if inventory.runtime_format() != expected_format {
         return Err(ProfileError::UntrustedRelease);
     }
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    let inventory = match &source {
+        ProfileSource::Ordinary => inventory,
+        ProfileSource::Maintenance(binding) => {
+            release::ProfileRelease::for_maintenance(inventory, binding.candidate(), &expected)?
+        }
+    };
     let exec_enabled = host.exec.as_ref().is_some_and(|exec| exec.enabled);
     if matches!(mode, GatewayWireMode::Legacy) && !exec_enabled {
         return Err(ProfileError::Unsupported);
@@ -700,6 +755,17 @@ fn load(state_dir: &Path, mode: GatewayWireMode) -> Result<LoadedLegacyProfile, 
         ("native_rust_v1", true) => "native_rust_v1_executor_only",
         ("native_rust_v1", false) => "native_rust_v1_signed_worker_closure",
         _ => return Err(ProfileError::Unsupported),
+    };
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    let runtime_format = if matches!(&source, ProfileSource::Maintenance(_)) {
+        "native_rust_v1_maintenance_validation"
+    } else {
+        runtime_format
+    };
+    let diagnostic_manifest = match &source {
+        ProfileSource::Ordinary => active.manifest_sha256,
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        ProfileSource::Maintenance(binding) => binding.candidate().report().manifest_sha256,
     };
     let signed_version = inventory.version().to_owned();
     // An absent Exec profile supplies no Browser workspace authority.
@@ -790,11 +856,12 @@ fn load(state_dir: &Path, mode: GatewayWireMode) -> Result<LoadedLegacyProfile, 
             },
             version: signed_version,
             publisher_sha256: deployment.host.publisher,
-            manifest_sha256: active.manifest_sha256,
+            manifest_sha256: diagnostic_manifest,
             preservation: capture.public,
             tool_health: "NOT RUN",
             account_acceptance: "NOT RUN",
         },
+        source,
     };
     loaded.revalidate()?;
     Ok(loaded)

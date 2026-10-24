@@ -476,6 +476,13 @@ impl ConfigurationMaintenance {
     pub fn root_identity(&self) -> JournalResult<RootIdentity> {
         self.owner.identity()
     }
+    /// Prove this exact maintenance fence is still active, not just that the
+    /// filesystem root has the same identity. This does not settle old writers.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    pub(crate) fn validate_active(&self) -> JournalResult<RootIdentity> {
+        self.owner
+            .with_maintenance(self, |state| Ok(state.root.identity()))
+    }
     pub(crate) fn matches(&self, owner: &OwnedConfigurationRoot) -> bool {
         self.owner.same_authority(owner)
     }

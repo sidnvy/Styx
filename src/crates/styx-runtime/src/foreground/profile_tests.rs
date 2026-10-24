@@ -76,6 +76,40 @@ const config=JSON.stringify({schema:1,mode:'join-existing',gateway:{url:'https:/
     /// Signed closure still validates without a Codex member; these fixtures
     /// exercise configuration only and never start the dummy signed worker.
     #[test]
+    fn ordinary_profiles_never_alias_a_retired_credential_locator() {
+        use std::os::unix::fs::MetadataExt;
+        let fixture = Fixture::new();
+        let legacy = load_legacy(&fixture.state).unwrap();
+        let paired = load_paired(&fixture.state).unwrap();
+        let original = fixture.base.join("device/host.token");
+        let retired = fixture
+            .base
+            .join("device/.styx-retired-host-token-profile-test");
+        let before = fs::metadata(&original).unwrap();
+        let raw = zeroize::Zeroizing::new(fs::read(&original).unwrap());
+        let host_json = fs::read(fixture.base.join("device/host.json")).unwrap();
+        let active = fs::read(fixture.base.join("install/active.json")).unwrap();
+        // This owned filesystem negative is deliberately NOT a retirement proof:
+        // no writer/journal/settlement attestation or migration reader is minted.
+        fs::rename(&original, &retired).unwrap();
+        let after = fs::metadata(&retired).unwrap();
+        assert_eq!((before.dev(), before.ino()), (after.dev(), after.ino()));
+        assert_eq!(before.mode(), after.mode());
+        assert!(fs::read(&retired).unwrap().as_slice() == raw.as_slice());
+        assert!(!original.exists());
+        assert!(load_legacy(&fixture.state).is_err());
+        assert!(load_paired(&fixture.state).is_err());
+        assert!(legacy.revalidate().is_err());
+        assert!(paired.revalidate().is_err());
+        assert!(fs::read(fixture.base.join("device/host.json")).unwrap() == host_json);
+        assert!(fs::read(fixture.base.join("install/active.json")).unwrap() == active);
+        assert!(
+            !original.exists(),
+            "reader must never restore the old locator"
+        );
+    }
+
+    #[test]
     fn paired_disabled_or_absent_exec_keeps_protected_worker_inputs() {
         for mode in ["disabled", "absent"] {
             let f = Fixture::with_exec(mode);

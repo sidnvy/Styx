@@ -394,6 +394,15 @@ def execute(args):
                 crypto = gate.run("node22-crypto", ["cargo", "test", "-p", "styx-runtime", "--locked", "--offline", CRYPTO_TEST, "--", "--ignored", "--exact"], extra_env={"STYX_TEST_NODE22": str(node)})
                 gate.semantic(crypto, [] if "1 passed; 0 failed" in gate.read("node22-crypto") else ["exact_crypto_case_not_executed"])
                 receipt["legacy_node22_interop"] = crypto["status"]
+                if args.enrollment_store:
+                    for label, test_case in (
+                        ("legacy-registry", "enrollment::legacy_import::tests::original_registry_revocation_credentials_and_source_change_batch"),
+                        ("legacy-registry-blockers", "enrollment::legacy_import::tests::original_unsettled_and_unsupported_sources_are_not_silently_imported_batch"),
+                    ):
+                        check = gate.run(label, ["cargo", "test", "-p", "styx-runtime", "--locked", "--offline", test_case, "--", "--ignored", "--exact", "--nocapture"], timeout=120,
+                            extra_env={"STYX_TEST_NODE22": str(node), "STYX_TEST_LEGACY_IMPORT_ROOT": str(evidence / ("owned-" + label))})
+                        gate.semantic(check, [] if "1 passed; 0 failed" in gate.read(label) else ["exact_" + label + "_case_not_executed"])
+                        receipt[label.replace("-", "_")] = check["status"]
         receipt["signed_enrollment_service"] = "NOT_RUN_explicit_complete_inputs_not_requested"
         if args.enrollment_service:
             if not args.enrollment_store or not args.node22 or not args.tls_fixtures or receipt.get("legacy_node22_interop") != "PASS":
@@ -578,6 +587,8 @@ def execute(args):
             required |= {"browser-references"}
         if args.node22:
             required |= {"node22-version", "node22-crypto"}
+            if args.enrollment_store:
+                required |= {"legacy-registry", "legacy-registry-blockers"}
         if args.codex_bin:
             required |= {"codex-version"} | {name for name, _ in CODEX_TESTS}
         if args.tls_fixtures:

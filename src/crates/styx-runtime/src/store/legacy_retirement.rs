@@ -397,6 +397,66 @@ impl LegacyWriterFence {
         self.credential_retirement_observation()
             .map_err(|_| JournalError::Unknown)
     }
+    /// The only retired credential read port. Both supplied roots must be the
+    /// original kernel identities; no path, token value or journal DTO selects
+    /// authority. The caller separately holds the original physical proof.
+    pub(crate) fn read_retired_credential(
+        &self,
+        configuration: &PrivateRoot,
+        host: &PrivateRoot,
+    ) -> Result<Zeroizing<Vec<u8>>, LegacyFenceError> {
+        self.credential_retirement_observation()?;
+        if configuration.identity() != self.owner.identity().map_err(classify)?
+            || host.identity() != self.host_identity
+        {
+            return Err(LegacyFenceError::InvalidMaterials);
+        }
+        // Also observe the supplied configuration locator, not just its cached
+        // identity. All selected configuration files must still be original.
+        for old in self
+            .frozen
+            .iter()
+            .filter(|file| file.binding.root == LegacyMaterialRoot::Configuration)
+        {
+            let now = configuration
+                .read_raw(&old.binding.relative_path, old.limit)
+                .map_err(|_| LegacyFenceError::Unknown)?;
+            if now.observation() != &old.binding.observation || now.bytes() != old.bytes.as_slice()
+            {
+                return Err(LegacyFenceError::Unknown);
+            }
+        }
+        let bytes = {
+            let slot = self
+                .retirement
+                .lock()
+                .map_err(|_| LegacyFenceError::Unknown)?;
+            slot.require_complete_or_original().map_err(classify)?;
+            let handles = slot.handles.as_ref().ok_or(LegacyFenceError::Unknown)?;
+            let post = handles.post.as_ref().ok_or(LegacyFenceError::Unknown)?;
+            let old = self
+                .frozen
+                .iter()
+                .find(|file| token_material(file))
+                .ok_or(LegacyFenceError::Unknown)?;
+            host.ensure_absent("device/host.token")
+                .map_err(|_| LegacyFenceError::Unknown)?;
+            let now = host
+                .read_raw(&handles.destination, 4096)
+                .map_err(|_| LegacyFenceError::Unknown)?;
+            if now.observation() != &observation(post)
+                || now.bytes() != old.bytes.as_slice()
+                || stamp(&handles.file, &old.bytes).map_err(classify)? != *post
+            {
+                return Err(LegacyFenceError::Unknown);
+            }
+            Zeroizing::new(now.bytes().to_vec())
+        };
+        // Do not hold the token slot across owner/journal acquisition: every
+        // retirement path keeps the original journal -> owner -> slot order.
+        self.credential_retirement_observation()?;
+        Ok(bytes)
+    }
     pub(crate) fn invalidate_credential_retirement(&self) {
         if let Ok(mut slot) = self.retirement.lock() {
             slot.indeterminate = true;

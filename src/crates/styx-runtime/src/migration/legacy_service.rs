@@ -365,3 +365,86 @@ impl RetiredLegacyCredential {
         })
     }
 }
+
+/// Non-transferable provenance for maintenance validation only. Arc shares the
+/// SAME original writer/proof/candidate; serialized material cannot recreate it.
+/// It grants neither ordinary dispatch nor a new configuration/execution owner.
+pub(crate) struct RetiredCredentialReadBinding {
+    original: Arc<RetiredLegacyCredential>,
+}
+impl RetiredLegacyCredential {
+    /// Read original protected identity/trust materials for controlled candidate
+    /// validation while keeping original service settlement and maintenance.
+    /// The result cannot enter ordinary Host startup or release this fence.
+    pub fn validation_profile(
+        self: &Arc<Self>,
+        state_dir: &Path,
+    ) -> Result<
+        crate::foreground::profile::LoadedMaintenanceProfile,
+        crate::foreground::profile::ProfileError,
+    > {
+        crate::foreground::profile::load_for_migration_validation(state_dir, self.reader_binding())
+    }
+    pub(crate) fn reader_binding(self: &Arc<Self>) -> Arc<RetiredCredentialReadBinding> {
+        Arc::new(RetiredCredentialReadBinding {
+            original: self.clone(),
+        })
+    }
+}
+impl RetiredCredentialReadBinding {
+    fn with_original<T>(
+        &self,
+        read: impl FnOnce() -> Result<T, TransitionError>,
+    ) -> Result<T, TransitionError> {
+        let handle = match tokio::runtime::Handle::try_current() {
+            Ok(handle) if handle.runtime_flavor() == tokio::runtime::RuntimeFlavor::MultiThread => {
+                handle
+            }
+            _ => return Err(TransitionError::Unsupported),
+        };
+        tokio::task::block_in_place(|| {
+            let proof = &self.original.original.proof;
+            if handle
+                .block_on(proof.verify_original_still_settled())
+                .is_err()
+            {
+                proof.invalidate_credential_retirement();
+                return Err(TransitionError::Unknown);
+            }
+            self.original.observation()?;
+            let result = read();
+            if handle
+                .block_on(proof.verify_original_still_settled())
+                .is_err()
+            {
+                proof.invalidate_credential_retirement();
+                return Err(TransitionError::Unknown);
+            }
+            self.original.observation()?;
+            result
+        })
+    }
+    pub(crate) fn read_token(
+        &self,
+        configuration: &crate::store::PrivateRoot,
+        host: &crate::store::PrivateRoot,
+    ) -> Result<zeroize::Zeroizing<Vec<u8>>, TransitionError> {
+        self.with_original(|| {
+            self.original
+                .original
+                .proof
+                .fence()
+                .read_retired_credential(configuration, host)
+                .map_err(|error| match error {
+                    LegacyFenceError::InvalidMaterials => TransitionError::Conflict,
+                    _ => TransitionError::Unknown,
+                })
+        })
+    }
+    pub(crate) fn revalidate(&self) -> Result<(), TransitionError> {
+        self.with_original(|| Ok(()))
+    }
+    pub(crate) fn candidate(&self) -> Arc<VerifiedNativeRelease> {
+        self.original.original.target.clone()
+    }
+}

@@ -131,6 +131,8 @@ pub struct ReleaseReport {
 /// A caller launching this image must keep this object until real child reaping.
 pub struct VerifiedNativeRelease {
     root: PrivateRoot,
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    prefix: PathBuf,
     manifest_file: RawFile,
     signature_file: RawFile,
     publisher_root: PrivateRoot,
@@ -143,6 +145,13 @@ pub struct VerifiedNativeRelease {
     report: ReleaseReport,
 }
 impl VerifiedNativeRelease {
+    /// Locator from the original verified root, never a caller-selected worker
+    /// directory. Consumers retain this object and its pins through cleanup.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    pub(crate) fn runtime_root(&self) -> Result<PathBuf> {
+        self.revalidate()?;
+        Ok(self.prefix.clone())
+    }
     pub fn report(&self) -> ReleaseReport {
         self.report.clone()
     }
@@ -446,6 +455,8 @@ fn verify_native(
     };
     let verified = VerifiedNativeRelease {
         root,
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        prefix: payload.to_path_buf(),
         manifest_file,
         signature_file,
         publisher_root,

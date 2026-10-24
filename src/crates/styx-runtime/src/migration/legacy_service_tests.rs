@@ -93,14 +93,19 @@ fn save(path: &Path, value: &serde_json::Value) {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires fresh STYX_TEST_LEGACY_SERVICE_FIXTURE, native signed target and externally owned original user units; not migration/activation"]
 async fn actual_original_service_scope_settlement() {
-    original_service_scene(false).await;
+    original_service_scene(false, false).await;
 }
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires fresh externally owned original service fixture, candidate and explicit credential-retirement observer; not migration/activation"]
 async fn actual_original_service_scope_credential_retirement() {
-    original_service_scene(true).await;
+    original_service_scene(true, false).await;
 }
-async fn original_service_scene(retire_credential: bool) {
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[ignore = "requires fresh externally owned original service fixtures and explicit retired-reader observer; synthetic bootstrap is not onboarding acceptance"]
+async fn actual_original_service_scope_retired_reader() {
+    original_service_scene(true, true).await;
+}
+async fn original_service_scene(retire_credential: bool, validate_reader: bool) {
     let root = PathBuf::from(std::env::var("STYX_TEST_LEGACY_SERVICE_FIXTURE").unwrap());
     PrivateRoot::open(&root).unwrap();
     let fixture: serde_json::Value =
@@ -118,6 +123,15 @@ async fn original_service_scene(retire_credential: bool) {
         let spec = &fixture["roles"][role];
         let state = PathBuf::from(spec["state_dir"].as_str().unwrap());
         assert!(state.starts_with(root.join(role)));
+        let host_base = PathBuf::from(spec["host_base"].as_str().unwrap());
+        let original_token = validate_reader.then(|| {
+            zeroize::Zeroizing::new(fs::read(host_base.join("device/host.token")).unwrap())
+        });
+        // Strict original input reader must accept BEFORE any ownership or
+        // credential changes. This is not evidence of real onboarding steps:
+        // the isolated fixture producer marks its trusted bootstrap synthetic.
+        let original_profile =
+            validate_reader.then(|| crate::foreground::profile::load_paired(&state).unwrap());
         let private = PrivateRoot::open(&state).unwrap();
         let writer = private.try_configuration_writer().unwrap();
         let owner = OwnedConfigurationRoot::open_existing(private, writer).unwrap();
@@ -198,6 +212,59 @@ async fn original_service_scene(retire_credential: bool) {
             row["retired_relative_path"] =
                 observation.retired_relative_path.to_str().unwrap().into();
             row["retired_receipt_sha256"] = observation.retired_receipt_sha256.to_hex().into();
+            let retired = Arc::new(retired);
+            if validate_reader {
+                let original = original_profile.as_ref().unwrap();
+                assert!(crate::foreground::profile::load_legacy(&state).is_err());
+                assert!(crate::foreground::profile::load_paired(&state).is_err());
+                assert!(original.revalidate().is_err());
+                let binding = retired.reader_binding();
+                let configuration = PrivateRoot::open(&state).unwrap();
+                let host = PrivateRoot::open(&host_base).unwrap();
+                let read = binding.read_token(&configuration, &host).unwrap();
+                assert!(read.as_slice() == original_token.as_ref().unwrap().as_slice());
+                let foreign_role = if role == "normal" { "side" } else { "normal" };
+                let foreign = &fixture["roles"][foreign_role];
+                let foreign_configuration =
+                    PrivateRoot::open(foreign["state_dir"].as_str().unwrap()).unwrap();
+                let foreign_host =
+                    PrivateRoot::open(foreign["host_base"].as_str().unwrap()).unwrap();
+                assert!(matches!(
+                    binding.read_token(&foreign_configuration, &host),
+                    Err(TransitionError::Conflict)
+                ));
+                assert!(matches!(
+                    binding.read_token(&configuration, &foreign_host),
+                    Err(TransitionError::Conflict)
+                ));
+                let native = retired.validation_profile(&state).unwrap();
+                assert_eq!(native.device_id(), original.device_id());
+                assert_eq!(native.endpoint().as_str(), original.endpoint().as_str());
+                assert_eq!(
+                    native.paired_gateway_namespace(),
+                    original.paired_gateway_namespace()
+                );
+                assert_eq!(
+                    native.device_id().as_str(),
+                    spec["device_id"].as_str().unwrap()
+                );
+                assert!(native.executor_enabled());
+                let executor = native.executor_config().unwrap();
+                assert!(executor.binary.to_string_lossy().starts_with("/proc/"));
+                assert_eq!(
+                    executor.cwd,
+                    PathBuf::from(spec["workspace"].as_str().unwrap())
+                );
+                native.revalidate().unwrap();
+                assert!(retired.configuration_root().ensure_admission().is_err());
+                assert!(!host_base.join("device/host.token").exists());
+                row["maintenance_reader_validated"] = true.into();
+                row["ordinary_reader_refused"] = true.into();
+                row["foreign_configuration_refused"] = true.into();
+                row["foreign_host_refused"] = true.into();
+                row["original_identity_preserved"] = true.into();
+                row["scope"] = "original scope and maintenance reader against trusted synthetic legacy-layout bootstrap; not original onboarding, execution or activation".into();
+            }
             retired_credentials.push(retired);
         } else {
             retained_proofs.push(proof);
@@ -217,7 +284,7 @@ async fn original_service_scene(retire_credential: bool) {
     }
     save(
         &root.join("service-settlement.json"),
-        &json!({"schema":1,"status":if retire_credential {"PASS_ORIGINAL_SERVICE_CREDENTIAL_RETIREMENT_ONLY"} else {"PASS_ORIGINAL_SERVICE_SETTLEMENT_ONLY"},
+        &json!({"schema":1,"status":if validate_reader {"PASS_ORIGINAL_SERVICE_RETIRED_READER_ONLY"} else if retire_credential {"PASS_ORIGINAL_SERVICE_CREDENTIAL_RETIREMENT_ONLY"} else {"PASS_ORIGINAL_SERVICE_SETTLEMENT_ONLY"},
         "records":records,"migration_committed":false,"native_activated":false,"runtime_ready":false}),
     );
     let deadline = Instant::now() + Duration::from_secs(if retire_credential { 45 } else { 15 });

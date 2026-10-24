@@ -2,3 +2,6 @@
 //! never a final handoff, activation, committed migration or rollback receipt.
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 pub mod legacy_service;
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+pub mod legacy_enrollment;
