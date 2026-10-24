@@ -26,6 +26,8 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+pub(crate) mod assets;
+
 const IO_BYTES: usize = 16 * 1024 * 1024;
 const FRAME_BYTES: usize = 8 * 1024 * 1024;
 // One MiB logical retained metadata, conservatively 8KiB per record.

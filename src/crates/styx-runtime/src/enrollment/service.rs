@@ -954,6 +954,7 @@ impl EnrollmentService {
                 let p = verified.profile();
                 Ok(GatewayExecProfile {
                     device_id: d.id,
+                    browser_approved: d.grant.browser,
                     capability_generation: d.generation,
                     platform: p.platform.clone(),
                     cwd: p.cwd.clone(),
@@ -987,6 +988,15 @@ impl EnrollmentService {
         id: &DeviceId,
         generation: ConnectionGeneration,
     ) -> Result<ConnectionLease, ServiceError> {
+        self.admit_upgrade_for_lane(headers, id, generation, Lane::Exec)
+    }
+    pub(crate) fn admit_upgrade_for_lane(
+        &mut self,
+        headers: &HeaderMap,
+        id: &DeviceId,
+        generation: ConnectionGeneration,
+        lane: Lane,
+    ) -> Result<ConnectionLease, ServiceError> {
         if headers.get_all(HOST).iter().count() != 1
             || headers.contains_key(ORIGIN)
             || headers.contains_key("x-styx-tunnel-context")
@@ -998,7 +1008,7 @@ impl EnrollmentService {
             return Err(ServiceError::new(403, "host_or_origin_not_allowed"));
         }
         let token = bearer(headers)?;
-        self.admit_host(id, token, Lane::Exec, generation)
+        self.admit_host(id, token, lane, generation)
     }
     /// Host transport adapters retain the nonserializable lease and recheck it
     /// per frame. This is not a native operation/owner authorization substitute.
@@ -1042,6 +1052,8 @@ mod controller_tests;
 #[derive(Clone, Debug)]
 pub struct GatewayExecProfile {
     pub device_id: DeviceId,
+    /// Recovered Core metadata only; a live Browser ConnectionLease authorizes.
+    pub browser_approved: bool,
     pub capability_generation: String,
     pub platform: String,
     pub cwd: String,

@@ -1,6 +1,8 @@
 //! Owned Hyper upgrades. Registry routes; Core lease and owner gates authorize.
 use super::relay::{Command, Entry, RelayError, RelayHandle};
-use crate::host::protocol::wire::{Call, Reply, Request as WireRequest, Response as WireResponse};
+use crate::host::protocol::wire::{
+    BROWSER_HEADLESS_V1, Call, Reply, Request as WireRequest, Response as WireResponse,
+};
 use bytes::Bytes;
 use futures_util::{Sink, SinkExt, StreamExt};
 use http::{Method, Request, Response};
@@ -17,7 +19,7 @@ use std::{
     time::Duration,
 };
 use styx_contracts::identity::*;
-use styx_core::enrollment::ConnectionLease;
+use styx_core::enrollment::{ConnectionLease, Lane};
 use tokio::sync::{OwnedSemaphorePermit, mpsc};
 use tokio_tungstenite::{
     WebSocketStream,
@@ -59,6 +61,7 @@ impl Drop for LiveFence {
 struct Pending {
     command: Command,
     control: bool,
+    browser: bool,
     deadline: tokio::time::Instant,
 }
 impl RelayHandle {
@@ -125,6 +128,7 @@ impl RelayHandle {
             Ok(Ok(v)) => v,
             _ => return reject(403),
         };
+        let upgrade_headers = req.headers().clone();
         let upgraded = hyper::upgrade::on(&mut req);
         let relay = self.clone();
         let stop = CancellationToken::new();
@@ -138,57 +142,121 @@ impl RelayHandle {
                         let _slot = slot;
                         let _connection = connection;
                         let mut lease = Some(lease);
+                        let mut browser_lease: Option<ConnectionLease> = None;
                         let mut entry: Option<Arc<Entry>> = None;
-                        let result=async{
-       let io=tokio::select!{_=task_stop.cancelled()=>return Err(RelayError::Offline),r=tokio::time::timeout(Duration::from_secs(5),upgraded)=>r.map_err(|_|RelayError::Unknown)?.map_err(|_|RelayError::Unknown)?};
-       let config=WebSocketConfig::default().max_message_size(Some(FRAME)).max_frame_size(Some(FRAME)).max_write_buffer_size(FRAME+64*1024);
-       let socket=WebSocketStream::from_raw_socket(hyper_util::rt::TokioIo::new(io),Role::Server,Some(config)).await;
-       let(mut sink,mut source)=socket.split();
-       let challenge=format!("challenge-{}",uuid::Uuid::new_v4());
-       let request=WireRequest{request_id:request_id()?,connection_generation:None,call:Call::Negotiate{version:3,challenge:challenge.clone(),gateway_namespace:relay.inner.gateway.clone(),gateway_epoch:relay.inner.epoch.clone()}};
-       guarded_send(&relay,lease.as_ref().expect("owned lease"),None,&mut sink,&request,&task_stop).await?;
-       let response=tokio::select!{_=task_stop.cancelled()=>return Err(RelayError::Offline),r=tokio::time::timeout(Duration::from_secs(5),read_response(&mut source))=>r.map_err(|_|RelayError::Unknown)??};
-       if response.request_id!=request.request_id{return Err(RelayError::Invalid)}
-       let(host_generation,host_connection,grant_revision)=match response.reply{Reply::Negotiated{version:3,challenge:got,device_id,host_generation,connection_generation,grant_revision:Some(rev),owner_issuance,features,write:true,terminate:true,read_resume:false,..}if ["prepare_start","dispatch_start","inspect_start","read","prepare_action","dispatch_action","inspect_action","owner_open","owner_revoke","owner_cleanup"].iter().all(|f|features.iter().any(|v|v==f))&&got==challenge&&device_id==device&&connection_generation==response.connection_generation&&owner_issuance=="gateway_authenticated"=>(host_generation,connection_generation,rev),_=>return Err(RelayError::Unauthorized)};
-       let(tx,mut rx)=mpsc::channel::<Command>(3);
-       let e=Arc::new(Entry{device:device.clone(),transport_generation:generation.clone(),host_connection,host_generation,grant_revision,profile,tx,stop:task_stop.clone(),live:AtomicBool::new(true),lease:tokio::sync::Mutex::new(lease.take())});
-       entry=Some(e.clone());let _fence=LiveFence(e.clone());
-       {let mut s=relay.inner.state.lock().map_err(|_|RelayError::Unknown)?;if s.closing||s.entries.contains_key(&device){return Err(RelayError::Busy)}s.entries.insert(device.clone(),e.clone());}
-       let mut pending:BTreeMap<RequestId,Pending>=BTreeMap::new();
-       loop{
-        let until=pending.values().map(|p|p.deadline).min().unwrap_or_else(||tokio::time::Instant::now()+Duration::from_secs(30));
-        tokio::select!{
-         _=task_stop.cancelled()=>break,
-         _=tokio::time::sleep_until(until)=>{if !pending.is_empty(){return Err(RelayError::Unknown)} relay.authorize(&e).await?;},
-         command=rx.recv()=>{
-          let Some(command)=command else{break};
-          let control=matches!(command.call,Call::OwnerOpen{..}|Call::OwnerRevoke{..}|Call::OwnerCleanup{..});
-          let business=pending.values().filter(|p|!p.control).count();
-          if (!control&&business>=2)||pending.len()>=3 {let _=command.result.send(Err(RelayError::Busy));continue}
-          let request=WireRequest{request_id:request_id()?,connection_generation:Some(e.host_connection.clone()),call:command.call};
-          let locked=e.lease.lock().await;let Some(l)=locked.as_ref()else{return Err(RelayError::Offline)};
-          let result=guarded_send(&relay,l,command.gate.as_deref(),&mut sink,&request,&task_stop).await;drop(locked);
-          // Keep the exact request's responder without retaining sensitive payload.
-          let command=Command{call:Call::Write{},result:command.result,gate:command.gate};
-          match result{Ok(())=>{pending.insert(request.request_id,Pending{command,control,deadline:tokio::time::Instant::now()+Duration::from_secs(35)});},Err(error)=>{let _=command.result.send(Err(error));return Err(error)}}
-         },
-         response=read_response(&mut source)=>{
-          let response=response?;
-          if response.connection_generation!=e.host_connection{return Err(RelayError::Invalid)}
-          let Some(p)=pending.remove(&response.request_id)else{return Err(RelayError::Invalid)};
-          let locked=e.lease.lock().await;let Some(l)=locked.as_ref()else{return Err(RelayError::Offline)};
-          relay.inner.shared.with(|s|{
-           let allowed=s.authorize_host_frame(l).is_ok();
-           let gate=p.command.gate.as_ref().map(|g|g.lock());
-           let gate_allowed=match &gate{None=>true,Some(Ok(g))=>!**g,Some(Err(_))=>false};
-           let result=if allowed&&gate_allowed{Ok(response.reply)}else{Err(RelayError::Unauthorized)};
-           let _=p.command.result.send(result);
-          }).await.map_err(|_|RelayError::Unknown)?;
-         }
-        }
-       }
-       drop(sink);drop(source);Ok::<(),RelayError>(())
-      }.await;
+                        let result=async {
+                            let io=tokio::select! {
+                                _=task_stop.cancelled()=>return Err(RelayError::Offline),
+                                r=tokio::time::timeout(Duration::from_secs(5),upgraded)=>r.map_err(|_|RelayError::Unknown)?.map_err(|_|RelayError::Unknown)?,
+                            };
+                            let config=WebSocketConfig::default().max_message_size(Some(FRAME)).max_frame_size(Some(FRAME)).max_write_buffer_size(FRAME+64*1024);
+                            let socket=WebSocketStream::from_raw_socket(hyper_util::rt::TokioIo::new(io),Role::Server,Some(config)).await;
+                            let(mut sink,mut source)=socket.split();
+                            let challenge=format!("challenge-{}",uuid::Uuid::new_v4());
+                            let request=WireRequest{request_id:request_id()?,connection_generation:None,call:Call::Negotiate{
+                                version:3,challenge:challenge.clone(),gateway_namespace:relay.inner.gateway.clone(),gateway_epoch:relay.inner.epoch.clone()}};
+                            guarded_send(&relay,lease.as_ref().expect("owned lease"),None,&mut sink,&request,&task_stop).await?;
+                            let response=tokio::select!{
+                                _=task_stop.cancelled()=>return Err(RelayError::Offline),
+                                r=tokio::time::timeout(Duration::from_secs(5),read_response(&mut source))=>r.map_err(|_|RelayError::Unknown)??,
+                            };
+                            if response.request_id!=request.request_id{return Err(RelayError::Invalid)}
+                            let(host_generation,host_connection,grant_revision,browser_feature)=match response.reply {
+                                Reply::Negotiated{version:3,challenge:got,device_id,host_generation,connection_generation,grant_revision:Some(rev),owner_issuance,
+                                    features,write:true,terminate:true,read_resume:false,..}
+                                    if ["prepare_start","dispatch_start","inspect_start","read","prepare_action","dispatch_action","inspect_action","owner_open","owner_revoke","owner_cleanup"]
+                                        .iter().all(|f|features.iter().any(|v|v==f)) && got==challenge && device_id==device
+                                        && connection_generation==response.connection_generation && owner_issuance=="gateway_authenticated" => {
+                                            let browser=features.iter().any(|v|v==BROWSER_HEADLESS_V1);
+                                            (host_generation,connection_generation,rev,browser)
+                                        },
+                                _=>return Err(RelayError::Unauthorized),
+                            };
+                            // One physical WS, two nonserializable Core lane leases.
+                            // Metadata/feature is necessary, never sufficient authorization.
+                            browser_lease=if browser_feature && profile.browser_approved {
+                                match relay.inner.shared.with(|s| {
+                                    s.profile_is_current(&device,&profile.capability_generation)?;
+                                    s.admit_upgrade_for_lane(&upgrade_headers,&device,generation.clone(),Lane::Browser)
+                                }).await {
+                                    Ok(Ok(admitted))=>Some(admitted),
+                                    _=>None,
+                                }
+                            } else {None};
+                            drop(upgrade_headers);
+                            let(tx,mut rx)=mpsc::channel::<Command>(3);
+                            let e=Arc::new(Entry{device:device.clone(),transport_generation:generation.clone(),host_connection,host_generation,grant_revision,profile,
+                                tx,stop:task_stop.clone(),live:AtomicBool::new(true),lease:tokio::sync::Mutex::new(lease.take()),browser_feature,
+                                browser_lease:tokio::sync::Mutex::new(browser_lease.take())});
+                            entry=Some(e.clone());let _fence=LiveFence(e.clone());
+                            {
+                                let mut state=relay.inner.state.lock().map_err(|_|RelayError::Unknown)?;
+                                if state.closing||state.entries.contains_key(&device){return Err(RelayError::Busy)}
+                                state.entries.insert(device.clone(),e.clone());
+                            }
+                            let mut pending:BTreeMap<RequestId,Pending>=BTreeMap::new();
+                            loop {
+                                let until=pending.values().map(|p|p.deadline).min()
+                                    .unwrap_or_else(||tokio::time::Instant::now()+Duration::from_secs(30));
+                                tokio::select! {
+                                    _=task_stop.cancelled()=>break,
+                                    _=tokio::time::sleep_until(until)=>{
+                                        if !pending.is_empty(){return Err(RelayError::Unknown)}
+                                        relay.control_lane(&e).await?;
+                                    },
+                                    command=rx.recv()=>{
+                                        let Some(command)=command else{break};
+                                        let control=matches!(command.call,Call::OwnerOpen{..}|Call::OwnerRevoke{..}|Call::OwnerCleanup{..});
+                                        let browser=match relay.authorization_lane(&e,&command.call).await {
+                                            Ok(lane)=>lane,
+                                            Err(error)=>{let _=command.result.send(Err(error));continue},
+                                        };
+                                        let business=pending.values().filter(|p|!p.control).count();
+                                        if (!control&&business>=2)||pending.len()>=3 {
+                                            let _=command.result.send(Err(RelayError::Busy));continue
+                                        }
+                                        let request=WireRequest{request_id:request_id()?,connection_generation:Some(e.host_connection.clone()),call:command.call};
+                                        let locked=if browser{e.browser_lease.lock().await}else{e.lease.lock().await};
+                                        let Some(l)=locked.as_ref() else {
+                                            let _=command.result.send(Err(if browser{RelayError::Unauthorized}else{RelayError::Offline}));
+                                            if browser{continue}else{return Err(RelayError::Offline)}
+                                        };
+                                        let result=guarded_send(&relay,l,command.gate.as_deref(),&mut sink,&request,&task_stop).await;
+                                        drop(locked);
+                                        // Drop sensitive request payload after send, keep its exact lane.
+                                        let command=Command{call:Call::Write{},result:command.result,gate:command.gate};
+                                        match result {
+                                            Ok(())=>{pending.insert(request.request_id,Pending{command,control,browser,deadline:tokio::time::Instant::now()+Duration::from_secs(35)});},
+                                            Err(error)=>{
+                                                let _=command.result.send(Err(error));
+                                                // Refusal before start_send is local to Browser. Actual
+                                                // socket/write uncertainty still invalidates the physical WS.
+                                                if browser && matches!(error,RelayError::Unauthorized|RelayError::Unsupported|RelayError::Invalid){continue}
+                                                return Err(error)
+                                            },
+                                        }
+                                    },
+                                    response=read_response(&mut source)=>{
+                                        let response=response?;
+                                        if response.connection_generation!=e.host_connection{return Err(RelayError::Invalid)}
+                                        let Some(p)=pending.remove(&response.request_id) else{return Err(RelayError::Invalid)};
+                                        let locked=if p.browser{e.browser_lease.lock().await}else{e.lease.lock().await};
+                                        let Some(l)=locked.as_ref() else {
+                                            let _=p.command.result.send(Err(if p.browser{RelayError::Unauthorized}else{RelayError::Offline}));
+                                            if p.browser{continue}else{return Err(RelayError::Offline)}
+                                        };
+                                        relay.inner.shared.with(|s| {
+                                            let allowed=s.authorize_host_frame(l).is_ok();
+                                            let gate=p.command.gate.as_ref().map(|g|g.lock());
+                                            let gate_allowed=match &gate{None=>true,Some(Ok(g))=>!**g,Some(Err(_))=>false};
+                                            let result=if allowed&&gate_allowed{Ok(response.reply)}else{Err(RelayError::Unauthorized)};
+                                            let _=p.command.result.send(result);
+                                        }).await.map_err(|_|RelayError::Unknown)?;
+                                    },
+                                }
+                            }
+                            drop(sink);drop(source);Ok::<(),RelayError>(())
+                        }.await;
                         if let Some(e) = entry {
                             e.live.store(false, Ordering::Release);
                             e.stop.cancel();
@@ -201,8 +269,11 @@ impl RelayHandle {
                                 state.entries.remove(&device);
                             }
                             lease = e.lease.lock().await.take();
+                            browser_lease = e.browser_lease.lock().await.take();
                         }
-                        if let Some(lease) = lease {
+                        // This task has dropped its socket halves (also on Err).
+                        // No logical offline inference from a timeout alone.
+                        for lease in [lease, browser_lease].into_iter().flatten() {
                             let _ = relay
                                 .inner
                                 .shared

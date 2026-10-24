@@ -59,6 +59,12 @@ pub enum Call {
         owner: OwnerRef,
         action: ActionRef,
     },
+    Browser {
+        owner: OwnerRef,
+        grant_revision: u64,
+        timeout_ms: u32,
+        command: BrowserCommand,
+    },
     OwnerOpen {
         owner: OwnerRef,
         grant_revision: u64,
@@ -73,6 +79,35 @@ pub enum Call {
     // Direct native mutations have no authority; use Host prepare+dispatch.
     Write {},
     Terminate {},
+}
+pub const BROWSER_HEADLESS_V1: &str = "browser_headless_v1";
+impl Call {
+    pub(crate) fn is_browser(&self) -> bool {
+        matches!(self, Self::Browser { .. })
+    }
+}
+/// Additive private v3 feature. No paths, credentials or native profile choices
+/// are accepted from a wire peer; prepare/dispatch stay distinct Core actions.
+#[derive(Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum BrowserCommand {
+    PrepareOpen,
+    DispatchOpen {
+        target: ResourceTarget,
+    },
+    InspectOpen {
+        target: ResourceTarget,
+    },
+    PrepareAction {
+        target: ResourceTarget,
+        action: Box<serde_json::value::RawValue>,
+    },
+    DispatchAction {
+        action: ActionRef,
+    },
+    InspectAction {
+        action: ActionRef,
+    },
 }
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -152,6 +187,13 @@ pub enum Reply {
         dispatch: String,
         acknowledgment: Option<ActionAcknowledgmentDto>,
         write_id: Option<String>,
+    },
+    BrowserAction {
+        snapshot: Snapshot,
+        dispatch: String,
+        result: Option<serde_json::Value>,
+        cause: Option<ErrorCategory>,
+        cleanup_complete: Option<bool>,
     },
     Unsupported {
         feature: String,

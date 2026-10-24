@@ -439,6 +439,12 @@ async fn actual_owned_browser_host_nonce_policy_drop_and_cleanup() {
         assert!(matches!(duplicate,BrowserActionSubmission::Existing(ref s) if s.state==OperationState::Unknown));
         assert_eq!(effects.lock().unwrap().iter().filter(|n|*n==&unknown_nonce).count(),1);
         observations["unknown_duplicate_existing_no_replay"]=serde_json::json!(true);
+        stage = "direct_protocol_original_history_after_validator_failure";
+        crate::host::protocol::browser::history_tests::verify_original_dispatch_history(
+            &host, &authority, &other, &b, &unknown.snapshot,
+        ).await;
+        assert_eq!(effects.lock().unwrap().iter().filter(|n|*n==&unknown_nonce).count(),1);
+        observations["direct_private_adapter_history_regression"]=serde_json::json!({"running_open_preserved":true,"unknown_action_preserved":true,"validator_calls":0,"independent_effect_count":1,"network_auth_tested":false});
         stage = "close_b_after_unknown";
         // A stuck evaluate may also prevent the upstream Close ACK. Only actual
         // scope exit+stdio join+descendant proof establishes physical cleanup.

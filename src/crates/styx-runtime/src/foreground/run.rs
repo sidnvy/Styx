@@ -34,7 +34,7 @@ const HEALTH_OWNERS: &[&str] = &[
     "install/.health-recovery-guard",
 ];
 struct Admitted {
-    profile: profile::LoadedLegacyProfile,
+    profile: Arc<profile::LoadedLegacyProfile>,
     state: PrivateRoot,
     base: PrivateRoot,
     lease: ExecutionLeaseGuard,
@@ -65,6 +65,33 @@ impl Admitted {
         self.validate_ownership()?;
         self.profile.revalidate()?;
         Ok(())
+    }
+}
+#[cfg(target_os = "linux")]
+struct ForegroundBrowser {
+    admitted: Arc<Admitted>,
+    source: Arc<dyn crate::host::protocol::browser::BrowserBootstrap>,
+}
+#[cfg(target_os = "linux")]
+impl crate::host::protocol::browser::BrowserBootstrap for ForegroundBrowser {
+    fn prepare_profile(
+        &self,
+        owner: &styx_core::operations::OwnerLease,
+    ) -> Result<crate::providers::browser::OwnedBrowserConfig, styx_contracts::error::ErrorCategory>
+    {
+        self.source.prepare_profile(owner)
+    }
+    fn validate_before_spawn(&self) -> Result<(), styx_contracts::error::ErrorCategory> {
+        self.admitted
+            .validate_ownership()
+            .map_err(|_| styx_contracts::error::ErrorCategory::StateConflict)?;
+        self.source.validate_before_spawn()
+    }
+    fn validate_control(&self) -> Result<(), styx_contracts::error::ErrorCategory> {
+        self.admitted
+            .validate_ownership()
+            .map_err(|_| styx_contracts::error::ErrorCategory::StateConflict)?;
+        self.source.validate_control()
     }
 }
 fn event(
@@ -213,7 +240,7 @@ async fn run_owned(
             .try_execution_lease()
             .map_err(|_| ForegroundError("execution_lease_busy"))?;
         let admitted = Arc::new(Admitted {
-            profile,
+            profile: Arc::new(profile),
             state,
             base,
             lease,
@@ -279,6 +306,50 @@ async fn run_owned(
             return Err(ForegroundError("executor_start_failed"));
         }
     };
+    // Browser is an independent optional local capability. Unsupported or
+    // unavailable Browser inputs cannot take down an already admitted Exec Host.
+    #[cfg(target_os = "linux")]
+    let browser: Option<Arc<dyn crate::host::protocol::browser::BrowserBootstrap>> =
+        if mode == HostWireMode::PairedV3 {
+            let retained = admitted.clone();
+            let source = tokio::task::spawn_blocking(move || {
+                retained
+                    .validate_ownership()
+                    .map_err(|_| styx_contracts::error::ErrorCategory::StateConflict)?;
+                super::browser::prepare_browser_bootstrap(retained.profile.clone())
+            })
+            .await;
+            match source {
+                Ok(Ok(Some(source))) => {
+                    let mut browser_facts = facts(&device);
+                    browser_facts.descriptor.capability_id = CapabilityId::BrowserHeadless;
+                    browser_facts.descriptor.scope = Scope::Browser;
+                    browser_facts.descriptor.provider_id =
+                        "playwright".try_into().expect("static provider identity");
+                    match host.reserve_browser_io().and_then(|budget| {
+                        host.authority()
+                            .configure_browser(browser_facts, budget)
+                            .map_err(Into::into)
+                    }) {
+                        Ok(()) => Some(Arc::new(ForegroundBrowser {
+                            admitted: admitted.clone(),
+                            source,
+                        })),
+                        Err(_) => {
+                            event(&events, &cancel, "browser_unavailable", &device, None);
+                            None
+                        }
+                    }
+                }
+                Ok(Ok(None)) => None,
+                _ => {
+                    event(&events, &cancel, "browser_unavailable", &device, None);
+                    None
+                }
+            }
+        } else {
+            None
+        };
     // Keep this SAME protocol and executor across transport reconnects. In v3,
     // per-chat owner admission comes only from the authenticated fixed Gateway;
     // loading a device credential does not register a bootstrap MCP owner.
@@ -301,6 +372,13 @@ async fn run_owned(
                 gateway_namespace: admitted.profile.paired_gateway_namespace(),
                 device_id: device.clone(),
                 host_generation: generation,
+            })
+            .and_then(|protocol| {
+                #[cfg(target_os = "linux")]
+                if let Some(source) = &browser {
+                    return protocol.with_browser_profiles(source.clone());
+                }
+                Ok(protocol)
             })
             .map(ConnectionSession::Paired)
             .map_err(|_| ForegroundError("paired_bootstrap_refused")),
@@ -386,6 +464,10 @@ async fn run_owned(
                     Some(link.generation()),
                 );
             }
+            // EOF abandons only a response waiter. Explicit shutdown joins all
+            // retained blocking input jobs before releasing original owner pins.
+            #[cfg(target_os = "linux")]
+            session.drain_browser_inputs().await;
         }
         Err(error) => {
             let _ = link.shutdown(Duration::from_secs(3)).await;
@@ -425,6 +507,8 @@ async fn run_owned(
     event(&events, &cancel, "stopped", &device, None);
     // Explicit drop order: observed signed files / lease outlive native cleanup.
     drop(host);
+    #[cfg(target_os = "linux")]
+    drop(browser);
     drop(admitted);
     if let Some(error) = failure {
         Err(error)
@@ -440,6 +524,12 @@ enum ConnectionSession<'a> {
     Paired(HostProtocol<'a>),
 }
 impl ConnectionSession<'_> {
+    #[cfg(target_os = "linux")]
+    async fn drain_browser_inputs(&self) {
+        if let Self::Paired(protocol) = self {
+            protocol.drain_browser_inputs().await;
+        }
+    }
     async fn run_connection(&self, link: &mut HostWssLink) -> Result<(), ()> {
         match self {
             Self::Legacy(session) => session.run_connection(link).await.map_err(|_| ()),

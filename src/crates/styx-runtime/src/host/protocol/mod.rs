@@ -13,6 +13,8 @@ use crate::providers::codex::{
     ActionAcknowledgment, ActionEvidence, ActionReceipt, DispatchEvidence, ProcessAction,
     StartProcess,
 };
+#[cfg(target_os = "linux")]
+pub(crate) mod browser;
 pub mod wire;
 use futures_util::{FutureExt, StreamExt, stream::FuturesUnordered};
 use std::{
@@ -160,6 +162,8 @@ pub struct HostProtocol<'a> {
     owners: Mutex<OwnerRegistry>,
     paired: bool,
     connection_slot: tokio::sync::Semaphore,
+    #[cfg(target_os = "linux")]
+    browser: Option<browser::BrowserInputs>,
 }
 impl<'a> HostProtocol<'a> {
     pub fn new(
@@ -206,6 +210,8 @@ impl<'a> HostProtocol<'a> {
             owners: Mutex::new(OwnerRegistry::default()),
             paired,
             connection_slot: tokio::sync::Semaphore::new(1),
+            #[cfg(target_os = "linux")]
+            browser: None,
         })
     }
     pub fn register_bootstrap_verified_owner(
@@ -383,6 +389,25 @@ impl<'a> HostProtocol<'a> {
     }
     async fn handle(&self, call: Call) -> Reply {
         match call {
+            Call::Browser {
+                owner,
+                grant_revision,
+                timeout_ms,
+                command,
+            } => {
+                #[cfg(target_os = "linux")]
+                {
+                    self.handle_browser(owner, grant_revision, timeout_ms, command)
+                        .await
+                }
+                #[cfg(not(target_os = "linux"))]
+                {
+                    let _ = (owner, grant_revision, timeout_ms, command);
+                    Reply::Unsupported {
+                        feature: BROWSER_HEADLESS_V1.into(),
+                    }
+                }
+            }
             Call::OwnerCleanup { owner, timeout_ms } => {
                 if !self.paired || timeout_ms == 0 || timeout_ms > 5000 {
                     return invalid();
@@ -613,6 +638,32 @@ impl<'a> HostProtocol<'a> {
             Call::Negotiate { .. } | Call::OwnerOpen { .. } | Call::OwnerRevoke { .. } => invalid(),
         }
     }
+    fn features(&self) -> Vec<String> {
+        let mut features: Vec<String> = [
+            "prepare_start",
+            "dispatch_start",
+            "inspect_start",
+            "read",
+            "prepare_action",
+            "dispatch_action",
+            "inspect_action",
+        ]
+        .into_iter()
+        .map(str::to_owned)
+        .collect();
+        if self.paired {
+            features.extend(
+                ["owner_open", "owner_revoke", "owner_cleanup"]
+                    .into_iter()
+                    .map(str::to_owned),
+            );
+        }
+        #[cfg(target_os = "linux")]
+        if self.paired && self.browser.is_some() {
+            features.push(BROWSER_HEADLESS_V1.into());
+        }
+        features
+    }
     /// Scoped business waiters never own the native executor. Control admission
     /// remains live while at most two business handlers await upstream work.
     pub async fn run_connection(&self, link: &mut HostWssLink) -> Result<(), ProtocolError> {
@@ -663,7 +714,7 @@ impl<'a> HostProtocol<'a> {
                                 Reply::Negotiated {
                                     version, challenge, device_id: self.profile.device_id.clone(),
                                     host_generation: self.profile.host_generation.clone(), connection_generation: generation.clone(),
-                                    features: ["prepare_start", "dispatch_start", "inspect_start", "read", "prepare_action", "dispatch_action", "inspect_action"].into_iter().chain(if self.paired { vec!["owner_open", "owner_revoke", "owner_cleanup"] } else { vec![] }).map(str::to_owned).collect(),
+                                    features: self.features(),
                                     write: true, terminate: true, read_resume: false,
                                     owner_issuance: if self.paired { "gateway_authenticated" } else { "bootstrap_preverified_only" }.into(),
                                     grant_revision: self.paired.then(|| self.coordinator.grant_revision()),
@@ -714,7 +765,8 @@ fn call_owner(call: &Call) -> Option<&OwnerRef> {
         | Call::Read { owner, .. }
         | Call::PrepareAction { owner, .. }
         | Call::DispatchAction { owner, .. }
-        | Call::InspectAction { owner, .. } => Some(owner),
+        | Call::InspectAction { owner, .. }
+        | Call::Browser { owner, .. } => Some(owner),
         _ => None,
     }
 }
@@ -740,8 +792,8 @@ fn coordinator_error(error: CoordinatorError, read: bool) -> Reply {
         CoordinatorError::ResponseLost | CoordinatorError::Executor(_) => {
             (ErrorCategory::ResultUnknown, ExecutionCertainty::Unknown)
         }
-        // This Exec wire does not dispatch Browser operations. Preserve uncertainty
-        // if a Browser failure reaches the shared coordinator boundary.
+        // An executor error crossing the shared boundary carries no proof that a
+        // native dispatch did not happen; preserve uncertainty.
         #[cfg(target_os = "linux")]
         CoordinatorError::Browser(_) => (ErrorCategory::ResultUnknown, ExecutionCertainty::Unknown),
     };

@@ -56,6 +56,8 @@ struct Deployment {
 }
 #[derive(Deserialize)]
 struct HostLocator {
+    #[cfg(target_os = "linux")]
+    browser: Option<serde_json::Value>,
     #[serde(rename = "baseDir")]
     base_dir: PathBuf,
     #[serde(rename = "publisherSha256")]
@@ -105,6 +107,8 @@ struct Identity {
 }
 #[derive(Deserialize)]
 struct HostProfile {
+    #[cfg(target_os = "linux")]
+    browser: Option<serde_json::Value>,
     host_id: DeviceId,
     gateway_ws_url: String,
     token_file: PathBuf,
@@ -130,6 +134,8 @@ struct Active {
 }
 #[derive(Deserialize)]
 struct Manifest {
+    #[cfg(target_os = "linux")]
+    upstream: Option<serde_json::Value>,
     schema: u32,
     version: String,
     platform: String,
@@ -170,6 +176,14 @@ pub struct ProfileDiagnostics {
     pub tool_health: &'static str,
     pub account_acceptance: &'static str,
 }
+#[cfg(target_os = "linux")]
+pub(super) struct BrowserSource<'a> {
+    pub deployment: Option<&'a serde_json::Value>,
+    pub host: Option<&'a serde_json::Value>,
+    pub release: &'a Path,
+    pub workspace: &'a Path,
+    pub node_version: Option<&'a str>,
+}
 pub struct LoadedLegacyProfile {
     host_base_dir: PathBuf,
     device: DeviceId,
@@ -179,6 +193,14 @@ pub struct LoadedLegacyProfile {
     bearer: SecretBearer,
     executor: PinnedExecutable,
     inventory: PayloadInventory,
+    #[cfg(target_os = "linux")]
+    release_root: PathBuf,
+    #[cfg(target_os = "linux")]
+    browser_node_version: Option<String>,
+    #[cfg(target_os = "linux")]
+    deployment_browser: Option<serde_json::Value>,
+    #[cfg(target_os = "linux")]
+    host_browser: Option<serde_json::Value>,
     cwd: PathBuf,
     environment: BTreeMap<String, String>,
     rpc_timeout: Duration,
@@ -220,6 +242,24 @@ impl LoadedLegacyProfile {
     pub fn into_diagnostics(self) -> ProfileDiagnostics {
         self.diagnostics
     }
+    /// Browser selections remain private mutable input, never an execution grant.
+    /// Unsupported/malformed Browser options must not invalidate the Exec profile.
+    #[cfg(target_os = "linux")]
+    pub(super) fn browser_source(&self) -> BrowserSource<'_> {
+        BrowserSource {
+            deployment: self.deployment_browser.as_ref(),
+            host: self.host_browser.as_ref(),
+            release: &self.release_root,
+            workspace: &self.cwd,
+            node_version: self.browser_node_version.as_deref(),
+        }
+    }
+    #[cfg(target_os = "linux")]
+    pub(super) fn pin_browser_node(&self) -> Result<PinnedExecutable, ProfileError> {
+        self.inventory
+            .pin_executable("bin/node")
+            .map_err(|_| ProfileError::UntrustedRelease)
+    }
     pub fn executor_config(&self) -> Result<OwnedExecutorConfig, ProfileError> {
         self.revalidate()?;
         Ok(OwnedExecutorConfig {
@@ -237,6 +277,11 @@ impl LoadedLegacyProfile {
         self.inventory
             .revalidate()
             .map_err(|_| ProfileError::Changed)?;
+        self.revalidate_control()
+    }
+    /// Existing control does not load a new release/configuration snapshot.
+    /// Original private observations and executable pin remain mandatory.
+    pub(super) fn revalidate_control(&self) -> Result<(), ProfileError> {
         self.executor
             .revalidate()
             .map_err(|_| ProfileError::Changed)?;
@@ -642,6 +687,19 @@ fn load(state_dir: &Path, mode: GatewayWireMode) -> Result<LoadedLegacyProfile, 
         bearer,
         executor,
         inventory,
+        #[cfg(target_os = "linux")]
+        release_root: release,
+        #[cfg(target_os = "linux")]
+        browser_node_version: manifest
+            .upstream
+            .as_ref()
+            .and_then(|v| v.get("node"))
+            .and_then(|v| v.as_str())
+            .map(str::to_owned),
+        #[cfg(target_os = "linux")]
+        deployment_browser: deployment.host.browser,
+        #[cfg(target_os = "linux")]
+        host_browser: host.browser,
         cwd: host.exec.cwd,
         environment: host.exec.env,
         rpc_timeout: Duration::from_millis(timeout),

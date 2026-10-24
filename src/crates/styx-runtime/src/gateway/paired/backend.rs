@@ -7,6 +7,10 @@ use serde_json::{Map, Value, json};
 use std::{collections::BTreeMap, sync::LazyLock};
 use styx_contracts::identity::DeviceId;
 
+#[cfg(target_os = "linux")]
+#[path = "backend_browser.rs"]
+mod browser;
+
 static PUBLIC: LazyLock<Vec<Tool>> = LazyLock::new(|| {
     let value: Value = serde_json::from_str(include_str!(
         "../../../../../docs/rust-core-rewrite/PUBLIC-MCP-V1.json"
@@ -380,6 +384,8 @@ struct State {
     next_session: u64,
     owners: BTreeMap<OwnerId, OwnerState>,
     sessions: BTreeMap<u64, Entry>,
+    #[cfg(target_os = "linux")]
+    browsers: browser::BrowserContexts,
 }
 /// No raw executor or network authority is exposed to the public tool adapter.
 pub struct PairedGatewayBackend {
@@ -400,6 +406,8 @@ impl PairedGatewayBackend {
                 next_session: 1,
                 owners: BTreeMap::new(),
                 sessions: BTreeMap::new(),
+                #[cfg(target_os = "linux")]
+                browsers: browser::BrowserContexts::default(),
             }),
         }
     }
@@ -940,6 +948,11 @@ impl GatewayToolBackend for PairedGatewayBackend {
                 Ok(a) => self.execute(owner, a).await,
                 Err(e) => failure(e, None, false),
             },
+            #[cfg(target_os = "linux")]
+            "browser_navigate" | "browser_evaluate" | "browser_close" => {
+                self.browser_call(owner, request.name.as_ref(), request.arguments)
+                    .await
+            }
             "write_stdin" => match WriteArgs::parse(request.arguments) {
                 Ok(a) => self.write(owner, a).await,
                 Err(e) => failure(e, None, false),
@@ -950,7 +963,7 @@ impl GatewayToolBackend for PairedGatewayBackend {
                 }
                 match self.relay.devices().await {
                     Ok(devices) => success(
-                        json!({"environments":devices.iter().map(|d| json!({"environment_id":d.device_id.as_str(),"kind":"paired","connection":if d.online {"connected"} else {"disconnected"}})).collect::<Vec<_>>()}),
+                        json!({"environments":devices.iter().map(|d| json!({"environment_id":d.device_id.as_str(),"kind":"paired","connection":if d.online || d.browser_online {"connected"} else {"disconnected"}})).collect::<Vec<_>>()}),
                     ),
                     Err(e) => failure(e.code(), None, false),
                 }
@@ -969,7 +982,7 @@ impl GatewayToolBackend for PairedGatewayBackend {
                         .find(|d| d.device_id.as_str() == a.environment_id)
                     {
                         Some(d) => success(
-                            json!({"environment_id":a.environment_id,"kind":"paired","access":"allowed","exec":{"configured":true,"connection":if d.online {"connected"} else {"disconnected"},"readiness":"unknown","version":"unknown"},"browser":{"configured":"unknown","connection":"unknown","readiness":"unknown","version":"unknown"},"computer":{"configured":"unknown","connection":"unknown","permission":"unknown","readiness":"unknown","version":"unknown"}}),
+                            json!({"environment_id":a.environment_id,"kind":"paired","access":"allowed","exec":{"configured":true,"connection":if d.online {"connected"} else {"disconnected"},"readiness":"unknown","version":"unknown"},"browser":{"configured":"unknown","connection":if d.browser_online {"connected"} else {"disconnected"},"readiness":"unknown","version":"unknown"},"computer":{"configured":"unknown","connection":"unknown","permission":"unknown","readiness":"unknown","version":"unknown"}}),
                         ),
                         None => failure("environment_unavailable", None, false),
                     },
@@ -1011,14 +1024,13 @@ impl GatewayOwnerLifecycle for PairedGatewayBackend {
                 #[cfg(test)]
                 self.physical_cleanups_completed
                     .fetch_add(1, std::sync::atomic::Ordering::Release);
-                self.state
-                    .lock()
-                    .expect("paired state")
-                    .sessions
-                    .retain(|_, entry| {
-                        entry.owner != *owner.owner_id()
-                            || entry.principal != owner.principal_fingerprint()
-                    });
+                let mut state = self.state.lock().expect("paired state");
+                state.sessions.retain(|_, entry| {
+                    entry.owner != *owner.owner_id()
+                        || entry.principal != owner.principal_fingerprint()
+                });
+                #[cfg(target_os = "linux")]
+                state.browsers.clear_owner(owner);
                 OwnerCleanup::Complete
             }
             _ => OwnerCleanup::Unknown,

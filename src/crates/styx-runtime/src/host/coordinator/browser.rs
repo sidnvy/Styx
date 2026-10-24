@@ -214,6 +214,31 @@ impl HostAuthority {
     }
 }
 impl HostCoordinator {
+    pub(crate) fn browser_configured(&self) -> bool {
+        self.inner
+            .state
+            .lock()
+            .expect("Host state mutex")
+            .browser
+            .is_some()
+    }
+    /// History is capability- and target-kind-bound. It does not replay output
+    /// or synthesize a fresh execution permit for a prior browser operation.
+    pub(crate) fn inspect_browser(
+        &self,
+        owner: &OwnerLease,
+        id: &OperationId,
+        digest: Sha256Digest,
+        action: bool,
+    ) -> Result<OperationSnapshot, CoordinatorError> {
+        let state = self.inner.state.lock().expect("Host state mutex");
+        validate_context(&state.ledger.inspect_context(owner, id, digest)?)?;
+        let snapshot = state.ledger.inspect(owner, id, digest)?;
+        if snapshot.target.is_some() != action {
+            return Err(ErrorCategory::StateConflict.into());
+        }
+        Ok(snapshot)
+    }
     pub fn prepare_browser_open(
         &self,
         owner: &OwnerLease,
@@ -258,6 +283,12 @@ impl HostCoordinator {
             .try_acquire_owned()
             .map_err(|_| CoordinatorError::Busy)?;
         let mut state = self.inner.state.lock().expect("Host state mutex");
+        // A concurrent duplicate can pass the first observation. Recheck under
+        // the final admission lock before reserving another physical worker.
+        let snapshot = state.ledger.inspect(owner, id, digest)?;
+        if snapshot.state != OperationState::Reserved {
+            return Ok(BrowserOpenSubmission::Existing(snapshot));
+        }
         if state.shutting_down {
             return Err(CoordinatorError::Busy);
         }
@@ -386,10 +417,13 @@ impl HostCoordinator {
             .try_acquire_owned()
             .map_err(|_| CoordinatorError::Busy)?;
         let mut state = self.inner.state.lock().expect("Host state mutex");
+        let snapshot = state.ledger.inspect(owner, id, digest)?;
+        if snapshot.state != OperationState::Reserved {
+            return Ok(BrowserActionSubmission::Existing(snapshot));
+        }
         if state.shutting_down {
             return Err(CoordinatorError::Busy);
         }
-        let snapshot = state.ledger.inspect(owner, id, digest)?;
         let target = snapshot
             .target
             .as_ref()

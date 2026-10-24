@@ -2,7 +2,7 @@ use super::GatewayExecProfile;
 use crate::{
     enrollment::shared::SharedEnrollment,
     gateway::auth::VerifiedGatewayOwner,
-    host::protocol::wire::{Call, OwnerRef, Reply},
+    host::protocol::wire::{BrowserCommand, Call, OwnerRef, Reply},
 };
 use std::{
     collections::BTreeMap,
@@ -47,6 +47,7 @@ impl RelayError {
 pub struct DeviceStatus {
     pub device_id: DeviceId,
     pub online: bool,
+    pub browser_online: bool,
     pub capability_generation: String,
     pub host_generation: Option<HostGeneration>,
     pub grant_revision: Option<u64>,
@@ -67,12 +68,21 @@ pub(crate) struct Entry {
     pub stop: CancellationToken,
     pub live: AtomicBool,
     pub lease: tokio::sync::Mutex<Option<ConnectionLease>>,
+    pub browser_feature: bool,
+    pub browser_lease: tokio::sync::Mutex<Option<ConnectionLease>>,
+}
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TargetKind {
+    ExecResource,
+    ExecAction,
+    BrowserResource,
+    BrowserAction,
 }
 struct Binding {
     owner: VerifiedGatewayOwner,
     reference: OwnerRef,
     entry: Arc<Entry>,
-    targets: Mutex<BTreeMap<OperationId, Sha256Digest>>,
+    targets: Mutex<BTreeMap<OperationId, (Sha256Digest, TargetKind)>>,
     revoked: Arc<Mutex<bool>>,
     ready: AtomicBool,
     admitted_records: AtomicUsize,
@@ -161,17 +171,57 @@ impl RelayHandle {
         })
     }
     pub(crate) async fn authorize(&self, e: &Entry) -> Result<(), RelayError> {
+        self.authorize_for(e, false).await
+    }
+    pub(crate) async fn authorize_for(&self, e: &Entry, browser: bool) -> Result<(), RelayError> {
         if !e.live.load(Ordering::Acquire) || e.stop.is_cancelled() {
             return Err(RelayError::Offline);
         }
-        let lease = e.lease.lock().await;
-        let lease = lease.as_ref().ok_or(RelayError::Offline)?;
+        if browser && !e.browser_feature {
+            return Err(RelayError::Unsupported);
+        }
+        let lease = if browser {
+            e.browser_lease.lock().await
+        } else {
+            e.lease.lock().await
+        };
+        let lease = lease.as_ref().ok_or(if browser {
+            RelayError::Unauthorized
+        } else {
+            RelayError::Offline
+        })?;
         self.inner
             .shared
             .with(|s| s.authorize_host_frame(lease))
             .await
             .map_err(|_| RelayError::Unknown)?
             .map_err(|_| RelayError::Unauthorized)
+    }
+    /// Control messages have no execution capability. They may use either
+    /// currently authorized connection lane; business calls never fall through
+    /// from a denied Browser grant to an Exec grant.
+    pub(crate) async fn authorization_lane(
+        &self,
+        e: &Entry,
+        call: &Call,
+    ) -> Result<bool, RelayError> {
+        if matches!(
+            call,
+            Call::OwnerOpen { .. } | Call::OwnerRevoke { .. } | Call::OwnerCleanup { .. }
+        ) {
+            self.control_lane(e).await
+        } else {
+            let browser = call.is_browser();
+            self.authorize_for(e, browser).await?;
+            Ok(browser)
+        }
+    }
+    pub(crate) async fn control_lane(&self, e: &Entry) -> Result<bool, RelayError> {
+        if self.authorize(e).await.is_ok() {
+            return Ok(false);
+        }
+        self.authorize_for(e, true).await?;
+        Ok(true)
     }
     pub async fn devices(&self) -> Result<Vec<DeviceStatus>, RelayError> {
         let profiles = self
@@ -180,23 +230,37 @@ impl RelayHandle {
             .profiles()
             .await
             .map_err(|_| RelayError::Unknown)?;
-        let state = self.inner.state.lock().map_err(|_| RelayError::Unknown)?;
-        Ok(profiles
-            .into_iter()
-            .map(|p| {
-                let e = state.entries.get(&p.device_id).filter(|e| {
-                    e.live.load(Ordering::Acquire)
-                        && e.profile.capability_generation == p.capability_generation
-                });
-                DeviceStatus {
-                    device_id: p.device_id,
-                    online: e.is_some(),
-                    capability_generation: p.capability_generation,
-                    host_generation: e.map(|e| e.host_generation.clone()),
-                    grant_revision: e.map(|e| e.grant_revision),
-                }
-            })
-            .collect())
+        let entries = self
+            .inner
+            .state
+            .lock()
+            .map_err(|_| RelayError::Unknown)?
+            .entries
+            .clone();
+        let mut devices = Vec::with_capacity(profiles.len());
+        for p in profiles {
+            let e = entries.get(&p.device_id).filter(|e| {
+                e.live.load(Ordering::Acquire)
+                    && e.profile.capability_generation == p.capability_generation
+            });
+            let online = match e {
+                Some(e) => self.authorize(e).await.is_ok(),
+                None => false,
+            };
+            let browser_online = match e {
+                Some(e) if p.browser_approved => self.authorize_for(e, true).await.is_ok(),
+                _ => false,
+            };
+            devices.push(DeviceStatus {
+                device_id: p.device_id,
+                online,
+                browser_online,
+                capability_generation: p.capability_generation,
+                host_generation: e.map(|e| e.host_generation.clone()),
+                grant_revision: e.map(|e| e.grant_revision),
+            });
+        }
+        Ok(devices)
     }
     async fn exchange(
         &self,
@@ -204,7 +268,7 @@ impl RelayHandle {
         call: Call,
         gate: Option<Arc<Mutex<bool>>>,
     ) -> Result<Reply, RelayError> {
-        self.authorize(e).await?;
+        self.authorization_lane(e, &call).await?;
         let (tx, rx) = oneshot::channel();
         e.tx.try_send(Command {
             call,
@@ -222,6 +286,21 @@ impl RelayHandle {
         owner: &VerifiedGatewayOwner,
         device: &DeviceId,
     ) -> Result<BoundOwner, RelayError> {
+        self.bind_for(owner, device, false).await
+    }
+    pub async fn bind_browser(
+        &self,
+        owner: &VerifiedGatewayOwner,
+        device: &DeviceId,
+    ) -> Result<BoundOwner, RelayError> {
+        self.bind_for(owner, device, true).await
+    }
+    async fn bind_for(
+        &self,
+        owner: &VerifiedGatewayOwner,
+        device: &DeviceId,
+        browser: bool,
+    ) -> Result<BoundOwner, RelayError> {
         if self.is_fenced(owner)? {
             return Err(RelayError::Unauthorized);
         }
@@ -234,7 +313,7 @@ impl RelayHandle {
             .get(device)
             .cloned()
             .ok_or(RelayError::Offline)?;
-        self.authorize(&entry).await?;
+        self.authorize_for(&entry, browser).await?;
         {
             let bindings = self
                 .inner
@@ -336,17 +415,32 @@ impl RelayHandle {
                 return Err(RelayError::Unauthorized);
             }
         }
-        let (owner, target, revision, new_record) = match &call {
+        let browser = call.is_browser();
+        // A denied lane cannot consume the shared routing-record allowance.
+        // exchange/actual-send/delivery still repeat the current authorization.
+        self.authorize_for(&b.inner.entry, browser).await?;
+        let (owner, target, revision, new_record, record_kind) = match &call {
             Call::PrepareStart {
                 owner,
                 grant_revision,
                 ..
-            } => (owner, None, Some(*grant_revision), true),
+            } => (
+                owner,
+                None,
+                Some(*grant_revision),
+                true,
+                TargetKind::ExecResource,
+            ),
             Call::DispatchStart { owner, target } | Call::InspectStart { owner, target } => (
                 owner,
-                Some((target.operation_id.clone(), target.payload_digest)),
+                Some((
+                    target.operation_id.clone(),
+                    target.payload_digest,
+                    TargetKind::ExecResource,
+                )),
                 None,
                 false,
+                TargetKind::ExecResource,
             ),
             Call::Read {
                 owner,
@@ -355,9 +449,14 @@ impl RelayHandle {
                 ..
             } => (
                 owner,
-                Some((target.operation_id.clone(), target.payload_digest)),
+                Some((
+                    target.operation_id.clone(),
+                    target.payload_digest,
+                    TargetKind::ExecResource,
+                )),
                 Some(*grant_revision),
                 false,
+                TargetKind::ExecResource,
             ),
             Call::PrepareAction {
                 owner,
@@ -366,16 +465,75 @@ impl RelayHandle {
                 ..
             } => (
                 owner,
-                Some((target.operation_id.clone(), target.payload_digest)),
+                Some((
+                    target.operation_id.clone(),
+                    target.payload_digest,
+                    TargetKind::ExecResource,
+                )),
                 Some(*grant_revision),
                 true,
+                TargetKind::ExecAction,
             ),
             Call::DispatchAction { owner, action } | Call::InspectAction { owner, action } => (
                 owner,
-                Some((action.operation_id.clone(), action.payload_digest)),
+                Some((
+                    action.operation_id.clone(),
+                    action.payload_digest,
+                    TargetKind::ExecAction,
+                )),
                 None,
                 false,
+                TargetKind::ExecAction,
             ),
+            Call::Browser {
+                owner,
+                grant_revision,
+                command,
+                ..
+            } => match command {
+                BrowserCommand::PrepareOpen => (
+                    owner,
+                    None,
+                    Some(*grant_revision),
+                    true,
+                    TargetKind::BrowserResource,
+                ),
+                BrowserCommand::DispatchOpen { target }
+                | BrowserCommand::InspectOpen { target } => (
+                    owner,
+                    Some((
+                        target.operation_id.clone(),
+                        target.payload_digest,
+                        TargetKind::BrowserResource,
+                    )),
+                    Some(*grant_revision),
+                    false,
+                    TargetKind::BrowserResource,
+                ),
+                BrowserCommand::PrepareAction { target, .. } => (
+                    owner,
+                    Some((
+                        target.operation_id.clone(),
+                        target.payload_digest,
+                        TargetKind::BrowserResource,
+                    )),
+                    Some(*grant_revision),
+                    true,
+                    TargetKind::BrowserAction,
+                ),
+                BrowserCommand::DispatchAction { action }
+                | BrowserCommand::InspectAction { action } => (
+                    owner,
+                    Some((
+                        action.operation_id.clone(),
+                        action.payload_digest,
+                        TargetKind::BrowserAction,
+                    )),
+                    Some(*grant_revision),
+                    false,
+                    TargetKind::BrowserAction,
+                ),
+            },
             _ => return Err(RelayError::Unsupported),
         };
         if owner != &b.inner.reference || revision.is_some_and(|r| r != b.grant_revision()) {
@@ -385,7 +543,7 @@ impl RelayHandle {
             let targets = b.inner.targets.lock().map_err(|_| RelayError::Unknown)?;
             if target
                 .as_ref()
-                .is_some_and(|(id, d)| targets.get(id) != Some(d))
+                .is_some_and(|(id, d, kind)| targets.get(id) != Some(&(*d, *kind)))
             {
                 return Err(RelayError::Unauthorized);
             }
@@ -412,21 +570,26 @@ impl RelayHandle {
         {
             return Err(RelayError::Unauthorized);
         }
+        self.authorize_for(&b.inner.entry, browser).await?;
         if let Reply::Prepared { snapshot }
         | Reply::Start { snapshot, .. }
         | Reply::Inspected { snapshot }
-        | Reply::Action { snapshot, .. } = &reply
+        | Reply::Action { snapshot, .. }
+        | Reply::BrowserAction { snapshot, .. } = &reply
         {
             let mut targets = b.inner.targets.lock().map_err(|_| RelayError::Unknown)?;
             if let Some(existing) = targets.get(&snapshot.operation_id) {
-                if existing != &snapshot.payload_digest {
+                if existing != &(snapshot.payload_digest, record_kind) {
                     return Err(RelayError::Unknown);
                 }
             } else {
                 if targets.len() >= 256 {
                     return Err(RelayError::Unknown);
                 }
-                targets.insert(snapshot.operation_id.clone(), snapshot.payload_digest);
+                targets.insert(
+                    snapshot.operation_id.clone(),
+                    (snapshot.payload_digest, record_kind),
+                );
             }
         }
         Ok(reply)
