@@ -1322,6 +1322,21 @@ impl LegacySettlementProof {
     pub(crate) fn observation(&self) -> LegacySettlementObservation {
         self.observation
     }
+    /// Durable descriptive identity, never a reconstructed settlement proof.
+    pub(crate) fn original_scope_binding(&self) -> serde_json::Value {
+        serde_json::json!({"schema":1,"unit":self.scope.inputs.unit_name(),
+            "unit_sha256":Sha256Digest::of_bytes(self.scope.inputs.unit_bytes()),
+            "invocation":self.scope.invocation,"manager_owner":self.scope.manager_owner,
+            "manager_birth":self.scope.manager_birth,"main_birth":self.scope.main,
+            "node_sha256":self.scope.inputs.node_sha(),"cgroup_path":self.scope.cgroup_path,
+            "cgroup_device":self.scope.cgroup_stat.dev,"cgroup_inode":self.scope.cgroup_stat.ino,
+            "settlement":{"term_attempted":self.observation.term_attempted,
+                "signal_accepted":self.observation.signal_accepted,
+                "original_main_exited":self.observation.original_main_exited,
+                "original_cgroup_empty":self.observation.original_cgroup_empty,
+                "manager_reported_success":self.observation.manager_reported_success,
+                "worker_joined":self.observation.worker_joined}})
+    }
     pub(crate) fn fence(&self) -> &LegacyWriterFence {
         &self.scope.fence
     }

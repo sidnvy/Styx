@@ -318,6 +318,7 @@ pub(super) fn scan_handoffs(scan: &JournalObservation) -> JournalResult<HandoffI
     Ok(HandoffInventory { records, used })
 }
 fn check_canonical(
+    journal: &OwnedManagementJournal,
     state: &ConfigurationState,
     intent: &LegacyCredentialRetirementIntent,
 ) -> JournalResult<()> {
@@ -332,8 +333,11 @@ fn check_canonical(
         .root
         .read_raw("state.json", 1024 * 1024)
         .map_err(|_| JournalError::Unknown)?;
-    if Sha256Digest::of_bytes(deployment.bytes()) != intent.deployment_raw_sha256
-        || Sha256Digest::of_bytes(before.bytes()) != intent.before_state_sha256
+    if Sha256Digest::of_bytes(deployment.bytes()) != intent.deployment_raw_sha256 {
+        return Err(JournalError::Conflict);
+    }
+    if Sha256Digest::of_bytes(before.bytes()) != intent.before_state_sha256
+        && !super::cutover::canonical_matches_retired_cutover_locked(journal, state, intent)?
     {
         return Err(JournalError::Conflict);
     }
@@ -443,7 +447,7 @@ impl OwnedManagementJournal {
         let [raw_name, prepared_name, _] = names(&intent.transaction_id);
         let entries = vec![(raw_name, raw), (prepared_name, record)];
         self.owner.with_maintenance(maintenance, |state| {
-            check_canonical(state, intent)?;
+            check_canonical(self, state, intent)?;
             let result = self.with_directory_locked(state, |dir| {
                 let scan = files::scan(dir, self.budget)?;
                 let inventory = super::platform::inventory(&scan)?;
@@ -492,7 +496,7 @@ impl OwnedManagementJournal {
                 }
                 prepared(self, &original)
             })?;
-            check_canonical(state, intent).map_err(|_| JournalError::Unknown)?;
+            check_canonical(self, state, intent).map_err(|_| JournalError::Unknown)?;
             Ok(result)
         })
     }
@@ -521,7 +525,7 @@ impl OwnedManagementJournal {
             return Err(JournalError::Conflict);
         }
         self.owner.with_maintenance(maintenance, |state| {
-            check_canonical(state, &source.intent)?;
+            check_canonical(self, state, &source.intent)?;
             let result = self.with_directory_locked(state, |dir| {
                 let scan = files::scan(dir, self.budget)?;
                 let existing = original(&scan, &source.intent.transaction_id)?;
@@ -580,7 +584,7 @@ impl OwnedManagementJournal {
                     post_stamp: post_stamp.clone(),
                 })
             })?;
-            check_canonical(state, &source.intent).map_err(|_| JournalError::Unknown)?;
+            check_canonical(self, state, &source.intent).map_err(|_| JournalError::Unknown)?;
             Ok(result)
         })
     }
@@ -596,7 +600,7 @@ impl OwnedManagementJournal {
             self.with_directory_locked(state, |dir| {
                 let scan = files::scan(dir, self.budget)?;
                 let before = original(&scan, id)?;
-                check_canonical(state, &before.intent)?;
+                check_canonical(self, state, &before.intent)?;
                 // Recovery may observe an intent-only crash, but never manufactures
                 // Prepared/Retired or renames/restores a token to advance the chain.
                 let [raw, prepared, retired] = names(id);
@@ -620,7 +624,7 @@ impl OwnedManagementJournal {
                 {
                     return Err(JournalError::Unknown);
                 }
-                check_canonical(state, &after.intent).map_err(|_| JournalError::Unknown)?;
+                check_canonical(self, state, &after.intent).map_err(|_| JournalError::Unknown)?;
                 Ok(after.original())
             })
         })

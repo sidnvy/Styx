@@ -15,6 +15,8 @@ pub const MAX_INTENT_BYTES: usize = 4096;
 #[serde(rename_all = "snake_case")]
 pub enum ReaderContract {
     NativeManagementStateV1,
+    /// Explicit reader barrier for an original-identity runtime cutover.
+    NativeMigratedStateV1,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

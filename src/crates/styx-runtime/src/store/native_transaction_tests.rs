@@ -36,6 +36,7 @@ fn genesis(marker: &NativeRootMarker) -> NativeState {
                 autostart: NativeAutostartDesired::Disabled,
             }),
         },
+        migration: None,
         extensions: BTreeMap::from([(
             "opaque_extension".into(),
             serde_json::value::RawValue::from_string(

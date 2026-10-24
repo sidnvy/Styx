@@ -21,6 +21,17 @@ pub(crate) fn load_for_migration_validation(
     Ok(LoadedMaintenanceProfile { original })
 }
 impl LoadedMaintenanceProfile {
+    pub fn host_base_dir(&self) -> &Path {
+        self.original.host_base_dir()
+    }
+    pub(crate) fn preservation_entries(&self) -> &[PreservationEntry] {
+        &self.original.diagnostics().preservation
+    }
+    /// Exact original signed closure plus candidate, independent of the one
+    /// canonical state replacement. This does not skip any executable inventory.
+    pub(crate) fn revalidate_worker_closures(&self) -> Result<(), ProfileError> {
+        self.original.inventory.revalidate()
+    }
     pub fn device_id(&self) -> &DeviceId {
         self.original.device_id()
     }

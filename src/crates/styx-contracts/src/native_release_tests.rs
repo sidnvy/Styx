@@ -265,3 +265,44 @@ fn signed_members_cannot_masquerade_cross_closure_or_escape_runtime_budget() {
     invalid_raw["worker_closures"][0]["unexpected_authority"] = json!(true);
     assert!(serde_json::from_value::<NativeReleaseManifest>(invalid_raw).is_err());
 }
+
+#[test]
+fn migrated_runtime_reader_is_explicit_and_old_manifest_shape_does_not_claim_it() {
+    use crate::management::ReaderContract;
+    let old = runtime(NativeReleaseTarget::LinuxX86_64Gnu, &[]);
+    let raw = serde_json::to_vec(&old).unwrap();
+    old.validate().unwrap();
+    assert!(
+        old.minimum_reader
+            .supports_state_reader(ReaderContract::NativeManagementStateV1)
+    );
+    assert!(
+        !old.minimum_reader
+            .supports_state_reader(ReaderContract::NativeMigratedStateV1)
+    );
+    let mut new = old.clone();
+    new.minimum_reader = NativeReleaseReader::NativeRuntimeMigratedV1;
+    new.validate().unwrap();
+    assert!(
+        new.minimum_reader
+            .supports_state_reader(ReaderContract::NativeMigratedStateV1)
+    );
+    assert!(
+        new.minimum_reader
+            .supports_state_reader(ReaderContract::NativeManagementStateV1)
+    );
+    assert_ne!(raw, serde_json::to_vec(&new).unwrap());
+    let decoded: NativeReleaseManifest = serde_json::from_slice(&raw).unwrap();
+    assert_eq!(raw, serde_json::to_vec(&decoded).unwrap());
+    assert_eq!(decoded.minimum_reader, NativeReleaseReader::NativeRuntimeV1);
+    let mut preview = preview();
+    preview.minimum_reader = new.minimum_reader;
+    assert!(preview.validate().is_err());
+    assert!(
+        !NativeReleaseReader::NativeReleaseV1
+            .supports_state_reader(ReaderContract::NativeMigratedStateV1)
+    );
+    let mut unknown = serde_json::to_value(&new).unwrap();
+    unknown["minimum_reader"] = "native_runtime_unknown_v1".into();
+    assert!(serde_json::from_value::<NativeReleaseManifest>(unknown).is_err());
+}

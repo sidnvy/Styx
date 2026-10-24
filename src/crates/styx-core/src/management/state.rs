@@ -28,6 +28,20 @@ pub fn validate_state(
     {
         return Err(NativeStateRuleError::InvalidState);
     }
+    match (&state.migration, state.reader_contract) {
+        (None, styx_contracts::management::ReaderContract::NativeManagementStateV1) => (),
+        (Some(migration), styx_contracts::management::ReaderContract::NativeMigratedStateV1)
+            if state.revision > 0
+                && migration.original_token_relative_path
+                    == format!(
+                        "device/.styx-retired-host-token-{}",
+                        migration.transaction_id.as_str()
+                    ) =>
+        {
+            ()
+        }
+        _ => return Err(NativeStateRuleError::InvalidState),
+    }
     match (state.revision, state.last_transaction.as_ref()) {
         (0, None) => (),
         (1.., Some(tx)) if tx.sequence > 0 => (),
@@ -76,6 +90,7 @@ pub fn validate_transition(
                 .checked_add(1)
                 .ok_or(NativeStateRuleError::InvalidTransition)?
         || target.mode != before.mode
+        || target.migration != before.migration
         || target.deployment_raw_sha256 != before.deployment_raw_sha256
         || target.deployment_raw_sha256 != intent.deployment_raw_sha256
         || target.reader_contract != intent.reader

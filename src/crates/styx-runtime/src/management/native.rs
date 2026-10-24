@@ -497,6 +497,7 @@ mod platform {
                 gateway: options.gateway.then_some(component),
                 host: options.host.then_some(component),
             },
+            migration: None,
             extensions: BTreeMap::new(),
         };
         let binding = fresh

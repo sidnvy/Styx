@@ -372,7 +372,7 @@
       "input": "fresh STYX_TEST_LEGACY_IMPORT_ROOT and fixed STYX_TEST_NODE22",
       "required_for": "protected original source file/RSA association to same-root native history; independent process reopens original current grant/generation/default and no-token revoked, verifies real RSA/SPKI, and ordinary service execution remains migration_commit_required; not old Gateway settlement, onboarding, remote authentication or final migration"
     },
-    "migration::legacy_service::gateway::tests::actual_original_host_gateway_history_under_same_writer": {
+    "migration::legacy_service::gateway::tests::actual_original_runtime_cutover_preparation_probe_and_application": {
       "kind": "explicit_owned_original_linux_host_and_gateway_services",
       "input": "fresh STYX_TEST_LEGACY_GATEWAY_FIXTURE with original Core preparation/pairing/doctor; original publisher native payload; externally owned fixed Host and signed Gateway units plus independent observer barrier",
       "required_for": "same original writer/fence, actual Host and independently signed Gateway physical settlement, original-inode retired credential, state-root history persistence and unrelated Gateway survival; not launch retirement, C07 commit, native activation, original production identity cutover or account acceptance"
@@ -381,6 +381,11 @@
       "kind": "explicit_owned_original_settled_history_reopen",
       "required_for": "external controller only; after actual product child exit, independent original state writer and pending history storage inspection; no Core/C07 recovery or ordinary admission",
       "input": "fresh STYX_TEST_LEGACY_GATEWAY_FIXTURE with original Core preparation/pairing/doctor; original publisher native payload; externally owned fixed Host and signed Gateway units plus independent observer barrier"
+    },
+    "store::management::cutover::tests::same_original_cutover_chain_files_and_interruption_boundaries": {
+      "kind": "explicit_owned_original_cutover_journal_files",
+      "input": "fresh STYX_TEST_MANAGEMENT_CUTOVER_ROOT; synthetic retirement/scope/probe report data only",
+      "required_for": "same transaction successor hashes, reader barrier, attachment/phase preflight and interrupted-chain refusal; not actual runtime handoff/activation/Core enrollment recovery"
     }
   },
   "change_policy": "dependency or ignored-test additions require explicit policy review; preserve mature Cargo tooling rather than replacing its resolver/compiler/lints"

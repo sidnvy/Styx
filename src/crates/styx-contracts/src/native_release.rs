@@ -1,6 +1,8 @@
 //! C08 native release metadata. Parsing data never grants publisher trust,
 //! executable admission, installation, profile migration or platform permissions.
-use crate::{identity::Sha256Digest, native_management::NativeRuntimeFormat};
+use crate::{
+    identity::Sha256Digest, management::ReaderContract, native_management::NativeRuntimeFormat,
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 pub const NATIVE_RELEASE_SCHEMA: u16 = 2;
@@ -21,6 +23,23 @@ pub enum NativeReleaseScope {
 pub enum NativeReleaseReader {
     NativeReleaseV1,
     NativeRuntimeV1,
+    /// Original-identity cutover reader barrier; old runtimes reject this variant.
+    NativeRuntimeMigratedV1,
+}
+impl NativeReleaseReader {
+    /// Signed reader declaration only; no runtime health or activation authority.
+    pub fn supports_state_reader(self, reader: ReaderContract) -> bool {
+        matches!(
+            (self, reader),
+            (
+                Self::NativeRuntimeV1 | Self::NativeRuntimeMigratedV1,
+                ReaderContract::NativeManagementStateV1
+            ) | (
+                Self::NativeRuntimeMigratedV1,
+                ReaderContract::NativeMigratedStateV1
+            )
+        )
+    }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum NativeReleaseTarget {
@@ -277,7 +296,10 @@ impl NativeReleaseManifest {
     fn validate_runtime(&self) -> Result<(), NativeReleaseManifestError> {
         let invalid = NativeReleaseManifestError;
         if self.schema != NATIVE_RELEASE_SCHEMA
-            || self.minimum_reader != NativeReleaseReader::NativeRuntimeV1
+            || !matches!(
+                self.minimum_reader,
+                NativeReleaseReader::NativeRuntimeV1 | NativeReleaseReader::NativeRuntimeMigratedV1
+            )
             || !worker_version(&self.version)
             || self.version.contains('+')
             || self.source.revision.len() != 40

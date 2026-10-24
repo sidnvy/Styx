@@ -33,9 +33,10 @@ use std::path::{Path, PathBuf};
 use styx_contracts::native_release::NativeReleaseTarget;
 use styx_contracts::{
     identity::Sha256Digest,
+    management::ReaderContract,
     native_release::{
         NATIVE_RELEASE_MANIFEST_BYTES, NativeExternalWorker, NativeReleaseManifest,
-        NativeReleaseScope,
+        NativeReleaseReader, NativeReleaseScope,
     },
 };
 
@@ -112,6 +113,7 @@ pub struct ReleaseReport {
     pub schema: u16,
     pub scope: &'static str,
     pub runtime_format: &'static str,
+    pub minimum_reader: NativeReleaseReader,
     pub component: &'static str,
     pub version: String,
     pub target: &'static str,
@@ -158,6 +160,12 @@ impl VerifiedNativeRelease {
     /// Verified data only, not a replacement for this object's pinned ownership.
     pub fn manifest(&self) -> &NativeReleaseManifest {
         &self.manifest
+    }
+    /// Revalidated publisher-signed reader support; not a readiness/commit proof.
+    pub fn supports_state_reader(&self, reader: ReaderContract) -> Result<bool> {
+        self.revalidate()?;
+        Ok(self.manifest.scope == NativeReleaseScope::RuntimeCandidate
+            && self.manifest.minimum_reader.supports_state_reader(reader))
     }
     pub fn revalidate(&self) -> Result<()> {
         reobserve(
@@ -434,6 +442,7 @@ fn verify_native(
             NativeReleaseScope::RuntimeCandidate => "runtime_candidate",
         },
         runtime_format: "native_rust_v1",
+        minimum_reader: manifest.minimum_reader,
         component: "styx",
         version: manifest.version.clone(),
         target: match target {

@@ -1,7 +1,7 @@
-//! One actual original signed Host+Gateway installed-service settlement scene.
+//! One actual original signed Host+Gateway to fenced native cutover scene.
 //! The external controller owns original Core preparation/pairing/doctor, unit
 //! registration and all final cleanup. This test neither installs a service nor
-//! proves C07 commit, native activation, or account acceptance.
+//! proves final C07 commit, ordinary native activation, or account acceptance.
 use super::*;
 use crate::{
     crypto::PublisherFingerprint,
@@ -175,7 +175,7 @@ async fn settle_gateway(t: &LegacyGatewayTransition) -> SettledLegacyRuntime {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires STYX_TEST_LEGACY_GATEWAY_FIXTURE, external original Core preparation/pairing/doctor and owned installed signed systemd Host/Gateway units; not C07 activation or account acceptance"]
-async fn actual_original_host_gateway_history_under_same_writer() {
+async fn actual_original_runtime_cutover_preparation_probe_and_application() {
     let root = PathBuf::from(
         std::env::var_os("STYX_TEST_LEGACY_GATEWAY_FIXTURE").expect("explicit fresh fixture root"),
     );
@@ -287,7 +287,7 @@ async fn actual_original_host_gateway_history_under_same_writer() {
         gateway.begin_settlement(Duration::from_secs(15), CancellationToken::new()),
         Err(TransitionError::Conflict)
     );
-    let combined = settle_gateway(&gateway).await;
+    let combined = Arc::new(settle_gateway(&gateway).await);
     assert!(matches!(
         gateway.consume_settlement(),
         Err(TransitionError::Conflict)
@@ -350,9 +350,54 @@ async fn actual_original_host_gateway_history_under_same_writer() {
         .ensure_absent(".styx-enrollment-journal-v1")
         .unwrap();
     combined.revalidate().await.unwrap();
+    let desired_component = styx_contracts::native_management::NativeComponentDesired {
+        manager: styx_contracts::native_management::NativeManager::ForegroundCli,
+        run: styx_contracts::native_management::NativeRunDesired::Running,
+        autostart: styx_contracts::native_management::NativeAutostartDesired::Disabled,
+    };
+    let mut cutover = combined
+        .prepare_native_transition(
+            &fixture.state_dir,
+            &mut history_journal,
+            styx_contracts::native_management::NativeDesired {
+                gateway: Some(desired_component),
+                host: Some(desired_component),
+            },
+        )
+        .unwrap();
+    assert!(!cutover.report().migration_committed && !cutover.report().network_ready);
+    let probe = combined
+        .validate_candidate_exec(&fixture.state_dir)
+        .await
+        .unwrap();
+    let probe_report = serde_json::to_value(probe.report()).unwrap();
+    assert!(matches!(
+        combined.validate_candidate_exec(&fixture.state_dir).await,
+        Err(TransitionError::Busy)
+    ));
+    cutover.apply_candidate(probe).unwrap();
+    assert!(cutover.report().applied_sha256.is_some());
+    assert!(cutover.report().candidate_exec_validation_sha256.is_some());
+    assert!(!cutover.report().migration_committed && !cutover.report().network_ready);
+    combined.revalidate().await.unwrap();
+    assert!(combined.configuration_root().ensure_admission().is_err());
+    let marker_raw = configuration
+        .read_raw(crate::store::native_root::NATIVE_MARKER_FILE, 4096)
+        .unwrap();
+    let marker = crate::store::native_state::decode_marker(marker_raw.bytes()).unwrap();
+    let canonical_raw = configuration.read_raw("state.json", 1024 * 1024).unwrap();
+    let canonical =
+        crate::store::native_state::decode_state(canonical_raw.bytes(), &marker).unwrap();
+    assert_eq!(canonical.raw_sha256(), cutover.report().target_sha256);
+    assert_eq!(
+        canonical.state().reader_contract,
+        styx_contracts::management::ReaderContract::NativeMigratedStateV1
+    );
+    assert!(crate::foreground::profile::load_paired(&fixture.state_dir).is_err());
     let facts = json!({
-        "schema":1,"status":"ORIGINAL_SCOPES_HISTORY_PERSISTED_OBSERVER_REQUIRED",
-        "scope":"actual installed signed Host and Gateway physical settlement; no C07 commit/activation/account acceptance",
+        "schema":1,"status":"ORIGINAL_CUTOVER_APPLIED_PROBE_OBSERVER_REQUIRED",
+        "scope":"actual original signed scopes to same-writer cutover preparation, candidate Core Exec and canonical application; final Gateway validation/C07 commit/ordinary startup still required",
+        "cutover":cutover.report(),"candidate_probe":probe_report,
         "host":observation(combined.host_observation()),"gateway":observation(combined.gateway_observation()),
         "configuration_root":original_root,
         "history":{"schema":history.schema,"baseline_sha256":history.prepared.baseline_digest.to_hex(),
@@ -401,11 +446,12 @@ async fn actual_original_host_gateway_history_under_same_writer() {
     );
     assert!(owner.ensure_admission().is_err());
     let mut result = facts;
-    result["status"] = json!("PASS_ORIGINAL_HOST_GATEWAY_HISTORY_WITH_EXTERNAL_ACK");
+    result["status"] = json!("PASS_ORIGINAL_CUTOVER_APPLIED_PROBE_WITH_EXTERNAL_ACK");
     result["host"] = observation(combined.host_observation());
     result["gateway"] = observation(combined.gateway_observation());
     save(&root, "native-result.json", &result);
     drop((
+        cutover,
         history_journal,
         combined,
         gateway,
@@ -432,7 +478,7 @@ fn original_settled_history_reopens_same_state_writer_fenced() {
     let result: Value = serde_json::from_slice(result_raw.bytes()).unwrap();
     assert_eq!(
         result["status"],
-        "PASS_ORIGINAL_HOST_GATEWAY_HISTORY_WITH_EXTERNAL_ACK"
+        "PASS_ORIGINAL_CUTOVER_APPLIED_PROBE_WITH_EXTERNAL_ACK"
     );
     let original_enrollment =
         PrivateRoot::open(fixture.state_dir.join("gateway/enrollment")).unwrap();
@@ -454,6 +500,22 @@ fn original_settled_history_reopens_same_state_writer_fenced() {
         OwnedEnrollmentJournal::from_configuration(owner.clone(), JournalBudget::default())
             .unwrap();
     assert!(journal.with_journal(|_| Ok(())).is_err());
+    let state_root = PrivateRoot::open(&fixture.state_dir).unwrap();
+    let marker_raw = state_root
+        .read_raw(crate::store::native_root::NATIVE_MARKER_FILE, 4096)
+        .unwrap();
+    let marker = crate::store::native_state::decode_marker(marker_raw.bytes()).unwrap();
+    let canonical_raw = state_root.read_raw("state.json", 1024 * 1024).unwrap();
+    let canonical =
+        crate::store::native_state::decode_state(canonical_raw.bytes(), &marker).unwrap();
+    assert_eq!(
+        canonical.raw_sha256().to_hex(),
+        result["cutover"]["target_sha256"]
+    );
+    assert_eq!(
+        canonical.state().reader_contract,
+        styx_contracts::management::ReaderContract::NativeMigratedStateV1
+    );
     let observation =
         crate::migration::legacy_enrollment::inspect_pending_history(&mut journal).unwrap();
     assert_eq!(
@@ -474,6 +536,15 @@ fn original_settled_history_reopens_same_state_writer_fenced() {
     assert_eq!(observation.revoked, 0);
     assert!(owner.ensure_admission().is_err());
     assert!(journal.with_journal(|_| Ok(())).is_err());
+    let pending_cutover =
+        crate::migration::legacy_service::inspect_pending_cutover(owner.clone()).unwrap();
+    assert_eq!(
+        pending_cutover.stage,
+        styx_contracts::management::DurableStage::Applied
+    );
+    assert_eq!(pending_cutover.target_sha256, canonical.raw_sha256());
+    assert!(pending_cutover.validation_sha256.is_some());
+    assert!(!pending_cutover.ordinary_admission_open);
     assert!(crate::foreground::profile::load_paired(&fixture.state_dir).is_err());
     original_enrollment
         .ensure_absent(".styx-configuration-writer.lock")
@@ -486,6 +557,8 @@ fn original_settled_history_reopens_same_state_writer_fenced() {
         "history-reopen.json",
         &json!({
             "schema":1,"status":"PASS_PENDING_HISTORY_STORAGE_INSPECTION_ONLY",
+        "canonical_target_sha256":canonical.raw_sha256(),"native_reader_barrier":"native_migrated_state_v1",
+        "pending_cutover":pending_cutover,
             "baseline_sha256":observation.baseline_digest.to_hex(),
             "committed_sha256":observation.committed_digest.to_hex(),
             "single_state_writer":true,"original_enrollment_writer_created":false,

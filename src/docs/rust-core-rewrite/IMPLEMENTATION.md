@@ -196,3 +196,25 @@ recovery, complete C07, clear management recovery or publish ordinary access.
 Ordinary foreground's old enrollment startup remains unchanged until canonical
 C07 publication/recovery is implemented. This source change is not a new package,
 installation, original production cutover or completed platform acceptance.
+
+
+R32 adds the first legacy-to-native conversion under the retained original
+retirement transaction. The new explicit `native_migrated_state_v1` reader barrier
+and native migration binding retain original state, retired credential, history,
+full preservation, candidate/publisher and original scope bindings. The existing
+pure management transaction validates the same journal's successor phases; the
+existing fixed private-file and conditional rename/fsync primitives apply the
+canonical target. The same owner mutex publishes the actual new canonical inode
+pin before other fence readers can observe it. All other original inputs and both
+signed worker closures remain checked.
+A fixed candidate Exec probe uses the original maintenance profile and Host
+execution lease, Core owner/operation, a private nonce file and real executor/
+worker cleanup. Unknown bootstrap/cleanup retains one bounded slot and custody;
+that failure's recovery is not implemented and must not be reported ready.
+The runtime composition stops at Applied plus candidate Exec validation. It does
+not treat this as full Gateway/Host validation, C07 Verified/Committed or ordinary
+admission. Original default CA-as-leaf requires a proper CA-preserving server-leaf
+transition before final strict-TLS candidate validation; no verifier bypass,
+identity re-pair or installed-profile change is part of this checkpoint. Pending
+boot inspection validates/resyncs existing files only, with no effect replay or
+fence-clear capability. Actual exact-SHA scenario results are external receipts.

@@ -96,6 +96,21 @@ pub struct NativeStateTransaction {
     pub transaction_id: TransactionId,
     pub sequence: u64,
 }
+/// Durable original-identity bindings, never a runtime/commit authority by DTO.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeMigrationBinding {
+    pub transaction_id: TransactionId,
+    pub original_state_sha256: Sha256Digest,
+    pub retired_receipt_sha256: Sha256Digest,
+    pub enrollment_baseline_sha256: Sha256Digest,
+    pub enrollment_committed_sha256: Sha256Digest,
+    pub candidate_manifest_sha256: Sha256Digest,
+    pub publisher_spki_sha256: Sha256Digest,
+    pub preservation_sha256: Sha256Digest,
+    pub scope_bindings_sha256: Sha256Digest,
+    pub original_token_relative_path: String,
+}
 /// No Debug/automatic logging: unknown extension values can contain secrets.
 /// Formal readers MUST first reject decoded duplicate keys at every depth.
 #[derive(Clone, Serialize)]
@@ -110,6 +125,8 @@ pub struct NativeState {
     pub revision: u64,
     pub last_transaction: Option<NativeStateTransaction>,
     pub desired: NativeDesired,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub migration: Option<NativeMigrationBinding>,
     #[serde(flatten)]
     pub extensions: BTreeMap<String, Box<serde_json::value::RawValue>>,
 }

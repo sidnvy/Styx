@@ -37,7 +37,10 @@ enum Command {
         candidate: String,
     },
     /// Print build and contract identity; never claims a running service.
-    BuildInfo,
+    BuildInfo {
+        #[arg(long)]
+        json: bool,
+    },
     /// Run the explicitly configured native Host in this foreground process.
     Host {
         #[command(subcommand)]
@@ -720,7 +723,14 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
                 }
             }
         }
-        Command::BuildInfo => {
+        Command::BuildInfo { json } => {
+            if json {
+                return if write_json(&native_build_info()).is_ok() {
+                    ExitCode::SUCCESS
+                } else {
+                    error("output_unavailable")
+                };
+            }
             println!(
                 "styx {} contract={} stage={}",
                 env!("CARGO_PKG_VERSION"),
@@ -938,3 +948,35 @@ mod transient_manager;
 #[cfg(test)]
 #[path = "cli_tests.rs"]
 mod tests;
+
+/// This binary's closed reader declaration, consumed only with build/source/hash
+/// evidence. It does not claim installed state, readiness or platform acceptance.
+fn native_build_info() -> serde_json::Value {
+    let target = if cfg!(all(
+        target_os = "linux",
+        target_arch = "x86_64",
+        target_env = "gnu"
+    )) {
+        "x86_64-unknown-linux-gnu"
+    } else if cfg!(all(target_os = "macos", target_arch = "aarch64")) {
+        "aarch64-apple-darwin"
+    } else if cfg!(all(target_os = "macos", target_arch = "x86_64")) {
+        "x86_64-apple-darwin"
+    } else if cfg!(all(
+        target_os = "windows",
+        target_arch = "x86_64",
+        target_env = "msvc"
+    )) {
+        "x86_64-pc-windows-msvc"
+    } else {
+        "unsupported"
+    };
+    serde_json::json!({
+        "schema": 1, "target": target,
+        "minimum_release_reader": styx_contracts::native_release::NativeReleaseReader::NativeRuntimeMigratedV1,
+        "supported_state_readers": [
+            styx_contracts::management::ReaderContract::NativeManagementStateV1,
+            styx_contracts::management::ReaderContract::NativeMigratedStateV1
+        ]
+    })
+}

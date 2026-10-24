@@ -52,6 +52,7 @@ fn genesis(fresh: &FreshNativeRoot) -> NativeState {
                 autostart: NativeAutostartDesired::Disabled,
             }),
         },
+        migration: None,
         extensions: BTreeMap::from([(
             "preserved_unknown".into(),
             serde_json::value::RawValue::from_string("900719925474099312345".into()).unwrap(),

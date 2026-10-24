@@ -1,0 +1,288 @@
+//! First conversion composition, retaining the original scope/writer/candidate.
+//! Applied + candidate Exec evidence does not grant ordinary admission. Full
+//! Gateway/Host maintenance validation and final C07 commit remain required.
+use super::*;
+use crate::store::{
+    PrivateRoot, RootIdentity,
+    enrollment::OwnedEnrollmentJournal,
+    legacy_handoff::{AppliedNativeCutover, CutoverInputs, PreparedNativeCutover},
+};
+use serde::Serialize;
+use std::{collections::BTreeMap, path::PathBuf};
+use styx_contracts::{
+    identity::Sha256Digest,
+    management::{DurableStage, ReaderContract},
+    native_management::*,
+};
+
+#[derive(Serialize)]
+pub struct LegacyCutoverReport {
+    pub schema: u8,
+    pub stage: &'static str,
+    pub transaction_id: styx_contracts::identity::TransactionId,
+    pub target_sha256: Sha256Digest,
+    pub prepared_sha256: Sha256Digest,
+    pub applied_sha256: Option<Sha256Digest>,
+    pub candidate_exec_validation_sha256: Option<Sha256Digest>,
+    pub preservation: PreservationReport,
+    pub network_ready: bool,
+    pub migration_committed: bool,
+}
+/// Owned intermediate state, never a deserializable commit/activation flag.
+/// Errors leave the original resources in this object; apply cannot be retried.
+#[must_use]
+pub struct PreparedLegacyCutover {
+    original: Arc<SettledLegacyRuntime>,
+    _state_dir: PathBuf,
+    preservation: OriginalPreservation,
+    prepared: PreparedNativeCutover,
+    applied: Option<AppliedNativeCutover>,
+    probe: Option<MigrationValidationProbe>,
+    report: LegacyCutoverReport,
+}
+impl SettledLegacyRuntime {
+    /// Desired manager/run/autostart is an explicit reviewed plan input. Old
+    /// successful service steps never silently turn into a new run preference.
+    pub fn prepare_native_transition(
+        self: &Arc<Self>,
+        state_dir: &Path,
+        history: &mut OwnedEnrollmentJournal,
+        desired: NativeDesired,
+    ) -> Result<PreparedLegacyCutover, TransitionError> {
+        // Refuse before any cutover write: a verified old worker closure does
+        // not attest that its native entrypoint can read the target state.
+        if !self
+            .target()
+            .supports_state_reader(ReaderContract::NativeMigratedStateV1)
+            .map_err(|_| TransitionError::Unknown)?
+        {
+            return Err(TransitionError::Unsupported);
+        }
+        self.with_original_history(state_dir, |snapshot, owner, maintenance| {
+            if !history.configuration_root().same_authority(owner) {
+                return Err(TransitionError::Conflict);
+            }
+            let summary = snapshot.summary()?;
+            snapshot.validate_preparation()?;
+            let observation = history
+                .with_historical_journal(maintenance, |journal| {
+                    journal
+                        .resync_historical()?
+                        .ok_or(crate::store::enrollment::JournalError::Conflict)
+                })
+                .map_err(|_| TransitionError::Unknown)?;
+            let committed = observation
+                .committed
+                .as_ref()
+                .ok_or(TransitionError::Conflict)?;
+            if observation.body.schema != 2
+                || observation.body.migration != *maintenance.transaction_id()
+                || observation.body.source_bindings_sha256 != summary.source_bindings_sha256
+            {
+                return Err(TransitionError::Conflict);
+            }
+            let profile = self
+                .maintenance_profile(state_dir)
+                .map_err(|_| TransitionError::Unknown)?;
+            let retired = self.original_retirement()?;
+            let preservation =
+                super::preservation::capture(state_dir, &profile, &summary, &retired)?;
+            let preservation_bytes = preservation.private_bytes()?;
+            let scope_bindings = self.scope_bindings()?;
+            let root = PrivateRoot::open(state_dir).map_err(|_| TransitionError::Conflict)?;
+            let before = root
+                .read_raw("state.json", NATIVE_STATE_BYTES)
+                .map_err(|_| TransitionError::Unknown)?;
+            let deployment = root
+                .read_raw("deployment.json", NATIVE_STATE_BYTES)
+                .map_err(|_| TransitionError::Unknown)?;
+            let RootIdentity::Linux { device, inode, uid } =
+                owner.identity().map_err(|_| TransitionError::Unknown)?;
+            let sequence = self
+                .original_fence()
+                .cutover_sequence()
+                .map_err(|_| TransitionError::Unknown)?;
+            let mut entropy = [0u8; 32];
+            getrandom::fill(&mut entropy).map_err(|_| TransitionError::Unavailable)?;
+            let marker = NativeRootMarker {
+                schema: NATIVE_MARKER_SCHEMA,
+                kind: NativeRootKind::StyxConfigurationRoot,
+                runtime_format: NativeRuntimeFormat::NativeRustV1,
+                root_identity: NativeRootIdentity::Linux { device, inode, uid },
+                scope_generation: Sha256Digest::from_bytes(entropy),
+                reader_floor: ReaderContract::NativeMigratedStateV1,
+            };
+            let deployment_mode: serde_json::Value = serde_json::from_slice(deployment.bytes())
+                .map_err(|_| TransitionError::Conflict)?;
+            let mode = match deployment_mode.get("mode").and_then(|v| v.as_str()) {
+                Some("create-local") => NativeDeploymentMode::CreateLocal,
+                Some("join-existing") => NativeDeploymentMode::JoinExisting,
+                _ => return Err(TransitionError::Unsupported),
+            };
+            let candidate = self.target().report();
+            let migration = NativeMigrationBinding {
+                transaction_id: maintenance.transaction_id().clone(),
+                original_state_sha256: Sha256Digest::of_bytes(before.bytes()),
+                retired_receipt_sha256: retired.retired_receipt_sha256,
+                enrollment_baseline_sha256: observation.digest,
+                enrollment_committed_sha256: committed
+                    .digest()
+                    .map_err(|_| TransitionError::Unknown)?,
+                candidate_manifest_sha256: candidate.manifest_sha256,
+                publisher_spki_sha256: candidate
+                    .publisher_spki_sha256
+                    .clone()
+                    .try_into()
+                    .map_err(|_| TransitionError::Conflict)?,
+                preservation_sha256: Sha256Digest::of_bytes(&preservation_bytes),
+                scope_bindings_sha256: Sha256Digest::of_bytes(&scope_bindings),
+                original_token_relative_path: retired
+                    .retired_relative_path
+                    .to_str()
+                    .ok_or(TransitionError::Unsupported)?
+                    .to_owned(),
+            };
+            let original = serde_json::value::RawValue::from_string(
+                std::str::from_utf8(before.bytes())
+                    .map_err(|_| TransitionError::Conflict)?
+                    .to_owned(),
+            )
+            .map_err(|_| TransitionError::Conflict)?;
+            let target = NativeState {
+                schema: NATIVE_STATE_SCHEMA,
+                kind: NativeStateKind::StyxDesiredState,
+                runtime_format: NativeRuntimeFormat::NativeRustV1,
+                reader_contract: marker.reader_floor,
+                scope_generation: marker.scope_generation,
+                deployment_raw_sha256: Sha256Digest::of_bytes(deployment.bytes()),
+                mode,
+                revision: 1,
+                last_transaction: Some(NativeStateTransaction {
+                    transaction_id: maintenance.transaction_id().clone(),
+                    sequence,
+                }),
+                desired,
+                migration: Some(migration),
+                extensions: BTreeMap::from([("original_legacy_state".into(), original)]),
+            };
+            let target = serde_json::to_vec(&target).map_err(|_| TransitionError::Conflict)?;
+            let prepared = self
+                .original_fence()
+                .prepare_native_cutover(CutoverInputs {
+                    history_baseline_sha256: observation.digest,
+                    history_committed_sha256: committed
+                        .digest()
+                        .map_err(|_| TransitionError::Unknown)?,
+                    preservation: preservation_bytes,
+                    scope_bindings,
+                    marker: serde_json::to_vec(&marker).map_err(|_| TransitionError::Conflict)?,
+                    before: before.bytes().to_vec(),
+                    target,
+                })
+                .map_err(|_| TransitionError::Unknown)?;
+            preservation.revalidate()?;
+            let report = LegacyCutoverReport {
+                schema: 1,
+                stage: "prepared_original_cutover_only",
+                transaction_id: prepared.transaction_id().clone(),
+                target_sha256: prepared.target_sha256(),
+                prepared_sha256: prepared.prepared_sha256(),
+                applied_sha256: None,
+                candidate_exec_validation_sha256: None,
+                preservation: preservation.report(),
+                network_ready: false,
+                migration_committed: false,
+            };
+            Ok(PreparedLegacyCutover {
+                original: self.clone(),
+                _state_dir: state_dir.to_owned(),
+                preservation,
+                prepared,
+                applied: None,
+                probe: None,
+                report,
+            })
+        })
+    }
+}
+impl PreparedLegacyCutover {
+    pub fn report(&self) -> &LegacyCutoverReport {
+        &self.report
+    }
+    /// Uncancellable short filesystem transition; caller still owns this object
+    /// on error. It does not mark C07 Verified/Committed or clear any fence.
+    pub fn apply_candidate(
+        &mut self,
+        probe: MigrationValidationProbe,
+    ) -> Result<(), TransitionError> {
+        if self.probe.is_some()
+            || self.applied.is_some()
+            || !Arc::ptr_eq(probe.original_runtime(), &self.original)
+        {
+            return Err(TransitionError::Conflict);
+        }
+        self.probe = Some(probe);
+        let handle =
+            tokio::runtime::Handle::try_current().map_err(|_| TransitionError::Unsupported)?;
+        if handle.runtime_flavor() != tokio::runtime::RuntimeFlavor::MultiThread {
+            return Err(TransitionError::Unsupported);
+        }
+        tokio::task::block_in_place(|| {
+            let probe = self.probe.as_ref().ok_or(TransitionError::Conflict)?;
+            handle.block_on(probe.revalidate())?;
+            self.preservation.revalidate()?;
+            let applied = self
+                .original
+                .original_fence()
+                .apply_native_cutover(&self.prepared)
+                .map_err(|_| TransitionError::Unknown)?;
+            self.applied = Some(applied);
+            let applied = self.applied.as_ref().ok_or(TransitionError::Unknown)?;
+            if applied.target_sha256() != self.report.target_sha256 {
+                return Err(TransitionError::Unknown);
+            }
+            self.preservation.revalidate_except_canonical()?;
+            handle.block_on(probe.revalidate_after_canonical(applied))?;
+            let receipt = self
+                .original
+                .original_fence()
+                .record_cutover_phase(applied, DurableStage::Applied)
+                .map_err(|_| TransitionError::Unknown)?;
+            let report =
+                serde_json::to_vec(probe.report()).map_err(|_| TransitionError::Unknown)?;
+            let validation = self
+                .original
+                .original_fence()
+                .record_cutover_validation(applied, &report)
+                .map_err(|_| TransitionError::Unknown)?;
+            self.preservation.revalidate_except_canonical()?;
+            handle.block_on(self.original.revalidate())?;
+            if self
+                .original
+                .configuration_root()
+                .ensure_admission()
+                .is_ok()
+            {
+                return Err(TransitionError::Unknown);
+            }
+            self.report.stage =
+                "applied_candidate_exec_verified_gateway_validation_and_final_commit_required";
+            self.report.applied_sha256 = Some(receipt.record_sha256);
+            self.report.candidate_exec_validation_sha256 = Some(validation);
+            Ok(())
+        })
+    }
+}
+
+/// Existing pending data can be inspected after process exit. Inspection never
+/// recreates physical scope/probe proof, resumes an action or opens dispatch.
+pub fn inspect_pending_cutover(
+    owner: OwnedConfigurationRoot,
+) -> Result<crate::store::legacy_handoff::PendingNativeCutoverReport, TransitionError> {
+    crate::store::legacy_handoff::inspect_pending_native_cutover(owner).map_err(|error| match error
+    {
+        crate::store::enrollment::JournalError::Unknown => TransitionError::Unknown,
+        crate::store::enrollment::JournalError::Unsupported => TransitionError::Unsupported,
+        _ => TransitionError::Conflict,
+    })
+}

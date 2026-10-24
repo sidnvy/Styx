@@ -199,6 +199,10 @@ pub fn decode_state(
         revision: field(&mut fields, "revision")?,
         last_transaction: field(&mut fields, "last_transaction")?,
         desired: field(&mut fields, "desired")?,
+        migration: fields
+            .remove("migration")
+            .map(|raw| serde_json::from_str(raw.get()).map_err(|_| NativeStateError::InvalidState))
+            .transpose()?,
         extensions: fields
             .into_iter()
             .map(|(key, value)| {

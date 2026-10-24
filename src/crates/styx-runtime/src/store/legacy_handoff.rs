@@ -374,7 +374,9 @@ impl LegacyWriterFence {
                 let retirement = self.retirement.lock().map_err(|_| JournalError::Unknown)?;
                 retirement.require_complete_or_original()?;
                 for old in &self.frozen {
-                    if retirement.validate_relocated(&self.host, old)? {
+                    if retirement.validate_relocated(&self.host, old)?
+                        || cutover::validate_canonical_replacement(&retirement, &state.root, old)?
+                    {
                         continue;
                     }
                     let root = match old.binding.root {
@@ -431,6 +433,15 @@ impl LegacyWriterFence {
     /// transaction/root descriptions or acquire a child writer.
     pub(crate) fn maintenance(&self) -> &ConfigurationMaintenance {
         &self.maintenance
+    }
+    pub(crate) fn writer_exclusion_bindings(&self) -> Result<serde_json::Value, LegacyFenceError> {
+        self.validate()?;
+        Ok(
+            serde_json::json!({"schema":1,"transaction":self.maintenance.transaction_id(),
+            "locks":self.locks.iter().map(|lock| serde_json::json!({
+                "name":lock.name,"stamp":lock.stamp,"raw_sha256":styx_contracts::identity::Sha256Digest::of_bytes(&lock.raw)
+            })).collect::<Vec<_>>()}),
+        )
     }
     pub fn material_bindings(&self) -> impl Iterator<Item = &LegacyMaterialBinding> {
         self.frozen.iter().map(|v| &v.binding)
@@ -535,3 +546,10 @@ mod tests;
 #[path = "legacy_retirement.rs"]
 mod retirement;
 pub(crate) use retirement::CredentialRetirementObservation;
+
+#[path = "legacy_cutover.rs"]
+mod cutover;
+pub(crate) use super::management::cutover::CutoverInputs;
+pub use cutover::PendingNativeCutoverReport;
+pub(crate) use cutover::inspect_pending_native_cutover;
+pub(crate) use cutover::{AppliedNativeCutover, PreparedNativeCutover};

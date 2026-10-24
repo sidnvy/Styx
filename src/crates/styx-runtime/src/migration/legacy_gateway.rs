@@ -106,6 +106,39 @@ impl SettledLegacyRuntime {
     pub fn configuration_root(&self) -> &OwnedConfigurationRoot {
         self.original.configuration_root()
     }
+    pub(crate) fn maintenance_profile(
+        self: &Arc<Self>,
+        state_dir: &Path,
+    ) -> Result<
+        crate::foreground::profile::LoadedMaintenanceProfile,
+        crate::foreground::profile::ProfileError,
+    > {
+        self.original.validation_profile(state_dir)
+    }
+    pub(crate) fn maintenance_transaction(&self) -> styx_contracts::identity::TransactionId {
+        self.original
+            .original
+            .proof
+            .fence()
+            .maintenance()
+            .transaction_id()
+            .clone()
+    }
+    pub(crate) fn original_fence(&self) -> &crate::store::legacy_handoff::LegacyWriterFence {
+        self.original.original.proof.fence()
+    }
+    pub(crate) fn original_retirement(
+        &self,
+    ) -> Result<CredentialRetirementObservation, TransitionError> {
+        self.original.observation()
+    }
+    pub(crate) fn scope_bindings(&self) -> Result<Vec<u8>, TransitionError> {
+        serde_json::to_vec(&serde_json::json!({"schema":1,
+            "host":self.original.original.proof.original_scope_binding(),
+            "gateway":self.gateway.original_scope_binding(),
+            "writer_exclusion":self.original_fence().writer_exclusion_bindings().map_err(|_| TransitionError::Unknown)?
+        })).map_err(|_| TransitionError::Unknown)
+    }
     pub fn target(&self) -> &VerifiedNativeRelease {
         self.original.target()
     }

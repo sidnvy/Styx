@@ -10,6 +10,9 @@ use styx_core::management::transaction::{DesiredStateCommit, DurableStage, Journ
 pub(in crate::store) mod handoff;
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 pub use handoff::{CredentialRetirementObservation, CredentialRetirementStage};
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[path = "management_cutover.rs"]
+pub(in crate::store) mod cutover;
 
 pub struct PreparedPersistence {
     pub intent: DesiredStateCommit,
@@ -96,6 +99,15 @@ impl OwnedManagementJournal {
         {
             Err(JournalError::Unsupported)
         }
+    }
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    pub(super) fn observe_locked(
+        &self,
+        state: &super::configuration::ConfigurationState,
+    ) -> JournalResult<ManagementInventory> {
+        self.with_directory_locked(state, |directory| {
+            platform::inventory(&super::secure_journal::files::scan(directory, self.budget)?)
+        })
     }
     pub(super) fn read_original(
         &self,
@@ -524,6 +536,8 @@ mod platform {
             }
         }
         used.extend(handoff_inventory.used);
+        let cutover_inventory = super::cutover::scan_cutovers(scan)?;
+        used.extend(cutover_inventory.used);
         for (index, tx) in transactions.iter().enumerate() {
             let committed = tx
                 .phase_receipts

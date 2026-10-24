@@ -458,3 +458,15 @@ impl RetiredCredentialReadBinding {
 #[path = "legacy_gateway.rs"]
 mod gateway;
 pub use gateway::{LegacyGatewayTransition, SettledLegacyRuntime};
+
+#[path = "legacy_probe.rs"]
+mod probe;
+pub use probe::{MigrationProbeReport, MigrationValidationProbe};
+
+#[path = "legacy_preservation.rs"]
+mod preservation;
+pub use preservation::{OriginalPreservation, PreservationReport};
+
+#[path = "legacy_cutover.rs"]
+mod cutover;
+pub use cutover::{LegacyCutoverReport, PreparedLegacyCutover, inspect_pending_cutover};

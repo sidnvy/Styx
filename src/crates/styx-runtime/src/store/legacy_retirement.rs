@@ -24,6 +24,7 @@ pub(super) struct RetirementSlot {
     prepared: Option<Arc<PreparedCredentialRetirement>>,
     retired: Option<RetiredCredentialRecord>,
     journal: Option<Arc<Mutex<OwnedManagementJournal>>>,
+    pub(super) cutover: Option<super::cutover::CutoverSlot>,
 }
 struct TokenHandles {
     device: File,
@@ -521,5 +522,20 @@ impl LegacyWriterFence {
             original_locator_absent: true,
             retired_receipt_sha256: record.record_sha256(),
         })
+    }
+}
+
+/// Borrow the original journal; never claim ManagementV1 again.
+impl LegacyWriterFence {
+    pub(in crate::store) fn original_journal(
+        &self,
+    ) -> JournalResult<Arc<Mutex<OwnedManagementJournal>>> {
+        self.retirement
+            .lock()
+            .map_err(|_| JournalError::Unknown)?
+            .journal
+            .as_ref()
+            .cloned()
+            .ok_or(JournalError::Conflict)
     }
 }

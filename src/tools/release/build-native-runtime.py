@@ -372,6 +372,38 @@ def deterministic_archive(payload, destination, names, executable):
         os.fsync(raw.fileno())
 
 
+
+def release_reader(receipt, binary_hash, target, inputs):
+    """Missing historical evidence never upgrades an old signed candidate.
+
+    The producer's native CLI observation is bound to the same complete frozen
+    source inputs and exact executable digest, not a packaging CLI flag.
+    """
+    evidence = receipt.get('cli_build_info')
+    if evidence is None:
+        return 'native_runtime_v1'
+    require(isinstance(evidence, dict) and receipt.get('producer') == 'src/tools/release/build-native-binary.py'
+            and receipt['producer'] in inputs, 'reader_evidence_original_producer_required')
+    require(evidence.get('actual_wait') is True and type(evidence.get('exit_code')) is int
+            and evidence['exit_code'] == 0 and evidence.get('binary_sha256') == binary_hash,
+            'reader_evidence_original_binary_or_wait_mismatch')
+    argv = evidence.get('command')
+    require(argv == [receipt.get('cli_binary'), 'build-info', '--json'], 'reader_evidence_command_mismatch')
+    text = evidence.get('stdout_utf8')
+    require(isinstance(text, str) and 0 < len(text.encode('utf-8')) <= 4096, 'reader_evidence_output_bound')
+    raw = text.encode('utf-8')
+    require(evidence.get('stdout_sha256') == sha(raw) and evidence.get('stdout_bytes') == len(raw)
+            and evidence.get('stderr_bytes') == 0 and evidence.get('stderr_sha256') == sha(b''),
+            'reader_evidence_output_digest_mismatch')
+    report = strict_json(raw)
+    require(report == evidence.get('report') and report.get('schema') == 1 and report.get('target') == target,
+            'reader_evidence_typed_report_mismatch')
+    require(report.get('minimum_release_reader') == 'native_runtime_migrated_v1'
+            and report.get('supported_state_readers') == ['native_management_state_v1', 'native_migrated_state_v1'],
+            'reader_evidence_supported_contract_mismatch')
+    return 'native_runtime_migrated_v1'
+
+
 def build(args):
     require(sys.platform == 'linux', 'builder_linux_only')
     require(re.fullmatch(r'[a-f0-9]{40}', args.source_revision) is not None, 'full_source_revision_required')
@@ -413,6 +445,7 @@ def build(args):
                     'receipt_cli_binary_path_mismatch')
         actual_binary_hash, binary_metadata = hash_checked(args.binary, forbidden)
         require(actual_binary_hash == binary_hash, 'binary_receipt_hash_mismatch')
+        minimum_reader = release_reader(receipt, binary_hash, args.target, inputs)
         source = inspect_worker(args.worker_release, args.worker_publisher_file, args.target,
                                 args.expected_publisher, forbidden, output) if kinds else None
         selections = [selected_worker(source, kind, args.target, forbidden) for kind in kinds]
@@ -446,7 +479,7 @@ def build(args):
         require(len(members) <= MAX_FILES and sum(item['size'] for item in members) <= MAX_TOTAL,
                 'runtime_payload_capacity')
         manifest = dict(schema=2, runtime_format='native_rust_v1', component='styx', scope='runtime_candidate',
-                        minimum_reader='native_runtime_v1', target=args.target, version=args.version,
+                        minimum_reader=minimum_reader, target=args.target, version=args.version,
                         entrypoint=entrypoint, source=dict(revision=args.source_revision, inputs_sha256=sha(source_raw)),
                         contracts=dict(control=1, management_state=2), files=members, external_workers=kinds)
         if closures:
@@ -492,7 +525,8 @@ def build(args):
         artifacts = ['payload/manifest.json', 'payload/manifest.sig', 'publisher.pem', 'publisher.der', 'native-runtime-candidate.tar.gz']
         result = dict(schema=1, status='PASS', scope=SCOPE, source_revision=args.source_revision, target=args.target,
                       version=args.version, input_stability='PASS', build_receipt_sha256=sha(raw_receipt),
-                      cli_binary_sha256=binary_hash, source_inputs_sha256=sha(source_raw), members=len(members),
+                      cli_binary_sha256=binary_hash, minimum_release_reader=minimum_reader,
+                      source_inputs_sha256=sha(source_raw), members=len(members),
                       external_workers=kinds, worker_closures=closures, publisher_spki_der_sha256=args.expected_publisher,
                       signature='Ed25519 exact raw manifest bytes, raw64 signature; OpenSSL verified',
                       worker_source_signature='schema1 exact raw manifest bytes, canonical base64url raw64; OpenSSL verified' if source else None,
