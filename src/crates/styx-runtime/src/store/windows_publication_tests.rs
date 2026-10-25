@@ -111,6 +111,7 @@ fn windows_fresh_child_and_no_replace_publication_observations() {
                 files::existing_namespace(directory, NamespaceName::EnrollmentV1)?,
                 identity
             );
+            eprintln!("STYX_WINDOWS_FS_STAGE: protected_namespace_synced");
             let budget = JournalBudget::default();
             files::immutable(
                 &namespace,
@@ -136,6 +137,7 @@ fn windows_fresh_child_and_no_replace_publication_observations() {
                 ),
                 Err(JournalError::Conflict)
             ));
+            eprintln!("STYX_WINDOWS_FS_STAGE: immutable_publication_and_conflict_verified");
             assert_eq!(files::scan(&namespace, budget)?.files.len(), 1);
             let limited = JournalBudget {
                 max_files: 1,
@@ -148,8 +150,11 @@ fn windows_fresh_child_and_no_replace_publication_observations() {
             let old = 1000u64.to_be_bytes();
             let new = 2000u64.to_be_bytes();
             files::replace_observed(&namespace, "clock.floor", None, &old, budget, &|_| {})?;
+            eprintln!("STYX_WINDOWS_FS_STAGE: clock_floor_created");
             files::replace_observed(&namespace, "clock.floor", Some(&old), &new, budget, &|_| {})?;
+            eprintln!("STYX_WINDOWS_FS_STAGE: clock_floor_replaced");
             files::replace_observed(&namespace, "clock.floor", Some(&new), &new, budget, &|_| {})?;
+            eprintln!("STYX_WINDOWS_FS_STAGE: same_value_floor_resynced");
             assert!(matches!(
                 files::replace_observed(
                     &namespace,
@@ -192,6 +197,7 @@ fn windows_fresh_child_and_no_replace_publication_observations() {
                 files::read(&namespace, "clock.floor", 8)?.as_deref(),
                 Some(new.as_slice())
             );
+            eprintln!("STYX_WINDOWS_FS_STAGE: protected_reader_refused_replacement");
             let inventory = files::scan(&namespace, budget)?;
             assert_eq!(inventory.files.len(), 3);
             assert_eq!(

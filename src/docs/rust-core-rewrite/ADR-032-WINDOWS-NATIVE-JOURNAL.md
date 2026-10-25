@@ -54,3 +54,17 @@ candidate local quality gate and actual Windows owned-FS/fault/reopen aggregate.
 Fresh request/approval/claim/self, ordinary execution, configuration recovery,
 installation/login/reboot and cross-platform acceptance remain distinct gates.
 Do not substitute the probe, compilation or static review for those journeys.
+
+## Actual rename compatibility correction
+
+The subsequent owned NAB5 probe `r39-windows-native/rename-api-probe-1`
+observed Win32 error87 for both read-only and read/write RootDirectory handles
+with a relative target. A NULL RootDirectory and an absolute target derived
+from the retained original directory handle succeeded, preserved the source
+file ID and content hash, and was flushed through the same source handle.
+Use that supported Win32 form, matching the standard-library implementation's
+NULL RootDirectory approach. The original source is never reopened by path;
+the validated single-component destination stays under the original Root's
+retained ancestor/name pins. Do not retry a failed business publication using
+a second rename strategy; the three probe cases used independent fresh files.
+The corrected full owned-FS aggregate still requires execution.

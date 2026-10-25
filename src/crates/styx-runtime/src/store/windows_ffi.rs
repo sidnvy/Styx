@@ -384,8 +384,10 @@ pub(super) fn final_path(file: &File) -> Result<PathBuf> {
     normalized_root(Path::new(local))
 }
 /// Source is the actual original writable/delete-capable HANDLE. Destination
-/// resolves against the original retained namespace HANDLE. No source path is
-/// reopened, no copy/delete fallback or POSIX replacement flags are used.
+/// is derived from the original retained namespace HANDLE. Root retains all
+/// ancestor/name pins without delete sharing while using this absolute path.
+/// Win32 requires a NULL RootDirectory on the supported actual target; source
+/// selection still uses its original HANDLE, with no copy/delete fallback.
 /// Caller owns the original configuration writer and validates expected target
 /// bytes for the replace case; this is not hostile-same-UID atomic CAS.
 pub(super) fn rename_journal_file(
@@ -395,13 +397,18 @@ pub(super) fn rename_journal_file(
     replace: bool,
 ) -> Result<()> {
     component(OsStr::new(name))?;
-    let encoded: Vec<u16> = OsStr::new(name).encode_wide().collect();
-    if encoded.len() > 255 {
+    if OsStr::new(name).encode_wide().count() > 255 {
         return Err(StoreError::InvalidRelativePath);
     }
+    // The destination cannot be supplied as an arbitrary path. Resolve the
+    // validated component under the OS-observed original namespace. Its Root
+    // owner retains/rechecks the complete ancestor chain and directory identity.
+    let destination = final_path(directory)?.join(name);
+    let encoded = wide(destination.as_os_str())?;
+    let name_bytes = (encoded.len() - 1) * 2;
     let offset = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
     let total = offset
-        .checked_add((encoded.len() + 1) * 2)
+        .checked_add(encoded.len() * 2)
         .ok_or(StoreError::TooLarge)?;
     // Word allocation supplies the alignment of official FILE_RENAME_INFO;
     // zeroed storage includes its padding and the bounded trailing WCHAR array.
@@ -411,8 +418,8 @@ pub(super) fn rename_journal_file(
     // terminator. FileNameLength excludes the terminator per official ABI.
     unsafe {
         (*info).Anonymous.ReplaceIfExists = replace;
-        (*info).RootDirectory = directory.as_raw_handle();
-        (*info).FileNameLength = (encoded.len() * 2) as u32;
+        (*info).RootDirectory = ptr::null_mut();
+        (*info).FileNameLength = name_bytes as u32;
         ptr::copy_nonoverlapping(
             encoded.as_ptr(),
             ptr::addr_of_mut!((*info).FileName).cast::<u16>(),
