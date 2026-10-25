@@ -272,6 +272,7 @@ impl MacPreviousBootInput {
         let intent = LegacyOwnerRecoveryIntent {
             schema: 1,
             kind: RecoveryKind::LegacyOwnerRecovery,
+            startup_checkpoint: None,
             transaction_id: successor.transaction_id.clone(),
             sequence: successor.sequence,
             config_root: successor.config_root.clone(),

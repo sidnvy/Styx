@@ -218,6 +218,7 @@ fn native_owner_recovery_continues_original_partial_archive_without_second_trans
     let intent = LegacyOwnerRecoveryIntent {
         schema: 1,
         kind: RecoveryKind::LegacyOwnerRecovery,
+        startup_checkpoint: None,
         transaction_id: tx.clone(),
         sequence: 1,
         config_root,

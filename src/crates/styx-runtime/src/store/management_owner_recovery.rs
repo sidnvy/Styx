@@ -80,6 +80,31 @@ pub(in crate::store) enum RecoveryKind {
 #[serde(rename_all = "snake_case")]
 pub(in crate::store) enum RecoveryRestartBinding {
     ForegroundOnlyNoInstalledManager,
+    WindowsStartupExclusion,
+}
+/// Data bound by the original C intent. Actual Windows APIs remain the producer.
+/// The existing config_root binds SID/volume; fixed names and archive path are
+/// derived by the OS adapter, never supplied by wire or by these fields.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(in crate::store) struct WindowsRestartProcess {
+    pub pid: u32,
+    pub birth_filetime: u64,
+}
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(in crate::store) struct WindowsStartupCheckpoint {
+    pub original_link: NativeRetirementFileStamp,
+    pub startup_directory: String,
+    pub target: String,
+    pub arguments: String,
+    pub working_directory: String,
+    pub desired_enabled: bool,
+    pub app: WindowsRestartProcess,
+    pub core: WindowsRestartProcess,
+    pub original_package_sha256: Sha256Digest,
+    pub original_app_sha256: Sha256Digest,
+    pub original_publisher_spki_sha256: Sha256Digest,
 }
 /// DTO only. The actual platform producer must establish boot and closed restart
 /// sources and keep its original guards, never infer them from this serialization.
@@ -115,6 +140,8 @@ pub(in crate::store) struct LegacyOwnerRecoveryIntent {
     pub successor_retirement_intent_sha256: Sha256Digest,
     pub originals: Vec<RecoveryOriginalBinding>,
     pub guards: Vec<RecoveryGuardBinding>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup_checkpoint: Option<WindowsStartupCheckpoint>,
 }
 pub(in crate::store) struct RecoveryOriginal {
     pub name: RecoveryOriginalName,
@@ -129,6 +156,8 @@ pub(in crate::store) struct RecoveryGuard {
 #[serde(rename_all = "snake_case")]
 pub(in crate::store) enum OwnerRecoveryStage {
     Prepared,
+    RestartExcluded,
+    BootObserved,
     Archived,
     GuardsHeld,
 }
@@ -156,6 +185,10 @@ struct RecoveryPhase {
     previous: Option<Sha256Digest>,
     originals: Vec<RecoveryOriginalPost>,
     guards: Vec<RecoveryGuardPost>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    startup_post: Option<NativeRetirementFileStamp>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    boot_observation: Option<RecoveryBoot>,
 }
 pub(in crate::store) struct OriginalOwnerRecovery {
     pub intent: LegacyOwnerRecoveryIntent,
@@ -163,6 +196,7 @@ pub(in crate::store) struct OriginalOwnerRecovery {
     pub originals: Vec<RecoveryOriginal>,
     pub guards: Vec<RecoveryGuard>,
     pub authorization_plan: Option<Vec<u8>>,
+    pub startup_raw: Option<Vec<u8>>,
     phases: Vec<(Vec<u8>, RecoveryPhase)>,
 }
 impl OriginalOwnerRecovery {
@@ -199,6 +233,24 @@ pub(in crate::store) struct LegacyGuardsHeld {
     archived: ArchivedLegacyOwnerRecovery,
 }
 impl PreparedLegacyOwnerRecovery {
+    pub(in crate::store) fn startup_checkpoint(&self) -> Option<&WindowsStartupCheckpoint> {
+        self.original.intent.startup_checkpoint.as_ref()
+    }
+    pub(in crate::store) fn startup_raw(&self) -> Option<&[u8]> {
+        self.original.startup_raw.as_deref()
+    }
+    pub(in crate::store) fn startup_post(&self) -> Option<&NativeRetirementFileStamp> {
+        self.original
+            .phases
+            .last()
+            .and_then(|(_, p)| p.startup_post.as_ref())
+    }
+    pub(in crate::store) fn boot_observation(&self) -> Option<&RecoveryBoot> {
+        self.original
+            .phases
+            .last()
+            .and_then(|(_, p)| p.boot_observation.as_ref())
+    }
     pub(in crate::store) fn intent(&self) -> &LegacyOwnerRecoveryIntent {
         &self.original.intent
     }
@@ -263,6 +315,70 @@ fn bytes<'a>(scan: &'a JournalObservation, name: &str) -> JournalResult<Option<&
     }
     Ok(one.map(|f| f.bytes()))
 }
+fn windows_boot_micros(boot: &RecoveryBoot) -> Option<u64> {
+    let raw = boot.id.strip_prefix("wmi-lastboot-unix-micros:")?;
+    let n: u64 = raw.parse().ok()?;
+    (n > 0 && raw == n.to_string() && boot.started_at_ms == n / 1000).then_some(n)
+}
+fn startup_valid(i: &LegacyOwnerRecoveryIntent) -> bool {
+    let Some(c) = &i.startup_checkpoint else {
+        return matches!(i.schema, 1 | 2)
+            && i.restart == RecoveryRestartBinding::ForegroundOnlyNoInstalledManager;
+    };
+    if i.schema != 3
+        || i.restart != RecoveryRestartBinding::WindowsStartupExclusion
+        || !matches!(
+            i.config_root,
+            styx_contracts::native_management::NativeRootIdentity::Windows { .. }
+        )
+        || !matches!(c.original_link, NativeRetirementFileStamp::Windows { .. })
+        || !c.original_link.valid_for(&i.config_root)
+        || windows_boot_micros(&i.current_boot).is_none()
+        || c.app.pid == 0
+        || c.core.pid == 0
+        || c.app.pid == c.core.pid
+        || c.app.birth_filetime == 0
+        || c.core.birth_filetime < c.app.birth_filetime
+    {
+        return false;
+    }
+    let Some(boot_filetime) = windows_boot_micros(&i.current_boot)
+        .and_then(|n| n.checked_add(11_644_473_600_000_000))
+        .and_then(|n| n.checked_mul(10))
+    else {
+        return false;
+    };
+    if c.app.birth_filetime < boot_filetime
+        || c.original_publisher_spki_sha256 != i.publisher_spki_sha256
+        || !matches!((&c.original_link, &i.config_root),
+            (NativeRetirementFileStamp::Windows {volume_serial: a, ..},
+             styx_contracts::native_management::NativeRootIdentity::Windows {volume_serial: b, ..}) if a == b)
+    {
+        return false;
+    }
+    [
+        &c.startup_directory,
+        &c.target,
+        &c.arguments,
+        &c.working_directory,
+    ]
+    .iter()
+    .all(|s| !s.is_empty() && s.len() <= 32768 && !s.contains('\0'))
+}
+fn recovery_stages(schema: u16) -> Vec<(OwnerRecoveryStage, &'static str)> {
+    let mut stages = vec![(OwnerRecoveryStage::Prepared, "prepared")];
+    if schema == 3 {
+        stages.extend([
+            (OwnerRecoveryStage::RestartExcluded, "restart-excluded"),
+            (OwnerRecoveryStage::BootObserved, "boot-observed"),
+        ]);
+    }
+    stages.extend([
+        (OwnerRecoveryStage::Archived, "archived"),
+        (OwnerRecoveryStage::GuardsHeld, "guards-held"),
+    ]);
+    stages
+}
 fn valid_intent(i: &LegacyOwnerRecoveryIntent) -> JournalResult<()> {
     let names: BTreeSet<_> = i.originals.iter().map(|f| f.name).collect();
     let guards: BTreeSet<_> = i.guards.iter().map(|g| g.name).collect();
@@ -276,7 +392,7 @@ fn valid_intent(i: &LegacyOwnerRecoveryIntent) -> JournalResult<()> {
                 && names.contains(&RecoveryOriginalName::Lock)
                 && names.len() <= 3
         }
-        (Some(RecoveryBasis::ExplicitLegacyMaintenance { observer_pid, .. }), None, 2) => {
+        (Some(RecoveryBasis::ExplicitLegacyMaintenance { observer_pid, .. }), None, 2 | 3) => {
             *observer_pid > 0
                 && names
                     == BTreeSet::from([RecoveryOriginalName::Lock, RecoveryOriginalName::Observer])
@@ -284,6 +400,7 @@ fn valid_intent(i: &LegacyOwnerRecoveryIntent) -> JournalResult<()> {
         _ => false,
     };
     if !shape
+        || !startup_valid(i)
         || i.kind != RecoveryKind::LegacyOwnerRecovery
         || i.sequence == 0
         || !i.config_root.valid_pair(&i.config_root)
@@ -346,6 +463,8 @@ struct AuthorizationPlan {
     requires_explicit_authorization: bool,
     #[serde(rename = "planSha256", default)]
     _legacy_plan_sha256: Option<Sha256Digest>,
+    #[serde(rename = "startupCheckpointSha256", default)]
+    startup_checkpoint_sha256: Option<Sha256Digest>,
 }
 fn file_tuple(s: &NativeRetirementFileStamp) -> JournalResult<(u64, u64, i64, i64)> {
     Ok(match s {
@@ -411,8 +530,17 @@ fn validate_authorization_plan(
         styx_contracts::native_management::NativeRootIdentity::Windows { .. } => "win32",
     };
     let path = std::path::Path::new(&p.state_dir);
-    if p.schema != 1
-        || p.action != "retire_legacy_foreground_owner"
+    let plan_scope_valid = if let Some(c) = &i.startup_checkpoint {
+        let canonical = serde_json::to_vec(c).map_err(|_| JournalError::Conflict)?;
+        p.schema == 2
+            && p.action == "retire_legacy_foreground_owner_after_windows_restart"
+            && p.startup_checkpoint_sha256 == Some(Sha256Digest::of_bytes(&canonical))
+    } else {
+        p.schema == 1
+            && p.action == "retire_legacy_foreground_owner"
+            && p.startup_checkpoint_sha256.is_none()
+    };
+    if !plan_scope_valid
         || !path.is_absolute()
         || path.components().any(|c| {
             matches!(
@@ -495,6 +623,53 @@ fn validate_current_authorization(
     }
     Ok(())
 }
+fn validate_startup_phase(
+    original: &OriginalOwnerRecovery,
+    p: &RecoveryPhase,
+) -> JournalResult<()> {
+    let Some(c) = &original.intent.startup_checkpoint else {
+        return if p.startup_post.is_none() && p.boot_observation.is_none() {
+            Ok(())
+        } else {
+            Err(JournalError::Conflict)
+        };
+    };
+    if p.stage == OwnerRecoveryStage::Prepared {
+        return if p.startup_post.is_none() && p.boot_observation.is_none() {
+            Ok(())
+        } else {
+            Err(JournalError::Conflict)
+        };
+    }
+    let post = p.startup_post.as_ref().ok_or(JournalError::Conflict)?;
+    if !c.original_link.same_file_after_rename(post) {
+        return Err(JournalError::Conflict);
+    }
+    if p.stage == OwnerRecoveryStage::RestartExcluded {
+        return if p.boot_observation.is_none() {
+            Ok(())
+        } else {
+            Err(JournalError::Conflict)
+        };
+    }
+    let previous = original.phases.last().ok_or(JournalError::Conflict)?;
+    if previous.1.startup_post.as_ref() != Some(post) {
+        return Err(JournalError::Conflict);
+    }
+    let after = p.boot_observation.as_ref().ok_or(JournalError::Conflict)?;
+    let old = windows_boot_micros(&original.intent.current_boot).ok_or(JournalError::Conflict)?;
+    let new = windows_boot_micros(after).ok_or(JournalError::Conflict)?;
+    // Same conservative whole-second boundary as the actual BootStamp adapter.
+    if new / 1_000_000 <= old / 1_000_000 {
+        return Err(JournalError::Conflict);
+    }
+    if p.stage != OwnerRecoveryStage::BootObserved
+        && previous.1.boot_observation.as_ref() != Some(after)
+    {
+        return Err(JournalError::Conflict);
+    }
+    Ok(())
+}
 pub(in crate::store) fn scan_owner_recoveries(
     scan: &JournalObservation,
 ) -> JournalResult<OwnerRecoveryInventory> {
@@ -520,6 +695,7 @@ pub(in crate::store) fn scan_owner_recoveries(
             originals: Vec::new(),
             guards: Vec::new(),
             authorization_plan: None,
+            startup_raw: None,
             phases: Vec::new(),
         };
         for b in &original.intent.originals {
@@ -555,12 +731,31 @@ pub(in crate::store) fn scan_owner_recoveries(
         if original.authorization_plan.is_some() {
             result.used.insert(plan_name);
         }
+        let startup_name = member(&original.intent.transaction_id, "startup-original");
+        original.startup_raw = bytes(scan, &startup_name)?.map(|b| b.to_vec());
+        match (&original.intent.startup_checkpoint, &original.startup_raw) {
+            (None, None) => {}
+            (Some(c), Some(raw))
+                if !raw.is_empty()
+                    && raw.len() <= MAX_RECOVERY_RAW
+                    && matches!(&c.original_link, NativeRetirementFileStamp::Windows {byte_len, ..} if *byte_len == raw.len() as u64)
+                    && Sha256Digest::of_bytes(raw) == c.original_link.content_sha256() =>
+            {
+                result.used.insert(startup_name);
+            }
+            _ => return Err(JournalError::Conflict),
+        }
+        // Reserved Windows-only phase files on an old schema are explicit
+        // conflicts, not invisible optional evidence or a second scanner.
+        if original.intent.schema != 3 {
+            for suffix in ["restart-excluded", "boot-observed"] {
+                if bytes(scan, &member(&original.intent.transaction_id, suffix))?.is_some() {
+                    return Err(JournalError::Conflict);
+                }
+            }
+        }
         let mut missing = false;
-        for (stage, suffix) in [
-            (OwnerRecoveryStage::Prepared, "prepared"),
-            (OwnerRecoveryStage::Archived, "archived"),
-            (OwnerRecoveryStage::GuardsHeld, "guards-held"),
-        ] {
+        for (stage, suffix) in recovery_stages(original.intent.schema) {
             let name = member(&original.intent.transaction_id, suffix);
             let Some(raw) = bytes(scan, &name)? else {
                 missing = true;
@@ -582,7 +777,13 @@ pub(in crate::store) fn scan_owner_recoveries(
             {
                 return Err(JournalError::Conflict);
             }
-            if stage == OwnerRecoveryStage::Prepared {
+            validate_startup_phase(&original, &p)?;
+            if matches!(
+                stage,
+                OwnerRecoveryStage::Prepared
+                    | OwnerRecoveryStage::RestartExcluded
+                    | OwnerRecoveryStage::BootObserved
+            ) {
                 if !p.originals.is_empty() || !p.guards.is_empty() {
                     return Err(JournalError::Conflict);
                 }
@@ -652,6 +853,61 @@ fn canonical(state: &ConfigurationState, intent: &LegacyOwnerRecoveryIntent) -> 
     }
     Ok(())
 }
+/// Inspect only an unfinished schema3 preparation. No effect was authorized:
+/// Prepared must be absent and every existing member must match the exact same
+/// original request. The projected baseline is for admission/budget inspection,
+/// never an alternate parser or a modified on-disk journal.
+fn incomplete_startup_preparation(
+    scan: &JournalObservation,
+    intent: &LegacyOwnerRecoveryIntent,
+    entries: &[(String, Vec<u8>)],
+) -> JournalResult<Option<JournalObservation>> {
+    if intent.schema != 3 || bytes(scan, &member(&intent.transaction_id, "prepared"))?.is_some() {
+        return Ok(None);
+    }
+    let prefix = format!("txn-{}.owner-recovery-", intent.transaction_id.as_str());
+    let members: Vec<_> = scan
+        .files
+        .iter()
+        .filter(|f| f.name.starts_with(&prefix))
+        .collect();
+    if members.is_empty() {
+        return Ok(None);
+    }
+    // Intent is published first. A missing intent with later attachments is not
+    // a supported interrupted write and must not be reconstructed by guessing.
+    if bytes(scan, &member(&intent.transaction_id, "intent"))?.is_none() {
+        return Err(JournalError::Conflict);
+    }
+    for file in members {
+        if entries
+            .iter()
+            .filter(|(name, _)| name == &file.name)
+            .count()
+            != 1
+            || entries
+                .iter()
+                .find(|(name, _)| name == &file.name)
+                .is_none_or(|(_, raw)| raw.as_slice() != file.bytes())
+        {
+            return Err(JournalError::Conflict);
+        }
+    }
+    let files: Vec<_> = scan
+        .files
+        .iter()
+        .filter(|f| !f.name.starts_with(&prefix))
+        .map(|f| crate::store::secure_journal::ObservedJournalFile {
+            name: f.name.clone(),
+            bytes: f.bytes().to_vec(),
+        })
+        .collect();
+    Ok(Some(JournalObservation {
+        total_bytes: files.iter().map(|f| f.bytes().len()).sum(),
+        files,
+    }))
+}
+
 impl OwnedManagementJournal {
     pub(in crate::store) fn owner_recovery_prepared_matches(
         &self,
@@ -697,7 +953,7 @@ impl OwnedManagementJournal {
         if intent.schema != 1 {
             return Err(JournalError::Conflict);
         }
-        self.prepare_owner_recovery(maintenance, intent, originals, guards, None)
+        self.prepare_owner_recovery(maintenance, intent, originals, guards, None, None)
     }
     pub(in crate::store) fn prepare_authorized_legacy_owner_recovery(
         &mut self,
@@ -716,6 +972,30 @@ impl OwnedManagementJournal {
             originals,
             guards,
             Some(authorization_plan),
+            None,
+        )
+    }
+    /// Private same-journal preparation; caller's explicit reviewed-plan authority
+    /// is separate. ALL attachments and Prepared must be durable before any effect.
+    pub(in crate::store) fn prepare_windows_restart_checkpoint(
+        &mut self,
+        maintenance: &ConfigurationMaintenance,
+        intent: &LegacyOwnerRecoveryIntent,
+        originals: Vec<RecoveryOriginal>,
+        guards: Vec<RecoveryGuard>,
+        authorization_plan: &[u8],
+        startup_raw: &[u8],
+    ) -> JournalResult<PreparedLegacyOwnerRecovery> {
+        if intent.schema != 3 {
+            return Err(JournalError::Conflict);
+        }
+        self.prepare_owner_recovery(
+            maintenance,
+            intent,
+            originals,
+            guards,
+            Some(authorization_plan),
+            Some(startup_raw),
         )
     }
     fn prepare_owner_recovery(
@@ -725,6 +1005,7 @@ impl OwnedManagementJournal {
         originals: Vec<RecoveryOriginal>,
         guards: Vec<RecoveryGuard>,
         authorization_plan: Option<&[u8]>,
+        startup_raw: Option<&[u8]>,
     ) -> JournalResult<PreparedLegacyOwnerRecovery> {
         valid_intent(intent)?;
         if maintenance.transaction_id() != &intent.transaction_id
@@ -744,6 +1025,8 @@ impl OwnedManagementJournal {
             previous: None,
             originals: Vec::new(),
             guards: Vec::new(),
+            startup_post: None,
+            boot_observation: None,
         };
         let mut entries = vec![
             (member(&intent.transaction_id, "intent"), raw),
@@ -777,6 +1060,22 @@ impl OwnedManagementJournal {
                 raw.to_vec(),
             ));
         }
+        if let Some(raw) = startup_raw {
+            entries.push((
+                member(&intent.transaction_id, "startup-original"),
+                raw.to_vec(),
+            ));
+        }
+        if intent.schema == 3 {
+            // New schema only: publish Prepared last. An incomplete preparation
+            // cannot authorize the OS rename. Old record ordering/bytes unchanged.
+            let position = entries
+                .iter()
+                .position(|(name, _)| *name == member(&intent.transaction_id, "prepared"))
+                .ok_or(JournalError::Conflict)?;
+            let prepared_entry = entries.remove(position);
+            entries.push(prepared_entry);
+        }
         // Validate the exact candidate bytes with the SAME scanner before write.
         let synthetic = JournalObservation {
             total_bytes: entries.iter().map(|(_, b)| b.len()).sum(),
@@ -794,7 +1093,9 @@ impl OwnedManagementJournal {
             validate_current_authorization(state, intent, authorization_plan)?;
             self.with_directory_locked(state, |dir| {
                 let scan = files::scan(dir, self.budget)?;
-                let inventory = super::super::platform::inventory(&scan)?;
+                let baseline = incomplete_startup_preparation(&scan, intent, &entries)?;
+                let inventory =
+                    super::super::platform::inventory(baseline.as_ref().unwrap_or(&scan))?;
                 if !inventory.orphans.is_empty()
                     || inventory.has_legacy_handoffs()
                     || intent.sequence <= inventory.high_water
@@ -812,10 +1113,12 @@ impl OwnedManagementJournal {
                     return Err(JournalError::Conflict);
                 }
                 let mut reserved = entries.clone();
-                for suffix in ["archived", "guards-held"] {
+                for (_, suffix) in recovery_stages(intent.schema).into_iter().skip(1) {
                     reserved.push((member(&intent.transaction_id, suffix), vec![0; MAX_INTENT]));
                 }
                 preflight(state, &scan, &reserved, self.budget)?;
+                // immutable resyncs exact existing members and creates only
+                // missing ones. Prepared remains last for this schema.
                 for (name, raw) in &entries {
                     files::immutable(dir, name, raw, self.budget, &|_| {})?;
                 }
@@ -835,6 +1138,8 @@ impl OwnedManagementJournal {
         stage: OwnerRecoveryStage,
         originals: Vec<RecoveryOriginalPost>,
         guards: Vec<RecoveryGuardPost>,
+        startup_post: Option<NativeRetirementFileStamp>,
+        boot_observation: Option<RecoveryBoot>,
     ) -> JournalResult<PreparedLegacyOwnerRecovery> {
         if !prepared.matches_owner(&self.owner)
             || prepared.namespace != self.namespace
@@ -852,12 +1157,22 @@ impl OwnedManagementJournal {
                 }
                 let old = original(&scan, &prepared.intent().transaction_id)?;
                 let expected = match stage {
-                    OwnerRecoveryStage::Archived => OwnerRecoveryStage::Prepared,
-                    OwnerRecoveryStage::GuardsHeld => OwnerRecoveryStage::Archived,
+                    OwnerRecoveryStage::Prepared if old.intent.schema == 3 => None,
+                    OwnerRecoveryStage::RestartExcluded if old.intent.schema == 3 => {
+                        Some(OwnerRecoveryStage::Prepared)
+                    }
+                    OwnerRecoveryStage::BootObserved if old.intent.schema == 3 => {
+                        Some(OwnerRecoveryStage::RestartExcluded)
+                    }
+                    OwnerRecoveryStage::Archived if old.intent.schema == 3 => {
+                        Some(OwnerRecoveryStage::BootObserved)
+                    }
+                    OwnerRecoveryStage::Archived => Some(OwnerRecoveryStage::Prepared),
+                    OwnerRecoveryStage::GuardsHeld => Some(OwnerRecoveryStage::Archived),
                     _ => return Err(JournalError::Conflict),
                 };
                 if old.raw_intent != prepared.original.raw_intent
-                    || old.stage() != Some(expected)
+                    || old.stage() != expected
                     || old.last_digest() != prepared.original.last_digest()
                 {
                     return Err(JournalError::Conflict);
@@ -872,11 +1187,15 @@ impl OwnedManagementJournal {
                     previous: old.last_digest(),
                     originals,
                     guards,
+                    startup_post,
+                    boot_observation,
                 };
                 let suffix = match stage {
+                    OwnerRecoveryStage::Prepared => "prepared",
+                    OwnerRecoveryStage::RestartExcluded => "restart-excluded",
+                    OwnerRecoveryStage::BootObserved => "boot-observed",
                     OwnerRecoveryStage::Archived => "archived",
                     OwnerRecoveryStage::GuardsHeld => "guards-held",
-                    _ => unreachable!(),
                 };
                 let name = member(&old.intent.transaction_id, suffix);
                 let raw = serde_json::to_vec(&phase).map_err(|_| JournalError::InvalidInput)?;
@@ -900,6 +1219,58 @@ impl OwnedManagementJournal {
             })
         })
     }
+    /// Resume ONLY a complete immutable checkpoint whose final Prepared file
+    /// was not published. The original scanner must already validate every raw
+    /// attachment; no Windows effect was authorized before this append succeeds.
+    pub(in crate::store) fn record_windows_restart_prepared(
+        &mut self,
+        maintenance: &ConfigurationMaintenance,
+        prepared: &PreparedLegacyOwnerRecovery,
+    ) -> JournalResult<PreparedLegacyOwnerRecovery> {
+        self.append_owner_recovery(
+            maintenance,
+            prepared,
+            OwnerRecoveryStage::Prepared,
+            Vec::new(),
+            Vec::new(),
+            None,
+            None,
+        )
+    }
+    /// Actual retained OS effect producer supplies the post; this record attests
+    /// the durable bytes/chain only, never derives OS completion from a DTO.
+    pub(in crate::store) fn record_legacy_restart_excluded(
+        &mut self,
+        maintenance: &ConfigurationMaintenance,
+        prepared: &PreparedLegacyOwnerRecovery,
+        post: NativeRetirementFileStamp,
+    ) -> JournalResult<PreparedLegacyOwnerRecovery> {
+        self.append_owner_recovery(
+            maintenance,
+            prepared,
+            OwnerRecoveryStage::RestartExcluded,
+            Vec::new(),
+            Vec::new(),
+            Some(post),
+            None,
+        )
+    }
+    pub(in crate::store) fn record_legacy_boot_observed(
+        &mut self,
+        maintenance: &ConfigurationMaintenance,
+        prepared: &PreparedLegacyOwnerRecovery,
+        actual_boot: RecoveryBoot,
+    ) -> JournalResult<PreparedLegacyOwnerRecovery> {
+        self.append_owner_recovery(
+            maintenance,
+            prepared,
+            OwnerRecoveryStage::BootObserved,
+            Vec::new(),
+            Vec::new(),
+            prepared.startup_post().cloned(),
+            Some(actual_boot),
+        )
+    }
     pub(in crate::store) fn record_legacy_owner_archived(
         &mut self,
         maintenance: &ConfigurationMaintenance,
@@ -913,6 +1284,8 @@ impl OwnedManagementJournal {
                 OwnerRecoveryStage::Archived,
                 originals,
                 Vec::new(),
+                prepared.startup_post().cloned(),
+                prepared.boot_observation().cloned(),
             )?,
         })
     }
@@ -939,6 +1312,8 @@ impl OwnedManagementJournal {
                     OwnerRecoveryStage::GuardsHeld,
                     originals,
                     guards,
+                    archived.prepared.startup_post().cloned(),
+                    archived.prepared.boot_observation().cloned(),
                 )?,
             },
         })

@@ -722,5 +722,6 @@ pub(in crate::store) use owner_recovery::{
     ArchivedLegacyOwnerRecovery, LegacyGuardsHeld, LegacyOwnerRecoveryIntent, OwnerRecoveryStage,
     PreparedLegacyOwnerRecovery, RecoveryBasis, RecoveryBoot, RecoveryGuard, RecoveryGuardBinding,
     RecoveryGuardName, RecoveryGuardPost, RecoveryKind, RecoveryOriginal, RecoveryOriginalBinding,
-    RecoveryOriginalName, RecoveryOriginalPost, RecoveryRestartBinding, scan_owner_recoveries,
+    RecoveryOriginalName, RecoveryOriginalPost, RecoveryRestartBinding, WindowsRestartProcess,
+    WindowsStartupCheckpoint, scan_owner_recoveries,
 };
