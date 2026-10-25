@@ -5,15 +5,15 @@
   "upstream_version": "0.36.0",
   "official_archive_sha256": "157acdc2fd0bf5c480af2bdbe4a69f75a709551627f851caee16346234fdedef",
   "patch": "cua-0.36.0-styx-once.patch",
-  "patch_sha256": "267a723497374947dc68ce59f05400680147024d5f21f989b619b7d6f63e5b94",
+  "patch_sha256": "9f5e417e772f3492402f1a95fdce0dd4d0e2d883950c6c568e76ba2cca7086d4",
   "files": [
     {
       "path": "libs/cua-driver/rust/crates/platform-linux/src/tools/impl_.rs",
       "original_sha256": "1a22d33d7d13ec9fa05aa3dafd0b20bd5e6b0b30d386ac8cbd508c74dfa4cbc0",
       "original_git_blob_sha1": "3be700798b9310b6cf931725f97ae7c02c619b5a",
-      "final_sha256": "dd46daaa32cf2cf19eaf653b4bb66939917883dd7abaae5196f94e03c8dab5b5",
+      "final_sha256": "158470dbd72ee54c580de24498d47bc577f7666b4aa32e719c93bd63c6340b8e",
       "original_bytes": 654449,
-      "final_bytes": 665438
+      "final_bytes": 665465
     },
     {
       "path": "libs/cua-driver/rust/crates/platform-linux/src/atspi/native.rs",

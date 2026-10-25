@@ -181,15 +181,15 @@
 +        STYX_SET_TEXT_ONCE_DEF.get_or_init(||ToolDef {
 +            name:"styx_private_ax_set_text_once_v1".into(),
 +            description:"Private single-consume exact EditableText write; ACK does not verify application effect.".into(),
-+            input_schema:json!({"type":"object","required":["target","value"],"properties":{
-+                "target":{"type":"string","minLength":64,"maxLength":64},
++            input_schema:json!({"type":"object","required":["editable_target","value"],"properties":{
++                "editable_target":{"type":"string","minLength":64,"maxLength":64},
 +                "value":{"type":"string","maxLength":16384}},"additionalProperties":false}),
 +            read_only:false,destructive:true,idempotent:false,open_world:false,
 +        })
 +    }
 +    async fn invoke(&self, args: Value) -> ToolResult {
 +        let (transport,session,lifecycle) = match styx_private_lifecycle(&args) { Ok(v)=>v,Err(e)=>return e };
-+        let (nonce,value) = match (args.get("target").and_then(Value::as_str),args.get("value").and_then(Value::as_str)) {
++        let (nonce,value) = match (args.get("editable_target").and_then(Value::as_str),args.get("value").and_then(Value::as_str)) {
 +            (Some(t),Some(v)) if t.len()==64 && t.bytes().all(|b|b.is_ascii_hexdigit()) && v.len()<=16*1024 => (t,v),
 +            _=>return styx_private_result("invalid_request","not_dispatched"),
 +        };

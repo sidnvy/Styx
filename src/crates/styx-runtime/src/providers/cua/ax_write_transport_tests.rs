@@ -152,7 +152,7 @@ async fn private_acquire_gate_refusal_and_post_effect_error_never_replay_write()
                     ),
                     (
                         WRITE.into(),
-                        json!({"target":"ab".repeat(32),"value":"owned-fixture-replacement"})
+                        json!({"editable_target":"ab".repeat(32),"value":"owned-fixture-replacement"})
                             .as_object()
                             .unwrap()
                             .clone()

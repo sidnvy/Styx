@@ -115,8 +115,8 @@ pub(super) fn private_schemas() -> Map<String, Value> {
     schemas.insert(
         WRITE.into(),
         serde_json::json!({
-            "type":"object","required":["target","value"],"properties":{
-            "target":{"type":"string","minLength":64,"maxLength":64},
+            "type":"object","required":["editable_target","value"],"properties":{
+            "editable_target":{"type":"string","minLength":64,"maxLength":64},
             "value":{"type":"string","maxLength":16384}},"additionalProperties":false
         }),
     );
@@ -273,9 +273,11 @@ pub(super) async fn invoke(
         Some(Ok(Err(cause))) => return (CuaEvidence::NotDispatched, None, Some(cause)),
         _ => return (CuaEvidence::NotDispatched, None, Some(CuaError::Unknown)),
     }
+    // Cua reserves `target` for its public typed desktop selector. This private
+    // handle must pass through the same dispatcher without entering that path.
     let write = CallToolRequestParams::new(WRITE).with_arguments(
         serde_json::json!({
-            "target":target,"value":request.value
+            "editable_target":target,"value":request.value
         })
         .as_object()
         .expect("literal object")
