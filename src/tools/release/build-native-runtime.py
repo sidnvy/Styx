@@ -10,7 +10,7 @@ import gzip
 import hashlib
 import json
 import os
-from pathlib import Path
+from pathlib import Path, PurePosixPath, PureWindowsPath
 import re
 import runpy
 import shutil
@@ -404,6 +404,37 @@ def release_reader(receipt, binary_hash, target, inputs):
     return 'native_runtime_migrated_v1'
 
 
+def validate_binary_location(receipt, binary, target, relocated, minimum_reader):
+    if not relocated:
+        if 'cli_binary' in receipt:
+            require(Path(receipt['cli_binary']).is_absolute()
+                    and Path(receipt['cli_binary']).resolve(strict=True) == binary.resolve(strict=True),
+                    'receipt_cli_binary_path_mismatch')
+        return
+    # A copied artifact is bound by the original producer's SHA and actual
+    # build-info observation. Its original locator is provenance, never opened
+    # on this machine. This flag cannot upgrade historical receipts.
+    require(minimum_reader == 'native_runtime_migrated_v1'
+            and receipt.get('producer') == 'src/tools/release/build-native-binary.py'
+            and isinstance(receipt.get('cli_build_info'), dict),
+            'relocation_original_producer_evidence_required')
+    original = receipt.get('cli_binary')
+    require(isinstance(original, str) and 0 < len(original) <= 4096
+            and '\x00' not in original, 'relocation_original_locator_invalid')
+    if target == 'x86_64-pc-windows-msvc':
+        path = PureWindowsPath(original)
+        require(path.is_absolute() and re.fullmatch('[A-Za-z]:', path.drive) is not None
+                and len(original) >= 3 and original[2] in ('/', '\\')
+                and all(part not in {'', '.', '..'} for part in re.split(r'[\\/]', original[3:]))
+                and ':' not in original[2:], 'relocation_original_locator_invalid')
+    else:
+        path = PurePosixPath(original)
+        require(path.is_absolute() and not original.startswith('//')
+                and '\\' not in original
+                and all(part not in {'', '.', '..'} for part in original[1:].split('/')),
+                'relocation_original_locator_invalid')
+
+
 def build(args):
     require(sys.platform == 'linux', 'builder_linux_only')
     require(re.fullmatch(r'[a-f0-9]{40}', args.source_revision) is not None, 'full_source_revision_required')
@@ -440,12 +471,10 @@ def build(args):
         validate_inputs(inputs, forbidden)
         binary_hash = receipt.get('cli_binary_sha256')
         require(isinstance(binary_hash, str) and HEX.fullmatch(binary_hash), 'receipt_cli_binary_sha256_missing')
-        if 'cli_binary' in receipt:
-            require(Path(receipt['cli_binary']).is_absolute() and Path(receipt['cli_binary']).resolve(strict=True) == args.binary.resolve(strict=True),
-                    'receipt_cli_binary_path_mismatch')
         actual_binary_hash, binary_metadata = hash_checked(args.binary, forbidden)
         require(actual_binary_hash == binary_hash, 'binary_receipt_hash_mismatch')
         minimum_reader = release_reader(receipt, binary_hash, args.target, inputs)
+        validate_binary_location(receipt, args.binary, args.target, args.relocated_binary, minimum_reader)
         source = inspect_worker(args.worker_release, args.worker_publisher_file, args.target,
                                 args.expected_publisher, forbidden, output) if kinds else None
         selections = [selected_worker(source, kind, args.target, forbidden) for kind in kinds]
@@ -526,6 +555,7 @@ def build(args):
         result = dict(schema=1, status='PASS', scope=SCOPE, source_revision=args.source_revision, target=args.target,
                       version=args.version, input_stability='PASS', build_receipt_sha256=sha(raw_receipt),
                       cli_binary_sha256=binary_hash, minimum_release_reader=minimum_reader,
+                      binary_relocated=args.relocated_binary,
                       source_inputs_sha256=sha(source_raw), members=len(members),
                       external_workers=kinds, worker_closures=closures, publisher_spki_der_sha256=args.expected_publisher,
                       signature='Ed25519 exact raw manifest bytes, raw64 signature; OpenSSL verified',
@@ -549,6 +579,8 @@ def main():
     for name in ('source-revision', 'expected-publisher', 'version'):
         parser.add_argument('--' + name, required=True)
     parser.add_argument('--target', choices=TARGETS, required=True)
+    parser.add_argument('--relocated-binary', action='store_true',
+                        help='accept copied bytes only with complete original producer/build-info evidence; preserve original receipt')
     parser.add_argument('--worker-release', type=Path)
     parser.add_argument('--worker-publisher-file', type=Path)
     parser.add_argument('--worker-kind', action='append', choices=KINDS, default=[])
