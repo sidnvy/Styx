@@ -143,7 +143,10 @@ impl<'a> EnrollmentBootstrap<'a> {
 
 /// Reuses the server's bounded canonical admission checks without granting or
 /// approving a local device. Client-side validation is not Gateway authority.
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[cfg(any(
+    all(target_os = "windows", target_arch = "x86_64"),
+    all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
+))]
 pub(crate) fn validate_local_join(
     payload: &styx_contracts::legacy::JoinPayload,
     signature: &str,
