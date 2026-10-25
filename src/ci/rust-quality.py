@@ -372,6 +372,12 @@ def execute(args):
                 extra_env={"STYX_TEST_NATIVE_GATEWAY_ROOT": str(fresh_gateway_root)})
             gate.semantic(fresh_gateway, [] if "1 passed; 0 failed" in gate.read("fresh-gateway-store") else ["exact_fresh_gateway_store_case_not_executed"])
             receipt["fresh_gateway_store"] = fresh_gateway["status"]
+            fresh_host_root = evidence / "owned-fresh-host"
+            fresh_host_root.mkdir(mode=0o700)
+            fresh_host = gate.run("fresh-host-store", ["cargo", "test", "-p", "styx-runtime", "--locked", "--offline", "store::native_root::host::tests::native_host_pending_closed_chain_reopen_and_sticky_unknown_aggregate", "--", "--ignored", "--exact", "--nocapture"], timeout=120,
+                extra_env={"STYX_TEST_NATIVE_HOST_ROOT": str(fresh_host_root)})
+            gate.semantic(fresh_host, [] if "1 passed; 0 failed" in gate.read("fresh-host-store") else ["exact_fresh_host_store_case_not_executed"])
+            receipt["fresh_host_store"] = fresh_host["status"]
             # Each case owns a distinct root; the gate-race case requires absence.
             for label, test, env_name in (
                 ("configuration-owner", CONFIGURATION_OWNER_TEST, "STYX_TEST_CONFIGURATION_ROOT"),

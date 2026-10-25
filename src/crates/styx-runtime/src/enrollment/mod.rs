@@ -140,3 +140,15 @@ impl<'a> EnrollmentBootstrap<'a> {
         })
     }
 }
+
+/// Reuses the server's bounded canonical admission checks without granting or
+/// approving a local device. Client-side validation is not Gateway authority.
+#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+pub(crate) fn validate_local_join(
+    payload: &styx_contracts::legacy::JoinPayload,
+    signature: &str,
+) -> Result<(), &'static str> {
+    profile::verify_join(payload, signature)
+        .map(|_| ())
+        .map_err(|_| "native_join_profile_invalid")
+}

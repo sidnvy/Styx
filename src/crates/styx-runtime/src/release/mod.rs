@@ -3,6 +3,7 @@
 //! verified closure do not establish runtime health or final release acceptance.
 #[cfg(any(
     all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+    all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"),
     all(
         target_os = "macos",
         any(target_arch = "x86_64", target_arch = "aarch64")
@@ -16,6 +17,7 @@ use crate::{
 use serde::Serialize;
 #[cfg(any(
     all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+    all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"),
     all(
         target_os = "macos",
         any(target_arch = "x86_64", target_arch = "aarch64")
@@ -25,6 +27,7 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 #[cfg(any(
     all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+    all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"),
     all(
         target_os = "macos",
         any(target_arch = "x86_64", target_arch = "aarch64")
@@ -201,14 +204,33 @@ impl VerifiedNativeRelease {
         Ok(selection)
     }
     fn selection_root_identity(&self) -> Result<NativeRootIdentity> {
-        // The configuration root contract is Linux-only. Existing Mac C08
-        // release verification remains supported; no Darwin migration is implied.
+        // Actual protected kernel roots bind this DATA selection. This does
+        // not enable Windows durable management or prove a migration commit.
         #[cfg(all(target_os = "linux", target_env = "gnu"))]
         {
             let crate::store::RootIdentity::Linux { device, inode, uid } = self.root.identity();
             Ok(NativeRootIdentity::Linux { device, inode, uid })
         }
-        #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+        #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
+        {
+            let crate::store::RootIdentity::Windows {
+                volume_serial,
+                file_id,
+                owner_sid,
+            } = self.root.identity()
+            else {
+                return Err(ReleaseError::Changed);
+            };
+            Ok(NativeRootIdentity::Windows {
+                volume_serial,
+                file_id,
+                owner_sid,
+            })
+        }
+        #[cfg(not(any(
+            all(target_os = "linux", target_env = "gnu"),
+            all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")
+        )))]
         {
             Err(ReleaseError::Unsupported)
         }
@@ -309,6 +331,7 @@ fn reobserve(root: &PrivateRoot, original: &RawFile, limit: usize) -> Result<()>
 }
 #[cfg(any(
     all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+    all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"),
     all(
         target_os = "macos",
         any(target_arch = "x86_64", target_arch = "aarch64")
@@ -325,6 +348,7 @@ pub async fn inspect(
 ) -> Result<ReleaseReport> {
     #[cfg(any(
         all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+        all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"),
         all(
             target_os = "macos",
             any(target_arch = "x86_64", target_arch = "aarch64")
@@ -347,6 +371,7 @@ pub async fn inspect(
     }
     #[cfg(not(any(
         all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+        all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"),
         all(
             target_os = "macos",
             any(target_arch = "x86_64", target_arch = "aarch64")
@@ -364,10 +389,17 @@ pub async fn inspect(
 /// neither admits ordinary traffic nor proves the cutover was committed.
 pub fn verify_selected(selection: &NativeRuntimeSelection) -> Result<VerifiedNativeRelease> {
     validate_selection_locator(selection)?;
-    if !cfg!(all(
-        target_os = "linux",
-        target_arch = "x86_64",
-        target_env = "gnu"
+    if !cfg!(any(
+        all(
+            target_os = "linux",
+            target_arch = "x86_64",
+            target_env = "gnu"
+        ),
+        all(
+            target_os = "windows",
+            target_arch = "x86_64",
+            target_env = "msvc"
+        )
     )) {
         return Err(ReleaseError::Unsupported);
     }
@@ -395,6 +427,25 @@ fn validate_selection_locator(selection: &NativeRuntimeSelection) -> Result<()> 
     {
         return Err(ReleaseError::Invalid);
     }
+    #[cfg(target_os = "windows")]
+    for locator in [&selection.payload_path, &selection.publisher_file] {
+        use std::path::{Component, Prefix};
+        // Only a local drive path is a locator. PrivateRoot remains the single
+        // owner/ACL/component/reparse/ADS authority and pins every ancestor.
+        if locator
+            .split(['\\', '/'])
+            .any(|part| matches!(part, "." | ".."))
+        {
+            return Err(ReleaseError::Invalid);
+        }
+        let mut components = Path::new(locator).components();
+        if !matches!(components.next(), Some(Component::Prefix(prefix)) if matches!(prefix.kind(), Prefix::Disk(_)))
+            || !matches!(components.next(), Some(Component::RootDir))
+            || components.any(|part| !matches!(part, Component::Normal(name) if !name.to_string_lossy().contains(':')))
+        {
+            return Err(ReleaseError::Invalid);
+        }
+    }
     Ok(())
 }
 pub fn verify(
@@ -404,6 +455,7 @@ pub fn verify(
 ) -> Result<VerifiedNativeRelease> {
     #[cfg(any(
         all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+        all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"),
         all(
             target_os = "macos",
             any(target_arch = "x86_64", target_arch = "aarch64")
@@ -414,6 +466,7 @@ pub fn verify(
     }
     #[cfg(not(any(
         all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+        all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"),
         all(
             target_os = "macos",
             any(target_arch = "x86_64", target_arch = "aarch64")
@@ -426,6 +479,7 @@ pub fn verify(
 }
 #[cfg(any(
     all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+    all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"),
     all(
         target_os = "macos",
         any(target_arch = "x86_64", target_arch = "aarch64")
@@ -465,6 +519,7 @@ fn verify_native(
         ("linux", "x86_64") => NativeReleaseTarget::LinuxX86_64Gnu,
         ("macos", "x86_64") => NativeReleaseTarget::MacosX86_64,
         ("macos", "aarch64") => NativeReleaseTarget::MacosAarch64,
+        ("windows", "x86_64") => NativeReleaseTarget::WindowsX86_64Msvc,
         _ => return Err(ReleaseError::Unsupported),
     };
     if manifest.target != target {
@@ -545,7 +600,7 @@ fn verify_native(
             NativeReleaseTarget::LinuxX86_64Gnu => "x86_64-unknown-linux-gnu",
             NativeReleaseTarget::MacosX86_64 => "x86_64-apple-darwin",
             NativeReleaseTarget::MacosAarch64 => "aarch64-apple-darwin",
-            NativeReleaseTarget::WindowsX86_64Msvc => return Err(ReleaseError::Unsupported),
+            NativeReleaseTarget::WindowsX86_64Msvc => "x86_64-pc-windows-msvc",
         },
         entrypoint: target.entrypoint(),
         source_revision: manifest.source.revision.clone(),
@@ -617,3 +672,11 @@ mod selection_tests {
         assert!(serde_json::from_value::<NativeRuntimeSelection>(raw).is_err());
     }
 }
+
+#[cfg(all(
+    test,
+    target_os = "windows",
+    target_arch = "x86_64",
+    target_env = "msvc"
+))]
+mod windows_tests;

@@ -183,6 +183,11 @@ impl Cli {
 }
 #[derive(Subcommand)]
 enum HostCommand {
+    /// Explicit native enrollment; does not start or install a Host.
+    Join {
+        #[command(subcommand)]
+        command: HostJoinCommand,
+    },
     /// Explicit current-user transient action; no autostart or installation.
     Start {
         #[arg(long)]
@@ -230,6 +235,28 @@ enum HostCommand {
         state_dir: Option<PathBuf>,
     },
 }
+#[derive(Subcommand)]
+enum HostJoinCommand {
+    /// Create a fresh private Host identity and request Gateway approval once.
+    Request {
+        #[arg(long)]
+        parent_dir: PathBuf,
+        #[arg(long)]
+        name: OsString,
+        #[arg(long)]
+        deployment_file: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Claim an approved credential and verify current authenticated self state.
+    Claim {
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+}
+
 #[derive(Subcommand)]
 enum GatewayCommand {
     /// Initialize fresh Gateway-only foreground configuration; no service launch or legacy adoption.
@@ -288,6 +315,30 @@ fn native_result<T: serde::Serialize>(
         Ok(value) => {
             if !json {
                 eprintln!("{summary}");
+            }
+            if write_json(&value).is_err() {
+                error("output_unavailable")
+            } else {
+                ExitCode::SUCCESS
+            }
+        }
+        Err(value) => {
+            eprintln!("{}", serde_json::json!({"schema":1,"error":value.code()}));
+            ExitCode::from(value.exit_code())
+        }
+    }
+}
+fn join_result(
+    result: Result<
+        styx_runtime::management::native_join::JoinReport,
+        styx_runtime::management::native_join::JoinError,
+    >,
+    json: bool,
+) -> ExitCode {
+    match result {
+        Ok(value) => {
+            if !json {
+                eprintln!("Native Host enrollment observed; runtime not started:");
             }
             if write_json(&value).is_err() {
                 error("output_unavailable")
@@ -761,6 +812,28 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
             );
             ExitCode::SUCCESS
         }
+        Command::Host {
+            command: HostCommand::Join { command },
+        } => match command {
+            HostJoinCommand::Request {
+                parent_dir,
+                name,
+                deployment_file,
+                json,
+            } => join_result(
+                styx_runtime::management::native_join::request(
+                    &parent_dir,
+                    &name,
+                    &deployment_file,
+                )
+                .await,
+                json,
+            ),
+            HostJoinCommand::Claim { state_dir, json } => join_result(
+                styx_runtime::management::native_join::claim(&state_dir).await,
+                json,
+            ),
+        },
         Command::Host {
             command: HostCommand::Start {
                 state_dir, json, ..

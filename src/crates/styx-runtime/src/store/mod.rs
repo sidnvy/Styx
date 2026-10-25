@@ -14,6 +14,8 @@ pub mod enrollment;
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 pub mod legacy_handoff;
 pub mod management;
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+pub(crate) mod native_host_snapshot;
 pub mod native_root;
 pub mod native_state;
 pub mod native_transaction;

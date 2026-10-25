@@ -246,3 +246,35 @@ mutate an existing CA/credential. See ADR-030 for exact persistent bindings,
 ordering and unresolved endpoint renewal/recovery limits. Source implementation,
 automated verification, actual fresh pairing and packaged acceptance must each
 be recorded separately; this paragraph is not an execution receipt.
+
+
+## R37 fresh native Host enrollment and Windows signed-reader boundary
+
+`management/native_join.rs` is an explicit Linux x64 request/claim actor, not a
+service installer. It composes existing AWS-LC RSA-3072/PSS/OAEP, canonical wire
+validation, strict pinned rustls and bounded Hyper. Local generated material is
+persisted under the original fresh-root configuration owner before a single join
+dispatch. Fixed protected phase files distinguish dispatch, reply, credential,
+confirmation dispatch and final authenticated self observation. Unknown join or
+confirmation is never replayed; an existing confirmation dispatch can only be
+resolved through the existing authenticated `/self/{device}/capabilities` GET.
+An expired pending invitation is distinct from a previously confirmed credential.
+
+`store/native_host_snapshot.rs` supplies the ordinary Host reader without a
+fabricated legacy migration or successful installation steps. `foreground/profile_fresh.rs`
+uses the existing C08 worker selection and paired runtime. Local requested
+capabilities select local providers; persisted approval bits are historical
+observations, while live grants remain Gateway/Core authority. The original C07
+parser and Core transition validator reject an unresolved or mismatched canonical
+tip for both claim and ordinary Host. Neither reader repairs the journal, clears
+maintenance or mints new durability receipts. Service install/login recovery,
+Browser/Desktop actual acceptance and other-platform writable management remain
+separate work.
+
+The C08 signed runtime reader now recognizes protected Windows payload identity
+and PE inventory via the existing Windows store. This is read-only verification,
+not Windows durable configuration, installation or executable launch authority.
+The ignored signed-Windows fixture requires a real Windows candidate and external
+publisher pin; compilation or a Linux payload does not satisfy that acceptance.
+Actual development, full gate, signed packaging and device results must remain
+separate per-SHA external receipts.

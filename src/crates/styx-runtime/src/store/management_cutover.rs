@@ -423,7 +423,11 @@ fn validate_materials(original: &OriginalCutover) -> JournalResult<()> {
         return Err(JournalError::Unknown);
     }
     let marker = decode_marker(&original.marker).map_err(|_| JournalError::Unknown)?;
-    let NativeRootIdentity::Linux { device, inode, uid } = &marker.root_identity;
+    let NativeRootIdentity::Linux { device, inode, uid } = &marker.root_identity else {
+        // The original cutover proof is Linux-specific. A Windows selection
+        // identity must never be relabeled as an original Linux writer root.
+        return Err(JournalError::Conflict);
+    };
     if (*device, *inode, *uid) != (i.config_root.device, i.config_root.inode, i.config_root.uid) {
         return Err(JournalError::Conflict);
     }

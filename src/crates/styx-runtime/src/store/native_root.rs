@@ -5,6 +5,10 @@ use super::native_state::{self, ValidatedNativeState};
 use super::{ConfigurationWriterGuard, OwnedConfigurationRoot, PrivateRoot, RootIdentity};
 use styx_contracts::native_management::{NativeRootMarker, NativeState};
 
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[path = "native_host.rs"]
+pub(crate) mod host;
+
 pub const NATIVE_MARKER_FILE: &str = ".styx-native-root-v1.json";
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum NativeRootError {
@@ -425,7 +429,7 @@ mod platform {
             Ok(())
         }
     }
-    fn encode_genesis(state: &NativeState) -> Result<Vec<u8>, NativeRootError> {
+    pub(super) fn encode_genesis(state: &NativeState) -> Result<Vec<u8>, NativeRootError> {
         let mut output = GenesisJson(Vec::with_capacity(NATIVE_STATE_BYTES));
         serde_json::to_writer(&mut output, state).map_err(|_| NativeRootError::InvalidInput)?;
         Ok(output.0)

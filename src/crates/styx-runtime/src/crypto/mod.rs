@@ -2,13 +2,15 @@
 //!
 //! Device RSA, claim HMAC and release-publisher Ed25519 are distinct domains.
 //! Callers retain responsibility for authenticated canonical preimages, protected
-//! file access, key pins and transaction state. No API generates/writes identities.
+//! file access, key pins and transaction state. Fresh cryptographic generation does not enroll a device or grant filesystem authority.
 mod claim;
 mod device;
 mod publisher;
 
 pub use claim::{ClaimCapability, ClaimConfirmation, EnrollmentRequestId};
-pub use device::{DeviceFingerprint, DevicePrivateKey, DeviceProofBytes, DevicePublicKey};
+pub use device::{
+    DeviceFingerprint, DevicePrivateKey, DeviceProofBytes, DevicePublicKey, GeneratedDeviceIdentity,
+};
 pub use publisher::{
     PublisherFingerprint, PublisherSigningKey, PublisherVerifyingKey, RawReleaseManifest,
 };

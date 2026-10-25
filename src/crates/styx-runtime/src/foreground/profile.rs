@@ -19,6 +19,9 @@ use styx_contracts::{
     identity::{DeviceId, GatewayId, Sha256Digest},
     native_release::NativeExternalWorker,
 };
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[path = "profile_fresh.rs"]
+mod fresh;
 #[path = "profile_release.rs"]
 mod release;
 const JSON_LIMIT: usize = 1024 * 1024;
@@ -428,6 +431,17 @@ impl LoadedLegacyProfile {
                 .map_err(|_| ProfileError::Changed)?;
             return Ok(true);
         }
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        if let ProfileSource::Fresh(binding) = &self.source {
+            binding.revalidate().map_err(|_| ProfileError::Changed)?;
+            if state.identity() != binding.root_identity()
+                || host.identity() != binding.root_identity()
+                || self.host_base_dir != binding.state_dir()
+            {
+                return Err(ProfileError::Changed);
+            }
+            return Ok(true);
+        }
         let _ = (state, host);
         Ok(false)
     }
@@ -568,6 +582,8 @@ enum ProfileSource {
     Maintenance(Arc<crate::migration::legacy_service::RetiredCredentialReadBinding>),
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     Committed(Arc<crate::store::committed_runtime::CommittedRuntimeSnapshot>),
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    Fresh(Arc<crate::store::native_host_snapshot::NativeHostSnapshot>),
 }
 impl ProfileSource {
     fn revalidate(&self) -> Result<(), ProfileError> {
@@ -577,6 +593,8 @@ impl ProfileSource {
             Self::Maintenance(binding) => binding.revalidate().map_err(|_| ProfileError::Changed),
             #[cfg(all(target_os = "linux", target_env = "gnu"))]
             Self::Committed(binding) => binding.revalidate().map_err(|_| ProfileError::Changed),
+            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            Self::Fresh(binding) => binding.revalidate().map_err(|_| ProfileError::Changed),
         }
     }
 }
@@ -597,7 +615,16 @@ pub fn load_paired(state_dir: &Path) -> Result<LoadedLegacyProfile, ProfileError
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     {
         let root = PrivateRoot::open(state_dir).map_err(|_| ProfileError::ProtectedRead)?;
-        if root.ensure_absent(".styx-native-root-v1.json").is_err() {
+        let native_present = root.ensure_absent(".styx-native-root-v1.json").is_err();
+        // A present/unreadable native seed selects this exact reader, never an
+        // old active pointer or synthetic legacy succeeded-step fallback.
+        if root.ensure_absent("host-join-seed-v1.json").is_err() {
+            if !native_present {
+                return Err(ProfileError::Changed);
+            }
+            return fresh::load(state_dir);
+        }
+        if native_present {
             let committed =
                 crate::store::committed_runtime::CommittedRuntimeSnapshot::open(state_dir)
                     .map_err(|_| ProfileError::Changed)?;
@@ -630,6 +657,10 @@ fn load_source(
     source: ProfileSource,
 ) -> Result<LoadedLegacyProfile, ProfileError> {
     source.revalidate()?;
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    if matches!(&source, ProfileSource::Fresh(_)) {
+        return Err(ProfileError::Invalid);
+    }
     if !cfg!(any(
         target_os = "linux",
         target_os = "macos",
@@ -739,6 +770,8 @@ fn load_source(
         return Err(ProfileError::Invalid);
     }
     let raw_token = match &source {
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        ProfileSource::Fresh(_) => return Err(ProfileError::Invalid),
         ProfileSource::Ordinary => {
             zeroize::Zeroizing::new(capture.read(base, "device/host.token", 4096)?)
         }
@@ -833,7 +866,7 @@ fn load_source(
     let inventory = match &source {
         #[cfg(all(target_os = "linux", target_env = "gnu"))]
         ProfileSource::Committed(committed) => {
-            release::ProfileRelease::from_committed_selection(committed.selection(), &expected)?
+            release::ProfileRelease::from_native_selection(committed.selection(), &expected)?
         }
         _ => {
             let inventory =
@@ -887,6 +920,8 @@ fn load_source(
         runtime_format
     };
     let diagnostic_manifest = match &source {
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        ProfileSource::Fresh(_) => return Err(ProfileError::Invalid),
         ProfileSource::Ordinary => active.manifest_sha256,
         #[cfg(all(target_os = "linux", target_env = "gnu"))]
         ProfileSource::Maintenance(binding) => binding.candidate().report().manifest_sha256,

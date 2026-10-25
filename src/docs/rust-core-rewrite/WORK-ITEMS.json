@@ -6,7 +6,8 @@
   "default_new_worktrees": 0,
   "integration_checkout": "existing styx-develop",
   "staging_checkout": "existing styx-capability-lifecycle",
-  "execution_state": "PLAN_ONLY_NOT_STARTED",
+  "execution_state": "BASELINE_PLAN_LIVE_EXECUTION_RECORDED_SEPARATELY",
+  "execution_state_note": "Task rows below are the frozen initial DAG, not live completion claims; see IMPLEMENTATION.md and per-SHA external Owner Control Report/immutable receipts.",
   "tasks": [
     {
       "id": "R00",

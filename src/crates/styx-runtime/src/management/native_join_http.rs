@@ -1,0 +1,324 @@
+//! One owned, once-only enrollment HTTP exchange. No identity, persistence,
+//! approval, retry, redirect, proxy, or publication authority lives here.
+use crate::tls::{GatewayClientTls, GatewayLeafPin, TlsError};
+use bytes::Bytes;
+use http_body_util::{BodyExt, Full, LengthLimitError, Limited};
+use hyper::{Request, header};
+use hyper_util::rt::TokioIo;
+use std::{fmt, time::Duration};
+use tokio::{net::TcpStream, time::Instant};
+use zeroize::Zeroizing;
+
+const REQUEST_BYTES: usize = 16 * 1024;
+const RESPONSE_BYTES: usize = 32 * 1024;
+const HEADER_BYTES: usize = 16 * 1024;
+const MAX_HEADERS: usize = 32;
+const MAX_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// Contains a credential response; deliberately no Debug/Clone/Serde.
+pub(super) struct JoinHttpResponse {
+    pub(super) status: u16,
+    pub(super) body: Zeroizing<Vec<u8>>,
+    /// The actual verified endpoint certificate, never a configured CA pin.
+    pub(super) leaf_pin: GatewayLeafPin,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum JoinHttpCertainty {
+    NotDispatched,
+    ResultUnknown,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) enum JoinHttpErrorKind {
+    InvalidInput,
+    InvalidTimeout,
+    Connect,
+    Tls(TlsError),
+    Http,
+    ResponseTooLarge,
+    RedirectRefused,
+    Deadline,
+}
+/// Only typed/static facts. Never retains URLs, headers, bodies or upstream
+/// Display strings. Even a backend error response may follow an actual effect.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(super) struct JoinHttpError {
+    pub(super) kind: JoinHttpErrorKind,
+    pub(super) certainty: JoinHttpCertainty,
+}
+impl JoinHttpError {
+    pub(super) fn code(self) -> &'static str {
+        match self.kind {
+            JoinHttpErrorKind::InvalidInput => "join_http_invalid_input",
+            JoinHttpErrorKind::InvalidTimeout => "join_http_invalid_timeout",
+            JoinHttpErrorKind::Connect => "join_http_connect_failed",
+            JoinHttpErrorKind::Tls(TlsError::CertificateRejected(value)) => value.code(),
+            JoinHttpErrorKind::Tls(TlsError::PinMismatch) => "join_http_leaf_pin_mismatch",
+            JoinHttpErrorKind::Tls(_) => "join_http_tls_rejected",
+            JoinHttpErrorKind::Http => "join_http_exchange_failed",
+            JoinHttpErrorKind::ResponseTooLarge => "join_http_response_too_large",
+            JoinHttpErrorKind::RedirectRefused => "join_http_redirect_refused",
+            JoinHttpErrorKind::Deadline => "join_http_deadline",
+        }
+    }
+}
+impl fmt::Display for JoinHttpError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(self.code())
+    }
+}
+impl std::error::Error for JoinHttpError {}
+fn refusal(kind: JoinHttpErrorKind) -> JoinHttpError {
+    JoinHttpError {
+        kind,
+        certainty: JoinHttpCertainty::NotDispatched,
+    }
+}
+fn unknown(kind: JoinHttpErrorKind) -> JoinHttpError {
+    JoinHttpError {
+        kind,
+        certainty: JoinHttpCertainty::ResultUnknown,
+    }
+}
+
+// Bytes retains this zeroizing owner until the official HTTP body releases its
+// last reference. This does not promise zeroization of TLS/Hyper internal copies.
+struct RequestBytes(Zeroizing<Vec<u8>>);
+impl AsRef<[u8]> for RequestBytes {
+    fn as_ref(&self) -> &[u8] {
+        self.0.as_slice()
+    }
+}
+
+pub(super) async fn exchange(
+    origin: &url::Url,
+    tls: &GatewayClientTls,
+    path: &'static str,
+    body: &[u8],
+    bearer: Option<&[u8]>,
+    timeout: Duration,
+) -> Result<JoinHttpResponse, JoinHttpError> {
+    if !post_path(path) {
+        return Err(refusal(JoinHttpErrorKind::InvalidInput));
+    }
+    exchange_once(
+        origin,
+        tls,
+        hyper::Method::POST,
+        path,
+        body,
+        bearer,
+        timeout,
+    )
+    .await
+}
+
+/// Fixed authenticated self route only. A response status is not a ready grant;
+/// the caller must validate actual device/fingerprint/generation and status200.
+pub(super) async fn exchange_self(
+    origin: &url::Url,
+    tls: &GatewayClientTls,
+    device: &styx_contracts::identity::DeviceId,
+    bearer: &[u8],
+    timeout: Duration,
+) -> Result<JoinHttpResponse, JoinHttpError> {
+    if !device_path_component(device.as_str()) {
+        return Err(refusal(JoinHttpErrorKind::InvalidInput));
+    }
+    let path = format!("/styx/enroll/self/{}/capabilities", device.as_str());
+    exchange_once(
+        origin,
+        tls,
+        hyper::Method::GET,
+        &path,
+        &[],
+        Some(bearer),
+        timeout,
+    )
+    .await
+}
+fn post_path(path: &str) -> bool {
+    matches!(
+        path,
+        "/styx/enroll/join" | "/styx/enroll/claim" | "/styx/enroll/confirm"
+    )
+}
+fn device_path_component(device: &str) -> bool {
+    device.len() == 29
+        && device.starts_with("styx-")
+        && device.as_bytes()[5..]
+            .iter()
+            .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(b))
+}
+async fn exchange_once(
+    origin: &url::Url,
+    tls: &GatewayClientTls,
+    method: hyper::Method,
+    path: &str,
+    body: &[u8],
+    bearer: Option<&[u8]>,
+    timeout: Duration,
+) -> Result<JoinHttpResponse, JoinHttpError> {
+    if timeout.is_zero() || timeout > MAX_TIMEOUT {
+        return Err(refusal(JoinHttpErrorKind::InvalidTimeout));
+    }
+    let allowed = (method == hyper::Method::POST && post_path(path))
+        || (method == hyper::Method::GET
+            && body.is_empty()
+            && bearer.is_some()
+            && path
+                .strip_prefix("/styx/enroll/self/")
+                .and_then(|p| p.strip_suffix("/capabilities"))
+                .is_some_and(device_path_component));
+    if !allowed
+        || body.len() > REQUEST_BYTES
+        || origin.as_str().len() > 2048
+        || origin.scheme() != "https"
+        || !origin.username().is_empty()
+        || origin.password().is_some()
+        || origin.path() != "/"
+        || origin.query().is_some()
+        || origin.fragment().is_some()
+        || origin.as_str() != format!("{}/", origin.origin().ascii_serialization())
+    {
+        return Err(refusal(JoinHttpErrorKind::InvalidInput));
+    }
+    let host = origin
+        .host_str()
+        .ok_or_else(|| refusal(JoinHttpErrorKind::InvalidInput))?;
+    // Url::host_str includes brackets on IPv6; the TLS API requires an
+    // unbracketed literal. Authority retains the URI's required brackets.
+    let server_name = host.trim_matches(['[', ']']);
+    let port = origin
+        .port_or_known_default()
+        .filter(|p| *p != 0)
+        .ok_or_else(|| refusal(JoinHttpErrorKind::InvalidInput))?;
+    let authority = if server_name.contains(':') {
+        format!("[{server_name}]:{port}")
+    } else {
+        format!("{server_name}:{port}")
+    };
+    // Conservative complete HTTP/1 request bound: mature Hyper performs the
+    // encoding; reserve more than all fixed names, framing and length digits.
+    let wire_bound = body
+        .len()
+        .checked_add(path.len())
+        .and_then(|n| n.checked_add(authority.len()))
+        .and_then(|n| n.checked_add(bearer.map_or(0, <[u8]>::len)))
+        .and_then(|n| n.checked_add(512));
+    if server_name.len() > 253 || wire_bound.is_none_or(|n| n > REQUEST_BYTES) {
+        return Err(refusal(JoinHttpErrorKind::InvalidInput));
+    }
+    let mut request = Request::builder()
+        .method(method)
+        .uri(path)
+        .header(header::HOST, authority)
+        .header(header::CONTENT_TYPE, "application/json")
+        .header(header::ACCEPT, "application/json")
+        .header(header::CONNECTION, "close");
+    if let Some(bearer) = bearer {
+        if !(32..=4096).contains(&bearer.len())
+            || !bearer
+                .iter()
+                .all(|b| b.is_ascii_alphanumeric() || matches!(*b, b'_' | b'-'))
+        {
+            return Err(refusal(JoinHttpErrorKind::InvalidInput));
+        }
+        let mut value = Zeroizing::new(Vec::with_capacity(7 + bearer.len()));
+        value.extend_from_slice(b"Bearer ");
+        value.extend_from_slice(bearer);
+        let mut value = hyper::header::HeaderValue::from_bytes(&value)
+            .map_err(|_| refusal(JoinHttpErrorKind::InvalidInput))?;
+        value.set_sensitive(true);
+        request = request.header(header::AUTHORIZATION, value);
+    }
+    let request = request
+        .body(Full::new(Bytes::from_owner(RequestBytes(Zeroizing::new(
+            body.to_vec(),
+        )))))
+        .map_err(|_| refusal(JoinHttpErrorKind::InvalidInput))?;
+    let until = Instant::now()
+        .checked_add(timeout)
+        .ok_or_else(|| refusal(JoinHttpErrorKind::InvalidTimeout))?;
+    let mut dispatched = false;
+    let result = tokio::time::timeout_at(until, async {
+        // One standard Tokio DNS lookup and one TCP connect. Do not add
+        // address failover, proxy handling or an automatic request retry layer.
+        let address = tokio::net::lookup_host((server_name, port))
+            .await
+            .map_err(|_| refusal(JoinHttpErrorKind::Connect))?
+            .next()
+            .ok_or_else(|| refusal(JoinHttpErrorKind::Connect))?;
+        let tcp = TcpStream::connect(address)
+            .await
+            .map_err(|_| refusal(JoinHttpErrorKind::Connect))?;
+        let remaining = until.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(refusal(JoinHttpErrorKind::Deadline));
+        }
+        let stream = tls
+            .connect(server_name, tcp, remaining)
+            .await
+            .map_err(|e| refusal(JoinHttpErrorKind::Tls(e)))?;
+        let leaf = stream
+            .get_ref()
+            .1
+            .peer_certificates()
+            .and_then(|chain| chain.first())
+            .ok_or_else(|| refusal(JoinHttpErrorKind::Tls(TlsError::MissingPeerCertificate)))?;
+        let leaf_pin = GatewayLeafPin::from_certificate_der(leaf);
+        let mut builder = hyper::client::conn::http1::Builder::new();
+        builder.max_headers(MAX_HEADERS).max_buf_size(HEADER_BYTES);
+        let (mut sender, connection) = builder
+            .handshake::<_, Full<Bytes>>(TokioIo::new(stream))
+            .await
+            .map_err(|_| refusal(JoinHttpErrorKind::Http))?;
+        let started = &mut dispatched;
+        let request_once = async move {
+            // Conservative dispatch boundary: never infer NotDispatched from
+            // a send/response error. There is exactly one send_request call.
+            *started = true;
+            let response = sender
+                .send_request(request)
+                .await
+                .map_err(|_| unknown(JoinHttpErrorKind::Http))?;
+            let status = response.status();
+            if status.is_redirection() {
+                return Err(unknown(JoinHttpErrorKind::RedirectRefused));
+            }
+            let body = Limited::new(response.into_body(), RESPONSE_BYTES)
+                .collect()
+                .await
+                .map_err(|e| {
+                    unknown(if e.is::<LengthLimitError>() {
+                        JoinHttpErrorKind::ResponseTooLarge
+                    } else {
+                        JoinHttpErrorKind::Http
+                    })
+                })?
+                .to_bytes();
+            Ok(JoinHttpResponse {
+                status: status.as_u16(),
+                body: Zeroizing::new(body.to_vec()),
+                leaf_pin,
+            })
+        };
+        // Both futures are owned/polled here. The sender is owned by the
+        // request future and dropped on completion/error, closing admission.
+        let (response, io) = tokio::join!(request_once, connection);
+        let response = response?;
+        io.map_err(|_| unknown(JoinHttpErrorKind::Http))?;
+        Ok(response)
+    })
+    .await;
+    match result {
+        Ok(result) => result,
+        Err(_) => Err(if dispatched {
+            unknown(JoinHttpErrorKind::Deadline)
+        } else {
+            refusal(JoinHttpErrorKind::Deadline)
+        }),
+    }
+    // Timeout/caller cancellation drops the inline connection and its TLS/TCP
+    // handle. No spawned connection task or sender survives this future. This
+    // is local transport closure, not proof that the server rolled back effects.
+}

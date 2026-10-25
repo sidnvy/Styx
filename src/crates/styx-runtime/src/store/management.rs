@@ -14,6 +14,87 @@ pub use handoff::{CredentialRetirementObservation, CredentialRetirementStage};
 #[path = "management_cutover.rs"]
 pub(in crate::store) mod cutover;
 
+/// Read-only reuse of the canonical journal parser. Observations are not new
+/// durability receipts, writer authority, or permission to recover/apply.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+pub(super) fn readonly_inventory(
+    scan: &super::secure_journal::JournalObservation,
+) -> JournalResult<ManagementInventory> {
+    platform::inventory(scan)
+}
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+pub(super) fn readonly_original(
+    scan: &super::secure_journal::JournalObservation,
+    id: &TransactionId,
+) -> JournalResult<OriginalManagementTransaction> {
+    platform::original(scan, id)
+}
+
+/// Canonical native state must agree with a complete original pure C07 tip.
+/// Read-only evidence only: does not clear maintenance or attest durability.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+pub(super) fn validate_readonly_native_tip(
+    scan: &super::secure_journal::JournalObservation,
+    canonical: &super::native_state::ValidatedNativeState,
+    marker: &styx_contracts::native_management::NativeRootMarker,
+) -> JournalResult<()> {
+    let inventory = readonly_inventory(scan)?;
+    let state = canonical.state();
+    if scan.files.is_empty() {
+        return if state.revision == 0 && state.last_transaction.is_none() {
+            Ok(())
+        } else {
+            Err(JournalError::Conflict)
+        };
+    }
+    let tip = state
+        .last_transaction
+        .as_ref()
+        .ok_or(JournalError::Conflict)?;
+    if !inventory.orphans.is_empty()
+        || !inventory.handoffs.is_empty()
+        || inventory.high_water != tip.sequence
+        || inventory.transactions.last().is_none_or(|tx| {
+            tx.intent.transaction_id != tip.transaction_id || tx.intent.sequence != tip.sequence
+        })
+        || inventory.transactions.iter().any(|tx| {
+            tx.prepared.is_none()
+                || tx
+                    .phase_receipts
+                    .last()
+                    .is_none_or(|p| p.stage != DurableStage::Committed)
+        })
+    {
+        return Err(JournalError::Conflict);
+    }
+    let original = readonly_original(scan, &tip.transaction_id)?;
+    let before = super::native_state::decode_state(&original.before, marker)
+        .map_err(|_| JournalError::Conflict)?;
+    let target = super::native_state::decode_state(&original.target, marker)
+        .map_err(|_| JournalError::Conflict)?;
+    if original.intent.sequence != tip.sequence
+        || original.intent.deployment_raw_sha256 != state.deployment_raw_sha256
+        || original.intent.target_state_sha256 != Sha256Digest::of_bytes(&original.target)
+        || original.intent.before_state_sha256 != Sha256Digest::of_bytes(&original.before)
+        || original
+            .phases
+            .last()
+            .is_none_or(|p| p.stage != DurableStage::Committed)
+        || before.state().migration.is_some()
+        || target.state().migration.is_some()
+        || original.target != canonical.raw_bytes()
+    {
+        return Err(JournalError::Conflict);
+    }
+    styx_core::management::state::validate_transition(
+        before.state(),
+        target.state(),
+        marker,
+        &original.intent,
+    )
+    .map_err(|_| JournalError::Conflict)
+}
+
 pub struct PreparedPersistence {
     pub intent: DesiredStateCommit,
     pub raw_intent_sha256: styx_contracts::identity::Sha256Digest,

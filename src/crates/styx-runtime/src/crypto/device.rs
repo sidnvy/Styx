@@ -1,9 +1,9 @@
 use super::{CryptoError, decode_pem};
 use aws_lc_rs::{
-    encoding::{AsDer, PublicKeyX509Der},
+    encoding::{AsDer, Pkcs8V1Der, PublicKeyX509Der},
     rand::SystemRandom,
     rsa::{
-        OAEP_SHA256_MGF1SHA256, OaepPrivateDecryptingKey, OaepPublicEncryptingKey,
+        KeySize, OAEP_SHA256_MGF1SHA256, OaepPrivateDecryptingKey, OaepPublicEncryptingKey,
         PrivateDecryptingKey, PublicEncryptingKey,
     },
     signature::{self, RsaKeyPair},
@@ -38,7 +38,62 @@ impl std::fmt::Debug for DevicePrivateKey {
         f.write_str("DevicePrivateKey([REDACTED])")
     }
 }
+/// Fresh cryptographic DATA, never a device ID, enrolled identity or writer
+/// capability. No Debug/Clone/Serde; caller owns any protected persistence.
+pub struct GeneratedDeviceIdentity {
+    private_key: DevicePrivateKey,
+    _pkcs8_pem: Zeroizing<Vec<u8>>,
+    public_key_pem: String,
+}
+impl GeneratedDeviceIdentity {
+    pub fn private_key(&self) -> &DevicePrivateKey {
+        &self.private_key
+    }
+    pub fn public_key(&self) -> &DevicePublicKey {
+        self.private_key.public_key()
+    }
+    pub fn public_key_pem(&self) -> &str {
+        &self.public_key_pem
+    }
+    /// Borrow only for the caller's protected same-writer persistence. Never
+    /// serialize/log this PEM or treat possession as enrollment authority.
+    #[cfg(any(
+        test,
+        all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
+    ))]
+    pub(crate) fn protected_pkcs8_pem(&self) -> &[u8] {
+        &self._pkcs8_pem
+    }
+}
+
 impl DevicePrivateKey {
+    /// One fresh RSA-3072 key, imported through the existing compatibility
+    /// decoder. This synchronous crypto work belongs on an owned blocking job.
+    /// No filesystem, clock, policy, device ID, network or automatic retry.
+    pub fn generate_rsa3072() -> Result<GeneratedDeviceIdentity, CryptoError> {
+        let generated = PrivateDecryptingKey::generate(KeySize::Rsa3072)
+            .map_err(|_| CryptoError::OperationFailed)?;
+        // AWS-LC's owned DER buffer zeroizes on drop. rcgen supplies the mature
+        // PKCS8 PEM codec; no custom PEM framing or second RSA generation.
+        let encoded = AsDer::<Pkcs8V1Der<'static>>::as_der(&generated)
+            .map_err(|_| CryptoError::OperationFailed)?;
+        let pkcs8 = rustls::pki_types::PrivatePkcs8KeyDer::from(encoded.as_ref());
+        let serializer = Zeroizing::new(
+            rcgen::KeyPair::from_pkcs8_der_and_sign_algo(&pkcs8, &rcgen::PKCS_RSA_SHA256)
+                .map_err(|_| CryptoError::OperationFailed)?,
+        );
+        let pkcs8_pem = Zeroizing::new(serializer.serialize_pem().into_bytes());
+        let private_key = Self::from_pkcs8_pem(&pkcs8_pem)?;
+        let original_public = DevicePublicKey::from_backend(generated.public_key())?;
+        if private_key.public_key().spki_der() != original_public.spki_der() {
+            return Err(CryptoError::OperationFailed);
+        }
+        Ok(GeneratedDeviceIdentity {
+            private_key,
+            _pkcs8_pem: pkcs8_pem,
+            public_key_pem: serializer.public_key_pem(),
+        })
+    }
     pub fn from_pkcs8_pem(pem: &[u8]) -> Result<Self, CryptoError> {
         let der = decode_pem(pem, "PRIVATE KEY", 16 * 1024)?;
         let private =
@@ -154,3 +209,7 @@ fn validate_bits(bits: usize) -> Result<(), CryptoError> {
         Err(CryptoError::UnsupportedDeviceKey)
     }
 }
+
+#[cfg(test)]
+#[path = "device_generation_tests.rs"]
+mod generation_tests;

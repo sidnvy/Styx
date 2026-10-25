@@ -27,3 +27,6 @@ pub mod native_release;
 
 /// Private historical journal codec; not a remote protocol extension.
 pub mod historical_enrollment;
+
+/// Private native Host bootstrap data, never enrollment or execution authority.
+pub mod native_host;

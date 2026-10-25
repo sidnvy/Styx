@@ -29,7 +29,18 @@ pub enum NativeStateKind {
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(tag = "platform", rename_all = "snake_case", deny_unknown_fields)]
 pub enum NativeRootIdentity {
-    Linux { device: u64, inode: u64, uid: u32 },
+    Linux {
+        device: u64,
+        inode: u64,
+        uid: u32,
+    },
+    /// Observed local Windows object identity. DATA only; this does not enable
+    /// configuration writes, journal recovery or execute a selected image.
+    Windows {
+        volume_serial: u64,
+        file_id: u64,
+        owner_sid: String,
+    },
 }
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
