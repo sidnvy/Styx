@@ -153,7 +153,7 @@ pub struct VerifiedNativeRelease {
 impl VerifiedNativeRelease {
     /// Locator from the original verified root, never a caller-selected worker
     /// directory. Consumers retain this object and its pins through cleanup.
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
     pub(crate) fn runtime_root(&self) -> Result<PathBuf> {
         self.revalidate()?;
         Ok(self.prefix.clone())
