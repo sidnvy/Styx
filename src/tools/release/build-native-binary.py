@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Build one native release CLI from an exact clean, already-passing source gate.
-No installation, signing, foreign-image execution or runtime/profile startup.
+Optional macOS local-certificate signing changes only the fresh output copy.
+No installation, foreign-image execution or runtime/profile startup.
 """
 import argparse
 import hashlib
@@ -140,6 +141,51 @@ def normalized_inputs(inputs):
     return result
 
 
+def signing_input(path, limit):
+    require(path.is_absolute() and path.resolve(strict=True) == path,
+            'canonical_signing_input_required')
+    info = path.lstat()
+    require(stat.S_ISREG(info.st_mode) and info.st_nlink == 1
+            and not (getattr(info, 'st_file_attributes', 0) & 0x400)
+            and info.st_size <= limit, 'bounded_regular_signing_input_required')
+    return sha(path)
+
+
+def sign_macos_output(binary, config, node, output, receipt):
+    helper = ROOT / 'src/tools/release/sign-native-macos.mjs'
+    planner = ROOT / 'src/host/build-macos-app.mjs'
+    config_hash = signing_input(config, 4096)
+    node_hash = signing_input(node, 256 * 1048576)
+    helper_hash, planner_hash = sha(helper), sha(planner)
+    argv = [str(node), str(helper), str(config), str(binary)]
+    facts = {'schema': 1, 'kind': 'macos_local_certificate_codesign',
+             'configuration_sha256': config_hash, 'node': str(node),
+             'node_sha256': node_hash, 'helper_sha256': helper_hash,
+             'planner_sha256': planner_hash, 'actual_wait': False}
+    receipt['platform_signature'] = facts
+    with (output / 'codesign.stdout.json').open('xb') as out, (output / 'codesign.stderr.log').open('xb') as err:
+        # Own the helper through actual completion. Its synchronous codesign
+        # calls retain/wait their original children; do not kill the helper on an
+        # outer timer and abandon an uncertain codesign descendant.
+        result = subprocess.run(argv, cwd=ROOT, stdin=subprocess.DEVNULL,
+                                stdout=out, stderr=err)
+        facts.update(actual_wait=True, exit_code=result.returncode)
+    require((output / 'codesign.stdout.json').stat().st_size <= 16384
+            and (output / 'codesign.stderr.log').stat().st_size == 0,
+            'macos_signing_output_bound')
+    report = strict_json((output / 'codesign.stdout.json').read_bytes())
+    facts['report'] = report
+    require(result.returncode == 0 and report.get('status') == 'PASS'
+            and report.get('sign_actual_wait') is True and report.get('sign_exit_code') == 0
+            and report.get('verify_actual_wait') is True and report.get('verify_exit_code') == 0,
+            'macos_signing_not_verified')
+    require(config_hash == signing_input(config, 4096)
+            and node_hash == signing_input(node, 256 * 1048576)
+            and helper_hash == sha(helper) and planner_hash == sha(planner),
+            'macos_signing_inputs_changed')
+    return facts
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ['source-revision', 'gate-receipt', 'target-dir', 'output']:
@@ -148,7 +194,13 @@ def main():
                         help='external source-inputs.json; exact original source.tar must be adjacent')
     parser.add_argument('--expected-source-archive-sha256',
                         help='independent controller pin, required exactly in source-archive mode')
+    parser.add_argument('--macos-local-signing', type=Path,
+                        help='explicit original localSigning JSON; signs only fresh macOS output')
+    parser.add_argument('--macos-signing-node', type=Path,
+                        help='explicit existing Node executable for the original App signing planner')
     args = parser.parse_args()
+    require(bool(args.macos_local_signing) == bool(args.macos_signing_node),
+            'macos_signing_inputs_required_together')
     require(bool(args.source_archive_manifest) == bool(args.expected_source_archive_sha256),
             'archive_manifest_and_expected_sha256_required_together')
     os.umask(0o077)
@@ -182,6 +234,14 @@ def main():
         rust = command(['rustc', '-vV'])
         target = re.search(r'^host: (.+)$', rust, re.M).group(1)
         require(target in TARGETS, 'supported_native_host_required')
+        require(args.macos_local_signing is None or target.endswith('apple-darwin'),
+                'macos_signing_requires_native_darwin')
+        if args.macos_local_signing is not None:
+            signing_input(args.macos_local_signing, 4096)
+            strict_json(args.macos_local_signing.read_bytes())
+            signing_input(args.macos_signing_node, 256 * 1048576)
+            require('src/tools/release/sign-native-macos.mjs' in inputs,
+                    'macos_signing_helper_missing_from_gate_inputs')
         receipt.update(target=target, toolchain=rust, inputs=inputs,
                        gate_receipt_sha256=hashlib.sha256(gate_raw).hexdigest())
         env = dict(os.environ, CARGO_BUILD_JOBS='2', CARGO_NET_OFFLINE='true',
@@ -206,6 +266,13 @@ def main():
         shutil.copyfile(original, binary)
         binary.chmod(0o700)
         require(sha(binary) == original_hash == sha(original), 'native_binary_copy_changed')
+        if args.macos_local_signing is not None:
+            receipt['source_image_sha256'] = original_hash
+            receipt['source_image_bytes'] = original.stat().st_size
+            sign_macos_output(binary, args.macos_local_signing, args.macos_signing_node,
+                              args.output, receipt)
+            require(sha(original) == original_hash, 'original_cached_image_changed')
+        final_hash = sha(binary)
         info_argv = [str(binary), 'build-info', '--json']
         with (args.output / 'build-info.stdout.json').open('xb') as out, (args.output / 'build-info.stderr.log').open('xb') as err:
             try:
@@ -232,12 +299,20 @@ def main():
             source_stable = (archive_source(args.source_archive_manifest, args.source_revision,
                                                      args.expected_source_archive_sha256)
                              == receipt['source_archive'])
-        stable = (source_stable and inputs == normalized_inputs(q['source_inputs'](ROOT))
-                  and sha(binary) == original_hash == sha(original)
+        signing_stable = True
+        if args.macos_local_signing is not None:
+            signing = receipt['platform_signature']
+            signing_stable = (
+                signing_input(args.macos_local_signing, 4096) == signing['configuration_sha256']
+                and signing_input(args.macos_signing_node, 256 * 1048576) == signing['node_sha256']
+                and sha(ROOT / 'src/tools/release/sign-native-macos.mjs') == signing['helper_sha256']
+                and sha(ROOT / 'src/host/build-macos-app.mjs') == signing['planner_sha256'])
+        stable = (signing_stable and source_stable and inputs == normalized_inputs(q['source_inputs'](ROOT))
+                  and sha(binary) == final_hash and sha(original) == original_hash
                   and args.gate_receipt.read_bytes() == gate_raw)
-        receipt.update(cli_binary=str(binary), cli_binary_sha256=original_hash,
+        receipt.update(cli_binary=str(binary), cli_binary_sha256=final_hash,
             cli_build_info={'command': info_argv, 'actual_wait': True, 'exit_code': info.returncode,
-                'binary_sha256': original_hash, 'stdout_utf8': raw.decode('utf-8'),
+                'binary_sha256': final_hash, 'stdout_utf8': raw.decode('utf-8'),
                 'stdout_sha256': hashlib.sha256(raw).hexdigest(), 'stdout_bytes': len(raw),
                 'stderr_sha256': hashlib.sha256(error_raw).hexdigest(), 'stderr_bytes': len(error_raw),
                 'report': report}, input_stability='PASS' if stable else 'FAIL')

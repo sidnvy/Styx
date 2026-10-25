@@ -90,7 +90,7 @@ struct ProductView: View {
             ProductBrand(size: 100).padding(.top, 40)
             Text(productText("欢迎使用 Styx", "Welcome to Styx")).font(.system(size: 32, weight: .semibold))
             Text(productText("在 ChatGPT 中使用你的电脑。", "Use your computer from ChatGPT.")).foregroundStyle(.secondary)
-            Button(productText("开始设置", "Get started")) { model.joining = false; model.page = .capabilities }.buttonStyle(.borderedProminent).controlSize(.large)
+            Button(productText("开始设置", "Get started")) { model.joining = model.nativeHost; model.page = model.nativeHost ? .invitation : .capabilities }.buttonStyle(.borderedProminent).controlSize(.large)
             Button(productText("加入已有 Styx", "Join an existing Styx")) { model.joining = true; model.page = .invitation }.buttonStyle(.link)
         }.frame(maxWidth: .infinity).padding(.bottom, 50)
     }
@@ -100,9 +100,9 @@ struct ProductView: View {
             ProductPanel(title: productText("这台电脑的功能", "Features on this computer")) {
                 ProductCapabilityLabel(kind: .cli)
                 Divider()
-                Toggle(isOn: $model.computer) { ProductCapabilityLabel(kind: .computer) }
+                Toggle(isOn: $model.computer) { ProductCapabilityLabel(kind: .computer) }.disabled(model.nativeHost)
                 Divider()
-                Toggle(isOn: $model.browser) { ProductCapabilityLabel(kind: .browser) }
+                Toggle(isOn: $model.browser) { ProductCapabilityLabel(kind: .browser) }.disabled(model.nativeHost)
                 Text(productText("自动准备专用浏览器；网站登录时由你确认。", "A dedicated browser is prepared for you. Sign in to websites when needed.")).font(.caption).foregroundStyle(.secondary)
             }
             TextField(productText("电脑名称", "Computer name"), text: $model.label)
@@ -110,7 +110,7 @@ struct ProductView: View {
                 Button(productText("返回", "Back")) { model.page = model.joining ? .invitation : .welcome }
                 Spacer()
                 Button(productText("继续", "Continue")) { model.createAndPrepare() }.buttonStyle(.borderedProminent)
-                    .disabled(model.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || model.session["defaults"]["bundle"].string == nil)
+                    .disabled(model.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || (!model.nativeHost && model.session["defaults"]["bundle"].string == nil))
             }
         }
     }
@@ -330,11 +330,24 @@ struct ProductView: View {
         VStack(alignment: .leading, spacing: 20) {
             heading("Styx", productText("查看这台电脑的功能和连接。", "Check this computer’s features and connection."))
             ProductPanel(title: productText("这台电脑", "This computer")) {
+                if model.nativeHost {
+                    Text("Host: " + (model.status["foreground"]["status"].string ?? "unknown"))
+                    Text("Exec transport: " + (model.status["foreground"]["execConnection"].string ?? "unknown"))
+                    if model.status["enrollment"]["status"].string == "awaiting_approval" {
+                        Text(model.status["enrollment"]["comparison_code"].string ?? "").textSelection(.enabled)
+                        Text(model.status["enrollment"]["fingerprint"].string ?? "").font(.caption).textSelection(.enabled)
+                        Button(productText("检查批准", "Check confirmation")) { model.nativeClaim() }
+                    }
+                    Button(productText("重新连接", "Reconnect")) { model.resumeForeground() }.disabled(model.busy || model.status["admission_fenced"].bool)
+                    Button(productText("暂停连接", "Pause connection")) { model.nativePause() }.disabled(model.busy)
+                    Text(productText("仅管理本机 Host；工具效果、Computer Use 和账号尚未验收。", "This App manages this Host only. Tool effects, Computer Use and account acceptance are separate."))
+                } else {
                 statusRow(ProductCapabilityKind.cli.title, model.journey["readiness"]["exec"]["status"].string)
                 statusRow(ProductCapabilityKind.browser.title, model.browserNotApproved ? "not_approved" : model.journey["readiness"]["browser"]["status"].string)
                 statusRow(ProductCapabilityKind.computer.title, model.computerNotApproved ? "not_approved" : model.journey["readiness"]["desktop"]["status"].string)
+                }
                 approvalNotice
-                if !model.localPrepared { Button(productText("继续设置", "Continue setup")) { model.page = .preparation } }
+                if !model.nativeHost && !model.localPrepared { Button(productText("继续设置", "Continue setup")) { model.page = .preparation } }
                 if model.computerApproved && (!model.axGranted || !model.screenGranted) { Button(productText("检查系统权限", "Review system permissions")) { model.page = .permissions } }
                 if model.foregroundRecoveryNeeded { Button(productText("恢复电脑连接", "Resume computer connection")) { model.resumeForeground() } }
             }
@@ -395,8 +408,8 @@ struct ProductView: View {
                         Text(productText("可选能力由管理电脑审批。请在管理电脑核对当前授权；这里不会自行扩大权限。", "Optional capabilities are approved on the main computer. Review authorization there; this computer cannot expand it itself.")).font(.callout).foregroundStyle(.secondary)
                         approvalNotice
                     } else {
-                        Toggle(isOn: $model.computer) { ProductCapabilityLabel(kind: .computer) }
-                        Toggle(isOn: $model.browser) { ProductCapabilityLabel(kind: .browser) }
+                        Toggle(isOn: $model.computer) { ProductCapabilityLabel(kind: .computer) }.disabled(model.nativeHost)
+                        Toggle(isOn: $model.browser) { ProductCapabilityLabel(kind: .browser) }.disabled(model.nativeHost)
                         Text(productText("应用更改时，Styx 会暂时断开这台电脑。请先完成正在进行的操作。", "Applying changes temporarily disconnects this computer. Finish any active work first.")).font(.caption).foregroundStyle(.secondary)
                         Button(productText("应用更改", "Apply changes")) { model.updateCapabilities() }
                     }
@@ -503,11 +516,12 @@ struct ProductAcceptanceField: NSViewRepresentable {
     private var menuSizeTimer: Timer?
     var showMenuInvitation: (() -> Void)?
 
-    init(sessionURL: URL) {
-        // Bootstrap was already checked by the App's child-pipe parser; keep a
-        // failable client construction here so tests can cover its own boundary.
-        do { model = try ProductModel(sessionURL: sessionURL) }
+    convenience init(sessionURL: URL) {
+        do { self.init(model: try ProductModel(sessionURL: sessionURL)) }
         catch { preconditionFailure("Invalid owned Styx bootstrap") }
+    }
+    init(model: ProductModel) {
+        self.model = model
         let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 680, height: 640), styleMask: [.titled, .closable, .miniaturizable, .resizable], backing: .buffered, defer: false)
         window.title = "Styx"; window.minSize = NSSize(width: 620, height: 560)
         super.init(window: window)
@@ -598,6 +612,12 @@ struct ProductAcceptanceField: NSViewRepresentable {
             do {
                 // Quitting needs only the authenticated lifecycle endpoint. A
                 // page bootstrap also scans connections and must not hold quit.
+                if model.nativeHost {
+                    try await model.client.quitNative()
+                    observationTimer?.invalidate(); observationTimer = nil
+                    menuSizeTimer?.invalidate(); menuSizeTimer = nil; menuPopover?.performClose(nil); settingsWindow?.close()
+                    completion(true); return
+                }
                 let session = try await model.client.read("session")
                 guard session["nativeAppLifecycleSupported"].bool else { throw ProductCoreError.unavailable }
                 let lifecycle = try await model.client.write("app/quit", ["authorize": .bool(true)])["lifecycle"]

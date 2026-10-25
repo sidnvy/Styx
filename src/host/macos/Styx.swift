@@ -483,6 +483,9 @@ func productSystemQuitReason(_ reason: OSType?) -> Bool {
     var setupWindow: SetupWindowController?
     #endif
     #if STYX_PRODUCT_UI
+    var nativeCore: ProductOwnedCore?
+    var nativeCoreStarting = false
+    var nativeCoreAttempted = false
     var componentTimer: Timer?
     var componentObservationPending = false
     var computerUseRequested = false
@@ -567,12 +570,19 @@ func productSystemQuitReason(_ reason: OSType?) -> Bool {
         do { runtime = try RuntimeDirectory(); try start() }
         catch { phase = "blocked"; statusLine?.title = "Blocked: \(error)" }
         #endif
+        // Product startup is exclusively Rust. Missing native metadata is a
+        // refusal, never an implicit selection of the historical Node helper.
+        #if STYX_PRODUCT_UI
+        do { try startSetup(openWindow: !UserDefaults.standard.bool(forKey: setupPreference)) }
+        catch { setupStatusLine?.title = "Native Host settings unavailable; original identity retained" }
+        #else
         // A competing Cua owner does not prevent opening this app's setup UI.
         if let resources = Bundle.main.resourceURL,
-           FileManager.default.isExecutableFile(atPath: bundledCoreExecutable(resources).path) {
+           (FileManager.default.isExecutableFile(atPath: bundledCoreExecutable(resources).path) || FileManager.default.fileExists(atPath: resources.appendingPathComponent("macos-runtime.json").path)) {
             do { try startSetup(openWindow: !UserDefaults.standard.bool(forKey: setupPreference)) }
             catch { setupStatusLine?.title = "Local setup unavailable; reopen Settings" }
         }
+        #endif
     }
     private func bundledCoreExecutable(_ resources: URL) -> URL {
         let helper = resources.deletingLastPathComponent().appendingPathComponent("Helpers/Styx Core.app")
@@ -586,6 +596,26 @@ func productSystemQuitReason(_ reason: OSType?) -> Bool {
         if let url = setupURL { if setupOpenRequested { showSetup(url) }; return }
         guard setupProcess == nil else { return }
         guard let resources = Bundle.main.resourceURL else { throw HostError.daemonUnavailable }
+        #if STYX_PRODUCT_UI
+        nativeCoreAttempted = true
+        if let _ = nativeCore { setupWindow?.present(); return }
+        guard !nativeCoreStarting else { return }; nativeCoreStarting = true
+        Task {
+            defer { nativeCoreStarting = false }
+            do {
+                let core = try await Task.detached { try ProductOwnedCore.open(resources: resources) }.value
+                guard !terminationPending else { core.requestEOF(); return }
+                nativeCore = core
+                let model = ProductModel(owned: core)
+                setupWindow = ProductWindowController(model: model)
+                await model.bootstrap()
+                guard model.loaded else { core.requestEOF(); nativeCore = nil; throw ProductOwnedCoreError.unavailable }
+                setupStatusLine?.title = "Native Host settings ready"
+                if setupOpenRequested { setupWindow?.present(); setupOpenRequested = false }
+            } catch { setupStatusLine?.title = "Native package unavailable; original identity retained" }
+        }
+        return
+        #else
         let node = bundledCoreExecutable(resources)
         let launcher = resources.appendingPathComponent("onboarding/vnext/host/macos/setup-launcher.mjs")
         guard FileManager.default.isExecutableFile(atPath: node.path),
@@ -649,6 +679,7 @@ func productSystemQuitReason(_ reason: OSType?) -> Bool {
         do { try child.run() }
         catch { stopSetup(); throw error }
         try? input.fileHandleForReading.close(); try? output.fileHandleForWriting.close()
+        #endif
     }
     func showSetup(_ url: URL) {
         if setupWindow == nil {
@@ -672,6 +703,7 @@ func productSystemQuitReason(_ reason: OSType?) -> Bool {
     }
     #if STYX_PRODUCT_UI
     @objc func toggleProductPanel() {
+        if nativeCore != nil { setupWindow?.present(); return }
         menuOpenRequested = true
         do {
             try startSetup(openWindow: false)
@@ -774,6 +806,7 @@ func productSystemQuitReason(_ reason: OSType?) -> Bool {
     #endif
     func stopSetup() {
         #if STYX_PRODUCT_UI
+        nativeCore?.requestEOF(); nativeCore = nil
         componentTimer?.invalidate(); componentTimer = nil; computerUseRequested = false
         #endif
         setupWindow?.close(); setupWindow = nil
@@ -912,6 +945,20 @@ func productSystemQuitReason(_ reason: OSType?) -> Bool {
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         #if STYX_PRODUCT_UI
         if terminationPending { return .terminateLater }
+        if nativeCoreAttempted {
+            // Original bootstrap worker still owns its child until it completes.
+            // A UI close cannot make an in-flight verified launch ownerless.
+            if nativeCoreStarting { return .terminateCancel }
+            guard let _ = nativeCore else { stop(); return .terminateNow }
+            terminationPending = true
+            setupWindow?.prepareToQuit { [weak self] approved in
+                guard let owner = self else { sender.reply(toApplicationShouldTerminate: false); return }
+                owner.terminationPending = false
+                if approved { owner.nativeCore = nil; owner.stop() }
+                sender.reply(toApplicationShouldTerminate: approved)
+            }
+            return .terminateLater
+        }
         let reason = NSAppleEventManager.shared().currentAppleEvent?.paramDescriptor(forKeyword: AEKeyword(kAEQuitReason))?.enumCodeValue
         let userQuit = !terminationPreservesRecovery && !productSystemQuitReason(reason)
         if userQuit && !terminationApproved && setupURL == nil {

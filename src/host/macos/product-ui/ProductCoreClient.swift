@@ -12,7 +12,7 @@ enum ProductNativeDiagnostics {
 
 // This client uses only the private bootstrap handed to the owning App by its
 // Node child. Credentials stay in memory and never enter URLs after bootstrap.
-indirect enum ProductJSON: Codable, Equatable {
+indirect enum ProductJSON: Codable, Equatable, Sendable {
     case object([String: ProductJSON]), array([ProductJSON]), string(String), number(Double), bool(Bool), null
     init(from decoder: Decoder) throws {
         let c = try decoder.singleValueContainer()
@@ -56,10 +56,12 @@ final class ProductRedirectBlocker: NSObject, URLSessionTaskDelegate {
 }
 
 final class ProductCoreClient {
-    private let origin: URL
-    private let token: String
+    private let origin: URL?
+    private let token: String?
+    private let owned: ProductOwnedCore?
+    var isNativeHost: Bool { owned != nil }
     private var csrf: String?
-    private let transport: URLSession
+    private let transport: URLSession?
     private let redirectBlocker = ProductRedirectBlocker()
     static let reads: Set<String> = ["join/recovery", "native-signing/status", "app/lifecycle", "session", "snapshot", "native-status", "status", "journey", "acceptance", "plugin", "browser", "diagnostics"]
     static let writes: Set<String> = ["join/recover", "join/rollback", "host-payload/handoff/prepare", "host-payload/handoff/status", "host-payload/handoff/cancel", "native-signing/plan", "native-signing/apply", "app/quit", "app/login", "device/revoke", "create", "local-setup", "advance", "foreground", "foreground/stop", "browser/prepare", "capabilities", "tunnel/configure", "tunnel/start", "tunnel/stop", "plugin/profile", "plugin/record", "connection-handoff", "acceptance/begin", "acceptance/confirm", "acceptance/desktop-readback", "devices", "default-device", "device-ingress/plan", "device-ingress/verify", "device-ingress/prepare", "device-ingress/status", "device-ingress/recover", "pairing-link/close", "pairing-link/inspect", "pairing-link/accept", "pairing-link/create", "pending/list", "pending/approve"]
@@ -77,7 +79,13 @@ final class ProductCoreClient {
         return (origin, token)
     }
 
+    init(owned: ProductOwnedCore) { self.owned = owned; origin = nil; token = nil; transport = nil }
+    func native(_ operation: String, _ input: [String: ProductJSON] = [:]) async throws -> ProductJSON {
+        guard let owner = owned else { throw ProductCoreError.unavailable }; return try await owner.call(operation, input)
+    }
+    func quitNative() async throws { guard let owner = owned else { throw ProductCoreError.unavailable }; try await owner.quitAndJoin() }
     init(sessionURL: URL) throws {
+        owned = nil
         guard let bootstrap = Self.bootstrap(sessionURL) else { throw ProductCoreError.invalidBootstrap }
         origin = bootstrap.origin; token = bootstrap.token
         let config = URLSessionConfiguration.ephemeral
@@ -87,12 +95,23 @@ final class ProductCoreClient {
         config.timeoutIntervalForRequest = 90; config.timeoutIntervalForResource = 300
         transport = URLSession(configuration: config, delegate: redirectBlocker, delegateQueue: nil)
     }
-    deinit { transport.invalidateAndCancel() }
+    deinit { transport?.invalidateAndCancel(); owned?.requestEOF() }
     func read(_ route: String) async throws -> ProductJSON {
+        if isNativeHost {
+            guard route == "status" || route == "native-status" else { throw ProductCoreError.rejected }; return try await native("status")
+        }
         guard Self.reads.contains(route) else { throw ProductCoreError.rejected }
         return try await request(route, body: nil)
     }
     func write(_ route: String, _ body: [String: ProductJSON]) async throws -> ProductJSON {
+        if isNativeHost {
+            switch route {
+            case "pairing-link/inspect": return try await native("inspectJoin", body)
+            case "foreground": return try await native("connect")
+            case "foreground/stop": return try await native("disconnect")
+            default: throw ProductCoreError.rejected
+            }
+        }
         guard Self.writes.contains(route), csrf != nil else { throw ProductCoreError.rejected }
         return try await request(route, body: .object(body))
     }
@@ -114,6 +133,7 @@ final class ProductCoreClient {
         return value
     }
     private func response(_ route: String, body: ProductJSON?, mimeType: String) async throws -> Data {
+        guard let origin = origin, let token = token, let transport = transport else { throw ProductCoreError.rejected }
         let url = origin.appendingPathComponent("api/" + route)
         var request = URLRequest(url: url)
         request.httpMethod = body == nil ? "GET" : "POST"

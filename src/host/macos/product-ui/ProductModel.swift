@@ -171,6 +171,9 @@ enum ProductRestorationPolicy {
 
 @MainActor final class ProductModel: ObservableObject {
     let client: ProductCoreClient
+    var nativeHost: Bool { client.isNativeHost }
+    func nativeClaim() { perform { [self] in _ = try await client.native("claimJoin") } }
+    func nativePause() { perform { [self] in _ = try await client.native("disconnect") } }
     #if STYX_TESTING
     var testSuppressObservations = false
     var testPreview = false
@@ -331,6 +334,20 @@ enum ProductRestorationPolicy {
         && ["verified", "not_required"].contains(acceptance["desktop"]["status"].string ?? "")
         && ["verified", "not_required"].contains(acceptance["browser"]["status"].string ?? "")
     }
+    init(owned: ProductOwnedCore) {
+        client = ProductCoreClient(owned: owned)
+        permissionReader = { (AXIsProcessTrusted(), CGPreflightScreenCaptureAccess()) }
+        permissionActions = .system
+        computer = false; browser = false; joining = true
+    }
+    private func applyNative(_ value: ProductJSON) throws {
+        guard value["mode"].string == "rust_host" else { throw ProductCoreError.invalidResponse }
+        status = value; journey = .null; browserObservation = .null; acceptance = .null
+        if !restoredPage {
+            restoredPage = true
+            page = value["configuration"] == .null && value["enrollment"] == .null ? .welcome : .overview
+        }
+    }
     init(sessionURL: URL, permissionReader: @escaping () -> (accessibility: Bool, screenRecording: Bool) = {
         (AXIsProcessTrusted(), CGPreflightScreenCaptureAccess())
     }, permissionActions: ProductPermissionActions? = nil) throws {
@@ -349,6 +366,10 @@ enum ProductRestorationPolicy {
         defer { busy = false }
         do {
             loadingMessage = productText("正在连接本机 Styx…", "Connecting to Styx on this Mac…")
+            if nativeHost {
+                try applyNative(try await client.native("startupStatus"))
+                label = Host.current().localizedName ?? "Mac"; loaded = true; return
+            }
             session = try await client.read("session")
             label = session["defaults"]["label"].string ?? Host.current().localizedName ?? "Mac"
             try await reload()
@@ -398,6 +419,7 @@ enum ProductRestorationPolicy {
         }
     }
     private func reload() async throws {
+        if nativeHost { try applyNative(try await client.native("status")); return }
         // Native permission observation must not depend on a successful Core read.
         observePermissions()
         let revision = mutationRevision
@@ -548,6 +570,14 @@ enum ProductRestorationPolicy {
         }
     }
     func createAndPrepare() {
+        if nativeHost {
+            perform { [self] in
+                guard let origin = joinAcceptance["origin"].string,
+                      let ca = joinAcceptance["caSha256"].string else { throw ProductCoreError.rejected }
+                _ = try await client.native("join", ["approvedGatewayOrigin": .string(origin), "approvedCaSha256": .string(ca), "label": .string(label), "computer": .bool(false), "browser": .bool(false), "browserChannel": .null, "persistLogin": .bool(false)])
+                joinAcceptance = .null; inspection = .null; page = .overview
+            }; return
+        }
         guard status["deployment"] == .null else { page = .preparation; return }
         perform { [self] in
             guard status["deployment"] == .null else { throw ProductCoreError.rejected }
@@ -666,6 +696,10 @@ enum ProductRestorationPolicy {
         perform { [self] in inspection = try await client.write("pairing-link/inspect", ["link": .string(input)]) }
     }
     func acceptInvitation() {
+        if nativeHost {
+            guard inspection["preview"]["origin"].string != nil, inspection["preview"]["caSha256"].string != nil else { error = productText("需要核对证书", "Certificate confirmation required"); return }
+            joinAcceptance = inspection["preview"]; joining = true; page = .capabilities; return
+        }
         perform { [self] in
             // Existing deployments may only use the Core-admitted recovery path.
             guard recoveringJoin ? canRecoverJoin : status["deployment"] == .null else { throw ProductCoreError.rejected }
@@ -878,6 +912,7 @@ enum ProductRestorationPolicy {
         }
     }
     func resumeForeground() {
+        if nativeHost { perform { [self] in _ = try await client.native("connect") }; return }
         perform { [self] in
             _ = try await client.write("foreground", ["authorize": .bool(true)])
             foregroundRecoveryNeeded = false
