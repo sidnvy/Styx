@@ -135,6 +135,7 @@ impl<L: GatewayOwnerLifecycle> Transport<RoleServer> for ObservedTransport<L> {
                 .lock()
                 .expect("session lifetime")
                 .transport_joined = true;
+            self.life.changed.notify_waiters();
         }
         if fenced.is_err() {
             return Err(TransportError::FenceRefused);
@@ -195,7 +196,13 @@ impl<L: GatewayOwnerLifecycle> SessionManager for BoundedManager<L> {
         self.life.close().map_err(|_| SessionError::Refused)?;
         // Cancellation token wakes the official worker even if a stream is backpressured.
         self.inner.close_session(id).await?;
-        Ok(()) // means close accepted, not transport joined/owner cleanup completed
+        // Successful DELETE is an ordered close boundary, not merely the SDK
+        // close event being accepted. This awaits the SAME original Life job;
+        // timeout/HTTP waiter loss leaves its supervisor and Closing slot owned.
+        self.life
+            .wait_complete()
+            .await
+            .map_err(|_| SessionError::Refused)
     }
     async fn create_stream(
         &self,

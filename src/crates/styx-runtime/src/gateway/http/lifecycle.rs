@@ -4,7 +4,7 @@ use std::{
     sync::{Arc, Mutex, Weak},
     time::Duration,
 };
-use tokio::task::JoinSet;
+use tokio::{sync::Notify, task::JoinSet};
 use tokio_util::sync::CancellationToken;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -44,6 +44,7 @@ pub(super) struct Life<L: GatewayOwnerLifecycle> {
     pub owner: VerifiedGatewayOwner,
     pub lifecycle: Arc<L>,
     pub facts: Mutex<CloseFacts>,
+    pub changed: Notify,
     pub cancellation: Mutex<Option<CancellationToken>>,
     pub supervisor: Weak<Supervisor>,
     // All SDK handler/transport and cleanup owners retain this same real lease.
@@ -57,6 +58,35 @@ impl<L: GatewayOwnerLifecycle> Life<L> {
     pub fn is_complete(&self) -> bool {
         let f = self.facts.lock().expect("session lifetime");
         f.fenced && f.cleanup == Some(OwnerCleanup::Complete) && f.transport_joined
+    }
+    /// Wait only for this Life's original supervised cleanup and actual SDK
+    /// transport close. Dropping this waiter cannot cancel or recreate either.
+    /// The outer HTTP deadline remains independently bounded at five seconds.
+    pub(super) async fn wait_complete(&self) -> Result<(), OwnerFenceError> {
+        tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                let changed = self.changed.notified();
+                tokio::pin!(changed);
+                // Register before sampling facts: cleanup/transport completion
+                // between the sample and await must not lose its notification.
+                changed.as_mut().enable();
+                {
+                    let facts = self.facts.lock().expect("session lifetime");
+                    if facts.cleanup == Some(OwnerCleanup::Unknown) {
+                        return Err(OwnerFenceError);
+                    }
+                    if facts.fenced
+                        && facts.cleanup == Some(OwnerCleanup::Complete)
+                        && facts.transport_joined
+                    {
+                        return Ok(());
+                    }
+                }
+                changed.await;
+            }
+        })
+        .await
+        .map_err(|_| OwnerFenceError)?
     }
     /// Sync fence precedes any async close, even when invoked from Drop.
     pub fn close(self: &Arc<Self>) -> Result<(), OwnerFenceError> {
@@ -110,6 +140,7 @@ impl<L: GatewayOwnerLifecycle> Life<L> {
                     .cleanup_owner(&this.owner, Duration::from_secs(5))
                     .await;
                 this.facts.lock().expect("session lifetime").cleanup = Some(result);
+                this.changed.notify_waiters();
             });
         }
         Ok(())

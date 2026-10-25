@@ -165,6 +165,7 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayHttp<B> {
             owner: owner.clone(),
             lifecycle: self.backend.clone(),
             facts: Mutex::new(CloseFacts::default()),
+            changed: tokio::sync::Notify::new(),
             cancellation: Mutex::new(None),
             supervisor: Arc::downgrade(&self.supervisor),
             _session_slot: slot,

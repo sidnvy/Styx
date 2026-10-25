@@ -36,3 +36,11 @@ The first real two-device App/CLI journey completed both enrollments, then the o
 The bootstrap now allocates the previously unused16MiB to the relay:32MiB for two simultaneously retained Host links and the unchanged32MiB MCP partition. Total and per-peer wire/queue limits, handshake authentication and retained/unknown capacity rules are unchanged. This is a bounded default, not an unlimited device-count or RSS claim. Future scaling needs an explicit budget policy; it must not silently reduce per-link reserves or evict unknown work. WSS HTTP capacity/admission/unavailability statuses remain distinct typed failures, without logging response headers, bodies or credentials.
 
 The original failed journeys remain failed evidence. The new two-Host scenario must actually establish both links and observe independent execution across Pause/reconnect/Quit before this fix is accepted.
+
+## Ordered MCP termination before App stop
+
+After the two-Host repair, real App execution/Pause/reconnect/Quit and independent CLI execution succeeded, but Gateway shutdown reported two unconfirmed owner cleanups. The original native processes did exit; those facts cannot substitute for the Gateway's missing per-owner cleanup reply. The exact owner IDs were not established by the aggregate shutdown log.
+
+`BoundedManager::close_session` previously returned success immediately after scheduling `Life::close` and the SDK close event. It now awaits the same retained supervised cleanup plus fenced and actual SDK transport-joined facts. `Life` notifications wake the bounded waiter; no new cleanup request, ledger or authority is created. HTTP waiter cancellation leaves the original supervised job owned. Original5s cleanup and outer HTTP deadlines stay unchanged; Unknown/deadline cannot become success. Drop still only fences/signals.
+
+This repairs ordered explicit MCP termination followed by App Pause/Quit if actual cleanup completes. It does not establish a remote graceful stop when the Chat owner remains active. That case requires a separately reviewed, negotiated drain of the exact authenticated Host connection and its original bindings, preserving another device used by the same owner. Local process exit or a new Host generation must not clear an old remote Unknown. The external drain proposal is not implementation or acceptance.
