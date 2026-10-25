@@ -285,8 +285,8 @@ def execute(args):
         pin = tomllib.loads((ROOT / "rust-toolchain.toml").read_text())["toolchain"]["channel"]
         tc = gate.run("rustc-version", ["rustc", "--version"], timeout=30)
         cg = gate.run("cargo-version", ["cargo", "--version"], timeout=30)
-        gate.semantic(tc, [] if pin == policy["toolchain"] and re.match(r"^rustc 1\.94\.1\s", gate.read("rustc-version")) else ["exact_rustc_and_toolchain_pin_required"])
-        gate.semantic(cg, [] if re.match(r"^cargo 1\.94\.1\s", gate.read("cargo-version")) else ["exact_cargo_required"])
+        gate.semantic(tc, [] if pin == policy["toolchain"] and re.match(r"^rustc " + re.escape(pin) + r"\s", gate.read("rustc-version")) else ["exact_rustc_and_toolchain_pin_required"])
+        gate.semantic(cg, [] if re.match(r"^cargo " + re.escape(pin) + r"\s", gate.read("cargo-version")) else ["exact_cargo_required"])
         if tc["status"] != "PASS" or cg["status"] != "PASS":
             raise ValueError("toolchain_precondition_failed")
         md = gate.run("dependency-metadata", ["cargo", "metadata", "--no-deps", "--format-version", "1", "--locked", "--offline"], timeout=60)
