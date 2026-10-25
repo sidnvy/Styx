@@ -137,6 +137,14 @@ fn bounded_sid(sid: Security::PSID, start: usize, end: usize) -> Result<String> 
 /// Owner must be the current user. Only that user, SYSTEM and Administrators may
 /// receive effective allow ACEs. Null/unrecognized DACLs and ACE forms fail shut.
 pub(super) fn private(file: &File) -> Result<String> {
+    checked_acl(file, false)
+}
+/// Local administrator-selected executable: ordinary read ACEs are permitted,
+/// but only the current user and OS administrators may alter the image.
+pub(super) fn local_executable_acl(file: &File) -> Result<String> {
+    checked_acl(file, true)
+}
+fn checked_acl(file: &File, executable: bool) -> Result<String> {
     let mut owner = ptr::null_mut();
     let mut acl = ptr::null_mut();
     let mut descriptor = ptr::null_mut();
@@ -170,7 +178,13 @@ pub(super) fn private(file: &File) -> Result<String> {
     let current = current_sid()?;
     let actual = bounded_sid(owner, base, end)?;
     let acl_start = acl as usize;
-    if actual != current
+    let trusted = |sid: &str| {
+        sid == current
+            || sid == "S-1-5-18"
+            || sid == "S-1-5-32-544"
+            || executable && sid == "S-1-5-80-956008885-3418522649-1831038044-1853292631-2271478464"
+    };
+    if (!executable && actual != current || executable && !trusted(&actual))
         || acl_start < base
         || acl_start
             .checked_add(size_of::<Security::ACL>())
@@ -232,11 +246,15 @@ pub(super) fn private(file: &File) -> Result<String> {
                     .checked_add(std::mem::offset_of!(ACCESS_ALLOWED_ACE, SidStart))
                     .ok_or(StoreError::NotPrivate)?;
                 let allowed = bounded_sid(raw.with_addr(sid_address), address, ace_end)?;
-                if ace.Mask != 0
-                    && allowed != current
-                    && allowed != "S-1-5-18"
-                    && allowed != "S-1-5-32-544"
-                {
+                // Generic rights are not pre-mapped by GetSecurityInfo. Include
+                // both generic and concrete modification/delete/security rights.
+                const READ_ONLY: u32 = 0x8000_0000 | 0x2000_0000 | 0x0012_0000 | 0x0000_00A9;
+                let relevant = if executable {
+                    ace.Mask & !READ_ONLY
+                } else {
+                    ace.Mask
+                };
+                if relevant != 0 && !trusted(&allowed) {
                     return Err(StoreError::NotPrivate);
                 }
             }

@@ -1,6 +1,6 @@
 pub mod codex;
 
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 pub mod browser;
 
 #[cfg(target_os = "linux")]

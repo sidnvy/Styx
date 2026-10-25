@@ -53,6 +53,8 @@ mod platform;
 mod platform;
 
 #[cfg(target_os = "windows")]
+pub(crate) use platform::WindowsLocalExecutable;
+#[cfg(target_os = "windows")]
 pub(crate) use platform::file_identity as windows_file_identity;
 
 #[derive(Debug, Error)]
@@ -351,6 +353,25 @@ impl PrivateRoot {
     #[cfg(target_os = "windows")]
     pub(crate) fn revalidate_runtime_directory(&self) -> Result<()> {
         self.inner.validate_root()
+    }
+
+    /// Fresh runtime directory only. Existing names are refused, never adopted.
+    #[cfg(target_os = "windows")]
+    pub(crate) fn create_runtime_child(&self, name: &str) -> Result<Self> {
+        self.inner
+            .create_fresh_child(std::ffi::OsStr::new(name))
+            .map(|inner| Self { inner })
+            .map_err(|failure| failure.cause)
+    }
+
+    /// Bounded runtime-only asset publication; no durable configuration writes.
+    #[cfg(target_os = "windows")]
+    pub(crate) fn create_runtime_asset(
+        &self,
+        name: &str,
+        bytes: &[u8],
+    ) -> Result<(RawFile, std::fs::File)> {
+        self.inner.create_runtime_asset(name, bytes)
     }
 
     /// App onboarding input only: fixed destinations, exclusive creation and

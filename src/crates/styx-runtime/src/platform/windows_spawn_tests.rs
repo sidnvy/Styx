@@ -210,3 +210,46 @@ async fn actual_pinned_codex_suspended_job_cleanup_and_waiter_drop() {
     // No new business operation/nonce or descendant-containment success is
     // inferred from this cancelled-waiter branch. Ordinary Host E2E is separate.
 }
+
+#[test]
+#[allow(unsafe_code)]
+fn browser_fixed_argv_roundtrips_through_windows_parser() {
+    use windows_sys::Win32::{Foundation::LocalFree, UI::Shell::CommandLineToArgvW};
+    let application = OsStr::new(r"D:\owned runtime\node.exe");
+    let entry = Entry::Browser {
+        worker: PathBuf::from(r"D:\owned space\worker.mjs"),
+        config: PathBuf::from("D:\\config\\quoted\"value\\tail\\"),
+    };
+    let command = command_line(application, &entry).unwrap();
+    let mut count = 0;
+    // Independent OS parser: no child, shell, browser or fixture side effect.
+    let parsed = unsafe { CommandLineToArgvW(command.as_ptr(), &mut count) };
+    assert!(!parsed.is_null());
+    let values: Vec<OsString> = (0..count as usize)
+        .map(|i| {
+            let start = unsafe { *parsed.add(i) };
+            let mut length = 0;
+            while unsafe { *start.add(length) } != 0 {
+                length += 1;
+            }
+            OsString::from_wide(unsafe { std::slice::from_raw_parts(start, length) })
+        })
+        .collect();
+    unsafe {
+        LocalFree(parsed.cast());
+    }
+    let Entry::Browser { worker, config } = entry else {
+        unreachable!()
+    };
+    assert_eq!(
+        values,
+        vec![
+            application.to_os_string(),
+            worker.into_os_string(),
+            "--config".into(),
+            config.into_os_string()
+        ]
+    );
+    assert!(quote_argument(OsStr::new("bad\0arg"), &mut Vec::new()).is_err());
+    assert!(quote_argument(OsStr::new(&"\\".repeat(32768)), &mut Vec::new()).is_err());
+}

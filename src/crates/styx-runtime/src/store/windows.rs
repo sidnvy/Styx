@@ -671,3 +671,7 @@ mod tests;
 #[cfg(test)]
 #[path = "windows_publication_tests.rs"]
 mod publication_tests;
+
+#[path = "windows_browser.rs"]
+mod browser;
+pub(crate) use browser::LocalExecutable as WindowsLocalExecutable;

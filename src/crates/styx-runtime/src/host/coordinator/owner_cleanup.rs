@@ -113,7 +113,7 @@ async fn run_cleanup(
     // Browser ownership ends independently of Codex resources. Cancel its
     // in-flight wait before seeking global I/O quiescence; the original action
     // remains Unknown, and only exact native scope evidence settles liveness.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     let _browser = super::browser::cleanup_browser_owner(
         inner.clone(),
         handle.authority.owner(),
@@ -230,7 +230,7 @@ async fn run_cleanup(
         facts.deadline_exhausted |= desktop.deadline_exhausted;
         facts.blocked.extend(desktop.blocked);
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     {
         let browser =
             super::browser::collect_browser_retention(inner, Some(handle.authority.owner()), until)
@@ -246,7 +246,7 @@ async fn run_cleanup(
     facts.deadline_exhausted |= tokio::time::Instant::now() >= until;
     facts.physical_complete = facts.unreleased_records == 0 && facts.blocked.is_empty();
     drop(state);
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     if facts.physical_complete {
         // Core includes ReleasePending in the original owner's inventory.
         // Only its empty cleanup proof permits retiring this scope metadata.

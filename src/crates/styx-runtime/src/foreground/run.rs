@@ -76,12 +76,12 @@ impl Admitted {
         Ok(())
     }
 }
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 struct ForegroundBrowser {
     admitted: Arc<Admitted>,
     source: Arc<dyn crate::host::protocol::browser::BrowserBootstrap>,
 }
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 impl crate::host::protocol::browser::BrowserBootstrap for ForegroundBrowser {
     fn prepare_profile(
         &self,
@@ -481,7 +481,7 @@ async fn run_owned(
     };
     // Browser is an independent optional local capability. Unsupported or
     // unavailable Browser inputs cannot take down an already admitted Exec Host.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     let browser: Option<Arc<dyn crate::host::protocol::browser::BrowserBootstrap>> =
         if mode == HostWireMode::PairedV3 {
             let retained = admitted.clone();
@@ -571,7 +571,7 @@ async fn run_owned(
             });
             #[cfg(not(target_os = "windows"))]
             let protocol = protocol.and_then(|protocol| {
-                #[cfg(target_os = "linux")]
+                #[cfg(any(target_os = "linux", target_os = "windows"))]
                 let protocol = if let Some(source) = &browser {
                     protocol.with_browser_profiles(source.clone())?
                 } else {
@@ -681,7 +681,7 @@ async fn run_owned(
             }
             // EOF abandons only a response waiter. Explicit shutdown joins all
             // retained blocking input jobs before releasing original owner pins.
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
             session.drain_browser_inputs().await;
         }
         Err(error) => {
@@ -730,7 +730,7 @@ async fn run_owned(
     event(&events, &cancel, "stopped", &device, None);
     // Explicit drop order: observed signed files / lease outlive native cleanup.
     drop(host);
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     drop(browser);
     #[cfg(target_os = "linux")]
     drop(computer);
@@ -749,7 +749,7 @@ enum ConnectionSession<'a> {
     Paired(HostProtocol<'a>),
 }
 impl ConnectionSession<'_> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     async fn drain_browser_inputs(&self) {
         if let Self::Paired(protocol) = self {
             protocol.drain_browser_inputs().await;

@@ -1,5 +1,5 @@
 //! Foreground composition; CLI and later native UI share these authority ports.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 mod browser;
 #[cfg(target_os = "linux")]
 mod computer;

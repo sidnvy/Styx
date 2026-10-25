@@ -129,7 +129,7 @@ impl OwnedExecHost {
     }
     /// Explicit Browser lane allocation from this SAME Host budget. This does
     /// not enable a capability or create a worker; trusted policy does that.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     pub fn reserve_browser_io(
         &self,
     ) -> Result<Arc<crate::providers::browser::BrowserIoBudget>, BootstrapError> {

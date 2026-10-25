@@ -4,6 +4,8 @@
 //! All methods perform synchronous protected I/O: call only on bounded blocking
 //! workers. This directory binding is not an owner/admission/operation ledger.
 use super::profile::LoadedLegacyProfile;
+#[cfg(target_os = "windows")]
+use crate::store::WindowsLocalExecutable as LocalExecutable;
 use crate::{
     host::protocol::browser::BrowserBootstrap,
     providers::browser::{
@@ -13,17 +15,26 @@ use crate::{
     store::{PinnedExecutable, PrivateRoot},
 };
 use serde::Deserialize;
+#[cfg(target_os = "linux")]
 use std::{
     fs::{File, OpenOptions},
     os::unix::fs::{MetadataExt, OpenOptionsExt},
+};
+use std::{
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
     time::Duration,
 };
-use styx_contracts::{error::ErrorCategory, identity::Sha256Digest};
+use styx_contracts::error::ErrorCategory;
+#[cfg(target_os = "linux")]
+use styx_contracts::identity::Sha256Digest;
 use styx_core::operations::OwnerLease;
+#[cfg(target_os = "windows")]
+#[path = "browser_windows.rs"]
+mod windows;
 
 const MAX_OWNERS: usize = 16;
+#[cfg(target_os = "linux")]
 const MAX_BROWSER_BYTES: u64 = 512 * 1024 * 1024;
 type Result<T> = std::result::Result<T, ErrorCategory>;
 
@@ -44,15 +55,18 @@ struct OwnerProfile {
     owner: OwnerLease,
     profile: PrivateDirectory,
     output: PrivateDirectory,
+    #[cfg(target_os = "windows")]
+    workspace: PrivateDirectory,
     config: OwnedBrowserConfig,
 }
 struct LocalBrowser {
     profile: Arc<LoadedLegacyProfile>,
-    node: PinnedExecutable,
+    node: Arc<PinnedExecutable>,
     node_path: PathBuf,
     browser: LocalExecutable,
     runtime: PrivateDirectory,
     assets: PreparedBrowserAssets,
+    #[cfg(target_os = "linux")]
     workspace: PathBuf,
     owners: Mutex<Vec<OwnerProfile>>,
 }
@@ -60,6 +74,7 @@ struct LocalBrowser {
 /// Executable explicitly selected by protected local configuration. This pin
 /// establishes exact local bytes/identity, NOT a publisher signature for Chrome.
 /// The caller's ordinary same-UID administrative trust boundary is unchanged.
+#[cfg(target_os = "linux")]
 struct LocalExecutable {
     path: PathBuf,
     file: File,
@@ -70,6 +85,7 @@ struct LocalExecutable {
     bytes: u64,
     digest: Sha256Digest,
 }
+#[cfg(target_os = "linux")]
 impl LocalExecutable {
     fn open(path: &Path) -> Result<Self> {
         canonical(path)?;
@@ -106,6 +122,9 @@ impl LocalExecutable {
         pinned.revalidate()?;
         Ok(pinned)
     }
+    fn path(&self) -> &Path {
+        &self.path
+    }
     fn revalidate(&self) -> Result<()> {
         canonical(&self.path)?;
         let current = OpenOptions::new()
@@ -127,6 +146,7 @@ impl LocalExecutable {
         Ok(())
     }
 }
+#[cfg(target_os = "linux")]
 fn hash_file(file: &File, expected: u64) -> Result<Sha256Digest> {
     use sha2::{Digest, Sha256};
     use std::os::unix::fs::FileExt;
@@ -152,12 +172,17 @@ fn hash_file(file: &File, expected: u64) -> Result<Sha256Digest> {
     Ok(Sha256Digest::from_bytes(hasher.finalize().into()))
 }
 fn canonical(path: &Path) -> Result<()> {
-    if !path.is_absolute()
-        || path.as_os_str().len() > 4096
-        || std::fs::canonicalize(path).map_err(|_| ErrorCategory::PermissionDenied)? != path
+    #[cfg(target_os = "linux")]
     {
-        return Err(ErrorCategory::PermissionDenied);
+        if !path.is_absolute()
+            || path.as_os_str().len() > 4096
+            || std::fs::canonicalize(path).map_err(|_| ErrorCategory::PermissionDenied)? != path
+        {
+            return Err(ErrorCategory::PermissionDenied);
+        }
     }
+    #[cfg(target_os = "windows")]
+    assets::canonical_path(path).map_err(map_error)?;
     Ok(())
 }
 fn selected(profile: &LoadedLegacyProfile) -> Result<Option<PathBuf>> {
@@ -191,10 +216,19 @@ fn selected(profile: &LoadedLegacyProfile) -> Result<Option<PathBuf>> {
     {
         return Err(ErrorCategory::CapabilityUnsupported);
     }
-    // No implicit system browser selection/channel inference in this slice.
-    Ok(Some(
-        d.executable.ok_or(ErrorCategory::CapabilityUnsupported)?,
-    ))
+    #[cfg(target_os = "linux")]
+    {
+        Ok(Some(
+            d.executable.ok_or(ErrorCategory::CapabilityUnsupported)?,
+        ))
+    }
+    #[cfg(target_os = "windows")]
+    {
+        Ok(Some(match d.executable {
+            Some(path) => path,
+            None => windows::selected_channel(d.channel.as_deref().unwrap_or("auto"))?,
+        }))
+    }
 }
 
 /// Only a bootstrap already holding the original private profile and verified
@@ -210,25 +244,38 @@ pub(crate) fn prepare_browser_bootstrap(
         .revalidate()
         .map_err(|_| ErrorCategory::IntegrityFailure)?;
     let source = profile.browser_source();
-    let (release, workspace) = (source.release, source.workspace);
+    let release = source.release;
+    #[cfg(target_os = "linux")]
+    let workspace = source.workspace;
     if !source.node_version.is_some_and(|v| v.starts_with("22.")) {
         return Err(ErrorCategory::CapabilityUnsupported);
     }
     check_dependency_versions(release)?;
+    #[cfg(target_os = "linux")]
     canonical(workspace)?;
     // MCP roots must not encompass the private stage, other owners or original
     // credential/release trees. An unsupported workspace disables Browser only.
+    #[cfg(target_os = "linux")]
     if profile.host_base_dir().starts_with(workspace)
         || workspace.starts_with(profile.host_base_dir())
     {
         return Err(ErrorCategory::PermissionDenied);
     }
-    let node = profile
-        .pin_browser_node()
-        .map_err(|_| ErrorCategory::IntegrityFailure)?;
+    let node = Arc::new(
+        profile
+            .pin_browser_node()
+            .map_err(|_| ErrorCategory::IntegrityFailure)?,
+    );
+    #[cfg(target_os = "linux")]
     let node_path = release.join("bin/node");
+    #[cfg(target_os = "windows")]
+    let node_path = release.join("bin/node.exe");
     canonical(&node_path)?;
+    #[cfg(target_os = "linux")]
     let browser = LocalExecutable::open(&browser_path)?;
+    #[cfg(target_os = "windows")]
+    let browser =
+        LocalExecutable::open(&browser_path).map_err(|_| ErrorCategory::PermissionDenied)?;
     let runtime = assets::fresh_private_directory(profile.host_base_dir()).map_err(map_error)?;
     let staged = assets::prepare(
         runtime.path(),
@@ -236,6 +283,7 @@ pub(crate) fn prepare_browser_bootstrap(
     )
     .map_err(map_error)?;
     let factory = LocalBrowser {
+        #[cfg(target_os = "linux")]
         workspace: workspace.into(),
         node_path,
         node,
@@ -259,9 +307,15 @@ impl LocalBrowser {
         self.node
             .revalidate()
             .map_err(|_| ErrorCategory::IntegrityFailure)?;
+        #[cfg(target_os = "linux")]
         self.browser.revalidate()?;
+        #[cfg(target_os = "windows")]
+        self.browser
+            .revalidate()
+            .map_err(|_| ErrorCategory::IntegrityFailure)?;
         self.runtime.revalidate().map_err(map_error)?;
         self.assets.revalidate().map_err(map_error)?;
+        #[cfg(target_os = "linux")]
         canonical(&self.workspace)?;
         let owners = self
             .owners
@@ -270,6 +324,8 @@ impl LocalBrowser {
         for p in owners.iter() {
             p.profile.revalidate().map_err(map_error)?;
             p.output.revalidate().map_err(map_error)?;
+            #[cfg(target_os = "windows")]
+            p.workspace.revalidate().map_err(map_error)?;
         }
         Ok(())
     }
@@ -297,13 +353,25 @@ impl BrowserBootstrap for LocalBrowser {
         }
         let private = assets::fresh_private_directory(self.runtime.path()).map_err(map_error)?;
         let output = assets::fresh_private_directory(self.runtime.path()).map_err(map_error)?;
+        #[cfg(target_os = "windows")]
+        let workspace = assets::fresh_private_directory(self.runtime.path()).map_err(map_error)?;
         let config = OwnedBrowserConfig {
             node_binary: self.node_path.clone(),
             worker_entry: self.assets.entry_path().into(),
-            browser_binary: self.browser.path.clone(),
+            browser_binary: self.browser.path().into(),
+            #[cfg(target_os = "linux")]
             workspace_dir: self.workspace.clone(),
+            #[cfg(target_os = "windows")]
+            workspace_dir: workspace.path().into(),
             profile_dir: private.path().into(),
             output_dir: output.path().into(),
+            #[cfg(target_os = "windows")]
+            node_pin: self.node.clone(),
+            #[cfg(target_os = "windows")]
+            environment: self
+                .profile
+                .browser_environment()
+                .map_err(|_| ErrorCategory::PermissionDenied)?,
             rpc_timeout: Duration::from_millis(u64::from(
                 crate::host::protocol::wire::BROWSER_WAIT_PREPARE_TIMEOUT_MS,
             )),
@@ -314,6 +382,8 @@ impl BrowserBootstrap for LocalBrowser {
             owner: owner.clone(),
             profile: private,
             output,
+            #[cfg(target_os = "windows")]
+            workspace,
             config: config.clone(),
         });
         Ok(config)

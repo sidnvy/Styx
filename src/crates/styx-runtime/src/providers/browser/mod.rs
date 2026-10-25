@@ -11,23 +11,45 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     fs::File,
-    os::fd::AsRawFd,
     path::{Path, PathBuf},
-    process::Stdio,
     sync::{Arc, Mutex},
     time::Duration,
 };
 use styx_contracts::{capability::CapabilityId, identity::Sha256Digest, operation::OperationId};
 use styx_core::operations::{DispatchPermit, OwnerLease};
 use tokio::{
-    process::Child,
     sync::{OwnedMutexGuard, OwnedSemaphorePermit, Semaphore},
     task::JoinHandle,
     time::{Instant, timeout_at},
 };
 use tokio_util::sync::CancellationToken;
 
+#[cfg(target_os = "windows")]
+use crate::platform::windows_spawn::RunningChild as Child;
+#[cfg(target_os = "linux")]
+use std::{os::fd::AsRawFd, process::Stdio};
+#[cfg(target_os = "linux")]
+use tokio::process::Child;
+#[cfg(target_os = "linux")]
 pub(crate) mod assets;
+#[cfg(target_os = "windows")]
+#[path = "windows_assets.rs"]
+pub(crate) mod assets;
+#[cfg(target_os = "windows")]
+mod windows;
+
+/// Ordinary drive paths are used by Node; Windows canonicalize returns the
+/// extended prefix even for these paths. Never accept UNC/device locators.
+fn canonical_path(path: &Path) -> Result<PathBuf> {
+    #[cfg(target_os = "linux")]
+    {
+        std::fs::canonicalize(path).map_err(|_| BrowserError::PermissionDenied)
+    }
+    #[cfg(target_os = "windows")]
+    {
+        assets::canonical_path(path)
+    }
+}
 
 const IO_BYTES: usize = 16 * 1024 * 1024;
 const FRAME_BYTES: usize = 8 * 1024 * 1024;
@@ -69,6 +91,10 @@ pub struct OwnedBrowserConfig {
     pub profile_dir: PathBuf,
     pub output_dir: PathBuf,
     pub rpc_timeout: Duration,
+    #[cfg(target_os = "windows")]
+    pub node_pin: Arc<crate::store::PinnedExecutable>,
+    #[cfg(target_os = "windows")]
+    pub environment: BTreeMap<String, String>,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -163,7 +189,7 @@ pub struct BrowserCleanup {
 /// Exclusive lane reservation from the SAME Host allocator. Metadata retention
 /// does not own the physical single-worker slot; only actual cleanup releases it.
 pub struct BrowserIoBudget {
-    _partition: OwnedSemaphorePermit,
+    _partition: Arc<OwnedSemaphorePermit>,
     active: Arc<Semaphore>,
 }
 impl BrowserIoBudget {
@@ -172,7 +198,7 @@ impl BrowserIoBudget {
             return Err(BrowserError::InvalidRequest);
         }
         Ok(Arc::new(Self {
-            _partition: partition,
+            _partition: Arc::new(partition),
             active: Arc::new(Semaphore::new(1)),
         }))
     }
@@ -246,6 +272,7 @@ struct Live {
         ),
     >,
     config_file: PathBuf,
+    #[cfg(target_os = "linux")]
     scope: Option<LinuxOwnedScope>,
     cleanup: Option<BrowserCleanup>,
 }
@@ -424,7 +451,9 @@ impl ClientHandler for BrowserClient {}
 mod policy;
 mod references;
 mod retention;
+#[cfg(target_os = "linux")]
 use crate::providers::linux_scope::{LinuxOwnedScope, ScopeCommand, ScopeError};
+#[cfg(target_os = "linux")]
 impl From<ScopeError> for BrowserError {
     fn from(value: ScopeError) -> Self {
         match value {
@@ -458,6 +487,30 @@ impl OwnedBrowserConfig {
         if self.rpc_timeout.is_zero() || self.rpc_timeout > Duration::from_secs(35) {
             return Err(BrowserError::InvalidRequest);
         }
+        #[cfg(target_os = "windows")]
+        {
+            // The bootstrap supplies only the OS-derived baseline. Node preload,
+            // module/search flags and inherited SSH variables are never allowed.
+            const KEYS: &[&str] = &[
+                "SystemRoot",
+                "WinDir",
+                "ComSpec",
+                "Path",
+                "PATHEXT",
+                "USERPROFILE",
+                "HOMEDRIVE",
+                "HOMEPATH",
+                "APPDATA",
+                "LOCALAPPDATA",
+                "TEMP",
+                "TMP",
+            ];
+            if self.environment.len() != KEYS.len()
+                || KEYS.iter().any(|key| !self.environment.contains_key(*key))
+            {
+                return Err(BrowserError::PermissionDenied);
+            }
+        }
         for path in [
             &self.node_binary,
             &self.worker_entry,
@@ -468,7 +521,7 @@ impl OwnedBrowserConfig {
         ] {
             if path.as_os_str().len() > 4096
                 || !path.is_absolute()
-                || std::fs::canonicalize(path).map_err(|_| BrowserError::InvalidRequest)? != *path
+                || canonical_path(path)? != *path
             {
                 return Err(BrowserError::InvalidRequest);
             }
@@ -497,6 +550,8 @@ impl OwnedBrowserConfig {
             &self.profile_dir,
             &self.output_dir,
             self.rpc_timeout.as_millis(),
+            #[cfg(target_os = "windows")]
+            &self.environment,
         ))
         .map_err(|_| BrowserError::InvalidRequest)?;
         Ok(Sha256Digest::of_bytes(&bytes))
@@ -614,6 +669,7 @@ impl BrowserOpenSlot {
                 timeout: config.rpc_timeout,
                 actions: BTreeMap::new(),
                 config_file: PathBuf::new(),
+                #[cfg(target_os = "linux")]
                 scope: None,
                 cleanup: None,
             })),
@@ -640,6 +696,8 @@ impl BrowserOpenSlot {
         let started = Instant::now();
         let until = started + config.rpc_timeout;
         let result = async {
+            #[cfg(target_os = "linux")]
+            {
             let node = pin(&config.node_binary, &mut live.pins)?;
             let worker = pin(&config.worker_entry, &mut live.pins)?;
             let browser = pin(&config.browser_binary, &mut live.pins)?;
@@ -658,10 +716,13 @@ impl BrowserOpenSlot {
                 _=resource.stop.cancelled()=>return Err(BrowserError::Unknown),
                 result=live.scope.as_mut().ok_or(BrowserError::Unknown)?.attest_started(until)=>result?,
             }
+            }
+            #[cfg(target_os = "windows")]
+            windows::start(&mut live, &config, resource._budget._partition.clone()).await?;
             let child = live.child.as_mut().ok_or(BrowserError::Unknown)?;
-            let stdin = child.stdin.take().ok_or(BrowserError::SpawnFailed)?;
-            let stdout = child.stdout.take().ok_or(BrowserError::SpawnFailed)?;
-            if let Some(mut stderr) = child.stderr.take() {
+            let stdin = child_stdin(child).ok_or(BrowserError::SpawnFailed)?;
+            let stdout = child_stdout(child).ok_or(BrowserError::SpawnFailed)?;
+            if let Some(mut stderr) = child_stderr(child) {
                 let budget = resource._budget.clone();
                 live.stderr = Some(tokio::spawn(async move {let _budget=budget;let _=tokio::io::copy(&mut stderr,&mut tokio::io::sink()).await;}));
             }
@@ -751,6 +812,7 @@ fn validate_tools(tools: &[rmcp::model::Tool]) -> Result<()> {
     }
     Ok(())
 }
+#[cfg(target_os = "linux")]
 fn fd_path(file: &File) -> PathBuf {
     PathBuf::from(format!(
         "/proc/{}/fd/{}",
@@ -758,6 +820,7 @@ fn fd_path(file: &File) -> PathBuf {
         file.as_raw_fd()
     ))
 }
+#[cfg(target_os = "linux")]
 fn pin(path: &Path, pins: &mut Vec<File>) -> Result<PathBuf> {
     let file = File::open(path).map_err(|_| BrowserError::SpawnFailed)?;
     if !file
@@ -770,6 +833,36 @@ fn pin(path: &Path, pins: &mut Vec<File>) -> Result<PathBuf> {
     let path = fd_path(&file);
     pins.push(file);
     Ok(path)
+}
+fn child_stdin(child: &mut Child) -> Option<tokio::process::ChildStdin> {
+    #[cfg(target_os = "linux")]
+    {
+        child.stdin.take()
+    }
+    #[cfg(target_os = "windows")]
+    {
+        child.take_stdin()
+    }
+}
+fn child_stdout(child: &mut Child) -> Option<tokio::process::ChildStdout> {
+    #[cfg(target_os = "linux")]
+    {
+        child.stdout.take()
+    }
+    #[cfg(target_os = "windows")]
+    {
+        child.take_stdout()
+    }
+}
+fn child_stderr(child: &mut Child) -> Option<tokio::process::ChildStderr> {
+    #[cfg(target_os = "linux")]
+    {
+        child.stderr.take()
+    }
+    #[cfg(target_os = "windows")]
+    {
+        child.take_stderr()
+    }
 }
 fn synchronize_reference_revision(
     live: &mut Live,
@@ -1156,36 +1249,63 @@ async fn cleanup(live: &mut Live, budget: Duration) -> BrowserCleanup {
     let worker_exited;
     let worker_exit_success;
     let descendants;
-    if let Some(child) = &mut live.child {
-        if let Some(scope) = &mut live.scope {
-            match scope
-                .stop_and_confirm(child, until.saturating_duration_since(Instant::now()))
-                .await
-            {
-                Ok(proof) => {
-                    worker_exited = proof.wrapper_exited;
-                    worker_exit_success = proof.exit_success;
-                    descendants = if proof.confirmed {
-                        BrowserDescendants::Confirmed
-                    } else {
-                        BrowserDescendants::Unknown
-                    };
+    #[cfg(target_os = "linux")]
+    {
+        if let Some(child) = &mut live.child {
+            if let Some(scope) = &mut live.scope {
+                match scope
+                    .stop_and_confirm(child, until.saturating_duration_since(Instant::now()))
+                    .await
+                {
+                    Ok(proof) => {
+                        worker_exited = proof.wrapper_exited;
+                        worker_exit_success = proof.exit_success;
+                        descendants = if proof.confirmed {
+                            BrowserDescendants::Confirmed
+                        } else {
+                            BrowserDescendants::Unknown
+                        };
+                    }
+                    Err(_) => {
+                        worker_exited = false;
+                        worker_exit_success = None;
+                        descendants = BrowserDescendants::Unknown;
+                    }
                 }
-                Err(_) => {
+            } else {
+                worker_exited = false;
+                worker_exit_success = None;
+                descendants = BrowserDescendants::Unknown;
+            }
+        } else {
+            worker_exited = true;
+            worker_exit_success = None;
+            descendants = BrowserDescendants::Confirmed;
+        }
+    }
+    #[cfg(target_os = "windows")]
+    {
+        if let Some(child) = &mut live.child {
+            // A close ACK is never native cleanup. The Job bridge returns only
+            // after original root wait AND ActiveProcesses == 0.
+            let _ = child.start_kill();
+            match timeout_at(until, child.wait()).await {
+                Ok(Ok(exit)) => {
+                    worker_exited = true;
+                    worker_exit_success = Some(exit.success());
+                    descendants = BrowserDescendants::Confirmed;
+                }
+                _ => {
                     worker_exited = false;
                     worker_exit_success = None;
                     descendants = BrowserDescendants::Unknown;
                 }
             }
         } else {
-            worker_exited = false;
+            worker_exited = true;
             worker_exit_success = None;
-            descendants = BrowserDescendants::Unknown;
+            descendants = BrowserDescendants::Confirmed;
         }
-    } else {
-        worker_exited = true;
-        worker_exit_success = None;
-        descendants = BrowserDescendants::Confirmed;
     }
     if let Some(task) = &mut live.client_close {
         match timeout_at(until, task).await {
@@ -1285,9 +1405,9 @@ impl BrowserWorker {
         Ok(results)
     }
 }
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 mod tests;
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 #[path = "link_reference_tests.rs"]
 mod link_reference_tests;

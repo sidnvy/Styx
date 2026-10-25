@@ -150,9 +150,7 @@ pub(super) fn check_files(
     workspace: &Path,
     output: &Path,
 ) -> Result<()> {
-    if std::fs::canonicalize(workspace).map_err(|_| BrowserError::InvalidRequest)? != workspace
-        || std::fs::canonicalize(output).map_err(|_| BrowserError::InvalidRequest)? != output
-    {
+    if super::canonical_path(workspace)? != workspace || super::canonical_path(output)? != output {
         return Err(BrowserError::PermissionDenied);
     }
     if let Some(paths) = args.get("paths").and_then(Value::as_array) {
@@ -164,8 +162,7 @@ pub(super) fn check_files(
             if !path.is_absolute() || path.as_os_str().len() > 4096 {
                 return Err(BrowserError::InvalidRequest);
             }
-            let canonical =
-                std::fs::canonicalize(path).map_err(|_| BrowserError::InvalidRequest)?;
+            let canonical = super::canonical_path(path)?;
             if canonical != path
                 || !(path.starts_with(workspace) || path.starts_with(output))
                 || !std::fs::symlink_metadata(path)
@@ -187,7 +184,7 @@ pub(super) fn check_files(
         if filename.is_empty()
             || filename.len() > 4096
             || !destination.starts_with(output)
-            || std::fs::canonicalize(parent).map_err(|_| BrowserError::PermissionDenied)? != parent
+            || super::canonical_path(parent)? != parent
             || !parent.starts_with(output)
         {
             return Err(BrowserError::PermissionDenied);

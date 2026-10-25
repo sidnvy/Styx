@@ -356,3 +356,36 @@ fn windows_private_runtime_child_creation_and_existing_refusal() {
     // cleanup-by-name. All changes above belong to this explicitly fresh root.
     parent.validate_root().unwrap();
 }
+
+#[test]
+#[ignore = "requires STYX_TEST_WINDOWS_PRIVATE_CHILD_ROOT; actual private asset publication, replacement refusal and retained handle sharing"]
+fn windows_browser_runtime_assets_are_fresh_and_nonreplaceable() {
+    let parent = PathBuf::from(
+        std::env::var_os("STYX_TEST_WINDOWS_PRIVATE_CHILD_ROOT").expect("owned parent"),
+    );
+    let parent = PrivateRoot::open(parent).unwrap();
+    let name = format!("browser-assets-{}", uuid::Uuid::new_v4().simple());
+    let root = parent.create_runtime_child(&name).unwrap();
+    assert!(parent.create_runtime_child(&name).is_err());
+    let (observed, held) = root
+        .create_runtime_asset("worker.mjs", b"// immutable asset")
+        .unwrap();
+    assert!(
+        root.create_runtime_asset("worker.mjs", b"// replacement")
+            .is_err()
+    );
+    let path = ffi::final_path(&held).unwrap();
+    assert!(std::fs::OpenOptions::new().write(true).open(&path).is_err());
+    assert!(std::fs::remove_file(&path).is_err());
+    let current = root.read_raw("worker.mjs", 1024).unwrap();
+    assert_eq!(current.observation(), observed.observation());
+    assert_eq!(current.bytes(), b"// immutable asset");
+    assert!(root.create_runtime_asset("../escape", b"x").is_err());
+    assert!(
+        root.create_runtime_asset("worker.mjs:stream", b"x")
+            .is_err()
+    );
+    assert!(root.create_runtime_asset("empty", &[]).is_err());
+    drop(held);
+    std::fs::remove_file(path).unwrap();
+}

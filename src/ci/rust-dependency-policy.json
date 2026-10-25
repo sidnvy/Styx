@@ -411,6 +411,11 @@
       "input": "STYX_TEST_WINDOWS_SPAWN_ROOT private fresh parent and original native Codex copies",
       "required_for": "Windows suspended PE verification, original wait, Job-empty and dropped-waiter custody; not deployment or login acceptance"
     },
+    "store::platform::tests::windows_browser_runtime_assets_are_fresh_and_nonreplaceable": {
+      "kind": "explicit_windows_owned_fixture",
+      "input": "STYX_TEST_WINDOWS_PRIVATE_CHILD_ROOT fresh current-SID private Windows parent",
+      "required_for": "actual exclusive asset creation, byte readback, write/delete sharing refusal and path rejection; not Browser execution or platform acceptance"
+    },
     "store::platform::tests::windows_private_runtime_child_creation_and_existing_refusal": {
       "kind": "explicit_windows_owned_fixture",
       "input": "STYX_TEST_WINDOWS_PRIVATE_CHILD_ROOT fresh current-SID private Windows parent; elevated default owner may be Administrators",

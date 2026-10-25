@@ -2,16 +2,16 @@
 //! C08 owns signed workers; neither local DATA nor this adapter grants tools.
 use super::*;
 use crate::store::native_host_snapshot::NativeHostSnapshot;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 use serde_json::Value;
 
 #[derive(Deserialize)]
 struct FreshDeployment {
     schema: u16,
     mode: String,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     host: FreshHost,
-    #[cfg(any(target_os = "windows", target_os = "macos"))]
+    #[cfg(target_os = "macos")]
     #[serde(rename = "host")]
     _host: FreshHost,
 }
@@ -19,7 +19,7 @@ struct FreshDeployment {
 struct FreshHost {
     #[cfg(target_os = "linux")]
     computer: Option<Value>,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     browser: Option<Value>,
 }
 
@@ -145,8 +145,8 @@ fn load_snapshot(
     if deployment.schema != 1 || deployment.mode != "join-existing" {
         return Err(ProfileError::Invalid);
     }
-    // Only Linux implements these native Browser/Computer factories. Remote
-    // approvals are not local feature configuration or macOS/Windows desktop authority.
+    // Browser has Linux and Windows native factories; Computer remains Linux-only.
+    // Remote approvals never replace local selection or OS desktop authorization.
     #[cfg(target_os = "linux")]
     let computer = seed.computer_requested && deployment.host.computer == Some(Value::Bool(true));
     #[cfg(target_os = "linux")]
@@ -155,13 +155,13 @@ fn load_snapshot(
     let host_computer = Some(serde_json::json!({
         "enabled":computer,"connections":1,"env":{"CUA_DRIVER_RS_ENABLE_WAYLAND":"1"}
     }));
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     let deployment_browser = if seed.browser_requested {
         deployment.host.browser
     } else {
         None
     };
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     let host_browser = deployment_browser.clone().map(|mut value| {
         if let Some(object) = value.as_object_mut() {
             object.insert(
@@ -171,9 +171,9 @@ fn load_snapshot(
         }
         value
     });
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     let release_root = inventory.browser_release_root();
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     let browser_node_version = inventory.browser_node_version();
     #[cfg(target_os = "linux")]
     let cua_version = inventory.cua_version();
@@ -191,9 +191,9 @@ fn load_snapshot(
         bearer,
         executor,
         inventory,
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         release_root,
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         browser_node_version,
         #[cfg(target_os = "linux")]
         cua_version,
@@ -201,9 +201,9 @@ fn load_snapshot(
         deployment_computer,
         #[cfg(target_os = "linux")]
         host_computer,
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         deployment_browser,
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         host_browser,
         cwd,
         environment,

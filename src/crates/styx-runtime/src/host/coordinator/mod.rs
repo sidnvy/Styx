@@ -1,9 +1,9 @@
 //! Host-owned start/read/targeted-action composition.
 //! No network DTO can construct control authority. Physical retention is Core-
 //! attested; legacy raw-wire mode remains outside this composition.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 mod browser;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 pub use browser::*;
 #[cfg(target_os = "linux")]
 mod desktop;
@@ -46,7 +46,7 @@ pub enum CoordinatorError {
     Admission(ErrorCategory),
     #[error("executor refused or could not resolve resource")]
     Executor(#[from] ExecError),
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     #[error("Browser executor refused or has an unknown outcome")]
     Browser(#[from] crate::providers::browser::BrowserError),
     #[cfg(target_os = "linux")]
@@ -71,7 +71,7 @@ struct State {
     facts: AdmissionFacts,
     shutting_down: bool,
     sessions: crate::session::HostSessions,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     browser: Option<browser::BrowserLane>,
     #[cfg(target_os = "linux")]
     desktop: Option<desktop::DesktopLane>,
@@ -84,7 +84,7 @@ impl State {
             ledger,
             facts,
             sessions,
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
             browser: None,
             #[cfg(target_os = "linux")]
             desktop: None,
@@ -243,7 +243,7 @@ pub struct HostCleanup {
     /// None means no Exec adapter was ever started, not an observed exit.
     pub native: Option<CleanupReceipt>,
     pub supervised_jobs_joined: bool,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     pub browser: Option<BrowserLaneCleanup>,
     #[cfg(target_os = "linux")]
     pub desktop: Option<DesktopLaneCleanup>,
@@ -256,7 +256,11 @@ impl HostCleanup {
             self.browser.as_ref().is_none_or(|facts| facts.complete)
                 && self.desktop.as_ref().is_none_or(|facts| facts.complete)
         }
-        #[cfg(not(target_os = "linux"))]
+        #[cfg(target_os = "windows")]
+        {
+            self.browser.as_ref().is_none_or(|facts| facts.complete)
+        }
+        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
         {
             true
         }
@@ -905,7 +909,7 @@ impl HostAuthority {
                 }
             }
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         let browser = browser::cleanup_browser_lane(
             self.inner.clone(),
             until.saturating_duration_since(tokio::time::Instant::now()),
@@ -914,7 +918,7 @@ impl HostAuthority {
         Ok(HostCleanup {
             native,
             supervised_jobs_joined: joined,
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
             browser,
             #[cfg(target_os = "linux")]
             desktop,

@@ -960,6 +960,8 @@ pub(super) fn release_browser_profile(inner: &Arc<Inner>, owner: &OwnerLease) {
         lane.profiles.remove(owner.owner_id());
     }
 }
-#[cfg(test)]
+// These existing fixtures use Unix paths/native Linux process scopes.
+// Windows acceptance uses its actual protected Job and platform journey.
+#[cfg(all(test, target_os = "linux"))]
 #[path = "browser_tests.rs"]
 mod browser_tests;

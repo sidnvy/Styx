@@ -367,6 +367,101 @@ pub(crate) fn spawn_suspended(
     cwd: PathBuf,
     env: BTreeMap<OsString, OsString>,
 ) -> Result<SuspendedChild, SpawnFailure> {
+    spawn_fixed(image, startup_budget, cwd, env, Entry::Exec)
+}
+/// Fixed trusted Browser entry: no shell, Node flags, remote arguments or
+/// arbitrary program selection. The same native image/Job checks precede resume.
+pub(crate) fn spawn_browser_suspended(
+    image: Arc<PinnedExecutable>,
+    startup_budget: Arc<tokio::sync::OwnedSemaphorePermit>,
+    cwd: PathBuf,
+    env: BTreeMap<OsString, OsString>,
+    worker: PathBuf,
+    config: PathBuf,
+) -> Result<SuspendedChild, SpawnFailure> {
+    if !worker.is_absolute()
+        || !config.is_absolute()
+        || worker.file_name() != Some(OsStr::new("worker.mjs"))
+        || config.extension() != Some(OsStr::new("json"))
+    {
+        return Err(refused("invalid_browser_spawn_input"));
+    }
+    spawn_fixed(
+        image,
+        startup_budget,
+        cwd,
+        env,
+        Entry::Browser { worker, config },
+    )
+}
+enum Entry {
+    Exec,
+    Browser { worker: PathBuf, config: PathBuf },
+}
+// Microsoft CRT quoting, applied only to trusted fixed-entry arguments. The
+// application is separately specified to CreateProcessW, never shell resolved.
+// https://learn.microsoft.com/en-us/cpp/c-language/parsing-c-command-line-arguments
+fn quote_argument(value: &OsStr, output: &mut Vec<u16>) -> io::Result<()> {
+    output.push(b'"' as u16);
+    let mut slashes = 0;
+    for unit in value.encode_wide() {
+        if unit == 0 {
+            return Err(lost());
+        }
+        if unit == b'\\' as u16 {
+            slashes += 1;
+            continue;
+        }
+        output.extend(std::iter::repeat_n(
+            b'\\' as u16,
+            if unit == b'"' as u16 {
+                2 * slashes + 1
+            } else {
+                slashes
+            },
+        ));
+        slashes = 0;
+        output.push(unit);
+        if output.len() > 32765 {
+            return Err(lost());
+        }
+    }
+    output.extend(std::iter::repeat_n(b'\\' as u16, 2 * slashes));
+    output.push(b'"' as u16);
+    if output.len() > 32765 {
+        return Err(lost());
+    }
+    Ok(())
+}
+fn command_line(path: &OsStr, entry: &Entry) -> io::Result<Vec<u16>> {
+    let mut result = Vec::new();
+    quote_argument(path, &mut result)?;
+    let args: Vec<&OsStr> = match entry {
+        Entry::Exec => vec![
+            OsStr::new("exec-server"),
+            OsStr::new("--listen"),
+            OsStr::new("stdio://"),
+        ],
+        Entry::Browser { worker, config } => vec![
+            worker.as_os_str(),
+            OsStr::new("--config"),
+            config.as_os_str(),
+        ],
+    };
+    for arg in args {
+        result.push(b' ' as u16);
+        quote_argument(arg, &mut result)?;
+    }
+    result.push(0);
+    Ok(result)
+}
+fn spawn_fixed(
+    image: Arc<PinnedExecutable>,
+    startup_budget: Arc<tokio::sync::OwnedSemaphorePermit>,
+    cwd: PathBuf,
+    env: BTreeMap<OsString, OsString>,
+    entry: Entry,
+) -> Result<SuspendedChild, SpawnFailure> {
     let runtime =
         tokio::runtime::Handle::try_current().map_err(|_| refused("runtime_unavailable"))?;
     let parent_identity =
@@ -380,15 +475,8 @@ pub(crate) fn spawn_suspended(
     }
     let application = wide(path.as_os_str()).map_err(|_| refused("invalid_spawn_input"))?;
     let directory = wide(cwd.as_os_str()).map_err(|_| refused("invalid_spawn_input"))?;
-    let mut command: Vec<u16> = OsStr::new("\"")
-        .encode_wide()
-        .chain(path.as_os_str().encode_wide())
-        .chain(OsStr::new("\" exec-server --listen stdio://").encode_wide())
-        .collect();
-    command.push(0);
-    if command.len() > 32767 {
-        return Err(refused("invalid_spawn_input"));
-    }
+    let mut command =
+        command_line(path.as_os_str(), &entry).map_err(|_| refused("invalid_spawn_input"))?;
     let mut environment = environment(&env).map_err(|_| refused("invalid_spawn_environment"))?;
     let (input_read, input_write) = io::pipe().map_err(|_| refused("pipe_unavailable"))?;
     let (output_read, output_write) = io::pipe().map_err(|_| refused("pipe_unavailable"))?;
@@ -408,7 +496,8 @@ pub(crate) fn spawn_suspended(
         error_read,
     )))
     .map_err(|_| refused("pipe_unavailable"))?;
-    let job = ffi::job().map_err(|_| refused("job_unavailable"))?;
+    let job =
+        ffi::job(matches!(entry, Entry::Browser { .. })).map_err(|_| refused("job_unavailable"))?;
     let (process, thread, pid) = ffi::spawn(
         &application,
         &mut command,
@@ -492,7 +581,7 @@ mod ffi {
             Ok(())
         }
     }
-    pub(super) fn job() -> io::Result<OwnedHandle> {
+    pub(super) fn job(browser: bool) -> io::Result<OwnedHandle> {
         unsafe {
             let h = CreateJobObjectW(ptr::null(), ptr::null());
             if h.is_null() {
@@ -501,12 +590,33 @@ mod ffi {
             let owned = OwnedHandle::from_raw_handle(h);
             let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = zeroed();
             limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+            if browser {
+                limits.BasicLimitInformation.LimitFlags |=
+                    JOB_OBJECT_LIMIT_JOB_MEMORY | JOB_OBJECT_LIMIT_ACTIVE_PROCESS;
+                limits.BasicLimitInformation.ActiveProcessLimit = 256;
+                limits.JobMemoryLimit = 2 * 1024 * 1024 * 1024;
+            }
             ok(SetInformationJobObject(
                 raw(&owned),
                 JobObjectExtendedLimitInformation,
                 (&limits as *const JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
                 size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
             ))?;
+            let mut actual: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = zeroed();
+            ok(QueryInformationJobObject(
+                raw(&owned),
+                JobObjectExtendedLimitInformation,
+                (&mut actual as *mut JOBOBJECT_EXTENDED_LIMIT_INFORMATION).cast(),
+                size_of::<JOBOBJECT_EXTENDED_LIMIT_INFORMATION>() as u32,
+                ptr::null_mut(),
+            ))?;
+            if actual.BasicLimitInformation.LimitFlags != limits.BasicLimitInformation.LimitFlags
+                || browser
+                    && (actual.JobMemoryLimit != limits.JobMemoryLimit
+                        || actual.BasicLimitInformation.ActiveProcessLimit != 256)
+            {
+                return Err(lost());
+            }
             Ok(owned)
         }
     }

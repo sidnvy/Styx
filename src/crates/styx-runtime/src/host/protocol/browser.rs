@@ -372,6 +372,8 @@ fn uncertain(mut reply: Reply) -> Reply {
     reply
 }
 
-#[cfg(test)]
+// These existing fixtures use Unix paths/native Linux process scopes.
+// Windows acceptance uses its actual protected Job and platform journey.
+#[cfg(all(test, target_os = "linux"))]
 #[path = "browser_history_tests.rs"]
 pub(crate) mod history_tests;

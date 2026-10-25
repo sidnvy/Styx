@@ -13,7 +13,7 @@ use crate::providers::codex::{
     ActionAcknowledgment, ActionEvidence, ActionReceipt, DispatchEvidence, ProcessAction,
     StartProcess,
 };
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 pub(crate) mod browser;
 #[cfg(target_os = "linux")]
 pub(crate) mod computer;
@@ -86,9 +86,9 @@ impl From<PairedTrustedProfile> for ProfileBinding {
         }
     }
 }
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 struct BrowserLinkReferences<'a>(&'a HostCoordinator);
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 impl Drop for BrowserLinkReferences<'_> {
     fn drop(&mut self) {
         self.0.invalidate_browser_link_references();
@@ -176,7 +176,7 @@ pub struct HostProtocol<'a> {
     connection_slot: tokio::sync::Semaphore,
     #[cfg(target_os = "windows")]
     command_environment: BTreeMap<String, String>,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     browser: Option<browser::BrowserInputs>,
     #[cfg(target_os = "linux")]
     computer: Option<computer::ComputerInputs>,
@@ -228,7 +228,7 @@ impl<'a> HostProtocol<'a> {
             connection_slot: tokio::sync::Semaphore::new(1),
             #[cfg(target_os = "windows")]
             command_environment: BTreeMap::new(),
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
             browser: None,
             #[cfg(target_os = "linux")]
             computer: None,
@@ -482,12 +482,12 @@ impl<'a> HostProtocol<'a> {
                 timeout_ms,
                 command,
             } => {
-                #[cfg(target_os = "linux")]
+                #[cfg(any(target_os = "linux", target_os = "windows"))]
                 {
                     self.handle_browser(owner, grant_revision, timeout_ms, command)
                         .await
                 }
-                #[cfg(not(target_os = "linux"))]
+                #[cfg(not(any(target_os = "linux", target_os = "windows")))]
                 {
                     let _ = (owner, grant_revision, timeout_ms, command);
                     Reply::Unsupported {
@@ -782,7 +782,7 @@ impl<'a> HostProtocol<'a> {
                 .map(str::to_owned),
             );
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         if self.paired && self.browser.is_some() {
             features.push(BROWSER_HEADLESS_V1.into());
         }
@@ -813,7 +813,7 @@ impl<'a> HostProtocol<'a> {
         if link.endpoint() != self.profile.endpoint {
             return Err(ProtocolError::BootstrapMismatch);
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         let _browser_references = if self.paired {
             self.coordinator.invalidate_browser_link_references();
             Some(BrowserLinkReferences(&self.coordinator))
@@ -1000,7 +1000,7 @@ fn coordinator_error(error: CoordinatorError, read: bool) -> Reply {
         }
         // An executor error crossing the shared boundary carries no proof that a
         // native dispatch did not happen; preserve uncertainty.
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         CoordinatorError::Browser(_) => (ErrorCategory::ResultUnknown, ExecutionCertainty::Unknown),
         #[cfg(target_os = "linux")]
         CoordinatorError::Desktop(error) => match error {

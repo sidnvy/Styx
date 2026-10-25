@@ -67,7 +67,7 @@ struct Deployment {
 struct HostLocator {
     #[cfg(target_os = "linux")]
     computer: Option<serde_json::Value>,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     browser: Option<serde_json::Value>,
     #[serde(rename = "baseDir")]
     base_dir: PathBuf,
@@ -120,7 +120,7 @@ struct Identity {
 struct HostProfile {
     #[cfg(target_os = "linux")]
     computer: Option<serde_json::Value>,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     browser: Option<serde_json::Value>,
     host_id: DeviceId,
     gateway_ws_url: String,
@@ -197,11 +197,12 @@ pub struct ProfileDiagnostics {
     pub tool_health: &'static str,
     pub account_acceptance: &'static str,
 }
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 pub(super) struct BrowserSource<'a> {
     pub deployment: Option<&'a serde_json::Value>,
     pub host: Option<&'a serde_json::Value>,
     pub release: &'a Path,
+    #[cfg(target_os = "linux")]
     pub workspace: &'a Path,
     pub node_version: Option<&'a str>,
 }
@@ -264,9 +265,9 @@ pub struct LoadedLegacyProfile {
     bearer: SecretBearer,
     executor: Option<Arc<PinnedExecutable>>,
     inventory: release::ProfileRelease,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     release_root: PathBuf,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     browser_node_version: Option<String>,
     #[cfg(target_os = "linux")]
     cua_version: Option<String>,
@@ -274,9 +275,9 @@ pub struct LoadedLegacyProfile {
     deployment_computer: Option<serde_json::Value>,
     #[cfg(target_os = "linux")]
     host_computer: Option<serde_json::Value>,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     deployment_browser: Option<serde_json::Value>,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     host_browser: Option<serde_json::Value>,
     cwd: PathBuf,
     environment: BTreeMap<String, String>,
@@ -324,17 +325,18 @@ impl LoadedLegacyProfile {
     }
     /// Browser selections remain private mutable input, never an execution grant.
     /// Unsupported/malformed Browser options must not invalidate the Exec profile.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     pub(super) fn browser_source(&self) -> BrowserSource<'_> {
         BrowserSource {
             deployment: self.deployment_browser.as_ref(),
             host: self.host_browser.as_ref(),
             release: &self.release_root,
+            #[cfg(target_os = "linux")]
             workspace: &self.cwd,
             node_version: self.browser_node_version.as_deref(),
         }
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     pub(super) fn pin_browser_node(&self) -> Result<PinnedExecutable, ProfileError> {
         self.inventory
             .pin_worker(NativeExternalWorker::BrowserNode22)
@@ -383,9 +385,27 @@ impl LoadedLegacyProfile {
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect()
     }
+    /// Browser receives the OS-derived baseline only, without Exec-specific
+    /// configuration. Its private scratch must already belong to this Host.
+    #[cfg(target_os = "windows")]
+    pub(super) fn browser_environment(&self) -> Result<BTreeMap<String, String>, ProfileError> {
+        self.revalidate_control()?;
+        self.runtime_temp
+            .get()
+            .ok_or(ProfileError::ProtectedRead)?
+            .revalidate_runtime_directory()
+            .map_err(|_| ProfileError::Changed)?;
+        super::windows_env::executor_environment(&BTreeMap::new(), &self.host_base_dir)
+    }
     #[cfg(target_os = "windows")]
     pub(super) fn prepare_runtime_temp(&self, base: &PrivateRoot) -> Result<(), ProfileError> {
-        if self.executor_enabled() {
+        let browser_requested = self
+            .deployment_browser
+            .as_ref()
+            .and_then(|value| value.get("enabled"))
+            .and_then(serde_json::Value::as_bool)
+            == Some(true);
+        if self.executor_enabled() || browser_requested {
             let expected =
                 PrivateRoot::open(&self.host_base_dir).map_err(|_| ProfileError::ProtectedRead)?;
             if base.identity() != expected.identity() {
@@ -946,9 +966,9 @@ fn load_source(
     } else {
         None
     };
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     let release_root = inventory.browser_release_root();
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     let browser_node_version = inventory.browser_node_version();
     #[cfg(target_os = "linux")]
     let cua_version = inventory.cua_version();
@@ -1046,9 +1066,9 @@ fn load_source(
         bearer,
         executor,
         inventory,
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         release_root,
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         browser_node_version,
         #[cfg(target_os = "linux")]
         cua_version,
@@ -1056,9 +1076,9 @@ fn load_source(
         deployment_computer: deployment.host.computer,
         #[cfg(target_os = "linux")]
         host_computer: host.computer,
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         deployment_browser: deployment.host.browser,
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         host_browser: host.browser,
         cwd: exec.cwd,
         environment: runtime_environment,

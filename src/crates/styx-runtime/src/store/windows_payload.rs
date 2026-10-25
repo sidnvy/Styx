@@ -24,7 +24,7 @@ pub(in crate::store) struct PinnedImage {
     observed: Observed,
     creator: ProcessIdentity,
 }
-fn stream_hash(file: &File, max: u64) -> Result<Sha256Digest> {
+pub(super) fn stream_hash(file: &File, max: u64) -> Result<Sha256Digest> {
     let mut hash = Sha256::new();
     let mut bytes = [0u8; 65536];
     let mut offset = 0u64;
@@ -252,7 +252,7 @@ fn read_exact_at(file: &File, mut buffer: &mut [u8], mut offset: u64) -> Result<
     }
     Ok(())
 }
-fn check_pe64(file: &File, len: u64) -> Result<()> {
+pub(super) fn check_pe64(file: &File, len: u64) -> Result<()> {
     // Bounded format/machine guard only; the Windows loader validates the image.
     if !cfg!(target_arch = "x86_64") || len < 64 {
         return Err(StoreError::Unsupported);

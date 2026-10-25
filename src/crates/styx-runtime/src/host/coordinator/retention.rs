@@ -190,7 +190,7 @@ impl HostAuthority {
                 }),
             }
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         {
             let browser = super::browser::collect_browser_retention(&self.inner, None, until).await;
             receipt.actions_released += browser.actions_released;
