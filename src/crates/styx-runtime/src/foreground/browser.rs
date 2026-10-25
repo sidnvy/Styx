@@ -15,7 +15,7 @@ use crate::{
     store::{PinnedExecutable, PrivateRoot},
 };
 use serde::Deserialize;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use std::{
     fs::{File, OpenOptions},
     os::unix::fs::{MetadataExt, OpenOptionsExt},
@@ -26,7 +26,7 @@ use std::{
     time::Duration,
 };
 use styx_contracts::error::ErrorCategory;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use styx_contracts::identity::Sha256Digest;
 use styx_core::operations::OwnerLease;
 #[cfg(target_os = "windows")]
@@ -34,7 +34,7 @@ use styx_core::operations::OwnerLease;
 mod windows;
 
 const MAX_OWNERS: usize = 16;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 const MAX_BROWSER_BYTES: u64 = 512 * 1024 * 1024;
 type Result<T> = std::result::Result<T, ErrorCategory>;
 
@@ -55,7 +55,7 @@ struct OwnerProfile {
     owner: OwnerLease,
     profile: PrivateDirectory,
     output: PrivateDirectory,
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     workspace: PrivateDirectory,
     config: OwnedBrowserConfig,
 }
@@ -74,7 +74,7 @@ struct LocalBrowser {
 /// Executable explicitly selected by protected local configuration. This pin
 /// establishes exact local bytes/identity, NOT a publisher signature for Chrome.
 /// The caller's ordinary same-UID administrative trust boundary is unchanged.
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 struct LocalExecutable {
     path: PathBuf,
     file: File,
@@ -85,7 +85,7 @@ struct LocalExecutable {
     bytes: u64,
     digest: Sha256Digest,
 }
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 impl LocalExecutable {
     fn open(path: &Path) -> Result<Self> {
         canonical(path)?;
@@ -146,7 +146,7 @@ impl LocalExecutable {
         Ok(())
     }
 }
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 fn hash_file(file: &File, expected: u64) -> Result<Sha256Digest> {
     use sha2::{Digest, Sha256};
     use std::os::unix::fs::FileExt;
@@ -172,7 +172,7 @@ fn hash_file(file: &File, expected: u64) -> Result<Sha256Digest> {
     Ok(Sha256Digest::from_bytes(hasher.finalize().into()))
 }
 fn canonical(path: &Path) -> Result<()> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         if !path.is_absolute()
             || path.as_os_str().len() > 4096
@@ -229,6 +229,33 @@ fn selected(profile: &LoadedLegacyProfile) -> Result<Option<PathBuf>> {
             None => windows::selected_channel(d.channel.as_deref().unwrap_or("auto"))?,
         }))
     }
+    #[cfg(target_os = "macos")]
+    {
+        let path = match d.executable {
+            Some(path) => path,
+            None => {
+                let paths: &[&str] = match d.channel.as_deref().unwrap_or("auto") {
+                    "chrome" => &["/Applications/Google Chrome.app/Contents/MacOS/Google Chrome"],
+                    "msedge" => &["/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge"],
+                    "auto" => &[
+                        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+                        "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+                    ],
+                    _ => return Err(ErrorCategory::CapabilityUnsupported),
+                };
+                let existing: Vec<_> = paths
+                    .iter()
+                    .filter(|path| Path::new(path).exists())
+                    .collect();
+                if existing.len() != 1 {
+                    return Err(ErrorCategory::CapabilityUnsupported);
+                }
+                PathBuf::from(*existing[0])
+            }
+        };
+        canonical(&path)?;
+        Ok(Some(path))
+    }
 }
 
 /// Fixed local bootstrap stage and existing typed category only. No native
@@ -279,12 +306,12 @@ pub(crate) fn prepare_browser_bootstrap(
             .pin_browser_node()
             .map_err(|_| at("node_pin", ErrorCategory::IntegrityFailure))?,
     );
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     let node_path = release.join("bin/node");
     #[cfg(target_os = "windows")]
     let node_path = release.join("bin/node.exe");
     canonical(&node_path).map_err(|e| at("node_path", e))?;
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     let browser = LocalExecutable::open(&browser_path).map_err(|e| at("browser_pin", e))?;
     #[cfg(target_os = "windows")]
     let browser = LocalExecutable::open(&browser_path).map_err(|error| {
@@ -336,7 +363,7 @@ impl LocalBrowser {
         self.node
             .revalidate()
             .map_err(|_| ErrorCategory::IntegrityFailure)?;
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         self.browser.revalidate()?;
         #[cfg(target_os = "windows")]
         self.browser
@@ -353,7 +380,7 @@ impl LocalBrowser {
         for p in owners.iter() {
             p.profile.revalidate().map_err(map_error)?;
             p.output.revalidate().map_err(map_error)?;
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", target_os = "macos"))]
             p.workspace.revalidate().map_err(map_error)?;
         }
         Ok(())
@@ -382,7 +409,7 @@ impl BrowserBootstrap for LocalBrowser {
         }
         let private = assets::fresh_private_directory(self.runtime.path()).map_err(map_error)?;
         let output = assets::fresh_private_directory(self.runtime.path()).map_err(map_error)?;
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "macos"))]
         let workspace = assets::fresh_private_directory(self.runtime.path()).map_err(map_error)?;
         let config = OwnedBrowserConfig {
             node_binary: self.node_path.clone(),
@@ -390,28 +417,43 @@ impl BrowserBootstrap for LocalBrowser {
             browser_binary: self.browser.path().into(),
             #[cfg(target_os = "linux")]
             workspace_dir: self.workspace.clone(),
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", target_os = "macos"))]
             workspace_dir: workspace.path().into(),
             profile_dir: private.path().into(),
             output_dir: output.path().into(),
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", target_os = "macos"))]
             node_pin: self.node.clone(),
             #[cfg(target_os = "windows")]
             environment: self
                 .profile
                 .browser_environment()
                 .map_err(|_| ErrorCategory::PermissionDenied)?,
+            #[cfg(target_os = "macos")]
+            environment: std::collections::BTreeMap::new(),
             rpc_timeout: Duration::from_millis(u64::from(
                 crate::host::protocol::wire::BROWSER_WAIT_PREPARE_TIMEOUT_MS,
             )),
         };
         private.revalidate().map_err(map_error)?;
         output.revalidate().map_err(map_error)?;
+        #[cfg(target_os = "macos")]
+        let config = OwnedBrowserConfig {
+            environment: std::collections::BTreeMap::from([
+                ("HOME".into(), output.path().to_string_lossy().into_owned()),
+                (
+                    "TMPDIR".into(),
+                    output.path().to_string_lossy().into_owned(),
+                ),
+                ("PATH".into(), "/usr/bin:/bin".into()),
+                ("LANG".into(), "C.UTF-8".into()),
+            ]),
+            ..config
+        };
         owners.push(OwnerProfile {
             owner: owner.clone(),
             profile: private,
             output,
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", target_os = "macos"))]
             workspace,
             config: config.clone(),
         });

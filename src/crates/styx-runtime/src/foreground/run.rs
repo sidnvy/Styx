@@ -76,12 +76,12 @@ impl Admitted {
         Ok(())
     }
 }
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 struct ForegroundBrowser {
     admitted: Arc<Admitted>,
     source: Arc<dyn crate::host::protocol::browser::BrowserBootstrap>,
 }
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 impl crate::host::protocol::browser::BrowserBootstrap for ForegroundBrowser {
     fn prepare_profile(
         &self,
@@ -103,12 +103,12 @@ impl crate::host::protocol::browser::BrowserBootstrap for ForegroundBrowser {
         self.source.validate_control()
     }
 }
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 struct ForegroundComputer {
     admitted: Arc<Admitted>,
     source: Arc<dyn crate::host::protocol::computer::ComputerBootstrap>,
 }
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 impl crate::host::protocol::computer::ComputerBootstrap for ForegroundComputer {
     fn prepare_profile(
         &self,
@@ -132,7 +132,7 @@ impl crate::host::protocol::computer::ComputerBootstrap for ForegroundComputer {
         self.source.validate_control()
     }
 }
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
 async fn prepare_computer(
     admitted: &Arc<Admitted>,
     host: &OwnedExecHost,
@@ -145,17 +145,24 @@ async fn prepare_computer(
     if !enabled {
         return Ok(None);
     }
-    // Zero candidates is normal on a headless Host; multiple candidates are
-    // ambiguous. Never pick the first desktop or inherit stale SSH/tmux env.
-    let snapshot = super::discover_desktop_candidates().await?;
-    if snapshot.candidates.len() != 1 {
-        return Err(ForegroundError("desktop_selection_required"));
-    }
-    let source = crate::host::coordinator::DesktopSource::start(
-        snapshot.candidates.into_iter().next().expect("exactly one"),
-    )
-    .await
-    .map_err(|e| ForegroundError(e.code()))?;
+    #[cfg(target_os = "linux")]
+    let source = {
+        // Zero candidates is normal on a headless Host; multiple candidates are
+        // ambiguous. Never pick the first desktop or inherit stale SSH/tmux env.
+        let snapshot = super::discover_desktop_candidates().await?;
+        if snapshot.candidates.len() != 1 {
+            return Err(ForegroundError("desktop_selection_required"));
+        }
+        crate::host::coordinator::DesktopSource::start(
+            snapshot.candidates.into_iter().next().expect("exactly one"),
+        )
+        .await
+        .map_err(|e| ForegroundError(e.code()))?
+    };
+    #[cfg(target_os = "windows")]
+    let source = crate::host::coordinator::DesktopSource::start()
+        .await
+        .map_err(|_| ForegroundError("computer_native_session_unavailable"))?;
     let budget = match host.reserve_computer_io() {
         Ok(v) => v,
         Err(_) => {
@@ -192,6 +199,77 @@ async fn prepare_computer(
             return Err(ForegroundError("computer_session_refused"));
         }
     };
+    let retained = admitted.clone();
+    let prepared = tokio::task::spawn_blocking(move || {
+        super::computer::prepare_computer_bootstrap(retained.profile.clone(), source, binding)
+    })
+    .await
+    .map_err(|_| ForegroundError("computer_bootstrap_failed"))??;
+    Ok(prepared.map(|source| {
+        Arc::new(ForegroundComputer {
+            admitted: admitted.clone(),
+            source,
+        }) as Arc<dyn crate::host::protocol::computer::ComputerBootstrap>
+    }))
+}
+#[cfg(target_os = "macos")]
+async fn prepare_computer(
+    admitted: &Arc<Admitted>,
+    host: &OwnedExecHost,
+) -> Result<Option<Arc<dyn crate::host::protocol::computer::ComputerBootstrap>>, ForegroundError> {
+    let retained = admitted.clone();
+    let enabled = tokio::task::spawn_blocking(move || retained.profile.computer_enabled())
+        .await
+        .map_err(|_| ForegroundError("profile_reader_failed"))??;
+    if !enabled {
+        return Ok(None);
+    }
+    let source = crate::host::coordinator::DesktopSource::start()
+        .await
+        .map_err(|e| ForegroundError(e.code()))?;
+    let budget = match host.reserve_computer_io() {
+        Ok(v) => v,
+        Err(_) => {
+            let _ = source.stop().await;
+            return Err(ForegroundError("computer_capacity"));
+        }
+    };
+    let mut grants = BTreeMap::new();
+    for cap in [
+        CapabilityId::DesktopWindowsRead,
+        CapabilityId::DesktopWindowsControl,
+        CapabilityId::DesktopCapture,
+        CapabilityId::DesktopPointer,
+        CapabilityId::DesktopKeyboard,
+        CapabilityId::DesktopAccessibility,
+    ] {
+        grants.insert(
+            cap,
+            crate::host::coordinator::DesktopGrant {
+                configured: true,
+                remote_grant: true,
+                local_policy_allowed: true,
+            },
+        );
+    }
+    let binding = match host
+        .authority()
+        .configure_desktop(source.clone(), budget, grants)
+        .await
+    {
+        Ok(v) => v,
+        Err(_) => {
+            let _ = source.stop().await;
+            return Err(ForegroundError("computer_session_refused"));
+        }
+    };
+    // The original source is now retained in the Host lane. A lost read-probe
+    // reply remains owned Unknown through the common Host cleanup, even if
+    // profile construction below fails or the Computer lane stays unavailable.
+    host.coordinator()
+        .refresh_desktop_source()
+        .await
+        .map_err(|_| ForegroundError("computer_source_probe_failed"))?;
     let retained = admitted.clone();
     let prepared = tokio::task::spawn_blocking(move || {
         super::computer::prepare_computer_bootstrap(retained.profile.clone(), source, binding)
@@ -465,7 +543,7 @@ async fn run_owned(
     };
     // Browser is an independent optional local capability. Unsupported or
     // unavailable Browser inputs cannot take down an already admitted Exec Host.
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     let browser: Option<Arc<dyn crate::host::protocol::browser::BrowserBootstrap>> =
         if mode == HostWireMode::PairedV3 {
             let retained = admitted.clone();
@@ -541,7 +619,7 @@ async fn run_owned(
         } else {
             None
         };
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     let computer = if mode == HostWireMode::PairedV3 {
         match prepare_computer(&admitted, &host).await {
             Ok(source) => source,
@@ -587,15 +665,15 @@ async fn run_owned(
             let protocol = protocol.map(|protocol| {
                 protocol.with_windows_command_environment(admitted.profile.command_environment())
             });
-            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
             let protocol = protocol.and_then(|protocol| {
-                #[cfg(any(target_os = "linux", target_os = "windows"))]
+                #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
                 let protocol = if let Some(source) = &browser {
                     protocol.with_browser_profiles(source.clone())?
                 } else {
                     protocol
                 };
-                #[cfg(target_os = "linux")]
+                #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
                 let protocol = if let Some(source) = &computer {
                     protocol.with_computer_profiles(source.clone())?
                 } else {
@@ -746,7 +824,7 @@ async fn run_owned(
                 Err(error) => failure = Some(error),
             }
             // Same original input jobs remain owned through every link failure.
-            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
             session.drain_browser_inputs().await;
         }
         Err(error) => failure = Some(error),
@@ -792,9 +870,9 @@ async fn run_owned(
     event(&events, &cancel, "stopped", &device, None);
     // Explicit drop order: observed signed files / lease outlive native cleanup.
     drop(host);
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     drop(browser);
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     drop(computer);
     drop(admitted);
     if let Some(error) = failure {
@@ -811,11 +889,12 @@ enum ConnectionSession<'a> {
     Paired(HostProtocol<'a>),
 }
 impl ConnectionSession<'_> {
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     async fn drain_browser_inputs(&self) {
         if let Self::Paired(protocol) = self {
+            #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
             protocol.drain_browser_inputs().await;
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
             protocol.drain_computer_inputs().await;
         }
     }

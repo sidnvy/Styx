@@ -9,7 +9,7 @@ use styx_contracts::identity::DeviceId;
 
 #[path = "backend_browser.rs"]
 mod browser;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 #[path = "backend_computer.rs"]
 mod computer;
 
@@ -387,7 +387,7 @@ struct State {
     owners: BTreeMap<OwnerId, OwnerState>,
     sessions: BTreeMap<u64, Entry>,
     browsers: browser::BrowserContexts,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     computers: computer::ComputerContexts,
 }
 impl State {
@@ -401,7 +401,7 @@ impl State {
                 .is_ok_and(|resource| resource.binding.physically_settled())
         });
         self.browsers.collect_settled();
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
         self.computers.collect_settled();
     }
 }
@@ -425,7 +425,7 @@ impl PairedGatewayBackend {
                 owners: BTreeMap::new(),
                 sessions: BTreeMap::new(),
                 browsers: browser::BrowserContexts::default(),
-                #[cfg(target_os = "linux")]
+                #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
                 computers: computer::ComputerContexts::default(),
             }),
         }
@@ -972,7 +972,7 @@ impl GatewayToolBackend for PairedGatewayBackend {
                 Ok(a) => self.execute(owner, a).await,
                 Err(e) => failure(e, None, false),
             },
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
             name if computer::is_public_computer_tool(name) => {
                 self.computer_call(owner, request.name.as_ref(), request.arguments)
                     .await
@@ -1058,7 +1058,7 @@ impl GatewayOwnerLifecycle for PairedGatewayBackend {
                         || entry.principal != owner.principal_fingerprint()
                 });
                 state.browsers.clear_owner(owner);
-                #[cfg(target_os = "linux")]
+                #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
                 state.computers.clear_owner(owner);
                 OwnerCleanup::Complete
             }

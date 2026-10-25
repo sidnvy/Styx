@@ -1,5 +1,7 @@
 //! macOS descriptor-relative signed-payload observations. No path-launch fallback.
 //! Uses existing MacRoot private/empty-ACL checks and safe nix/std ownership.
+#[path = "macos_signed_app.rs"]
+pub(in crate::store) mod signed_app;
 use super::*;
 use crate::store::payload::{PayloadInventory, PayloadLimits, PayloadMember};
 use nix::dir::Dir;

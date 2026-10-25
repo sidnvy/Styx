@@ -31,8 +31,26 @@ const stateTool = {
   inputSchema: { type: 'object', properties: {}, additionalProperties: false },
   annotations: { readOnlyHint: true, destructiveHint: false, idempotentHint: true, openWorldHint: false },
 };
+let macProcess, macProcessClose;
 let nativeEpoch = 1, nativeClosed = false, epochExhausted = false;
 let contextPromise, context, backend, client, server, startupPromise, closing = false, cleanupPromise;
+// Fixed Playwright 1.64 adapter only: reuse its existing in-process bridge,
+// never a new BrowserServer/listener or a process selected by remote input.
+function retainMacBrowserProcess(value, executable) {
+  if (process.platform !== 'darwin') return;
+  const implementation = value?._connection?.toImpl?.(value);
+  const child = implementation?._browser?.options?.browserProcess?.process;
+  if (!child || !Number.isInteger(child.pid) || child.pid <= 0 || child.pid > 0x7fffffff
+      || child.spawnfile !== executable || child.exitCode !== null || child.signalCode !== null
+      || macProcess) throw new Error('browser_original_process_unconfirmed');
+  macProcess = { schema: 1, pid: child.pid, original_child_closed: false };
+  // The closure retains the original ChildProcess until its actual close event;
+  // it is not inferred from a later PID census or an MCP close acknowledgement.
+  macProcessClose = new Promise(resolve => child.once('close', () => {
+    macProcess.original_child_closed = true;
+    resolve();
+  }));
+}
 function advanceEpoch() {
   if (epochExhausted) return false;
   if (nativeEpoch === Number.MAX_SAFE_INTEGER) {
@@ -68,6 +86,7 @@ async function cleanup() {
     await startupPromise?.catch(() => {});
     await contextPromise?.catch(() => {});
     await context?.close();
+    await macProcessClose;
     await client?.close();
     await backend?.close();
     await server?.close();
@@ -103,6 +122,7 @@ async function main() {
       viewport: { width: 1280, height: 800 },
     }).then(async value => {
       context = value;
+      retainMacBrowserProcess(value, config.browser_executable);
       if (closing) { await value.close(); throw new Error('browser_worker_closing'); }
       const pageObserved = page => {
         advanceEpoch();
@@ -151,6 +171,7 @@ async function main() {
         schema: 1, epoch: nativeEpoch,
         ready: !!context && !nativeClosed && !closing && !epochExhausted,
         closed: nativeClosed || epochExhausted,
+        ...(process.platform === 'darwin' ? { mac_process: macProcess ?? null } : {}),
       } }, nativeEpoch, false);
     }
     // Reject known-invalid/stale calls before any avoidable native launch.
@@ -178,6 +199,7 @@ async function main() {
         const ownedContext = await contextPromise;
         if (!ownedContext) throw new Error('browser_worker_close_unconfirmed');
         await ownedContext.close();
+        await macProcessClose;
         result = { ...result, structuredContent: { ...result.structuredContent, styx_context_closed: true } };
       }
     } catch {

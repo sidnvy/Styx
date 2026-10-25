@@ -39,9 +39,9 @@ pub(super) struct ProfileRelease {
     retained: RetainedRelease,
     root: PathBuf,
     version: String,
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     node_version: Option<String>,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     cua_version: Option<String>,
 }
 fn fixed_legacy_worker(kind: NativeExternalWorker) -> &'static str {
@@ -77,13 +77,13 @@ impl ProfileRelease {
         }
         let verified = crate::release::verify_selected(selection).map_err(load_error)?;
         let manifest = verified.manifest();
-        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
         let node_version = manifest
             .worker_closures
             .iter()
             .find(|w| w.kind == NativeExternalWorker::BrowserNode22)
             .map(|w| w.version.clone());
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         let cua_version = manifest
             .worker_closures
             .iter()
@@ -102,9 +102,9 @@ impl ProfileRelease {
             },
             root,
             version,
-            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
             node_version,
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
             cua_version,
         })
     }
@@ -126,13 +126,13 @@ impl ProfileRelease {
         {
             return Err(ProfileError::UntrustedRelease);
         }
-        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
         let node_version = manifest
             .worker_closures
             .iter()
             .find(|worker| worker.kind == NativeExternalWorker::BrowserNode22)
             .map(|worker| worker.version.clone());
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         let cua_version = manifest
             .worker_closures
             .iter()
@@ -155,9 +155,9 @@ impl ProfileRelease {
             },
             root,
             version,
-            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
             node_version,
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
             cua_version,
         })
     }
@@ -218,7 +218,7 @@ impl ProfileRelease {
     }
     /// Locator only. The caller still requires Browser membership and its pin,
     /// and retains/revalidates this WHOLE release through physical Host cleanup.
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     pub(super) fn browser_release_root(&self) -> PathBuf {
         match &self.retained {
             RetainedRelease::Legacy { .. } => self.root.clone(),
@@ -227,11 +227,11 @@ impl ProfileRelease {
             RetainedRelease::Maintenance { .. } => self.root.join("workers/browser-node22"),
         }
     }
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     pub(super) fn browser_node_version(&self) -> Option<String> {
         self.node_version.clone()
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     pub(super) fn cua_version(&self) -> Option<String> {
         self.cua_version.clone()
     }
@@ -292,13 +292,13 @@ pub(super) fn load(
             {
                 return Err(ProfileError::UntrustedRelease);
             }
-            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
             let node_version = manifest
                 .worker_closures
                 .iter()
                 .find(|worker| worker.kind == NativeExternalWorker::BrowserNode22)
                 .map(|worker| worker.version.clone());
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
             let cua_version = manifest
                 .worker_closures
                 .iter()
@@ -319,9 +319,9 @@ pub(super) fn load(
                 },
                 root: release.to_path_buf(),
                 version: signed_version,
-                #[cfg(any(target_os = "linux", target_os = "windows"))]
+                #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
                 node_version,
-                #[cfg(target_os = "linux")]
+                #[cfg(any(target_os = "linux", target_os = "windows"))]
                 cua_version,
             })
         }
@@ -402,6 +402,15 @@ fn load_legacy(
         )
     };
     #[cfg(target_os = "windows")]
+    let cua_version = {
+        let metadata: serde_json::Value = decode(manifest_raw)?;
+        metadata
+            .get("upstream")
+            .and_then(|v| v.get("cua"))
+            .and_then(|v| v.as_str())
+            .map(str::to_owned)
+    };
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     let node_version = {
         let metadata: serde_json::Value = decode(manifest_raw)?;
         metadata
@@ -462,9 +471,9 @@ fn load_legacy(
         retained: RetainedRelease::Legacy { inventory },
         root: release.to_path_buf(),
         version: manifest.version,
-        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
         node_version,
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         cua_version,
     })
 }

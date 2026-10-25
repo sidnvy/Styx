@@ -65,9 +65,9 @@ struct Deployment {
 }
 #[derive(Deserialize)]
 struct HostLocator {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     computer: Option<serde_json::Value>,
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     browser: Option<serde_json::Value>,
     #[serde(rename = "baseDir")]
     base_dir: PathBuf,
@@ -118,9 +118,9 @@ struct Identity {
 }
 #[derive(Deserialize)]
 struct HostProfile {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     computer: Option<serde_json::Value>,
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     browser: Option<serde_json::Value>,
     host_id: DeviceId,
     gateway_ws_url: String,
@@ -197,7 +197,7 @@ pub struct ProfileDiagnostics {
     pub tool_health: &'static str,
     pub account_acceptance: &'static str,
 }
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 pub(super) struct BrowserSource<'a> {
     pub deployment: Option<&'a serde_json::Value>,
     pub host: Option<&'a serde_json::Value>,
@@ -206,7 +206,7 @@ pub(super) struct BrowserSource<'a> {
     pub workspace: &'a Path,
     pub node_version: Option<&'a str>,
 }
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct ComputerSelection {
@@ -218,7 +218,7 @@ struct ComputerSelection {
     socket: Option<serde_json::Value>,
     env: Option<BTreeMap<String, String>>,
 }
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 fn computer_selected(
     deployment: Option<&serde_json::Value>,
     host: Option<&serde_json::Value>,
@@ -248,8 +248,9 @@ fn computer_selected(
     if selected.connections.is_some_and(|v| v != 1)
         || selected.socket.is_some()
         || selected.env.as_ref().is_some_and(|env| {
-            env.iter()
-                .any(|(key, value)| key != "CUA_DRIVER_RS_ENABLE_WAYLAND" || value != "1")
+            env.iter().any(|(key, value)| {
+                !cfg!(target_os = "linux") || key != "CUA_DRIVER_RS_ENABLE_WAYLAND" || value != "1"
+            })
         })
     {
         return Err(ProfileError::Unsupported);
@@ -265,19 +266,19 @@ pub struct LoadedLegacyProfile {
     bearer: SecretBearer,
     executor: Option<Arc<PinnedExecutable>>,
     inventory: release::ProfileRelease,
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     release_root: PathBuf,
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     browser_node_version: Option<String>,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     cua_version: Option<String>,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     deployment_computer: Option<serde_json::Value>,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     host_computer: Option<serde_json::Value>,
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     deployment_browser: Option<serde_json::Value>,
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     host_browser: Option<serde_json::Value>,
     cwd: PathBuf,
     environment: BTreeMap<String, String>,
@@ -325,7 +326,7 @@ impl LoadedLegacyProfile {
     }
     /// Browser selections remain private mutable input, never an execution grant.
     /// Unsupported/malformed Browser options must not invalidate the Exec profile.
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     pub(super) fn browser_source(&self) -> BrowserSource<'_> {
         BrowserSource {
             deployment: self.deployment_browser.as_ref(),
@@ -336,7 +337,7 @@ impl LoadedLegacyProfile {
             node_version: self.browser_node_version.as_deref(),
         }
     }
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     pub(super) fn pin_browser_node(&self) -> Result<PinnedExecutable, ProfileError> {
         self.inventory
             .pin_worker(NativeExternalWorker::BrowserNode22)
@@ -346,7 +347,15 @@ impl LoadedLegacyProfile {
     /// mint this pin. It is neither an OS permission nor Core dispatch grant.
     /// Call on a bounded blocking worker: original closure revalidation hashes
     /// signed bytes; no executable, subprocess or GUI is started here.
-    #[cfg(target_os = "linux")]
+    #[cfg(target_os = "macos")]
+    pub(crate) fn computer_enabled(&self) -> Result<bool, ProfileError> {
+        self.revalidate_control()?;
+        computer_selected(
+            self.deployment_computer.as_ref(),
+            self.host_computer.as_ref(),
+        )
+    }
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     pub(crate) fn pin_cua_driver(&self) -> Result<Option<PinnedExecutable>, ProfileError> {
         self.revalidate_control()?;
         if !computer_selected(
@@ -405,7 +414,13 @@ impl LoadedLegacyProfile {
             .and_then(|value| value.get("enabled"))
             .and_then(serde_json::Value::as_bool)
             == Some(true);
-        if self.executor_enabled() || browser_requested {
+        if self.executor_enabled()
+            || browser_requested
+            || computer_selected(
+                self.deployment_computer.as_ref(),
+                self.host_computer.as_ref(),
+            )?
+        {
             let expected =
                 PrivateRoot::open(&self.host_base_dir).map_err(|_| ProfileError::ProtectedRead)?;
             if base.identity() != expected.identity() {
@@ -966,11 +981,11 @@ fn load_source(
     } else {
         None
     };
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     let release_root = inventory.browser_release_root();
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     let browser_node_version = inventory.browser_node_version();
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     let cua_version = inventory.cua_version();
     let runtime_format = match (inventory.runtime_format(), exec_enabled) {
         ("legacy_js_v1", true) => "legacy_js_v1_executor_only",
@@ -1066,19 +1081,19 @@ fn load_source(
         bearer,
         executor,
         inventory,
-        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
         release_root,
-        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
         browser_node_version,
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         cua_version,
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
         deployment_computer: deployment.host.computer,
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
         host_computer: host.computer,
-        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
         deployment_browser: deployment.host.browser,
-        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
         host_browser: host.browser,
         cwd: exec.cwd,
         environment: runtime_environment,

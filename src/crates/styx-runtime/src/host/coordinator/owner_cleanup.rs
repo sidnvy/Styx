@@ -113,14 +113,14 @@ async fn run_cleanup(
     // Browser ownership ends independently of Codex resources. Cancel its
     // in-flight wait before seeking global I/O quiescence; the original action
     // remains Unknown, and only exact native scope evidence settles liveness.
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     let _browser = super::browser::cleanup_browser_owner(
         inner.clone(),
         handle.authority.owner(),
         until.saturating_duration_since(tokio::time::Instant::now()),
     )
     .await;
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     let _desktop = super::desktop_cleanup::cleanup_desktop_owner(
         inner.clone(),
         handle.authority.owner(),
@@ -218,7 +218,7 @@ async fn run_cleanup(
             }),
         }
     }
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     {
         let desktop = super::desktop_cleanup::collect_desktop_retention(
             inner,
@@ -230,7 +230,7 @@ async fn run_cleanup(
         facts.deadline_exhausted |= desktop.deadline_exhausted;
         facts.blocked.extend(desktop.blocked);
     }
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     {
         let browser =
             super::browser::collect_browser_retention(inner, Some(handle.authority.owner()), until)
@@ -246,7 +246,7 @@ async fn run_cleanup(
     facts.deadline_exhausted |= tokio::time::Instant::now() >= until;
     facts.physical_complete = facts.unreleased_records == 0 && facts.blocked.is_empty();
     drop(state);
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     if facts.physical_complete {
         // Core includes ReleasePending in the original owner's inventory.
         // Only its empty cleanup proof permits retiring this scope metadata.

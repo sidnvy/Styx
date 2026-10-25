@@ -326,6 +326,16 @@ impl RunningChild {
     }
 }
 impl SuspendedChild {
+    pub(crate) fn identity(&self) -> &ProcessIdentity {
+        &self.birth
+    }
+    /// Return original custody without resuming a stale-session worker.
+    pub(crate) fn cancel_unresumed(mut self) -> RunningChild {
+        // Current start_kill always records termination in original Shared.
+        let _ = self.child.start_kill();
+        self.child
+    }
+
     pub(crate) fn verify_and_resume(self) -> Result<RunningChild, SpawnFailure> {
         let result = (|| {
             let guard = self.child.shared.native.lock().map_err(|_| lost())?;
@@ -403,8 +413,18 @@ pub(crate) fn spawn_browser_suspended(
         Entry::Browser { worker, config },
     )
 }
+/// Fixed original Cua entry. Never accepts caller argv or a daemon locator.
+pub(crate) fn spawn_cua_suspended(
+    image: Arc<PinnedExecutable>,
+    startup_budget: Arc<tokio::sync::OwnedSemaphorePermit>,
+    cwd: PathBuf,
+    env: BTreeMap<OsString, OsString>,
+) -> Result<SuspendedChild, SpawnFailure> {
+    spawn_fixed(image, startup_budget, cwd, env, Entry::Cua)
+}
 enum Entry {
     Exec,
+    Cua,
     Browser { worker: PathBuf, config: PathBuf },
 }
 // Microsoft CRT quoting, applied only to trusted fixed-entry arguments. The
@@ -451,6 +471,7 @@ fn command_line(path: &OsStr, entry: &Entry) -> io::Result<Vec<u16>> {
             OsStr::new("--listen"),
             OsStr::new("stdio://"),
         ],
+        Entry::Cua => vec![OsStr::new("mcp"), OsStr::new("--direct")],
         Entry::Browser { worker, config } => vec![
             worker.as_os_str(),
             OsStr::new("--config"),

@@ -1,25 +1,37 @@
 //! Host-owned start/read/targeted-action composition.
 //! No network DTO can construct control authority. Physical retention is Core-
 //! attested; legacy raw-wire mode remains outside this composition.
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 mod browser;
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 pub use browser::*;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 mod desktop;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 mod desktop_observation;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 mod desktop_read;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub(crate) use desktop::*;
 #[cfg(target_os = "linux")]
 mod desktop_source;
-#[cfg(target_os = "linux")]
+#[cfg(target_os = "windows")]
+mod desktop_source {
+    pub(crate) use crate::platform::windows_desktop::{
+        DesktopSource, SourceCleanup as DesktopSourceStop,
+    };
+    pub(crate) fn source_stop_complete(report: &DesktopSourceStop) -> bool {
+        report.native_thread_joined && report.native_handles_released
+    }
+}
+#[cfg(target_os = "macos")]
+#[path = "desktop_source_macos.rs"]
+mod desktop_source;
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub(crate) use desktop_source::DesktopSource;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 mod desktop_cleanup;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub use desktop_cleanup::DesktopLaneCleanup;
 mod legacy;
 mod owner_cleanup;
@@ -46,10 +58,10 @@ pub enum CoordinatorError {
     Admission(ErrorCategory),
     #[error("executor refused or could not resolve resource")]
     Executor(#[from] ExecError),
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     #[error("Browser executor refused or has an unknown outcome")]
     Browser(#[from] crate::providers::browser::BrowserError),
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     #[error("Desktop executor refused or has an unknown outcome")]
     Desktop(#[from] crate::providers::cua::CuaError),
     #[error("Host work budget exhausted or maintenance is active")]
@@ -71,9 +83,9 @@ struct State {
     facts: AdmissionFacts,
     shutting_down: bool,
     sessions: crate::session::HostSessions,
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     browser: Option<browser::BrowserLane>,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     desktop: Option<desktop::DesktopLane>,
 }
 impl State {
@@ -84,9 +96,9 @@ impl State {
             ledger,
             facts,
             sessions,
-            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
             browser: None,
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
             desktop: None,
             shutting_down: false,
         }
@@ -243,24 +255,20 @@ pub struct HostCleanup {
     /// None means no Exec adapter was ever started, not an observed exit.
     pub native: Option<CleanupReceipt>,
     pub supervised_jobs_joined: bool,
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     pub browser: Option<BrowserLaneCleanup>,
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     pub desktop: Option<DesktopLaneCleanup>,
 }
 impl HostCleanup {
     /// Native Codex facts and Browser process-tree facts are independent.
     pub fn ancillary_providers_settled(&self) -> bool {
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
         {
             self.browser.as_ref().is_none_or(|facts| facts.complete)
                 && self.desktop.as_ref().is_none_or(|facts| facts.complete)
         }
-        #[cfg(target_os = "windows")]
-        {
-            self.browser.as_ref().is_none_or(|facts| facts.complete)
-        }
-        #[cfg(not(any(target_os = "linux", target_os = "windows")))]
+        #[cfg(not(any(target_os = "linux", target_os = "windows", target_os = "macos")))]
         {
             true
         }
@@ -857,7 +865,7 @@ impl HostAuthority {
             state.shutting_down = true;
             state.ledger.begin_maintenance();
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
         let desktop = desktop_cleanup::cleanup_desktop_lane(
             self.inner.clone(),
             until.saturating_duration_since(tokio::time::Instant::now()),
@@ -909,7 +917,7 @@ impl HostAuthority {
                 }
             }
         }
-        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
         let browser = browser::cleanup_browser_lane(
             self.inner.clone(),
             until.saturating_duration_since(tokio::time::Instant::now()),
@@ -918,9 +926,9 @@ impl HostAuthority {
         Ok(HostCleanup {
             native,
             supervised_jobs_joined: joined,
-            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
             browser,
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
             desktop,
         })
     }

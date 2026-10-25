@@ -2,24 +2,19 @@
 //! C08 owns signed workers; neither local DATA nor this adapter grants tools.
 use super::*;
 use crate::store::native_host_snapshot::NativeHostSnapshot;
-#[cfg(any(target_os = "linux", target_os = "windows"))]
 use serde_json::Value;
 
 #[derive(Deserialize)]
 struct FreshDeployment {
     schema: u16,
     mode: String,
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
     host: FreshHost,
-    #[cfg(target_os = "macos")]
-    #[serde(rename = "host")]
-    _host: FreshHost,
 }
 #[derive(Deserialize)]
 struct FreshHost {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     computer: Option<Value>,
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     browser: Option<Value>,
 }
 
@@ -145,23 +140,25 @@ fn load_snapshot(
     if deployment.schema != 1 || deployment.mode != "join-existing" {
         return Err(ProfileError::Invalid);
     }
-    // Browser has Linux and Windows native factories; Computer remains Linux-only.
+    // Each selected capability uses its native factory and independent lifecycle.
     // Remote approvals never replace local selection or OS desktop authorization.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     let computer = seed.computer_requested && deployment.host.computer == Some(Value::Bool(true));
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     let deployment_computer = Some(Value::Bool(computer));
     #[cfg(target_os = "linux")]
     let host_computer = Some(serde_json::json!({
         "enabled":computer,"connections":1,"env":{"CUA_DRIVER_RS_ENABLE_WAYLAND":"1"}
     }));
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    let host_computer = Some(serde_json::json!({"enabled":computer,"connections":1}));
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     let deployment_browser = if seed.browser_requested {
         deployment.host.browser
     } else {
         None
     };
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     let host_browser = deployment_browser.clone().map(|mut value| {
         if let Some(object) = value.as_object_mut() {
             object.insert(
@@ -171,11 +168,11 @@ fn load_snapshot(
         }
         value
     });
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     let release_root = inventory.browser_release_root();
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     let browser_node_version = inventory.browser_node_version();
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     let cua_version = inventory.cua_version();
     #[cfg(target_os = "windows")]
     let environment = super::super::windows_env::executor_environment(&BTreeMap::new(), state_dir)?;
@@ -191,19 +188,19 @@ fn load_snapshot(
         bearer,
         executor,
         inventory,
-        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
         release_root,
-        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
         browser_node_version,
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         cua_version,
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
         deployment_computer,
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
         host_computer,
-        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
         deployment_browser,
-        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
         host_browser,
         cwd,
         environment,

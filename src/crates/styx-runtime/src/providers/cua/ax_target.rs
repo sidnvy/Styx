@@ -1,7 +1,9 @@
 //! Exact, bounded AX-only acquisition. This is not OS write authorization.
 use super::{CuaError, Result, window_capture::WindowCaptureRequest};
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 use crate::store::ProcessIdentity;
 use serde_json::{Map, Value};
+#[cfg(target_os = "linux")]
 use std::{
     fs::{File, OpenOptions},
     os::unix::fs::{MetadataExt, OpenOptionsExt},
@@ -94,15 +96,19 @@ impl DesktopReadRequest {
 }
 /// Original proc directory stays pinned until the native reply is settled.
 /// PID alone and a remote window number never establish process ownership.
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) struct DesktopReadTarget {
     pub(crate) request: DesktopReadRequest,
     identity: ProcessIdentity,
+    #[cfg(target_os = "linux")]
     directory: File,
 }
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 impl DesktopReadTarget {
     pub(crate) fn acquire(request: DesktopReadRequest) -> Result<Self> {
         let identity =
             ProcessIdentity::observe(request.pid()).map_err(|_| CuaError::PermissionDenied)?;
+        #[cfg(target_os = "linux")]
         let directory = OpenOptions::new()
             .read(true)
             .custom_flags(libc::O_PATH | libc::O_NOFOLLOW | libc::O_DIRECTORY | libc::O_CLOEXEC)
@@ -111,19 +117,31 @@ impl DesktopReadTarget {
         let value = Self {
             request,
             identity,
+            #[cfg(target_os = "linux")]
             directory,
         };
         value.validate()?;
         Ok(value)
     }
     pub(crate) fn validate(&self) -> Result<()> {
+        #[cfg(target_os = "linux")]
         let current = self
             .directory
             .metadata()
             .map_err(|_| CuaError::PermissionDenied)?;
+        #[cfg(target_os = "linux")]
         if !current.is_dir()
             || current.uid() != nix::unistd::Uid::current().as_raw()
             || !self.identity.still_current().unwrap_or(false)
+        {
+            return Err(CuaError::PermissionDenied);
+        }
+        #[cfg(target_os = "macos")]
+        if !matches!(&self.identity, ProcessIdentity::Macos { uid, .. } if *uid == nix::unistd::Uid::current().as_raw())
+            || !self
+                .identity
+                .still_current()
+                .map_err(|_| CuaError::PermissionDenied)?
         {
             return Err(CuaError::PermissionDenied);
         }
@@ -178,5 +196,30 @@ mod tests {
                 .unwrap()
                 .is_none()
         );
+    }
+}
+
+#[cfg(target_os = "windows")]
+pub(crate) struct DesktopReadTarget {
+    pub(crate) request: DesktopReadRequest,
+    target: crate::platform::windows_desktop::Target,
+}
+#[cfg(target_os = "windows")]
+impl DesktopReadTarget {
+    pub(crate) fn acquire(request: DesktopReadRequest) -> Result<Self> {
+        let window = match request {
+            DesktopReadRequest::Accessibility(v) => v.window_id,
+            DesktopReadRequest::WindowCapture(v) => v.window_id,
+        };
+        Ok(Self {
+            request,
+            target: crate::platform::windows_desktop::Target::acquire(request.pid(), window)
+                .map_err(|_| CuaError::PermissionDenied)?,
+        })
+    }
+    pub(crate) fn validate(&self) -> Result<()> {
+        self.target
+            .validate()
+            .map_err(|_| CuaError::PermissionDenied)
     }
 }

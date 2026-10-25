@@ -190,7 +190,7 @@ impl HostAuthority {
                 }),
             }
         }
-        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
         {
             let browser = super::browser::collect_browser_retention(&self.inner, None, until).await;
             receipt.actions_released += browser.actions_released;
@@ -198,7 +198,7 @@ impl HostAuthority {
             receipt.deadline_exhausted |= browser.deadline_exhausted;
             receipt.blocked.extend(browser.blocked);
         }
-        #[cfg(target_os = "linux")]
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
         {
             let desktop =
                 super::desktop_cleanup::collect_desktop_retention(&self.inner, None, until).await;

@@ -329,6 +329,9 @@ pub struct PreservationManifest {
     pub entries: Vec<PreservedFile>,
 }
 
+#[cfg(target_os = "macos")]
+pub(crate) use platform::{SignedAppMember, SignedAppMembers};
+
 pub struct PrivateRoot {
     inner: platform::Root,
 }

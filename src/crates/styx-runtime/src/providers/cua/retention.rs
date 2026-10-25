@@ -237,7 +237,7 @@ impl CuaWorker {
         if live.retired
             || !clean.worker_exited
             || !clean.io_joined
-            || !clean.descendants_confirmed
+            || !clean.physical_settlement_confirmed()
             || s.liveness != ExecutionLiveness::Exited
             || s.output_drain != OutputDrain::Drained
         {

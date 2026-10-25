@@ -1,7 +1,7 @@
 //! Darwin native-image launch. START_SUSPENDED is a verification barrier, not readiness.
 //! Only the direct parent reaps this child; cancellation requests termination but never
 //! substitutes an acknowledgement for waitpid. Business descendants belong to Host cleanup.
-use crate::store::{PinnedExecutable, ProcessIdentity};
+use crate::store::{PinnedExecutable, ProcessIdentity, SignedAppMember};
 use nix::{
     spawn::{PosixSpawnAttr, PosixSpawnFileActions, PosixSpawnFlags, posix_spawn},
     sys::{
@@ -61,13 +61,50 @@ struct Facts {
     exit: Option<ExitStatus>,
     wait_unknown: bool,
 }
+#[derive(Clone)]
+enum LaunchImage {
+    Native(Arc<PinnedExecutable>),
+    // Constructed only by the fixed App-member proxy wrapper below. This does
+    // not turn readonly members into ordinary PinnedExecutable/path authority.
+    InstalledProxy {
+        member: Arc<SignedAppMember>,
+        _custody: Arc<dyn Send + Sync>,
+    },
+}
+impl LaunchImage {
+    fn revalidate(&self) -> crate::store::Result<()> {
+        match self {
+            Self::Native(image) => image.revalidate(),
+            Self::InstalledProxy { member, .. } => member.revalidate(),
+        }
+    }
+    fn source_path_for_suspended_spawn(&self) -> crate::store::Result<PathBuf> {
+        match self {
+            Self::Native(image) => image.source_path_for_suspended_spawn(),
+            Self::InstalledProxy { member, .. } => {
+                let path = member.source_path_for_image_attestation()?;
+                if path != std::path::Path::new("/Applications/Styx.app/Contents/MacOS/cua-driver")
+                {
+                    return Err(crate::store::StoreError::Unsupported);
+                }
+                Ok(path)
+            }
+        }
+    }
+    fn expected_cdhash(&self) -> crate::store::Result<Vec<u8>> {
+        match self {
+            Self::Native(image) => image.expected_cdhash(),
+            Self::InstalledProxy { member, .. } => member.expected_cdhash(),
+        }
+    }
+}
 struct Shared {
     pid: Pid,
     facts: Mutex<Facts>,
     terminate: AtomicBool,
     joined: AtomicBool,
     // Retain the trusted source even if the public waiter is dropped.
-    _image: Arc<PinnedExecutable>,
+    _image: LaunchImage,
 }
 #[derive(Clone, Debug)]
 pub struct ChildReceipt {
@@ -95,6 +132,15 @@ mod darwin_file_actions {
     use nix::spawn::PosixSpawnFileActions;
     use std::ffi::CStr;
 
+    pub(super) fn duplicate_inherited(
+        fd: &std::os::fd::OwnedFd,
+    ) -> Result<std::os::fd::OwnedFd, super::SpawnFailure> {
+        let raw = nix::fcntl::fcntl(fd, nix::fcntl::FcntlArg::F_DUPFD_CLOEXEC(5))
+            .map_err(|_| super::refused("proxy_descriptor_unavailable"))?;
+        // SAFETY: successful F_DUPFD_CLOEXEC returns a NEW descriptor owned by
+        // this call; it cannot alias caller ownership. It is adopted exactly once.
+        Ok(unsafe { std::os::fd::FromRawFd::from_raw_fd(raw) })
+    }
     // nix 0.31.3 spawn.rs:229 declares this wrapper repr(transparent), with
     // its sole libc::posix_spawn_file_actions_t field. Darwin's official
     // addchdir_np operates on that initialized object; no OS layout is copied.
@@ -129,6 +175,68 @@ pub fn spawn_suspended(
     args: Vec<OsString>,
     cwd: PathBuf,
     env: BTreeMap<OsString, OsString>,
+) -> Result<SuspendedChild, SpawnFailure> {
+    spawn_image(LaunchImage::Native(image), args, cwd, env, Vec::new())
+}
+/// Fixed installed App proxy only. Inputs are private trusted source handles;
+/// no serialized request can provide an executable, FD, environment or socket.
+pub(crate) fn spawn_installed_proxy_suspended(
+    member: Arc<SignedAppMember>,
+    control: OwnedFd,
+    lifecycle: OwnedFd,
+    socket: PathBuf,
+    workspace: PathBuf,
+    home: PathBuf,
+    custody: Arc<dyn Send + Sync>,
+) -> Result<SuspendedChild, SpawnFailure> {
+    if !socket.is_absolute() || !home.is_absolute() || !workspace.is_absolute() {
+        return Err(refused("invalid_proxy_source"));
+    }
+    // Duplicate above the fixed child slots before posix_spawn file actions;
+    // source descriptors3/4 cannot be clobbered by another dup2 action.
+    let inherited = vec![
+        (darwin_file_actions::duplicate_inherited(&control)?, 3),
+        (darwin_file_actions::duplicate_inherited(&lifecycle)?, 4),
+    ];
+    let env = BTreeMap::from([
+        (
+            OsString::from("CUA_DRIVER_RS_TELEMETRY_ENABLED"),
+            OsString::from("0"),
+        ),
+        (OsString::from("HOME"), home.into_os_string()),
+        (OsString::from("TMPDIR"), workspace.clone().into_os_string()),
+        (OsString::from("PATH"), OsString::from("/usr/bin:/bin")),
+        (OsString::from("LANG"), OsString::from("C.UTF-8")),
+        (
+            OsString::from("STYX_PRIVATE_OWNED_PROXY_V1"),
+            OsString::from("1"),
+        ),
+        (
+            OsString::from("CUA_DRIVER_MCP_ENVELOPES"),
+            OsString::from("0"),
+        ),
+    ]);
+    spawn_image(
+        LaunchImage::InstalledProxy {
+            member,
+            _custody: custody,
+        },
+        vec![
+            OsString::from("mcp"),
+            OsString::from("--socket"),
+            socket.into_os_string(),
+        ],
+        workspace,
+        env,
+        inherited,
+    )
+}
+fn spawn_image(
+    image: LaunchImage,
+    args: Vec<OsString>,
+    cwd: PathBuf,
+    env: BTreeMap<OsString, OsString>,
+    inherited: Vec<(OwnedFd, i32)>,
 ) -> Result<SuspendedChild, SpawnFailure> {
     // The only production caller supplies fixed executor arguments. Bound this
     // OS boundary before CString/environment allocation nevertheless.
@@ -191,6 +299,11 @@ pub fn spawn_suspended(
         actions
             .add_dup2(fd.as_raw_fd(), target)
             .map_err(|_| refused("spawn_unavailable"))?;
+    }
+    for (fd, target) in &inherited {
+        actions
+            .add_dup2(fd.as_raw_fd(), *target)
+            .map_err(|_| refused("proxy_descriptor_unavailable"))?;
     }
     darwin_file_actions::chdir(&mut actions, directory.as_c_str())
         .map_err(|_| refused("spawn_directory_unavailable"))?;

@@ -1,7 +1,10 @@
 //! Foreground composition; CLI and later native UI share these authority ports.
-#[cfg(any(target_os = "linux", target_os = "windows"))]
+#[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 mod browser;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+mod computer;
+#[cfg(target_os = "macos")]
+#[path = "computer_macos.rs"]
 mod computer;
 pub mod profile;
 #[cfg(target_os = "windows")]

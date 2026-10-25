@@ -11,6 +11,7 @@ use nix::{
     sys::stat::Mode,
     unistd::geteuid,
 };
+pub(crate) use payload_backend::signed_app::{SignedAppMember, SignedAppMembers};
 pub(in crate::store) use payload_backend::{PayloadSnapshot, PinnedImage};
 use std::{
     ffi::{OsStr, OsString},

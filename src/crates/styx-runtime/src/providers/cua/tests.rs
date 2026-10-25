@@ -60,6 +60,7 @@ fn authority() -> (
     };
     (ledger, owner, other, facts, context)
 }
+#[cfg(target_os = "linux")]
 #[test]
 fn fixed_public_tools_and_native_inventory_cannot_become_arbitrary_rpc() {
     let native: Value = serde_json::from_str(NATIVE_CATALOG).unwrap();
@@ -104,6 +105,68 @@ fn fixed_public_tools_and_native_inventory_cannot_become_arbitrary_rpc() {
     }
     assert!(bounded_bytes(&"x".repeat(FRAME_BYTES), FRAME_BYTES).is_err());
 }
+// Source-derived catalogs are compatibility evidence, never device acceptance.
+// A portable projection must still reject altered schemas, duplicate names and
+// half-present private write protocols; unrelated upstream tools grant no access.
+#[test]
+fn portable_catalogs_preserve_exact_schemas_and_private_protocol_pairing() {
+    for schemas_json in [
+        include_str!("macos_catalog.json"),
+        include_str!("windows-catalog.json"),
+    ] {
+        let contract = FixedNativeCatalog {
+            native_count: None,
+            schemas_json,
+            full_catalog: false,
+        };
+        let expected: BTreeMap<String, Value> = serde_json::from_str(schemas_json).unwrap();
+        let tools: Vec<rmcp::model::Tool> = expected
+            .into_iter()
+            .map(|(name, schema)| {
+                serde_json::from_value(serde_json::json!({"name": name, "inputSchema": schema}))
+                    .unwrap()
+            })
+            .collect();
+        assert!(!validate_native_catalog(&tools, contract).unwrap());
+        let mut duplicate = tools.clone();
+        duplicate.push(tools[0].clone());
+        assert!(validate_native_catalog(&duplicate, contract).is_err());
+        let mut missing = tools.clone();
+        missing.remove(0);
+        assert!(validate_native_catalog(&missing, contract).is_err());
+        let mut altered = tools.clone();
+        altered[0].input_schema = Arc::new(
+            serde_json::json!({"type":"object"})
+                .as_object()
+                .unwrap()
+                .clone(),
+        );
+        assert!(validate_native_catalog(&altered, contract).is_err());
+        let mut extended = tools;
+        for (name, schema) in ax_write::private_schemas() {
+            extended.push(
+                serde_json::from_value(serde_json::json!({"name": name, "inputSchema": schema}))
+                    .unwrap(),
+            );
+            if extended.len() == 11 {
+                assert!(validate_native_catalog(&extended, contract).is_err());
+            }
+        }
+        assert!(validate_native_catalog(&extended, contract).unwrap());
+        extended.push(
+            serde_json::from_value(
+                serde_json::json!({"name":"run_script","inputSchema":{"type":"object"}}),
+            )
+            .unwrap(),
+        );
+        assert!(validate_native_catalog(&extended, contract).unwrap());
+        assert!(matches!(
+            CuaAction::new("run_script".into(), Map::new()),
+            Err(CuaError::Unsupported)
+        ));
+    }
+}
+
 #[tokio::test]
 async fn exact_core_target_owner_and_session_are_required_and_io_credit_is_exclusive() {
     let (mut ledger, owner, other, facts, context) = authority();

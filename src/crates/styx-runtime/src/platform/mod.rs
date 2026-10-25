@@ -8,3 +8,6 @@ pub(crate) mod macos_spawn;
 
 #[cfg(target_os = "windows")]
 pub(crate) mod windows_spawn;
+
+#[cfg(target_os = "windows")]
+pub(crate) mod windows_desktop;

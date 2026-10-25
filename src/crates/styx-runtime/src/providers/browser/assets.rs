@@ -13,12 +13,12 @@ use std::{
     collections::BTreeSet,
     fs::{File, OpenOptions},
     io::Write,
-    os::{
-        fd::AsRawFd,
-        unix::fs::{MetadataExt, OpenOptionsExt},
-    },
+    os::unix::fs::{MetadataExt, OpenOptionsExt},
     path::{Path, PathBuf},
 };
+
+#[cfg(target_os = "linux")]
+use std::os::fd::AsRawFd;
 
 type Result<T> = std::result::Result<T, BrowserError>;
 const WORKER: &[u8] = include_bytes!("../../../../../providers/browser-worker/worker.mjs");
@@ -72,10 +72,13 @@ impl PreparedBrowserAssets {
         }
         // The one deliberate dependency link is not accepted as a manifest
         // member. Its exact target is an independently verified original tree.
+        #[cfg(target_os = "linux")]
         let pinned = PathBuf::from(format!(
             "/proc/self/fd/{}",
             self.stage_directory.as_raw_fd()
         ));
+        #[cfg(target_os = "macos")]
+        let pinned = self.stage_path.clone();
         let metadata = std::fs::symlink_metadata(pinned.join("node_modules"))
             .map_err(|_| BrowserError::PermissionDenied)?;
         if !metadata.file_type().is_symlink()
@@ -113,7 +116,12 @@ impl PreparedBrowserAssets {
 }
 fn checked_root(path: &Path, original: &PrivateRoot, directory: &File) -> Result<()> {
     let current = PrivateRoot::open(path).map_err(|_| BrowserError::PermissionDenied)?;
+    #[cfg(target_os = "linux")]
     let RootIdentity::Linux { device, inode, uid } = original.identity();
+    #[cfg(target_os = "macos")]
+    let RootIdentity::Macos { device, inode, uid } = original.identity() else {
+        return Err(BrowserError::PermissionDenied);
+    };
     let pinned = directory
         .metadata()
         .map_err(|_| BrowserError::PermissionDenied)?;

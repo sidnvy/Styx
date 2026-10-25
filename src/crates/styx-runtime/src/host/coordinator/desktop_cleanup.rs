@@ -1,8 +1,8 @@
 //! Cua physical cleanup and Core-attested retention share the Host's sole ledger.
 //! Native scope/IO facts are distinct from action ACK and historical outcome.
+use super::desktop_source::{DesktopSourceStop, source_stop_complete};
 use super::*;
 use crate::providers::cua::{CuaCleanup, CuaError, CuaEvidence, CuaHandle, CuaReceipt, CuaWorker};
-use crate::session_probe::watch::WatchReport;
 use std::collections::{BTreeMap, BTreeSet};
 use styx_contracts::capability::CapabilityId;
 use styx_core::operations::{ProviderRecordKey, ResourceDomain};
@@ -12,7 +12,7 @@ pub struct DesktopLaneCleanup {
     pub resources: Vec<(OperationId, CuaCleanup)>,
     pub errors: Vec<(Option<OperationId>, CuaError)>,
     pub complete: bool,
-    pub source_report: Option<WatchReport>,
+    pub source_report: Option<DesktopSourceStop>,
     pub source_error: bool,
 }
 #[derive(Debug)]
@@ -23,7 +23,7 @@ pub(super) struct DesktopRetentionCollection {
     pub(super) blocked: Vec<RetentionBlock>,
 }
 fn physical_complete(facts: &CuaCleanup) -> bool {
-    facts.worker_exited && facts.io_joined && facts.descendants_confirmed
+    facts.complete()
 }
 fn strict_no_io(snapshot: &OperationSnapshot) -> bool {
     snapshot.state == OperationState::Failed
@@ -104,7 +104,7 @@ pub(super) async fn cleanup_desktop_lane(
     let mut report = native?;
     match source_result {
         Ok(Ok(facts)) => {
-            report.source_error = !facts.child_reaped || !facts.stdout_joined;
+            report.source_error = !source_stop_complete(&facts);
             report.source_report = Some(facts);
         }
         _ => report.source_error = true,

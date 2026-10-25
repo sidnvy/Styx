@@ -24,24 +24,28 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
+#[cfg(target_os = "macos")]
+use crate::platform::macos_spawn::RunningChild as Child;
 #[cfg(target_os = "windows")]
 use crate::platform::windows_spawn::RunningChild as Child;
 #[cfg(target_os = "linux")]
 use std::{os::fd::AsRawFd, process::Stdio};
 #[cfg(target_os = "linux")]
 use tokio::process::Child;
-#[cfg(target_os = "linux")]
+#[cfg(any(target_os = "linux", target_os = "macos"))]
 pub(crate) mod assets;
 #[cfg(target_os = "windows")]
 #[path = "windows_assets.rs"]
 pub(crate) mod assets;
+#[cfg(target_os = "macos")]
+mod macos;
 #[cfg(target_os = "windows")]
 mod windows;
 
 /// Ordinary drive paths are used by Node; Windows canonicalize returns the
 /// extended prefix even for these paths. Never accept UNC/device locators.
 fn canonical_path(path: &Path) -> Result<PathBuf> {
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     {
         std::fs::canonicalize(path).map_err(|_| BrowserError::PermissionDenied)
     }
@@ -69,9 +73,9 @@ pub struct OwnedBrowserConfig {
     pub profile_dir: PathBuf,
     pub output_dir: PathBuf,
     pub rpc_timeout: Duration,
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     pub node_pin: Arc<crate::store::PinnedExecutable>,
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     pub environment: BTreeMap<String, String>,
 }
 #[derive(Serialize, Deserialize)]
@@ -189,6 +193,12 @@ struct Resource {
 }
 struct Live {
     child: Option<Child>,
+    #[cfg(target_os = "macos")]
+    suspended: Option<crate::platform::macos_spawn::SuspendedChild>,
+    #[cfg(target_os = "macos")]
+    launch_unconfirmed: bool,
+    #[cfg(target_os = "macos")]
+    original_browser_process: Option<macos::OriginalBrowserProcess>,
     client: Option<RunningService<RoleClient, BrowserClient>>,
     stderr: Option<JoinHandle<()>>,
     client_close: Option<JoinHandle<bool>>,
@@ -452,6 +462,24 @@ impl OwnedBrowserConfig {
                 return Err(BrowserError::PermissionDenied);
             }
         }
+        #[cfg(target_os = "macos")]
+        {
+            let expected = BTreeMap::from([
+                (
+                    "HOME".to_owned(),
+                    self.output_dir.to_string_lossy().into_owned(),
+                ),
+                (
+                    "TMPDIR".to_owned(),
+                    self.output_dir.to_string_lossy().into_owned(),
+                ),
+                ("PATH".to_owned(), "/usr/bin:/bin".to_owned()),
+                ("LANG".to_owned(), "C.UTF-8".to_owned()),
+            ]);
+            if self.environment != expected {
+                return Err(BrowserError::PermissionDenied);
+            }
+        }
         for path in [
             &self.node_binary,
             &self.worker_entry,
@@ -491,7 +519,7 @@ impl OwnedBrowserConfig {
             &self.profile_dir,
             &self.output_dir,
             self.rpc_timeout.as_millis(),
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", target_os = "macos"))]
             &self.environment,
         ))
         .map_err(|_| BrowserError::InvalidRequest)?;
@@ -594,6 +622,12 @@ impl BrowserOpenSlot {
             owner,
             state: Arc::new(tokio::sync::Mutex::new(Live {
                 child: None,
+                #[cfg(target_os = "macos")]
+                suspended: None,
+                #[cfg(target_os = "macos")]
+                launch_unconfirmed: false,
+                #[cfg(target_os = "macos")]
+                original_browser_process: None,
                 client: None,
                 stderr: None,
                 client_close: None,
@@ -660,6 +694,8 @@ impl BrowserOpenSlot {
             }
             #[cfg(target_os = "windows")]
             windows::start(&mut live, &config, resource._budget._partition.clone()).await?;
+            #[cfg(target_os = "macos")]
+            macos::start(&mut live, &config).await?;
             let child = live.child.as_mut().ok_or(BrowserError::Unknown)?;
             let stdin = child_stdin(child).ok_or(BrowserError::SpawnFailed)?;
             let stdout = child_stdout(child).ok_or(BrowserError::SpawnFailed)?;
@@ -780,7 +816,7 @@ fn child_stdin(child: &mut Child) -> Option<tokio::process::ChildStdin> {
     {
         child.stdin.take()
     }
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     {
         child.take_stdin()
     }
@@ -790,7 +826,7 @@ fn child_stdout(child: &mut Child) -> Option<tokio::process::ChildStdout> {
     {
         child.stdout.take()
     }
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     {
         child.take_stdout()
     }
@@ -800,7 +836,7 @@ fn child_stderr(child: &mut Child) -> Option<tokio::process::ChildStderr> {
     {
         child.stderr.take()
     }
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     {
         child.take_stderr()
     }
@@ -906,7 +942,7 @@ impl BrowserActionSlot {
             return refuse(BrowserError::Unknown);
         }
         if self.state.child.as_mut().is_some_and(|child| {
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "macos"))]
             let observed = child.try_wait();
             #[cfg(target_os = "windows")]
             let observed = child.observed_exit();
@@ -954,6 +990,8 @@ impl BrowserActionSlot {
             epoch: u64,
             ready: bool,
             closed: bool,
+            #[cfg(target_os = "macos")]
+            mac_process: Option<macos::OriginalBrowserProcess>,
         }
         let observed_state = match observed {
             Some(Ok(Ok(CallToolResponse::Complete(value)))) if value.is_error != Some(true) => {
@@ -971,6 +1009,28 @@ impl BrowserActionSlot {
             // dispatched. Fence this executor rather than infer a false Ready.
             return refuse(BrowserError::ProtocolMismatch);
         };
+        #[cfg(target_os = "macos")]
+        if let Some(process) = observed_state.mac_process {
+            if process.schema != 1
+                || process.pid == 0
+                || process.pid > i32::MAX as u32
+                || self
+                    .state
+                    .original_browser_process
+                    .as_ref()
+                    .is_some_and(|old| {
+                        old.pid != process.pid
+                            || (old.original_child_closed && !process.original_child_closed)
+                    })
+            {
+                self.state.uncertain = true;
+                self.state.references.invalidate();
+                return refuse(BrowserError::ProtocolMismatch);
+            }
+            // Worker-local ChildProcess observations, not OS authority, a grant,
+            // a kernel PID handle, or proof of detached helper termination.
+            self.state.original_browser_process = Some(process);
+        }
         if observed_state.closed {
             self.state.references.invalidate();
             self.state.uncertain = true;
@@ -1247,6 +1307,48 @@ async fn cleanup(live: &mut Live, budget: Duration) -> BrowserCleanup {
             worker_exited = true;
             worker_exit_success = None;
             descendants = BrowserDescendants::Confirmed;
+        }
+    }
+    #[cfg(target_os = "macos")]
+    {
+        if let Some(suspended) = &mut live.suspended {
+            match timeout_at(until, suspended.terminate_and_wait()).await {
+                Ok(Ok(exit)) => {
+                    worker_exited = true;
+                    worker_exit_success = Some(exit.success());
+                    // START_SUSPENDED was never resumed: no browser code ran.
+                    descendants = BrowserDescendants::Confirmed;
+                }
+                _ => {
+                    worker_exited = false;
+                    worker_exit_success = None;
+                    descendants = BrowserDescendants::Unknown;
+                }
+            }
+        } else if let Some(child) = &mut live.child {
+            // Closing the MCP service delivers EOF to the original Node worker.
+            // Its existing cleanup awaits the actual persistent context close.
+            match timeout_at(until, child.wait()).await {
+                Ok(Ok(exit)) => {
+                    worker_exited = true;
+                    worker_exit_success = Some(exit.success());
+                }
+                _ => {
+                    worker_exited = false;
+                    worker_exit_success = None;
+                }
+            }
+            // A direct Node wait cannot prove termination of detached Crashpad
+            // helpers. Keep the existing retained failure custody; no fake Job0.
+            descendants = BrowserDescendants::Unknown;
+        } else {
+            worker_exited = !live.launch_unconfirmed;
+            worker_exit_success = None;
+            descendants = if live.launch_unconfirmed {
+                BrowserDescendants::Unknown
+            } else {
+                BrowserDescendants::Confirmed
+            };
         }
     }
     if let Some(task) = &mut live.client_close {

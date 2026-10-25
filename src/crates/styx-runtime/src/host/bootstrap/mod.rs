@@ -129,7 +129,7 @@ impl OwnedExecHost {
     }
     /// Explicit Browser lane allocation from this SAME Host budget. This does
     /// not enable a capability or create a worker; trusted policy does that.
-    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     pub fn reserve_browser_io(
         &self,
     ) -> Result<Arc<crate::providers::browser::BrowserIoBudget>, BootstrapError> {
@@ -142,7 +142,7 @@ impl OwnedExecHost {
             .map_err(|_| BootstrapError::InvalidConfiguration)
     }
     /// Final8MiB native Desktop partition from the same64MiB Host allocator.
-    #[cfg(target_os = "linux")]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     pub(crate) fn reserve_computer_io(
         &self,
     ) -> Result<Arc<crate::providers::cua::CuaIoBudget>, BootstrapError> {

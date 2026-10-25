@@ -11,8 +11,9 @@ use crate::{
     },
     store::PinnedExecutable,
 };
+#[cfg(target_os = "linux")]
+use std::path::PathBuf;
 use std::{
-    path::PathBuf,
     sync::{Arc, Mutex},
     time::Duration,
 };
@@ -27,6 +28,8 @@ struct OwnerDirectories {
     root: PrivateDirectory,
     workspace: PrivateDirectory,
     home: PrivateDirectory,
+    #[cfg(target_os = "windows")]
+    temporary: PrivateDirectory,
 }
 struct LocalComputer {
     // These original authorities outlive configs/jobs and remain revalidated.
@@ -36,11 +39,17 @@ struct LocalComputer {
     source: DesktopSource,
     source_epoch: u64,
     binding: SessionBinding,
+    #[cfg(target_os = "linux")]
     uid: u32,
+    #[cfg(target_os = "linux")]
     runtime_dir: PathBuf,
+    #[cfg(target_os = "linux")]
     wayland_display: String,
+    #[cfg(target_os = "linux")]
     hyprland_instance: String,
     runtime: PrivateDirectory,
+    #[cfg(target_os = "windows")]
+    environment: std::collections::BTreeMap<String, String>,
     owners: Mutex<Vec<OwnerDirectories>>,
 }
 /// Called after root has explicitly selected/registered the source and exact
@@ -56,29 +65,40 @@ pub(crate) fn prepare_computer_bootstrap(
         return Ok(None);
     };
     let epoch = source.epoch();
+    #[cfg(target_os = "linux")]
     let fields = source
         .launch_fields()
         .map_err(|error| ForegroundError(error.code()))?;
+    #[cfg(target_os = "linux")]
     let uid = nix::unistd::Uid::current().as_raw();
-    if source.fenced()
-        || source.epoch() != epoch
-        || fields.runtime_dir != std::path::Path::new(&format!("/run/user/{uid}"))
-    {
+    #[cfg(target_os = "linux")]
+    if fields.runtime_dir != std::path::Path::new(&format!("/run/user/{uid}")) {
+        return Err(ForegroundError("desktop_source_fenced"));
+    }
+    if source.fenced() || source.epoch() != epoch {
         return Err(ForegroundError("desktop_source_fenced"));
     }
     let runtime = assets::fresh_private_directory(profile.host_base_dir())
         .map_err(|_| ForegroundError("computer_private_root_failed"))?;
+    #[cfg(target_os = "windows")]
+    let environment = profile.browser_environment()?;
     let factory = LocalComputer {
         profile,
         driver: Arc::new(driver),
         source,
         source_epoch: epoch,
         binding,
+        #[cfg(target_os = "linux")]
         uid,
+        #[cfg(target_os = "linux")]
         runtime_dir: fields.runtime_dir,
+        #[cfg(target_os = "linux")]
         wayland_display: fields.wayland_display,
+        #[cfg(target_os = "linux")]
         hyprland_instance: fields.hyprland_instance,
         runtime,
+        #[cfg(target_os = "windows")]
+        environment,
         owners: Mutex::new(Vec::new()),
     };
     factory
@@ -91,17 +111,20 @@ impl LocalComputer {
         if self.source.fenced() || self.source.epoch() != self.source_epoch {
             return Err(ErrorCategory::SessionDisconnected);
         }
-        let fields = self
-            .source
-            .launch_fields()
-            .map_err(|_| ErrorCategory::SessionDisconnected)?;
-        if fields.runtime_dir != self.runtime_dir
-            || fields.wayland_display != self.wayland_display
-            || fields.hyprland_instance != self.hyprland_instance
-            || self.source.fenced()
-            || self.source.epoch() != self.source_epoch
+        #[cfg(target_os = "linux")]
         {
-            return Err(ErrorCategory::SessionDisconnected);
+            let fields = self
+                .source
+                .launch_fields()
+                .map_err(|_| ErrorCategory::SessionDisconnected)?;
+            if fields.runtime_dir != self.runtime_dir
+                || fields.wayland_display != self.wayland_display
+                || fields.hyprland_instance != self.hyprland_instance
+                || self.source.fenced()
+                || self.source.epoch() != self.source_epoch
+            {
+                return Err(ErrorCategory::SessionDisconnected);
+            }
         }
         Ok(())
     }
@@ -126,13 +149,16 @@ impl LocalComputer {
                 owner.root.revalidate().map_err(map_directory)?;
                 owner.workspace.revalidate().map_err(map_directory)?;
                 owner.home.revalidate().map_err(map_directory)?;
+                #[cfg(target_os = "windows")]
+                owner.temporary.revalidate().map_err(map_directory)?;
             }
         }
         // A fence concurrent with protected I/O invalidates the completed result too.
         self.validate_source()
     }
-    fn config(&self, owner: &OwnerDirectories) -> OwnedCuaConfig {
-        OwnedCuaConfig {
+    #[cfg(target_os = "linux")]
+    fn config(&self, owner: &OwnerDirectories) -> Result<OwnedCuaConfig> {
+        Ok(OwnedCuaConfig {
             driver: self.driver.clone(),
             launch: TrustedCuaLaunch {
                 session: self.binding.clone(),
@@ -145,7 +171,55 @@ impl LocalComputer {
             rpc_timeout: RPC_TIMEOUT,
             workspace: owner.workspace.path().into(),
             home: owner.home.path().into(),
+        })
+    }
+    #[cfg(target_os = "windows")]
+    fn config(&self, owner: &OwnerDirectories) -> Result<OwnedCuaConfig> {
+        // Only the OS-derived baseline is reused. All Cua state and temporary
+        // paths belong to this exact owner's retained private directories.
+        let mut environment = std::collections::BTreeMap::new();
+        for (source, target) in [
+            ("SystemRoot", "SystemRoot"),
+            ("WinDir", "WINDIR"),
+            ("ComSpec", "COMSPEC"),
+            ("Path", "PATH"),
+            ("PATHEXT", "PATHEXT"),
+        ] {
+            let value = self
+                .environment
+                .get(source)
+                .ok_or(ErrorCategory::IntegrityFailure)?;
+            environment.insert(target.to_owned(), value.clone());
         }
+        let home = owner
+            .home
+            .path()
+            .to_str()
+            .ok_or(ErrorCategory::IntegrityFailure)?;
+        let temporary = owner
+            .temporary
+            .path()
+            .to_str()
+            .ok_or(ErrorCategory::IntegrityFailure)?;
+        for key in ["HOME", "USERPROFILE", "CUA_DRIVER_RS_HOME"] {
+            environment.insert(key.into(), home.into());
+        }
+        for key in ["TEMP", "TMP"] {
+            environment.insert(key.into(), temporary.into());
+        }
+        environment.insert("CUA_DRIVER_RS_TELEMETRY_ENABLED".into(), "0".into());
+        environment.insert("DO_NOT_TRACK".into(), "1".into());
+        Ok(OwnedCuaConfig {
+            driver: self.driver.clone(),
+            launch: TrustedCuaLaunch {
+                session: self.binding.clone(),
+                source: self.source.clone(),
+            },
+            rpc_timeout: RPC_TIMEOUT,
+            workspace: owner.workspace.path().into(),
+            home: owner.home.path().into(),
+            environment,
+        })
     }
 }
 impl ComputerBootstrap for LocalComputer {
@@ -156,7 +230,7 @@ impl ComputerBootstrap for LocalComputer {
             .lock()
             .map_err(|_| ErrorCategory::ResultUnknown)?;
         if let Some(existing) = owners.iter().find(|existing| &existing.owner == owner) {
-            let config = self.config(existing);
+            let config = self.config(existing)?;
             self.validate_source()?;
             return Ok(config);
         }
@@ -174,17 +248,23 @@ impl ComputerBootstrap for LocalComputer {
         let root = assets::fresh_private_directory(self.runtime.path()).map_err(map_directory)?;
         let workspace = assets::fresh_private_directory(root.path()).map_err(map_directory)?;
         let home = assets::fresh_private_directory(root.path()).map_err(map_directory)?;
+        #[cfg(target_os = "windows")]
+        let temporary = assets::fresh_private_directory(root.path()).map_err(map_directory)?;
         let owned = OwnerDirectories {
             owner: owner.clone(),
             root,
             workspace,
             home,
+            #[cfg(target_os = "windows")]
+            temporary,
         };
         owned.root.revalidate().map_err(map_directory)?;
         owned.workspace.revalidate().map_err(map_directory)?;
         owned.home.revalidate().map_err(map_directory)?;
+        #[cfg(target_os = "windows")]
+        owned.temporary.revalidate().map_err(map_directory)?;
         self.validate_source()?;
-        let config = self.config(&owned);
+        let config = self.config(&owned)?;
         owners.push(owned);
         Ok(config)
     }

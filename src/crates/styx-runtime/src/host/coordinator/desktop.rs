@@ -73,6 +73,7 @@ fn validate_context(lane: &DesktopLane, context: &PreparedContext) -> Result<(),
     }
     Ok(())
 }
+#[cfg(target_os = "linux")]
 fn window_read_evidence(source: &DesktopSource) -> Result<ProviderEvidence, CoordinatorError> {
     let evidence = source
         .window_read_evidence()
@@ -92,6 +93,33 @@ fn window_read_evidence(source: &DesktopSource) -> Result<ProviderEvidence, Coor
             "bounded EOF read peer={pid}:{birth} socket={device}:{inode} monitors={monitors}:{} clients={clients}:{}",
             monitor_hash.to_hex(),
             client_hash.to_hex()
+        ),
+        reason: None,
+        recovery: styx_contracts::error::Recovery::None,
+    })
+}
+#[cfg(target_os = "macos")]
+fn window_read_evidence(source: &DesktopSource) -> Result<ProviderEvidence, CoordinatorError> {
+    source
+        .provider_evidence(CapabilityId::DesktopWindowsRead)
+        .map_err(|_| CuaError::PermissionDenied.into())
+}
+
+#[cfg(target_os = "windows")]
+fn window_read_evidence(source: &DesktopSource) -> Result<ProviderEvidence, CoordinatorError> {
+    let evidence = source
+        .window_read_evidence()
+        .map_err(|_| CuaError::PermissionDenied)?;
+    Ok(ProviderEvidence {
+        capability: CapabilityId::DesktopWindowsRead,
+        provider: "windows-owned-desktop-read"
+            .try_into()
+            .expect("fixed provider"),
+        availability: Availability::Available,
+        authorization: Authorization::Granted,
+        provenance: format!(
+            "original held desktop EnumDesktopWindows complete; count={}",
+            evidence.count
         ),
         reason: None,
         recovery: styx_contracts::error::Recovery::None,
@@ -175,6 +203,37 @@ impl HostAuthority {
             .await
             .map_err(|_| CuaError::Unknown)?
             .map_err(|_| CuaError::PermissionDenied)?;
+        // Collect every fallible source-derived projection BEFORE registration.
+        // No native query occurs while the Host state mutex is held. Missing or
+        // expired Mac facts cannot strand a registered session without its lane.
+        let mut providers = vec![(window_read_evidence(&source)?, Duration::from_secs(1))];
+        for cap in [
+            CapabilityId::DesktopWindowsControl,
+            CapabilityId::DesktopCapture,
+            CapabilityId::DesktopPointer,
+            CapabilityId::DesktopKeyboard,
+            CapabilityId::DesktopAccessibility,
+        ] {
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            let evidence = ProviderEvidence {
+                capability: cap,
+                provider: "cua-native".try_into().expect("fixed provider"),
+                availability: Availability::Unavailable,
+                authorization: Authorization::Unknown,
+                provenance: "native provider permission acquisition not yet observed".into(),
+                reason: Some(ErrorCategory::PermissionRequired),
+                recovery: styx_contracts::error::Recovery::Rediscover,
+            };
+            #[cfg(target_os = "macos")]
+            let evidence = source
+                .provider_evidence(cap)
+                .map_err(|_| CuaError::PermissionDenied)?;
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
+            let lifetime = Duration::from_secs(60);
+            #[cfg(target_os = "macos")]
+            let lifetime = Duration::from_secs(1);
+            providers.push((evidence, lifetime));
+        }
         let mut state = self.inner.state.lock().expect("Host state mutex");
         if state.shutting_down || state.desktop.is_some() {
             return Err(CoordinatorError::Busy);
@@ -194,40 +253,10 @@ impl HostAuthority {
             .sessions
             .set_state(&binding, styx_contracts::session::SessionState::Connecting)
             .map_err(|_| CuaError::PermissionDenied)?;
-        // Only this actual read API has evidence. Other providers remain absent.
-        state
-            .sessions
-            .provider(
-                &binding,
-                window_read_evidence(&source)?,
-                Duration::from_secs(1),
-            )
-            .map_err(|_| CuaError::PermissionDenied)?;
-        // Publish missing native provider facts explicitly, preserving a
-        // Degraded aggregate instead of implying all Computer permissions.
-        for cap in [
-            CapabilityId::DesktopWindowsControl,
-            CapabilityId::DesktopCapture,
-            CapabilityId::DesktopPointer,
-            CapabilityId::DesktopKeyboard,
-            CapabilityId::DesktopAccessibility,
-        ] {
+        for (evidence, lifetime) in providers {
             state
                 .sessions
-                .provider(
-                    &binding,
-                    ProviderEvidence {
-                        capability: cap,
-                        provider: "cua-native".try_into().expect("fixed provider"),
-                        availability: Availability::Unavailable,
-                        authorization: Authorization::Unknown,
-                        provenance: "native provider permission acquisition not yet observed"
-                            .into(),
-                        reason: Some(ErrorCategory::PermissionRequired),
-                        recovery: styx_contracts::error::Recovery::Rediscover,
-                    },
-                    Duration::from_secs(60),
-                )
+                .provider(&binding, evidence, lifetime)
                 .map_err(|_| CuaError::PermissionDenied)?;
         }
         state.desktop = Some(DesktopLane {
@@ -330,7 +359,15 @@ impl HostCoordinator {
             desktop(&state)?.source.clone()
         };
         let result = source.fresh().await;
+        #[cfg(any(target_os = "linux", target_os = "macos"))]
         if matches!(result, Err(super::desktop_source::DesktopSourceError::Busy)) {
+            return Err(CoordinatorError::Busy);
+        }
+        #[cfg(target_os = "windows")]
+        if matches!(
+            result,
+            Err(crate::platform::windows_desktop::ObservationError::Busy)
+        ) {
             return Err(CoordinatorError::Busy);
         }
         let mut state = self.inner.state.lock().expect("Host state mutex");
@@ -357,6 +394,25 @@ impl HostCoordinator {
                 Duration::from_secs(1),
             )
             .map_err(|_| CuaError::PermissionDenied)?;
+        #[cfg(target_os = "macos")]
+        for cap in [
+            CapabilityId::DesktopWindowsControl,
+            CapabilityId::DesktopCapture,
+            CapabilityId::DesktopPointer,
+            CapabilityId::DesktopKeyboard,
+            CapabilityId::DesktopAccessibility,
+        ] {
+            state
+                .sessions
+                .provider(
+                    &binding,
+                    source
+                        .provider_evidence(cap)
+                        .map_err(|_| CuaError::PermissionDenied)?,
+                    Duration::from_secs(1),
+                )
+                .map_err(|_| CuaError::PermissionDenied)?;
+        }
         Ok(())
     }
     pub(crate) fn prepare_desktop_open(

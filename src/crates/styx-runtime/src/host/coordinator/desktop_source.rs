@@ -394,3 +394,9 @@ async fn supervise(
 #[cfg(test)]
 #[path = "desktop_source_tests.rs"]
 mod tests;
+
+/// Source supervisor settlement is platform-specific; this alias is Linux only.
+pub(crate) type DesktopSourceStop = WatchReport;
+pub(crate) fn source_stop_complete(report: &DesktopSourceStop) -> bool {
+    report.child_reaped && report.stdout_joined
+}
