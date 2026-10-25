@@ -347,8 +347,8 @@ struct AuthorizationPlan {
     #[serde(rename = "planSha256", default)]
     _legacy_plan_sha256: Option<Sha256Digest>,
 }
-fn file_tuple(s: &NativeRetirementFileStamp) -> (u64, u64, i64, i64) {
-    match s {
+fn file_tuple(s: &NativeRetirementFileStamp) -> JournalResult<(u64, u64, i64, i64)> {
+    Ok(match s {
         NativeRetirementFileStamp::Linux { stamp } | NativeRetirementFileStamp::Macos { stamp } => {
             (
                 stamp.device,
@@ -363,13 +363,24 @@ fn file_tuple(s: &NativeRetirementFileStamp) -> (u64, u64, i64, i64) {
             modified_seconds,
             modified_nanoseconds,
             ..
-        } => (
-            *volume_serial,
-            *file_id,
-            *modified_seconds,
-            *modified_nanoseconds,
-        ),
-    }
+        } => {
+            // FILE_BASIC_INFO is retained in its original FILETIME epoch in
+            // FileObservation/journal stamps. Only the comparison with legacy
+            // Node fs.Stats.mtimeMs projects it to the Unix epoch.
+            // https://learn.microsoft.com/en-us/windows/win32/api/minwinbase/ns-minwinbase-filetime
+            if *modified_seconds < 0 || !(0..1_000_000_000).contains(modified_nanoseconds) {
+                return Err(JournalError::Conflict);
+            }
+            (
+                *volume_serial,
+                *file_id,
+                modified_seconds
+                    .checked_sub(11_644_473_600)
+                    .ok_or(JournalError::Conflict)?,
+                *modified_nanoseconds,
+            )
+        }
+    })
 }
 fn validate_authorization_plan(
     i: &LegacyOwnerRecoveryIntent,
@@ -426,7 +437,7 @@ fn validate_authorization_plan(
         return Err(JournalError::Conflict);
     }
     for (f, b) in p.files.iter().zip(&i.originals) {
-        let (dev, ino, sec, nano) = file_tuple(&b.stamp);
+        let (dev, ino, sec, nano) = file_tuple(&b.stamp)?;
         if f.name != b.name.source_name()
             || f.dev != dev.to_string()
             || f.ino != ino.to_string()
@@ -975,3 +986,7 @@ impl OwnedManagementJournal {
         })
     }
 }
+
+#[cfg(test)]
+#[path = "management_owner_recovery_tests.rs"]
+mod tests;
