@@ -58,14 +58,14 @@ pub(in crate::store) enum CutoverKind {
 }
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(in crate::store) struct CutoverIntent {
+pub(in crate::store) struct CutoverIntent<R = handoff::RetirementLinuxRoot> {
     pub schema: u16,
     pub kind: CutoverKind,
     pub transaction_id: TransactionId,
     pub sequence: u64,
     pub retired_record_sha256: Sha256Digest,
-    pub config_root: handoff::RetirementLinuxRoot,
-    pub host_root: handoff::RetirementLinuxRoot,
+    pub config_root: R,
+    pub host_root: R,
     pub candidate_manifest_sha256: Sha256Digest,
     pub publisher_spki_sha256: Sha256Digest,
     pub deployment_raw_sha256: Sha256Digest,
@@ -85,7 +85,7 @@ pub(in crate::store) struct CutoverIntent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint_key_sha256: Option<Sha256Digest>,
 }
-impl CutoverIntent {
+impl<R> CutoverIntent<R> {
     pub(in crate::store) fn management_intent(&self) -> DesiredStateCommit {
         DesiredStateCommit {
             transaction_id: self.transaction_id.clone(),
@@ -99,8 +99,8 @@ impl CutoverIntent {
 }
 /// Private data observation, not a retained writer/durability capability.
 #[derive(Clone)]
-pub(in crate::store) struct OriginalCutover {
-    pub intent: CutoverIntent,
+pub(in crate::store) struct OriginalCutover<R = handoff::RetirementLinuxRoot> {
+    pub intent: CutoverIntent<R>,
     pub raw_intent: Vec<u8>,
     pub preservation: Vec<u8>,
     pub scope_bindings: Vec<u8>,
@@ -115,7 +115,7 @@ pub(in crate::store) struct OriginalCutover {
     pub paired_validation_sha256: Option<Sha256Digest>,
     pub endpoint: Option<CutoverEndpointMaterials>,
 }
-impl OriginalCutover {
+impl<R> OriginalCutover<R> {
     pub(in crate::store) fn paired_validation_report(&self) -> Option<&[u8]> {
         self.paired_validation.as_deref()
     }
@@ -135,6 +135,7 @@ impl OriginalCutover {
 pub(in crate::store) struct CutoverInventory {
     pub used: BTreeSet<String>,
     pub records: Vec<OriginalCutover>,
+    pub native_records: Vec<OriginalCutover<NativeRootIdentity>>,
 }
 /// Move-owned preparation evidence; no Clone/Serde or arbitrary constructor.
 pub(in crate::store) struct PreparedCutover {
@@ -182,9 +183,9 @@ impl PreparedCutover {
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct PhaseRecord {
+struct PhaseRecord<R = handoff::RetirementLinuxRoot> {
     schema: u16,
-    intent: CutoverIntent,
+    intent: CutoverIntent<R>,
     raw_intent_sha256: Sha256Digest,
     stage: DurableStage,
     #[serde(deserialize_with = "required_option")]
@@ -219,7 +220,7 @@ struct ValidationHeader {
     supervised_jobs_joined: bool,
     probe_task_joined: bool,
 }
-fn validate_report(raw: &[u8], intent: &CutoverIntent) -> JournalResult<()> {
+fn validate_report<R>(raw: &[u8], intent: &CutoverIntent<R>) -> JournalResult<()> {
     if raw.is_empty() || raw.len() > MAX_VALIDATION {
         return Err(JournalError::BudgetExceeded);
     }
@@ -271,7 +272,7 @@ struct PairedValidationHeader {
     migration_committed: bool,
     ordinary_admission_open: bool,
 }
-fn validate_paired_report(raw: &[u8], original: &OriginalCutover) -> JournalResult<()> {
+fn validate_paired_report<R>(raw: &[u8], original: &OriginalCutover<R>) -> JournalResult<()> {
     if raw.is_empty() || raw.len() > MAX_VALIDATION {
         return Err(JournalError::BudgetExceeded);
     }
@@ -285,7 +286,7 @@ fn validate_paired_report(raw: &[u8], original: &OriginalCutover) -> JournalResu
             .binding,
     )
     .map_err(|_| JournalError::Conflict)?;
-    if original.intent.schema != 2
+    if !matches!(original.intent.schema, 2 | 3)
         || report.schema != 1
         || report.transaction_id != original.intent.transaction_id
         || report.candidate_manifest_sha256 != original.intent.candidate_manifest_sha256
@@ -375,8 +376,8 @@ fn phase_bytes(
     })
     .map_err(|_| JournalError::InvalidInput)
 }
-fn receipt(
-    intent: &CutoverIntent,
+fn receipt<R>(
+    intent: &CutoverIntent<R>,
     stage: DurableStage,
     previous: Option<Sha256Digest>,
     bytes: &[u8],
@@ -393,15 +394,12 @@ fn root_matches(expected: &handoff::RetirementLinuxRoot, actual: RootIdentity) -
     let RootIdentity::Linux { device, inode, uid } = actual;
     expected.device == device && expected.inode == inode && expected.uid == uid
 }
-fn validate_materials(original: &OriginalCutover) -> JournalResult<()> {
+fn validate_materials<R: handoff::ProofRoot>(original: &OriginalCutover<R>) -> JournalResult<()> {
     let i = &original.intent;
-    if !matches!(i.schema, 1 | 2)
+    if !R::permits_cutover(i.schema)
         || i.kind != CutoverKind::LegacyRuntimeCutover
         || i.sequence == 0
-        || i.config_root.inode == 0
-        || i.host_root.inode == 0
-        || i.config_root.uid != i.host_root.uid
-        || i.config_root.uid != nix::unistd::geteuid().as_raw()
+        || !i.config_root.valid_pair(&i.host_root)
         || original.raw_intent.len() > MAX_INTENT
         || original.marker.len() > 4096
         || [
@@ -423,12 +421,7 @@ fn validate_materials(original: &OriginalCutover) -> JournalResult<()> {
         return Err(JournalError::Unknown);
     }
     let marker = decode_marker(&original.marker).map_err(|_| JournalError::Unknown)?;
-    let NativeRootIdentity::Linux { device, inode, uid } = &marker.root_identity else {
-        // The original cutover proof is Linux-specific. A Windows selection
-        // identity must never be relabeled as an original Linux writer root.
-        return Err(JournalError::Conflict);
-    };
-    if (*device, *inode, *uid) != (i.config_root.device, i.config_root.inode, i.config_root.uid) {
+    if marker.root_identity != i.config_root.native_identity() {
         return Err(JournalError::Conflict);
     }
     let validated = decode_state(&original.target, &marker).map_err(|_| JournalError::Unknown)?;
@@ -455,7 +448,7 @@ fn validate_materials(original: &OriginalCutover) -> JournalResult<()> {
                 return Err(JournalError::Conflict);
             }
         }
-        (2, Some(endpoint)) => {
+        (2 | 3, Some(endpoint)) => {
             if [
                 endpoint.binding.as_slice(),
                 endpoint.chain.as_slice(),
@@ -509,7 +502,7 @@ fn validate_materials(original: &OriginalCutover) -> JournalResult<()> {
     }
     Ok(())
 }
-fn validate_roles(deployment: &[u8], original: &OriginalCutover) -> JournalResult<()> {
+fn validate_roles<R>(deployment: &[u8], original: &OriginalCutover<R>) -> JournalResult<()> {
     let legacy: LegacyDeployment =
         serde_json::from_slice(deployment).map_err(|_| JournalError::Conflict)?;
     let mode = match legacy.mode.as_str() {
@@ -530,7 +523,7 @@ fn validate_roles(deployment: &[u8], original: &OriginalCutover) -> JournalResul
     }
     Ok(())
 }
-fn replay(original: &OriginalCutover) -> JournalResult<()> {
+fn replay<R>(original: &OriginalCutover<R>) -> JournalResult<()> {
     let i = original.intent.management_intent();
     let mut tx = ManagementTransaction::plan(i.clone()).map_err(|_| JournalError::Unknown)?;
     for r in &original.phases {
@@ -583,6 +576,7 @@ pub(in crate::store) fn scan_cutovers(
     let handoffs = handoff::scan_handoffs(scan)?;
     let mut used = BTreeSet::new();
     let mut records = Vec::new();
+    let mut native_records = Vec::new();
     for file in &scan.files {
         if !file.name.ends_with(".cutover-intent") {
             continue;
@@ -590,159 +584,36 @@ pub(in crate::store) fn scan_cutovers(
         if file.bytes().len() > MAX_INTENT {
             return Err(JournalError::BudgetExceeded);
         }
-        let intent: CutoverIntent =
+        #[derive(Deserialize)]
+        struct Version {
+            schema: u16,
+            transaction_id: TransactionId,
+        }
+        let version: Version =
             serde_json::from_slice(file.bytes()).map_err(|_| JournalError::Unknown)?;
-        if file.name != name(&intent.transaction_id, "intent") {
-            return Err(JournalError::Unknown);
-        }
-        let old = handoffs
-            .records
-            .iter()
-            .find(|r| r.intent.transaction_id == intent.transaction_id)
-            .ok_or(JournalError::Conflict)?;
-        let observation = old.observation();
-        let r = &old.intent;
-        if observation.stage != handoff::CredentialRetirementStage::Retired
-            || observation.retired_sha256 != Some(intent.retired_record_sha256)
-            || intent.sequence != r.sequence
-            || intent.config_root != r.config_root
-            || intent.host_root != r.host_root
-            || intent.candidate_manifest_sha256 != r.candidate_manifest_sha256
-            || intent.publisher_spki_sha256 != r.publisher_spki_sha256
-            || intent.deployment_raw_sha256 != r.deployment_raw_sha256
-            || intent.before_state_sha256 != r.before_state_sha256
-            || intent.retirement_preservation_sha256 != r.preservation_sha256
-        {
-            return Err(JournalError::Conflict);
-        }
-        used.insert(file.name.clone());
-        let mut read = |suffix: &str| -> JournalResult<Vec<u8>> {
-            let n = name(&intent.transaction_id, suffix);
-            let raw = by_name.get(n.as_str()).ok_or(JournalError::Unknown)?;
-            used.insert(n);
-            Ok(raw.to_vec())
-        };
-        let endpoint = match intent.schema {
-            1 => None,
-            2 => Some(CutoverEndpointMaterials {
-                binding: read("endpoint-binding")?,
-                chain: read("endpoint-chain")?,
-                key: Zeroizing::new(read("endpoint-key")?),
-            }),
-            _ => return Err(JournalError::Unknown),
-        };
-        let mut original = OriginalCutover {
-            intent: intent.clone(),
-            raw_intent: file.bytes().to_vec(),
-            preservation: read("preservation")?,
-            scope_bindings: read("scopes")?,
-            marker: read("marker")?,
-            before: read("before")?,
-            target: read("target")?,
-            phases: vec![],
-            last_stage: DurableStage::Planned,
-            validation: None,
-            validation_sha256: None,
-            paired_validation: None,
-            paired_validation_sha256: None,
-            endpoint,
-        };
-        validate_materials(&original)?;
-        let validation_name = name(&intent.transaction_id, "validation");
-        if let Some(raw) = by_name.get(validation_name.as_str()) {
-            validate_report(raw, &intent).map_err(|_| JournalError::Unknown)?;
-            original.validation = Some(raw.to_vec());
-            original.validation_sha256 = Some(Sha256Digest::of_bytes(raw));
-        }
-        let paired_name = name(&intent.transaction_id, "paired-validation");
-        if let Some(raw) = by_name.get(paired_name.as_str()) {
-            validate_paired_report(raw, &original).map_err(|_| JournalError::Unknown)?;
-            original.paired_validation = Some(raw.to_vec());
-            original.paired_validation_sha256 = Some(Sha256Digest::of_bytes(raw));
-        }
-        let mut previous = None;
-        let mut missing = false;
-        for stage in [
-            DurableStage::Prepared,
-            DurableStage::Applied,
-            DurableStage::Verified,
-            DurableStage::Committed,
-        ] {
-            let n = name(&intent.transaction_id, stage_name(stage)?);
-            if let Some(bytes) = by_name.get(n.as_str()) {
-                if missing || bytes.len() > MAX_INTENT {
-                    return Err(JournalError::Unknown);
-                }
-                let record: PhaseRecord =
-                    serde_json::from_slice(bytes).map_err(|_| JournalError::Unknown)?;
-                let final_paired = intent.schema == 2
-                    && matches!(stage, DurableStage::Verified | DurableStage::Committed);
-                let expected_schema = if final_paired { 2 } else { 1 };
-                let invalid_paired = if final_paired {
-                    original.paired_validation_sha256.is_none()
-                        || record.paired_validation_sha256 != original.paired_validation_sha256
-                } else {
-                    record.paired_validation_sha256.is_some()
-                };
-                if record.schema != expected_schema
-                    || invalid_paired
-                    || record.intent != intent
-                    || record.raw_intent_sha256 != Sha256Digest::of_bytes(file.bytes())
-                    || record.stage != stage
-                    || record.previous != previous
-                    || match stage {
-                        DurableStage::Verified | DurableStage::Committed => {
-                            original.validation_sha256.is_none()
-                                || record.validation_sha256 != original.validation_sha256
-                        }
-                        _ => record.validation_sha256.is_some(),
-                    }
-                    || record.canonical_raw_sha256
-                        != if stage == DurableStage::Prepared {
-                            intent.before_state_sha256
-                        } else {
-                            intent.target_state_sha256
-                        }
-                {
-                    return Err(JournalError::Unknown);
-                }
-                let r = receipt(&intent, stage, previous, bytes);
-                previous = Some(r.record_sha256);
-                original.phases.push(r);
-                original.last_stage = stage;
-                used.insert(n);
-            } else {
-                missing = true;
-            }
-        }
-        if original.validation.is_some() {
-            if !original
-                .phases
-                .iter()
-                .any(|p| p.stage == DurableStage::Applied)
-            {
-                return Err(JournalError::Unknown);
-            }
-            used.insert(validation_name);
-        }
-        if original.paired_validation.is_some() {
-            if original.validation.is_none()
-                || !original
-                    .phases
+        match version.schema {
+            1 | 2 => {
+                let old = handoffs
+                    .records
                     .iter()
-                    .any(|p| p.stage == DurableStage::Applied)
-            {
-                return Err(JournalError::Unknown);
+                    .find(|r| r.intent.transaction_id == version.transaction_id)
+                    .ok_or(JournalError::Conflict)?;
+                records.push(parse_cutover(file, &by_name, &mut used, old)?);
             }
-            used.insert(paired_name);
+            3 => {
+                let old = handoffs
+                    .native_records
+                    .iter()
+                    .find(|r| r.intent.transaction_id == version.transaction_id)
+                    .ok_or(JournalError::Conflict)?;
+                native_records.push(parse_cutover(file, &by_name, &mut used, old)?);
+            }
+            _ => return Err(JournalError::Unknown),
         }
-        replay(&original)?;
-        records.push(original);
     }
-    if records.len() > 1 {
+    if records.len() + native_records.len() > 1 {
         return Err(JournalError::Conflict);
     }
-    // Recognized suffixes without their original intent are not adopted.
     if scan
         .files
         .iter()
@@ -750,7 +621,168 @@ pub(in crate::store) fn scan_cutovers(
     {
         return Err(JournalError::Unknown);
     }
-    Ok(CutoverInventory { used, records })
+    Ok(CutoverInventory {
+        used,
+        records,
+        native_records,
+    })
+}
+fn parse_cutover<R: handoff::ProofRoot, S: handoff::ProofStamp<R>>(
+    file: &crate::store::secure_journal::ObservedJournalFile,
+    by_name: &BTreeMap<&str, &[u8]>,
+    used: &mut BTreeSet<String>,
+    old: &handoff::ObservedRetirement<R, S>,
+) -> JournalResult<OriginalCutover<R>> {
+    let intent: CutoverIntent<R> =
+        serde_json::from_slice(file.bytes()).map_err(|_| JournalError::Unknown)?;
+    if file.name != name(&intent.transaction_id, "intent") {
+        return Err(JournalError::Unknown);
+    }
+    let observation = old.observation();
+    let r = &old.intent;
+    if observation.stage != handoff::CredentialRetirementStage::Retired
+        || observation.retired_sha256 != Some(intent.retired_record_sha256)
+        || intent.sequence != r.sequence
+        || intent.config_root != r.config_root
+        || intent.host_root != r.host_root
+        || intent.candidate_manifest_sha256 != r.candidate_manifest_sha256
+        || intent.publisher_spki_sha256 != r.publisher_spki_sha256
+        || intent.deployment_raw_sha256 != r.deployment_raw_sha256
+        || intent.before_state_sha256 != r.before_state_sha256
+        || intent.retirement_preservation_sha256 != r.preservation_sha256
+    {
+        return Err(JournalError::Conflict);
+    }
+    used.insert(file.name.clone());
+    let mut read = |suffix: &str| -> JournalResult<Vec<u8>> {
+        let n = name(&intent.transaction_id, suffix);
+        let raw = by_name.get(n.as_str()).ok_or(JournalError::Unknown)?;
+        used.insert(n);
+        Ok(raw.to_vec())
+    };
+    let endpoint = match intent.schema {
+        1 => None,
+        2 | 3 => Some(CutoverEndpointMaterials {
+            binding: read("endpoint-binding")?,
+            chain: read("endpoint-chain")?,
+            key: Zeroizing::new(read("endpoint-key")?),
+        }),
+        _ => return Err(JournalError::Unknown),
+    };
+    let mut original = OriginalCutover {
+        intent: intent.clone(),
+        raw_intent: file.bytes().to_vec(),
+        preservation: read("preservation")?,
+        scope_bindings: read("scopes")?,
+        marker: read("marker")?,
+        before: read("before")?,
+        target: read("target")?,
+        phases: vec![],
+        last_stage: DurableStage::Planned,
+        validation: None,
+        validation_sha256: None,
+        paired_validation: None,
+        paired_validation_sha256: None,
+        endpoint,
+    };
+    validate_materials(&original)?;
+    let validation_name = name(&intent.transaction_id, "validation");
+    if let Some(raw) = by_name.get(validation_name.as_str()) {
+        validate_report(raw, &intent).map_err(|_| JournalError::Unknown)?;
+        original.validation = Some(raw.to_vec());
+        original.validation_sha256 = Some(Sha256Digest::of_bytes(raw));
+    }
+    let paired_name = name(&intent.transaction_id, "paired-validation");
+    if let Some(raw) = by_name.get(paired_name.as_str()) {
+        validate_paired_report(raw, &original).map_err(|_| JournalError::Unknown)?;
+        original.paired_validation = Some(raw.to_vec());
+        original.paired_validation_sha256 = Some(Sha256Digest::of_bytes(raw));
+    }
+    let mut previous = None;
+    let mut missing = false;
+    for stage in [
+        DurableStage::Prepared,
+        DurableStage::Applied,
+        DurableStage::Verified,
+        DurableStage::Committed,
+    ] {
+        let n = name(&intent.transaction_id, stage_name(stage)?);
+        if let Some(bytes) = by_name.get(n.as_str()) {
+            if missing || bytes.len() > MAX_INTENT {
+                return Err(JournalError::Unknown);
+            }
+            let record: PhaseRecord<R> =
+                serde_json::from_slice(bytes).map_err(|_| JournalError::Unknown)?;
+            let final_paired = matches!(intent.schema, 2 | 3)
+                && matches!(stage, DurableStage::Verified | DurableStage::Committed);
+            let expected_schema = if intent.schema == 3 {
+                3
+            } else if final_paired {
+                2
+            } else {
+                1
+            };
+            let invalid_paired = if final_paired {
+                original.paired_validation_sha256.is_none()
+                    || record.paired_validation_sha256 != original.paired_validation_sha256
+            } else {
+                record.paired_validation_sha256.is_some()
+            };
+            if record.schema != expected_schema
+                || invalid_paired
+                || record.intent != intent
+                || record.raw_intent_sha256 != Sha256Digest::of_bytes(file.bytes())
+                || record.stage != stage
+                || record.previous != previous
+                || match stage {
+                    DurableStage::Verified | DurableStage::Committed => {
+                        original.validation_sha256.is_none()
+                            || record.validation_sha256 != original.validation_sha256
+                    }
+                    _ => record.validation_sha256.is_some(),
+                }
+                || record.canonical_raw_sha256
+                    != if stage == DurableStage::Prepared {
+                        intent.before_state_sha256
+                    } else {
+                        intent.target_state_sha256
+                    }
+            {
+                return Err(JournalError::Unknown);
+            }
+            let r = receipt(&intent, stage, previous, bytes);
+            previous = Some(r.record_sha256);
+            original.phases.push(r);
+            original.last_stage = stage;
+            used.insert(n);
+        } else {
+            missing = true;
+        }
+    }
+    if original.validation.is_some() {
+        if !original
+            .phases
+            .iter()
+            .any(|p| p.stage == DurableStage::Applied)
+        {
+            return Err(JournalError::Unknown);
+        }
+        used.insert(validation_name);
+    }
+    if original.paired_validation.is_some() {
+        if original.validation.is_none()
+            || !original
+                .phases
+                .iter()
+                .any(|p| p.stage == DurableStage::Applied)
+        {
+            return Err(JournalError::Unknown);
+        }
+        used.insert(paired_name);
+    }
+    replay(&original)?;
+
+    Ok(original)
 }
 pub(in crate::store) fn original(
     scan: &JournalObservation,
@@ -772,7 +804,11 @@ pub(in crate::store) fn original(
     {
         return Err(JournalError::Conflict);
     }
-    scan_cutovers(scan)?
+    let cutovers = scan_cutovers(scan)?;
+    if !cutovers.native_records.is_empty() {
+        return Err(JournalError::Conflict);
+    }
+    cutovers
         .records
         .into_iter()
         .find(|r| &r.intent.transaction_id == id)
@@ -914,7 +950,11 @@ impl OwnedManagementJournal {
                 let inventory = super::platform::inventory(&scan)?;
                 let handoffs = handoff::scan_handoffs(&scan)?;
                 if !inventory.orphans.is_empty()
-                    || !scan_cutovers(&scan)?.records.is_empty()
+                    || {
+                        let cutovers = scan_cutovers(&scan)?;
+                        !cutovers.records.is_empty() || !cutovers.native_records.is_empty()
+                    }
+                    || !handoffs.native_records.is_empty()
                     || handoffs.records.len() != 1
                     || inventory.transactions.iter().any(|t| {
                         t.prepared.is_none()

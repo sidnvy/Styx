@@ -945,3 +945,378 @@ fn same_original_cutover_chain_files_and_interruption_boundaries() {
     .unwrap();
     cleanup(endpoint_budget);
 }
+
+// These versioned reader fixtures are synthetic data, not a native stopped-owner,
+// token-retirement, TLS, writer-handoff or activation attestation. Only the legacy
+// fixture's isolated scratch writer is exercised; no v3 writer is introduced.
+fn with_reader_seed(test: impl FnOnce(&mut Fixture, &PreparedCutover)) {
+    struct RemoveScratch(PathBuf);
+    impl Drop for RemoveScratch {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    let parent = std::env::temp_dir().join(format!("styx-cutover-reader-{}", uuid::Uuid::new_v4()));
+    directory(&parent);
+    let _cleanup = RemoveScratch(parent.clone());
+    let mut f = fixture(&parent, JournalBudget::default());
+    let p = f
+        .journal
+        .prepare_cutover(&f.maintenance, endpoint_inputs(&f))
+        .unwrap();
+    test(&mut f, &p);
+}
+fn fixture_raw(v: &serde_json::Value) -> Vec<u8> {
+    // Original whitespace is deliberately hash-significant. The reader must
+    // retain these bytes, not hash a freshly normalized serialization.
+    format!(" {}\n", serde_json::to_string(v).unwrap()).into_bytes()
+}
+fn reader_chain(
+    f: &Fixture,
+    p: &PreparedCutover,
+    version: u16,
+    platform: &str,
+) -> JournalObservation {
+    use crate::store::secure_journal::ObservedJournalFile;
+    use serde_json::json;
+    let native = version == 3;
+    let mut retirement = serde_json::to_value(&f.retired).unwrap();
+    if native {
+        retirement["schema"] = 3.into();
+        for (field, id) in [("config_root", 10), ("host_root", 11)] {
+            retirement[field] = match platform {
+                "windows" => {
+                    json!({"platform":"windows","volume_serial":7,"file_id":id,"owner_sid":"S-1-5-21-123"})
+                }
+                "linux" | "macos" => json!({"platform":platform,"device":7,"inode":id,"uid":501}),
+                _ => panic!("fixed fixture platform"),
+            };
+        }
+        let stamp = &f.retired.original_token;
+        retirement["original_token"] = if platform == "windows" {
+            json!({"platform":"windows","volume_serial":7,"file_id":12,"owner_sid":"S-1-5-21-123",
+                "nlink":1,"byte_len":stamp.byte_len,"modified_seconds":100,"modified_nanoseconds":100,
+                "changed_seconds":100,"changed_nanoseconds":200,"sha256":stamp.sha256})
+        } else {
+            let mut stamp = serde_json::to_value(stamp).unwrap();
+            stamp["device"] = 7.into();
+            stamp["inode"] = 12.into();
+            stamp["uid"] = 501.into();
+            json!({"platform":platform,"stamp":stamp})
+        };
+    }
+    let id = f.retired.transaction_id.clone();
+    let mut members = BTreeMap::<String, Vec<u8>>::new();
+    let retirement_raw = fixture_raw(&retirement);
+    let prepared = fixture_raw(
+        &json!({"schema":retirement["schema"],"kind":"legacy_credential_retirement",
+        "transaction_id":id,"sequence":f.retired.sequence,"raw_intent_sha256":Sha256Digest::of_bytes(&retirement_raw),
+        "stage":"prepared","previous":null,"post_stamp":null}),
+    );
+    let retired = fixture_raw(
+        &json!({"schema":retirement["schema"],"kind":"legacy_credential_retirement",
+        "transaction_id":id,"sequence":f.retired.sequence,"raw_intent_sha256":Sha256Digest::of_bytes(&retirement_raw),
+        "stage":"retired","previous":Sha256Digest::of_bytes(&prepared),"post_stamp":retirement["original_token"]}),
+    );
+    let retired_hash = Sha256Digest::of_bytes(&retired);
+    for (name, bytes) in ["intent", "prepared", "retired"]
+        .map(|phase| format!("txn-{}.handoff-{phase}", id.as_str()))
+        .into_iter()
+        .zip([retirement_raw, prepared, retired])
+    {
+        members.insert(name, bytes);
+    }
+    let mut intent = serde_json::to_value(p.intent()).unwrap();
+    intent["schema"] = version.into();
+    intent["retired_record_sha256"] = json!(retired_hash);
+    intent["config_root"] = retirement["config_root"].clone();
+    intent["host_root"] = retirement["host_root"].clone();
+    let mut marker: serde_json::Value = serde_json::from_slice(p.marker()).unwrap();
+    if native {
+        marker["root_identity"] = retirement["config_root"].clone();
+    }
+    let marker_raw = fixture_raw(&marker);
+    intent["marker_sha256"] = json!(Sha256Digest::of_bytes(&marker_raw));
+    let mut target: NativeState = decode_state(p.target(), &decode_marker(p.marker()).unwrap())
+        .unwrap()
+        .state()
+        .clone();
+    target.migration.as_mut().unwrap().retired_receipt_sha256 = retired_hash;
+    let mut endpoint: serde_json::Value =
+        serde_json::from_slice(p.endpoint_binding().unwrap()).unwrap();
+    endpoint["root_identity"] = marker["root_identity"].clone();
+    if version == 1 {
+        target.extensions.remove("gateway_endpoint_v1");
+        for field in [
+            "endpoint_binding_sha256",
+            "endpoint_chain_sha256",
+            "endpoint_key_sha256",
+        ] {
+            intent.as_object_mut().unwrap().remove(field);
+        }
+    } else {
+        let binding = serde_json::to_vec(&endpoint).unwrap();
+        target.extensions.insert(
+            "gateway_endpoint_v1".into(),
+            serde_json::value::RawValue::from_string(String::from_utf8(binding.clone()).unwrap())
+                .unwrap(),
+        );
+        intent["endpoint_binding_sha256"] = json!(Sha256Digest::of_bytes(&binding));
+        members.insert(name(&id, "endpoint-binding"), binding);
+        members.insert(
+            name(&id, "endpoint-chain"),
+            p.endpoint_chain().unwrap().to_vec(),
+        );
+        members.insert(
+            name(&id, "endpoint-key"),
+            p.endpoint_key().unwrap().to_vec(),
+        );
+    }
+    let target_raw = serde_json::to_vec(&target).unwrap();
+    intent["target_state_sha256"] = json!(Sha256Digest::of_bytes(&target_raw));
+    let raw_intent = fixture_raw(&intent);
+    for (suffix, bytes) in [
+        ("preservation", p.original.preservation.clone()),
+        ("scopes", p.original.scope_bindings.clone()),
+        ("marker", marker_raw),
+        ("before", p.before().to_vec()),
+        ("target", target_raw),
+        ("intent", raw_intent.clone()),
+    ] {
+        members.insert(name(&id, suffix), bytes);
+    }
+    let validation = synthetic_validation(f);
+    let mut paired: serde_json::Value = serde_json::from_slice(&synthetic_paired(p)).unwrap();
+    paired["target_sha256"] = intent["target_state_sha256"].clone();
+    paired["endpoint"] = endpoint;
+    let paired_raw = fixture_raw(&paired);
+    members.insert(name(&id, "validation"), validation.clone());
+    if version != 1 {
+        members.insert(name(&id, "paired-validation"), paired_raw.clone());
+    }
+    let mut previous = serde_json::Value::Null;
+    for stage in ["prepared", "applied", "verified", "committed"] {
+        let final_stage = matches!(stage, "verified" | "committed");
+        let mut phase = json!({"schema":if native {3} else if version == 2 && final_stage {2} else {1},
+            "intent":intent,"raw_intent_sha256":Sha256Digest::of_bytes(&raw_intent),"stage":stage,"previous":previous,
+            "canonical_raw_sha256":intent[if stage == "prepared" {"before_state_sha256"} else {"target_state_sha256"}],
+            "validation_sha256":if final_stage {json!(Sha256Digest::of_bytes(&validation))} else {serde_json::Value::Null}});
+        if version != 1 && final_stage {
+            phase["paired_validation_sha256"] = json!(Sha256Digest::of_bytes(&paired_raw));
+        }
+        let raw = fixture_raw(&phase);
+        previous = json!(Sha256Digest::of_bytes(&raw));
+        members.insert(name(&id, stage), raw);
+    }
+    JournalObservation {
+        total_bytes: members.values().map(Vec::len).sum(),
+        files: members
+            .into_iter()
+            .map(|(name, bytes)| ObservedJournalFile { name, bytes })
+            .collect(),
+    }
+}
+fn rewrite_fixture(
+    scan: &mut JournalObservation,
+    suffix: &str,
+    change: impl FnOnce(&mut serde_json::Value),
+) {
+    let f = scan
+        .files
+        .iter_mut()
+        .find(|f| f.name.ends_with(suffix))
+        .unwrap();
+    let mut value = serde_json::from_slice(f.bytes()).unwrap();
+    change(&mut value);
+    f.bytes = fixture_raw(&value);
+    scan.total_bytes = scan.files.iter().map(|f| f.bytes().len()).sum();
+}
+fn raw_members(scan: &JournalObservation) -> BTreeMap<String, Vec<u8>> {
+    scan.files
+        .iter()
+        .map(|f| (f.name.clone(), f.bytes().to_vec()))
+        .collect()
+}
+#[test]
+fn versioned_cutover_reader_preserves_original_bytes_and_requires_paired_completion() {
+    with_reader_seed(|f, p| {
+        for (version, platform) in [
+            (1, "linux"),
+            (2, "linux"),
+            (3, "linux"),
+            (3, "macos"),
+            (3, "windows"),
+        ] {
+            let scan = reader_chain(f, p, version, platform);
+            let parsed = scan_cutovers(&scan).unwrap();
+            let (raw, phases, last) = if version == 3 {
+                assert!(parsed.records.is_empty());
+                let record = &parsed.native_records[0];
+                (&record.raw_intent, &record.phases, record.last_stage)
+            } else {
+                assert!(parsed.native_records.is_empty());
+                let record = &parsed.records[0];
+                // The legacy writer's serializer is deliberately unchanged.
+                assert_ne!(
+                    serde_json::to_vec(&record.intent).unwrap(),
+                    record.raw_intent
+                );
+                (&record.raw_intent, &record.phases, record.last_stage)
+            };
+            assert_eq!(last, DurableStage::Committed);
+            let members = raw_members(&scan);
+            assert_eq!(raw, &members[&name(&f.retired.transaction_id, "intent")]);
+            for phase in phases {
+                assert_eq!(
+                    phase.record_sha256,
+                    Sha256Digest::of_bytes(
+                        &members
+                            [&name(&f.retired.transaction_id, stage_name(phase.stage).unwrap())]
+                    )
+                );
+            }
+            assert!(
+                super::super::readonly_inventory(&scan)
+                    .unwrap()
+                    .orphans
+                    .is_empty()
+            );
+        }
+        let original_scan = scan(f);
+        let original = scan_cutovers(&original_scan).unwrap().records.remove(0);
+        let original_bytes = raw_members(&original_scan);
+        assert_eq!(
+            phase_bytes(&original, DurableStage::Prepared, None).unwrap(),
+            original_bytes[&name(&f.retired.transaction_id, "prepared")]
+        );
+        let mut partial = reader_chain(f, p, 3, "windows");
+        partial
+            .files
+            .retain(|f| !f.name.ends_with(".cutover-committed"));
+        assert_eq!(
+            scan_cutovers(&partial).unwrap().native_records[0].last_stage,
+            DurableStage::Verified
+        );
+        let mut no_paired = reader_chain(f, p, 3, "windows");
+        no_paired
+            .files
+            .retain(|f| !f.name.ends_with(".cutover-paired-validation"));
+        assert!(scan_cutovers(&no_paired).is_err());
+    });
+}
+#[test]
+fn versioned_cutover_reader_rejects_foreign_roots_versions_and_broken_original_chains() {
+    with_reader_seed(|f, p| {
+        for root in [
+            serde_json::json!({"platform":"macos","device":7,"inode":10,"uid":501}),
+            serde_json::json!({"platform":"windows","volume_serial":7,"file_id":10,"owner_sid":"S-1-5-21-999"}),
+            serde_json::json!({"platform":"windows","volume_serial":7,"file_id":99,"owner_sid":"S-1-5-21-123"}),
+        ] {
+            let mut bad = reader_chain(f, p, 3, "windows");
+            rewrite_fixture(&mut bad, ".cutover-intent", |v| v["config_root"] = root);
+            assert!(scan_cutovers(&bad).is_err());
+        }
+        // Rehash a foreign marker so this tests root binding, not merely a
+        // stale attachment digest. The decoded original native record is not
+        // a writer capability, even with complete synthetic phase evidence.
+        let scan = reader_chain(f, p, 3, "windows");
+        let mut foreign = scan_cutovers(&scan).unwrap().native_records.remove(0);
+        let mut marker: serde_json::Value = serde_json::from_slice(&foreign.marker).unwrap();
+        marker["root_identity"]["file_id"] = 99.into();
+        foreign.marker = fixture_raw(&marker);
+        foreign.intent.marker_sha256 = Sha256Digest::of_bytes(&foreign.marker);
+        foreign.raw_intent = serde_json::to_vec(&foreign.intent).unwrap();
+        assert!(validate_materials(&foreign).is_err());
+        // Both directions select the wrong retirement version before any
+        // legacy projection or phase decoding; no fallback is permitted.
+        for (version, replacement) in [(3, 2), (2, 3)] {
+            let mut bad = reader_chain(f, p, version, "windows");
+            rewrite_fixture(&mut bad, ".cutover-intent", |v| {
+                v["schema"] = replacement.into()
+            });
+            assert!(scan_cutovers(&bad).is_err());
+        }
+        for suffix in [
+            ".cutover-prepared",
+            ".cutover-applied",
+            ".cutover-verified",
+            ".cutover-committed",
+        ] {
+            let mut bad = reader_chain(f, p, 3, "windows");
+            rewrite_fixture(&mut bad, suffix, |v| v["schema"] = 1.into());
+            assert!(scan_cutovers(&bad).is_err());
+        }
+        let mut changed = reader_chain(f, p, 3, "windows");
+        rewrite_fixture(&mut changed, ".cutover-applied", |v| {
+            v["previous"] = serde_json::json!(Sha256Digest::of_bytes(b"foreign predecessor"))
+        });
+        assert!(scan_cutovers(&changed).is_err());
+        let mut missing = reader_chain(f, p, 3, "windows");
+        missing
+            .files
+            .retain(|f| !f.name.ends_with(".cutover-applied"));
+        assert!(scan_cutovers(&missing).is_err());
+        let mut missing_field = reader_chain(f, p, 3, "windows");
+        rewrite_fixture(&mut missing_field, ".cutover-prepared", |v| {
+            v.as_object_mut().unwrap().remove("previous");
+        });
+        assert!(scan_cutovers(&missing_field).is_err());
+    });
+}
+#[test]
+fn old_cutover_mutations_reject_native_chain_before_writing_scratch_members() {
+    with_reader_seed(|f, p| {
+        let native = reader_chain(f, p, 3, "windows");
+        // Install only synthetic test journal bytes into this test's freshly
+        // owned root. This is never a production migration or native receipt.
+        let dir = f.path.join(NamespaceName::ManagementV1.as_str());
+        for old in scan(f).files {
+            fs::remove_file(dir.join(old.name)).unwrap();
+        }
+        for entry in &native.files {
+            write(&dir.join(&entry.name), entry.bytes());
+        }
+        assert!(scan_cutovers(&scan(f)).unwrap().records.is_empty());
+        let before = raw_members(&scan(f));
+        let canonical_before = fs::read(f.path.join("state.json")).unwrap();
+        assert!(original(&scan(f), &f.retired.transaction_id).is_err());
+        let input = endpoint_inputs(f);
+        assert!(f.journal.prepare_cutover(&f.maintenance, input).is_err());
+        let report = synthetic_validation(f);
+        assert!(
+            f.journal
+                .record_cutover_validation(&f.maintenance, p, &report)
+                .is_err()
+        );
+        assert!(
+            f.journal
+                .record_cutover_paired_validation(&f.maintenance, p, &synthetic_paired(p))
+                .is_err()
+        );
+        assert!(
+            f.journal
+                .append_cutover_phase(&f.maintenance, p, DurableStage::Applied)
+                .is_err()
+        );
+        assert!(
+            f.journal
+                .resync_original_cutover(&f.maintenance, &f.retired.transaction_id)
+                .is_err()
+        );
+        assert_eq!(raw_members(&scan(f)), before);
+        assert_eq!(
+            fs::read(f.path.join("state.json")).unwrap(),
+            canonical_before
+        );
+        assert!(!f.path.join(MARKER).exists());
+        // The earlier partial boundary is equally closed: native retirement
+        // alone must not start a fresh legacy cutover or add any attachments.
+        for entry in native.files.iter().filter(|f| f.name.contains(".cutover-")) {
+            fs::remove_file(dir.join(&entry.name)).unwrap();
+        }
+        let before_partial = raw_members(&scan(f));
+        let input = endpoint_inputs(f);
+        assert!(f.journal.prepare_cutover(&f.maintenance, input).is_err());
+        assert_eq!(raw_members(&scan(f)), before_partial);
+    });
+}

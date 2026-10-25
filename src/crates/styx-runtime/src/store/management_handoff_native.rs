@@ -8,10 +8,22 @@ pub(in crate::store) trait ProofRoot:
     Clone + PartialEq + Eq + Serialize + DeserializeOwned
 {
     const RETIREMENT_SCHEMA: u16;
+    fn permits_cutover(schema: u16) -> bool;
+    fn native_identity(&self) -> NativeRootIdentity;
     fn valid_pair(&self, other: &Self) -> bool;
 }
 impl ProofRoot for RetirementLinuxRoot {
     const RETIREMENT_SCHEMA: u16 = 1;
+    fn permits_cutover(schema: u16) -> bool {
+        matches!(schema, 1 | 2)
+    }
+    fn native_identity(&self) -> NativeRootIdentity {
+        NativeRootIdentity::Linux {
+            device: self.device,
+            inode: self.inode,
+            uid: self.uid,
+        }
+    }
     fn valid_pair(&self, other: &Self) -> bool {
         self.inode != 0
             && other.inode != 0
@@ -21,6 +33,12 @@ impl ProofRoot for RetirementLinuxRoot {
 }
 impl ProofRoot for NativeRootIdentity {
     const RETIREMENT_SCHEMA: u16 = 3;
+    fn permits_cutover(schema: u16) -> bool {
+        schema == 3
+    }
+    fn native_identity(&self) -> NativeRootIdentity {
+        self.clone()
+    }
     fn valid_pair(&self, other: &Self) -> bool {
         match (self, other) {
             (
