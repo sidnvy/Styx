@@ -12,6 +12,152 @@ use styx_contracts::management::ReaderContract;
 const DEPLOYMENT: &[u8] = b"{\"schema\":1,\"unknown\":900719925474099312345}\n";
 const BEFORE: &[u8] = b"{ \"schema\":1, \"opaque\":true }\n";
 const TOKEN: &[u8] = b"owned-synthetic-token-not-production\n";
+
+// Decoder fixtures are deliberately not physical-retirement or stopped-owner
+// evidence. Exercise the production inventory/scanner on original byte chains.
+fn native_chain_intent() -> serde_json::Value {
+    let hash = Sha256Digest::of_bytes(b"fixture-only");
+    serde_json::json!({
+        "schema":3,"kind":"legacy_credential_retirement","transaction_id":"native-retire","sequence":1,
+        "config_root":{"platform":"windows","volume_serial":7,"file_id":10,"owner_sid":"S-1-5-21-123"},
+        "host_root":{"platform":"windows","volume_serial":7,"file_id":11,"owner_sid":"S-1-5-21-123"},
+        "deployment_raw_sha256":hash,"before_state_sha256":hash,"preservation_sha256":hash,
+        "service_descriptor_sha256":hash,"candidate_manifest_sha256":hash,"publisher_spki_sha256":hash,
+        "original_token":{"platform":"windows","volume_serial":7,"file_id":12,"owner_sid":"S-1-5-21-123",
+          "nlink":1,"byte_len":32,"modified_seconds":100,"modified_nanoseconds":100,
+          "changed_seconds":100,"changed_nanoseconds":200,"sha256":hash}
+    })
+}
+fn observed_chain(intent: serde_json::Value) -> JournalObservation {
+    use crate::store::secure_journal::ObservedJournalFile;
+    let id: TransactionId = serde_json::from_value(intent["transaction_id"].clone()).unwrap();
+    let raw = format!(" {}\n", serde_json::to_string(&intent).unwrap()).into_bytes();
+    let prepared = serde_json::to_vec(&serde_json::json!({
+        "schema":intent["schema"],"kind":"legacy_credential_retirement","transaction_id":id,
+        "sequence":intent["sequence"],"raw_intent_sha256":Sha256Digest::of_bytes(&raw),
+        "stage":"prepared","previous":null,"post_stamp":null
+    }))
+    .unwrap();
+    let retired = serde_json::to_vec(&serde_json::json!({
+        "schema":intent["schema"],"kind":"legacy_credential_retirement","transaction_id":id,
+        "sequence":intent["sequence"],"raw_intent_sha256":Sha256Digest::of_bytes(&raw),
+        "stage":"retired","previous":Sha256Digest::of_bytes(&prepared),"post_stamp":intent["original_token"]
+    })).unwrap();
+    let files: Vec<_> = names(&id)
+        .into_iter()
+        .zip([raw, prepared, retired])
+        .map(|(name, bytes)| ObservedJournalFile { name, bytes })
+        .collect();
+    JournalObservation {
+        total_bytes: files.iter().map(|f| f.bytes().len()).sum(),
+        files,
+    }
+}
+#[test]
+fn versioned_retirement_scanner_preserves_old_raw_chain_and_observes_native_pending() {
+    let native = observed_chain(native_chain_intent());
+    let scan = scan_handoffs(&native).unwrap();
+    assert!(scan.records.is_empty());
+    assert_eq!(scan.native_records[0].raw, native.files[0].bytes());
+    let inventory = super::super::readonly_inventory(&native).unwrap();
+    assert_eq!(inventory.high_water, 1);
+    assert!(inventory.orphans.is_empty());
+    assert_eq!(
+        inventory.handoffs[0].stage,
+        CredentialRetirementStage::Retired
+    );
+    let mut legacy = native_chain_intent();
+    legacy["schema"] = 1.into();
+    let uid = nix::unistd::geteuid().as_raw();
+    legacy["config_root"] = serde_json::json!({"device":7,"inode":10,"uid":uid});
+    legacy["host_root"] = serde_json::json!({"device":7,"inode":11,"uid":uid});
+    legacy["original_token"] = serde_json::json!({"device":7,"inode":12,"uid":uid,"mode":libc::S_IFREG | 0o600,
+        "nlink":1,"byte_len":32,"modified_seconds":100,"modified_nanoseconds":100,
+        "changed_seconds":100,"changed_nanoseconds":200,"sha256":Sha256Digest::of_bytes(b"fixture-only")});
+    let old = observed_chain(legacy);
+    let parsed = scan_handoffs(&old).unwrap();
+    assert!(parsed.native_records.is_empty());
+    assert_eq!(parsed.records[0].raw, old.files[0].bytes());
+    assert_eq!(
+        parsed.records[0].retired,
+        Some(Sha256Digest::of_bytes(old.files[2].bytes()))
+    );
+    assert!(
+        super::super::readonly_inventory(&old)
+            .unwrap()
+            .orphans
+            .is_empty()
+    );
+}
+#[test]
+fn native_retirement_rejects_foreign_owner_platform_mixed_chain_and_missing_predecessor() {
+    for bad_root in [
+        serde_json::json!({"platform":"macos","device":7,"inode":10,"uid":501}),
+        serde_json::json!({"platform":"windows","volume_serial":7,"file_id":10,"owner_sid":"S-1-5-21-999"}),
+    ] {
+        let mut intent = native_chain_intent();
+        intent["config_root"] = bad_root;
+        assert!(scan_handoffs(&observed_chain(intent)).is_err());
+    }
+    let mut mixed = observed_chain(native_chain_intent());
+    let mut phase: serde_json::Value = serde_json::from_slice(mixed.files[2].bytes()).unwrap();
+    phase["schema"] = 1.into();
+    mixed.files[2].bytes = serde_json::to_vec(&phase).unwrap();
+    assert!(scan_handoffs(&mixed).is_err());
+    let mut missing = observed_chain(native_chain_intent());
+    missing.files.remove(1);
+    assert!(scan_handoffs(&missing).is_err());
+    let mut changed = observed_chain(native_chain_intent());
+    let mut phase: serde_json::Value = serde_json::from_slice(changed.files[2].bytes()).unwrap();
+    phase["post_stamp"]["file_id"] = 99.into();
+    changed.files[2].bytes = serde_json::to_vec(&phase).unwrap();
+    assert!(scan_handoffs(&changed).is_err());
+    let mut partial = observed_chain(native_chain_intent());
+    partial.files.pop();
+    let inventory = super::super::readonly_inventory(&partial).unwrap();
+    assert_eq!(
+        inventory.handoffs[0].stage,
+        CredentialRetirementStage::Prepared
+    );
+}
+#[test]
+fn legacy_writer_refuses_native_chain_before_creating_any_journal_member() {
+    struct ScratchCleanup(PathBuf);
+    impl Drop for ScratchCleanup {
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+    let mut f = fixture(&std::env::temp_dir(), JournalBudget::default());
+    let cleanup = ScratchCleanup(f.path.clone());
+    let namespace = f.path.join(NamespaceName::ManagementV1.as_str());
+    let input = observed_chain(native_chain_intent());
+    for file in &input.files {
+        write(&namespace.join(&file.name), file.bytes());
+    }
+    let read = || {
+        let dir = fs::File::open(&namespace).unwrap();
+        files::scan(&dir, JournalBudget::default()).unwrap()
+    };
+    let before = read();
+    assert!(matches!(
+        original(&before, &f.intent.transaction_id),
+        Err(JournalError::Conflict)
+    ));
+    assert!(matches!(
+        f.journal
+            .prepare_credential_retirement(&f.maintenance, &f.intent),
+        Err(JournalError::Conflict)
+    ));
+    let after = read();
+    assert_eq!(before.files.len(), after.files.len());
+    for (a, b) in before.files.iter().zip(&after.files) {
+        assert_eq!(a.name, b.name);
+        assert_eq!(a.bytes(), b.bytes());
+    }
+    drop(f);
+    drop(cleanup);
+}
 struct Fixture {
     path: PathBuf,
     host: PathBuf,

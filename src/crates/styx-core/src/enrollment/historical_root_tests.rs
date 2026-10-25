@@ -95,6 +95,21 @@ fn historical_root_versions_preserve_original_bytes_and_native_continuation() {
         raw
     );
 
+    // Schema 3 is now an explicit native-root codec. Core replay retains its
+    // original bytes; this pure proof does not enable a platform writer.
+    let mut v3 = v2.clone();
+    v3.schema = 3;
+    let native_raw = contract::encode(&v3).unwrap();
+    assert_eq!(contract::decode(&native_raw).unwrap(), v3);
+    validate_historical_baseline(&v3, Limits::default()).unwrap();
+    let (mut native, native_control) = fresh();
+    recover(&mut native, &native_control, &native_raw).unwrap();
+    assert!(native.recovering);
+    assert_eq!(
+        native.historical_baseline.as_ref().unwrap().bytes.as_ref(),
+        native_raw
+    );
+
     let mut missing = v2.clone();
     missing.journal_root = None;
     let mut wrong = v2.clone();
@@ -110,7 +125,7 @@ fn historical_root_versions_preserve_original_bytes_and_native_continuation() {
     let mut added_to_old = v1.clone();
     added_to_old.journal_root = Some(v1.enrollment_root.clone());
     let mut unknown = v2.clone();
-    unknown.schema = 3;
+    unknown.schema = 4;
     for invalid in [
         missing,
         wrong,
@@ -133,7 +148,7 @@ fn historical_root_versions_preserve_original_bytes_and_native_continuation() {
             1,
         ),
         text.replace("\"schema\":2", "\"schema\":1"),
-        text.replace("\"schema\":2", "\"schema\":3"),
+        text.replace("\"schema\":2", "\"schema\":4"),
         String::from_utf8(V1.to_vec())
             .unwrap()
             .replace("\"schema\":1", "\"schema\":2"),

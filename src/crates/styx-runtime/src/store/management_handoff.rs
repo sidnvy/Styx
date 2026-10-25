@@ -12,6 +12,10 @@ use std::{
     path::PathBuf,
 };
 const MAX_INTENT: usize = 8192;
+#[path = "management_handoff_native.rs"]
+mod native;
+use native::NativeObservedRetirement;
+pub(in crate::store) use native::{ProofRoot, ProofStamp};
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -74,30 +78,30 @@ pub(in crate::store) enum RetirementKind {
 }
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-pub(in crate::store) struct LegacyCredentialRetirementIntent {
+pub(in crate::store) struct LegacyCredentialRetirementIntent<
+    R = RetirementLinuxRoot,
+    S = RetirementFileStamp,
+> {
     pub schema: u16,
     pub kind: RetirementKind,
     pub transaction_id: TransactionId,
     pub sequence: u64,
-    pub config_root: RetirementLinuxRoot,
-    pub host_root: RetirementLinuxRoot,
+    pub config_root: R,
+    pub host_root: R,
     pub deployment_raw_sha256: Sha256Digest,
     pub before_state_sha256: Sha256Digest,
     pub preservation_sha256: Sha256Digest,
     pub service_descriptor_sha256: Sha256Digest,
     pub candidate_manifest_sha256: Sha256Digest,
     pub publisher_spki_sha256: Sha256Digest,
-    pub original_token: RetirementFileStamp,
+    pub original_token: S,
 }
-impl LegacyCredentialRetirementIntent {
+impl<R: ProofRoot, S: ProofStamp<R>> LegacyCredentialRetirementIntent<R, S> {
     fn validate(&self) -> JournalResult<()> {
-        if self.schema != 1
+        if self.schema != R::RETIREMENT_SCHEMA
             || self.sequence == 0
-            || self.config_root.inode == 0
-            || self.host_root.inode == 0
-            || self.config_root.uid != self.host_root.uid
-            || self.config_root.uid != nix::unistd::geteuid().as_raw()
-            || !self.original_token.valid(self.host_root.uid)
+            || !self.config_root.valid_pair(&self.host_root)
+            || !self.original_token.valid_for(&self.host_root)
         {
             return Err(JournalError::InvalidInput);
         }
@@ -130,8 +134,8 @@ pub struct CredentialRetirementObservation {
     pub retired_sha256: Option<Sha256Digest>,
 }
 #[derive(Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-struct PhaseRecord {
+#[serde(deny_unknown_fields, bound(deserialize = "S: Deserialize<'de>"))]
+struct PhaseRecord<S = RetirementFileStamp> {
     schema: u16,
     kind: RetirementKind,
     transaction_id: TransactionId,
@@ -141,7 +145,7 @@ struct PhaseRecord {
     #[serde(deserialize_with = "required_option")]
     previous: Option<Sha256Digest>,
     #[serde(deserialize_with = "required_option")]
-    post_stamp: Option<RetirementFileStamp>,
+    post_stamp: Option<S>,
 }
 fn required_option<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
 where
@@ -189,14 +193,14 @@ pub(in crate::store) struct OriginalCredentialRetirement {
     pub retired_sha256: Option<Sha256Digest>,
     pub post_stamp: Option<RetirementFileStamp>,
 }
-pub(in crate::store) struct ObservedRetirement {
-    pub(in crate::store) intent: LegacyCredentialRetirementIntent,
+pub(in crate::store) struct ObservedRetirement<R = RetirementLinuxRoot, S = RetirementFileStamp> {
+    pub(in crate::store) intent: LegacyCredentialRetirementIntent<R, S>,
     raw: Vec<u8>,
     prepared: Option<Sha256Digest>,
     retired: Option<Sha256Digest>,
-    post: Option<RetirementFileStamp>,
+    post: Option<S>,
 }
-impl ObservedRetirement {
+impl<R, S> ObservedRetirement<R, S> {
     pub(super) fn observation(&self) -> CredentialRetirementObservation {
         CredentialRetirementObservation {
             transaction_id: self.intent.transaction_id.clone(),
@@ -213,6 +217,8 @@ impl ObservedRetirement {
             retired_sha256: self.retired,
         }
     }
+}
+impl ObservedRetirement {
     pub(in crate::store) fn original(&self) -> OriginalCredentialRetirement {
         OriginalCredentialRetirement {
             intent: self.intent.clone(),
@@ -225,7 +231,22 @@ impl ObservedRetirement {
 }
 pub(in crate::store) struct HandoffInventory {
     pub records: Vec<ObservedRetirement>,
+    pub native_records: Vec<NativeObservedRetirement>,
     pub used: BTreeSet<String>,
+}
+impl HandoffInventory {
+    pub(in crate::store) fn observations(
+        &self,
+    ) -> impl Iterator<Item = (CredentialRetirementObservation, Sha256Digest)> + '_ {
+        self.records
+            .iter()
+            .map(|r| (r.observation(), r.intent.before_state_sha256))
+            .chain(
+                self.native_records
+                    .iter()
+                    .map(|r| (r.observation(), r.intent.before_state_sha256)),
+            )
+    }
 }
 fn names(id: &TransactionId) -> [String; 3] {
     let id = id.as_str();
@@ -243,8 +264,12 @@ pub(in crate::store) fn scan_handoffs(
         .iter()
         .map(|f| (f.name.as_str(), f.bytes()))
         .collect();
+    if by_name.len() != scan.files.len() {
+        return Err(JournalError::Unknown);
+    }
     let mut used = BTreeSet::new();
     let mut records = Vec::new();
+    let mut native_records = Vec::new();
     for file in &scan.files {
         if !file.name.ends_with(".handoff-intent") {
             continue;
@@ -252,72 +277,93 @@ pub(in crate::store) fn scan_handoffs(
         if file.bytes().len() > MAX_INTENT {
             return Err(JournalError::BudgetExceeded);
         }
-        let intent: LegacyCredentialRetirementIntent =
+        #[derive(Deserialize)]
+        struct Version {
+            schema: u16,
+        }
+        let version: Version =
             serde_json::from_slice(file.bytes()).map_err(|_| JournalError::Unknown)?;
-        intent.validate().map_err(|_| JournalError::Unknown)?;
-        let [raw_name, prepared_name, retired_name] = names(&intent.transaction_id);
-        if raw_name != file.name {
-            return Err(JournalError::Unknown);
+        match version.schema {
+            1 => records.push(parse_retirement(file, &by_name, &mut used)?),
+            3 => native_records.push(parse_retirement(file, &by_name, &mut used)?),
+            _ => return Err(JournalError::Unknown),
         }
-        used.insert(raw_name);
-        let digest = Sha256Digest::of_bytes(file.bytes());
-        let mut prepared = None;
-        let mut retired = None;
-        let mut post = None;
-        for (stage, name) in [
-            (CredentialRetirementStage::Prepared, prepared_name),
-            (CredentialRetirementStage::Retired, retired_name),
-        ] {
-            if let Some(bytes) = by_name.get(name.as_str()) {
-                let record: PhaseRecord =
-                    serde_json::from_slice(bytes).map_err(|_| JournalError::Unknown)?;
-                if record.schema != 1
-                    || record.kind != RetirementKind::LegacyCredentialRetirement
-                    || record.transaction_id != intent.transaction_id
-                    || record.sequence != intent.sequence
-                    || record.raw_intent_sha256 != digest
-                    || record.stage != stage
-                {
-                    return Err(JournalError::Unknown);
-                }
-                match stage {
-                    CredentialRetirementStage::Prepared => {
-                        if record.previous.is_some() || record.post_stamp.is_some() {
-                            return Err(JournalError::Unknown);
-                        }
-                        prepared = Some(Sha256Digest::of_bytes(bytes));
-                    }
-                    CredentialRetirementStage::Retired => {
-                        if prepared.is_none()
-                            || record.previous != prepared
-                            || !record
-                                .post_stamp
-                                .as_ref()
-                                .is_some_and(|p| intent.original_token.same_renamed_file(p))
-                        {
-                            return Err(JournalError::Unknown);
-                        }
-                        retired = Some(Sha256Digest::of_bytes(bytes));
-                        post = record.post_stamp;
-                    }
-                    CredentialRetirementStage::IntentOnly => return Err(JournalError::Unknown),
-                }
-                used.insert(name);
-            }
-        }
-        records.push(ObservedRetirement {
-            intent,
-            raw: file.bytes().to_vec(),
-            prepared,
-            retired,
-            post,
-        });
     }
-    // No commit exists; even Retired is a pending substage of its original ID.
-    if records.len() > 1 {
+    // An original migration has only one retirement chain, regardless of DTO version.
+    if records.len() + native_records.len() > 1 {
         return Err(JournalError::Conflict);
     }
-    Ok(HandoffInventory { records, used })
+    Ok(HandoffInventory {
+        records,
+        native_records,
+        used,
+    })
+}
+fn parse_retirement<R: ProofRoot, S: ProofStamp<R>>(
+    file: &crate::store::secure_journal::ObservedJournalFile,
+    by_name: &BTreeMap<&str, &[u8]>,
+    used: &mut BTreeSet<String>,
+) -> JournalResult<ObservedRetirement<R, S>> {
+    let intent: LegacyCredentialRetirementIntent<R, S> =
+        serde_json::from_slice(file.bytes()).map_err(|_| JournalError::Unknown)?;
+    intent.validate().map_err(|_| JournalError::Unknown)?;
+    let [raw_name, prepared_name, retired_name] = names(&intent.transaction_id);
+    if raw_name != file.name {
+        return Err(JournalError::Unknown);
+    }
+    used.insert(raw_name);
+    let digest = Sha256Digest::of_bytes(file.bytes());
+    let mut prepared = None;
+    let mut retired = None;
+    let mut post = None;
+    for (stage, name) in [
+        (CredentialRetirementStage::Prepared, prepared_name),
+        (CredentialRetirementStage::Retired, retired_name),
+    ] {
+        if let Some(bytes) = by_name.get(name.as_str()) {
+            let record: PhaseRecord<S> =
+                serde_json::from_slice(bytes).map_err(|_| JournalError::Unknown)?;
+            if record.schema != R::RETIREMENT_SCHEMA
+                || record.kind != RetirementKind::LegacyCredentialRetirement
+                || record.transaction_id != intent.transaction_id
+                || record.sequence != intent.sequence
+                || record.raw_intent_sha256 != digest
+                || record.stage != stage
+            {
+                return Err(JournalError::Unknown);
+            }
+            match stage {
+                CredentialRetirementStage::Prepared => {
+                    if record.previous.is_some() || record.post_stamp.is_some() {
+                        return Err(JournalError::Unknown);
+                    }
+                    prepared = Some(Sha256Digest::of_bytes(bytes));
+                }
+                CredentialRetirementStage::Retired => {
+                    if prepared.is_none()
+                        || record.previous != prepared
+                        || !record
+                            .post_stamp
+                            .as_ref()
+                            .is_some_and(|p| intent.original_token.same_file_after_rename(p))
+                    {
+                        return Err(JournalError::Unknown);
+                    }
+                    retired = Some(Sha256Digest::of_bytes(bytes));
+                    post = record.post_stamp;
+                }
+                CredentialRetirementStage::IntentOnly => return Err(JournalError::Unknown),
+            }
+            used.insert(name);
+        }
+    }
+    Ok(ObservedRetirement {
+        intent,
+        raw: file.bytes().to_vec(),
+        prepared,
+        retired,
+        post,
+    })
 }
 fn check_canonical(
     journal: &OwnedManagementJournal,
@@ -390,7 +436,11 @@ fn original(scan: &JournalObservation, id: &TransactionId) -> JournalResult<Obse
     if !inventory.orphans.is_empty() {
         return Err(JournalError::Conflict);
     }
-    scan_handoffs(scan)?
+    let handoffs = scan_handoffs(scan)?;
+    if !handoffs.native_records.is_empty() {
+        return Err(JournalError::Conflict);
+    }
+    handoffs
         .records
         .into_iter()
         .find(|r| &r.intent.transaction_id == id)
@@ -435,7 +485,7 @@ impl OwnedManagementJournal {
         if raw.len() > MAX_INTENT {
             return Err(JournalError::BudgetExceeded);
         }
-        let record = serde_json::to_vec(&PhaseRecord {
+        let record = serde_json::to_vec(&PhaseRecord::<RetirementFileStamp> {
             schema: 1,
             kind: RetirementKind::LegacyCredentialRetirement,
             transaction_id: intent.transaction_id.clone(),
@@ -457,6 +507,11 @@ impl OwnedManagementJournal {
                     return Err(JournalError::Conflict);
                 }
                 let handoffs = scan_handoffs(&scan)?;
+                // This writer is the original v1 API. A valid newer observed
+                // chain never authorizes appending an unrelated legacy intent.
+                if !handoffs.native_records.is_empty() {
+                    return Err(JournalError::Conflict);
+                }
                 if let Some(existing) = handoffs.records.first() {
                     if existing.intent != *intent
                         || existing.prepared.is_none()

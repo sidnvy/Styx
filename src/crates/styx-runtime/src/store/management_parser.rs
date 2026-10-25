@@ -176,17 +176,15 @@ pub(super) fn inventory(scan: &JournalObservation) -> JournalResult<ManagementIn
         .map(|tx| tx.intent.transaction_id.clone())
         .collect();
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    for record in &handoff_inventory.records {
-        if !ids.insert(record.intent.transaction_id.clone())
-            || !sequences.insert(record.intent.sequence)
-        {
+    for (record, before_state_sha256) in handoff_inventory.observations() {
+        if !ids.insert(record.transaction_id.clone()) || !sequences.insert(record.sequence) {
             return Err(JournalError::Conflict);
         }
-        high_water = high_water.max(record.intent.sequence);
+        high_water = high_water.max(record.sequence);
         // There is deliberately no committed handoff stage yet. It must be
         // the sole pending tail after all desired-state history committed.
         if transactions.iter().any(|tx| {
-            tx.intent.sequence >= record.intent.sequence
+            tx.intent.sequence >= record.sequence
                 || !tx
                     .phase_receipts
                     .last()
@@ -196,14 +194,14 @@ pub(super) fn inventory(scan: &JournalObservation) -> JournalResult<ManagementIn
         }
         if transactions
             .last()
-            .is_some_and(|tx| tx.intent.target_state_sha256 != record.intent.before_state_sha256)
+            .is_some_and(|tx| tx.intent.target_state_sha256 != before_state_sha256)
         {
             return Err(JournalError::Conflict);
         }
     }
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     {
-        used.extend(handoff_inventory.used);
+        used.extend(handoff_inventory.used.iter().cloned());
         let cutover_inventory = super::cutover::scan_cutovers(scan)?;
         used.extend(cutover_inventory.used);
     }
@@ -226,9 +224,8 @@ pub(super) fn inventory(scan: &JournalObservation) -> JournalResult<ManagementIn
         transactions,
         #[cfg(all(target_os = "linux", target_env = "gnu"))]
         handoffs: handoff_inventory
-            .records
-            .iter()
-            .map(handoff::ObservedRetirement::observation)
+            .observations()
+            .map(|(observation, _)| observation)
             .collect(),
         orphans: scan
             .files
