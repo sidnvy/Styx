@@ -297,7 +297,7 @@ mod platform {
             _root: Box<FreshNativeRoot>,
         },
         Store {
-            _store: NativeHostJoinStore,
+            _store: Box<NativeHostJoinStore>,
         },
         Work {
             _work: Box<Work>,
@@ -697,7 +697,11 @@ mod platform {
         })();
         let (root, seed, seed_raw, key, tls, origin, candidate, inputs) = match loaded {
             Ok(value) => value,
-            Err(error) => return Err(error.keep(Retained::Store { _store: store })),
+            Err(error) => {
+                return Err(error.keep(Retained::Store {
+                    _store: Box::new(store),
+                }));
+            }
         };
         let work = Work {
             store,
