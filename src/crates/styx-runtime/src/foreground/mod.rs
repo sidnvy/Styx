@@ -4,6 +4,8 @@ mod browser;
 #[cfg(target_os = "linux")]
 mod computer;
 pub mod profile;
+#[cfg(target_os = "windows")]
+mod windows_env;
 pub use profile::ProfileDiagnostics;
 use serde::Serialize;
 use std::path::Path;

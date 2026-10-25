@@ -287,7 +287,7 @@ impl CodexStdio {
         let child = Child::spawn(&config)?;
         Self::initialize_owned(config, partition, child).await
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub(crate) async fn spawn_pinned_with_reserved_budget(
         config: OwnedExecutorConfig,
         partition: tokio::sync::OwnedSemaphorePermit,
@@ -303,7 +303,10 @@ impl CodexStdio {
             return Err(ExecError::InvalidRequest);
         }
         let partition = Arc::new(partition);
+        #[cfg(target_os = "macos")]
         let child = Child::spawn_pinned(&config, image).await?;
+        #[cfg(target_os = "windows")]
+        let child = Child::spawn_pinned(&config, image, partition.clone()).await?;
         Self::initialize_owned(config, partition, child).await
     }
     async fn initialize_owned(

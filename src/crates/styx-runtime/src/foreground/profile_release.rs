@@ -43,10 +43,13 @@ pub(super) struct ProfileRelease {
     cua_version: Option<String>,
 }
 fn fixed_legacy_worker(kind: NativeExternalWorker) -> &'static str {
-    match kind {
-        NativeExternalWorker::CodexExec => "bin/codex",
-        NativeExternalWorker::BrowserNode22 => "bin/node",
-        NativeExternalWorker::CuaNative => "bin/cua-driver",
+    match (kind, cfg!(target_os = "windows")) {
+        (NativeExternalWorker::CodexExec, true) => "bin/codex.exe",
+        (NativeExternalWorker::BrowserNode22, true) => "bin/node.exe",
+        (NativeExternalWorker::CuaNative, true) => "bin/cua-driver.exe",
+        (NativeExternalWorker::CodexExec, false) => "bin/codex",
+        (NativeExternalWorker::BrowserNode22, false) => "bin/node",
+        (NativeExternalWorker::CuaNative, false) => "bin/cua-driver",
     }
 }
 fn load_error(error: ReleaseError) -> ProfileError {
@@ -336,6 +339,7 @@ fn load_legacy(
     let platform = match std::env::consts::OS {
         "linux" => "linux",
         "macos" => "darwin",
+        "windows" => "win32",
         _ => return Err(ProfileError::Unsupported),
     };
     let arch = match std::env::consts::ARCH {

@@ -4,10 +4,12 @@ use std::{io, process::ExitStatus};
 use tokio::process::{ChildStderr, ChildStdin, ChildStdout};
 
 enum Process {
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     Tokio(tokio::process::Child),
     #[cfg(target_os = "macos")]
     Darwin(crate::platform::macos_spawn::RunningChild),
+    #[cfg(target_os = "windows")]
+    Windows(crate::platform::windows_spawn::RunningChild),
 }
 pub(super) struct Child {
     process: Process,
@@ -17,12 +19,12 @@ pub(super) struct Child {
 }
 impl Child {
     pub(super) fn spawn(config: &OwnedExecutorConfig) -> Result<Self, ExecError> {
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         {
             let _ = config;
             Err(ExecError::SpawnFailed)
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         {
             let mut child = tokio::process::Command::new(&config.binary)
                 .args(["exec-server", "--listen", "stdio://"])
@@ -86,20 +88,61 @@ impl Child {
             process: Process::Darwin(child),
         })
     }
+    #[cfg(target_os = "windows")]
+    pub(super) async fn spawn_pinned(
+        config: &OwnedExecutorConfig,
+        image: std::sync::Arc<crate::store::PinnedExecutable>,
+        startup_budget: std::sync::Arc<tokio::sync::OwnedSemaphorePermit>,
+    ) -> Result<Self, ExecError> {
+        let cwd = config.cwd.clone();
+        let environment = config
+            .environment
+            .iter()
+            .map(|(key, value)| (key.into(), value.into()))
+            .collect();
+        let spawned = tokio::task::spawn_blocking(move || {
+            crate::platform::windows_spawn::spawn_suspended(image, startup_budget, cwd, environment)
+                .and_then(|child| child.verify_and_resume())
+        })
+        .await
+        .map_err(|_| ExecError::ProcessLost)?;
+        let mut child = match spawned {
+            Ok(child) => child,
+            Err(failure) => {
+                if let Some(mut original) = failure.into_owned_child() {
+                    original
+                        .terminate_and_wait()
+                        .await
+                        .map_err(|_| ExecError::ProcessLost)?;
+                }
+                return Err(ExecError::SpawnFailed);
+            }
+        };
+        Ok(Self {
+            stdin: child.take_stdin(),
+            stdout: child.take_stdout(),
+            stderr: child.take_stderr(),
+            process: Process::Windows(child),
+        })
+    }
     pub(super) fn start_kill(&mut self) -> io::Result<()> {
         match &mut self.process {
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
             Process::Tokio(child) => child.start_kill(),
             #[cfg(target_os = "macos")]
             Process::Darwin(child) => child.start_kill(),
+            #[cfg(target_os = "windows")]
+            Process::Windows(child) => child.start_kill(),
         }
     }
     pub(super) async fn wait(&mut self) -> io::Result<ExitStatus> {
         match &mut self.process {
-            #[cfg(not(target_os = "macos"))]
+            #[cfg(not(any(target_os = "macos", target_os = "windows")))]
             Process::Tokio(child) => child.wait().await,
             #[cfg(target_os = "macos")]
             Process::Darwin(child) => child.wait().await,
+            #[cfg(target_os = "windows")]
+            Process::Windows(child) => child.wait().await,
         }
     }
     pub(super) async fn kill(&mut self) -> io::Result<()> {

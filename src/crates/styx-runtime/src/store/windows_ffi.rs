@@ -1,0 +1,445 @@
+//! Official windows-sys ABI boundary. No private OS structures or protocols.
+#![allow(unsafe_code)]
+use super::*;
+use std::{
+    ffi::c_void,
+    mem::size_of,
+    os::windows::{
+        ffi::OsStrExt,
+        io::{AsRawHandle, FromRawHandle, OwnedHandle},
+    },
+    ptr,
+};
+use windows_sys::Win32::{
+    Foundation::{
+        ERROR_HANDLE_EOF, ERROR_INVALID_PARAMETER, FILETIME, GENERIC_READ, GENERIC_WRITE,
+        INVALID_HANDLE_VALUE, LocalFree, WAIT_OBJECT_0, WAIT_TIMEOUT,
+    },
+    Security::{
+        self, ACCESS_ALLOWED_ACE, ACE_HEADER,
+        Authorization::{
+            ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
+            GetSecurityInfo, SE_FILE_OBJECT,
+        },
+        DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, SECURITY_ATTRIBUTES, TOKEN_QUERY,
+        TOKEN_USER, TokenUser,
+    },
+    Storage::FileSystem::*,
+    System::{
+        SystemServices::{ACCESS_ALLOWED_ACE_TYPE, ACCESS_DENIED_ACE_TYPE},
+        Threading::*,
+    },
+};
+struct Local(*mut c_void);
+impl Drop for Local {
+    fn drop(&mut self) {
+        unsafe {
+            LocalFree(self.0);
+        }
+    }
+}
+fn io_error() -> StoreError {
+    std::io::Error::last_os_error().into()
+}
+fn wide(value: &OsStr) -> Result<Vec<u16>> {
+    let mut raw: Vec<_> = value.encode_wide().collect();
+    if raw.len() > 32760 || raw.contains(&0) {
+        return Err(StoreError::InvalidRelativePath);
+    }
+    raw.push(0);
+    Ok(raw)
+}
+fn sid_string(sid: Security::PSID) -> Result<String> {
+    if sid.is_null() || unsafe { Security::IsValidSid(sid) } == 0 {
+        return Err(StoreError::NotPrivate);
+    }
+    let mut raw = ptr::null_mut();
+    if unsafe { ConvertSidToStringSidW(sid, &mut raw) } == 0 {
+        return Err(io_error());
+    }
+    let _owned = Local(raw.cast());
+    let mut len = 0;
+    while len < 256 && unsafe { *raw.add(len) } != 0 {
+        len += 1;
+    }
+    if len == 256 {
+        return Err(StoreError::NotPrivate);
+    }
+    String::from_utf16(unsafe { std::slice::from_raw_parts(raw, len) })
+        .map_err(|_| StoreError::NotPrivate)
+}
+fn user_sid(process: windows_sys::Win32::Foundation::HANDLE) -> Result<String> {
+    let mut raw = ptr::null_mut();
+    if unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut raw) } == 0 {
+        return Err(io_error());
+    }
+    let token = unsafe { OwnedHandle::from_raw_handle(raw) };
+    let mut required = 0;
+    unsafe {
+        Security::GetTokenInformation(
+            token.as_raw_handle(),
+            TokenUser,
+            ptr::null_mut(),
+            0,
+            &mut required,
+        );
+    }
+    if required < size_of::<TOKEN_USER>() as u32 || required > 65536 {
+        return Err(StoreError::ProcessIdentityUnavailable);
+    }
+    // Vec<usize> provides alignment for official TOKEN_USER, unlike a byte Vec.
+    let mut buffer = vec![0usize; (required as usize).div_ceil(size_of::<usize>())];
+    if unsafe {
+        Security::GetTokenInformation(
+            token.as_raw_handle(),
+            TokenUser,
+            buffer.as_mut_ptr().cast(),
+            required,
+            &mut required,
+        )
+    } == 0
+    {
+        return Err(io_error());
+    }
+    // SAFETY: TOKEN_USER fits in the aligned allocation, and API success
+    // initialized it. Its SID is then bounded against that same allocation.
+    let user = unsafe { &*buffer.as_ptr().cast::<TOKEN_USER>() };
+    bounded_sid(
+        user.User.Sid,
+        buffer.as_ptr() as usize,
+        (buffer.as_ptr() as usize) + required as usize,
+    )
+}
+pub(super) fn current_sid() -> Result<String> {
+    user_sid(unsafe { GetCurrentProcess() })
+}
+/// Bounds every SID dereference against its original API-owned container.
+fn bounded_sid(sid: Security::PSID, start: usize, end: usize) -> Result<String> {
+    let address = sid as usize;
+    if address < start
+        || address
+            .checked_add(size_of::<Security::SID>())
+            .is_none_or(|n| n > end)
+    {
+        return Err(StoreError::NotPrivate);
+    }
+    // SAFETY: the official SID fixed prefix fits inside the owned API buffer;
+    // read_unaligned avoids assuming any alignment for the variable-size SID.
+    let prefix = unsafe { ptr::read_unaligned(sid.cast::<Security::SID>()) };
+    let length = 8usize
+        .checked_add(usize::from(prefix.SubAuthorityCount) * 4)
+        .ok_or(StoreError::NotPrivate)?;
+    if address.checked_add(length).is_none_or(|n| n > end) {
+        return Err(StoreError::NotPrivate);
+    }
+    sid_string(sid)
+}
+/// Owner must be the current user. Only that user, SYSTEM and Administrators may
+/// receive effective allow ACEs. Null/unrecognized DACLs and ACE forms fail shut.
+pub(super) fn private(file: &File) -> Result<String> {
+    let mut owner = ptr::null_mut();
+    let mut acl = ptr::null_mut();
+    let mut descriptor = ptr::null_mut();
+    // SAFETY: valid retained File handle and pointers to initialized output slots.
+    let code = unsafe {
+        GetSecurityInfo(
+            file.as_raw_handle(),
+            SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
+            &mut owner,
+            ptr::null_mut(),
+            &mut acl,
+            ptr::null_mut(),
+            &mut descriptor,
+        )
+    };
+    if code != 0 {
+        return Err(std::io::Error::from_raw_os_error(code as i32).into());
+    }
+    let _owned = Local(descriptor);
+    if descriptor.is_null() || acl.is_null() {
+        return Err(StoreError::NotPrivate);
+    }
+    // SAFETY: success returned an owned self-relative security descriptor.
+    let bytes = unsafe { Security::GetSecurityDescriptorLength(descriptor) } as usize;
+    if bytes == 0 || bytes > 65536 {
+        return Err(StoreError::NotPrivate);
+    }
+    let base = descriptor as usize;
+    let end = base.checked_add(bytes).ok_or(StoreError::NotPrivate)?;
+    let current = current_sid()?;
+    let actual = bounded_sid(owner, base, end)?;
+    let acl_start = acl as usize;
+    if actual != current
+        || acl_start < base
+        || acl_start
+            .checked_add(size_of::<Security::ACL>())
+            .is_none_or(|n| n > end)
+    {
+        return Err(StoreError::NotPrivate);
+    }
+    // SAFETY: the official ACL fixed header is entirely in the owned descriptor.
+    let header = unsafe { ptr::read_unaligned(acl) };
+    let acl_end = acl_start
+        .checked_add(usize::from(header.AclSize))
+        .ok_or(StoreError::NotPrivate)?;
+    if usize::from(header.AclSize) < size_of::<Security::ACL>()
+        || acl_end > end
+        || header.AceCount > 4096
+    {
+        return Err(StoreError::NotPrivate);
+    }
+    // SAFETY: the complete ACL extent was bounded above, not just its header.
+    if unsafe { Security::IsValidAcl(acl) } == 0 {
+        return Err(StoreError::NotPrivate);
+    }
+    for index in 0..header.AceCount {
+        let mut raw = ptr::null_mut();
+        // SAFETY: validated owned ACL and output pointer; the returned ACE is
+        // checked against the same original ACL before any Rust dereference.
+        if unsafe { Security::GetAce(acl, u32::from(index), &mut raw) } == 0 || raw.is_null() {
+            return Err(StoreError::NotPrivate);
+        }
+        let address = raw as usize;
+        if address < acl_start + size_of::<Security::ACL>()
+            || address
+                .checked_add(size_of::<ACE_HEADER>())
+                .is_none_or(|n| n > acl_end)
+        {
+            return Err(StoreError::NotPrivate);
+        }
+        // SAFETY: official ACE header fits in the already bounded ACL buffer.
+        let ace_header = unsafe { ptr::read_unaligned(raw.cast::<ACE_HEADER>()) };
+        let ace_end = address
+            .checked_add(usize::from(ace_header.AceSize))
+            .ok_or(StoreError::NotPrivate)?;
+        if usize::from(ace_header.AceSize) < size_of::<ACE_HEADER>() || ace_end > acl_end {
+            return Err(StoreError::NotPrivate);
+        }
+        if u32::from(ace_header.AceFlags) & Security::INHERIT_ONLY_ACE != 0 {
+            continue;
+        }
+        match u32::from(ace_header.AceType) {
+            ACCESS_DENIED_ACE_TYPE => {}
+            ACCESS_ALLOWED_ACE_TYPE => {
+                if usize::from(ace_header.AceSize) < size_of::<ACCESS_ALLOWED_ACE>() {
+                    return Err(StoreError::NotPrivate);
+                }
+                // SAFETY: the complete fixed official ACE fits inside its
+                // bounded original AceSize; variable SID extent checked next.
+                let ace = unsafe { ptr::read_unaligned(raw.cast::<ACCESS_ALLOWED_ACE>()) };
+                let sid_address = address
+                    .checked_add(std::mem::offset_of!(ACCESS_ALLOWED_ACE, SidStart))
+                    .ok_or(StoreError::NotPrivate)?;
+                let allowed = bounded_sid(raw.with_addr(sid_address), address, ace_end)?;
+                if ace.Mask != 0
+                    && allowed != current
+                    && allowed != "S-1-5-18"
+                    && allowed != "S-1-5-32-544"
+                {
+                    return Err(StoreError::NotPrivate);
+                }
+            }
+            _ => return Err(StoreError::NotPrivate),
+        }
+    }
+    Ok(actual)
+}
+/// Ancestors and every opened directory omit FILE_SHARE_DELETE; regular input
+/// files additionally omit FILE_SHARE_WRITE. Kernel sharing locks pin the names
+/// while retained handles exist. Handles are non-inheritable by default.
+pub(super) fn open(path: &Path, directory: bool, write: bool, create: bool) -> Result<File> {
+    let path = wide(path.as_os_str())?;
+    let mut security = ptr::null_mut();
+    let local = if create {
+        let sid = current_sid()?;
+        let sddl = wide(OsStr::new(&format!(
+            "O:{sid}D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;{sid})"
+        )))?;
+        if unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                sddl.as_ptr(),
+                1,
+                &mut security,
+                ptr::null_mut(),
+            )
+        } == 0
+        {
+            return Err(io_error());
+        }
+        Some(Local(security))
+    } else {
+        None
+    };
+    let attributes = SECURITY_ATTRIBUTES {
+        nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: security,
+        bInheritHandle: 0,
+    };
+    let handle = unsafe {
+        CreateFileW(
+            path.as_ptr(),
+            GENERIC_READ | if write { GENERIC_WRITE } else { 0 },
+            FILE_SHARE_READ
+                | if directory || write {
+                    FILE_SHARE_WRITE
+                } else {
+                    0
+                },
+            if create { &attributes } else { ptr::null() },
+            if create { OPEN_ALWAYS } else { OPEN_EXISTING },
+            FILE_FLAG_OPEN_REPARSE_POINT
+                | if directory {
+                    FILE_FLAG_BACKUP_SEMANTICS
+                } else {
+                    0
+                },
+            ptr::null_mut(),
+        )
+    };
+    drop(local);
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(io_error());
+    }
+    let file = unsafe { File::from_raw_handle(handle) };
+    let facts = facts(&file)?;
+    if facts.directory != directory {
+        return Err(StoreError::NotRegularFile);
+    }
+    Ok(file)
+}
+#[derive(Clone, PartialEq, Eq)]
+pub(super) struct Facts {
+    pub observation: FileObservation,
+    pub directory: bool,
+    pub links: u32,
+}
+pub(super) fn facts(file: &File) -> Result<Facts> {
+    if unsafe { GetFileType(file.as_raw_handle()) } != FILE_TYPE_DISK {
+        return Err(StoreError::NotRegularFile);
+    }
+    let mut info = BY_HANDLE_FILE_INFORMATION::default();
+    let mut basic = FILE_BASIC_INFO::default();
+    if unsafe { GetFileInformationByHandle(file.as_raw_handle(), &mut info) } == 0
+        || unsafe {
+            GetFileInformationByHandleEx(
+                file.as_raw_handle(),
+                FileBasicInfo,
+                ptr::addr_of_mut!(basic).cast(),
+                size_of::<FILE_BASIC_INFO>() as u32,
+            )
+        } == 0
+    {
+        return Err(io_error());
+    }
+    if info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        || basic.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT != 0
+        || basic.LastWriteTime < 0
+        || basic.ChangeTime < 0
+    {
+        return Err(StoreError::NotRegularFile);
+    }
+    let directory = info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY != 0;
+    if !directory && info.nNumberOfLinks != 1 {
+        return Err(StoreError::NotRegularFile);
+    }
+    Ok(Facts {
+        directory,
+        links: info.nNumberOfLinks,
+        observation: FileObservation {
+            device: u64::from(info.dwVolumeSerialNumber),
+            inode: (u64::from(info.nFileIndexHigh) << 32) | u64::from(info.nFileIndexLow),
+            byte_len: (u64::from(info.nFileSizeHigh) << 32) | u64::from(info.nFileSizeLow),
+            modified_seconds: basic.LastWriteTime / 10_000_000,
+            modified_nanoseconds: (basic.LastWriteTime % 10_000_000) * 100,
+            changed_seconds: basic.ChangeTime / 10_000_000,
+            changed_nanoseconds: (basic.ChangeTime % 10_000_000) * 100,
+        },
+    })
+}
+pub(super) fn require_no_streams(path: &Path) -> Result<()> {
+    let path = wide(path.as_os_str())?;
+    let mut data = WIN32_FIND_STREAM_DATA::default();
+    let handle = unsafe {
+        FindFirstStreamW(
+            path.as_ptr(),
+            FindStreamInfoStandard,
+            ptr::addr_of_mut!(data).cast(),
+            0,
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        let e = std::io::Error::last_os_error();
+        return if e.raw_os_error() == Some(ERROR_HANDLE_EOF as i32) {
+            Ok(())
+        } else {
+            Err(e.into())
+        };
+    }
+    struct Find(windows_sys::Win32::Foundation::HANDLE);
+    impl Drop for Find {
+        fn drop(&mut self) {
+            unsafe {
+                FindClose(self.0);
+            }
+        }
+    }
+    let _owned = Find(handle);
+    let len = data
+        .cStreamName
+        .iter()
+        .position(|n| *n == 0)
+        .ok_or(StoreError::NotRegularFile)?;
+    if String::from_utf16(&data.cStreamName[..len]).map_err(|_| StoreError::NotRegularFile)?
+        != "::$DATA"
+    {
+        return Err(StoreError::NotRegularFile);
+    }
+    if unsafe { FindNextStreamW(handle, ptr::addr_of_mut!(data).cast()) } != 0 {
+        return Err(StoreError::NotRegularFile);
+    }
+    let e = std::io::Error::last_os_error();
+    if e.raw_os_error() != Some(ERROR_HANDLE_EOF as i32) {
+        return Err(e.into());
+    }
+    Ok(())
+}
+pub(super) fn process_optional(pid: u32) -> Result<Option<ProcessIdentity>> {
+    let raw = unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION | SYNCHRONIZE, 0, pid) };
+    if raw.is_null() {
+        let e = std::io::Error::last_os_error();
+        return if e.raw_os_error() == Some(ERROR_INVALID_PARAMETER as i32) && pid != 0 {
+            Ok(None)
+        } else {
+            Err(StoreError::ProcessIdentityUnavailable)
+        };
+    }
+    let process = unsafe { OwnedHandle::from_raw_handle(raw) };
+    let mut created = FILETIME::default();
+    let mut exited = FILETIME::default();
+    let mut kernel = FILETIME::default();
+    let mut user = FILETIME::default();
+    if unsafe {
+        GetProcessTimes(
+            process.as_raw_handle(),
+            &mut created,
+            &mut exited,
+            &mut kernel,
+            &mut user,
+        )
+    } == 0
+    {
+        return Err(StoreError::ProcessIdentityUnavailable);
+    }
+    let sid = user_sid(process.as_raw_handle())?;
+    match unsafe { WaitForSingleObject(process.as_raw_handle(), 0) } {
+        WAIT_OBJECT_0 => Ok(None),
+        WAIT_TIMEOUT => Ok(Some(ProcessIdentity::Windows {
+            pid,
+            creation_time_100ns: (u64::from(created.dwHighDateTime) << 32)
+                | u64::from(created.dwLowDateTime),
+            owner_sid: sid,
+        })),
+        _ => Err(StoreError::ProcessIdentityUnavailable),
+    }
+}

@@ -39,9 +39,15 @@ mod platform;
 #[cfg(target_os = "macos")]
 #[path = "macos.rs"]
 mod platform;
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(target_os = "windows")]
+#[path = "windows.rs"]
+mod platform;
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 #[path = "unsupported.rs"]
 mod platform;
+
+#[cfg(target_os = "windows")]
+pub(crate) use platform::file_identity as windows_file_identity;
 
 #[derive(Debug, Error)]
 pub enum StoreError {
@@ -80,6 +86,12 @@ pub type Result<T> = std::result::Result<T, StoreError>;
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(tag = "platform", rename_all = "snake_case")]
 pub enum RootIdentity {
+    #[cfg(target_os = "windows")]
+    Windows {
+        volume_serial: u64,
+        file_id: u64,
+        owner_sid: String,
+    },
     Linux {
         device: u64,
         inode: u64,
@@ -96,6 +108,12 @@ pub enum RootIdentity {
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
 #[serde(tag = "platform", rename_all = "snake_case")]
 pub enum ProcessIdentity {
+    #[cfg(target_os = "windows")]
+    Windows {
+        pid: u32,
+        creation_time_100ns: u64,
+        owner_sid: String,
+    },
     Linux {
         boot_id: String,
         pid: u32,
@@ -390,7 +408,7 @@ impl PrivateRoot {
     /// Existing native ownership namespace only: never recreate a missing lock
     /// as a side effect of inspection/reopen. Fresh bootstrap uses the explicit
     /// creating acquisition above. Same validation/flock implementation.
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     pub fn try_existing_configuration_writer(&self) -> Result<ConfigurationWriterGuard> {
         Ok(ConfigurationWriterGuard(
             self.inner

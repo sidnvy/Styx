@@ -69,7 +69,8 @@
         "rustix",
         "rcgen",
         "x509-parser",
-        "time"
+        "time",
+        "windows-sys"
       ]
     },
     "styx": {
@@ -97,7 +98,8 @@
     "nix",
     "windows",
     "objc",
-    "playwright"
+    "playwright",
+    "windows_sys"
   ],
   "source_guard_limit": "lexical defense in depth; imports/aliases/macros/FFI still need review; not a Rust sandbox or a proof of no IO",
   "known_ignored": {
@@ -394,6 +396,20 @@
       "kind": "explicit_owned_committed_original_runtime_ordinary_reopen",
       "input": "STYX_TEST_LEGACY_GATEWAY_FIXTURE finalized by the externally observed original migration scene with STYX_TEST_FINALIZE_CUTOVER=1; new independent process, exact signed candidate and original identity/CA/publisher/credential",
       "required_for": "after actual original writer process exit, ordinary Gateway and Host startup through fresh committed chain and single state-root writer, original device self200/wrong modeltoken403/admin200, actual TLS/WSS/MCP38/Codex nonce and Gateway-before-Host physical cleanup; controller independently validates file effect, final chain and artifacts; not deployment, account login, rollback or other-platform acceptance"
+    },
+    "store::platform::tests::windows_owned_root_leases_acl_alias_and_pe_pin": {
+      "kind": "explicit_windows_owned_fixture",
+      "input": "STYX_TEST_WINDOWS_STORE_ROOT protected fresh Windows parent",
+      "required_for": "Windows native read/lease/ACL/alias/PE aggregate; not product migration or platform release"
+    },
+    "store::platform::tests::windows_lock_holder_child": {
+      "kind": "owned_subprocess_helper",
+      "parent": "store::platform::tests::windows_owned_root_leases_acl_alias_and_pe_pin"
+    },
+    "platform::windows_spawn::tests::actual_pinned_codex_suspended_job_cleanup_and_waiter_drop": {
+      "kind": "explicit_windows_owned_fixture",
+      "input": "STYX_TEST_WINDOWS_SPAWN_ROOT private fresh parent and original native Codex copies",
+      "required_for": "Windows suspended PE verification, original wait, Job-empty and dropped-waiter custody; not deployment or login acceptance"
     }
   },
   "change_policy": "dependency or ignored-test additions require explicit policy review; preserve mature Cargo tooling rather than replacing its resolver/compiler/lints"

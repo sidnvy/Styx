@@ -52,7 +52,7 @@ pub struct PayloadMember {
 /// tree. This is a detected-change observation, not an atomic filesystem snapshot.
 pub struct PayloadInventory {
     pub(super) members: Vec<PayloadMember>,
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     pub(super) inner: platform::PayloadSnapshot,
 }
 impl PayloadInventory {
@@ -60,24 +60,24 @@ impl PayloadInventory {
         &self.members
     }
     pub fn revalidate(&self) -> Result<()> {
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
         {
             self.inner.revalidate()
         }
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
         {
             Err(StoreError::Unsupported)
         }
     }
     pub fn pin_executable(&self, relative: impl AsRef<Path>) -> Result<PinnedExecutable> {
         let relative = checked_relative(relative.as_ref())?;
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
         {
             self.inner
                 .pin_executable(&relative)
                 .map(|inner| PinnedExecutable { inner })
         }
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
         {
             let _ = relative;
             Err(StoreError::Unsupported)
@@ -87,16 +87,16 @@ impl PayloadInventory {
 /// A pinned observed native image, not a signature or execution grant. The owning
 /// bootstrap must retain this object until its child has actually been reaped.
 pub struct PinnedExecutable {
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     inner: platform::PinnedImage,
 }
 impl PinnedExecutable {
     pub fn revalidate(&self) -> Result<()> {
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
         {
             self.inner.revalidate()
         }
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
         {
             Err(StoreError::Unsupported)
         }
@@ -105,23 +105,24 @@ impl PinnedExecutable {
     /// Darwin remains Unsupported here: it requires the verified suspended-spawn port.
     /// Script interpreters are deliberately unsupported by this native-image port.
     pub fn launch_path(&self) -> Result<PathBuf> {
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
         {
             self.inner.launch_path()
         }
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
         {
             Err(StoreError::Unsupported)
         }
     }
 }
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 impl PinnedExecutable {
     /// Only the suspended native-child adapter may use this source locator.
     /// Ordinary launch_path stays unsupported until loaded-image attestation.
     pub(crate) fn source_path_for_suspended_spawn(&self) -> Result<PathBuf> {
         self.inner.source_path_for_suspended_spawn()
     }
+    #[cfg(target_os = "macos")]
     pub(crate) fn expected_cdhash(&self) -> Result<Vec<u8>> {
         self.inner.expected_cdhash()
     }
@@ -136,11 +137,11 @@ impl PinnedExecutable {
 impl PrivateRoot {
     pub fn payload_inventory(&self, limits: PayloadLimits) -> Result<PayloadInventory> {
         limits.validate()?;
-        #[cfg(any(target_os = "linux", target_os = "macos"))]
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
         {
             self.inner.payload_inventory(limits)
         }
-        #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+        #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
         {
             Err(StoreError::Unsupported)
         }

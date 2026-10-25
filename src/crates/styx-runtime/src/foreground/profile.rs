@@ -361,18 +361,18 @@ impl LoadedLegacyProfile {
     pub fn executor_enabled(&self) -> bool {
         self.executor.is_some()
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub(crate) fn executor_image(&self) -> Option<Arc<PinnedExecutable>> {
         self.executor.clone()
     }
     pub fn executor_config(&self) -> Result<OwnedExecutorConfig, ProfileError> {
         self.revalidate()?;
         let image = self.executor.as_ref().ok_or(ProfileError::Unsupported)?;
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         let binary = image
             .source_path_for_suspended_spawn()
             .map_err(|_| ProfileError::Changed)?;
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         let binary = image.launch_path().map_err(|_| ProfileError::Changed)?;
         Ok(OwnedExecutorConfig {
             binary,
@@ -465,17 +465,24 @@ fn decode<T: serde::de::DeserializeOwned>(raw: &[u8]) -> Result<T, ProfileError>
     serde_json::from_slice(raw).map_err(|_| ProfileError::Invalid)
 }
 fn absolute(path: &Path) -> Result<(), ProfileError> {
-    if !path.is_absolute()
-        || path.components().any(|p| {
-            matches!(
-                p,
-                Component::ParentDir | Component::CurDir | Component::Prefix(_)
-            )
-        })
+    #[cfg(target_os = "windows")]
     {
-        return Err(ProfileError::Invalid);
+        super::windows_env::local_absolute(path)
     }
-    Ok(())
+    #[cfg(not(target_os = "windows"))]
+    {
+        if !path.is_absolute()
+            || path.components().any(|p| {
+                matches!(
+                    p,
+                    Component::ParentDir | Component::CurDir | Component::Prefix(_)
+                )
+            })
+        {
+            return Err(ProfileError::Invalid);
+        }
+        Ok(())
+    }
 }
 fn version(v: &str) -> bool {
     !v.is_empty()
@@ -583,8 +590,12 @@ fn load_source(
     source: ProfileSource,
 ) -> Result<LoadedLegacyProfile, ProfileError> {
     source.revalidate()?;
-    if !cfg!(any(target_os = "linux", target_os = "macos"))
-        || (cfg!(target_os = "macos") && !matches!(mode, GatewayWireMode::PairedV3))
+    if !cfg!(any(
+        target_os = "linux",
+        target_os = "macos",
+        target_os = "windows"
+    )) || (cfg!(any(target_os = "macos", target_os = "windows"))
+        && !matches!(mode, GatewayWireMode::PairedV3))
     {
         return Err(ProfileError::Unsupported);
     }
@@ -593,6 +604,7 @@ fn load_source(
     let legacy_platform = match std::env::consts::OS {
         "linux" => "linux",
         "macos" => "darwin",
+        "windows" => "win32",
         _ => return Err(ProfileError::Unsupported),
     };
     absolute(state_dir)?;
@@ -888,6 +900,18 @@ fn load_source(
     if !(1..=60000).contains(&timeout) {
         return Err(ProfileError::Invalid);
     }
+    #[cfg(target_os = "windows")]
+    let runtime_environment = if exec_enabled {
+        super::windows_env::executor_environment(&exec.env)?
+    } else {
+        BTreeMap::new()
+    };
+    #[cfg(not(target_os = "windows"))]
+    let runtime_environment = if exec_enabled {
+        exec.env
+    } else {
+        BTreeMap::new()
+    };
     let loaded = LoadedLegacyProfile {
         host_base_dir: base.clone(),
         device: identity.device_id.clone(),
@@ -912,11 +936,7 @@ fn load_source(
         #[cfg(target_os = "linux")]
         host_browser: host.browser,
         cwd: exec.cwd,
-        environment: if exec_enabled {
-            exec.env
-        } else {
-            BTreeMap::new()
-        },
+        environment: runtime_environment,
         rpc_timeout: Duration::from_millis(timeout),
         observed: capture.observed,
         diagnostics: ProfileDiagnostics {

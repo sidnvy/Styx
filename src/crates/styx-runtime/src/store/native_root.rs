@@ -268,6 +268,8 @@ fn same_identity(root: &RootIdentity, marker: &NativeRootMarker) -> bool {
         // identity must never be relabeled as a compatible native writer root.
         #[cfg(target_os = "macos")]
         RootIdentity::Macos { .. } => false,
+        #[cfg(target_os = "windows")]
+        RootIdentity::Windows { .. } => false,
     }
 }
 

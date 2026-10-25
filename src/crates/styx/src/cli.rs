@@ -550,7 +550,16 @@ async fn stop_signal() -> io::Result<()> {
     let mut terminate = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?;
     tokio::select! { r=tokio::signal::ctrl_c()=>r, _=terminate.recv()=>Ok(()) }
 }
-#[cfg(not(unix))]
+#[cfg(windows)]
+async fn stop_signal() -> io::Result<()> {
+    let mut interrupt = tokio::signal::windows::ctrl_c()?;
+    let mut terminate = tokio::signal::windows::ctrl_break()?;
+    tokio::select! {
+        event = interrupt.recv() => event.ok_or_else(|| io::Error::other("console_signal_closed")),
+        event = terminate.recv() => event.ok_or_else(|| io::Error::other("console_signal_closed")),
+    }
+}
+#[cfg(not(any(unix, windows)))]
 async fn stop_signal() -> io::Result<()> {
     tokio::signal::ctrl_c().await
 }

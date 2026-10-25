@@ -191,7 +191,7 @@ impl ExecHostReservation {
             budget: self.partitions.source,
         })
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub(crate) async fn spawn_optional_pinned(
         self,
         executor: Option<OwnedExecutorConfig>,

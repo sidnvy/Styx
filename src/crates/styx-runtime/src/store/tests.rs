@@ -477,7 +477,7 @@ mod linux {
     }
 }
 
-#[cfg(not(target_os = "linux"))]
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 #[test]
 fn secure_store_and_birth_identity_are_explicitly_unsupported() {
     assert!(matches!(
