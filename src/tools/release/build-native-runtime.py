@@ -435,6 +435,33 @@ def validate_binary_location(receipt, binary, target, relocated, minimum_reader)
                 'relocation_original_locator_invalid')
 
 
+def detached_public(args, output, forbidden):
+    pin, raw = public_pin(args.publisher_file, forbidden)
+    require(pin == args.expected_publisher, 'expected_publisher_pin_mismatch')
+    write_private(output / 'publisher.pem', raw)
+    der = openssl(['pkey', '-pubin', '-in', str(output / 'publisher.pem'), '-outform', 'DER'])
+    require(sha(der) == pin, 'publisher_der_pin_mismatch')
+    write_private(output / 'publisher.der', der)
+    return raw
+
+
+def accept_detached_signature(args, output, payload, manifest_raw, forbidden):
+    # The signer authorizes these exact bytes. Rebuilding never edits a prepared
+    # payload or substitutes a remotely supplied manifest for local validation.
+    require(HEX.fullmatch(args.approved_manifest_sha256 or '') is not None
+            and sha(manifest_raw) == args.approved_manifest_sha256,
+            'approved_manifest_sha256_mismatch')
+    nonsecret(args.detached_signature, forbidden, 64)
+    raw = read_bounded(args.detached_signature, 64)
+    require(len(raw) == 64, 'manifest_signature_not_64_bytes')
+    write_private(payload / 'manifest.sig', raw)
+    openssl(['pkeyutl', '-verify', '-pubin', '-inkey', str(output / 'publisher.pem'),
+             '-rawin', '-in', str(payload / 'manifest.json'), '-sigfile', str(payload / 'manifest.sig')])
+    require(read_bounded(args.detached_signature, 64) == raw,
+            'detached_signature_changed')
+    return raw
+
+
 def build(args):
     require(sys.platform == 'linux', 'builder_linux_only')
     require(re.fullmatch(r'[a-f0-9]{40}', args.source_revision) is not None, 'full_source_revision_required')
@@ -443,7 +470,12 @@ def build(args):
     kinds = sorted(args.worker_kind)
     require(len(kinds) == len(set(kinds)), 'duplicate_worker_kind')
     require(bool(kinds) == bool(args.worker_release) == bool(args.worker_publisher_file), 'worker_inputs_incomplete')
-    paths = [args.binary, args.build_receipt, args.publisher_private_key, args.output]
+    public_only = args.publisher_private_key is None
+    require(public_only == bool(args.publisher_file), 'public_publisher_required_only_for_detached_modes')
+    require(bool(args.detached_signature) == bool(args.approved_manifest_sha256),
+            'detached_signature_and_approved_manifest_required_together')
+    paths = [args.binary, args.build_receipt, args.output]
+    paths += [p for p in (args.publisher_private_key, args.publisher_file, args.detached_signature) if p is not None]
     paths += [p for p in (args.worker_release, args.worker_publisher_file) if p is not None]
     for path in paths:
         absolute(path)
@@ -455,13 +487,19 @@ def build(args):
     output = args.output
     try:
         frozen_git(args.source_revision)
-        fd, private_metadata = open_regular(args.publisher_private_key, 64 * 1024, private=True)
-        os.close(fd)
-        forbidden = (private_metadata.st_dev, private_metadata.st_ino)
+        private_metadata, public_raw = None, None
+        forbidden = (-1, -1)
+        if not public_only:
+            fd, private_metadata = open_regular(args.publisher_private_key, 64 * 1024, private=True)
+            os.close(fd)
+            forbidden = (private_metadata.st_dev, private_metadata.st_ino)
+        else:
+            public_raw = detached_public(args, output, forbidden)
         for path in [args.binary, args.build_receipt, REPO / 'LICENSE'] + ([args.worker_publisher_file] if kinds else []):
             nonsecret(path, forbidden)
-        require(key_pin(args.publisher_private_key, output, private_metadata) == args.expected_publisher,
-                'expected_publisher_pin_mismatch')
+        if not public_only:
+            require(key_pin(args.publisher_private_key, output, private_metadata) == args.expected_publisher,
+                    'expected_publisher_pin_mismatch')
         raw_receipt = read_bounded(args.build_receipt, 16 * 1024 * 1024)
         receipt = strict_json(raw_receipt)
         require(receipt.get('status') == 'PASS' and receipt.get('input_stability') == 'PASS', 'build_receipt_not_pass_stable')
@@ -516,20 +554,30 @@ def build(args):
         manifest_raw = encode(manifest)
         require(len(manifest_raw) <= 1024 * 1024, 'manifest_capacity')
         write_private(payload / 'manifest.json', manifest_raw)
-        require(signature(args.publisher_private_key.lstat()) == signature(private_metadata), 'publisher_key_metadata_changed_before_sign')
-        require(sign_manifest(args.publisher_private_key, output, payload) == args.expected_publisher,
-                'signed_publisher_pin_mismatch')
-        signature_raw = read_bounded(payload / 'manifest.sig', 64)
-        require(len(signature_raw) == 64, 'manifest_signature_not_64_bytes')
-        names = [item['path'] for item in members] + ['manifest.json', 'manifest.sig']
-        bundle = output / 'native-runtime-candidate.tar.gz'
-        deterministic_archive(payload, bundle, names, {item['path'] for item in members if item['executable']})
+        signature_raw = None
+        if not public_only:
+            require(signature(args.publisher_private_key.lstat()) == signature(private_metadata), 'publisher_key_metadata_changed_before_sign')
+            require(sign_manifest(args.publisher_private_key, output, payload) == args.expected_publisher,
+                    'signed_publisher_pin_mismatch')
+            signature_raw = read_bounded(payload / 'manifest.sig', 64)
+            require(len(signature_raw) == 64, 'manifest_signature_not_64_bytes')
+        elif args.detached_signature:
+            signature_raw = accept_detached_signature(args, output, payload, manifest_raw, forbidden)
+        names = [item['path'] for item in members] + ['manifest.json']
+        if signature_raw is not None:
+            names.append('manifest.sig')
+            bundle = output / 'native-runtime-candidate.tar.gz'
+            deterministic_archive(payload, bundle, names, {item['path'] for item in members if item['executable']})
         frozen_git(args.source_revision)
         validate_inputs(inputs, forbidden)
         require(read_bounded(args.build_receipt, 16 * 1024 * 1024) == raw_receipt, 'build_receipt_changed')
         require(signature(args.binary.lstat()) == signature(binary_observation)
                 and hash_checked(args.binary, forbidden)[0] == binary_hash, 'binary_changed_after_packaging')
-        require(signature(args.publisher_private_key.lstat()) == signature(private_metadata), 'publisher_key_metadata_changed_after_sign')
+        if not public_only:
+            require(signature(args.publisher_private_key.lstat()) == signature(private_metadata), 'publisher_key_metadata_changed_after_sign')
+        else:
+            require(public_pin(args.publisher_file, forbidden) == (args.expected_publisher, public_raw),
+                    'publisher_public_file_changed')
         if source:
             require(tree(source['root'], forbidden) == (source['observations'], source['directories']), 'worker_inventory_changed')
             require(read_bounded(source['root'] / 'manifest.json', 1024 * 1024) == source['raw']
@@ -545,10 +593,25 @@ def build(args):
                     and stat.S_IMODE(current.st_mode) == (0o700 if item['executable'] else 0o600),
                     'payload_changed_after_packaging')
         require(read_bounded(payload / 'manifest.json', 1024 * 1024) == manifest_raw, 'manifest_changed')
-        require(read_bounded(payload / 'manifest.sig', 64) == signature_raw
-                and public_pin(output / 'publisher.pem', forbidden)[0] == args.expected_publisher
+        require(public_pin(output / 'publisher.pem', forbidden)[0] == args.expected_publisher
                 and digest_file(output / 'publisher.der') == args.expected_publisher,
                 'signature_or_publisher_artifact_changed')
+        if args.prepare_signing:
+            # All source, receipt, worker and resulting payload checks above are
+            # shared with finalization. This is not a signed package or PASS.
+            request = dict(schema=1, status='SIGNING_REQUIRED', scope=SCOPE,
+                           source_revision=args.source_revision, target=args.target,
+                           version=args.version, publisher_spki_der_sha256=args.expected_publisher,
+                           manifest_sha256=sha(manifest_raw), manifest_bytes=len(manifest_raw),
+                           build_receipt_sha256=sha(raw_receipt), cli_binary_sha256=binary_hash,
+                           input_stability='PASS', signed=False, archive_created=False)
+            write_private(output / 'signing-request.json', encode(request))
+            print(encode(request).decode('utf-8').strip())
+            return 0
+        require(read_bounded(payload / 'manifest.sig', 64) == signature_raw,
+                'signature_or_publisher_artifact_changed')
+        if args.detached_signature:
+            require(read_bounded(args.detached_signature, 64) == signature_raw, 'detached_signature_changed')
         openssl(['pkeyutl', '-verify', '-pubin', '-inkey', str(output / 'publisher.pem'),
                  '-rawin', '-in', str(payload / 'manifest.json'), '-sigfile', str(payload / 'manifest.sig')])
         artifacts = ['payload/manifest.json', 'payload/manifest.sig', 'publisher.pem', 'publisher.der', 'native-runtime-candidate.tar.gz']
@@ -574,8 +637,14 @@ def build(args):
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
-    for name in ('binary', 'build-receipt', 'publisher-private-key', 'output'):
+    for name in ('binary', 'build-receipt', 'output'):
         parser.add_argument('--' + name, type=Path, required=True)
+    signing = parser.add_mutually_exclusive_group(required=True)
+    signing.add_argument('--publisher-private-key', type=Path)
+    signing.add_argument('--prepare-signing', action='store_true')
+    signing.add_argument('--detached-signature', type=Path, help='external raw64 Ed25519 signature, finalization only')
+    parser.add_argument('--publisher-file', type=Path, help='original externally pinned public PEM; required for detached modes')
+    parser.add_argument('--approved-manifest-sha256', help='exact approved prepared manifest SHA; required for finalization')
     for name in ('source-revision', 'expected-publisher', 'version'):
         parser.add_argument('--' + name, required=True)
     parser.add_argument('--target', choices=TARGETS, required=True)
