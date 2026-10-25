@@ -543,7 +543,7 @@ impl MacBootRecoveryEffects {
             let before_name = format!("{}.before", original.name.source_name());
             let retired_name = format!("{}.retired", original.name.source_name());
             let owner = self.owner.clone();
-            owner.with_maintenance(&self.maintenance, |_| {
+            owner.with_maintenance(&maintenance, |_| {
                 self.environment()?;
                 // Save original bytes without creating a second ledger.
                 match maybe_raw(&archive, &before_name)? {

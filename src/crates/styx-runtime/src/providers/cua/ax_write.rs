@@ -314,7 +314,8 @@ mod tests {
     use super::*;
     #[test]
     fn extended_catalog_is_exact_and_old_catalog_never_enables_private_input() {
-        let old: Map<String, Value> = serde_json::from_str(NATIVE_CATALOG).unwrap();
+        let old: Map<String, Value> =
+            serde_json::from_str(selected_native_catalog().unwrap().schemas_json).unwrap();
         let tools = |schemas: Map<String, Value>| {
             schemas
                 .into_iter()

@@ -55,7 +55,7 @@ impl MacProxySource {
             .connect(until)
             .await
             .map_err(|_| CuaError::PermissionDenied)?;
-        let control = tokio::task::spawn_blocking(move || connected.finish_binding())
+        let mut control = tokio::task::spawn_blocking(move || connected.finish_binding())
             .await
             .map_err(|_| CuaError::Unknown)?
             .map_err(|_| CuaError::PermissionDenied)?;

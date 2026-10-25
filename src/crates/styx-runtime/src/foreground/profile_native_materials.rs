@@ -135,6 +135,12 @@ pub(crate) fn read_original_pair_materials<'a>(
     Ok(result)
 }
 impl OriginalNativePairMaterials<'_> {
+    pub(crate) fn preservation_entries(&self) -> &[PreservationEntry] {
+        &self.original.diagnostics.preservation
+    }
+    pub(crate) fn executor_configured(&self) -> bool {
+        self.original.executor_enabled()
+    }
     fn validate_fence_and_roots(&self) -> Result<(), ProfileError> {
         if native_root(
             self.maintenance
