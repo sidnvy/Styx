@@ -1,3 +1,13 @@
+--- a/libs/cua-driver/rust/Cargo.lock
++++ b/libs/cua-driver/rust/Cargo.lock
+@@ -3638,6 +3638,7 @@
+  "tracing",
+  "uuid",
+  "windows 0.58.0",
++ "windows-core 0.58.0",
+  "zeroize",
+ ]
+ 
 --- a/libs/cua-driver/rust/crates/cua-driver-core/src/authorization.rs
 +++ b/libs/cua-driver/rust/crates/cua-driver-core/src/authorization.rs
 @@ -228,6 +228,7 @@
@@ -62,6 +72,109 @@
              | "double_click"
              | "right_click"
              | "drag"
+--- a/libs/cua-driver/rust/crates/cua-driver-core/src/daemon.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/daemon.rs
+@@ -211,6 +211,8 @@
+ 
+     let mut stream = UnixStream::connect(socket_path)
+         .map_err(|error| anyhow::anyhow!("connect to {socket_path}: {error}"))?;
++    #[cfg(target_os = "macos")]
++    check_styx_private_peer(&stream)?;
+     stream.set_write_timeout(Some(Duration::from_secs(5)))?;
+     stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+ 
+@@ -294,8 +296,8 @@
+ #[cfg(test)]
+ mod tests {
+     use super::{
+-        current_daemon_metadata, socket_path_for_namespace, DaemonClientKind, DaemonRequest,
+-        DaemonResponse, ToolObservationOrigin,
++        DaemonClientKind, DaemonRequest, DaemonResponse, ToolObservationOrigin,
++        current_daemon_metadata, socket_path_for_namespace,
+     };
+ 
+     #[test]
+@@ -367,3 +369,80 @@
+         );
+     }
+ }
++
++// Private owned-proxy mode binds every real one-shot request to the original
++// inherited control socket's exact kernel peer, before writing request bytes.
++#[cfg(target_os = "macos")]
++#[derive(Clone, PartialEq, Eq)]
++struct StyxPeer {
++    uid: u32,
++    pid: libc::pid_t,
++    token: [u8; 32],
++}
++#[cfg(target_os = "macos")]
++static STYX_PEER: std::sync::OnceLock<StyxPeer> = std::sync::OnceLock::new();
++#[cfg(target_os = "macos")]
++fn styx_peer(stream: &std::os::unix::net::UnixStream) -> anyhow::Result<StyxPeer> {
++    use std::os::fd::AsRawFd;
++    let mut uid = 0;
++    let mut gid = 0;
++    let mut pid: libc::pid_t = 0;
++    let mut token = [0u8; 32];
++    let mut pid_len = std::mem::size_of_val(&pid) as libc::socklen_t;
++    let mut token_len = token.len() as libc::socklen_t;
++    // SAFETY: official libc socket APIs receive live connected FD, valid output
++    // pointers and exact mutable sizes. Audit token is compared as opaque kernel
++    // bytes; no field layout or PID-only identity is invented.
++    unsafe {
++        if libc::getpeereid(stream.as_raw_fd(), &mut uid, &mut gid) != 0
++            || libc::getsockopt(
++                stream.as_raw_fd(),
++                libc::SOL_LOCAL,
++                libc::LOCAL_PEERPID,
++                (&mut pid as *mut libc::pid_t).cast(),
++                &mut pid_len,
++            ) != 0
++            || libc::getsockopt(
++                stream.as_raw_fd(),
++                libc::SOL_LOCAL,
++                libc::LOCAL_PEERTOKEN,
++                token.as_mut_ptr().cast(),
++                &mut token_len,
++            ) != 0
++            || pid_len as usize != std::mem::size_of_val(&pid)
++            || token_len as usize != token.len()
++            || uid != libc::getuid()
++            || uid != libc::geteuid()
++            || pid <= 0
++        {
++            anyhow::bail!("private_proxy_peer_refused")
++        }
++    }
++    Ok(StyxPeer { uid, pid, token })
++}
++#[cfg(target_os = "macos")]
++pub fn bind_styx_private_control_peer(
++    stream: &std::os::unix::net::UnixStream,
++) -> anyhow::Result<()> {
++    if std::env::var("STYX_PRIVATE_OWNED_PROXY_V1").as_deref() != Ok("1") {
++        anyhow::bail!("private_proxy_not_selected")
++    }
++    STYX_PEER
++        .set(styx_peer(stream)?)
++        .map_err(|_| anyhow::anyhow!("private_proxy_already_bound"))
++}
++#[cfg(target_os = "macos")]
++pub fn check_styx_private_peer(stream: &std::os::unix::net::UnixStream) -> anyhow::Result<()> {
++    match std::env::var("STYX_PRIVATE_OWNED_PROXY_V1") {
++        Err(std::env::VarError::NotPresent) => return Ok(()),
++        Ok(value) if value == "1" => {}
++        _ => anyhow::bail!("private_proxy_mode_invalid"),
++    }
++    let expected = STYX_PEER
++        .get()
++        .ok_or_else(|| anyhow::anyhow!("private_proxy_not_bound"))?;
++    if &styx_peer(stream)? != expected {
++        anyhow::bail!("private_proxy_peer_changed")
++    }
++    Ok(())
++}
 --- a/libs/cua-driver/rust/crates/cua-driver-core/src/tool.rs
 +++ b/libs/cua-driver/rust/crates/cua-driver-core/src/tool.rs
 @@ -710,6 +710,8 @@
@@ -73,9 +186,1257 @@
          // ── input.pointer ────────────────────────────────────────────
          //
          // Surface 6: tools that accept the opaque `element_token` arg
+--- a/libs/cua-driver/rust/crates/cua-driver/src/cli.rs
++++ b/libs/cua-driver/rust/crates/cua-driver/src/cli.rs
+@@ -551,43 +551,95 @@
+         println!("Subcommands: {}", HELP_SUBCOMMANDS.join(", "));
+         println!();
+         println!("permissions options (macOS):");
+-        println!("  cua-driver permissions status   Report Accessibility + Screen Recording status. Read-only (no prompt).");
+-        println!("                                  Answers via a running daemon, so the result carries the CuaDriver");
+-        println!("                                  identity (com.trycua.driver). If no daemon is running it reports");
+-        println!("                                  `unknown` rather than your terminal's grants. Add --json for the payload.");
+-        println!("  cua-driver permissions grant    Launch CuaDriver via LaunchServices so dialogs attribute to the app,");
+-        println!("                                  explain and request Accessibility, Screen Recording, and Tahoe's");
+-        println!("                                  direct-capture consent, then verify live capture. This is the correct");
+-        println!("                                  way to grant; the read-only status command never triggers that probe.");
++        println!(
++            "  cua-driver permissions status   Report Accessibility + Screen Recording status. Read-only (no prompt)."
++        );
++        println!(
++            "                                  Answers via a running daemon, so the result carries the CuaDriver"
++        );
++        println!(
++            "                                  identity (com.trycua.driver). If no daemon is running it reports"
++        );
++        println!(
++            "                                  `unknown` rather than your terminal's grants. Add --json for the payload."
++        );
++        println!(
++            "  cua-driver permissions grant    Launch CuaDriver via LaunchServices so dialogs attribute to the app,"
++        );
++        println!(
++            "                                  explain and request Accessibility, Screen Recording, and Tahoe's"
++        );
++        println!(
++            "                                  direct-capture consent, then verify live capture. This is the correct"
++        );
++        println!(
++            "                                  way to grant; the read-only status command never triggers that probe."
++        );
+         println!();
+         println!("Updating cua-driver:");
+-        println!("  cua-driver check-update         Ask GitHub whether a newer release is available. Read-only.");
++        println!(
++            "  cua-driver check-update         Ask GitHub whether a newer release is available. Read-only."
++        );
+         println!("                                  Default output is human-friendly text.");
+-        println!("    --json                        Emit a machine-readable JSON payload (same shape as the");
+-        println!("                                  check_for_update MCP tool). Hermes branches on update_available.");
+-        println!("    --no-cache                    Skip the 20h on-disk cache and force a fresh GitHub round-trip.");
+-        println!("  cua-driver update               Same check as above, then suggest --apply if outdated.");
+-        println!("    --apply                       Download + install the latest release via the canonical installer.");
+-        println!("    --json                        Emit the structured check payload (does not change --apply behaviour).");
++        println!(
++            "    --json                        Emit a machine-readable JSON payload (same shape as the"
++        );
++        println!(
++            "                                  check_for_update MCP tool). Hermes branches on update_available."
++        );
++        println!(
++            "    --no-cache                    Skip the 20h on-disk cache and force a fresh GitHub round-trip."
++        );
++        println!(
++            "  cua-driver update               Same check as above, then suggest --apply if outdated."
++        );
++        println!(
++            "    --apply                       Download + install the latest release via the canonical installer."
++        );
++        println!(
++            "    --json                        Emit the structured check payload (does not change --apply behaviour)."
++        );
+         println!("  cua-driver channel status      Show the saved stable/nightly update channel.");
+-        println!("  cua-driver channel set <name>  Save stable or nightly; run update --apply to switch binaries.");
++        println!(
++            "  cua-driver channel set <name>  Save stable or nightly; run update --apply to switch binaries."
++        );
+         println!("    --json                        Emit machine-readable channel state.");
+         println!();
+         println!("autostart options (Windows-only today):");
+-        println!("  cua-driver autostart enable     Register a logon Scheduled Task so serve starts at every interactive logon.");
+-        println!("  cua-driver autostart disable    Remove the autostart entry. No-op if not registered.");
+-        println!("  cua-driver autostart status     Print whether the entry is registered + whether the daemon is running.");
++        println!(
++            "  cua-driver autostart enable     Register a logon Scheduled Task so serve starts at every interactive logon."
++        );
++        println!(
++            "  cua-driver autostart disable    Remove the autostart entry. No-op if not registered."
++        );
++        println!(
++            "  cua-driver autostart status     Print whether the entry is registered + whether the daemon is running."
++        );
+         println!("  cua-driver autostart kick       Start the entry now without re-logging.");
+         println!();
+         println!("skills options (agent skill-pack management, opt-in):");
+-        println!("  cua-driver skills install       Fetch the versioned skill pack from GitHub Releases and symlink it");
+-        println!("                                  into each detected agent's skills/ dir (Claude Code, Codex, Prime Agent,");
+-        println!("                                  OpenClaw, OpenCode). Idempotent. Never overwrites existing user links.");
+-        println!("  cua-driver skills update        Re-fetch the skill pack from GitHub, refreshing the local copy + links.");
+-        println!("  cua-driver skills uninstall     Remove the agent symlinks. Add --all to also delete the local copy.");
+-        println!("  cua-driver skills status        Report local install state + per-agent link state. Read-only.");
++        println!(
++            "  cua-driver skills install       Fetch the versioned skill pack from GitHub Releases and symlink it"
++        );
++        println!(
++            "                                  into each detected agent's skills/ dir (Claude Code, Codex, Prime Agent,"
++        );
++        println!(
++            "                                  OpenClaw, OpenCode). Idempotent. Never overwrites existing user links."
++        );
++        println!(
++            "  cua-driver skills update        Re-fetch the skill pack from GitHub, refreshing the local copy + links."
++        );
++        println!(
++            "  cua-driver skills uninstall     Remove the agent symlinks. Add --all to also delete the local copy."
++        );
++        println!(
++            "  cua-driver skills status        Report local install state + per-agent link state. Read-only."
++        );
+         println!("  cua-driver skills path          Print where the local skill pack lives.");
+-        println!("  --from main                     (install only) Fetch latest from main branch instead of the tagged release.");
++        println!(
++            "  --from main                     (install only) Fetch latest from main branch instead of the tagged release."
++        );
+         println!();
+         println!("extension options (SIGNED TARGET-SPECIFIC CATALOGS):");
+         println!(
+@@ -614,28 +666,40 @@
+         println!();
+         println!("local perception (read-only, no Driver action authority):");
+         println!("  cua-driver perception parse --image <png> --capture <capture.json> --json");
+-        println!("  The capture file supplies source metadata only; the image is never registered as a reusable capture.");
++        println!(
++            "  The capture file supplies source metadata only; the image is never registered as a reusable capture."
++        );
+         println!();
+         println!("agent authorization (serve only):");
+         println!("  --permission-mode <mode>        standard (default), bounded, or unrestricted.");
+         println!(
+             "  --grant existing-profile       Pre-authorize existing logged-in Chromium attachment"
+         );
+-        println!("                                  for this runtime. Repeatable for future grant types.");
++        println!(
++            "                                  for this runtime. Repeatable for future grant types."
++        );
+         println!(
+             "  --dangerously-bypass-approvals  Select unrestricted mode and acknowledge its risk."
+         );
+-        println!("                                  The mode is fixed for the daemon lifetime and cannot");
++        println!(
++            "                                  The mode is fixed for the daemon lifetime and cannot"
++        );
+         println!("                                  be changed by a tool call.");
+-        println!("                                  This is separate from --no-permissions-gate, which only");
++        println!(
++            "                                  This is separate from --no-permissions-gate, which only"
++        );
+         println!(
+             "                                  controls the macOS OS-permission onboarding UI."
+         );
+         println!(
+             "  --capability-manifest <path>    Narrow-only tool/resource manifest; required in bounded mode."
+         );
+-        println!("  --approve-capability-manifest   Required with --capability-manifest; the trusted launcher asserts");
+-        println!("                                  that the human reviewed this exact manifest at startup.");
++        println!(
++            "  --approve-capability-manifest   Required with --capability-manifest; the trusted launcher asserts"
++        );
++        println!(
++            "                                  that the human reviewed this exact manifest at startup."
++        );
+         println!("  --session-policy <path>         Deprecated alias for --capability-manifest.");
+         println!(
+             "  --approve-session-policy        Deprecated alias for --approve-capability-manifest."
+@@ -644,7 +708,9 @@
+         println!("authorization revocation:");
+         println!("  cua-driver revoke --session <id>  Stop and revoke one session's grants.");
+         println!("  cua-driver revoke --all           Stop and revoke every live session.");
+-        println!("                                      Revocation is deny-only and never needs a token.");
++        println!(
++            "                                      Revocation is deny-only and never needs a token."
++        );
+         println!();
+         println!("mcp options:");
+         println!("  --direct                Own the runtime in this MCP process. On macOS this");
+@@ -702,7 +768,9 @@
+         println!("  cua-driver cursor-theme install <theme.cua-theme>");
+         println!("  cua-driver cursor-theme list [--json]");
+         println!("  cua-driver cursor-theme uninstall <theme-id>");
+-        println!("                                  Theme installation is local-only and is never an agent tool.");
++        println!(
++            "                                  Theme installation is local-only and is never an agent tool."
++        );
+         println!();
+         println!("cursor options (forwards to set_agent_cursor_motion on the daemon):");
+         println!(
+@@ -716,12 +784,18 @@
+         println!("    --effects   trail, glow, magnet, ripple, squish set to on, off, or default.");
+         println!();
+         println!("manifest options:");
+-        println!("  cua-driver manifest             Emit a stable JSON description of this CLI's surface");
+-        println!("                                  (subcommands, args, MCP invocation, version). Read-only.");
++        println!(
++            "  cua-driver manifest             Emit a stable JSON description of this CLI's surface"
++        );
++        println!(
++            "                                  (subcommands, args, MCP invocation, version). Read-only."
++        );
+         println!(
+             "                                  Consumers (Hermes, Claude Code, …) read it to drop"
+         );
+-        println!("                                  hardcoded launch argv like _CUA_DRIVER_ARGS = [\"mcp\"].");
++        println!(
++            "                                  hardcoded launch argv like _CUA_DRIVER_ARGS = [\"mcp\"]."
++        );
+         println!("    --pretty / -p                 Pretty-print the JSON.");
+         println!();
+         println!("doctor options:");
+@@ -746,7 +820,9 @@
+         println!(
+             "  --experimental-pip-geometry WxH[+X+Y]   Override window size (and optional top-left"
+         );
+-        println!("                                          origin). Defaults to 480x360 in the top-right");
++        println!(
++            "                                          origin). Defaults to 480x360 in the top-right"
++        );
+         println!("                                          corner of the main display.");
+         std::process::exit(0);
+     }
+@@ -794,9 +870,15 @@
+ 
+     if matches!(positionals.first().copied(), None | Some("mcp")) {
+         if let Some(flag) = serve_only_authorization_flag(&args) {
+-            eprintln!("cua-driver mcp does not accept {flag}; authorization flags belong to `cua-driver serve`.");
+-            eprintln!("For direct MCP, use CUA_DRIVER_PERMISSION_MODE and the related CUA_DRIVER_* environment variables.");
+-            eprintln!("Otherwise start a configured daemon and connect with `cua-driver mcp --socket <path>`." );
++            eprintln!(
++                "cua-driver mcp does not accept {flag}; authorization flags belong to `cua-driver serve`."
++            );
++            eprintln!(
++                "For direct MCP, use CUA_DRIVER_PERMISSION_MODE and the related CUA_DRIVER_* environment variables."
++            );
++            eprintln!(
++                "Otherwise start a configured daemon and connect with `cua-driver mcp --socket <path>`."
++            );
+             process::exit(64);
+         }
+     }
+@@ -1041,7 +1123,9 @@
+                 Command::Telemetry(TelemetryCommand::Inspect { event })
+             }
+             _ => {
+-                eprintln!("Usage: cua-driver telemetry {{enable|disable|status [--json]|reset-id|inspect <event> --json}}");
++                eprintln!(
++                    "Usage: cua-driver telemetry {{enable|disable|status [--json]|reset-id|inspect <event> --json}}"
++                );
+                 process::exit(64);
+             }
+         },
+@@ -1207,7 +1291,7 @@
+                 other => {
+                     return Err(format!(
+                         "effect `{name}` takes on, off or default, got `{other}`"
+-                    ))
++                    ));
+                 }
+             };
+             map.insert(name.to_owned(), value);
+@@ -1590,12 +1674,12 @@
+     arguments: &[String],
+ ) -> Result<(), LaunchDaemonError> {
+     use std::os::windows::ffi::OsStrExt as _;
+-    use windows::core::{PCWSTR, PWSTR};
+     use windows::Win32::Foundation::CloseHandle;
+     use windows::Win32::System::Threading::{
+-        CreateProcessW, CREATE_NEW_PROCESS_GROUP, DETACHED_PROCESS, PROCESS_INFORMATION,
++        CREATE_NEW_PROCESS_GROUP, CreateProcessW, DETACHED_PROCESS, PROCESS_INFORMATION,
+         STARTUPINFOW,
+     };
++    use windows::core::{PCWSTR, PWSTR};
+ 
+     let executable_wide = executable
+         .as_os_str()
+@@ -1833,6 +1917,15 @@
+     // clients always enter through the canonical service authorization path;
+     // they must never select the helper merely because its pipe exists.
+     let socket_path = socket.unwrap_or_else(crate::serve::default_socket_path);
++    #[cfg(target_os = "macos")]
++    if crate::proxy::owned_proxy_requested()? {
++        if claude_code_compat || !grants.is_empty() {
++            anyhow::bail!("private_proxy_options_refused")
++        }
++        // The original App daemon already exists. Never launch or adopt one;
++        // run_proxy consumes only the inherited authenticated control descriptor.
++        return run_mcp_runtime(crate::proxy::run_proxy(socket_path));
++    }
+ 
+     let already_running = crate::serve::is_daemon_listening(&socket_path);
+     if already_running && !grants.is_empty() {
+@@ -2434,7 +2527,9 @@
+             );
+         }
+         Some(other) => {
+-            eprintln!("Unknown client '{other}'. Valid: claude, codex, cursor, antigravity, openclaw, opencode, hermes, pi, prime-agent, qwen, droid, zcode.");
++            eprintln!(
++                "Unknown client '{other}'. Valid: claude, codex, cursor, antigravity, openclaw, opencode, hermes, pi, prime-agent, qwen, droid, zcode."
++            );
+             process::exit(2);
+         }
+     }
+@@ -2605,11 +2700,15 @@
+                                             {
+                                                 Ok(bytes) => {
+                                                     if let Err(e) = std::fs::write(path, &bytes) {
+-                                                        eprintln!("--screenshot-out-file: failed to write {path}: {e}");
++                                                        eprintln!(
++                                                            "--screenshot-out-file: failed to write {path}: {e}"
++                                                        );
+                                                     }
+                                                 }
+                                                 Err(e) => {
+-                                                    eprintln!("--screenshot-out-file: base64 decode failed: {e}");
++                                                    eprintln!(
++                                                        "--screenshot-out-file: base64 decode failed: {e}"
++                                                    );
+                                                 }
+                                             }
+                                         } else {
+@@ -2698,11 +2797,15 @@
+         "enable" | "disable" | "pause" | "resume" | "status" | "flush" | "list" | "show" | "delete"
+     );
+     if !valid {
+-        eprintln!("Unknown history subcommand '{subcommand}'. Valid: enable, disable, pause, resume, status, flush, list, show <sequence>, delete --yes");
++        eprintln!(
++            "Unknown history subcommand '{subcommand}'. Valid: enable, disable, pause, resume, status, flush, list, show <sequence>, delete --yes"
++        );
+         process::exit(64);
+     }
+     if subcommand == "delete" && !confirmed {
+-        eprintln!("history delete destroys the encrypted files and their native credential-store key. Re-run with --yes.");
++        eprintln!(
++            "history delete destroys the encrypted files and their native credential-store key. Re-run with --yes."
++        );
+         process::exit(64);
+     }
+     let socket_path = socket
+@@ -2766,7 +2869,9 @@
+                     &prior_daemon_state,
+                     prior_preview_admitted_preference,
+                 );
+-                eprintln!("history enable: could not relaunch the installed daemon with preview admission: {error}");
++                eprintln!(
++                    "history enable: could not relaunch the installed daemon with preview admission: {error}"
++                );
+                 process::exit(1);
+             }
+         }
+@@ -2828,8 +2933,12 @@
+                 println!("{}", serde_json::to_string_pretty(&value).unwrap());
+             } else if subcommand == "enable" {
+                 println!("Computer History preview enabled.");
+-                println!("Stored fields: time, opaque session/action ids, fixed capability, app name/bundle id, and fixed action outcome metadata.");
+-                println!("Never stored: screenshots, typed text, clipboard contents, raw arguments/results, accessibility trees, paths, titles, URLs, or free-form diagnostics.");
++                println!(
++                    "Stored fields: time, opaque session/action ids, fixed capability, app name/bundle id, and fixed action outcome metadata."
++                );
++                println!(
++                    "Never stored: screenshots, typed text, clipboard contents, raw arguments/results, accessibility trees, paths, titles, URLs, or free-form diagnostics."
++                );
+                 println!(
+                     "Encryption: CBOR Sequence + COSE_Encrypt0 (ChaCha20-Poly1305), with the key protected by {}.",
+                     crate::history_runtime::platform_key_store_name()
+@@ -3158,7 +3267,9 @@
+         }
+ 
+         other => {
+-            eprintln!("Unknown recording subcommand '{other}'. Valid: start <dir>, stop, status, render <dir> --output <out.mp4>");
++            eprintln!(
++                "Unknown recording subcommand '{other}'. Valid: start <dir>, stop, status, render <dir> --output <out.mp4>"
++            );
+             process::exit(64);
+         }
+     }
+@@ -3398,7 +3509,9 @@
+                         // means the running daemon kept executing the old
+                         // binary — restart picks up the new one.
+                         println!();
+-                        println!("A daemon was running before the install. Restart it to pick up the new binary:");
++                        println!(
++                            "A daemon was running before the install. Restart it to pick up the new binary:"
++                        );
+                         println!("  cua-driver stop && cua-driver serve");
+                     }
+                 }
+@@ -4749,128 +4862,560 @@
+ /// Examples per command path (without the `cua-driver` prefix), rendered in
+ /// the generated CLI reference and parsed by the docs CLI-shape lane.
+ const CLI_EXAMPLES: &[(&str, &[(&str, &str)])] = &[
+-    ("mcp", &[
+-        ("cua-driver mcp", "Run the stdio MCP server (what MCP clients launch)"),
+-        ("cua-driver mcp --socket /tmp/cua-driver.sock", "Connect to a daemon on an explicit socket"),
+-    ]),
+-    ("list-tools", &[("cua-driver list-tools", "List every tool with a one-line description")]),
+-    ("describe", &[("cua-driver describe click", "Print a tool's description and input schema")]),
+-    ("call", &[
+-        ("cua-driver call list_apps", "Call a tool with no arguments"),
+-        ("cua-driver call click '{\"pid\":844,\"x\":100,\"y\":200}'", "Click at window coordinates"),
+-        ("cua-driver call get_window_state '{\"pid\":844,\"window_id\":10725}' --screenshot-out-file state.png", "Save the screenshot from a tool response"),
+-        ("cua-driver call get_window_state '{\"pid\":844,\"window_id\":10725,\"since\":\"s0000002a\"}'", "Read only what changed since an earlier snapshot_id"),
+-        ("cua-driver call get_window_state '{\"pid\":844,\"window_id\":10725,\"tree_format\":\"elements\"}'", "Return the structured elements instead of the markdown tree"),
+-    ]),
+-    ("serve", &[
+-        ("cua-driver serve", "Run the daemon in the foreground"),
+-        ("cua-driver serve --permission-mode bounded --capability-manifest manifest.yaml --approve-capability-manifest", "Start a bounded daemon with a reviewed capability manifest"),
+-        ("cua-driver serve --no-overlay", "Run without the agent cursor overlay"),
+-    ]),
+-    ("stop", &[("cua-driver stop", "Ask the running daemon to exit")]),
+-    ("revoke", &[
+-        ("cua-driver revoke --session 3f9c2a", "Stop and revoke one session"),
+-        ("cua-driver revoke --all", "Stop and revoke every live session"),
+-    ]),
+-    ("status", &[("cua-driver status", "Check whether the daemon is running")]),
+-    ("sessions", &[("cua-driver sessions --json", "List live sessions as JSON")]),
+-    ("sessions list", &[("cua-driver sessions list", "List live sessions")]),
+-    ("history", &[("cua-driver history", "Print the Computer History state")]),
+-    ("history enable", &[("cua-driver history enable", "Turn on the Computer History preview")]),
+-    ("history disable", &[("cua-driver history disable", "Turn Computer History off")]),
+-    ("history pause", &[("cua-driver history pause", "Pause recording")]),
+-    ("history resume", &[("cua-driver history resume", "Resume recording")]),
+-    ("history status", &[("cua-driver history status --json", "Print the state as JSON")]),
+-    ("history flush", &[("cua-driver history flush", "Seal the current chunk now")]),
+-    ("history list", &[("cua-driver history list 20", "List the 20 most recent events")]),
+-    ("history show", &[("cua-driver history show 42 --json", "Print event 42 as JSON")]),
+-    ("history delete", &[("cua-driver history delete --yes", "Delete every recorded chunk and its key")]),
+-    ("permissions", &[("cua-driver permissions", "Report Accessibility and Screen Recording status")]),
+-    ("permissions status", &[("cua-driver permissions status --json", "Report the grants as JSON")]),
+-    ("permissions grant", &[("cua-driver permissions grant", "Request the grants for CuaDriver.app")]),
+-    ("mcp-config", &[
+-        ("cua-driver mcp-config", "Print a generic mcpServers entry"),
+-        ("cua-driver mcp-config --client codex", "Print setup for Codex"),
+-    ]),
+-    ("recording", &[("cua-driver recording", "Print the current recording state")]),
+-    ("recording start", &[("cua-driver recording start ~/cua-trajectories/demo1", "Record turns into a directory")]),
+-    ("recording stop", &[("cua-driver recording stop", "Stop recording")]),
+-    ("recording status", &[("cua-driver recording status", "Print the recording state")]),
+-    ("recording render", &[("cua-driver recording render ~/cua-trajectories/demo1 demo1.mp4", "Render a recorded trajectory to MP4")]),
++    (
++        "mcp",
++        &[
++            (
++                "cua-driver mcp",
++                "Run the stdio MCP server (what MCP clients launch)",
++            ),
++            (
++                "cua-driver mcp --socket /tmp/cua-driver.sock",
++                "Connect to a daemon on an explicit socket",
++            ),
++        ],
++    ),
++    (
++        "list-tools",
++        &[(
++            "cua-driver list-tools",
++            "List every tool with a one-line description",
++        )],
++    ),
++    (
++        "describe",
++        &[(
++            "cua-driver describe click",
++            "Print a tool's description and input schema",
++        )],
++    ),
++    (
++        "call",
++        &[
++            ("cua-driver call list_apps", "Call a tool with no arguments"),
++            (
++                "cua-driver call click '{\"pid\":844,\"x\":100,\"y\":200}'",
++                "Click at window coordinates",
++            ),
++            (
++                "cua-driver call get_window_state '{\"pid\":844,\"window_id\":10725}' --screenshot-out-file state.png",
++                "Save the screenshot from a tool response",
++            ),
++            (
++                "cua-driver call get_window_state '{\"pid\":844,\"window_id\":10725,\"since\":\"s0000002a\"}'",
++                "Read only what changed since an earlier snapshot_id",
++            ),
++            (
++                "cua-driver call get_window_state '{\"pid\":844,\"window_id\":10725,\"tree_format\":\"elements\"}'",
++                "Return the structured elements instead of the markdown tree",
++            ),
++        ],
++    ),
++    (
++        "serve",
++        &[
++            ("cua-driver serve", "Run the daemon in the foreground"),
++            (
++                "cua-driver serve --permission-mode bounded --capability-manifest manifest.yaml --approve-capability-manifest",
++                "Start a bounded daemon with a reviewed capability manifest",
++            ),
++            (
++                "cua-driver serve --no-overlay",
++                "Run without the agent cursor overlay",
++            ),
++        ],
++    ),
++    (
++        "stop",
++        &[("cua-driver stop", "Ask the running daemon to exit")],
++    ),
++    (
++        "revoke",
++        &[
++            (
++                "cua-driver revoke --session 3f9c2a",
++                "Stop and revoke one session",
++            ),
++            (
++                "cua-driver revoke --all",
++                "Stop and revoke every live session",
++            ),
++        ],
++    ),
++    (
++        "status",
++        &[("cua-driver status", "Check whether the daemon is running")],
++    ),
++    (
++        "sessions",
++        &[("cua-driver sessions --json", "List live sessions as JSON")],
++    ),
++    (
++        "sessions list",
++        &[("cua-driver sessions list", "List live sessions")],
++    ),
++    (
++        "history",
++        &[("cua-driver history", "Print the Computer History state")],
++    ),
++    (
++        "history enable",
++        &[(
++            "cua-driver history enable",
++            "Turn on the Computer History preview",
++        )],
++    ),
++    (
++        "history disable",
++        &[("cua-driver history disable", "Turn Computer History off")],
++    ),
++    (
++        "history pause",
++        &[("cua-driver history pause", "Pause recording")],
++    ),
++    (
++        "history resume",
++        &[("cua-driver history resume", "Resume recording")],
++    ),
++    (
++        "history status",
++        &[(
++            "cua-driver history status --json",
++            "Print the state as JSON",
++        )],
++    ),
++    (
++        "history flush",
++        &[("cua-driver history flush", "Seal the current chunk now")],
++    ),
++    (
++        "history list",
++        &[(
++            "cua-driver history list 20",
++            "List the 20 most recent events",
++        )],
++    ),
++    (
++        "history show",
++        &[(
++            "cua-driver history show 42 --json",
++            "Print event 42 as JSON",
++        )],
++    ),
++    (
++        "history delete",
++        &[(
++            "cua-driver history delete --yes",
++            "Delete every recorded chunk and its key",
++        )],
++    ),
++    (
++        "permissions",
++        &[(
++            "cua-driver permissions",
++            "Report Accessibility and Screen Recording status",
++        )],
++    ),
++    (
++        "permissions status",
++        &[(
++            "cua-driver permissions status --json",
++            "Report the grants as JSON",
++        )],
++    ),
++    (
++        "permissions grant",
++        &[(
++            "cua-driver permissions grant",
++            "Request the grants for CuaDriver.app",
++        )],
++    ),
++    (
++        "mcp-config",
++        &[
++            ("cua-driver mcp-config", "Print a generic mcpServers entry"),
++            (
++                "cua-driver mcp-config --client codex",
++                "Print setup for Codex",
++            ),
++        ],
++    ),
++    (
++        "recording",
++        &[("cua-driver recording", "Print the current recording state")],
++    ),
++    (
++        "recording start",
++        &[(
++            "cua-driver recording start ~/cua-trajectories/demo1",
++            "Record turns into a directory",
++        )],
++    ),
++    (
++        "recording stop",
++        &[("cua-driver recording stop", "Stop recording")],
++    ),
++    (
++        "recording status",
++        &[("cua-driver recording status", "Print the recording state")],
++    ),
++    (
++        "recording render",
++        &[(
++            "cua-driver recording render ~/cua-trajectories/demo1 demo1.mp4",
++            "Render a recorded trajectory to MP4",
++        )],
++    ),
+     ("config", &[("cua-driver config", "Print the full config")]),
+-    ("config show", &[("cua-driver config show", "Print the full config")]),
+-    ("config get", &[("cua-driver config get max_image_dimension", "Print one key")]),
+-    ("config set", &[
+-        ("cua-driver config set max_image_dimension 1568", "Downscale screenshots to at most 1568 px"),
+-        ("cua-driver config set cursor.motion.style magnetic", "Make magnetic the default cursor motion for new sessions"),
+-        ("cua-driver config set cursor.motion.timing fitts", "Scale cursor move time with distance and target size"),
+-        ("cua-driver config set cursor.motion.timing native", "Drop the 600 ms floor of the default steady timing"),
+-        ("cua-driver config set cursor.motion.effects.trail true", "Turn the cursor trail on by default"),
+-    ]),
+-    ("config reset", &[("cua-driver config reset", "Restore the defaults")]),
+-    ("telemetry", &[("cua-driver telemetry status", "Show the effective telemetry setting")]),
+-    ("telemetry enable", &[("cua-driver telemetry enable", "Enable telemetry")]),
+-    ("telemetry disable", &[("cua-driver telemetry disable", "Disable every telemetry request")]),
+-    ("telemetry status", &[("cua-driver telemetry status --json", "Show the setting as JSON")]),
+-    ("telemetry reset-id", &[("cua-driver telemetry reset-id", "Erase the installation ID")]),
+-    ("telemetry inspect", &[("cua-driver telemetry inspect cua_driver_cli_completed --json", "Show the payload of one event without sending it")]),
+-    ("check-update", &[
+-        ("cua-driver check-update", "Check for a newer release"),
+-        ("cua-driver check-update --json --no-cache", "Check now, as JSON"),
+-    ]),
+-    ("update", &[
+-        ("cua-driver update", "Check and print the install command"),
+-        ("cua-driver update --apply", "Install the latest release"),
+-    ]),
+-    ("channel", &[("cua-driver channel", "Show the selected release channel")]),
+-    ("channel status", &[("cua-driver channel status --json", "Show the channels as JSON")]),
+-    ("channel set", &[("cua-driver channel set nightly", "Follow nightly builds (then run update --apply)")]),
+-    ("doctor", &[
+-        ("cua-driver doctor", "Run the diagnostic probes"),
+-        ("cua-driver doctor --json", "Emit the probe report as JSON"),
+-    ]),
+-    ("diagnose", &[("cua-driver diagnose", "Print an install and permission report to paste into an issue")]),
+-    ("autostart", &[("cua-driver autostart status", "Check the autostart entry")]),
+-    ("autostart enable", &[("cua-driver autostart enable", "Start the daemon at every logon")]),
+-    ("autostart disable", &[("cua-driver autostart disable", "Remove the autostart entry")]),
+-    ("autostart status", &[("cua-driver autostart status", "Check the autostart entry")]),
+-    ("autostart kick", &[("cua-driver autostart kick", "Start the entry now")]),
+-    ("skills", &[("cua-driver skills", "Report skill-pack state")]),
+-    ("skills install", &[
+-        ("cua-driver skills install", "Install the skill pack and link detected agents"),
+-        ("cua-driver skills install --from=main", "Install the latest skill pack from main"),
+-    ]),
+-    ("skills update", &[("cua-driver skills update", "Refresh the skill pack and links")]),
+-    ("skills uninstall", &[("cua-driver skills uninstall --all", "Remove the links and the local copy")]),
+-    ("skills status", &[("cua-driver skills status", "Report skill-pack and link state")]),
+-    ("skills path", &[("cua-driver skills path", "Print the skill-pack path")]),
+-    ("extension", &[("cua-driver extension list", "List known extensions")]),
+-    ("extension list", &[("cua-driver extension list --json", "List extensions as JSON")]),
+-    ("extension info", &[("cua-driver extension info cua-perception", "Show an installed extension")]),
+-    ("extension inspect", &[("cua-driver extension inspect cua-perception --catalog catalog.json", "Preview license, source and provenance")]),
+-    ("extension status", &[("cua-driver extension status cua-perception --self-test", "Verify an extension and run its self-test")]),
+-    ("extension install", &[("cua-driver extension install cua-perception --catalog catalog.json", "Install from a signed catalog")]),
+-    ("extension update", &[("cua-driver extension update cua-perception --catalog catalog.json", "Activate a newer version")]),
+-    ("extension remove", &[("cua-driver extension remove cua-perception", "Remove an extension")]),
+-    ("extension path", &[("cua-driver extension path cua-perception", "Print the active version directory")]),
+-    ("perception", &[("cua-driver perception parse --image screen.png --capture capture.json --json", "Parse a PNG into visual regions")]),
+-    ("perception parse", &[("cua-driver perception parse --image screen.png --capture capture.json --json", "Parse a PNG into visual regions")]),
+-    ("manifest", &[("cua-driver manifest --pretty", "Print the CLI surface as JSON")]),
+-    ("cursor-theme", &[("cua-driver cursor-theme list", "List cursor themes")]),
+-    ("cursor", &[("cua-driver cursor motion --session demo --style magnetic", "Use the magnetic cursor motion")]),
+-    ("cursor motion", &[
+-        ("cua-driver cursor motion --session demo --style comet_swoop", "Use the comet swoop cursor motion"),
+-        ("cua-driver cursor motion --session demo --timing fixed --glide-ms 900", "Make every move take 900 ms"),
+-        ("cua-driver cursor motion --session demo --effects trail=off,ripple=default", "Turn off the trail and reset the click ripple"),
+-    ]),
+-    ("cursor-theme validate", &[("cua-driver cursor-theme validate my-cursor.lottie", "Validate a source archive")]),
+-    ("cursor-theme build", &[("cua-driver cursor-theme build my-cursor.lottie --output my-cursor.cua-theme", "Compile a theme")]),
+-    ("cursor-theme inspect", &[("cua-driver cursor-theme inspect my-cursor.cua-theme --json", "Print a theme's metadata")]),
+-    ("cursor-theme preview", &[("cua-driver cursor-theme preview my-cursor.cua-theme --output preview", "Render still frames")]),
+-    ("cursor-theme install", &[("cua-driver cursor-theme install my-cursor.cua-theme", "Install a theme")]),
+-    ("cursor-theme list", &[("cua-driver cursor-theme list --json", "List themes as JSON")]),
+-    ("cursor-theme uninstall", &[("cua-driver cursor-theme uninstall com.example.my-cursor", "Remove an installed theme")]),
+-    ("dump-docs", &[("cua-driver dump-docs --type cli --pretty", "Print the CLI documentation JSON")]),
++    (
++        "config show",
++        &[("cua-driver config show", "Print the full config")],
++    ),
++    (
++        "config get",
++        &[("cua-driver config get max_image_dimension", "Print one key")],
++    ),
++    (
++        "config set",
++        &[
++            (
++                "cua-driver config set max_image_dimension 1568",
++                "Downscale screenshots to at most 1568 px",
++            ),
++            (
++                "cua-driver config set cursor.motion.style magnetic",
++                "Make magnetic the default cursor motion for new sessions",
++            ),
++            (
++                "cua-driver config set cursor.motion.timing fitts",
++                "Scale cursor move time with distance and target size",
++            ),
++            (
++                "cua-driver config set cursor.motion.timing native",
++                "Drop the 600 ms floor of the default steady timing",
++            ),
++            (
++                "cua-driver config set cursor.motion.effects.trail true",
++                "Turn the cursor trail on by default",
++            ),
++        ],
++    ),
++    (
++        "config reset",
++        &[("cua-driver config reset", "Restore the defaults")],
++    ),
++    (
++        "telemetry",
++        &[(
++            "cua-driver telemetry status",
++            "Show the effective telemetry setting",
++        )],
++    ),
++    (
++        "telemetry enable",
++        &[("cua-driver telemetry enable", "Enable telemetry")],
++    ),
++    (
++        "telemetry disable",
++        &[(
++            "cua-driver telemetry disable",
++            "Disable every telemetry request",
++        )],
++    ),
++    (
++        "telemetry status",
++        &[(
++            "cua-driver telemetry status --json",
++            "Show the setting as JSON",
++        )],
++    ),
++    (
++        "telemetry reset-id",
++        &[("cua-driver telemetry reset-id", "Erase the installation ID")],
++    ),
++    (
++        "telemetry inspect",
++        &[(
++            "cua-driver telemetry inspect cua_driver_cli_completed --json",
++            "Show the payload of one event without sending it",
++        )],
++    ),
++    (
++        "check-update",
++        &[
++            ("cua-driver check-update", "Check for a newer release"),
++            (
++                "cua-driver check-update --json --no-cache",
++                "Check now, as JSON",
++            ),
++        ],
++    ),
++    (
++        "update",
++        &[
++            ("cua-driver update", "Check and print the install command"),
++            ("cua-driver update --apply", "Install the latest release"),
++        ],
++    ),
++    (
++        "channel",
++        &[("cua-driver channel", "Show the selected release channel")],
++    ),
++    (
++        "channel status",
++        &[(
++            "cua-driver channel status --json",
++            "Show the channels as JSON",
++        )],
++    ),
++    (
++        "channel set",
++        &[(
++            "cua-driver channel set nightly",
++            "Follow nightly builds (then run update --apply)",
++        )],
++    ),
++    (
++        "doctor",
++        &[
++            ("cua-driver doctor", "Run the diagnostic probes"),
++            ("cua-driver doctor --json", "Emit the probe report as JSON"),
++        ],
++    ),
++    (
++        "diagnose",
++        &[(
++            "cua-driver diagnose",
++            "Print an install and permission report to paste into an issue",
++        )],
++    ),
++    (
++        "autostart",
++        &[("cua-driver autostart status", "Check the autostart entry")],
++    ),
++    (
++        "autostart enable",
++        &[(
++            "cua-driver autostart enable",
++            "Start the daemon at every logon",
++        )],
++    ),
++    (
++        "autostart disable",
++        &[("cua-driver autostart disable", "Remove the autostart entry")],
++    ),
++    (
++        "autostart status",
++        &[("cua-driver autostart status", "Check the autostart entry")],
++    ),
++    (
++        "autostart kick",
++        &[("cua-driver autostart kick", "Start the entry now")],
++    ),
++    (
++        "skills",
++        &[("cua-driver skills", "Report skill-pack state")],
++    ),
++    (
++        "skills install",
++        &[
++            (
++                "cua-driver skills install",
++                "Install the skill pack and link detected agents",
++            ),
++            (
++                "cua-driver skills install --from=main",
++                "Install the latest skill pack from main",
++            ),
++        ],
++    ),
++    (
++        "skills update",
++        &[(
++            "cua-driver skills update",
++            "Refresh the skill pack and links",
++        )],
++    ),
++    (
++        "skills uninstall",
++        &[(
++            "cua-driver skills uninstall --all",
++            "Remove the links and the local copy",
++        )],
++    ),
++    (
++        "skills status",
++        &[(
++            "cua-driver skills status",
++            "Report skill-pack and link state",
++        )],
++    ),
++    (
++        "skills path",
++        &[("cua-driver skills path", "Print the skill-pack path")],
++    ),
++    (
++        "extension",
++        &[("cua-driver extension list", "List known extensions")],
++    ),
++    (
++        "extension list",
++        &[(
++            "cua-driver extension list --json",
++            "List extensions as JSON",
++        )],
++    ),
++    (
++        "extension info",
++        &[(
++            "cua-driver extension info cua-perception",
++            "Show an installed extension",
++        )],
++    ),
++    (
++        "extension inspect",
++        &[(
++            "cua-driver extension inspect cua-perception --catalog catalog.json",
++            "Preview license, source and provenance",
++        )],
++    ),
++    (
++        "extension status",
++        &[(
++            "cua-driver extension status cua-perception --self-test",
++            "Verify an extension and run its self-test",
++        )],
++    ),
++    (
++        "extension install",
++        &[(
++            "cua-driver extension install cua-perception --catalog catalog.json",
++            "Install from a signed catalog",
++        )],
++    ),
++    (
++        "extension update",
++        &[(
++            "cua-driver extension update cua-perception --catalog catalog.json",
++            "Activate a newer version",
++        )],
++    ),
++    (
++        "extension remove",
++        &[(
++            "cua-driver extension remove cua-perception",
++            "Remove an extension",
++        )],
++    ),
++    (
++        "extension path",
++        &[(
++            "cua-driver extension path cua-perception",
++            "Print the active version directory",
++        )],
++    ),
++    (
++        "perception",
++        &[(
++            "cua-driver perception parse --image screen.png --capture capture.json --json",
++            "Parse a PNG into visual regions",
++        )],
++    ),
++    (
++        "perception parse",
++        &[(
++            "cua-driver perception parse --image screen.png --capture capture.json --json",
++            "Parse a PNG into visual regions",
++        )],
++    ),
++    (
++        "manifest",
++        &[(
++            "cua-driver manifest --pretty",
++            "Print the CLI surface as JSON",
++        )],
++    ),
++    (
++        "cursor-theme",
++        &[("cua-driver cursor-theme list", "List cursor themes")],
++    ),
++    (
++        "cursor",
++        &[(
++            "cua-driver cursor motion --session demo --style magnetic",
++            "Use the magnetic cursor motion",
++        )],
++    ),
++    (
++        "cursor motion",
++        &[
++            (
++                "cua-driver cursor motion --session demo --style comet_swoop",
++                "Use the comet swoop cursor motion",
++            ),
++            (
++                "cua-driver cursor motion --session demo --timing fixed --glide-ms 900",
++                "Make every move take 900 ms",
++            ),
++            (
++                "cua-driver cursor motion --session demo --effects trail=off,ripple=default",
++                "Turn off the trail and reset the click ripple",
++            ),
++        ],
++    ),
++    (
++        "cursor-theme validate",
++        &[(
++            "cua-driver cursor-theme validate my-cursor.lottie",
++            "Validate a source archive",
++        )],
++    ),
++    (
++        "cursor-theme build",
++        &[(
++            "cua-driver cursor-theme build my-cursor.lottie --output my-cursor.cua-theme",
++            "Compile a theme",
++        )],
++    ),
++    (
++        "cursor-theme inspect",
++        &[(
++            "cua-driver cursor-theme inspect my-cursor.cua-theme --json",
++            "Print a theme's metadata",
++        )],
++    ),
++    (
++        "cursor-theme preview",
++        &[(
++            "cua-driver cursor-theme preview my-cursor.cua-theme --output preview",
++            "Render still frames",
++        )],
++    ),
++    (
++        "cursor-theme install",
++        &[(
++            "cua-driver cursor-theme install my-cursor.cua-theme",
++            "Install a theme",
++        )],
++    ),
++    (
++        "cursor-theme list",
++        &[("cua-driver cursor-theme list --json", "List themes as JSON")],
++    ),
++    (
++        "cursor-theme uninstall",
++        &[(
++            "cua-driver cursor-theme uninstall com.example.my-cursor",
++            "Remove an installed theme",
++        )],
++    ),
++    (
++        "dump-docs",
++        &[(
++            "cua-driver dump-docs --type cli --pretty",
++            "Print the CLI documentation JSON",
++        )],
++    ),
+ ];
+ 
+ /// Adds `examples` to every command in the docs JSON (by command path).
+@@ -5287,7 +5832,9 @@
+                 Some(k) => k,
+                 None => {
+                     eprintln!("Usage: cua-driver config get <key>");
+-                    eprintln!("Keys: capture_mode, max_image_dimension, version, platform, cursor.motion.style, cursor.motion.timing, cursor.badges");
++                    eprintln!(
++                        "Keys: capture_mode, max_image_dimension, version, platform, cursor.motion.style, cursor.motion.timing, cursor.badges"
++                    );
+                     process::exit(64);
+                 }
+             };
+@@ -5316,7 +5863,9 @@
+                 );
+             } else {
+                 eprintln!("Unknown config key: {key}");
+-                eprintln!("Available keys: capture_mode, max_image_dimension, version, platform, agent_cursor.enabled, cursor.motion.style, cursor.motion.timing, cursor.motion.effects, cursor.badges");
++                eprintln!(
++                    "Available keys: capture_mode, max_image_dimension, version, platform, agent_cursor.enabled, cursor.motion.style, cursor.motion.timing, cursor.motion.effects, cursor.badges"
++                );
+                 process::exit(64);
+             }
+         }
+@@ -5379,7 +5928,9 @@
+         }
+ 
+         other => {
+-            eprintln!("Unknown config subcommand '{other}'. Valid: show, get <key>, set <key> <value>, reset");
++            eprintln!(
++                "Unknown config subcommand '{other}'. Valid: show, get <key>, set <key> <value>, reset"
++            );
+             process::exit(64);
+         }
+     }
+@@ -5554,8 +6105,7 @@
+             let mut node = &docs["commands"];
+             for word in path.split(' ') {
+                 node = &find(node, word)
+-                    .unwrap_or_else(|| panic!("CLI_EXAMPLES path {path} is not documented"))
+-                    ["subcommands"];
++                    .unwrap_or_else(|| panic!("CLI_EXAMPLES path {path} is not documented"))["subcommands"];
+             }
+         }
+         let codes: Vec<i64> = docs["exit_codes"]
+@@ -5623,11 +6173,13 @@
+             .find(|c| c["name"] == "serve")
+             .cloned()
+             .unwrap();
+-        assert!(serve["flags"]
+-            .as_array()
+-            .unwrap()
+-            .iter()
+-            .any(|f| f["name"] == "experimental-history"));
++        assert!(
++            serve["flags"]
++                .as_array()
++                .unwrap()
++                .iter()
++                .any(|f| f["name"] == "experimental-history")
++        );
+     }
+ 
+     use super::*;
+@@ -5751,26 +6303,36 @@
+         let launch = daemon_launch_arguments("CuaDriver", "/tmp/history-test.sock", &state, true);
+         #[cfg(not(target_os = "macos"))]
+         let launch = daemon_process_arguments("history-test.sock", &state, true);
+-        assert!(launch
+-            .windows(2)
+-            .any(|pair| pair == ["--permission-mode", "bounded"]));
+-        assert!(launch
+-            .windows(2)
+-            .any(|pair| { pair == ["--capability-manifest", "/tmp/capabilities.yaml"] }));
++        assert!(
++            launch
++                .windows(2)
++                .any(|pair| pair == ["--permission-mode", "bounded"])
++        );
++        assert!(
++            launch
++                .windows(2)
++                .any(|pair| { pair == ["--capability-manifest", "/tmp/capabilities.yaml"] })
++        );
+         assert!(launch.contains(&"--approve-capability-manifest".to_owned()));
+         assert!(launch.contains(&"--no-permissions-gate".to_owned()));
+         assert!(launch.contains(&"--claude-code-computer-use-compat".to_owned()));
+         assert!(launch.contains(&"--experimental-history".to_owned()));
+-        assert!(launch
+-            .windows(2)
+-            .any(|pair| pair == ["--grant", "capability:a"]));
+-        assert!(launch
+-            .windows(2)
+-            .any(|pair| pair == ["--grant", "capability:b"]));
++        assert!(
++            launch
++                .windows(2)
++                .any(|pair| pair == ["--grant", "capability:a"])
++        );
++        assert!(
++            launch
++                .windows(2)
++                .any(|pair| pair == ["--grant", "capability:b"])
++        );
+         #[cfg(target_os = "macos")]
+-        assert!(launch
+-            .windows(2)
+-            .any(|pair| pair == ["--socket", "/tmp/history-test.sock"]));
++        assert!(
++            launch
++                .windows(2)
++                .any(|pair| pair == ["--socket", "/tmp/history-test.sock"])
++        );
+     }
+ 
+     #[test]
+@@ -5782,9 +6344,11 @@
+         };
+         let mut launch = vec!["serve".to_owned()];
+         append_daemon_launch_state(&mut launch, &state, true);
+-        assert!(launch
+-            .windows(2)
+-            .any(|pair| { pair == ["--permission-mode", "unrestricted"] }));
++        assert!(
++            launch
++                .windows(2)
++                .any(|pair| { pair == ["--permission-mode", "unrestricted"] })
++        );
+         assert!(launch.contains(&"--dangerously-bypass-approvals".to_owned()));
+     }
+ 
 --- a/libs/cua-driver/rust/crates/cua-driver/src/proxy.rs
 +++ b/libs/cua-driver/rust/crates/cua-driver/src/proxy.rs
-@@ -243,7 +243,15 @@
+@@ -17,19 +17,26 @@
+ //!   coupling.
+ 
+ use std::sync::Arc;
++#[cfg(target_os = "macos")]
++#[path = "proxy_owned.rs"]
++mod owned;
++#[cfg(target_os = "macos")]
++pub(crate) fn owned_proxy_requested() -> anyhow::Result<bool> {
++    owned::requested()
++}
+ 
+ use cua_driver_core::mcp_wire::{self, ProtocolSession};
+ use cua_driver_core::policy::{authorize_tool_call, validate_configured_policy};
+-use cua_driver_core::protocol::{initialize_result, Request, Response};
++use cua_driver_core::protocol::{Request, Response, initialize_result};
+ use cua_driver_core::server::{
+-    observe_proxy_session_started, observe_proxy_tool_completed, tool_observation_timer,
+-    StdioExecutionPath,
++    StdioExecutionPath, observe_proxy_session_started, observe_proxy_tool_completed,
++    tool_observation_timer,
+ };
+ use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader};
+ use tracing::{debug, error, warn};
+ 
+ use crate::serve::{
+-    is_daemon_listening, send_request, DaemonRequest, DaemonResponse, ToolObservationOrigin,
++    DaemonRequest, DaemonResponse, ToolObservationOrigin, is_daemon_listening, send_request,
+ };
+ 
+ /// Run stdio MCP directly over an SDK-owned runtime.
+@@ -200,7 +207,13 @@
+ /// Swift `makeProxy`'s `fetchProxyToolList` pre-check.
+ pub async fn run_proxy(socket_path: String) -> anyhow::Result<()> {
+     validate_configured_policy()?;
+-    if !is_daemon_listening(&socket_path) {
++    #[cfg(target_os = "macos")]
++    let mut owned = owned::OwnedProxy::prepare()?;
++    #[cfg(target_os = "macos")]
++    let inherited = owned.is_some();
++    #[cfg(not(target_os = "macos"))]
++    let inherited = false;
++    if !inherited && !is_daemon_listening(&socket_path) {
+         anyhow::bail!(
+             "cua-driver-rs daemon not reachable on {socket_path}. Start it \
+              with `open -n -g -a CuaDriver --args serve` and retry."
+@@ -243,7 +256,15 @@
      // calls. Besides lifecycle cleanup, that registered control channel is the
      // trust boundary used by destructive `browser_prepare` calls.
      let (control_ready_tx, control_ready_rx) = tokio::sync::oneshot::channel();
@@ -92,7 +1453,7 @@
      tokio::pin!(control);
      supervise_control_connection(&mut control, async {
          tokio::time::timeout(std::time::Duration::from_secs(4), control_ready_rx)
-@@ -263,7 +271,7 @@
+@@ -263,7 +284,7 @@
  
      let stdin = tokio::io::stdin();
      let stdout = tokio::io::stdout();
@@ -101,7 +1462,7 @@
          &mut control,
          run_proxy_io(
              BufReader::new(stdin),
-@@ -274,7 +282,24 @@
+@@ -274,7 +295,28 @@
              daemon_observes_tool_calls,
          ),
      )
@@ -122,12 +1483,16 @@
 +        tokio::time::timeout(std::time::Duration::from_secs(6), drain)
 +            .await
 +            .map_err(|_| anyhow::anyhow!("private_transport_drain_unknown"))??;
++        #[cfg(target_os = "macos")]
++        if let Some(owned) = &mut owned {
++            owned.record_drained()?;
++        }
 +    }
 +    io_result
  }
  
  /// Keep the MCP transport alive only while its daemon-owned identity is live.
-@@ -454,6 +479,8 @@
+@@ -454,6 +496,8 @@
      socket_path: String,
      session_id: String,
      control_ready: tokio::sync::oneshot::Sender<()>,
@@ -136,7 +1501,43 @@
  ) {
      let begin = DaemonRequest {
          method: "session_begin".into(),
-@@ -513,14 +540,7 @@
+@@ -478,15 +522,26 @@
+         // (mirrors the windows pipe-open retry below). The is_daemon_listening
+         // precheck makes the window tiny, but keep both paths symmetric.
+         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(3);
+-        let mut stream = loop {
+-            match UnixStream::connect(&socket_path).await {
+-                Ok(s) => break s,
+-                Err(_) if std::time::Instant::now() < deadline => {
+-                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+-                }
+-                Err(e) => {
+-                    debug!(session_id = %session_id, "control connect failed (daemon starting?): {e}");
+-                    return;
++        #[cfg(target_os = "macos")]
++        let inherited = match owned::take_control() {
++            Ok(value) => value,
++            Err(_) => return,
++        };
++        #[cfg(not(target_os = "macos"))]
++        let inherited: Option<UnixStream> = None;
++        let mut stream = if let Some(stream) = inherited {
++            stream
++        } else {
++            loop {
++                match UnixStream::connect(&socket_path).await {
++                    Ok(s) => break s,
++                    Err(_) if std::time::Instant::now() < deadline => {
++                        tokio::time::sleep(std::time::Duration::from_millis(50)).await;
++                    }
++                    Err(e) => {
++                        debug!(session_id = %session_id, "control connect failed (daemon starting?): {e}");
++                        return;
++                    }
+                 }
+             }
+         };
+@@ -513,14 +568,7 @@
                  let _ = control_ready.send(());
              }
          }
@@ -152,7 +1553,7 @@
      }
  
      #[cfg(all(not(unix), target_os = "windows"))]
-@@ -564,20 +584,59 @@
+@@ -564,20 +612,59 @@
                  let _ = control_ready.send(());
              }
          }
@@ -222,6 +1623,124 @@
  }
  
  fn validate_session_begin_ack(line: &str) -> Result<(), String> {
+@@ -1076,10 +1163,12 @@
+             replies[1]["result"]["skills"][0]["uri"],
+             "skill://cua-driver/SKILL.md"
+         );
+-        assert!(replies[2]["result"]["contents"][0]["text"]
+-            .as_str()
+-            .unwrap()
+-            .starts_with("---"));
++        assert!(
++            replies[2]["result"]["contents"][0]["text"]
++                .as_str()
++                .unwrap()
++                .starts_with("---")
++        );
+         for reply in &replies[..3] {
+             assert_eq!(reply["result"]["resultType"], "complete");
+             assert_eq!(reply["result"]["cacheScope"], "private");
+@@ -1153,10 +1242,12 @@
+         assert_eq!(result["isError"], true);
+         assert_eq!(result["structuredContent"]["code"], "permission_denied");
+         assert_eq!(result["content"][0]["type"], "text");
+-        assert!(result["content"][0]["text"]
+-            .as_str()
+-            .unwrap()
+-            .contains("explicitly denied"));
++        assert!(
++            result["content"][0]["text"]
++                .as_str()
++                .unwrap()
++                .contains("explicitly denied")
++        );
+     }
+ 
+     #[test]
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/cua-driver/src/proxy_owned.rs
+@@ -0,0 +1,81 @@
++//! Fixed inherited descriptors supplied only by the signed App/Host launcher.
++//! No MCP request can select a descriptor/socket/daemon or replace this binding.
++use std::{
++    fs::File,
++    io::Write,
++    os::fd::FromRawFd,
++    os::unix::net::UnixStream,
++    sync::{Mutex, OnceLock},
++};
++const ENV: &str = "STYX_PRIVATE_OWNED_PROXY_V1";
++const CONTROL: i32 = 3;
++const REPORT: i32 = 4;
++static CONTROL_STREAM: OnceLock<Mutex<Option<UnixStream>>> = OnceLock::new();
++pub(super) fn requested() -> anyhow::Result<bool> {
++    match std::env::var(ENV) {
++        Ok(v) if v == "1" => Ok(true),
++        Err(std::env::VarError::NotPresent) => Ok(false),
++        _ => anyhow::bail!("private_proxy_mode_invalid"),
++    }
++}
++pub(super) struct OwnedProxy {
++    report: File,
++}
++impl OwnedProxy {
++    pub(super) fn prepare() -> anyhow::Result<Option<Self>> {
++        if !requested()? {
++            return Ok(None);
++        }
++        if crate::mcp_envelope::configured()? {
++            anyhow::bail!("private_proxy_envelope_unsupported")
++        }
++        // SAFETY: only fixed descriptors3/4 from our explicit launcher contract are
++        // adopted, once per fresh process. Validate their kernel kinds/access before
++        // assigning ownership. No caller number or pathname is interpreted here.
++        unsafe {
++            if libc::fcntl(CONTROL, libc::F_GETFD) < 0 || libc::fcntl(REPORT, libc::F_GETFD) < 0 {
++                anyhow::bail!("private_proxy_descriptors_missing")
++            }
++            let mut facts = std::mem::zeroed::<libc::stat>();
++            if libc::fstat(REPORT, &mut facts) != 0
++                || facts.st_mode & libc::S_IFMT != libc::S_IFIFO
++                || libc::fcntl(REPORT, libc::F_GETFL) & libc::O_ACCMODE != libc::O_WRONLY
++            {
++                anyhow::bail!("private_proxy_report_refused")
++            }
++        }
++        // SAFETY: fixed inherited handles have passed validation; ownership transfers
++        // once and is retained for the real control/drain and report lifetime.
++        let control = unsafe { UnixStream::from_raw_fd(CONTROL) };
++        cua_driver_core::daemon::bind_styx_private_control_peer(&control)?;
++        control.set_nonblocking(true)?;
++        CONTROL_STREAM
++            .set(Mutex::new(Some(control)))
++            .map_err(|_| anyhow::anyhow!("private_proxy_already_bound"))?;
++        let report = unsafe { File::from_raw_fd(REPORT) };
++        Ok(Some(Self { report }))
++    }
++    pub(super) fn record_drained(&mut self) -> anyhow::Result<()> {
++        // Written ONLY after the real original-control drain ACK, never exit status.
++        self.report.write_all(
++            b"{\"schema\":1,\"source\":\"original_control_transport\",\"drained\":true}\n",
++        )?;
++        self.report.flush()?;
++        Ok(())
++    }
++}
++pub(super) fn take_control() -> anyhow::Result<Option<tokio::net::UnixStream>> {
++    if !requested()? {
++        return Ok(None);
++    }
++    let stream = CONTROL_STREAM
++        .get()
++        .ok_or_else(|| anyhow::anyhow!("private_proxy_not_bound"))?
++        .lock()
++        .map_err(|_| anyhow::anyhow!("private_proxy_state_unknown"))?
++        .take()
++        .ok_or_else(|| anyhow::anyhow!("private_proxy_control_consumed"))?;
++    // No reconnect: original retainedFD peer is rechecked immediately at adoption.
++    cua_driver_core::daemon::check_styx_private_peer(&stream)?;
++    Ok(Some(tokio::net::UnixStream::from_std(stream)?))
++}
 --- a/libs/cua-driver/rust/crates/cua-driver/src/sdk_adapter.rs
 +++ b/libs/cua-driver/rust/crates/cua-driver/src/sdk_adapter.rs
 @@ -41,6 +41,9 @@
@@ -3833,4 +5352,1683 @@
 +        state: state.clone(),
 +    }));
 +    registry.register(Box::new(SetTextOnceTool { state }));
++}
+--- a/libs/cua-driver/rust/crates/platform-windows/Cargo.toml
++++ b/libs/cua-driver/rust/crates/platform-windows/Cargo.toml
+@@ -25,10 +25,13 @@
+ tiny-skia = { version = "0.11", default-features = false, features = ["std"] }
+ 
+ [target.'cfg(target_os = "windows")'.dependencies]
++windows-core = "0.58"
+ clipboard-rs = "0.3.5"
+ keyring = { version = "4.1.6", default-features = false, features = ["v1"] }
+ image = { workspace = true }
+ windows = { version = "0.58", features = [
++    "implement",
++    "Win32_System_Variant",
+     "Win32_Foundation",
+     "Win32_UI_Accessibility",
+     "Win32_UI_WindowsAndMessaging",
+--- a/libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs
++++ b/libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs
+@@ -634,6 +634,7 @@
+ use cua_driver_core::snapshot_store::ZoomContext;
+ 
+ pub struct ToolState {
++    pub(crate) styx_private_ax: Arc<super::styx_private::PrivateAx>,
+     pub snapshots: Arc<Snapshots>,
+     pub cursor_registry: Arc<CursorRegistry>,
+     pub config: Arc<RwLock<DriverConfig>>,
+@@ -646,6 +647,7 @@
+     ) -> Arc<Self> {
+         Arc::new(Self {
+             snapshots: Arc::new(Snapshots::new()),
++            styx_private_ax: Arc::new(super::styx_private::PrivateAx::default()),
+             cursor_registry: Arc::new(CursorRegistry::new()),
+             config: Arc::new(RwLock::new(load_driver_config())),
+             capture_bridge: capture_service
+@@ -1269,6 +1271,10 @@
+     }
+ 
+     async fn invoke(&self, args: Value) -> ToolResult {
++        if super::styx_private::is_complete_request(&args) {
++            return super::styx_private::complete_snapshot(self.state.clone(), args).await;
++        }
++
+         let display_only = match cua_driver_core::window_state_view::display_only(&args) {
+             Ok(display_only) => display_only,
+             Err(refusal) => return refusal,
+@@ -10208,6 +10214,7 @@
+ ) -> ToolRegistry {
+     let mut r = ToolRegistry::new_with_protected_consent_provider(provider);
+     let state = ToolState::new(Some(r.capture_service()));
++    super::styx_private::register(&mut r, state.clone());
+     let cursor_outcome_reader = {
+         let cursor_registry = state.cursor_registry.clone();
+         cua_driver_core::session::register_scoped_cursor_outcome_reader(std::sync::Arc::new(
+@@ -10257,8 +10264,10 @@
+     // `register_all` session_end hook (platform-macos/src/tools/mod.rs).
+     let cursor_registry = state.cursor_registry.clone();
+     let snapshots = state.snapshots.clone();
++    let private_ax = state.styx_private_ax.clone();
+     let session_end_hook =
+         cua_driver_core::session::register_scoped_session_end_hook(move |session_id| {
++            private_ax.retire(Some(session_id));
+             snapshots.retire_session_screenshots(session_id);
+             cursor_registry.remove(session_id);
+             crate::overlay::remove_cursor(session_id.to_owned());
+@@ -10271,6 +10280,8 @@
+     r.retain_cursor_outcome_reader(cursor_outcome_reader);
+     r.retain_session_end_hook(session_end_hook);
+     r.retain_session_revive_hook(session_revive_hook);
++    let private_ax = state.styx_private_ax.clone();
++    r.retain_runtime_cleanup(move || private_ax.retire(None));
+     if let Some(runtime_scope) = cua_driver_core::tool::current_dispatch_runtime_scope() {
+         let prefix = format!("__cua_runtime_{runtime_scope}:");
+         let cursor_registry = state.cursor_registry.clone();
+--- a/libs/cua-driver/rust/crates/platform-windows/src/tools/mod.rs
++++ b/libs/cua-driver/rust/crates/platform-windows/src/tools/mod.rs
+@@ -11,6 +11,8 @@
+ pub(crate) mod page;
+ #[cfg(target_os = "windows")]
+ pub(crate) mod page_bookmark;
++#[cfg(target_os = "windows")]
++pub(crate) mod styx_private;
+ // Pure title parsing for `page_bookmark`; ungated so its tests run on any host.
+ pub(crate) mod page_title_marker;
+ 
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/platform-windows/src/tools/styx_private.rs
+@@ -0,0 +1,485 @@
++//! Internal adapter operations: no new public Styx tool or authorization owner.
++use super::impl_::ToolState;
++use crate::uia::styx_private::{self as native, CompleteSnapshot, EditableTarget, WriteOutcome};
++use async_trait::async_trait;
++use cua_driver_core::{
++    element_token::{format_snapshot_id, parse_token, token_for, ResolvedElement},
++    protocol::ToolResult,
++    tool::{Tool, ToolDef, ToolRegistry},
++};
++use serde_json::{json, Value};
++use std::{
++    sync::{Arc, Mutex, OnceLock},
++    time::{Duration, Instant},
++};
++
++struct CachedSnapshot {
++    id: u32,
++    transport: String,
++    session: String,
++    native: Arc<CompleteSnapshot>,
++}
++struct Pending {
++    nonce: String,
++    transport: String,
++    session: String,
++    pid: i32,
++    window: u64,
++    native_token: String,
++    target: EditableTarget,
++}
++#[derive(Default)]
++struct Slot {
++    revision: u64,
++    snapshot: Option<CachedSnapshot>,
++    pending: Option<Pending>,
++}
++#[derive(Default)]
++pub(crate) struct PrivateAx {
++    slot: Mutex<Slot>,
++}
++impl Slot {
++    fn advance(&mut self) -> Result<u64, ToolResult> {
++        self.revision = self
++            .revision
++            .checked_add(1)
++            .ok_or_else(|| refusal("target_cache_exhausted"))?;
++        Ok(self.revision)
++    }
++    fn retire_snapshot(&mut self) -> (Option<CachedSnapshot>, Option<Pending>) {
++        let snapshot = self.snapshot.take();
++        if let Some(snapshot) = &snapshot {
++            snapshot.native.invalidate();
++        }
++        (snapshot, self.pending.take())
++    }
++}
++impl PrivateAx {
++    pub(crate) fn retire(&self, session: Option<&str>) {
++        // This upstream lifecycle callback is synchronous. Keep its real join
++        // semantics, but never wait for COM teardown while holding the slot.
++        let retired = {
++            let mut slot = self.slot.lock().unwrap_or_else(|error| error.into_inner());
++            if session.is_none()
++                || slot
++                    .snapshot
++                    .as_ref()
++                    .is_some_and(|snapshot| Some(snapshot.session.as_str()) == session)
++            {
++                let retired = slot.retire_snapshot();
++                let _ = slot.advance();
++                Some(retired)
++            } else {
++                None
++            }
++        };
++        // Last native reference may synchronously join the original MTA here.
++        // Direct worker Job teardown remains the hard physical boundary if COM
++        // cannot finish; this callback does not claim a bounded async join.
++        drop(retired);
++    }
++}
++impl Drop for PrivateAx {
++    fn drop(&mut self) {
++        self.retire(None);
++    }
++}
++
++fn result(code: &'static str, certainty: &'static str) -> ToolResult {
++    ToolResult::error(code).with_structured(json!({"schema":1,"code":code,"execution_certainty":certainty,"uncertain":certainty == "unknown"}))
++}
++fn refusal(code: &'static str) -> ToolResult {
++    result(code, "not_dispatched")
++}
++fn lifecycle(
++    args: &Value,
++) -> Result<
++    (
++        String,
++        String,
++        cua_driver_core::session::SessionDispatchGuard,
++    ),
++    ToolResult,
++> {
++    let transport = args
++        .get("_transport_session_id")
++        .and_then(Value::as_str)
++        .ok_or_else(|| refusal("transport_required"))?;
++    let session = args
++        .get("_session_id")
++        .and_then(Value::as_str)
++        .ok_or_else(|| refusal("transport_required"))?;
++    let snapshot = cua_driver_core::session::session_snapshot(session, transport, Duration::ZERO)
++        .ok_or_else(|| refusal("lifecycle_unavailable"))?;
++    let guard = cua_driver_core::session::begin_session_dispatch(
++        session,
++        snapshot.public_label.as_deref(),
++        transport,
++        snapshot.implicit,
++        snapshot.transport,
++        snapshot.client_kind,
++    )
++    .map_err(|_| refusal("lifecycle_unavailable"))?;
++    Ok((transport.to_owned(), session.to_owned(), guard))
++}
++/// Exact existing runtime tree-only request. Other native Cua read modes retain
++/// their original actionable-tree semantics and never claim completeness here.
++pub(crate) fn is_complete_request(args: &Value) -> bool {
++    let Some(object) = args.as_object() else {
++        return false;
++    };
++    args.get("include_screenshot").and_then(Value::as_bool) == Some(false)
++        && args
++            .get("include_accessibility_tree")
++            .and_then(Value::as_bool)
++            == Some(true)
++        && args.get("tree_format").and_then(Value::as_str) == Some("elements")
++        && args
++            .get("max_elements")
++            .and_then(Value::as_u64)
++            .is_some_and(|value| (1..=2048).contains(&value))
++        && args
++            .get("max_depth")
++            .and_then(Value::as_u64)
++            .is_some_and(|value| (1..=64).contains(&value))
++        && args
++            .get("timeout_ms")
++            .and_then(Value::as_u64)
++            .is_some_and(|value| (100..=2000).contains(&value))
++        && object.keys().all(|key| {
++            matches!(
++                key.as_str(),
++                "pid"
++                    | "window_id"
++                    | "include_screenshot"
++                    | "include_accessibility_tree"
++                    | "tree_format"
++                    | "max_elements"
++                    | "max_depth"
++                    | "timeout_ms"
++                    | "session"
++                    | "_session_id"
++                    | "_transport_session_id"
++                    | "_public_session_label"
++                    | "_session_idle_ttl_ms"
++            )
++        })
++}
++fn incomplete(code: &'static str) -> ToolResult {
++    ToolResult::error(code).with_structured(json!({
++        "schema":1,"code":code,"execution_certainty":"not_dispatched","uncertain":false,
++        "elements_complete":false,"degraded":true
++    }))
++}
++
++pub(crate) async fn complete_snapshot(state: Arc<ToolState>, args: Value) -> ToolResult {
++    // Own the entire synchronous stage, including final native reference drops,
++    // on the blocking pool. Dropping this async waiter never aborts its custody.
++    tokio::task::spawn_blocking(move || complete_snapshot_blocking(state, args))
++        .await
++        .unwrap_or_else(|_| incomplete("object_unavailable"))
++}
++fn complete_snapshot_blocking(state: Arc<ToolState>, args: Value) -> ToolResult {
++    let (transport, session, lifecycle) = match lifecycle(&args) {
++        Ok(value) => value,
++        Err(error) => return error,
++    };
++    let (pid, window, max_elements, max_depth, timeout_ms) = match (
++        args.get("pid")
++            .and_then(Value::as_i64)
++            .and_then(|value| i32::try_from(value).ok()),
++        args.get("window_id").and_then(Value::as_u64),
++        args.get("max_elements").and_then(Value::as_u64),
++        args.get("max_depth").and_then(Value::as_u64),
++        args.get("timeout_ms").and_then(Value::as_u64),
++    ) {
++        (Some(pid), Some(window), Some(count), Some(depth), Some(timeout))
++            if pid > 0 && window > 0 && is_complete_request(&args) =>
++        {
++            (pid, window, count as usize, depth as usize, timeout)
++        }
++        _ => return incomplete("invalid_request"),
++    };
++    let (revision, retired) = {
++        let mut slot = match state.styx_private_ax.slot.lock() {
++            Ok(value) => value,
++            Err(_) => return incomplete("target_cache_unavailable"),
++        };
++        let retired = slot.retire_snapshot();
++        (slot.advance(), retired)
++    };
++    drop(retired); // Original thread join occurs outside the global slot lock.
++    let revision = match revision {
++        Ok(value) => value,
++        Err(error) => return error,
++    };
++    let native = {
++        let _lifecycle = lifecycle;
++        match native::capture(
++            pid,
++            window,
++            max_elements,
++            max_depth,
++            Instant::now() + Duration::from_millis(timeout_ms),
++        ) {
++            Ok(value) => Arc::new(value),
++            Err(code) => return incomplete(code),
++        }
++    };
++    let mut slot = match state.styx_private_ax.slot.lock() {
++        Ok(value) => value,
++        Err(_) => return incomplete("target_cache_unavailable"),
++    };
++    if slot.revision != revision || !native.valid() {
++        return incomplete("stale_observation");
++    }
++    // Session publication rejects a session ended while the blocking work ran.
++    let Some((id, invalidated)) =
++        state
++            .snapshots
++            .publish_for_session(pid, window, native.payload(), Some(&session), None)
++    else {
++        return incomplete("lifecycle_unavailable");
++    };
++    let mut rows = native.rows.clone();
++    for (index, row) in rows.iter_mut().enumerate() {
++        row["element_token"] = json!(token_for(id, index));
++    }
++    let count = rows.len();
++    let data = json!({
++        "pid":pid,"window_id":window,"tree_format":"elements","snapshot_id":format_snapshot_id(id),
++        "elements":rows,"element_count":count,"total_element_count":count,"returned_element_count":count,
++        "elements_complete":true,"truncated":false,
++        "invalidated_snapshot_ids":invalidated.into_iter().map(format_snapshot_id).collect::<Vec<_>>(),
++        "native_identity":{"platform":"windows","pid":pid,"creation_filetime":native.birth,
++            "window_id":window,"object_binding":"retained_uia_objects",
++            "invalidation":"observed_uia_notifications","atomic_remote_generation":false}
++    });
++    slot.snapshot = Some(CachedSnapshot {
++        id,
++        transport,
++        session,
++        native,
++    });
++    ToolResult::text("private_complete_ax_snapshot").with_structured(data)
++}
++
++struct AcquireTool {
++    state: Arc<ToolState>,
++}
++static ACQUIRE_DEF: OnceLock<ToolDef> = OnceLock::new();
++#[async_trait]
++impl Tool for AcquireTool {
++    fn def(&self) -> &ToolDef {
++        ACQUIRE_DEF.get_or_init(|| ToolDef {
++            name:"styx_private_ax_acquire_editable_v1".into(),
++            description:"Private owned-transport exact snapshot EditableText target acquisition; no OS write authorization is granted.".into(),
++            input_schema:json!({"type":"object","required":["pid","window_id","element_token"],
++                "properties":{"pid":{"type":"integer","minimum":1,"maximum":4294967295u64},
++                "window_id":{"type":"integer","minimum":1},"element_token":{"type":"string","maxLength":64}},
++                "additionalProperties":false}),
++            read_only:true,destructive:false,idempotent:false,open_world:false,
++        })
++    }
++    async fn invoke(&self, args: Value) -> ToolResult {
++        let state = self.state.clone();
++        tokio::task::spawn_blocking(move || acquire_blocking(state, args))
++            .await
++            .unwrap_or_else(|_| refusal("object_unavailable"))
++    }
++}
++fn acquire_blocking(state: Arc<ToolState>, args: Value) -> ToolResult {
++    let (transport, session, lifecycle) = match lifecycle(&args) {
++        Ok(value) => value,
++        Err(error) => return error,
++    };
++    let (pid, window, token) = match (
++        args.get("pid")
++            .and_then(Value::as_i64)
++            .and_then(|value| i32::try_from(value).ok()),
++        args.get("window_id").and_then(Value::as_u64),
++        args.get("element_token").and_then(Value::as_str),
++    ) {
++        (Some(pid), Some(window), Some(token)) if pid > 0 && window > 0 && token.len() <= 64 => {
++            (pid, window, token.to_owned())
++        }
++        _ => return refusal("invalid_request"),
++    };
++    let Some((id, row)) = parse_token(&token) else {
++        return refusal("stale_observation");
++    };
++    if id == 0 || row >= 2048 || token_for(id, row) != token {
++        return refusal("stale_observation");
++    }
++    let (prepared, retired) = {
++        let mut slot = match state.styx_private_ax.slot.lock() {
++            Ok(value) => value,
++            Err(_) => return refusal("target_cache_unavailable"),
++        };
++        let retired = slot.pending.take();
++        let prepared = (|| {
++            let revision = slot.advance()?;
++            let cached = slot
++                .snapshot
++                .as_ref()
++                .filter(|cached| {
++                    cached.id == id
++                        && cached.transport == transport
++                        && cached.session == session
++                        && cached.native.pid == pid
++                        && cached.native.window_id == window
++                        && cached.native.valid()
++                })
++                .ok_or_else(|| refusal("stale_observation"))?;
++            Ok((revision, cached.native.clone()))
++        })();
++        (prepared, retired)
++    };
++    drop(retired);
++    let (revision, snapshot) = match prepared {
++        Ok(value) => value,
++        Err(error) => return error,
++    };
++    let element = match state.snapshots.resolve(pid, &args) {
++        Ok(ResolvedElement::Element {
++            window_id,
++            element_index,
++            element,
++        }) if window_id == window && element_index == row => element,
++        _ => return refusal("stale_observation"),
++    };
++    let mut random = [0u8; 32];
++    if getrandom::fill(&mut random).is_err() {
++        return refusal("target_cache_unavailable");
++    }
++    let nonce = random
++        .iter()
++        .map(|byte| format!("{byte:02x}"))
++        .collect::<String>();
++    let target = {
++        let _lifecycle = lifecycle;
++        match native::acquire(snapshot, row, element) {
++            Ok(value) => value,
++            Err(code) => return refusal(code),
++        }
++    };
++    let mut slot = match state.styx_private_ax.slot.lock() {
++        Ok(value) => value,
++        Err(_) => return refusal("target_cache_unavailable"),
++    };
++    if slot.revision != revision
++        || !slot
++            .snapshot
++            .as_ref()
++            .is_some_and(|snapshot| snapshot.id == id && snapshot.native.valid())
++    {
++        return refusal("stale_observation");
++    }
++    slot.pending = Some(Pending {
++        nonce: nonce.clone(),
++        transport,
++        session,
++        pid,
++        window,
++        native_token: token,
++        target,
++    });
++    ToolResult::text("private_target_acquired").with_structured(json!({
++        "schema":1,"target":nonce,"pid":pid,"window_id":window,
++        "snapshot_id":format_snapshot_id(id),"element_index":row
++    }))
++}
++
++struct SetTextOnceTool {
++    state: Arc<ToolState>,
++}
++static WRITE_DEF: OnceLock<ToolDef> = OnceLock::new();
++#[async_trait]
++impl Tool for SetTextOnceTool {
++    fn def(&self) -> &ToolDef {
++        WRITE_DEF.get_or_init(||ToolDef {
++            name:"styx_private_ax_set_text_once_v1".into(),
++            description:"Private single-consume exact EditableText write; ACK does not verify application effect.".into(),
++            input_schema:json!({"type":"object","required":["editable_target","value"],"properties":{
++                "editable_target":{"type":"string","minLength":64,"maxLength":64},
++                "value":{"type":"string","maxLength":16384}},"additionalProperties":false}),
++            read_only:false,destructive:true,idempotent:false,open_world:false,
++        })
++    }
++    async fn invoke(&self, args: Value) -> ToolResult {
++        let state = self.state.clone();
++        tokio::task::spawn_blocking(move || write_blocking(state, args))
++            .await
++            .unwrap_or_else(|_| result("native_write_unknown", "unknown"))
++    }
++}
++fn write_blocking(state: Arc<ToolState>, args: Value) -> ToolResult {
++    let (transport, session, lifecycle) = match lifecycle(&args) {
++        Ok(value) => value,
++        Err(error) => return error,
++    };
++    let (nonce, value) = match (
++        args.get("editable_target").and_then(Value::as_str),
++        args.get("value").and_then(Value::as_str),
++    ) {
++        (Some(nonce), Some(value))
++            if nonce.len() == 64
++                && nonce.bytes().all(|byte| byte.is_ascii_hexdigit())
++                && value.len() <= 16 * 1024 =>
++        {
++            (nonce, value)
++        }
++        _ => return refusal("invalid_request"),
++    };
++    // Single consumption precedes binding checks and native dispatch inside
++    // this retained task; a lost async response cannot restore the target slot.
++    let (pending, advanced) = {
++        let mut slot = match state.styx_private_ax.slot.lock() {
++            Ok(value) => value,
++            Err(_) => return refusal("target_cache_unavailable"),
++        };
++        let pending = slot.pending.take();
++        (pending, slot.advance())
++    };
++    if let Err(error) = advanced {
++        return error;
++    }
++    let pending = match pending {
++        Some(pending)
++            if pending.nonce == nonce
++                && pending.transport == transport
++                && pending.session == session =>
++        {
++            pending
++        }
++        _ => return refusal("stale_observation"),
++    };
++    match state.snapshots.resolve(
++        pending.pid,
++        &json!({"window_id":pending.window,"element_token":pending.native_token}),
++    ) {
++        Ok(ResolvedElement::Element {
++            window_id, element, ..
++        }) if window_id == pending.window && pending.target.matches(&element) => {}
++        _ => return refusal("stale_observation"),
++    }
++    let value = zeroize::Zeroizing::new(value.to_owned());
++    let outcome = {
++        // Held through actual native completion, even if the async waiter
++        // or transport drops. No cancellation/timeout is native closure.
++        let _lifecycle = lifecycle;
++        native::set_text_once(pending.target, value)
++    };
++    match outcome {
++            WriteOutcome::Acknowledged => ToolResult::text("private_write_acknowledged").with_structured(json!({"schema":1,"target_consumed":true,"outcome":"acknowledged","effect":"unverified"})),
++            WriteOutcome::NotDispatched(code) => refusal(code),
++            WriteOutcome::Unknown => result("native_write_unknown", "unknown"),
++        }
++}
++
++pub(crate) fn register(registry: &mut ToolRegistry, state: Arc<ToolState>) {
++    registry.register(Box::new(AcquireTool {
++        state: state.clone(),
++    }));
++    registry.register(Box::new(SetTextOnceTool { state }));
++}
+--- a/libs/cua-driver/rust/crates/platform-windows/src/uia/mod.rs
++++ b/libs/cua-driver/rust/crates/platform-windows/src/uia/mod.rs
+@@ -8,6 +8,8 @@
+ //! Uses IUIAutomationCacheRequest to batch-fetch all properties in one RPC
+ //! (avoids per-property cross-process calls that make Chrome's 5000-node tree
+ //!  take >4s when reading each property individually).
++
++pub(crate) mod styx_private;
+ 
+ use cua_driver_core::walk_budget::WalkBudget;
+ use windows::core::{Interface, BSTR};
+--- a/libs/cua-driver/rust/crates/platform-windows/src/uia/snapshot.rs
++++ b/libs/cua-driver/rust/crates/platform-windows/src/uia/snapshot.rs
+@@ -15,6 +15,16 @@
+ }
+ 
+ impl RetainedElement {
++    pub(crate) fn from_owned_uia(element: IUIAutomationElement) -> Self {
++        Self {
++            ptr: element.into_raw() as usize,
++            kind: SnapshotKind::Uia,
++            center: (0, 0),
++            rect: None,
++            msaa_role: None,
++        }
++    }
++
+     pub fn as_ptr(&self) -> usize {
+         self.ptr
+     }
+@@ -100,6 +110,10 @@
+ }
+ 
+ impl UiaSnapshot {
++    pub(crate) fn from_retained(elements: Vec<RetainedElement>) -> Self {
++        Self { elements }
++    }
++
+     pub fn from_nodes(nodes: &[UiaNode], kind: SnapshotKind) -> Self {
+         Self {
+             elements: nodes
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/platform-windows/src/uia/styx_private.rs
+@@ -0,0 +1,684 @@
++//! Private complete UIA observation and single-consume Edit ValuePattern write.
++//! The original non-UI MTA owns all UIA calls and event subscriptions. Events
++//! invalidate; they never select a new window or confer authorization.
++use super::snapshot::{RetainedElement, UiaSnapshot};
++use serde_json::{json, Value};
++use std::{
++    sync::{
++        atomic::{AtomicBool, Ordering},
++        mpsc, Arc,
++    },
++    thread,
++    time::{Duration, Instant},
++};
++use windows::{
++    core::{implement, Interface, BSTR, VARIANT},
++    Win32::{
++        Foundation::HWND,
++        System::Com::{
++            CoCreateInstance, CoInitializeEx, CoUninitialize, CLSCTX_INPROC_SERVER,
++            COINIT_MULTITHREADED, SAFEARRAY,
++        },
++        UI::Accessibility::*,
++    },
++};
++#[path = "styx_private/binding.rs"]
++mod binding;
++use binding::WindowBinding;
++type NativeResult<T> = Result<T, &'static str>;
++
++#[implement(
++    IUIAutomationPropertyChangedEventHandler,
++    IUIAutomationStructureChangedEventHandler
++)]
++struct Invalidator {
++    invalid: Arc<AtomicBool>,
++}
++impl IUIAutomationPropertyChangedEventHandler_Impl for Invalidator_Impl {
++    fn HandlePropertyChangedEvent(
++        &self,
++        _: Option<&IUIAutomationElement>,
++        _: UIA_PROPERTY_ID,
++        _: &VARIANT,
++    ) -> windows::core::Result<()> {
++        self.invalid.store(true, Ordering::Release);
++        Ok(())
++    }
++}
++impl IUIAutomationStructureChangedEventHandler_Impl for Invalidator_Impl {
++    fn HandleStructureChangedEvent(
++        &self,
++        _: Option<&IUIAutomationElement>,
++        _: StructureChangeType,
++        _: *const SAFEARRAY,
++    ) -> windows::core::Result<()> {
++        self.invalid.store(true, Ordering::Release);
++        Ok(())
++    }
++}
++struct Apartment;
++impl Drop for Apartment {
++    fn drop(&mut self) {
++        unsafe { CoUninitialize() };
++    }
++}
++struct State {
++    automation: IUIAutomation,
++    timeouts: IUIAutomation2,
++    root: IUIAutomationElement,
++    walker: IUIAutomationTreeWalker,
++    properties: IUIAutomationPropertyChangedEventHandler,
++    structure: IUIAutomationStructureChangedEventHandler,
++    properties_added: bool,
++    structure_added: bool,
++    binding: WindowBinding,
++    invalid: Arc<AtomicBool>,
++    elements: Vec<IUIAutomationElement>,
++    values: Vec<Option<String>>,
++    pending: Option<(u64, usize)>,
++    sequence: u64,
++    captured: Instant,
++}
++impl Drop for State {
++    fn drop(&mut self) {
++        self.invalid.store(true, Ordering::Release);
++        // The exact subscription owner removes on the same original MTA. A
++        // failed COM removal is not cleanup success; direct worker Job teardown
++        // is the final physical lifetime boundary, never this Rust Drop alone.
++        unsafe {
++            if self.properties_added {
++                let _ = self
++                    .automation
++                    .RemovePropertyChangedEventHandler(&self.root, &self.properties);
++            }
++            if self.structure_added {
++                let _ = self
++                    .automation
++                    .RemoveStructureChangedEventHandler(&self.root, &self.structure);
++            }
++        }
++    }
++}
++fn budget(automation: &IUIAutomation2, deadline: Instant) -> NativeResult<()> {
++    let ms = deadline
++        .saturating_duration_since(Instant::now())
++        .as_millis();
++    if ms == 0 {
++        return Err("validation_timeout");
++    }
++    let ms = u32::try_from(ms).map_err(|_| "validation_timeout")?;
++    unsafe {
++        automation
++            .SetConnectionTimeout(ms)
++            .map_err(|_| "object_unavailable")?;
++        automation
++            .SetTransactionTimeout(ms)
++            .map_err(|_| "object_unavailable")?;
++    }
++    Ok(())
++}
++fn text(value: BSTR) -> NativeResult<String> {
++    if value.len() > 4096 {
++        return Err("stale_observation");
++    }
++    String::from_utf16(value.as_wide()).map_err(|_| "object_unavailable")
++}
++// Generated vtable ABI distinguishes success+null (leaf/end) from a real UIA
++// error. The convenience wrapper maps both to Err, so it cannot prove a leaf.
++fn relative(
++    walker: &IUIAutomationTreeWalker,
++    node: &IUIAutomationElement,
++    child: bool,
++) -> NativeResult<Option<IUIAutomationElement>> {
++    let mut raw = std::ptr::null_mut();
++    let table = Interface::vtable(walker);
++    let result = unsafe {
++        if child {
++            (table.GetFirstChildElement)(walker.as_raw(), node.as_raw(), &mut raw)
++        } else {
++            (table.GetNextSiblingElement)(walker.as_raw(), node.as_raw(), &mut raw)
++        }
++    };
++    if result != windows::core::HRESULT(0) {
++        if !raw.is_null() {
++            drop(unsafe { IUIAutomationElement::from_raw(raw) });
++        }
++        return Err("object_unavailable");
++    }
++    Ok((!raw.is_null()).then(|| unsafe { IUIAutomationElement::from_raw(raw) }))
++}
++impl State {
++    fn open(
++        pid: i32,
++        window: u64,
++        invalid: Arc<AtomicBool>,
++        deadline: Instant,
++    ) -> NativeResult<Self> {
++        let binding = WindowBinding::open(pid, window)?;
++        let automation: IUIAutomation =
++            unsafe { CoCreateInstance(&CUIAutomation8, None, CLSCTX_INPROC_SERVER) }
++                .map_err(|_| "editable_unavailable")?;
++        let timeouts = automation
++            .cast::<IUIAutomation2>()
++            .map_err(|_| "editable_unavailable")?;
++        budget(&timeouts, deadline)?;
++        unsafe { timeouts.SetAutoSetFocus(false) }.map_err(|_| "editable_unavailable")?;
++        let root = unsafe { automation.ElementFromHandle(HWND(window as usize as *mut _)) }
++            .map_err(|_| "window_unavailable")?;
++        let walker = unsafe { automation.RawViewWalker() }.map_err(|_| "object_unavailable")?;
++        let properties: IUIAutomationPropertyChangedEventHandler = Invalidator {
++            invalid: invalid.clone(),
++        }
++        .into();
++        let structure = properties.cast().map_err(|_| "object_unavailable")?;
++        let mut state = Self {
++            automation,
++            timeouts,
++            root,
++            walker,
++            properties,
++            structure,
++            properties_added: false,
++            structure_added: false,
++            binding,
++            invalid,
++            elements: Vec::new(),
++            values: Vec::new(),
++            pending: None,
++            sequence: 0,
++            captured: Instant::now(),
++        };
++        budget(&state.timeouts, deadline)?;
++        unsafe {
++            state.automation.AddPropertyChangedEventHandlerNativeArray(
++                &state.root,
++                TreeScope_Subtree,
++                None,
++                &state.properties,
++                &[
++                    UIA_ValueValuePropertyId,
++                    UIA_IsEnabledPropertyId,
++                    UIA_IsPasswordPropertyId,
++                    UIA_ControlTypePropertyId,
++                    UIA_BoundingRectanglePropertyId,
++                    UIA_NamePropertyId,
++                    UIA_IsOffscreenPropertyId,
++                ],
++            )
++        }
++        .map_err(|_| "observer_unavailable")?;
++        state.properties_added = true;
++        budget(&state.timeouts, deadline)?;
++        unsafe {
++            state.automation.AddStructureChangedEventHandler(
++                &state.root,
++                TreeScope_Subtree,
++                None,
++                &state.structure,
++            )
++        }
++        .map_err(|_| "observer_unavailable")?;
++        state.structure_added = true;
++        state.verify(deadline)?;
++        Ok(state)
++    }
++    fn verify(&self, deadline: Instant) -> NativeResult<()> {
++        if self.invalid.load(Ordering::Acquire) {
++            return Err("target_invalidated");
++        }
++        if self.captured.elapsed() >= Duration::from_secs(30) {
++            return Err("target_expired");
++        }
++        self.binding.verify()?;
++        budget(&self.timeouts, deadline)?;
++        let current = unsafe { self.automation.ElementFromHandle(self.binding.hwnd()) }
++            .map_err(|_| "window_unavailable")?;
++        if !unsafe { self.automation.CompareElements(&current, &self.root) }
++            .map_err(|_| "object_unavailable")?
++            .as_bool()
++        {
++            return Err("window_changed");
++        }
++        if unsafe { self.root.CurrentProcessId() }.map_err(|_| "object_unavailable")?
++            != self.binding.pid()
++        {
++            return Err("unproven_object_owner");
++        }
++        budget(&self.timeouts, deadline)?;
++        if self.invalid.load(Ordering::Acquire) {
++            return Err("target_invalidated");
++        }
++        Ok(())
++    }
++    fn collect(
++        &mut self,
++        limit: usize,
++        max_depth: usize,
++        deadline: Instant,
++    ) -> NativeResult<Vec<Value>> {
++        let mut stack = vec![(self.root.clone(), 0usize, None::<usize>)];
++        let mut rows = Vec::new();
++        while let Some((element, depth, parent)) = stack.pop() {
++            budget(&self.timeouts, deadline)?;
++            if self.invalid.load(Ordering::Acquire) {
++                return Err("target_invalidated");
++            }
++            if rows.len() >= limit || depth > max_depth {
++                return Err("stale_observation");
++            }
++            for old in &self.elements {
++                if unsafe { self.automation.CompareElements(old, &element) }
++                    .map_err(|_| "object_unavailable")?
++                    .as_bool()
++                {
++                    return Err("stale_observation");
++                }
++                budget(&self.timeouts, deadline)?;
++            }
++            if unsafe { element.CurrentProcessId() }.map_err(|_| "object_unavailable")?
++                != self.binding.pid()
++            {
++                return Err("unproven_object_owner");
++            }
++            let role = unsafe { element.CurrentControlType() }.map_err(|_| "object_unavailable")?;
++            budget(&self.timeouts, deadline)?;
++            let secret = unsafe { element.CurrentIsPassword() }
++                .map_err(|_| "object_unavailable")?
++                .as_bool();
++            budget(&self.timeouts, deadline)?;
++            let label = text(unsafe { element.CurrentName() }.map_err(|_| "object_unavailable")?)?;
++            budget(&self.timeouts, deadline)?;
++            let enabled = unsafe { element.CurrentIsEnabled() }
++                .map_err(|_| "object_unavailable")?
++                .as_bool();
++            let value = if role == UIA_EditControlTypeId && !secret {
++                budget(&self.timeouts, deadline)?;
++                let pattern = unsafe {
++                    element.GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
++                }
++                .map_err(|_| "editable_unavailable")?;
++                budget(&self.timeouts, deadline)?;
++                Some(text(
++                    unsafe { pattern.CurrentValue() }.map_err(|_| "object_unavailable")?,
++                )?)
++            } else {
++                None
++            };
++            let index = rows.len();
++            let mut row = json!({"element_index":index,"role":super::control_type_name(role.0),"label":label,"depth":depth,"enabled":enabled,"password":secret});
++            if let Some(parent) = parent {
++                row["parent_index"] = json!(parent);
++            }
++            if let Some(value) = &value {
++                row["value"] = json!(value);
++            }
++            let mut children = Vec::new();
++            budget(&self.timeouts, deadline)?;
++            let mut next = relative(&self.walker, &element, true)?;
++            while let Some(child) = next {
++                if rows.len() + stack.len() + children.len() + 1 >= limit || depth == max_depth {
++                    return Err("stale_observation");
++                }
++                budget(&self.timeouts, deadline)?;
++                next = relative(&self.walker, &child, false)?;
++                children.push(child);
++            }
++            for child in children.into_iter().rev() {
++                stack.push((child, depth + 1, Some(index)));
++            }
++            self.elements.push(element);
++            self.values.push(value);
++            rows.push(row);
++        }
++        if rows.is_empty()
++            || serde_json::to_vec(&rows)
++                .map_err(|_| "stale_observation")?
++                .len()
++                > 256 * 1024
++        {
++            return Err("stale_observation");
++        }
++        self.verify(deadline)?;
++        Ok(rows)
++    }
++    fn belongs_to_original_window(
++        &self,
++        element: &IUIAutomationElement,
++        deadline: Instant,
++    ) -> NativeResult<()> {
++        let mut current = element.clone();
++        for _ in 0..=64 {
++            budget(&self.timeouts, deadline)?;
++            if unsafe { self.automation.CompareElements(&current, &self.root) }
++                .map_err(|_| "object_unavailable")?
++                .as_bool()
++            {
++                return Ok(());
++            }
++            budget(&self.timeouts, deadline)?;
++            let mut raw = std::ptr::null_mut();
++            let result = unsafe {
++                (Interface::vtable(&self.walker).GetParentElement)(
++                    self.walker.as_raw(),
++                    current.as_raw(),
++                    &mut raw,
++                )
++            };
++            if result != windows::core::HRESULT(0) {
++                if !raw.is_null() {
++                    drop(unsafe { IUIAutomationElement::from_raw(raw) });
++                }
++                return Err("object_unavailable");
++            }
++            if raw.is_null() {
++                return Err("object_frame_mismatch");
++            }
++            current = unsafe { IUIAutomationElement::from_raw(raw) };
++        }
++        Err("object_frame_mismatch")
++    }
++    fn editable(&self, row: usize, deadline: Instant) -> NativeResult<IUIAutomationValuePattern> {
++        self.verify(deadline)?;
++        let element = self.elements.get(row).ok_or("stale_observation")?;
++        self.belongs_to_original_window(element, deadline)?;
++        let expected = self
++            .values
++            .get(row)
++            .and_then(Option::as_ref)
++            .ok_or("editable_unavailable")?;
++        budget(&self.timeouts, deadline)?;
++        unsafe {
++            if element
++                .CurrentControlType()
++                .map_err(|_| "object_unavailable")?
++                != UIA_EditControlTypeId
++                || element
++                    .CurrentIsPassword()
++                    .map_err(|_| "object_unavailable")?
++                    .as_bool()
++                || !element
++                    .CurrentIsEnabled()
++                    .map_err(|_| "object_unavailable")?
++                    .as_bool()
++                || element
++                    .CurrentProcessId()
++                    .map_err(|_| "object_unavailable")?
++                    != self.binding.pid()
++            {
++                return Err("editable_unavailable");
++            }
++            let pattern = element
++                .GetCurrentPatternAs::<IUIAutomationValuePattern>(UIA_ValuePatternId)
++                .map_err(|_| "editable_unavailable")?;
++            if pattern
++                .CurrentIsReadOnly()
++                .map_err(|_| "object_unavailable")?
++                .as_bool()
++                || text(pattern.CurrentValue().map_err(|_| "object_unavailable")?)? != *expected
++            {
++                return Err("target_identity_changed");
++            }
++            self.verify(deadline)?;
++            Ok(pattern)
++        }
++    }
++}
++enum Command {
++    Acquire {
++        row: usize,
++        pointer: usize,
++        reply: mpsc::SyncSender<NativeResult<u64>>,
++    },
++    Write {
++        sequence: u64,
++        value: zeroize::Zeroizing<String>,
++        reply: mpsc::SyncSender<WriteOutcome>,
++    },
++}
++struct Worker {
++    invalid: Arc<AtomicBool>,
++    stop: Arc<AtomicBool>,
++    commands: mpsc::SyncSender<Command>,
++    thread: Option<thread::JoinHandle<()>>,
++}
++impl Drop for Worker {
++    fn drop(&mut self) {
++        self.invalid.store(true, Ordering::Release);
++        self.stop.store(true, Ordering::Release);
++        if let Some(thread) = self.thread.take() {
++            let _ = thread.join();
++        }
++    }
++}
++pub(crate) struct CompleteSnapshot {
++    pub(crate) pid: i32,
++    pub(crate) window_id: u64,
++    pub(crate) birth: u64,
++    pub(crate) rows: Vec<Value>,
++    pub(crate) elements: Vec<RetainedElement>,
++    worker: Worker,
++}
++impl CompleteSnapshot {
++    pub(crate) fn invalidate(&self) {
++        self.worker.invalid.store(true, Ordering::Release);
++    }
++    pub(crate) fn valid(&self) -> bool {
++        !self.worker.invalid.load(Ordering::Acquire)
++            && self
++                .worker
++                .thread
++                .as_ref()
++                .is_some_and(|thread| !thread.is_finished())
++    }
++    pub(crate) fn payload(&self) -> UiaSnapshot {
++        UiaSnapshot::from_retained(self.elements.clone())
++    }
++}
++pub(crate) fn capture(
++    pid: i32,
++    window_id: u64,
++    max_elements: usize,
++    max_depth: usize,
++    deadline: Instant,
++) -> NativeResult<CompleteSnapshot> {
++    let invalid = Arc::new(AtomicBool::new(false));
++    let stop = Arc::new(AtomicBool::new(false));
++    let thread_invalid = invalid.clone();
++    let thread_stop = stop.clone();
++    let (commands, incoming) = mpsc::sync_channel(1);
++    let (ready, result) = mpsc::sync_channel(1);
++    let thread = thread::Builder::new()
++        .name("styx-private-uia".into())
++        .spawn(move || {
++            if unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.is_err() {
++                let _ = ready.send(Err("object_unavailable"));
++                return;
++            }
++            let _apartment = Apartment;
++            let mut state = match State::open(pid, window_id, thread_invalid.clone(), deadline) {
++                Ok(state) => state,
++                Err(e) => {
++                    let _ = ready.send(Err(e));
++                    return;
++                }
++            };
++            let rows = match state.collect(max_elements, max_depth, deadline) {
++                Ok(rows) => rows,
++                Err(e) => {
++                    let _ = ready.send(Err(e));
++                    return;
++                }
++            };
++            let elements = state
++                .elements
++                .iter()
++                .cloned()
++                .map(RetainedElement::from_owned_uia)
++                .collect::<Vec<_>>();
++            if ready
++                .send(Ok((rows, elements, state.binding.birth())))
++                .is_err()
++            {
++                return;
++            }
++            while !thread_stop.load(Ordering::Acquire) {
++                let command = match incoming.recv_timeout(Duration::from_millis(10)) {
++                    Ok(c) => c,
++                    Err(mpsc::RecvTimeoutError::Timeout) => continue,
++                    Err(_) => break,
++                };
++                let deadline = Instant::now() + Duration::from_secs(3);
++                match command {
++                    Command::Acquire {
++                        row,
++                        pointer,
++                        reply,
++                    } => {
++                        state.pending.take();
++                        let answer = (|| {
++                            let element = state.elements.get(row).ok_or("stale_observation")?;
++                            if element.as_raw() as usize != pointer {
++                                return Err("target_identity_changed");
++                            }
++                            state.editable(row, deadline)?;
++                            state.sequence = state
++                                .sequence
++                                .checked_add(1)
++                                .ok_or("target_cache_exhausted")?;
++                            state.pending = Some((state.sequence, row));
++                            Ok(state.sequence)
++                        })();
++                        let _ = reply.send(answer);
++                    }
++                    Command::Write {
++                        sequence,
++                        value,
++                        reply,
++                    } => {
++                        // Consume before validation; errors cannot restore this slot.
++                        let answer = match state.pending.take() {
++                            Some((expected, row)) if expected == sequence => {
++                                match state.editable(row, deadline) {
++                                    Ok(pattern) => match state
++                                        .binding
++                                        .verify()
++                                        .and_then(|_| budget(&state.timeouts, deadline))
++                                    {
++                                        Ok(()) => {
++                                            if state.invalid.swap(true, Ordering::AcqRel) {
++                                                WriteOutcome::NotDispatched("target_invalidated")
++                                            } else {
++                                                match unsafe {
++                                                    pattern.SetValue(&BSTR::from(value.as_str()))
++                                                } {
++                                                    Ok(()) => WriteOutcome::Acknowledged,
++                                                    Err(_) => WriteOutcome::Unknown,
++                                                }
++                                            }
++                                        }
++                                        Err(e) => WriteOutcome::NotDispatched(e),
++                                    },
++                                    Err(e) => WriteOutcome::NotDispatched(e),
++                                }
++                            }
++                            _ => WriteOutcome::NotDispatched("stale_observation"),
++                        };
++                        let _ = reply.send(answer);
++                    }
++                }
++            }
++        })
++        .map_err(|_| "target_cache_unavailable")?;
++    let worker = Worker {
++        invalid,
++        stop,
++        commands,
++        thread: Some(thread),
++    };
++    let (rows, elements, birth) = result
++        .recv_timeout(deadline.saturating_duration_since(Instant::now()))
++        .map_err(|_| "validation_timeout")??;
++    Ok(CompleteSnapshot {
++        pid,
++        window_id,
++        birth,
++        rows,
++        elements,
++        worker,
++    })
++}
++pub(crate) struct EditableTarget {
++    snapshot: Arc<CompleteSnapshot>,
++    element: RetainedElement,
++    sequence: u64,
++}
++impl EditableTarget {
++    pub(crate) fn matches(&self, element: &RetainedElement) -> bool {
++        element.is_uia() && element.as_ptr() == self.element.as_ptr() && self.snapshot.valid()
++    }
++}
++pub(crate) fn acquire(
++    snapshot: Arc<CompleteSnapshot>,
++    row: usize,
++    element: RetainedElement,
++) -> NativeResult<EditableTarget> {
++    if !snapshot.valid()
++        || !element.is_uia()
++        || snapshot
++            .elements
++            .get(row)
++            .is_none_or(|original| original.as_ptr() != element.as_ptr())
++    {
++        return Err("stale_observation");
++    }
++    let (reply, receive) = mpsc::sync_channel(1);
++    snapshot
++        .worker
++        .commands
++        .try_send(Command::Acquire {
++            row,
++            pointer: element.as_ptr(),
++            reply,
++        })
++        .map_err(|_| "target_cache_unavailable")?;
++    let sequence = receive.recv().map_err(|_| "object_unavailable")??;
++    Ok(EditableTarget {
++        snapshot,
++        element,
++        sequence,
++    })
++}
++pub(crate) enum WriteOutcome {
++    Acknowledged,
++    NotDispatched(&'static str),
++    Unknown,
++}
++pub(crate) fn set_text_once(
++    target: EditableTarget,
++    value: zeroize::Zeroizing<String>,
++) -> WriteOutcome {
++    if value.contains('\0') {
++        return WriteOutcome::NotDispatched("invalid_request");
++    }
++    if !target.snapshot.valid() {
++        return WriteOutcome::NotDispatched("target_invalidated");
++    }
++    let (reply, receive) = mpsc::sync_channel(1);
++    if target
++        .snapshot
++        .worker
++        .commands
++        .try_send(Command::Write {
++            sequence: target.sequence,
++            value,
++            reply,
++        })
++        .is_err()
++    {
++        target.snapshot.invalidate();
++        return WriteOutcome::NotDispatched("target_cache_unavailable");
++    }
++    // Wait for the original native result, never turn waiter timeout into a
++    // cancelled action. Host owns direct-worker Job cancellation and settlement.
++    receive.recv().unwrap_or(WriteOutcome::Unknown)
++}
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/platform-windows/src/uia/styx_private/binding.rs
+@@ -0,0 +1,376 @@
++//! Local OS facts, independent of caller-supplied descriptors. These are fresh
++//! observations, not an atomic lock/action barrier. The Host additionally fences
++//! its original WTS event epoch and owns the direct worker's entire Job.
++use super::NativeResult;
++use std::{
++    ffi::c_void,
++    mem::{size_of, zeroed},
++};
++use windows::{
++    core::PWSTR,
++    Win32::{
++        Foundation::{CloseHandle, BOOL, FILETIME, HANDLE, HWND, LPARAM},
++        Security::*,
++        System::{RemoteDesktop::*, StationsAndDesktops::*, Threading::*},
++        UI::WindowsAndMessaging::GetWindowThreadProcessId,
++    },
++};
++struct Handle(HANDLE);
++impl Drop for Handle {
++    fn drop(&mut self) {
++        unsafe {
++            let _ = CloseHandle(self.0);
++        }
++    }
++}
++struct Desktop(HDESK);
++impl Drop for Desktop {
++    fn drop(&mut self) {
++        unsafe {
++            let _ = CloseDesktop(self.0);
++        }
++    }
++}
++fn token(process: HANDLE) -> NativeResult<Handle> {
++    let mut value = HANDLE::default();
++    unsafe { OpenProcessToken(process, TOKEN_QUERY, &mut value) }
++        .map_err(|_| "permission_required")?;
++    Ok(Handle(value))
++}
++struct Info(Vec<usize>);
++impl Info {
++    fn ptr<T>(&self) -> *const T {
++        self.0.as_ptr().cast()
++    }
++}
++fn info(token: HANDLE, class: TOKEN_INFORMATION_CLASS) -> NativeResult<Info> {
++    let mut size = 0;
++    let _ = unsafe { GetTokenInformation(token, class, None, 0, &mut size) };
++    if size == 0 || size > 65536 {
++        return Err("session_unknown");
++    }
++    let mut data = vec![0usize; (size as usize).div_ceil(size_of::<usize>())];
++    let mut returned = 0;
++    unsafe {
++        GetTokenInformation(
++            token,
++            class,
++            Some(data.as_mut_ptr().cast()),
++            size,
++            &mut returned,
++        )
++    }
++    .map_err(|_| "session_unknown")?;
++    if returned != size {
++        return Err("session_unknown");
++    }
++    Ok(Info(data))
++}
++fn session(token: HANDLE) -> NativeResult<u32> {
++    let data = info(token, TokenSessionId)?;
++    if data.0.len() * size_of::<usize>() < 4 {
++        return Err("session_unknown");
++    }
++    Ok(unsafe { *data.ptr::<u32>() })
++}
++fn integrity(token: HANDLE) -> NativeResult<u32> {
++    let data = info(token, TokenIntegrityLevel)?;
++    if data.0.len() * size_of::<usize>() < size_of::<TOKEN_MANDATORY_LABEL>() {
++        return Err("session_unknown");
++    }
++    let sid = unsafe { (*data.ptr::<TOKEN_MANDATORY_LABEL>()).Label.Sid };
++    if !unsafe { IsValidSid(sid) }.as_bool() {
++        return Err("session_unknown");
++    }
++    let count = unsafe { *GetSidSubAuthorityCount(sid) };
++    if count == 0 {
++        return Err("session_unknown");
++    }
++    Ok(unsafe { *GetSidSubAuthority(sid, u32::from(count - 1)) })
++}
++#[derive(Clone, Copy, PartialEq, Eq)]
++struct TokenStamp {
++    id: (u32, i32),
++    modified: (u32, i32),
++    authentication: (u32, i32),
++}
++fn token_stamp(token: HANDLE) -> NativeResult<TokenStamp> {
++    let data = info(token, TokenStatistics)?;
++    if data.0.len() * size_of::<usize>() < size_of::<TOKEN_STATISTICS>() {
++        return Err("session_unknown");
++    }
++    let value = unsafe { &*data.ptr::<TOKEN_STATISTICS>() };
++    Ok(TokenStamp {
++        id: (value.TokenId.LowPart, value.TokenId.HighPart),
++        modified: (value.ModifiedId.LowPart, value.ModifiedId.HighPart),
++        authentication: (
++            value.AuthenticationId.LowPart,
++            value.AuthenticationId.HighPart,
++        ),
++    })
++}
++fn principal_matches(a: HANDLE, b: HANDLE) -> NativeResult<()> {
++    let au = info(a, TokenUser)?;
++    let bu = info(b, TokenUser)?;
++    let az = info(a, TokenStatistics)?;
++    let bz = info(b, TokenStatistics)?;
++    if au.0.len() * size_of::<usize>() < size_of::<TOKEN_USER>()
++        || bu.0.len() * size_of::<usize>() < size_of::<TOKEN_USER>()
++        || az.0.len() * size_of::<usize>() < size_of::<TOKEN_STATISTICS>()
++        || bz.0.len() * size_of::<usize>() < size_of::<TOKEN_STATISTICS>()
++    {
++        return Err("session_unknown");
++    }
++    let (auser, buser, astat, bstat) = unsafe {
++        (
++            &*au.ptr::<TOKEN_USER>(),
++            &*bu.ptr::<TOKEN_USER>(),
++            &*az.ptr::<TOKEN_STATISTICS>(),
++            &*bz.ptr::<TOKEN_STATISTICS>(),
++        )
++    };
++    if !unsafe { EqualSid(auser.User.Sid, buser.User.Sid) }.is_ok()
++        || astat.AuthenticationId != bstat.AuthenticationId
++        || session(a)? != session(b)?
++        || integrity(b)? > integrity(a)?
++    {
++        return Err("unproven_object_owner");
++    }
++    Ok(())
++}
++fn name(handle: HANDLE) -> NativeResult<String> {
++    let mut buf = [0u16; 256];
++    let mut used = 0;
++    unsafe {
++        GetUserObjectInformationW(
++            handle,
++            UOI_NAME,
++            Some(buf.as_mut_ptr().cast()),
++            (buf.len() * 2) as u32,
++            Some(&mut used),
++        )
++    }
++    .map_err(|_| "session_unknown")?;
++    if used < 2 || used > 512 || used % 2 != 0 || buf[used as usize / 2 - 1] != 0 {
++        return Err("session_unknown");
++    }
++    String::from_utf16(&buf[..used as usize / 2 - 1]).map_err(|_| "session_unknown")
++}
++fn input(desktop: HDESK) -> NativeResult<()> {
++    let mut yes = BOOL(0);
++    let mut used = 0;
++    unsafe {
++        GetUserObjectInformationW(
++            HANDLE(desktop.0),
++            UOI_IO,
++            Some((&mut yes as *mut BOOL).cast()),
++            size_of::<BOOL>() as u32,
++            Some(&mut used),
++        )
++    }
++    .map_err(|_| "session_unknown")?;
++    if used != size_of::<BOOL>() as u32 || !yes.as_bool() {
++        return Err("session_locked");
++    }
++    Ok(())
++}
++#[derive(Clone, Copy, PartialEq, Eq)]
++struct Session {
++    session: u32,
++    logon: i64,
++    connect: i64,
++}
++fn unlocked(session: u32) -> NativeResult<Session> {
++    if session == 0 {
++        return Err("session_unknown");
++    }
++    let mut buffer = PWSTR::null();
++    let mut count = 0;
++    unsafe {
++        WTSQuerySessionInformationW(
++            WTS_CURRENT_SERVER_HANDLE,
++            session,
++            WTSSessionInfoEx,
++            &mut buffer,
++            &mut count,
++        )
++    }
++    .map_err(|_| "session_unknown")?;
++    struct Buffer(PWSTR);
++    impl Drop for Buffer {
++        fn drop(&mut self) {
++            unsafe {
++                WTSFreeMemory(self.0 .0.cast());
++            }
++        }
++    }
++    let _owner = Buffer(buffer);
++    if buffer.is_null() || count as usize != size_of::<WTSINFOEXW>() {
++        return Err("session_unknown");
++    }
++    let data = unsafe { &*buffer.0.cast::<WTSINFOEXW>() };
++    if data.Level != 1 {
++        return Err("session_unknown");
++    }
++    let row = unsafe { data.Data.WTSInfoExLevel1 };
++    if row.SessionId != session || row.SessionState != WTSActive {
++        return Err("session_disconnected");
++    }
++    if row.SessionFlags as u32 == WTS_SESSIONSTATE_LOCK {
++        return Err("session_locked");
++    }
++    if row.SessionFlags as u32 != WTS_SESSIONSTATE_UNLOCK
++        || row.LogonTime <= 0
++        || row.ConnectTime <= 0
++    {
++        return Err("session_unknown");
++    }
++    Ok(Session {
++        session,
++        logon: row.LogonTime,
++        connect: row.ConnectTime,
++    })
++}
++fn birth(handle: HANDLE) -> NativeResult<u64> {
++    let (mut created, mut exit, mut kernel, mut user): (FILETIME, FILETIME, FILETIME, FILETIME) =
++        unsafe { zeroed() };
++    unsafe { GetProcessTimes(handle, &mut created, &mut exit, &mut kernel, &mut user) }
++        .map_err(|_| "process_unavailable")?;
++    if exit.dwLowDateTime != 0 || exit.dwHighDateTime != 0 {
++        return Err("process_unavailable");
++    }
++    Ok((u64::from(created.dwHighDateTime) << 32) | u64::from(created.dwLowDateTime))
++}
++struct Enumeration {
++    target: HWND,
++    pid: u32,
++    seen: bool,
++    overflow: bool,
++    count: usize,
++}
++unsafe extern "system" fn visit(window: HWND, param: LPARAM) -> BOOL {
++    let state = unsafe { &mut *(param.0 as *mut Enumeration) };
++    state.count += 1;
++    if state.count > 4096 {
++        state.overflow = true;
++        return BOOL(0);
++    }
++    if window == state.target {
++        let mut pid = 0;
++        unsafe {
++            GetWindowThreadProcessId(window, Some(&mut pid));
++        }
++        state.seen = pid == state.pid;
++    }
++    BOOL(1)
++}
++pub(super) struct WindowBinding {
++    pid: i32,
++    window: u64,
++    process: Handle,
++    token: Handle,
++    current: Handle,
++    desktop: Desktop,
++    session: Session,
++    birth: u64,
++    original_current_token: TokenStamp,
++    original_target_token: TokenStamp,
++}
++impl WindowBinding {
++    pub(super) fn open(pid: i32, window: u64) -> NativeResult<Self> {
++        if pid <= 0 || window == 0 || window > usize::MAX as u64 {
++            return Err("window_unavailable");
++        }
++        let process = Handle(
++            unsafe { OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, false, pid as u32) }
++                .map_err(|_| "process_unavailable")?,
++        );
++        let target_token = token(process.0)?;
++        let current = token(unsafe { GetCurrentProcess() })?;
++        principal_matches(current.0, target_token.0)?;
++        let session = unlocked(session(current.0)?)?;
++        let station = unsafe { GetProcessWindowStation() }.map_err(|_| "session_unknown")?;
++        if name(HANDLE(station.0))? != "WinSta0" {
++            return Err("session_unknown");
++        }
++        let desktop = Desktop(
++            unsafe { OpenInputDesktop(DESKTOP_CONTROL_FLAGS(0), false, DESKTOP_READOBJECTS) }
++                .map_err(|_| "session_unknown")?,
++        );
++        if name(HANDLE(desktop.0 .0))? != "Default" {
++            return Err("session_locked");
++        }
++        input(desktop.0)?;
++        let birth = birth(process.0)?;
++        let original_current_token = token_stamp(current.0)?;
++        let original_target_token = token_stamp(target_token.0)?;
++        let result = Self {
++            pid,
++            window,
++            process,
++            token: target_token,
++            current,
++            desktop,
++            session,
++            birth,
++            original_current_token,
++            original_target_token,
++        };
++        result.verify()?;
++        Ok(result)
++    }
++    pub(super) fn pid(&self) -> i32 {
++        self.pid
++    }
++    pub(super) fn hwnd(&self) -> HWND {
++        HWND(self.window as usize as *mut c_void)
++    }
++    pub(super) fn birth(&self) -> u64 {
++        self.birth
++    }
++    pub(super) fn verify(&self) -> NativeResult<()> {
++        if birth(self.process.0)? != self.birth {
++            return Err("process_unavailable");
++        }
++        // Reopen the primary token of each original still-live process. A held
++        // old token alone does not detect replacement or privilege mutation.
++        let current = token(unsafe { GetCurrentProcess() })?;
++        let target = token(self.process.0)?;
++        if token_stamp(current.0)? != self.original_current_token
++            || token_stamp(target.0)? != self.original_target_token
++        {
++            return Err("session_changed");
++        }
++        principal_matches(current.0, target.0)?;
++        principal_matches(self.current.0, self.token.0)?;
++        if unlocked(self.session.session)? != self.session {
++            return Err("session_disconnected");
++        }
++        input(self.desktop.0)?;
++        let mut enumeration = Enumeration {
++            target: self.hwnd(),
++            pid: self.pid as u32,
++            seen: false,
++            overflow: false,
++            count: 0,
++        };
++        let result = unsafe {
++            EnumDesktopWindows(
++                self.desktop.0,
++                Some(visit),
++                LPARAM((&mut enumeration as *mut Enumeration) as isize),
++            )
++        };
++        if enumeration.overflow {
++            return Err("session_unknown");
++        }
++        result.map_err(|_| "session_unknown")?;
++        if !enumeration.seen {
++            return Err("window_changed");
++        }
++        if unlocked(self.session.session)? != self.session {
++            return Err("session_disconnected");
++        }
++        input(self.desktop.0)
++    }
 +}

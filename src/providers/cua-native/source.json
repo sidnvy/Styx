@@ -5,8 +5,16 @@
   "upstream_version": "0.36.0",
   "official_archive_sha256": "157acdc2fd0bf5c480af2bdbe4a69f75a709551627f851caee16346234fdedef",
   "patch": "cua-0.36.0-styx-once.patch",
-  "patch_sha256": "028621c8e3c2eeb755f66fe2ff296271b53c553359da696bd62277a00b282a9c",
+  "patch_sha256": "e413ddb521f85d24d8d42d08363d5566e3f86a40328c5565730dfb20fcd8bb07",
   "files": [
+    {
+      "path": "libs/cua-driver/rust/Cargo.lock",
+      "original_sha256": "f9d49ce2dccdc43b2f7f027185301138fdd45eab4f9a556aace4cb0f4a98d46c",
+      "original_git_blob_sha1": "a8eb3937149be683228f91c6465afa9e20373b84",
+      "final_sha256": "978a9b7e0bc2855af210f26c28dadc29f1a9b978df2677385332f1fc6bf39964",
+      "original_bytes": 160713,
+      "final_bytes": 160737
+    },
     {
       "path": "libs/cua-driver/rust/crates/cua-driver-core/src/authorization.rs",
       "original_sha256": "1b55a8696da7df98455833a7c1f6d1851eb9a60520050dd76143883820ecc827",
@@ -14,6 +22,14 @@
       "final_sha256": "d46226c685731b6c9886f9d7931167819bcc318a43b1447d830617129e9ac7eb",
       "original_bytes": 77890,
       "final_bytes": 78218
+    },
+    {
+      "path": "libs/cua-driver/rust/crates/cua-driver-core/src/daemon.rs",
+      "original_sha256": "1c06afb2a576f62317c32e709136f463520eca851009a93f3835973af507848f",
+      "original_git_blob_sha1": "004ece3806118cfc07e2716e85be8fc9630346a5",
+      "final_sha256": "7760bb0c8bd69fd54b06f24a14102155fdf2a3d85b8b9585a070e614f13d5544",
+      "original_bytes": 13170,
+      "final_bytes": 16102
     },
     {
       "path": "libs/cua-driver/rust/crates/cua-driver-core/src/tool.rs",
@@ -24,12 +40,28 @@
       "final_bytes": 290196
     },
     {
+      "path": "libs/cua-driver/rust/crates/cua-driver/src/cli.rs",
+      "original_sha256": "321a7a20c09c6c1584186da7fb14e821ef6914947d3d72f22c3742b342916e3c",
+      "original_git_blob_sha1": "c76f074604221323134a4335223540a00bf2ccb1",
+      "final_sha256": "69811c1c7ec7d494834836bc82e5b7d4a92e56f12abba8091ef67fa8569a4461",
+      "original_bytes": 291130,
+      "final_bytes": 297853
+    },
+    {
       "path": "libs/cua-driver/rust/crates/cua-driver/src/proxy.rs",
       "original_sha256": "4fef0a24eb37d6ba73ba35ff7acdb205a61ed56e1b45633ff6bb96341e186f18",
       "original_git_blob_sha1": "810bf385e599980efc9274a76debe5e11b3f8aff",
-      "final_sha256": "01eef755773a04e0f28d8231388bfed22d8a43a6c5cbf79aa1593fdf7df6ac28",
+      "final_sha256": "8c4e172e8bba475bdbb5eb6c1ed391a0a9af87500504ad718ae30fbf0e358d44",
       "original_bytes": 62011,
-      "final_bytes": 64251
+      "final_bytes": 65247
+    },
+    {
+      "path": "libs/cua-driver/rust/crates/cua-driver/src/proxy_owned.rs",
+      "original_sha256": null,
+      "original_git_blob_sha1": null,
+      "final_sha256": "bf2e0a6a57a8e19e220a3245dc6b9abb3451820107c48f19d2dfadf0018112ba",
+      "original_bytes": 0,
+      "final_bytes": 3412
     },
     {
       "path": "libs/cua-driver/rust/crates/cua-driver/src/sdk_adapter.rs",
@@ -158,6 +190,70 @@
       "final_sha256": "2674b24b23c79cf6390ce1f3dea4677321bd527b4bcd771f08288412c702326b",
       "original_bytes": 0,
       "final_bytes": 17140
+    },
+    {
+      "path": "libs/cua-driver/rust/crates/platform-windows/Cargo.toml",
+      "original_sha256": "1a1cbc82841bc738694c114995d9d2c4003441e6e7b0bb2e745c5df676d5cd33",
+      "original_git_blob_sha1": "1d2a2ae148db9ffe7d9ee599babd4fd89ba416df",
+      "final_sha256": "3b4838c2ba9f677bef50e15d82b4e9084518816236ab1f3e139d4e16bf3d3b7e",
+      "original_bytes": 3879,
+      "final_bytes": 3946
+    },
+    {
+      "path": "libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs",
+      "original_sha256": "8db99aefc501c8747b825be534dbf48602f1e1423fb553c886eb9c84e864ef8f",
+      "original_git_blob_sha1": "94d1c68610ccb4db9fb55bbf39cbca8110df5bf2",
+      "final_sha256": "b88afe579d796b3a4b38605e4b4977ad9f4f140c8a60fb123d587e05c814ca08",
+      "original_bytes": 510570,
+      "final_bytes": 511158
+    },
+    {
+      "path": "libs/cua-driver/rust/crates/platform-windows/src/tools/mod.rs",
+      "original_sha256": "7094e8f1641bc299bb3a14001b4f4c45c84cf6f41dc4f7162eb3630cebdfec5b",
+      "original_git_blob_sha1": "b7c4793603a376b0204513b7dd991193fb7d498f",
+      "final_sha256": "cd8da63926f632395ce4b8d30704289d6987d51ffe51230e261bc83f5895fad8",
+      "original_bytes": 1065,
+      "final_bytes": 1124
+    },
+    {
+      "path": "libs/cua-driver/rust/crates/platform-windows/src/tools/styx_private.rs",
+      "original_sha256": null,
+      "original_git_blob_sha1": null,
+      "final_sha256": "be751b846fe5664941a947646722b7ff21fe52ce5fd2fb528fd5a1d0af13df46",
+      "original_bytes": 0,
+      "final_bytes": 18000
+    },
+    {
+      "path": "libs/cua-driver/rust/crates/platform-windows/src/uia/mod.rs",
+      "original_sha256": "d7d0d160c1009e20a636ee5694a60fcce257bc5e2e60b85c18ab39106a682dc3",
+      "original_git_blob_sha1": "7536aed7893863682508c463efb248b65dab5285",
+      "final_sha256": "967f59136e3552edcfb790a46fa5ee72feb607811a08a36e45d2b429462d71c5",
+      "original_bytes": 43969,
+      "final_bytes": 43999
+    },
+    {
+      "path": "libs/cua-driver/rust/crates/platform-windows/src/uia/snapshot.rs",
+      "original_sha256": "66b7bfd9a4ce829932277a718c95d9c38423f79a29dec0869abae3bf94a9e7df",
+      "original_git_blob_sha1": "5f2e69a7ba7eaa30a92ddbd4bc0fe03fe9365eec",
+      "final_sha256": "2b1a5040aaf30e6ba0579abf7db4173a27fcac91398546bdaf1fcf551c413159",
+      "original_bytes": 3871,
+      "final_bytes": 4248
+    },
+    {
+      "path": "libs/cua-driver/rust/crates/platform-windows/src/uia/styx_private.rs",
+      "original_sha256": null,
+      "original_git_blob_sha1": null,
+      "final_sha256": "e1bd9e5ce639c96c9ac4c8114fd6835dd6a0cf0a197e402c0ac6ade3484cd813",
+      "original_bytes": 0,
+      "final_bytes": 24576
+    },
+    {
+      "path": "libs/cua-driver/rust/crates/platform-windows/src/uia/styx_private/binding.rs",
+      "original_sha256": null,
+      "original_git_blob_sha1": null,
+      "final_sha256": "ec10b3d3cbf15c6074a409062f4308eb8151862771566aeaba4883ad61da0647",
+      "original_bytes": 0,
+      "final_bytes": 11958
     }
   ],
   "rust_toolchain": "1.97.1",
@@ -181,5 +277,6 @@
   ],
   "public_styx_catalog_changed": false,
   "observed_invalidation_only": true,
-  "remote_atomic_object_generation_proven": false
+  "remote_atomic_object_generation_proven": false,
+  "patched_lock_sha256": "978a9b7e0bc2855af210f26c28dadc29f1a9b978df2677385332f1fc6bf39964"
 }

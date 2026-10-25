@@ -9,9 +9,10 @@ Build in libs/cua-driver/rust using the locked features/arguments in source.json
 Never alter an installed or previously signed worker release in place.
 
 The standard native tools remain available. Two private AX tools and a connection-bound native drain control
-are added; the Styx public 38-tool/Computer10 schema is unchanged. Runtime accepts
+are added; the Styx public 38-tool/Computer10 schema is unchanged. On Linux, runtime accepts
 the exact original 64-tool catalog for reads and requires the exact 66-tool
-catalog for this once-write path. A new independently signed worker closure is
+catalog for this once-write path. macOS and Windows validate the exact frozen
+ten-tool projection plus the private pair when present; a partial pair is rejected. A new independently signed worker closure is
 required before deployment. Source/build success alone is not GUI acceptance.
 
 The Linux private route retains the original transport, full native snapshot
@@ -37,7 +38,8 @@ The pinned patch also contains the macOS counterpart of the same two private
 AX schemas. It retains the original AX objects, window/process identity and
 observed invalidation; it consumes the acquired target before one native setter.
 It adds no public Computer tools and does not replace the signed App-owned
-embedded Cua permission principal. Runtime Host integration is still incomplete.
+embedded Cua permission principal. Runtime Host/Gateway composition is integrated,
+but complete native builds and installed platform effects remain unverified.
 
 The private Mac session reader requires a unique matching native UID/audit
 session, on-console/login state, and an explicit unlocked boolean from Apple's
@@ -67,4 +69,23 @@ typed per-session/global lock facts. Descriptor booleans grant no authority.
 The daemon retains its original bounded reader task through connection loss and
 joins it during shutdown before SDK teardown. These observations do not create
 a Core session or grant, and do not resolve the missing lock-field limitation.
-The Rust Host connection consumer is still an external integration draft.
+The Rust Host connection consumer is integrated and preserves this strict
+observation boundary; it does not infer authorization from global lock facts.
+
+## Windows integration status
+
+The patch includes retained UIA objects on an original MTA thread, strict raw-tree
+traversal, token/session/desktop binding, and single-consumption ValuePattern
+writes to eligible Edit controls. Failed or lost setter replies remain Unknown;
+there is no keyboard, focus, or alternate setter fallback. Raw traversal requires
+S_OK; another HRESULT cannot prove complete enumeration or ancestry.
+
+Snapshot retirement invalidates and takes references under the slot lock, then
+releases and joins them outside that lock. Private tool synchronous stages run on
+the blocking pool. The original MTA join can still wait on COM: a capture timeout
+is not a cleanup receipt. The direct worker's original Job remains the physical
+shutdown boundary; an async waiter disappearing does not prove cancellation.
+
+Windows runtime wiring is integrated, but private once-write admission remains
+disabled pending native build and effect verification. A Linux build of the
+combined sources does not compile the Windows platform module or prove UIA.
