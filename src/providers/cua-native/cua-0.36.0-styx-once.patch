@@ -1,0 +1,773 @@
+--- a/libs/cua-driver/rust/crates/platform-linux/src/tools/impl_.rs
++++ b/libs/cua-driver/rust/crates/platform-linux/src/tools/impl_.rs
+@@ -199,6 +199,7 @@
+ 
+ pub struct ToolState {
+     pub snapshots: Arc<Snapshots>,
++    styx_once: std::sync::Mutex<StyxOnceSlot>,
+     pub cursor_registry: Arc<CursorRegistry>,
+     pub capture_service: Arc<cua_driver_core::capture_runtime::CaptureService>,
+     pub mouse_hold: std::sync::Mutex<std::collections::HashMap<String, MouseHoldState>>,
+@@ -232,6 +233,7 @@
+         cua_driver_core::snapshot_store::register_runtime_store(&snapshots);
+         Arc::new(Self {
+             snapshots,
++            styx_once: std::sync::Mutex::new(StyxOnceSlot::default()),
+             cursor_registry: Arc::new(CursorRegistry::new()),
+             capture_service,
+             mouse_hold: std::sync::Mutex::new(Default::default()),
+@@ -1340,6 +1342,8 @@
+         let result = tokio::task::spawn_blocking(move || -> anyhow::Result<_> {
+             // Skip the AT-SPI walk on the capture-only path
+             // (include_accessibility_tree:false).
++            let private_epoch_before = want_tree
++                .then(crate::atspi::native::styx_begin_snapshot_epoch).flatten();
+             let tree_result = if want_tree {
+                 Some(crate::atspi::walk_tree_bounded_within(
+                     pid,
+@@ -1465,12 +1469,14 @@
+             } else {
+                 None
+             };
+-            Ok((tree_result, screenshot, bounds, screenshot_error, overlays))
++            let private_epoch = private_epoch_before
++                .filter(|value| crate::atspi::native::styx_event_epoch_matches(*value));
++            Ok((tree_result, screenshot, bounds, screenshot_error, overlays, private_epoch))
+         })
+         .await;
+ 
+         match result {
+-            Ok(Ok((tree_opt, shot_opt, bounds, screenshot_error, overlays))) => {
++            Ok(Ok((tree_opt, shot_opt, bounds, screenshot_error, overlays, private_epoch))) => {
+                 let mut content = Vec::new();
+                 let mut structured = json!({ "window_id": xid, "pid": pid });
+                 let screenshot_scale = shot_opt.as_ref().map(|(_, _, w, _, original_w, _)| {
+@@ -1539,8 +1545,8 @@
+                             state.snapshots.publish_for_session(
+                                 pid as i32,
+                                 xid,
+-                                crate::atspi::snapshot::update_snapshot(
+-                                    pid, xid, &tr.nodes, &tr.bounds,
++                                crate::atspi::snapshot::update_snapshot_with_epoch(
++                                    pid, xid, &tr.nodes, &tr.bounds, private_epoch,
+                                 ),
+                                 session_id.as_deref(),
+                                 screenshot_scale,
+@@ -14461,6 +14467,180 @@
+     }
+ }
+ 
++// Private Styx adapter tools in this separately versioned artifact. They do not
++// replace or rename any of the standard 64 tools. Native target tokens are only
++// useful on the original owned child transport; Core remains the action ledger.
++#[derive(Default)]
++struct StyxOnceSlot {
++    revision: u64,
++    pending: Option<StyxPendingEditable>,
++}
++struct StyxPendingEditable {
++    nonce: String,
++    transport: String,
++    session: String,
++    pid: u32,
++    window: u64,
++    native_token: String,
++    identity: crate::atspi::AtspiIdentity,
++    event_epoch: u64,
++    target: crate::atspi::native::StyxEditableTarget,
++}
++fn styx_private_result(code: &'static str, certainty: &'static str) -> ToolResult {
++    ToolResult::error(code).with_structured(json!({
++        "schema":1,"code":code,"execution_certainty":certainty,
++        "uncertain":certainty == "unknown"
++    }))
++}
++fn styx_private_lifecycle(args: &Value) -> Result<(String, String, cua_driver_core::session::SessionDispatchGuard), ToolResult> {
++    let transport = args.get("_transport_session_id").and_then(Value::as_str)
++        .ok_or_else(|| styx_private_result("transport_required", "not_dispatched"))?;
++    let session = args.get("_session_id").and_then(Value::as_str)
++        .ok_or_else(|| styx_private_result("transport_required", "not_dispatched"))?;
++    let snapshot = cua_driver_core::session::session_snapshot(session, transport, std::time::Duration::ZERO)
++        .ok_or_else(|| styx_private_result("lifecycle_unavailable", "not_dispatched"))?;
++    let guard = cua_driver_core::session::begin_session_dispatch(
++        session, snapshot.public_label.as_deref(), transport, snapshot.implicit,
++        snapshot.transport, snapshot.client_kind,
++    ).map_err(|_| styx_private_result("lifecycle_unavailable", "not_dispatched"))?;
++    Ok((transport.to_owned(), session.to_owned(), guard))
++}
++
++struct StyxAcquireEditableTool { state: Arc<ToolState> }
++static STYX_ACQUIRE_EDITABLE_DEF: std::sync::OnceLock<ToolDef> = std::sync::OnceLock::new();
++#[async_trait]
++impl Tool for StyxAcquireEditableTool {
++    fn def(&self) -> &ToolDef {
++        STYX_ACQUIRE_EDITABLE_DEF.get_or_init(|| ToolDef {
++            name:"styx_private_ax_acquire_editable_v1".into(),
++            description:"Private owned-transport exact snapshot EditableText target acquisition; no OS write authorization is granted.".into(),
++            input_schema:json!({"type":"object","required":["pid","window_id","element_token"],
++                "properties":{"pid":{"type":"integer","minimum":1,"maximum":4294967295u64},
++                "window_id":{"type":"integer","minimum":1},"element_token":{"type":"string","maxLength":64}},
++                "additionalProperties":false}),
++            read_only:true,destructive:false,idempotent:false,open_world:false,
++        })
++    }
++    async fn invoke(&self, args: Value) -> ToolResult {
++        let (transport, session, lifecycle) = match styx_private_lifecycle(&args) { Ok(v)=>v,Err(e)=>return e };
++        let (pid, window, token) = match (
++            args.get("pid").and_then(Value::as_u64).and_then(|v|u32::try_from(v).ok()),
++            args.get("window_id").and_then(Value::as_u64),
++            args.get("element_token").and_then(Value::as_str),
++        ) { (Some(p),Some(w),Some(t)) if p>0 && p<=i32::MAX as u32 && w>0 && t.len()<=64 => (p,w,t.to_owned()),
++            _=>return styx_private_result("invalid_request","not_dispatched") };
++        let Some((snapshot_id, row)) = cua_driver_core::element_token::parse_token(&token) else {
++            return styx_private_result("full_snapshot_token_required","not_dispatched");
++        };
++        if snapshot_id == 0 || row >= 2048
++            || cua_driver_core::element_token::token_for(snapshot_id,row) != token {
++            return styx_private_result("full_snapshot_token_required","not_dispatched");
++        }
++        // New acquisition retires the previous slot before any await. A slow
++        // older acquisition cannot install after a newer acquire/write call.
++        let revision = {
++            let mut slot = match self.state.styx_once.lock() { Ok(v)=>v,Err(_)=>return styx_private_result("target_cache_unavailable","not_dispatched") };
++            slot.pending.take();
++            let Some(next) = slot.revision.checked_add(1) else { return styx_private_result("target_cache_exhausted","not_dispatched"); };
++            slot.revision=next; next
++        };
++        let element = match self.state.snapshots.resolve(pid as i32, &args) {
++            Ok(cua_driver_core::element_token::ResolvedElement::Element { window_id, element_index, element })
++                if window_id == window && element_index == row => element,
++            _=>return styx_private_result("stale_observation","not_dispatched"),
++        };
++        let Some(event_epoch) = element.styx_event_epoch
++            .filter(|value| crate::atspi::native::styx_event_epoch_matches(*value)) else {
++            return styx_private_result("stale_observation","not_dispatched");
++        };
++        let Some(object) = element.object_ref else { return styx_private_result("unproven_object_identity","not_dispatched"); };
++        let identity = element.identity;
++        let retained_identity = identity.clone();
++        let mut random = [0u8;32];
++        if getrandom::fill(&mut random).is_err() { return styx_private_result("entropy_unavailable","not_dispatched"); }
++        let nonce = random.iter().map(|b|format!("{b:02x}")).collect::<String>();
++        let job = tokio::task::spawn_blocking(move || {
++            let _lifecycle=lifecycle;
++            crate::atspi::native::styx_acquire_editable(pid,window,identity,object,event_epoch)
++        });
++        let target = match job.await {
++            Ok(Ok(target))=>target,
++            Ok(Err(code))=>return styx_private_result(code,"not_dispatched"),
++            Err(_)=>return styx_private_result("acquisition_worker_failed","not_dispatched"),
++        };
++        let mut slot = match self.state.styx_once.lock() { Ok(v)=>v,Err(_)=>return styx_private_result("target_cache_unavailable","not_dispatched") };
++        if slot.revision != revision || !crate::atspi::native::styx_event_epoch_matches(event_epoch) {
++            return styx_private_result("stale_observation","not_dispatched");
++        }
++        slot.pending=Some(StyxPendingEditable {
++            nonce:nonce.clone(),transport,session,pid,window,native_token:token,
++            identity:retained_identity,event_epoch,target,
++        });
++        ToolResult::text("private_target_acquired").with_structured(json!({
++            "schema":1,"target":nonce,"pid":pid,"window_id":window,
++            "snapshot_id":cua_driver_core::element_token::format_snapshot_id(snapshot_id),"element_index":row
++        }))
++    }
++}
++
++struct StyxSetTextOnceTool { state: Arc<ToolState> }
++static STYX_SET_TEXT_ONCE_DEF: std::sync::OnceLock<ToolDef> = std::sync::OnceLock::new();
++#[async_trait]
++impl Tool for StyxSetTextOnceTool {
++    fn def(&self) -> &ToolDef {
++        STYX_SET_TEXT_ONCE_DEF.get_or_init(||ToolDef {
++            name:"styx_private_ax_set_text_once_v1".into(),
++            description:"Private single-consume exact EditableText write; ACK does not verify application effect.".into(),
++            input_schema:json!({"type":"object","required":["target","value"],"properties":{
++                "target":{"type":"string","minLength":64,"maxLength":64},
++                "value":{"type":"string","maxLength":16384}},"additionalProperties":false}),
++            read_only:false,destructive:true,idempotent:false,open_world:false,
++        })
++    }
++    async fn invoke(&self, args: Value) -> ToolResult {
++        let (transport,session,lifecycle) = match styx_private_lifecycle(&args) { Ok(v)=>v,Err(e)=>return e };
++        let (nonce,value) = match (args.get("target").and_then(Value::as_str),args.get("value").and_then(Value::as_str)) {
++            (Some(t),Some(v)) if t.len()==64 && t.bytes().all(|b|b.is_ascii_hexdigit()) && v.len()<=16*1024 => (t,v),
++            _=>return styx_private_result("invalid_request","not_dispatched"),
++        };
++        // Consume before the first await, including a failed binding check.
++        // Neither a lost response nor an unknown native outcome restores it.
++        let pending = {
++            let mut slot = match self.state.styx_once.lock() { Ok(v)=>v,Err(_)=>return styx_private_result("target_cache_unavailable","not_dispatched") };
++            let pending=slot.pending.take();
++            let Some(next)=slot.revision.checked_add(1) else { return styx_private_result("target_cache_exhausted","not_dispatched"); };
++            slot.revision=next;
++            match pending { Some(v) if v.nonce==nonce && v.transport==transport && v.session==session=>v,
++                _=>return styx_private_result("stale_observation","not_dispatched") }
++        };
++        let current = self.state.snapshots.resolve(pending.pid as i32,&json!({
++            "window_id":pending.window,"element_token":pending.native_token
++        }));
++        match current {
++            Ok(cua_driver_core::element_token::ResolvedElement::Element { window_id, element, .. })
++                if window_id==pending.window && element.identity==pending.identity
++                    && element.styx_event_epoch==Some(pending.event_epoch)
++                    && crate::atspi::native::styx_event_epoch_matches(pending.event_epoch) => {},
++            _=>return styx_private_result("stale_observation","not_dispatched"),
++        }
++        let value=zeroize::Zeroizing::new(value.to_owned());
++        let job=tokio::task::spawn_blocking(move || {
++            // The lifecycle dispatch remains held until the actual blocking
++            // job ends even if the async waiter/transport is dropped.
++            let _lifecycle=lifecycle;
++            crate::atspi::native::styx_set_text_once(pending.target,value)
++        });
++        match job.await {
++            Ok(crate::atspi::native::StyxWriteOutcome::Acknowledged)=>
++                ToolResult::text("private_write_acknowledged").with_structured(json!({
++                    "schema":1,"target_consumed":true,"outcome":"acknowledged","effect":"unverified"
++                })),
++            Ok(crate::atspi::native::StyxWriteOutcome::NotDispatched(code))=>styx_private_result(code,"not_dispatched"),
++            Ok(crate::atspi::native::StyxWriteOutcome::Unknown)|Err(_)=>styx_private_result("native_write_unknown","unknown"),
++        }
++    }
++}
++
+ // ── registry ─────────────────────────────────────────────────────────────────
+ 
+ pub fn build_registry_with_provider(
+@@ -14469,6 +14649,8 @@
+ ) -> ToolRegistry {
+     let mut r = ToolRegistry::new_with_protected_consent_provider(provider);
+     let state = ToolState::new_with_capture_service(r.capture_service());
++    r.register(Box::new(StyxAcquireEditableTool { state:state.clone() }));
++    r.register(Box::new(StyxSetTextOnceTool { state:state.clone() }));
+     if crate::wayland::is_wayland() && crate::wayland::hyprland::is_session() {
+         let recording_state = Arc::downgrade(&state);
+         r.recording
+--- a/libs/cua-driver/rust/crates/platform-linux/src/atspi/native.rs
++++ b/libs/cua-driver/rust/crates/platform-linux/src/atspi/native.rs
+@@ -191,6 +191,59 @@
+ static SHARED_CONNECTION: tokio::sync::OnceCell<AccessibilityConnection> =
+     tokio::sync::OnceCell::const_new();
+ 
++
++// Only observed AT-SPI invalidations, not a remote object-generation proof.
++// One atomic word makes activation, checked epoch advance and terminal loss
++// monotonic. No event error/EOF can be revived by late startup publication.
++struct StyxEventFence {
++    state: std::sync::atomic::AtomicU64,
++}
++impl StyxEventFence {
++    const fn new() -> Self {
++        Self { state: std::sync::atomic::AtomicU64::new(0) }
++    }
++    fn activate(&self) {
++        let _ = self.state.compare_exchange(0, 1,
++            std::sync::atomic::Ordering::AcqRel, std::sync::atomic::Ordering::Acquire);
++    }
++    fn capture(&self) -> Option<u64> {
++        match self.state.load(std::sync::atomic::Ordering::Acquire) {
++            0 | u64::MAX => None,
++            value => Some(value),
++        }
++    }
++    fn matches(&self, expected: u64) -> bool {
++        self.capture() == Some(expected)
++    }
++    fn advance(&self) {
++        let _ = self.state.fetch_update(
++            std::sync::atomic::Ordering::AcqRel,
++            std::sync::atomic::Ordering::Acquire,
++            |current| Some(match current {
++                // An event before readiness is conservatively terminal too.
++                0 | u64::MAX => u64::MAX,
++                value => value.checked_add(1).unwrap_or(u64::MAX),
++            }),
++        );
++    }
++    fn lost(&self) {
++        self.state.store(u64::MAX, std::sync::atomic::Ordering::Release);
++    }
++}
++static STYX_EVENT_FENCE: StyxEventFence = StyxEventFence::new();
++
++pub(crate) fn styx_event_epoch_matches(expected: u64) -> bool {
++    STYX_EVENT_FENCE.matches(expected)
++}
++/// Prime only the original bounded readonly listener, then capture its health.
++/// Failure never changes the ordinary read: it only removes private eligibility.
++pub(crate) fn styx_begin_snapshot_epoch() -> Option<u64> {
++    if SHARED_CONNECTION.get().is_none() && ensure_listener_active().is_err() {
++        return None;
++    }
++    STYX_EVENT_FENCE.capture()
++}
++
+ /// Keep one AT-SPI connection and registry registration alive for the daemon
+ /// lifetime. WebKitGTK only publishes its WebProcess accessibility subtree
+ /// while the registry reports an interested listener.
+@@ -201,6 +254,7 @@
+                 .await
+                 .map_err(|error| anyhow!("AT-SPI connect failed: {error}"))?;
+             if let Err(error) = conn.add_registry_event::<atspi::ObjectEvents>().await {
++                STYX_EVENT_FENCE.lost();
+                 dlog!("AT-SPI object-event registration failed: {error}");
+             }
+             // Subscribe to focus changes so `focused_is_editable` / typing can
+@@ -209,6 +263,7 @@
+                 .register_event::<atspi::events::object::StateChangedEvent>()
+                 .await
+             {
++                STYX_EVENT_FENCE.lost();
+                 dlog!("AT-SPI state-changed subscription failed: {error}");
+             }
+             // Grids (LibreOffice Calc) keep the focus on the table and report
+@@ -217,7 +272,15 @@
+                 .register_event::<atspi::events::object::ActiveDescendantChangedEvent>()
+                 .await
+             {
++                STYX_EVENT_FENCE.lost();
+                 dlog!("AT-SPI active-descendant subscription failed: {error}");
++            }
++            if let Err(error) = conn
++                .register_event::<atspi::events::object::ChildrenChangedEvent>()
++                .await
++            {
++                STYX_EVENT_FENCE.lost();
++                dlog!("AT-SPI children-changed subscription failed: {error}");
+             }
+             Ok(conn)
+         })
+@@ -258,11 +321,24 @@
+ /// Consume the shared connection's event stream for the daemon lifetime,
+ /// remembering the last focused accessible per application bus.
+ fn spawn_focus_tracker(conn: &'static AccessibilityConnection) {
++    // The original stream is established before private readiness is published.
++    let stream = conn.event_stream();
++    STYX_EVENT_FENCE.activate();
+     runtime().spawn(async move {
+         use futures_util::StreamExt;
+-        let stream = conn.event_stream();
+         futures_util::pin_mut!(stream);
+         while let Some(event) = stream.next().await {
++            match &event {
++                Ok(atspi::Event::Object(atspi::ObjectEvents::ChildrenChanged(_))) => {
++                    STYX_EVENT_FENCE.advance();
++                }
++                Ok(atspi::Event::Object(atspi::ObjectEvents::StateChanged(changed)))
++                    if changed.state == State::Defunct => {
++                    STYX_EVENT_FENCE.advance();
++                }
++                Err(_) => STYX_EVENT_FENCE.lost(),
++                _ => {}
++            }
+             if let Ok(atspi::Event::Object(atspi::ObjectEvents::ActiveDescendantChanged(active))) =
+                 &event
+             {
+@@ -285,6 +361,7 @@
+             };
+             note_focus_event(bus, changed.item.path_as_str(), changed.enabled);
+         }
++        STYX_EVENT_FENCE.lost();
+         dlog!("AT-SPI focus tracker stream ended");
+     });
+ }
+@@ -7714,3 +7791,234 @@
+         assert!(selected.describe().contains("read back as selected"));
+     }
+ }
++
++// Styx private adapter extension. These are data/OS-target handles, never Core
++// owner/grant authority. The standard Cua set_value routes above are unchanged.
++// A D-Bus object path is not a kernel object-generation handle: application
++// path reuse remains an explicit limitation, not a claimed object-lifetime pin.
++pub(crate) struct StyxEditableTarget {
++    connection: &'static AccessibilityConnection,
++    editable: atspi::zbus::Proxy<'static>,
++    object: ObjectRef,
++    identity: AtspiIdentity,
++    pid: u32,
++    birth: u64,
++    boot: String,
++    window: crate::wayland::hyprland::Window,
++    bus_guid: String,
++    expires: std::time::Instant,
++    event_epoch: u64,
++}
++
++pub(crate) enum StyxWriteOutcome {
++    Acknowledged,
++    NotDispatched(&'static str),
++    Unknown,
++}
++
++fn styx_boot() -> std::result::Result<String, &'static str> {
++    let boot = std::fs::read_to_string("/proc/sys/kernel/random/boot_id")
++        .map_err(|_| "process_unavailable")?;
++    if boot.len() != 37 || !boot.trim().bytes().all(|b| b.is_ascii_hexdigit() || b == b'-') {
++        return Err("process_unavailable");
++    }
++    Ok(boot)
++}
++
++fn styx_same_window(a: &crate::wayland::hyprland::Window, b: &crate::wayland::hyprland::Window) -> bool {
++    a.address == b.address && a.pid == b.pid && a.title == b.title
++        && a.app_id == b.app_id && a.x == b.x && a.y == b.y
++        && a.width == b.width && a.height == b.height
++        && b.visible && b.xwayland == Some(false)
++}
++
++async fn styx_owner_pid(connection: &AccessibilityConnection, owner: &str) -> std::result::Result<u32, &'static str> {
++    // No well-known-name resolution and no caller-supplied bus locator.
++    let name = atspi::zbus::names::UniqueName::try_from(owner.to_owned())
++        .map_err(|_| "unproven_object_owner")?;
++    let bus = atspi::zbus::fdo::DBusProxy::new(connection.connection()).await
++        .map_err(|_| "bus_unavailable")?;
++    bus.get_connection_unix_process_id(name.into()).await.map_err(|_| "object_owner_gone")
++}
++
++async fn styx_validate_target(target: &StyxEditableTarget) -> std::result::Result<(), &'static str> {
++    if !styx_event_epoch_matches(target.event_epoch) {
++        return Err("target_invalidated");
++    }
++    if std::time::Instant::now() >= target.expires {
++        return Err("target_expired");
++    }
++    let connection = shared_connection().await.map_err(|_| "bus_unavailable")?;
++    if !std::ptr::eq(connection, target.connection)
++        || connection.connection().server_guid().to_string() != target.bus_guid
++        || styx_boot()? != target.boot
++        || crate::proc_fs::process_instance_id(target.pid) != Some(target.birth)
++        || styx_owner_pid(connection, &target.identity.bus_name).await? != target.pid
++        || styx_owner_pid(connection, &target.identity.frame_bus_name).await? != target.pid
++    {
++        return Err("target_identity_changed");
++    }
++    let window = crate::wayland::hyprland::accessibility_window(target.window.address, target.pid)
++        .ok_or("window_unavailable")?;
++    if !styx_same_window(&target.window, &window) { return Err("window_changed"); }
++    let frame = accessible_via_bus(connection, &RawObjectRef {
++        name: target.identity.frame_bus_name.clone(), path: target.identity.frame_path.clone(),
++    }).await.map_err(|_| "frame_unavailable")?;
++    let title = frame.name().await.map_err(|_| "frame_unavailable")?;
++    let role = frame.get_role_name().await.map_err(|_| "frame_unavailable")?;
++    if title != window.title || !matches!(role.to_lowercase().as_str(), "frame" | "window" | "dialog") {
++        return Err("frame_window_mismatch");
++    }
++    // Follow only this already selected object's ancestors. Never enumerate
++    // children, re-resolve an ordinal, or search for a replacement object.
++    let mut current = RawObjectRef { name: target.object.bus.clone(), path: target.object.path.clone() };
++    let mut visited = std::collections::HashSet::new();
++    let mut reached_frame = false;
++    for _ in 0..64 {
++        if current.name == target.identity.frame_bus_name && current.path == target.identity.frame_path {
++            reached_frame = true; break;
++        }
++        if current.name != target.identity.bus_name || !visited.insert(current.path.clone()) {
++            return Err("object_frame_mismatch");
++        }
++        let proxy = atspi::zbus::proxy::Builder::<atspi::zbus::Proxy<'_>>::new(connection.connection())
++            .cache_properties(atspi::zbus::proxy::CacheProperties::No)
++            .destination(current.name.clone()).map_err(|_| "object_unavailable")?
++            .path(current.path.clone()).map_err(|_| "object_unavailable")?
++            .interface("org.a11y.atspi.Accessible").map_err(|_| "object_unavailable")?
++            .build().await.map_err(|_| "object_unavailable")?;
++        let (owner, path): (String, atspi::zbus::zvariant::OwnedObjectPath) = proxy
++            .get_property("Parent").await.map_err(|_| "object_unavailable")?;
++        if owner != target.identity.bus_name { return Err("object_frame_mismatch"); }
++        current = RawObjectRef { name: owner, path: path.to_string() };
++    }
++    if !reached_frame { return Err("object_frame_mismatch"); }
++    let accessible = accessible_via_bus(connection, &RawObjectRef {
++        name: target.object.bus.clone(), path: target.object.path.clone(),
++    }).await.map_err(|_| "object_unavailable")?;
++    let states = accessible.get_state().await.map_err(|_| "object_unavailable")?;
++    if states.contains(State::Defunct) { return Err("object_defunct"); }
++    if !accessible.get_interfaces().await.map_err(|_| "object_unavailable")?.contains(Interface::EditableText) {
++        return Err("editable_unavailable");
++    }
++    if std::time::Instant::now() >= target.expires
++        || !styx_event_epoch_matches(target.event_epoch)
++        || crate::proc_fs::process_instance_id(target.pid) != Some(target.birth)
++    { return Err("target_identity_changed"); }
++    Ok(())
++}
++
++pub(crate) fn styx_acquire_editable(
++    pid: u32, window_id: u64, identity: AtspiIdentity, object: ObjectRef, event_epoch: u64,
++) -> std::result::Result<StyxEditableTarget, &'static str> {
++    if !styx_event_epoch_matches(event_epoch) { return Err("target_invalidated"); }
++    if pid == 0 || pid == std::process::id() || window_id == 0
++        || identity.bus_name != object.bus || identity.path != object.path
++        || identity.bus_name != identity.frame_bus_name
++        || identity.path.len() > 4096 || identity.frame_path.len() > 4096
++        || identity.bus_name.len() > 255
++    { return Err("unproven_object_identity"); }
++    let expires = std::time::Instant::now() + Duration::from_secs(30);
++    let birth = crate::proc_fs::process_instance_id(pid).ok_or("process_unavailable")?;
++    let boot = styx_boot()?;
++    // Narrow first slice: native Hyprland same-process EditableText. No X11,
++    // WebProcess, title-prefix or cross-process accessibility fallback.
++    let window = crate::wayland::hyprland::accessibility_window(window_id, pid)
++        .filter(|w| w.visible && w.xwayland == Some(false)).ok_or("window_unavailable")?;
++    runtime().block_on(async {
++        tokio::time::timeout(Duration::from_secs(3), async {
++            let connection = shared_connection().await.map_err(|_| "bus_unavailable")?;
++            let editable = atspi::zbus::proxy::Builder::<atspi::zbus::Proxy<'static>>::new(connection.connection())
++                .cache_properties(atspi::zbus::proxy::CacheProperties::No)
++                .destination(object.bus.clone()).map_err(|_| "object_unavailable")?
++                .path(object.path.clone()).map_err(|_| "object_unavailable")?
++                .interface("org.a11y.atspi.EditableText").map_err(|_| "object_unavailable")?
++                .build().await.map_err(|_| "object_unavailable")?;
++            let target = StyxEditableTarget {
++                connection, editable, object, identity, pid, birth, boot, window,
++                bus_guid: connection.connection().server_guid().to_string(), expires, event_epoch,
++            };
++            styx_validate_target(&target).await?;
++            Ok(target)
++        }).await.unwrap_or(Err("acquisition_timeout"))
++    })
++}
++
++/// Consumes the non-Clone target. No insert/Value/Selection/activate fallback.
++/// Timeout ends only our wait; the protected application may still complete
++/// the original request. The shared bus stays alive and the caller reports
++/// Unknown rather than claiming cancellation or retrying the native method.
++pub(crate) fn styx_set_text_once(target: StyxEditableTarget, value: zeroize::Zeroizing<String>) -> StyxWriteOutcome {
++    if value.len() > 16 * 1024 { return StyxWriteOutcome::NotDispatched("value_too_large"); }
++    runtime().block_on(async {
++        match tokio::time::timeout(Duration::from_secs(3), styx_validate_target(&target)).await {
++            Ok(Ok(())) => {},
++            Ok(Err(code)) => return StyxWriteOutcome::NotDispatched(code),
++            Err(_) => return StyxWriteOutcome::NotDispatched("validation_timeout"),
++        }
++        // Last local expiry check and the single method dispatch have no
++        // intervening await. Remote revocation after send cannot retract it.
++        if !styx_event_epoch_matches(target.event_epoch) {
++            return StyxWriteOutcome::NotDispatched("target_invalidated");
++        }
++        if std::time::Instant::now() >= target.expires {
++            return StyxWriteOutcome::NotDispatched("target_expired");
++        }
++        let result = tokio::time::timeout(Duration::from_secs(3), async {
++            let reply: atspi::zbus::Result<bool> = target.editable.call("SetTextContents", &(value.as_str(),)).await;
++            reply
++        }).await;
++        match result {
++            Ok(Ok(true)) => StyxWriteOutcome::Acknowledged,
++            // False has no sufficiently strong no-effect contract. Errors and
++            // lost replies likewise never permit a second mutation route.
++            _ => StyxWriteOutcome::Unknown,
++        }
++    })
++}
++
++
++#[cfg(test)]
++mod styx_observed_epoch_tests {
++    use super::StyxEventFence;
++    use std::sync::atomic::AtomicU64;
++
++    #[test]
++    fn local_observation_epoch_rejects_changed_snapshots() {
++        let fence = StyxEventFence::new();
++        assert_eq!(fence.capture(), None);
++        fence.activate();
++        let observed = fence.capture().expect("local listener ready");
++        assert!(fence.matches(observed));
++        fence.advance(); // Same operation used for structural/defunct events.
++        assert!(!fence.matches(observed));
++        let next = fence.capture().expect("healthy later observation");
++        assert!(next > observed);
++        assert!(fence.matches(next));
++    }
++
++    #[test]
++    fn local_stream_or_subscription_loss_cannot_reactivate() {
++        for activated in [false, true] {
++            let fence = StyxEventFence::new();
++            if activated { fence.activate(); }
++            fence.lost(); // Subscription failure, stream Err or EOF path.
++            fence.activate(); // A late initialization must never revive it.
++            fence.advance();
++            assert_eq!(fence.capture(), None);
++            assert!(!fence.matches(1));
++        }
++    }
++
++    #[test]
++    fn local_epoch_overflow_is_terminal_without_aba() {
++        let fence = StyxEventFence { state: AtomicU64::new(u64::MAX - 1) };
++        assert!(fence.matches(u64::MAX - 1));
++        fence.advance();
++        assert_eq!(fence.capture(), None);
++        fence.activate();
++        fence.advance();
++        assert_eq!(fence.capture(), None);
++        assert!(!fence.matches(1));
++    }
++}
+--- a/libs/cua-driver/rust/crates/cua-driver-core/src/authorization.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/authorization.rs
+@@ -228,6 +228,7 @@
+ ];
+ 
+ const PRIVATE_OBSERVATION_OPERATIONS: &[&str] = &[
++    "styx_private_ax_acquire_editable_v1",
+     "get_desktop_state",
+     "get_accessibility_tree",
+     "get_window_state",
+@@ -267,6 +268,7 @@
+ ];
+ 
+ const DESKTOP_INPUT_OPERATIONS: &[&str] = &[
++    "styx_private_ax_set_text_once_v1",
+     "click",
+     "double_click",
+     "right_click",
+@@ -736,7 +738,8 @@
+ 
+     if matches!(
+         tool,
+-        "get_desktop_state"
++        "styx_private_ax_acquire_editable_v1"
++            | "get_desktop_state"
+             | "get_accessibility_tree"
+             | "get_window_state"
+             | "verify_state"
+@@ -892,6 +895,7 @@
+         | "press_key"
+         | "hotkey"
+         | "set_value"
++        | "styx_private_ax_set_text_once_v1"
+         | "run_steps"
+         | "run_script"
+         | "invoke_menu"
+@@ -916,6 +920,7 @@
+         | "debug_window_info"
+         | "check_permissions"
+         | "get_accessibility_tree"
++        | "styx_private_ax_acquire_editable_v1"
+         | "verify_state"
+         | "set_config"
+         | "escalate_session"
+@@ -1027,7 +1032,8 @@
+             enforcement: RiskEnforcement::Active,
+             operation_sensitive: true,
+         },
+-        "get_accessibility_tree"
++        "styx_private_ax_acquire_editable_v1"
++        | "get_accessibility_tree"
+         | "list_apps"
+         | "list_windows"
+         | "debug_window_info"
+@@ -1185,7 +1191,8 @@
+     // input from Cua or another automation runtime remains a separate threat.
+     let process_targeting_tool = matches!(
+         tool,
+-        "click"
++        "styx_private_ax_acquire_editable_v1"
++            | "click"
+             | "double_click"
+             | "right_click"
+             | "drag"
+--- a/libs/cua-driver/rust/crates/cua-driver-core/src/tool.rs
++++ b/libs/cua-driver/rust/crates/cua-driver-core/src/tool.rs
+@@ -710,6 +710,8 @@
+         return capabilities;
+     }
+     let caps: &[&str] = match tool_name {
++        "styx_private_ax_acquire_editable_v1" => &["accessibility.tree", "accessibility.tree.structured", "accessibility.element_tokens"],
++        "styx_private_ax_set_text_once_v1" => &["input.keyboard.type", "accessibility.element_tokens"],
+         // ── input.pointer ────────────────────────────────────────────
+         //
+         // Surface 6: tools that accept the opaque `element_token` arg
+--- a/libs/cua-driver/rust/crates/platform-linux/src/atspi/snapshot.rs
++++ b/libs/cua-driver/rust/crates/platform-linux/src/atspi/snapshot.rs
+@@ -41,6 +41,8 @@
+     /// Proven identity (unique bus owner + owning frame): what an indexed
+     /// click acts on; the live ordinal is never used to retarget.
+     pub identity: AtspiIdentity,
++    /// Private once-write eligibility from this exact readonly walk only.
++    pub(crate) styx_event_epoch: Option<u64>,
+     /// D-Bus address for the cached fast paths (same object as `identity`).
+     pub object_ref: Option<ObjectRef>,
+     pub role: String,
+@@ -52,6 +54,7 @@
+ }
+ 
+ pub struct AtspiSnapshot {
++    styx_event_epoch: Option<u64>,
+     elements: Arc<HashMap<usize, CachedElement>>,
+ }
+ 
+@@ -65,6 +68,14 @@
+     pub fn from_nodes_with_bounds(
+         nodes: &[AtspiNode],
+         bounds: &[(usize, i32, i32, u32, u32)],
++    ) -> Self {
++        Self::from_nodes_with_epoch(nodes, bounds, None)
++    }
++
++    fn from_nodes_with_epoch(
++        nodes: &[AtspiNode],
++        bounds: &[(usize, i32, i32, u32, u32)],
++        styx_event_epoch: Option<u64>,
+     ) -> Self {
+         let mut elements: HashMap<usize, CachedElement> = nodes
+             .iter()
+@@ -76,6 +87,7 @@
+                     CachedElement {
+                         key: node.element_key,
+                         identity,
++                        styx_event_epoch,
+                         object_ref: node.object_ref.clone(),
+                         role: node.role.clone(),
+                         in_web_content: node.in_web_content,
+@@ -90,6 +102,7 @@
+             }
+         }
+         Self {
++            styx_event_epoch,
+             elements: Arc::new(elements),
+         }
+     }
+@@ -101,7 +114,10 @@
+         self.elements.len()
+     }
+     fn retain(&self, index: usize) -> Option<CachedElement> {
+-        self.elements.get(&index).cloned()
++        self.elements.get(&index).cloned().map(|mut element| {
++            element.styx_event_epoch = self.styx_event_epoch;
++            element
++        })
+     }
+ }
+ 
+@@ -118,13 +134,26 @@
+ 
+ /// Build the payload for (pid, xid) and record its elements in the side index.
+ /// Returns the payload for the caller to publish into the runtime cache.
++#[cfg(test)]
+ pub(crate) fn update_snapshot(
+     pid: u32,
+     xid: u64,
+     nodes: &[AtspiNode],
+     bounds: &[(usize, i32, i32, u32, u32)],
+ ) -> AtspiSnapshot {
+-    let snapshot = AtspiSnapshot::from_nodes_with_bounds(nodes, bounds);
++    update_snapshot_with_epoch(pid, xid, nodes, bounds, None)
++}
++
++pub(crate) fn update_snapshot_with_epoch(
++    pid: u32,
++    xid: u64,
++    nodes: &[AtspiNode],
++    bounds: &[(usize, i32, i32, u32, u32)],
++    epoch: Option<u64>,
++) -> AtspiSnapshot {
++    // Standard reads still publish; only private write eligibility is removed.
++    let epoch = epoch.filter(|value| native::styx_event_epoch_matches(*value));
++    let snapshot = AtspiSnapshot::from_nodes_with_epoch(nodes, bounds, epoch);
+     store()
+         .lock()
+         .unwrap()

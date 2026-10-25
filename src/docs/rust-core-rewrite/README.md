@@ -2,7 +2,7 @@
 
 2026-10-24 · Owner-directed implementation choice: **Rust is the final Styx core runtime**.
 
-状态（2026-10-25）：Rust 是 Styx 自有核心的唯一目标实现，goal 仍 active。已接受集成基线 `e321914c3eb9284be561a391e1f327c20fab478b` 已有同身份迁移/原凭据退役及普通前台恢复证据、Windows Headless 配对/Exec/跨 owner 拒绝/真实进程收尾证据，以及同 SHA Linux 签名内部候选包；Mac 目前只完成该 SHA 编译检查。它们不等于已部署、统一三平台安装包或完整平台验收。当前 R36 补齐全新原生 Gateway 初始化，见 [ADR-030](ADR-030-FRESH-NATIVE-GATEWAY.md)；新代码不能继承旧 SHA 的实际结果。具体实现与历史切片见 [IMPLEMENTATION.md](IMPLEMENTATION.md)，逐次执行结论保存在外部 Owner Control Report/不可变 receipts。行为/旧格式参考基线仍为 `44cf1470e6b0cfdfd2c2372e54e84ebd279c59c3`。测试计数不作为重写完成度。
+状态（2026-10-25）：Rust 是 Styx 自有核心的唯一目标实现，goal 仍 active。已接受基线 `a8572d2367c063ade3c0e1e79444676070871fea` 有原身份迁移/原凭据退役、全新原生 Gateway/Host join、Linux 签名内部候选 `.8` 的实际 TLS/Exec 证据及独立 Browser 场景证据；Mac/Windows 的同 SHA 结果只覆盖其已记录的编译范围，不能视为统一三平台安装或完整验收。当前 R38 将工作区工具链统一到 Rust 1.97.1，并补齐目标绑定的原生 AX 单次写入（[ADR-031](ADR-031-TARGET-BOUND-ACCESSIBILITY-WRITE.md)）；新源码、编译器和 native worker 必须各自验证，不能继承旧包结论。具体实现与历史切片见 [IMPLEMENTATION.md](IMPLEMENTATION.md)，逐次执行结果以外部 Owner Control Report/不可变 receipts 为准。行为/旧格式参考基线仍为 `44cf1470e6b0cfdfd2c2372e54e84ebd279c59c3`。测试计数不作为重写完成度。
 
 阅读顺序：
 

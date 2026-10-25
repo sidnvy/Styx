@@ -28,6 +28,7 @@ pub(super) struct DesktopLane {
     pub(super) binding: SessionBinding,
     pub(super) grants: BTreeMap<CapabilityId, DesktopGrant>,
     pub(super) next_read_alias: u32,
+    pub(super) ax_observation: Option<super::desktop_observation::OwnedAxObservation>,
     profiles: BTreeMap<OwnerId, DesktopProfile>,
     pub(super) handles: BTreeMap<OperationId, CuaHandle>,
 }
@@ -235,6 +236,7 @@ impl HostAuthority {
             binding: binding.clone(),
             grants,
             next_read_alias: 0,
+            ax_observation: None,
             profiles: BTreeMap::new(),
             handles: BTreeMap::new(),
         });
@@ -333,6 +335,7 @@ impl HostCoordinator {
         }
         let mut state = self.inner.state.lock().expect("Host state mutex");
         if result.is_err() || source.fenced() {
+            super::desktop_observation::invalidate(state.desktop.as_mut(), None);
             if let Some(lane) = state.desktop.as_ref() {
                 let binding = lane.binding.clone();
                 let _ = state.sessions.set_state(
@@ -502,7 +505,7 @@ impl HostCoordinator {
         &self,
         owner: &OwnerLease,
         target: ResourceTarget,
-        context: PreparedContext,
+        mut context: PreparedContext,
         action: &CuaAction,
     ) -> Result<OperationSnapshot, CoordinatorError> {
         let mut state = self.inner.state.lock().expect("Host state mutex");
@@ -514,6 +517,18 @@ impl HostCoordinator {
             return Err(ErrorCategory::ProtocolMismatch.into());
         }
         handle(desktop(&state)?, owner, &target)?;
+        if let Some(request) = action.accessibility_write_request()? {
+            let (translated, observation) =
+                super::desktop_observation::prepare(&state, owner, &target, &request)?;
+            context.observation = Some(observation);
+            return Ok(state.ledger.prepare_desktop_accessibility_write_attempt(
+                owner,
+                target,
+                context,
+                translated.to_operation_payload()?,
+                self.now(),
+            )?);
+        }
         let payload = action.to_operation_payload()?;
         if let Some(read) = action.desktop_read_request()? {
             Ok(match read {
@@ -583,7 +598,23 @@ impl HostCoordinator {
                 serde_json::from_slice(state.ledger.inspect_payload(owner, id, digest)?)
                     .map_err(|_| CuaError::InvalidRequest)?;
             let acquisition = action.desktop_read_request()?;
-            let primary = if acquisition.is_some() {
+            let write = action.accessibility_write_request()?;
+            if write.is_some()
+                != (state.ledger.inspect_purpose(owner, id, digest)?
+                    == styx_core::operations::OperationPurpose::DesktopAccessibilityWriteAttempt)
+            {
+                return Err(ErrorCategory::StateConflict.into());
+            }
+            let primary = if let Some(request) = write.as_ref() {
+                super::desktop_observation::validate_dispatch(
+                    &state,
+                    owner,
+                    target,
+                    &context,
+                    request,
+                    self.now(),
+                )?
+            } else if acquisition.is_some() {
                 super::desktop_read::acquisition_facts(&state, context.capability)?
             } else {
                 facts(&state, context.capability)?
@@ -610,7 +641,7 @@ impl HostCoordinator {
                 }
             }
             for cap in action.required_capabilities()? {
-                if acquisition.is_some() {
+                if acquisition.is_some() || write.is_some() {
                     continue;
                 }
                 let required = facts(&state, cap)?;
@@ -622,13 +653,13 @@ impl HostCoordinator {
                 }
                 styx_core::policy::check_admission(&requested, &required, self.now())?;
             }
-            if action.requires_observed_target()? {
+            if write.is_none() && action.requires_observed_target()? {
                 // The owned native observation map must authorize the exact target;
                 // a caller-provided observation ID alone is insufficient. This gate
                 // stays closed until a real native snapshot is installed below.
                 return Err(ErrorCategory::StaleObservation.into());
             }
-            let acquired_target = acquisition
+            let mut acquired_target = acquisition
                 .map(crate::providers::cua::DesktopReadTarget::acquire)
                 .transpose()?;
             let acquired_epoch = desktop(&state)?.source.epoch();
@@ -643,7 +674,22 @@ impl HostCoordinator {
                 }
                 DispatchDisposition::ExecuteOnce(p) => p,
             };
+            // Consume only after the one Core dispatch; a dropped waiter or
+            // failed/unknown native reply can never restore this target map.
+            let write_observation = if write.is_some() {
+                state
+                    .desktop
+                    .as_mut()
+                    .and_then(|lane| lane.ax_observation.take())
+                    .map(Arc::new)
+            } else {
+                super::desktop_observation::invalidate(state.desktop.as_mut(), None);
+                None
+            };
             let delivery_context = permit.context().clone();
+            let write_until = tokio::time::Instant::now()
+                + Duration::from_millis(delivery_context.deadline.0.saturating_sub(self.now().0));
+            let gate_owner = owner.clone();
             let operation = id.clone();
             let inner = self.inner.clone();
             let coordinator = self.clone();
@@ -659,7 +705,38 @@ impl HostCoordinator {
             jobs.spawn_on(
                 async move {
                     let _slot = job_slot;
-                    let mut receipt = slot.call_once(permit).await;
+                    let mut receipt = if let Some(observation) = write_observation.as_ref() {
+                        let retained = observation.clone();
+                        let gate_coordinator = coordinator.clone();
+                        let gate_inner = inner.clone();
+                        let gate_operation = operation.clone();
+                        let gate: crate::providers::cua::AxWriteGate = Box::new(move || {
+                            Box::pin(async move {
+                                gate_coordinator
+                                    .refresh_desktop_source()
+                                    .await
+                                    .map_err(|_| CuaError::StaleObservation)?;
+                                let state =
+                                    gate_inner.state.lock().map_err(|_| CuaError::Unknown)?;
+                                if state.shutting_down {
+                                    return Err(CuaError::StaleObservation);
+                                }
+                                retained
+                                    .recheck_write(
+                                        &state,
+                                        &gate_owner,
+                                        &gate_operation,
+                                        digest,
+                                        gate_inner.now(),
+                                    )
+                                    .map_err(|_| CuaError::StaleObservation)
+                            })
+                        });
+                        slot.call_once_until_with_write_gate(permit, write_until, gate)
+                            .await
+                    } else {
+                        slot.call_once(permit).await
+                    };
                     // A late response cannot mint observations or be delivered into a
                     // replaced/locked source, even if the original native call ACKed.
                     let fresh = coordinator.refresh_desktop_source().await;
@@ -685,7 +762,7 @@ impl HostCoordinator {
                     let delivery = if fresh.is_err() {
                         Err(ErrorCategory::SessionDisconnected.into())
                     } else {
-                        let f = if acquired_target.is_some() {
+                        let f = if acquired_target.is_some() || write_observation.is_some() {
                             super::desktop_read::acquisition_facts(
                                 &state,
                                 delivery_context.capability,
@@ -694,6 +771,23 @@ impl HostCoordinator {
                             facts(&state, delivery_context.capability)
                         };
                         f.and_then(|f| {
+                            if let Some(observation) = write_observation.as_ref() {
+                                observation.validate_delivery(&state)?;
+                                if receipt.evidence != CuaEvidence::Acknowledged {
+                                    return Ok(());
+                                }
+                                return state
+                                    .ledger
+                                    .authorize_desktop_accessibility_write_result(
+                                        bound.owner(),
+                                        &operation,
+                                        digest,
+                                        &f,
+                                        inner.now(),
+                                    )
+                                    .map(|_| ())
+                                    .map_err(CoordinatorError::from);
+                            }
                             if acquired_target.is_some() {
                                 return state
                                     .ledger
@@ -727,7 +821,26 @@ impl HostCoordinator {
                             if lane.source.fenced() || lane.source.epoch() != acquired_epoch {
                                 return Err(ErrorCategory::SessionDisconnected.into());
                             }
-                            super::desktop_read::settle_acquired_read(lane, target, &mut receipt);
+                            let parsed = super::desktop_read::settle_acquired_read(
+                                lane,
+                                target,
+                                &mut receipt,
+                            );
+                            if let Some((parsed, alias)) = parsed {
+                                let original =
+                                    acquired_target.take().ok_or(ErrorCategory::StateConflict)?;
+                                super::desktop_observation::install(
+                                    &mut state,
+                                    bound.owner(),
+                                    bound.target(),
+                                    super::desktop_observation::AcquiredAxObservation {
+                                        target: original,
+                                        parsed,
+                                        alias,
+                                        source_epoch: acquired_epoch,
+                                    },
+                                )?;
+                            }
                         }
                         Ok(())
                     });

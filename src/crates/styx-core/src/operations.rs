@@ -1,8 +1,8 @@
 //! A bounded reservation ledger. Only a recorded, current reservation may dispatch.
 //! It owns immutable request bytes, not executor I/O. Outcome and liveness differ.
 use crate::policy::{
-    AdmissionFacts, check_admission, check_desktop_read_acquisition,
-    check_desktop_window_capture_acquisition,
+    AdmissionFacts, check_admission, check_desktop_accessibility_write_attempt,
+    check_desktop_read_acquisition, check_desktop_window_capture_acquisition,
 };
 use std::collections::BTreeMap;
 use styx_contracts::{capability::CapabilityId, error::ErrorCategory, identity::*, operation::*};
@@ -56,6 +56,7 @@ pub enum OperationPurpose {
     Execute,
     DesktopAccessibilityReadAcquisition,
     DesktopWindowCaptureReadAcquisition,
+    DesktopAccessibilityWriteAttempt,
 }
 fn desktop_capability(capability: CapabilityId) -> bool {
     matches!(
@@ -396,6 +397,39 @@ impl OperationLedger {
             .purpose = OperationPurpose::DesktopWindowCaptureReadAcquisition;
         Ok(snapshot)
     }
+    /// Reserve one exact-object write attempt. The runtime supplies only an
+    /// owned acquired observation and the signed provider's once-route payload.
+    /// This purpose does not grant OS permission or authorize generic input.
+    pub fn prepare_desktop_accessibility_write_attempt(
+        &mut self,
+        owner: &OwnerLease,
+        target: ResourceTarget,
+        context: PreparedContext,
+        payload: Vec<u8>,
+        now: MonotonicMillis,
+    ) -> Result<OperationSnapshot, ErrorCategory> {
+        if context.capability != CapabilityId::DesktopAccessibility
+            || context.session.is_none()
+            || context.observation.is_none()
+            || self.verify_target(owner, &target, &context)? != ResourceDomain::DesktopAgent
+        {
+            return Err(ErrorCategory::StateConflict);
+        }
+        let snapshot = self.prepare_record(
+            owner,
+            Some(target),
+            ResourceDomain::DesktopAgent,
+            context,
+            payload,
+            now,
+        )?;
+        self.records
+            .get_mut(&snapshot.id)
+            .ok_or(ErrorCategory::StateConflict)?
+            .purpose = OperationPurpose::DesktopAccessibilityWriteAttempt;
+        Ok(snapshot)
+    }
+
     fn verify_target(
         &self,
         owner: &OwnerLease,
@@ -518,6 +552,9 @@ impl OperationLedger {
             OperationPurpose::DesktopWindowCaptureReadAcquisition => {
                 check_desktop_window_capture_acquisition(&record.context, facts, now)?
             }
+            OperationPurpose::DesktopAccessibilityWriteAttempt => {
+                check_desktop_accessibility_write_attempt(&record.context, facts, now)?
+            }
         }
         let record = self
             .records
@@ -561,6 +598,15 @@ impl OperationLedger {
         digest: Sha256Digest,
     ) -> Result<ResourceDomain, ErrorCategory> {
         Ok(self.record_for(owner, id, digest)?.domain)
+    }
+    /// Read the original trusted prepare-port purpose; never accepts a wire flag.
+    pub fn inspect_purpose(
+        &self,
+        owner: &OwnerLease,
+        id: &OperationId,
+        digest: Sha256Digest,
+    ) -> Result<OperationPurpose, ErrorCategory> {
+        Ok(self.record_for(owner, id, digest)?.purpose)
     }
     pub fn inspect_payload(
         &self,
@@ -647,8 +693,76 @@ impl OperationLedger {
             OperationPurpose::DesktopWindowCaptureReadAcquisition => {
                 check_desktop_window_capture_acquisition(&record.context, facts, now)?
             }
-            OperationPurpose::Execute => return Err(ErrorCategory::StateConflict),
+            OperationPurpose::Execute | OperationPurpose::DesktopAccessibilityWriteAttempt => {
+                return Err(ErrorCategory::StateConflict);
+            }
         }
+        Ok(record.snapshot.clone())
+    }
+    /// Final current-facts recheck after read-only native acquisition and before
+    /// the adapter's only protected OS write send. This neither allocates a new
+    /// operation nor makes the linear original permit replayable.
+    pub fn authorize_desktop_accessibility_write_dispatch(
+        &self,
+        owner: &OwnerLease,
+        action_id: &OperationId,
+        digest: Sha256Digest,
+        facts: &AdmissionFacts,
+        now: MonotonicMillis,
+    ) -> Result<OperationSnapshot, ErrorCategory> {
+        let record = self.record_for(owner, action_id, digest)?;
+        if record.purpose != OperationPurpose::DesktopAccessibilityWriteAttempt
+            || record.domain != ResourceDomain::DesktopAgent
+            || record.snapshot.state != OperationState::Dispatched
+            || record.snapshot.cancellation.is_some()
+        {
+            return Err(ErrorCategory::StateConflict);
+        }
+        if self.maintenance_fenced {
+            return Err(ErrorCategory::Busy);
+        }
+        let target = record
+            .snapshot
+            .target
+            .as_ref()
+            .ok_or(ErrorCategory::StateConflict)?;
+        if self.verify_target(owner, target, &record.context)? != ResourceDomain::DesktopAgent {
+            return Err(ErrorCategory::StateConflict);
+        }
+        check_desktop_accessibility_write_attempt(&record.context, facts, now)?;
+        Ok(record.snapshot.clone())
+    }
+    /// Deliver an acknowledged exact-object write attempt under current owner,
+    /// resource, session and grant facts. This is an acknowledgement only, never
+    /// application-effect verification or a permission grant. Revocation can
+    /// suppress delivery without rewriting the already recorded native outcome.
+    pub fn authorize_desktop_accessibility_write_result(
+        &self,
+        owner: &OwnerLease,
+        action_id: &OperationId,
+        digest: Sha256Digest,
+        facts: &AdmissionFacts,
+        now: MonotonicMillis,
+    ) -> Result<OperationSnapshot, ErrorCategory> {
+        let record = self.record_for(owner, action_id, digest)?;
+        if record.purpose != OperationPurpose::DesktopAccessibilityWriteAttempt
+            || record.domain != ResourceDomain::DesktopAgent
+            || record.snapshot.state != OperationState::Succeeded
+        {
+            return Err(ErrorCategory::StateConflict);
+        }
+        if self.maintenance_fenced {
+            return Err(ErrorCategory::Busy);
+        }
+        let target = record
+            .snapshot
+            .target
+            .as_ref()
+            .ok_or(ErrorCategory::StateConflict)?;
+        if self.verify_target(owner, target, &record.context)? != ResourceDomain::DesktopAgent {
+            return Err(ErrorCategory::StateConflict);
+        }
+        check_desktop_accessibility_write_attempt(&record.context, facts, now)?;
         Ok(record.snapshot.clone())
     }
     pub fn request_cancel(

@@ -418,7 +418,7 @@ impl Root {
             Mode::S_IRUSR | Mode::S_IWUSR,
         )?;
         private_file(&file)?;
-        // Rust 1.94.1 uses nonblocking exclusive flock on Linux. Only this
+        // File::try_lock supplies the nonblocking exclusive lock. Only this
         // owned handle is locked; it is never cloned or explicitly unlocked.
         match file.try_lock() {
             Ok(()) => {}

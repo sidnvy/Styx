@@ -126,7 +126,8 @@ async fn cleanup_selected(
     budget: Duration,
 ) -> Option<DesktopLaneCleanup> {
     let worker = {
-        let state = inner.state.lock().expect("Host state mutex");
+        let mut state = inner.state.lock().expect("Host state mutex");
+        super::desktop_observation::invalidate(state.desktop.as_mut(), owner);
         state.desktop.as_ref().map(|lane| lane.worker.clone())
     }?;
     let until = tokio::time::Instant::now() + budget.min(Duration::from_secs(30));

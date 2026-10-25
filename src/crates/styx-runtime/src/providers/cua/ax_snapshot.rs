@@ -32,6 +32,31 @@ impl ParsedAxSnapshot {
         &self.native_snapshot_id
     }
 
+    /// Resolve only the exact Host presentation alias in this retained map.
+    /// Native cache tokens are never accepted as remotely supplied authority.
+    pub(crate) fn native_token_for(
+        &self,
+        host_alias: &str,
+        full_host_token: &str,
+    ) -> Result<&str, CuaError> {
+        if !snapshot_id_valid(host_alias) || host_alias == self.native_snapshot_id {
+            return Err(CuaError::StaleObservation);
+        }
+        let row = full_host_token
+            .strip_prefix(&format!("{host_alias}:"))
+            .and_then(|row| row.parse::<u64>().ok())
+            .filter(|row| full_host_token == format!("{host_alias}:{row}"))
+            .ok_or(CuaError::StaleObservation)?;
+        self.tokens
+            .get(&row)
+            .map(String::as_str)
+            .ok_or(CuaError::StaleObservation)
+    }
+    /// Only the Core-private translated payload is checked through this port.
+    pub(crate) fn contains_native_token(&self, token: &str) -> bool {
+        self.tokens.values().any(|value| value == token)
+    }
+
     /// The caller supplies an alias from its own nonreused Host scope. This
     /// does not mint/validate that scope or authorize any subsequent action.
     /// Original text is discarded, including Markdown/native token hints.
@@ -257,3 +282,32 @@ fn bounded_digest(value: &impl Serialize) -> Result<Sha256Digest, CuaError> {
 #[cfg(test)]
 #[path = "ax_snapshot_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+mod host_alias_tests {
+    use super::*;
+    #[test]
+    fn exact_host_alias_resolves_only_its_retained_row_and_never_native_input() {
+        let parsed = ParsedAxSnapshot {
+            native_snapshot_id: "s00000001".into(),
+            tokens: BTreeMap::from([(2, "s00000001:2".into())]),
+            response_sha256: bounded_digest(&Value::Null).unwrap(),
+        };
+        assert_eq!(
+            parsed.native_token_for("s00000002", "s00000002:2").unwrap(),
+            "s00000001:2"
+        );
+        for (alias, token) in [
+            ("s00000001", "s00000001:2"),
+            ("s00000002", "s00000001:2"),
+            ("s00000003", "s00000002:2"),
+            ("s00000002", "s00000002:02"),
+            ("s00000002", "s00000002:3"),
+            ("s00000000", "s00000000:2"),
+        ] {
+            assert!(parsed.native_token_for(alias, token).is_err());
+        }
+        assert!(parsed.contains_native_token("s00000001:2"));
+        assert!(!parsed.contains_native_token("s00000002:2"));
+    }
+}

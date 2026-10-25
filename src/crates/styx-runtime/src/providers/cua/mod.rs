@@ -26,7 +26,9 @@ use styx_core::operations::{DispatchPermit, OperationPurpose, OwnerLease, Resour
 mod admission;
 pub(crate) mod ax_snapshot;
 mod ax_target;
+mod ax_write;
 pub(crate) use ax_target::{DesktopReadRequest, DesktopReadTarget};
+pub(crate) use ax_write::{AxWriteGate, AxWriteRequest};
 mod retention;
 mod transport;
 pub(crate) mod window_capture;
@@ -50,6 +52,8 @@ pub enum CuaError {
     InvalidRequest,
     #[error("cua_permission_denied")]
     PermissionDenied,
+    #[error("cua_stale_observation")]
+    StaleObservation,
     #[error("cua_unsupported")]
     Unsupported,
     #[error("cua_protocol_mismatch")]
@@ -77,6 +81,7 @@ impl CuaError {
             Self::Busy => "cua_busy",
             Self::InvalidRequest => "cua_invalid_request",
             Self::PermissionDenied => "cua_permission_denied",
+            Self::StaleObservation => "cua_stale_observation",
             Self::Unsupported => "cua_unsupported",
             Self::ProtocolMismatch => "cua_protocol_mismatch",
             Self::Unknown => "cua_outcome_unknown",
@@ -369,6 +374,7 @@ struct Live {
     cleanup: Option<CuaCleanup>,
     uncertain: bool,
     io_failed: bool,
+    ax_once_available: bool,
     exit_success: Option<bool>,
     actions: BTreeMap<OperationId, (Sha256Digest, CuaEvidence, Option<CuaError>, CapabilityId)>,
 }
@@ -614,6 +620,7 @@ impl CuaOpenSlot {
                 cleanup: None,
                 uncertain: false,
                 io_failed: false,
+                ax_once_available: false,
                 exit_success: None,
                 actions: BTreeMap::new(),
             })),
@@ -669,7 +676,7 @@ impl CuaOpenSlot {
    let peer=live.client.as_ref().ok_or(CuaError::Unknown)?.peer();let info=peer.peer_info().ok_or(CuaError::ProtocolMismatch)?;
    if !info.server_info.as_ref().is_some_and(|v|v.name=="cua-driver"&&v.version=="0.36.0"){return Err(CuaError::ProtocolMismatch)}
    let catalog=tokio::select!{_=resource.stop.cancelled()=>return Err(CuaError::Unknown),v=timeout_at(until,peer.list_tools(None))=>v.map_err(|_|CuaError::Unknown)?.map_err(|_|CuaError::ProtocolMismatch)?};
-   if catalog.next_cursor.is_some(){return Err(CuaError::Unsupported)}validate_catalog(&catalog.tools)?;Ok(())
+   if catalog.next_cursor.is_some(){return Err(CuaError::Unsupported)}live.ax_once_available=validate_catalog(&catalog.tools)?;Ok(())
   }.await;
         match result {
             Ok(()) => Ok(CuaOpenReceipt {
@@ -715,8 +722,8 @@ impl CuaOpenSlot {
         }
     }
 }
-fn validate_catalog(tools: &[rmcp::model::Tool]) -> Result<()> {
-    if tools.len() != 64 {
+fn validate_catalog(tools: &[rmcp::model::Tool]) -> Result<bool> {
+    if !matches!(tools.len(), 64 | 66) {
         return Err(CuaError::Unsupported);
     }
     let expected: Value =
@@ -731,17 +738,52 @@ fn validate_catalog(tools: &[rmcp::model::Tool]) -> Result<()> {
             return Err(CuaError::ProtocolMismatch);
         }
     }
+    let private = ax_write::private_schemas();
+    let extended = tools.len() == 66;
+    if extended {
+        for (name, schema) in private {
+            if actual.remove(&name).as_ref() != Some(&schema) {
+                return Err(CuaError::Unsupported);
+            }
+        }
+    }
     if Value::Object(actual) != expected {
         return Err(CuaError::Unsupported);
     }
-    Ok(())
+    Ok(extended)
 }
 impl CuaActionSlot {
     pub async fn call_once(self, permit: DispatchPermit) -> CuaReceipt {
+        let budget = self.live.config.rpc_timeout;
+        self.call_once_with_budget(permit, budget).await
+    }
+    pub(crate) async fn call_once_with_budget(
+        self,
+        permit: DispatchPermit,
+        budget: Duration,
+    ) -> CuaReceipt {
+        let until = Instant::now() + budget.min(self.live.config.rpc_timeout);
+        self.call_owned(permit, until, None).await
+    }
+    pub(crate) async fn call_once_until_with_write_gate(
+        self,
+        permit: DispatchPermit,
+        until: Instant,
+        gate: AxWriteGate,
+    ) -> CuaReceipt {
+        let until = until.min(Instant::now() + self.live.config.rpc_timeout);
+        self.call_owned(permit, until, Some(gate)).await
+    }
+    async fn call_owned(
+        self,
+        permit: DispatchPermit,
+        until: Instant,
+        write_gate: Option<AxWriteGate>,
+    ) -> CuaReceipt {
         let operation = permit.id().clone();
         let (tx, rx) = tokio::sync::oneshot::channel();
         tokio::spawn(async move {
-            let _ = tx.send(self.call_inner(permit).await);
+            let _ = tx.send(self.call_inner(permit, until, write_gate).await);
         });
         rx.await.unwrap_or(CuaReceipt {
             operation,
@@ -750,7 +792,12 @@ impl CuaActionSlot {
             cause: Some(CuaError::Unknown),
         })
     }
-    async fn call_inner(mut self, permit: DispatchPermit) -> CuaReceipt {
+    async fn call_inner(
+        mut self,
+        permit: DispatchPermit,
+        until: Instant,
+        write_gate: Option<AxWriteGate>,
+    ) -> CuaReceipt {
         let operation = permit.id().clone();
         let refused = |cause| CuaReceipt {
             operation: operation.clone(),
@@ -778,7 +825,18 @@ impl CuaActionSlot {
         ) {
             return refused(e);
         }
+        let write_request = match action.accessibility_write_request() {
+            Ok(value) => value,
+            Err(error) => return refused(error),
+        };
+        let write_attempt = permit.purpose() == OperationPurpose::DesktopAccessibilityWriteAttempt;
+        if write_attempt != write_request.is_some()
+            || (write_attempt && (!self.live.ax_once_available || write_gate.is_none()))
+        {
+            return refused(CuaError::PermissionDenied);
+        }
         if permit.purpose() != OperationPurpose::Execute
+            && !write_attempt
             && !matches!(action.desktop_read_request(), Ok(Some(request)) if request.purpose() == permit.purpose())
         {
             return refused(CuaError::PermissionDenied);
@@ -798,7 +856,11 @@ impl CuaActionSlot {
                 cause: *cause,
             };
         }
-        if self.live.retired || self.live.uncertain || self.resource.stop.is_cancelled() {
+        if Instant::now() >= until
+            || self.live.retired
+            || self.live.uncertain
+            || self.resource.stop.is_cancelled()
+        {
             return refused(CuaError::Unknown);
         }
         if self.live.actions.len() >= ACTION_RECORDS {
@@ -824,19 +886,31 @@ impl CuaActionSlot {
                 capability,
             ),
         );
-        let until = Instant::now() + self.live.config.rpc_timeout;
-        // call_tool_once has no MRTR retry loop. From its first poll onwards a lost
-        // reply is possibly executed. Cancellation is not a native stop fact.
-        let response = tokio::select! {_=self.resource.stop.cancelled()=>None,result=timeout_at(until,peer.call_tool_once(params))=>Some(result)};
-        let (evidence, result, cause) = match response {
-            Some(Ok(Ok(CallToolResponse::Complete(value)))) => {
-                if value.is_error == Some(true) || bounded_bytes(&value, FRAME_BYTES).is_err() {
-                    (CuaEvidence::Unknown, None, Some(CuaError::Unknown))
-                } else {
-                    (CuaEvidence::Acknowledged, Some(value), None)
+        let (evidence, result, cause) = if let Some(request) = write_request {
+            let stop = self.resource.stop.clone();
+            ax_write::invoke(
+                &stop,
+                &mut self.live.uncertain,
+                &peer,
+                request,
+                until,
+                write_gate.expect("checked write gate"),
+            )
+            .await
+        } else {
+            // call_tool_once has no retry loop. From its first poll onwards a
+            // lost reply is possibly executed; cancellation is not a stop fact.
+            let response = tokio::select! {_=self.resource.stop.cancelled()=>None,result=timeout_at(until,peer.call_tool_once(params))=>Some(result)};
+            match response {
+                Some(Ok(Ok(CallToolResponse::Complete(value)))) => {
+                    if value.is_error == Some(true) || bounded_bytes(&value, FRAME_BYTES).is_err() {
+                        (CuaEvidence::Unknown, None, Some(CuaError::Unknown))
+                    } else {
+                        (CuaEvidence::Acknowledged, Some(value), None)
+                    }
                 }
+                _ => (CuaEvidence::Unknown, None, Some(CuaError::Unknown)),
             }
-            _ => (CuaEvidence::Unknown, None, Some(CuaError::Unknown)),
         };
         if evidence == CuaEvidence::Unknown {
             self.live.uncertain = true

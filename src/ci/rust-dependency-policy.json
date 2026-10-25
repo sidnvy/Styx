@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "scope": "foundation_development_gate_not_final_release",
-  "toolchain": "1.94.1",
+  "toolchain": "1.97.1",
   "members": {
     "styx-contracts": {
       "workspace_allowed": [],

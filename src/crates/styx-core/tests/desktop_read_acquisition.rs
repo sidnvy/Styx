@@ -551,3 +551,189 @@ fn window_capture_purpose_cannot_be_used_for_ax_or_native_input() {
         Err(ErrorCategory::PermissionDenied)
     );
 }
+
+#[test]
+fn exact_ax_write_attempt_is_separate_once_purpose_and_never_an_os_grant() {
+    let (mut ledger, owner, resource, mut c, mut f) = setup();
+    c.observation = Some("owned-ax-observation".try_into().unwrap());
+    f.current_observation = c.observation.clone();
+    f.descriptor.availability = Availability::Available;
+    f.descriptor.reason = None;
+    assert_eq!(
+        check_admission(&c, &f, MonotonicMillis(3)),
+        Err(ErrorCategory::PermissionRequired)
+    );
+    let action = ledger
+        .prepare_desktop_accessibility_write_attempt(
+            &owner,
+            target(&resource),
+            c.clone(),
+            b"owned-once-ax-write".to_vec(),
+            MonotonicMillis(3),
+        )
+        .unwrap();
+    // The only relaxed fact is Unknown OS authorization at this exact port.
+    let mut refusals = Vec::new();
+    for (authorization, error) in [
+        (Authorization::Required, ErrorCategory::PermissionRequired),
+        (Authorization::Denied, ErrorCategory::PermissionDenied),
+        (Authorization::Revoked, ErrorCategory::PermissionDenied),
+    ] {
+        let mut bad = f.clone();
+        bad.descriptor.authorization = authorization;
+        refusals.push((bad, error));
+    }
+    let mut bad = f.clone();
+    bad.current_observation = None;
+    refusals.push((bad, ErrorCategory::StaleObservation));
+    let mut bad = f.clone();
+    bad.descriptor.remote_grant = false;
+    refusals.push((bad, ErrorCategory::PermissionDenied));
+    let mut bad = f.clone();
+    bad.local_policy_allowed = false;
+    refusals.push((bad, ErrorCategory::PermissionDenied));
+    let mut bad = f.clone();
+    bad.session_state = Some(SessionState::Locked);
+    refusals.push((bad, ErrorCategory::SessionLocked));
+    let mut bad = f.clone();
+    bad.grant_revision += 1;
+    refusals.push((bad, ErrorCategory::StateConflict));
+    for (bad, expected) in refusals {
+        assert_eq!(
+            ledger
+                .dispatch(
+                    &owner,
+                    &action.id,
+                    action.payload_digest,
+                    &bad,
+                    MonotonicMillis(4)
+                )
+                .err(),
+            Some(expected)
+        );
+    }
+    let DispatchDisposition::ExecuteOnce(permit) = ledger
+        .dispatch(
+            &owner,
+            &action.id,
+            action.payload_digest,
+            &f,
+            MonotonicMillis(4),
+        )
+        .unwrap()
+    else {
+        panic!("first write attempt");
+    };
+    assert_eq!(
+        permit.purpose(),
+        OperationPurpose::DesktopAccessibilityWriteAttempt
+    );
+    assert_eq!(permit.payload(), b"owned-once-ax-write");
+    ledger
+        .authorize_desktop_accessibility_write_dispatch(
+            &owner,
+            &action.id,
+            action.payload_digest,
+            &f,
+            MonotonicMillis(4),
+        )
+        .unwrap();
+    let mut current_revoked = f.clone();
+    current_revoked.descriptor.authorization = Authorization::Revoked;
+    assert_eq!(
+        ledger.authorize_desktop_accessibility_write_dispatch(
+            &owner,
+            &action.id,
+            action.payload_digest,
+            &current_revoked,
+            MonotonicMillis(4)
+        ),
+        Err(ErrorCategory::PermissionDenied)
+    );
+    assert_eq!(
+        ledger.authorize_desktop_accessibility_write_dispatch(
+            &owner,
+            &action.id,
+            action.payload_digest,
+            &f,
+            MonotonicMillis(1000)
+        ),
+        Err(ErrorCategory::OperationTimeout)
+    );
+    ledger
+        .record_action_result(&action.id, ActionResult::Acknowledged, MonotonicMillis(5))
+        .unwrap();
+    ledger
+        .authorize_desktop_accessibility_write_result(
+            &owner,
+            &action.id,
+            action.payload_digest,
+            &f,
+            MonotonicMillis(6),
+        )
+        .unwrap();
+    assert_eq!(
+        ledger.authorize_desktop_read_result(
+            &owner,
+            &action.id,
+            action.payload_digest,
+            &f,
+            MonotonicMillis(6)
+        ),
+        Err(ErrorCategory::StateConflict)
+    );
+    let mut revoked = f.clone();
+    revoked.descriptor.authorization = Authorization::Revoked;
+    assert_eq!(
+        ledger.authorize_desktop_accessibility_write_result(
+            &owner,
+            &action.id,
+            action.payload_digest,
+            &revoked,
+            MonotonicMillis(6)
+        ),
+        Err(ErrorCategory::PermissionDenied)
+    );
+    // Delivery refusal does not turn the recorded ACK into cancellation/retry.
+    assert!(
+        matches!(ledger.dispatch(&owner, &action.id, action.payload_digest, &f, MonotonicMillis(7)).unwrap(), DispatchDisposition::Existing(s) if s.state == OperationState::Succeeded)
+    );
+    assert_eq!(f.descriptor.authorization, Authorization::Unknown);
+    let unknown = ledger
+        .prepare_desktop_accessibility_write_attempt(
+            &owner,
+            target(&resource),
+            c,
+            b"another-once-ax-write".to_vec(),
+            MonotonicMillis(8),
+        )
+        .unwrap();
+    assert!(matches!(
+        ledger
+            .dispatch(
+                &owner,
+                &unknown.id,
+                unknown.payload_digest,
+                &f,
+                MonotonicMillis(9)
+            )
+            .unwrap(),
+        DispatchDisposition::ExecuteOnce(_)
+    ));
+    ledger
+        .record_action_result(&unknown.id, ActionResult::Unknown, MonotonicMillis(10))
+        .unwrap();
+    assert!(
+        matches!(ledger.dispatch(&owner, &unknown.id, unknown.payload_digest, &f, MonotonicMillis(11)).unwrap(), DispatchDisposition::Existing(s) if s.state == OperationState::Unknown)
+    );
+    assert_eq!(
+        ledger.authorize_desktop_accessibility_write_result(
+            &owner,
+            &unknown.id,
+            unknown.payload_digest,
+            &f,
+            MonotonicMillis(11)
+        ),
+        Err(ErrorCategory::StateConflict)
+    );
+}

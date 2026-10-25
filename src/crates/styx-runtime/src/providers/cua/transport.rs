@@ -100,7 +100,10 @@ impl Admission {
                         ClientRequest::CallToolRequest(value)
                             if state.phase == Phase::Ready
                                 && state.catalog_seen
-                                && capability(value.params.name.as_ref()).is_ok() =>
+                                && (capability(value.params.name.as_ref()).is_ok()
+                                    || super::ax_write::private_name(
+                                        value.params.name.as_ref(),
+                                    )) =>
                         {
                             Kind::Tool
                         }

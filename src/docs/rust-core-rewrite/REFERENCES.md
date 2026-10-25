@@ -22,3 +22,12 @@
 Enrollment profile validation uses pinned `regex = 1.12.4` for the existing Unicode Letter/Number label and cross-platform path/shell patterns, rather than a hand-maintained Unicode classifier. One OnceLock compiles constant bounded patterns; request values are never patterns. See [upstream Unicode conformance](https://github.com/rust-lang/regex/blob/master/UNICODE.md) and [pinned crate documentation](https://docs.rs/regex/1.12.4/regex/). Cargo.lock pins the added transitive closure; this is not a claim that the newest release was required or that regex validates OS authorization.
 
 Paired native fixture uses the [official MCP Rust SDK HTTP client](https://rust.sdk.modelcontextprotocol.io/) and pinned [reqwest 0.13.5 TLS configuration](https://docs.rs/reqwest/0.13.5/reqwest/struct.ClientBuilder.html#method.tls_backend_preconfigured), rather than implementing an SSE parser. Runtime dev-dependency enables `rustls` (official AWS-LC default); the test supplies an explicit AWS-LC Rustls configuration, TLS 1.3 and only the owned fixture CA, disables proxy/redirects, and never disables certificate/hostname validation. Cargo.lock adds its platform TLS closure without changing preexisting locked versions. This feature is for the test client, not a second product ingress or OS certificate authorization.
+
+
+2026-10-25 toolchain update: the owner approved official Rust 1.97.1 for the
+workspace and native build lanes. Older 1.94.1 source/receipt references above
+are historical. Cargo `rust-version` specifies the supported minimum; the
+rustup toolchain file and dependency policy now pin 1.97.1. Compiler upgrading
+alone does not change the edition, dependency lock or identity/state contracts.
+Official references: https://doc.rust-lang.org/cargo/reference/rust-version.html
+and https://doc.rust-lang.org/stable/edition-guide/editions/ .

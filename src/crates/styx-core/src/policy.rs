@@ -18,7 +18,7 @@ pub fn check_admission(
     facts: &AdmissionFacts,
     now: MonotonicMillis,
 ) -> Result<(), ErrorCategory> {
-    check_admission_inner(context, facts, now, false)
+    check_admission_inner(context, facts, now, AdmissionMode::Ordinary)
 }
 
 /// A single explicitly prepared AX read may obtain evidence while OS permission
@@ -37,7 +37,7 @@ pub fn check_desktop_read_acquisition(
     {
         return Err(ErrorCategory::StateConflict);
     }
-    check_admission_inner(context, facts, now, true)
+    check_admission_inner(context, facts, now, AdmissionMode::ReadAcquisition)
 }
 
 /// A fixed exact-window screenshot attempt has the same acquisition boundary
@@ -54,14 +54,42 @@ pub fn check_desktop_window_capture_acquisition(
     {
         return Err(ErrorCategory::StateConflict);
     }
-    check_admission_inner(context, facts, now, true)
+    check_admission_inner(context, facts, now, AdmissionMode::ReadAcquisition)
+}
+
+/// Only the dedicated target-bound EditableText write-attempt port may use
+/// this policy. Unknown OS permission remains Unknown: the protected OS call
+/// performs final authorization, and a lost/negative write reply is not replayed.
+/// Runtime must prove the original owner/resource/native snapshot/object and
+/// select only the signed once-write provider; ordinary input remains closed.
+pub fn check_desktop_accessibility_write_attempt(
+    context: &PreparedContext,
+    facts: &AdmissionFacts,
+    now: MonotonicMillis,
+) -> Result<(), ErrorCategory> {
+    if context.capability != CapabilityId::DesktopAccessibility
+        || context.session.is_none()
+        || context.observation.is_none()
+        || facts.current_observation != context.observation
+        || facts.descriptor.scope != Scope::Session
+    {
+        return Err(ErrorCategory::StaleObservation);
+    }
+    check_admission_inner(context, facts, now, AdmissionMode::TargetBoundWriteAttempt)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AdmissionMode {
+    Ordinary,
+    ReadAcquisition,
+    TargetBoundWriteAttempt,
 }
 
 fn check_admission_inner(
     context: &PreparedContext,
     facts: &AdmissionFacts,
     now: MonotonicMillis,
-    read_acquisition: bool,
+    mode: AdmissionMode,
 ) -> Result<(), ErrorCategory> {
     let d = &facts.descriptor;
     if now >= context.deadline {
@@ -83,7 +111,9 @@ fn check_admission_inner(
     }
     match d.authorization {
         Authorization::Granted => {}
-        Authorization::Required | Authorization::Unknown if read_acquisition => {}
+        Authorization::Required | Authorization::Unknown
+            if mode == AdmissionMode::ReadAcquisition => {}
+        Authorization::Unknown if mode == AdmissionMode::TargetBoundWriteAttempt => {}
         Authorization::Required => return Err(ErrorCategory::PermissionRequired),
         Authorization::Denied | Authorization::Revoked => {
             return Err(ErrorCategory::PermissionDenied);
@@ -91,7 +121,7 @@ fn check_admission_inner(
         Authorization::Unknown => return Err(ErrorCategory::PermissionRequired),
     }
     if d.availability != Availability::Available
-        && !(read_acquisition && d.availability == Availability::Unavailable)
+        && !(mode == AdmissionMode::ReadAcquisition && d.availability == Availability::Unavailable)
     {
         return Err(d.reason.unwrap_or(ErrorCategory::CapabilityUnsupported));
     }

@@ -468,6 +468,50 @@ impl SessionRegistry {
         self.install(next, EventKind::Observed, Some(capability), Some(issuer))?;
         Ok(observation)
     }
+    /// Trusted runtime reports an actual acquired AX snapshot, never an input
+    /// grant. Unlike generic observation this preserves Unknown authorization;
+    /// only the separately prepared exact-object write-attempt policy may use it.
+    pub fn record_accessibility_read_observation(
+        &mut self,
+        control: &SessionControl,
+        binding: &SessionBinding,
+        now: u64,
+    ) -> Result<ObservationId> {
+        self.authority(&control.brand)?;
+        let current = self.current(binding)?;
+        usable_state(current.state)?;
+        let provider = current
+            .providers
+            .get(&CapabilityId::DesktopAccessibility)
+            .ok_or(SessionError::CapabilityUnsupported)?;
+        if now < provider.facts.observed_at || now >= provider.facts.valid_until {
+            return Err(SessionError::StaleObservation);
+        }
+        match provider.facts.authorization {
+            Authorization::Denied | Authorization::Revoked => {
+                return Err(SessionError::PermissionDenied);
+            }
+            Authorization::Required => return Err(SessionError::PermissionRequired),
+            Authorization::Granted | Authorization::Unknown => {}
+        }
+        if provider.facts.availability != Availability::Available {
+            return Err(SessionError::CapabilityUnsupported);
+        }
+        let (issuer, value) = self.issued(b"styx.session.observation.v1\0")?;
+        let observation = ObservationId::try_from(value).map_err(|_| SessionError::Invalid)?;
+        let mut next = self.current(binding)?.clone();
+        next.providers
+            .get_mut(&CapabilityId::DesktopAccessibility)
+            .ok_or(SessionError::CapabilityUnsupported)?
+            .observation = Some(observation.clone());
+        self.install(
+            next,
+            EventKind::Observed,
+            Some(CapabilityId::DesktopAccessibility),
+            Some(issuer),
+        )?;
+        Ok(observation)
+    }
     pub fn select(
         &self,
         authority: &SelectionAuthority,

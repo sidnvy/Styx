@@ -1,5 +1,15 @@
 # Rust implementation status · 2026-10-24
 
+## Toolchain convergence — Rust 1.97.1 (2026-10-25)
+
+The owner approved moving the Styx workspace, dependency gate and native build
+lanes to official Rust 1.97.1. Edition 2024 and Cargo.lock remain unchanged.
+Earlier Rust 1.94.1 receipts are historical evidence, not proof for the upgraded
+candidate. Linux, pho and NAB5 toolchain preparation, same-source checks and
+candidate acceptance are recorded separately in the execution owner report.
+No compiler upgrade grants native permissions or changes device/publisher pins.
+
+
 Owner-authorized goal is active. The plan at a21ea75 remains the scope baseline; WORK-ITEMS/ACCEPTANCE are obligations, not execution receipts. All source work uses the existing staging checkout, no new worktree. Integration SHA and evidence hashes are recorded outside source after commits.
 
 | Area | Implemented / locally checked | Still required |

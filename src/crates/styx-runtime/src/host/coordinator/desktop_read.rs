@@ -3,7 +3,7 @@ use super::desktop::{DesktopLane, desktop};
 use super::*;
 use crate::providers::cua::{
     CuaError, CuaEvidence, CuaReceipt, DesktopReadRequest, DesktopReadTarget,
-    ax_snapshot::parse_acquired,
+    ax_snapshot::{ParsedAxSnapshot, parse_acquired},
 };
 use rmcp::model::{CallToolResult, ContentBlock};
 use styx_contracts::capability::*;
@@ -57,7 +57,7 @@ pub(super) fn acquisition_facts(
             recovery: provider.facts.recovery,
         },
         session_state: Some(view.descriptor.state),
-        current_observation: None,
+        current_observation: provider.observation,
     })
 }
 fn insufficient_read() -> CallToolResult {
@@ -74,9 +74,9 @@ pub(super) fn settle_acquired_read(
     lane: &mut DesktopLane,
     target: &DesktopReadTarget,
     receipt: &mut CuaReceipt,
-) {
+) -> Option<(ParsedAxSnapshot, String)> {
     if receipt.evidence != CuaEvidence::Acknowledged {
-        return;
+        return None;
     }
     let rewritten = (|| {
         target.validate()?;
@@ -89,14 +89,26 @@ pub(super) fn settle_acquired_read(
                     next = next.checked_add(1).ok_or(CuaError::Busy)?;
                 }
                 lane.next_read_alias = next;
-                parsed.rewrite_result(original, &format!("s{next:08x}"))
+                let alias = format!("s{next:08x}");
+                let result = parsed.rewrite_result(original, &alias)?;
+                Ok((result, Some((parsed, alias))))
             }
             DesktopReadRequest::WindowCapture(request) => {
                 crate::providers::cua::window_capture::project_acquired(original, &request)
+                    .map(|result| (result, None))
             }
         }
     })();
-    // Preserve the original native ACK even when the returned read is not
-    // adequate evidence. Neither read creates input authority.
-    receipt.result = Some(rewritten.unwrap_or_else(|_| insufficient_read()));
+    // The original ACK is preserved even when the read is inadequate. Only the
+    // caller's fresh Core/owner/resource settlement can install the returned map.
+    match rewritten {
+        Ok((result, observation)) => {
+            receipt.result = Some(result);
+            observation
+        }
+        Err(_) => {
+            receipt.result = Some(insufficient_read());
+            None
+        }
+    }
 }

@@ -1,0 +1,73 @@
+{
+  "schema": 1,
+  "upstream_repository": "https://github.com/trycua/cua",
+  "upstream_commit": "6d6c734c127025fb39ad5d585a10382808b39dc1",
+  "upstream_version": "0.36.0",
+  "official_archive_sha256": "157acdc2fd0bf5c480af2bdbe4a69f75a709551627f851caee16346234fdedef",
+  "patch": "cua-0.36.0-styx-once.patch",
+  "patch_sha256": "267a723497374947dc68ce59f05400680147024d5f21f989b619b7d6f63e5b94",
+  "files": [
+    {
+      "path": "libs/cua-driver/rust/crates/platform-linux/src/tools/impl_.rs",
+      "original_sha256": "1a22d33d7d13ec9fa05aa3dafd0b20bd5e6b0b30d386ac8cbd508c74dfa4cbc0",
+      "original_git_blob_sha1": "3be700798b9310b6cf931725f97ae7c02c619b5a",
+      "final_sha256": "dd46daaa32cf2cf19eaf653b4bb66939917883dd7abaae5196f94e03c8dab5b5",
+      "original_bytes": 654449,
+      "final_bytes": 665438
+    },
+    {
+      "path": "libs/cua-driver/rust/crates/platform-linux/src/atspi/native.rs",
+      "original_sha256": "59e3c53a54b4d51dd1259cdcdf347400dcf85dd8ffdae2d0a04462012e21042f",
+      "original_git_blob_sha1": "36451e533335892864981f6f36a69ad318309199",
+      "final_sha256": "a5b1a9e0b13e2e9b914b46e14413dbd2611b5c2ccf7375547ba4c8abaaa7ba51",
+      "original_bytes": 310281,
+      "final_bytes": 324759
+    },
+    {
+      "path": "libs/cua-driver/rust/crates/cua-driver-core/src/authorization.rs",
+      "original_sha256": "1b55a8696da7df98455833a7c1f6d1851eb9a60520050dd76143883820ecc827",
+      "original_git_blob_sha1": "d8c79dd0b20baaedc56309ccf694d7bd8be66812",
+      "final_sha256": "d46226c685731b6c9886f9d7931167819bcc318a43b1447d830617129e9ac7eb",
+      "original_bytes": 77890,
+      "final_bytes": 78218
+    },
+    {
+      "path": "libs/cua-driver/rust/crates/cua-driver-core/src/tool.rs",
+      "original_sha256": "0366052d1f40e533e3f9ca253397c2eb1862daeb0d85debecba476ab6a036862",
+      "original_git_blob_sha1": "7ff2e42c9d71869c88c74452f19c5576032f77ab",
+      "final_sha256": "793a0928196e20e5ff5b53b48ef9045dfbb6f42897321471102587c3f4653af8",
+      "original_bytes": 289953,
+      "final_bytes": 290196
+    },
+    {
+      "path": "libs/cua-driver/rust/crates/platform-linux/src/atspi/snapshot.rs",
+      "original_sha256": "16fee7f6eac68eb2c7bc66bb8a2f6d983e48d6d8f22a9398cb6d8f133da24c21",
+      "original_git_blob_sha1": "c3f06cfb2b90c7595b83cce8fe977edf54c15eeb",
+      "final_sha256": "a642de13c10354284578e95b6222be0efe4fef34b5cac1e10340799761350e31",
+      "original_bytes": 13707,
+      "final_bytes": 14702
+    }
+  ],
+  "rust_toolchain": "1.97.1",
+  "workspace": "libs/cua-driver/rust",
+  "build_arguments": [
+    "build",
+    "--locked",
+    "--offline",
+    "-p",
+    "cua-driver",
+    "--release",
+    "--features",
+    "cua-driver/portal-input",
+    "--jobs",
+    "2"
+  ],
+  "upstream_lock_sha256": "f9d49ce2dccdc43b2f7f027185301138fdd45eab4f9a556aace4cb0f4a98d46c",
+  "native_private_tools": [
+    "styx_private_ax_acquire_editable_v1",
+    "styx_private_ax_set_text_once_v1"
+  ],
+  "public_styx_catalog_changed": false,
+  "observed_invalidation_only": true,
+  "remote_atomic_object_generation_proven": false
+}

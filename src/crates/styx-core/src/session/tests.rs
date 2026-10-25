@@ -1022,3 +1022,53 @@ fn safety_review_regressions_revocation_incarnation_and_freshness() {
         SessionState::Degraded
     );
 }
+
+#[test]
+fn acquired_ax_observation_preserves_unknown_and_expires_with_provider() {
+    let (mut directory, control) = registry(SessionLimits::default());
+    let binding = register(&mut directory, &control, "ax");
+    ready(&mut directory, &control, &binding);
+    let mut evidence = provider(CapabilityId::DesktopAccessibility);
+    evidence.authorization = Authorization::Unknown;
+    directory
+        .update_provider(&control, &binding, evidence.clone())
+        .unwrap();
+    let observation = directory
+        .record_accessibility_read_observation(&control, &binding, 20)
+        .unwrap();
+    let view = directory.inspect(&binding, 20).unwrap();
+    let ax = view
+        .providers
+        .iter()
+        .find(|p| p.facts.capability == CapabilityId::DesktopAccessibility)
+        .unwrap();
+    assert_eq!(ax.facts.authorization, Authorization::Unknown);
+    assert_eq!(ax.observation.as_ref(), Some(&observation));
+    assert_eq!(
+        directory
+            .project(&binding, CapabilityId::DesktopAccessibility, 20)
+            .err(),
+        Some(SessionError::PermissionRequired)
+    );
+    assert_eq!(
+        directory.record_accessibility_read_observation(&control, &binding, 100),
+        Err(SessionError::StaleObservation)
+    );
+    evidence.authorization = Authorization::Revoked;
+    directory
+        .update_provider(&control, &binding, evidence)
+        .unwrap();
+    assert_eq!(
+        directory.record_accessibility_read_observation(&control, &binding, 21),
+        Err(SessionError::PermissionDenied)
+    );
+    let view = directory.inspect(&binding, 21).unwrap();
+    assert!(
+        view.providers
+            .iter()
+            .find(|p| p.facts.capability == CapabilityId::DesktopAccessibility)
+            .unwrap()
+            .observation
+            .is_none()
+    );
+}

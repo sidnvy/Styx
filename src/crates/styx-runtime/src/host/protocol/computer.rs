@@ -355,6 +355,7 @@ fn category(error: CuaError) -> ErrorCategory {
         CuaError::Busy => ErrorCategory::Busy,
         CuaError::InvalidRequest => ErrorCategory::InvalidRequest,
         CuaError::PermissionDenied => ErrorCategory::PermissionDenied,
+        CuaError::StaleObservation => ErrorCategory::StaleObservation,
         CuaError::Unsupported => ErrorCategory::CapabilityUnsupported,
         CuaError::ProtocolMismatch => ErrorCategory::ProtocolMismatch,
         CuaError::Unknown | CuaError::CleanupUnconfirmed => ErrorCategory::ResultUnknown,
