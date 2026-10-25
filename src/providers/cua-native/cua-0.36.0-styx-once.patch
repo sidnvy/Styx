@@ -364,10 +364,41 @@
      pub fn end_transport_sessions(&self, transport_session: &str) -> usize {
 --- a/libs/cua-driver/rust/crates/cua-driver/src/serve.rs
 +++ b/libs/cua-driver/rust/crates/cua-driver/src/serve.rs
-@@ -28,6 +28,33 @@
+@@ -28,6 +28,64 @@
      is_daemon_listening, send_request, socket_path_for_namespace, DaemonRequest, DaemonResponse,
      ToolObservationOrigin,
  };
++
++#[cfg(target_os = "macos")]
++const STYX_PRIVATE_DESKTOP_OBSERVATION: &str = "styx_private_desktop_observation_v1";
++#[cfg(target_os = "macos")]
++#[derive(serde::Deserialize)]
++#[serde(deny_unknown_fields)]
++struct PrivateDesktopObservationRequest {
++    method: String,
++}
++#[cfg(target_os = "macos")]
++async fn private_desktop_observation_response(
++    context: std::sync::Arc<
++        platform_macos::session::private_observation::EmbeddedObservationContext,
++    >,
++    raw: &str,
++) -> DaemonResponse {
++    if !serde_json::from_str::<PrivateDesktopObservationRequest>(raw)
++        .is_ok_and(|request| request.method == STYX_PRIVATE_DESKTOP_OBSERVATION)
++    {
++        return DaemonResponse::err("invalid_private_observation_request", 65);
++    }
++    // This same-UID authenticated stream owns the reply. No separate proxy,
++    // public tool, registry lookup, GUI prompt, or action is involved.
++    match context.observe_tracked().await {
++        Ok(value) => match serde_json::to_value(value) {
++            Ok(value) => DaemonResponse::ok(value),
++            Err(_) => DaemonResponse::err("private_observation_encoding_failed", 1),
++        },
++        Err(reason) => DaemonResponse::err(reason, 1),
++    }
++}
 +
 +const STYX_PRIVATE_TRANSPORT_DRAIN: &str = "styx_private_transport_drain_v1";
 +#[derive(serde::Deserialize)]
@@ -398,7 +429,56 @@
  
  static ACTIVE_PROXY_SESSIONS: OnceLock<Mutex<HashSet<String>>> = OnceLock::new();
  
-@@ -1317,6 +1344,10 @@
+@@ -961,6 +1019,13 @@
+     }
+ 
+     let embedded = cua_driver_core::embedded_mode();
++    #[cfg(target_os = "macos")]
++    let private_observation_context = std::sync::Arc::new(
++        platform_macos::session::private_observation::EmbeddedObservationContext::capture(
++            embedded,
++            cua_driver_core::parent_liveness_stdin_enabled(),
++        ),
++    );
+     // Embedded endpoints are host-owned. The daemon must never unlink an
+     // arbitrary pre-existing path between the host's safety check and bind.
+     prepare_embedded_socket_path(socket_path, embedded)?;
+@@ -988,7 +1053,11 @@
+     let mut connection_tasks = tokio::task::JoinSet::new();
+     let parent_liveness = async {
+         if cua_driver_core::parent_liveness_stdin_enabled() {
++            #[cfg(target_os = "macos")]
++            private_observation_context.monitor_started();
+             wait_for_parent_stdin_eof().await;
++            #[cfg(target_os = "macos")]
++            private_observation_context.ended();
+         } else {
+             std::future::pending::<()>().await;
+         }
+@@ -1022,6 +1091,8 @@
+                 let shutdown_tx2 = shutdown_tx.clone();
+                 let trusted_resume_registry = trusted_resume_registry.clone();
+ 
++                #[cfg(target_os = "macos")]
++                let private_observation = private_observation_context.clone();
+                 connection_tasks.spawn(async move {
+                     let (reader, mut writer) = stream.into_split();
+                     let mut lines = BufReader::new(reader).lines();
+@@ -1055,6 +1126,13 @@
+                         ).await;
+ 
+                         match req.method.as_str() {
++                            #[cfg(target_os = "macos")]
++                            STYX_PRIVATE_DESKTOP_OBSERVATION => {
++                                let resp = private_desktop_observation_response(private_observation.clone(), &line).await;
++                                let _ = writer.write_all(
++                                    (serde_json::to_string(&resp).unwrap() + "\n").as_bytes()
++                                ).await;
++                            }
+                             "mcp_envelope_stream" if control_session_id.is_none() && trusted_session.is_none() => {
+                                 // Existing local-peer authentication already passed.
+                                 // Registry and session lifetime belong to this stream.
+@@ -1317,6 +1395,10 @@
                                      (serde_json::to_string(&resp).unwrap() + "\n").as_bytes()
                                  ).await;
                              }
@@ -409,7 +489,7 @@
                              "session_begin" => {
                                  // The proxy's persistent control connection.
                                  // Record the session_id so this connection's EOF
-@@ -1324,7 +1355,17 @@
+@@ -1324,7 +1406,17 @@
                                  // session in the post-loop block below. This is
                                  // the ONLY place a connection is marked control;
                                  // per-call connections never send this. ACK ok.
@@ -428,7 +508,7 @@
                                      control_session_id = Some(sid.to_owned());
                                      active_proxy_sessions()
                                          .lock()
-@@ -1383,7 +1424,9 @@
+@@ -1383,7 +1475,9 @@
                      // benign.
                      if let Some(sid) = control_session_id {
                          active_proxy_sessions().lock().unwrap().remove(&sid);
@@ -439,7 +519,24 @@
                      }
                      if let Some(connection) = trusted_session {
                          detach_trusted_connection(&trusted_resume_registry, connection).await;
-@@ -2107,12 +2150,26 @@
+@@ -1401,9 +1495,16 @@
+         }
+     }
+ 
++    #[cfg(target_os = "macos")]
++    private_observation_context.ended();
++
+     // Accepted connections may still own SDK/session state after the listener
+     // stops. Abort and join them before tearing down the SDK runtime.
+     connection_tasks.shutdown().await;
++    // A connection can be cancelled while its CF/TCC spawn_blocking call is
++    // still running. The original context retains that handle until real join.
++    #[cfg(target_os = "macos")]
++    private_observation_context.drain_observations().await;
+     release_active_proxy_sessions();
+ 
+     // Do not unlink a replacement socket created after this listener was bound.
+@@ -2107,12 +2208,26 @@
                                      (serde_json::to_string(&resp).unwrap() + "\n").as_bytes()
                                  ).await;
                              }
@@ -467,7 +564,7 @@
                                      control_session_id = Some(sid.to_owned());
                                      active_proxy_sessions()
                                          .lock()
-@@ -2160,7 +2217,9 @@
+@@ -2160,7 +2275,9 @@
                      // control_session_id None.
                      if let Some(sid) = control_session_id {
                          active_proxy_sessions().lock().unwrap().remove(&sid);
@@ -2461,9 +2558,259 @@
      }
  
      extern "C" {
+--- /dev/null
++++ b/libs/cua-driver/rust/crates/platform-macos/src/private_session_observation.rs
+@@ -0,0 +1,247 @@
++//! Read-only facts for the authenticated local embedded daemon connection.
++//! No registry registration, grant, prompt, input, or claim of Desktop Ready.
++
++use super::observation;
++use crate::{ax::enablement::process_start_stamp, permissions::current_status};
++use serde::Serialize;
++use std::sync::{
++    atomic::{AtomicBool, Ordering},
++    Arc,
++};
++use tokio::{sync::Mutex, task::JoinHandle};
++
++type ObservationResult = Result<NativeObservation, &'static str>;
++
++#[derive(Clone, Copy, Eq, PartialEq, Serialize)]
++pub struct ProcessBirth {
++    pub pid: u32,
++    pub start_seconds: u64,
++    pub start_microseconds: u64,
++}
++fn birth(pid: i32) -> Option<ProcessBirth> {
++    if pid <= 0 {
++        return None;
++    }
++    let (start_seconds, start_microseconds) = process_start_stamp(pid)?;
++    if start_seconds == 0 || start_microseconds >= 1_000_000 {
++        return None;
++    }
++    Some(ProcessBirth {
++        pid: pid as u32,
++        start_seconds,
++        start_microseconds,
++    })
++}
++
++#[derive(Clone, Copy, Eq, PartialEq)]
++struct StdinPipe {
++    device: u64,
++    inode: u64,
++    mode: u32,
++}
++fn stdin_pipe() -> Option<StdinPipe> {
++    // libc supplies the official native stat ABI. No descriptor is opened,
++    // closed, reconfigured or read by this observation.
++    let mut value = std::mem::MaybeUninit::<libc::stat>::uninit();
++    if unsafe { libc::fstat(libc::STDIN_FILENO, value.as_mut_ptr()) } != 0 {
++        return None;
++    }
++    let value = unsafe { value.assume_init() };
++    if value.st_mode & libc::S_IFMT != libc::S_IFIFO {
++        return None;
++    }
++    Some(StdinPipe {
++        device: value.st_dev as u64,
++        inode: value.st_ino,
++        mode: value.st_mode as u32,
++    })
++}
++
++/// Captured once by the original serve invocation, before accepting clients.
++/// Mode flags describe configured behavior. They do not authenticate the App;
++/// the Host must independently match the actual parent to its signed App pin.
++pub struct EmbeddedObservationContext {
++    instance: String,
++    daemon: Option<ProcessBirth>,
++    parent: Option<ProcessBirth>,
++    stdin: Option<StdinPipe>,
++    embedded: bool,
++    monitor_enabled: bool,
++    monitor_started: AtomicBool,
++    ended: AtomicBool,
++    // The daemon, not a cancellable connection waiter, owns the actual native
++    // reader. One slot bounds CF/TCC concurrency without a queue or new service.
++    reader: Mutex<Option<JoinHandle<ObservationResult>>>,
++}
++impl EmbeddedObservationContext {
++    pub fn capture(embedded: bool, monitor_enabled: bool) -> Self {
++        let parent_pid = unsafe { libc::getppid() };
++        let parent = birth(parent_pid);
++        Self {
++            instance: uuid::Uuid::new_v4().to_string(),
++            daemon: birth(std::process::id() as i32),
++            parent: if unsafe { libc::getppid() } == parent_pid {
++                parent
++            } else {
++                None
++            },
++            stdin: stdin_pipe(),
++            embedded,
++            monitor_enabled,
++            monitor_started: AtomicBool::new(false),
++            ended: AtomicBool::new(false),
++            reader: Mutex::new(None),
++        }
++    }
++    /// Called inside the actual parent-stdin future before its first read.
++    pub fn monitor_started(&self) {
++        self.monitor_started.store(true, Ordering::Release);
++    }
++    /// Called on lifetime EOF/read error and before serve begins terminal drain.
++    pub fn ended(&self) {
++        self.ended.store(true, Ordering::Release);
++    }
++
++    /// A cancelled connection drops only its wait, never the original handle.
++    /// Concurrent readers are refused; no unbounded queue of native calls exists.
++    pub async fn observe_tracked(self: &Arc<Self>) -> ObservationResult {
++        let mut slot = self
++            .reader
++            .try_lock()
++            .map_err(|_| "private_observation_busy")?;
++        if self.ended.load(Ordering::Acquire) {
++            return Err("private_observation_closed");
++        }
++        if let Some(original) = slot.as_mut() {
++            if !original.is_finished() {
++                return Err("private_observation_busy");
++            }
++            // A prior connection may have stopped waiting. Reap that exact
++            // reader; never return its old facts to this new request.
++            let _ = original.await;
++            slot.take();
++        }
++        if self.ended.load(Ordering::Acquire) {
++            return Err("private_observation_closed");
++        }
++        let context = self.clone();
++        *slot = Some(tokio::task::spawn_blocking(move || context.observe()));
++        // Borrow the retained handle across await. Cancelling this future leaves
++        // the original task in the slot for the terminal owner to join.
++        let result = slot.as_mut().expect("original reader stored").await;
++        slot.take();
++        result.map_err(|_| "private_observation_worker_failed")?
++    }
++
++    /// Called after connection abort/join and before SDK/runtime teardown.
++    /// There is deliberately no timeout->success or blocking-task abort here.
++    /// Cancellation of the drain waiter also leaves the original slot intact.
++    pub async fn drain_observations(&self) {
++        self.ended();
++        let mut slot = self.reader.lock().await;
++        if let Some(original) = slot.as_mut() {
++            // Success or panic both mean the original worker actually ended.
++            // A never-returning OS reader keeps shutdown pending, not complete.
++            let _ = original.await;
++            slot.take();
++        }
++    }
++
++    fn observe(&self) -> ObservationResult {
++        if self.ended.load(Ordering::Acquire) {
++            return Err("private_observation_closed");
++        }
++        if !self.embedded || !self.monitor_enabled {
++            return Err("private_observation_requires_embedded_lifetime");
++        }
++        let daemon = self.daemon.ok_or("daemon_birth_unknown")?;
++        let parent = self.parent.ok_or("original_parent_unknown")?;
++        if parent.pid <= 1 || !self.same_processes(daemon, parent) {
++            return Err("original_parent_or_daemon_changed");
++        }
++        let uid = unsafe { libc::getuid() };
++        if uid != unsafe { libc::geteuid() } {
++            return Err("caller_uid_changed");
++        }
++        let first = observation::observe_current();
++        let permissions = current_status(); // No prompt and no descriptor fallback.
++        let second = observation::observe_current();
++        let identity = first
++            .identity
++            .filter(|value| Some(*value) == second.identity);
++        let status =
++            if first.identity != second.identity || first.availability != second.availability {
++                "desktop_session_changed"
++            } else {
++                match second.availability {
++                    Ok(()) => "unlocked",
++                    Err(error) => error.code(),
++                }
++            };
++        if !self.same_processes(daemon, parent)
++            || unsafe { libc::getuid() } != uid
++            || unsafe { libc::geteuid() } != uid
++        {
++            return Err("original_parent_or_daemon_changed");
++        }
++        let original_pipe = self.stdin.is_some() && stdin_pipe() == self.stdin;
++        Ok(NativeObservation {
++            schema: 1,
++            platform: "macos",
++            daemon_instance: self.instance.clone(),
++            uid,
++            daemon,
++            parent,
++            session: SessionObservation {
++                uid: identity.map(|value| value.uid),
++                audit_id: identity.map(|value| value.audit_id),
++                status,
++            },
++            permissions,
++            registry_before: first.registry,
++            registry_after: second.registry,
++            lifetime: LifetimeObservation {
++                embedded_configured: self.embedded,
++                stdin_monitor_enabled: self.monitor_enabled,
++                stdin_monitor_started: self.monitor_started.load(Ordering::Acquire),
++                original_stdin_pipe: original_pipe,
++                ended: self.ended.load(Ordering::Acquire),
++            },
++        })
++    }
++    fn same_processes(&self, daemon: ProcessBirth, parent: ProcessBirth) -> bool {
++        birth(daemon.pid as i32) == Some(daemon)
++            && unsafe { libc::getppid() } == parent.pid as i32
++            && birth(parent.pid as i32) == Some(parent)
++            && unsafe { libc::getppid() } == parent.pid as i32
++    }
++}
++
++#[derive(Serialize)]
++pub struct NativeObservation {
++    schema: u32,
++    platform: &'static str,
++    daemon_instance: String,
++    uid: u32,
++    daemon: ProcessBirth,
++    parent: ProcessBirth,
++    session: SessionObservation,
++    permissions: crate::permissions::PermissionsStatus,
++    registry_before: observation::RegistryObservation,
++    registry_after: observation::RegistryObservation,
++    lifetime: LifetimeObservation,
++}
++#[derive(Serialize)]
++struct SessionObservation {
++    uid: Option<u32>,
++    audit_id: Option<u32>,
++    status: &'static str,
++}
++#[derive(Serialize)]
++struct LifetimeObservation {
++    embedded_configured: bool,
++    stdin_monitor_enabled: bool,
++    stdin_monitor_started: bool,
++    original_stdin_pipe: bool,
++    ended: bool,
++}
 --- a/libs/cua-driver/rust/crates/platform-macos/src/session.rs
 +++ b/libs/cua-driver/rust/crates/platform-macos/src/session.rs
-@@ -56,3 +56,7 @@
+@@ -56,3 +56,11 @@
          let _ = has_graphic_access();
      }
  }
@@ -2471,9 +2818,13 @@
 +// Private Styx AX admission only; the general Cua capability probe above is unchanged.
 +#[path = "session_observation.rs"]
 +pub(crate) mod observation;
++
++// Private same-connection daemon observations; not an MCP tool registry.
++#[path = "private_session_observation.rs"]
++pub mod private_observation;
 --- /dev/null
 +++ b/libs/cua-driver/rust/crates/platform-macos/src/session_observation.rs
-@@ -0,0 +1,321 @@
+@@ -0,0 +1,469 @@
 +//! Narrow, fail-closed observation for Styx's private AX once-write path.
 +//!
 +//! IOConsoleUsers is an Apple private registry schema (IOKitKeysPrivate.h).
@@ -2486,9 +2837,11 @@
 +    array::{CFArrayGetCount, CFArrayGetTypeID, CFArrayGetValueAtIndex},
 +    base::{CFAllocatorRef, CFGetTypeID, CFRelease, CFTypeRef, TCFType},
 +    boolean::{kCFBooleanFalse, kCFBooleanTrue, CFBooleanGetTypeID},
-+    dictionary::{CFDictionaryGetTypeID, CFDictionaryGetValue, CFDictionaryRef},
++    dictionary::{
++        CFDictionaryGetTypeID, CFDictionaryGetValue, CFDictionaryRef, CFMutableDictionaryRef,
++    },
 +    number::{kCFNumberSInt64Type, CFNumberGetTypeID, CFNumberGetValue, CFNumberIsFloatType},
-+    string::{CFString, CFStringRef},
++    string::{CFString, CFStringGetLength, CFStringGetTypeID},
 +};
 +
 +#[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -2526,12 +2879,12 @@
 +#[link(name = "IOKit", kind = "framework")]
 +unsafe extern "C" {
 +    fn IORegistryGetRootEntry(main_port: u32) -> u32;
-+    fn IORegistryEntryCreateCFProperty(
++    fn IORegistryEntryCreateCFProperties(
 +        entry: u32,
-+        key: CFStringRef,
++        properties: *mut CFMutableDictionaryRef,
 +        allocator: CFAllocatorRef,
 +        options: u32,
-+    ) -> CFTypeRef;
++    ) -> i32;
 +    fn IOObjectRelease(object: u32) -> i32;
 +}
 +struct RegistryEntry(u32);
@@ -2611,11 +2964,11 @@
 +/// Parse only retained CF objects returned by the native registry, never JSON
 +/// from a client. Non-matching sessions need valid identity fields so malformed
 +/// data cannot hide a second match. Their lock/presence states do not authorize us.
-+fn selected_session(users: &OwnedCf, expected: SessionIdentity) -> Observed<()> {
-+    if users.0.is_null() || unsafe { CFGetTypeID(users.0) } != unsafe { CFArrayGetTypeID() } {
++fn selected_row(users: CFTypeRef, expected: SessionIdentity) -> Observed<SelectedRow> {
++    if users.is_null() || unsafe { CFGetTypeID(users) } != unsafe { CFArrayGetTypeID() } {
 +        return Err(SessionUnavailable::Unknown);
 +    }
-+    let array = users.0.cast();
++    let array = users.cast();
 +    let count = unsafe { CFArrayGetCount(array) };
 +    // A conservative parse-work limit, not a platform session-count claim.
 +    if !(0..=4096).contains(&count) {
@@ -2640,39 +2993,185 @@
 +        }
 +    }
 +    let dictionary = selected.ok_or(SessionUnavailable::Disconnected)?;
-+    let on_console = boolean(field(dictionary, "kCGSSessionOnConsoleKey"))?;
-+    let login_done = boolean(field(dictionary, "kCGSessionLoginDoneKey"))?;
-+    let locked = boolean(field(dictionary, "CGSSessionScreenIsLocked"))?;
-+    if locked {
-+        return Err(SessionUnavailable::Locked);
++    Ok(SelectedRow {
++        uid: expected.uid,
++        audit_id: expected.audit_id,
++        console_uuid: ConsoleUuidObservation::read(field(
++            dictionary,
++            "CGSSessionUniqueSessionUUID",
++        )),
++        session_id: integer(field(dictionary, "kCGSSessionIDKey")).ok(),
++        on_console: BoolObservation::read(field(dictionary, "kCGSSessionOnConsoleKey")),
++        login_done: BoolObservation::read(field(dictionary, "kCGSessionLoginDoneKey")),
++        screen_locked: BoolObservation::read(field(dictionary, "CGSSessionScreenIsLocked")),
++    })
++}
++
++/// Provenance is the enclosing field: global IOConsoleLocked is NOT the
++/// per-row CGSSessionScreenIsLocked field and cannot override a missing row bit.
++#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
++#[serde(tag = "state", content = "value", rename_all = "snake_case")]
++pub(crate) enum BoolObservation {
++    Known(bool),
++    Missing,
++    Invalid,
++}
++impl BoolObservation {
++    fn read(value: CFTypeRef) -> Self {
++        if value.is_null() {
++            Self::Missing
++        } else {
++            boolean(value).map(Self::Known).unwrap_or(Self::Invalid)
++        }
 +    }
-+    if !on_console || !login_done {
-+        return Err(SessionUnavailable::Disconnected);
++    fn required(self) -> Observed<bool> {
++        match self {
++            Self::Known(value) => Ok(value),
++            _ => Err(SessionUnavailable::Unknown),
++        }
 +    }
-+    Ok(())
++}
++/// Original selected IOConsoleUsers row UUID, never a generated daemon label.
++#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
++#[serde(tag = "state", content = "value", rename_all = "snake_case")]
++pub(crate) enum ConsoleUuidObservation {
++    Known(String),
++    Missing,
++    Invalid,
++}
++impl ConsoleUuidObservation {
++    fn read(value: CFTypeRef) -> Self {
++        if value.is_null() {
++            return Self::Missing;
++        }
++        if unsafe { CFGetTypeID(value) } != unsafe { CFStringGetTypeID() }
++            || unsafe { CFStringGetLength(value.cast()) } != 36
++        {
++            return Self::Invalid;
++        }
++        let text = unsafe { CFString::wrap_under_get_rule(value.cast()) }.to_string();
++        match uuid::Uuid::parse_str(&text) {
++            Ok(value) if !value.is_nil() => Self::Known(value.to_string()),
++            _ => Self::Invalid,
++        }
++    }
++}
++#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
++pub(crate) struct SelectedRow {
++    uid: u32,
++    audit_id: u32,
++    console_uuid: ConsoleUuidObservation,
++    session_id: Option<u32>,
++    on_console: BoolObservation,
++    login_done: BoolObservation,
++    screen_locked: BoolObservation,
++}
++impl SelectedRow {
++    fn availability(self) -> Observed<()> {
++        // Preserve the original strict admission order and semantics.
++        let on_console = self.on_console.required()?;
++        let login_done = self.login_done.required()?;
++        if self.screen_locked.required()? {
++            return Err(SessionUnavailable::Locked);
++        }
++        if !on_console || !login_done {
++            return Err(SessionUnavailable::Disconnected);
++        }
++        Ok(())
++    }
++}
++#[cfg(test)]
++fn selected_session(users: &OwnedCf, expected: SessionIdentity) -> Observed<()> {
++    selected_row(users.0, expected)?.availability()
++}
++
++#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
++pub(crate) struct RegistryObservation {
++    /// A successful single native copy is not an atomic session/action fence.
++    read_status: &'static str,
++    global_io_console_locked: BoolObservation,
++    selected_unique_row: Option<SelectedRow>,
++    selection_status: &'static str,
++}
++impl RegistryObservation {
++    fn unknown() -> Self {
++        Self {
++            read_status: "unavailable",
++            global_io_console_locked: BoolObservation::Missing,
++            selected_unique_row: None,
++            selection_status: "desktop_session_unknown",
++        }
++    }
 +}
 +
 +/// A successful result records a currently observed unlocked caller session.
 +/// It is not a lease, generation, or guarantee that the next action is atomic
 +/// with this read. Native OS permissions and the existing Core grant still apply.
++pub(crate) struct CurrentSessionObservation {
++    pub(crate) identity: Option<SessionIdentity>,
++    pub(crate) availability: Observed<()>,
++    pub(crate) registry: RegistryObservation,
++}
++
++/// Preserve the actual caller identity even when lock state is Locked/Unknown.
++/// A successful identity observation by itself never authorizes desktop input.
++pub(crate) fn observe_current() -> CurrentSessionObservation {
++    let identity = match caller_identity() {
++        Ok(value) => value,
++        Err(error) => {
++            return CurrentSessionObservation {
++                identity: None,
++                availability: Err(error),
++                registry: RegistryObservation::unknown(),
++            }
++        }
++    };
++    let mut registry = RegistryObservation::unknown();
++    let availability = (|| {
++        let root = unsafe { IORegistryGetRootEntry(0) };
++        if root == 0 {
++            return Err(SessionUnavailable::Unknown);
++        }
++        let root = RegistryEntry(root);
++        let mut raw = std::ptr::null_mut();
++        let status =
++            unsafe { IORegistryEntryCreateCFProperties(root.0, &mut raw, std::ptr::null(), 0) };
++        let properties = OwnedCf(raw.cast());
++        if status != 0
++            || properties.0.is_null()
++            || unsafe { CFGetTypeID(properties.0) } != unsafe { CFDictionaryGetTypeID() }
++        {
++            return Err(SessionUnavailable::Unknown);
++        }
++        // Both properties come from this one fixed-root native copy. No
++        // separately sampled property can masquerade as a coherent snapshot.
++        let dictionary = properties.0.cast();
++        registry.read_status = "copied";
++        registry.global_io_console_locked =
++            BoolObservation::read(field(dictionary, "IOConsoleLocked"));
++        let selected = selected_row(field(dictionary, "IOConsoleUsers"), identity);
++        registry.selected_unique_row = selected.as_ref().ok().cloned();
++        registry.selection_status = match selected.as_ref() {
++            Ok(_) => "unique",
++            Err(error) => error.code(),
++        };
++        let selected = selected.and_then(SelectedRow::availability);
++        if caller_identity()? != identity {
++            return Err(SessionUnavailable::IdentityChanged);
++        }
++        selected
++    })();
++    CurrentSessionObservation {
++        identity: Some(identity),
++        availability,
++        registry,
++    }
++}
++
 +pub(crate) fn observe_unlocked_current() -> Observed<SessionIdentity> {
-+    let identity = caller_identity()?;
-+    let root = unsafe { IORegistryGetRootEntry(0) }; // kIOMainPortDefault
-+    if root == 0 {
-+        return Err(SessionUnavailable::Unknown);
-+    }
-+    let root = RegistryEntry(root);
-+    let key = CFString::new("IOConsoleUsers");
-+    let users = OwnedCf(unsafe {
-+        IORegistryEntryCreateCFProperty(root.0, key.as_concrete_TypeRef(), std::ptr::null(), 0)
-+    });
-+    // The CF API returns null on missing property or access refusal. Both must
-+    // remain Unknown: do not claim a specific permission error without evidence.
-+    selected_session(&users, identity)?;
-+    if caller_identity()? != identity {
-+        return Err(SessionUnavailable::IdentityChanged);
-+    }
-+    Ok(identity)
++    let observed = observe_current();
++    observed.availability?;
++    observed.identity.ok_or(SessionUnavailable::Unknown)
 +}
 +
 +pub(crate) fn revalidate(expected: SessionIdentity) -> Observed<()> {

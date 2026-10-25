@@ -5,7 +5,7 @@
   "upstream_version": "0.36.0",
   "official_archive_sha256": "157acdc2fd0bf5c480af2bdbe4a69f75a709551627f851caee16346234fdedef",
   "patch": "cua-0.36.0-styx-once.patch",
-  "patch_sha256": "01164d2444e7a38b30a22920b2cfc7996d9b45d1b620d424836e19a520f3611b",
+  "patch_sha256": "028621c8e3c2eeb755f66fe2ff296271b53c553359da696bd62277a00b282a9c",
   "files": [
     {
       "path": "libs/cua-driver/rust/crates/cua-driver-core/src/authorization.rs",
@@ -43,9 +43,9 @@
       "path": "libs/cua-driver/rust/crates/cua-driver/src/serve.rs",
       "original_sha256": "5af49d759dcbda5a4845c59ce017d0ba955e171615ec3ac28af9062968208796",
       "original_git_blob_sha1": "d97ca38eacb2981aab13b2bba3fd41708d52aace",
-      "final_sha256": "5a91159e4416ef04b32e10fa4f2936c256d698ecf8bd51b347ae3c60014bab96",
+      "final_sha256": "dbc88665fa8815eb9b1d9291c500617cbb6f15eb549e57116f25944a7c32ab10",
       "original_bytes": 133753,
-      "final_bytes": 137392
+      "final_bytes": 139978
     },
     {
       "path": "libs/cua-driver/rust/crates/cua-driver/src/transport_drain.rs",
@@ -112,20 +112,28 @@
       "final_bytes": 72569
     },
     {
+      "path": "libs/cua-driver/rust/crates/platform-macos/src/private_session_observation.rs",
+      "original_sha256": null,
+      "original_git_blob_sha1": null,
+      "final_sha256": "1138acbd1fc8b7639587e5cba77444a4f1a8cf4656938538463b66da2e34d9a0",
+      "original_bytes": 0,
+      "final_bytes": 9128
+    },
+    {
       "path": "libs/cua-driver/rust/crates/platform-macos/src/session.rs",
       "original_sha256": "7a14f5b18c8538a8e0332a1808301b36407fb7e53add0dca302facadd80f5421",
       "original_git_blob_sha1": "80a444c9136879ef6611a9a6b65c174f7e8caf46",
-      "final_sha256": "2440394097e383d1ecc786ad1b866780ff26b57b12c8f1ca3a806a4793466f58",
+      "final_sha256": "b4ebcc71b72876ddff980b0480be38e96a17ca4864cc5200c6cd882193f7d10a",
       "original_bytes": 2470,
-      "final_bytes": 2622
+      "final_bytes": 2769
     },
     {
       "path": "libs/cua-driver/rust/crates/platform-macos/src/session_observation.rs",
       "original_sha256": null,
       "original_git_blob_sha1": null,
-      "final_sha256": "fb2241de54cf064c59909558123d6b321199ee81a5254e20657fc6ee1d426f0d",
+      "final_sha256": "69e8454a2842825d054335be2b7bfdd9434cac55939910abe71aa20060c4389a",
       "original_bytes": 0,
-      "final_bytes": 11603
+      "final_bytes": 16848
     },
     {
       "path": "libs/cua-driver/rust/crates/platform-macos/src/tools/get_window_state.rs",

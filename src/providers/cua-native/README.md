@@ -59,3 +59,12 @@ The transport change has passed a real Linux Unix-socket/SDK failure scenario.
 The added macOS AX/session/overlay code has NOT been compiled or accepted on a
 Mac. Linux evidence cannot satisfy that gate. A new signed worker and native
 permission, target-invalidation, effect and cleanup scenarios are required.
+
+The existing same-UID UDS protocol also has a read-only, strict-schema private
+observation method for the original embedded daemon. It reports actual process
+and parent births, native UID/audit/console identity, TCC probes and separately
+typed per-session/global lock facts. Descriptor booleans grant no authority.
+The daemon retains its original bounded reader task through connection loss and
+joins it during shutdown before SDK teardown. These observations do not create
+a Core session or grant, and do not resolve the missing lock-field limitation.
+The Rust Host connection consumer is still an external integration draft.
