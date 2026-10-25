@@ -311,16 +311,18 @@ async fn actual_paired_tls_mcp_codex_nonce_owner_and_revocation_journey() {
     let endpoint_text = format!("wss://{host_header}/styx/host/v3/{}/exec", device.as_str());
     // Negative upgrades share the actual listener and use independent random
     // connection generations; a later positive path rules out blanket failure.
-    for (url, token) in [
+    for (url, token, expected_status) in [
         (
             format!("wss://{host_header}/styx/host/v3/styx-2123456789abcdef01234567/exec"),
             credential.credential.expose().to_owned(),
+            403,
         ),
         (
             format!("wss://{host_header}/styx/hosts/{}/exec", device.as_str()),
             credential.credential.expose().to_owned(),
+            404,
         ),
-        (endpoint_text.clone(), random_token().to_string()),
+        (endpoint_text.clone(), random_token().to_string(), 403),
     ] {
         let rejected_endpoint = LinkEndpoint::parse(&url).unwrap();
         let rejected_bearer = SecretBearer::from_protected_reader(token).unwrap();
@@ -337,7 +339,7 @@ async fn actual_paired_tls_mcp_codex_nonce_owner_and_revocation_journey() {
         assert!(
             matches!(
                 attempt,
-                Err(crate::host::link::LinkError::HandshakeRejected)
+                Err(crate::host::link::LinkError::UpgradeStatus(status)) if status == expected_status
             ),
             "wrong device, legacy endpoint and wrong credential must each reject the actual upgrade"
         );
