@@ -28,7 +28,7 @@ mod desktop_source {
 #[path = "desktop_source_macos.rs"]
 mod desktop_source;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-pub(crate) use desktop_source::DesktopSource;
+pub(crate) use desktop_source::{DesktopSource, source_stop_complete};
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 mod desktop_cleanup;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]

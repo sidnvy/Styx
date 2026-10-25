@@ -24,9 +24,11 @@ impl HostProtocol<'_> {
         mut self,
         source: Arc<dyn ComputerBootstrap>,
     ) -> Result<Self, ProtocolError> {
-        if !self.paired || !self.coordinator.desktop_configured() || self.computer.is_some() {
+        if !self.paired || self.computer.is_some() {
             return Err(ProtocolError::BootstrapMismatch);
         }
+        // A trusted deferred factory may still be Pending. Its own original
+        // readiness check runs before looking up any Core desktop session.
         self.computer = Some(ComputerInputs {
             source,
             tasks: TaskTracker::new(),
@@ -171,10 +173,6 @@ impl HostProtocol<'_> {
         context.observation = None;
         match command {
             ComputerCommand::PrepareOpen => {
-                context.session = match self.coordinator.desktop_binding() {
-                    Ok(v) => Some(v),
-                    Err(e) => return coordinator_error(e, false),
-                };
                 let bound = owner.clone();
                 let config = match self
                     .computer_input(move |source| {
@@ -185,6 +183,13 @@ impl HostProtocol<'_> {
                 {
                     Ok(v) => v,
                     Err(e) => return rejection(e),
+                };
+                if !self.coordinator.desktop_configured() {
+                    return rejection(ErrorCategory::CapabilityUnsupported);
+                }
+                context.session = match self.coordinator.desktop_binding() {
+                    Ok(v) => Some(v),
+                    Err(e) => return coordinator_error(e, false),
                 };
                 if self.owner(&reference).as_ref() != Ok(&owner) {
                     return rejection(ErrorCategory::Unauthorized);
@@ -250,10 +255,6 @@ impl HostProtocol<'_> {
                 Err(e) => coordinator_error(e, false),
             },
             ComputerCommand::PrepareAction { target, action } => {
-                context.session = match self.coordinator.desktop_binding() {
-                    Ok(v) => Some(v),
-                    Err(e) => return coordinator_error(e, false),
-                };
                 if action.get().len() > SPEC_LIMIT {
                     return invalid();
                 }
@@ -277,6 +278,13 @@ impl HostProtocol<'_> {
                 {
                     return rejection(e);
                 }
+                if !self.coordinator.desktop_configured() {
+                    return rejection(ErrorCategory::CapabilityUnsupported);
+                }
+                context.session = match self.coordinator.desktop_binding() {
+                    Ok(v) => Some(v),
+                    Err(e) => return coordinator_error(e, false),
+                };
                 match self
                     .coordinator
                     .prepare_desktop_action(&owner, target, context, &action)
@@ -376,4 +384,116 @@ fn uncertain(mut reply: Reply) -> Reply {
         *certainty = ExecutionCertainty::Unknown;
     }
     reply
+}
+
+/// Real Host/Core owner and protocol preparation ports for the retained-startup
+/// fault test. No native executor, desktop association or platform PASS is faked.
+#[cfg(test)]
+pub(crate) async fn assert_pending_factory_keeps_owner_control_live(
+    source: Arc<dyn ComputerBootstrap>,
+) {
+    use styx_contracts::{capability::*, error::Recovery};
+    use styx_core::policy::AdmissionFacts;
+    let device: DeviceId = "desktop-startup-fault-device".try_into().unwrap();
+    let generation: HostGeneration = "desktop-startup-fault-generation".try_into().unwrap();
+    let host = crate::host::bootstrap::OwnedExecHost::reserve(
+        generation.clone(),
+        AdmissionFacts {
+            device_id: device.clone(),
+            grant_revision: 1,
+            local_policy_allowed: true,
+            descriptor: CapabilityDescriptor {
+                contract_version: 1,
+                capability_id: CapabilityId::ExecRun,
+                scope: Scope::Host,
+                provider_id: "codex".try_into().unwrap(),
+                configured: true,
+                remote_grant: true,
+                availability: Availability::Available,
+                authorization: Authorization::Granted,
+                target_session: None,
+                reason: None,
+                observed_at: 1,
+                observation_generation: 1,
+                recovery: Recovery::None,
+            },
+            session_state: None,
+            current_observation: None,
+        },
+        2,
+    )
+    .unwrap()
+    .without_executor()
+    .unwrap();
+    let protocol = host
+        .paired_protocol(PairedTrustedProfile {
+            endpoint: "wss://localhost/desktop-startup-fault".into(),
+            gateway_namespace: "desktop-startup-gateway".try_into().unwrap(),
+            device_id: device,
+            host_generation: generation,
+        })
+        .unwrap()
+        .with_computer_profiles(source)
+        .unwrap();
+    protocol
+        .accept_epoch(&"desktop-startup-gateway-epoch".try_into().unwrap())
+        .unwrap();
+    let owner = OwnerRef {
+        owner_id: "desktop-startup:owner".try_into().unwrap(),
+        owner_epoch: "desktop-startup-owner-epoch".try_into().unwrap(),
+    };
+    assert!(matches!(
+        protocol.control(&Call::OwnerOpen {
+            owner: owner.clone(),
+            grant_revision: 1
+        }),
+        Some(Reply::OwnerOpened { .. })
+    ));
+    let reply = tokio::time::timeout(
+        Duration::from_secs(1),
+        protocol.handle(Call::Computer {
+            owner: owner.clone(),
+            grant_revision: 1,
+            timeout_ms: 1000,
+            command: ComputerCommand::PrepareOpen,
+        }),
+    )
+    .await
+    .unwrap();
+    assert!(matches!(
+        reply,
+        Reply::Error {
+            category: ErrorCategory::Busy,
+            certainty: ExecutionCertainty::NotDispatched,
+            ..
+        }
+    ));
+    assert!(!host.coordinator().desktop_configured());
+    // Actual control authority still advances the SAME Core owner while the
+    // separate initialization job remains blocked; no synthetic grant is added.
+    assert!(matches!(
+        protocol.control(&Call::OwnerRevoke {
+            owner: owner.clone()
+        }),
+        Some(Reply::OwnerRevoked { fenced: true, .. })
+    ));
+    let reply = protocol
+        .handle(Call::Computer {
+            owner,
+            grant_revision: 1,
+            timeout_ms: 1000,
+            command: ComputerCommand::PrepareOpen,
+        })
+        .await;
+    assert!(matches!(
+        reply,
+        Reply::Error {
+            category: ErrorCategory::Unauthorized,
+            ..
+        }
+    ));
+    protocol.drain_computer_inputs().await;
+    drop(protocol);
+    let cleanup = host.shutdown_owned(Duration::from_secs(1)).await.unwrap();
+    assert!(cleanup.supervised_jobs_joined);
 }

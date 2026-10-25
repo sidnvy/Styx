@@ -21,6 +21,10 @@ use styx_core::policy::AdmissionFacts;
 use tokio::{net::TcpStream, sync::mpsc};
 use tokio_util::sync::CancellationToken;
 
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+#[path = "computer_startup.rs"]
+mod computer_startup;
+
 const STATE_OWNERS: &[&str] = &[
     "foreground.lock",
     "foreground-recovery.lock",
@@ -136,6 +140,7 @@ impl crate::host::protocol::computer::ComputerBootstrap for ForegroundComputer {
 async fn prepare_computer(
     admitted: &Arc<Admitted>,
     host: &OwnedExecHost,
+    custody: &computer_startup::DeferredComputer,
 ) -> Result<Option<Arc<dyn crate::host::protocol::computer::ComputerBootstrap>>, ForegroundError> {
     let retained = admitted.clone();
     let enabled =
@@ -163,6 +168,7 @@ async fn prepare_computer(
     let source = crate::host::coordinator::DesktopSource::start()
         .await
         .map_err(|_| ForegroundError("computer_native_session_unavailable"))?;
+    custody.retain_source(source.clone());
     let budget = match host.reserve_computer_io() {
         Ok(v) => v,
         Err(_) => {
@@ -216,6 +222,7 @@ async fn prepare_computer(
 async fn prepare_computer(
     admitted: &Arc<Admitted>,
     host: &OwnedExecHost,
+    custody: &computer_startup::DeferredComputer,
 ) -> Result<Option<Arc<dyn crate::host::protocol::computer::ComputerBootstrap>>, ForegroundError> {
     let retained = admitted.clone();
     let enabled = tokio::task::spawn_blocking(move || retained.profile.computer_enabled())
@@ -227,6 +234,7 @@ async fn prepare_computer(
     let source = crate::host::coordinator::DesktopSource::start()
         .await
         .map_err(|e| ForegroundError(e.code()))?;
+    custody.retain_source(source.clone());
     let budget = match host.reserve_computer_io() {
         Ok(v) => v,
         Err(_) => {
@@ -538,7 +546,7 @@ async fn run_owned(
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let started = reservation.spawn_optional(config).await;
     let host = match started {
-        Ok(v) => v,
+        Ok(v) => Arc::new(v),
         Err(_) => return Err(ForegroundError("executor_start_failed")),
     };
     // Browser is an independent optional local capability. Unsupported or
@@ -620,24 +628,15 @@ async fn run_owned(
             None
         };
     #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-    let computer = if mode == HostWireMode::PairedV3 {
-        match prepare_computer(&admitted, &host).await {
-            Ok(source) => source,
-            Err(error) => {
-                event_with_reason(
-                    &events,
-                    &cancel,
-                    "computer_unavailable",
-                    &device,
-                    None,
-                    Some(error.code()),
-                );
-                None
-            }
-        }
-    } else {
-        None
-    };
+    let mut computer = (mode == HostWireMode::PairedV3).then(|| {
+        computer_startup::ComputerStartup::start(
+            admitted.clone(),
+            host.clone(),
+            events.clone(),
+            device.clone(),
+            cancel.clone(),
+        )
+    });
     // Keep this SAME protocol and executor across transport reconnects. In v3,
     // per-chat owner admission comes only from the authenticated fixed Gateway;
     // loading a device credential does not register a bootstrap MCP owner.
@@ -675,7 +674,7 @@ async fn run_owned(
                 };
                 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
                 let protocol = if let Some(source) = &computer {
-                    protocol.with_computer_profiles(source.clone())?
+                    protocol.with_computer_profiles(source.factory())?
                 } else {
                     protocol
                 };
@@ -840,6 +839,11 @@ async fn run_owned(
         remote_transport_drain,
     };
     let mut process_exits = BTreeMap::new();
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    if let Some(computer) = &computer {
+        computer.close_admission();
+    }
+
     // Unknown cleanup retains the SAME owner, pin and supervisor. Never release
     // the lease on a timer while the native child might still execute signed code.
     loop {
@@ -860,6 +864,17 @@ async fn run_owned(
                 .is_none_or(|native| native.reader_task_reaped && native.stderr_task_reaped)
                 && cleanup.ancillary_providers_settled();
             outcome.supervised_jobs_joined = cleanup.supervised_jobs_joined;
+        }
+        #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+        if let Some(computer) = &mut computer {
+            // Exec shutdown happens independently, while desktop initialization
+            // and its original source stay retained until real join/stop facts.
+            let complete = computer
+                .settle(tokio::time::Instant::now() + Duration::from_secs(1))
+                .await;
+            outcome.supervised_jobs_joined &= complete;
+            outcome.processes_exited &= complete;
+            outcome.io_tasks_joined &= complete;
         }
         if outcome.local_stop_complete() {
             break;
