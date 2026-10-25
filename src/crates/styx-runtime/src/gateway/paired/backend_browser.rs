@@ -235,7 +235,19 @@ impl PairedGatewayBackend {
         command: BrowserCommand,
         budget: BrowserBudget,
     ) -> Result<Reply, super::super::RelayError> {
-        tokio::time::timeout(
+        // Fixed phase/error codes only. Never log owner identities, arguments,
+        // URLs, worker output or credentials. This is diagnostic, not a ledger
+        // fact or permission to retry a request whose result is unknown.
+        let phase = match &command {
+            BrowserCommand::PrepareOpen => "prepare_open",
+            BrowserCommand::DispatchOpen { .. } => "dispatch_open",
+            BrowserCommand::InspectOpen { .. } => "inspect_open",
+            BrowserCommand::PrepareAction { .. } => "prepare_action",
+            BrowserCommand::DispatchAction { .. } => "dispatch_action",
+            BrowserCommand::InspectAction { .. } => "inspect_action",
+        };
+        let started = std::time::Instant::now();
+        let response = tokio::time::timeout(
             Duration::from_secs(budget.response_secs),
             self.relay.call(
                 binding,
@@ -247,8 +259,26 @@ impl PairedGatewayBackend {
                 },
             ),
         )
-        .await
-        .unwrap_or(Err(super::super::RelayError::Unknown))
+        .await;
+        let result = match response {
+            Ok(result) => result,
+            Err(_) => {
+                eprintln!(
+                    "styx_browser_exchange_failed phase={phase} cause=response_deadline elapsed_ms={} response_budget_ms={}",
+                    started.elapsed().as_millis(),
+                    budget.response_secs * 1000,
+                );
+                return Err(super::super::RelayError::Unknown);
+            }
+        };
+        if let Err(error) = &result {
+            eprintln!(
+                "styx_browser_exchange_failed phase={phase} cause={} elapsed_ms={}",
+                error.code(),
+                started.elapsed().as_millis(),
+            );
+        }
+        result
     }
     pub(super) async fn browser_call(
         &self,
