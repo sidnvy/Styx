@@ -49,7 +49,7 @@ with tempfile.TemporaryDirectory() as temp:
  identity={'identitySha1':'a'*40,'certificateSha256':'b'*64,'keychain':str(root/'styx-development.keychain-db')}
  (root/'identity.json').write_text(json.dumps(identity));(root/'identity.json').chmod(0o600)
  (root/'host-publisher-private.pem').write_text('private fixture');(root/'host-publisher-private.pem').chmod(0o600)
- config=root/'build.json';config.write_text(json.dumps({'localSigning':identity,'hostPublisher':{'mode':'persistent','privateKeyFile':str(root/'host-publisher-private.pem')}}))
+ config=root/'build.json';config.write_text(json.dumps({'preparedSource':str(root/'historical-prepared'),'localSigning':identity,'hostPublisher':{'mode':'persistent','privateKeyFile':str(root/'host-publisher-private.pem')}}))
  calls=[]
  def prepare(r,existing_only=False):
   assert r==root and existing_only

@@ -185,6 +185,7 @@ test('preview update releases reject missing or invalid build sequence before na
  assert.throws(()=>buildMacPreview(base),/macos_update_release_build_number_required/);
  assert.throws(()=>buildMacPreview({...base,buildNumber:base.releaseVersion}),/invalid_macos_build_number/);
  assert.throws(()=>buildMacPreview({...base,buildNumber:'1008',updateRelease:'true'}),/invalid_macos_update_release/);
+ assert.throws(()=>buildMacPreview({...base,buildNumber:'1008'}),/native_runtime_required_for_product_app/);
 });
 
 test('Mac preview selects distinct pinned Intel inputs without changing arm64 pins',()=>{

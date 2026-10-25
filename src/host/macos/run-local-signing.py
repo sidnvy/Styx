@@ -24,8 +24,12 @@ def run_session(root, config_file, node):
     st = root.lstat()
     if not stat.S_ISDIR(st.st_mode) or st.st_uid != os.getuid() or st.st_mode & 0o077:
         raise RuntimeError('private owned signing directory required')
-    identity.private_file(root / 'identity.json')
     config = json.loads(config_file.read_text())
+    # This original runner owns only historical prepared-preview signing. New
+    # native App prepare/finalize uses the explicit current builder branches.
+    if not config.get('preparedSource'):
+        raise RuntimeError('new App requires nativeRuntime prepareOnly then nativePreparedSource via build-macos-preview.mjs; this runner accepts historical preparedSource only')
+    identity.private_file(root / 'identity.json')
     recorded = json.loads((root / 'identity.json').read_text())
     expected = {key: recorded[key] for key in ['identitySha1', 'certificateSha256', 'keychain']}
     if config.get('localSigning') != expected or config.get('prepareOnly'):

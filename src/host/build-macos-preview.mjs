@@ -153,6 +153,9 @@ export function buildMacPreview(config){
  assert(typeof prepareOnly==='boolean','invalid_preview_prepare_mode');
  assert(!prepareOnly||(localSigning===undefined&&hostPublisher===undefined&&platformUpdate===undefined),'prepared_preview_requires_unsigned_native_inputs');
  const appMetadata=macAppBuildMetadata({version,buildNumber,updateRelease});
+ // Current product Swift requires native metadata. Preserve the pure input
+ // errors above, then refuse old new-build recipes before output/key/tool IO.
+ assert(config.nativeRuntime!==undefined,'native_runtime_required_for_product_app');
  assert(process.platform==='darwin','native_macos_preview_build_required');
  const arch=process.arch,inputs=macPreviewInputs(arch);
  previewReleasePublisher({localSigning,hostPublisher});
