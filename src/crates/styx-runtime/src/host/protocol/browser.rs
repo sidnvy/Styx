@@ -12,6 +12,7 @@ use std::sync::Arc;
 use tokio_util::task::TaskTracker;
 
 pub(crate) trait BrowserBootstrap: Send + Sync {
+    /// Includes control and full worker-input validation before profile creation.
     fn prepare_profile(&self, owner: &OwnerLease) -> Result<OwnedBrowserConfig, ErrorCategory>;
     fn validate_before_spawn(&self) -> Result<(), ErrorCategory>;
     fn validate_control(&self) -> Result<(), ErrorCategory>;
@@ -177,10 +178,7 @@ impl HostProtocol<'_> {
             BrowserCommand::PrepareOpen => {
                 let bound = owner.clone();
                 let config = match self
-                    .browser_input(move |source| {
-                        source.validate_control()?;
-                        source.prepare_profile(&bound)
-                    })
+                    .browser_input(move |source| source.prepare_profile(&bound))
                     .await
                 {
                     Ok(v) => v,

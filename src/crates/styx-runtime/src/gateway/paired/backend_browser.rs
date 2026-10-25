@@ -22,6 +22,14 @@ struct BrowserBudget {
     response_secs: u64,
 }
 impl BrowserBudget {
+    // Opening includes protected local preparation and the existing bounded
+    // worker handshake. It is independent of the first public action's budget.
+    fn opening() -> Self {
+        Self {
+            host_timeout_ms: BROWSER_WAIT_PREPARE_TIMEOUT_MS,
+            response_secs: BROWSER_WAIT_RESPONSE_SECS,
+        }
+    }
     fn for_tool(name: &str) -> Self {
         if name == "browser_wait_for" {
             Self {
@@ -234,6 +242,7 @@ impl PairedGatewayBackend {
         binding: &BoundOwner,
         command: BrowserCommand,
         budget: BrowserBudget,
+        opening_until: Option<tokio::time::Instant>,
     ) -> Result<Reply, super::super::RelayError> {
         // Fixed phase/error codes only. Never log owner identities, arguments,
         // URLs, worker output or credentials. This is diagnostic, not a ledger
@@ -247,8 +256,18 @@ impl PairedGatewayBackend {
             BrowserCommand::InspectAction { .. } => "inspect_action",
         };
         let started = std::time::Instant::now();
-        let response = tokio::time::timeout(
-            Duration::from_secs(budget.response_secs),
+        // Preparation and dispatch share one opening response deadline; a
+        // second phase must not restart a new forty-second waiting period.
+        let until = opening_until.unwrap_or_else(|| {
+            tokio::time::Instant::now() + Duration::from_secs(budget.response_secs)
+        });
+        if tokio::time::Instant::now() >= until {
+            // A prior phase may have completed at the response boundary. Do
+            // not enqueue another command merely to discover the expired wait.
+            return Err(super::super::RelayError::Unknown);
+        }
+        let response = tokio::time::timeout_at(
+            until,
             self.relay.call(
                 binding,
                 Call::Browser {
@@ -275,6 +294,17 @@ impl PairedGatewayBackend {
             eprintln!(
                 "styx_browser_exchange_failed phase={phase} cause={} elapsed_ms={}",
                 error.code(),
+                started.elapsed().as_millis(),
+            );
+        }
+        if let Ok(Reply::Error {
+            category,
+            certainty,
+            ..
+        }) = &result
+        {
+            eprintln!(
+                "styx_browser_exchange_refused phase={phase} category={category:?} certainty={certainty:?} elapsed_ms={}",
                 started.elapsed().as_millis(),
             );
         }
@@ -361,8 +391,16 @@ impl PairedGatewayBackend {
             // Poison BEFORE the first await. Lost preparation/dispatch replies
             // and dropped futures cannot cause a later automatic reopen.
             record.phase = Phase::Opening;
+            let opening = BrowserBudget::opening();
+            let opening_until =
+                tokio::time::Instant::now() + Duration::from_secs(opening.response_secs);
             let prepared = self
-                .browser_exchange(&binding, BrowserCommand::PrepareOpen, request.budget)
+                .browser_exchange(
+                    &binding,
+                    BrowserCommand::PrepareOpen,
+                    opening,
+                    Some(opening_until),
+                )
                 .await;
             let snapshot = match prepared {
                 Ok(Reply::Prepared { snapshot }) => snapshot,
@@ -398,7 +436,8 @@ impl PairedGatewayBackend {
                     BrowserCommand::DispatchOpen {
                         target: target.clone(),
                     },
-                    request.budget,
+                    opening,
+                    Some(opening_until),
                 )
                 .await
             {
@@ -455,6 +494,7 @@ impl PairedGatewayBackend {
                     action: raw,
                 },
                 request.budget,
+                None,
             )
             .await;
         let snapshot = match prepared {
@@ -494,6 +534,7 @@ impl PairedGatewayBackend {
                 &binding,
                 BrowserCommand::DispatchAction { action },
                 request.budget,
+                None,
             )
             .await;
         if !self.active(owner) {

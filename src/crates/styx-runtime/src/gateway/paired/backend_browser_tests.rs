@@ -93,6 +93,10 @@ fn browser_arguments_reuse_real_policy_without_owner_or_internal_metadata() {
     ] {
         assert!(BrowserRequest::parse("browser_snapshot", args(value)).is_err());
     }
+    // Startup is a separate resource operation. Its budget must not depend
+    // on whether the first public action is navigate, snapshot or wait.
+    assert_eq!(BrowserBudget::opening().host_timeout_ms, 35_000);
+    assert_eq!(BrowserBudget::opening().response_secs, 40);
     // Wait's bounded duration applies to all frozen wait forms, not to an
     // arbitrary caller-provided timeout. All other Browser calls retain 5s.
     for value in [
