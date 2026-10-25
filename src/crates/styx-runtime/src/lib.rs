@@ -19,3 +19,10 @@ pub mod store;
 pub mod tls;
 
 pub mod release;
+
+#[cfg(any(
+    all(target_os = "linux", target_env = "gnu"),
+    target_os = "windows",
+    target_os = "macos"
+))]
+pub mod app;

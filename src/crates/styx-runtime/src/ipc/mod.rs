@@ -182,6 +182,7 @@ fn error_outcome(
         public_message: message.into(),
     })
 }
+#[cfg(target_os = "linux")]
 fn response(request_id: RequestId, outcome: ControlOutcome) -> ControlResponse {
     ControlResponse {
         protocol_version: CONTROL_PROTOCOL_VERSION,

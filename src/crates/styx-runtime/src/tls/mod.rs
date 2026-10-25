@@ -317,10 +317,12 @@ impl GatewayClientTls {
         })
     }
     /// Exact configured trust set; never derived from an observed peer leaf.
+    #[cfg(any(test, all(target_os = "linux", target_env = "gnu")))]
     pub(crate) fn configured_anchors(&self) -> &[TrustAnchorPin] {
         &self.anchor_pins
     }
     /// Separate optional endpoint pin. Migration must not silently replace it.
+    #[cfg(any(test, all(target_os = "linux", target_env = "gnu")))]
     pub(crate) fn configured_leaf(&self) -> Option<&GatewayLeafPin> {
         self.leaf_pin.as_ref()
     }
@@ -416,4 +418,6 @@ impl GatewayServerTls {
 mod tests;
 
 mod issuer;
-pub(crate) use issuer::{IssuerError, generate_gateway_ca, issue_server_leaf};
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+pub(crate) use issuer::IssuerError;
+pub(crate) use issuer::{generate_gateway_ca, issue_server_leaf};

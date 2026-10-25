@@ -227,7 +227,7 @@ impl SharedEnrollment {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux", target_env = "gnu"))]
     pub(crate) fn test_with<T>(&self, f: impl FnOnce(&mut EnrollmentService) -> T) -> T {
         f(&mut self.inner.try_lock().expect("exclusive test service"))
     }

@@ -24,9 +24,24 @@ struct FreshHost {
 }
 
 pub(super) fn load(state_dir: &Path) -> Result<LoadedLegacyProfile, ProfileError> {
-    absolute(state_dir)?;
     let snapshot =
         Arc::new(NativeHostSnapshot::open(state_dir).map_err(|_| ProfileError::Changed)?);
+    load_snapshot(state_dir, snapshot)
+}
+pub(super) fn load_for_app(
+    scope: Arc<crate::app::HostScope>,
+) -> Result<LoadedLegacyProfile, ProfileError> {
+    let path = scope.state_dir().to_owned();
+    let snapshot = Arc::new(
+        NativeHostSnapshot::open_for_app(&path, scope).map_err(|_| ProfileError::Changed)?,
+    );
+    load_snapshot(&path, snapshot)
+}
+fn load_snapshot(
+    state_dir: &Path,
+    snapshot: Arc<NativeHostSnapshot>,
+) -> Result<LoadedLegacyProfile, ProfileError> {
+    absolute(state_dir)?;
     snapshot.revalidate().map_err(|_| ProfileError::Changed)?;
     let seed = snapshot.seed();
     let ready = snapshot.ready();

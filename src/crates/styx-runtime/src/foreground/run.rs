@@ -338,23 +338,47 @@ pub async fn host_run(
     // its lease, pinned payload or native supervisor. Tokio detaches the worker
     // JoinHandle on waiter drop; the running runtime must remain alive for cleanup.
     let _cancel_on_waiter_drop = stop.clone().drop_guard();
-    tokio::spawn(async move { run_owned(&state, mode, stop, events).await })
+    tokio::spawn(async move { run_owned(&state, mode, stop, events, None).await })
         .await
         .map_err(|_| ForegroundError("foreground_worker_failed"))?
+}
+#[cfg(any(
+    all(target_os = "linux", target_env = "gnu"),
+    target_os = "windows",
+    target_os = "macos"
+))]
+pub(crate) async fn host_run_for_app(
+    scope: Arc<crate::app::HostScope>,
+    cancel: CancellationToken,
+    events: mpsc::Sender<ForegroundEvent>,
+) -> Result<ForegroundOutcome, ForegroundError> {
+    let state = scope.state_dir().to_owned();
+    let stop = cancel.child_token();
+    let _cancel_on_waiter_drop = stop.clone().drop_guard();
+    tokio::spawn(async move {
+        run_owned(&state, HostWireMode::PairedV3, stop, events, Some(scope)).await
+    })
+    .await
+    .map_err(|_| ForegroundError("foreground_worker_failed"))?
 }
 async fn run_owned(
     state_dir: &Path,
     mode: HostWireMode,
     cancel: CancellationToken,
     events: mpsc::Sender<ForegroundEvent>,
+    app_scope: Option<Arc<crate::app::HostScope>>,
 ) -> Result<ForegroundOutcome, ForegroundError> {
     let path = state_dir.to_path_buf();
     // Never abandon a blocking reader/lease acquisition on signal. Join it,
     // then observe cancellation before any native executable is started.
     let admitted = tokio::task::spawn_blocking(move || {
-        let profile = match mode {
-            HostWireMode::LegacyExplicit => profile::load_legacy(&path)?,
-            HostWireMode::PairedV3 => profile::load_paired(&path)?,
+        let profile = if let Some(scope) = app_scope {
+            profile::load_for_app(scope)?
+        } else {
+            match mode {
+                HostWireMode::LegacyExplicit => profile::load_legacy(&path)?,
+                HostWireMode::PairedV3 => profile::load_paired(&path)?,
+            }
         };
         let state = PrivateRoot::open(&path).map_err(|_| ForegroundError("state_root_refused"))?;
         let base = PrivateRoot::open(profile.host_base_dir())

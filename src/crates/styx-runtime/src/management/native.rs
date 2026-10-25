@@ -228,7 +228,8 @@ pub async fn apply(state_dir: &Path, plan_file: &Path) -> Result<NativeManagemen
 fn parse_transaction_id(value: &str) -> Result<TransactionId> {
     if !cfg!(any(
         all(target_os = "linux", target_env = "gnu"),
-        target_os = "windows"
+        target_os = "windows",
+        target_os = "macos"
     )) {
         return Err(NativeManagementError::new(ErrorKind::Unsupported));
     }
@@ -241,6 +242,24 @@ pub async fn recover(state_dir: &Path, transaction_id: &str) -> Result<NativeMan
     let path = state_dir.to_owned();
     let id = parse_transaction_id(transaction_id)?;
     blocking(move || platform::recover(&path, &id)).await
+}
+/// Offline owned-App admission. Only an already complete original C07 tip may
+/// be re-established; an incomplete/pending transaction is never auto-recovered.
+#[cfg(any(
+    all(target_os = "linux", target_env = "gnu"),
+    target_os = "windows",
+    target_os = "macos"
+))]
+pub(crate) async fn inspect_for_app(
+    scope: std::sync::Arc<crate::app::HostScope>,
+) -> Result<NativeManagementReport> {
+    blocking(move || {
+        scope
+            .validate()
+            .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?;
+        platform::inspect_for_app(scope.state_dir())
+    })
+    .await
 }
 pub async fn inspect(
     state_dir: &Path,
@@ -646,6 +665,23 @@ mod platform {
                 recovered: committed.recovered,
             };
             report(transactions, "recover", Some(transaction))
+        })
+    }
+    pub(super) fn inspect_for_app(path: &Path) -> Result<NativeManagementReport> {
+        use_transactions(path, |transactions| {
+            let state = transactions.readstate().map_err(tx)?;
+            if state.state().mode != NativeDeploymentMode::JoinExisting
+                || state.state().migration.is_some()
+                || state.state().desired.gateway.is_some()
+                || !state.state().desired.host.is_some_and(|host| {
+                    host.manager == NativeManager::AppManaged
+                        && host.autostart == NativeAutostartDesired::Disabled
+                })
+            {
+                return Err(NativeManagementError::new(ErrorKind::Invalid));
+            }
+            reconcile_complete_tip(transactions)?;
+            report(transactions, "app_offline_admission", None)
         })
     }
     pub(super) fn inspect(

@@ -1,4 +1,5 @@
 //! One owned real-filesystem import batch. No installed profile or OS service.
+#[cfg(target_os = "linux")]
 use super::*;
 #[cfg(target_os = "linux")]
 #[tokio::test]

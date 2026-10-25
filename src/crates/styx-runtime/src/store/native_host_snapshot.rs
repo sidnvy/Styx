@@ -16,6 +16,7 @@ use std::{
     fs::File,
     io::Cursor,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 use styx_contracts::{
     identity::Sha256Digest,
@@ -75,9 +76,28 @@ pub(crate) struct NativeHostSnapshot {
     ca: Vec<u8>,
     identity: Zeroizing<Vec<u8>>,
     credential: Zeroizing<Vec<u8>>,
+    app_scope: Option<Arc<crate::app::HostScope>>,
 }
 impl NativeHostSnapshot {
     pub(crate) fn open(path: &Path) -> JournalResult<Self> {
+        Self::open_source(path, None)
+    }
+    pub(crate) fn open_for_app(
+        path: &Path,
+        scope: Arc<crate::app::HostScope>,
+    ) -> JournalResult<Self> {
+        Self::open_source(path, Some(scope))
+    }
+    fn open_source(
+        path: &Path,
+        app_scope: Option<Arc<crate::app::HostScope>>,
+    ) -> JournalResult<Self> {
+        validate_app_scope(app_scope.as_deref(), path)?;
+        let manager = if app_scope.is_some() {
+            NativeManager::AppManaged
+        } else {
+            NativeManager::ForegroundCli
+        };
         if !path.is_absolute() {
             return Err(JournalError::InvalidInput);
         }
@@ -139,7 +159,7 @@ impl NativeHostSnapshot {
             || state.desired.gateway.is_some()
             || !state.desired.host.as_ref().is_some_and(|d| {
                 d.run == NativeRunDesired::Running
-                    && d.manager == NativeManager::ForegroundCli
+                    && d.manager == manager
                     && d.autostart == NativeAutostartDesired::Disabled
             })
             || state.deployment_raw_sha256 != Sha256Digest::of_bytes(&deployment_raw)
@@ -198,11 +218,13 @@ impl NativeHostSnapshot {
             ca,
             identity,
             credential,
+            app_scope,
         };
         snapshot.revalidate()?;
         Ok(snapshot)
     }
     pub(crate) fn revalidate(&self) -> JournalResult<()> {
+        validate_app_scope(self.app_scope.as_deref(), &self.state_dir)?;
         ownership(&self.root)?;
         self.root
             .inner
@@ -225,7 +247,7 @@ impl NativeHostSnapshot {
                         return Err(JournalError::Unknown);
                     }
                     ownership(&self.root)?;
-                    Ok(())
+                    validate_app_scope(self.app_scope.as_deref(), &self.state_dir)
                 })();
                 Ok(result)
             })
@@ -267,6 +289,16 @@ impl NativeHostSnapshot {
         &self.state_dir
     }
 }
+fn validate_app_scope(scope: Option<&crate::app::HostScope>, path: &Path) -> JournalResult<()> {
+    if let Some(scope) = scope {
+        if path != scope.state_dir() {
+            return Err(JournalError::Conflict);
+        }
+        scope.validate().map_err(|_| JournalError::Unknown)?;
+    }
+    Ok(())
+}
+
 fn ownership(root: &PrivateRoot) -> JournalResult<()> {
     for name in OWNERS {
         root.ensure_absent(name)

@@ -215,6 +215,7 @@ impl HostSessions {
             .registry
             .record_observation(&value.control, binding, capability, now)?)
     }
+    #[cfg(target_os = "linux")]
     pub(crate) fn observe_accessibility_read(
         &mut self,
         binding: &SessionBinding,

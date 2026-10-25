@@ -2,7 +2,9 @@
 //! No filesystem, network, clock reads, logging or admission authority.
 //! The trusted caller owns bootstrap or original protected observations,
 //! transaction/writer custody, and one-time durable publication.
-use super::{GatewayLeafPin, PrivateKeyPem, TrustAnchorPin, certificate_chain, private_key};
+#[cfg(any(test, all(target_os = "linux", target_env = "gnu")))]
+use super::GatewayLeafPin;
+use super::{PrivateKeyPem, TrustAnchorPin, certificate_chain, private_key};
 use rcgen::{
     BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa,
     Issuer, KeyPair, KeyUsagePurpose, PKCS_ECDSA_P256_SHA256, PKCS_RSA_SHA256, PublicKeyData,
@@ -58,8 +60,11 @@ impl IssuerError {
 pub(crate) struct IssuedGatewayEndpoint {
     pub(crate) certificate_chain_pem: Vec<u8>,
     pub(crate) private_key: PrivateKeyPem,
+    #[cfg(any(test, all(target_os = "linux", target_env = "gnu")))]
     pub(crate) anchor_pin: TrustAnchorPin,
+    #[cfg(any(test, all(target_os = "linux", target_env = "gnu")))]
     pub(crate) leaf_pin: GatewayLeafPin,
+    #[cfg(any(test, all(target_os = "linux", target_env = "gnu")))]
     pub(crate) origin: String,
     pub(crate) not_before_unix: i64,
     pub(crate) not_after_unix: i64,
@@ -273,7 +278,7 @@ pub(crate) fn issue_server_leaf(
     {
         return Err(IssuerError::IssuerNotCurrentlyValid);
     }
-    let (origin, san) = endpoint(original_origin)?;
+    let (_origin, san) = endpoint(original_origin)?;
     let not_before_date =
         OffsetDateTime::from_unix_timestamp(not_before).map_err(|_| IssuerError::InvalidClock)?;
     let not_after_date =
@@ -330,6 +335,7 @@ pub(crate) fn issue_server_leaf(
     generated
         .verify_signature(Some(ca.public_key()))
         .map_err(|_| IssuerError::IssuanceFailed)?;
+    #[cfg(any(test, all(target_os = "linux", target_env = "gnu")))]
     let leaf_pin = GatewayLeafPin::from_certificate_der(leaf.der().as_ref());
     let mut certificate_chain_pem = leaf.pem().into_bytes();
     if certificate_chain_pem
@@ -346,9 +352,12 @@ pub(crate) fn issue_server_leaf(
     Ok(IssuedGatewayEndpoint {
         certificate_chain_pem,
         private_key,
+        #[cfg(any(test, all(target_os = "linux", target_env = "gnu")))]
         anchor_pin,
+        #[cfg(any(test, all(target_os = "linux", target_env = "gnu")))]
         leaf_pin,
-        origin,
+        #[cfg(any(test, all(target_os = "linux", target_env = "gnu")))]
+        origin: _origin,
         not_before_unix: not_before,
         not_after_unix: not_after,
     })

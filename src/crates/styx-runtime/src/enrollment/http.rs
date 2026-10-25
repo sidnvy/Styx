@@ -190,7 +190,7 @@ impl EnrollmentHttp {
         self.handle(request).await.map(BodyExt::boxed)
     }
     /// Test-only same-state observation/admission seam; never an HTTP route.
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux", target_env = "gnu"))]
     pub(super) fn with_service<T>(&self, operation: impl FnOnce(&mut EnrollmentService) -> T) -> T {
         self.service.test_with(operation)
     }

@@ -474,7 +474,7 @@ impl EnrollmentService {
         }
         result
     }
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux", target_env = "gnu"))]
     pub(crate) fn configuration_root(&self) -> crate::store::OwnedConfigurationRoot {
         self.store.configuration_root()
     }

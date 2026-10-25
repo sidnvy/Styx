@@ -1,5 +1,6 @@
 //! Synthetic private roots and real child exits; not Core enrollment acceptance,
 //! faulting hardware or live-profile migration. Child helper is not a product skip.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
 use super::*;
 
 #[cfg(all(target_os = "linux", target_env = "gnu"))]

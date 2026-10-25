@@ -626,6 +626,18 @@ pub(crate) use migration::load_for_migration_validation;
 pub fn load_legacy(state_dir: &Path) -> Result<LoadedLegacyProfile, ProfileError> {
     load(state_dir, GatewayWireMode::Legacy)
 }
+/// Sealed App composition never adopts a legacy or CLI-managed profile.
+#[cfg(any(
+    all(target_os = "linux", target_env = "gnu"),
+    target_os = "windows",
+    target_os = "macos"
+))]
+pub(crate) fn load_for_app(
+    scope: Arc<crate::app::HostScope>,
+) -> Result<LoadedLegacyProfile, ProfileError> {
+    // App startup never adopts an ordinary legacy/CLI profile.
+    fresh::load_for_app(scope)
+}
 /// Explicit paired-v3 bridge using the SAME protected original profile and
 /// signed legacy executor closure. No identity, pairing or native-format rewrite.
 pub fn load_paired(state_dir: &Path) -> Result<LoadedLegacyProfile, ProfileError> {

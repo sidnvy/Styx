@@ -21,6 +21,14 @@ pub(crate) struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Private native App owned-child transport, never a network endpoint.
+    #[command(name = "__app-core", hide = true)]
+    AppCore {
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(long)]
+        deployment_file: PathBuf,
+    },
     // Fixed read-only worker mode; there are no target/credential/path options.
     #[command(name = "__linux-desktop-probe", hide = true)]
     LinuxDesktopProbe,
@@ -631,6 +639,40 @@ async fn stop_signal() -> io::Result<()> {
 pub(crate) async fn run(cli: Cli) -> ExitCode {
     use styx_runtime::foreground::{self, HostWireMode};
     match cli.command {
+        Command::AppCore {
+            state_dir,
+            deployment_file,
+        } => {
+            let cancel = CancellationToken::new();
+            let signal_cancel = cancel.clone();
+            let signal = tokio::spawn(async move {
+                let result = stop_signal().await;
+                signal_cancel.cancel();
+                result
+            });
+            let result = styx_runtime::app::serve(
+                &state_dir,
+                &deployment_file,
+                tokio::io::stdin(),
+                tokio::io::stdout(),
+                cancel,
+            )
+            .await;
+            let signal_failed = if signal.is_finished() {
+                !matches!(signal.await, Ok(Ok(())))
+            } else {
+                signal.abort();
+                let _ = signal.await;
+                false
+            };
+            if signal_failed {
+                return error("signal_listener_failed");
+            }
+            match result {
+                Ok(()) => ExitCode::SUCCESS,
+                Err(value) => error(value.code()),
+            }
+        }
         Command::LinuxDesktopProbe => desktop_probe_worker().await,
         Command::LinuxDesktopWatch => desktop_watch_worker().await,
         Command::LinuxDesktopAssociation { candidate } => {

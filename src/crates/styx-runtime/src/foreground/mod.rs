@@ -66,6 +66,12 @@ pub async fn inspect(state_dir: &Path) -> Result<ProfileDiagnostics, ForegroundE
 }
 mod run;
 pub use run::host_run;
+#[cfg(any(
+    all(target_os = "linux", target_env = "gnu"),
+    target_os = "windows",
+    target_os = "macos"
+))]
+pub(crate) use run::host_run_for_app;
 mod gateway;
 #[cfg(any(
     all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),

@@ -5,6 +5,7 @@ use std::{
     ffi::OsStr,
     fmt,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 use styx_contracts::identity::{DeviceId, Sha256Digest};
 
@@ -90,7 +91,8 @@ pub async fn request(parent: &Path, name: &OsStr, deployment_file: &Path) -> Res
             name.to_owned(),
             deployment_file.to_path_buf(),
         );
-        platform::owned(async move { platform::request(parent, name, deployment).await }).await
+        platform::owned(async move { platform::request(parent, name, deployment, None).await })
+            .await
     }
     #[cfg(not(any(
         all(target_os = "windows", target_arch = "x86_64"),
@@ -116,7 +118,7 @@ pub async fn claim(state_dir: &Path) -> Result<JoinReport> {
     ))]
     {
         let path = state_dir.to_path_buf();
-        platform::owned(async move { platform::claim(path).await }).await
+        platform::owned(async move { platform::claim(path, None).await }).await
     }
     #[cfg(not(any(
         all(target_os = "windows", target_arch = "x86_64"),
@@ -128,6 +130,80 @@ pub async fn claim(state_dir: &Path) -> Result<JoinReport> {
     )))]
     {
         let _ = state_dir;
+        Err(JoinError::new("native_join_platform_unsupported", 3))
+    }
+}
+
+/// Explicit owned-App enrollment; the public CLI entry remains ForegroundCli.
+pub(crate) async fn request_for_app(
+    scope: Arc<crate::app::HostScope>,
+    deployment_file: &Path,
+) -> Result<JoinReport> {
+    #[cfg(any(
+        all(target_os = "windows", target_arch = "x86_64"),
+        all(
+            target_os = "macos",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
+    ))]
+    {
+        let path = scope.state_dir().to_owned();
+        let parent = path
+            .parent()
+            .ok_or_else(|| JoinError::new("native_join_invalid_input", 2))?
+            .to_owned();
+        let name = path
+            .file_name()
+            .ok_or_else(|| JoinError::new("native_join_invalid_input", 2))?
+            .to_owned();
+        let deployment = deployment_file.to_owned();
+        let retained = scope.clone();
+        platform::owned(
+            async move { platform::request(parent, name, deployment, Some(scope)).await },
+        )
+        .await
+        .map_err(|error| error.with_app_scope(retained))
+    }
+    #[cfg(not(any(
+        all(target_os = "windows", target_arch = "x86_64"),
+        all(
+            target_os = "macos",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
+    )))]
+    {
+        let _ = (scope, deployment_file);
+        Err(JoinError::new("native_join_platform_unsupported", 3))
+    }
+}
+pub(crate) async fn claim_for_app(scope: Arc<crate::app::HostScope>) -> Result<JoinReport> {
+    #[cfg(any(
+        all(target_os = "windows", target_arch = "x86_64"),
+        all(
+            target_os = "macos",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
+    ))]
+    {
+        let path = scope.state_dir().to_owned();
+        let retained = scope.clone();
+        platform::owned(async move { platform::claim(path, Some(scope)).await })
+            .await
+            .map_err(|error| error.with_app_scope(retained))
+    }
+    #[cfg(not(any(
+        all(target_os = "windows", target_arch = "x86_64"),
+        all(
+            target_os = "macos",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
+    )))]
+    {
+        let _ = scope;
         Err(JoinError::new("native_join_platform_unsupported", 3))
     }
 }
@@ -182,12 +258,32 @@ mod platform {
     static JOBS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
 
     pub(super) enum Retained {
-        Root { _failure: NativeRootFailure },
-        Fresh { _root: FreshNativeRoot },
-        Store { _store: NativeHostJoinStore },
-        Work { _work: Box<Work> },
+        Root {
+            _failure: NativeRootFailure,
+        },
+        Fresh {
+            _root: FreshNativeRoot,
+        },
+        Store {
+            _store: NativeHostJoinStore,
+        },
+        Work {
+            _work: Box<Work>,
+        },
+        App {
+            _scope: Arc<crate::app::HostScope>,
+            _retained: Option<Box<Retained>>,
+        },
     }
     impl JoinError {
+        pub(super) fn with_app_scope(mut self, scope: Arc<crate::app::HostScope>) -> Self {
+            let retained = self._retained.take();
+            self._retained = Some(Box::new(Retained::App {
+                _scope: scope,
+                _retained: retained,
+            }));
+            self
+        }
         fn keep(mut self, retained: Retained) -> Self {
             self._retained = Some(Box::new(retained));
             self
@@ -395,9 +491,21 @@ mod platform {
         origin: url::Url,
         candidate: VerifiedNativeRelease,
         inputs: Vec<Input>,
+        app_scope: Option<Arc<crate::app::HostScope>>,
     }
     impl Work {
         fn validate(&self) -> Result<()> {
+            validate_app_scope(self.app_scope.as_deref(), &self.state_dir)?;
+            let state = self.store.readstate().map_err(|_| unknown())?;
+            if !state
+                .state()
+                .desired
+                .host
+                .as_ref()
+                .is_some_and(|host| host.manager == caller_manager(self.app_scope.as_deref()))
+            {
+                return Err(unknown());
+            }
             self.candidate.revalidate().map_err(|_| unknown())?;
             if self.candidate.runtime_selection().map_err(|_| unknown())? != self.seed.runtime
                 || self.store.seed_binding().map_err(|_| unknown())? != self.seed_raw.as_slice()
@@ -413,7 +521,7 @@ mod platform {
             for input in &self.inputs {
                 input.revalidate()?;
             }
-            Ok(())
+            validate_app_scope(self.app_scope.as_deref(), &self.state_dir)
         }
         fn append(&mut self, file: File, bytes: &[u8]) -> Result<()> {
             self.validate()?;
@@ -457,8 +565,41 @@ mod platform {
         })
         .await
     }
-    fn load(store: NativeHostJoinStore, path: PathBuf) -> Result<Work> {
+    fn caller_manager(scope: Option<&crate::app::HostScope>) -> NativeManager {
+        if scope.is_some() {
+            NativeManager::AppManaged
+        } else {
+            NativeManager::ForegroundCli
+        }
+    }
+    fn validate_app_scope(scope: Option<&crate::app::HostScope>, path: &Path) -> Result<()> {
+        if let Some(scope) = scope {
+            if path != scope.state_dir() {
+                return Err(bad());
+            }
+            scope
+                .validate()
+                .map_err(|_| JoinError::new("native_join_app_scope_changed", 4))?;
+        }
+        Ok(())
+    }
+    fn load(
+        store: NativeHostJoinStore,
+        path: PathBuf,
+        app_scope: Option<Arc<crate::app::HostScope>>,
+    ) -> Result<Work> {
         let loaded: Result<_> = (|| {
+            validate_app_scope(app_scope.as_deref(), &path)?;
+            let state = store.readstate().map_err(|_| unknown())?;
+            if !state
+                .state()
+                .desired
+                .host
+                .as_ref()
+                .is_some_and(|host| host.manager == caller_manager(app_scope.as_deref()))
+            {
+                return Err(bad());
+            }
             let root = PrivateRoot::open(&path).map_err(|_| unknown())?;
             if store
                 .configuration_root()
@@ -478,7 +619,6 @@ mod platform {
             let key = DevicePrivateKey::from_pkcs8_pem(&private.raw).map_err(|_| unknown())?;
             let candidate = release::verify_selected(&seed.runtime)
                 .map_err(|_| JoinError::new("native_join_candidate_untrusted", 2))?;
-            let state = store.readstate().map_err(|_| unknown())?;
             let selected: NativeRuntimeSelection = serde_json::from_str(
                 state
                     .state()
@@ -538,6 +678,7 @@ mod platform {
             origin,
             candidate,
             inputs,
+            app_scope,
         };
         if let Err(error) = work.validate() {
             return Err(error.keep(Retained::Work {
@@ -550,10 +691,12 @@ mod platform {
         parent: &Path,
         name: &OsStr,
         deployment_file: &Path,
+        app_scope: Option<Arc<crate::app::HostScope>>,
     ) -> Result<(Work, Zeroizing<Vec<u8>>)> {
         if !parent.is_absolute() {
             return Err(bad());
         }
+        validate_app_scope(app_scope.as_deref(), &parent.join(name))?;
         let source = Input::open(deployment_file, LIMIT)?;
         let (d, _, browser_requested) = deployment(&source.raw)?;
         let selection_input = Input::open(&d.runtime_selection_file, LIMIT)?;
@@ -585,7 +728,15 @@ mod platform {
             input.revalidate()?;
         }
         candidate.revalidate().map_err(|_| unknown())?;
+        // Validate the original App parent again immediately before creation.
+        validate_app_scope(app_scope.as_deref(), &parent.join(name))?;
         let fresh = native_root::create_fresh(&parent_root, name).map_err(JoinError::root)?;
+        if let Some(scope) = &app_scope
+            && scope.bind().and_then(|()| scope.validate()).is_err()
+        {
+            return Err(JoinError::new("native_join_app_scope_changed", 4)
+                .keep(Retained::Fresh { _root: fresh }));
+        }
         let metadata: Result<_> = (|| {
             let seed = NativeHostJoinSeed {
                 schema: 1,
@@ -631,7 +782,7 @@ mod platform {
                 desired: NativeDesired {
                     gateway: None,
                     host: Some(NativeComponentDesired {
-                        manager: NativeManager::ForegroundCli,
+                        manager: caller_manager(app_scope.as_deref()),
                         run: NativeRunDesired::Stopped,
                         autostart: NativeAutostartDesired::Disabled,
                     }),
@@ -657,7 +808,7 @@ mod platform {
         let store = fresh
             .initialize_host_pending(&source.raw, &state, material, seconds)
             .map_err(JoinError::root)?;
-        let mut work = load(store, parent.join(name))?;
+        let mut work = load(store, parent.join(name), app_scope)?;
         // Before dispatch recheck the caller's original source/CA/invitation too.
         for input in [source, selection_input, ca, invitation_input] {
             if let Err(error) = input.revalidate() {
@@ -685,8 +836,10 @@ mod platform {
         parent: PathBuf,
         name: std::ffi::OsString,
         deployment_file: PathBuf,
+        app_scope: Option<Arc<crate::app::HostScope>>,
     ) -> Result<JoinReport> {
-        let (mut work, body) = blocking(move || create(&parent, &name, &deployment_file)).await?;
+        let (mut work, body) =
+            blocking(move || create(&parent, &name, &deployment_file, app_scope)).await?;
         let response = match http::exchange(
             &work.origin,
             &work.tls,
@@ -733,17 +886,18 @@ mod platform {
         work = next;
         Ok(work.report("native_host_request", "awaiting_approval", &pending))
     }
-    fn open(path: &Path) -> Result<Work> {
+    fn open(path: &Path, app_scope: Option<Arc<crate::app::HostScope>>) -> Result<Work> {
         if !path.is_absolute() {
             return Err(bad());
         }
+        validate_app_scope(app_scope.as_deref(), path)?;
         let root = PrivateRoot::open(path).map_err(|_| bad())?;
         let writer = root
             .try_existing_configuration_writer()
             .map_err(|_| JoinError::new("native_join_configuration_busy", 3))?;
         let binding = native_root::reopen_native(root, writer).map_err(JoinError::root)?;
         let store = NativeHostJoinStore::from_binding(binding).map_err(JoinError::root)?;
-        load(store, path.to_path_buf())
+        load(store, path.to_path_buf(), app_scope)
     }
     fn pending(work: &Work, raw: &[u8], historical: bool) -> Result<protocol::PendingJoin> {
         let record: RecordedReply<'_> = serde_json::from_slice(raw).map_err(|_| unknown())?;
@@ -760,8 +914,11 @@ mod platform {
                 .map_err(protocol_error)
         }
     }
-    pub(super) async fn claim(path: PathBuf) -> Result<JoinReport> {
-        let work = blocking(move || open(&path)).await?;
+    pub(super) async fn claim(
+        path: PathBuf,
+        app_scope: Option<Arc<crate::app::HostScope>>,
+    ) -> Result<JoinReport> {
+        let work = blocking(move || open(&path, app_scope)).await?;
         let (work, (reply, ready_raw, mut credential, confirm_dispatched)) = io(work, |w| {
             Ok((
                 w.read(File::JoinReply)?

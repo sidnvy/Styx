@@ -420,7 +420,7 @@ impl PairedGatewayBackend {
     }
     /// Read-only typed settlement observation for independent integration
     /// fixtures; it never requests cleanup or changes a native operation.
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux", target_env = "gnu"))]
     pub(crate) fn observed_physical_cleanups(&self) -> usize {
         self.physical_cleanups_completed
             .load(std::sync::atomic::Ordering::Acquire)
