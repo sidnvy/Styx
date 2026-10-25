@@ -90,7 +90,7 @@ struct ProductView: View {
             ProductBrand(size: 100).padding(.top, 40)
             Text(productText("欢迎使用 Styx", "Welcome to Styx")).font(.system(size: 32, weight: .semibold))
             Text(productText("在 ChatGPT 中使用你的电脑。", "Use your computer from ChatGPT.")).foregroundStyle(.secondary)
-            Button(productText("开始设置", "Get started")) { model.joining = model.nativeHost; model.page = model.nativeHost ? .invitation : .capabilities }.buttonStyle(.borderedProminent).controlSize(.large)
+            Button(productText("开始设置", "Get started")) { model.joining = false; model.page = .capabilities }.buttonStyle(.borderedProminent).controlSize(.large).disabled(model.nativeHost && !model.nativeCanCreateLocal)
             Button(productText("加入已有 Styx", "Join an existing Styx")) { model.joining = true; model.page = .invitation }.buttonStyle(.link)
         }.frame(maxWidth: .infinity).padding(.bottom, 50)
     }
@@ -110,7 +110,7 @@ struct ProductView: View {
                 Button(productText("返回", "Back")) { model.page = model.joining ? .invitation : .welcome }
                 Spacer()
                 Button(productText("继续", "Continue")) { model.createAndPrepare() }.buttonStyle(.borderedProminent)
-                    .disabled(model.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || (!model.nativeHost && model.session["defaults"]["bundle"].string == nil))
+                    .disabled(model.busy || model.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty || (model.nativeHost && !model.joining && !model.nativeCanCreateLocal) || (!model.nativeHost && model.session["defaults"]["bundle"].string == nil))
             }
         }
     }
@@ -331,6 +331,13 @@ struct ProductView: View {
             heading("Styx", productText("查看这台电脑的功能和连接。", "Check this computer’s features and connection."))
             ProductPanel(title: productText("这台电脑", "This computer")) {
                 if model.nativeHost {
+                    if model.status["gateway"] != .null {
+                        Text(productText("本机网关地址：", "Local gateway address: ") + (model.status["gateway"]["origin"].string ?? productText("状态未确认", "status not confirmed")))
+                        Text(productText("本机网关：", "Local gateway: ") + (model.status["gateway"]["running"] == .bool(true) && model.status["gateway"]["listening"] == .bool(true) ? productText("运行中", "running") : productText("状态未确认", "status not confirmed")))
+                    }
+                    if model.status["admission_fenced"].bool || model.status["gateway"]["admission_fenced"].bool {
+                        Text(productText("上次设置结果尚未确认，请刷新状态查看；原配置已保留。", "The last setup result is unconfirmed. Refresh status to review it; your existing settings have been retained.")).foregroundStyle(.secondary)
+                    }
                     Text("Host: " + (model.status["foreground"]["status"].string ?? "unknown"))
                     Text("Exec transport: " + (model.status["foreground"]["execConnection"].string ?? "unknown"))
                     if model.status["enrollment"]["status"].string == "awaiting_approval" {
@@ -340,7 +347,7 @@ struct ProductView: View {
                     }
                     Button(productText("重新连接", "Reconnect")) { model.resumeForeground() }.disabled(model.busy || model.status["admission_fenced"].bool)
                     Button(productText("暂停连接", "Pause connection")) { model.nativePause() }.disabled(model.busy)
-                    Text(productText("仅管理本机 Host；工具效果、Computer Use 和账号尚未验收。", "This App manages this Host only. Tool effects, Computer Use and account acceptance are separate."))
+                    Text(productText("关闭设置窗口后 Styx 会继续运行。退出 Styx 会停止它管理的本机连接和网关。", "Styx keeps running when you close Settings. Quitting Styx stops the local connection and gateway it manages."))
                 } else {
                 statusRow(ProductCapabilityKind.cli.title, model.journey["readiness"]["exec"]["status"].string)
                 statusRow(ProductCapabilityKind.browser.title, model.browserNotApproved ? "not_approved" : model.journey["readiness"]["browser"]["status"].string)

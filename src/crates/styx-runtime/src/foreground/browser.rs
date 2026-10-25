@@ -231,57 +231,71 @@ fn selected(profile: &LoadedLegacyProfile) -> Result<Option<PathBuf>> {
     }
 }
 
+/// Fixed local bootstrap stage and existing typed category only. No native
+/// error text, protected path, configuration or credentials enter diagnostics.
+pub(crate) struct BrowserPreparationError {
+    pub(crate) stage: &'static str,
+    pub(crate) category: ErrorCategory,
+}
+impl BrowserPreparationError {
+    pub(crate) fn new(stage: &'static str, category: ErrorCategory) -> Self {
+        Self { stage, category }
+    }
+}
+
 /// Only a bootstrap already holding the original private profile and verified
 /// publisher inventory may call this. No fixture path or network input can mint
 /// this object. No browser is executed by preparation or validation.
 pub(crate) fn prepare_browser_bootstrap(
     profile: Arc<LoadedLegacyProfile>,
-) -> Result<Option<Arc<dyn BrowserBootstrap>>> {
-    let Some(browser_path) = selected(&profile)? else {
+) -> std::result::Result<Option<Arc<dyn BrowserBootstrap>>, BrowserPreparationError> {
+    let at = BrowserPreparationError::new;
+    let Some(browser_path) = selected(&profile).map_err(|e| at("selection", e))? else {
         return Ok(None);
     };
     profile
         .revalidate()
-        .map_err(|_| ErrorCategory::IntegrityFailure)?;
+        .map_err(|_| at("profile", ErrorCategory::IntegrityFailure))?;
     let source = profile.browser_source();
     let release = source.release;
     #[cfg(target_os = "linux")]
     let workspace = source.workspace;
     if !source.node_version.is_some_and(|v| v.starts_with("22.")) {
-        return Err(ErrorCategory::CapabilityUnsupported);
+        return Err(at("node_version", ErrorCategory::CapabilityUnsupported));
     }
-    check_dependency_versions(release)?;
+    check_dependency_versions(release).map_err(|e| at("dependency_versions", e))?;
     #[cfg(target_os = "linux")]
-    canonical(workspace)?;
+    canonical(workspace).map_err(|e| at("workspace", e))?;
     // MCP roots must not encompass the private stage, other owners or original
     // credential/release trees. An unsupported workspace disables Browser only.
     #[cfg(target_os = "linux")]
     if profile.host_base_dir().starts_with(workspace)
         || workspace.starts_with(profile.host_base_dir())
     {
-        return Err(ErrorCategory::PermissionDenied);
+        return Err(at("workspace", ErrorCategory::PermissionDenied));
     }
     let node = Arc::new(
         profile
             .pin_browser_node()
-            .map_err(|_| ErrorCategory::IntegrityFailure)?,
+            .map_err(|_| at("node_pin", ErrorCategory::IntegrityFailure))?,
     );
     #[cfg(target_os = "linux")]
     let node_path = release.join("bin/node");
     #[cfg(target_os = "windows")]
     let node_path = release.join("bin/node.exe");
-    canonical(&node_path)?;
+    canonical(&node_path).map_err(|e| at("node_path", e))?;
     #[cfg(target_os = "linux")]
-    let browser = LocalExecutable::open(&browser_path)?;
+    let browser = LocalExecutable::open(&browser_path).map_err(|e| at("browser_pin", e))?;
     #[cfg(target_os = "windows")]
-    let browser =
-        LocalExecutable::open(&browser_path).map_err(|_| ErrorCategory::PermissionDenied)?;
-    let runtime = assets::fresh_private_directory(profile.host_base_dir()).map_err(map_error)?;
+    let browser = LocalExecutable::open(&browser_path)
+        .map_err(|_| at("browser_pin", ErrorCategory::PermissionDenied))?;
+    let runtime = assets::fresh_private_directory(profile.host_base_dir())
+        .map_err(|e| at("private_runtime", map_error(e)))?;
     let staged = assets::prepare(
         runtime.path(),
         &release.join("packages/styx-browser-provider/node_modules"),
     )
-    .map_err(map_error)?;
+    .map_err(|e| at("worker_assets", map_error(e)))?;
     let factory = LocalBrowser {
         #[cfg(target_os = "linux")]
         workspace: workspace.into(),
@@ -293,7 +307,9 @@ pub(crate) fn prepare_browser_bootstrap(
         profile,
         owners: Mutex::new(Vec::new()),
     };
-    factory.validate_before_spawn()?;
+    factory
+        .validate_before_spawn()
+        .map_err(|e| at("prepared_inputs", e))?;
     Ok(Some(Arc::new(factory)))
 }
 impl LocalBrowser {

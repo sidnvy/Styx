@@ -486,9 +486,12 @@ async fn run_owned(
         if mode == HostWireMode::PairedV3 {
             let retained = admitted.clone();
             let source = tokio::task::spawn_blocking(move || {
-                retained
-                    .validate_ownership()
-                    .map_err(|_| styx_contracts::error::ErrorCategory::StateConflict)?;
+                retained.validate_ownership().map_err(|_| {
+                    super::browser::BrowserPreparationError::new(
+                        "ownership",
+                        styx_contracts::error::ErrorCategory::StateConflict,
+                    )
+                })?;
                 super::browser::prepare_browser_bootstrap(retained.profile.clone())
             })
             .await;
@@ -509,14 +512,45 @@ async fn run_owned(
                             source,
                         })),
                         Err(_) => {
-                            event(&events, &cancel, "browser_unavailable", &device, None);
+                            event_with_reason(
+                                &events,
+                                &cancel,
+                                "browser_unavailable",
+                                &device,
+                                None,
+                                Some("configure_lane"),
+                            );
                             None
                         }
                     }
                 }
                 Ok(Ok(None)) => None,
-                _ => {
-                    event(&events, &cancel, "browser_unavailable", &device, None);
+                Ok(Err(error)) => {
+                    // Static stage plus typed category; never format an upstream
+                    // native error or protected path into this event/log.
+                    eprintln!(
+                        "styx_browser_prepare_failed stage={} category={:?}",
+                        error.stage, error.category
+                    );
+                    event_with_reason(
+                        &events,
+                        &cancel,
+                        "browser_unavailable",
+                        &device,
+                        None,
+                        Some(error.stage),
+                    );
+                    None
+                }
+                Err(_) => {
+                    event_with_reason(
+                        &events,
+                        &cancel,
+                        "browser_unavailable",
+                        &device,
+                        None,
+                        Some("prepare_task_join"),
+                    );
                     None
                 }
             }

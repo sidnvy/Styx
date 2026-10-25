@@ -26,7 +26,7 @@ final class ProductOwnedCore: @unchecked Sendable {
     private var eofRequested = false
     private var sequence = 0
     private var buffer = Data()
-    private static let operations: Set<String> = ["startupStatus", "status", "inspectJoin", "join", "requestJoin", "claimJoin", "inspectHost", "connect", "disconnect", "quitAdmission"]
+    private static let operations: Set<String> = ["startupStatus", "status", "createLocal", "inspectJoin", "join", "requestJoin", "claimJoin", "inspectHost", "connect", "disconnect", "quitAdmission"]
 
     // Only the fixed package bootstrap below can construct this owner.
     private init(cli: URL, selection: URL, state: URL, cliPin: FileHandle, selectionPin: FileHandle) throws {

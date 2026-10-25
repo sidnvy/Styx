@@ -205,6 +205,13 @@ enum ProductRestorationPolicy {
     @Published var inspection: ProductJSON = .null
     @Published var joinAcceptance: ProductJSON = .null
     @Published var joining = false
+    // UI duplicate-submit guard only. Core remains the durable setup authority.
+    @Published private(set) var nativeLocalSetupSubmitted = false
+    var nativeCanCreateLocal: Bool {
+        !nativeLocalSetupSubmitted && status["admission_fenced"] == .bool(false)
+        && status["configuration"] == .null && status["enrollment"] == .null && status["gateway"] == .null
+        && status["supportedOperations"].array.contains { $0.string == "createLocal" }
+    }
     @Published var recoveringJoin = false
     @Published var joinRecovery: ProductJSON = .null
     @Published var tunnelID = ""
@@ -338,14 +345,14 @@ enum ProductRestorationPolicy {
         client = ProductCoreClient(owned: owned)
         permissionReader = { (AXIsProcessTrusted(), CGPreflightScreenCaptureAccess()) }
         permissionActions = .system
-        computer = false; browser = false; joining = true
+        computer = false; browser = false; joining = false
     }
     private func applyNative(_ value: ProductJSON) throws {
         guard value["mode"].string == "rust_host" else { throw ProductCoreError.invalidResponse }
         status = value; journey = .null; browserObservation = .null; acceptance = .null
         if !restoredPage {
             restoredPage = true
-            page = value["configuration"] == .null && value["enrollment"] == .null ? .welcome : .overview
+            page = value["configuration"] == .null && value["enrollment"] == .null && value["gateway"] == .null && value["admission_fenced"] == .bool(false) ? .welcome : .overview
         }
     }
     init(sessionURL: URL, permissionReader: @escaping () -> (accessibility: Bool, screenRecording: Bool) = {
@@ -571,11 +578,34 @@ enum ProductRestorationPolicy {
     }
     func createAndPrepare() {
         if nativeHost {
+            guard !busy else { return }
+            let name = label.trimmingCharacters(in: .whitespacesAndNewlines)
+            guard !name.isEmpty else { return }
+            let joinExisting = joining
+            if !joinExisting && !nativeCanCreateLocal { page = .overview; return }
             perform { [self] in
-                guard let origin = joinAcceptance["origin"].string,
-                      let ca = joinAcceptance["caSha256"].string else { throw ProductCoreError.rejected }
-                _ = try await client.native("join", ["approvedGatewayOrigin": .string(origin), "approvedCaSha256": .string(ca), "label": .string(label), "computer": .bool(false), "browser": .bool(false), "browserChannel": .null, "persistLogin": .bool(false)])
-                joinAcceptance = .null; inspection = .null; page = .overview
+                // Preserve this Mac slice's existing disabled capabilities.
+                // Selecting setup never grants desktop permission or invents readiness.
+                var choice: [String: ProductJSON] = ["label": .string(name), "computer": .bool(false), "browser": .bool(false), "browserChannel": .null, "persistLogin": .bool(false)]
+                if joinExisting {
+                    guard let origin = joinAcceptance["origin"].string,
+                          let ca = joinAcceptance["caSha256"].string else { throw ProductCoreError.rejected }
+                    choice["approvedGatewayOrigin"] = .string(origin)
+                    choice["approvedCaSha256"] = .string(ca)
+                    _ = try await client.native("join", choice)
+                    joinAcceptance = .null; inspection = .null; page = .overview
+                } else {
+                    guard nativeCanCreateLocal else { throw ProductCoreError.rejected }
+                    nativeLocalSetupSubmitted = true
+                    defer { page = .overview }
+                    // One request; omitted port uses Core's fixed default 22022.
+                    // perform refreshes status after failure, never this mutation.
+                    do { try applyNative(try await client.native("createLocal", choice)) }
+                    catch {
+                        self.error = productText("上次设置结果尚未确认，请刷新状态查看；原配置已保留。", "The last setup result is unconfirmed. Refresh status to review it; your existing settings have been retained.")
+                        return
+                    }
+                }
             }; return
         }
         guard status["deployment"] == .null else { page = .preparation; return }
