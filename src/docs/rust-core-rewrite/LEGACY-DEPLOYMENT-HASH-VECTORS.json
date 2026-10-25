@@ -1,0 +1,67 @@
+{
+  "schema": 1,
+  "oracle": "src/shared/deployment-scope.mjs",
+  "oracle_sha256": "2e61b5ba6acdf97a7bc735416994fc1823c2e25c89a56dff01f53dc838fd5d1b",
+  "vectors": [
+    {
+      "id": "host_only_original_bytes",
+      "input": "{ \"mode\": \"join-existing\", \"gateway\": {\"origin\":\"https://fixture.invalid\"} }\r\n",
+      "sha256": "77c05d62882361d8b1f8848e0c47d6652679c9b62415003e6c4fa82589e255c6"
+    },
+    {
+      "id": "gateway_without_ingress",
+      "input": "{\"mode\":\"create-local\",\"gateway\":{\"port\":8443}}\n",
+      "sha256": "c2292c179ca365bca5515a68c105a663b7ca655f1f60af05dbaeb07cfdb76842"
+    },
+    {
+      "id": "default_local_with_ingress",
+      "input": "{\"schema\":1,\"mode\":\"create-local\",\"gateway\":{\"port\":8443,\"deviceIngress\":{\"port\":8444},\"host\":\"127.0.0.1\"},\"host\":{\"enabled\":true}}",
+      "sha256": "cfa4128ccbf6c2a1f5179a7f2dc5af68a8fa52d12ef73398ed2093c64f0f15f4"
+    },
+    {
+      "id": "null_ingress_still_deleted",
+      "input": "{\"gateway\":{\"deviceIngress\":null,\"port\":8443},\"enabled\":false}",
+      "sha256": "5b6377f51ddfc28ead5dd8a9a62c7430456c15ca26d9e98cef9637f8397638f2"
+    },
+    {
+      "id": "decoded_duplicate_keys",
+      "input": "{\"gateway\":{\"port\":1,\"deviceIngress\":true},\"gate\\u0077ay\":{\"deviceIngress\":false,\"port\":2},\"x\":1,\"x\":2}",
+      "sha256": "c74ddab059a592ec67c5692317e091e097aeb1854253d80ac7c0b0e92148a204"
+    },
+    {
+      "id": "numeric_property_order",
+      "input": "{\"10\":\"ten\",\"2\":\"two\",\"01\":\"text\",\"4294967295\":\"notIndex\",\"gateway\":{\"10\":1,\"2\":2,\"deviceIngress\":true,\"0\":0}}",
+      "sha256": "a00c0cfa2cfdf120c0b60fb3b28bb058433ce65b3a8784134ca280a2e512aae6"
+    },
+    {
+      "id": "unicode_and_control_escaping",
+      "input": "{\"label\":\"Styx 中文 😀 /     \\b\\f\\n\\r\\t\\u0000\",\"gateway\":{\"deviceIngress\":{\"enabled\":true}},\"nested\":[{},[],null,true,false]}",
+      "sha256": "a500e20fbea3c05b4e04c892af5efab46de153fe01398b3b0b1a12339634e7dc"
+    },
+    {
+      "id": "binary64_and_exponents",
+      "input": "{\"gateway\":{\"deviceIngress\":true},\"numbers\":[-0,1.0,1e-7,1e-6,1e20,1e21,9007199254740993,1e400,-1e400,5e-324,1.2345678901234567,1000000000000000128]}",
+      "sha256": "37c0693ef4af22ae91ff485b7e9bbf1f675246272aac276b71e74c14f3fa526c"
+    },
+    {
+      "id": "nested_ingress_is_preserved",
+      "input": "{\"gateway\":{\"deviceIngress\":{},\"nested\":{\"deviceIngress\":{\"token\":\"fixture\"}}},\"deviceIngress\":\"outside\"}",
+      "sha256": "f9d196141b302387b0e91c5a95721487692f0fd15137878950f03336273573dc"
+    },
+    {
+      "id": "gateway_null_unchanged",
+      "input": " {\"gateway\":null,\"value\":1.0}\n",
+      "sha256": "fa67e7474277466fed44c208250cc0d593c415b5cde9e30b92c97afffd2d6585"
+    },
+    {
+      "id": "empty_gateway_after_delete",
+      "input": "{\"gateway\":{\"deviceIngress\":true}}",
+      "sha256": "df09ac8e6febfcacbca1cdc9c383ee0649e94ee264a8e7587db6fb5038c94256"
+    },
+    {
+      "id": "array_and_prototype_keys",
+      "input": "{\"gateway\":{\"deviceIngress\":false},\"__proto__\":{\"a\":1},\"data\":[{\"4\":0,\"1\":1,\"b\":2,\"a\":3}]}",
+      "sha256": "27b5252b4d993f5ad5b4c05bca143209d71f51bf554ff99c43051c145ec5803e"
+    }
+  ]
+}

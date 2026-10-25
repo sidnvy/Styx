@@ -14,6 +14,7 @@ styx-core = { path = "src/crates/styx-core" }
 styx-runtime = { path = "src/crates/styx-runtime" }
 serde = { version = "=1.0.229", features = ["derive"] }
 serde_json = { version = "=1.0.150", features = ["raw_value"] }
+ryu-js = "=1.0.3"
 thiserror = "=2.0.18"
 sha2 = "=0.10.9"
 url = "=2.5.8"

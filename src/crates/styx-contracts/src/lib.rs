@@ -30,3 +30,6 @@ pub mod historical_enrollment;
 
 /// Private native Host bootstrap data, never enrollment or execution authority.
 pub mod native_host;
+
+/// Exact historical deployment connection projection, not admission authority.
+pub mod legacy_deployment;
