@@ -152,7 +152,11 @@ impl FreshNativeRoot {
         material: FreshGatewayFiles<'_>,
         trusted_now_unix: u64,
     ) -> Result<NativeRootBinding, NativeRootFailure> {
-        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "windows",
+            target_os = "macos"
+        ))]
         {
             platform::initialize_gateway(
                 self,
@@ -163,7 +167,11 @@ impl FreshNativeRoot {
                 &|_, _| {},
             )
         }
-        #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+        #[cfg(not(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "windows",
+            target_os = "macos"
+        )))]
         {
             let _ = (deployment, state, material, trusted_now_unix);
             Err(NativeRootFailure {
@@ -718,7 +726,11 @@ mod platform {
         }
         bind(root, writer, marker, marker_bytes, marker_observation)
     }
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "windows",
+        target_os = "macos"
+    ))]
     pub(super) fn initialize_gateway(
         mut fresh: FreshNativeRoot,
         deployment: &[u8],

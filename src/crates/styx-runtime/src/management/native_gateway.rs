@@ -23,7 +23,14 @@ pub struct BootstrapReport {
 }
 /// Retains uncertain bootstrap resources until the caller explicitly tears down
 /// this entire scope. Formatting is static and never contains key material.
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[cfg(any(
+    all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+    all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"),
+    all(
+        target_os = "macos",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+))]
 enum Retained {
     Root {
         _failure: crate::store::native_root::NativeRootFailure,
@@ -45,7 +52,14 @@ enum Retained {
 pub struct BootstrapError {
     code: &'static str,
     exit: u8,
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(
+        all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+        all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"),
+        all(
+            target_os = "macos",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    ))]
     _retained: Option<Box<Retained>>,
 }
 impl BootstrapError {
@@ -59,16 +73,37 @@ impl BootstrapError {
         Self {
             code,
             exit,
-            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            #[cfg(any(
+                all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+                all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"),
+                all(
+                    target_os = "macos",
+                    any(target_arch = "x86_64", target_arch = "aarch64")
+                )
+            ))]
             _retained: None,
         }
     }
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(
+        all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+        all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"),
+        all(
+            target_os = "macos",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    ))]
     fn retaining(mut self, retained: Retained) -> Self {
         self._retained = Some(Box::new(retained));
         self
     }
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(
+        all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+        all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"),
+        all(
+            target_os = "macos",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    ))]
     fn root(failure: crate::store::native_root::NativeRootFailure) -> Self {
         use crate::store::native_root::NativeRootError;
         let (code, exit) = match failure.error() {
@@ -102,7 +137,14 @@ pub async fn bootstrap(
     deployment_file: &Path,
     runtime_selection_file: &Path,
 ) -> Result<BootstrapReport, BootstrapError> {
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(
+        all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+        all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"),
+        all(
+            target_os = "macos",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    ))]
     {
         static JOBS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
         let permit = JOBS
@@ -123,16 +165,37 @@ pub async fn bootstrap(
         .await
         .map_err(|_| BootstrapError::new("fresh_gateway_worker_failed", 4))?
     }
-    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+    #[cfg(not(any(
+        all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+        all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"),
+        all(
+            target_os = "macos",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    )))]
     {
         let _ = (parent, name, deployment_file, runtime_selection_file);
         Err(BootstrapError::new("fresh_gateway_platform_unsupported", 3))
     }
 }
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[cfg(any(
+    all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+    all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"),
+    all(
+        target_os = "macos",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+))]
 pub(crate) use platform::{FreshGatewayRuntime, open_existing};
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[cfg(any(
+    all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+    all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"),
+    all(
+        target_os = "macos",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+))]
 mod platform {
     use super::*;
     use crate::{
@@ -170,6 +233,29 @@ mod platform {
     }
     fn changed() -> BootstrapError {
         BootstrapError::new("fresh_gateway_binding_changed", 4)
+    }
+    // Map only the identity observed by the retained PrivateRoot. Ready JSON
+    // cannot choose a foreign OS root or alias another platform's identity.
+    fn native_identity(root: &PrivateRoot) -> NativeRootIdentity {
+        match root.identity() {
+            RootIdentity::Linux { device, inode, uid } => {
+                NativeRootIdentity::Linux { device, inode, uid }
+            }
+            #[cfg(target_os = "macos")]
+            RootIdentity::Macos { device, inode, uid } => {
+                NativeRootIdentity::Macos { device, inode, uid }
+            }
+            #[cfg(target_os = "windows")]
+            RootIdentity::Windows {
+                volume_serial,
+                file_id,
+                owner_sid,
+            } => NativeRootIdentity::Windows {
+                volume_serial,
+                file_id,
+                owner_sid,
+            },
+        }
     }
     fn now() -> Result<u64, BootstrapError> {
         SystemTime::now()
@@ -446,10 +532,9 @@ mod platform {
         let ready: ReadyBinding = serde_json::from_slice(ready_raw.bytes()).map_err(|_| bad())?;
         let deployment = root.read_raw("deployment.json", LIMIT).map_err(|_| bad())?;
         let (origin, address) = endpoint(deployment.bytes())?;
-        let RootIdentity::Linux { device, inode, uid } = root.identity();
         let clock = i64::try_from(now()?).map_err(|_| bad())?;
         if ready.schema != 1
-            || ready.root_identity != (NativeRootIdentity::Linux { device, inode, uid })
+            || ready.root_identity != native_identity(&root)
             || ready.origin != origin
             || ready.deployment_raw_sha256 != Sha256Digest::of_bytes(deployment.bytes())
             || clock < ready.not_before_unix

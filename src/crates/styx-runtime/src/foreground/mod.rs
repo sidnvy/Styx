@@ -67,7 +67,14 @@ pub async fn inspect(state_dir: &Path) -> Result<ProfileDiagnostics, ForegroundE
 mod run;
 pub use run::host_run;
 mod gateway;
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[cfg(any(
+    all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+    all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"),
+    all(
+        target_os = "macos",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+))]
 pub(crate) use gateway::StartupTransportClosure;
 pub use gateway::{GatewayForegroundOutcome, gateway_run};
 

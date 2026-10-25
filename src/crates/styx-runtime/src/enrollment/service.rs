@@ -367,7 +367,14 @@ pub struct EnrollmentService {
     historical_migration_pending: bool,
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     migration_binding: Option<crate::migration::legacy_service::GatewayMaintenanceBinding>,
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(
+        all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+        all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"),
+        all(
+            target_os = "macos",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    ))]
     startup_transport_reconciled: bool,
 }
 impl EnrollmentService {
@@ -406,7 +413,14 @@ impl EnrollmentService {
             historical_migration_pending: recovered.facts.historical_baseline.is_some(),
             #[cfg(all(target_os = "linux", target_env = "gnu"))]
             migration_binding: None,
-            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            #[cfg(any(
+                all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+                all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"),
+                all(
+                    target_os = "macos",
+                    any(target_arch = "x86_64", target_arch = "aarch64")
+                )
+            ))]
             startup_transport_reconciled: false,
         };
         service.verify_profiles()?;
@@ -415,7 +429,14 @@ impl EnrollmentService {
     /// Foreground bootstrap only, before SharedEnrollment/Relay/listener exists.
     /// The sealed closure retains this exact owner's actual execution lease and
     /// writer, not a caller's ready flag or evidence that Host commands exited.
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(
+        all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+        all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"),
+        all(
+            target_os = "macos",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    ))]
     pub(crate) fn reconcile_recovered_foreground_transports(
         &mut self,
         closure: crate::foreground::StartupTransportClosure<'_>,

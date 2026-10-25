@@ -40,7 +40,14 @@ pub async fn gateway_run(
     cancel: CancellationToken,
     events: mpsc::Sender<ForegroundEvent>,
 ) -> Result<GatewayForegroundOutcome, ForegroundError> {
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(
+        all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+        all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"),
+        all(
+            target_os = "macos",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    ))]
     {
         let path = state_dir.to_path_buf();
         let stop = cancel.child_token();
@@ -51,17 +58,38 @@ pub async fn gateway_run(
             .await
             .map_err(|_| ForegroundError("gateway_foreground_worker_failed"))?
     }
-    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+    #[cfg(not(any(
+        all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+        all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"),
+        all(
+            target_os = "macos",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    )))]
     {
         let _ = (state_dir, cancel, events);
         Err(ForegroundError("gateway_foreground_platform_unsupported"))
     }
 }
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[cfg(any(
+    all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+    all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"),
+    all(
+        target_os = "macos",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+))]
 pub(crate) use platform::StartupTransportClosure;
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[cfg(any(
+    all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+    all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"),
+    all(
+        target_os = "macos",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+))]
 mod platform {
     use super::*;
     use crate::{
@@ -72,25 +100,29 @@ mod platform {
             paired::{PairedGatewayBackend, RelayHandle},
         },
         store::{
-            ExecutionLeaseGuard, OwnedConfigurationRoot, PrivateRoot, RawFile,
+            ExecutionLeaseGuard, OwnedConfigurationRoot, PrivateRoot,
             enrollment::{JournalBudget, OwnedEnrollmentJournal},
         },
-        tls::{GatewayLeafPin, GatewayServerTls, PrivateKeyPem},
+        tls::GatewayServerTls,
     };
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    use crate::{
+        store::RawFile,
+        tls::{GatewayLeafPin, PrivateKeyPem},
+    };
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     use serde::Deserialize;
-    use std::{
-        io::Cursor,
-        net::{IpAddr, SocketAddr},
-        path::PathBuf,
-        sync::Arc,
-        time::Duration,
-    };
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    use std::{io::Cursor, net::IpAddr};
+    use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
     use styx_contracts::identity::{GatewayEpoch, GatewayId, Sha256Digest};
     use styx_core::enrollment::Limits;
     use tokio::{net::TcpListener, sync::Semaphore};
 
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     const LIMIT: usize = 1024 * 1024;
     static LOADERS: Semaphore = Semaphore::const_new(2);
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     const OWNERS: &[&str] = &[
         "foreground.lock",
         "foreground-recovery.lock",
@@ -104,6 +136,7 @@ mod platform {
         "onboarding-plugin.lock",
         "tunnel/owner.lock",
     ];
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     const GATEWAY_OWNERS: &[&str] = &[
         "service.json",
         "runtime-change.json",
@@ -114,12 +147,14 @@ mod platform {
         "install/.health-recovery-guard",
     ];
     #[derive(Deserialize)]
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     struct Deployment {
         schema: u32,
         mode: String,
         gateway: Gateway,
     }
     #[derive(Deserialize)]
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     struct Gateway {
         url: String,
         #[serde(rename = "listenHost")]
@@ -129,15 +164,18 @@ mod platform {
         device_ingress: Option<Ingress>,
     }
     #[derive(Deserialize)]
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     struct RuntimeLocator {
         #[serde(rename = "baseDir")]
         base_dir: PathBuf,
     }
     #[derive(Deserialize)]
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     struct Ingress {
         enabled: bool,
     }
     #[derive(Deserialize)]
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     struct DeploymentState {
         schema: u32,
         mode: String,
@@ -158,17 +196,20 @@ mod platform {
         maintenance: Vec<Step>,
     }
     #[derive(Deserialize)]
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     struct Maintenance {
         #[serde(rename = "hasUncertainMutation", default)]
         has_uncertain_mutation: bool,
     }
     #[derive(Deserialize)]
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     struct Step {
         id: Option<String>,
         status: String,
         evidence: Option<EvidenceSet>,
     }
     #[derive(Deserialize)]
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     struct EvidenceSet {
         runtime: Option<Evidence>,
         certificate: Option<Evidence>,
@@ -176,12 +217,14 @@ mod platform {
         owner: Option<Evidence>,
     }
     #[derive(Deserialize)]
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     struct Evidence {
         path: PathBuf,
         sha256: String,
     }
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     struct Runtime {
         schema: u32,
         url: String,
@@ -202,12 +245,14 @@ mod platform {
     }
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     struct Catalog {
         version: u32,
         targets: Vec<Box<serde_json::value::RawValue>>,
     }
     #[derive(Deserialize)]
     #[serde(deny_unknown_fields)]
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     struct LegacyEnrollment {
         version: u32,
         invitations: Vec<Box<serde_json::value::RawValue>>,
@@ -215,15 +260,18 @@ mod platform {
         devices: Vec<Box<serde_json::value::RawValue>>,
     }
     #[derive(Deserialize)]
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     struct Owner {
         gateway_url: String,
         gateway_ca_file: PathBuf,
         admin_token_file: PathBuf,
     }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     struct Input {
         root: Arc<PrivateRoot>,
         raw: RawFile,
     }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     struct NativeCommittedAdmission {
         snapshot: Arc<crate::store::committed_runtime::CommittedRuntimeSnapshot>,
         host: PrivateRoot,
@@ -231,15 +279,21 @@ mod platform {
         proof: crate::store::committed_runtime::RecoveredCommittedRuntime,
     }
     struct Admitted {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         state: Arc<PrivateRoot>,
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         gateway: Arc<PrivateRoot>,
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         runtime_root: Option<PrivateRoot>,
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         inputs: Vec<Input>,
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         absent_inputs: Vec<(Arc<PrivateRoot>, &'static str)>,
         lease: ExecutionLeaseGuard,
         // Retains the SAME writer even if service boot fails after uncertain I/O.
         _configuration: OwnedConfigurationRoot,
         address: SocketAddr,
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         native: Option<NativeCommittedAdmission>,
         fresh: Option<crate::management::native_gateway::FreshGatewayRuntime>,
     }
@@ -273,7 +327,24 @@ mod platform {
                 {
                     return Err(error("fresh_gateway_configuration_changed"));
                 }
-            } else if let Some(native) = &self.native {
+            } else {
+                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                self.validate_legacy()?;
+                #[cfg(not(all(
+                    target_os = "linux",
+                    target_arch = "x86_64",
+                    target_env = "gnu"
+                )))]
+                return Err(error("fresh_gateway_required"));
+            }
+            self.lease
+                .validate()
+                .map_err(|_| error("execution_lease_changed"))?;
+            Ok(())
+        }
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        fn validate_legacy(&self) -> Result<(), ForegroundError> {
+            if let Some(native) = &self.native {
                 native
                     .snapshot
                     .validate_legacy_owners(&self.state, &native.host)
@@ -289,9 +360,6 @@ mod platform {
             } else {
                 ownership(&self.state, &self.gateway, self.runtime_root.as_ref())?;
             }
-            self.lease
-                .validate()
-                .map_err(|_| error("execution_lease_changed"))?;
             for (root, name) in &self.absent_inputs {
                 root.ensure_absent(name)
                     .map_err(|_| error("legacy_enrollment_appeared"))?;
@@ -313,6 +381,7 @@ mod platform {
     fn error(code: &'static str) -> ForegroundError {
         ForegroundError(code)
     }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     fn ownership(
         state: &PrivateRoot,
         gateway: &PrivateRoot,
@@ -337,6 +406,7 @@ mod platform {
             .map_err(|_| error("legacy_gateway_migration_reconciliation_required"))?;
         Ok(())
     }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     fn read(
         root: &Arc<PrivateRoot>,
         path: &str,
@@ -351,10 +421,12 @@ mod platform {
         });
         Ok(inputs.len() - 1)
     }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     fn decode<T: serde::de::DeserializeOwned>(input: &Input) -> Result<T, ForegroundError> {
         serde_json::from_slice(input.raw.bytes())
             .map_err(|_| error("gateway_configuration_invalid"))
     }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     fn evidence(
         expected: &Option<Evidence>,
         path: &Path,
@@ -368,6 +440,7 @@ mod platform {
         }
         Ok(())
     }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     fn token(input: &Input) -> Result<&[u8], ForegroundError> {
         // Original Gateway readers trim token-file whitespace. Keep/pin the
         // original file bytes; normalize only the admission input in memory.
@@ -403,6 +476,21 @@ mod platform {
         if native && state.ensure_absent("gateway-ready-v1.json").is_err() {
             return load_fresh(path);
         }
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        {
+            load_legacy(path, state, native)
+        }
+        #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+        {
+            Err(error("fresh_native_gateway_required"))
+        }
+    }
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    fn load_legacy(
+        path: &Path,
+        state: Arc<PrivateRoot>,
+        native: bool,
+    ) -> Result<Loaded, ForegroundError> {
         let gateway_path = path.join("gateway");
         let gateway = Arc::new(
             PrivateRoot::open(&gateway_path).map_err(|_| error("gateway_protected_read"))?,
@@ -683,14 +771,20 @@ mod platform {
         .map_err(|_| error("gateway_namespace_invalid"))?;
         let tls = runtime.tls.clone();
         let admitted = Arc::new(Admitted {
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             state: runtime.root.clone(),
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             gateway: runtime.root.clone(),
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             runtime_root: None,
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             inputs: vec![],
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             absent_inputs: vec![],
             lease,
             _configuration: configuration,
             address: runtime.address,
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             native: None,
             fresh: Some(runtime),
         });
@@ -707,6 +801,7 @@ mod platform {
     /// Ordinary native startup consumes a fresh complete committed chain. The
     /// state-root writer remains the ONLY configuration writer; imported device
     /// history is read there, never from the old child enrollment runtime.
+    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     fn load_committed(
         path: &Path,
         state: Arc<PrivateRoot>,
@@ -1103,7 +1198,7 @@ mod platform {
         }
     }
 
-    #[cfg(test)]
+    #[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     mod tests {
         use super::*;
         use std::{fs, os::unix::fs::PermissionsExt};
