@@ -1,7 +1,7 @@
 //! Fixed local Exec validation under an actual applied Mac maintenance profile.
 //! This is not remote authentication, full capability validation or C07 proof.
 //! The outer non-aborted owned migration task must retain the entire original
-//! scope through this future AND all bootstrap/cleanup outcomes. Dropping run's
+//! scope through the joined worker AND all bootstrap/cleanup outcomes. Dropping run's
 //! future is NOT dropping/settling this probe; dropping this probe is NOT cleanup.
 //! In particular, cancellation during spawn_optional_pinned before it returns
 //! cannot be justified by host: Option below. Such an attempt remains Unknown.
@@ -67,6 +67,7 @@ pub(crate) struct MacCandidateExecReport {
     stderr_task_reaped: bool,
     supervised_jobs_joined: bool,
     inline_probe_future_completed: bool,
+    probe_task_joined: bool,
 }
 struct Effect {
     observation: FileObservation,
@@ -144,10 +145,39 @@ impl<'profile, 'borrow, 'effects, 'materials>
         }
         Ok(())
     }
-    /// No guard-borrowing task is spawned. On cancellation attempted stays true;
-    /// a returned host remains in self, but a still-awaiting bootstrap has no
-    /// returned host receipt. The caller MUST NOT abort/drop the outer owner.
-    pub(crate) async fn run(&mut self) -> Result<&MacCandidateExecReport> {
+    /// Call from the retained outer blocking owner, never an async runtime thread.
+    /// The scoped worker borrows this SAME probe and its original guard chain.
+    /// Its actual join settles the validation task before a successful report is
+    /// exposed; a disconnected waiter cannot cancel or detach that worker.
+    pub(crate) fn run_joined(
+        &mut self,
+        runtime: &tokio::runtime::Handle,
+    ) -> Result<&MacCandidateExecReport> {
+        if self.attempted || self.unknown {
+            return Err(MacExecValidationError::Conflict);
+        }
+        let outcome = std::thread::scope(|scope| {
+            std::thread::Builder::new()
+                .name("styx-mac-migration-probe".into())
+                .spawn_scoped(scope, || runtime.block_on(self.run()).map(|_| ()))
+                .map_err(|_| MacExecValidationError::Busy)?
+                .join()
+                .map_err(|_| MacExecValidationError::Unknown)?
+        });
+        if let Err(error) = outcome {
+            // A failed spawn has no operation to settle. Once attempted, neither
+            // a worker panic nor a late effect permits replay or a success claim.
+            if self.attempted {
+                self.unknown = true;
+            }
+            return Err(error);
+        }
+        let report = self.report.as_mut().ok_or(MacExecValidationError::Unknown)?;
+        report.probe_task_joined = true;
+        Ok(report)
+    }
+    /// Only the scoped worker may poll this future; it never escapes to a caller.
+    async fn run(&mut self) -> Result<&MacCandidateExecReport> {
         if self.attempted || self.unknown {
             return Err(MacExecValidationError::Conflict);
         }
@@ -275,6 +305,7 @@ impl<'profile, 'borrow, 'effects, 'materials>
             stderr_task_reaped: native.stderr_task_reaped,
             supervised_jobs_joined: cleanup.supervised_jobs_joined,
             inline_probe_future_completed: true,
+            probe_task_joined: false,
         });
         self.revalidate_success()?;
         Ok(())
