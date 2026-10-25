@@ -277,9 +277,19 @@ fn native_principal() -> Option<NativePrincipal> {
         nix::unistd::Uid::current().as_raw(),
     ))
 }
-// Windows SID/token observation has not been implemented. Never derive it from
-// USERNAME, a session DTO, or a fabricated cross-platform UID.
-#[cfg(not(any(target_os = "linux", target_os = "macos")))]
+#[cfg(target_os = "windows")]
+fn native_principal() -> Option<NativePrincipal> {
+    // The original process token supplies the Host principal independently of
+    // desktop availability. This enables a registry, not a desktop grant: an
+    // adapter must still prove the session, target, and permissions separately.
+    let crate::store::ProcessIdentity::Windows { owner_sid, .. } =
+        crate::store::ProcessIdentity::current().ok()?
+    else {
+        return None;
+    };
+    Some(NativePrincipal::WindowsSid(owner_sid))
+}
+#[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
 fn native_principal() -> Option<NativePrincipal> {
     None
 }

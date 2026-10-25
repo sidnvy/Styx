@@ -1,10 +1,10 @@
 //! Actual Host State composition, real UID/OS entropy/Instant; no native executor
 //! is started. A consumed Core permit is not a native execution receipt.
 use super::*;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use crate::session::ProviderEvidence;
 use crate::session::{HostSessionError, SessionSupport};
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 use styx_contracts::session::*;
 use styx_contracts::{capability::*, error::Recovery};
 fn exec_facts() -> AdmissionFacts {
@@ -104,8 +104,9 @@ fn reserve_dispatch(state: &mut State, owner: &OwnerLease) {
         OperationState::Dispatched
     );
 }
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 fn registration() -> RegistrationFacts {
+    #[cfg(any(target_os = "linux", target_os = "macos"))]
     let uid = nix::unistd::Uid::current().as_raw();
     #[cfg(target_os = "linux")]
     let identity = SessionIdentity::Linux {
@@ -122,6 +123,22 @@ fn registration() -> RegistrationFacts {
         console_instance: "synthetic-console".into(),
         window_server_instance: Some("synthetic-window-server".into()),
     };
+    #[cfg(target_os = "windows")]
+    let identity = {
+        let crate::store::ProcessIdentity::Windows { owner_sid, .. } =
+            crate::store::ProcessIdentity::current().unwrap()
+        else {
+            panic!("expected the current Windows process token");
+        };
+        SessionIdentity::Windows {
+            sid: owner_sid,
+            authentication_luid: 1,
+            session_id: 1,
+            window_station: "synthetic-station".into(),
+            desktop: "synthetic-desktop".into(),
+            integrity_level: 0x2000,
+        }
+    };
     RegistrationFacts {
         id: SessionId::try_from("test-session").unwrap(),
         identity,
@@ -130,7 +147,7 @@ fn registration() -> RegistrationFacts {
         provenance: "trusted fixture only; no native session proof".into(),
     }
 }
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 fn evidence(capability: CapabilityId) -> ProviderEvidence {
     ProviderEvidence {
         capability,
@@ -235,9 +252,25 @@ fn actual_host_state_session_composition_and_exec_guards() {
         );
     }
     first.facts = original;
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     {
         assert_eq!(first.sessions.status().support, SessionSupport::Enabled);
+        // Owning an OS principal does not attest an arbitrary remote user or
+        // create a desktop. Exercise this on the same real Host registry used
+        // by the registration/locking/Exec isolation scenario below.
+        let mut foreign = registration();
+        match &mut foreign.identity {
+            SessionIdentity::Linux { uid, .. } | SessionIdentity::Macos { uid, .. } => {
+                *uid = uid.wrapping_add(1);
+            }
+            SessionIdentity::Windows { sid, .. } => sid.push_str("-1"),
+        }
+        assert!(
+            first
+                .with_sessions(|sessions| sessions.attest(foreign))
+                .is_err()
+        );
+        assert_eq!(first.sessions.status().sessions, 0);
         let mut second = state();
         let mut third = state();
         let transferred = first
@@ -351,7 +384,7 @@ fn actual_host_state_session_composition_and_exec_guards() {
             Err(CoordinatorError::Admission(ErrorCategory::StateConflict))
         ));
     }
-    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+    #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
     {
         assert_eq!(
             first.sessions.status().support,
