@@ -274,6 +274,15 @@ fn supervise(shared: Arc<Shared>) {
     }
 }
 impl RunningChild {
+    /// Nonblocking admission observation from the original supervisor. A root
+    /// exit alone never proves Job quiescence; cleanup still requires wait().
+    pub(crate) fn observed_exit(&self) -> io::Result<Option<ExitStatus>> {
+        let facts = self.shared.facts.lock().map_err(|_| lost())?;
+        if facts.unknown {
+            return Err(lost());
+        }
+        Ok(facts.exit)
+    }
     pub(crate) fn take_stdin(&mut self) -> Option<ChildStdin> {
         self.stdin.take()
     }

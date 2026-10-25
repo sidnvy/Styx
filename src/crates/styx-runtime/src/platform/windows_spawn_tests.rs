@@ -87,6 +87,7 @@ async fn actual_pinned_codex_suspended_job_cleanup_and_waiter_drop() {
         .expect("wrong PID/birth refused");
     let mut rejected = failure.into_owned_child().expect("failed child retained");
     rejected.terminate_and_wait().await.unwrap();
+    assert!(rejected.observed_exit().unwrap().is_some());
     {
         let facts = rejected.shared.facts.lock().unwrap();
         assert!(facts.root_waited && facts.job_empty && facts.supervisor_finished);
@@ -133,6 +134,7 @@ async fn actual_pinned_codex_suspended_job_cleanup_and_waiter_drop() {
         assert!(facts.supervisor_finished && facts.unknown && facts.handles_closed_unconfirmed);
         assert!(!facts.root_waited && !facts.job_empty);
     }
+    assert!(child.observed_exit().is_err());
     drop(child);
     assert_eq!(pool.available_permits(), 16 * 1024 * 1024);
     assert!(!birth.still_current().unwrap());

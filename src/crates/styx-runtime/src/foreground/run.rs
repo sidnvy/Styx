@@ -753,6 +753,7 @@ impl ConnectionSession<'_> {
     async fn drain_browser_inputs(&self) {
         if let Self::Paired(protocol) = self {
             protocol.drain_browser_inputs().await;
+            #[cfg(target_os = "linux")]
             protocol.drain_computer_inputs().await;
         }
     }

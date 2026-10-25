@@ -964,14 +964,15 @@ impl BrowserActionSlot {
         if self.state.uncertain && !action.is_close() {
             return refuse(BrowserError::Unknown);
         }
-        if self
-            .state
-            .child
-            .as_mut()
-            .and_then(|c| c.try_wait().ok())
-            .flatten()
-            .is_some()
-        {
+        if self.state.child.as_mut().is_some_and(|child| {
+            #[cfg(target_os = "linux")]
+            let observed = child.try_wait();
+            #[cfg(target_os = "windows")]
+            let observed = child.observed_exit();
+            // Lost process evidence cannot authorize another input. This is
+            // admission only; root exit is not descendant cleanup proof.
+            !matches!(observed, Ok(None))
+        }) {
             self.state.uncertain = true;
             return refuse(BrowserError::Unknown);
         }
