@@ -80,7 +80,22 @@ pub async fn gateway_run(
 #[must_use]
 pub(crate) struct AppGatewayError {
     foreground: ForegroundError,
-    _retained: Option<crate::management::native_gateway::BootstrapError>,
+    _retained: Option<AppStartupOwner>,
+}
+enum AppStartupOwner {
+    Fresh(crate::management::native_gateway::BootstrapError),
+    Native {
+        _owner: crate::store::OwnedConfigurationRoot,
+        _scope: std::sync::Arc<crate::app::HostScope>,
+    },
+}
+impl AppStartupOwner {
+    fn code(&self) -> &'static str {
+        match self {
+            Self::Fresh(error) => error.code(),
+            Self::Native { .. } => "committed_app_gateway_scope_unsettled",
+        }
+    }
 }
 impl AppGatewayError {
     pub(crate) fn code(&self) -> &'static str {
@@ -111,8 +126,7 @@ impl std::error::Error for AppGatewayError {}
 ))]
 // One startup loader and one error slot per original run, with no backpointer
 // from HostScope. This transports ownership, not new domain/recovery state.
-type AppStartupFailure =
-    std::sync::Arc<std::sync::Mutex<Option<crate::management::native_gateway::BootstrapError>>>;
+type AppStartupFailure = std::sync::Arc<std::sync::Mutex<Option<AppStartupOwner>>>;
 
 /// Owned native App role. Scope cannot be constructed from RPC data. The worker
 /// retains it through original blocking work and Gateway settlement.
@@ -145,6 +159,9 @@ pub(crate) async fn gateway_run_for_app(
         let retained = failure.lock().unwrap_or_else(|e| e.into_inner()).take();
         match (result, retained) {
             (Ok(outcome), None) => Ok(outcome),
+            (Ok(outcome), Some(AppStartupOwner::Native { .. })) if outcome.is_complete() => {
+                Ok(outcome)
+            }
             (Err(foreground), retained) => Err(AppGatewayError {
                 foreground,
                 _retained: retained,
@@ -205,21 +222,17 @@ mod platform {
         },
         tls::GatewayServerTls,
     };
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     use crate::{
         store::RawFile,
         tls::{GatewayLeafPin, PrivateKeyPem},
     };
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     use serde::Deserialize;
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     use std::{io::Cursor, net::IpAddr};
     use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
     use styx_contracts::identity::{GatewayEpoch, GatewayId, Sha256Digest};
     use styx_core::enrollment::Limits;
     use tokio::{net::TcpListener, sync::Semaphore};
 
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     const LIMIT: usize = 1024 * 1024;
     static LOADERS: Semaphore = Semaphore::const_new(2);
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -247,18 +260,17 @@ mod platform {
         "install/.health-recovery-guard",
     ];
     #[derive(Deserialize)]
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     struct Deployment {
         schema: u32,
         mode: String,
         gateway: Gateway,
     }
     #[derive(Deserialize)]
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     struct Gateway {
         url: String,
         #[serde(rename = "listenHost")]
         listen_host: Option<String>,
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
         runtime: Option<RuntimeLocator>,
         #[serde(rename = "deviceIngress")]
         device_ingress: Option<Ingress>,
@@ -270,7 +282,6 @@ mod platform {
         base_dir: PathBuf,
     }
     #[derive(Deserialize)]
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     struct Ingress {
         enabled: bool,
     }
@@ -366,34 +377,157 @@ mod platform {
         gateway_ca_file: PathBuf,
         admin_token_file: PathBuf,
     }
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     struct Input {
         root: Arc<PrivateRoot>,
         raw: RawFile,
     }
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    enum CommittedSnapshot {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        Legacy(Arc<crate::store::committed_runtime::CommittedRuntimeSnapshot>),
+        Native(Arc<crate::store::committed_runtime_native::NativeCommittedRuntimeSnapshot>),
+    }
+    impl CommittedSnapshot {
+        fn state(&self) -> &styx_contracts::native_management::NativeState {
+            match self {
+                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                Self::Legacy(s) => s.state(),
+                Self::Native(s) => s.state(),
+            }
+        }
+        fn selection(&self) -> &styx_contracts::native_management::NativeRuntimeSelection {
+            match self {
+                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                Self::Legacy(s) => s.selection(),
+                Self::Native(s) => s.selection(),
+            }
+        }
+        fn root_identity(&self) -> crate::store::RootIdentity {
+            match self {
+                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                Self::Legacy(s) => s.root_identity(),
+                Self::Native(s) => s.root_identity(),
+            }
+        }
+        fn validate_legacy_owners(
+            &self,
+            state: &PrivateRoot,
+            host: &PrivateRoot,
+        ) -> crate::store::enrollment::JournalResult<()> {
+            match self {
+                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                Self::Legacy(s) => s.validate_legacy_owners(state, host),
+                Self::Native(s) => s.validate_legacy_owners(state, host),
+            }
+        }
+        fn endpoint_binding(&self) -> Option<&[u8]> {
+            match self {
+                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                Self::Legacy(s) => s.endpoint_binding(),
+                Self::Native(s) => s.endpoint_binding(),
+            }
+        }
+        fn endpoint_chain(&self) -> Option<&[u8]> {
+            match self {
+                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                Self::Legacy(s) => s.endpoint_chain(),
+                Self::Native(s) => s.endpoint_chain(),
+            }
+        }
+        fn endpoint_key(&self) -> Option<&[u8]> {
+            match self {
+                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                Self::Legacy(s) => s.endpoint_key(),
+                Self::Native(s) => s.endpoint_key(),
+            }
+        }
+        fn transaction_id(
+            &self,
+        ) -> Result<styx_contracts::identity::TransactionId, ForegroundError> {
+            match self {
+                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                Self::Legacy(s) => s
+                    .state()
+                    .migration
+                    .as_ref()
+                    .map(|m| m.transaction_id.clone())
+                    .ok_or(error("committed_migration_binding_required")),
+                Self::Native(s) => s
+                    .state()
+                    .migration_v2()
+                    .map_err(|_| error("committed_migration_binding_required"))?
+                    .map(|m| m.transaction_id.clone())
+                    .ok_or(error("committed_migration_binding_required")),
+            }
+        }
+        fn reopen(
+            &self,
+            owner: &OwnedConfigurationRoot,
+        ) -> Result<CommittedRecovery, ForegroundError> {
+            match self {
+                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                Self::Legacy(s) => {
+                    crate::store::committed_runtime::RecoveredCommittedRuntime::reopen(
+                        owner.clone(),
+                        s.clone(),
+                    )
+                    .map(CommittedRecovery::Legacy)
+                }
+                Self::Native(s) => {
+                    crate::store::committed_runtime_native::RecoveredNativeCommittedRuntime::reopen(
+                        owner,
+                        s.clone(),
+                    )
+                    .map(CommittedRecovery::Native)
+                }
+            }
+            .map_err(|_| error("committed_configuration_reopen_failed"))
+        }
+    }
+    enum CommittedRecovery {
+        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+        Legacy(crate::store::committed_runtime::RecoveredCommittedRuntime),
+        Native(crate::store::committed_runtime_native::RecoveredNativeCommittedRuntime),
+    }
+    impl CommittedRecovery {
+        fn validate_owner(
+            &self,
+            owner: &OwnedConfigurationRoot,
+        ) -> crate::store::enrollment::JournalResult<()> {
+            match self {
+                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                Self::Legacy(p) => p.validate_owner(owner),
+                Self::Native(p) => p.validate_owner(owner),
+            }
+        }
+        fn accept(
+            &self,
+            service: &mut EnrollmentService,
+        ) -> Result<(), crate::enrollment::service::ServiceError> {
+            match self {
+                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+                Self::Legacy(p) => service.accept_committed_recovery(p),
+                Self::Native(p) => service.accept_native_committed_recovery(p),
+            }
+        }
+    }
     struct NativeCommittedAdmission {
-        snapshot: Arc<crate::store::committed_runtime::CommittedRuntimeSnapshot>,
+        snapshot: CommittedSnapshot,
         host: PrivateRoot,
         candidate: crate::release::VerifiedNativeRelease,
-        proof: crate::store::committed_runtime::RecoveredCommittedRuntime,
+        proof: CommittedRecovery,
     }
     struct Admitted {
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         state: Arc<PrivateRoot>,
         #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         gateway: Arc<PrivateRoot>,
         #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         runtime_root: Option<PrivateRoot>,
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         inputs: Vec<Input>,
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         absent_inputs: Vec<(Arc<PrivateRoot>, &'static str)>,
         lease: ExecutionLeaseGuard,
         // Retains the SAME writer even if service boot fails after uncertain I/O.
         _configuration: OwnedConfigurationRoot,
         address: SocketAddr,
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         native: Option<NativeCommittedAdmission>,
         fresh: Option<crate::management::native_gateway::FreshGatewayRuntime>,
     }
@@ -428,21 +562,13 @@ mod platform {
                     return Err(error("fresh_gateway_configuration_changed"));
                 }
             } else {
-                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
                 self.validate_legacy()?;
-                #[cfg(not(all(
-                    target_os = "linux",
-                    target_arch = "x86_64",
-                    target_env = "gnu"
-                )))]
-                return Err(error("fresh_gateway_required"));
             }
             self.lease
                 .validate()
                 .map_err(|_| error("execution_lease_changed"))?;
             Ok(())
         }
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         fn validate_legacy(&self) -> Result<(), ForegroundError> {
             if let Some(native) = &self.native {
                 native
@@ -458,7 +584,14 @@ mod platform {
                     .validate_owner(&self._configuration)
                     .map_err(|_| error("committed_configuration_changed"))?;
             } else {
+                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
                 ownership(&self.state, &self.gateway, self.runtime_root.as_ref())?;
+                #[cfg(not(all(
+                    target_os = "linux",
+                    target_arch = "x86_64",
+                    target_env = "gnu"
+                )))]
+                return Err(error("native_committed_gateway_required"));
             }
             for (root, name) in &self.absent_inputs {
                 root.ensure_absent(name)
@@ -506,7 +639,6 @@ mod platform {
             .map_err(|_| error("legacy_gateway_migration_reconciliation_required"))?;
         Ok(())
     }
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     fn read(
         root: &Arc<PrivateRoot>,
         path: &str,
@@ -521,7 +653,6 @@ mod platform {
         });
         Ok(inputs.len() - 1)
     }
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     fn decode<T: serde::de::DeserializeOwned>(input: &Input) -> Result<T, ForegroundError> {
         serde_json::from_slice(input.raw.bytes())
             .map_err(|_| error("gateway_configuration_invalid"))
@@ -540,7 +671,6 @@ mod platform {
         }
         Ok(())
     }
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     fn token(input: &Input) -> Result<&[u8], ForegroundError> {
         // Original Gateway readers trim token-file whitespace. Keep/pin the
         // original file bytes; normalize only the admission input in memory.
@@ -576,6 +706,42 @@ mod platform {
         if native && state.ensure_absent("gateway-ready-v1.json").is_err() {
             return load_fresh(path, None, None);
         }
+        if native {
+            let raw = state
+                .read_raw("state.json", LIMIT)
+                .map_err(|_| error("gateway_protected_read"))?;
+            let marker_raw = state
+                .read_raw(".styx-native-root-v1.json", 4096)
+                .map_err(|_| error("gateway_protected_read"))?;
+            let marker = crate::store::native_state::decode_marker(marker_raw.bytes())
+                .map_err(|_| error("committed_configuration_required"))?;
+            let canonical = crate::store::native_state::decode_state(raw.bytes(), &marker)
+                .map_err(|_| error("committed_configuration_required"))?;
+            if canonical.state().reader_contract
+                == styx_contracts::management::ReaderContract::NativeMigratedStateV2
+            {
+                let snapshot = Arc::new(
+                    crate::store::committed_runtime_native::NativeCommittedRuntimeSnapshot::open(
+                        path,
+                    )
+                    .map_err(|_| error("committed_configuration_required"))?,
+                );
+                if snapshot.state().desired.gateway.is_none() {
+                    return Err(error("host_only_migration_has_no_gateway"));
+                }
+                let gateway = Arc::new(
+                    PrivateRoot::open(path.join("gateway"))
+                        .map_err(|_| error("gateway_protected_read"))?,
+                );
+                return load_committed(
+                    path,
+                    state,
+                    gateway,
+                    CommittedSnapshot::Native(snapshot),
+                    None,
+                );
+            }
+        }
         #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         {
             load_legacy(path, state, native)
@@ -584,6 +750,44 @@ mod platform {
         {
             Err(error("fresh_native_gateway_required"))
         }
+    }
+    fn load_app(
+        path: &Path,
+        scope: Arc<crate::app::HostScope>,
+        failure: Option<AppStartupFailure>,
+    ) -> Result<Loaded, ForegroundError> {
+        if scope.state_dir() != path {
+            return Err(error("app_scope_changed"));
+        }
+        scope.validate().map_err(|_| error("app_scope_changed"))?;
+        let state = Arc::new(PrivateRoot::open(path).map_err(|_| error("gateway_protected_read"))?);
+        let raw = state
+            .read_raw(".styx-native-root-v1.json", 4096)
+            .map_err(|_| error("gateway_protected_read"))?;
+        let marker = crate::store::native_state::decode_marker(raw.bytes())
+            .map_err(|_| error("committed_configuration_required"))?;
+        if marker.reader_floor != styx_contracts::management::ReaderContract::NativeMigratedStateV2
+        {
+            return load_fresh(path, Some(scope), failure);
+        }
+        let snapshot = Arc::new(
+            crate::store::committed_runtime_native::NativeCommittedRuntimeSnapshot::open_for_app_gateway(
+                path, scope.clone(),
+            ).map_err(|_| error("committed_app_gateway_required"))?,
+        );
+        let gateway = Arc::new(
+            PrivateRoot::open(path.join("gateway")).map_err(|_| error("gateway_protected_read"))?,
+        );
+        load_committed(
+            path,
+            state,
+            gateway,
+            CommittedSnapshot::Native(snapshot),
+            Some((
+                scope,
+                failure.ok_or(error("app_gateway_startup_owner_required"))?,
+            )),
+        )
     }
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     fn load_legacy(
@@ -596,7 +800,17 @@ mod platform {
             PrivateRoot::open(&gateway_path).map_err(|_| error("gateway_protected_read"))?,
         );
         if native {
-            return load_committed(path, state, gateway);
+            let snapshot = Arc::new(
+                crate::store::committed_runtime::CommittedRuntimeSnapshot::open(path)
+                    .map_err(|_| error("committed_configuration_required"))?,
+            );
+            return load_committed(
+                path,
+                state,
+                gateway,
+                CommittedSnapshot::Legacy(snapshot),
+                None,
+            );
         }
         let mut inputs = Vec::new();
         let deployment_i = read(&state, "deployment.json", &mut inputs)?;
@@ -848,7 +1062,8 @@ mod platform {
             if let Some(failure) = app_failure {
                 // Exactly one open attempt in this run, so no prior failure can
                 // be overwritten. Keep the original error, writer and scope.
-                *failure.lock().unwrap_or_else(|e| e.into_inner()) = Some(e);
+                *failure.lock().unwrap_or_else(|e| e.into_inner()) =
+                    Some(AppStartupOwner::Fresh(e));
             }
             foreground
         })?;
@@ -891,20 +1106,16 @@ mod platform {
         .map_err(|_| error("gateway_namespace_invalid"))?;
         let tls = runtime.tls.clone();
         let admitted = Arc::new(Admitted {
-            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             state: runtime.root.clone(),
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             gateway: runtime.root.clone(),
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             runtime_root: None,
-            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             inputs: vec![],
-            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             absent_inputs: vec![],
             lease,
             _configuration: configuration,
             address: runtime.address,
-            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             native: None,
             fresh: Some(runtime),
         });
@@ -921,20 +1132,39 @@ mod platform {
     /// Ordinary native startup consumes a fresh complete committed chain. The
     /// state-root writer remains the ONLY configuration writer; imported device
     /// history is read there, never from the old child enrollment runtime.
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    fn native_root_identity(
+        root: crate::store::RootIdentity,
+    ) -> styx_contracts::native_management::NativeRootIdentity {
+        use crate::store::RootIdentity;
+        use styx_contracts::native_management::NativeRootIdentity;
+        match root {
+            RootIdentity::Linux { device, inode, uid } => {
+                NativeRootIdentity::Linux { device, inode, uid }
+            }
+            #[cfg(target_os = "macos")]
+            RootIdentity::Macos { device, inode, uid } => {
+                NativeRootIdentity::Macos { device, inode, uid }
+            }
+            #[cfg(target_os = "windows")]
+            RootIdentity::Windows {
+                volume_serial,
+                file_id,
+                owner_sid,
+            } => NativeRootIdentity::Windows {
+                volume_serial,
+                file_id,
+                owner_sid,
+            },
+        }
+    }
     fn load_committed(
         path: &Path,
         state: Arc<PrivateRoot>,
         gateway: Arc<PrivateRoot>,
+        snapshot: CommittedSnapshot,
+        app: Option<(Arc<crate::app::HostScope>, AppStartupFailure)>,
     ) -> Result<Loaded, ForegroundError> {
-        use crate::store::committed_runtime::{
-            CommittedRuntimeSnapshot, RecoveredCommittedRuntime,
-        };
         use styx_contracts::native_management::{NativeGatewayEndpointBinding, NativeRunDesired};
-        let snapshot = Arc::new(
-            CommittedRuntimeSnapshot::open(path)
-                .map_err(|_| error("committed_configuration_required"))?,
-        );
         if !snapshot
             .state()
             .desired
@@ -943,6 +1173,36 @@ mod platform {
             .is_some_and(|desired| desired.run == NativeRunDesired::Running)
         {
             return Err(error("gateway_not_desired_running"));
+        }
+        if matches!(&snapshot, CommittedSnapshot::Native(_)) {
+            use styx_contracts::native_management::{
+                NativeAutostartDesired, NativeManager, NativeMigrationHistory,
+            };
+            let current = snapshot.state();
+            let manager = if let Some((scope, _)) = &app {
+                if scope.state_dir() != path {
+                    return Err(error("app_scope_changed"));
+                }
+                scope.validate().map_err(|_| error("app_scope_changed"))?;
+                NativeManager::AppManaged
+            } else {
+                NativeManager::ForegroundCli
+            };
+            let binding = current
+                .migration_v2()
+                .map_err(|_| error("committed_migration_binding_required"))?
+                .ok_or(error("committed_migration_binding_required"))?;
+            if current.desired.host.is_none()
+                || !matches!(
+                    binding.history,
+                    NativeMigrationHistory::ImportedLocalGateway { .. }
+                )
+                || current.desired.gateway.as_ref().is_none_or(|d| {
+                    d.manager != manager || d.autostart != NativeAutostartDesired::Disabled
+                })
+            {
+                return Err(error("committed_gateway_foreground_required"));
+            }
         }
         let mut inputs = Vec::new();
         let deployment_i = read(&state, "deployment.json", &mut inputs)?;
@@ -1002,24 +1262,11 @@ mod platform {
             .ok()
             .and_then(|d| i64::try_from(d.as_secs()).ok())
             .ok_or(error("gateway_clock_unproven"))?;
-        let migration = snapshot
-            .state()
-            .migration
-            .as_ref()
-            .ok_or(error("committed_migration_binding_required"))?;
+        let migration_transaction = snapshot.transaction_id()?;
         if endpoint.schema != 1
-            || endpoint.transaction_id != migration.transaction_id
+            || endpoint.transaction_id != migration_transaction
             || endpoint.candidate_manifest_sha256 != snapshot.selection().manifest_sha256
-            || endpoint.root_identity
-                != match snapshot.root_identity() {
-                    crate::store::RootIdentity::Linux { device, inode, uid } => {
-                        styx_contracts::native_management::NativeRootIdentity::Linux {
-                            device,
-                            inode,
-                            uid,
-                        }
-                    }
-                }
+            || endpoint.root_identity != native_root_identity(snapshot.root_identity())
             || endpoint.origin != original.origin().ascii_serialization()
             || origin.scheme() != "https"
             || original.scheme() != "https"
@@ -1090,8 +1337,19 @@ mod platform {
             .map_err(|_| error("existing_native_configuration_writer_required"))?;
         let configuration = OwnedConfigurationRoot::open_existing(owned_root, writer)
             .map_err(|_| error("existing_native_configuration_required"))?;
-        let proof = RecoveredCommittedRuntime::reopen(configuration.clone(), snapshot.clone())
-            .map_err(|_| error("committed_configuration_reopen_failed"))?;
+        // Retain the original writer through every later startup/cleanup error.
+        // Only a fully joined Gateway run releases this App-owned recovery scope.
+        if let Some((scope, slot)) = &app {
+            let mut retained = slot.lock().unwrap_or_else(|e| e.into_inner());
+            if retained.is_some() {
+                return Err(error("app_gateway_startup_already_owned"));
+            }
+            *retained = Some(AppStartupOwner::Native {
+                _owner: configuration.clone(),
+                _scope: scope.clone(),
+            });
+        }
+        let proof = snapshot.reopen(&configuration)?;
         let journal = OwnedEnrollmentJournal::from_configuration(
             configuration.clone(),
             JournalBudget::default(),
@@ -1105,9 +1363,7 @@ mod platform {
             Limits::default(),
         )
         .map_err(|e| error(e.code()))?;
-        service
-            .accept_committed_recovery(&proof)
-            .map_err(|e| error(e.code()))?;
+        proof.accept(&mut service).map_err(|e| error(e.code()))?;
         let lease = gateway
             .try_execution_lease()
             .map_err(|_| error("gateway_execution_busy"))?;
@@ -1119,7 +1375,9 @@ mod platform {
         .map_err(|_| error("gateway_namespace_invalid"))?;
         let admitted = Arc::new(Admitted {
             state,
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             gateway,
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             runtime_root: None,
             inputs,
             absent_inputs: vec![],
@@ -1190,7 +1448,7 @@ mod platform {
         } = tokio::task::spawn_blocking(move || {
             let _permit = permit;
             match app_scope {
-                Some(scope) => load_fresh(&path, Some(scope), app_failure),
+                Some(scope) => load_app(&path, scope, app_failure),
                 None => load(&path),
             }
         })
@@ -1368,6 +1626,7 @@ mod platform {
             let admitted = Admitted {
                 state,
                 gateway: gateway.clone(),
+                #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
                 runtime_root: None,
                 inputs,
                 absent_inputs: vec![],

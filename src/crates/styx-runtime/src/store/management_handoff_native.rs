@@ -25,16 +25,24 @@ impl ProofRoot for RetirementLinuxRoot {
         }
     }
     fn valid_pair(&self, other: &Self) -> bool {
-        self.inode != 0
-            && other.inode != 0
-            && self.uid == other.uid
-            && self.uid == nix::unistd::geteuid().as_raw()
+        #[cfg(unix)]
+        {
+            self.inode != 0
+                && other.inode != 0
+                && self.uid == other.uid
+                && self.uid == nix::unistd::geteuid().as_raw()
+        }
+        #[cfg(not(unix))]
+        {
+            let _ = other;
+            false
+        }
     }
 }
 impl ProofRoot for NativeRootIdentity {
     const RETIREMENT_SCHEMA: u16 = 3;
     fn permits_cutover(schema: u16) -> bool {
-        schema == 3
+        matches!(schema, 3 | 4)
     }
     fn native_identity(&self) -> NativeRootIdentity {
         self.clone()
@@ -84,9 +92,13 @@ pub(in crate::store) trait ProofStamp<R>:
     Clone + PartialEq + Eq + Serialize + DeserializeOwned
 {
     fn valid_for(&self, root: &R) -> bool;
+    fn content_sha256(&self) -> Sha256Digest;
     fn same_file_after_rename(&self, post: &Self) -> bool;
 }
 impl ProofStamp<RetirementLinuxRoot> for RetirementFileStamp {
+    fn content_sha256(&self) -> Sha256Digest {
+        self.sha256
+    }
     fn valid_for(&self, root: &RetirementLinuxRoot) -> bool {
         self.valid(root.uid)
     }
@@ -117,6 +129,12 @@ pub(in crate::store) enum NativeRetirementFileStamp {
     },
 }
 impl ProofStamp<NativeRootIdentity> for NativeRetirementFileStamp {
+    fn content_sha256(&self) -> Sha256Digest {
+        match self {
+            Self::Linux { stamp } | Self::Macos { stamp } => stamp.sha256,
+            Self::Windows { sha256, .. } => *sha256,
+        }
+    }
     fn valid_for(&self, root: &NativeRootIdentity) -> bool {
         if !root.valid_pair(root) {
             return false;

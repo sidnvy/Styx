@@ -553,3 +553,19 @@ mod tests;
 #[cfg(test)]
 #[path = "macos_publication_tests.rs"]
 mod publication_tests;
+
+#[path = "macos_legacy.rs"]
+mod legacy_effect;
+pub(in crate::store) use legacy_effect::MacTokenRetirement;
+
+#[path = "macos_previous_boot.rs"]
+mod previous_boot;
+pub(in crate::store) use previous_boot::{MacBootRecoveryEffects, MacPreviousBootInput};
+
+#[path = "macos_legacy_restart.rs"]
+mod legacy_restart;
+
+#[path = "macos_native_cutover.rs"]
+mod native_cutover;
+pub(crate) use native_cutover::MacCanonicalCutover;
+pub(in crate::store) use native_cutover::MacCutoverPlan;

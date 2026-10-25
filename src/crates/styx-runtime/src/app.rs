@@ -2,6 +2,7 @@
 //! privilege or a second policy/configuration authority. No network listener,
 //! arbitrary call-supplied paths, legacy adoption or mutation replay lives here.
 mod local_gateway;
+mod migrated;
 mod pairing_link;
 
 use crate::{
@@ -278,7 +279,7 @@ impl ConnectionStatus {
 struct RunningHost {
     // Same protected enrollment/configuration snapshot for this original role.
     // App component intent is not an OS permission or a remote operation grant.
-    desktop_intent: Option<Arc<crate::store::native_host_snapshot::NativeHostSnapshot>>,
+    desktop_intent: Option<migrated::DesktopIntent>,
     cancel: CancellationToken,
     worker: JoinHandle<Result<ForegroundOutcome, ForegroundError>>,
     events: JoinHandle<()>,
@@ -301,6 +302,8 @@ impl RetainedFailure {
 }
 struct HostApp {
     local_gateway: Option<local_gateway::LocalGateway>,
+    committed_migration: bool,
+    migrated_shared: bool,
     deployment_file: PathBuf,
     configuration: Option<native::NativeManagementReport>,
     runtime_selection_file: Option<PathBuf>,
@@ -327,6 +330,8 @@ impl HostApp {
         let (status, observed) = watch::channel(ConnectionStatus::stopped());
         let mut app = Self {
             local_gateway: None,
+            committed_migration: false,
+            migrated_shared: false,
             scope,
             deployment_file: deployment_file.to_owned(),
             configuration: None,
@@ -351,18 +356,24 @@ impl HostApp {
                 app.enrollment = Some(json!({"status":"incomplete","error":error.code()}));
                 return Ok(app);
             }
-            match native_join::inspect_for_app(app.scope.clone()).await {
-                Ok(report) => {
-                    app.enrollment = Some(
-                        serde_json::to_value(report)
-                            .map_err(|_| AppError("app_response_invalid"))?,
-                    )
+            if !app.committed_migration {
+                match native_join::inspect_for_app(app.scope.clone()).await {
+                    Ok(report) => {
+                        app.enrollment = Some(
+                            serde_json::to_value(report)
+                                .map_err(|_| AppError("app_response_invalid"))?,
+                        )
+                    }
+                    Err(error) => {
+                        let code = app.join_error(error).code();
+                        app.unknown = true;
+                        app.enrollment = Some(json!({"status":"incomplete","error":code}));
+                    }
                 }
-                Err(error) => {
-                    let code = app.join_error(error).code();
-                    app.unknown = true;
-                    app.enrollment = Some(json!({"status":"incomplete","error":code}));
-                }
+            }
+            if app.migrated_shared {
+                let gateway = local_gateway::LocalGateway::open_migrated(app.scope.clone()).await?;
+                app.local_gateway = Some(gateway);
             }
         }
         Ok(app)
@@ -377,6 +388,11 @@ impl HostApp {
             .join("app-join-input-v1.json");
         let mut app = Self::open(state_dir, &deployment).await?;
         app.runtime_selection_file = Some(selection.to_owned());
+        // A committed original Host-only root is not a fresh split App setup.
+        // Its original remote Gateway and pairing are never reconstructed.
+        if app.committed_migration {
+            return Ok(app);
+        }
         let gateway_scope = Arc::new(app.scope.gateway_sibling()?);
         if gateway_scope.root.get().is_some() {
             let gateway = match app.load_local_gateway(gateway_scope).await {
@@ -553,19 +569,39 @@ impl HostApp {
     async fn read_configuration(&mut self) -> Result<(), AppError> {
         self.scope.validate()?;
         // Never call a path-only writer while our original role is still live.
-        if self.running.is_some() {
+        if self.running.is_some()
+            || (self.migrated_shared && self.local_gateway.as_ref().is_some_and(|g| g.is_running()))
+        {
             return Err(AppError("app_role_busy"));
         }
         let report = native::inspect_for_app(self.scope.clone())
             .await
             .map_err(|e| self.management_error(e))?;
-        if report.desired.gateway.is_some()
+        let scope = self.scope.clone();
+        let inspection = tokio::task::spawn_blocking(move || migrated::inspect(scope))
+            .await
+            .map_err(|_| AppError("app_migrated_reader_failed"))??;
+        let shared = inspection
+            .as_ref()
+            .is_some_and(|i| i.topology == migrated::Topology::SharedLocal);
+        if (report.desired.gateway.is_some() && !shared)
             || !report.desired.host.is_some_and(|d| {
                 d.manager == NativeManager::AppManaged
                     && d.autostart == NativeAutostartDesired::Disabled
             })
+            || report.desired.gateway.is_some_and(|d| {
+                d.manager != NativeManager::AppManaged
+                    || d.autostart != NativeAutostartDesired::Disabled
+            })
         {
             return Err(AppError("app_manager_refused"));
+        }
+        if let Some(inspection) = inspection {
+            self.committed_migration = true;
+            self.migrated_shared = shared;
+            self.enrollment = Some(inspection.enrollment);
+        } else if self.committed_migration {
+            return Err(AppError("app_migrated_input_changed"));
         }
         if report.admission_fenced {
             return Err(AppError("app_transaction_fenced"));
@@ -575,15 +611,13 @@ impl HostApp {
     }
     async fn connect_host(&mut self) -> Result<(), AppError> {
         if self.running.is_none() {
-            self.set_desired(NativeRunDesired::Running).await?;
+            if !self.migrated_shared {
+                self.set_desired(NativeRunDesired::Running).await?;
+            }
             let intent_scope = self.scope.clone();
+            let migrated_source = self.committed_migration;
             let desktop_intent = tokio::task::spawn_blocking(move || {
-                crate::store::native_host_snapshot::NativeHostSnapshot::open_for_app(
-                    intent_scope.state_dir(),
-                    intent_scope.clone(),
-                )
-                .ok()
-                .map(Arc::new)
+                migrated::DesktopIntent::open(intent_scope, migrated_source).ok()
             })
             .await
             .ok()
@@ -643,6 +677,70 @@ impl HostApp {
             self.unknown = true;
         }
         host.and(gateway)
+    }
+    /// Both actual roles have joined before the one original-root C07 update.
+    /// Gateway desired remains Running on Pause, preserving its existing role.
+    async fn set_shared_desired(&mut self, run: NativeRunDesired) -> Result<(), AppError> {
+        self.available()?;
+        if !self.migrated_shared
+            || self.running.is_some()
+            || self.local_gateway.as_ref().is_some_and(|g| g.is_running())
+        {
+            return Err(AppError("app_role_busy"));
+        }
+        self.read_configuration().await?;
+        let report = self
+            .configuration
+            .as_ref()
+            .ok_or(AppError("app_not_configured"))?;
+        if report.desired.host.is_some_and(|h| h.run == run)
+            && report
+                .desired
+                .gateway
+                .is_some_and(|g| g.run == NativeRunDesired::Running)
+        {
+            return Ok(());
+        }
+        let change = native::NativeDesiredChange {
+            component: native::NativeComponent::Host,
+            run,
+            transaction_id: uuid::Uuid::new_v4()
+                .to_string()
+                .try_into()
+                .expect("UUID identity"),
+            sequence: report
+                .revision
+                .checked_add(1)
+                .ok_or(AppError("app_revision_exhausted"))?,
+        };
+        let plan = native::plan_shared_roles_for_app(
+            self.scope.clone(),
+            change,
+            NativeRunDesired::Running,
+        )
+        .await
+        .map_err(|e| self.management_error(e))?;
+        self.scope.validate()?;
+        let report = native::apply_for_app(self.scope.clone(), &plan.plan_file)
+            .await
+            .map_err(|e| self.management_error(e))?;
+        if report.admission_fenced {
+            self.unknown = true;
+            return Err(AppError("app_transaction_fenced"));
+        }
+        self.configuration = Some(report);
+        // The previous read-only snapshot correctly pins the previous canonical
+        // tip. Reopen only after both roles joined and this exact C07 committed;
+        // the original scope/root and immutable migration bindings are retained.
+        let gateway = match local_gateway::LocalGateway::open_migrated(self.scope.clone()).await {
+            Ok(gateway) => gateway,
+            Err(error) => {
+                self.unknown = true;
+                return Err(error);
+            }
+        };
+        self.local_gateway = Some(gateway);
+        Ok(())
     }
     async fn set_desired(&mut self, run: NativeRunDesired) -> Result<(), AppError> {
         self.available()?;
@@ -765,18 +863,14 @@ impl HostApp {
         // Never acquire a replacement profile on a status request. Original
         // private file/namespace identities and bytes must still match; only
         // the successful pairing self-response supplies computer_approved.
-        let requested = tokio::task::spawn_blocking(move || {
-            original.revalidate().is_ok()
-                && original.seed().computer_requested
-                && original.ready().computer_approved
-        })
-        .await
-        .unwrap_or(false);
+        let requested = tokio::task::spawn_blocking(move || original.requested())
+            .await
+            .unwrap_or(false);
         requested && !role.cancel.is_cancelled() && !role.worker.is_finished()
     }
     async fn snapshot(&self) -> Value {
         let computer_requested = self.desktop_component_requested().await;
-        json!({"schema":1,"configuration":self.configuration,"foreground":*self.observed.borrow(),"admission_fenced":self.admission_fenced(),"desktop_intent":{"schema":1,"computer_requested":computer_requested,"source":"approved_host_configuration"},"cleanup":self.cleanup,"gateway":self.local_gateway.as_ref().map(|g| g.status()),"enrollment":self.enrollment,"mode":"rust_host","supportedOperations":["startupStatus","status","createLocal","inspectJoin","join","requestJoin","claimJoin","inspectHost","connect","disconnect","quitAdmission"]})
+        json!({"schema":1,"configuration":self.configuration,"foreground":*self.observed.borrow(),"admission_fenced":self.admission_fenced(),"desktop_intent":{"schema":1,"computer_requested":computer_requested,"source":if self.committed_migration {"committed_original_local_intent"} else {"approved_host_configuration"}},"cleanup":self.cleanup,"gateway":self.local_gateway.as_ref().map(|g| g.status()),"enrollment":self.enrollment,"mode":"rust_host","supportedOperations":["startupStatus","status","createLocal","inspectJoin","join","requestJoin","claimJoin","inspectHost","connect","disconnect","quitAdmission"]})
     }
     async fn dispatch(
         &mut self,
@@ -845,6 +939,9 @@ impl HostApp {
                 Ok(value)
             }
             Operation::ClaimJoin => {
+                if self.committed_migration {
+                    return Err(AppError("app_migrated_pairing_already_committed"));
+                }
                 if self.running.is_some() {
                     return Err(AppError("app_role_busy"));
                 }
@@ -870,6 +967,12 @@ impl HostApp {
                 serde_json::to_value(report).map_err(|_| AppError("app_response_invalid"))
             }
             Operation::Connect => {
+                if self.migrated_shared && self.running.is_none() {
+                    if let Some(gateway) = &mut self.local_gateway {
+                        gateway.settle().await?;
+                    }
+                    self.set_shared_desired(NativeRunDesired::Running).await?;
+                }
                 if let Some(gateway) = &mut self.local_gateway {
                     gateway.start().await?;
                 }
@@ -877,8 +980,16 @@ impl HostApp {
                 Ok(self.snapshot().await)
             }
             Operation::Disconnect => {
-                self.settle().await?;
-                self.set_desired(NativeRunDesired::Stopped).await?;
+                if self.migrated_shared {
+                    self.settle_all().await?;
+                    self.set_shared_desired(NativeRunDesired::Stopped).await?;
+                    if let Some(gateway) = &mut self.local_gateway {
+                        gateway.start().await?;
+                    }
+                } else {
+                    self.settle().await?;
+                    self.set_desired(NativeRunDesired::Stopped).await?;
+                }
                 Ok(self.snapshot().await)
             }
             Operation::QuitAdmission => {

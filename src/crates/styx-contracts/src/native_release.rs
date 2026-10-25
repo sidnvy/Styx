@@ -25,6 +25,8 @@ pub enum NativeReleaseReader {
     NativeRuntimeV1,
     /// Original-identity cutover reader barrier; old runtimes reject this variant.
     NativeRuntimeMigratedV1,
+    /// Typed Host-only/local-Gateway migration reader; earlier readers reject it.
+    NativeRuntimeMigratedV2,
 }
 impl NativeReleaseReader {
     /// Signed reader declaration only; no runtime health or activation authority.
@@ -32,11 +34,16 @@ impl NativeReleaseReader {
         matches!(
             (self, reader),
             (
-                Self::NativeRuntimeV1 | Self::NativeRuntimeMigratedV1,
+                Self::NativeRuntimeV1
+                    | Self::NativeRuntimeMigratedV1
+                    | Self::NativeRuntimeMigratedV2,
                 ReaderContract::NativeManagementStateV1
             ) | (
-                Self::NativeRuntimeMigratedV1,
+                Self::NativeRuntimeMigratedV1 | Self::NativeRuntimeMigratedV2,
                 ReaderContract::NativeMigratedStateV1
+            ) | (
+                Self::NativeRuntimeMigratedV2,
+                ReaderContract::NativeMigratedStateV2
             )
         )
     }
@@ -298,7 +305,9 @@ impl NativeReleaseManifest {
         if self.schema != NATIVE_RELEASE_SCHEMA
             || !matches!(
                 self.minimum_reader,
-                NativeReleaseReader::NativeRuntimeV1 | NativeReleaseReader::NativeRuntimeMigratedV1
+                NativeReleaseReader::NativeRuntimeV1
+                    | NativeReleaseReader::NativeRuntimeMigratedV1
+                    | NativeReleaseReader::NativeRuntimeMigratedV2
             )
             || !worker_version(&self.version)
             || self.version.contains('+')

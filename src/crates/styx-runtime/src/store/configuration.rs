@@ -247,9 +247,30 @@ impl ConfigurationState {
         self.recovery_required = false;
         Ok(())
     }
+    /// Only the writer-owned, re-synced schema4 chain can reopen its native root.
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "macos",
+        target_os = "windows"
+    ))]
+    pub(super) fn finish_recovered_native_cutover(
+        &mut self,
+        proof: &super::committed_runtime_native::RecoveredNativeCommittedRuntime,
+    ) -> JournalResult<()> {
+        self.require_recovery_inspection()?;
+        if !proof.matches_root(&self.root.identity()) {
+            return Err(JournalError::Conflict);
+        }
+        self.recovery_required = false;
+        Ok(())
+    }
     /// Existing pending management data can be inspected after a fresh boot,
     /// never used to reopen ordinary service or manufacture maintenance proof.
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "macos",
+        target_os = "windows"
+    ))]
     pub(super) fn require_recovery_inspection(&self) -> JournalResult<()> {
         if !self.recovery_required || self.fence.is_some() {
             return Err(JournalError::Conflict);
@@ -441,7 +462,11 @@ impl OwnedConfigurationRoot {
     /// The original maintenance owner may initialize exactly its management
     /// namespace for migration. No new writer, enrollment namespace or fresh
     /// root authority is created; an unexpected existing name is not adopted.
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "macos",
+        target_os = "windows"
+    ))]
     pub(super) fn claim_legacy_management_namespace(
         &self,
         maintenance: &ConfigurationMaintenance,
@@ -631,7 +656,11 @@ impl ConfigurationMaintenance {
     }
     /// Prove this exact maintenance fence is still active, not just that the
     /// filesystem root has the same identity. This does not settle old writers.
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "macos",
+        target_os = "windows"
+    ))]
     pub(crate) fn validate_active(&self) -> JournalResult<RootIdentity> {
         self.owner
             .with_maintenance(self, |state| Ok(state.root.identity()))

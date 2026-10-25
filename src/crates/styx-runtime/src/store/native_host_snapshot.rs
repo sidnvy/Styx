@@ -155,7 +155,7 @@ impl NativeHostSnapshot {
             native_state::decode_state(&state_raw, &marker).map_err(|_| JournalError::Conflict)?;
         let state = canonical.state();
         if state.mode != NativeDeploymentMode::JoinExisting
-            || state.migration.is_some()
+            || state.has_migration_binding()
             || state.desired.gateway.is_some()
             || !state.desired.host.as_ref().is_some_and(|d| {
                 d.run == NativeRunDesired::Running

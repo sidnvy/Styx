@@ -26,8 +26,27 @@ use styx_contracts::{
 ))]
 #[path = "profile_fresh.rs"]
 mod fresh;
+#[cfg(any(
+    all(target_os = "linux", target_env = "gnu"),
+    target_os = "windows",
+    target_os = "macos"
+))]
+#[path = "profile_native_materials.rs"]
+mod native_materials;
 #[path = "profile_release.rs"]
 mod release;
+#[cfg(any(
+    all(target_os = "linux", target_env = "gnu"),
+    target_os = "windows",
+    target_os = "macos"
+))]
+pub(crate) use native_materials::{OriginalNativePairMaterials, read_original_pair_materials};
+
+#[cfg(target_os = "macos")]
+pub(crate) use native_materials::{
+    AppliedMacMaintenanceProfile, load_applied_mac_maintenance_profile,
+};
+
 const JSON_LIMIT: usize = 1024 * 1024;
 #[derive(Debug, Clone, Copy, thiserror::Error)]
 pub enum ProfileError {
@@ -347,7 +366,7 @@ impl LoadedLegacyProfile {
     /// mint this pin. It is neither an OS permission nor Core dispatch grant.
     /// Call on a bounded blocking worker: original closure revalidation hashes
     /// signed bytes; no executable, subprocess or GUI is started here.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
     pub(crate) fn computer_enabled(&self) -> Result<bool, ProfileError> {
         self.revalidate_control()?;
         computer_selected(
@@ -463,6 +482,17 @@ impl LoadedLegacyProfile {
         state: &PrivateRoot,
         host: &PrivateRoot,
     ) -> Result<bool, ProfileError> {
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "windows",
+            target_os = "macos"
+        ))]
+        if let ProfileSource::NativeCommitted(binding) = &self.source {
+            binding
+                .validate_legacy_owners(state, host)
+                .map_err(|_| ProfileError::Changed)?;
+            return Ok(true);
+        }
         #[cfg(all(target_os = "linux", target_env = "gnu"))]
         if let ProfileSource::Committed(binding) = &self.source {
             binding
@@ -622,6 +652,20 @@ enum GatewayWireMode {
 // points. Its profile remains private inside a non-convertible wrapper.
 enum ProfileSource {
     Ordinary,
+    // Only the private material loader can choose this mode. Its result has no
+    // ordinary-profile conversion or execution/credential accessor.
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "windows",
+        target_os = "macos"
+    ))]
+    OriginalMaterials,
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "windows",
+        target_os = "macos"
+    ))]
+    NativeCommitted(Arc<crate::store::committed_runtime_native::NativeCommittedRuntimeSnapshot>),
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     Maintenance(Arc<crate::migration::legacy_service::RetiredCredentialReadBinding>),
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
@@ -637,6 +681,20 @@ impl ProfileSource {
     fn revalidate(&self) -> Result<(), ProfileError> {
         match self {
             Self::Ordinary => Ok(()),
+            #[cfg(any(
+                all(target_os = "linux", target_env = "gnu"),
+                target_os = "windows",
+                target_os = "macos"
+            ))]
+            Self::OriginalMaterials => Ok(()),
+            #[cfg(any(
+                all(target_os = "linux", target_env = "gnu"),
+                target_os = "windows",
+                target_os = "macos"
+            ))]
+            Self::NativeCommitted(binding) => {
+                binding.revalidate().map_err(|_| ProfileError::Changed)
+            }
             #[cfg(all(target_os = "linux", target_env = "gnu"))]
             Self::Maintenance(binding) => binding.revalidate().map_err(|_| ProfileError::Changed),
             #[cfg(all(target_os = "linux", target_env = "gnu"))]
@@ -661,7 +719,8 @@ pub(crate) use migration::load_for_migration_validation;
 pub fn load_legacy(state_dir: &Path) -> Result<LoadedLegacyProfile, ProfileError> {
     load(state_dir, GatewayWireMode::Legacy)
 }
-/// Sealed App composition never adopts a legacy or CLI-managed profile.
+/// Sealed App composition accepts fresh or completed native migration state;
+/// it never adopts an ordinary legacy or CLI-managed profile.
 #[cfg(any(
     all(target_os = "linux", target_env = "gnu"),
     target_os = "windows",
@@ -670,7 +729,26 @@ pub fn load_legacy(state_dir: &Path) -> Result<LoadedLegacyProfile, ProfileError
 pub(crate) fn load_for_app(
     scope: Arc<crate::app::HostScope>,
 ) -> Result<LoadedLegacyProfile, ProfileError> {
-    // App startup never adopts an ordinary legacy/CLI profile.
+    scope.validate().map_err(|_| ProfileError::Changed)?;
+    let path = scope.state_dir().to_owned();
+    let root = PrivateRoot::open(&path).map_err(|_| ProfileError::ProtectedRead)?;
+    let marker_raw = root
+        .read_raw(".styx-native-root-v1.json", 4096)
+        .map_err(|_| ProfileError::Changed)?;
+    let marker = crate::store::native_state::decode_marker(marker_raw.bytes())
+        .map_err(|_| ProfileError::Changed)?;
+    if marker.reader_floor == styx_contracts::management::ReaderContract::NativeMigratedStateV2 {
+        let snapshot =
+            crate::store::committed_runtime_native::NativeCommittedRuntimeSnapshot::open_for_app(
+                &path, scope,
+            )
+            .map_err(|_| ProfileError::Changed)?;
+        return load_source(
+            &path,
+            GatewayWireMode::PairedV3,
+            ProfileSource::NativeCommitted(Arc::new(snapshot)),
+        );
+    }
     fresh::load_for_app(scope)
 }
 /// Explicit paired-v3 bridge using the SAME protected original profile and
@@ -693,6 +771,38 @@ pub fn load_paired(state_dir: &Path) -> Result<LoadedLegacyProfile, ProfileError
             return fresh::load(state_dir);
         }
         if native_present {
+            let marker_raw = root
+                .read_raw(".styx-native-root-v1.json", 4096)
+                .map_err(|_| ProfileError::Changed)?;
+            let marker = crate::store::native_state::decode_marker(marker_raw.bytes())
+                .map_err(|_| ProfileError::Changed)?;
+            if marker.reader_floor
+                == styx_contracts::management::ReaderContract::NativeMigratedStateV2
+            {
+                let snapshot =
+                    crate::store::committed_runtime_native::NativeCommittedRuntimeSnapshot::open(
+                        state_dir,
+                    )
+                    .map_err(|_| ProfileError::Changed)?;
+                // This entry point belongs to the CLI. A completed migration
+                // preserves desired ownership; it never lets a CLI adopt an
+                // App-managed or persistent-service Host.
+                if !snapshot.state().desired.host.as_ref().is_some_and(|h| {
+                    use styx_contracts::native_management::{
+                        NativeAutostartDesired, NativeManager, NativeRunDesired,
+                    };
+                    h.run == NativeRunDesired::Running
+                        && h.manager == NativeManager::ForegroundCli
+                        && h.autostart == NativeAutostartDesired::Disabled
+                }) {
+                    return Err(ProfileError::Invalid);
+                }
+                return load_source(
+                    state_dir,
+                    GatewayWireMode::PairedV3,
+                    ProfileSource::NativeCommitted(Arc::new(snapshot)),
+                );
+            }
             #[cfg(any(target_os = "windows", target_os = "macos"))]
             return Err(ProfileError::Changed);
             #[cfg(all(target_os = "linux", target_env = "gnu"))]
@@ -769,29 +879,65 @@ fn load_source(
     }
     let canonical = capture.read(state_dir, "state.json", JSON_LIMIT)?;
     let legacy_source = match &source {
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "windows",
+            target_os = "macos"
+        ))]
+        ProfileSource::NativeCommitted(committed) => committed.before(),
         #[cfg(all(target_os = "linux", target_env = "gnu"))]
         ProfileSource::Committed(committed) => committed.before(),
         _ => canonical.as_slice(),
     };
     let state: LegacyState = decode(legacy_source)?;
+    let original_history_only = {
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "windows",
+            target_os = "macos"
+        ))]
+        {
+            matches!(
+                &source,
+                ProfileSource::OriginalMaterials | ProfileSource::NativeCommitted(_)
+            )
+        }
+        #[cfg(not(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "windows",
+            target_os = "macos"
+        )))]
+        {
+            false
+        }
+    };
     if state.schema != 1
-        || state.uncertain
         || state.mode != deployment.mode
         || state.config_sha256 != Sha256Digest::of_bytes(&deployment_raw)
-        || state.active_step.is_some()
-        || state
-            .host_maintenance
-            .as_ref()
-            .is_some_and(|m| m.has_uncertain_mutation)
-        || state
-            .gateway_maintenance
-            .as_ref()
-            .is_some_and(|m| m.has_uncertain_mutation)
-        || state
-            .steps
-            .iter()
-            .chain(&state.gateway_operations)
-            .any(|s| matches!(s.status.as_str(), "running" | "uncertain"))
+    {
+        return Err(ProfileError::Invalid);
+    }
+    // A fenced material read has no runtime conversion. A NativeCommitted
+    // snapshot separately validates the complete committed conversion, current
+    // native tip and original ownership/identity inputs before supplying before.
+    // Its legacy before is historical DATA, not current native operation state.
+    // Preserve it unchanged; neither path replays the old unknown operation.
+    if !original_history_only
+        && (state.uncertain
+            || state.active_step.is_some()
+            || state
+                .host_maintenance
+                .as_ref()
+                .is_some_and(|m| m.has_uncertain_mutation)
+            || state
+                .gateway_maintenance
+                .as_ref()
+                .is_some_and(|m| m.has_uncertain_mutation)
+            || state
+                .steps
+                .iter()
+                .chain(&state.gateway_operations)
+                .any(|s| matches!(s.status.as_str(), "running" | "uncertain")))
     {
         return Err(ProfileError::Invalid);
     }
@@ -852,8 +998,27 @@ fn load_source(
             target_os = "windows",
             target_os = "macos"
         ))]
+        ProfileSource::NativeCommitted(committed) => {
+            let root = PrivateRoot::open(base).map_err(|_| ProfileError::ProtectedRead)?;
+            committed
+                .read_retired_token(&root)
+                .map_err(|_| ProfileError::Changed)?
+        }
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "windows",
+            target_os = "macos"
+        ))]
         ProfileSource::Fresh(_) => return Err(ProfileError::Invalid),
         ProfileSource::Ordinary => {
+            zeroize::Zeroizing::new(capture.read(base, "device/host.token", 4096)?)
+        }
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "windows",
+            target_os = "macos"
+        ))]
+        ProfileSource::OriginalMaterials => {
             zeroize::Zeroizing::new(capture.read(base, "device/host.token", 4096)?)
         }
         #[cfg(all(target_os = "linux", target_env = "gnu"))]
@@ -945,6 +1110,14 @@ fn load_source(
     // migration it never selects workers; only the committed canonical selection
     // and a fresh C08 verification may do that.
     let inventory = match &source {
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "windows",
+            target_os = "macos"
+        ))]
+        ProfileSource::NativeCommitted(committed) => {
+            release::ProfileRelease::from_native_selection(committed.selection(), &expected)?
+        }
         #[cfg(all(target_os = "linux", target_env = "gnu"))]
         ProfileSource::Committed(committed) => {
             release::ProfileRelease::from_native_selection(committed.selection(), &expected)?
@@ -1008,6 +1181,18 @@ fn load_source(
         ))]
         ProfileSource::Fresh(_) => return Err(ProfileError::Invalid),
         ProfileSource::Ordinary => active.manifest_sha256,
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "windows",
+            target_os = "macos"
+        ))]
+        ProfileSource::OriginalMaterials => active.manifest_sha256,
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "windows",
+            target_os = "macos"
+        ))]
+        ProfileSource::NativeCommitted(committed) => committed.selection().manifest_sha256,
         #[cfg(all(target_os = "linux", target_env = "gnu"))]
         ProfileSource::Maintenance(binding) => binding.candidate().report().manifest_sha256,
         #[cfg(all(target_os = "linux", target_env = "gnu"))]

@@ -95,7 +95,7 @@ pub(crate) struct NativeHostJoinStore {
     phases: Vec<Pin>,
 }
 fn seed_hash(state: &NativeState) -> JournalResult<Sha256Digest> {
-    if state.migration.is_some()
+    if state.has_migration_binding()
         || state.mode != NativeDeploymentMode::JoinExisting
         || state.desired.gateway.is_some()
         || state.desired.host.is_none()

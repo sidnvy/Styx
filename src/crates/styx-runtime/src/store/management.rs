@@ -5,12 +5,24 @@ use super::configuration::{ConfigurationMaintenance, OwnedConfigurationRoot};
 use super::secure_journal::{JournalBudget, JournalError, JournalResult};
 use styx_contracts::identity::{Sha256Digest, TransactionId};
 use styx_core::management::transaction::{DesiredStateCommit, DurableStage, JournalReceipt};
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[cfg(any(
+    all(target_os = "linux", target_env = "gnu"),
+    target_os = "macos",
+    target_os = "windows"
+))]
 #[path = "management_handoff.rs"]
 pub(in crate::store) mod handoff;
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[cfg(any(
+    all(target_os = "linux", target_env = "gnu"),
+    target_os = "macos",
+    target_os = "windows"
+))]
 pub use handoff::{CredentialRetirementObservation, CredentialRetirementStage};
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[cfg(any(
+    all(target_os = "linux", target_env = "gnu"),
+    target_os = "macos",
+    target_os = "windows"
+))]
 #[path = "management_cutover.rs"]
 pub(in crate::store) mod cutover;
 
@@ -58,6 +70,11 @@ pub(super) fn validate_readonly_native_tip(
     canonical: &super::native_state::ValidatedNativeState,
     marker: &styx_contracts::native_management::NativeRootMarker,
 ) -> JournalResult<()> {
+    if canonical.state().reader_contract
+        == styx_contracts::management::ReaderContract::NativeMigratedStateV2
+    {
+        return validate_migrated_native_tip(scan, canonical, marker, None);
+    }
     let inventory = readonly_inventory(scan)?;
     let state = canonical.state();
     if scan.files.is_empty() {
@@ -100,8 +117,8 @@ pub(super) fn validate_readonly_native_tip(
             .phases
             .last()
             .is_none_or(|p| p.stage != DurableStage::Committed)
-        || before.state().migration.is_some()
-        || target.state().migration.is_some()
+        || before.state().has_migration_binding()
+        || target.state().has_migration_binding()
         || original.target != canonical.raw_bytes()
     {
         return Err(JournalError::Conflict);
@@ -115,6 +132,149 @@ pub(super) fn validate_readonly_native_tip(
     .map_err(|_| JournalError::Conflict)
 }
 
+/// Formal chain replay after the one committed schema4 conversion. No owner
+/// release is implied. `pending` is used only by original transaction append
+/// while its canonical target already exists; ordinary readers always pass None.
+#[cfg(any(
+    all(target_os = "linux", target_env = "gnu"),
+    target_os = "macos",
+    target_os = "windows"
+))]
+fn validate_migrated_native_tip(
+    scan: &super::secure_journal::JournalObservation,
+    canonical: &super::native_state::ValidatedNativeState,
+    marker: &styx_contracts::native_management::NativeRootMarker,
+    pending: Option<&TransactionId>,
+) -> JournalResult<()> {
+    use styx_contracts::management::ReaderContract;
+    let inventory = readonly_inventory(scan)?;
+    if inventory.has_unresolved_legacy_handoffs() {
+        return Err(JournalError::Conflict);
+    }
+    let cutovers = cutover::scan_cutovers(scan)?;
+    if !cutovers.records.is_empty() || cutovers.native_records.len() != 1 {
+        return Err(JournalError::Conflict);
+    }
+    let anchor = &cutovers.native_records[0];
+    if anchor.intent.schema != 4
+        || anchor.last_stage != DurableStage::Committed
+        || anchor.validation_report().is_none()
+        || anchor.paired_validation_report().is_none()
+    {
+        return Err(JournalError::Conflict);
+    }
+    let original_marker =
+        super::native_state::decode_marker(&anchor.marker).map_err(|_| JournalError::Conflict)?;
+    if &original_marker != marker
+        || canonical.state().reader_contract != ReaderContract::NativeMigratedStateV2
+    {
+        return Err(JournalError::Conflict);
+    }
+    let mut previous = super::native_state::decode_state(&anchor.target, marker)
+        .map_err(|_| JournalError::Conflict)?;
+    for tx in inventory
+        .transactions
+        .into_iter()
+        .filter(|tx| tx.intent.sequence > anchor.intent.sequence)
+    {
+        let committed = tx
+            .phase_receipts
+            .last()
+            .is_some_and(|p| p.stage == DurableStage::Committed);
+        if !committed && pending != Some(&tx.intent.transaction_id) {
+            return Err(JournalError::Conflict);
+        }
+        let original = parser::original_observed(scan, tx)?;
+        if original.before != previous.raw_bytes()
+            || original.intent.reader != ReaderContract::NativeMigratedStateV2
+        {
+            return Err(JournalError::Conflict);
+        }
+        let before = super::native_state::decode_state(&original.before, marker)
+            .map_err(|_| JournalError::Conflict)?;
+        let target = super::native_state::decode_state(&original.target, marker)
+            .map_err(|_| JournalError::Conflict)?;
+        styx_core::management::state::validate_transition(
+            before.state(),
+            target.state(),
+            marker,
+            &original.intent,
+        )
+        .map_err(|_| JournalError::Conflict)?;
+        previous = target;
+    }
+    let last = previous
+        .state()
+        .last_transaction
+        .as_ref()
+        .ok_or(JournalError::Conflict)?;
+    if previous.raw_bytes() != canonical.raw_bytes() || inventory.high_water != last.sequence {
+        return Err(JournalError::Conflict);
+    }
+    Ok(())
+}
+#[cfg(any(
+    all(target_os = "linux", target_env = "gnu"),
+    target_os = "macos",
+    target_os = "windows"
+))]
+fn validate_locked_migrated_tip(
+    state: &super::configuration::ConfigurationState,
+    scan: &super::secure_journal::JournalObservation,
+    pending: Option<&TransactionId>,
+) -> JournalResult<()> {
+    let marker_raw = state
+        .root
+        .read_raw(".styx-native-root-v1.json", 4096)
+        .map_err(|_| JournalError::Unknown)?;
+    let marker = super::native_state::decode_marker(marker_raw.bytes())
+        .map_err(|_| JournalError::Conflict)?;
+    use super::RootIdentity;
+    use styx_contracts::native_management::NativeRootIdentity;
+    let matches = match (state.root.identity(), &marker.root_identity) {
+        (
+            RootIdentity::Linux { device, inode, uid },
+            NativeRootIdentity::Linux {
+                device: d,
+                inode: i,
+                uid: u,
+            },
+        ) => device == *d && inode == *i && uid == *u,
+        #[cfg(target_os = "macos")]
+        (
+            RootIdentity::Macos { device, inode, uid },
+            NativeRootIdentity::Macos {
+                device: d,
+                inode: i,
+                uid: u,
+            },
+        ) => device == *d && inode == *i && uid == *u,
+        #[cfg(target_os = "windows")]
+        (
+            RootIdentity::Windows {
+                volume_serial,
+                file_id,
+                owner_sid,
+            },
+            NativeRootIdentity::Windows {
+                volume_serial: v,
+                file_id: f,
+                owner_sid: s,
+            },
+        ) => volume_serial == *v && file_id == *f && owner_sid == *s,
+        _ => false,
+    };
+    if !matches {
+        return Err(JournalError::Conflict);
+    }
+    let raw = state
+        .root
+        .read_raw("state.json", 1024 * 1024)
+        .map_err(|_| JournalError::Unknown)?;
+    let canonical = super::native_state::decode_state(raw.bytes(), &marker)
+        .map_err(|_| JournalError::Conflict)?;
+    validate_migrated_native_tip(scan, &canonical, &marker, pending)
+}
 pub struct PreparedPersistence {
     pub intent: DesiredStateCommit,
     pub raw_intent_sha256: styx_contracts::identity::Sha256Digest,
@@ -136,14 +296,54 @@ pub struct ManagementTransactionObservation {
 }
 pub struct ManagementInventory {
     pub high_water: u64,
+    pub(super) committed_cutover_anchor: Option<(u64, Sha256Digest)>,
     pub transactions: Vec<ManagementTransactionObservation>,
     /// Uncommitted legacy credential sub-stages; never admission/cutover proof.
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "macos",
+        target_os = "windows"
+    ))]
     pub handoffs: Vec<CredentialRetirementObservation>,
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "macos",
+        target_os = "windows"
+    ))]
+    pub(super) owner_recoveries: Vec<(TransactionId, u64, Option<handoff::OwnerRecoveryStage>)>,
     /// Retained unknown names/materials/temporary files; never silently deleted.
     pub orphans: Vec<String>,
 }
 impl ManagementInventory {
+    /// Historical presence is distinct from an unresolved migration stage.
+    /// Only a complete schema4 successor, exact retirement and GuardsHeld
+    /// original C chain resolve this barrier. This is data, not owner release.
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "macos",
+        target_os = "windows"
+    ))]
+    pub(super) fn has_unresolved_legacy_handoffs(&self) -> bool {
+        !self.orphans.is_empty()
+            || (self.has_legacy_handoffs() && self.committed_cutover_anchor.is_none())
+    }
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "macos",
+        target_os = "windows"
+    ))]
+    fn current_target_sha256(&self) -> Option<Sha256Digest> {
+        match (self.transactions.last(), self.committed_cutover_anchor) {
+            (Some(tx), Some((seq, sha))) => Some(if tx.intent.sequence > seq {
+                tx.intent.target_state_sha256
+            } else {
+                sha
+            }),
+            (Some(tx), None) => Some(tx.intent.target_state_sha256),
+            (None, Some((_, sha))) => Some(sha),
+            (None, None) => None,
+        }
+    }
     /// Typed legacy records exist only for the implemented Linux reader. On
     /// Windows/macOS their names remain orphans, which every complete-tip check must
     /// reject; false here is never proof that an unknown legacy file is safe.
@@ -153,13 +353,13 @@ impl ManagementInventory {
         target_os = "macos"
     ))]
     pub(super) fn has_legacy_handoffs(&self) -> bool {
-        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "macos",
+            target_os = "windows"
+        ))]
         {
-            !self.handoffs.is_empty()
-        }
-        #[cfg(any(target_os = "windows", target_os = "macos"))]
-        {
-            false
+            !self.handoffs.is_empty() || !self.owner_recoveries.is_empty()
         }
     }
 }
@@ -336,7 +536,7 @@ impl OwnedManagementJournal {
                 let scan = super::secure_journal::files::scan(dir, self.budget)?;
                 let inventory = platform::inventory(&scan)?;
                 if !inventory.orphans.is_empty()
-                    || inventory.has_legacy_handoffs()
+                    || inventory.has_unresolved_legacy_handoffs()
                     || inventory
                         .transactions
                         .last()
@@ -351,6 +551,9 @@ impl OwnedManagementJournal {
                     })
                 {
                     return Err(JournalError::Conflict);
+                }
+                if inventory.committed_cutover_anchor.is_some() {
+                    validate_locked_migrated_tip(state, &scan, None)?;
                 }
                 Ok(())
             })
@@ -391,7 +594,8 @@ impl OwnedManagementJournal {
                         // families are preserved as orphans, never resynced into
                         // an apparently complete supported native transaction.
                         let observed = platform::inventory(&scan)?;
-                        if !observed.orphans.is_empty() || observed.has_legacy_handoffs() {
+                        if !observed.orphans.is_empty() || observed.has_unresolved_legacy_handoffs()
+                        {
                             return Err(JournalError::Conflict);
                         }
                     }
@@ -600,8 +804,11 @@ mod platform {
             let receipt = with_directory(state, journal.namespace, |dir| {
                 let scan = files::scan(dir, journal.budget)?;
                 let inventory = inventory(&scan)?;
-                if !inventory.orphans.is_empty() || inventory.has_legacy_handoffs() {
+                if !inventory.orphans.is_empty() || inventory.has_unresolved_legacy_handoffs() {
                     return Err(JournalError::Conflict);
+                }
+                if inventory.committed_cutover_anchor.is_some() {
+                    validate_locked_migrated_tip(state, &scan, Some(&intent.transaction_id))?;
                 }
                 let source = original(&scan, &intent.transaction_id)?;
                 if &source.intent != intent {
@@ -751,8 +958,11 @@ mod platform {
             with_directory(state, journal.namespace, |dir| {
                 let scan = files::scan(dir, journal.budget)?;
                 let observed = inventory(&scan)?;
-                if !observed.orphans.is_empty() || observed.has_legacy_handoffs() {
+                if !observed.orphans.is_empty() || observed.has_unresolved_legacy_handoffs() {
                     return Err(JournalError::Conflict);
+                }
+                if observed.committed_cutover_anchor.is_some() {
+                    validate_locked_migrated_tip(state, &scan, None)?;
                 }
                 if let Some(existing) = observed
                     .transactions
@@ -775,9 +985,10 @@ mod platform {
                     {
                         return Err(JournalError::Conflict);
                     }
-                    if observed.transactions.last().is_some_and(|tx| {
-                        tx.intent.target_state_sha256 != intent.before_state_sha256
-                    }) {
+                    if observed
+                        .current_target_sha256()
+                        .is_some_and(|sha| sha != intent.before_state_sha256)
+                    {
                         return Err(JournalError::Conflict);
                     }
                 }

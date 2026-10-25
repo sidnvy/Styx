@@ -60,6 +60,12 @@ pub(in crate::store) enum CutoverKind {
 #[serde(deny_unknown_fields)]
 pub(in crate::store) struct CutoverIntent<R = handoff::RetirementLinuxRoot> {
     pub schema: u16,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub endpoint_mode: Option<styx_contracts::native_management::NativeMigrationEndpointMode>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history: Option<styx_contracts::native_management::NativeMigrationHistory>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host_pair_sha256: Option<Sha256Digest>,
     pub kind: CutoverKind,
     pub transaction_id: TransactionId,
     pub sequence: u64,
@@ -76,8 +82,10 @@ pub(in crate::store) struct CutoverIntent<R = handoff::RetirementLinuxRoot> {
     pub preservation_sha256: Sha256Digest,
     pub scope_bindings_sha256: Sha256Digest,
     pub marker_sha256: Sha256Digest,
-    pub history_baseline_sha256: Sha256Digest,
-    pub history_committed_sha256: Sha256Digest,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_baseline_sha256: Option<Sha256Digest>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub history_committed_sha256: Option<Sha256Digest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub endpoint_binding_sha256: Option<Sha256Digest>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -109,6 +117,7 @@ pub(in crate::store) struct OriginalCutover<R = handoff::RetirementLinuxRoot> {
     pub target: Vec<u8>,
     pub phases: Vec<JournalReceipt>,
     pub last_stage: DurableStage,
+    pub host_pair: Option<Vec<u8>>,
     pub validation: Option<Vec<u8>>,
     pub validation_sha256: Option<Sha256Digest>,
     pub paired_validation: Option<Vec<u8>>,
@@ -138,16 +147,34 @@ pub(in crate::store) struct CutoverInventory {
     pub native_records: Vec<OriginalCutover<NativeRootIdentity>>,
 }
 /// Move-owned preparation evidence; no Clone/Serde or arbitrary constructor.
-pub(in crate::store) struct PreparedCutover {
+pub(in crate::store) struct PreparedCutover<R = handoff::RetirementLinuxRoot> {
     owner: OwnedConfigurationRoot,
     namespace: (u64, u64),
-    original: OriginalCutover,
+    original: OriginalCutover<R>,
+    candidate: Option<std::sync::Arc<crate::release::VerifiedNativeRelease>>,
 }
-impl PreparedCutover {
+impl<R> PreparedCutover<R> {
+    fn validate_candidate(&self) -> JournalResult<()> {
+        if self.original.intent.schema == 4 {
+            let candidate = self.candidate.as_ref().ok_or(JournalError::Conflict)?;
+            candidate.revalidate().map_err(|_| JournalError::Unknown)?;
+            if candidate.report().manifest_sha256 != self.original.intent.candidate_manifest_sha256
+                || candidate.report().publisher_spki_sha256
+                    != self.original.intent.publisher_spki_sha256.to_hex()
+                || !candidate
+                    .manifest()
+                    .minimum_reader
+                    .supports_state_reader(ReaderContract::NativeMigratedStateV2)
+            {
+                return Err(JournalError::Conflict);
+            }
+        }
+        Ok(())
+    }
     pub(in crate::store) fn matches_owner(&self, owner: &OwnedConfigurationRoot) -> bool {
         self.owner.same_authority(owner)
     }
-    pub(in crate::store) fn intent(&self) -> &CutoverIntent {
+    pub(in crate::store) fn intent(&self) -> &CutoverIntent<R> {
         &self.original.intent
     }
     pub(in crate::store) fn before(&self) -> &[u8] {
@@ -171,14 +198,22 @@ impl PreparedCutover {
     pub(in crate::store) fn endpoint_key(&self) -> Option<&[u8]> {
         self.original.endpoint.as_ref().map(|e| e.key.as_slice())
     }
-    pub(in crate::store) fn history_baseline_sha256(&self) -> Sha256Digest {
-        self.original.intent.history_baseline_sha256
-    }
-    pub(in crate::store) fn history_committed_sha256(&self) -> Sha256Digest {
-        self.original.intent.history_committed_sha256
-    }
     pub(in crate::store) fn journal(&self) -> &JournalReceipt {
         &self.original.phases[0]
+    }
+}
+impl PreparedCutover<handoff::RetirementLinuxRoot> {
+    pub(in crate::store) fn history_baseline_sha256(&self) -> Sha256Digest {
+        self.original
+            .intent
+            .history_baseline_sha256
+            .expect("validated legacy baseline")
+    }
+    pub(in crate::store) fn history_committed_sha256(&self) -> Sha256Digest {
+        self.original
+            .intent
+            .history_committed_sha256
+            .expect("validated legacy committed baseline")
     }
 }
 #[derive(Serialize, Deserialize)]
@@ -276,6 +311,12 @@ fn validate_paired_report<R>(raw: &[u8], original: &OriginalCutover<R>) -> Journ
     if raw.is_empty() || raw.len() > MAX_VALIDATION {
         return Err(JournalError::BudgetExceeded);
     }
+    if original.intent.schema == 4
+        && original.intent.endpoint_mode
+            == Some(styx_contracts::native_management::NativeMigrationEndpointMode::PreservedRemote)
+    {
+        return native_writer::validate_remote_report(raw, original);
+    }
     let report: PairedValidationHeader =
         serde_json::from_slice(raw).map_err(|_| JournalError::InvalidInput)?;
     let endpoint: NativeGatewayEndpointBinding = serde_json::from_slice(
@@ -286,7 +327,7 @@ fn validate_paired_report<R>(raw: &[u8], original: &OriginalCutover<R>) -> Journ
             .binding,
     )
     .map_err(|_| JournalError::Conflict)?;
-    if !matches!(original.intent.schema, 2 | 3)
+    if !matches!(original.intent.schema, 2 | 3 | 4)
         || report.schema != 1
         || report.transaction_id != original.intent.transaction_id
         || report.candidate_manifest_sha256 != original.intent.candidate_manifest_sha256
@@ -334,8 +375,8 @@ fn stage_name(stage: DurableStage) -> JournalResult<&'static str> {
         _ => Err(JournalError::InvalidInput),
     }
 }
-fn phase_bytes(
-    original: &OriginalCutover,
+fn phase_bytes<R: Clone + Serialize>(
+    original: &OriginalCutover<R>,
     stage: DurableStage,
     previous: Option<Sha256Digest>,
 ) -> JournalResult<Vec<u8>> {
@@ -345,7 +386,7 @@ fn phase_bytes(
         }
         _ => None,
     };
-    let paired_validation_sha256 = if original.intent.schema == 2
+    let paired_validation_sha256 = if matches!(original.intent.schema, 2 | 3 | 4)
         && matches!(stage, DurableStage::Verified | DurableStage::Committed)
     {
         Some(
@@ -357,7 +398,9 @@ fn phase_bytes(
         None
     };
     serde_json::to_vec(&PhaseRecord {
-        schema: if paired_validation_sha256.is_some() {
+        schema: if matches!(original.intent.schema, 3 | 4) {
+            original.intent.schema
+        } else if paired_validation_sha256.is_some() {
             2
         } else {
             1
@@ -390,12 +433,37 @@ fn receipt<R>(
         record_sha256: Sha256Digest::of_bytes(bytes),
     }
 }
-fn root_matches(expected: &handoff::RetirementLinuxRoot, actual: RootIdentity) -> bool {
-    let RootIdentity::Linux { device, inode, uid } = actual;
-    expected.device == device && expected.inode == inode && expected.uid == uid
+fn root_matches<R: handoff::ProofRoot>(expected: &R, actual: RootIdentity) -> bool {
+    let actual = match actual {
+        RootIdentity::Linux { device, inode, uid } => {
+            NativeRootIdentity::Linux { device, inode, uid }
+        }
+        #[cfg(target_os = "macos")]
+        RootIdentity::Macos { device, inode, uid } => {
+            NativeRootIdentity::Macos { device, inode, uid }
+        }
+        #[cfg(target_os = "windows")]
+        RootIdentity::Windows {
+            volume_serial,
+            file_id,
+            owner_sid,
+        } => NativeRootIdentity::Windows {
+            volume_serial,
+            file_id,
+            owner_sid,
+        },
+    };
+    expected.native_identity() == actual
 }
+#[path = "management_cutover_native.rs"]
+mod native_writer;
+pub(in crate::store) use native_writer::CutoverProofRoot;
+pub(crate) use native_writer::{NativeCutoverHistoryInputs, NativeCutoverInputs};
 fn validate_materials<R: handoff::ProofRoot>(original: &OriginalCutover<R>) -> JournalResult<()> {
     let i = &original.intent;
+    if i.schema == 4 {
+        handoff::reject_migration_v2_collision(&original.before)?;
+    }
     if !R::permits_cutover(i.schema)
         || i.kind != CutoverKind::LegacyRuntimeCutover
         || i.sequence == 0
@@ -427,7 +495,12 @@ fn validate_materials<R: handoff::ProofRoot>(original: &OriginalCutover<R>) -> J
     let validated = decode_state(&original.target, &marker).map_err(|_| JournalError::Unknown)?;
     let state = validated.state();
     if state.revision != 1
-        || i.reader != ReaderContract::NativeMigratedStateV1
+        || i.reader
+            != if i.schema == 4 {
+                ReaderContract::NativeMigratedStateV2
+            } else {
+                ReaderContract::NativeMigratedStateV1
+            }
         || state.reader_contract != i.reader
         || state.deployment_raw_sha256 != i.deployment_raw_sha256
         || state
@@ -439,7 +512,7 @@ fn validate_materials<R: handoff::ProofRoot>(original: &OriginalCutover<R>) -> J
     }
     let extension = state.extensions.get("gateway_endpoint_v1");
     match (i.schema, original.endpoint.as_ref()) {
-        (1, None) => {
+        (1 | 4, None) => {
             if extension.is_some()
                 || i.endpoint_binding_sha256.is_some()
                 || i.endpoint_chain_sha256.is_some()
@@ -448,7 +521,7 @@ fn validate_materials<R: handoff::ProofRoot>(original: &OriginalCutover<R>) -> J
                 return Err(JournalError::Conflict);
             }
         }
-        (2 | 3, Some(endpoint)) => {
+        (2 | 3 | 4, Some(endpoint)) => {
             if [
                 endpoint.binding.as_slice(),
                 endpoint.chain.as_slice(),
@@ -482,12 +555,22 @@ fn validate_materials<R: handoff::ProofRoot>(original: &OriginalCutover<R>) -> J
         }
         _ => return Err(JournalError::Conflict),
     }
+    if i.schema == 4 {
+        return native_writer::validate_v4(original, state);
+    }
+    if i.endpoint_mode.is_some()
+        || i.history.is_some()
+        || original.host_pair.is_some()
+        || i.host_pair_sha256.is_some()
+    {
+        return Err(JournalError::Conflict);
+    }
     let migration = state.migration.as_ref().ok_or(JournalError::Conflict)?;
     if migration.transaction_id != i.transaction_id
         || migration.original_state_sha256 != i.before_state_sha256
         || migration.retired_receipt_sha256 != i.retired_record_sha256
-        || migration.enrollment_baseline_sha256 != i.history_baseline_sha256
-        || migration.enrollment_committed_sha256 != i.history_committed_sha256
+        || Some(migration.enrollment_baseline_sha256) != i.history_baseline_sha256
+        || Some(migration.enrollment_committed_sha256) != i.history_committed_sha256
         || migration.candidate_manifest_sha256 != i.candidate_manifest_sha256
         || migration.publisher_spki_sha256 != i.publisher_spki_sha256
         || migration.preservation_sha256 != i.preservation_sha256
@@ -600,7 +683,7 @@ pub(in crate::store) fn scan_cutovers(
                     .ok_or(JournalError::Conflict)?;
                 records.push(parse_cutover(file, &by_name, &mut used, old)?);
             }
-            3 => {
+            3 | 4 => {
                 let old = handoffs
                     .native_records
                     .iter()
@@ -660,14 +743,26 @@ fn parse_cutover<R: handoff::ProofRoot, S: handoff::ProofStamp<R>>(
         used.insert(n);
         Ok(raw.to_vec())
     };
-    let endpoint = match intent.schema {
-        1 => None,
-        2 | 3 => Some(CutoverEndpointMaterials {
-            binding: read("endpoint-binding")?,
-            chain: read("endpoint-chain")?,
-            key: Zeroizing::new(read("endpoint-key")?),
-        }),
+    let endpoint = match (intent.schema, intent.endpoint_mode) {
+        (1, None)
+        | (
+            4,
+            Some(styx_contracts::native_management::NativeMigrationEndpointMode::PreservedRemote),
+        ) => None,
+        (2 | 3, None)
+        | (4, Some(styx_contracts::native_management::NativeMigrationEndpointMode::IssuedLocal)) => {
+            Some(CutoverEndpointMaterials {
+                binding: read("endpoint-binding")?,
+                chain: read("endpoint-chain")?,
+                key: Zeroizing::new(read("endpoint-key")?),
+            })
+        }
         _ => return Err(JournalError::Unknown),
+    };
+    let host_pair = if intent.schema == 4 {
+        Some(read("host-pair")?)
+    } else {
+        None
     };
     let mut original = OriginalCutover {
         intent: intent.clone(),
@@ -679,6 +774,7 @@ fn parse_cutover<R: handoff::ProofRoot, S: handoff::ProofStamp<R>>(
         target: read("target")?,
         phases: vec![],
         last_stage: DurableStage::Planned,
+        host_pair,
         validation: None,
         validation_sha256: None,
         paired_validation: None,
@@ -686,6 +782,16 @@ fn parse_cutover<R: handoff::ProofRoot, S: handoff::ProofStamp<R>>(
         endpoint,
     };
     validate_materials(&original)?;
+    if let Some(pair) = original.host_pair.as_ref() {
+        let binding: styx_contracts::native_management::NativePreservedHostPair =
+            serde_json::from_slice(pair).map_err(|_| JournalError::Unknown)?;
+        if binding.credential_sha256
+            != handoff::ProofStamp::content_sha256(&old.intent.original_token)
+        {
+            return Err(JournalError::Conflict);
+        }
+    }
+
     let validation_name = name(&intent.transaction_id, "validation");
     if let Some(raw) = by_name.get(validation_name.as_str()) {
         validate_report(raw, &intent).map_err(|_| JournalError::Unknown)?;
@@ -713,10 +819,10 @@ fn parse_cutover<R: handoff::ProofRoot, S: handoff::ProofStamp<R>>(
             }
             let record: PhaseRecord<R> =
                 serde_json::from_slice(bytes).map_err(|_| JournalError::Unknown)?;
-            let final_paired = matches!(intent.schema, 2 | 3)
+            let final_paired = matches!(intent.schema, 2 | 3 | 4)
                 && matches!(stage, DurableStage::Verified | DurableStage::Committed);
-            let expected_schema = if intent.schema == 3 {
-                3
+            let expected_schema = if matches!(intent.schema, 3 | 4) {
+                intent.schema
             } else if final_paired {
                 2
             } else {
@@ -788,13 +894,14 @@ pub(in crate::store) fn original(
     scan: &JournalObservation,
     id: &TransactionId,
 ) -> JournalResult<OriginalCutover> {
+    original_for::<handoff::RetirementLinuxRoot>(scan, id)
+}
+pub(in crate::store) fn original_for<R: CutoverProofRoot>(
+    scan: &JournalObservation,
+    id: &TransactionId,
+) -> JournalResult<OriginalCutover<R>> {
     let inventory = super::platform::inventory(scan)?;
-    if !inventory.orphans.is_empty() {
-        return Err(JournalError::Conflict);
-    }
-    let handoffs = handoff::scan_handoffs(scan)?;
-    if handoffs.records.len() != 1
-        || &handoffs.records[0].intent.transaction_id != id
+    if !inventory.orphans.is_empty()
         || inventory.transactions.iter().any(|t| {
             t.prepared.is_none()
                 || t.phase_receipts
@@ -804,26 +911,28 @@ pub(in crate::store) fn original(
     {
         return Err(JournalError::Conflict);
     }
-    let cutovers = scan_cutovers(scan)?;
-    if !cutovers.native_records.is_empty() {
+    let handoffs = handoff::scan_handoffs(scan)?;
+    let old = R::retirement(handoffs)?;
+    if &old.intent.transaction_id != id {
         return Err(JournalError::Conflict);
     }
-    cutovers
-        .records
-        .into_iter()
-        .find(|r| &r.intent.transaction_id == id)
-        .ok_or(JournalError::Conflict)
+    R::cutovers(scan_cutovers(scan)?).and_then(|records| {
+        records
+            .into_iter()
+            .find(|r| &r.intent.transaction_id == id)
+            .ok_or(JournalError::Conflict)
+    })
 }
-pub(in crate::store) fn check_canonical(
+pub(in crate::store) fn check_canonical<R: handoff::ProofRoot>(
     state: &ConfigurationState,
-    original: &OriginalCutover,
+    original: &OriginalCutover<R>,
     require_target: bool,
 ) -> JournalResult<()> {
     check_canonical_root(&state.root, original, require_target)
 }
-pub(in crate::store) fn check_canonical_root(
+pub(in crate::store) fn check_canonical_root<R: handoff::ProofRoot>(
     root: &crate::store::PrivateRoot,
-    original: &OriginalCutover,
+    original: &OriginalCutover<R>,
     require_target: bool,
 ) -> JournalResult<()> {
     let i = &original.intent;
@@ -868,12 +977,22 @@ pub(in crate::store) fn check_canonical_root(
             i.history_committed_sha256,
         ),
     ] {
+        let Some(expected) = expected else { continue };
         let raw = root
             .read_raw(path, MAX_RAW)
             .map_err(|_| JournalError::Unknown)?;
         if Sha256Digest::of_bytes(raw.bytes()) != expected {
             return Err(JournalError::Conflict);
         }
+    }
+    if original.intent.schema == 4
+        && original.intent.endpoint_mode
+            == Some(styx_contracts::native_management::NativeMigrationEndpointMode::PreservedRemote)
+    {
+        root.ensure_absent(".styx-enrollment-journal-v1")
+            .map_err(|_| JournalError::Conflict)?;
+        root.ensure_absent("gateway")
+            .map_err(|_| JournalError::Conflict)?;
     }
     Ok(())
 }
@@ -936,14 +1055,63 @@ fn sync_existing(
             return Err(JournalError::Unknown);
         }
     }
-    dir.sync_all().map_err(|_| JournalError::Unknown)
+    super::platform::sync_directory(dir)
 }
 impl OwnedManagementJournal {
+    pub(in crate::store) fn cutover_prepared_matches<R>(
+        &self,
+        prepared: &PreparedCutover<R>,
+    ) -> bool {
+        self.owner.same_authority(&prepared.owner) && self.namespace == prepared.namespace
+    }
     pub(in crate::store) fn prepare_cutover(
         &mut self,
         maintenance: &ConfigurationMaintenance,
         inputs: CutoverInputs,
     ) -> JournalResult<PreparedCutover> {
+        self.prepare_cutover_for::<handoff::RetirementLinuxRoot>(maintenance, inputs.into())
+    }
+    pub(in crate::store) fn prepare_native_cutover(
+        &mut self,
+        maintenance: &ConfigurationMaintenance,
+        inputs: NativeCutoverInputs,
+        candidate: std::sync::Arc<crate::release::VerifiedNativeRelease>,
+    ) -> JournalResult<PreparedCutover<NativeRootIdentity>> {
+        candidate.revalidate().map_err(|_| JournalError::Unknown)?;
+        if candidate.report().scope != "runtime_candidate"
+            || !candidate
+                .manifest()
+                .minimum_reader
+                .supports_state_reader(ReaderContract::NativeMigratedStateV2)
+        {
+            return Err(JournalError::Unsupported);
+        }
+        self.owner.with_maintenance(maintenance, |state| {
+            self.with_directory_locked(state, |dir| {
+                let old = NativeRootIdentity::retirement(handoff::scan_handoffs(&files::scan(
+                    dir,
+                    self.budget,
+                )?)?)?;
+                if old.intent.candidate_manifest_sha256 != candidate.report().manifest_sha256
+                    || old.intent.publisher_spki_sha256.to_hex()
+                        != candidate.report().publisher_spki_sha256
+                {
+                    return Err(JournalError::Conflict);
+                }
+                Ok(())
+            })
+        })?;
+        let mut prepared =
+            self.prepare_cutover_for::<NativeRootIdentity>(maintenance, inputs.try_into()?)?;
+        prepared.candidate = Some(candidate);
+        prepared.validate_candidate()?;
+        Ok(prepared)
+    }
+    fn prepare_cutover_for<R: CutoverProofRoot>(
+        &mut self,
+        maintenance: &ConfigurationMaintenance,
+        inputs: native_writer::NormalizedInputs,
+    ) -> JournalResult<PreparedCutover<R>> {
         self.owner.with_maintenance(maintenance, |state| {
             self.with_directory_locked(state, |dir| {
                 let scan = files::scan(dir, self.budget)?;
@@ -954,8 +1122,6 @@ impl OwnedManagementJournal {
                         let cutovers = scan_cutovers(&scan)?;
                         !cutovers.records.is_empty() || !cutovers.native_records.is_empty()
                     }
-                    || !handoffs.native_records.is_empty()
-                    || handoffs.records.len() != 1
                     || inventory.transactions.iter().any(|t| {
                         t.prepared.is_none()
                             || t.phase_receipts
@@ -965,7 +1131,7 @@ impl OwnedManagementJournal {
                 {
                     return Err(JournalError::Conflict);
                 }
-                let old = &handoffs.records[0];
+                let old = R::retirement(handoffs)?;
                 let r = &old.intent;
                 let fact = old.observation();
                 if maintenance.transaction_id() != &r.transaction_id
@@ -978,7 +1144,17 @@ impl OwnedManagementJournal {
                 let target = decode_state(&inputs.target, &marker)
                     .map_err(|_| JournalError::InvalidInput)?;
                 let intent = CutoverIntent {
-                    schema: if inputs.endpoint.is_some() { 2 } else { 1 },
+                    schema: if inputs.schema4 {
+                        if !R::permits_cutover(4) {
+                            return Err(JournalError::InvalidInput);
+                        }
+                        4
+                    } else {
+                        R::schema(inputs.endpoint.is_some())?
+                    },
+                    endpoint_mode: inputs.endpoint_mode,
+                    history: inputs.history,
+                    host_pair_sha256: inputs.host_pair.as_ref().map(|b| Sha256Digest::of_bytes(b)),
                     kind: CutoverKind::LegacyRuntimeCutover,
                     transaction_id: r.transaction_id.clone(),
                     sequence: r.sequence,
@@ -1019,6 +1195,7 @@ impl OwnedManagementJournal {
                     marker: inputs.marker,
                     before: inputs.before,
                     target: inputs.target,
+                    host_pair: inputs.host_pair,
                     phases: vec![],
                     last_stage: DurableStage::Planned,
                     validation: None,
@@ -1060,6 +1237,12 @@ impl OwnedManagementJournal {
                         Zeroizing::new(bytes.clone()),
                     ));
                 }
+                if let Some(pair) = &data.host_pair {
+                    entries.push((
+                        name(&data.intent.transaction_id, "host-pair"),
+                        Zeroizing::new(pair.clone()),
+                    ));
+                }
                 if let Some(endpoint) = &data.endpoint {
                     entries.push((
                         name(&data.intent.transaction_id, "endpoint-binding"),
@@ -1079,7 +1262,7 @@ impl OwnedManagementJournal {
                 // Fixed-size digest placeholders reserve bytes only. No future
                 // phase or synthetic validation report is written by prepare.
                 reserved.validation_sha256 = Some(Sha256Digest::from_bytes([0; 32]));
-                if reserved.intent.schema == 2 {
+                if matches!(reserved.intent.schema, 2 | 3 | 4) {
                     reserved.paired_validation_sha256 = Some(Sha256Digest::from_bytes([0; 32]));
                 }
                 let mut previous = None;
@@ -1101,7 +1284,7 @@ impl OwnedManagementJournal {
                     name(&data.intent.transaction_id, "validation"),
                     Zeroizing::new(vec![0; MAX_VALIDATION]),
                 ));
-                if data.intent.schema == 2 {
+                if matches!(data.intent.schema, 2 | 3 | 4) {
                     entries.push((
                         name(&data.intent.transaction_id, "paired-validation"),
                         Zeroizing::new(vec![0; MAX_VALIDATION]),
@@ -1132,7 +1315,7 @@ impl OwnedManagementJournal {
                     files::immutable(dir, n, b, self.budget, &|_| {})?;
                 }
                 let after = files::scan(dir, self.budget)?;
-                let observed = original(&after, &data.intent.transaction_id)
+                let observed = original_for::<R>(&after, &data.intent.transaction_id)
                     .map_err(|_| JournalError::Unknown)?;
                 if observed.raw_intent != data.raw_intent
                     || observed.phases.len() != 1
@@ -1147,18 +1330,20 @@ impl OwnedManagementJournal {
                     owner: self.owner.clone(),
                     namespace: self.namespace,
                     original: data,
+                    candidate: None,
                 })
             })
         })
     }
     /// Persist a report obtained from a trusted opaque successful probe. This
     /// validates its data links only; no caller-supplied JSON proves execution.
-    pub(in crate::store) fn record_cutover_validation(
+    pub(in crate::store) fn record_cutover_validation<R: CutoverProofRoot>(
         &mut self,
         maintenance: &ConfigurationMaintenance,
-        prepared: &PreparedCutover,
+        prepared: &PreparedCutover<R>,
         report: &[u8],
     ) -> JournalResult<Sha256Digest> {
+        prepared.validate_candidate()?;
         if !prepared.matches_owner(&self.owner)
             || prepared.namespace != self.namespace
             || maintenance.transaction_id() != &prepared.intent().transaction_id
@@ -1169,7 +1354,7 @@ impl OwnedManagementJournal {
         self.owner.with_maintenance(maintenance, |state| {
             self.with_directory_locked(state, |dir| {
                 let scan = files::scan(dir, self.budget)?;
-                let source = original(&scan, &prepared.intent().transaction_id)?;
+                let source = original_for::<R>(&scan, &prepared.intent().transaction_id)?;
                 if source.intent != *prepared.intent()
                     || source.raw_intent != prepared.original.raw_intent
                     || source.last_stage != DurableStage::Applied
@@ -1183,7 +1368,7 @@ impl OwnedManagementJournal {
                 used.extend(handoff::scan_handoffs(&scan)?.used);
                 sync_existing(dir, &scan, &used)?;
                 files::immutable(dir, &n, report, self.budget, &|_| {})?;
-                let after = original(
+                let after = original_for::<R>(
                     &files::scan(dir, self.budget)?,
                     &source.intent.transaction_id,
                 )
@@ -1202,12 +1387,13 @@ impl OwnedManagementJournal {
     }
     /// Persist data supplied only by the upper retained opaque paired proof.
     /// This port checks links and durability, never grants physical authority.
-    pub(in crate::store) fn record_cutover_paired_validation(
+    pub(in crate::store) fn record_cutover_paired_validation<R: CutoverProofRoot>(
         &mut self,
         maintenance: &ConfigurationMaintenance,
-        prepared: &PreparedCutover,
+        prepared: &PreparedCutover<R>,
         report: &[u8],
     ) -> JournalResult<Sha256Digest> {
+        prepared.validate_candidate()?;
         if !prepared.matches_owner(&self.owner)
             || prepared.namespace != self.namespace
             || maintenance.transaction_id() != &prepared.intent().transaction_id
@@ -1217,7 +1403,7 @@ impl OwnedManagementJournal {
         self.owner.with_maintenance(maintenance, |state| {
             self.with_directory_locked(state, |dir| {
                 let scan = files::scan(dir, self.budget)?;
-                let source = original(&scan, &prepared.intent().transaction_id)?;
+                let source = original_for::<R>(&scan, &prepared.intent().transaction_id)?;
                 if source.intent != *prepared.intent()
                     || source.raw_intent != prepared.original.raw_intent
                     || source.last_stage != DurableStage::Applied
@@ -1235,7 +1421,7 @@ impl OwnedManagementJournal {
                 used.extend(handoff::scan_handoffs(&scan)?.used);
                 sync_existing(dir, &scan, &used)?;
                 files::immutable(dir, &n, report, self.budget, &|_| {})?;
-                let after = original(
+                let after = original_for::<R>(
                     &files::scan(dir, self.budget)?,
                     &source.intent.transaction_id,
                 )
@@ -1252,12 +1438,13 @@ impl OwnedManagementJournal {
             })
         })
     }
-    pub(in crate::store) fn append_cutover_phase(
+    pub(in crate::store) fn append_cutover_phase<R: CutoverProofRoot>(
         &mut self,
         maintenance: &ConfigurationMaintenance,
-        prepared: &PreparedCutover,
+        prepared: &PreparedCutover<R>,
         stage: DurableStage,
     ) -> JournalResult<JournalReceipt> {
+        prepared.validate_candidate()?;
         if !prepared.matches_owner(&self.owner)
             || prepared.namespace != self.namespace
             || maintenance.transaction_id() != &prepared.intent().transaction_id
@@ -1273,7 +1460,7 @@ impl OwnedManagementJournal {
         self.owner.with_maintenance(maintenance, |state| {
             self.with_directory_locked(state, |dir| {
                 let scan = files::scan(dir, self.budget)?;
-                let source = original(&scan, &prepared.intent().transaction_id)?;
+                let source = original_for::<R>(&scan, &prepared.intent().transaction_id)?;
                 if source.intent != *prepared.intent()
                     || source.raw_intent != prepared.original.raw_intent
                     || source.last_stage != wanted
@@ -1293,7 +1480,7 @@ impl OwnedManagementJournal {
                 used.extend(handoff::scan_handoffs(&scan)?.used);
                 sync_existing(dir, &scan, &used)?;
                 files::immutable(dir, &n, &raw, self.budget, &|_| {})?;
-                let after = original(
+                let after = original_for::<R>(
                     &files::scan(dir, self.budget)?,
                     &source.intent.transaction_id,
                 )
@@ -1312,15 +1499,16 @@ impl OwnedManagementJournal {
     }
     /// Read the exact completed successor under the retained configuration
     /// lock. This does not clear a fence or reconstruct physical runtime proof.
-    pub(in crate::store) fn validate_committed_cutover_locked(
+    pub(in crate::store) fn validate_committed_cutover_locked<R: CutoverProofRoot>(
         &self,
         state: &ConfigurationState,
-        prepared: &PreparedCutover,
+        prepared: &PreparedCutover<R>,
         committed: &JournalReceipt,
     ) -> JournalResult<()> {
+        prepared.validate_candidate()?;
         self.with_directory_locked(state, |dir| {
             let scan = files::scan(dir, self.budget)?;
-            let source = original(&scan, &prepared.intent().transaction_id)?;
+            let source = original_for::<R>(&scan, &prepared.intent().transaction_id)?;
             if source.intent != *prepared.intent()
                 || source.raw_intent != prepared.original.raw_intent
                 || source.phases.first() != Some(prepared.journal())
@@ -1328,7 +1516,8 @@ impl OwnedManagementJournal {
                 || committed.stage != DurableStage::Committed
                 || source.last_stage != DurableStage::Committed
                 || source.validation_report().is_none()
-                || (source.intent.schema == 2 && source.paired_validation_report().is_none())
+                || (matches!(source.intent.schema, 2 | 3 | 4)
+                    && source.paired_validation_report().is_none())
             {
                 return Err(JournalError::Conflict);
             }
@@ -1340,19 +1529,34 @@ impl OwnedManagementJournal {
         maintenance: &ConfigurationMaintenance,
         id: &TransactionId,
     ) -> JournalResult<OriginalCutover> {
+        self.resync_cutover_for::<handoff::RetirementLinuxRoot>(maintenance, id)
+    }
+    pub(in crate::store) fn resync_native_cutover(
+        &self,
+        maintenance: &ConfigurationMaintenance,
+        id: &TransactionId,
+    ) -> JournalResult<OriginalCutover<NativeRootIdentity>> {
+        self.resync_cutover_for::<NativeRootIdentity>(maintenance, id)
+    }
+    pub(in crate::store) fn resync_cutover_for<R: CutoverProofRoot>(
+        &self,
+        maintenance: &ConfigurationMaintenance,
+        id: &TransactionId,
+    ) -> JournalResult<OriginalCutover<R>> {
         if maintenance.transaction_id() != id {
             return Err(JournalError::Conflict);
         }
         self.owner.with_maintenance(maintenance, |state| {
             self.with_directory_locked(state, |dir| {
                 let scan = files::scan(dir, self.budget)?;
-                let before = original(&scan, id)?;
+                let before = original_for::<R>(&scan, id)?;
                 check_canonical(state, &before, false)?;
                 let mut used = scan_cutovers(&scan)?.used;
                 used.extend(handoff::scan_handoffs(&scan)?.used);
                 sync_existing(dir, &scan, &used)?;
-                let after = original(&files::scan(dir, self.budget)?, id)?;
+                let after = original_for::<R>(&files::scan(dir, self.budget)?, id)?;
                 if before.raw_intent != after.raw_intent
+                    || before.host_pair != after.host_pair
                     || before.preservation != after.preservation
                     || before.scope_bindings != after.scope_bindings
                     || before.marker != after.marker
@@ -1409,6 +1613,6 @@ pub(in crate::store) fn canonical_matches_retired_cutover_locked(
     })
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux", target_env = "gnu"))]
 #[path = "management_cutover_tests.rs"]
 mod tests;

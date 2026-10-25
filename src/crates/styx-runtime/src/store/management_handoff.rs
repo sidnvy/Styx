@@ -15,6 +15,7 @@ const MAX_INTENT: usize = 8192;
 #[path = "management_handoff_native.rs"]
 mod native;
 use native::NativeObservedRetirement;
+pub(in crate::store) use native::NativeRetirementFileStamp;
 pub(in crate::store) use native::{ProofRoot, ProofStamp};
 
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -24,6 +25,7 @@ pub(in crate::store) struct RetirementLinuxRoot {
     pub inode: u64,
     pub uid: u32,
 }
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
 impl RetirementLinuxRoot {
     fn matches(&self, actual: RootIdentity) -> bool {
         let RootIdentity::Linux { device, inode, uid } = actual;
@@ -50,7 +52,7 @@ impl RetirementFileStamp {
     fn valid(&self, uid: u32) -> bool {
         self.inode != 0
             && self.uid == uid
-            && self.mode == (libc::S_IFREG | 0o600)
+            && self.mode == 0o100600
             && self.nlink == 1
             && self.byte_len > 0
             && self.byte_len <= 4096
@@ -154,44 +156,56 @@ where
 {
     Option::<T>::deserialize(deserializer)
 }
-pub(in crate::store) struct PreparedCredentialRetirement {
-    intent: LegacyCredentialRetirementIntent,
+pub(in crate::store) struct PreparedCredentialRetirement<
+    R = RetirementLinuxRoot,
+    S = RetirementFileStamp,
+> {
+    intent: LegacyCredentialRetirementIntent<R, S>,
     raw_intent_sha256: Sha256Digest,
     record_sha256: Sha256Digest,
     owner: OwnedConfigurationRoot,
     namespace: (u64, u64),
 }
-pub(in crate::store) struct RetiredCredentialRecord {
-    prepared: PreparedCredentialRetirement,
+pub(in crate::store) struct RetiredCredentialRecord<
+    R = RetirementLinuxRoot,
+    S = RetirementFileStamp,
+> {
+    prepared: PreparedCredentialRetirement<R, S>,
     record_sha256: Sha256Digest,
-    post_stamp: RetirementFileStamp,
+    post_stamp: S,
 }
-impl PreparedCredentialRetirement {
-    pub(in crate::store) fn intent(&self) -> &LegacyCredentialRetirementIntent {
+impl<R, S> PreparedCredentialRetirement<R, S> {
+    pub(in crate::store) fn matches_owner(&self, owner: &OwnedConfigurationRoot) -> bool {
+        self.owner.same_authority(owner)
+    }
+    pub(in crate::store) fn intent(&self) -> &LegacyCredentialRetirementIntent<R, S> {
         &self.intent
     }
     pub(in crate::store) fn record_sha256(&self) -> Sha256Digest {
         self.record_sha256
     }
 }
-impl RetiredCredentialRecord {
-    pub(in crate::store) fn intent(&self) -> &LegacyCredentialRetirementIntent {
+impl<R, S> RetiredCredentialRecord<R, S> {
+    pub(in crate::store) fn intent(&self) -> &LegacyCredentialRetirementIntent<R, S> {
         &self.prepared.intent
     }
     pub(in crate::store) fn record_sha256(&self) -> Sha256Digest {
         self.record_sha256
     }
-    pub(in crate::store) fn post_stamp(&self) -> &RetirementFileStamp {
+    pub(in crate::store) fn post_stamp(&self) -> &S {
         &self.post_stamp
     }
 }
 /// Original exact bytes; no Debug/Serde or token contents. Re-sync never advances.
-pub(in crate::store) struct OriginalCredentialRetirement {
-    pub intent: LegacyCredentialRetirementIntent,
+pub(in crate::store) struct OriginalCredentialRetirement<
+    R = RetirementLinuxRoot,
+    S = RetirementFileStamp,
+> {
+    pub intent: LegacyCredentialRetirementIntent<R, S>,
     pub raw_intent: Vec<u8>,
     pub prepared_sha256: Option<Sha256Digest>,
     pub retired_sha256: Option<Sha256Digest>,
-    pub post_stamp: Option<RetirementFileStamp>,
+    pub post_stamp: Option<S>,
 }
 pub(in crate::store) struct ObservedRetirement<R = RetirementLinuxRoot, S = RetirementFileStamp> {
     pub(in crate::store) intent: LegacyCredentialRetirementIntent<R, S>,
@@ -218,8 +232,8 @@ impl<R, S> ObservedRetirement<R, S> {
         }
     }
 }
-impl ObservedRetirement {
-    pub(in crate::store) fn original(&self) -> OriginalCredentialRetirement {
+impl<R: Clone, S: Clone> ObservedRetirement<R, S> {
+    pub(in crate::store) fn original(&self) -> OriginalCredentialRetirement<R, S> {
         OriginalCredentialRetirement {
             intent: self.intent.clone(),
             raw_intent: self.raw.clone(),
@@ -365,6 +379,7 @@ fn parse_retirement<R: ProofRoot, S: ProofStamp<R>>(
         post,
     })
 }
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
 fn check_canonical(
     journal: &OwnedManagementJournal,
     state: &ConfigurationState,
@@ -419,10 +434,10 @@ fn preflight(
     }
     state.preflight_growth(bytes - scan.total_bytes)
 }
-fn prepared(
+fn prepared<R: Clone, S: Clone>(
     journal: &OwnedManagementJournal,
-    record: &ObservedRetirement,
-) -> JournalResult<PreparedCredentialRetirement> {
+    record: &ObservedRetirement<R, S>,
+) -> JournalResult<PreparedCredentialRetirement<R, S>> {
     Ok(PreparedCredentialRetirement {
         intent: record.intent.clone(),
         raw_intent_sha256: Sha256Digest::of_bytes(&record.raw),
@@ -431,6 +446,7 @@ fn prepared(
         namespace: journal.namespace,
     })
 }
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
 fn original(scan: &JournalObservation, id: &TransactionId) -> JournalResult<ObservedRetirement> {
     let inventory = super::platform::inventory(scan)?;
     if !inventory.orphans.is_empty() {
@@ -447,6 +463,7 @@ fn original(scan: &JournalObservation, id: &TransactionId) -> JournalResult<Obse
         .ok_or(JournalError::Conflict)
 }
 
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
 impl OwnedManagementJournal {
     /// Retains the original writer while initializing its one fixed journal.
     /// Existing tracked namespaces may be claimed once, never an untracked one.
@@ -688,6 +705,22 @@ impl OwnedManagementJournal {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux", target_env = "gnu"))]
 #[path = "management_handoff_tests.rs"]
 mod tests;
+
+#[path = "management_handoff_native_writer.rs"]
+mod native_writer;
+pub(in crate::store) use native_writer::{
+    NativeOriginalRetirement, NativePreparedRetirement, NativeRetiredRecord,
+    NativeRetirementIntent, reject_migration_v2_collision,
+};
+
+#[path = "management_owner_recovery.rs"]
+mod owner_recovery;
+pub(in crate::store) use owner_recovery::{
+    ArchivedLegacyOwnerRecovery, LegacyGuardsHeld, LegacyOwnerRecoveryIntent, OwnerRecoveryStage,
+    PreparedLegacyOwnerRecovery, RecoveryBasis, RecoveryBoot, RecoveryGuard, RecoveryGuardBinding,
+    RecoveryGuardName, RecoveryGuardPost, RecoveryKind, RecoveryOriginal, RecoveryOriginalBinding,
+    RecoveryOriginalName, RecoveryOriginalPost, RecoveryRestartBinding, scan_owner_recoveries,
+};

@@ -129,6 +129,64 @@ pub struct NativeMigrationBinding {
     pub scope_bindings_sha256: Sha256Digest,
     pub original_token_relative_path: String,
 }
+/// Versioned original-identity history; absence of a local Gateway is explicit.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum NativeMigrationHistory {
+    PreservedHostPair {
+        source_bindings_sha256: Sha256Digest,
+    },
+    ImportedLocalGateway {
+        baseline_sha256: Sha256Digest,
+        committed_sha256: Sha256Digest,
+    },
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum NativeMigrationEndpointMode {
+    PreservedRemote,
+    IssuedLocal,
+}
+pub const NATIVE_MIGRATION_V2_KEY: &str = "migration_v2";
+/// Typed by the V2 reader only; data does not grant a credential or admission.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeMigrationBindingV2 {
+    pub host_pair_sha256: Sha256Digest,
+    pub schema: u16,
+    pub transaction_id: TransactionId,
+    pub root_identity: NativeRootIdentity,
+    pub original_state_sha256: Sha256Digest,
+    pub retired_receipt_sha256: Sha256Digest,
+    pub candidate_manifest_sha256: Sha256Digest,
+    pub publisher_spki_sha256: Sha256Digest,
+    pub preservation_sha256: Sha256Digest,
+    pub scope_bindings_sha256: Sha256Digest,
+    pub original_token_relative_path: String,
+    pub endpoint_mode: NativeMigrationEndpointMode,
+    pub history: NativeMigrationHistory,
+}
+/// Complete original Pair material hashes. No private key/token bytes or grants.
+/// Source binding requires a trusted protected-root reader and real crypto
+/// validation upstream; decoding this attachment cannot mint identity proof.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativePreservedHostPair {
+    pub schema: u16,
+    pub transaction_id: TransactionId,
+    pub config_root: NativeRootIdentity,
+    pub host_root: NativeRootIdentity,
+    pub deployment_raw_sha256: Sha256Digest,
+    pub device_id: crate::identity::DeviceId,
+    pub fingerprint: Sha256Digest,
+    pub gateway_origin: String,
+    pub gateway_ca_pem_sha256: Sha256Digest,
+    pub identity_json_sha256: Sha256Digest,
+    pub identity_private_pem_sha256: Sha256Digest,
+    pub host_profile_sha256: Sha256Digest,
+    pub credential_sha256: Sha256Digest,
+    pub preservation_sha256: Sha256Digest,
+}
 /// No Debug/automatic logging: unknown extension values can contain secrets.
 /// Formal readers MUST first reject decoded duplicate keys at every depth.
 #[derive(Clone, Serialize)]
@@ -149,6 +207,20 @@ pub struct NativeState {
     pub extensions: BTreeMap<String, Box<serde_json::value::RawValue>>,
 }
 impl NativeState {
+    pub fn has_migration_binding(&self) -> bool {
+        self.migration.is_some() || self.reader_contract == ReaderContract::NativeMigratedStateV2
+    }
+    /// No fallback: an explicit V2 reader must consume its typed reserved key.
+    pub fn migration_v2(&self) -> Result<Option<NativeMigrationBindingV2>, serde_json::Error> {
+        // Earlier readers preserve opaque extensions without interpreting V2.
+        if self.reader_contract != ReaderContract::NativeMigratedStateV2 {
+            return Ok(None);
+        }
+        self.extensions
+            .get(NATIVE_MIGRATION_V2_KEY)
+            .map(|raw| serde_json::from_str(raw.get()))
+            .transpose()
+    }
     /// Compare opaque extension bytes, never interpret/roundtrip their numbers.
     pub fn extensions_preserved_in(&self, target: &Self) -> bool {
         self.extensions.len() == target.extensions.len()

@@ -757,7 +757,7 @@ mod platform {
             if trusted_now_unix == 0
                 || deployment.is_empty()
                 || deployment.len() > NATIVE_STATE_BYTES
-                || state.migration.is_some()
+                || state.has_migration_binding()
                 || state.mode != NativeDeploymentMode::CreateLocal
                 || state.desired.gateway.is_none()
                 || state.revision != 0

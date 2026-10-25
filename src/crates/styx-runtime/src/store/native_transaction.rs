@@ -87,6 +87,35 @@ impl NativeTransactions {
             }),
         }
     }
+    /// Reopen only a fully committed migration and complete later native tip.
+    /// This reuses this coordinator's original journal and writer; it never
+    /// decodes the old legacy before-image as a native configuration or advances
+    /// an incomplete migration. Manager/scope policy belongs to the caller.
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "macos",
+        target_os = "windows"
+    ))]
+    pub(crate) fn reconcile_committed_migration(
+        &mut self,
+        snapshot: std::sync::Arc<super::committed_runtime_native::NativeCommittedRuntimeSnapshot>,
+    ) -> Result<(), NativeTransactionError> {
+        if self.marker().reader_floor
+            != styx_contracts::management::ReaderContract::NativeMigratedStateV2
+            || self.retained_maintenance.is_some()
+        {
+            return Err(NativeTransactionError::Conflict);
+        }
+        self.readstate()?;
+        let owner = self.configuration_root();
+        let _recovered =
+            super::committed_runtime_native::RecoveredNativeCommittedRuntime::reopen_with_journal(
+                &owner,
+                snapshot,
+                &self.journal,
+            )?;
+        Ok(())
+    }
     pub fn marker(&self) -> &styx_contracts::native_management::NativeRootMarker {
         self.binding.marker()
     }

@@ -14,6 +14,7 @@ pub(super) struct LocalGateway {
     pub ca_sha: String,
     tls: GatewayClientTls,
     inputs: Vec<RawFile>,
+    migration: Option<Arc<crate::store::committed_runtime_native::NativeCommittedRuntimeSnapshot>>,
     running: Option<RunningGateway>,
     observed: watch::Receiver<bool>,
     ready: watch::Sender<bool>,
@@ -81,6 +82,7 @@ impl LocalGateway {
             ca_sha,
             tls,
             inputs,
+            migration: None,
             running: None,
             observed,
             ready,
@@ -92,10 +94,101 @@ impl LocalGateway {
         result.validate()?;
         Ok(result)
     }
+    /// Original local endpoint, not the fresh sibling Gateway layout.
+    pub async fn open_migrated(scope: Arc<HostScope>) -> Result<Self, AppError> {
+        tokio::task::spawn_blocking(move || {
+            scope.validate()?;
+            let snapshot = Arc::new(
+                crate::store::committed_runtime_native::NativeCommittedRuntimeSnapshot::open(
+                    scope.state_dir(),
+                )
+                .map_err(|_| AppError("app_gateway_input_refused"))?,
+            );
+            let inspection =
+                migrated::inspect(scope.clone())?.ok_or(AppError("app_gateway_input_refused"))?;
+            if inspection.topology != migrated::Topology::SharedLocal {
+                return Err(AppError("app_gateway_input_refused"));
+            }
+            let endpoint: styx_contracts::native_management::NativeGatewayEndpointBinding =
+                serde_json::from_slice(
+                    snapshot
+                        .endpoint_binding()
+                        .ok_or(AppError("app_gateway_input_refused"))?,
+                )
+                .map_err(|_| AppError("app_gateway_input_refused"))?;
+            let chain = snapshot
+                .endpoint_chain()
+                .ok_or(AppError("app_gateway_input_refused"))?;
+            let certs = rustls_pemfile::certs(&mut Cursor::new(chain))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| AppError("app_gateway_input_refused"))?;
+            if certs.len() != 2 {
+                return Err(AppError("app_gateway_input_refused"));
+            }
+            let gateway = PrivateRoot::open(scope.state_dir().join("gateway"))
+                .map_err(|_| AppError("app_gateway_input_refused"))?;
+            let original_ca = gateway
+                .read_raw("certificate.pem", 128 * 1024)
+                .map_err(|_| AppError("app_gateway_input_refused"))?;
+            let anchors = rustls_pemfile::certs(&mut Cursor::new(original_ca.bytes()))
+                .collect::<Result<Vec<_>, _>>()
+                .map_err(|_| AppError("app_gateway_input_refused"))?;
+            if anchors.len() != 1
+                || anchors[0] != certs[1]
+                || endpoint.anchor_sha256
+                    != styx_contracts::identity::Sha256Digest::of_bytes(&certs[1])
+                || endpoint.leaf_sha256
+                    != styx_contracts::identity::Sha256Digest::of_bytes(&certs[0])
+            {
+                return Err(AppError("app_gateway_input_refused"));
+            }
+            let ca = String::from_utf8(original_ca.bytes().to_vec())
+                .map_err(|_| AppError("app_gateway_input_refused"))?;
+            let anchor = TrustAnchorPin::from_certificate_der(&anchors[0]);
+            let ca_sha = anchor.as_hex();
+            let tls = GatewayClientTls::from_pinned_ca_pem(
+                ca.as_bytes(),
+                anchor,
+                Some(GatewayLeafPin::from_certificate_der(&certs[0])),
+            )
+            .map_err(|_| AppError("app_gateway_input_refused"))?;
+            let (ready, observed) = watch::channel(false);
+            snapshot
+                .revalidate()
+                .map_err(|_| AppError("app_gateway_input_changed"))?;
+            scope.validate()?;
+            Ok(Self {
+                origin: endpoint.origin,
+                ca,
+                ca_sha,
+                tls,
+                inputs: vec![],
+                migration: Some(snapshot),
+                running: None,
+                observed,
+                ready,
+                cleanup: None,
+                retained: None,
+                startup_failure: None,
+                failed: false,
+                scope,
+            })
+        })
+        .await
+        .map_err(|_| AppError("app_gateway_reader_failed"))?
+    }
+    pub fn is_running(&self) -> bool {
+        self.running.is_some()
+    }
     pub fn validate(&self) -> Result<(), AppError> {
         self.scope.validate()?;
         if self.failed || self.retained.is_some() || self.startup_failure.is_some() {
             return Err(AppError("app_gateway_fenced"));
+        }
+        if let Some(original) = &self.migration {
+            return original
+                .revalidate()
+                .map_err(|_| AppError("app_gateway_input_changed"));
         }
         let root = self
             .scope
@@ -141,6 +234,9 @@ impl LocalGateway {
             .gateway
             .is_none_or(|g| g.run != NativeRunDesired::Running)
         {
+            if self.migration.is_some() {
+                return Err(AppError("app_shared_gateway_plan_required"));
+            }
             let change = native::NativeDesiredChange {
                 component: native::NativeComponent::Gateway,
                 run: NativeRunDesired::Running,
@@ -208,6 +304,9 @@ impl LocalGateway {
         );
         // Latch before dispatch: any lost/invalid reply keeps this original role
         // fenced. No retry of invitation or approval, including after restart.
+        if self.migration.is_some() {
+            return Err(AppError("app_migrated_pairing_already_committed"));
+        }
         self.failed = true;
         let response = native_join_http::exchange_local_admin(
             &origin,

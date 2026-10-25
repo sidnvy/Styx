@@ -1196,10 +1196,11 @@ fn native_build_info() -> serde_json::Value {
     };
     serde_json::json!({
         "schema": 1, "target": target,
-        "minimum_release_reader": styx_contracts::native_release::NativeReleaseReader::NativeRuntimeMigratedV1,
+        "minimum_release_reader": styx_contracts::native_release::NativeReleaseReader::NativeRuntimeMigratedV2,
         "supported_state_readers": [
             styx_contracts::management::ReaderContract::NativeManagementStateV1,
-            styx_contracts::management::ReaderContract::NativeMigratedStateV1
+            styx_contracts::management::ReaderContract::NativeMigratedStateV1,
+            styx_contracts::management::ReaderContract::NativeMigratedStateV2
         ]
     })
 }

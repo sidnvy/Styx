@@ -17,6 +17,8 @@ pub enum ReaderContract {
     NativeManagementStateV1,
     /// Explicit reader barrier for an original-identity runtime cutover.
     NativeMigratedStateV1,
+    /// Explicit reader barrier: typed native migration history, including Host-only.
+    NativeMigratedStateV2,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

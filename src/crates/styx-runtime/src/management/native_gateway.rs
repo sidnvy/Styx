@@ -683,7 +683,7 @@ mod platform {
                     .get(),
             )
             .map_err(|_| bad())?;
-            if state_value.migration.is_some()
+            if state_value.has_migration_binding()
                 || state_value.mode != NativeDeploymentMode::CreateLocal
                 || state_value.desired.host.is_some()
                 || state_value.desired.gateway.as_ref().is_none_or(|d| {

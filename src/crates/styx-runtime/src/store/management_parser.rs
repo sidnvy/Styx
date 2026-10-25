@@ -168,43 +168,156 @@ pub(super) fn inventory(scan: &JournalObservation) -> JournalResult<ManagementIn
         });
     }
     transactions.sort_by_key(|transaction| transaction.intent.sequence);
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "macos",
+        target_os = "windows"
+    ))]
     let handoff_inventory = handoff::scan_handoffs(scan)?;
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "macos",
+        target_os = "windows"
+    ))]
+    let cutover_inventory = super::cutover::scan_cutovers(scan)?;
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "macos",
+        target_os = "windows"
+    ))]
+    let completed_native_anchor = {
+        let mut completed = cutover_inventory
+            .native_records
+            .iter()
+            .filter(|c| c.intent.schema == 4 && c.last_stage == DurableStage::Committed);
+        let first = completed.next();
+        if completed.next().is_some() {
+            return Err(JournalError::Conflict);
+        }
+        first.map(|c| {
+            (
+                c.intent.transaction_id.clone(),
+                c.intent.sequence,
+                c.intent.before_state_sha256,
+                c.intent.target_state_sha256,
+            )
+        })
+    };
+
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "macos",
+        target_os = "windows"
+    ))]
     let mut ids: BTreeSet<_> = transactions
         .iter()
         .map(|tx| tx.intent.transaction_id.clone())
         .collect();
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "macos",
+        target_os = "windows"
+    ))]
     for (record, before_state_sha256) in handoff_inventory.observations() {
         if !ids.insert(record.transaction_id.clone()) || !sequences.insert(record.sequence) {
             return Err(JournalError::Conflict);
         }
         high_water = high_water.max(record.sequence);
-        // There is deliberately no committed handoff stage yet. It must be
-        // the sole pending tail after all desired-state history committed.
+        let completed = completed_native_anchor
+            .as_ref()
+            .is_some_and(|(id, seq, before, _)| {
+                id == &record.transaction_id
+                    && *seq == record.sequence
+                    && *before == before_state_sha256
+            });
         if transactions.iter().any(|tx| {
-            tx.intent.sequence >= record.sequence
-                || !tx
-                    .phase_receipts
-                    .last()
-                    .is_some_and(|p| p.stage == DurableStage::Committed)
+            tx.intent.sequence == record.sequence
+                || (tx.intent.sequence > record.sequence && !completed)
+                || (tx.intent.sequence < record.sequence
+                    && tx
+                        .phase_receipts
+                        .last()
+                        .is_none_or(|p| p.stage != DurableStage::Committed))
         }) {
             return Err(JournalError::Conflict);
         }
         if transactions
-            .last()
+            .iter()
+            .filter(|tx| tx.intent.sequence < record.sequence)
+            .next_back()
             .is_some_and(|tx| tx.intent.target_state_sha256 != before_state_sha256)
         {
             return Err(JournalError::Conflict);
         }
     }
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "macos",
+        target_os = "windows"
+    ))]
     {
         used.extend(handoff_inventory.used.iter().cloned());
-        let cutover_inventory = super::cutover::scan_cutovers(scan)?;
-        used.extend(cutover_inventory.used);
+        used.extend(cutover_inventory.used.iter().cloned());
     }
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "macos",
+        target_os = "windows"
+    ))]
+    let owner_recoveries: Vec<(TransactionId, u64, Option<handoff::OwnerRecoveryStage>)> = {
+        let recovery = handoff::scan_owner_recoveries(scan)?;
+        used.extend(recovery.used.iter().cloned());
+        for record in &recovery.records {
+            let i = &record.intent;
+            let matching = handoff_inventory
+                .native_records
+                .iter()
+                .find(|r| r.intent.transaction_id == i.transaction_id);
+            if let Some(retirement) = matching {
+                if record.stage() != Some(handoff::OwnerRecoveryStage::GuardsHeld)
+                    || i.sequence != retirement.intent.sequence
+                    || i.config_root != retirement.intent.config_root
+                    || i.before_state_sha256 != retirement.intent.before_state_sha256
+                    || i.deployment_raw_sha256 != retirement.intent.deployment_raw_sha256
+                    || i.candidate_manifest_sha256 != retirement.intent.candidate_manifest_sha256
+                    || i.publisher_spki_sha256 != retirement.intent.publisher_spki_sha256
+                    || i.successor_retirement_intent_sha256
+                        != retirement.observation().intent_sha256
+                {
+                    return Err(JournalError::Conflict);
+                }
+            } else {
+                if !ids.insert(i.transaction_id.clone())
+                    || !sequences.insert(i.sequence)
+                    || !handoff_inventory.records.is_empty()
+                    || !handoff_inventory.native_records.is_empty()
+                    || transactions.iter().any(|t| {
+                        t.intent.sequence >= i.sequence
+                            || t.phase_receipts
+                                .last()
+                                .is_none_or(|p| p.stage != DurableStage::Committed)
+                    })
+                    || transactions
+                        .last()
+                        .is_some_and(|t| t.intent.target_state_sha256 != i.before_state_sha256)
+                {
+                    return Err(JournalError::Conflict);
+                }
+                high_water = high_water.max(i.sequence);
+            }
+        }
+        recovery
+            .records
+            .iter()
+            .map(|r| {
+                (
+                    r.intent.transaction_id.clone(),
+                    r.intent.sequence,
+                    r.stage(),
+                )
+            })
+            .collect()
+    };
     for (index, tx) in transactions.iter().enumerate() {
         let committed = tx
             .phase_receipts
@@ -213,16 +326,52 @@ pub(super) fn inventory(scan: &JournalObservation) -> JournalResult<ManagementIn
         if !committed && index + 1 != transactions.len() {
             return Err(JournalError::Conflict);
         }
-        if index > 0
-            && transactions[index - 1].intent.target_state_sha256 != tx.intent.before_state_sha256
-        {
+        let previous = if let Some((_, sequence, _, target)) = &completed_native_anchor {
+            if tx.intent.sequence > *sequence
+                && (index == 0 || transactions[index - 1].intent.sequence < *sequence)
+            {
+                Some(*target)
+            } else if index > 0 {
+                Some(transactions[index - 1].intent.target_state_sha256)
+            } else {
+                None
+            }
+        } else if index > 0 {
+            Some(transactions[index - 1].intent.target_state_sha256)
+        } else {
+            None
+        };
+        if previous.is_some_and(|hash| hash != tx.intent.before_state_sha256) {
             return Err(JournalError::Conflict);
         }
     }
     Ok(ManagementInventory {
         high_water,
+        committed_cutover_anchor: completed_native_anchor
+            .as_ref()
+            .filter(|(id, seq, _, _)| {
+                handoff_inventory.records.is_empty()
+                    && handoff_inventory.native_records.len() == 1
+                    && owner_recoveries.len() == 1
+                    && owner_recoveries.iter().all(|(rid, rseq, stage)| {
+                        rid == id
+                            && rseq == seq
+                            && *stage == Some(handoff::OwnerRecoveryStage::GuardsHeld)
+                    })
+            })
+            .map(|(_, seq, _, target)| (*seq, *target)),
         transactions,
-        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "macos",
+            target_os = "windows"
+        ))]
+        owner_recoveries,
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "macos",
+            target_os = "windows"
+        ))]
         handoffs: handoff_inventory
             .observations()
             .map(|(observation, _)| observation)
@@ -245,6 +394,14 @@ pub(super) fn original(
         .into_iter()
         .find(|tx| &tx.intent.transaction_id == id)
         .ok_or(JournalError::Conflict)?;
+    original_observed(scan, tx)
+}
+/// The inventory has already verified the one canonical parser. This extracts
+/// its original raw attachments without recursively reparsing the full history.
+pub(super) fn original_observed(
+    scan: &JournalObservation,
+    tx: ManagementTransactionObservation,
+) -> JournalResult<OriginalManagementTransaction> {
     let (raw_name, _, before_name, target_name) = names(&tx.intent);
     let read = |name: &str| {
         scan.files

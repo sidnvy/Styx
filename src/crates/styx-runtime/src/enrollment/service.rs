@@ -1170,3 +1170,11 @@ impl ServiceError {
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 #[path = "service_maintenance.rs"]
 mod maintenance;
+
+#[cfg(any(
+    all(target_os = "linux", target_env = "gnu"),
+    target_os = "macos",
+    target_os = "windows"
+))]
+#[path = "service_native_recovery.rs"]
+mod native_recovery;

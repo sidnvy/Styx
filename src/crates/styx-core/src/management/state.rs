@@ -28,6 +28,9 @@ pub fn validate_state(
     {
         return Err(NativeStateRuleError::InvalidState);
     }
+    let migration_v2 = state
+        .migration_v2()
+        .map_err(|_| NativeStateRuleError::InvalidState)?;
     match (&state.migration, state.reader_contract) {
         (None, styx_contracts::management::ReaderContract::NativeManagementStateV1) => (),
         (Some(migration), styx_contracts::management::ReaderContract::NativeMigratedStateV1)
@@ -37,6 +40,39 @@ pub fn validate_state(
                         "device/.styx-retired-host-token-{}",
                         migration.transaction_id.as_str()
                     ) => {}
+        (None, styx_contracts::management::ReaderContract::NativeMigratedStateV2) => {
+            let migration = migration_v2
+                .as_ref()
+                .ok_or(NativeStateRuleError::InvalidState)?;
+            if migration.schema != 2
+                || state.revision == 0
+                || migration.root_identity != marker.root_identity
+                || migration.original_token_relative_path
+                    != format!(
+                        "device/.styx-retired-host-token-{}",
+                        migration.transaction_id.as_str()
+                    )
+            {
+                return Err(NativeStateRuleError::InvalidState);
+            }
+            match (&migration.history, migration.endpoint_mode, state.mode) {
+                (
+                    NativeMigrationHistory::PreservedHostPair {
+                        source_bindings_sha256,
+                    },
+                    NativeMigrationEndpointMode::PreservedRemote,
+                    NativeDeploymentMode::JoinExisting,
+                ) if state.desired.gateway.is_none()
+                    && state.desired.host.is_some()
+                    && *source_bindings_sha256 == migration.host_pair_sha256 => {}
+                (
+                    NativeMigrationHistory::ImportedLocalGateway { .. },
+                    NativeMigrationEndpointMode::IssuedLocal,
+                    NativeDeploymentMode::CreateLocal,
+                ) if state.desired.gateway.is_some() => {}
+                _ => return Err(NativeStateRuleError::InvalidState),
+            }
+        }
         _ => return Err(NativeStateRuleError::InvalidState),
     }
     match (state.revision, state.last_transaction.as_ref()) {
