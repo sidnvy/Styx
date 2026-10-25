@@ -225,7 +225,7 @@ impl HostWssLink {
             .as_str()
             .into_client_request()
             .map_err(|_| LinkError::InvalidEndpoint)?;
-        let mut authorization = http::HeaderValue::from_str(&format!("Bearer {}", &*bearer.0))
+        let mut authorization = http::HeaderValue::from_str(&format!("Bearer {}", *bearer.0))
             .map_err(|_| LinkError::InvalidBearer)?;
         authorization.set_sensitive(true);
         request
