@@ -345,6 +345,34 @@ fn create_new_file(path: &Path, rename: bool) -> Result<File> {
     private(&file)?;
     Ok(file)
 }
+/// Reopen an already observed journal source without truncation or creation.
+/// Caller must compare its original file identity and exact bytes before use.
+/// No write sharing keeps that actual source immutable until its handle closes.
+pub(super) fn open_journal_for_rename(path: &Path) -> Result<File> {
+    let path = wide(path.as_os_str())?;
+    // SAFETY: bounded absolute path, official ABI, noninheritable OPEN_EXISTING.
+    let handle = unsafe {
+        CreateFileW(
+            path.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE | DELETE,
+            FILE_SHARE_READ | FILE_SHARE_DELETE,
+            ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH,
+            ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(io_error());
+    }
+    // SAFETY: successful CreateFileW transfers unique ownership of one handle.
+    let file = unsafe { File::from_raw_handle(handle) };
+    if facts(&file)?.directory {
+        return Err(StoreError::NotRegularFile);
+    }
+    private(&file)?;
+    Ok(file)
+}
 /// Flush only this actual writable file/directory HANDLE. The caller validates
 /// its original identity, private ACL and local NTFS support. No volume flush,
 /// administrator elevation or physical power-loss claim is implied.

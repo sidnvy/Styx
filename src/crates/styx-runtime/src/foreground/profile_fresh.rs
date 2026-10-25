@@ -2,17 +2,24 @@
 //! C08 owns signed workers; neither local DATA nor this adapter grants tools.
 use super::*;
 use crate::store::native_host_snapshot::NativeHostSnapshot;
+#[cfg(target_os = "linux")]
 use serde_json::Value;
 
 #[derive(Deserialize)]
 struct FreshDeployment {
     schema: u16,
     mode: String,
+    #[cfg(target_os = "linux")]
     host: FreshHost,
+    #[cfg(target_os = "windows")]
+    #[serde(rename = "host")]
+    _host: FreshHost,
 }
 #[derive(Deserialize)]
 struct FreshHost {
+    #[cfg(target_os = "linux")]
     computer: Option<Value>,
+    #[cfg(target_os = "linux")]
     browser: Option<Value>,
 }
 
@@ -25,7 +32,12 @@ pub(super) fn load(state_dir: &Path) -> Result<LoadedLegacyProfile, ProfileError
     let ready = snapshot.ready();
     if seed.schema != 1
         || ready.schema != 1
-        || seed.platform != "linux"
+        || seed.platform
+            != if cfg!(target_os = "windows") {
+                "win32"
+            } else {
+                "linux"
+            }
         || seed.device_id != ready.device_id
         || seed.fingerprint != ready.fingerprint
         || snapshot.state_dir() != state_dir
@@ -116,18 +128,23 @@ pub(super) fn load(state_dir: &Path) -> Result<LoadedLegacyProfile, ProfileError
     if deployment.schema != 1 || deployment.mode != "join-existing" {
         return Err(ProfileError::Invalid);
     }
-    // Local requests and Gateway approvals remain distinct. Unsupported/missing
-    // Browser executable selection disables only that lane in its factory.
+    // Only Linux implements these native Browser/Computer factories. Remote
+    // approvals are not local feature configuration or Windows desktop authority.
+    #[cfg(target_os = "linux")]
     let computer = seed.computer_requested && deployment.host.computer == Some(Value::Bool(true));
+    #[cfg(target_os = "linux")]
     let deployment_computer = Some(Value::Bool(computer));
+    #[cfg(target_os = "linux")]
     let host_computer = Some(serde_json::json!({
         "enabled":computer,"connections":1,"env":{"CUA_DRIVER_RS_ENABLE_WAYLAND":"1"}
     }));
+    #[cfg(target_os = "linux")]
     let deployment_browser = if seed.browser_requested {
         deployment.host.browser
     } else {
         None
     };
+    #[cfg(target_os = "linux")]
     let host_browser = deployment_browser.clone().map(|mut value| {
         if let Some(object) = value.as_object_mut() {
             object.insert(
@@ -137,9 +154,16 @@ pub(super) fn load(state_dir: &Path) -> Result<LoadedLegacyProfile, ProfileError
         }
         value
     });
+    #[cfg(target_os = "linux")]
     let release_root = inventory.browser_release_root();
+    #[cfg(target_os = "linux")]
     let browser_node_version = inventory.browser_node_version();
+    #[cfg(target_os = "linux")]
     let cua_version = inventory.cua_version();
+    #[cfg(target_os = "windows")]
+    let environment = super::super::windows_env::executor_environment(&BTreeMap::new(), state_dir)?;
+    #[cfg(not(target_os = "windows"))]
+    let environment = BTreeMap::new();
     let signed_version = inventory.version().to_owned();
     let loaded = LoadedLegacyProfile {
         host_base_dir: state_dir.to_path_buf(),
@@ -150,15 +174,24 @@ pub(super) fn load(state_dir: &Path) -> Result<LoadedLegacyProfile, ProfileError
         bearer,
         executor,
         inventory,
+        #[cfg(target_os = "linux")]
         release_root,
+        #[cfg(target_os = "linux")]
         browser_node_version,
+        #[cfg(target_os = "linux")]
         cua_version,
+        #[cfg(target_os = "linux")]
         deployment_computer,
+        #[cfg(target_os = "linux")]
         host_computer,
+        #[cfg(target_os = "linux")]
         deployment_browser,
+        #[cfg(target_os = "linux")]
         host_browser,
         cwd,
-        environment: BTreeMap::new(),
+        environment,
+        #[cfg(target_os = "windows")]
+        runtime_temp: std::sync::OnceLock::new(),
         rpc_timeout: Duration::from_millis(35000),
         observed: capture.observed,
         diagnostics: ProfileDiagnostics {

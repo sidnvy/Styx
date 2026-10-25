@@ -216,7 +216,7 @@ impl NativeRootBinding {
         &self,
         state: &super::configuration::ConfigurationState,
     ) -> super::secure_journal::JournalResult<ValidatedNativeState> {
-        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
         {
             use super::secure_journal::{JournalError, files};
             use styx_contracts::native_management::NATIVE_STATE_BYTES;
@@ -240,7 +240,14 @@ impl NativeRootBinding {
                         for name in [NATIVE_MARKER_FILE, "deployment.json", "state.json"] {
                             files::sync_file(directory, name)?;
                         }
-                        directory.sync_all().map_err(|_| JournalError::Unknown)
+                        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+                        {
+                            directory.sync_all().map_err(|_| JournalError::Unknown)
+                        }
+                        #[cfg(target_os = "windows")]
+                        {
+                            files::sync_directory(directory)
+                        }
                     })())
                 })
                 .map_err(|_| JournalError::Unknown)??;
@@ -271,7 +278,7 @@ impl NativeRootBinding {
             .map_err(|_| JournalError::Unknown)?;
             Ok(after)
         }
-        #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+        #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows")))]
         {
             let _ = state;
             Err(super::secure_journal::JournalError::Unsupported)

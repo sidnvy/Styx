@@ -156,7 +156,7 @@ impl NativeTransactions {
         id: &TransactionId,
         bytes: &[u8],
     ) -> Result<String, NativeTransactionError> {
-        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
         {
             if bytes.is_empty()
                 || bytes.len() > styx_contracts::native_management::NATIVE_STATE_BYTES
@@ -179,7 +179,7 @@ impl NativeTransactions {
             })?;
             Ok(name)
         }
-        #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+        #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows")))]
         {
             let _ = (id, bytes);
             Err(NativeTransactionError::Unsupported)
@@ -266,9 +266,10 @@ impl NativeTransactions {
         intent: &DesiredStateCommit,
         observer: &dyn Fn(&str, &str),
     ) -> Result<(), NativeTransactionError> {
-        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
         {
             use super::secure_journal::files;
+            #[cfg(all(target_os = "linux", target_env = "gnu"))]
             use nix::fcntl::{RenameFlags, renameat2};
             self.binding.with_binding(|state, marker| {
                 self.configuration_root()
@@ -323,19 +324,38 @@ impl NativeTransactions {
                     state
                         .root
                         .inner
-                        .with_configuration_writer_directory(&state.writer, |root_dir| {
+                        .with_configuration_writer_directory(&state.writer, |_root_dir| {
                             let result = (|| {
-                                renameat2(
-                                    directory,
-                                    temporary.as_str(),
-                                    root_dir,
-                                    "state.json",
-                                    RenameFlags::empty(),
-                                )
-                                .map_err(|_| JournalError::Unknown)?;
-                                observer("canonical", "rename");
-                                root_dir.sync_all().map_err(|_| JournalError::Unknown)?;
-                                directory.sync_all().map_err(|_| JournalError::Unknown)?;
+                                #[cfg(all(target_os = "linux", target_env = "gnu"))]
+                                {
+                                    renameat2(
+                                        directory,
+                                        temporary.as_str(),
+                                        _root_dir,
+                                        "state.json",
+                                        RenameFlags::empty(),
+                                    )
+                                    .map_err(|_| JournalError::Unknown)?;
+                                    observer("canonical", "rename");
+                                    _root_dir.sync_all().map_err(|_| JournalError::Unknown)?;
+                                    directory.sync_all().map_err(|_| JournalError::Unknown)?;
+                                }
+                                #[cfg(target_os = "windows")]
+                                {
+                                    // Original writer, expected canonical observation and
+                                    // protected namespace remain held throughout publication.
+                                    state
+                                        .root
+                                        .inner
+                                        .replace_native_state_from_journal(
+                                            &state.writer,
+                                            (directory, &temporary),
+                                            &pin,
+                                            target,
+                                            &|phase| observer("canonical", phase),
+                                        )
+                                        .map_err(|_| JournalError::Unknown)?;
+                                }
                                 observer("canonical", "directory_sync");
                                 Ok(())
                             })();
@@ -351,7 +371,7 @@ impl NativeTransactions {
             })?;
             Ok(())
         }
-        #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+        #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows")))]
         {
             let _ = (maintenance, before, target, intent, observer);
             Err(NativeTransactionError::Unsupported)
@@ -588,3 +608,7 @@ fn advance(
 #[cfg(test)]
 #[path = "native_transaction_tests.rs"]
 mod tests;
+
+#[cfg(all(test, target_os = "windows"))]
+#[path = "native_transaction_windows_tests.rs"]
+mod windows_tests;

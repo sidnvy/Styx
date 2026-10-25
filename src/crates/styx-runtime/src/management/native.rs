@@ -170,12 +170,12 @@ impl fmt::Display for NativeManagementError {
 }
 impl std::error::Error for NativeManagementError {}
 type Result<T> = std::result::Result<T, NativeManagementError>;
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
 static WORKERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 async fn blocking<T: Send + 'static>(
     job: impl FnOnce() -> Result<T> + Send + 'static,
 ) -> Result<T> {
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
     {
         let permit = WORKERS
             .try_acquire()
@@ -187,7 +187,7 @@ async fn blocking<T: Send + 'static>(
         .await
         .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?
     }
-    #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+    #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows")))]
     {
         let _ = job;
         Err(NativeManagementError::new(ErrorKind::Unsupported))
@@ -214,7 +214,10 @@ pub async fn apply(state_dir: &Path, plan_file: &Path) -> Result<NativeManagemen
     blocking(move || platform::apply(&path, &plan)).await
 }
 fn parse_transaction_id(value: &str) -> Result<TransactionId> {
-    if !cfg!(all(target_os = "linux", target_env = "gnu")) {
+    if !cfg!(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "windows"
+    )) {
         return Err(NativeManagementError::new(ErrorKind::Unsupported));
     }
     if value.len() > 128 {
@@ -236,7 +239,7 @@ pub async fn inspect(
     blocking(move || platform::inspect(&path, id.as_ref())).await
 }
 
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
 mod platform {
     use super::*;
     use crate::store::{PrivateRoot, RawFile, StoreError, native_root, native_state};
@@ -285,8 +288,22 @@ mod platform {
             .map_err(store)?;
         let marker = native_state::decode_marker(raw.bytes())
             .map_err(|_| NativeManagementError::new(ErrorKind::Invalid))?;
-        let crate::store::RootIdentity::Linux { device, inode, uid } = root.identity();
-        if marker.root_identity != (NativeRootIdentity::Linux { device, inode, uid }) {
+        let observed = match root.identity() {
+            crate::store::RootIdentity::Linux { device, inode, uid } => {
+                NativeRootIdentity::Linux { device, inode, uid }
+            }
+            #[cfg(target_os = "windows")]
+            crate::store::RootIdentity::Windows {
+                volume_serial,
+                file_id,
+                owner_sid,
+            } => NativeRootIdentity::Windows {
+                volume_serial,
+                file_id,
+                owner_sid,
+            },
+        };
+        if marker.root_identity != observed {
             return Err(NativeManagementError::new(ErrorKind::Conflict));
         }
         let writer = root.try_existing_configuration_writer().map_err(store)?;
@@ -621,7 +638,7 @@ mod platform {
         })
     }
 }
-#[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows")))]
 mod platform {
     use super::*;
     pub(super) fn initialize(

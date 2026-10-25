@@ -61,7 +61,7 @@ fn load_error(error: ReleaseError) -> ProfileError {
     }
 }
 impl ProfileRelease {
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
     pub(super) fn from_native_selection(
         selection: &styx_contracts::native_management::NativeRuntimeSelection,
         expected: &PublisherFingerprint,

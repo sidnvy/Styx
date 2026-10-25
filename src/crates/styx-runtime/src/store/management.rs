@@ -154,11 +154,11 @@ pub(super) struct OriginalManagementTransaction {
 }
 pub struct OwnedManagementJournal {
     owner: OwnedConfigurationRoot,
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
     budget: JournalBudget,
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
     namespace: (u64, u64),
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
     root_identity: super::RootIdentity,
 }
 impl OwnedManagementJournal {
@@ -166,7 +166,7 @@ impl OwnedManagementJournal {
         owner: OwnedConfigurationRoot,
         budget: JournalBudget,
     ) -> JournalResult<Self> {
-        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
         {
             let root_identity = owner.identity()?;
             let namespace = owner
@@ -178,7 +178,7 @@ impl OwnedManagementJournal {
                 root_identity,
             })
         }
-        #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+        #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows")))]
         {
             let _ = (owner, budget);
             Err(JournalError::Unsupported)
@@ -188,7 +188,7 @@ impl OwnedManagementJournal {
         self.owner.clone()
     }
     pub fn observe(&self) -> JournalResult<ManagementInventory> {
-        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
         {
             self.owner.with_state(|state| {
                 platform::with_directory(state, self.namespace, |dir| {
@@ -196,12 +196,12 @@ impl OwnedManagementJournal {
                 })
             })
         }
-        #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+        #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows")))]
         {
             Err(JournalError::Unsupported)
         }
     }
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
     pub(super) fn observe_locked(
         &self,
         state: &super::configuration::ConfigurationState,
@@ -224,13 +224,13 @@ impl OwnedManagementJournal {
         state: &super::configuration::ConfigurationState,
         id: &TransactionId,
     ) -> JournalResult<OriginalManagementTransaction> {
-        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
         {
             self.with_directory_locked(state, |dir| {
                 platform::original(&super::secure_journal::files::scan(dir, self.budget)?, id)
             })
         }
-        #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+        #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows")))]
         {
             let _ = (state, id);
             Err(JournalError::Unsupported)
@@ -238,7 +238,7 @@ impl OwnedManagementJournal {
     }
     /// Store-private pinned namespace access under an ALREADY held writer lock.
     /// It neither acquires/replaces authority nor exposes arbitrary directories.
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
     pub(super) fn with_directory_locked<T>(
         &self,
         state: &super::configuration::ConfigurationState,
@@ -249,7 +249,7 @@ impl OwnedManagementJournal {
         }
         platform::with_directory(state, self.namespace, operation)
     }
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
     pub(super) fn budget(&self) -> JournalBudget {
         self.budget
     }
@@ -262,13 +262,13 @@ impl OwnedManagementJournal {
         state: &super::configuration::ConfigurationState,
         id: &TransactionId,
     ) -> JournalResult<()> {
-        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
         {
             self.with_directory_locked(state, |dir| {
                 let scan = super::secure_journal::files::scan(dir, self.budget)?;
                 let inventory = platform::inventory(&scan)?;
                 if !inventory.orphans.is_empty()
-                    || !inventory.handoffs.is_empty()
+                    || inventory.has_legacy_handoffs()
                     || inventory
                         .transactions
                         .last()
@@ -287,7 +287,7 @@ impl OwnedManagementJournal {
                 Ok(())
             })
         }
-        #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+        #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows")))]
         {
             let _ = (state, id);
             Err(JournalError::Unsupported)
@@ -303,12 +303,22 @@ impl OwnedManagementJournal {
         if maintenance.transaction_id() != id {
             return Err(JournalError::Conflict);
         }
-        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
         {
             self.owner.with_maintenance(maintenance, |state| {
                 self.with_directory_locked(state, |dir| {
                     use super::secure_journal::files;
                     let scan = files::scan(dir, self.budget)?;
+                    #[cfg(target_os = "windows")]
+                    {
+                        // Windows has no legacy migration reader. Unknown file
+                        // families are preserved as orphans, never resynced into
+                        // an apparently complete supported native transaction.
+                        let observed = platform::inventory(&scan)?;
+                        if !observed.orphans.is_empty() || observed.has_legacy_handoffs() {
+                            return Err(JournalError::Conflict);
+                        }
+                    }
                     let before = platform::original(&scan, id)?;
                     let (intent_name, prepared_name, before_name, target_name) =
                         platform::names(&before.intent);
@@ -321,7 +331,7 @@ impl OwnedManagementJournal {
                     for name in names {
                         files::sync_file(dir, &name)?;
                     }
-                    dir.sync_all().map_err(|_| JournalError::Unknown)?;
+                    platform::sync_directory(dir)?;
                     let after = platform::original(&files::scan(dir, self.budget)?, id)?;
                     if before.intent != after.intent
                         || before.raw_intent != after.raw_intent
@@ -335,7 +345,7 @@ impl OwnedManagementJournal {
                 })
             })
         }
-        #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+        #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows")))]
         {
             Err(JournalError::Unsupported)
         }
@@ -348,7 +358,7 @@ impl OwnedManagementJournal {
         previous: Sha256Digest,
         reconciled: bool,
     ) -> JournalResult<JournalReceipt> {
-        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
         {
             platform::append(
                 self,
@@ -360,7 +370,7 @@ impl OwnedManagementJournal {
                 &|_, _| {},
             )
         }
-        #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+        #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows")))]
         {
             let _ = (maintenance, intent, stage, previous, reconciled);
             Err(JournalError::Unsupported)
@@ -396,11 +406,11 @@ impl OwnedManagementJournal {
         before: &[u8],
         target: &[u8],
     ) -> JournalResult<PreparedPersistence> {
-        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
         {
             platform::prepare(self, maintenance, raw_intent, before, target, &|_, _| {})
         }
-        #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+        #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows")))]
         {
             let _ = (maintenance, raw_intent, before, target);
             Err(JournalError::Unsupported)
@@ -418,7 +428,7 @@ impl OwnedManagementJournal {
         platform::prepare(self, maintenance, raw_intent, before, target, observer)
     }
 }
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
 mod platform {
     use super::parser::{PhaseRecord, PreparedRecord, persistence, phase_label};
     pub(super) use super::parser::{inventory, names, original, phase_name};
@@ -430,6 +440,19 @@ mod platform {
     use std::fs::File;
     use styx_contracts::identity::Sha256Digest;
 
+    // These are the platform's actual directory barriers. Windows calls the
+    // identity-checked writable-HANDLE implementation already exercised by the
+    // FS aggregate; neither branch invents a durability receipt from presence.
+    pub(super) fn sync_directory(dir: &File) -> JournalResult<()> {
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        {
+            dir.sync_all().map_err(|_| JournalError::Unknown)
+        }
+        #[cfg(target_os = "windows")]
+        {
+            files::sync_directory(dir)
+        }
+    }
     pub(super) fn with_directory<T>(
         state: &ConfigurationState,
         pin: (u64, u64),
@@ -477,7 +500,7 @@ mod platform {
             let receipt = with_directory(state, journal.namespace, |dir| {
                 let scan = files::scan(dir, journal.budget)?;
                 let inventory = inventory(&scan)?;
-                if !inventory.orphans.is_empty() || !inventory.handoffs.is_empty() {
+                if !inventory.orphans.is_empty() || inventory.has_legacy_handoffs() {
                     return Err(JournalError::Conflict);
                 }
                 let source = original(&scan, &intent.transaction_id)?;
@@ -628,7 +651,7 @@ mod platform {
             with_directory(state, journal.namespace, |dir| {
                 let scan = files::scan(dir, journal.budget)?;
                 let observed = inventory(&scan)?;
-                if !observed.orphans.is_empty() || !observed.handoffs.is_empty() {
+                if !observed.orphans.is_empty() || observed.has_legacy_handoffs() {
                     return Err(JournalError::Conflict);
                 }
                 if let Some(existing) = observed

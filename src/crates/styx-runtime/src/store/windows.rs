@@ -206,6 +206,90 @@ impl Root {
             ffi::flush_file(file)
         })
     }
+    /// Publish the already journaled C07 target under the SAME writer. The
+    /// source namespace, original file ID and exact bytes are pinned separately;
+    /// the canonical before observation is checked immediately before rename.
+    /// This is cooperating-writer replacement, never hostile-writer kernel CAS.
+    pub(in crate::store) fn replace_native_state_from_journal(
+        &self,
+        guard: &ConfigurationWriterGuard,
+        source: (&File, &str),
+        expected: &RawFile,
+        target: &[u8],
+        observer: &dyn Fn(&str),
+    ) -> Result<()> {
+        let (directory, temporary) = source;
+        Self::validate_journal_name(temporary)?;
+        if expected.relative_path != Path::new("state.json")
+            || target.is_empty()
+            || target.len() > 1024 * 1024
+        {
+            return Err(StoreError::Changed);
+        }
+        let source_root = Self::from_directory_handle(directory)?;
+        if source_root.path != self.path.join(".styx-management-journal-v1") {
+            return Err(StoreError::Changed);
+        }
+        self.with_configuration_writer_directory(guard, |destination| {
+            source_root.with_readonly_directory(|_| {
+                let observed = source_root.read_raw(Path::new(temporary), target.len())?;
+                if observed.bytes() != target {
+                    return Err(StoreError::Changed);
+                }
+                let source_path = source_root.path.join(temporary);
+                let file = ffi::open_journal_for_rename(&source_path)?;
+                let facts = private_facts(&file, false)?;
+                ffi::require_no_streams(&source_path)?;
+                if facts.observation != *observed.observation() {
+                    return Err(StoreError::Changed);
+                }
+                let mut bytes = Vec::new();
+                file.try_clone()?
+                    .take(target.len() as u64 + 1)
+                    .read_to_end(&mut bytes)?;
+                if bytes != target
+                    || private_facts(&file, false)? != facts
+                    || ffi::final_path(&file)? != source_path
+                {
+                    return Err(StoreError::Changed);
+                }
+                let canonical = self.read_raw(Path::new("state.json"), 1024 * 1024)?;
+                if canonical.observation() != expected.observation()
+                    || canonical.bytes() != expected.bytes()
+                {
+                    return Err(StoreError::Changed);
+                }
+                // Both Root owners retain all directory/ancestor pins without
+                // delete sharing. Source selection uses this actual HANDLE only.
+                ffi::rename_journal_file(&file, destination, "state.json", true)?;
+                observer("rename");
+                ffi::flush_file(&file)?;
+                observer("file_sync_after_rename");
+                if Self::journal_file_identity(&file)?
+                    != (facts.observation.device, facts.observation.inode)
+                {
+                    return Err(StoreError::Changed);
+                }
+                drop(file); // close write/delete access before protected reads
+                let after = self.read_raw(Path::new("state.json"), target.len())?;
+                if (after.observation().device, after.observation().inode)
+                    != (facts.observation.device, facts.observation.inode)
+                    || after.bytes() != target
+                {
+                    return Err(StoreError::Changed);
+                }
+                source_root.ensure_absent(Path::new(temporary))?;
+                self.sync_directory()?;
+                source_root.sync_directory()?;
+                let final_state = self.read_raw(Path::new("state.json"), target.len())?;
+                if after.observation() != final_state.observation() || final_state.bytes() != target
+                {
+                    return Err(StoreError::Changed);
+                }
+                Ok(())
+            })
+        })
+    }
     pub(in crate::store) fn flush_journal_file(&self, file: &File) -> Result<()> {
         self.with_readonly_directory(|_| {
             private_facts(file, false)?;

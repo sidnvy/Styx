@@ -1,15 +1,16 @@
 //! Existing-only native Host profile observation. No writer, recovery, fsync,
 //! remote grant, migration proof, or signed-release authority is minted here.
-#![cfg(all(target_os = "linux", target_env = "gnu"))]
+#![cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
 use super::{
     FileObservation, PrivateRoot, RootIdentity, management, native_state,
     secure_journal::{JournalBudget, JournalError, JournalObservation, JournalResult, files},
 };
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+use std::os::unix::fs::MetadataExt;
 use std::{
     collections::BTreeSet,
     fs::File,
     io::Cursor,
-    os::unix::fs::MetadataExt,
     path::{Path, PathBuf},
 };
 use styx_contracts::{
@@ -82,8 +83,7 @@ impl NativeHostSnapshot {
             .inner
             .with_readonly_directory(|dir| Ok(files::directory(dir, NAMESPACE)))
             .map_err(|_| JournalError::Unknown)??;
-        let metadata = namespace.metadata().map_err(|_| JournalError::Unknown)?;
-        let namespace_identity = (metadata.dev(), metadata.ino());
+        let namespace_identity = directory_identity(&namespace)?;
         let journal = files::scan(&namespace, JournalBudget::default())?;
         let mut pins = Vec::new();
         let mut identities = BTreeSet::new();
@@ -157,7 +157,7 @@ impl NativeHostSnapshot {
         if expected_seed != Sha256Digest::of_bytes(&seed_raw)
             || seed.schema != 1
             || ready.schema != 1
-            || seed.platform != "linux"
+            || seed.platform != native_platform()
             || seed.root_identity != marker.root_identity
             || seed.scope_generation != marker.scope_generation
             || seed.deployment_raw_sha256 != state.deployment_raw_sha256
@@ -205,13 +205,8 @@ impl NativeHostSnapshot {
             .with_readonly_directory(|directory| {
                 let result = (|| {
                     let current = files::directory(directory, NAMESPACE)?;
-                    let m = current.metadata().map_err(|_| JournalError::Unknown)?;
-                    let held = self
-                        .namespace
-                        .metadata()
-                        .map_err(|_| JournalError::Unknown)?;
-                    if (m.dev(), m.ino()) != self.namespace_identity
-                        || (held.dev(), held.ino()) != self.namespace_identity
+                    if directory_identity(&current)? != self.namespace_identity
+                        || directory_identity(&self.namespace)? != self.namespace_identity
                     {
                         return Err(JournalError::Unknown);
                     }
@@ -222,10 +217,7 @@ impl NativeHostSnapshot {
                     }
                     self.check_pins()?;
                     let final_directory = files::directory(directory, NAMESPACE)?;
-                    let m = final_directory
-                        .metadata()
-                        .map_err(|_| JournalError::Unknown)?;
-                    if (m.dev(), m.ino()) != self.namespace_identity {
+                    if directory_identity(&final_directory)? != self.namespace_identity {
                         return Err(JournalError::Unknown);
                     }
                     ownership(&self.root)?;
@@ -278,15 +270,56 @@ fn ownership(root: &PrivateRoot) -> JournalResult<()> {
     }
     Ok(())
 }
-fn matches_root(actual: &RootIdentity, marker: &NativeRootIdentity) -> bool {
-    let RootIdentity::Linux { device, inode, uid } = actual;
-    marker
-        == &NativeRootIdentity::Linux {
-            device: *device,
-            inode: *inode,
-            uid: *uid,
-        }
+fn native_platform() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "win32"
+    } else {
+        "linux"
+    }
 }
+fn directory_identity(directory: &File) -> JournalResult<(u64, u64)> {
+    #[cfg(target_os = "windows")]
+    {
+        super::windows_file_identity(directory).map_err(|_| JournalError::Unknown)
+    }
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        let metadata = directory.metadata().map_err(|_| JournalError::Unknown)?;
+        Ok((metadata.dev(), metadata.ino()))
+    }
+}
+fn matches_root(actual: &RootIdentity, marker: &NativeRootIdentity) -> bool {
+    match (actual, marker) {
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        (
+            RootIdentity::Linux { device, inode, uid },
+            NativeRootIdentity::Linux {
+                device: expected_device,
+                inode: expected_inode,
+                uid: expected_uid,
+            },
+        ) => device == expected_device && inode == expected_inode && uid == expected_uid,
+        #[cfg(target_os = "windows")]
+        (
+            RootIdentity::Windows {
+                volume_serial,
+                file_id,
+                owner_sid,
+            },
+            NativeRootIdentity::Windows {
+                volume_serial: expected_volume,
+                file_id: expected_file,
+                owner_sid: expected_sid,
+            },
+        ) => {
+            volume_serial == expected_volume
+                && file_id == expected_file
+                && owner_sid == expected_sid
+        }
+        _ => false,
+    }
+}
+
 fn pin(
     root: &PrivateRoot,
     path: &str,

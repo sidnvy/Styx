@@ -67,4 +67,41 @@ NULL RootDirectory approach. The original source is never reopened by path;
 the validated single-component destination stays under the original Root's
 retained ancestor/name pins. Do not retry a failed business publication using
 a second rename strategy; the three probe cases used independent fresh files.
-The corrected full owned-FS aggregate still requires execution.
+The corrected owned-FS aggregate passed on NAB5 for d35896b, including
+monotonic replacement, exact same-value resync, protected-reader refusal and
+orphan retention. This is not C07, ordinary Host, or power-loss acceptance.
+
+
+## R40: reuse the original C07 and ordinary Fresh reader
+
+The Windows backend now supplies the same OwnedManagementJournal and
+NativeTransactions coordinator as Linux. There is no second journal format,
+configuration authority, recovery flag, or implicit Host activation. A successful
+join still creates Stopped revision0. Starting an ordinary Fresh Host requires
+an actual committed C07 desired-state transition to Running; the reader keeps
+its Ready/root/seed/CA/credential and complete current-tip checks. Wire platform
+identity remains `win32`, with original volume/fileID/current-SID matching.
+
+Canonical replacement stages the existing exact target in the protected
+management namespace. Windows reopens that already observed source with
+OPEN_EXISTING and denies write sharing; original fileID, exact bytes and final
+source path are checked before using its actual rename HANDLE. It retains the
+same root/writer/maintenance and namespace pins, rechecks the original canonical
+bytes/observation immediately before replacement, flushes that same file and
+both affected directories, closes writable access and verifies the target's
+original source ID and bytes. This is cooperating-writer conditional replacement,
+not an atomic compare-and-swap against malicious same-user writers. The earlier
+R39 immutable publication retains its source from CREATE_NEW without reopening.
+
+Recovery re-syncs only the original exact transaction materials and phase chain
+under the same writer. Windows still has no legacy migration reader: unknown
+files stay retained orphans and prevent commit/recovery proof. No new or old
+input action is replayed by configuration recovery. Browser/Computer readiness
+remains independent; this slice wires ordinary Windows headless Exec and does
+not claim new native desktop factories or OS permissions.
+
+The new Windows C07 aggregate must verify fresh commit, exact close/reopen,
+foreign/stale intent refusal and explicit original recovery after an actual
+child process exits at the canonical rename boundary. Process interruption is
+not physical power loss. Compilation, this store aggregate, and the later
+request/approval/claim/self plus ordinary Host/Exec journey are separate gates.
