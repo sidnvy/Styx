@@ -2,7 +2,7 @@
 
 2026-10-24 · Owner-directed implementation choice: **Rust is the final Styx core runtime**.
 
-状态：owner已于2026-10-24授权执行，goal为active。四crate、Core准入/操作ledger、crypto/原格式私有store、配对TLS Gateway/Host与真实Codex开发切片已落地；显式旧Gateway/CLI互操作已取得开发证据；Session事实正在接入Host原准入锁，Linux候选发现采用有界独立worker。尚无Rust统一候选包、部署或真实跨平台迁移验收。实现状态与计划状态分开，见[IMPLEMENTATION.md](IMPLEMENTATION.md)。行为/迁移参考基线为 `44cf1470e6b0cfdfd2c2372e54e84ebd279c59c3`；既有date24.1安装包仍属于`8e4e645`，不包含后续修复。旧测试总数不作为Rust重写完成度。
+状态（2026-10-25）：Rust 是 Styx 自有核心的唯一目标实现，goal 仍 active。已接受集成基线 `e321914c3eb9284be561a391e1f327c20fab478b` 已有同身份迁移/原凭据退役及普通前台恢复证据、Windows Headless 配对/Exec/跨 owner 拒绝/真实进程收尾证据，以及同 SHA Linux 签名内部候选包；Mac 目前只完成该 SHA 编译检查。它们不等于已部署、统一三平台安装包或完整平台验收。当前 R36 补齐全新原生 Gateway 初始化，见 [ADR-030](ADR-030-FRESH-NATIVE-GATEWAY.md)；新代码不能继承旧 SHA 的实际结果。具体实现与历史切片见 [IMPLEMENTATION.md](IMPLEMENTATION.md)，逐次执行结论保存在外部 Owner Control Report/不可变 receipts。行为/旧格式参考基线仍为 `44cf1470e6b0cfdfd2c2372e54e84ebd279c59c3`。测试计数不作为重写完成度。
 
 阅读顺序：
 

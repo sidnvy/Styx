@@ -1,11 +1,12 @@
-//! Integration draft: place beneath `crate::tls`, not an independent crate.
-//! No filesystem, network, clock reads, logging or migration/admission authority.
-//! The trusted caller must bind all inputs to original protected observations,
-//! original transaction and maintenance custody, and persist outputs once.
+//! Fresh trust-anchor generation and preserved-anchor endpoint issuance.
+//! No filesystem, network, clock reads, logging or admission authority.
+//! The trusted caller owns bootstrap or original protected observations,
+//! transaction/writer custody, and one-time durable publication.
 use super::{GatewayLeafPin, PrivateKeyPem, TrustAnchorPin, certificate_chain, private_key};
 use rcgen::{
-    CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa, Issuer, KeyPair,
-    KeyUsagePurpose, PKCS_ECDSA_P256_SHA256, PKCS_RSA_SHA256, PublicKeyData, SanType, SerialNumber,
+    BasicConstraints, CertificateParams, DistinguishedName, DnType, ExtendedKeyUsagePurpose, IsCa,
+    Issuer, KeyPair, KeyUsagePurpose, PKCS_ECDSA_P256_SHA256, PKCS_RSA_SHA256, PublicKeyData,
+    RsaKeySize, SanType, SerialNumber,
 };
 use std::net::IpAddr;
 use time::OffsetDateTime;
@@ -62,6 +63,96 @@ pub(crate) struct IssuedGatewayEndpoint {
     pub(crate) origin: String,
     pub(crate) not_before_unix: i64,
     pub(crate) not_after_unix: i64,
+}
+
+/// Fresh DATA for a single explicit bootstrap, not durable publication or
+/// enrollment authority. The private PEM is owned/zeroized by `PrivateKeyPem`.
+/// No Clone, Debug or Serde; persistence remains the caller's same-writer job.
+pub(crate) struct IssuedGatewayCa {
+    pub(crate) certificate_pem: Vec<u8>,
+    pub(crate) private_key: PrivateKeyPem,
+    pub(crate) anchor_pin: TrustAnchorPin,
+    pub(crate) not_before_unix: i64,
+    pub(crate) not_after_unix: i64,
+}
+
+/// Generate one fresh RSA-3072 trust anchor, compatible with `issue_server_leaf`.
+///
+/// The trusted caller explicitly supplies the entire validity window and clock;
+/// no expiry default, wall-clock read, persistence, implicit retry or CA rotation
+/// happens here. Invalid UTC/window input is refused before RSA/entropy work.
+/// This synchronous crypto operation belongs on the caller's owned blocking job.
+pub(crate) fn generate_gateway_ca(
+    trusted_now_unix: u64,
+    not_before_unix: u64,
+    not_after_unix: u64,
+) -> Result<IssuedGatewayCa, IssuerError> {
+    let now = i64::try_from(trusted_now_unix).map_err(|_| IssuerError::InvalidClock)?;
+    let start = i64::try_from(not_before_unix).map_err(|_| IssuerError::InvalidClock)?;
+    let end = i64::try_from(not_after_unix).map_err(|_| IssuerError::InvalidClock)?;
+    OffsetDateTime::from_unix_timestamp(now).map_err(|_| IssuerError::InvalidClock)?;
+    let not_before =
+        OffsetDateTime::from_unix_timestamp(start).map_err(|_| IssuerError::InvalidClock)?;
+    let not_after =
+        OffsetDateTime::from_unix_timestamp(end).map_err(|_| IssuerError::InvalidClock)?;
+    if start > now
+        || end
+            .checked_sub(now)
+            .is_none_or(|remaining| remaining < MIN_REMAINING_SECONDS)
+    {
+        return Err(IssuerError::IssuerNotCurrentlyValid);
+    }
+    let key = Zeroizing::new(
+        KeyPair::generate_rsa_for(&PKCS_RSA_SHA256, RsaKeySize::_3072)
+            .map_err(|_| IssuerError::IssuanceFailed)?,
+    );
+    let mut serial = [0u8; 16];
+    getrandom::fill(&mut serial).map_err(|_| IssuerError::EntropyUnavailable)?;
+    serial[0] &= 0x7f;
+    if serial.iter().all(|byte| *byte == 0) {
+        return Err(IssuerError::EntropyUnavailable);
+    }
+    let mut params =
+        CertificateParams::new(Vec::<String>::new()).map_err(|_| IssuerError::IssuanceFailed)?;
+    params.distinguished_name = DistinguishedName::new();
+    params
+        .distinguished_name
+        .push(DnType::CommonName, "Styx Gateway trust anchor");
+    // This anchor may issue endpoint leaves, not subordinate CAs. No SAN/EKU:
+    // it is never an endpoint, and strict clients must still reject CA-as-leaf.
+    params.is_ca = IsCa::Ca(BasicConstraints::Constrained(0));
+    params.key_usages = vec![KeyUsagePurpose::KeyCertSign, KeyUsagePurpose::CrlSign];
+    params.use_authority_key_identifier_extension = true;
+    params.serial_number = Some(SerialNumber::from_slice(&serial));
+    params.not_before = not_before;
+    params.not_after = not_after;
+    let ca = params
+        .self_signed(&*key)
+        .map_err(|_| IssuerError::IssuanceFailed)?;
+    let (rest, parsed) = x509_parser::parse_x509_certificate(ca.der().as_ref())
+        .map_err(|_| IssuerError::IssuanceFailed)?;
+    if !rest.is_empty()
+        || parsed.subject() != parsed.issuer()
+        || parsed.public_key().raw != key.subject_public_key_info().as_slice()
+    {
+        return Err(IssuerError::IssuanceFailed);
+    }
+    parsed
+        .verify_signature(None)
+        .map_err(|_| IssuerError::IssuanceFailed)?;
+    let certificate_pem = ca.pem().into_bytes();
+    if certificate_pem.len() > MAX_ISSUED_CHAIN {
+        return Err(IssuerError::IssuanceFailed);
+    }
+    let private_key = PrivateKeyPem::from_protected_reader_bytes(key.serialize_pem().into_bytes())
+        .map_err(|_| IssuerError::IssuanceFailed)?;
+    Ok(IssuedGatewayCa {
+        certificate_pem,
+        private_key,
+        anchor_pin: TrustAnchorPin::from_certificate_der(ca.der().as_ref()),
+        not_before_unix: start,
+        not_after_unix: end,
+    })
 }
 
 fn endpoint(origin: &str) -> Result<(String, SanType), IssuerError> {

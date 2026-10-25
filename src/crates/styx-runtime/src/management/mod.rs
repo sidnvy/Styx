@@ -5,6 +5,7 @@
 //! are reobserved before returning; that is not a transactional snapshot against
 //! an uncoordinated legacy writer. CLI and future UI use this same entry point.
 pub mod native;
+pub mod native_gateway;
 use crate::store::{PrivateRoot, RawFile, StoreError};
 use serde::{
     Deserialize, Serialize,

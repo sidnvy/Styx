@@ -241,6 +241,7 @@ mod platform {
         _configuration: OwnedConfigurationRoot,
         address: SocketAddr,
         native: Option<NativeCommittedAdmission>,
+        fresh: Option<crate::management::native_gateway::FreshGatewayRuntime>,
     }
     /// One-shot bootstrap evidence for this exact cooperating Rust foreground
     /// scope. Not proof that a legacy writer stopped or a remote process exited.
@@ -264,7 +265,15 @@ mod platform {
     }
     impl Admitted {
         fn validate(&self) -> Result<(), ForegroundError> {
-            if let Some(native) = &self.native {
+            if let Some(fresh) = &self.fresh {
+                fresh.validate().map_err(|e| error(e.code()))?;
+                if !fresh
+                    .configuration_root()
+                    .same_authority(&self._configuration)
+                {
+                    return Err(error("fresh_gateway_configuration_changed"));
+                }
+            } else if let Some(native) = &self.native {
                 native
                     .snapshot
                     .validate_legacy_owners(&self.state, &native.host)
@@ -387,11 +396,18 @@ mod platform {
             return Err(error("absolute_state_directory_required"));
         }
         let state = Arc::new(PrivateRoot::open(path).map_err(|_| error("gateway_protected_read"))?);
+        // Select the explicit native reader before touching legacy layout.
+        // Any malformed/present ready material stays on the fresh reader path;
+        // failure must never fall back to the legacy or migrated authority.
+        let native = state.ensure_absent(".styx-native-root-v1.json").is_err();
+        if native && state.ensure_absent("gateway-ready-v1.json").is_err() {
+            return load_fresh(path);
+        }
         let gateway_path = path.join("gateway");
         let gateway = Arc::new(
             PrivateRoot::open(&gateway_path).map_err(|_| error("gateway_protected_read"))?,
         );
-        if state.ensure_absent(".styx-native-root-v1.json").is_err() {
+        if native {
             return load_committed(path, state, gateway);
         }
         let mut inputs = Vec::new();
@@ -611,6 +627,7 @@ mod platform {
             _configuration: configuration,
             address,
             native: None,
+            fresh: None,
         });
         admitted.validate()?;
         Ok(Loaded {
@@ -619,6 +636,71 @@ mod platform {
             tls,
             policy,
             host,
+            gateway_id,
+        })
+    }
+    /// Fresh native startup retains the existing ready binding and the same
+    /// configuration owner. No legacy-layout or migration proof is invented.
+    fn load_fresh(path: &Path) -> Result<Loaded, ForegroundError> {
+        let runtime =
+            crate::management::native_gateway::open_existing(path).map_err(|e| error(e.code()))?;
+        let configuration = runtime.configuration_root();
+        let authority = runtime
+            .origin
+            .strip_prefix("https://")
+            .ok_or(error("gateway_origin_invalid"))?
+            .to_owned();
+        let policy = Arc::new(
+            GatewayBearerPolicy::new(
+                &runtime.model_token,
+                vec![authority.clone()],
+                vec![runtime.origin.clone()],
+            )
+            .map_err(|_| error("gateway_model_authority_invalid"))?,
+        );
+        let journal = OwnedEnrollmentJournal::from_configuration(
+            configuration.clone(),
+            JournalBudget::default(),
+        )
+        .map_err(|_| error("existing_native_enrollment_required"))?;
+        let service = EnrollmentService::recover_existing(
+            journal,
+            &runtime.admin_token,
+            Sha256Digest::of_bytes(&runtime.model_token),
+            vec![authority.clone()],
+            Limits::default(),
+        )
+        .map_err(|e| error(e.code()))?;
+        let lease = runtime
+            .root
+            .try_execution_lease()
+            .map_err(|_| error("gateway_execution_busy"))?;
+        let gateway_id = format!(
+            "paired.{}",
+            Sha256Digest::of_bytes(runtime.origin.as_bytes()).to_hex()
+        )
+        .try_into()
+        .map_err(|_| error("gateway_namespace_invalid"))?;
+        let tls = runtime.tls.clone();
+        let admitted = Arc::new(Admitted {
+            state: runtime.root.clone(),
+            gateway: runtime.root.clone(),
+            runtime_root: None,
+            inputs: vec![],
+            absent_inputs: vec![],
+            lease,
+            _configuration: configuration,
+            address: runtime.address,
+            native: None,
+            fresh: Some(runtime),
+        });
+        admitted.validate()?;
+        Ok(Loaded {
+            admitted,
+            service,
+            tls,
+            policy,
+            host: authority,
             gateway_id,
         })
     }
@@ -835,6 +917,7 @@ mod platform {
                 candidate,
                 proof,
             }),
+            fresh: None,
         });
         admitted.validate()?;
         Ok(Loaded {
@@ -1064,6 +1147,7 @@ mod platform {
                 _configuration: owner.clone(),
                 address: "127.0.0.1:32651".parse().unwrap(),
                 native: None,
+                fresh: None,
             };
             let closure = StartupTransportClosure {
                 admitted: &admitted,

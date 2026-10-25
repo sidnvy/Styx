@@ -96,10 +96,58 @@ pub struct NativeRootBinding {
     marker_bytes: Vec<u8>,
     marker_observation: super::FileObservation,
 }
+/// Caller-verified DATA only. No publication, signature or admission authority.
+/// Secret bytes stay borrowed from the caller's zeroizing custody; no copies
+/// enter a report. This fixed shape cannot choose filesystem destinations.
+pub(crate) struct FreshGatewayFiles<'a> {
+    pub(crate) certificate_pem: &'a [u8],
+    pub(crate) ca_private_key_pem: &'a [u8],
+    pub(crate) endpoint_chain_pem: &'a [u8],
+    pub(crate) endpoint_private_key_pem: &'a [u8],
+    pub(crate) admin_token: &'a [u8],
+    pub(crate) model_token: &'a [u8],
+    pub(crate) ready_binding: &'a [u8],
+}
+
 impl FreshNativeRoot {
     pub fn marker(&self) -> &NativeRootMarker {
         &self.marker
     }
+    /// One-shot fresh Gateway persistence under this original root/writer.
+    /// `trusted_now_unix` is Unix seconds; the enrollment floor is milliseconds.
+    /// This stores already-verified bytes, never selects a publisher or clears a
+    /// migration fence. Any ambiguous result retains its original ownership.
+    pub(crate) fn initialize_gateway(
+        self,
+        deployment: &[u8],
+        state: &NativeState,
+        material: FreshGatewayFiles<'_>,
+        trusted_now_unix: u64,
+    ) -> Result<NativeRootBinding, NativeRootFailure> {
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        {
+            platform::initialize_gateway(
+                self,
+                deployment,
+                state,
+                material,
+                trusted_now_unix,
+                &|_, _| {},
+            )
+        }
+        #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+        {
+            let _ = (deployment, state, material, trusted_now_unix);
+            Err(NativeRootFailure {
+                error: NativeRootError::Unsupported,
+                ownership: Box::new(Ownership::Root {
+                    root: self.root,
+                    writer: self.writer,
+                }),
+            })
+        }
+    }
+
     /// Canonical genesis only: original deployment bytes remain opaque and are
     /// not evidence of a completed onboarding/service/legacy migration flow.
     pub fn initialize(
@@ -556,6 +604,196 @@ mod platform {
         }
         bind(root, writer, marker, marker_bytes, marker_observation)
     }
+    pub(super) fn initialize_gateway(
+        mut fresh: FreshNativeRoot,
+        deployment: &[u8],
+        state: &NativeState,
+        material: FreshGatewayFiles<'_>,
+        trusted_now_unix: u64,
+        observer: &dyn Fn(&str, &str),
+    ) -> Result<NativeRootBinding, NativeRootFailure> {
+        use crate::store::enrollment::{EnrollmentJournal, JournalBudget, JournalError};
+        const READY: &str = "gateway-ready-v1.json";
+        let fixed = [
+            ("gateway-ca.pem", material.certificate_pem, 128 * 1024),
+            ("gateway-ca-key.pem", material.ca_private_key_pem, 64 * 1024),
+            ("gateway-chain.pem", material.endpoint_chain_pem, 128 * 1024),
+            (
+                "gateway-key.pem",
+                material.endpoint_private_key_pem,
+                64 * 1024,
+            ),
+            ("gateway-admin.token", material.admin_token, 4096),
+            ("gateway-model.token", material.model_token, 4096),
+        ];
+        let preflight = (|| {
+            if trusted_now_unix == 0
+                || deployment.is_empty()
+                || deployment.len() > NATIVE_STATE_BYTES
+                || state.migration.is_some()
+                || state.mode != NativeDeploymentMode::CreateLocal
+                || state.desired.gateway.is_none()
+                || state.revision != 0
+                || state.last_transaction.is_some()
+                || state.deployment_raw_sha256 != Sha256Digest::of_bytes(deployment)
+                || material.ready_binding.is_empty()
+                || material.ready_binding.len() > NATIVE_STATE_BYTES
+                || fixed
+                    .iter()
+                    .any(|(_, bytes, max)| bytes.is_empty() || bytes.len() > *max)
+                || material.admin_token.len() < 32
+                || material.model_token.len() < 32
+            {
+                return Err(NativeRootError::InvalidInput);
+            }
+            let clock =
+                i64::try_from(trusted_now_unix).map_err(|_| NativeRootError::InvalidInput)?;
+            time::OffsetDateTime::from_unix_timestamp(clock)
+                .map_err(|_| NativeRootError::InvalidInput)?;
+            let floor = trusted_now_unix
+                .checked_mul(1000)
+                .ok_or(NativeRootError::InvalidInput)?;
+            let bytes = encode_genesis(state)?;
+            native_state::decode_state(&bytes, &fresh.marker)
+                .map_err(|_| NativeRootError::InvalidInput)?;
+            Ok(floor)
+        })();
+        let floor = match preflight {
+            Ok(floor) => floor,
+            Err(error) => return Err(failure(fresh.root, fresh.writer, error)),
+        };
+        let persist = (|| {
+            verify_marker(
+                &fresh.root,
+                &fresh.marker,
+                &fresh.marker_bytes,
+                &fresh.marker_observation,
+            )?;
+            // Refuse every collision before first material IO. Never adopt or
+            // overwrite an old/partial file, even if its bytes happen to match.
+            for name in fixed.iter().map(|(name, _, _)| *name).chain([
+                "deployment.json",
+                "state.json",
+                READY,
+            ]) {
+                fresh
+                    .root
+                    .ensure_absent(name)
+                    .map_err(|_| NativeRootError::Unknown)?;
+            }
+            let mut observations = Vec::with_capacity(fixed.len());
+            for (name, bytes, limit) in &fixed {
+                fresh
+                    .root
+                    .inner
+                    .create_fixed(&fresh.writer, name, bytes, &|phase| observer(name, phase))
+                    .map_err(|_| NativeRootError::Unknown)?;
+                let raw = fresh
+                    .root
+                    .read_raw(name, *limit)
+                    .map_err(|_| NativeRootError::Unknown)?;
+                if raw.bytes() != *bytes {
+                    return Err(NativeRootError::Unknown);
+                }
+                observations.push(raw.observation().clone());
+            }
+            {
+                // create_fresh already created EnrollmentV1. This cannot create
+                // or adopt a second namespace, journal, writer or Core ledger.
+                let mut journal = EnrollmentJournal::open_existing(
+                    &fresh.root,
+                    &mut fresh.writer,
+                    JournalBudget::default(),
+                )
+                .map_err(|_| NativeRootError::Unknown)?;
+                if !journal
+                    .scan()
+                    .map_err(|_| NativeRootError::Unknown)?
+                    .files
+                    .is_empty()
+                {
+                    return Err(NativeRootError::Unknown);
+                }
+                journal
+                    .record_time_floor(floor)
+                    .map_err(|_| NativeRootError::Unknown)?;
+                if journal
+                    .read_time_floor()
+                    .map_err(|_| NativeRootError::Unknown)?
+                    != Some(floor)
+                {
+                    return Err(NativeRootError::Unknown);
+                }
+                observer("clock.floor", "directory_sync");
+            }
+            Ok(observations)
+        })();
+        let observations = match persist {
+            Ok(observations) => observations,
+            Err(error) => return Err(failure(fresh.root, fresh.writer, error)),
+        };
+        let binding = initialize(fresh, deployment, state, observer)?;
+        let publish = binding.owner.with_state(|configuration| {
+            verify_marker(
+                &configuration.root,
+                &binding.marker,
+                &binding.marker_bytes,
+                &binding.marker_observation,
+            )
+            .map_err(|_| JournalError::Unknown)?;
+            let check_materials = || {
+                for ((name, bytes, limit), original) in fixed.iter().zip(&observations) {
+                    let raw = configuration
+                        .root
+                        .read_raw(name, *limit)
+                        .map_err(|_| JournalError::Unknown)?;
+                    if raw.bytes() != *bytes || raw.observation() != original {
+                        return Err(JournalError::Unknown);
+                    }
+                }
+                Ok(())
+            };
+            check_materials()?;
+            configuration
+                .root
+                .ensure_absent(READY)
+                .map_err(|_| JournalError::Unknown)?;
+            configuration
+                .root
+                .inner
+                .create_fixed(
+                    &configuration.writer,
+                    READY,
+                    material.ready_binding,
+                    &|phase| observer(READY, phase),
+                )
+                .map_err(|_| JournalError::Unknown)?;
+            let ready = configuration
+                .root
+                .read_raw(READY, NATIVE_STATE_BYTES)
+                .map_err(|_| JournalError::Unknown)?;
+            if ready.bytes() != material.ready_binding {
+                return Err(JournalError::Unknown);
+            }
+            check_materials()?;
+            verify_read(
+                &configuration.root,
+                &binding.marker,
+                &binding.marker_bytes,
+                &binding.marker_observation,
+            )
+            .map_err(|_| JournalError::Unknown)?;
+            Ok(())
+        });
+        if publish.is_err() {
+            return Err(NativeRootFailure {
+                error: NativeRootError::Unknown,
+                ownership: Box::new(Ownership::Configuration(binding.owner)),
+            });
+        }
+        Ok(binding)
+    }
+
     fn bind(
         root: PrivateRoot,
         writer: ConfigurationWriterGuard,
@@ -607,3 +845,7 @@ mod platform {
 #[cfg(test)]
 #[path = "native_root_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "native_gateway_tests.rs"]
+mod gateway_tests;

@@ -218,3 +218,31 @@ transition before final strict-TLS candidate validation; no verifier bypass,
 identity re-pair or installed-profile change is part of this checkpoint. Pending
 boot inspection validates/resyncs existing files only, with no effect replay or
 fence-clear capability. Actual exact-SHA scenario results are external receipts.
+
+
+## R33–R35 accepted checkpoint and R36 implementation boundary
+
+`e321914c3eb9284be561a391e1f327c20fab478b` supersedes the historical
+R32 limitations above for the exercised original paired Linux migration journey:
+CA-preserving endpoint issuance, complete same-journal C07 commit, retired old
+Host credential, recovered historical enrollment and ordinary foreground run have
+actual receipts. It does not imply the offline original Gateway was repaired.
+Windows native protected reads, process creation/Job/wait and current-user private
+runtime Temp are implemented. Actual signed-worker Windows Host, ordinary MCP
+pipe/whoami/one nonce/input and foreign-owner refusal passed in one run with
+normal actual Gateway/Host cleanup. The same-SHA Linux signed internal runtime
+candidate also passed that complete Windows Host scene as the running packaged
+Gateway CLI. That package is not a unified installer and was not deployed.
+Mac evidence at this checkpoint is compile only. Browser/desktop/account/login,
+reboot, Windows native durable management and fresh native Host joining remain
+separate gates; previous results are never assigned to changed source.
+
+R36 adds an explicit fresh Gateway-only bootstrap and ordinary foreground loader
+without a fictitious legacy migration. The existing fresh-root capability,
+single configuration owner, secure file writes, enrollment clock floor, C07
+configuration plans, mature rcgen/rustls TLS and paired runtime are reused.
+The new path does not install/start a service, create a Host, change MCP tools or
+mutate an existing CA/credential. See ADR-030 for exact persistent bindings,
+ordering and unresolved endpoint renewal/recovery limits. Source implementation,
+automated verification, actual fresh pairing and packaged acceptance must each
+be recorded separately; this paragraph is not an execution receipt.

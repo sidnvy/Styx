@@ -232,6 +232,19 @@ enum HostCommand {
 }
 #[derive(Subcommand)]
 enum GatewayCommand {
+    /// Initialize fresh Gateway-only foreground configuration; no service launch or legacy adoption.
+    Bootstrap {
+        #[arg(long)]
+        parent_dir: PathBuf,
+        #[arg(long)]
+        name: OsString,
+        #[arg(long)]
+        deployment_file: PathBuf,
+        #[arg(long)]
+        runtime_selection_file: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
     Run {
         #[arg(long)]
         state_dir: Option<PathBuf>,
@@ -772,6 +785,43 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
                     json,
                 },
         } => transient_manager::stop(state_dir, owner_file, expected, json).await,
+        Command::Gateway {
+            command:
+                GatewayCommand::Bootstrap {
+                    parent_dir,
+                    name,
+                    deployment_file,
+                    runtime_selection_file,
+                    json,
+                },
+        } => {
+            match styx_runtime::management::native_gateway::bootstrap(
+                &parent_dir,
+                &name,
+                &deployment_file,
+                &runtime_selection_file,
+            )
+            .await
+            {
+                Ok(value) => {
+                    if !json {
+                        eprintln!(
+                            "Fresh Gateway-only foreground configuration initialized; Gateway not started:"
+                        );
+                    }
+                    if write_json(&value).is_err() {
+                        error("output_unavailable")
+                    } else {
+                        ExitCode::SUCCESS
+                    }
+                }
+                Err(value) => {
+                    // Retain the owned error through output, as for native_result.
+                    eprintln!("{}", serde_json::json!({"schema":1,"error":value.code()}));
+                    ExitCode::from(value.exit_code())
+                }
+            }
+        }
         Command::Gateway {
             command: GatewayCommand::Run {
                 state_dir: Some(state_dir),

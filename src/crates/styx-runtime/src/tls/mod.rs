@@ -416,4 +416,4 @@ impl GatewayServerTls {
 mod tests;
 
 mod issuer;
-pub(crate) use issuer::{IssuerError, issue_server_leaf};
+pub(crate) use issuer::{IssuerError, generate_gateway_ca, issue_server_leaf};
