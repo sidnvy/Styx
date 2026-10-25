@@ -421,7 +421,11 @@ impl PairedGatewayBackend {
             )
             .await;
         let snapshot = match prepared {
-            Ok(Reply::Prepared { snapshot }) => snapshot,
+            Ok(Reply::Prepared { snapshot }) if snapshot.payload_digest == digest => snapshot,
+            Ok(Reply::ComputerPrepared {
+                request_digest,
+                snapshot,
+            }) if request_digest == digest => snapshot,
             Ok(reply) => {
                 if let Some((category, certainty)) = typed_error(&reply) {
                     if certainty == ExecutionCertainty::NotDispatched {
@@ -433,9 +437,10 @@ impl PairedGatewayBackend {
             }
             Err(_) => return failure("outcome_unknown", None, true),
         };
+        // Request identity was checked above. Core owns the translated payload
+        // digest; retain it through dispatch/result checks without exposing tokens.
         if snapshot.target.as_ref() != Some(&target)
             || snapshot.state != OperationState::Reserved
-            || snapshot.payload_digest != digest
             || snapshot.operation_id.host_generation != *binding.host_generation()
             || snapshot.operation_id.owner_epoch != binding.owner_ref().owner_epoch
         {

@@ -216,7 +216,10 @@ pub(super) fn prepare(
     entry.check(state, owner, resource, request)?;
     let native = entry
         .parsed
-        .native_token_for(&entry.alias, &request.element_token)?;
+        .native_token_for(&entry.alias, &request.element_token)
+        // This pure lookup precedes ledger preparation and every native call.
+        // Keep its proven admission refusal distinct from post-dispatch errors.
+        .map_err(|_| ErrorCategory::StaleObservation)?;
     Ok((
         request.with_native_token(native)?,
         entry.observation.clone(),

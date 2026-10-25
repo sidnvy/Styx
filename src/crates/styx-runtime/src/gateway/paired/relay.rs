@@ -875,6 +875,7 @@ impl RelayHandle {
         }
         self.authorize_for(&entry, lane).await?;
         if let Reply::Prepared { snapshot }
+        | Reply::ComputerPrepared { snapshot, .. }
         | Reply::Start { snapshot, .. }
         | Reply::Inspected { snapshot }
         | Reply::Action { snapshot, .. }

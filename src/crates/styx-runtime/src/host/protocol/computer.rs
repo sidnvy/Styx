@@ -261,6 +261,10 @@ impl HostProtocol<'_> {
                     Ok(v) => v,
                     Err(_) => return invalid(),
                 };
+                let request_digest = match action.to_operation_payload() {
+                    Ok(payload) => Sha256Digest::of_bytes(&payload),
+                    Err(error) => return rejection(category(error)),
+                };
                 context.capability = match action.capability() {
                     Ok(v) => v,
                     Err(e) => return rejection(category(e)),
@@ -277,6 +281,12 @@ impl HostProtocol<'_> {
                     .coordinator
                     .prepare_desktop_action(&owner, target, context, &action)
                 {
+                    Ok(snapshot) if snapshot.payload_digest != request_digest => {
+                        Reply::ComputerPrepared {
+                            request_digest,
+                            snapshot: snapshot.into(),
+                        }
+                    }
                     Ok(snapshot) => Reply::Prepared {
                         snapshot: snapshot.into(),
                     },

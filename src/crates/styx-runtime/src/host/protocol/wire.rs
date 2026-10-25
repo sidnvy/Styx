@@ -249,6 +249,12 @@ pub enum Reply {
     Prepared {
         snapshot: Snapshot,
     },
+    /// Host/Core may translate a presentation alias into a private native token.
+    /// Bind the original request independently from the canonical Core payload.
+    ComputerPrepared {
+        request_digest: Sha256Digest,
+        snapshot: Snapshot,
+    },
     Start {
         snapshot: Snapshot,
         dispatch: String,
