@@ -531,6 +531,9 @@ async fn run_owned(
                 host_generation: generation,
             })
             .and_then(|protocol| {
+                #[cfg(target_os = "windows")]
+                let protocol = protocol
+                    .with_windows_command_environment(admitted.profile.command_environment());
                 #[cfg(target_os = "linux")]
                 let protocol = if let Some(source) = &browser {
                     protocol.with_browser_profiles(source.clone())?

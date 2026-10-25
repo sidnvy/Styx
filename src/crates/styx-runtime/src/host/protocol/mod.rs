@@ -172,6 +172,8 @@ pub struct HostProtocol<'a> {
     owners: Mutex<OwnerRegistry>,
     paired: bool,
     connection_slot: tokio::sync::Semaphore,
+    #[cfg(target_os = "windows")]
+    command_environment: BTreeMap<String, String>,
     #[cfg(target_os = "linux")]
     browser: Option<browser::BrowserInputs>,
     #[cfg(target_os = "linux")]
@@ -222,11 +224,60 @@ impl<'a> HostProtocol<'a> {
             owners: Mutex::new(OwnerRegistry::default()),
             paired,
             connection_slot: tokio::sync::Semaphore::new(1),
+            #[cfg(target_os = "windows")]
+            command_environment: BTreeMap::new(),
             #[cfg(target_os = "linux")]
             browser: None,
             #[cfg(target_os = "linux")]
             computer: None,
         })
+    }
+    /// Trusted local Windows defaults are resolved BEFORE Core preparation, so
+    /// the operation digest and retained payload include every effective value.
+    /// This is bootstrap data, never a post-permit provider environment fallback.
+    #[cfg(target_os = "windows")]
+    pub(crate) fn with_windows_command_environment(
+        mut self,
+        environment: BTreeMap<String, String>,
+    ) -> Self {
+        self.command_environment = environment;
+        self
+    }
+    #[cfg(target_os = "windows")]
+    fn command_spec(&self, mut spec: StartProcess) -> Result<StartProcess, ProtocolError> {
+        let mut names = BTreeSet::new();
+        if spec.environment.len() > 64
+            || spec.environment.keys().any(|key| {
+                key.is_empty()
+                    || !key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
+                    || !names.insert(key.to_ascii_uppercase())
+            })
+        {
+            return Err(ProtocolError::InvalidFrame);
+        }
+        for (key, value) in &self.command_environment {
+            if let Some(alias) = spec
+                .environment
+                .keys()
+                .find(|name| name.eq_ignore_ascii_case(key))
+                .cloned()
+            {
+                if spec.environment.get(&alias) != Some(value) {
+                    return Err(ProtocolError::InvalidFrame);
+                }
+                spec.environment.remove(&alias);
+            }
+            spec.environment.insert(key.clone(), value.clone());
+        }
+        if spec
+            .to_operation_payload()
+            .map_err(|_| ProtocolError::InvalidFrame)?
+            .len()
+            > SPEC_LIMIT
+        {
+            return Err(ProtocolError::InvalidFrame);
+        }
+        Ok(spec)
     }
     pub fn register_bootstrap_verified_owner(
         &mut self,
@@ -486,6 +537,11 @@ impl<'a> HostProtocol<'a> {
                 };
                 let spec: StartProcess = match serde_json::from_str(spec.get()) {
                     Ok(v) => v,
+                    Err(_) => return invalid(),
+                };
+                #[cfg(target_os = "windows")]
+                let spec = match self.command_spec(spec) {
+                    Ok(spec) => spec,
                     Err(_) => return invalid(),
                 };
                 match self.coordinator.prepare_start(&owner, context, &spec) {

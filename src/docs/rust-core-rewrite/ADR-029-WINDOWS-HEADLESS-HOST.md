@@ -52,6 +52,10 @@ uses a separately specified application path; business commands continue through
 upstream Codex. Worker environment is explicit: original CODEX_HOME plus bounded
 OS/token-derived Windows/user directories and system search paths. SSH's inherited
 PATH or arbitrary host.json environment keys do not become trusted configuration.
+The Host expands business-command defaults before Core prepares the operation;
+the retained payload/digest therefore includes the final environment. Codex still
+uses inherit:none. The provider never silently adds variables after admission;
+case aliases and attempts to override the trusted OS baseline are refused.
 
 Root process wait, Job ActiveProcesses zero, RPC drain and Host job joins are
 separate facts. Drop or a termination acknowledgement is not cleanup success.

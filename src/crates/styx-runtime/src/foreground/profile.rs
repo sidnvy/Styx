@@ -365,6 +365,15 @@ impl LoadedLegacyProfile {
     pub(crate) fn executor_image(&self) -> Option<Arc<PinnedExecutable>> {
         self.executor.clone()
     }
+    #[cfg(target_os = "windows")]
+    pub(crate) fn command_environment(&self) -> BTreeMap<String, String> {
+        // CODEX_HOME belongs to the supervised executor, not business commands.
+        self.environment
+            .iter()
+            .filter(|(key, _)| key.as_str() != "CODEX_HOME")
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect()
+    }
     pub fn executor_config(&self) -> Result<OwnedExecutorConfig, ProfileError> {
         self.revalidate()?;
         let image = self.executor.as_ref().ok_or(ProfileError::Unsupported)?;
