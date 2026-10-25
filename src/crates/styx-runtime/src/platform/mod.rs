@@ -11,3 +11,8 @@ pub(crate) mod windows_spawn;
 
 #[cfg(target_os = "windows")]
 pub(crate) mod windows_desktop;
+
+#[cfg(target_os = "windows")]
+pub(crate) mod windows_legacy_observation;
+#[cfg(target_os = "windows")]
+pub(crate) mod windows_restart_observation;

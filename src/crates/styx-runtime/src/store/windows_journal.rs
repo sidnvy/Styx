@@ -263,9 +263,7 @@ pub(in crate::store) fn existing_namespace(
 ) -> JournalResult<(u64, u64)> {
     pin(&directory(root, name.as_str())?)
 }
-// Strict namespace creation is exercised by the native publication tests;
-// the production historical migration caller is currently Linux-only.
-#[cfg(test)]
+// Original-writer migration uses the same strict create-new namespace.
 pub(in crate::store) fn create_new_namespace(
     root: &File,
     name: NamespaceName,

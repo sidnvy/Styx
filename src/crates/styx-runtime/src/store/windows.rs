@@ -3,6 +3,15 @@
 //! omit write sharing. Fixed writes use local NTFS write-through/file flush;
 //! directory flush uses a separately opened, identity-checked writable handle.
 //! No ACL rewrite or path launch fallback.
+#[path = "windows_migration.rs"]
+mod migration;
+#[path = "windows_previous_boot.rs"]
+mod previous_boot;
+pub(in crate::store) use migration::{WindowsOriginalMaterials, WindowsTokenRetirement};
+pub(in crate::store) use previous_boot::{
+    WindowsBootRecoveryEffects, WindowsLegacyMaintenancePlan, WindowsPreviousBootEvidence,
+    WindowsRecoveryOpenFailure, WindowsRestartCheckpoint,
+};
 #[path = "windows_ffi.rs"]
 mod ffi;
 #[path = "windows_payload.rs"]
@@ -675,3 +684,6 @@ mod publication_tests;
 #[path = "windows_browser.rs"]
 mod browser;
 pub(crate) use browser::LocalExecutable as WindowsLocalExecutable;
+
+#[path = "windows_restart_effects.rs"]
+mod restart;

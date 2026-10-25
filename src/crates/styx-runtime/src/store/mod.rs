@@ -68,6 +68,11 @@ mod platform;
 pub(crate) use platform::MacCanonicalCutover;
 
 #[cfg(target_os = "windows")]
+pub(in crate::store) use platform::{
+    WindowsBootRecoveryEffects, WindowsLegacyMaintenancePlan, WindowsRecoveryOpenFailure,
+    WindowsRestartCheckpoint,
+};
+#[cfg(target_os = "windows")]
 pub(crate) use platform::WindowsLocalExecutable;
 #[cfg(target_os = "windows")]
 pub(crate) use platform::file_identity as windows_file_identity;

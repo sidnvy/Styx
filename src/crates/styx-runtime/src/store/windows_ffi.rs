@@ -413,6 +413,33 @@ pub(super) fn open_journal_for_rename(path: &Path) -> Result<File> {
     private(&file)?;
     Ok(file)
 }
+/// Fixed migration source only. Deny other write/delete opens while the original
+/// token is inspected and renamed; do not weaken ordinary reader sharing.
+pub(super) fn open_retirement_token(path: &Path) -> Result<File> {
+    let path = wide(path.as_os_str())?;
+    // SAFETY: original protected absolute path, noninheritable OPEN_EXISTING;
+    // no shell, reparse following, ACL rewrite, or delete-on-close.
+    let handle = unsafe {
+        CreateFileW(
+            path.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE | DELETE,
+            FILE_SHARE_READ,
+            ptr::null(),
+            OPEN_EXISTING,
+            FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH,
+            ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(io_error());
+    }
+    let file = unsafe { File::from_raw_handle(handle) };
+    if facts(&file)?.directory {
+        return Err(StoreError::NotRegularFile);
+    }
+    private(&file)?;
+    Ok(file)
+}
 /// Flush only this actual writable file/directory HANDLE. The caller validates
 /// its original identity, private ACL and local NTFS support. No volume flush,
 /// administrator elevation or physical power-loss claim is implied.
