@@ -74,6 +74,7 @@ async fn fault_case(mode: Fault) {
         .unwrap();
     let stop = CancellationToken::new();
     let request_stop = stop.clone();
+    let (ready_tx, mut ready_rx) = tokio::sync::oneshot::channel();
     let gateway = async move {
         let (tcp, _) = listener.accept().await.unwrap();
         let tls = server.accept(tcp, Duration::from_secs(2)).await.unwrap();
@@ -96,6 +97,11 @@ async fn fault_case(mode: Fault) {
                 .as_array()
                 .unwrap()
                 .contains(&json!(TRANSPORT_DRAIN_V1))
+        );
+        assert_eq!(
+            ready_rx.try_recv(),
+            Err(tokio::sync::oneshot::error::TryRecvError::Empty),
+            "WSS and Negotiate alone cannot publish paired readiness"
         );
         if matches!(mode, Fault::UnnegotiatedResult) {
             send_call(
@@ -123,6 +129,10 @@ async fn fault_case(mode: Fault) {
                 receive(&mut ws).await["reply"]["status"],
                 "transport_drain_enabled"
             );
+            tokio::time::timeout(Duration::from_secs(2), &mut ready_rx)
+                .await
+                .expect("bounded original connection readiness")
+                .expect("readiness follows actual enable reply");
         }
         request_stop.cancel();
         if matches!(mode, Fault::OldPeer) {
@@ -208,7 +218,9 @@ async fn fault_case(mode: Fault) {
         )
         .await
         .unwrap();
-        let result = protocol.run_connection_with_stop(&mut link, &stop).await;
+        let result = protocol
+            .run_connection_with_readiness(&mut link, &stop, Some(ready_tx))
+            .await;
         // This always awaits original I/O tasks, including an abrupt peer loss;
         // a close handshake error is not promoted into a remote cleanup fact.
         let _close_result = link.shutdown(Duration::from_secs(2)).await;

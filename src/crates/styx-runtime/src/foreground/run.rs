@@ -418,15 +418,6 @@ async fn run_owned(
         .expect("UUID identity");
     let reservation = OwnedExecHost::reserve(generation.clone(), facts(&device), 16)
         .map_err(|_| ForegroundError("host_reservation_refused"))?;
-    let connection: ConnectionGeneration = uuid::Uuid::new_v4()
-        .to_string()
-        .try_into()
-        .expect("UUID identity");
-    event(&events, &cancel, "connecting", &device, Some(&connection));
-    let mut link = tokio::select! {
-        _=cancel.cancelled()=>return Ok(empty_outcome()),
-        result=connect(&admitted.profile,connection,reservation.link_budget())=>result?,
-    };
     // Run blocking filesystem work on the blocking pool. executor_config itself
     // revalidates the entire signed inventory/raw profile at this spawn boundary;
     // avoid repeating the same full walk immediately before it on an I/O thread.
@@ -451,7 +442,6 @@ async fn run_owned(
     let config = match prepared {
         Ok(Ok(v)) => v,
         result => {
-            let _ = link.shutdown(Duration::from_secs(3)).await;
             return Err(match result {
                 Ok(Err(error)) => error,
                 _ => ForegroundError("profile_reader_failed"),
@@ -459,9 +449,6 @@ async fn run_owned(
         }
     };
     if cancel.is_cancelled() {
-        link.shutdown(Duration::from_secs(3))
-            .await
-            .map_err(|_| ForegroundError("link_cleanup_unknown"))?;
         return Ok(empty_outcome());
     }
     // Spawn is joined even on signal; cancelling initialization cannot orphan a
@@ -474,10 +461,7 @@ async fn run_owned(
     let started = reservation.spawn_optional(config).await;
     let host = match started {
         Ok(v) => v,
-        Err(_) => {
-            let _ = link.shutdown(Duration::from_secs(3)).await;
-            return Err(ForegroundError("executor_start_failed"));
-        }
+        Err(_) => return Err(ForegroundError("executor_start_failed")),
     };
     // Browser is an independent optional local capability. Unsupported or
     // unavailable Browser inputs cannot take down an already admitted Exec Host.
@@ -625,103 +609,147 @@ async fn run_owned(
         }
     };
     let mut failure = None;
-    let mut remote_transport_drain = (mode == HostWireMode::PairedV3)
-        .then_some(crate::host::protocol::wire::TransportDrainOutcome::Unknown);
+    // No remote transport exists until after the local signed inputs, executor
+    // and optional providers are ready. Local failure still settles this host.
+    let mut remote_transport_drain = None;
     match session {
         Ok(session) => {
-            event(
-                &events,
-                &cancel,
-                "connected",
-                &device,
-                Some(link.generation()),
-            );
-            loop {
-                // This trusted collector runs alongside the SAME pinned connection
-                // future; a timer must not drop an in-flight request and invent EOF.
-                let housekeeping = async {
-                    loop {
-                        tokio::time::sleep(Duration::from_secs(5)).await;
-                        let _ = host
-                            .authority()
-                            .collect_provider_retention(Duration::from_secs(1))
-                            .await;
+            let connection: ConnectionGeneration = uuid::Uuid::new_v4()
+                .to_string()
+                .try_into()
+                .expect("UUID identity");
+            let initial = if cancel.is_cancelled() {
+                Ok(None)
+            } else {
+                event(&events, &cancel, "connecting", &device, Some(&connection));
+                tokio::select! {
+                    _=cancel.cancelled()=>Ok(None),
+                    result=connect(&admitted.profile,connection,host.link_budget())=>result.map(Some),
+                }
+            };
+            match initial {
+                Ok(Some(mut link)) => {
+                    if mode == HostWireMode::PairedV3 {
+                        remote_transport_drain =
+                            Some(crate::host::protocol::wire::TransportDrainOutcome::Unknown);
                     }
-                };
-                let disconnected = tokio::select! {
-                    _=housekeeping=>unreachable!("collector loop does not return"),
-                    result=session.run_connection_with_stop(&mut link, &cancel)=>{
-                        if cancel.is_cancelled() {
+                    loop {
+                        // Readiness cannot drop or replace this connection future.
+                        // The paired protocol sends it only after the drain-enable
+                        // response has actually been sent on this exact link.
+                        let connection_generation = link.generation().clone();
+                        let (ready, mut readiness) = tokio::sync::oneshot::channel();
+                        let result = {
+                            let housekeeping = async {
+                                loop {
+                                    tokio::time::sleep(Duration::from_secs(5)).await;
+                                    let _ = host
+                                        .authority()
+                                        .collect_provider_retention(Duration::from_secs(1))
+                                        .await;
+                                }
+                            };
+                            let running = session.run_connection_with_readiness(
+                                &mut link,
+                                &cancel,
+                                Some(ready),
+                            );
+                            tokio::pin!(housekeeping);
+                            tokio::pin!(running);
+                            let mut awaiting_ready = true;
+                            loop {
+                                tokio::select! {
+                                    biased;
+                                    // A known terminal link wins over a queued
+                                    // readiness observation for that same link.
+                                    result=&mut running=>break result,
+                                    ready=&mut readiness, if awaiting_ready=>{
+                                        awaiting_ready = false;
+                                        if ready.is_ok() && !cancel.is_cancelled() {
+                                            event(&events,&cancel,"connected",&device,Some(&connection_generation));
+                                        }
+                                    },
+                                    _=&mut housekeeping=>unreachable!("collector loop does not return"),
+                                }
+                            }
+                        };
+                        let disconnected = if cancel.is_cancelled() {
                             if mode == HostWireMode::PairedV3 {
-                                remote_transport_drain = Some(result.ok().flatten().unwrap_or(crate::host::protocol::wire::TransportDrainOutcome::Unknown));
+                                remote_transport_drain = Some(result.ok().flatten().unwrap_or(
+                                    crate::host::protocol::wire::TransportDrainOutcome::Unknown,
+                                ));
                             }
                             false
                         } else {
-                            event(&events,&cancel,if result.is_ok(){"disconnected"}else{"connection_result_unknown"},&device,Some(link.generation()));
+                            event(
+                                &events,
+                                &cancel,
+                                if result.is_ok() {
+                                    "disconnected"
+                                } else {
+                                    "connection_result_unknown"
+                                },
+                                &device,
+                                Some(&connection_generation),
+                            );
                             true
+                        };
+                        // EOF does not stop the executor. Always join the same
+                        // physical link before reconnecting or native cleanup.
+                        if link.shutdown(Duration::from_secs(3)).await.is_err() {
+                            event(&events, &cancel, "link_close_deadline", &device, None);
                         }
-                    },
-                };
-                // The executor and supervised operations are NOT stopped by EOF.
-                // shutdown joins all I/O tasks even when graceful-close times out;
-                // Deadline is not evidence of a still-detached transport task.
-                if link.shutdown(Duration::from_secs(3)).await.is_err() {
-                    event(&events, &cancel, "link_close_deadline", &device, None);
-                }
-                if !disconnected || cancel.is_cancelled() {
-                    break;
-                }
-                let mut next = None;
-                loop {
-                    tokio::select! {
-                        _=cancel.cancelled()=>break,
-                        _=tokio::time::sleep(Duration::from_secs(2))=>{},
-                    }
-                    if cancel.is_cancelled() {
-                        break;
-                    }
-                    if let Err(error) = validate(&admitted).await {
-                        failure = Some(error);
-                        break;
-                    }
-                    let generation: ConnectionGeneration = uuid::Uuid::new_v4()
-                        .to_string()
-                        .try_into()
-                        .expect("UUID identity");
-                    event(&events, &cancel, "reconnecting", &device, Some(&generation));
-                    let attempt = tokio::select! {
-                        _=cancel.cancelled()=>break,
-                        result=connect(&admitted.profile,generation,host.link_budget())=>result,
-                    };
-                    match attempt {
-                        Ok(v) => {
-                            next = Some(v);
+                        if !disconnected || cancel.is_cancelled() {
                             break;
                         }
-                        Err(_) => event(&events, &cancel, "disconnected", &device, None),
+                        let mut next = None;
+                        loop {
+                            tokio::select! {
+                                _=cancel.cancelled()=>break,
+                                _=tokio::time::sleep(Duration::from_secs(2))=>{},
+                            }
+                            if cancel.is_cancelled() {
+                                break;
+                            }
+                            if let Err(error) = validate(&admitted).await {
+                                failure = Some(error);
+                                break;
+                            }
+                            let generation: ConnectionGeneration = uuid::Uuid::new_v4()
+                                .to_string()
+                                .try_into()
+                                .expect("UUID identity");
+                            event(&events, &cancel, "reconnecting", &device, Some(&generation));
+                            let attempt = tokio::select! {
+                                _=cancel.cancelled()=>break,
+                                result=connect(&admitted.profile,generation,host.link_budget())=>result,
+                            };
+                            match attempt {
+                                Ok(v) => {
+                                    next = Some(v);
+                                    break;
+                                }
+                                Err(_) => event(&events, &cancel, "disconnected", &device, None),
+                            }
+                        }
+                        let Some(connected) = next else {
+                            break;
+                        };
+                        link = connected;
+                        if mode == HostWireMode::PairedV3 {
+                            remote_transport_drain =
+                                Some(crate::host::protocol::wire::TransportDrainOutcome::Unknown);
+                        }
                     }
                 }
-                let Some(connected) = next else {
-                    break;
-                };
-                link = connected;
-                event(
-                    &events,
-                    &cancel,
-                    "connected",
-                    &device,
-                    Some(link.generation()),
-                );
+                Ok(None) => {}
+                Err(error) => failure = Some(error),
             }
-            // EOF abandons only a response waiter. Explicit shutdown joins all
-            // retained blocking input jobs before releasing original owner pins.
+            // Same original input jobs remain owned through every link failure.
             #[cfg(any(target_os = "linux", target_os = "windows"))]
             session.drain_browser_inputs().await;
         }
-        Err(error) => {
-            let _ = link.shutdown(Duration::from_secs(3)).await;
-            failure = Some(error);
-        }
+        Err(error) => failure = Some(error),
     }
     event(&events, &cancel, "stopping", &device, None);
     let mut outcome = ForegroundOutcome {
@@ -791,18 +819,26 @@ impl ConnectionSession<'_> {
             protocol.drain_computer_inputs().await;
         }
     }
-    async fn run_connection_with_stop(
+    async fn run_connection_with_readiness(
         &self,
         link: &mut HostWssLink,
         stop: &CancellationToken,
+        ready: Option<tokio::sync::oneshot::Sender<()>>,
     ) -> Result<Option<crate::host::protocol::wire::TransportDrainOutcome>, ()> {
         match self {
-            Self::Legacy(session) => tokio::select! {
-                _ = stop.cancelled() => Ok(None),
-                result = session.run_connection(link) => result.map(|()| None).map_err(|_| ()),
-            },
+            Self::Legacy(session) => {
+                if !stop.is_cancelled()
+                    && let Some(ready) = ready
+                {
+                    let _ = ready.send(());
+                }
+                tokio::select! {
+                    _ = stop.cancelled() => Ok(None),
+                    result = session.run_connection(link) => result.map(|()| None).map_err(|_| ()),
+                }
+            }
             Self::Paired(protocol) => protocol
-                .run_connection_with_stop(link, stop)
+                .run_connection_with_readiness(link, stop, ready)
                 .await
                 .map_err(|_| ()),
         }

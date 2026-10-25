@@ -806,6 +806,17 @@ impl<'a> HostProtocol<'a> {
         link: &mut HostWssLink,
         stop: &CancellationToken,
     ) -> Result<Option<TransportDrainOutcome>, ProtocolError> {
+        self.run_connection_with_readiness(link, stop, None).await
+    }
+    /// Connection-local observation only: notify after the negotiated drain
+    /// enable reply has actually left the original writer. Opening WSS or merely
+    /// parsing Negotiate cannot establish a ready paired Host.
+    pub(crate) async fn run_connection_with_readiness(
+        &self,
+        link: &mut HostWssLink,
+        stop: &CancellationToken,
+        mut ready: Option<tokio::sync::oneshot::Sender<()>>,
+    ) -> Result<Option<TransportDrainOutcome>, ProtocolError> {
         let _slot = self
             .connection_slot
             .try_acquire()
@@ -954,6 +965,12 @@ impl<'a> HostProtocol<'a> {
                 .send_text(text, send_budget)
                 .await
                 .map_err(|_| ProtocolError::ResponseLost)?;
+            if matches!(&response.reply, Reply::TransportDrainEnabled)
+                && let Some(ready) = ready.take()
+            {
+                // An absent observer never changes protocol/owner admission.
+                let _ = ready.send(());
+            }
             if let Some(outcome) = completed_drain {
                 return Ok(Some(outcome));
             }
