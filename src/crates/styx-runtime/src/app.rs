@@ -1,6 +1,7 @@
 //! Private owned-child App composition. Local UI is an entry point, not an OS
 //! privilege or a second policy/configuration authority. No network listener,
 //! arbitrary call-supplied paths, legacy adoption or mutation replay lives here.
+mod local_gateway;
 mod pairing_link;
 
 use crate::{
@@ -42,10 +43,13 @@ impl AppError {
 /// operations. Arc retains this owner; wire DATA cannot construct/replace it.
 /// This protects cooperative same-user lifecycle ownership, not against a
 /// malicious process already able to execute as the same OS account.
-pub(crate) struct HostScope {
+struct AppContainer {
     parent_path: PathBuf,
     parent: PrivateRoot,
     instance: ExecutionLeaseGuard,
+}
+pub(crate) struct HostScope {
+    container: Arc<AppContainer>,
     state_dir: PathBuf,
     root: OnceLock<PrivateRoot>,
 }
@@ -65,7 +69,6 @@ impl HostScope {
             .parent()
             .ok_or(AppError("app_scope_invalid"))?
             .to_owned();
-        let name = state_dir.file_name().ok_or(AppError("app_scope_invalid"))?;
         let parent = PrivateRoot::open(&parent_path).map_err(|_| AppError("app_scope_refused"))?;
         // The container is never itself an active native configuration root.
         parent
@@ -79,33 +82,54 @@ impl HostScope {
         let instance = parent
             .try_execution_lease()
             .map_err(|_| AppError("app_instance_busy"))?;
+        let container = Arc::new(AppContainer {
+            parent_path,
+            parent,
+            instance,
+        });
+        Self::in_container(container, state_dir.to_owned())
+    }
+    fn in_container(container: Arc<AppContainer>, state_dir: PathBuf) -> Result<Self, AppError> {
+        if state_dir.parent() != Some(container.parent_path.as_path()) {
+            return Err(AppError("app_scope_invalid"));
+        }
+        let name = state_dir.file_name().ok_or(AppError("app_scope_invalid"))?;
         let root = OnceLock::new();
-        if parent.ensure_absent(Path::new(name)).is_err() {
+        if container.parent.ensure_absent(Path::new(name)).is_err() {
             let original =
-                PrivateRoot::open(state_dir).map_err(|_| AppError("app_scope_refused"))?;
+                PrivateRoot::open(&state_dir).map_err(|_| AppError("app_scope_refused"))?;
             root.set(original)
                 .map_err(|_| AppError("app_scope_changed"))?;
         }
         let result = Self {
-            parent_path,
-            parent,
-            instance,
-            state_dir: state_dir.to_owned(),
+            container,
+            state_dir,
             root,
         };
         result.validate()?;
         Ok(result)
     }
+    /// A fixed sibling under the SAME original App instance lease. Neither the
+    /// wire caller nor a second App process can choose or acquire another owner.
+    fn gateway_sibling(&self) -> Result<Self, AppError> {
+        self.validate()?;
+        let state_dir = self.container.parent_path.join("gateway");
+        if state_dir == self.state_dir {
+            return Err(AppError("app_role_scope_conflict"));
+        }
+        Self::in_container(self.container.clone(), state_dir)
+    }
     pub(crate) fn state_dir(&self) -> &Path {
         &self.state_dir
     }
     pub(crate) fn validate(&self) -> Result<(), AppError> {
-        self.instance
+        self.container
+            .instance
             .validate()
             .map_err(|_| AppError("app_instance_changed"))?;
-        let parent =
-            PrivateRoot::open(&self.parent_path).map_err(|_| AppError("app_scope_changed"))?;
-        if parent.identity() != self.parent.identity() {
+        let parent = PrivateRoot::open(&self.container.parent_path)
+            .map_err(|_| AppError("app_scope_changed"))?;
+        if parent.identity() != self.container.parent.identity() {
             return Err(AppError("app_scope_changed"));
         }
         for name in [".styx-native-root-v1.json", "state.json", "deployment.json"] {
@@ -122,6 +146,7 @@ impl HostScope {
                 }
             }
             None => self
+                .container
                 .parent
                 .ensure_absent(Path::new(
                     self.state_dir
@@ -151,6 +176,7 @@ struct EmptyInput {}
 enum Operation {
     StartupStatus,
     Status,
+    CreateLocal,
     RequestJoin,
     InspectJoin,
     Join,
@@ -189,6 +215,33 @@ struct JoinInput {
     browser: bool,
     browser_channel: Option<String>,
     persist_login: bool,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct LocalInput {
+    label: String,
+    computer: bool,
+    browser: bool,
+    browser_channel: Option<String>,
+    persist_login: bool,
+    #[serde(default = "local_port")]
+    port: u16,
+}
+fn local_port() -> u16 {
+    22022
+}
+fn validate_choice(choice: &JoinInput) -> Result<(), AppError> {
+    if choice.label.trim().is_empty()
+        || choice.label.len() > 128
+        || choice.label.chars().any(char::is_control)
+        || choice
+            .browser_channel
+            .as_deref()
+            .is_some_and(|v| !matches!(v, "chrome" | "msedge" | "chromium"))
+    {
+        return Err(AppError("app_input_invalid"));
+    }
+    Ok(())
 }
 fn now_ms() -> Result<u64, AppError> {
     std::time::SystemTime::now()
@@ -235,17 +288,19 @@ struct RunningHost {
 enum RetainedFailure {
     Join(native_join::JoinError),
     Management(native::NativeManagementError),
+    Bootstrap(crate::management::native_gateway::BootstrapError),
 }
 impl RetainedFailure {
     fn code(&self) -> &'static str {
         match self {
             Self::Join(e) => e.code(),
             Self::Management(e) => e.code(),
+            Self::Bootstrap(e) => e.code(),
         }
     }
 }
 struct HostApp {
-    scope: Arc<HostScope>,
+    local_gateway: Option<local_gateway::LocalGateway>,
     deployment_file: PathBuf,
     configuration: Option<native::NativeManagementReport>,
     runtime_selection_file: Option<PathBuf>,
@@ -260,6 +315,8 @@ struct HostApp {
     retained: Option<RetainedFailure>,
     unknown: bool,
     quit_ticket: Option<String>,
+    // Last owner drops only after role workers, retained failures and writers.
+    scope: Arc<HostScope>,
 }
 impl HostApp {
     async fn open(state_dir: &Path, deployment_file: &Path) -> Result<Self, AppError> {
@@ -269,6 +326,7 @@ impl HostApp {
         let scope = Arc::new(HostScope::open(state_dir)?);
         let (status, observed) = watch::channel(ConnectionStatus::stopped());
         let mut app = Self {
+            local_gateway: None,
             scope,
             deployment_file: deployment_file.to_owned(),
             configuration: None,
@@ -285,12 +343,27 @@ impl HostApp {
             quit_ticket: None,
         };
         if app.scope.root.get().is_some() {
-            app.read_configuration().await?;
-            let report = native_join::inspect_for_app(app.scope.clone())
-                .await
-                .map_err(|e| app.join_error(e))?;
-            app.enrollment =
-                Some(serde_json::to_value(report).map_err(|_| AppError("app_response_invalid"))?);
+            if let Err(error) = app.read_configuration().await {
+                if app.retained.is_none() {
+                    return Err(error);
+                }
+                app.unknown = true;
+                app.enrollment = Some(json!({"status":"incomplete","error":error.code()}));
+                return Ok(app);
+            }
+            match native_join::inspect_for_app(app.scope.clone()).await {
+                Ok(report) => {
+                    app.enrollment = Some(
+                        serde_json::to_value(report)
+                            .map_err(|_| AppError("app_response_invalid"))?,
+                    )
+                }
+                Err(error) => {
+                    let code = app.join_error(error).code();
+                    app.unknown = true;
+                    app.enrollment = Some(json!({"status":"incomplete","error":code}));
+                }
+            }
         }
         Ok(app)
     }
@@ -304,27 +377,50 @@ impl HostApp {
             .join("app-join-input-v1.json");
         let mut app = Self::open(state_dir, &deployment).await?;
         app.runtime_selection_file = Some(selection.to_owned());
+        let gateway_scope = Arc::new(app.scope.gateway_sibling()?);
+        if gateway_scope.root.get().is_some() {
+            let gateway = match app.load_local_gateway(gateway_scope).await {
+                Ok(gateway) => gateway,
+                Err(error) => {
+                    app.unknown = true;
+                    app.enrollment = Some(json!({"status":"incomplete","error":error.code()}));
+                    return Ok(app);
+                }
+            };
+            // Existing local setup must retain the original Host enrollment.
+            // Missing/partial phases remain inspectable but never auto-paired.
+            if let Ok(snapshot) =
+                crate::store::native_host_snapshot::NativeHostSnapshot::open_for_app(
+                    app.scope.state_dir(),
+                    app.scope.clone(),
+                )
+            {
+                if snapshot.seed().gateway_origin != gateway.origin
+                    || snapshot.seed().anchor_sha256.to_hex() != gateway.ca_sha
+                {
+                    app.unknown = true;
+                }
+            } else {
+                app.unknown = true;
+            }
+            app.local_gateway = Some(gateway);
+        } else if app
+            .scope
+            .container
+            .parent
+            .ensure_absent("app-local-gateway-input-v1.json")
+            .is_err()
+        {
+            app.unknown = true;
+        }
         Ok(app)
     }
     fn prepare_join_input(&mut self, choice: JoinInput) -> Result<(), AppError> {
         self.available()?;
-        let selection = self
-            .runtime_selection_file
-            .as_ref()
-            .ok_or(AppError("app_join_input_unavailable"))?;
         if self.scope.root.get().is_some() || self.input_writer.is_some() {
             return Err(AppError("app_join_already_exists"));
         }
-        if choice.label.trim().is_empty()
-            || choice.label.len() > 128
-            || choice.label.chars().any(char::is_control)
-            || choice
-                .browser_channel
-                .as_deref()
-                .is_some_and(|v| !matches!(v, "chrome" | "msedge" | "chromium"))
-        {
-            return Err(AppError("app_input_invalid"));
-        }
+        validate_choice(&choice)?;
         let inspected = self
             .inspected_join
             .take()
@@ -343,6 +439,21 @@ impl HostApp {
             .map_err(|e| AppError(e.code()))?;
         let (origin, invitation, ca, _) = accepted.into_parts();
         let ca = ca.ok_or(AppError("app_system_trust_not_supported"))?;
+        self.write_join_input(choice, origin, ca_sha, invitation, ca)
+    }
+    fn write_join_input(
+        &mut self,
+        choice: JoinInput,
+        origin: String,
+        ca_sha: String,
+        invitation: zeroize::Zeroizing<String>,
+        ca: String,
+    ) -> Result<(), AppError> {
+        validate_choice(&choice)?;
+        let selection = self
+            .runtime_selection_file
+            .as_ref()
+            .ok_or(AppError("app_join_input_unavailable"))?;
         // OS/user launch context only. RPC cannot choose arbitrary executables,
         // working directories, runtime payloads or trust files.
         #[cfg(windows)]
@@ -369,7 +480,7 @@ impl HostApp {
         let shell = shell
             .filter(|p| p.is_absolute() && p.is_file())
             .ok_or(AppError("app_shell_unavailable"))?;
-        let parent = &self.scope.parent_path;
+        let parent = &self.scope.container.parent_path;
         let mut browser =
             json!({"enabled":choice.browser,"headless":true,"persistLogin":choice.persist_login});
         if let Some(channel) = choice.browser_channel {
@@ -382,13 +493,16 @@ impl HostApp {
             "runtimeSelectionFile":selection,"invitationFile":parent.join("app-join-invitation-v1")
         })).map_err(|_| AppError("app_input_invalid"))?;
         self.scope.validate()?;
-        self.input_writer = Some(
-            self.scope
-                .parent
-                .try_configuration_writer()
-                .map_err(|_| AppError("app_input_writer_busy"))?,
-        );
-        let result = self.scope.parent.create_app_join_inputs(
+        if self.input_writer.is_none() {
+            self.input_writer = Some(
+                self.scope
+                    .container
+                    .parent
+                    .try_configuration_writer()
+                    .map_err(|_| AppError("app_input_writer_busy"))?,
+            );
+        }
+        let result = self.scope.container.parent.create_app_join_inputs(
             self.input_writer
                 .as_ref()
                 .ok_or(AppError("app_input_writer_busy"))?,
@@ -409,6 +523,13 @@ impl HostApp {
         }
         if self.unknown {
             return Err(AppError("app_cleanup_unknown"));
+        }
+        if self
+            .local_gateway
+            .as_ref()
+            .is_some_and(|gateway| gateway.is_fenced())
+        {
+            return Err(AppError("app_gateway_fenced"));
         }
         if self.quit_ticket.is_some() {
             return Err(AppError("app_quit_admitted"));
@@ -452,6 +573,77 @@ impl HostApp {
         self.configuration = Some(report);
         Ok(())
     }
+    async fn connect_host(&mut self) -> Result<(), AppError> {
+        if self.running.is_none() {
+            self.set_desired(NativeRunDesired::Running).await?;
+            let intent_scope = self.scope.clone();
+            let desktop_intent = tokio::task::spawn_blocking(move || {
+                crate::store::native_host_snapshot::NativeHostSnapshot::open_for_app(
+                    intent_scope.state_dir(),
+                    intent_scope.clone(),
+                )
+                .ok()
+                .map(Arc::new)
+            })
+            .await
+            .ok()
+            .flatten();
+            // Missing desktop facts disable that optional component;
+            // they cannot prevent the independent Exec Host starting.
+            let cancel = CancellationToken::new();
+            let worker_cancel = cancel.clone();
+            let scope = self.scope.clone();
+            let (events, mut received) = mpsc::channel::<foreground::ForegroundEvent>(16);
+            let status = self.status.clone();
+            let event_task = tokio::spawn(async move {
+                while let Some(event) = received.recv().await {
+                    let status_value = match event.event {
+                        "connected" => ConnectionStatus {
+                            status: "connected",
+                            exec_connection: "connected",
+                        },
+                        "connecting" | "reconnecting" => ConnectionStatus {
+                            status: "started",
+                            exec_connection: "connecting",
+                        },
+                        "disconnected" => ConnectionStatus {
+                            status: "started",
+                            exec_connection: "disconnected",
+                        },
+                        _ => continue,
+                    };
+                    status.send_replace(status_value);
+                }
+            });
+            self.status.send_replace(ConnectionStatus {
+                status: "started",
+                exec_connection: "connecting",
+            });
+            let worker = tokio::spawn(async move {
+                foreground::host_run_for_app(scope, worker_cancel, events).await
+            });
+            let cancel_on_drop = cancel.clone().drop_guard();
+            self.running = Some(RunningHost {
+                desktop_intent,
+                cancel,
+                worker,
+                events: event_task,
+                _cancel_on_drop: cancel_on_drop,
+            });
+        }
+        Ok(())
+    }
+    async fn settle_all(&mut self) -> Result<(), AppError> {
+        let host = self.settle().await;
+        let gateway = match &mut self.local_gateway {
+            Some(gateway) => gateway.settle().await,
+            None => Ok(()),
+        };
+        if gateway.is_err() {
+            self.unknown = true;
+        }
+        host.and(gateway)
+    }
     async fn set_desired(&mut self, run: NativeRunDesired) -> Result<(), AppError> {
         self.available()?;
         self.read_configuration().await?;
@@ -474,11 +666,11 @@ impl HostApp {
                 .checked_add(1)
                 .ok_or(AppError("app_revision_exhausted"))?,
         };
-        let plan = native::plan(self.scope.state_dir(), change)
+        let plan = native::plan_for_app(self.scope.clone(), change)
             .await
             .map_err(|e| self.management_error(e))?;
         self.scope.validate()?;
-        let report = native::apply(self.scope.state_dir(), &plan.plan_file)
+        let report = native::apply_for_app(self.scope.clone(), &plan.plan_file)
             .await
             .map_err(|e| self.management_error(e))?;
         if report.admission_fenced {
@@ -549,7 +741,13 @@ impl HostApp {
         Ok(())
     }
     fn admission_fenced(&self) -> bool {
-        self.unknown || self.retained.is_some() || self.quit_ticket.is_some()
+        self.unknown
+            || self.retained.is_some()
+            || self.quit_ticket.is_some()
+            || self
+                .local_gateway
+                .as_ref()
+                .is_some_and(|gateway| gateway.is_fenced())
     }
     async fn desktop_component_requested(&self) -> bool {
         if self.admission_fenced() {
@@ -578,14 +776,17 @@ impl HostApp {
     }
     async fn snapshot(&self) -> Value {
         let computer_requested = self.desktop_component_requested().await;
-        json!({"schema":1,"configuration":self.configuration,"foreground":*self.observed.borrow(),"admission_fenced":self.admission_fenced(),"desktop_intent":{"schema":1,"computer_requested":computer_requested,"source":"approved_host_configuration"},"cleanup":self.cleanup,"enrollment":self.enrollment,"mode":"rust_host","supportedOperations":["startupStatus","status","inspectJoin","join","requestJoin","claimJoin","inspectHost","connect","disconnect","quitAdmission"]})
+        json!({"schema":1,"configuration":self.configuration,"foreground":*self.observed.borrow(),"admission_fenced":self.admission_fenced(),"desktop_intent":{"schema":1,"computer_requested":computer_requested,"source":"approved_host_configuration"},"cleanup":self.cleanup,"gateway":self.local_gateway.as_ref().map(|g| g.status()),"enrollment":self.enrollment,"mode":"rust_host","supportedOperations":["startupStatus","status","createLocal","inspectJoin","join","requestJoin","claimJoin","inspectHost","connect","disconnect","quitAdmission"]})
     }
     async fn dispatch(
         &mut self,
         operation: Operation,
         input: Box<serde_json::value::RawValue>,
     ) -> Result<Value, AppError> {
-        if !matches!(operation, Operation::InspectJoin | Operation::Join) {
+        if !matches!(
+            operation,
+            Operation::InspectJoin | Operation::Join | Operation::CreateLocal
+        ) {
             let _: EmptyInput = decode_input(&input)?;
         }
         self.reap().await?;
@@ -595,11 +796,19 @@ impl HostApp {
         }
         // Stopping our own captured role remains safe even if scope validation
         // has failed. Never leave it running because a configuration write was refused.
-        if matches!(operation, Operation::Disconnect | Operation::QuitAdmission) {
+        if matches!(operation, Operation::QuitAdmission) {
+            self.settle_all().await?;
+        } else if matches!(operation, Operation::Disconnect) {
             self.settle().await?;
         }
         self.available()?;
         match operation {
+            Operation::CreateLocal => {
+                let choice: LocalInput = decode_input(&input)?;
+                self.create_local(choice).await?;
+                self.connect_host().await?;
+                Ok(self.snapshot().await)
+            }
             Operation::InspectJoin => {
                 if self.scope.root.get().is_some() || self.input_writer.is_some() {
                     return Err(AppError("app_join_already_exists"));
@@ -661,63 +870,10 @@ impl HostApp {
                 serde_json::to_value(report).map_err(|_| AppError("app_response_invalid"))
             }
             Operation::Connect => {
-                if self.running.is_none() {
-                    self.set_desired(NativeRunDesired::Running).await?;
-                    let intent_scope = self.scope.clone();
-                    let desktop_intent = tokio::task::spawn_blocking(move || {
-                        crate::store::native_host_snapshot::NativeHostSnapshot::open_for_app(
-                            intent_scope.state_dir(),
-                            intent_scope.clone(),
-                        )
-                        .ok()
-                        .map(Arc::new)
-                    })
-                    .await
-                    .ok()
-                    .flatten();
-                    // Missing desktop facts disable that optional component;
-                    // they cannot prevent the independent Exec Host starting.
-                    let cancel = CancellationToken::new();
-                    let worker_cancel = cancel.clone();
-                    let scope = self.scope.clone();
-                    let (events, mut received) = mpsc::channel::<foreground::ForegroundEvent>(16);
-                    let status = self.status.clone();
-                    let event_task = tokio::spawn(async move {
-                        while let Some(event) = received.recv().await {
-                            let status_value = match event.event {
-                                "connected" => ConnectionStatus {
-                                    status: "connected",
-                                    exec_connection: "connected",
-                                },
-                                "connecting" | "reconnecting" => ConnectionStatus {
-                                    status: "started",
-                                    exec_connection: "connecting",
-                                },
-                                "disconnected" => ConnectionStatus {
-                                    status: "started",
-                                    exec_connection: "disconnected",
-                                },
-                                _ => continue,
-                            };
-                            status.send_replace(status_value);
-                        }
-                    });
-                    self.status.send_replace(ConnectionStatus {
-                        status: "started",
-                        exec_connection: "connecting",
-                    });
-                    let worker = tokio::spawn(async move {
-                        foreground::host_run_for_app(scope, worker_cancel, events).await
-                    });
-                    let cancel_on_drop = cancel.clone().drop_guard();
-                    self.running = Some(RunningHost {
-                        desktop_intent,
-                        cancel,
-                        worker,
-                        events: event_task,
-                        _cancel_on_drop: cancel_on_drop,
-                    });
+                if let Some(gateway) = &mut self.local_gateway {
+                    gateway.start().await?;
                 }
+                self.connect_host().await?;
                 Ok(self.snapshot().await)
             }
             Operation::Disconnect => {
@@ -728,11 +884,11 @@ impl HostApp {
             Operation::QuitAdmission => {
                 // This ticket is only admission. Here admission is deliberately
                 // issued after actual owned-role settlement, never after kill.
-                self.settle().await?;
+                self.settle_all().await?;
                 let ticket = uuid::Uuid::new_v4().simple().to_string();
                 self.quit_ticket = Some(ticket.clone());
                 Ok(
-                    json!({"quit":{"status":"ready_to_quit","ticketId":ticket},"cleanup":self.cleanup}),
+                    json!({"quit":{"status":"ready_to_quit","ticketId":ticket},"cleanup":self.cleanup,"gateway":self.local_gateway.as_ref().map(|g|g.status())}),
                 )
             }
             Operation::StartupStatus | Operation::Status => unreachable!(),
@@ -832,7 +988,7 @@ async fn serve_app<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
             break;
         }
     }
-    app.settle().await?;
+    app.settle_all().await?;
     if app.retained.is_some() {
         return Err(AppError("app_operation_unknown"));
     }

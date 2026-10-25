@@ -15,7 +15,7 @@ pub mod native_join;
     ),
     all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
 ))]
-mod native_join_http;
+pub(crate) mod native_join_http;
 #[cfg(any(
     all(target_os = "windows", target_arch = "x86_64"),
     all(

@@ -110,6 +110,29 @@ impl NativeTransactions {
             .into_iter()
             .find(|tx| &tx.intent.transaction_id == id))
     }
+    /// Read the original, hash-bound role ownership before any recovery. This
+    /// exposes desired DATA only and cannot authorize or replay a transaction.
+    pub(crate) fn original_desired(
+        &self,
+        id: &TransactionId,
+    ) -> Result<
+        (
+            styx_contracts::native_management::NativeDesired,
+            styx_contracts::native_management::NativeDesired,
+        ),
+        NativeTransactionError,
+    > {
+        let original = self.journal.read_original(id)?;
+        validate_original(&original, self.binding.marker())?;
+        let before = native_state::decode_state(&original.before, self.binding.marker())
+            .map_err(|_| NativeTransactionError::UnknownInspect)?;
+        let target = native_state::decode_state(&original.target, self.binding.marker())
+            .map_err(|_| NativeTransactionError::UnknownInspect)?;
+        Ok((
+            before.state().desired.clone(),
+            target.state().desired.clone(),
+        ))
+    }
     /// Standalone startup only. If enrollment authority is instantiated, callers
     /// must obtain its complete maintenance gate and use apply_with_maintenance.
     pub fn apply_target(

@@ -12,6 +12,7 @@ use std::{
     ffi::OsStr,
     fmt,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 use styx_contracts::{
     identity::{Sha256Digest, TransactionId},
@@ -86,6 +87,8 @@ enum ErrorKind {
 pub struct NativeManagementError {
     kind: ErrorKind,
     _retained: Option<Retained>,
+    // Keep the App container until the retained coordinator has been dropped.
+    _app_scope: Option<Arc<crate::app::HostScope>>,
 }
 enum Retained {
     Bootstrap {
@@ -99,6 +102,10 @@ enum Retained {
     },
 }
 impl NativeManagementError {
+    fn with_app_scope(mut self, scope: Arc<crate::app::HostScope>) -> Self {
+        self._app_scope = Some(scope);
+        self
+    }
     pub fn code(&self) -> &'static str {
         match self.kind {
             ErrorKind::Invalid => "native_management_invalid_input",
@@ -120,6 +127,7 @@ impl NativeManagementError {
         Self {
             kind,
             _retained: None,
+            _app_scope: None,
         }
     }
     fn transaction(error: NativeTransactionError) -> Self {
@@ -146,6 +154,7 @@ impl NativeManagementError {
         Self {
             kind,
             _retained: Some(Retained::Bootstrap { _owner: error }),
+            _app_scope: None,
         }
     }
     fn open(error: NativeTransactionOpenFailure) -> Self {
@@ -153,6 +162,7 @@ impl NativeManagementError {
         Self {
             kind,
             _retained: Some(Retained::Open { _owner: error }),
+            _app_scope: None,
         }
     }
 }
@@ -218,12 +228,57 @@ pub async fn initialize(
 }
 pub async fn plan(state_dir: &Path, change: NativeDesiredChange) -> Result<NativeManagementPlan> {
     let path = state_dir.to_owned();
-    blocking(move || platform::plan(&path, change)).await
+    blocking(move || platform::plan(&path, change, None)).await
 }
 pub async fn apply(state_dir: &Path, plan_file: &Path) -> Result<NativeManagementReport> {
     let path = state_dir.to_owned();
     let plan = plan_file.to_owned();
-    blocking(move || platform::apply(&path, &plan)).await
+    blocking(move || platform::apply(&path, &plan, None)).await
+}
+/// A retained App scope is the authority; no manager or scope path is accepted
+/// as wire evidence. The worker keeps it even when its response waiter is lost.
+#[cfg(any(
+    all(target_os = "linux", target_env = "gnu"),
+    target_os = "windows",
+    target_os = "macos"
+))]
+async fn app_blocking<T: Send + 'static>(
+    scope: Arc<crate::app::HostScope>,
+    job: impl FnOnce(&Arc<crate::app::HostScope>) -> Result<T> + Send + 'static,
+) -> Result<T> {
+    let retained = scope.clone();
+    blocking(move || job(&scope).map_err(|error| error.with_app_scope(scope.clone())))
+        .await
+        .map_err(|error| error.with_app_scope(retained))
+}
+#[cfg(any(
+    all(target_os = "linux", target_env = "gnu"),
+    target_os = "windows",
+    target_os = "macos"
+))]
+pub(crate) async fn plan_for_app(
+    scope: Arc<crate::app::HostScope>,
+    change: NativeDesiredChange,
+) -> Result<NativeManagementPlan> {
+    app_blocking(scope, move |scope| {
+        platform::plan(scope.state_dir(), change, Some(scope))
+    })
+    .await
+}
+#[cfg(any(
+    all(target_os = "linux", target_env = "gnu"),
+    target_os = "windows",
+    target_os = "macos"
+))]
+pub(crate) async fn apply_for_app(
+    scope: Arc<crate::app::HostScope>,
+    plan_file: &Path,
+) -> Result<NativeManagementReport> {
+    let plan = plan_file.to_owned();
+    app_blocking(scope, move |scope| {
+        platform::apply(scope.state_dir(), &plan, Some(scope))
+    })
+    .await
 }
 fn parse_transaction_id(value: &str) -> Result<TransactionId> {
     if !cfg!(any(
@@ -253,11 +308,21 @@ pub async fn recover(state_dir: &Path, transaction_id: &str) -> Result<NativeMan
 pub(crate) async fn inspect_for_app(
     scope: std::sync::Arc<crate::app::HostScope>,
 ) -> Result<NativeManagementReport> {
-    blocking(move || {
-        scope
-            .validate()
-            .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?;
-        platform::inspect_for_app(scope.state_dir())
+    app_blocking(scope, |scope| {
+        platform::inspect_for_app(scope, NativeComponent::Host)
+    })
+    .await
+}
+#[cfg(any(
+    all(target_os = "linux", target_env = "gnu"),
+    target_os = "windows",
+    target_os = "macos"
+))]
+pub(crate) async fn inspect_gateway_for_app(
+    scope: Arc<crate::app::HostScope>,
+) -> Result<NativeManagementReport> {
+    app_blocking(scope, |scope| {
+        platform::inspect_for_app(scope, NativeComponent::Gateway)
     })
     .await
 }
@@ -360,6 +425,85 @@ mod platform {
             Err(error) => Err(error.keep(transactions)),
         }
     }
+    fn require_desired(desired: &NativeDesired, app_owned: bool) -> Result<()> {
+        let app_role = |role: NativeComponentDesired| {
+            role.manager == NativeManager::AppManaged
+                && role.autostart == NativeAutostartDesired::Disabled
+        };
+        let allowed = if app_owned {
+            match (desired.host, desired.gateway) {
+                (Some(host), None) => app_role(host),
+                (None, Some(gateway)) => app_role(gateway),
+                _ => false,
+            }
+        } else {
+            desired
+                .host
+                .iter()
+                .chain(desired.gateway.iter())
+                .all(|role| role.manager != NativeManager::AppManaged)
+        };
+        if allowed {
+            Ok(())
+        } else {
+            Err(NativeManagementError::new(ErrorKind::Invalid))
+        }
+    }
+    fn require_state(state: &NativeState, app_owned: bool) -> Result<()> {
+        require_desired(&state.desired, app_owned)?;
+        if app_owned
+            && (state.migration.is_some()
+                || !matches!(
+                    (
+                        state.mode,
+                        state.desired.host.is_some(),
+                        state.desired.gateway.is_some()
+                    ),
+                    (NativeDeploymentMode::JoinExisting, true, false)
+                        | (NativeDeploymentMode::CreateLocal, false, true)
+                ))
+        {
+            return Err(NativeManagementError::new(ErrorKind::Invalid));
+        }
+        Ok(())
+    }
+    fn require_scope(path: &Path, scope: Option<&Arc<crate::app::HostScope>>) -> Result<()> {
+        if let Some(scope) = scope {
+            if scope.state_dir() != path {
+                return Err(NativeManagementError::new(ErrorKind::Invalid));
+            }
+            scope
+                .validate()
+                .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?;
+        }
+        Ok(())
+    }
+    fn use_managed_transactions<T>(
+        path: &Path,
+        scope: Option<&Arc<crate::app::HostScope>>,
+        job: impl FnOnce(&mut NativeTransactions) -> Result<T>,
+    ) -> Result<T> {
+        require_scope(path, scope)?;
+        use_transactions(path, |transactions| {
+            // Policy is checked after acquiring the original writer, not from
+            // an unlocked preflight or caller-selected manager string.
+            require_scope(path, scope)?;
+            let state = transactions.readstate().map_err(tx)?;
+            require_state(state.state(), scope.is_some())?;
+            let result = job(transactions)?;
+            require_scope(path, scope)?;
+            Ok(result)
+        })
+    }
+    fn require_original_authority(
+        transactions: &NativeTransactions,
+        id: &TransactionId,
+        app_owned: bool,
+    ) -> Result<()> {
+        let (before, target) = transactions.original_desired(id).map_err(tx)?;
+        require_desired(&before, app_owned)?;
+        require_desired(&target, app_owned)
+    }
     fn tx(error: NativeTransactionError) -> NativeManagementError {
         NativeManagementError::transaction(error)
     }
@@ -420,7 +564,10 @@ mod platform {
     }
     /// Only re-establish an already complete canonical tip. Never complete a
     /// pending phase, adopt an orphan or replay an action as an implicit startup.
-    fn reconcile_complete_tip(transactions: &mut NativeTransactions) -> Result<()> {
+    fn reconcile_complete_tip(
+        transactions: &mut NativeTransactions,
+        app_owned: bool,
+    ) -> Result<()> {
         if !admission(transactions)? {
             return Ok(());
         }
@@ -440,6 +587,7 @@ mod platform {
         {
             return Err(NativeManagementError::new(ErrorKind::Conflict));
         }
+        require_original_authority(transactions, &id, app_owned)?;
         transactions.recover_original(&id).map_err(tx)?;
         if admission(transactions)? {
             return Err(NativeManagementError::new(ErrorKind::Conflict));
@@ -566,9 +714,13 @@ mod platform {
             Err(error) => Err(error.keep(transactions)),
         }
     }
-    pub(super) fn plan(path: &Path, change: NativeDesiredChange) -> Result<NativeManagementPlan> {
-        use_transactions(path, |transactions| {
-            reconcile_complete_tip(transactions)?;
+    pub(super) fn plan(
+        path: &Path,
+        change: NativeDesiredChange,
+        scope: Option<&Arc<crate::app::HostScope>>,
+    ) -> Result<NativeManagementPlan> {
+        use_managed_transactions(path, scope, |transactions| {
+            reconcile_complete_tip(transactions, scope.is_some())?;
             let before = transactions.readstate().map_err(tx)?;
             let mut target = before.state().clone();
             let component = match change.component {
@@ -618,12 +770,20 @@ mod platform {
             })
         })
     }
-    pub(super) fn apply(path: &Path, plan_file: &Path) -> Result<NativeManagementReport> {
+    pub(super) fn apply(
+        path: &Path,
+        plan_file: &Path,
+        scope: Option<&Arc<crate::app::HostScope>>,
+    ) -> Result<NativeManagementReport> {
         let raw = private_file(plan_file, 2 * NATIVE_STATE_BYTES)?;
         let plan: NativeConfigurationPlan = serde_json::from_slice(raw.bytes())
             .map_err(|_| NativeManagementError::new(ErrorKind::Invalid))?;
-        use_transactions(path, |transactions| {
-            reconcile_complete_tip(transactions)?;
+        use_managed_transactions(path, scope, |transactions| {
+            let target =
+                native_state::decode_state(plan.target.get().as_bytes(), transactions.marker())
+                    .map_err(|_| NativeManagementError::new(ErrorKind::Invalid))?;
+            require_state(target.state(), scope.is_some())?;
+            reconcile_complete_tip(transactions, scope.is_some())?;
             let before = transactions.readstate().map_err(tx)?;
             if plan.schema != 1
                 || plan.scope_generation != transactions.marker().scope_generation
@@ -655,7 +815,8 @@ mod platform {
         })
     }
     pub(super) fn recover(path: &Path, id: &TransactionId) -> Result<NativeManagementReport> {
-        use_transactions(path, |transactions| {
+        use_managed_transactions(path, None, |transactions| {
+            require_original_authority(transactions, id, false)?;
             let committed = transactions.recover_original(id).map_err(tx)?;
             let transaction = NativeTransactionReport {
                 transaction_id: committed.transaction_id,
@@ -667,20 +828,20 @@ mod platform {
             report(transactions, "recover", Some(transaction))
         })
     }
-    pub(super) fn inspect_for_app(path: &Path) -> Result<NativeManagementReport> {
-        use_transactions(path, |transactions| {
+    pub(super) fn inspect_for_app(
+        scope: &Arc<crate::app::HostScope>,
+        role: NativeComponent,
+    ) -> Result<NativeManagementReport> {
+        use_managed_transactions(scope.state_dir(), Some(scope), |transactions| {
             let state = transactions.readstate().map_err(tx)?;
-            if state.state().mode != NativeDeploymentMode::JoinExisting
-                || state.state().migration.is_some()
-                || state.state().desired.gateway.is_some()
-                || !state.state().desired.host.is_some_and(|host| {
-                    host.manager == NativeManager::AppManaged
-                        && host.autostart == NativeAutostartDesired::Disabled
-                })
-            {
+            let correct_role = match role {
+                NativeComponent::Host => state.state().desired.host.is_some(),
+                NativeComponent::Gateway => state.state().desired.gateway.is_some(),
+            };
+            if !correct_role {
                 return Err(NativeManagementError::new(ErrorKind::Invalid));
             }
-            reconcile_complete_tip(transactions)?;
+            reconcile_complete_tip(transactions, true)?;
             report(transactions, "app_offline_admission", None)
         })
     }
@@ -709,10 +870,18 @@ mod platform {
     ) -> Result<NativeManagementReport> {
         Err(NativeManagementError::new(ErrorKind::Unsupported))
     }
-    pub(super) fn plan(_: &Path, _: NativeDesiredChange) -> Result<NativeManagementPlan> {
+    pub(super) fn plan(
+        _: &Path,
+        _: NativeDesiredChange,
+        _: Option<&Arc<crate::app::HostScope>>,
+    ) -> Result<NativeManagementPlan> {
         Err(NativeManagementError::new(ErrorKind::Unsupported))
     }
-    pub(super) fn apply(_: &Path, _: &Path) -> Result<NativeManagementReport> {
+    pub(super) fn apply(
+        _: &Path,
+        _: &Path,
+        _: Option<&Arc<crate::app::HostScope>>,
+    ) -> Result<NativeManagementReport> {
         Err(NativeManagementError::new(ErrorKind::Unsupported))
     }
     pub(super) fn recover(_: &Path, _: &TransactionId) -> Result<NativeManagementReport> {

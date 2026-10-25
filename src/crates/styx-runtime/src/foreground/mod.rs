@@ -91,6 +91,7 @@ mod gateway;
     )
 ))]
 pub(crate) use gateway::StartupTransportClosure;
+pub(crate) use gateway::{AppGatewayError, gateway_run_for_app};
 pub use gateway::{GatewayForegroundOutcome, gateway_run};
 
 /// Read OS candidates for the actual invoking user. No state/profile, environment

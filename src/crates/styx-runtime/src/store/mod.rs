@@ -417,6 +417,41 @@ impl PrivateRoot {
         }
     }
 
+    /// Fixed owner-local Gateway bootstrap input, published once under the
+    /// same App container input writer as the subsequent Host join material.
+    pub(crate) fn create_app_gateway_input(
+        &self,
+        writer: &ConfigurationWriterGuard,
+        deployment: &[u8],
+    ) -> Result<()> {
+        #[cfg(any(
+            target_os = "windows",
+            target_os = "macos",
+            all(target_os = "linux", target_env = "gnu")
+        ))]
+        {
+            if deployment.is_empty() || deployment.len() > 128 * 1024 {
+                return Err(StoreError::TooLarge);
+            }
+            self.inner.create_fixed(
+                writer,
+                "app-local-gateway-input-v1.json",
+                deployment,
+                &|_| {},
+            )?;
+            Ok(())
+        }
+        #[cfg(not(any(
+            target_os = "windows",
+            target_os = "macos",
+            all(target_os = "linux", target_env = "gnu")
+        )))]
+        {
+            let _ = (writer, deployment);
+            Err(StoreError::Unsupported)
+        }
+    }
+
     /// Read-only, descriptor-relative absence check. An existing file, directory,
     /// symlink or special node refuses admission; only ENOENT proves absence.
     /// This is an observation, never a lock against an uncoordinated legacy writer.

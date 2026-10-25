@@ -6,6 +6,7 @@ use std::{
     ffi::OsStr,
     fmt,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 use styx_contracts::identity::Sha256Digest;
 
@@ -61,8 +62,14 @@ pub struct BootstrapError {
         )
     ))]
     _retained: Option<Box<Retained>>,
+    // Declared last so original writer/resources drop before the App lease.
+    _app_scope: Option<Arc<crate::app::HostScope>>,
 }
 impl BootstrapError {
+    fn with_app_scope(mut self, scope: Option<Arc<crate::app::HostScope>>) -> Self {
+        self._app_scope = scope;
+        self
+    }
     pub fn code(&self) -> &'static str {
         self.code
     }
@@ -73,6 +80,7 @@ impl BootstrapError {
         Self {
             code,
             exit,
+            _app_scope: None,
             #[cfg(any(
                 all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
                 all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"),
@@ -115,6 +123,7 @@ impl BootstrapError {
         Self {
             code,
             exit,
+            _app_scope: None,
             _retained: Some(Box::new(Retained::Root { _failure: failure })),
         }
     }
@@ -137,6 +146,39 @@ pub async fn bootstrap(
     deployment_file: &Path,
     runtime_selection_file: &Path,
 ) -> Result<BootstrapReport, BootstrapError> {
+    bootstrap_owned(parent, name, deployment_file, runtime_selection_file, None).await
+}
+
+/// The App supplies its retained scope, never a wire-selected role or manager.
+pub(crate) async fn bootstrap_for_app(
+    scope: Arc<crate::app::HostScope>,
+    deployment_file: &Path,
+    runtime_selection_file: &Path,
+) -> Result<BootstrapReport, BootstrapError> {
+    let path = scope.state_dir().to_owned();
+    let parent = path.parent().ok_or_else(|| {
+        BootstrapError::new("fresh_gateway_input_invalid", 2).with_app_scope(Some(scope.clone()))
+    })?;
+    let name = path.file_name().ok_or_else(|| {
+        BootstrapError::new("fresh_gateway_input_invalid", 2).with_app_scope(Some(scope.clone()))
+    })?;
+    bootstrap_owned(
+        parent,
+        name,
+        deployment_file,
+        runtime_selection_file,
+        Some(scope),
+    )
+    .await
+}
+
+async fn bootstrap_owned(
+    parent: &Path,
+    name: &OsStr,
+    deployment_file: &Path,
+    runtime_selection_file: &Path,
+    app_scope: Option<Arc<crate::app::HostScope>>,
+) -> Result<BootstrapReport, BootstrapError> {
     #[cfg(any(
         all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
         all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"),
@@ -147,9 +189,9 @@ pub async fn bootstrap(
     ))]
     {
         static JOBS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
-        let permit = JOBS
-            .try_acquire()
-            .map_err(|_| BootstrapError::new("fresh_gateway_busy", 3))?;
+        let permit = JOBS.try_acquire().map_err(|_| {
+            BootstrapError::new("fresh_gateway_busy", 3).with_app_scope(app_scope.clone())
+        })?;
         let (parent, name, deployment, selection) = (
             parent.to_path_buf(),
             name.to_owned(),
@@ -158,12 +200,16 @@ pub async fn bootstrap(
         );
         // The spawned job owns the permit until real completion even if its
         // response waiter is dropped. No second writer or entropy retry.
+        let retained = app_scope.clone();
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            platform::bootstrap(&parent, &name, &deployment, &selection)
+            platform::bootstrap(&parent, &name, &deployment, &selection, app_scope.clone())
+                .map_err(|error| error.with_app_scope(app_scope))
         })
         .await
-        .map_err(|_| BootstrapError::new("fresh_gateway_worker_failed", 4))?
+        .map_err(|_| {
+            BootstrapError::new("fresh_gateway_worker_failed", 4).with_app_scope(retained)
+        })?
     }
     #[cfg(not(any(
         all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
@@ -175,7 +221,7 @@ pub async fn bootstrap(
     )))]
     {
         let _ = (parent, name, deployment_file, runtime_selection_file);
-        Err(BootstrapError::new("fresh_gateway_platform_unsupported", 3))
+        Err(BootstrapError::new("fresh_gateway_platform_unsupported", 3).with_app_scope(app_scope))
     }
 }
 
@@ -187,7 +233,7 @@ pub async fn bootstrap(
         any(target_arch = "x86_64", target_arch = "aarch64")
     )
 ))]
-pub(crate) use platform::{FreshGatewayRuntime, open_existing};
+pub(crate) use platform::{FreshGatewayRuntime, open_existing, open_existing_for_app};
 #[cfg(any(
     all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
     all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"),
@@ -357,7 +403,14 @@ mod platform {
         name: &OsStr,
         deployment_file: &Path,
         selection_file: &Path,
+        app_scope: Option<Arc<crate::app::HostScope>>,
     ) -> Result<BootstrapReport, BootstrapError> {
+        if let Some(scope) = &app_scope {
+            if scope.state_dir() != parent.join(name) {
+                return Err(bad());
+            }
+            scope.validate().map_err(|_| changed())?;
+        }
         let (deployment_root, deployment) = private_input(deployment_file)?;
         let (selection_root, selection_raw) = private_input(selection_file)?;
         let (origin, _) = endpoint(deployment.bytes())?;
@@ -397,7 +450,17 @@ mod platform {
         reobserve(&deployment_root, &deployment)?;
         reobserve(&selection_root, &selection_raw)?;
         candidate.revalidate().map_err(|_| changed())?;
+        if let Some(scope) = &app_scope {
+            scope.validate().map_err(|_| changed())?;
+        }
         let fresh = native_root::create_fresh(&parent_root, name).map_err(BootstrapError::root)?;
+        if let Some(scope) = &app_scope
+            && scope.bind().is_err()
+        {
+            return Err(changed().retaining(Retained::Fresh {
+                _root: Box::new(fresh),
+            }));
+        }
         let public = [
             ca.certificate_pem.as_slice(),
             ca.private_key.as_protected_bytes(),
@@ -447,7 +510,11 @@ mod platform {
                 last_transaction: None,
                 desired: NativeDesired {
                     gateway: Some(NativeComponentDesired {
-                        manager: NativeManager::ForegroundCli,
+                        manager: if app_scope.is_some() {
+                            NativeManager::AppManaged
+                        } else {
+                            NativeManager::ForegroundCli
+                        },
                         run: NativeRunDesired::Stopped,
                         autostart: NativeAutostartDesired::Disabled,
                     }),
@@ -480,6 +547,11 @@ mod platform {
             .map_err(BootstrapError::root)?;
         // No daemon launched, no runtime-health claim. Reading the formal state
         // is complete before deliberately releasing this successful writer.
+        if let Some(scope) = &app_scope
+            && scope.validate().is_err()
+        {
+            return Err(changed().retaining(Retained::Binding { _binding: binding }));
+        }
         let _ = binding;
         Ok(BootstrapReport {
             schema: 1,
@@ -505,12 +577,16 @@ mod platform {
         candidate: VerifiedNativeRelease,
         inputs: Vec<RawFile>,
         state_raw: Vec<u8>,
+        app_scope: Option<Arc<crate::app::HostScope>>,
     }
     impl FreshGatewayRuntime {
         pub(crate) fn configuration_root(&self) -> OwnedConfigurationRoot {
             self.transactions.configuration_root()
         }
         pub(crate) fn validate(&self) -> Result<(), BootstrapError> {
+            if let Some(scope) = &self.app_scope {
+                scope.validate().map_err(|_| changed())?;
+            }
             self.candidate.revalidate().map_err(|_| changed())?;
             self.configuration_root()
                 .ensure_admission()
@@ -526,6 +602,25 @@ mod platform {
         }
     }
     pub(crate) fn open_existing(path: &Path) -> Result<FreshGatewayRuntime, BootstrapError> {
+        open_existing_owned(path, None)
+    }
+    pub(crate) fn open_existing_for_app(
+        scope: Arc<crate::app::HostScope>,
+    ) -> Result<FreshGatewayRuntime, BootstrapError> {
+        let path = scope.state_dir().to_owned();
+        open_existing_owned(&path, Some(scope.clone()))
+            .map_err(|error| error.with_app_scope(Some(scope)))
+    }
+    fn open_existing_owned(
+        path: &Path,
+        app_scope: Option<Arc<crate::app::HostScope>>,
+    ) -> Result<FreshGatewayRuntime, BootstrapError> {
+        if let Some(scope) = &app_scope {
+            if scope.state_dir() != path {
+                return Err(bad());
+            }
+            scope.validate().map_err(|_| changed())?;
+        }
         if !path.is_absolute() {
             return Err(bad());
         }
@@ -592,7 +687,12 @@ mod platform {
                 || state_value.mode != NativeDeploymentMode::CreateLocal
                 || state_value.desired.host.is_some()
                 || state_value.desired.gateway.as_ref().is_none_or(|d| {
-                    d.manager != NativeManager::ForegroundCli
+                    d.manager
+                        != if app_scope.is_some() {
+                            NativeManager::AppManaged
+                        } else {
+                            NativeManager::ForegroundCli
+                        }
                         || d.run != NativeRunDesired::Running
                         || d.autostart != NativeAutostartDesired::Disabled
                 })
@@ -685,6 +785,7 @@ mod platform {
             candidate,
             inputs,
             state_raw,
+            app_scope,
         };
         if let Err(error) = runtime.validate() {
             return Err(error.retaining(Retained::Transactions {

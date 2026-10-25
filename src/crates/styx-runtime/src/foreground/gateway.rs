@@ -56,7 +56,7 @@ pub async fn gateway_run(
         // Dropped response waiters request stop, not release of the owned task's
         // execution/configuration leases. The runtime must remain alive to join.
         let _waiter = stop.clone().drop_guard();
-        tokio::spawn(async move { platform::run(path, stop, events).await })
+        tokio::spawn(async move { platform::run(path, stop, events, None, None).await })
             .await
             .map_err(|_| ForegroundError("gateway_foreground_worker_failed"))?
     }
@@ -71,6 +71,104 @@ pub async fn gateway_run(
     {
         let _ = (state_dir, cancel, events);
         Err(ForegroundError("gateway_foreground_platform_unsupported"))
+    }
+}
+
+/// An App startup failure owns any unsettled bootstrap writer and its original
+/// App scope. The App must retain this value until its teardown; reporting the
+/// static code alone is not settlement evidence.
+#[must_use]
+pub(crate) struct AppGatewayError {
+    foreground: ForegroundError,
+    _retained: Option<crate::management::native_gateway::BootstrapError>,
+}
+impl AppGatewayError {
+    pub(crate) fn code(&self) -> &'static str {
+        self.foreground.code()
+    }
+}
+impl std::fmt::Debug for AppGatewayError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_tuple("AppGatewayError")
+            .field(&self.code())
+            .finish()
+    }
+}
+impl std::fmt::Display for AppGatewayError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(self.code())
+    }
+}
+impl std::error::Error for AppGatewayError {}
+
+#[cfg(any(
+    all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+    all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"),
+    all(
+        target_os = "macos",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    )
+))]
+// One startup loader and one error slot per original run, with no backpointer
+// from HostScope. This transports ownership, not new domain/recovery state.
+type AppStartupFailure =
+    std::sync::Arc<std::sync::Mutex<Option<crate::management::native_gateway::BootstrapError>>>;
+
+/// Owned native App role. Scope cannot be constructed from RPC data. The worker
+/// retains it through original blocking work and Gateway settlement.
+pub(crate) async fn gateway_run_for_app(
+    scope: std::sync::Arc<crate::app::HostScope>,
+    cancel: CancellationToken,
+    events: mpsc::Sender<ForegroundEvent>,
+) -> Result<GatewayForegroundOutcome, AppGatewayError> {
+    #[cfg(any(
+        all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+        all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"),
+        all(
+            target_os = "macos",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    ))]
+    {
+        let path = scope.state_dir().to_owned();
+        let stop = cancel.child_token();
+        let _waiter = stop.clone().drop_guard();
+        let failure: AppStartupFailure = Default::default();
+        let loader_failure = failure.clone();
+        let result = tokio::spawn(async move {
+            platform::run(path, stop, events, Some(scope), Some(loader_failure)).await
+        })
+        .await
+        .unwrap_or(Err(ForegroundError("gateway_foreground_worker_failed")));
+        // run awaits its original blocking loader. Only after that run has
+        // actually joined may ownership pass from the slot to the App result.
+        let retained = failure.lock().unwrap_or_else(|e| e.into_inner()).take();
+        match (result, retained) {
+            (Ok(outcome), None) => Ok(outcome),
+            (Err(foreground), retained) => Err(AppGatewayError {
+                foreground,
+                _retained: retained,
+            }),
+            (Ok(_), Some(retained)) => Err(AppGatewayError {
+                foreground: ForegroundError(retained.code()),
+                _retained: Some(retained),
+            }),
+        }
+    }
+    #[cfg(not(any(
+        all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+        all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"),
+        all(
+            target_os = "macos",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    )))]
+    {
+        let _ = (scope, cancel, events);
+        Err(AppGatewayError {
+            foreground: ForegroundError("gateway_foreground_platform_unsupported"),
+            _retained: None,
+        })
     }
 }
 
@@ -476,7 +574,7 @@ mod platform {
         // failure must never fall back to the legacy or migrated authority.
         let native = state.ensure_absent(".styx-native-root-v1.json").is_err();
         if native && state.ensure_absent("gateway-ready-v1.json").is_err() {
-            return load_fresh(path);
+            return load_fresh(path, None, None);
         }
         #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
         {
@@ -731,9 +829,29 @@ mod platform {
     }
     /// Fresh native startup retains the existing ready binding and the same
     /// configuration owner. No legacy-layout or migration proof is invented.
-    fn load_fresh(path: &Path) -> Result<Loaded, ForegroundError> {
-        let runtime =
-            crate::management::native_gateway::open_existing(path).map_err(|e| error(e.code()))?;
+    fn load_fresh(
+        path: &Path,
+        app_scope: Option<Arc<crate::app::HostScope>>,
+        app_failure: Option<AppStartupFailure>,
+    ) -> Result<Loaded, ForegroundError> {
+        let runtime = match app_scope {
+            Some(scope) => {
+                if scope.state_dir() != path {
+                    return Err(error("app_scope_changed"));
+                }
+                crate::management::native_gateway::open_existing_for_app(scope)
+            }
+            None => crate::management::native_gateway::open_existing(path),
+        }
+        .map_err(|e| {
+            let foreground = error(e.code());
+            if let Some(failure) = app_failure {
+                // Exactly one open attempt in this run, so no prior failure can
+                // be overwritten. Keep the original error, writer and scope.
+                *failure.lock().unwrap_or_else(|e| e.into_inner()) = Some(e);
+            }
+            foreground
+        })?;
         let configuration = runtime.configuration_root();
         let authority = runtime
             .origin
@@ -1055,6 +1173,8 @@ mod platform {
         path: PathBuf,
         stop: CancellationToken,
         events: mpsc::Sender<ForegroundEvent>,
+        app_scope: Option<Arc<crate::app::HostScope>>,
+        app_failure: Option<AppStartupFailure>,
     ) -> Result<GatewayForegroundOutcome, ForegroundError> {
         let permit = LOADERS
             .try_acquire()
@@ -1069,7 +1189,10 @@ mod platform {
             gateway_id,
         } = tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            load(&path)
+            match app_scope {
+                Some(scope) => load_fresh(&path, Some(scope), app_failure),
+                None => load(&path),
+            }
         })
         .await
         .map_err(|_| error("gateway_reader_failed"))??;

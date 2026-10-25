@@ -16,19 +16,19 @@ const MAX_HEADERS: usize = 32;
 const MAX_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// Contains a credential response; deliberately no Debug/Clone/Serde.
-pub(super) struct JoinHttpResponse {
-    pub(super) status: u16,
-    pub(super) body: Zeroizing<Vec<u8>>,
+pub(crate) struct JoinHttpResponse {
+    pub(crate) status: u16,
+    pub(crate) body: Zeroizing<Vec<u8>>,
     /// The actual verified endpoint certificate, never a configured CA pin.
-    pub(super) leaf_pin: GatewayLeafPin,
+    pub(crate) leaf_pin: GatewayLeafPin,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum JoinHttpCertainty {
+pub(crate) enum JoinHttpCertainty {
     NotDispatched,
     ResultUnknown,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum JoinHttpErrorKind {
+pub(crate) enum JoinHttpErrorKind {
     InvalidInput,
     InvalidTimeout,
     Connect,
@@ -41,12 +41,12 @@ pub(super) enum JoinHttpErrorKind {
 /// Only typed/static facts. Never retains URLs, headers, bodies or upstream
 /// Display strings. Even a backend error response may follow an actual effect.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) struct JoinHttpError {
-    pub(super) kind: JoinHttpErrorKind,
-    pub(super) certainty: JoinHttpCertainty,
+pub(crate) struct JoinHttpError {
+    pub(crate) kind: JoinHttpErrorKind,
+    pub(crate) certainty: JoinHttpCertainty,
 }
 impl JoinHttpError {
-    pub(super) fn code(self) -> &'static str {
+    pub(crate) fn code(self) -> &'static str {
         match self.kind {
             JoinHttpErrorKind::InvalidInput => "join_http_invalid_input",
             JoinHttpErrorKind::InvalidTimeout => "join_http_invalid_timeout",
@@ -89,7 +89,7 @@ impl AsRef<[u8]> for RequestBytes {
     }
 }
 
-pub(super) async fn exchange(
+pub(crate) async fn exchange(
     origin: &url::Url,
     tls: &GatewayClientTls,
     path: &'static str,
@@ -114,7 +114,7 @@ pub(super) async fn exchange(
 
 /// Fixed authenticated self route only. A response status is not a ready grant;
 /// the caller must validate actual device/fingerprint/generation and status200.
-pub(super) async fn exchange_self(
+pub(crate) async fn exchange_self(
     origin: &url::Url,
     tls: &GatewayClientTls,
     device: &styx_contracts::identity::DeviceId,
@@ -133,6 +133,31 @@ pub(super) async fn exchange_self(
         &[],
         Some(bearer),
         timeout,
+    )
+    .await
+}
+/// Owner-local setup uses the existing once-only exchange and original Gateway
+/// admin credential. No generic admin route, redirect or retry is introduced.
+pub(crate) async fn exchange_local_admin(
+    origin: &url::Url,
+    tls: &GatewayClientTls,
+    approve: bool,
+    body: &[u8],
+    bearer: &[u8],
+) -> Result<JoinHttpResponse, JoinHttpError> {
+    let path = if approve {
+        "/styx/enroll/approve"
+    } else {
+        "/styx/enroll/invitations"
+    };
+    exchange_once(
+        origin,
+        tls,
+        hyper::Method::POST,
+        path,
+        body,
+        Some(bearer),
+        MAX_TIMEOUT,
     )
     .await
 }
@@ -161,7 +186,10 @@ async fn exchange_once(
     if timeout.is_zero() || timeout > MAX_TIMEOUT {
         return Err(refusal(JoinHttpErrorKind::InvalidTimeout));
     }
-    let allowed = (method == hyper::Method::POST && post_path(path))
+    let allowed = (method == hyper::Method::POST
+        && (post_path(path)
+            || (bearer.is_some()
+                && matches!(path, "/styx/enroll/invitations" | "/styx/enroll/approve"))))
         || (method == hyper::Method::GET
             && body.is_empty()
             && bearer.is_some()
