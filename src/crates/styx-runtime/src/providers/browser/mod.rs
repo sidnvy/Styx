@@ -475,6 +475,10 @@ impl OwnedBrowserConfig {
                 ),
                 ("PATH".to_owned(), "/usr/bin:/bin".to_owned()),
                 ("LANG".to_owned(), "C.UTF-8".to_owned()),
+                (
+                    "BREAKPAD_DUMP_LOCATION".to_owned(),
+                    self.output_dir.to_string_lossy().into_owned(),
+                ),
             ]);
             if self.environment != expected {
                 return Err(BrowserError::PermissionDenied);

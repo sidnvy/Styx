@@ -446,6 +446,12 @@ impl BrowserBootstrap for LocalBrowser {
                 ),
                 ("PATH".into(), "/usr/bin:/bin".into()),
                 ("LANG".into(), "C.UTF-8".into()),
+                // Bind crash data to this original protected owner directory.
+                // HOME alone does not select Chrome's native crash database.
+                (
+                    "BREAKPAD_DUMP_LOCATION".into(),
+                    output.path().to_string_lossy().into_owned(),
+                ),
             ]),
             ..config
         };
