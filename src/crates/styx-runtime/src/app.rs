@@ -346,7 +346,14 @@ impl HostApp {
         let (home, shell) = (
             std::env::var_os("USERPROFILE").map(PathBuf::from),
             std::env::var_os("SystemRoot")
-                .map(|p| PathBuf::from(p).join("System32").join("cmd.exe")),
+                // Match the existing enrollment shell policy on every Gateway OS.
+                .map(|p| {
+                    PathBuf::from(p)
+                        .join("System32")
+                        .join("WindowsPowerShell")
+                        .join("v1.0")
+                        .join("powershell.exe")
+                }),
         );
         #[cfg(not(windows))]
         let (home, shell) = (

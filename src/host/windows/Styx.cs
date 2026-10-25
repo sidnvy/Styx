@@ -168,10 +168,27 @@ namespace StyxNative {
   internal void Logo(Control p,int size){p.Controls.Add(new PictureBox { Image=Image.FromFile(Path.Combine(root,"styx-logo.png")),SizeMode=PictureBoxSizeMode.Zoom,Width=size,Height=size,Margin=new Padding(0,0,0,15) });}
   void ShowPanel(){var bounds=Screen.PrimaryScreen.WorkingArea;panel.Location=new Point(bounds.Right-panel.Width-12,bounds.Bottom-panel.Height-12);panel.Show();panel.Activate();}
   void OpenSettings(){settings.Show();settings.Activate();}
+  // Fixed protocol result names only. Never display exception Message,
+  // request data, upstream errors, file paths or credentials.
+  static string NativeFailureCode(string code){
+   switch(code){
+    case "join_invalid":case "join_encoding":case "join_signature":case "seed_identity":
+    case "app_input_invalid":case "app_home_unavailable":case "app_shell_unavailable":
+    case "app_join_not_inspected":case "app_join_already_exists":case "app_join_input_unknown":
+    case "app_input_writer_busy":case "app_scope_changed":case "app_instance_changed":
+    case "native_join_invalid_input":case "native_join_candidate_untrusted":case "native_join_ca_rejected":
+    case "native_join_identity_generation_failed":case "native_join_entropy_unavailable":
+    case "native_join_app_scope_changed":case "native_join_already_exists":
+    case "native_join_persistence_unknown":case "native_join_unknown_inspect":
+    case "native_join_configuration_busy":case "native_join_busy":case "native_join_worker_unknown":
+    case "native_join_platform_unsupported":case "native_join_response_rejected":return code;
+    default:return "";
+   }
+  }
   internal async Task Run(Func<Task> action,string pending="Working…",string failure="The operation could not be confirmed. Refresh to review current state. Completed steps are retained; an interrupted operation is not automatically repeated."){
    if(busy||starting||core==null)return;string previousMessage=message.Text;busy=true;mutationDone=new TaskCompletionSource<bool>();mutationRevision++;settings.Enabled=false;message.Text=pending;settings.Feedback(pending);
    try{var reading=observation;if(reading!=null){try{await reading;}catch{}if(observation==reading)observation=null;}await action();if(settings.HasFeedback(pending))settings.Feedback("Operation completed. Review the current connection and test evidence below.");}
-   catch(Exception error){string text=failure;var native=error as NativeOperationException;if(native!=null&&native.Code=="app_system_trust_not_supported")text="This native join currently requires an explicit Gateway CA in the invitation. System-trust-only joining is not supported; no CA or approval was fabricated.";else if(native!=null&&native.Code=="app_operation_not_supported")text="This operation is unavailable in the native Host slice. Existing settings were retained.";else if(native!=null&&native.Code=="host_payload_insufficient_space")text=SpaceFeedback(native.Budget,native.Preflight);else if(native!=null&&native.Code=="windows_native_app_binding_required")text="The desktop test could not start. This package could not verify the current native Styx app. Your settings are retained.";else if(native!=null&&native.Code=="desktop_acceptance_native_app_changed")text="The native Styx app changed during this desktop test. Create a new test in this app before continuing.";else if(native!=null&&native.Code=="work_in_progress")text="A task is still running. Wait for it to finish before quitting or updating Styx.";else if(native!=null&&native.Code=="work_state_unknown")text="Styx could not confirm whether tasks are running. Keep it open and try again after checking the connection.";message.Text="Connection needs attention. Open Settings to review the last result.";settings.Feedback(text);}
+   catch(Exception error){string text=failure;var native=error as NativeOperationException;if(native!=null&&native.Code=="app_system_trust_not_supported")text="This native join currently requires an explicit Gateway CA in the invitation. System-trust-only joining is not supported; no CA or approval was fabricated.";else if(native!=null&&native.Code=="app_operation_not_supported")text="This operation is unavailable in the native Host slice. Existing settings were retained.";else if(native!=null&&native.Code=="host_payload_insufficient_space")text=SpaceFeedback(native.Budget,native.Preflight);else if(native!=null&&native.Code=="windows_native_app_binding_required")text="The desktop test could not start. This package could not verify the current native Styx app. Your settings are retained.";else if(native!=null&&native.Code=="desktop_acceptance_native_app_changed")text="The native Styx app changed during this desktop test. Create a new test in this app before continuing.";else if(native!=null&&native.Code=="work_in_progress")text="A task is still running. Wait for it to finish before quitting or updating Styx.";else if(native!=null&&native.Code=="work_state_unknown")text="Styx could not confirm whether tasks are running. Keep it open and try again after checking the connection.";if(native!=null){string diagnostic=NativeFailureCode(native.Code);if(diagnostic.Length>0)text+="\nNative result: "+diagnostic;}message.Text="Connection needs attention. Open Settings to review the last result.";settings.Feedback(text);}
    finally{if(message.Text==pending)message.Text=previousMessage;settings.Enabled=true;busy=false;mutationDone.TrySetResult(true);}
    // A mutation invalidates an in-flight startup observation. Resume only that
    // read after settling; never replay the mutation or block the ready controls.
