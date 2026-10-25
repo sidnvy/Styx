@@ -538,7 +538,8 @@ mod platform {
             {
                 return Err(unknown());
             }
-            self.candidate.revalidate().map_err(|_| unknown())?;
+            // runtime_selection brackets its original metadata read with full
+            // release revalidation; a third adjacent scan adds no new boundary.
             if self.candidate.runtime_selection().map_err(|_| unknown())? != self.seed.runtime
                 || self.store.seed_binding().map_err(|_| unknown())? != self.seed_raw.as_slice()
                 || self
@@ -969,11 +970,21 @@ mod platform {
         let (_work, report) = io(work, |w| {
             // A strict complete prefix is required. Missing reply or a partial
             // Claim/Confirm has unknown outcome, never an invitation to retry.
-            let dispatched = w.read(File::JoinDispatched)?;
-            let reply = w.read(File::JoinReply)?;
-            let credential = w.read(File::Credential)?;
-            let confirm = w.read(File::ConfirmDispatched)?;
-            let ready = w.read(File::Ready)?;
+            // Inspect one bounded read-only prefix under the original writer.
+            // Each store read still checks every original phase/material pin
+            // and journal tip. No network or mutation occurs between reads;
+            // validate the complete release before and after this batch instead
+            // of streaming that same closure separately for every phase file.
+            w.validate()?;
+            let dispatched = w.store.read(File::JoinDispatched).map_err(|_| unknown())?;
+            let reply = w.store.read(File::JoinReply).map_err(|_| unknown())?;
+            let credential = w.store.read(File::Credential).map_err(|_| unknown())?;
+            let confirm = w
+                .store
+                .read(File::ConfirmDispatched)
+                .map_err(|_| unknown())?;
+            let ready = w.store.read(File::Ready).map_err(|_| unknown())?;
+            w.validate()?;
             if dispatched.is_none() {
                 return Err(JoinError::new("native_join_dispatch_unknown_no_retry", 4));
             }

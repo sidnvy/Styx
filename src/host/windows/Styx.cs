@@ -389,8 +389,12 @@ namespace StyxNative {
      // Duplicate-submit guard only; Core owns all durable setup state. One
      // request, with Core's default port 22022. Failure only reads status.
      localCreationSubmitted=true;
-     try{await owner.Call("createLocal",choice);}
-     finally{try{await owner.RefreshAfterMutation();}catch{}ShowPage("overview");}
+     // The installed Framework compiler is C# 5: keep awaits outside
+     // catch/finally while preserving the original mutation failure and stack.
+     Exception setupFailure=null;
+     try{await owner.Call("createLocal",choice);}catch(Exception failure){setupFailure=failure;}
+     try{await owner.RefreshAfterMutation();}catch{}ShowPage("overview");
+     if(setupFailure!=null)System.Runtime.ExceptionServices.ExceptionDispatchInfo.Capture(setupFailure).Throw();
     });
     Action("Return",()=>{ShowPage("welcome");return Task.FromResult(0);},false);
    }else if(name=="join"){

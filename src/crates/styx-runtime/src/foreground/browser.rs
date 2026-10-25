@@ -287,8 +287,21 @@ pub(crate) fn prepare_browser_bootstrap(
     #[cfg(target_os = "linux")]
     let browser = LocalExecutable::open(&browser_path).map_err(|e| at("browser_pin", e))?;
     #[cfg(target_os = "windows")]
-    let browser = LocalExecutable::open(&browser_path)
-        .map_err(|_| at("browser_pin", ErrorCategory::PermissionDenied))?;
+    let browser = LocalExecutable::open(&browser_path).map_err(|error| {
+        use crate::store::StoreError;
+        let category = match error {
+            StoreError::NotPrivate => ErrorCategory::PermissionDenied,
+            StoreError::Unsupported => ErrorCategory::CapabilityUnsupported,
+            StoreError::Io(error) => match error.kind() {
+                std::io::ErrorKind::NotFound => ErrorCategory::TargetNotFound,
+                std::io::ErrorKind::PermissionDenied => ErrorCategory::PermissionDenied,
+                _ if matches!(error.raw_os_error(), Some(32 | 33)) => ErrorCategory::Busy,
+                _ => ErrorCategory::IntegrityFailure,
+            },
+            _ => ErrorCategory::IntegrityFailure,
+        };
+        at("browser_pin", category)
+    })?;
     let runtime = assets::fresh_private_directory(profile.host_base_dir())
         .map_err(|e| at("private_runtime", map_error(e)))?;
     let staged = assets::prepare(

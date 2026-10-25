@@ -16,7 +16,7 @@ use windows_sys::Win32::{
         GENERIC_WRITE, GetLastError, INVALID_HANDLE_VALUE, LocalFree, WAIT_OBJECT_0, WAIT_TIMEOUT,
     },
     Security::{
-        self, ACCESS_ALLOWED_ACE, ACE_HEADER,
+        self, ACCESS_ALLOWED_ACE, ACCESS_ALLOWED_CALLBACK_ACE, ACE_HEADER,
         Authorization::{
             ConvertSidToStringSidW, ConvertStringSecurityDescriptorToSecurityDescriptorW,
             GetSecurityInfo, SE_FILE_OBJECT,
@@ -26,7 +26,9 @@ use windows_sys::Win32::{
     },
     Storage::FileSystem::*,
     System::{
-        SystemServices::{ACCESS_ALLOWED_ACE_TYPE, ACCESS_DENIED_ACE_TYPE},
+        SystemServices::{
+            ACCESS_ALLOWED_ACE_TYPE, ACCESS_ALLOWED_CALLBACK_ACE_TYPE, ACCESS_DENIED_ACE_TYPE,
+        },
         Threading::*,
     },
 };
@@ -207,6 +209,7 @@ fn checked_acl(file: &File, executable: bool) -> Result<String> {
     if unsafe { Security::IsValidAcl(acl) } == 0 {
         return Err(StoreError::NotPrivate);
     }
+    const READ_ONLY: u32 = 0x8000_0000 | 0x2000_0000 | 0x0012_0000 | 0x0000_00A9;
     for index in 0..header.AceCount {
         let mut raw = ptr::null_mut();
         // SAFETY: validated owned ACL and output pointer; the returned ACE is
@@ -235,6 +238,26 @@ fn checked_acl(file: &File, executable: bool) -> Result<String> {
         }
         match u32::from(ace_header.AceType) {
             ACCESS_DENIED_ACE_TYPE => {}
+            ACCESS_ALLOWED_CALLBACK_ACE_TYPE if executable => {
+                if usize::from(ace_header.AceSize) < size_of::<ACCESS_ALLOWED_CALLBACK_ACE>() {
+                    return Err(StoreError::NotPrivate);
+                }
+                // SAFETY: the official fixed callback ACE fits inside the
+                // original bounded ACE. Its variable SID is bounded separately.
+                let ace = unsafe { ptr::read_unaligned(raw.cast::<ACCESS_ALLOWED_CALLBACK_ACE>()) };
+                let sid_address = address
+                    .checked_add(std::mem::offset_of!(ACCESS_ALLOWED_CALLBACK_ACE, SidStart))
+                    .ok_or(StoreError::NotPrivate)?;
+                bounded_sid(raw.with_addr(sid_address), address, ace_end)?;
+                // A callback/condition can restrict this allow, never grant
+                // rights outside Mask. Accept only an entirely read-only upper
+                // bound, without interpreting the opaque callback payload.
+                // Even trusted SIDs may not carry modifying callback rights;
+                // private-store ACLs and every other ACE type remain unchanged.
+                if ace.Mask & !READ_ONLY != 0 {
+                    return Err(StoreError::NotPrivate);
+                }
+            }
             ACCESS_ALLOWED_ACE_TYPE => {
                 if usize::from(ace_header.AceSize) < size_of::<ACCESS_ALLOWED_ACE>() {
                     return Err(StoreError::NotPrivate);
@@ -248,7 +271,6 @@ fn checked_acl(file: &File, executable: bool) -> Result<String> {
                 let allowed = bounded_sid(raw.with_addr(sid_address), address, ace_end)?;
                 // Generic rights are not pre-mapped by GetSecurityInfo. Include
                 // both generic and concrete modification/delete/security rights.
-                const READ_ONLY: u32 = 0x8000_0000 | 0x2000_0000 | 0x0012_0000 | 0x0000_00A9;
                 let relevant = if executable {
                     ace.Mask & !READ_ONLY
                 } else {
@@ -702,5 +724,157 @@ pub(super) fn process_optional(pid: u32) -> Result<Option<ProcessIdentity>> {
             owner_sid: sid,
         })),
         _ => Err(StoreError::ProcessIdentityUnavailable),
+    }
+}
+
+#[cfg(test)]
+mod callback_acl_tests {
+    use super::*;
+    use windows_sys::Win32::{
+        Security::ACCESS_ALLOWED_CALLBACK_ACE,
+        System::SystemServices::ACCESS_ALLOWED_CALLBACK_ACE_TYPE,
+    };
+
+    // Microsoft conditional-ACE grammar: XA;flags;rights;;;SID;(expression).
+    // Member_of accepts SID(BA); the condition's truth is deliberately irrelevant
+    // to our conservative maximum-rights check. Explicit current-user FA permits
+    // fixture creation/read/cleanup even when this callback condition is false.
+    // https://learn.microsoft.com/en-us/windows/win32/secauthz/security-descriptor-definition-language-for-conditional-aces-
+    fn fixture(sid: &str, mask: u32) -> (PathBuf, File) {
+        let current = current_sid().expect("current test user SID");
+        let sddl = wide(OsStr::new(&format!(
+            "O:{current}D:P(A;;FA;;;{current})(XA;;0x{mask:08x};;;{sid};(Member_of {{SID(BA)}}))"
+        )))
+        .expect("bounded test SDDL");
+        let mut descriptor = ptr::null_mut();
+        // SAFETY: NUL-terminated SDDL and initialized output pointer. Local owns
+        // the successful official allocation until CreateFileW has consumed it.
+        assert_ne!(
+            unsafe {
+                ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                    sddl.as_ptr(),
+                    1,
+                    &mut descriptor,
+                    ptr::null_mut(),
+                )
+            },
+            0,
+            "conditional SDDL must parse: {}",
+            std::io::Error::last_os_error()
+        );
+        let descriptor = Local(descriptor);
+        let attributes = SECURITY_ATTRIBUTES {
+            nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+            lpSecurityDescriptor: descriptor.0,
+            bInheritHandle: 0,
+        };
+        let path = std::env::temp_dir().join(format!(
+            "styx-callback-acl-{}.tmp",
+            uuid::Uuid::new_v4().simple()
+        ));
+        let name = wide(path.as_os_str()).expect("bounded fresh fixture name");
+        // SAFETY: fresh CREATE_NEW only. DELETE_ON_CLOSE cleans this exact
+        // kernel-owned fixture on normal return or assertion unwind; no SetACL,
+        // recursive cleanup, installed image or existing file is touched.
+        let handle = unsafe {
+            CreateFileW(
+                name.as_ptr(),
+                GENERIC_READ | DELETE,
+                FILE_SHARE_READ,
+                &attributes,
+                CREATE_NEW,
+                FILE_ATTRIBUTE_TEMPORARY | FILE_FLAG_DELETE_ON_CLOSE | FILE_FLAG_OPEN_REPARSE_POINT,
+                ptr::null_mut(),
+            )
+        };
+        assert_ne!(
+            handle,
+            INVALID_HANDLE_VALUE,
+            "fresh fixture creation: {}",
+            std::io::Error::last_os_error()
+        );
+        // SAFETY: successful CreateFileW transfers its one owned HANDLE to File.
+        let file = unsafe { File::from_raw_handle(handle) };
+        assert_stored_callback(&file, mask);
+        (path, file)
+    }
+
+    fn assert_stored_callback(file: &File, expected_mask: u32) {
+        let mut acl = ptr::null_mut();
+        let mut descriptor = ptr::null_mut();
+        // SAFETY: retained file handle and valid output slots. Query the actual
+        // stored DACL, so a stripped/ordinary ACE cannot make a negative pass.
+        let status = unsafe {
+            GetSecurityInfo(
+                file.as_raw_handle(),
+                SE_FILE_OBJECT,
+                DACL_SECURITY_INFORMATION,
+                ptr::null_mut(),
+                ptr::null_mut(),
+                &mut acl,
+                ptr::null_mut(),
+                &mut descriptor,
+            )
+        };
+        let _descriptor = Local(descriptor);
+        assert_eq!(status, 0, "read fixture DACL");
+        assert!(!acl.is_null());
+        assert_ne!(unsafe { Security::IsValidAcl(acl) }, 0);
+        // SAFETY: successful GetSecurityInfo and IsValidAcl supply the official
+        // ACL layout. GetAce supplies each valid ACE; check size before casting.
+        let count = unsafe { (*acl).AceCount };
+        let mut callbacks = 0;
+        for index in 0..count {
+            let mut raw = ptr::null_mut();
+            assert_ne!(
+                unsafe { Security::GetAce(acl, u32::from(index), &mut raw) },
+                0
+            );
+            assert!(!raw.is_null());
+            let header = unsafe { ptr::read_unaligned(raw.cast::<ACE_HEADER>()) };
+            if u32::from(header.AceType) == ACCESS_ALLOWED_CALLBACK_ACE_TYPE {
+                assert!(usize::from(header.AceSize) > size_of::<ACCESS_ALLOWED_CALLBACK_ACE>());
+                let ace = unsafe { ptr::read_unaligned(raw.cast::<ACCESS_ALLOWED_CALLBACK_ACE>()) };
+                assert_eq!(ace.Mask, expected_mask);
+                assert_eq!(u32::from(header.AceFlags) & Security::INHERIT_ONLY_ACE, 0);
+                callbacks += 1;
+            }
+        }
+        assert_eq!(callbacks, 1, "actual effective conditional callback ACE");
+    }
+
+    #[test]
+    fn callback_read_only_users_is_local_image_only() {
+        let (path, file) = fixture("BU", 0x0012_00a9);
+        assert!(
+            local_executable_acl(&file).is_ok(),
+            "ordinary read/execute callback"
+        );
+        assert!(
+            matches!(private(&file), Err(StoreError::NotPrivate)),
+            "private store must still reject callback ACEs"
+        );
+        drop(file);
+        assert!(!path.try_exists().expect("fixture deletion observation"));
+    }
+
+    #[test]
+    fn callback_modification_is_rejected_even_for_trusted_sid() {
+        let current = current_sid().expect("current test user SID");
+        for (sid, extra) in [
+            ("BU", FILE_WRITE_DATA),
+            ("BU", FILE_DELETE_CHILD),
+            ("BU", WRITE_DAC),
+            (current.as_str(), WRITE_DAC),
+        ] {
+            let (path, file) = fixture(sid, 0x0012_00a9 | extra);
+            assert!(
+                matches!(local_executable_acl(&file), Err(StoreError::NotPrivate)),
+                "modifying callback must be rejected: mask={extra:08x}"
+            );
+            assert!(matches!(private(&file), Err(StoreError::NotPrivate)));
+            drop(file);
+            assert!(!path.try_exists().expect("fixture deletion observation"));
+        }
     }
 }
