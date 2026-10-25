@@ -829,3 +829,6 @@ async fn actual_canonical_tls_wss_host_action_journey() {
     assert_eq!(host.unreserved_queued_bytes(), expected_unreserved);
     outcome.unwrap();
 }
+
+#[path = "drain_tests.rs"]
+mod drain;

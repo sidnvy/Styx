@@ -985,7 +985,8 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
                     if outcome.is_complete() {
                         ExitCode::SUCCESS
                     } else if outcome.local_stop_complete()
-                        && outcome.unconfirmed_owner_cleanups > 0
+                        && (outcome.unconfirmed_owner_cleanups > 0
+                            || outcome.unconfirmed_transport_drains > 0)
                         && !outcome.worker_failure_observed
                         && !outcome.listener_error_observed
                     {
@@ -993,7 +994,11 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
                         // cleanup. Keep that uncertainty visible and nonzero.
                         eprintln!(
                             "{}",
-                            serde_json::json!({"schema":1,"error":"remote_owner_cleanup_unconfirmed"})
+                            serde_json::json!({"schema":1,"error":if outcome.unconfirmed_owner_cleanups > 0 {
+                                "remote_owner_cleanup_unconfirmed"
+                            } else {
+                                "remote_transport_drain_unconfirmed"
+                            }})
                         );
                         ExitCode::from(4)
                     } else {

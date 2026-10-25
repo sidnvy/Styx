@@ -98,6 +98,16 @@ pub(super) struct ComputerContexts {
     entries: BTreeMap<(OwnerId, DeviceId), ComputerEntry>,
 }
 impl ComputerContexts {
+    pub(super) fn collect_settled(&mut self) {
+        self.entries.retain(|_, entry| {
+            !entry.resource.try_lock().is_ok_and(|resource| {
+                resource
+                    .binding
+                    .as_ref()
+                    .is_some_and(BoundOwner::physically_settled)
+            })
+        });
+    }
     pub(super) fn clear_owner(&mut self, owner: &VerifiedGatewayOwner) {
         self.entries.retain(|(id, _), entry| {
             id != owner.owner_id() || entry.principal != owner.principal_fingerprint()
@@ -159,6 +169,7 @@ impl PairedGatewayBackend {
         create: bool,
     ) -> Result<Option<Arc<AsyncMutex<ComputerResource>>>, &'static str> {
         let mut state = self.state.lock().expect("paired state");
+        state.collect_settled();
         if state
             .owners
             .get(owner.owner_id())
@@ -288,6 +299,9 @@ impl PairedGatewayBackend {
             {
                 Ok(Ok(b)) => b,
                 Ok(Err(e)) => {
+                    if !matches!(e, super::super::RelayError::Unknown) {
+                        self.retire_computer(owner, &device, &cell);
+                    }
                     return failure(
                         e.code(),
                         None,
@@ -297,6 +311,10 @@ impl PairedGatewayBackend {
                 Err(_) => return failure("outcome_unknown", None, true),
             };
             if !binding.defaults().computer_approved {
+                return failure("permission_denied", None, false);
+            }
+            if binding.closed() {
+                self.retire_computer(owner, &device, &cell);
                 return failure("permission_denied", None, false);
             }
             record.binding = Some(binding);

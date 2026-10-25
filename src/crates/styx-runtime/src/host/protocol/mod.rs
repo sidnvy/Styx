@@ -32,6 +32,7 @@ use styx_contracts::{
     operation::*,
 };
 use styx_core::operations::{OperationSnapshot, OwnerLease};
+use tokio_util::sync::CancellationToken;
 use wire::*;
 
 const FRAME_LIMIT: usize = 256 * 1024;
@@ -103,6 +104,7 @@ struct OwnerRegistry {
     owners: BTreeMap<(OwnerId, OwnerEpoch), OwnerRecord>,
     active_epoch: Option<GatewayEpoch>,
     retired_epochs: BTreeSet<GatewayEpoch>,
+    stopping: bool,
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum ProtocolError {
@@ -310,13 +312,30 @@ impl<'a> HostProtocol<'a> {
         Ok(())
     }
     fn owner(&self, reference: &OwnerRef) -> Result<OwnerLease, ErrorCategory> {
-        self.owners
-            .lock()
-            .expect("owner registry")
+        let registry = self.owners.lock().expect("owner registry");
+        if registry.stopping {
+            return Err(ErrorCategory::Unauthorized);
+        }
+        registry
             .owners
             .get(&(reference.owner_id.clone(), reference.owner_epoch.clone()))
             .and_then(|entry| entry.lease.clone())
             .ok_or(ErrorCategory::Unauthorized)
+    }
+    fn fence_transport_stop(&self) -> Result<(), ProtocolError> {
+        let mut registry = self.owners.lock().expect("owner registry");
+        registry.stopping = true;
+        for entry in registry.owners.values_mut() {
+            if let Some(lease) = &entry.lease {
+                let cleanup = self
+                    .authority
+                    .fence_owner_for_cleanup(lease)
+                    .map_err(|_| ProtocolError::OwnerRegistrationRejected)?;
+                entry.cleanup = Some(cleanup);
+                entry.lease = None;
+            }
+        }
+        Ok(())
     }
     fn accept_epoch(&self, epoch: &GatewayEpoch) -> Result<(), ProtocolError> {
         if !self.paired {
@@ -368,6 +387,9 @@ impl<'a> HostProtocol<'a> {
         let mut registry = self.owners.lock().expect("owner registry");
         let key = (owner.owner_id.clone(), owner.owner_epoch.clone());
         if let Some(revision) = revision {
+            if registry.stopping {
+                return Some(rejection(ErrorCategory::Unauthorized));
+            }
             if revision != self.coordinator.grant_revision() {
                 return Some(rejection(ErrorCategory::StateConflict));
             }
@@ -724,7 +746,11 @@ impl<'a> HostProtocol<'a> {
             Call::Terminate {} => Reply::Unsupported {
                 feature: "terminate".into(),
             },
-            Call::Negotiate { .. } | Call::OwnerOpen { .. } | Call::OwnerRevoke { .. } => invalid(),
+            Call::Negotiate { .. }
+            | Call::OwnerOpen { .. }
+            | Call::OwnerRevoke { .. }
+            | Call::EnableTransportDrain
+            | Call::TransportDrainResult { .. } => invalid(),
         }
     }
     fn features(&self) -> Vec<String> {
@@ -746,9 +772,14 @@ impl<'a> HostProtocol<'a> {
         };
         if self.paired {
             features.extend(
-                ["owner_open", "owner_revoke", "owner_cleanup"]
-                    .into_iter()
-                    .map(str::to_owned),
+                [
+                    "owner_open",
+                    "owner_revoke",
+                    "owner_cleanup",
+                    TRANSPORT_DRAIN_V1,
+                ]
+                .into_iter()
+                .map(str::to_owned),
             );
         }
         #[cfg(target_os = "linux")]
@@ -764,6 +795,17 @@ impl<'a> HostProtocol<'a> {
     /// Scoped business waiters never own the native executor. Control admission
     /// remains live while at most two business handlers await upstream work.
     pub async fn run_connection(&self, link: &mut HostWssLink) -> Result<(), ProtocolError> {
+        self.run_connection_with_stop(link, &CancellationToken::new())
+            .await
+            .map(|_| ())
+    }
+    /// Normal local stop keeps this exact negotiated connection future alive for
+    /// original Core owner cleanup. EOF is never terminal-quiescence evidence.
+    pub(crate) async fn run_connection_with_stop(
+        &self,
+        link: &mut HostWssLink,
+        stop: &CancellationToken,
+    ) -> Result<Option<TransportDrainOutcome>, ProtocolError> {
         let _slot = self
             .connection_slot
             .try_acquire()
@@ -781,11 +823,38 @@ impl<'a> HostProtocol<'a> {
         let generation = link.generation().clone();
         let sender = link.sender();
         let mut negotiated = false;
+        let mut drain_enabled = false;
+        let mut stop_requested = false;
+        let mut outstanding_drain: Option<RequestId> = None;
+        let mut drain_deadline: Option<tokio::time::Instant> = None;
+        let mut completed_drain = None;
         let mut pending: FuturesUnordered<
             futures_util::future::BoxFuture<'_, (RequestId, Option<OwnerRef>, Reply)>,
         > = FuturesUnordered::new();
         loop {
             let (request_id, reply) = tokio::select! {
+                biased;
+                _ = stop.cancelled(), if !stop_requested => {
+                    stop_requested = true;
+                    self.fence_transport_stop()?;
+                    if !self.paired || !negotiated || !drain_enabled {
+                        return Ok(Some(TransportDrainOutcome::Unsupported));
+                    }
+                    let id: RequestId = format!("host-drain-{}", uuid::Uuid::new_v4()).try_into()
+                        .map_err(|_| ProtocolError::InvalidFrame)?;
+                    drain_deadline = Some(tokio::time::Instant::now() + Duration::from_millis(u64::from(TRANSPORT_DRAIN_TIMEOUT_MS)));
+                    let frame = HostControl::TransportDrainV1 {
+                        drain_id: id.clone(), connection_generation: generation.clone(),
+                        host_generation: self.profile.host_generation.clone(), timeout_ms: TRANSPORT_DRAIN_TIMEOUT_MS,
+                    };
+                    outstanding_drain = Some(id);
+                    let text = serde_json::to_string(&frame).map_err(|_| ProtocolError::ResponseLost)?;
+                    sender.send_text(text, Duration::from_secs(5)).await.map_err(|_| ProtocolError::ResponseLost)?;
+                    continue;
+                }
+                _ = tokio::time::sleep_until(drain_deadline.unwrap_or_else(|| tokio::time::Instant::now() + Duration::from_secs(86400))), if drain_deadline.is_some() => {
+                    return Ok(Some(TransportDrainOutcome::Unknown));
+                }
                 finished = pending.next(), if !pending.is_empty() => {
                     let Some((id, owner, mut reply)) = finished else { continue; };
                     // A revoked owner may not receive an in-flight result.
@@ -826,8 +895,24 @@ impl<'a> HostProtocol<'a> {
                             }
                             _ => return Err(ProtocolError::NegotiationRejected),
                         }
+                    } else if matches!(&request.call, Call::EnableTransportDrain) {
+                        if !self.paired || stop_requested { invalid() } else {
+                            drain_enabled = true;
+                            Reply::TransportDrainEnabled
+                        }
+                    } else if let Call::TransportDrainResult { drain_id, host_generation, complete } = &request.call {
+                        if !stop_requested || !drain_enabled || outstanding_drain.as_ref() != Some(drain_id)
+                            || host_generation != &self.profile.host_generation
+                            || drain_deadline.is_none_or(|deadline| tokio::time::Instant::now() >= deadline) {
+                            return Err(ProtocolError::NegotiationRejected);
+                        }
+                        completed_drain = Some(if *complete { TransportDrainOutcome::Complete } else { TransportDrainOutcome::Unknown });
+                        Reply::TransportDrainResultAccepted { drain_id: drain_id.clone() }
                     } else if let Some(reply) = self.control(&request.call) { reply }
-                    else if pending.len() >= 2 { rejection(ErrorCategory::Busy) }
+                    else if stop_requested && !matches!(&request.call, Call::OwnerCleanup { .. }) {
+                        rejection(ErrorCategory::Unauthorized)
+                    }
+                    else if pending.len() >= if matches!(&request.call, Call::OwnerCleanup { .. }) { 3 } else { 2 } { rejection(ErrorCategory::Busy) }
                     else {
                         let owner = call_owner(&request.call).cloned();
                         // Poll once at admission: dispatch/cleanup synchronously
@@ -857,13 +942,24 @@ impl<'a> HostProtocol<'a> {
             serde_json::to_writer(&mut bytes, &response)
                 .map_err(|_| ProtocolError::ResponseLost)?;
             let text = String::from_utf8(bytes.0).map_err(|_| ProtocolError::ResponseLost)?;
+            let send_budget = drain_deadline.map_or(Duration::from_secs(5), |deadline| {
+                deadline
+                    .saturating_duration_since(tokio::time::Instant::now())
+                    .min(Duration::from_secs(5))
+            });
+            if send_budget.is_zero() {
+                return Ok(Some(TransportDrainOutcome::Unknown));
+            }
             sender
-                .send_text(text, Duration::from_secs(5))
+                .send_text(text, send_budget)
                 .await
                 .map_err(|_| ProtocolError::ResponseLost)?;
+            if let Some(outcome) = completed_drain {
+                return Ok(Some(outcome));
+            }
         }
         // Dropping scoped waiters does not cancel supervised Host work or replay it.
-        Ok(())
+        Ok(stop_requested.then_some(TransportDrainOutcome::Unknown))
     }
 }
 fn call_owner(call: &Call) -> Option<&OwnerRef> {

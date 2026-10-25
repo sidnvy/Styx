@@ -33,13 +33,22 @@ pub struct ForegroundOutcome {
     pub processes_exited: bool,
     pub io_tasks_joined: bool,
     pub supervised_jobs_joined: bool,
+    /// Only negotiated paired transport settlement; legacy has no such proof.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_transport_drain: Option<crate::host::protocol::wire::TransportDrainOutcome>,
 }
 impl ForegroundOutcome {
-    pub fn is_complete(&self) -> bool {
+    pub fn local_stop_complete(&self) -> bool {
         (!self.executor_started || self.executor_exited)
             && self.processes_exited
             && self.io_tasks_joined
             && self.supervised_jobs_joined
+    }
+    pub fn is_complete(&self) -> bool {
+        self.local_stop_complete()
+            && self.remote_transport_drain.is_none_or(|outcome| {
+                outcome == crate::host::protocol::wire::TransportDrainOutcome::Complete
+            })
     }
 }
 #[derive(Debug, thiserror::Error)]

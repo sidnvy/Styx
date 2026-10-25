@@ -71,6 +71,14 @@ pub enum Call {
         timeout_ms: u32,
         command: ComputerCommand,
     },
+    /// Same authenticated connection only; the Host first advertises support.
+    EnableTransportDrain,
+    /// Result of the one original transport drain, not a native-exit proof.
+    TransportDrainResult {
+        drain_id: RequestId,
+        host_generation: HostGeneration,
+        complete: bool,
+    },
     OwnerOpen {
         owner: OwnerRef,
         grant_revision: u64,
@@ -88,6 +96,29 @@ pub enum Call {
 }
 pub const BROWSER_HEADLESS_V1: &str = "browser_headless_v1";
 pub const COMPUTER_V1: &str = "computer_v1";
+pub const TRANSPORT_DRAIN_V1: &str = "transport_drain_v1";
+/// Private negotiated total stop budget, not a business-operation deadline.
+pub(crate) const TRANSPORT_DRAIN_TIMEOUT_MS: u32 = 15_000;
+
+/// Host-initiated request on the original authenticated socket. Identity and
+/// authority come from the retained Entry, never these untrusted wire fields.
+#[derive(Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum HostControl {
+    TransportDrainV1 {
+        drain_id: RequestId,
+        connection_generation: ConnectionGeneration,
+        host_generation: HostGeneration,
+        timeout_ms: u32,
+    },
+}
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TransportDrainOutcome {
+    Complete,
+    Unknown,
+    Unsupported,
+}
 /// Existing wait_for permits thirty seconds. Keep an explicit bounded margin
 /// for provider settlement; ordinary operations and owner cleanup are unchanged.
 pub(crate) const BROWSER_WAIT_PREPARE_TIMEOUT_MS: u32 = 35_000;
@@ -198,6 +229,10 @@ pub enum Reply {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         grant_revision: Option<u64>,
     },
+    TransportDrainEnabled,
+    TransportDrainResultAccepted {
+        drain_id: RequestId,
+    },
     OwnerOpened {
         owner: OwnerRef,
         grant_revision: u64,
@@ -265,6 +300,7 @@ pub enum ActionAcknowledgmentDto {
     TerminateRequested { was_running: bool },
 }
 #[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct Response {
     pub request_id: RequestId,
     pub connection_generation: ConnectionGeneration,

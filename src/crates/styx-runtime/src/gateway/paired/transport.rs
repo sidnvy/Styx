@@ -1,7 +1,8 @@
 //! Owned Hyper upgrades. Registry routes; Core lease and owner gates authorize.
-use super::relay::{Command, Entry, RelayError, RelayHandle};
+use super::relay::{Command, Entry, RelayError, RelayHandle, cleanup_control};
 use crate::host::protocol::wire::{
-    BROWSER_HEADLESS_V1, COMPUTER_V1, Call, Reply, Request as WireRequest, Response as WireResponse,
+    BROWSER_HEADLESS_V1, COMPUTER_V1, Call, HostControl, Reply, Request as WireRequest,
+    Response as WireResponse, TRANSPORT_DRAIN_V1,
 };
 use bytes::Bytes;
 use futures_util::{Sink, SinkExt, StreamExt};
@@ -62,6 +63,7 @@ impl Drop for LiveFence {
 struct Pending {
     command: Command,
     control: bool,
+    drain_fenced: bool,
     lane: Lane,
     deadline: tokio::time::Instant,
 }
@@ -172,13 +174,13 @@ impl RelayHandle {
                             let challenge=format!("challenge-{}",uuid::Uuid::new_v4());
                             let request=WireRequest{request_id:request_id()?,connection_generation:None,call:Call::Negotiate{
                                 version:3,challenge:challenge.clone(),gateway_namespace:relay.inner.gateway.clone(),gateway_epoch:relay.inner.epoch.clone()}};
-                            guarded_send(&relay,bootstrap_lease.as_ref().expect("initial admission"),None,&mut sink,&request,&task_stop).await?;
+                            guarded_send(&relay,bootstrap_lease.as_ref().expect("initial admission"),None,None,&mut sink,&request,&task_stop).await?;
                             let response=tokio::select!{
                                 _=task_stop.cancelled()=>return Err(RelayError::Offline),
                                 r=tokio::time::timeout(Duration::from_secs(5),read_response(&mut source))=>r.map_err(|_|RelayError::Unknown)??,
                             };
                             if response.request_id!=request.request_id{return Err(RelayError::Invalid)}
-                            let(host_generation,host_connection,grant_revision,exec_feature,browser_feature,computer_feature)=match response.reply {
+                            let(host_generation,host_connection,grant_revision,exec_feature,browser_feature,computer_feature,drain_feature)=match response.reply {
                                 Reply::Negotiated{version:3,challenge:got,device_id,host_generation,connection_generation,grant_revision:Some(rev),owner_issuance,
                                     features,write,terminate,read_resume,..}
                                     if ["owner_open","owner_revoke","owner_cleanup"].iter().all(|f|features.iter().any(|v|v==f))
@@ -186,10 +188,18 @@ impl RelayHandle {
                                         && connection_generation==response.connection_generation && owner_issuance=="gateway_authenticated" => {
                                             let exec=exec_negotiated(&features,write,terminate,read_resume);
                                             let browser=features.iter().any(|v|v==BROWSER_HEADLESS_V1);
-                                            (host_generation,connection_generation,rev,exec,browser,features.iter().any(|v|v==COMPUTER_V1))
+                                            (host_generation,connection_generation,rev,exec,browser,features.iter().any(|v|v==COMPUTER_V1),features.iter().any(|v|v==TRANSPORT_DRAIN_V1))
                                         },
                                 _=>return Err(RelayError::Unauthorized),
                             };
+                            let drain_enabled = if drain_feature {
+                                let enable = WireRequest { request_id: request_id()?, connection_generation: Some(host_connection.clone()), call: Call::EnableTransportDrain };
+                                guarded_send(&relay,bootstrap_lease.as_ref().expect("initial admission"),None,None,&mut sink,&enable,&task_stop).await?;
+                                let enabled=tokio::time::timeout(Duration::from_secs(5),read_response(&mut source)).await.map_err(|_|RelayError::Unknown)??;
+                                if enabled.request_id != enable.request_id || enabled.connection_generation != host_connection
+                                    || !matches!(enabled.reply,Reply::TransportDrainEnabled) { return Err(RelayError::Invalid); }
+                                true
+                            } else { false };
                             // A negotiation admission is never business authority.
                             // Move it once iff its exact lane was negotiated;
                             // otherwise it stays control-only until actual WS end.
@@ -209,7 +219,7 @@ impl RelayHandle {
                             drop(upgrade_headers);
                             let(tx,mut rx)=mpsc::channel::<Command>(3);
                             let e=Arc::new(Entry{device:device.clone(),transport_generation:generation.clone(),host_connection,host_generation,grant_revision,profile,
-                                tx,stop:task_stop.clone(),live:AtomicBool::new(true),lease:tokio::sync::Mutex::new(lease.take()),
+                                tx,stop:task_stop.clone(),live:AtomicBool::new(true),admission:Mutex::new(false),drain:Mutex::new(None),drain_enabled,lease:tokio::sync::Mutex::new(lease.take()),
                                 bootstrap_lane:initial_lane,bootstrap_lease:tokio::sync::Mutex::new(bootstrap_lease.take()),exec_feature,browser_feature,computer_feature,
                                 browser_lease:tokio::sync::Mutex::new(browser_lease.take()),computer_lease:tokio::sync::Mutex::new(computer_lease.take())});
                             entry=Some(e.clone());let _fence=LiveFence(e.clone());
@@ -230,7 +240,8 @@ impl RelayHandle {
                                     },
                                     command=rx.recv()=>{
                                         let Some(command)=command else{break};
-                                        let control=matches!(command.call,Call::OwnerOpen{..}|Call::OwnerRevoke{..}|Call::OwnerCleanup{..});
+                                        let control=matches!(command.call,Call::OwnerOpen{..}|Call::OwnerRevoke{..}|Call::OwnerCleanup{..}|Call::EnableTransportDrain|Call::TransportDrainResult{..});
+                                        let drain_fenced=!cleanup_control(&command.call);
                                         let lane=match relay.authorization_lane(&e,&command.call).await {
                                             Ok(lane)=>lane,
                                             Err(error)=>{let _=command.result.send(Err(error));continue},
@@ -246,12 +257,12 @@ impl RelayHandle {
                                             let _=command.result.send(Err(if lane!=Lane::Exec{RelayError::Unauthorized}else{RelayError::Offline}));
                                             continue
                                         };
-                                        let result=guarded_send(&relay,l,command.gate.as_deref(),&mut sink,&request,&task_stop).await;
+                                        let result=guarded_send(&relay,l,command.gate.as_deref(),drain_fenced.then_some(&e.admission),&mut sink,&request,&task_stop).await;
                                         drop(locked);
                                         // Drop sensitive request payload after send, keep its exact lane.
                                         let command=Command{call:Call::Write{},result:command.result,gate:command.gate};
                                         match result {
-                                            Ok(())=>{pending.insert(request.request_id,Pending{command,control,lane,deadline:tokio::time::Instant::now()+response_budget});},
+                                            Ok(())=>{pending.insert(request.request_id,Pending{command,control,drain_fenced,lane,deadline:tokio::time::Instant::now()+response_budget});},
                                             Err(error)=>{
                                                 let _=command.result.send(Err(error));
                                                 // Proven refusal before start_send is local to its lane. Actual
@@ -261,8 +272,11 @@ impl RelayHandle {
                                             },
                                         }
                                     },
-                                    response=read_response(&mut source)=>{
-                                        let response=response?;
+                                    response=read_message(&mut source)=>{
+                                        let response=match response? {
+                                            Incoming::Response(response)=>response,
+                                            Incoming::Control(control)=>{relay.begin_transport_drain(&e,control)?;continue},
+                                        };
                                         if response.connection_generation!=e.host_connection{return Err(RelayError::Invalid)}
                                         let Some(p)=pending.remove(&response.request_id) else{return Err(RelayError::Invalid)};
                                         let locked=if p.control {e.control_lease_for(p.lane).await}else{e.lease_for(p.lane).await};
@@ -272,9 +286,11 @@ impl RelayHandle {
                                         };
                                         relay.inner.shared.with(|s| {
                                             let allowed=s.authorize_host_frame(l).is_ok();
+                                            let admission=p.drain_fenced.then(||e.admission.lock());
+                                            let drain_allowed=match &admission {None=>true,Some(Ok(g))=>!**g,Some(Err(_))=>false};
                                             let gate=p.command.gate.as_ref().map(|g|g.lock());
                                             let gate_allowed=match &gate{None=>true,Some(Ok(g))=>!**g,Some(Err(_))=>false};
-                                            let result=if allowed&&gate_allowed{Ok(response.reply)}else{Err(RelayError::Unauthorized)};
+                                            let result=if allowed&&drain_allowed&&gate_allowed{Ok(response.reply)}else{Err(RelayError::Unauthorized)};
                                             let _=p.command.result.send(result);
                                         }).await.map_err(|_|RelayError::Unknown)?;
                                     },
@@ -285,6 +301,7 @@ impl RelayHandle {
                         if let Some(e) = entry {
                             e.live.store(false, Ordering::Release);
                             e.stop.cancel();
+                            relay.join_transport_drain(&e).await;
                             if let Ok(mut state) = relay.inner.state.lock()
                                 && state
                                     .entries
@@ -356,6 +373,7 @@ async fn guarded_send<S: Sink<Message> + Unpin>(
     relay: &RelayHandle,
     lease: &ConnectionLease,
     gate: Option<&Mutex<bool>>,
+    admission: Option<&Mutex<bool>>,
     sink: &mut S,
     request: &WireRequest,
     stop: &CancellationToken,
@@ -370,6 +388,14 @@ async fn guarded_send<S: Sink<Message> + Unpin>(
         .with(|s| {
             s.authorize_host_frame(lease)
                 .map_err(|_| RelayError::Unauthorized)?;
+            let admission = admission.map(|gate| gate.lock());
+            if match &admission {
+                None => false,
+                Some(Ok(g)) => **g,
+                Some(Err(_)) => true,
+            } {
+                return Err(RelayError::Unauthorized);
+            }
             let guard = gate.map(|g| g.lock());
             if match &guard {
                 None => false,
@@ -389,11 +415,17 @@ async fn guarded_send<S: Sink<Message> + Unpin>(
         .map_err(|_| RelayError::Unknown)??;
     tokio::select! {_=stop.cancelled()=>Err(RelayError::Unknown),r=tokio::time::timeout(Duration::from_secs(5),sink.flush())=>r.map_err(|_|RelayError::Unknown)?.map_err(|_|RelayError::Unknown)}
 }
-async fn read_response<
+#[derive(serde::Deserialize)]
+#[serde(untagged)]
+enum Incoming {
+    Response(Box<WireResponse>),
+    Control(HostControl),
+}
+async fn read_message<
     S: futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
 >(
     source: &mut S,
-) -> Result<WireResponse, RelayError> {
+) -> Result<Incoming, RelayError> {
     loop {
         match source.next().await {
             Some(Ok(Message::Text(text))) if text.len() <= FRAME => {
@@ -402,6 +434,16 @@ async fn read_response<
             Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
             _ => return Err(RelayError::Unknown),
         }
+    }
+}
+async fn read_response<
+    S: futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
+>(
+    source: &mut S,
+) -> Result<WireResponse, RelayError> {
+    match read_message(source).await? {
+        Incoming::Response(response) => Ok(*response),
+        Incoming::Control(_) => Err(RelayError::Invalid),
     }
 }
 

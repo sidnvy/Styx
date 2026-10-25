@@ -1,9 +1,12 @@
 use super::GatewayExecProfile;
+#[path = "drain.rs"]
+mod drain;
 use crate::{
     enrollment::shared::SharedEnrollment,
     gateway::auth::VerifiedGatewayOwner,
     host::protocol::wire::{BrowserCommand, Call, ComputerCommand, OwnerRef, Reply},
 };
+pub(crate) use drain::{EntryDrain, cleanup_control};
 use std::{
     collections::BTreeMap,
     sync::{
@@ -68,6 +71,9 @@ pub(crate) struct Entry {
     pub tx: mpsc::Sender<Command>,
     pub stop: CancellationToken,
     pub live: AtomicBool,
+    pub admission: Mutex<bool>,
+    pub drain: Mutex<Option<EntryDrain>>,
+    pub drain_enabled: bool,
     pub lease: tokio::sync::Mutex<Option<ConnectionLease>>,
     // Initial authenticated transport admission only. If its lane was not
     // negotiated, retain it solely for control until the physical WS ends.
@@ -122,12 +128,23 @@ struct Binding {
     revoked: Arc<Mutex<bool>>,
     ready: AtomicBool,
     admitted_records: AtomicUsize,
+    cleanup: Mutex<drain::BindingCleanup>,
+    cleanup_changed: tokio::sync::Notify,
 }
 #[derive(Clone)]
 pub struct BoundOwner {
     inner: Arc<Binding>,
 }
 impl BoundOwner {
+    pub(crate) fn physically_settled(&self) -> bool {
+        self.inner
+            .cleanup
+            .lock()
+            .is_ok_and(|s| s.result == Some(true))
+    }
+    pub(crate) fn closed(&self) -> bool {
+        self.inner.revoked.lock().map_or(true, |r| *r)
+    }
     pub fn device(&self) -> &DeviceId {
         &self.inner.entry.device
     }
@@ -170,6 +187,7 @@ pub(crate) struct Inner {
     bindings: Mutex<Vec<Arc<Binding>>>,
     shutdown_lock: tokio::sync::Mutex<()>,
     shutdown_failed: AtomicBool,
+    unconfirmed_drains: AtomicUsize,
     fenced: Mutex<Vec<(OwnerId, Sha256Digest)>>,
 }
 #[derive(Clone)]
@@ -204,6 +222,7 @@ impl RelayHandle {
                 bindings: Mutex::new(vec![]),
                 shutdown_lock: tokio::sync::Mutex::new(()),
                 shutdown_failed: AtomicBool::new(false),
+                unconfirmed_drains: AtomicUsize::new(0),
                 fenced: Mutex::new(vec![]),
             }),
         })
@@ -242,9 +261,16 @@ impl RelayHandle {
         e: &Entry,
         call: &Call,
     ) -> Result<Lane, RelayError> {
+        if !drain::cleanup_control(call) && *e.admission.lock().map_err(|_| RelayError::Unknown)? {
+            return Err(RelayError::Unauthorized);
+        }
         if matches!(
             call,
-            Call::OwnerOpen { .. } | Call::OwnerRevoke { .. } | Call::OwnerCleanup { .. }
+            Call::OwnerOpen { .. }
+                | Call::OwnerRevoke { .. }
+                | Call::OwnerCleanup { .. }
+                | Call::EnableTransportDrain
+                | Call::TransportDrainResult { .. }
         ) {
             self.control_lane(e).await
         } else {
@@ -352,15 +378,34 @@ impl RelayHandle {
         binding: &Binding,
         cleanup: bool,
     ) -> Result<Arc<Entry>, RelayError> {
-        let state = self.inner.state.lock().map_err(|_| RelayError::Unknown)?;
-        if state.closing && !cleanup {
-            return Err(RelayError::Offline);
+        let current = {
+            let state = self.inner.state.lock().map_err(|_| RelayError::Unknown)?;
+            if state.closing && !cleanup {
+                return Err(RelayError::Offline);
+            }
+            state
+                .entries
+                .get(&binding.entry.device)
+                .cloned()
+                .ok_or(RelayError::Offline)?
+        };
+        let original_draining = if cleanup {
+            false
+        } else {
+            *binding
+                .entry
+                .admission
+                .lock()
+                .map_err(|_| RelayError::Unknown)?
+        };
+        let current_draining = if cleanup {
+            false
+        } else {
+            *current.admission.lock().map_err(|_| RelayError::Unknown)?
+        };
+        if original_draining || current_draining {
+            return Err(RelayError::Unauthorized);
         }
-        let current = state
-            .entries
-            .get(&binding.entry.device)
-            .cloned()
-            .ok_or(RelayError::Offline)?;
         let old = &binding.entry;
         // Same Relay instance fixes Gateway ID/epoch. Metadata is not a grant:
         // authorize_for/control_lane still prove the current Core connection.
@@ -397,6 +442,9 @@ impl RelayHandle {
     ) -> Result<Arc<Entry>, RelayError> {
         self.active_binding(binding)?;
         let current = self.current_binding_entry(binding, false)?;
+        if *current.admission.lock().map_err(|_| RelayError::Unknown)? {
+            return Err(RelayError::Unauthorized);
+        }
         self.authorize_for(&current, lane).await?;
         let already_confirmed = {
             let route = binding.route.lock().map_err(|_| RelayError::Unknown)?;
@@ -534,9 +582,15 @@ impl RelayHandle {
             revoked: Arc::new(Mutex::new(false)),
             ready: AtomicBool::new(false),
             admitted_records: AtomicUsize::new(0),
+            cleanup: Mutex::new(drain::BindingCleanup::default()),
+            cleanup_changed: tokio::sync::Notify::new(),
         });
         // Reserve before await; cancelled bind never creates an untracked Host owner.
         {
+            let admission = entry.admission.lock().map_err(|_| RelayError::Unknown)?;
+            if *admission {
+                return Err(RelayError::Unauthorized);
+            }
             let fenced = self.inner.fenced.lock().map_err(|_| RelayError::Unknown)?;
             if fenced
                 .iter()
@@ -577,6 +631,10 @@ impl RelayHandle {
             } if got == reference && grant_revision == entry.grant_revision => {
                 if self.is_fenced(owner)? {
                     *binding.revoked.lock().map_err(|_| RelayError::Unknown)? = true;
+                    return Err(RelayError::Unauthorized);
+                }
+                let admission = entry.admission.lock().map_err(|_| RelayError::Unknown)?;
+                if *admission || *binding.revoked.lock().map_err(|_| RelayError::Unknown)? {
                     return Err(RelayError::Unauthorized);
                 }
                 binding.ready.store(true, Ordering::Release);
@@ -924,51 +982,7 @@ impl RelayHandle {
             .cloned()
             .collect();
         for b in bindings {
-            // An unconfirmed open remains tracked and cannot be called already cleaned.
-            if !b.ready.load(Ordering::Acquire) {
-                return Err(RelayError::Unknown);
-            }
-            let entry = tokio::time::timeout_at(until, self.cleanup_binding_entry(&b))
-                .await
-                .map_err(|_| RelayError::Unknown)??;
-            let revoked = tokio::time::timeout_at(
-                until,
-                self.exchange(
-                    &entry,
-                    Call::OwnerRevoke {
-                        owner: b.reference.clone(),
-                    },
-                    None,
-                ),
-            )
-            .await
-            .map_err(|_| RelayError::Unknown)??;
-            if !matches!(revoked,Reply::OwnerRevoked{owner:ref got,fenced:true,..} if got==&b.reference)
-            {
-                return Err(RelayError::Unknown);
-            }
-            let remaining = until
-                .saturating_duration_since(tokio::time::Instant::now())
-                .as_millis()
-                .min(5000) as u32;
-            if remaining == 0 {
-                return Err(RelayError::Unknown);
-            }
-            let result = tokio::time::timeout_at(
-                until,
-                self.exchange(
-                    &entry,
-                    Call::OwnerCleanup {
-                        owner: b.reference.clone(),
-                        timeout_ms: remaining,
-                    },
-                    None,
-                ),
-            )
-            .await
-            .map_err(|_| RelayError::Unknown)??;
-            if !matches!(result,Reply::OwnerCleanup{owner:ref got,complete:true} if got==&b.reference)
-            {
+            if !self.settle_binding(&b, until, None).await {
                 return Ok(false);
             }
         }
@@ -1003,6 +1017,23 @@ impl RelayHandle {
         for (stop, job) in jobs {
             stop.cancel();
             joined &= job.await.is_ok();
+        }
+        let bindings = self
+            .inner
+            .bindings
+            .lock()
+            .map_err(|_| RelayError::Unknown)?
+            .clone();
+        for binding in bindings {
+            let job = binding
+                .cleanup
+                .lock()
+                .map_err(|_| RelayError::Unknown)?
+                .job
+                .take();
+            if let Some(job) = job {
+                joined &= job.await.is_ok();
+            }
         }
         if joined {
             Ok(())

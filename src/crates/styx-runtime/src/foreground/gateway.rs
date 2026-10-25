@@ -14,6 +14,7 @@ pub struct GatewayForegroundOutcome {
     pub mcp_lifecycle_jobs_joined: bool,
     pub mcp_session_transports_joined: bool,
     pub unconfirmed_owner_cleanups: usize,
+    pub unconfirmed_transport_drains: usize,
     pub sdk_detached_tasks_joined: Option<bool>,
     pub worker_failure_observed: bool,
     pub listener_error_observed: bool,
@@ -30,6 +31,7 @@ impl GatewayForegroundOutcome {
     pub fn is_complete(&self) -> bool {
         self.local_stop_complete()
             && self.unconfirmed_owner_cleanups == 0
+            && self.unconfirmed_transport_drains == 0
             && !self.worker_failure_observed
             && !self.listener_error_observed
     }
@@ -1122,7 +1124,7 @@ mod platform {
         .map_err(|_| error("gateway_partition_invalid"))?;
         let mcp = GatewayHttp::new(policy, backend, budget);
         let mcp_stop = mcp.paired_shutdown_handle();
-        let app = EnrollmentHttp::new_paired(tls, shared, relay, mcp, vec![host])
+        let app = EnrollmentHttp::new_paired(tls, shared, relay.clone(), mcp, vec![host])
             .map_err(|_| error("gateway_listener_configuration_invalid"))?;
         let listener = TcpListener::bind(admitted.address)
             .await
@@ -1184,12 +1186,17 @@ mod platform {
             mcp_lifecycle_jobs_joined: lifecycle.lifecycle_jobs_joined,
             mcp_session_transports_joined: lifecycle.session_transports_joined,
             unconfirmed_owner_cleanups: lifecycle.unconfirmed_owner_cleanups,
+            // Enrollment listener shutdown actually joined original relay jobs.
+            unconfirmed_transport_drains: relay.unconfirmed_transport_drains(),
             sdk_detached_tasks_joined: lifecycle.sdk_detached_tasks_joined,
             worker_failure_observed: worker_failure || lifecycle.worker_failure_observed,
             listener_error_observed: facts.listener_error_observed,
         };
         if outcome.unconfirmed_owner_cleanups != 0 {
             emit(&events, &stop, "remote_owner_cleanup_unconfirmed");
+        }
+        if outcome.unconfirmed_transport_drains != 0 {
+            emit(&events, &stop, "remote_transport_drain_unconfirmed");
         }
         emit(&events, &stop, "gateway_stopped");
         // This explicit command-scope teardown follows actual owned-job waits.

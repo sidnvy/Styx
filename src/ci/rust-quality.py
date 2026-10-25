@@ -50,6 +50,7 @@ TLS_TESTS = [
     ("tls-certificate-classification", "tls::tests::strict_verifier_certificate_classification_batch"),
     ("tls-loopback", "tls::tests::aws_lc_owned_loopback_tls_full_scenario_batch"),
     ("wss-loopback", "host::link::tests::strict_tls_wss_data_heartbeat_limits_close_cleanup_batch"),
+    ("host-drain-faults", "host::protocol::tests::drain::actual_tls_wss_drain_negotiation_stale_result_and_loss"),
 ]
 HTTP_TESTS = [
     ("official-http-sdk", "gateway::http::tests::official_sdk_tcp_auth_sessions_limits_and_pending_close"),

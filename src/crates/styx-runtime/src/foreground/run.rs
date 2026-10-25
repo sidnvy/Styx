@@ -330,6 +330,7 @@ fn empty_outcome() -> ForegroundOutcome {
         processes_exited: true,
         io_tasks_joined: true,
         supervised_jobs_joined: true,
+        remote_transport_drain: None,
     }
 }
 pub async fn host_run(
@@ -590,6 +591,8 @@ async fn run_owned(
         }
     };
     let mut failure = None;
+    let mut remote_transport_drain = (mode == HostWireMode::PairedV3)
+        .then_some(crate::host::protocol::wire::TransportDrainOutcome::Unknown);
     match session {
         Ok(session) => {
             event(
@@ -612,11 +615,17 @@ async fn run_owned(
                     }
                 };
                 let disconnected = tokio::select! {
-                    _=cancel.cancelled()=>false,
                     _=housekeeping=>unreachable!("collector loop does not return"),
-                    result=session.run_connection(&mut link)=>{
-                        event(&events,&cancel,if result.is_ok(){"disconnected"}else{"connection_result_unknown"},&device,Some(link.generation()));
-                        true
+                    result=session.run_connection_with_stop(&mut link, &cancel)=>{
+                        if cancel.is_cancelled() {
+                            if mode == HostWireMode::PairedV3 {
+                                remote_transport_drain = Some(result.ok().flatten().unwrap_or(crate::host::protocol::wire::TransportDrainOutcome::Unknown));
+                            }
+                            false
+                        } else {
+                            event(&events,&cancel,if result.is_ok(){"disconnected"}else{"connection_result_unknown"},&device,Some(link.generation()));
+                            true
+                        }
                     },
                 };
                 // The executor and supervised operations are NOT stopped by EOF.
@@ -688,6 +697,7 @@ async fn run_owned(
         processes_exited: false,
         io_tasks_joined: false,
         supervised_jobs_joined: false,
+        remote_transport_drain,
     };
     let mut process_exits = BTreeMap::new();
     // Unknown cleanup retains the SAME owner, pin and supervisor. Never release
@@ -711,7 +721,7 @@ async fn run_owned(
                 && cleanup.ancillary_providers_settled();
             outcome.supervised_jobs_joined = cleanup.supervised_jobs_joined;
         }
-        if outcome.is_complete() {
+        if outcome.local_stop_complete() {
             break;
         }
         event(&events, &cancel, "cleanup_unknown", &device, None);
@@ -746,10 +756,20 @@ impl ConnectionSession<'_> {
             protocol.drain_computer_inputs().await;
         }
     }
-    async fn run_connection(&self, link: &mut HostWssLink) -> Result<(), ()> {
+    async fn run_connection_with_stop(
+        &self,
+        link: &mut HostWssLink,
+        stop: &CancellationToken,
+    ) -> Result<Option<crate::host::protocol::wire::TransportDrainOutcome>, ()> {
         match self {
-            Self::Legacy(session) => session.run_connection(link).await.map_err(|_| ()),
-            Self::Paired(protocol) => protocol.run_connection(link).await.map_err(|_| ()),
+            Self::Legacy(session) => tokio::select! {
+                _ = stop.cancelled() => Ok(None),
+                result = session.run_connection(link) => result.map(|()| None).map_err(|_| ()),
+            },
+            Self::Paired(protocol) => protocol
+                .run_connection_with_stop(link, stop)
+                .await
+                .map_err(|_| ()),
         }
     }
 }

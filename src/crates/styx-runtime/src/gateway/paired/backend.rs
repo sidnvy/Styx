@@ -392,6 +392,23 @@ struct State {
     #[cfg(target_os = "linux")]
     computers: computer::ComputerContexts,
 }
+impl State {
+    fn collect_settled(&mut self) {
+        // try_lock never waits while holding State. An in-flight old waiter
+        // retains its cell; after release it can only use its revoked binding.
+        self.sessions.retain(|_, entry| {
+            !entry
+                .resource
+                .try_lock()
+                .is_ok_and(|resource| resource.binding.physically_settled())
+        });
+        #[cfg(target_os = "linux")]
+        {
+            self.browsers.collect_settled();
+            self.computers.collect_settled();
+        }
+    }
+}
 /// No raw executor or network authority is exposed to the public tool adapter.
 pub struct PairedGatewayBackend {
     #[cfg(test)]
@@ -444,6 +461,10 @@ impl PairedGatewayBackend {
         binding: BoundOwner,
     ) -> Result<(u64, Arc<AsyncMutex<Resource>>), &'static str> {
         let mut state = self.state.lock().expect("paired state");
+        state.collect_settled();
+        if binding.closed() {
+            return Err("permission_denied");
+        }
         if state
             .owners
             .get(owner.owner_id())
@@ -490,7 +511,8 @@ impl PairedGatewayBackend {
         owner: &VerifiedGatewayOwner,
         id: u64,
     ) -> Result<Arc<AsyncMutex<Resource>>, &'static str> {
-        let state = self.state.lock().expect("paired state");
+        let mut state = self.state.lock().expect("paired state");
+        state.collect_settled();
         if state
             .owners
             .get(owner.owner_id())

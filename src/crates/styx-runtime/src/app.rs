@@ -331,9 +331,26 @@ impl HostApp {
             let outcome = role.worker.await;
             let events = role.events.await;
             match outcome {
-                Ok(Ok(outcome)) if outcome.is_complete() && events.is_ok() => {
+                Ok(Ok(outcome)) => {
+                    let complete = outcome.is_complete() && events.is_ok();
+                    let locally_joined = outcome.local_stop_complete() && events.is_ok();
                     self.cleanup = Some(outcome);
-                    self.status.send_replace(ConnectionStatus::stopped());
+                    if complete {
+                        self.status.send_replace(ConnectionStatus::stopped());
+                    } else {
+                        self.unknown = true;
+                        self.status.send_replace(ConnectionStatus::unknown());
+                        let cause = if locally_joined {
+                            "remote_transport_drain_unconfirmed"
+                        } else {
+                            "foreground_cleanup_incomplete"
+                        };
+                        eprintln!(
+                            "{}",
+                            json!({"schema":1,"event":"app_role_failed","cause":cause,"events_joined":events.is_ok()})
+                        );
+                        return Err(AppError("app_cleanup_unknown"));
+                    }
                 }
                 failed => {
                     // Preserve a fixed diagnostic cause; never print native
