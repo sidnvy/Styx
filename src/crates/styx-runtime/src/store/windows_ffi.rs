@@ -12,8 +12,8 @@ use std::{
 };
 use windows_sys::Win32::{
     Foundation::{
-        ERROR_HANDLE_EOF, ERROR_INVALID_PARAMETER, FILETIME, GENERIC_READ, GENERIC_WRITE,
-        INVALID_HANDLE_VALUE, LocalFree, WAIT_OBJECT_0, WAIT_TIMEOUT,
+        ERROR_ALREADY_EXISTS, ERROR_HANDLE_EOF, ERROR_INVALID_PARAMETER, FILETIME, GENERIC_READ,
+        GENERIC_WRITE, GetLastError, INVALID_HANDLE_VALUE, LocalFree, WAIT_OBJECT_0, WAIT_TIMEOUT,
     },
     Security::{
         self, ACCESS_ALLOWED_ACE, ACE_HEADER,
@@ -245,35 +245,61 @@ pub(super) fn private(file: &File) -> Result<String> {
     }
     Ok(actual)
 }
+// Convert the official SDDL form once; Local owns the API allocation through
+// the consuming CreateFile/CreateDirectory call. No descriptor layout is copied.
+fn private_descriptor(directory: bool) -> Result<Local> {
+    let sid = current_sid()?;
+    let inherit = if directory { "OICI" } else { "" };
+    let sddl = wide(OsStr::new(&format!(
+        "O:{sid}D:P(A;{inherit};FA;;;SY)(A;{inherit};FA;;;BA)(A;{inherit};FA;;;{sid})"
+    )))?;
+    let mut descriptor = ptr::null_mut();
+    // SAFETY: NUL-terminated UTF16 SDDL and valid output pointer. Local follows
+    // the documented LocalFree ownership rule for the returned allocation.
+    if unsafe {
+        ConvertStringSecurityDescriptorToSecurityDescriptorW(
+            sddl.as_ptr(),
+            1,
+            &mut descriptor,
+            ptr::null_mut(),
+        )
+    } == 0
+    {
+        return Err(io_error());
+    }
+    Ok(Local(descriptor))
+}
+/// Creates at most this one child. AlreadyExists conveys no privacy/type proof:
+/// the caller must still reopen without following reparse points and validate.
+pub(super) fn create_private_directory(path: &Path) -> Result<()> {
+    let path = wide(path.as_os_str())?;
+    let descriptor = private_descriptor(true)?;
+    let attributes = SECURITY_ATTRIBUTES {
+        nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: descriptor.0,
+        bInheritHandle: 0,
+    };
+    // SAFETY: live absolute UTF16 path and descriptor retained across the call.
+    if unsafe { CreateDirectoryW(path.as_ptr(), &attributes) } == 0 {
+        if unsafe { GetLastError() } != ERROR_ALREADY_EXISTS {
+            return Err(io_error());
+        }
+    }
+    Ok(())
+}
 /// Ancestors and every opened directory omit FILE_SHARE_DELETE; regular input
 /// files additionally omit FILE_SHARE_WRITE. Kernel sharing locks pin the names
 /// while retained handles exist. Handles are non-inheritable by default.
 pub(super) fn open(path: &Path, directory: bool, write: bool, create: bool) -> Result<File> {
     let path = wide(path.as_os_str())?;
-    let mut security = ptr::null_mut();
-    let local = if create {
-        let sid = current_sid()?;
-        let sddl = wide(OsStr::new(&format!(
-            "O:{sid}D:P(A;;FA;;;SY)(A;;FA;;;BA)(A;;FA;;;{sid})"
-        )))?;
-        if unsafe {
-            ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                sddl.as_ptr(),
-                1,
-                &mut security,
-                ptr::null_mut(),
-            )
-        } == 0
-        {
-            return Err(io_error());
-        }
-        Some(Local(security))
+    let descriptor = if create {
+        Some(private_descriptor(false)?)
     } else {
         None
     };
     let attributes = SECURITY_ATTRIBUTES {
         nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
-        lpSecurityDescriptor: security,
+        lpSecurityDescriptor: descriptor.as_ref().map_or(ptr::null_mut(), |value| value.0),
         bInheritHandle: 0,
     };
     let handle = unsafe {
@@ -297,7 +323,7 @@ pub(super) fn open(path: &Path, directory: bool, write: bool, create: bool) -> R
             ptr::null_mut(),
         )
     };
-    drop(local);
+    drop(descriptor);
     if handle == INVALID_HANDLE_VALUE {
         return Err(io_error());
     }

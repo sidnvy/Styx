@@ -82,3 +82,14 @@ An owned SSH reverse loopback tunnel can provide initial cross-machine transport
 without expanding the current Gateway listener contract. Such evidence is not a
 claim of direct LAN ingress, Windows service restart/login recovery, desktop access,
 full three-platform packaging, production identity migration or account acceptance.
+
+Actual Windows follow-up: user-global Temp is not a private authority.
+The NAB5 ordinary Host refused an otherwise valid original paired profile because
+that Temp grants other local principals. Preserve those OS ACLs. Read-only profile
+inspection now derives a fixed Host-local `.styx-runtime-tmp` path; only admitted
+Host startup, under its execution lease, creates that directory with current-SID
+owner and a protected inheritable DACL. An existing unsafe directory is rejected,
+never repaired. The retained directory/parent handles and actual owner/ACL identity
+are revalidated through command admission. TEMP/TMP remain bound before Core
+prepare/digest, with no post-admission environment injection. This is bounded
+runtime scratch, not another configuration writer or migration journal.

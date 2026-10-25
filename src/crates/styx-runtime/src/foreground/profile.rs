@@ -273,6 +273,8 @@ pub struct LoadedLegacyProfile {
     host_browser: Option<serde_json::Value>,
     cwd: PathBuf,
     environment: BTreeMap<String, String>,
+    #[cfg(target_os = "windows")]
+    runtime_temp: std::sync::OnceLock<PrivateRoot>,
     rpc_timeout: Duration,
     observed: Vec<Observed>,
     diagnostics: ProfileDiagnostics,
@@ -374,8 +376,31 @@ impl LoadedLegacyProfile {
             .map(|(key, value)| (key.clone(), value.clone()))
             .collect()
     }
+    #[cfg(target_os = "windows")]
+    pub(super) fn prepare_runtime_temp(&self, base: &PrivateRoot) -> Result<(), ProfileError> {
+        if self.executor_enabled() {
+            let expected =
+                PrivateRoot::open(&self.host_base_dir).map_err(|_| ProfileError::ProtectedRead)?;
+            if base.identity() != expected.identity() {
+                return Err(ProfileError::Changed);
+            }
+            let temp = base
+                .open_or_create_private_child(".styx-runtime-tmp")
+                .map_err(|_| ProfileError::ProtectedRead)?;
+            self.runtime_temp
+                .set(temp)
+                .map_err(|_| ProfileError::Changed)?;
+        }
+        Ok(())
+    }
     pub fn executor_config(&self) -> Result<OwnedExecutorConfig, ProfileError> {
         self.revalidate()?;
+        #[cfg(target_os = "windows")]
+        self.runtime_temp
+            .get()
+            .ok_or(ProfileError::ProtectedRead)?
+            .revalidate_runtime_directory()
+            .map_err(|_| ProfileError::Changed)?;
         let image = self.executor.as_ref().ok_or(ProfileError::Unsupported)?;
         #[cfg(any(target_os = "macos", target_os = "windows"))]
         let binary = image
@@ -416,6 +441,12 @@ impl LoadedLegacyProfile {
     /// Original private observations and executable pin remain mandatory.
     pub(super) fn revalidate_control(&self) -> Result<(), ProfileError> {
         self.source.revalidate()?;
+        #[cfg(target_os = "windows")]
+        if let Some(temp) = self.runtime_temp.get() {
+            temp.revalidate_runtime_directory()
+                .map_err(|_| ProfileError::Changed)?;
+        }
+
         if let Some(executor) = &self.executor {
             executor.revalidate().map_err(|_| ProfileError::Changed)?;
         }
@@ -911,7 +942,7 @@ fn load_source(
     }
     #[cfg(target_os = "windows")]
     let runtime_environment = if exec_enabled {
-        super::windows_env::executor_environment(&exec.env)?
+        super::windows_env::executor_environment(&exec.env, base)?
     } else {
         BTreeMap::new()
     };
@@ -946,6 +977,8 @@ fn load_source(
         host_browser: host.browser,
         cwd: exec.cwd,
         environment: runtime_environment,
+        #[cfg(target_os = "windows")]
+        runtime_temp: std::sync::OnceLock::new(),
         rpc_timeout: Duration::from_millis(timeout),
         observed: capture.observed,
         diagnostics: ProfileDiagnostics {

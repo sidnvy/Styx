@@ -125,10 +125,28 @@ impl Root {
             identity,
         })
     }
+    /// Runtime scratch only. Creation supplies its own owner/private inheritable
+    /// DACL instead of relying on an elevated token's default Administrators owner.
+    /// Existing objects are inspected as-is and never repaired or adopted by chmod.
+    pub(crate) fn open_or_create_private_child(&self, name: &str) -> Result<Self> {
+        component(OsStr::new(name))?;
+        if name.encode_utf16().count() > 255 {
+            return Err(StoreError::InvalidRelativePath);
+        }
+        self.validate_root()?;
+        let path = self.path.join(name);
+        // Retained parent/ancestor handles deny delete sharing throughout. The
+        // Win32 creator only handles a checked single child, never a new tree.
+        ffi::create_private_directory(&path)?;
+        let child = Self::open(&path)?;
+        self.validate_root()?;
+        child.validate_root()?;
+        Ok(child)
+    }
     pub(super) fn identity(&self) -> RootIdentity {
         self.identity.clone()
     }
-    fn validate_root(&self) -> Result<()> {
+    pub(super) fn validate_root(&self) -> Result<()> {
         let (_, pins) = absolute_pins(&self.path)?;
         let current = pins.last().ok_or(StoreError::InvalidRoot)?;
         if root_identity(current)? != self.identity

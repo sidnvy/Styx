@@ -47,6 +47,7 @@ pub(super) fn local_absolute(path: &Path) -> Result<(), ProfileError> {
 
 pub(super) fn executor_environment(
     profile: &BTreeMap<String, String>,
+    host_base: &Path,
 ) -> Result<BTreeMap<String, String>, ProfileError> {
     if profile.keys().any(|key| key != "CODEX_HOME") {
         return Err(ProfileError::UnsupportedExecutorEnvironment);
@@ -63,11 +64,11 @@ pub(super) fn executor_environment(
     let windows_text = to_text(&windows)?;
     let user_text = to_text(&user)?;
     let drive = user_text.get(..2).ok_or(ProfileError::Invalid)?;
-    let temp = user.join("AppData/Local/Temp");
-    // A shared temp directory must never become an implicit private worker
-    // namespace. Refuse unsuitable ACLs without changing installed permissions.
-    let _temp_root =
-        crate::store::PrivateRoot::open(&temp).map_err(|_| ProfileError::ProtectedRead)?;
+    // Derive only: profile inspection stays read-only. Actual Host startup
+    // creates this private child under its held execution lease and retains it.
+    // The OS user's global Temp may legitimately grant other local principals.
+    local_absolute(host_base)?;
+    let temp = host_base.join(".styx-runtime-tmp");
     let mut result = BTreeMap::from([
         ("SystemRoot".into(), windows_text.clone()),
         ("WinDir".into(), windows_text),

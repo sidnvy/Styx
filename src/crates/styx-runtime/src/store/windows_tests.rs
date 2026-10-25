@@ -245,3 +245,114 @@ fn windows_owned_root_leases_acl_alias_and_pe_pin() {
     drop(_parent);
     std::fs::remove_dir_all(&path).unwrap();
 }
+
+#[test]
+#[ignore = "requires STYX_TEST_WINDOWS_PRIVATE_CHILD_ROOT: fresh protected current-SID parent; actual Windows directory creation/ACL/reparse refusal, no runtime"]
+fn windows_private_runtime_child_creation_and_existing_refusal() {
+    let path = PathBuf::from(
+        std::env::var_os("STYX_TEST_WINDOWS_PRIVATE_CHILD_ROOT").expect("explicit fresh parent"),
+    );
+    let parent = Root::open(&path).unwrap();
+    assert!(std::fs::read_dir(&path).unwrap().next().is_none());
+    let original_parent = parent.identity();
+    for invalid in ["", ".", "..", "../escape", "a\\b", "temp:stream", "NUL"] {
+        assert!(parent.open_or_create_private_child(invalid).is_err());
+    }
+    assert!(std::fs::read_dir(&path).unwrap().next().is_none());
+    // This creator must set TokenUser ownership atomically, even when the
+    // elevated token's default owner is Administrators. Root::open enforces it.
+    let child = parent
+        .open_or_create_private_child(".styx-runtime-tmp")
+        .unwrap();
+    let RootIdentity::Windows { owner_sid, .. } = child.identity() else {
+        panic!("Windows root")
+    };
+    assert_eq!(owner_sid, ffi::current_sid().unwrap());
+    let reopened = parent
+        .open_or_create_private_child(".styx-runtime-tmp")
+        .unwrap();
+    assert_eq!(child.identity(), reopened.identity());
+    assert_eq!(parent.identity(), original_parent);
+    child.validate_root().unwrap();
+    reopened.validate_root().unwrap();
+
+    let unsafe_root = parent
+        .open_or_create_private_child("preexisting-unsafe")
+        .unwrap();
+    let unsafe_path = path.join("preexisting-unsafe");
+    let unsafe_identity = unsafe_root.identity();
+    drop(unsafe_root);
+    let changed = Command::new("icacls.exe")
+        .arg(&unsafe_path)
+        .args(["/grant", "*S-1-1-0:(OI)(CI)(F)"])
+        .output()
+        .unwrap();
+    assert!(changed.status.success());
+    let acl = |item: &Path| {
+        let powershell = PathBuf::from(std::env::var_os("SystemRoot").unwrap())
+            .join("System32/WindowsPowerShell/v1.0/powershell.exe");
+        let result = Command::new(powershell)
+            .args([
+                "-NoLogo",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "[Console]::Write((Get-Acl -LiteralPath $env:STYX_OWNED_ACL_OBSERVATION).Sddl)",
+            ])
+            .env("STYX_OWNED_ACL_OBSERVATION", item)
+            .output()
+            .unwrap();
+        assert!(result.status.success());
+        assert!(!result.stdout.is_empty() && result.stdout.len() <= 65536);
+        result.stdout
+    };
+    let before_acl = acl(&unsafe_path);
+    assert!(matches!(
+        parent.open_or_create_private_child("preexisting-unsafe"),
+        Err(StoreError::NotPrivate)
+    ));
+    assert_eq!(
+        before_acl,
+        acl(&unsafe_path),
+        "existing unsafe DACL was not repaired"
+    );
+    let retained = ffi::open(&unsafe_path, true, false, false).unwrap();
+    let RootIdentity::Windows {
+        volume_serial,
+        file_id,
+        ..
+    } = unsafe_identity
+    else {
+        panic!("Windows root")
+    };
+    assert_eq!(file_identity(&retained).unwrap(), (volume_serial, file_id));
+
+    let file_path = path.join("preexisting-file");
+    std::fs::write(&file_path, b"unchanged owned negative fixture").unwrap();
+    let file_before = std::fs::read(&file_path).unwrap();
+    assert!(
+        parent
+            .open_or_create_private_child("preexisting-file")
+            .is_err()
+    );
+    assert_eq!(std::fs::read(&file_path).unwrap(), file_before);
+
+    let alias = path.join("preexisting-junction");
+    let linked = Command::new("cmd.exe")
+        .args(["/D", "/C", "mklink", "/J"])
+        .arg(&alias)
+        .arg(path.join(".styx-runtime-tmp"))
+        .output()
+        .unwrap();
+    assert!(linked.status.success());
+    let target_before = std::fs::read_link(&alias).unwrap();
+    assert!(
+        parent
+            .open_or_create_private_child("preexisting-junction")
+            .is_err()
+    );
+    assert_eq!(std::fs::read_link(&alias).unwrap(), target_before);
+    // Preserve negatives for the external observer; no existing tree repair or
+    // cleanup-by-name. All changes above belong to this explicitly fresh root.
+    parent.validate_root().unwrap();
+}

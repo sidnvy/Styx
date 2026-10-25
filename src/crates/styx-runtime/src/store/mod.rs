@@ -335,6 +335,18 @@ impl PrivateRoot {
     pub fn identity(&self) -> RootIdentity {
         self.inner.identity()
     }
+    /// Runtime scratch only; no configuration/journal or existing ACL repair.
+    #[cfg(target_os = "windows")]
+    pub(crate) fn open_or_create_private_child(&self, name: &str) -> Result<Self> {
+        Ok(Self {
+            inner: self.inner.open_or_create_private_child(name)?,
+        })
+    }
+    #[cfg(target_os = "windows")]
+    pub(crate) fn revalidate_runtime_directory(&self) -> Result<()> {
+        self.inner.validate_root()
+    }
+
     /// Read-only, descriptor-relative absence check. An existing file, directory,
     /// symlink or special node refuses admission; only ENOENT proves absence.
     /// This is an observation, never a lock against an uncoordinated legacy writer.

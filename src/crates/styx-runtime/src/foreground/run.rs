@@ -369,6 +369,10 @@ async fn run_owned(
             lease,
         });
         admitted.validate()?;
+        // Runtime scratch is created only after original ownership/leases were
+        // admitted, never by the read-only profile inspection API.
+        #[cfg(target_os = "windows")]
+        admitted.profile.prepare_runtime_temp(&admitted.base)?;
         Ok::<_, ForegroundError>(admitted)
     })
     .await
