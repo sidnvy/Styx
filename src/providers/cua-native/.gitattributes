@@ -1,0 +1,2 @@
+# Nested unified patch context spaces and original LF bytes are significant.
+*.patch -text -whitespace
