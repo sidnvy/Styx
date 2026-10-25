@@ -5,3 +5,6 @@ pub mod legacy_service;
 
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 pub mod legacy_enrollment;
+
+#[cfg(target_os = "macos")]
+pub(crate) mod mac_exec_validation;

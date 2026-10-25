@@ -327,6 +327,9 @@ pub(crate) fn load_applied_mac_maintenance_profile<'borrow, 'effects, 'materials
 }
 #[cfg(target_os = "macos")]
 impl AppliedMacMaintenanceProfile<'_, '_, '_> {
+    pub(crate) fn transaction_id(&self) -> &styx_contracts::identity::TransactionId {
+        self.guard.transaction_id()
+    }
     fn original(&self) -> &LoadedLegacyProfile {
         &self.guard.original_materials().original
     }
