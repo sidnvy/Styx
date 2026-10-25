@@ -170,12 +170,20 @@ impl fmt::Display for NativeManagementError {
 }
 impl std::error::Error for NativeManagementError {}
 type Result<T> = std::result::Result<T, NativeManagementError>;
-#[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
+#[cfg(any(
+    all(target_os = "linux", target_env = "gnu"),
+    target_os = "windows",
+    target_os = "macos"
+))]
 static WORKERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
 async fn blocking<T: Send + 'static>(
     job: impl FnOnce() -> Result<T> + Send + 'static,
 ) -> Result<T> {
-    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "windows",
+        target_os = "macos"
+    ))]
     {
         let permit = WORKERS
             .try_acquire()
@@ -187,7 +195,11 @@ async fn blocking<T: Send + 'static>(
         .await
         .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?
     }
-    #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows")))]
+    #[cfg(not(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "windows",
+        target_os = "macos"
+    )))]
     {
         let _ = job;
         Err(NativeManagementError::new(ErrorKind::Unsupported))
@@ -239,7 +251,11 @@ pub async fn inspect(
     blocking(move || platform::inspect(&path, id.as_ref())).await
 }
 
-#[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
+#[cfg(any(
+    all(target_os = "linux", target_env = "gnu"),
+    target_os = "windows",
+    target_os = "macos"
+))]
 mod platform {
     use super::*;
     use crate::store::{PrivateRoot, RawFile, StoreError, native_root, native_state};
@@ -291,6 +307,10 @@ mod platform {
         let observed = match root.identity() {
             crate::store::RootIdentity::Linux { device, inode, uid } => {
                 NativeRootIdentity::Linux { device, inode, uid }
+            }
+            #[cfg(target_os = "macos")]
+            crate::store::RootIdentity::Macos { device, inode, uid } => {
+                NativeRootIdentity::Macos { device, inode, uid }
             }
             #[cfg(target_os = "windows")]
             crate::store::RootIdentity::Windows {
@@ -638,7 +658,11 @@ mod platform {
         })
     }
 }
-#[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows")))]
+#[cfg(not(any(
+    all(target_os = "linux", target_env = "gnu"),
+    target_os = "windows",
+    target_os = "macos"
+)))]
 mod platform {
     use super::*;
     pub(super) fn initialize(

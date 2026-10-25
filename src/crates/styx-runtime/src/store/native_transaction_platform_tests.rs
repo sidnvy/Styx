@@ -1,6 +1,6 @@
-//! Actual owned Windows configuration files/process exit only. This is neither
+//! Actual owned Windows/macOS configuration files/process exit only. This is neither
 //! service activation, pairing, hostile-writer CAS nor power-loss acceptance.
-#![cfg(target_os = "windows")]
+#![cfg(any(target_os = "windows", target_os = "macos"))]
 use super::*;
 use crate::store::{
     PrivateRoot, ProcessIdentity,
@@ -117,9 +117,9 @@ fn assert_committed(coordinator: &NativeTransactions, id: &TransactionId, expect
 }
 
 #[test]
-#[ignore = "requires STYX_TEST_WINDOWS_STORE_ROOT; owned Windows C07 desired-state files and original process-exit recovery only, no services/power-loss"]
-fn windows_native_c07_commit_and_original_recovery_batch() {
-    let parent_path = PathBuf::from(std::env::var_os("STYX_TEST_WINDOWS_STORE_ROOT").unwrap());
+#[ignore = "requires STYX_TEST_NATIVE_STORE_ROOT; owned Windows/macOS C07 desired-state files and original process-exit recovery only, no services/power-loss"]
+fn native_c07_commit_and_original_recovery_batch() {
+    let parent_path = PathBuf::from(std::env::var_os("STYX_TEST_NATIVE_STORE_ROOT").unwrap());
     let parent = PrivateRoot::open(&parent_path).unwrap();
     let (path, mut coordinator) = create(&parent, &parent_path);
     let original_fixed = fixed(&path);
@@ -135,7 +135,7 @@ fn windows_native_c07_commit_and_original_recovery_batch() {
             .run,
         NativeRunDesired::Stopped
     );
-    let id: TransactionId = "windows-native-1".try_into().unwrap();
+    let id: TransactionId = "native-c07-1".try_into().unwrap();
     let running = target(&coordinator, id.as_str(), 1);
     let plan_name = coordinator.save_plan(&id, &running).unwrap();
     let plan_pin = PrivateRoot::open(&path)
@@ -184,7 +184,7 @@ fn windows_native_c07_commit_and_original_recovery_batch() {
 
     // A real capability held by a different original root cannot authorize this root.
     let (_foreign_path, foreign) = create(&parent, &parent_path);
-    let next_id: TransactionId = "windows-native-2".try_into().unwrap();
+    let next_id: TransactionId = "native-c07-2".try_into().unwrap();
     let second = target(&coordinator, next_id.as_str(), 2);
     let foreign_maintenance = foreign
         .configuration_root()
@@ -236,16 +236,16 @@ fn windows_native_c07_commit_and_original_recovery_batch() {
         let (crash_path, crash) = create(&parent, &parent_path);
         let immutable = fixed(&crash_path);
         let before = crash.readstate().unwrap().raw_bytes().to_vec();
-        let expected = target(&crash, "windows-fault-1", 1);
+        let expected = target(&crash, "native-c07-fault-1", 1);
         drop(crash);
         let test_name = format!(
-            "{}::windows_native_transaction_exit_child",
+            "{}::native_transaction_exit_child",
             module_path!().split_once("::").unwrap().1
         );
         let mut child = Command::new(std::env::current_exe().unwrap())
             .args(["--ignored", "--exact", &test_name, "--nocapture"])
-            .env("STYX_TEST_WINDOWS_C07_CHILD_ROOT", &crash_path)
-            .env("STYX_TEST_WINDOWS_C07_CHILD_FAULT", fault)
+            .env("STYX_TEST_NATIVE_C07_CHILD_ROOT", &crash_path)
+            .env("STYX_TEST_NATIVE_C07_CHILD_FAULT", fault)
             .stdin(Stdio::piped())
             .stdout(Stdio::inherit())
             .stderr(Stdio::inherit())
@@ -280,8 +280,8 @@ fn windows_native_c07_commit_and_original_recovery_batch() {
         send.unwrap();
         let gone = !original.still_current().unwrap();
         println!(
-            "STYX_WINDOWS_C07_CHILD_JSON={}",
-            serde_json::json!({"schema":1,"fault":fault,"original":original,"actual_wait":true,"exit_code":status.code(),"original_birth_absent":gone,"timeout_exact_child_terminated":timed_out})
+            "STYX_NATIVE_C07_CHILD_JSON={}",
+            serde_json::json!({"schema":1,"platform":std::env::consts::OS,"fault":fault,"original":original,"actual_wait":true,"exit_code":status.code(),"original_birth_absent":gone,"timeout_exact_child_terminated":timed_out})
         );
         assert!(!timed_out, "original C07 child exceeded owned deadline");
         assert_eq!(status.code(), Some(86));
@@ -290,7 +290,7 @@ fn windows_native_c07_commit_and_original_recovery_batch() {
         assert_eq!(fs::read(crash_path.join("state.json")).unwrap(), expected);
         let mut crash = reopen(&crash_path);
         assert!(crash.configuration_root().ensure_admission().is_err());
-        let fault_id: TransactionId = "windows-fault-1".try_into().unwrap();
+        let fault_id: TransactionId = "native-c07-fault-1".try_into().unwrap();
         let original = crash.journal.read_original(&fault_id).unwrap();
         assert_eq!(original.before, before);
         assert_eq!(original.target, expected);
@@ -318,16 +318,16 @@ fn windows_native_c07_commit_and_original_recovery_batch() {
         assert!(crash.configuration_root().ensure_admission().is_ok());
     }
     println!(
-        "STYX_WINDOWS_C07_RESULT_JSON={}",
-        serde_json::json!({"schema":1,"status":"PASS_OWNED_WINDOWS_C07_ORIGINAL_RECOVERY_ONLY","service_started":false,"power_loss_tested":false,"fixtures_preserved":true})
+        "STYX_NATIVE_C07_RESULT_JSON={}",
+        serde_json::json!({"schema":1,"platform":std::env::consts::OS,"status":"PASS_OWNED_NATIVE_C07_ORIGINAL_RECOVERY_ONLY","service_started":false,"power_loss_tested":false,"fixtures_preserved":true})
     );
 }
 
 #[test]
-#[ignore = "private owned subprocess port for Windows C07 aggregate; explicit original root/fault/control byte required"]
-fn windows_native_transaction_exit_child() {
-    let path = PathBuf::from(std::env::var_os("STYX_TEST_WINDOWS_C07_CHILD_ROOT").unwrap());
-    let fault = std::env::var("STYX_TEST_WINDOWS_C07_CHILD_FAULT").unwrap();
+#[ignore = "private owned subprocess port for native C07 aggregate; explicit original root/fault/control byte required"]
+fn native_transaction_exit_child() {
+    let path = PathBuf::from(std::env::var_os("STYX_TEST_NATIVE_C07_CHILD_ROOT").unwrap());
+    let fault = std::env::var("STYX_TEST_NATIVE_C07_CHILD_FAULT").unwrap();
     assert!(matches!(
         fault.as_str(),
         "canonical.rename" | "committed.reply"
@@ -336,7 +336,7 @@ fn windows_native_transaction_exit_child() {
     std::io::stdin().read_exact(&mut control).unwrap();
     assert_eq!(control, *b"1");
     let mut coordinator = reopen(&path);
-    let target = target(&coordinator, "windows-fault-1", 1);
+    let target = target(&coordinator, "native-c07-fault-1", 1);
     let _ = coordinator.apply_observing(&target, &|record, phase| {
         if (record == "canonical" && phase == "rename" && fault == "canonical.rename")
             || (record == "committed" && phase == "reply" && fault == "committed.reply")

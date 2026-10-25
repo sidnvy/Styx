@@ -71,15 +71,35 @@ impl CommittedReceipt {
     }
 }
 pub struct EnrollmentJournal<'a> {
-    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "windows",
+        target_os = "macos"
+    ))]
     root: &'a PrivateRoot,
-    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "windows",
+        target_os = "macos"
+    ))]
     writer: &'a mut ConfigurationWriterGuard,
-    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "windows",
+        target_os = "macos"
+    ))]
     budget: JournalBudget,
-    #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows")))]
+    #[cfg(not(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "windows",
+        target_os = "macos"
+    )))]
     _borrow: std::marker::PhantomData<&'a mut ConfigurationWriterGuard>,
-    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "windows",
+        target_os = "macos"
+    ))]
     namespace: (u64, u64),
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     historical_transaction: Option<TransactionId>,
@@ -91,7 +111,11 @@ fn record_name(id: &TransactionId, suffix: &str) -> String {
     format!("txn-{}.{suffix}", id.as_str())
 }
 
-#[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
+#[cfg(any(
+    all(target_os = "linux", target_env = "gnu"),
+    target_os = "windows",
+    target_os = "macos"
+))]
 mod files {
     use super::*;
     use crate::store::secure_journal::{self, NamespaceName};
@@ -144,7 +168,11 @@ impl<'a> EnrollmentJournal<'a> {
         if !budget.valid() {
             return Err(JournalError::InvalidInput);
         }
-        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "windows",
+            target_os = "macos"
+        ))]
         {
             let namespace = root
                 .inner
@@ -167,7 +195,11 @@ impl<'a> EnrollmentJournal<'a> {
             journal.scan()?; // An over-budget/unsafe namespace never becomes writable.
             Ok(journal)
         }
-        #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows")))]
+        #[cfg(not(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "windows",
+            target_os = "macos"
+        )))]
         {
             let _ = (root, writer, budget, create);
             Err(JournalError::Unsupported)
@@ -391,11 +423,19 @@ impl<'a> EnrollmentJournal<'a> {
     /// Bounded observation, never an implicit sweep or automatic replay. A
     /// prepared-only intent remains Unknown; an orphan alone is not NotWritten.
     pub fn scan(&self) -> JournalResult<JournalObservation> {
-        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "windows",
+            target_os = "macos"
+        ))]
         {
             files::with_namespace(self, |dir| files::scan(dir, self.budget))
         }
-        #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows")))]
+        #[cfg(not(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "windows",
+            target_os = "macos"
+        )))]
         {
             Err(JournalError::Unsupported)
         }
@@ -470,26 +510,42 @@ impl<'a> EnrollmentJournal<'a> {
         Ok(())
     }
     fn read(&self, name: &str) -> JournalResult<Option<Vec<u8>>> {
-        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "windows",
+            target_os = "macos"
+        ))]
         {
             files::with_namespace(self, |dir| {
                 files::read(dir, name, self.budget.max_file_bytes)
             })
         }
-        #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows")))]
+        #[cfg(not(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "windows",
+            target_os = "macos"
+        )))]
         {
             let _ = name;
             Err(JournalError::Unsupported)
         }
     }
     fn write(&self, name: &str, bytes: &[u8], fault: &impl Fn(&str)) -> JournalResult<()> {
-        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "windows",
+            target_os = "macos"
+        ))]
         {
             files::with_namespace(self, |dir| {
                 files::immutable(dir, name, bytes, self.budget, fault)
             })
         }
-        #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows")))]
+        #[cfg(not(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "windows",
+            target_os = "macos"
+        )))]
         {
             let _ = (name, bytes, fault);
             Err(JournalError::Unsupported)

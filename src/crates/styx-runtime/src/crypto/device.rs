@@ -60,6 +60,10 @@ impl GeneratedDeviceIdentity {
     #[cfg(any(
         test,
         all(target_os = "windows", target_arch = "x86_64"),
+        all(
+            target_os = "macos",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
         all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
     ))]
     pub(crate) fn protected_pkcs8_pem(&self) -> &[u8] {

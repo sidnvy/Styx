@@ -11,7 +11,7 @@ struct FreshDeployment {
     mode: String,
     #[cfg(target_os = "linux")]
     host: FreshHost,
-    #[cfg(target_os = "windows")]
+    #[cfg(any(target_os = "windows", target_os = "macos"))]
     #[serde(rename = "host")]
     _host: FreshHost,
 }
@@ -35,6 +35,8 @@ pub(super) fn load(state_dir: &Path) -> Result<LoadedLegacyProfile, ProfileError
         || seed.platform
             != if cfg!(target_os = "windows") {
                 "win32"
+            } else if cfg!(target_os = "macos") {
+                "darwin"
             } else {
                 "linux"
             }
@@ -129,7 +131,7 @@ pub(super) fn load(state_dir: &Path) -> Result<LoadedLegacyProfile, ProfileError
         return Err(ProfileError::Invalid);
     }
     // Only Linux implements these native Browser/Computer factories. Remote
-    // approvals are not local feature configuration or Windows desktop authority.
+    // approvals are not local feature configuration or macOS/Windows desktop authority.
     #[cfg(target_os = "linux")]
     let computer = seed.computer_requested && deployment.host.computer == Some(Value::Bool(true));
     #[cfg(target_os = "linux")]

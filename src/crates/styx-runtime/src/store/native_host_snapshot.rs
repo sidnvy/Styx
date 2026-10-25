@@ -1,11 +1,15 @@
 //! Existing-only native Host profile observation. No writer, recovery, fsync,
 //! remote grant, migration proof, or signed-release authority is minted here.
-#![cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
+#![cfg(any(
+    all(target_os = "linux", target_env = "gnu"),
+    target_os = "windows",
+    target_os = "macos"
+))]
 use super::{
     FileObservation, PrivateRoot, RootIdentity, management, native_state,
     secure_journal::{JournalBudget, JournalError, JournalObservation, JournalResult, files},
 };
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
 use std::os::unix::fs::MetadataExt;
 use std::{
     collections::BTreeSet,
@@ -273,6 +277,8 @@ fn ownership(root: &PrivateRoot) -> JournalResult<()> {
 fn native_platform() -> &'static str {
     if cfg!(target_os = "windows") {
         "win32"
+    } else if cfg!(target_os = "macos") {
+        "darwin"
     } else {
         "linux"
     }
@@ -282,7 +288,7 @@ fn directory_identity(directory: &File) -> JournalResult<(u64, u64)> {
     {
         super::windows_file_identity(directory).map_err(|_| JournalError::Unknown)
     }
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
     {
         let metadata = directory.metadata().map_err(|_| JournalError::Unknown)?;
         Ok((metadata.dev(), metadata.ino()))
@@ -294,6 +300,15 @@ fn matches_root(actual: &RootIdentity, marker: &NativeRootIdentity) -> bool {
         (
             RootIdentity::Linux { device, inode, uid },
             NativeRootIdentity::Linux {
+                device: expected_device,
+                inode: expected_inode,
+                uid: expected_uid,
+            },
+        ) => device == expected_device && inode == expected_inode && uid == expected_uid,
+        #[cfg(target_os = "macos")]
+        (
+            RootIdentity::Macos { device, inode, uid },
+            NativeRootIdentity::Macos {
                 device: expected_device,
                 inode: expected_inode,
                 uid: expected_uid,

@@ -2,9 +2,9 @@
 //!
 //! Raw bytes are authoritative: this module never normalizes or rewrites legacy
 //! JSON. A preservation manifest is a per-file observation, not a transactional
-//! snapshot or permission to migrate. Linux implements writable stores; macOS
-//! adds private raw reads and independent leases only. Other platform operations
-//! remain explicitly Unsupported; read/lease support is not migration authority.
+//! snapshot or permission to migrate. Native persistence stays in OS adapters;
+//! raw observation or lease support alone never proves migration, recovery or
+//! a committed transaction. Unsupported platform operations fail explicitly.
 //! Secrets are not included in Debug output or preservation manifests.
 
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
@@ -14,7 +14,11 @@ pub mod enrollment;
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 pub mod legacy_handoff;
 pub mod management;
-#[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
+#[cfg(any(
+    all(target_os = "linux", target_env = "gnu"),
+    target_os = "windows",
+    target_os = "macos"
+))]
 pub(crate) mod native_host_snapshot;
 pub mod native_root;
 pub mod native_state;

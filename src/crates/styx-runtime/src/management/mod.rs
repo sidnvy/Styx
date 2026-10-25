@@ -9,11 +9,19 @@ pub mod native_gateway;
 pub mod native_join;
 #[cfg(any(
     all(target_os = "windows", target_arch = "x86_64"),
+    all(
+        target_os = "macos",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
     all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
 ))]
 mod native_join_http;
 #[cfg(any(
     all(target_os = "windows", target_arch = "x86_64"),
+    all(
+        target_os = "macos",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
     all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
 ))]
 mod native_join_protocol;

@@ -145,6 +145,10 @@ impl<'a> EnrollmentBootstrap<'a> {
 /// approving a local device. Client-side validation is not Gateway authority.
 #[cfg(any(
     all(target_os = "windows", target_arch = "x86_64"),
+    all(
+        target_os = "macos",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
     all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
 ))]
 pub(crate) fn validate_local_join(

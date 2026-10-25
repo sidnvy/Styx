@@ -153,7 +153,11 @@ pub struct VerifiedNativeRelease {
 impl VerifiedNativeRelease {
     /// Locator from the original verified root, never a caller-selected worker
     /// directory. Consumers retain this object and its pins through cleanup.
-    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "windows",
+        target_os = "macos"
+    ))]
     pub(crate) fn runtime_root(&self) -> Result<PathBuf> {
         self.revalidate()?;
         Ok(self.prefix.clone())
@@ -227,9 +231,18 @@ impl VerifiedNativeRelease {
                 owner_sid,
             })
         }
+        #[cfg(target_os = "macos")]
+        {
+            let crate::store::RootIdentity::Macos { device, inode, uid } = self.root.identity()
+            else {
+                return Err(ReleaseError::Changed);
+            };
+            Ok(NativeRootIdentity::Macos { device, inode, uid })
+        }
         #[cfg(not(any(
             all(target_os = "linux", target_env = "gnu"),
-            all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")
+            all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"),
+            target_os = "macos"
         )))]
         {
             Err(ReleaseError::Unsupported)
@@ -399,6 +412,10 @@ pub fn verify_selected(selection: &NativeRuntimeSelection) -> Result<VerifiedNat
             target_os = "windows",
             target_arch = "x86_64",
             target_env = "msvc"
+        ),
+        all(
+            target_os = "macos",
+            any(target_arch = "x86_64", target_arch = "aarch64")
         )
     )) {
         return Err(ReleaseError::Unsupported);

@@ -14,19 +14,31 @@ pub use handoff::{CredentialRetirementObservation, CredentialRetirementStage};
 #[path = "management_cutover.rs"]
 pub(in crate::store) mod cutover;
 
-#[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
+#[cfg(any(
+    all(target_os = "linux", target_env = "gnu"),
+    target_os = "windows",
+    target_os = "macos"
+))]
 #[path = "management_parser.rs"]
 mod parser;
 
 /// Read-only reuse of the canonical journal parser. Observations are not new
 /// durability receipts, writer authority, or permission to recover/apply.
-#[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
+#[cfg(any(
+    all(target_os = "linux", target_env = "gnu"),
+    target_os = "windows",
+    target_os = "macos"
+))]
 pub(super) fn readonly_inventory(
     scan: &super::secure_journal::JournalObservation,
 ) -> JournalResult<ManagementInventory> {
     parser::inventory(scan)
 }
-#[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
+#[cfg(any(
+    all(target_os = "linux", target_env = "gnu"),
+    target_os = "windows",
+    target_os = "macos"
+))]
 pub(super) fn readonly_original(
     scan: &super::secure_journal::JournalObservation,
     id: &TransactionId,
@@ -36,7 +48,11 @@ pub(super) fn readonly_original(
 
 /// Canonical native state must agree with a complete original pure C07 tip.
 /// Read-only evidence only: does not clear maintenance or attest durability.
-#[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
+#[cfg(any(
+    all(target_os = "linux", target_env = "gnu"),
+    target_os = "windows",
+    target_os = "macos"
+))]
 pub(super) fn validate_readonly_native_tip(
     scan: &super::secure_journal::JournalObservation,
     canonical: &super::native_state::ValidatedNativeState,
@@ -129,15 +145,19 @@ pub struct ManagementInventory {
 }
 impl ManagementInventory {
     /// Typed legacy records exist only for the implemented Linux reader. On
-    /// Windows their names remain orphans, which every complete-tip check must
+    /// Windows/macOS their names remain orphans, which every complete-tip check must
     /// reject; false here is never proof that an unknown legacy file is safe.
-    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "windows",
+        target_os = "macos"
+    ))]
     pub(super) fn has_legacy_handoffs(&self) -> bool {
         #[cfg(all(target_os = "linux", target_env = "gnu"))]
         {
             !self.handoffs.is_empty()
         }
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "macos"))]
         {
             false
         }
@@ -154,11 +174,23 @@ pub(super) struct OriginalManagementTransaction {
 }
 pub struct OwnedManagementJournal {
     owner: OwnedConfigurationRoot,
-    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "windows",
+        target_os = "macos"
+    ))]
     budget: JournalBudget,
-    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "windows",
+        target_os = "macos"
+    ))]
     namespace: (u64, u64),
-    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "windows",
+        target_os = "macos"
+    ))]
     root_identity: super::RootIdentity,
 }
 impl OwnedManagementJournal {
@@ -166,7 +198,11 @@ impl OwnedManagementJournal {
         owner: OwnedConfigurationRoot,
         budget: JournalBudget,
     ) -> JournalResult<Self> {
-        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "windows",
+            target_os = "macos"
+        ))]
         {
             let root_identity = owner.identity()?;
             let namespace = owner
@@ -178,7 +214,11 @@ impl OwnedManagementJournal {
                 root_identity,
             })
         }
-        #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows")))]
+        #[cfg(not(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "windows",
+            target_os = "macos"
+        )))]
         {
             let _ = (owner, budget);
             Err(JournalError::Unsupported)
@@ -188,7 +228,11 @@ impl OwnedManagementJournal {
         self.owner.clone()
     }
     pub fn observe(&self) -> JournalResult<ManagementInventory> {
-        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "windows",
+            target_os = "macos"
+        ))]
         {
             self.owner.with_state(|state| {
                 platform::with_directory(state, self.namespace, |dir| {
@@ -196,12 +240,20 @@ impl OwnedManagementJournal {
                 })
             })
         }
-        #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows")))]
+        #[cfg(not(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "windows",
+            target_os = "macos"
+        )))]
         {
             Err(JournalError::Unsupported)
         }
     }
-    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "windows",
+        target_os = "macos"
+    ))]
     pub(super) fn observe_locked(
         &self,
         state: &super::configuration::ConfigurationState,
@@ -224,13 +276,21 @@ impl OwnedManagementJournal {
         state: &super::configuration::ConfigurationState,
         id: &TransactionId,
     ) -> JournalResult<OriginalManagementTransaction> {
-        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "windows",
+            target_os = "macos"
+        ))]
         {
             self.with_directory_locked(state, |dir| {
                 platform::original(&super::secure_journal::files::scan(dir, self.budget)?, id)
             })
         }
-        #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows")))]
+        #[cfg(not(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "windows",
+            target_os = "macos"
+        )))]
         {
             let _ = (state, id);
             Err(JournalError::Unsupported)
@@ -238,7 +298,11 @@ impl OwnedManagementJournal {
     }
     /// Store-private pinned namespace access under an ALREADY held writer lock.
     /// It neither acquires/replaces authority nor exposes arbitrary directories.
-    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "windows",
+        target_os = "macos"
+    ))]
     pub(super) fn with_directory_locked<T>(
         &self,
         state: &super::configuration::ConfigurationState,
@@ -249,7 +313,11 @@ impl OwnedManagementJournal {
         }
         platform::with_directory(state, self.namespace, operation)
     }
-    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "windows",
+        target_os = "macos"
+    ))]
     pub(super) fn budget(&self) -> JournalBudget {
         self.budget
     }
@@ -262,7 +330,11 @@ impl OwnedManagementJournal {
         state: &super::configuration::ConfigurationState,
         id: &TransactionId,
     ) -> JournalResult<()> {
-        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "windows",
+            target_os = "macos"
+        ))]
         {
             self.with_directory_locked(state, |dir| {
                 let scan = super::secure_journal::files::scan(dir, self.budget)?;
@@ -287,7 +359,11 @@ impl OwnedManagementJournal {
                 Ok(())
             })
         }
-        #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows")))]
+        #[cfg(not(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "windows",
+            target_os = "macos"
+        )))]
         {
             let _ = (state, id);
             Err(JournalError::Unsupported)
@@ -303,15 +379,19 @@ impl OwnedManagementJournal {
         if maintenance.transaction_id() != id {
             return Err(JournalError::Conflict);
         }
-        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "windows",
+            target_os = "macos"
+        ))]
         {
             self.owner.with_maintenance(maintenance, |state| {
                 self.with_directory_locked(state, |dir| {
                     use super::secure_journal::files;
                     let scan = files::scan(dir, self.budget)?;
-                    #[cfg(target_os = "windows")]
+                    #[cfg(any(target_os = "windows", target_os = "macos"))]
                     {
-                        // Windows has no legacy migration reader. Unknown file
+                        // Windows/macOS have no legacy migration reader. Unknown file
                         // families are preserved as orphans, never resynced into
                         // an apparently complete supported native transaction.
                         let observed = platform::inventory(&scan)?;
@@ -345,7 +425,11 @@ impl OwnedManagementJournal {
                 })
             })
         }
-        #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows")))]
+        #[cfg(not(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "windows",
+            target_os = "macos"
+        )))]
         {
             Err(JournalError::Unsupported)
         }
@@ -358,7 +442,11 @@ impl OwnedManagementJournal {
         previous: Sha256Digest,
         reconciled: bool,
     ) -> JournalResult<JournalReceipt> {
-        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "windows",
+            target_os = "macos"
+        ))]
         {
             platform::append(
                 self,
@@ -370,7 +458,11 @@ impl OwnedManagementJournal {
                 &|_, _| {},
             )
         }
-        #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows")))]
+        #[cfg(not(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "windows",
+            target_os = "macos"
+        )))]
         {
             let _ = (maintenance, intent, stage, previous, reconciled);
             Err(JournalError::Unsupported)
@@ -406,11 +498,19 @@ impl OwnedManagementJournal {
         before: &[u8],
         target: &[u8],
     ) -> JournalResult<PreparedPersistence> {
-        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "windows",
+            target_os = "macos"
+        ))]
         {
             platform::prepare(self, maintenance, raw_intent, before, target, &|_, _| {})
         }
-        #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows")))]
+        #[cfg(not(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "windows",
+            target_os = "macos"
+        )))]
         {
             let _ = (maintenance, raw_intent, before, target);
             Err(JournalError::Unsupported)
@@ -428,7 +528,11 @@ impl OwnedManagementJournal {
         platform::prepare(self, maintenance, raw_intent, before, target, observer)
     }
 }
-#[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
+#[cfg(any(
+    all(target_os = "linux", target_env = "gnu"),
+    target_os = "windows",
+    target_os = "macos"
+))]
 mod platform {
     use super::parser::{PhaseRecord, PreparedRecord, persistence, phase_label};
     pub(super) use super::parser::{inventory, names, original, phase_name};
@@ -441,14 +545,14 @@ mod platform {
     use styx_contracts::identity::Sha256Digest;
 
     // These are the platform's actual directory barriers. Windows calls the
-    // identity-checked writable-HANDLE implementation already exercised by the
-    // FS aggregate; neither branch invents a durability receipt from presence.
+    // identity-checked writable-HANDLE implementation; macOS uses its native
+    // descriptor barrier. No branch infers durability merely from presence.
     pub(super) fn sync_directory(dir: &File) -> JournalResult<()> {
         #[cfg(all(target_os = "linux", target_env = "gnu"))]
         {
             dir.sync_all().map_err(|_| JournalError::Unknown)
         }
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "macos"))]
         {
             files::sync_directory(dir)
         }

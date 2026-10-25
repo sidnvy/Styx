@@ -2,7 +2,7 @@
 
 2026-10-24 · Owner-directed implementation choice: **Rust is the final Styx core runtime**.
 
-状态（2026-10-25）：Rust 是 Styx 自有核心的唯一目标实现，goal 仍 active。已接受基线 `a8572d2367c063ade3c0e1e79444676070871fea` 有原身份迁移/原凭据退役、全新原生 Gateway/Host join、Linux 签名内部候选 `.8` 的实际 TLS/Exec 证据及独立 Browser 场景证据；Mac/Windows 的同 SHA 结果只覆盖其已记录的编译范围，不能视为统一三平台安装或完整验收。当前 R38 将工作区工具链统一到 Rust 1.97.1，并补齐目标绑定的原生 AX 单次写入（[ADR-031](ADR-031-TARGET-BOUND-ACCESSIBILITY-WRITE.md)）；新源码、编译器和 native worker 必须各自验证，不能继承旧包结论。具体实现与历史切片见 [IMPLEMENTATION.md](IMPLEMENTATION.md)，逐次执行结果以外部 Owner Control Report/不可变 receipts 为准。行为/旧格式参考基线仍为 `44cf1470e6b0cfdfd2c2372e54e84ebd279c59c3`。测试计数不作为重写完成度。
+状态（2026-10-25）：Rust 是 Styx 自有核心的唯一目标实现，goal 仍 active。已签名的 Linux 内部候选仍为 `a8572d2` / `.8`，其真实 TLS/Exec/Browser 与原身份迁移证据不自动继承给新源码。已集成 `1021fb2` 完成 Rust 1.97.1、目标绑定的原生 AX 写入及 Windows C07/Fresh Host 接线：完整本地门禁、Windows 实际 C07 提交/原事务恢复、Mac 编译检查通过；Windows 外层 controller 的 SDK 辅助进程清理失败另行保留，不能统称整批全绿。普通 Windows fresh join/Host/Exec 新候选流程尚未验收。当前增量补齐 Darwin 可写 journal、原生 Mac 根身份与同一 C07 coordinator（[ADR-033](ADR-033-MACOS-NATIVE-JOURNAL.md)），不改 App/TCC 或原 publisher/设备身份。三平台同 SHA 签包、安装、完整生命周期及迁移验收尚未完成。具体实现见 [IMPLEMENTATION.md](IMPLEMENTATION.md)，逐次结果以外部 Owner Control Report 和不可变 receipts 为准；测试数量不表示重写完成度。行为/旧格式参考基线仍为 `44cf1470e6b0cfdfd2c2372e54e84ebd279c59c3`。
 
 阅读顺序：
 

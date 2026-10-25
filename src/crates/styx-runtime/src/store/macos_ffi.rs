@@ -168,3 +168,35 @@ pub(super) fn process_identity(pid: u32) -> Result<ProcessIdentity> {
     process_identity_optional(pid)?
         .ok_or_else(|| StoreError::Io(std::io::Error::from_raw_os_error(libc::ESRCH)))
 }
+
+/// Thin official Darwin renameatx_np/RENAME_EXCL ABI. Both names are checked
+/// single components relative to the caller's original retained directory FDs.
+/// Unsupported operations remain errors; there is no ordinary-rename fallback.
+pub(super) fn rename_exclusive(
+    source: &File,
+    source_name: &str,
+    destination: &File,
+    destination_name: &str,
+) -> Result<()> {
+    journal_component(source_name)?;
+    journal_component(destination_name)?;
+    let source_name =
+        std::ffi::CString::new(source_name).map_err(|_| StoreError::InvalidRelativePath)?;
+    let destination_name =
+        std::ffi::CString::new(destination_name).map_err(|_| StoreError::InvalidRelativePath)?;
+    // SAFETY: both live directory descriptors remain borrowed through the
+    // official libc call; CString owns both bounded NUL-terminated components.
+    if unsafe {
+        libc::renameatx_np(
+            source.as_raw_fd(),
+            source_name.as_ptr(),
+            destination.as_raw_fd(),
+            destination_name.as_ptr(),
+            libc::RENAME_EXCL,
+        )
+    } != 0
+    {
+        return Err(StoreError::Io(std::io::Error::last_os_error()));
+    }
+    Ok(())
+}

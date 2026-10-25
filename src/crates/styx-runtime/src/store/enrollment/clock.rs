@@ -91,7 +91,7 @@ impl EnrollmentJournal<'_> {
                 Ok(())
             })
         }
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", target_os = "macos"))]
         {
             let before = self.read_time_floor()?;
             if before.is_some_and(|floor| now < floor) {
@@ -100,7 +100,7 @@ impl EnrollmentJournal<'_> {
             let expected = before.map(u64::to_be_bytes);
             let bytes = now.to_be_bytes();
             files::with_namespace(self, |dir| {
-                // The Windows primitive owns native replacement/durability and
+                // The OS primitive owns native replacement/durability and
                 // revalidates the exact expected bytes under this same writer.
                 // Equal floors also require real sync/readback, not a cached ACK.
                 super::super::secure_journal::files::replace_observed(
@@ -117,7 +117,11 @@ impl EnrollmentJournal<'_> {
                 Ok(())
             })
         }
-        #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows")))]
+        #[cfg(not(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "windows",
+            target_os = "macos"
+        )))]
         {
             let _ = now;
             Err(JournalError::Unsupported)

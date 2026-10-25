@@ -5,7 +5,11 @@ use super::native_state::{self, ValidatedNativeState};
 use super::{ConfigurationWriterGuard, OwnedConfigurationRoot, PrivateRoot, RootIdentity};
 use styx_contracts::native_management::{NativeRootMarker, NativeState};
 
-#[cfg(any(target_os = "windows", all(target_os = "linux", target_env = "gnu")))]
+#[cfg(any(
+    target_os = "windows",
+    target_os = "macos",
+    all(target_os = "linux", target_env = "gnu")
+))]
 #[path = "native_host.rs"]
 pub(crate) mod host;
 
@@ -29,9 +33,17 @@ pub struct NativeRootFailure {
     ownership: Box<Ownership>,
 }
 enum Ownership {
-    #[cfg(not(any(target_os = "windows", all(target_os = "linux", target_env = "gnu"))))]
+    #[cfg(not(any(
+        target_os = "windows",
+        target_os = "macos",
+        all(target_os = "linux", target_env = "gnu")
+    )))]
     Unavailable,
-    #[cfg(any(target_os = "windows", all(target_os = "linux", target_env = "gnu")))]
+    #[cfg(any(
+        target_os = "windows",
+        target_os = "macos",
+        all(target_os = "linux", target_env = "gnu")
+    ))]
     Parent {
         parent: PrivateRoot,
         component: std::ffi::OsString,
@@ -62,15 +74,27 @@ impl NativeRootFailure {
         match &*self.ownership {
             Ownership::Root { root, .. } => Some(root.identity()),
             Ownership::Configuration(owner) => owner.identity().ok(),
-            #[cfg(any(target_os = "windows", all(target_os = "linux", target_env = "gnu")))]
+            #[cfg(any(
+                target_os = "windows",
+                target_os = "macos",
+                all(target_os = "linux", target_env = "gnu")
+            ))]
             Ownership::Parent { child, .. } => child.as_ref().map(PrivateRoot::identity),
-            #[cfg(not(any(target_os = "windows", all(target_os = "linux", target_env = "gnu"))))]
+            #[cfg(not(any(
+                target_os = "windows",
+                target_os = "macos",
+                all(target_os = "linux", target_env = "gnu")
+            )))]
             Ownership::Unavailable => None,
         }
     }
     /// Facts only: a directory may exist even before any child writer could be
     /// acquired. The retained parent locator never grants native-root authority.
-    #[cfg(any(target_os = "windows", all(target_os = "linux", target_env = "gnu")))]
+    #[cfg(any(
+        target_os = "windows",
+        target_os = "macos",
+        all(target_os = "linux", target_env = "gnu")
+    ))]
     pub fn orphan_locator(&self) -> Option<(RootIdentity, &std::ffi::OsStr, bool)> {
         match &*self.ownership {
             Ownership::Parent {
@@ -159,11 +183,19 @@ impl FreshNativeRoot {
         deployment: &[u8],
         state: &NativeState,
     ) -> Result<NativeRootBinding, NativeRootFailure> {
-        #[cfg(any(target_os = "windows", all(target_os = "linux", target_env = "gnu")))]
+        #[cfg(any(
+            target_os = "windows",
+            target_os = "macos",
+            all(target_os = "linux", target_env = "gnu")
+        ))]
         {
             platform::initialize(self, deployment, state, &|_, _| {})
         }
-        #[cfg(not(any(target_os = "windows", all(target_os = "linux", target_env = "gnu"))))]
+        #[cfg(not(any(
+            target_os = "windows",
+            target_os = "macos",
+            all(target_os = "linux", target_env = "gnu")
+        )))]
         {
             let _ = (deployment, state);
             Err(NativeRootFailure {
@@ -216,7 +248,11 @@ impl NativeRootBinding {
         &self,
         state: &super::configuration::ConfigurationState,
     ) -> super::secure_journal::JournalResult<ValidatedNativeState> {
-        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "windows",
+            target_os = "macos"
+        ))]
         {
             use super::secure_journal::{JournalError, files};
             use styx_contracts::native_management::NATIVE_STATE_BYTES;
@@ -244,7 +280,7 @@ impl NativeRootBinding {
                         {
                             directory.sync_all().map_err(|_| JournalError::Unknown)
                         }
-                        #[cfg(target_os = "windows")]
+                        #[cfg(any(target_os = "windows", target_os = "macos"))]
                         {
                             files::sync_directory(directory)
                         }
@@ -278,7 +314,11 @@ impl NativeRootBinding {
             .map_err(|_| JournalError::Unknown)?;
             Ok(after)
         }
-        #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows")))]
+        #[cfg(not(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "windows",
+            target_os = "macos"
+        )))]
         {
             let _ = state;
             Err(super::secure_journal::JournalError::Unsupported)
@@ -323,9 +363,15 @@ fn same_identity(root: &RootIdentity, marker: &NativeRootMarker) -> bool {
                     uid: *uid,
                 }
         }
-        // A Darwin read/lease identity is not a native writable-root identity.
         #[cfg(target_os = "macos")]
-        RootIdentity::Macos { .. } => false,
+        RootIdentity::Macos { device, inode, uid } => {
+            marker.root_identity
+                == styx_contracts::native_management::NativeRootIdentity::Macos {
+                    device: *device,
+                    inode: *inode,
+                    uid: *uid,
+                }
+        }
         #[cfg(target_os = "windows")]
         RootIdentity::Windows {
             volume_serial,
@@ -390,11 +436,19 @@ pub fn create_fresh(
     parent: &PrivateRoot,
     component: &std::ffi::OsStr,
 ) -> Result<FreshNativeRoot, NativeRootFailure> {
-    #[cfg(any(target_os = "windows", all(target_os = "linux", target_env = "gnu")))]
+    #[cfg(any(
+        target_os = "windows",
+        target_os = "macos",
+        all(target_os = "linux", target_env = "gnu")
+    ))]
     {
         platform::create(parent, component, &|_, _| {})
     }
-    #[cfg(not(any(target_os = "windows", all(target_os = "linux", target_env = "gnu"))))]
+    #[cfg(not(any(
+        target_os = "windows",
+        target_os = "macos",
+        all(target_os = "linux", target_env = "gnu")
+    )))]
     {
         let _ = (parent, component);
         Err(NativeRootFailure {
@@ -407,11 +461,19 @@ pub fn reopen_native(
     root: PrivateRoot,
     writer: ConfigurationWriterGuard,
 ) -> Result<NativeRootBinding, NativeRootFailure> {
-    #[cfg(any(target_os = "windows", all(target_os = "linux", target_env = "gnu")))]
+    #[cfg(any(
+        target_os = "windows",
+        target_os = "macos",
+        all(target_os = "linux", target_env = "gnu")
+    ))]
     {
         platform::reopen(root, writer)
     }
-    #[cfg(not(any(target_os = "windows", all(target_os = "linux", target_env = "gnu"))))]
+    #[cfg(not(any(
+        target_os = "windows",
+        target_os = "macos",
+        all(target_os = "linux", target_env = "gnu")
+    )))]
     {
         Err(NativeRootFailure {
             error: NativeRootError::Unsupported,
@@ -422,7 +484,11 @@ pub fn reopen_native(
         })
     }
 }
-#[cfg(any(target_os = "windows", all(target_os = "linux", target_env = "gnu")))]
+#[cfg(any(
+    target_os = "windows",
+    target_os = "macos",
+    all(target_os = "linux", target_env = "gnu")
+))]
 mod platform {
     use super::*;
     use crate::store::{
@@ -529,6 +595,10 @@ mod platform {
             RootIdentity::Linux { device, inode, uid } => {
                 NativeRootIdentity::Linux { device, inode, uid }
             }
+            #[cfg(target_os = "macos")]
+            RootIdentity::Macos { device, inode, uid } => {
+                NativeRootIdentity::Macos { device, inode, uid }
+            }
             #[cfg(target_os = "windows")]
             RootIdentity::Windows {
                 volume_serial,
@@ -567,7 +637,7 @@ mod platform {
                             .map_err(|_| StoreError::Changed)?;
                         #[cfg(all(target_os = "linux", target_env = "gnu"))]
                         observer(name.as_str(), "directory_sync");
-                        #[cfg(target_os = "windows")]
+                        #[cfg(any(target_os = "windows", target_os = "macos"))]
                         observer(name.as_str(), "namespace_observed");
                     }
                     Ok(())

@@ -34,6 +34,13 @@ pub enum NativeRootIdentity {
         inode: u64,
         uid: u32,
     },
+    /// Observed Darwin object identity. A distinct tag prevents cross-platform
+    /// root substitution; these bytes do not grant writer or commit authority.
+    Macos {
+        device: u64,
+        inode: u64,
+        uid: u32,
+    },
     /// Observed local Windows object identity. DATA only; this does not enable
     /// configuration writes, journal recovery or execute a selected image.
     Windows {

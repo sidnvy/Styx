@@ -31,6 +31,10 @@ pub struct JoinError {
     exit: u8,
     #[cfg(any(
         all(target_os = "windows", target_arch = "x86_64"),
+        all(
+            target_os = "macos",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
         all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
     ))]
     _retained: Option<Box<platform::Retained>>,
@@ -48,6 +52,10 @@ impl JoinError {
             exit,
             #[cfg(any(
                 all(target_os = "windows", target_arch = "x86_64"),
+                all(
+                    target_os = "macos",
+                    any(target_arch = "x86_64", target_arch = "aarch64")
+                ),
                 all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
             ))]
             _retained: None,
@@ -70,6 +78,10 @@ type Result<T> = std::result::Result<T, JoinError>;
 pub async fn request(parent: &Path, name: &OsStr, deployment_file: &Path) -> Result<JoinReport> {
     #[cfg(any(
         all(target_os = "windows", target_arch = "x86_64"),
+        all(
+            target_os = "macos",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
         all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
     ))]
     {
@@ -82,6 +94,10 @@ pub async fn request(parent: &Path, name: &OsStr, deployment_file: &Path) -> Res
     }
     #[cfg(not(any(
         all(target_os = "windows", target_arch = "x86_64"),
+        all(
+            target_os = "macos",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
         all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
     )))]
     {
@@ -92,6 +108,10 @@ pub async fn request(parent: &Path, name: &OsStr, deployment_file: &Path) -> Res
 pub async fn claim(state_dir: &Path) -> Result<JoinReport> {
     #[cfg(any(
         all(target_os = "windows", target_arch = "x86_64"),
+        all(
+            target_os = "macos",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
         all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
     ))]
     {
@@ -100,6 +120,10 @@ pub async fn claim(state_dir: &Path) -> Result<JoinReport> {
     }
     #[cfg(not(any(
         all(target_os = "windows", target_arch = "x86_64"),
+        all(
+            target_os = "macos",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
         all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
     )))]
     {
@@ -110,6 +134,10 @@ pub async fn claim(state_dir: &Path) -> Result<JoinReport> {
 
 #[cfg(any(
     all(target_os = "windows", target_arch = "x86_64"),
+    all(
+        target_os = "macos",
+        any(target_arch = "x86_64", target_arch = "aarch64")
+    ),
     all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
 ))]
 mod platform {
@@ -142,9 +170,11 @@ mod platform {
     use zeroize::Zeroizing;
     const LIMIT: usize = 1024 * 1024;
     // Enrollment wire names follow the existing Node/Host protocol, not Rust's
-    // OS identifier: Windows is "win32", never a new device platform spelling.
+    // OS identifier: Windows is "win32" and macOS is "darwin".
     const PLATFORM: &str = if cfg!(target_os = "windows") {
         "win32"
+    } else if cfg!(target_os = "macos") {
+        "darwin"
     } else {
         "linux"
     };
@@ -337,6 +367,10 @@ mod platform {
         match root.identity() {
             RootIdentity::Linux { device, inode, uid } => {
                 NativeRootIdentity::Linux { device, inode, uid }
+            }
+            #[cfg(target_os = "macos")]
+            RootIdentity::Macos { device, inode, uid } => {
+                NativeRootIdentity::Macos { device, inode, uid }
             }
             #[cfg(target_os = "windows")]
             RootIdentity::Windows {

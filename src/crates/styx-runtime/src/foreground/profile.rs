@@ -19,7 +19,11 @@ use styx_contracts::{
     identity::{DeviceId, GatewayId, Sha256Digest},
     native_release::NativeExternalWorker,
 };
-#[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
+#[cfg(any(
+    all(target_os = "linux", target_env = "gnu"),
+    target_os = "windows",
+    target_os = "macos"
+))]
 #[path = "profile_fresh.rs"]
 mod fresh;
 #[path = "profile_release.rs"]
@@ -431,7 +435,11 @@ impl LoadedLegacyProfile {
                 .map_err(|_| ProfileError::Changed)?;
             return Ok(true);
         }
-        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "windows",
+            target_os = "macos"
+        ))]
         if let ProfileSource::Fresh(binding) = &self.source {
             binding.revalidate().map_err(|_| ProfileError::Changed)?;
             if state.identity() != binding.root_identity()
@@ -583,7 +591,11 @@ enum ProfileSource {
     Maintenance(Arc<crate::migration::legacy_service::RetiredCredentialReadBinding>),
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     Committed(Arc<crate::store::committed_runtime::CommittedRuntimeSnapshot>),
-    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "windows",
+        target_os = "macos"
+    ))]
     Fresh(Arc<crate::store::native_host_snapshot::NativeHostSnapshot>),
 }
 impl ProfileSource {
@@ -594,7 +606,11 @@ impl ProfileSource {
             Self::Maintenance(binding) => binding.revalidate().map_err(|_| ProfileError::Changed),
             #[cfg(all(target_os = "linux", target_env = "gnu"))]
             Self::Committed(binding) => binding.revalidate().map_err(|_| ProfileError::Changed),
-            #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
+            #[cfg(any(
+                all(target_os = "linux", target_env = "gnu"),
+                target_os = "windows",
+                target_os = "macos"
+            ))]
             Self::Fresh(binding) => binding.revalidate().map_err(|_| ProfileError::Changed),
         }
     }
@@ -613,7 +629,11 @@ pub fn load_legacy(state_dir: &Path) -> Result<LoadedLegacyProfile, ProfileError
 /// Explicit paired-v3 bridge using the SAME protected original profile and
 /// signed legacy executor closure. No identity, pairing or native-format rewrite.
 pub fn load_paired(state_dir: &Path) -> Result<LoadedLegacyProfile, ProfileError> {
-    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "windows",
+        target_os = "macos"
+    ))]
     {
         let root = PrivateRoot::open(state_dir).map_err(|_| ProfileError::ProtectedRead)?;
         let native_present = root.ensure_absent(".styx-native-root-v1.json").is_err();
@@ -626,7 +646,7 @@ pub fn load_paired(state_dir: &Path) -> Result<LoadedLegacyProfile, ProfileError
             return fresh::load(state_dir);
         }
         if native_present {
-            #[cfg(target_os = "windows")]
+            #[cfg(any(target_os = "windows", target_os = "macos"))]
             return Err(ProfileError::Changed);
             #[cfg(all(target_os = "linux", target_env = "gnu"))]
             {
@@ -663,7 +683,11 @@ fn load_source(
     source: ProfileSource,
 ) -> Result<LoadedLegacyProfile, ProfileError> {
     source.revalidate()?;
-    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "windows",
+        target_os = "macos"
+    ))]
     if matches!(&source, ProfileSource::Fresh(_)) {
         return Err(ProfileError::Invalid);
     }
@@ -776,7 +800,11 @@ fn load_source(
         return Err(ProfileError::Invalid);
     }
     let raw_token = match &source {
-        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "windows",
+            target_os = "macos"
+        ))]
         ProfileSource::Fresh(_) => return Err(ProfileError::Invalid),
         ProfileSource::Ordinary => {
             zeroize::Zeroizing::new(capture.read(base, "device/host.token", 4096)?)
@@ -926,7 +954,11 @@ fn load_source(
         runtime_format
     };
     let diagnostic_manifest = match &source {
-        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "windows",
+            target_os = "macos"
+        ))]
         ProfileSource::Fresh(_) => return Err(ProfileError::Invalid),
         ProfileSource::Ordinary => active.manifest_sha256,
         #[cfg(all(target_os = "linux", target_env = "gnu"))]

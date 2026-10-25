@@ -1,5 +1,5 @@
-//! macOS private raw reads, payload observations and distinct ownership resources, not payload launch,
-//! journal persistence or native-root creation. Uses the existing nix/std APIs.
+//! macOS protected roots, fixed private writes and distinct ownership resources.
+//! OS file operations do not grant enrollment/migration/commit authority.
 //! Extended ACLs are conservatively refused; original ACLs are never rewritten.
 #[path = "macos_ffi.rs"]
 mod ffi;
@@ -15,7 +15,7 @@ pub(in crate::store) use payload_backend::{PayloadSnapshot, PinnedImage};
 use std::{
     ffi::{OsStr, OsString},
     fs::{File, Metadata, TryLockError},
-    io::Read,
+    io::{Read, Write},
     os::unix::fs::MetadataExt,
     sync::Arc,
 };
@@ -104,7 +104,185 @@ fn open_root(path: &Path) -> Result<File> {
     Ok(directory)
 }
 
+/// Post-mkdir failures preserve creation provenance and the original child
+/// whenever it was opened. No deletion, adoption or retry is performed here.
+pub(super) struct FreshChildError {
+    pub(super) cause: StoreError,
+    pub(super) created: bool,
+    pub(super) root: Option<Root>,
+}
+fn single_component(name: &OsStr) -> Result<()> {
+    let raw = name.as_encoded_bytes();
+    if raw.is_empty() || raw.len() > 255 || raw.contains(&0) || raw.contains(&b'/') {
+        return Err(StoreError::InvalidRelativePath);
+    }
+    let mut parts = Path::new(name).components();
+    if !matches!(parts.next(), Some(Component::Normal(_))) || parts.next().is_some() {
+        return Err(StoreError::InvalidRelativePath);
+    }
+    Ok(())
+}
+pub(in crate::store) fn journal_component(name: &str) -> Result<()> {
+    single_component(OsStr::new(name))
+}
+pub(in crate::store) fn journal_private_file(file: &File) -> Result<Metadata> {
+    let metadata = private_file(file)?;
+    if metadata.mode() & 0o7777 != 0o600 {
+        return Err(StoreError::NotPrivate);
+    }
+    Ok(metadata)
+}
+pub(in crate::store) fn journal_private_directory(file: &File) -> Result<Metadata> {
+    let metadata = private_descriptor(file)?;
+    if !metadata.is_dir() || metadata.mode() & 0o7777 != 0o700 {
+        return Err(StoreError::NotPrivate);
+    }
+    Ok(metadata)
+}
+/// Darwin fsync followed by the existing mature nix F_FULLFSYNC wrapper. No
+/// fallback on EINVAL/unsupported filesystems or a failed physical flush request.
+/// Success is the OS result, not a simulated power-loss acceptance claim.
+pub(in crate::store) fn sync_private_file(file: &File) -> Result<()> {
+    journal_private_file(file)?;
+    sync_descriptor(file)
+}
+pub(in crate::store) fn sync_private_directory(file: &File) -> Result<()> {
+    journal_private_directory(file)?;
+    sync_descriptor(file)
+}
+fn sync_descriptor(file: &File) -> Result<()> {
+    file.sync_all()?;
+    nix::fcntl::fcntl(file, nix::fcntl::FcntlArg::F_FULLFSYNC)
+        .map_err(|e| StoreError::Io(std::io::Error::from_raw_os_error(e as i32)))?;
+    Ok(())
+}
+pub(in crate::store) fn rename_exclusive(
+    source: &File,
+    source_name: &str,
+    destination: &File,
+    destination_name: &str,
+) -> Result<()> {
+    journal_component(source_name)?;
+    journal_component(destination_name)?;
+    ffi::rename_exclusive(source, source_name, destination, destination_name)
+}
 impl Root {
+    pub(super) fn create_fresh_child(
+        &self,
+        name: &OsStr,
+    ) -> std::result::Result<Self, FreshChildError> {
+        let mut created = false;
+        let mut retained = None;
+        let result = (|| {
+            single_component(name)?;
+            self.validate_root()?;
+            journal_private_directory(&self.directory)?;
+            nix::sys::stat::mkdirat(&*self.directory, name, Mode::S_IRWXU)
+                .map_err(|e| StoreError::Io(std::io::Error::from_raw_os_error(e as i32)))?;
+            created = true;
+            let directory = open_at(
+                &self.directory,
+                name,
+                OFlag::O_RDONLY | OFlag::O_DIRECTORY,
+                Mode::empty(),
+            )?;
+            let metadata = directory.metadata()?;
+            let child = Self {
+                directory: Arc::new(directory),
+                path: self.path.join(name),
+                identity: root_identity(&metadata),
+            };
+            retained = Some(child.clone());
+            journal_private_directory(&child.directory)?;
+            child.sync_directory()?;
+            self.sync_directory()?;
+            self.validate_root()?;
+            child.validate_root()?;
+            Ok(child)
+        })();
+        result.map_err(|cause| FreshChildError {
+            cause,
+            created,
+            root: retained,
+        })
+    }
+    pub(in crate::store) fn sync_directory(&self) -> Result<()> {
+        self.validate_root()?;
+        let before = journal_private_directory(&self.directory)?;
+        let result = sync_private_directory(&self.directory);
+        let after = journal_private_directory(&self.directory)?;
+        if (before.dev(), before.ino()) != (after.dev(), after.ino()) {
+            return Err(StoreError::Changed);
+        }
+        self.validate_root()?;
+        result
+    }
+    pub(super) fn with_readonly_directory<T>(
+        &self,
+        operation: impl FnOnce(&File) -> Result<T>,
+    ) -> Result<T> {
+        self.validate_root()?;
+        let result = operation(&self.directory);
+        self.validate_root()?;
+        result
+    }
+    pub(super) fn with_configuration_writer_directory<T>(
+        &self,
+        guard: &ConfigurationWriterGuard,
+        operation: impl FnOnce(&File) -> Result<T>,
+    ) -> Result<T> {
+        if guard.identity().resource != LockResource::ConfigurationWriter
+            || guard.identity().root != self.identity()
+            || guard.identity().process != ProcessIdentity::current()?
+        {
+            return Err(StoreError::Changed);
+        }
+        self.validate_root()?;
+        guard.validate()?;
+        journal_private_directory(&self.directory)?;
+        let result = operation(&self.directory);
+        self.validate_root()?;
+        guard.validate()?;
+        result
+    }
+    /// Same fixed CREATE_NEW failure model as Linux: partial final files remain
+    /// unknown; they are not overwritten, adopted, deleted or automatically retried.
+    pub(super) fn create_fixed(
+        &self,
+        guard: &ConfigurationWriterGuard,
+        name: &str,
+        bytes: &[u8],
+        observer: &dyn Fn(&str),
+    ) -> Result<()> {
+        journal_component(name)?;
+        if bytes.is_empty() || bytes.len() > 1024 * 1024 {
+            return Err(StoreError::TooLarge);
+        }
+        self.with_configuration_writer_directory(guard, |directory| {
+            let mut file = open_at(
+                directory,
+                OsStr::new(name),
+                OFlag::O_RDWR | OFlag::O_CREAT | OFlag::O_EXCL | OFlag::O_NONBLOCK,
+                Mode::S_IRUSR | Mode::S_IWUSR,
+            )?;
+            let original = journal_private_file(&file)?;
+            file.write_all(bytes)?;
+            observer("write");
+            sync_private_file(&file)?;
+            observer("file_sync");
+            sync_private_directory(directory)?;
+            observer("directory_sync");
+            let raw = self.read_raw(Path::new(name), bytes.len())?;
+            if (raw.observation().device, raw.observation().inode)
+                != (original.dev(), original.ino())
+                || raw.bytes() != bytes
+            {
+                return Err(StoreError::Changed);
+            }
+            journal_private_file(&file)?;
+            Ok(())
+        })
+    }
     pub(super) fn open(path: &Path) -> Result<Self> {
         let directory = open_root(path)?;
         let identity = root_identity(&directory.metadata()?);
@@ -117,7 +295,7 @@ impl Root {
     pub(super) fn identity(&self) -> RootIdentity {
         self.identity.clone()
     }
-    fn validate_root(&self) -> Result<()> {
+    pub(in crate::store) fn validate_root(&self) -> Result<()> {
         let current = open_root(&self.path)?;
         if root_identity(&current.metadata()?) != self.identity {
             return Err(StoreError::Changed);
@@ -370,3 +548,7 @@ pub(super) fn process_matches(identity: &ProcessIdentity) -> Result<bool> {
 #[cfg(test)]
 #[path = "macos_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "macos_publication_tests.rs"]
+mod publication_tests;
