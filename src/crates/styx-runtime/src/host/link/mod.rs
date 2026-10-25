@@ -45,6 +45,8 @@ pub enum LinkError {
     Tls(#[from] TlsError),
     #[error("WSS handshake rejected")]
     HandshakeRejected,
+    #[error("WSS upgrade refused with HTTP status {0}")]
+    UpgradeStatus(u16),
     #[error("transport deadline expired")]
     Deadline,
     #[error("connection generation closed")]
@@ -244,7 +246,12 @@ impl HostWssLink {
         )
         .await
         .map_err(|_| LinkError::Deadline)?
-        .map_err(|_| LinkError::HandshakeRejected)?;
+        .map_err(|error| match error {
+            tokio_tungstenite::tungstenite::Error::Http(response) => {
+                LinkError::UpgradeStatus(response.status().as_u16())
+            }
+            _ => LinkError::HandshakeRejected,
+        })?;
         if response
             .headers()
             .contains_key(http::header::SEC_WEBSOCKET_PROTOCOL)

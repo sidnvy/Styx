@@ -1098,6 +1098,9 @@ mod platform {
         }
         let shared = SharedEnrollment::new(service);
         let partition = Arc::new(Semaphore::new(styx_contracts::HOST_QUEUED_BYTES));
+        // Preserve the MCP32MiB allocation and use the previously unreserved
+        //16MiB for a second Host link. Both partitions still share the original
+        //64MiB queue budget; no per-link limit or authentication is relaxed.
         let relay = RelayHandle::new(
             shared.clone(),
             gateway_id,
@@ -1105,7 +1108,7 @@ mod platform {
                 .map_err(|_| error("gateway_epoch_invalid"))?,
             partition
                 .clone()
-                .try_acquire_many_owned(16 * 1024 * 1024)
+                .try_acquire_many_owned(32 * 1024 * 1024)
                 .map_err(|_| error("gateway_partition_unavailable"))?,
         )
         .map_err(|_| error("gateway_relay_invalid"))?;

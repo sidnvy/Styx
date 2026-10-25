@@ -28,3 +28,11 @@ Bind each actual run to its frozen source and executable. The new development Co
 The required first development journey is fresh join/comparison/approval/claim, two independently observed Exec effects across Pause/reconnect, actual owned-process settlement, an independent foreground Host still executing after App Quit/EOF, and both manager mismatch negatives when no active writer can mask the result. Native compile and local quality results alone do not close this journey.
 
 Still required: original Windows Settings/tray adapter and verified Rust bootstrap packaging, Mac native client integration with unchanged App/Cua/TCC responsibility, local Gateway/Host composition, original-identity migration and JS retirement, login/autostart/update/rollback/tunnel/device-management/permission/account parity, same-SHA signed installers and real platform acceptance. This checkpoint does not replace those requirements.
+
+## Actual integration finding: default Gateway admitted only one Host link
+
+The first real two-device App/CLI journey completed both enrollments, then the ordinary foreground Host connected and the App WSS upgrade was refused. Pure protected App profile/C08 admission passed. `RelayHandle::new` reserves one slot per16MiB, while `foreground::gateway` allocated only16MiB to the relay and32MiB to MCP from its existing64MiB queue allocator: a second live Host could not fit, regardless of valid credentials.
+
+The bootstrap now allocates the previously unused16MiB to the relay:32MiB for two simultaneously retained Host links and the unchanged32MiB MCP partition. Total and per-peer wire/queue limits, handshake authentication and retained/unknown capacity rules are unchanged. This is a bounded default, not an unlimited device-count or RSS claim. Future scaling needs an explicit budget policy; it must not silently reduce per-link reserves or evict unknown work. WSS HTTP capacity/admission/unavailability statuses remain distinct typed failures, without logging response headers, bodies or credentials.
+
+The original failed journeys remain failed evidence. The new two-Host scenario must actually establish both links and observe independent execution across Pause/reconnect/Quit before this fix is accepted.

@@ -285,7 +285,13 @@ async fn connect(
             ForegroundError("gateway_tls_timeout")
         }
         LinkError::Tls(_) => ForegroundError("gateway_tls_handshake_rejected"),
-        LinkError::HandshakeRejected => ForegroundError("gateway_wss_upgrade_rejected"),
+        LinkError::UpgradeStatus(400) => ForegroundError("gateway_wss_request_rejected"),
+        LinkError::UpgradeStatus(403) => ForegroundError("gateway_wss_admission_refused"),
+        LinkError::UpgradeStatus(429) => ForegroundError("gateway_wss_capacity_exhausted"),
+        LinkError::UpgradeStatus(503) => ForegroundError("gateway_wss_unavailable"),
+        LinkError::UpgradeStatus(_) | LinkError::HandshakeRejected => {
+            ForegroundError("gateway_wss_upgrade_rejected")
+        }
         LinkError::Deadline => ForegroundError("gateway_transport_deadline"),
         _ => ForegroundError("gateway_transport_refused"),
     })
