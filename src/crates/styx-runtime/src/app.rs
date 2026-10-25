@@ -151,6 +151,7 @@ enum Operation {
     Status,
     RequestJoin,
     ClaimJoin,
+    InspectHost,
     Connect,
     Disconnect,
     QuitAdmission,
@@ -334,7 +335,18 @@ impl HostApp {
                     self.cleanup = Some(outcome);
                     self.status.send_replace(ConnectionStatus::stopped());
                 }
-                _ => {
+                failed => {
+                    // Preserve a fixed diagnostic cause; never print native
+                    // output, credentials, paths or an arbitrary error display.
+                    let cause = match &failed {
+                        Ok(Err(error)) => error.code(),
+                        Ok(Ok(_)) => "foreground_cleanup_incomplete",
+                        Err(_) => "foreground_worker_failed",
+                    };
+                    eprintln!(
+                        "{}",
+                        json!({"schema":1,"event":"app_role_failed","cause":cause,"events_joined":events.is_ok()})
+                    );
                     self.unknown = true;
                     self.status.send_replace(ConnectionStatus::unknown());
                     return Err(AppError("app_cleanup_unknown"));
@@ -393,6 +405,16 @@ impl HostApp {
                     .await
                     .map_err(|e| self.join_error(e))?;
                 self.read_configuration().await?;
+                serde_json::to_value(report).map_err(|_| AppError("app_response_invalid"))
+            }
+            Operation::InspectHost => {
+                if self.running.is_some() {
+                    return Err(AppError("app_role_busy"));
+                }
+                self.read_configuration().await?;
+                let report = foreground::inspect_for_app(self.scope.clone())
+                    .await
+                    .map_err(|e| AppError(e.code()))?;
                 serde_json::to_value(report).map_err(|_| AppError("app_response_invalid"))
             }
             Operation::Connect => {

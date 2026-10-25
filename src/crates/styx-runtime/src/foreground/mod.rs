@@ -93,3 +93,22 @@ pub async fn discover_desktop_candidates()
         .await
         .map_err(|error| ForegroundError(error.code()))
 }
+
+/// Owned-App read-only Host admission diagnostics. Does not start a connector,
+/// acquire an execution lease, install a service or authorize a remote tool.
+#[cfg(any(
+    all(target_os = "linux", target_env = "gnu"),
+    target_os = "windows",
+    target_os = "macos"
+))]
+pub(crate) async fn inspect_for_app(
+    scope: std::sync::Arc<crate::app::HostScope>,
+) -> Result<ProfileDiagnostics, ForegroundError> {
+    tokio::task::spawn_blocking(move || {
+        let profile = profile::load_for_app(scope)?;
+        profile.revalidate()?;
+        Ok(profile.into_diagnostics())
+    })
+    .await
+    .map_err(|_| ForegroundError("profile_reader_failed"))?
+}
