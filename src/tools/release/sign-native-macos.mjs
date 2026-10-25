@@ -1,6 +1,8 @@
 // Build-time only: reuse the original App signing policy, never accept caller commands.
 import fs from 'node:fs';
 import path from 'node:path';
+import {fileURLToPath} from 'node:url';
+import {createHash} from 'node:crypto';
 import {execFileSync} from 'node:child_process';
 import {normalizeMacLocalSigning, verifyMacLocalSigning, macLocalSigningPlan} from '../../host/build-macos-app.mjs';
 
@@ -17,6 +19,10 @@ try {
     return st;
   };
   boundedFile(configuration,4096); boundedFile(binary,1024*1024*1024);
+  const digest=file=>createHash('sha256').update(fs.readFileSync(file)).digest('hex');
+  report.source_image_sha256=digest(binary);report.source_image_bytes=fs.statSync(binary).size;
+  report.helper_sha256=digest(fileURLToPath(import.meta.url));
+  report.planner_sha256=digest(fileURLToPath(new URL('../../host/build-macos-app.mjs',import.meta.url)));
   need(path.basename(binary)==='styx','fixed_native_cli_required');
   const raw=fs.readFileSync(configuration),local=normalizeMacLocalSigning(JSON.parse(raw));
   need(local.identitySha1==='cb50cee601419f28b43756f4fc8aefdbf60abae2' &&
@@ -48,6 +54,8 @@ try {
   }
   need(fs.readFileSync(configuration).equals(raw),'signing_configuration_changed');
   need(JSON.stringify(verifyMacLocalSigning(local))===JSON.stringify(report.certificate),'original_certificate_changed');
+  report.signed_image_sha256=digest(binary);report.signed_image_bytes=fs.statSync(binary).size;
+  need(report.helper_sha256===digest(fileURLToPath(import.meta.url))&&report.planner_sha256===digest(fileURLToPath(new URL('../../host/build-macos-app.mjs',import.meta.url))),'signing_helper_changed');
   report.status='PASS';
 } catch(error) { report.error=/^[a-z0-9_]+$/.test(error.message)?error.message:'macos_signing_helper_failed'; }
 process.stdout.write(JSON.stringify(report)+'\n');

@@ -294,7 +294,7 @@ mod platform {
             _failure: NativeRootFailure,
         },
         Fresh {
-            _root: FreshNativeRoot,
+            _root: Box<FreshNativeRoot>,
         },
         Store {
             _store: NativeHostJoinStore,
@@ -766,8 +766,11 @@ mod platform {
         if let Some(scope) = &app_scope
             && scope.bind().and_then(|()| scope.validate()).is_err()
         {
-            return Err(JoinError::new("native_join_app_scope_changed", 4)
-                .keep(Retained::Fresh { _root: fresh }));
+            return Err(
+                JoinError::new("native_join_app_scope_changed", 4).keep(Retained::Fresh {
+                    _root: Box::new(fresh),
+                }),
+            );
         }
         let metadata: Result<_> = (|| {
             let seed = NativeHostJoinSeed {
@@ -826,11 +829,19 @@ mod platform {
         })();
         let (seed_raw, state, join) = match metadata {
             Ok(value) => value,
-            Err(error) => return Err(error.keep(Retained::Fresh { _root: fresh })),
+            Err(error) => {
+                return Err(error.keep(Retained::Fresh {
+                    _root: Box::new(fresh),
+                }));
+            }
         };
         let seconds = match clock_ms() {
             Ok(now) => now / 1000,
-            Err(error) => return Err(error.keep(Retained::Fresh { _root: fresh })),
+            Err(error) => {
+                return Err(error.keep(Retained::Fresh {
+                    _root: Box::new(fresh),
+                }));
+            }
         };
         let material = FreshHostFiles {
             ca_certificate_pem: &ca.raw,

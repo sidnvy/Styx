@@ -39,7 +39,9 @@ pub(super) struct ProfileRelease {
     retained: RetainedRelease,
     root: PathBuf,
     version: String,
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     node_version: Option<String>,
+    #[cfg(target_os = "linux")]
     cua_version: Option<String>,
 }
 fn fixed_legacy_worker(kind: NativeExternalWorker) -> &'static str {
@@ -75,11 +77,13 @@ impl ProfileRelease {
         }
         let verified = crate::release::verify_selected(selection).map_err(load_error)?;
         let manifest = verified.manifest();
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         let node_version = manifest
             .worker_closures
             .iter()
             .find(|w| w.kind == NativeExternalWorker::BrowserNode22)
             .map(|w| w.version.clone());
+        #[cfg(target_os = "linux")]
         let cua_version = manifest
             .worker_closures
             .iter()
@@ -98,7 +102,9 @@ impl ProfileRelease {
             },
             root,
             version,
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
             node_version,
+            #[cfg(target_os = "linux")]
             cua_version,
         })
     }
@@ -120,11 +126,13 @@ impl ProfileRelease {
         {
             return Err(ProfileError::UntrustedRelease);
         }
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         let node_version = manifest
             .worker_closures
             .iter()
             .find(|worker| worker.kind == NativeExternalWorker::BrowserNode22)
             .map(|worker| worker.version.clone());
+        #[cfg(target_os = "linux")]
         let cua_version = manifest
             .worker_closures
             .iter()
@@ -147,7 +155,9 @@ impl ProfileRelease {
             },
             root,
             version,
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
             node_version,
+            #[cfg(target_os = "linux")]
             cua_version,
         })
     }
@@ -208,6 +218,7 @@ impl ProfileRelease {
     }
     /// Locator only. The caller still requires Browser membership and its pin,
     /// and retains/revalidates this WHOLE release through physical Host cleanup.
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     pub(super) fn browser_release_root(&self) -> PathBuf {
         match &self.retained {
             RetainedRelease::Legacy { .. } => self.root.clone(),
@@ -216,9 +227,11 @@ impl ProfileRelease {
             RetainedRelease::Maintenance { .. } => self.root.join("workers/browser-node22"),
         }
     }
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
     pub(super) fn browser_node_version(&self) -> Option<String> {
         self.node_version.clone()
     }
+    #[cfg(target_os = "linux")]
     pub(super) fn cua_version(&self) -> Option<String> {
         self.cua_version.clone()
     }
@@ -279,11 +292,13 @@ pub(super) fn load(
             {
                 return Err(ProfileError::UntrustedRelease);
             }
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
             let node_version = manifest
                 .worker_closures
                 .iter()
                 .find(|worker| worker.kind == NativeExternalWorker::BrowserNode22)
                 .map(|worker| worker.version.clone());
+            #[cfg(target_os = "linux")]
             let cua_version = manifest
                 .worker_closures
                 .iter()
@@ -304,7 +319,9 @@ pub(super) fn load(
                 },
                 root: release.to_path_buf(),
                 version: signed_version,
+                #[cfg(any(target_os = "linux", target_os = "windows"))]
                 node_version,
+                #[cfg(target_os = "linux")]
                 cua_version,
             })
         }
@@ -384,20 +401,14 @@ fn load_legacy(
                 .map(str::to_owned),
         )
     };
-    #[cfg(not(target_os = "linux"))]
-    let (node_version, cua_version) = {
+    #[cfg(target_os = "windows")]
+    let node_version = {
         let metadata: serde_json::Value = decode(manifest_raw)?;
-        let upstream = metadata.get("upstream");
-        (
-            upstream
-                .and_then(|value| value.get("node"))
-                .and_then(|value| value.as_str())
-                .map(str::to_owned),
-            upstream
-                .and_then(|value| value.get("cua"))
-                .and_then(|value| value.as_str())
-                .map(str::to_owned),
-        )
+        metadata
+            .get("upstream")
+            .and_then(|value| value.get("node"))
+            .and_then(|value| value.as_str())
+            .map(str::to_owned)
     };
     let private_release = PrivateRoot::open(release).map_err(|_| ProfileError::ProtectedRead)?;
     let inventory = private_release
@@ -451,7 +462,9 @@ fn load_legacy(
         retained: RetainedRelease::Legacy { inventory },
         root: release.to_path_buf(),
         version: manifest.version,
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
         node_version,
+        #[cfg(target_os = "linux")]
         cua_version,
     })
 }

@@ -569,7 +569,7 @@ async fn run_owned(
             let protocol = protocol.map(|protocol| {
                 protocol.with_windows_command_environment(admitted.profile.command_environment())
             });
-            #[cfg(not(target_os = "windows"))]
+            #[cfg(any(target_os = "linux", target_os = "windows"))]
             let protocol = protocol.and_then(|protocol| {
                 #[cfg(any(target_os = "linux", target_os = "windows"))]
                 let protocol = if let Some(source) = &browser {

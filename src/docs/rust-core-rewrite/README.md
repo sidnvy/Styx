@@ -2,7 +2,7 @@
 
 2026-10-24 · Owner-directed implementation choice: **Rust is the final Styx core runtime**.
 
-状态（2026-10-25）：Rust 是 Styx 自有核心的唯一目标实现，goal 仍 active。已签名的 Linux 内部候选仍为 `a8572d2` / `.8`，其真实 TLS/Exec/Browser 与原身份迁移证据不自动继承给新源码。已集成 `1021fb2` 完成 Rust 1.97.1、目标绑定的原生 AX 写入及 Windows C07/Fresh Host 接线：完整本地门禁、Windows 实际 C07 提交/原事务恢复、Mac 编译检查通过；Windows 外层 controller 的 SDK 辅助进程清理失败另行保留，不能统称整批全绿。普通 Windows fresh join/Host/Exec 新候选流程尚未验收。当前增量补齐 Darwin 可写 journal、原生 Mac 根身份与同一 C07 coordinator（[ADR-033](ADR-033-MACOS-NATIVE-JOURNAL.md)），不改 App/TCC 或原 publisher/设备身份。三平台同 SHA 签包、安装、完整生命周期及迁移验收尚未完成。具体实现见 [IMPLEMENTATION.md](IMPLEMENTATION.md)，逐次结果以外部 Owner Control Report 和不可变 receipts 为准；测试数量不表示重写完成度。行为/旧格式参考基线仍为 `44cf1470e6b0cfdfd2c2372e54e84ebd279c59c3`。
+状态（2026-10-26）：Rust 是 Styx 自有核心的唯一目标实现，goal active；尚未完成三平台产品交付。`ab97cc8` 同源 Linux 原签候选的 Exec、headless Browser、Cua 实际效果/拒绝/清理场景已通过；Windows 原签 Runtime 与未做 Authenticode 的原生 App 已构建，配对/Exec 有实际证据，最终完整生命周期仍未通过；Mac ARM 原证书 App 已完成签包，尚未安装或运行。Mac Intel 正在接通原机编译→原签名机签发→原机校验，保留原身份，不安装未经授权的 Rosetta。新增 Windows Browser 已实现，`5beac76` 整合字节本地完整门禁通过，NAB5 原生编译发现的两个接点已在 `76b7c61` 修复，原生场景尚待验收。这些状态不能推导出跨平台三能力、同身份迁移、JS 管理层退役、安装/更新/回滚或最终账号验收已完成。`src/` 是唯一产品源码，已有成熟 Codex/Cua/Playwright 与必要原生桥继续复用。精确源码、安装包、进程及效果证据以外部 Owner Control Report 和不可变 receipts 为准，旧包结果不自动继承给新源码。行为/旧格式参考基线仍为 `44cf1470e6b0cfdfd2c2372e54e84ebd279c59c3`。
 
 阅读顺序：
 

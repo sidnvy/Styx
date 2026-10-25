@@ -67,6 +67,7 @@ fn committed_for(
     })
 }
 impl EnrollmentJournal<'_> {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
     pub(crate) fn root_identity(&self) -> JournalResult<crate::store::RootIdentity> {
         #[cfg(all(target_os = "linux", target_env = "gnu"))]
         {
@@ -79,6 +80,7 @@ impl EnrollmentJournal<'_> {
     }
     /// Validate the WHOLE selected bundle before the first material write. An
     /// old transaction or unrelated material is not an empty migration target.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
     pub(crate) fn preflight_historical_bundle(
         &self,
         baseline: &[u8],

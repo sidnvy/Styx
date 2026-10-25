@@ -9,8 +9,8 @@ The new thin worker/config are fixed `include_bytes!` assets of the Rust image.
 The original protected deployment and Host profile must both explicitly select
 Browser, headless mode and `persistLogin: false`. Their explicit executable path
 and optional channel must agree; the Host profile root must equal the original
-`base/browser`. Missing/disabled selection leaves Exec available. Unsupported
-Browser choices, including channel-only executable discovery, are separately
+`base/browser`. Missing/disabled selection leaves Exec available. On Linux,
+unsupported Browser choices, including channel-only executable discovery, are separately
 unavailable rather than enabling a fallback. This slice accepts Node 22 metadata
 from the signed manifest and exactly MCP 0.0.83, Playwright/core
 1.64.0-alpha-1790635538000 and JS MCP SDK 1.32.1 package versions from the verified
@@ -43,3 +43,39 @@ Drop does not delete staged files. This preserves explicit failure evidence and
 avoids deleting assets still used by a child. Cleanup of old runtime directories
 is not implemented by this slice. Compilation and the ordinary-CLI native
 Browser scenario remain separate acceptance evidence.
+
+## Windows managed headless integration (native acceptance pending)
+
+The Windows adapter reuses this same Core owner/permit/reference/operation path.
+It accepts the publisher-verified native C08 Node 22 worker closure and the same
+fixed Playwright dependency versions. The existing native App requires an explicit
+Chrome or Edge selection; fixed OS Program Files locations are inspected, not PATH,
+registry commands or arbitrary running browser profiles. Multiple installations
+without one explicit usable target are unavailable rather than silently selected.
+
+Each owner receives private workspace, profile and output sibling directories.
+The Exec working directory remains unchanged: it is not automatically a Browser
+file root, especially when the user's home contains Styx credentials. Windows
+uses exclusive private asset files and fixed imports into the retained verified
+closure instead of symlink/junction setup or privileged filesystem changes.
+
+The original verified Node PE is created suspended with fixed worker/config
+arguments, put in the existing non-breakaway kill-on-close Job, revalidated and
+only then resumed. The Job limits are 2 GiB total memory and 256 active processes;
+this process count is not equivalent to Linux's task/thread count. A root-exit
+observation stops admission but is not cleanup: cleanup requires original root
+wait and Job ActiveProcesses zero. Unknown input results are never replayed.
+
+The selected browser executable has a separate local-system trust policy. Its
+owner/ACL/image identity and exact bytes are retained; ordinary user read/execute
+permissions are allowed, unauthorized mutation is not. The publisher is not said
+to have signed the system browser or its vendor DLL closure. Retained no-write/
+no-delete-share handles can prevent an updater replacing that browser executable
+while this Host owns the Browser configuration; automatic update continuity has
+not been verified. No global permissions are repaired.
+
+Implementation and Linux regression do not prove native Windows Browser behavior.
+Acceptance requires native compilation, an independent HTTP effect oracle, stale
+and foreign-owner refusal, original Node/Job cleanup, and Exec continuity using
+the exact candidate. Headed/attach modes, persistent login, Mac Browser and full
+installed-product lifecycle remain separate outstanding work.

@@ -7,7 +7,6 @@ use serde_json::{Map, Value, json};
 use std::{collections::BTreeMap, sync::LazyLock};
 use styx_contracts::identity::DeviceId;
 
-#[cfg(target_os = "linux")]
 #[path = "backend_browser.rs"]
 mod browser;
 #[cfg(target_os = "linux")]
@@ -387,7 +386,6 @@ struct State {
     next_session: u64,
     owners: BTreeMap<OwnerId, OwnerState>,
     sessions: BTreeMap<u64, Entry>,
-    #[cfg(target_os = "linux")]
     browsers: browser::BrowserContexts,
     #[cfg(target_os = "linux")]
     computers: computer::ComputerContexts,
@@ -402,11 +400,9 @@ impl State {
                 .try_lock()
                 .is_ok_and(|resource| resource.binding.physically_settled())
         });
+        self.browsers.collect_settled();
         #[cfg(target_os = "linux")]
-        {
-            self.browsers.collect_settled();
-            self.computers.collect_settled();
-        }
+        self.computers.collect_settled();
     }
 }
 /// No raw executor or network authority is exposed to the public tool adapter.
@@ -428,7 +424,6 @@ impl PairedGatewayBackend {
                 next_session: 1,
                 owners: BTreeMap::new(),
                 sessions: BTreeMap::new(),
-                #[cfg(target_os = "linux")]
                 browsers: browser::BrowserContexts::default(),
                 #[cfg(target_os = "linux")]
                 computers: computer::ComputerContexts::default(),
@@ -982,7 +977,6 @@ impl GatewayToolBackend for PairedGatewayBackend {
                 self.computer_call(owner, request.name.as_ref(), request.arguments)
                     .await
             }
-            #[cfg(target_os = "linux")]
             name if browser::is_public_browser_tool(name) => {
                 self.browser_call(owner, request.name.as_ref(), request.arguments)
                     .await
@@ -1063,7 +1057,6 @@ impl GatewayOwnerLifecycle for PairedGatewayBackend {
                     entry.owner != *owner.owner_id()
                         || entry.principal != owner.principal_fingerprint()
                 });
-                #[cfg(target_os = "linux")]
                 state.browsers.clear_owner(owner);
                 #[cfg(target_os = "linux")]
                 state.computers.clear_owner(owner);

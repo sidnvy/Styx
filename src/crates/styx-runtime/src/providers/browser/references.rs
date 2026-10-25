@@ -34,25 +34,7 @@ pub(super) fn fact(result: &CallToolResult) -> Result<NativeFact> {
     }
     Ok(fact)
 }
-pub(super) fn native_ref(value: &str) -> bool {
-    let bytes = value.as_bytes();
-    let mut at = 0;
-    if bytes.first() == Some(&b'f') {
-        at = 1;
-        let start = at;
-        while bytes.get(at).is_some_and(u8::is_ascii_digit) {
-            at += 1;
-        }
-        if at == start {
-            return false;
-        }
-    }
-    if bytes.get(at) != Some(&b'e') {
-        return false;
-    }
-    at += 1;
-    at < bytes.len() && bytes[at..].iter().all(u8::is_ascii_digit)
-}
+use crate::providers::browser_contract::native_ref;
 /// Resolve only target fields, recursively including form fields. Arbitrary
 /// page text, function bodies and typed input text are never target selectors.
 pub(super) fn resolve_targets(

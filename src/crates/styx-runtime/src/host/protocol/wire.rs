@@ -122,7 +122,6 @@ pub enum TransportDrainOutcome {
 /// Existing wait_for permits thirty seconds. Keep an explicit bounded margin
 /// for provider settlement; ordinary operations and owner cleanup are unchanged.
 pub(crate) const BROWSER_WAIT_PREPARE_TIMEOUT_MS: u32 = 35_000;
-#[cfg(any(target_os = "linux", target_os = "windows"))]
 pub(crate) const BROWSER_WAIT_RESPONSE_SECS: u64 = 40;
 impl Call {
     pub(crate) fn response_budget(&self) -> std::time::Duration {

@@ -1,4 +1,10 @@
-# Rust implementation status · 2026-10-24
+# Rust implementation checkpoints
+
+
+Current delivery status is summarized in [README.md](README.md) and the external
+Owner Control Report. The tables and sections below are historical implementation
+checkpoints; their “still required” columns are not a substitute for the current
+source, exact candidate receipts or final acceptance matrix.
 
 ## Toolchain convergence — Rust 1.97.1 (2026-10-25)
 

@@ -298,10 +298,10 @@ pub(super) fn create_private_directory(path: &Path) -> Result<()> {
         bInheritHandle: 0,
     };
     // SAFETY: live absolute UTF16 path and descriptor retained across the call.
-    if unsafe { CreateDirectoryW(path.as_ptr(), &attributes) } == 0 {
-        if unsafe { GetLastError() } != ERROR_ALREADY_EXISTS {
-            return Err(io_error());
-        }
+    if unsafe { CreateDirectoryW(path.as_ptr(), &attributes) } == 0
+        && unsafe { GetLastError() } != ERROR_ALREADY_EXISTS
+    {
+        return Err(io_error());
     }
     Ok(())
 }
@@ -517,7 +517,7 @@ pub(super) fn require_local_ntfs(path: &Path, directory: &File) -> Result<()> {
         .iter()
         .position(|v| *v == 0)
         .ok_or(StoreError::InvalidRoot)?;
-    if &filesystem[..end] != [b'N' as u16, b'T' as u16, b'F' as u16, b'S' as u16] {
+    if filesystem[..end] != [b'N' as u16, b'T' as u16, b'F' as u16, b'S' as u16] {
         return Err(StoreError::InvalidRoot);
     }
     Ok(())

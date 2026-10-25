@@ -176,11 +176,7 @@ impl ConfigurationState {
     /// Remaining bytes across BOTH namespaces under this same held writer.
     /// A temporary per-adapter budget can consume this room without inventing
     /// another reservation or retaining a filesystem lock across native work.
-    #[cfg(any(
-        target_os = "windows",
-        target_os = "macos",
-        all(target_os = "linux", target_env = "gnu")
-    ))]
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
     pub(super) fn remaining_growth(&self) -> JournalResult<usize> {
         self.root
             .inner
@@ -253,6 +249,7 @@ impl ConfigurationState {
     }
     /// Existing pending management data can be inspected after a fresh boot,
     /// never used to reopen ordinary service or manufacture maintenance proof.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
     pub(super) fn require_recovery_inspection(&self) -> JournalResult<()> {
         if !self.recovery_required || self.fence.is_some() {
             return Err(JournalError::Conflict);
@@ -634,11 +631,7 @@ impl ConfigurationMaintenance {
     }
     /// Prove this exact maintenance fence is still active, not just that the
     /// filesystem root has the same identity. This does not settle old writers.
-    #[cfg(any(
-        target_os = "windows",
-        target_os = "macos",
-        all(target_os = "linux", target_env = "gnu")
-    ))]
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
     pub(crate) fn validate_active(&self) -> JournalResult<RootIdentity> {
         self.owner
             .with_maintenance(self, |state| Ok(state.root.identity()))

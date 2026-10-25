@@ -36,7 +36,7 @@ enum Retained {
         _failure: crate::store::native_root::NativeRootFailure,
     },
     Fresh {
-        _root: crate::store::native_root::FreshNativeRoot,
+        _root: Box<crate::store::native_root::FreshNativeRoot>,
     },
     Binding {
         _binding: crate::store::native_root::NativeRootBinding,
@@ -460,7 +460,11 @@ mod platform {
         })();
         let (ready_bytes, state) = match metadata {
             Ok(value) => value,
-            Err(error) => return Err(error.retaining(Retained::Fresh { _root: fresh })),
+            Err(error) => {
+                return Err(error.retaining(Retained::Fresh {
+                    _root: Box::new(fresh),
+                }));
+            }
         };
         let material = FreshGatewayFiles {
             certificate_pem: &ca.certificate_pem,

@@ -6,13 +6,13 @@ import path from 'node:path';
 import {execFileSync} from 'node:child_process';
 import {createHash,generateKeyPairSync,createPublicKey,createPrivateKey,sign} from 'node:crypto';
 import {fileURLToPath} from 'node:url';
-import {buildMacApp,macNativeSwiftSources,macAppBuildMetadata,macAdhocSigningPlan,macLocalSigningPlan,normalizeMacLocalSigning,publicMacLocalSigning,verifyMacLocalSigning} from './build-macos-app.mjs';
+import {MAC_BUNDLE_ID,buildMacApp,macNativeSwiftSources,macAppBuildMetadata,macAdhocSigningPlan,macLocalSigningPlan,normalizeMacLocalSigning,publicMacLocalSigning,verifyMacLocalSigning} from './build-macos-app.mjs';
 import {isSparkleFrameworkLink} from './macos/platform-update/sparkle-build.mjs';
 import {prepareCoreHelper} from './macos/core-helper.mjs';
 import {buildHostRelease} from './build-host-release.mjs';
 import {verifySignedRelease} from './installer.mjs';
 import {requirePrivateFile} from './private-storage.mjs';
-import {verifyNativeMacRuntime,copyNativeMacRuntime} from './build-macos-native-runtime.mjs';
+import {verifyNativeMacRuntime,copyNativeMacRuntime,authenticateNativeMacRuntimeEnvelope} from './build-macos-native-runtime.mjs';
 const ROOT=fileURLToPath(new URL('../',import.meta.url));
 const assert=(x,code)=>{if(!x)throw Error(code)};
 const sha=p=>createHash('sha256').update(fs.readFileSync(p)).digest('hex');
@@ -302,6 +302,7 @@ export function prepareNativeMacPreview(config){
  assert(nativeRuntime.expectedPublisher==='ebb36f9dff7022d8921443bdc30c6236d18dd0535aa2cdce838d1c5b327bab67','original_native_app_publisher_required');
  const observedSources=macNativeSwiftSources(),sourceFiles=Object.fromEntries([observedSources.source,...observedSources.additionalSources,path.join(ROOT,'host/macos/StyxUpdater.swift'),path.join(ROOT,'host/macos/render-brand-icons.swift')].map(file=>[path.relative(ROOT,file).split(path.sep).join('/'),sha(file)]));
  const verified=verifyNativeMacRuntime(nativeRuntime,process.arch);
+ assert(sourceRevision===verified.report.source_revision,'native_app_source_revision_mismatch');
  fs.mkdirSync(destination,{mode:0o700});const app=path.join(destination,'image-root/Styx.app');
  const appBuild=buildMacApp({app,cuaBinary,version,buildNumber,sdkPath,moduleCachePath:moduleCachePath??path.join(destination,'swift-module-cache')});
  const resources=path.join(app,'Contents/Resources');
@@ -316,8 +317,9 @@ export function prepareNativeMacPreview(config){
 }
 export function finalizeNativeMacPreview(config){
  assert(process.platform==='darwin','native_macos_signing_required');
- assert(config&&Object.keys(config).every(k=>['nativePreparedSource','preparedReceiptSha256','destination','localSigning','expectedPublisherSha256'].includes(k)),'invalid_native_app_finalization');
- const {nativePreparedSource,preparedReceiptSha256,destination,localSigning,expectedPublisherSha256}=config;
+ assert(config&&Object.keys(config).every(k=>['nativePreparedSource','preparedReceiptSha256','destination','localSigning','expectedPublisherSha256','crossArchSignOnly'].includes(k)),'invalid_native_app_finalization');
+ const {nativePreparedSource,preparedReceiptSha256,destination,localSigning,expectedPublisherSha256,crossArchSignOnly=false}=config;
+ assert(typeof crossArchSignOnly==='boolean','invalid_cross_arch_sign_only');
  assert(ABS(nativePreparedSource)&&ABS(destination)&&!fs.existsSync(destination)&&/^[a-f0-9]{64}$/.test(preparedReceiptSha256??'')&&/^[a-f0-9]{64}$/.test(expectedPublisherSha256??''),'native_app_finalization_inputs_required');
  const relative=path.relative(nativePreparedSource,destination),reverse=path.relative(destination,nativePreparedSource),outside=p=>p==='..'||p.startsWith('..'+path.sep)||path.isAbsolute(p);
  assert(outside(relative)&&outside(reverse),'native_app_destination_overlap');
@@ -327,9 +329,12 @@ export function finalizeNativeMacPreview(config){
  assert(local.identitySha1==='cb50cee601419f28b43756f4fc8aefdbf60abae2'&&local.certificateSha256==='90792ed11f23a00f0107450dbc184f992016569ca188454cfa286fe0022c2c1e'&&expectedPublisherSha256==='ebb36f9dff7022d8921443bdc30c6236d18dd0535aa2cdce838d1c5b327bab67','original_native_app_identity_required');
  const receiptPath=path.join(nativePreparedSource,'prepared-native-app.json');assert(sha(receiptPath)===preparedReceiptSha256,'prepared_native_app_receipt_changed');
  const metadata=JSON.parse(fs.readFileSync(receiptPath,'utf8')),originalApp=path.join(nativePreparedSource,'image-root/Styx.app');
- assert(metadata.schema===1&&metadata.kind==='prepared_native_rust_app'&&metadata.delivery==='NOT FINALIZED'&&metadata.arch===process.arch&&metadata.nativeRuntime.publisherSpkiSha256===expectedPublisherSha256&&JSON.stringify(preparedPreviewInventory(originalApp))===JSON.stringify(metadata.files),'prepared_native_app_changed');
+ assert(metadata.schema===1&&metadata.kind==='prepared_native_rust_app'&&metadata.delivery==='NOT FINALIZED'&&(crossArchSignOnly?metadata.arch==='x64'&&process.arch==='arm64':metadata.arch===process.arch)&&metadata.readerActualWait===true&&metadata.readerExitCode===0&&metadata.nativeRuntime.publisherSpkiSha256===expectedPublisherSha256&&JSON.stringify(preparedPreviewInventory(originalApp))===JSON.stringify(metadata.files),'prepared_native_app_changed');
  const inputFor=app=>({payloadDir:path.join(app,'Contents/Resources/native'),publisherFile:path.join(app,'Contents/Resources/native-publisher.pem'),expectedPublisher:expectedPublisherSha256});
- const original=verifyNativeMacRuntime(inputFor(originalApp),metadata.arch);
+ const inspect=crossArchSignOnly?authenticateNativeMacRuntimeEnvelope:verifyNativeMacRuntime;
+ const protectedNative=app=>preparedPreviewInventory(app).filter(row=>row.path==='Contents/Resources/native'||row.path.startsWith('Contents/Resources/native/')||row.path==='Contents/Resources/native-publisher.pem'||row.path==='Contents/Resources/macos-runtime.json');
+ const nativeInventory=protectedNative(originalApp);
+ const original=inspect(inputFor(originalApp),metadata.arch);
  assert(original.manifestSha256===metadata.nativeRuntime.manifestSha256&&original.signatureSha256===metadata.nativeSignatureSha256,'prepared_native_manifest_changed');
  fs.mkdirSync(destination,{mode:0o700});const app=path.join(destination,'image-root/Styx.app');tree(originalApp,app);
  // Historical tree() does not retain file modes; restore exact prepared mode
@@ -345,11 +350,24 @@ export function finalizeNativeMacPreview(config){
  // the original platform signature; reject instead of codesigning sealed bytes.
  for(const file of sealed)execFileSync('/usr/bin/codesign',['--verify','--strict','-R',`=certificate leaf = H"${local.identitySha1}"`,file],{stdio:'pipe',timeout:30000});
  executeMacPreviewSigningPlan(macLocalSigningPlan({app,localSigning,files:unsigned,sealApp:false}));
- const copied=verifyNativeMacRuntime(inputFor(app),metadata.arch);
+ const copied=inspect(inputFor(app),metadata.arch);
  assert(copied.manifestSha256===original.manifestSha256&&copied.signatureSha256===original.signatureSha256&&copied.cliSha256===original.cliSha256,'sealed_native_payload_changed');
  scanPrivateMaterial(app);executeMacPreviewSigningPlan(macLocalSigningPlan({app,localSigning,files:[],sealApp:true}));
- const after=verifyNativeMacRuntime(inputFor(app),metadata.arch);
+ const after=inspect(inputFor(app),metadata.arch);
  assert(after.manifestSha256===original.manifestSha256&&after.signatureSha256===original.signatureSha256,'sealed_native_payload_changed');
+ assert(JSON.stringify(protectedNative(app))===JSON.stringify(nativeInventory),'sealed_native_inventory_changed');
+ if(crossArchSignOnly){
+  // No foreign CLI executes on this machine. This receipt is deliberately
+  // pending and cannot be consumed as a final native App delivery.
+  const pending={schema:1,kind:'signed_native_rust_app_pending_native_verification',status:'SIGNED_PENDING_NATIVE_VERIFICATION',delivery:'NOT FINALIZED',
+   sourceRevision:metadata.sourceRevision,runtimeSourceRevision:metadata.runtimeSourceRevision,sourceFiles:metadata.sourceFiles,
+   arch:metadata.arch,version:metadata.version,buildNumber:metadata.buildNumber,compiler:metadata.appBuild.compiler,
+   nativeRuntime:metadata.nativeRuntime,nativeSignatureSha256:after.signatureSha256,preparedReceiptSha256,
+   ...previewSigningReceipt(localSigning),files:preparedPreviewInventory(app),
+   sealedRuntimeCodesign:'verified_only_never_resigned',coreManagementRuntime:'owned_rust_stdio_no_node_core',
+   nativeReaderActualWait:false,nativeReaderExitCode:null,native_ui_acceptance:'NOT RUN',tcc_attribution:'NOT RUN',installation:'NOT RUN'};
+  fs.writeFileSync(path.join(destination,'signed-pending-app.json'),JSON.stringify(pending,null,2)+'\n',{flag:'wx',mode:0o600});return pending;
+ }
  const zip='Styx-'+metadata.version+'-native-macos-'+metadata.arch+'.zip';execFileSync('/usr/bin/ditto',['-c','-k','--keepParent',app,path.join(destination,zip)],{stdio:'pipe',timeout:180000});
  execFileSync('/usr/bin/unzip',['-tq',path.join(destination,zip)],{stdio:'pipe',timeout:180000});
  const receipt={schema:1,kind:'native_rust_local_certificate_preview',app,sourceRevision:metadata.sourceRevision,runtimeSourceRevision:metadata.runtimeSourceRevision,
@@ -358,7 +376,55 @@ export function finalizeNativeMacPreview(config){
   artifacts:[{name:zip,sha256:sha(path.join(destination,zip)),bytes:fs.statSync(path.join(destination,zip)).size}],native_ui_acceptance:'NOT RUN',tcc_attribution:'NOT RUN',installation:'NOT RUN'};
  fs.writeFileSync(path.join(destination,'native-app-receipt.json'),JSON.stringify(receipt,null,2)+'\n',{flag:'wx',mode:0o600});return receipt;
 }
+// Native completion is read/verify/copy/package only. It never signs or opens
+// a private key, and never treats a cross-machine pending receipt as readiness.
+export function completeNativeMacPreview(config){
+ assert(process.platform==='darwin','native_macos_completion_required');
+ assert(config&&Object.keys(config).every(k=>['signedPendingSource','pendingReceiptSha256','destination','expectedPublisherSha256'].includes(k)),'invalid_native_app_completion');
+ const {signedPendingSource,pendingReceiptSha256,destination,expectedPublisherSha256}=config;
+ assert(ABS(signedPendingSource)&&ABS(destination)&&!fs.existsSync(destination)&&/^[a-f0-9]{64}$/.test(pendingReceiptSha256??'')&&expectedPublisherSha256==='ebb36f9dff7022d8921443bdc30c6236d18dd0535aa2cdce838d1c5b327bab67','native_app_completion_inputs_required');
+ const relative=path.relative(signedPendingSource,destination),reverse=path.relative(destination,signedPendingSource),outside=p=>p==='..'||p.startsWith('..'+path.sep)||path.isAbsolute(p);
+ assert(outside(relative)&&outside(reverse),'native_app_destination_overlap');
+ const receiptPath=path.join(signedPendingSource,'signed-pending-app.json');requirePrivateFile(receiptPath);assert(sha(receiptPath)===pendingReceiptSha256,'signed_pending_receipt_changed');
+ const metadata=JSON.parse(fs.readFileSync(receiptPath,'utf8')),originalApp=path.join(signedPendingSource,'image-root/Styx.app');
+ assert(metadata.schema===1&&metadata.kind==='signed_native_rust_app_pending_native_verification'&&metadata.status==='SIGNED_PENDING_NATIVE_VERIFICATION'&&metadata.delivery==='NOT FINALIZED'&&metadata.arch===process.arch&&metadata.nativeReaderActualWait===false&&metadata.nativeReaderExitCode===null&&metadata.nativeRuntime.publisherSpkiSha256===expectedPublisherSha256&&JSON.stringify(preparedPreviewInventory(originalApp))===JSON.stringify(metadata.files),'signed_pending_app_changed');
+ const local=metadata.local_signing;
+ assert(local?.schema===1&&local.certificateSha1==='cb50cee601419f28b43756f4fc8aefdbf60abae2'&&local.certificateSha256==='90792ed11f23a00f0107450dbc184f992016569ca188454cfa286fe0022c2c1e','original_native_app_identity_required');
+ const inputFor=app=>({payloadDir:path.join(app,'Contents/Resources/native'),publisherFile:path.join(app,'Contents/Resources/native-publisher.pem'),expectedPublisher:expectedPublisherSha256});
+ const requirement=`=identifier "${MAC_BUNDLE_ID}" and certificate leaf = H"${local.certificateSha1}"`;
+ const observations=[];
+ const run=(command,args,timeout=30000)=>{execFileSync(command,args,{stdio:'pipe',timeout});observations.push({command:[command,...args],actualWait:true,exitCode:0});};
+ // Verify the original App before executing even its authenticated reader.
+ run('/usr/bin/codesign',['--verify','--deep','--strict',originalApp]);
+ run('/usr/bin/codesign',['--verify','--strict','-R',requirement,originalApp]);
+ for(const file of machOFiles(originalApp))run('/usr/bin/codesign',['--verify','--strict','-R',`=certificate leaf = H"${local.certificateSha1}"`,file]);
+ fs.mkdirSync(destination,{mode:0o700});
+ const prefix=path.join(destination,'app-signing-certificate-');run('/usr/bin/codesign',['-d','--extract-certificates',prefix,originalApp]);
+ const certificate=prefix+'0',st=fs.lstatSync(certificate);
+ assert(st.isFile()&&!st.isSymbolicLink()&&st.nlink===1&&st.size<=65536&&st.uid===process.getuid()&&!(st.mode&0o022)&&sha(certificate)===local.certificateSha256,'original_native_app_certificate_mismatch');
+ const original=verifyNativeMacRuntime(inputFor(originalApp),metadata.arch);
+ assert(original.manifestSha256===metadata.nativeRuntime.manifestSha256&&original.signatureSha256===metadata.nativeSignatureSha256&&original.cliSha256===metadata.nativeRuntime.cliSha256&&original.report.source_revision===metadata.runtimeSourceRevision&&original.report.source_revision===metadata.sourceRevision,'signed_pending_native_binding_changed');
+ const app=path.join(destination,'image-root/Styx.app');tree(originalApp,app);fs.chmodSync(path.join(app,'Contents/Resources'),0o700);
+ for(const row of metadata.files){const file=path.join(app,...row.path.split('/'));if(row.kind==='directory')fs.chmodSync(file,row.path.startsWith('Contents/Resources')?0o700:0o755);else fs.chmodSync(file,row.executable?0o700:0o600);}
+ assert(JSON.stringify(preparedPreviewInventory(app))===JSON.stringify(metadata.files),'signed_native_copy_changed');
+ run('/usr/bin/codesign',['--verify','--deep','--strict',app]);
+ run('/usr/bin/codesign',['--verify','--strict','-R',requirement,app]);
+ const copied=verifyNativeMacRuntime(inputFor(app),metadata.arch);
+ assert(copied.manifestSha256===original.manifestSha256&&copied.signatureSha256===original.signatureSha256&&copied.cliSha256===original.cliSha256,'sealed_native_payload_changed');
+ scanPrivateMaterial(app);
+ const zip='Styx-'+metadata.version+'-native-macos-'+metadata.arch+'.zip';
+ run('/usr/bin/ditto',['-c','-k','--keepParent',app,path.join(destination,zip)],180000);
+ run('/usr/bin/unzip',['-tq',path.join(destination,zip)],180000);
+ assert(sha(receiptPath)===pendingReceiptSha256&&JSON.stringify(preparedPreviewInventory(originalApp))===JSON.stringify(metadata.files)&&JSON.stringify(preparedPreviewInventory(app))===JSON.stringify(metadata.files),'signed_native_inputs_changed');
+ const receipt={schema:1,kind:'native_rust_local_certificate_preview',app,sourceRevision:metadata.sourceRevision,runtimeSourceRevision:metadata.runtimeSourceRevision,
+  sourceFiles:metadata.sourceFiles,nativeRuntime:metadata.nativeRuntime,nativeSignatureSha256:copied.signatureSha256,
+  signing:'local_certificate_preview',notarization:'NOT RUN',local_signing:local,private_key_in_artifact:false,compiler:metadata.compiler,
+  completion:'native_architecture_verification_after_original_cross_signing',signedPendingReceiptSha256:pendingReceiptSha256,
+  sealedRuntimeCodesign:'verified_only_never_resigned',coreManagementRuntime:'owned_rust_stdio_no_node_core',nativeReaderActualWait:true,nativeReaderExitCode:0,
+  nativeVerification:observations,artifacts:[{name:zip,sha256:sha(path.join(destination,zip)),bytes:fs.statSync(path.join(destination,zip)).size}],native_ui_acceptance:'NOT RUN',tcc_attribution:'NOT RUN',installation:'NOT RUN'};
+ fs.writeFileSync(path.join(destination,'native-app-receipt.json'),JSON.stringify(receipt,null,2)+'\n',{flag:'wx',mode:0o600});return receipt;
+}
 if(process.argv[1]&&fs.realpathSync(process.argv[1])===fs.realpathSync(fileURLToPath(import.meta.url))){
- try{assert(process.argv.length===3&&ABS(process.argv[2]),'usage_absolute_preview_config');const config=JSON.parse(fs.readFileSync(process.argv[2],'utf8'));console.log(JSON.stringify(config.nativePreparedSource?finalizeNativeMacPreview(config):config.preparedSource?finalizeMacPreview(config):buildMacPreview(config)));}
+ try{assert(process.argv.length===3&&ABS(process.argv[2]),'usage_absolute_preview_config');const config=JSON.parse(fs.readFileSync(process.argv[2],'utf8'));console.log(JSON.stringify(config.signedPendingSource?completeNativeMacPreview(config):config.nativePreparedSource?finalizeNativeMacPreview(config):config.preparedSource?finalizeMacPreview(config):buildMacPreview(config)));}
  catch{console.error('Styx developer preview build failed; preserve incomplete output for inspection.');process.exitCode=2;}
 }

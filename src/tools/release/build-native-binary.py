@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Build one native release CLI from an exact clean, already-passing source gate.
-Optional macOS local-certificate signing changes only the fresh output copy.
+Optional macOS local or cross-machine signing changes only a fresh output copy.
 No installation, foreign-image execution or runtime/profile startup.
 """
 import argparse
@@ -186,6 +186,94 @@ def sign_macos_output(binary, config, node, output, receipt):
     return facts
 
 
+def complete_external_macos_signature(args, output, receipt, target, inputs):
+    """Complete a native build using an original remote signing report.
+
+    Reports are retained provenance data. Actual identity is checked by Apple's
+    verifier on the native consumer; no report creates runtime/admission proof.
+    The original native build receipt is preserved byte-for-byte, never edited.
+    """
+    require(sys.platform == 'darwin' and target.endswith('apple-darwin'),
+            'external_macos_completion_requires_native_darwin')
+    specs = [(args.macos_unsigned_build_receipt, 16 * 1048576),
+             (args.macos_unsigned_image, 1024 ** 3),
+             (args.macos_signed_image, 1024 ** 3),
+             (args.macos_signing_receipt, 65536)]
+    before = {str(path): (signing_input(path, limit), limit) for path, limit in specs}
+    raw_build = args.macos_unsigned_build_receipt.read_bytes()
+    raw_signing = args.macos_signing_receipt.read_bytes()
+    built, signed = strict_json(raw_build), strict_json(raw_signing)
+    require(built.get('schema') == 1 and built.get('status') == 'PASS'
+            and built.get('input_stability') == 'PASS' and built.get('producer') == PRODUCER
+            and built.get('source_revision') == args.source_revision
+            and built.get('target') == target and built.get('profile') == 'release'
+            and built.get('inputs') == inputs and built.get('toolchain') == receipt['toolchain']
+            and built.get('build_actual_wait') is True
+            and type(built.get('build_actual_exit')) is int and built['build_actual_exit'] == 0
+            and 'platform_signature' not in built,
+            'original_unsigned_native_build_required')
+    require(Path(built.get('cli_binary', '')).is_absolute()
+            and Path(built['cli_binary']).resolve(strict=True) == args.macos_unsigned_image,
+            'original_unsigned_locator_mismatch')
+    unsigned_hash = before[str(args.macos_unsigned_image)][0]
+    signed_hash = before[str(args.macos_signed_image)][0]
+    require(built.get('cli_binary_sha256') == unsigned_hash
+            and signed.get('schema') == 1 and signed.get('status') == 'PASS'
+            and signed.get('source_image_sha256') == unsigned_hash
+            and signed.get('signed_image_sha256') == signed_hash
+            and signed.get('source_image_bytes') == args.macos_unsigned_image.stat().st_size
+            and signed.get('signed_image_bytes') == args.macos_signed_image.stat().st_size
+            and signed.get('helper_sha256') == inputs.get('src/tools/release/sign-native-macos.mjs')
+            and signed.get('planner_sha256') == sha(ROOT / 'src/host/build-macos-app.mjs')
+            and signed.get('sign_actual_wait') is True and signed.get('verify_actual_wait') is True
+            and type(signed.get('sign_exit_code')) is int and signed['sign_exit_code'] == 0
+            and type(signed.get('verify_exit_code')) is int and signed['verify_exit_code'] == 0,
+            'original_signing_report_binding_mismatch')
+    identity = 'cb50cee601419f28b43756f4fc8aefdbf60abae2'
+    certificate_hash = '90792ed11f23a00f0107450dbc184f992016569ca188454cfa286fe0022c2c1e'
+    # Existing App planner's fixed Resources/native/bin/styx identifier. Do not
+    # accept a remote caller-selected signing identity or executable identity.
+    identifier = 'app.styx.host.code.234ae9e3c9e0237f929adc7841ecb090'
+    require(signed.get('certificate') == {'schema': 1, 'certificateSha1': identity,
+                                        'certificateSha256': certificate_hash}
+            and signed.get('identifier') == identifier, 'original_macos_identity_required')
+    binary = output / 'styx'
+    shutil.copyfile(args.macos_signed_image, binary)
+    binary.chmod(0o700)
+    require(sha(binary) == signed_hash, 'signed_image_copy_changed')
+    requirement = '=identifier "' + identifier + '" and certificate leaf = H"' + identity + '"'
+    prefix = output / 'macos-signing-certificate-'
+    commands = [('verify', ['/usr/bin/codesign', '--verify', '--strict', '-R', requirement, str(binary)]),
+                ('certificate', ['/usr/bin/codesign', '-d', '--extract-certificates', str(prefix), str(binary)])]
+    observations = []
+    for kind, argv in commands:
+        with (output / ('macos-' + kind + '.stdout')).open('xb') as out, \
+             (output / ('macos-' + kind + '.stderr')).open('xb') as err:
+            child = subprocess.run(argv, stdin=subprocess.DEVNULL, stdout=out, stderr=err, timeout=15)
+        observations.append({'command': argv, 'actual_wait': True, 'exit_code': child.returncode})
+        require(child.returncode == 0 and (output / ('macos-' + kind + '.stdout')).stat().st_size <= 65536
+                and (output / ('macos-' + kind + '.stderr')).stat().st_size <= 65536,
+                'native_signed_image_verification_failed')
+    require(signing_input(Path(str(prefix) + '0'), 65536) == certificate_hash,
+            'native_signing_certificate_sha256_mismatch')
+    # Raw originals are evidence attachments, not reconstructed JSON receipts.
+    (output / 'original-unsigned-build-receipt.json').write_bytes(raw_build)
+    (output / 'original-macos-signing-receipt.json').write_bytes(raw_signing)
+    receipt['source_image_sha256'] = unsigned_hash
+    receipt['source_image_bytes'] = args.macos_unsigned_image.stat().st_size
+    receipt['original_unsigned_build'] = {
+        'receipt_sha256': hashlib.sha256(raw_build).hexdigest(),
+        'command': built['command'], 'actual_wait': True, 'exit_code': 0,
+        'binary_sha256': unsigned_hash, 'recompiled_in_completion': False}
+    receipt['platform_signature'] = {
+        'schema': 1, 'kind': 'macos_external_original_identity_codesign',
+        'source_image_sha256': unsigned_hash, 'signed_image_sha256': signed_hash,
+        'original_signing_receipt_sha256': hashlib.sha256(raw_signing).hexdigest(),
+        'report': signed, 'native_verification': observations,
+        'certificate_der_sha256': certificate_hash}
+    return args.macos_unsigned_image, unsigned_hash, binary, before
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     for name in ['source-revision', 'gate-receipt', 'target-dir', 'output']:
@@ -198,7 +286,15 @@ def main():
                         help='explicit original localSigning JSON; signs only fresh macOS output')
     parser.add_argument('--macos-signing-node', type=Path,
                         help='explicit existing Node executable for the original App signing planner')
+    for name in ['macos-unsigned-build-receipt', 'macos-unsigned-image',
+                 'macos-signed-image', 'macos-signing-receipt']:
+        parser.add_argument('--' + name, type=Path)
     args = parser.parse_args()
+    completion = [args.macos_unsigned_build_receipt, args.macos_unsigned_image,
+                  args.macos_signed_image, args.macos_signing_receipt]
+    require(not any(completion) or all(completion), 'complete_macos_signing_inputs_required')
+    require(not any(completion) or args.macos_local_signing is None,
+            'local_and_external_macos_signing_are_exclusive')
     require(bool(args.macos_local_signing) == bool(args.macos_signing_node),
             'macos_signing_inputs_required_together')
     require(bool(args.source_archive_manifest) == bool(args.expected_source_archive_sha256),
@@ -247,25 +343,30 @@ def main():
         env = dict(os.environ, CARGO_BUILD_JOBS='2', CARGO_NET_OFFLINE='true',
                    CARGO_TERM_COLOR='never', PYTHONDONTWRITEBYTECODE='1',
                    CARGO_TARGET_DIR=str(args.target_dir))
-        argv = ['cargo', 'build', '--release', '-p', 'styx', '--target', target, '--locked', '--offline']
-        receipt['command'] = argv
-        with (args.output / 'cargo-build.log').open('x') as log:
-            try:
-                result = subprocess.run(argv, cwd=ROOT, env=env, stdin=subprocess.DEVNULL,
-                                        stdout=log, stderr=subprocess.STDOUT, timeout=900)
-                receipt.update(build_actual_exit=result.returncode, build_actual_wait=True)
-            except subprocess.TimeoutExpired:
-                # subprocess.run kills and waits its ORIGINAL direct child before raising.
-                receipt.update(build_actual_wait=True, build_timeout=True)
-                raise RuntimeError('native_build_timeout') from None
-        require(result.returncode == 0, 'native_build_failed')
-        name = 'styx.exe' if target.endswith('windows-msvc') else 'styx'
-        original = args.target_dir / target / 'release' / name
-        original_hash = sha(original)
-        binary = args.output / name
-        shutil.copyfile(original, binary)
-        binary.chmod(0o700)
-        require(sha(binary) == original_hash == sha(original), 'native_binary_copy_changed')
+        external_signing_inputs = None
+        if all(completion):
+            original, original_hash, binary, external_signing_inputs = complete_external_macos_signature(
+                args, args.output, receipt, target, inputs)
+        else:
+            argv = ['cargo', 'build', '--release', '-p', 'styx', '--target', target, '--locked', '--offline']
+            receipt['command'] = argv
+            with (args.output / 'cargo-build.log').open('x') as log:
+                try:
+                    result = subprocess.run(argv, cwd=ROOT, env=env, stdin=subprocess.DEVNULL,
+                                            stdout=log, stderr=subprocess.STDOUT, timeout=900)
+                    receipt.update(build_actual_exit=result.returncode, build_actual_wait=True)
+                except subprocess.TimeoutExpired:
+                    # subprocess.run kills and waits its ORIGINAL direct child before raising.
+                    receipt.update(build_actual_wait=True, build_timeout=True)
+                    raise RuntimeError('native_build_timeout') from None
+            require(result.returncode == 0, 'native_build_failed')
+            name = 'styx.exe' if target.endswith('windows-msvc') else 'styx'
+            original = args.target_dir / target / 'release' / name
+            original_hash = sha(original)
+            binary = args.output / name
+            shutil.copyfile(original, binary)
+            binary.chmod(0o700)
+            require(sha(binary) == original_hash == sha(original), 'native_binary_copy_changed')
         if args.macos_local_signing is not None:
             receipt['source_image_sha256'] = original_hash
             receipt['source_image_bytes'] = original.stat().st_size
@@ -307,6 +408,9 @@ def main():
                 and signing_input(args.macos_signing_node, 256 * 1048576) == signing['node_sha256']
                 and sha(ROOT / 'src/tools/release/sign-native-macos.mjs') == signing['helper_sha256']
                 and sha(ROOT / 'src/host/build-macos-app.mjs') == signing['planner_sha256'])
+        if external_signing_inputs is not None:
+            signing_stable = all(signing_input(Path(name), limit) == digest
+                                 for name, (digest, limit) in external_signing_inputs.items())
         stable = (signing_stable and source_stable and inputs == normalized_inputs(q['source_inputs'](ROOT))
                   and sha(binary) == final_hash and sha(original) == original_hash
                   and args.gate_receipt.read_bytes() == gate_raw)

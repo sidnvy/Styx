@@ -46,6 +46,7 @@ impl OwnedEnrollmentJournal {
     }
     /// Migration-only access under the SAME original configuration writer and
     /// active opaque fence; this does not grant HTTP admission or C07 completion.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
     pub(crate) fn open_for_historical(
         owner: crate::store::OwnedConfigurationRoot,
         maintenance: &crate::store::ConfigurationMaintenance,
@@ -66,6 +67,7 @@ impl OwnedEnrollmentJournal {
             Err(JournalError::Unsupported)
         }
     }
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
     pub(crate) fn with_historical_journal<T>(
         &mut self,
         maintenance: &crate::store::ConfigurationMaintenance,
@@ -109,6 +111,7 @@ impl OwnedEnrollmentJournal {
     /// Closed boot-inspection port. Only already-existing complete historical
     /// bytes/materials are read and resynced; it cannot create/complete phases,
     /// restore credentials, issue Core authority or release pending management.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
     pub(crate) fn resync_pending_history(&mut self) -> JournalResult<HistoricalObservation> {
         #[cfg(all(target_os = "linux", target_env = "gnu"))]
         {

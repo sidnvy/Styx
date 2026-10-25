@@ -56,29 +56,7 @@ const FRAME_BYTES: usize = 8 * 1024 * 1024;
 // One MiB logical retained metadata, conservatively 8KiB per record.
 // This is not an I/O pool or a second Host byte allocator. No live eviction.
 const MAX_RECORDS: usize = 128;
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, thiserror::Error)]
-pub enum BrowserError {
-    #[error("browser_busy")]
-    Busy,
-    #[error("browser_invalid_request")]
-    InvalidRequest,
-    #[error("browser_permission_denied")]
-    PermissionDenied,
-    #[error("browser_unsupported")]
-    Unsupported,
-    #[error("browser_spawn_failed")]
-    SpawnFailed,
-    #[error("browser_protocol_mismatch")]
-    ProtocolMismatch,
-    #[error("browser_outcome_unknown")]
-    Unknown,
-    #[error("browser_already_dispatched")]
-    AlreadyDispatched,
-    #[error("browser_cleanup_unconfirmed")]
-    CleanupUnconfirmed,
-    #[error("browser_stale_observation")]
-    StaleObservation,
-}
+pub use crate::providers::browser_contract::{BrowserAction, BrowserError};
 type Result<T> = std::result::Result<T, BrowserError>;
 /// Trusted bootstrap input only, never a network DTO. Caller verifies release
 /// provenance before construction; absolute paths alone are not that proof.
@@ -112,43 +90,6 @@ impl BrowserOpenSpec {
     }
     pub fn to_operation_payload(&self) -> Result<Vec<u8>> {
         serde_json::to_vec(self).map_err(|_| BrowserError::InvalidRequest)
-    }
-}
-#[derive(Serialize, Deserialize)]
-#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
-pub enum BrowserAction {
-    Navigate {
-        url: String,
-    },
-    Evaluate {
-        function: String,
-    },
-    Close,
-    Tool {
-        name: String,
-        arguments: serde_json::Map<String, serde_json::Value>,
-    },
-}
-impl BrowserAction {
-    pub fn to_operation_payload(&self) -> Result<Vec<u8>> {
-        self.validate()?;
-        serde_json::to_vec(self).map_err(|_| BrowserError::InvalidRequest)
-    }
-    fn validate(&self) -> Result<()> {
-        match self {
-            Self::Tool { name, arguments } => policy::validate(name, arguments),
-            Self::Navigate { url } if url.len() > 8192 => Err(BrowserError::InvalidRequest),
-            Self::Evaluate { function } if function.len() > 65536 => {
-                Err(BrowserError::InvalidRequest)
-            }
-            _ => {
-                let (name, args) = policy::tool(self);
-                policy::validate(&name, &args)
-            }
-        }
-    }
-    pub fn is_close(&self) -> bool {
-        matches!(self, Self::Close) || matches!(self,Self::Tool{name,..} if name=="browser_close")
     }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

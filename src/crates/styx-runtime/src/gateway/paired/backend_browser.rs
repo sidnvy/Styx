@@ -5,7 +5,7 @@ use crate::{
     host::protocol::wire::{
         BROWSER_WAIT_PREPARE_TIMEOUT_MS, BROWSER_WAIT_RESPONSE_SECS, BrowserCommand, Snapshot,
     },
-    providers::browser::BrowserAction,
+    providers::browser_contract::BrowserAction,
 };
 use styx_contracts::error::{ErrorCategory, ExecutionCertainty};
 const MAX_BROWSER_CONTEXTS: usize = 16;
@@ -60,8 +60,9 @@ impl BrowserRequest {
                 arguments,
             },
         };
-        // Reuse the frozen mature-tool schema + actual provider policy, including
-        // URL/path/ref restrictions. No public metadata can create an owner.
+        // Reuse the same frozen schema and pure URL/ref rules as the Host.
+        // File confinement stays on the executing Host; no Gateway-local I/O
+        // or public metadata can create an owner or imply worker availability.
         value
             .action
             .to_operation_payload()

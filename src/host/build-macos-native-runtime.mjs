@@ -67,6 +67,12 @@ export function withAuthenticatedMacReader(input,arch,operation){
   return result;
  }finally{for(const f of held)fs.closeSync(f.fd);}
 }
+// Cross-architecture signing may authenticate the publisher/manifest/fixed CLI
+// envelope, but cannot run a foreign reader or claim full closure validation.
+// Only actual native reader execution may supply that closure observation.
+export function authenticateNativeMacRuntimeEnvelope(input,arch){
+ return withAuthenticatedMacReader(input,arch,reader=>({...reader,bootstrapOnly:true,readerActualWait:false,readerExitCode:null}));
+}
 export function verifyNativeMacRuntime(input,arch=process.arch){
  return withAuthenticatedMacReader(input,arch,reader=>{
   assert(process.platform==='darwin'&&process.arch===arch,'native_macos_reader_execution_required');
