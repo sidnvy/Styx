@@ -118,8 +118,8 @@ fn project(raw: &RawValue, depth: usize) -> Result<Projected, ConnectionHashErro
 /// Match `src/shared/deployment-scope.mjs` without writing the source config.
 /// A receipt hash alone grants no migration/owner authority. The caller must
 /// still bind the complete original configuration bytes, file and transaction.
-/// Invalid UTF-8, lone UTF-16 surrogates in projected strings, >1 MiB, and
-/// >64 projected levels refuse;
+/// Invalid UTF-8, lone UTF-16 surrogates in projected strings, inputs larger
+/// than 1 MiB, and more than 64 projected levels refuse;
 /// no alternate hash or normalization is used as a fallback.
 pub fn deployment_connection_hash(bytes: &[u8]) -> Result<Sha256Digest, ConnectionHashError> {
     if bytes.len() > 1024 * 1024 {

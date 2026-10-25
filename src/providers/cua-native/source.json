@@ -5,7 +5,7 @@
   "upstream_version": "0.36.0",
   "official_archive_sha256": "157acdc2fd0bf5c480af2bdbe4a69f75a709551627f851caee16346234fdedef",
   "patch": "cua-0.36.0-styx-once.patch",
-  "patch_sha256": "e413ddb521f85d24d8d42d08363d5566e3f86a40328c5565730dfb20fcd8bb07",
+  "patch_sha256": "0dbd26de72aa13076ee69a247e8ec3b362df771aa4d8c3515aeb5510d0052e71",
   "files": [
     {
       "path": "libs/cua-driver/rust/Cargo.lock",
@@ -131,9 +131,9 @@
       "path": "libs/cua-driver/rust/crates/platform-macos/src/ax/styx_private.rs",
       "original_sha256": null,
       "original_git_blob_sha1": null,
-      "final_sha256": "52a8cb5ba77ec4b14c9169e6f3c1c029bc0bc43208dc15512bc7fe5600ef7231",
+      "final_sha256": "902eaf87a05dbae0fbdf5f99d636d19ccc0a9c0a8424e09d8c82650f2d1bd291",
       "original_bytes": 0,
-      "final_bytes": 25631
+      "final_bytes": 25632
     },
     {
       "path": "libs/cua-driver/rust/crates/platform-macos/src/cursor/overlay.rs",
@@ -147,9 +147,9 @@
       "path": "libs/cua-driver/rust/crates/platform-macos/src/private_session_observation.rs",
       "original_sha256": null,
       "original_git_blob_sha1": null,
-      "final_sha256": "1138acbd1fc8b7639587e5cba77444a4f1a8cf4656938538463b66da2e34d9a0",
+      "final_sha256": "38c99bff8ac8e06e2c970882e7f4e155b435952f6901c24f6ca6bbf898e0c332",
       "original_bytes": 0,
-      "final_bytes": 9128
+      "final_bytes": 9157
     },
     {
       "path": "libs/cua-driver/rust/crates/platform-macos/src/session.rs",
@@ -163,9 +163,9 @@
       "path": "libs/cua-driver/rust/crates/platform-macos/src/session_observation.rs",
       "original_sha256": null,
       "original_git_blob_sha1": null,
-      "final_sha256": "69e8454a2842825d054335be2b7bfdd9434cac55939910abe71aa20060c4389a",
+      "final_sha256": "19a5876070d3b8fa1e36bbfa5017c2615be9fe7d45adb366cfa390c76f2facbb",
       "original_bytes": 0,
-      "final_bytes": 16848
+      "final_bytes": 32553
     },
     {
       "path": "libs/cua-driver/rust/crates/platform-macos/src/tools/get_window_state.rs",

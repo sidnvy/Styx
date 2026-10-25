@@ -3032,7 +3032,7 @@
 +    enablement::process_start_stamp,
 +    snapshot::{AxSnapshot, RetainedElement},
 +};
-+use crate::session::observation::{self, SessionIdentity};
++use crate::session::observation::{self, SessionEvidence};
 +use core_foundation::{
 +    array::{CFArrayGetCount, CFArrayGetTypeID, CFArrayGetValueAtIndex, CFArrayRef},
 +    base::{CFEqual, CFGetTypeID, CFRelease, CFRetain, CFTypeRef, TCFType},
@@ -3413,7 +3413,7 @@
 +    pub(crate) pid: i32,
 +    pub(crate) window_id: u32,
 +    pub(crate) birth: (u64, u64),
-+    pub(crate) session: SessionIdentity,
++    pub(crate) session: SessionEvidence,
 +    // Stop and join the observer before releasing any original AX objects.
 +    fence: Fence,
 +    window: RetainedElement,
@@ -3441,7 +3441,7 @@
 +        }
 +    }
 +    fn verify_session(&self) -> NativeResult<()> {
-+        if let Err(error) = observation::revalidate(self.session) {
++        if let Err(error) = observation::revalidate(&self.session) {
 +            // A later successful read cannot revive this original observation.
 +            // There is no fallback to another active user's desktop.
 +            self.invalidate();
@@ -4079,7 +4079,7 @@
      extern "C" {
 --- /dev/null
 +++ b/libs/cua-driver/rust/crates/platform-macos/src/private_session_observation.rs
-@@ -0,0 +1,247 @@
+@@ -0,0 +1,249 @@
 +//! Read-only facts for the authenticated local embedded daemon connection.
 +//! No registry registration, grant, prompt, input, or claim of Desktop Ready.
 +
@@ -4251,15 +4251,17 @@
 +        let identity = first
 +            .identity
 +            .filter(|value| Some(*value) == second.identity);
-+        let status =
-+            if first.identity != second.identity || first.availability != second.availability {
-+                "desktop_session_changed"
-+            } else {
-+                match second.availability {
-+                    Ok(()) => "unlocked",
-+                    Err(error) => error.code(),
-+                }
-+            };
++        let status = if first.identity != second.identity
++            || first.availability != second.availability
++            || first.registry != second.registry
++        {
++            "desktop_session_changed"
++        } else {
++            match second.availability {
++                Ok(()) => "unlocked",
++                Err(error) => error.code(),
++            }
++        };
 +        if !self.same_processes(daemon, parent)
 +            || unsafe { libc::getuid() } != uid
 +            || unsafe { libc::geteuid() } != uid
@@ -4268,7 +4270,7 @@
 +        }
 +        let original_pipe = self.stdin.is_some() && stdin_pipe() == self.stdin;
 +        Ok(NativeObservation {
-+            schema: 1,
++            schema: 2,
 +            platform: "macos",
 +            daemon_instance: self.instance.clone(),
 +            uid,
@@ -4343,12 +4345,15 @@
 +pub mod private_observation;
 --- /dev/null
 +++ b/libs/cua-driver/rust/crates/platform-macos/src/session_observation.rs
-@@ -0,0 +1,469 @@
+@@ -0,0 +1,884 @@
 +//! Narrow, fail-closed observation for Styx's private AX once-write path.
 +//!
 +//! IOConsoleUsers is an Apple private registry schema (IOKitKeysPrivate.h).
-+//! Missing lock state is Unknown, never unlocked. A read is not an atomic OS
-+//! action fence and cannot detect an entire lock/unlock episode between reads.
++//! Row absence stays Missing. A separately labelled single-console kernel
++//! security observation may establish availability, subject to native lock tests.
++//! A read is not an atomic OS
++//! action fence. The independently observed IOResources seed detects observed
++//! publication changes, but is not a seqlock or an atomic input fence.
 +//! This does not change Cua's general graphic-session capability probe.
 +
 +use super::{SessionGetInfo, CALLER_SECURITY_SESSION, SESSION_HAS_GRAPHIC_ACCESS};
@@ -4356,6 +4361,7 @@
 +    array::{CFArrayGetCount, CFArrayGetTypeID, CFArrayGetValueAtIndex},
 +    base::{CFAllocatorRef, CFGetTypeID, CFRelease, CFTypeRef, TCFType},
 +    boolean::{kCFBooleanFalse, kCFBooleanTrue, CFBooleanGetTypeID},
++    data::{CFDataGetBytePtr, CFDataGetLength, CFDataGetTypeID},
 +    dictionary::{
 +        CFDictionaryGetTypeID, CFDictionaryGetValue, CFDictionaryRef, CFMutableDictionaryRef,
 +    },
@@ -4404,6 +4410,15 @@
 +        allocator: CFAllocatorRef,
 +        options: u32,
 +    ) -> i32;
++    fn IORegistryEntryGetRegistryEntryID(entry: u32, identity: *mut u64) -> i32;
++    fn IOServiceMatching(name: *const libc::c_char) -> CFMutableDictionaryRef;
++    fn IOServiceGetMatchingService(main_port: u32, matching: CFMutableDictionaryRef) -> u32;
++    fn IORegistryEntryCreateCFProperty(
++        entry: u32,
++        name: core_foundation::string::CFStringRef,
++        allocator: CFAllocatorRef,
++        options: u32,
++    ) -> CFTypeRef;
 +    fn IOObjectRelease(object: u32) -> i32;
 +}
 +struct RegistryEntry(u32);
@@ -4411,6 +4426,123 @@
 +    fn drop(&mut self) {
 +        unsafe { IOObjectRelease(self.0) };
 +    }
++}
++/// Original registry ports stay in the native process. Only data observations
++/// cross the authenticated private pipe; a registry ID is never a port authority.
++struct RegistryEntries {
++    root: RegistryEntry,
++    resources: RegistryEntry,
++}
++impl RegistryEntries {
++    fn open() -> Observed<std::sync::Arc<Self>> {
++        let root = RegistryEntry(unsafe { IORegistryGetRootEntry(0) });
++        if root.0 == 0 {
++            return Err(SessionUnavailable::Unknown);
++        }
++        let matching = unsafe { IOServiceMatching(c"IOResources".as_ptr()) };
++        if matching.is_null() {
++            return Err(SessionUnavailable::Unknown);
++        }
++        // GetMatchingService consumes the matching dictionary, including failure.
++        let resources = RegistryEntry(unsafe { IOServiceGetMatchingService(0, matching) });
++        if resources.0 == 0 {
++            return Err(SessionUnavailable::Unknown);
++        }
++        Ok(std::sync::Arc::new(Self { root, resources }))
++    }
++    fn ids(&self) -> Observed<(u64, u64)> {
++        fn id(entry: &RegistryEntry) -> Observed<u64> {
++            let mut value = 0;
++            if unsafe { IORegistryEntryGetRegistryEntryID(entry.0, &mut value) } != 0 || value == 0
++            {
++                return Err(SessionUnavailable::Unknown);
++            }
++            Ok(value)
++        }
++        Ok((id(&self.root)?, id(&self.resources)?))
++    }
++    fn seed(&self) -> Observed<u32> {
++        let key = CFString::new("IOConsoleUsersSeed");
++        let value = OwnedCf(unsafe {
++            IORegistryEntryCreateCFProperty(
++                self.resources.0,
++                key.as_concrete_TypeRef(),
++                std::ptr::null(),
++                0,
++            )
++        });
++        strict_seed(value.0)
++    }
++}
++fn strict_seed(value: CFTypeRef) -> Observed<u32> {
++    if value.is_null()
++        || unsafe { CFGetTypeID(value) } != unsafe { CFDataGetTypeID() }
++        || unsafe { CFDataGetLength(value.cast()) } != 4
++    {
++        return Err(SessionUnavailable::Unknown);
++    }
++    let pointer = unsafe { CFDataGetBytePtr(value.cast()) };
++    if pointer.is_null() {
++        return Err(SessionUnavailable::Unknown);
++    }
++    let mut bytes = [0u8; 4];
++    unsafe {
++        std::ptr::copy_nonoverlapping(pointer, bytes.as_mut_ptr(), 4);
++    }
++    Ok(u32::from_ne_bytes(bytes))
++}
++#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
++pub(crate) struct ConsoleEpoch {
++    root_entry_id: u64,
++    resources_entry_id: u64,
++    seed: u32,
++}
++#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
++#[serde(tag = "source", rename_all = "snake_case")]
++pub(crate) enum ConsoleEpochObservation {
++    Cfdata4NativeEndian {
++        root_before: u64,
++        root_after: u64,
++        resources_before: u64,
++        resources_after: u64,
++        before: u32,
++        after: u32,
++    },
++    Unavailable,
++}
++impl ConsoleEpochObservation {
++    fn stable_stamp(&self) -> Observed<ConsoleEpoch> {
++        match *self {
++            Self::Cfdata4NativeEndian {
++                root_before,
++                root_after,
++                resources_before,
++                resources_after,
++                before,
++                after,
++            } if root_before != 0
++                && resources_before != 0
++                && root_before == root_after
++                && resources_before == resources_after
++                && before == after =>
++            {
++                Ok(ConsoleEpoch {
++                    root_entry_id: root_before,
++                    resources_entry_id: resources_before,
++                    seed: before,
++                })
++            }
++            _ => Err(SessionUnavailable::IdentityChanged),
++        }
++    }
++}
++/// Retains the original source ports without exporting or fabricating authority.
++/// Core still owns the session generation and all action permissions.
++pub(crate) struct SessionEvidence {
++    identity: SessionIdentity,
++    console_uuid: String,
++    epoch: ConsoleEpoch,
++    original: std::sync::Arc<RegistryEntries>,
 +}
 +struct OwnedCf(CFTypeRef);
 +impl Drop for OwnedCf {
@@ -4523,11 +4655,14 @@
 +        on_console: BoolObservation::read(field(dictionary, "kCGSSessionOnConsoleKey")),
 +        login_done: BoolObservation::read(field(dictionary, "kCGSessionLoginDoneKey")),
 +        screen_locked: BoolObservation::read(field(dictionary, "CGSSessionScreenIsLocked")),
++        screen_locked_time: LockTimeObservation::read(field(
++            dictionary,
++            "CGSSessionScreenLockedTime",
++        )),
 +    })
 +}
 +
-+/// Provenance is the enclosing field: global IOConsoleLocked is NOT the
-+/// per-row CGSSessionScreenIsLocked field and cannot override a missing row bit.
++/// Root lock and per-row lock remain separately labelled native observations.
 +#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
 +#[serde(tag = "state", content = "value", rename_all = "snake_case")]
 +pub(crate) enum BoolObservation {
@@ -4550,6 +4685,32 @@
 +        }
 +    }
 +}
++/// Any nonzero lock timestamp is a transition/lock indication, including a
++/// future password-lock deadline. No wall-clock subtraction or grace-period
++/// guess is used to turn that state into available.
++#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
++#[serde(tag = "state", content = "value", rename_all = "snake_case")]
++pub(crate) enum LockTimeObservation {
++    Known(u32),
++    Missing,
++    Invalid,
++}
++impl LockTimeObservation {
++    fn read(value: CFTypeRef) -> Self {
++        if value.is_null() {
++            Self::Missing
++        } else {
++            integer(value).map(Self::Known).unwrap_or(Self::Invalid)
++        }
++    }
++}
++#[derive(Clone, Copy, Debug, Eq, PartialEq, serde::Serialize)]
++#[serde(rename_all = "snake_case")]
++pub(crate) enum ConsoleLockEvidence {
++    PerRowUnlocked,
++    KernelConsoleSecurityOpen,
++}
++
 +/// Original selected IOConsoleUsers row UUID, never a generated daemon label.
 +#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 +#[serde(tag = "state", content = "value", rename_all = "snake_case")]
@@ -4584,6 +4745,7 @@
 +    on_console: BoolObservation,
 +    login_done: BoolObservation,
 +    screen_locked: BoolObservation,
++    screen_locked_time: LockTimeObservation,
 +}
 +impl SelectedRow {
 +    fn availability(self) -> Observed<()> {
@@ -4611,14 +4773,65 @@
 +    global_io_console_locked: BoolObservation,
 +    selected_unique_row: Option<SelectedRow>,
 +    selection_status: &'static str,
++    user_count: Option<u32>,
++    lock_evidence: Option<ConsoleLockEvidence>,
++    epoch: ConsoleEpochObservation,
 +}
 +impl RegistryObservation {
++    fn available_evidence(&self) -> Observed<ConsoleLockEvidence> {
++        if self.read_status != "copied" || self.selection_status != "unique" {
++            return Err(SessionUnavailable::Unknown);
++        }
++        self.epoch.stable_stamp()?;
++        let row = self
++            .selected_unique_row
++            .as_ref()
++            .ok_or(SessionUnavailable::Unknown)?;
++        if self.global_io_console_locked == BoolObservation::Known(true)
++            || row.screen_locked == BoolObservation::Known(true)
++            || matches!(row.screen_locked_time, LockTimeObservation::Known(1..))
++        {
++            return Err(SessionUnavailable::Locked);
++        }
++        if self.global_io_console_locked != BoolObservation::Known(false)
++            || row.screen_locked == BoolObservation::Invalid
++            || row.screen_locked_time == LockTimeObservation::Invalid
++        {
++            return Err(SessionUnavailable::Unknown);
++        }
++        if !row.on_console.required()? || !row.login_done.required()? {
++            return Err(SessionUnavailable::Disconnected);
++        }
++        let ConsoleUuidObservation::Known(uuid) = &row.console_uuid else {
++            return Err(SessionUnavailable::Unknown);
++        };
++        if uuid::Uuid::parse_str(uuid)
++            .ok()
++            .is_none_or(|value| value.is_nil() || value.to_string() != *uuid)
++        {
++            return Err(SessionUnavailable::Unknown);
++        }
++        match row.screen_locked {
++            BoolObservation::Known(false) => {
++                row.clone().availability()?;
++                Ok(ConsoleLockEvidence::PerRowUnlocked)
++            }
++            BoolObservation::Missing if self.user_count == Some(1) => {
++                Ok(ConsoleLockEvidence::KernelConsoleSecurityOpen)
++            }
++            BoolObservation::Missing => Err(SessionUnavailable::Ambiguous),
++            _ => Err(SessionUnavailable::Unknown),
++        }
++    }
 +    fn unknown() -> Self {
 +        Self {
 +            read_status: "unavailable",
 +            global_io_console_locked: BoolObservation::Missing,
 +            selected_unique_row: None,
 +            selection_status: "desktop_session_unknown",
++            user_count: None,
++            lock_evidence: None,
++            epoch: ConsoleEpochObservation::Unavailable,
 +        }
 +    }
 +}
@@ -4630,6 +4843,7 @@
 +    pub(crate) identity: Option<SessionIdentity>,
 +    pub(crate) availability: Observed<()>,
 +    pub(crate) registry: RegistryObservation,
++    entries: Option<std::sync::Arc<RegistryEntries>>,
 +}
 +
 +/// Preserve the actual caller identity even when lock state is Locked/Unknown.
@@ -4642,19 +4856,21 @@
 +                identity: None,
 +                availability: Err(error),
 +                registry: RegistryObservation::unknown(),
++                entries: None,
 +            }
 +        }
 +    };
 +    let mut registry = RegistryObservation::unknown();
++    let mut entries = None;
 +    let availability = (|| {
-+        let root = unsafe { IORegistryGetRootEntry(0) };
-+        if root == 0 {
-+            return Err(SessionUnavailable::Unknown);
-+        }
-+        let root = RegistryEntry(root);
++        let original = RegistryEntries::open()?;
++        entries = Some(original.clone());
++        let (root_before, resources_before) = original.ids()?;
++        let before = original.seed()?;
 +        let mut raw = std::ptr::null_mut();
-+        let status =
-+            unsafe { IORegistryEntryCreateCFProperties(root.0, &mut raw, std::ptr::null(), 0) };
++        let status = unsafe {
++            IORegistryEntryCreateCFProperties(original.root.0, &mut raw, std::ptr::null(), 0)
++        };
 +        let properties = OwnedCf(raw.cast());
 +        if status != 0
 +            || properties.0.is_null()
@@ -4668,33 +4884,74 @@
 +        registry.read_status = "copied";
 +        registry.global_io_console_locked =
 +            BoolObservation::read(field(dictionary, "IOConsoleLocked"));
-+        let selected = selected_row(field(dictionary, "IOConsoleUsers"), identity);
++        let users = field(dictionary, "IOConsoleUsers");
++        if !users.is_null() && unsafe { CFGetTypeID(users) } == unsafe { CFArrayGetTypeID() } {
++            let count = unsafe { CFArrayGetCount(users.cast()) };
++            if (0..=4096).contains(&count) {
++                registry.user_count = Some(count as u32);
++            }
++        }
++        let selected = selected_row(users, identity);
 +        registry.selected_unique_row = selected.as_ref().ok().cloned();
 +        registry.selection_status = match selected.as_ref() {
 +            Ok(_) => "unique",
 +            Err(error) => error.code(),
 +        };
-+        let selected = selected.and_then(SelectedRow::availability);
++        let after = original.seed()?;
++        let (root_after, resources_after) = original.ids()?;
++        registry.epoch = ConsoleEpochObservation::Cfdata4NativeEndian {
++            root_before,
++            root_after,
++            resources_before,
++            resources_after,
++            before,
++            after,
++        };
++        let selected = selected.and_then(|_| registry.available_evidence());
++        registry.lock_evidence = selected.as_ref().ok().copied();
 +        if caller_identity()? != identity {
 +            return Err(SessionUnavailable::IdentityChanged);
 +        }
-+        selected
++        selected.map(|_| ())
 +    })();
 +    CurrentSessionObservation {
 +        identity: Some(identity),
 +        availability,
 +        registry,
++        entries,
 +    }
 +}
 +
-+pub(crate) fn observe_unlocked_current() -> Observed<SessionIdentity> {
++pub(crate) fn observe_unlocked_current() -> Observed<SessionEvidence> {
 +    let observed = observe_current();
 +    observed.availability?;
-+    observed.identity.ok_or(SessionUnavailable::Unknown)
++    let row = observed
++        .registry
++        .selected_unique_row
++        .as_ref()
++        .ok_or(SessionUnavailable::Unknown)?;
++    let ConsoleUuidObservation::Known(console_uuid) = &row.console_uuid else {
++        return Err(SessionUnavailable::Unknown);
++    };
++    Ok(SessionEvidence {
++        identity: observed.identity.ok_or(SessionUnavailable::Unknown)?,
++        console_uuid: console_uuid.clone(),
++        epoch: observed.registry.epoch.stable_stamp()?,
++        original: observed.entries.ok_or(SessionUnavailable::Unknown)?,
++    })
 +}
-+
-+pub(crate) fn revalidate(expected: SessionIdentity) -> Observed<()> {
-+    if observe_unlocked_current()? != expected {
++pub(crate) fn revalidate(expected: &SessionEvidence) -> Observed<()> {
++    let current = observe_unlocked_current()?;
++    let ids = expected.original.ids()?;
++    if ids
++        != (
++            expected.epoch.root_entry_id,
++            expected.epoch.resources_entry_id,
++        )
++        || current.identity != expected.identity
++        || current.console_uuid != expected.console_uuid
++        || current.epoch != expected.epoch
++    {
 +        Err(SessionUnavailable::IdentityChanged)
 +    } else {
 +        Ok(())
@@ -4704,6 +4961,77 @@
 +#[cfg(test)]
 +mod tests {
 +    use super::*;
++    #[test]
++    fn epoch_requires_exact_cfdata4_source_and_preserves_unconsumed_stamp() {
++        use core_foundation::data::CFData;
++        let data = CFData::from_buffer(&17u32.to_ne_bytes());
++        assert_eq!(strict_seed(data.as_CFTypeRef()), Ok(17));
++        let short = CFData::from_buffer(&[1, 2, 3]);
++        assert!(strict_seed(short.as_CFTypeRef()).is_err());
++        assert!(strict_seed(std::ptr::null()).is_err());
++        assert!(strict_seed(unsafe { kCFBooleanFalse }.cast()).is_err());
++        let original = ConsoleEpochObservation::Cfdata4NativeEndian {
++            root_before: 1,
++            root_after: 1,
++            resources_before: 2,
++            resources_after: 2,
++            before: 17,
++            after: 17,
++        };
++        // No consume occurs here: an unchanged UID/audit/UUID cannot make a
++        // prior observation current after a lock/unlock publication changes seed.
++        let unconsumed = original.stable_stamp().unwrap();
++        for current in [
++            ConsoleEpochObservation::Cfdata4NativeEndian {
++                root_before: 1,
++                root_after: 1,
++                resources_before: 2,
++                resources_after: 2,
++                before: 19,
++                after: 19,
++            },
++            ConsoleEpochObservation::Cfdata4NativeEndian {
++                root_before: 1,
++                root_after: 1,
++                resources_before: 3,
++                resources_after: 3,
++                before: 17,
++                after: 17,
++            },
++        ] {
++            assert_ne!(current.stable_stamp().unwrap(), unconsumed);
++        }
++        for unstable in [
++            ConsoleEpochObservation::Unavailable,
++            ConsoleEpochObservation::Cfdata4NativeEndian {
++                root_before: 1,
++                root_after: 1,
++                resources_before: 2,
++                resources_after: 2,
++                before: 17,
++                after: 18,
++            },
++            ConsoleEpochObservation::Cfdata4NativeEndian {
++                root_before: 1,
++                root_after: 3,
++                resources_before: 2,
++                resources_after: 2,
++                before: 17,
++                after: 17,
++            },
++            ConsoleEpochObservation::Cfdata4NativeEndian {
++                root_before: 0,
++                root_after: 0,
++                resources_before: 2,
++                resources_after: 2,
++                before: 17,
++                after: 17,
++            },
++        ] {
++            assert!(unstable.stable_stamp().is_err());
++        }
++    }
++
 +    use core_foundation::{
 +        array::CFArray,
 +        base::{CFRetain, CFType},
@@ -4755,7 +5083,8 @@
 +    }
 +
 +    // Pure CF parser contract: no session read, desktop, TCC, or host state.
-+    // This does not establish that a real unlocked OS emits an explicit false.
++    // This legacy per-row subparser test is not the complete candidate policy;
++    // the kernel-console candidate matrix below checks that production branch.
 +    #[test]
 +    fn only_the_unique_explicitly_unlocked_caller_session_is_admitted() {
 +        let unlocked = row(501, 1001, true, Some(CFBoolean::from(false).as_CFType()));
@@ -4811,6 +5140,94 @@
 +            Err(SessionUnavailable::Unknown)
 +        );
 +        assert_eq!(parse(&[]), Err(SessionUnavailable::Disconnected));
++    }
++    #[test]
++    fn kernel_single_console_candidate_keeps_original_observations_and_denies_transitions() {
++        let row = SelectedRow {
++            uid: 501,
++            audit_id: 1001,
++            console_uuid: ConsoleUuidObservation::Known(
++                "7463ea88-7056-4b41-94d4-9b4311d2a970".into(),
++            ),
++            session_id: Some(100),
++            on_console: BoolObservation::Known(true),
++            login_done: BoolObservation::Known(true),
++            screen_locked: BoolObservation::Missing,
++            screen_locked_time: LockTimeObservation::Missing,
++        };
++        let candidate = RegistryObservation {
++            read_status: "copied",
++            global_io_console_locked: BoolObservation::Known(false),
++            selected_unique_row: Some(row),
++            selection_status: "unique",
++            user_count: Some(1),
++            lock_evidence: None,
++            epoch: ConsoleEpochObservation::Cfdata4NativeEndian {
++                root_before: 1,
++                root_after: 1,
++                resources_before: 2,
++                resources_after: 2,
++                before: 3,
++                after: 3,
++            },
++        };
++        assert_eq!(
++            candidate.available_evidence(),
++            Ok(ConsoleLockEvidence::KernelConsoleSecurityOpen)
++        );
++        assert_eq!(
++            candidate
++                .selected_unique_row
++                .as_ref()
++                .unwrap()
++                .screen_locked,
++            BoolObservation::Missing
++        );
++        let mut explicit = candidate.clone();
++        explicit.selected_unique_row.as_mut().unwrap().screen_locked =
++            BoolObservation::Known(false);
++        explicit.user_count = Some(2); // extra nonmatching row does not negate exact selected row
++        assert_eq!(
++            explicit.available_evidence(),
++            Ok(ConsoleLockEvidence::PerRowUnlocked)
++        );
++        for change in 0..9 {
++            let mut bad = candidate.clone();
++            let row = bad.selected_unique_row.as_mut().unwrap();
++            match change {
++                0 => bad.global_io_console_locked = BoolObservation::Known(true),
++                1 => row.screen_locked = BoolObservation::Known(true),
++                2 => row.screen_locked_time = LockTimeObservation::Known(u32::MAX),
++                3 => row.screen_locked_time = LockTimeObservation::Invalid,
++                4 => row.screen_locked = BoolObservation::Invalid,
++                5 => bad.user_count = Some(2),
++                6 => row.on_console = BoolObservation::Known(false),
++                7 => row.console_uuid = ConsoleUuidObservation::Missing,
++                _ => bad.global_io_console_locked = BoolObservation::Missing,
++            }
++            assert!(bad.available_evidence().is_err(), "case {change}");
++        }
++        assert_eq!(
++            LockTimeObservation::read(CFNumber::from(0).as_CFTypeRef()),
++            LockTimeObservation::Known(0)
++        );
++        assert_eq!(
++            LockTimeObservation::read(CFNumber::from(-1).as_CFTypeRef()),
++            LockTimeObservation::Invalid
++        );
++        assert_eq!(
++            LockTimeObservation::read(CFBoolean::from(false).as_CFTypeRef()),
++            LockTimeObservation::Invalid
++        );
++        let mut zero = candidate;
++        zero.selected_unique_row
++            .as_mut()
++            .unwrap()
++            .screen_locked_time = LockTimeObservation::Known(0);
++        assert_eq!(
++            zero.available_evidence(),
++            Ok(ConsoleLockEvidence::KernelConsoleSecurityOpen)
++        );
 +    }
 +}
 --- a/libs/cua-driver/rust/crates/platform-macos/src/tools/get_window_state.rs

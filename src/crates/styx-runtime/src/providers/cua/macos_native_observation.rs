@@ -110,6 +110,24 @@ pub(crate) enum ConsoleUuidObservation {
     Missing,
     Invalid,
 }
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize)]
+#[serde(
+    tag = "state",
+    content = "value",
+    rename_all = "snake_case",
+    deny_unknown_fields
+)]
+pub(crate) enum LockTimeObservation {
+    Known(u32),
+    Missing,
+    Invalid,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub(crate) enum ConsoleLockEvidence {
+    PerRowUnlocked,
+    KernelConsoleSecurityOpen,
+}
 #[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct SelectedRow {
@@ -120,14 +138,103 @@ pub(crate) struct SelectedRow {
     pub(crate) on_console: BoolObservation,
     pub(crate) login_done: BoolObservation,
     pub(crate) screen_locked: BoolObservation,
+    pub(crate) screen_locked_time: LockTimeObservation,
 }
-#[derive(Deserialize)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct ConsoleEpoch {
+    root_entry_id: u64,
+    resources_entry_id: u64,
+    seed: u32,
+}
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Deserialize)]
+#[serde(tag = "source", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum ConsoleEpochObservation {
+    Cfdata4NativeEndian {
+        root_before: u64,
+        root_after: u64,
+        resources_before: u64,
+        resources_after: u64,
+        before: u32,
+        after: u32,
+    },
+    Unavailable,
+}
+impl ConsoleEpochObservation {
+    fn stable_stamp(&self) -> Option<ConsoleEpoch> {
+        match *self {
+            Self::Cfdata4NativeEndian {
+                root_before,
+                root_after,
+                resources_before,
+                resources_after,
+                before,
+                after,
+            } if root_before != 0
+                && resources_before != 0
+                && root_before == root_after
+                && resources_before == resources_after
+                && before == after =>
+            {
+                Some(ConsoleEpoch {
+                    root_entry_id: root_before,
+                    resources_entry_id: resources_before,
+                    seed: before,
+                })
+            }
+            _ => None,
+        }
+    }
+}
+#[derive(Clone, Debug, Eq, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct RegistryObservation {
     read_status: String,
     pub(crate) global_io_console_locked: BoolObservation,
     pub(crate) selected_unique_row: Option<SelectedRow>,
     selection_status: String,
+    user_count: Option<u32>,
+    lock_evidence: Option<ConsoleLockEvidence>,
+    epoch: ConsoleEpochObservation,
+}
+
+impl RegistryObservation {
+    fn validated_lock_evidence(&self) -> Option<ConsoleLockEvidence> {
+        self.epoch.stable_stamp()?;
+        if self.read_status != "copied"
+            || self.selection_status != "unique"
+            || self.global_io_console_locked != BoolObservation::Known(false)
+        {
+            return None;
+        }
+        let row = self.selected_unique_row.as_ref()?;
+        if row.on_console != BoolObservation::Known(true)
+            || row.login_done != BoolObservation::Known(true)
+            || !matches!(
+                row.screen_locked_time,
+                LockTimeObservation::Missing | LockTimeObservation::Known(0)
+            )
+        {
+            return None;
+        }
+        let ConsoleUuidObservation::Known(uuid) = &row.console_uuid else {
+            return None;
+        };
+        if Uuid::parse_str(uuid)
+            .ok()
+            .is_none_or(|value| value.is_nil() || value.to_string() != *uuid)
+        {
+            return None;
+        }
+        let expected = match row.screen_locked {
+            BoolObservation::Known(false) => ConsoleLockEvidence::PerRowUnlocked,
+            BoolObservation::Missing if self.user_count == Some(1) => {
+                ConsoleLockEvidence::KernelConsoleSecurityOpen
+            }
+            _ => return None,
+        };
+        (self.lock_evidence == Some(expected)).then_some(expected)
+    }
 }
 
 /// An authenticated native identity candidate, not a Core registration/grant.
@@ -137,6 +244,7 @@ pub(crate) struct ObservedConsoleIdentity {
     pub(crate) uid: u32,
     pub(crate) audit_id: u32,
     pub(crate) console_uuid: String,
+    pub(crate) epoch: ConsoleEpoch,
 }
 impl NativeObservation {
     pub(crate) fn console_identity(&self) -> Option<ObservedConsoleIdentity> {
@@ -168,23 +276,21 @@ impl NativeObservation {
             uid: before.uid,
             audit_id: before.audit_id,
             console_uuid: value.clone(),
+            epoch: self
+                .registry_before
+                .epoch
+                .stable_stamp()
+                .filter(|value| Some(*value) == self.registry_after.epoch.stable_stamp())?,
         })
     }
-    /// Strict private AX admission remains unchanged. A global false bit cannot
-    /// override Unknown, and this read still is not an atomic OS input fence.
+    /// Separate labelled kernel-console-security evidence is not a fabricated
+    /// row lock bit, TCC grant, or atomic native input fence.
     pub(crate) fn observed_unlocked(&self) -> bool {
-        self.session.status == SessionStatus::Unlocked
+        self.schema == 2
+            && self.session.status == SessionStatus::Unlocked
             && self.console_identity().is_some()
-            && self
-                .registry_before
-                .selected_unique_row
-                .as_ref()
-                .is_some_and(|row| row.screen_locked == BoolObservation::Known(false))
-            && self
-                .registry_after
-                .selected_unique_row
-                .as_ref()
-                .is_some_and(|row| row.screen_locked == BoolObservation::Known(false))
+            && self.registry_before == self.registry_after
+            && self.registry_before.validated_lock_evidence().is_some()
     }
 }
 
@@ -201,7 +307,7 @@ impl BoundMacSource {
         if Instant::now() >= deadline {
             return Err(BindingError::NativeProtocol);
         }
-        if value.schema != 1
+        if value.schema != 2
             || value.platform != "macos"
             || value.uid != self.candidate.uid
             || !value
@@ -469,5 +575,129 @@ impl BoundMacSource {
         self.check_binding()?;
         self.probe_drained = true;
         Ok(true)
+    }
+}
+
+#[cfg(test)]
+mod console_contract_tests {
+    use super::*;
+    fn candidate() -> RegistryObservation {
+        RegistryObservation {
+            epoch: ConsoleEpochObservation::Cfdata4NativeEndian {
+                root_before: 1,
+                root_after: 1,
+                resources_before: 2,
+                resources_after: 2,
+                before: 3,
+                after: 3,
+            },
+            read_status: "copied".into(),
+            selection_status: "unique".into(),
+            user_count: Some(1),
+            global_io_console_locked: BoolObservation::Known(false),
+            lock_evidence: Some(ConsoleLockEvidence::KernelConsoleSecurityOpen),
+            selected_unique_row: Some(SelectedRow {
+                uid: 501,
+                audit_id: 1001,
+                console_uuid: ConsoleUuidObservation::Known(
+                    "7463ea88-7056-4b41-94d4-9b4311d2a970".into(),
+                ),
+                session_id: Some(100),
+                on_console: BoolObservation::Known(true),
+                login_done: BoolObservation::Known(true),
+                screen_locked: BoolObservation::Missing,
+                screen_locked_time: LockTimeObservation::Missing,
+            }),
+        }
+    }
+    #[test]
+    fn original_unconsumed_epoch_is_not_reused_after_lock_unlock_or_source_change() {
+        let original = candidate();
+        let unconsumed = original.epoch.stable_stamp().unwrap();
+        let mut after_unlock = candidate();
+        after_unlock.epoch = ConsoleEpochObservation::Cfdata4NativeEndian {
+            root_before: 1,
+            root_after: 1,
+            resources_before: 2,
+            resources_after: 2,
+            before: 5,
+            after: 5,
+        };
+        assert!(after_unlock.validated_lock_evidence().is_some());
+        assert_ne!(after_unlock.epoch.stable_stamp(), Some(unconsumed));
+        let mut replaced = candidate();
+        replaced.epoch = ConsoleEpochObservation::Cfdata4NativeEndian {
+            root_before: 1,
+            root_after: 1,
+            resources_before: 7,
+            resources_after: 7,
+            before: 3,
+            after: 3,
+        };
+        assert_ne!(replaced.epoch.stable_stamp(), Some(unconsumed));
+        let mut transitioning = candidate();
+        transitioning.epoch = ConsoleEpochObservation::Cfdata4NativeEndian {
+            root_before: 1,
+            root_after: 1,
+            resources_before: 2,
+            resources_after: 2,
+            before: 3,
+            after: 4,
+        };
+        assert!(transitioning.validated_lock_evidence().is_none());
+        transitioning.epoch = ConsoleEpochObservation::Unavailable;
+        assert!(transitioning.validated_lock_evidence().is_none());
+        assert!(
+            serde_json::from_str::<ConsoleEpochObservation>(
+                r#"{"source":"unconditional","before":3,"after":3}"#
+            )
+            .is_err()
+        );
+    }
+    #[test]
+    fn labelled_kernel_evidence_never_turns_missing_or_transition_into_row_false() {
+        let candidate = candidate();
+        assert_eq!(
+            candidate.validated_lock_evidence(),
+            Some(ConsoleLockEvidence::KernelConsoleSecurityOpen)
+        );
+        assert_eq!(
+            candidate
+                .selected_unique_row
+                .as_ref()
+                .unwrap()
+                .screen_locked,
+            BoolObservation::Missing
+        );
+        for change in 0..10 {
+            let mut bad = candidate.clone();
+            let row = bad.selected_unique_row.as_mut().unwrap();
+            match change {
+                0 => bad.global_io_console_locked = BoolObservation::Known(true),
+                1 => row.screen_locked = BoolObservation::Known(true),
+                2 => row.screen_locked_time = LockTimeObservation::Known(u32::MAX),
+                3 => row.screen_locked_time = LockTimeObservation::Known(1),
+                4 => row.screen_locked_time = LockTimeObservation::Invalid,
+                5 => bad.user_count = Some(2),
+                6 => row.on_console = BoolObservation::Known(false),
+                7 => row.console_uuid = ConsoleUuidObservation::Missing,
+                8 => bad.lock_evidence = Some(ConsoleLockEvidence::PerRowUnlocked),
+                _ => bad.global_io_console_locked = BoolObservation::Invalid,
+            }
+            assert_eq!(bad.validated_lock_evidence(), None, "case {change}");
+            assert_ne!(bad, candidate); // before/after transition cannot be stable
+        }
+        let mut explicit = candidate;
+        explicit.selected_unique_row.as_mut().unwrap().screen_locked =
+            BoolObservation::Known(false);
+        explicit.lock_evidence = Some(ConsoleLockEvidence::PerRowUnlocked);
+        explicit.user_count = Some(2); // exact matching row remains strict per-row evidence
+        assert_eq!(
+            explicit.validated_lock_evidence(),
+            Some(ConsoleLockEvidence::PerRowUnlocked)
+        );
+        let unknown_source =
+            serde_json::from_str::<ConsoleLockEvidence>("\"unconditional_unlocked\"");
+        assert!(unknown_source.is_err());
     }
 }

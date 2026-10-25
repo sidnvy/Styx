@@ -41,15 +41,28 @@ It adds no public Computer tools and does not replace the signed App-owned
 embedded Cua permission principal. Runtime Host/Gateway composition is integrated,
 but complete native builds and installed platform effects remain unverified.
 
-The private Mac session reader requires a unique matching native UID/audit
-session, on-console/login state, and an explicit unlocked boolean from Apple's
-private IOConsoleUsers schema. Missing or malformed facts fail closed. This is
-an observation, not an atomic lock/action fence; availability on a real unlocked
-Mac must be measured before accepting the adapter. A read-only check on pho
-(macOS 26.6.2) found an active completed console session with no per-session
-lock field. This version therefore refuses that observation as Unknown; the
-Mac positive path is not yet usable or accepted. The separately observed root
-IOConsoleLocked=false is not silently substituted for the missing field.
+The private Mac session report is schema 2. It retains separately typed per-row
+and root lock observations. A unique matching native UID/audit row with explicit
+unlocked state remains supported even with other nonmatching rows. A missing
+per-row bit is accepted only as a separately labelled kernel-console-security
+candidate: exactly one console row, root IOConsoleLocked=false, completed active
+login, canonical console UUID and no nonzero lock timestamp. Malformed, locked,
+transitioning or ambiguous observations refuse. Requiring root=false narrows the
+old per-row path when that root fact is absent; this awaits native qualification.
+
+Native snapshots retain the original root and IOResources ports, registry IDs
+and observed four-byte IOConsoleUsersSeed. Changed or unavailable source facts
+invalidate the original target. Runtime carries this stamp in its existing
+source identity, so changes fence the source and invalidate the Core session's
+old targets. Neither equal reads nor the seed provide an atomic action fence or
+prove that every unobserved transition can be detected.
+
+A read-only pho observation found an active console with a missing per-row bit;
+that alone does not qualify the candidate. Required real-device verification is
+lock/unlock with an unconsumed old target, fresh-target recovery, permission
+loss, and rejection during transitions. The native session module has passed a
+Darwin-target typecheck, and pure registry-policy fixtures pass. The full native
+AX/platform build, GUI effects and this lock qualification remain NOT RUN.
 
 The original proxy control connection can request native transport drain. Its
 terminal admission fence waits for the original blocking work and retained
@@ -58,8 +71,8 @@ cleanup acknowledges removal consumption and the AppKit layer update, not
 physical display presentation. No business operation is automatically retried.
 
 The transport change has passed a real Linux Unix-socket/SDK failure scenario.
-The added macOS AX/session/overlay code has NOT been compiled or accepted on a
-Mac. Linux evidence cannot satisfy that gate. A new signed worker and native
+The complete macOS AX/session/overlay closure has NOT been compiled or accepted
+on a Mac. Linux evidence cannot satisfy that gate. A new signed worker and native
 permission, target-invalidation, effect and cleanup scenarios are required.
 
 The existing same-UID UDS protocol also has a read-only, strict-schema private
@@ -68,9 +81,9 @@ and parent births, native UID/audit/console identity, TCC probes and separately
 typed per-session/global lock facts. Descriptor booleans grant no authority.
 The daemon retains its original bounded reader task through connection loss and
 joins it during shutdown before SDK teardown. These observations do not create
-a Core session or grant, and do not resolve the missing lock-field limitation.
-The Rust Host connection consumer is integrated and preserves this strict
-observation boundary; it does not infer authorization from global lock facts.
+a Core session or grant. The Rust Host consumer requires the matched schema-2
+worker and preserves the labelled observation boundary; lock evidence is never
+a substitute for TCC, device capability approval or Core authorization.
 
 ## Windows integration status
 
