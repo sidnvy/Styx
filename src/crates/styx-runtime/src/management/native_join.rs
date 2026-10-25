@@ -208,6 +208,38 @@ pub(crate) async fn claim_for_app(scope: Arc<crate::app::HostScope>) -> Result<J
     }
 }
 
+/// Recover only protected local enrollment progress for the original owned App.
+/// This does not contact the Gateway or establish current remote authorization.
+pub(crate) async fn inspect_for_app(scope: Arc<crate::app::HostScope>) -> Result<JoinReport> {
+    #[cfg(any(
+        all(target_os = "windows", target_arch = "x86_64"),
+        all(
+            target_os = "macos",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
+    ))]
+    {
+        let path = scope.state_dir().to_owned();
+        let retained = scope.clone();
+        platform::owned(async move { platform::inspect(path, scope).await })
+            .await
+            .map_err(|error| error.with_app_scope(retained))
+    }
+    #[cfg(not(any(
+        all(target_os = "windows", target_arch = "x86_64"),
+        all(
+            target_os = "macos",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        ),
+        all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
+    )))]
+    {
+        let _ = scope;
+        Err(JoinError::new("native_join_platform_unsupported", 3))
+    }
+}
+
 #[cfg(any(
     all(target_os = "windows", target_arch = "x86_64"),
     all(
@@ -913,6 +945,68 @@ mod platform {
             protocol::validate_pending(&work.seed, record.body.get().as_bytes(), &leaf, clock_ms()?)
                 .map_err(protocol_error)
         }
+    }
+    pub(super) async fn inspect(
+        path: PathBuf,
+        scope: Arc<crate::app::HostScope>,
+    ) -> Result<JoinReport> {
+        let work = blocking(move || open(&path, Some(scope))).await?;
+        let (_work, report) = io(work, |w| {
+            // A strict complete prefix is required. Missing reply or a partial
+            // Claim/Confirm has unknown outcome, never an invitation to retry.
+            let dispatched = w.read(File::JoinDispatched)?;
+            let reply = w.read(File::JoinReply)?;
+            let credential = w.read(File::Credential)?;
+            let confirm = w.read(File::ConfirmDispatched)?;
+            let ready = w.read(File::Ready)?;
+            if dispatched.is_none() {
+                return Err(JoinError::new("native_join_dispatch_unknown_no_retry", 4));
+            }
+            let reply =
+                reply.ok_or_else(|| JoinError::new("native_join_dispatch_unknown_no_retry", 4))?;
+            let status;
+            let observed_pending;
+            match (credential, confirm, ready) {
+                (None, None, None) => {
+                    observed_pending = pending(w, &reply, false)?;
+                    status = "awaiting_approval";
+                }
+                (Some(credential), Some(confirm), Some(raw)) => {
+                    observed_pending = pending(w, &reply, true)?;
+                    let original: NativeHostReady =
+                        serde_json::from_slice(&raw).map_err(|_| unknown())?;
+                    if original.schema != 1
+                        || original.seed_sha256 != Sha256Digest::of_bytes(&w.seed_raw)
+                        || original.request_id != observed_pending.request_id
+                        || original.credential_sha256 != Sha256Digest::of_bytes(&credential)
+                        || original.device_id != w.seed.device_id
+                        || original.fingerprint != w.seed.fingerprint
+                        || original.generation.is_empty()
+                        || original.generation.len() > 128
+                        || !(32..=4096).contains(&credential.len())
+                        || !credential
+                            .iter()
+                            .all(|b| b.is_ascii_alphanumeric() || matches!(*b, b'_' | b'-'))
+                    {
+                        return Err(JoinError::new("native_ready_binding_changed", 4));
+                    }
+                    let expected_confirm =
+                        protocol::confirm_request(&observed_pending, &credential)
+                            .map_err(protocol_error)?;
+                    if expected_confirm.as_slice() != confirm.as_slice() {
+                        return Err(unknown());
+                    }
+                    // This is the persisted local Ready proof, not a current
+                    // GET-self observation. Connect still rechecks admission.
+                    status = "ready_to_connect";
+                }
+                _ => return Err(JoinError::new("native_join_phase_unknown_no_retry", 4)),
+            }
+            w.validate()?;
+            Ok(w.report("native_host_inspect", status, &observed_pending))
+        })
+        .await?;
+        Ok(report)
     }
     pub(super) async fn claim(
         path: PathBuf,

@@ -26,8 +26,14 @@ enum Command {
     AppCore {
         #[arg(long)]
         state_dir: PathBuf,
+        #[arg(
+            long,
+            required_unless_present = "runtime_selection_file",
+            conflicts_with = "runtime_selection_file"
+        )]
+        deployment_file: Option<PathBuf>,
         #[arg(long)]
-        deployment_file: PathBuf,
+        runtime_selection_file: Option<PathBuf>,
     },
     // Fixed read-only worker mode; there are no target/credential/path options.
     #[command(name = "__linux-desktop-probe", hide = true)]
@@ -299,6 +305,9 @@ enum ReleaseCommand {
         expected_publisher: String,
         #[arg(long)]
         json: bool,
+        /// Emit verified runtime selection data for the native App bootstrap.
+        #[arg(long)]
+        runtime_selection: bool,
     },
 }
 
@@ -642,6 +651,7 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
         Command::AppCore {
             state_dir,
             deployment_file,
+            runtime_selection_file,
         } => {
             let cancel = CancellationToken::new();
             let signal_cancel = cancel.clone();
@@ -650,14 +660,29 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
                 signal_cancel.cancel();
                 result
             });
-            let result = styx_runtime::app::serve(
-                &state_dir,
-                &deployment_file,
-                tokio::io::stdin(),
-                tokio::io::stdout(),
-                cancel,
-            )
-            .await;
+            let result = match (deployment_file, runtime_selection_file) {
+                (Some(deployment), None) => {
+                    styx_runtime::app::serve(
+                        &state_dir,
+                        &deployment,
+                        tokio::io::stdin(),
+                        tokio::io::stdout(),
+                        cancel,
+                    )
+                    .await
+                }
+                (None, Some(selection)) => {
+                    styx_runtime::app::serve_native(
+                        &state_dir,
+                        &selection,
+                        tokio::io::stdin(),
+                        tokio::io::stdout(),
+                        cancel,
+                    )
+                    .await
+                }
+                _ => return error("app_startup_invalid"),
+            };
             let signal_failed = if signal.is_finished() {
                 !matches!(signal.await, Ok(Ok(())))
             } else {
@@ -815,8 +840,27 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
                     publisher_file,
                     expected_publisher,
                     json,
+                    runtime_selection,
                 },
         } => {
+            if runtime_selection {
+                return match styx_runtime::release::inspect_selection(
+                    &payload_dir,
+                    &publisher_file,
+                    &expected_publisher,
+                )
+                .await
+                {
+                    Ok(selection) => {
+                        if write_json(&selection).is_ok() {
+                            ExitCode::SUCCESS
+                        } else {
+                            error("output_unavailable")
+                        }
+                    }
+                    Err(value) => error(value.code()),
+                };
+            }
             match styx_runtime::release::inspect(&payload_dir, &publisher_file, &expected_publisher)
                 .await
             {

@@ -396,6 +396,49 @@ pub async fn inspect(
     }
 }
 
+/// Read-only bootstrap data from the same native verifier and observed root.
+pub async fn inspect_selection(
+    payload: &Path,
+    publisher_file: &Path,
+    expected_pin: &str,
+) -> Result<NativeRuntimeSelection> {
+    #[cfg(any(
+        all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+        all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"),
+        all(
+            target_os = "macos",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    ))]
+    {
+        let expected =
+            PublisherFingerprint::parse(expected_pin).map_err(|_| ReleaseError::Invalid)?;
+        let permit = INSPECTORS.try_acquire().map_err(|_| ReleaseError::Busy)?;
+        let payload = payload.to_owned();
+        let publisher_file = publisher_file.to_owned();
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            let verified = verify(&payload, &publisher_file, &expected)?;
+            verified.revalidate()?;
+            verified.runtime_selection()
+        })
+        .await
+        .map_err(|_| ReleaseError::Unknown)?
+    }
+    #[cfg(not(any(
+        all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+        all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"),
+        all(
+            target_os = "macos",
+            any(target_arch = "x86_64", target_arch = "aarch64")
+        )
+    )))]
+    {
+        let _ = (payload, publisher_file, expected_pin);
+        Err(ReleaseError::Unsupported)
+    }
+}
+
 /// The external public key must already have an independently approved pin.
 /// Bundling a new publisher.pem beside a package never supplies that trust.
 /// Re-open a canonical DATA selection through the existing C08 verifier. This

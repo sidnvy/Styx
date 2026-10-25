@@ -353,6 +353,49 @@ impl PrivateRoot {
         self.inner.validate_root()
     }
 
+    /// App onboarding input only: fixed destinations, exclusive creation and
+    /// native private-file publication. Caller retains the writer on failure;
+    /// partial material is never overwritten or automatically retried.
+    pub(crate) fn create_app_join_inputs(
+        &self,
+        writer: &ConfigurationWriterGuard,
+        deployment: &[u8],
+        invitation: &[u8],
+        ca: &[u8],
+    ) -> Result<()> {
+        #[cfg(any(
+            target_os = "windows",
+            target_os = "macos",
+            all(target_os = "linux", target_env = "gnu")
+        ))]
+        {
+            let files = [
+                ("app-join-ca-v1.pem", ca),
+                ("app-join-invitation-v1", invitation),
+                ("app-join-input-v1.json", deployment),
+            ];
+            for (name, bytes) in files {
+                if bytes.is_empty() || bytes.len() > 128 * 1024 {
+                    return Err(StoreError::TooLarge);
+                }
+                self.ensure_absent(name)?;
+            }
+            for (name, bytes) in files {
+                self.inner.create_fixed(writer, name, bytes, &|_| {})?;
+            }
+            Ok(())
+        }
+        #[cfg(not(any(
+            target_os = "windows",
+            target_os = "macos",
+            all(target_os = "linux", target_env = "gnu")
+        )))]
+        {
+            let _ = (writer, deployment, invitation, ca);
+            Err(StoreError::Unsupported)
+        }
+    }
+
     /// Read-only, descriptor-relative absence check. An existing file, directory,
     /// symlink or special node refuses admission; only ENOENT proves absence.
     /// This is an observation, never a lock against an uncoordinated legacy writer.

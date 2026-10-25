@@ -1,10 +1,12 @@
 //! Private owned-child App composition. Local UI is an entry point, not an OS
 //! privilege or a second policy/configuration authority. No network listener,
 //! arbitrary call-supplied paths, legacy adoption or mutation replay lives here.
+mod pairing_link;
+
 use crate::{
     foreground::{self, ForegroundError, ForegroundOutcome},
     management::{native, native_join},
-    store::{ExecutionLeaseGuard, PrivateRoot},
+    store::{ConfigurationWriterGuard, ExecutionLeaseGuard, PrivateRoot},
 };
 use futures_util::{SinkExt, StreamExt};
 use serde::{Deserialize, Serialize};
@@ -150,6 +152,8 @@ enum Operation {
     StartupStatus,
     Status,
     RequestJoin,
+    InspectJoin,
+    Join,
     ClaimJoin,
     InspectHost,
     Connect,
@@ -162,7 +166,41 @@ struct Request {
     schema: u16,
     id: u32,
     operation: Operation,
-    input: EmptyInput,
+    input: Box<serde_json::value::RawValue>,
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InspectJoinInput {
+    #[serde(deserialize_with = "secret_string")]
+    link: zeroize::Zeroizing<String>,
+}
+fn secret_string<'de, D: serde::Deserializer<'de>>(
+    d: D,
+) -> Result<zeroize::Zeroizing<String>, D::Error> {
+    String::deserialize(d).map(zeroize::Zeroizing::new)
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+struct JoinInput {
+    approved_gateway_origin: String,
+    approved_ca_sha256: Option<String>,
+    label: String,
+    computer: bool,
+    browser: bool,
+    browser_channel: Option<String>,
+    persist_login: bool,
+}
+fn now_ms() -> Result<u64, AppError> {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .ok()
+        .and_then(|d| u64::try_from(d.as_millis()).ok())
+        .ok_or(AppError("app_clock_unavailable"))
+}
+fn decode_input<T: serde::de::DeserializeOwned>(
+    value: &serde_json::value::RawValue,
+) -> Result<T, AppError> {
+    serde_json::from_str(value.get()).map_err(|_| AppError("app_input_invalid"))
 }
 #[derive(Clone, Serialize)]
 struct ConnectionStatus {
@@ -207,6 +245,11 @@ struct HostApp {
     scope: Arc<HostScope>,
     deployment_file: PathBuf,
     configuration: Option<native::NativeManagementReport>,
+    runtime_selection_file: Option<PathBuf>,
+    inspected_join: Option<pairing_link::InspectedLink>,
+    enrollment: Option<Value>,
+    // Retain the exact input writer after any partial publication, too.
+    input_writer: Option<ConfigurationWriterGuard>,
     running: Option<RunningHost>,
     observed: watch::Receiver<ConnectionStatus>,
     status: watch::Sender<ConnectionStatus>,
@@ -226,6 +269,10 @@ impl HostApp {
             scope,
             deployment_file: deployment_file.to_owned(),
             configuration: None,
+            runtime_selection_file: None,
+            inspected_join: None,
+            enrollment: None,
+            input_writer: None,
             running: None,
             observed,
             status,
@@ -236,8 +283,114 @@ impl HostApp {
         };
         if app.scope.root.get().is_some() {
             app.read_configuration().await?;
+            let report = native_join::inspect_for_app(app.scope.clone())
+                .await
+                .map_err(|e| app.join_error(e))?;
+            app.enrollment =
+                Some(serde_json::to_value(report).map_err(|_| AppError("app_response_invalid"))?);
         }
         Ok(app)
+    }
+    async fn open_native(state_dir: &Path, selection: &Path) -> Result<Self, AppError> {
+        if !selection.is_absolute() {
+            return Err(AppError("app_runtime_selection_invalid"));
+        }
+        let deployment = state_dir
+            .parent()
+            .ok_or(AppError("app_scope_invalid"))?
+            .join("app-join-input-v1.json");
+        let mut app = Self::open(state_dir, &deployment).await?;
+        app.runtime_selection_file = Some(selection.to_owned());
+        Ok(app)
+    }
+    fn prepare_join_input(&mut self, choice: JoinInput) -> Result<(), AppError> {
+        self.available()?;
+        let selection = self
+            .runtime_selection_file
+            .as_ref()
+            .ok_or(AppError("app_join_input_unavailable"))?;
+        if self.scope.root.get().is_some() || self.input_writer.is_some() {
+            return Err(AppError("app_join_already_exists"));
+        }
+        if choice.label.trim().is_empty()
+            || choice.label.len() > 128
+            || choice.label.chars().any(char::is_control)
+            || choice
+                .browser_channel
+                .as_deref()
+                .is_some_and(|v| !matches!(v, "chrome" | "msedge" | "chromium"))
+        {
+            return Err(AppError("app_input_invalid"));
+        }
+        let inspected = self
+            .inspected_join
+            .take()
+            .ok_or(AppError("app_join_not_inspected"))?;
+        let ca_sha = inspected
+            .preview()
+            .ca_sha256
+            .clone()
+            .ok_or(AppError("app_system_trust_not_supported"))?;
+        let accepted = inspected
+            .approve(
+                &choice.approved_gateway_origin,
+                choice.approved_ca_sha256.as_deref(),
+                now_ms()?,
+            )
+            .map_err(|e| AppError(e.code()))?;
+        let (origin, invitation, ca, _) = accepted.into_parts();
+        let ca = ca.ok_or(AppError("app_system_trust_not_supported"))?;
+        // OS/user launch context only. RPC cannot choose arbitrary executables,
+        // working directories, runtime payloads or trust files.
+        #[cfg(windows)]
+        let (home, shell) = (
+            std::env::var_os("USERPROFILE").map(PathBuf::from),
+            std::env::var_os("SystemRoot")
+                .map(|p| PathBuf::from(p).join("System32").join("cmd.exe")),
+        );
+        #[cfg(not(windows))]
+        let (home, shell) = (
+            std::env::var_os("HOME").map(PathBuf::from),
+            Some(PathBuf::from("/bin/sh")),
+        );
+        let home = home
+            .filter(|p| p.is_absolute() && p.is_dir())
+            .ok_or(AppError("app_home_unavailable"))?;
+        let shell = shell
+            .filter(|p| p.is_absolute() && p.is_file())
+            .ok_or(AppError("app_shell_unavailable"))?;
+        let parent = &self.scope.parent_path;
+        let mut browser =
+            json!({"enabled":choice.browser,"headless":true,"persistLogin":choice.persist_login});
+        if let Some(channel) = choice.browser_channel {
+            browser["channel"] = json!(channel);
+        }
+        let deployment = serde_json::to_vec(&json!({
+            "schema":1,"mode":"join-existing",
+            "gateway":{"url":origin,"caFile":parent.join("app-join-ca-v1.pem"),"expectedCaSha256":ca_sha},
+            "host":{"label":choice.label,"cwd":home,"shell":shell,"computer":choice.computer,"browser":browser},
+            "runtimeSelectionFile":selection,"invitationFile":parent.join("app-join-invitation-v1")
+        })).map_err(|_| AppError("app_input_invalid"))?;
+        self.scope.validate()?;
+        self.input_writer = Some(
+            self.scope
+                .parent
+                .try_configuration_writer()
+                .map_err(|_| AppError("app_input_writer_busy"))?,
+        );
+        let result = self.scope.parent.create_app_join_inputs(
+            self.input_writer
+                .as_ref()
+                .ok_or(AppError("app_input_writer_busy"))?,
+            &deployment,
+            invitation.as_bytes(),
+            ca.as_bytes(),
+        );
+        if result.is_err() || self.scope.validate().is_err() {
+            self.unknown = true;
+            return Err(AppError("app_join_input_unknown"));
+        }
+        Ok(())
     }
     fn available(&self) -> Result<(), AppError> {
         self.scope.validate()?;
@@ -386,9 +539,16 @@ impl HostApp {
         Ok(())
     }
     fn snapshot(&self) -> Value {
-        json!({"schema":1,"configuration":self.configuration,"foreground":*self.observed.borrow(),"admission_fenced":self.unknown||self.retained.is_some()||self.quit_ticket.is_some(),"cleanup":self.cleanup})
+        json!({"schema":1,"configuration":self.configuration,"foreground":*self.observed.borrow(),"admission_fenced":self.unknown||self.retained.is_some()||self.quit_ticket.is_some(),"cleanup":self.cleanup,"enrollment":self.enrollment,"mode":"rust_host","supportedOperations":["startupStatus","status","inspectJoin","join","requestJoin","claimJoin","inspectHost","connect","disconnect","quitAdmission"]})
     }
-    async fn dispatch(&mut self, operation: Operation) -> Result<Value, AppError> {
+    async fn dispatch(
+        &mut self,
+        operation: Operation,
+        input: Box<serde_json::value::RawValue>,
+    ) -> Result<Value, AppError> {
+        if !matches!(operation, Operation::InspectJoin | Operation::Join) {
+            let _: EmptyInput = decode_input(&input)?;
+        }
         self.reap().await?;
         if matches!(operation, Operation::Status | Operation::StartupStatus) {
             self.scope.validate()?;
@@ -401,7 +561,28 @@ impl HostApp {
         }
         self.available()?;
         match operation {
-            Operation::RequestJoin => {
+            Operation::InspectJoin => {
+                if self.scope.root.get().is_some() || self.input_writer.is_some() {
+                    return Err(AppError("app_join_already_exists"));
+                }
+                // Clear the previous secret even when replacement input is invalid.
+                self.inspected_join = None;
+                let input: InspectJoinInput = decode_input(&input)?;
+                let inspected = pairing_link::inspect(&input.link, now_ms()?)
+                    .map_err(|e| AppError(e.code()))?;
+                let preview = inspected.preview();
+                self.inspected_join = Some(inspected);
+                Ok(json!({"inspectionId":uuid::Uuid::new_v4().to_string(),"preview":preview}))
+            }
+            Operation::RequestJoin | Operation::Join => {
+                if matches!(operation, Operation::RequestJoin)
+                    && self.runtime_selection_file.is_some()
+                {
+                    return Err(AppError("app_join_inspection_required"));
+                }
+                if matches!(operation, Operation::Join) {
+                    self.prepare_join_input(decode_input(&input)?)?;
+                }
                 if self.running.is_some() || self.scope.root.get().is_some() {
                     return Err(AppError("app_join_already_exists"));
                 }
@@ -410,7 +591,10 @@ impl HostApp {
                         .await
                         .map_err(|e| self.join_error(e))?;
                 self.read_configuration().await?;
-                serde_json::to_value(report).map_err(|_| AppError("app_response_invalid"))
+                let value =
+                    serde_json::to_value(report).map_err(|_| AppError("app_response_invalid"))?;
+                self.enrollment = Some(value.clone());
+                Ok(value)
             }
             Operation::ClaimJoin => {
                 if self.running.is_some() {
@@ -422,7 +606,10 @@ impl HostApp {
                     .await
                     .map_err(|e| self.join_error(e))?;
                 self.read_configuration().await?;
-                serde_json::to_value(report).map_err(|_| AppError("app_response_invalid"))
+                let value =
+                    serde_json::to_value(report).map_err(|_| AppError("app_response_invalid"))?;
+                self.enrollment = Some(value.clone());
+                Ok(value)
             }
             Operation::InspectHost => {
                 if self.running.is_some() {
@@ -510,7 +697,38 @@ pub async fn serve<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     write: W,
     cancel: CancellationToken,
 ) -> Result<(), AppError> {
-    let mut app = HostApp::open(state_dir, deployment_file).await?;
+    serve_app(
+        HostApp::open(state_dir, deployment_file).await?,
+        read,
+        write,
+        cancel,
+    )
+    .await
+}
+
+/// Native UI bootstrap: selection is a protected, fixed launcher input, never RPC data.
+pub async fn serve_native<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+    state_dir: &Path,
+    runtime_selection_file: &Path,
+    read: R,
+    write: W,
+    cancel: CancellationToken,
+) -> Result<(), AppError> {
+    serve_app(
+        HostApp::open_native(state_dir, runtime_selection_file).await?,
+        read,
+        write,
+        cancel,
+    )
+    .await
+}
+
+async fn serve_app<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
+    mut app: HostApp,
+    read: R,
+    write: W,
+    cancel: CancellationToken,
+) -> Result<(), AppError> {
     let mut input = FramedRead::new(read, LinesCodec::new_with_max_length(FRAME_BYTES));
     let mut output = FramedWrite::new(write, LinesCodec::new_with_max_length(FRAME_BYTES));
     let mut previous_id = 0;
@@ -523,6 +741,7 @@ pub async fn serve<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
             }
             break;
         };
+        let line = zeroize::Zeroizing::new(line);
         let request: Request = match serde_json::from_str(&line) {
             Ok(r) => r,
             Err(_) => {
@@ -539,10 +758,9 @@ pub async fn serve<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
             break;
         }
         previous_id = request.id;
-        let _input = request.input;
         // Do not select/drop this future on disconnect or cancellation: an
         // already dispatched enrollment/configuration operation must settle.
-        let result = app.dispatch(request.operation).await;
+        let result = app.dispatch(request.operation, request.input).await;
         let response = match result {
             Ok(result) => json!({"id":request.id,"ok":true,"result":result}),
             Err(error) => json!({"id":request.id,"ok":false,"error":error.code()}),

@@ -18,65 +18,85 @@ namespace StyxNative {
   internal static bool Yes(object obj,params string[] keys){return Equals(Get(obj,keys),true);}
  }
  sealed class NativeOperationException:IOException { internal readonly string Code;internal readonly object Budget;internal readonly bool Preflight;internal NativeOperationException(string code,object budget=null,bool preflight=false){Code=code;Budget=budget;Preflight=preflight;} }
+ // The installed outer package pins the bootstrap executable. Its hash is an
+ // integrity boundary, not a substitute for Windows publisher authentication.
+ sealed class NativeBootstrap:IDisposable {
+  internal const string PublisherPin="f524e2e87f4cda2bc2b52d448233ae347b05c00730374f6b379a8aafe1cc2566";
+  internal readonly string Root,Cli,Payload,Publisher,CliSha,ManifestSha;internal string Selection;
+  readonly FileStream cliPin;
+  internal static string Hash(Stream stream){using(var sha=System.Security.Cryptography.SHA256.Create()){stream.Position=0;string v=BitConverter.ToString(sha.ComputeHash(stream)).Replace("-","").ToLowerInvariant();stream.Position=0;return v;}}
+  internal static string ReadSmall(string path,int bound){NoRedirect(path);using(var f=new FileStream(path,FileMode.Open,FileAccess.Read,FileShare.Read)){if(f.Length>bound)throw new IOException("app_bootstrap_material_too_large");using(var r=new StreamReader(f))return r.ReadToEnd();}}
+  internal static void NoRedirect(string path){string full=Path.GetFullPath(path);for(string current=full;!String.IsNullOrEmpty(current);current=Path.GetDirectoryName(current)){if((File.GetAttributes(current)&FileAttributes.ReparsePoint)!=0)throw new IOException("app_redirected_path");}}
+  internal NativeBootstrap(string root){
+   Root=Path.GetFullPath(root);var m=Json.Codec.DeserializeObject(ReadSmall(Path.Combine(Root,"windows-runtime.json"),16384));var n=Json.Get(m,"nativeRuntime");
+   if(Convert.ToInt32(Json.Get(m,"schema"))!=1||Convert.ToInt32(Json.Get(n,"schema"))!=1||Json.Str(n,"cli")!="native/bin/styx.exe"||Json.Str(n,"payload")!="native"||Json.Str(n,"publisher")!="native-publisher.pem"||Json.Str(n,"publisherSpkiSha256")!=PublisherPin)throw new IOException("app_native_runtime_required");
+   Cli=Path.Combine(Root,"native","bin","styx.exe");Payload=Path.Combine(Root,"native");Publisher=Path.Combine(Root,"native-publisher.pem");CliSha=Json.Str(n,"cliSha256");ManifestSha=Json.Str(n,"manifestSha256");
+   if(!System.Text.RegularExpressions.Regex.IsMatch(CliSha,"\\A[a-f0-9]{64}\\z")||!System.Text.RegularExpressions.Regex.IsMatch(ManifestSha,"\\A[a-f0-9]{64}\\z"))throw new IOException("app_native_hash_required");
+   NoRedirect(Cli);cliPin=new FileStream(Cli,FileMode.Open,FileAccess.Read,FileShare.Read);try{Validate();}catch{cliPin.Dispose();throw;}
+  }
+  internal void Validate(){NoRedirect(Cli);NoRedirect(Payload);NoRedirect(Publisher);if(Hash(cliPin)!=CliSha)throw new IOException("app_native_cli_changed");using(var f=new FileStream(Path.Combine(Payload,"manifest.json"),FileMode.Open,FileAccess.Read,FileShare.Read))if(Hash(f)!=ManifestSha)throw new IOException("app_native_manifest_changed");}
+  internal ProcessStartInfo StartInfo(string arguments){Validate();var info=new ProcessStartInfo(Cli,arguments){WorkingDirectory=Root,UseShellExecute=false,CreateNoWindow=true,RedirectStandardOutput=true,RedirectStandardError=true};info.EnvironmentVariables.Remove("NODE_OPTIONS");info.EnvironmentVariables.Remove("NODE_PATH");info.EnvironmentVariables.Remove("STYX_NATIVE_STATE");info.EnvironmentVariables.Remove("STYX_NATIVE_RESOURCES");return info;}
+  internal static string Quote(string value){if(value.IndexOf('"')>=0||value.IndexOf('\0')>=0||value.EndsWith("\\"))throw new IOException("app_fixed_path_invalid");return "\""+value+"\"";}
+  public void Dispose(){cliPin.Dispose();}
+ }
+ static class PrivateAppFiles {
+  static readonly System.Security.Principal.SecurityIdentifier User=System.Security.Principal.WindowsIdentity.GetCurrent().User;
+  static readonly System.Security.Principal.SecurityIdentifier SystemSid=new System.Security.Principal.SecurityIdentifier("S-1-5-18"),Admins=new System.Security.Principal.SecurityIdentifier("S-1-5-32-544");
+  static void Validate(string path,bool directory){NativeBootstrap.NoRedirect(path);System.Security.AccessControl.FileSystemSecurity security=directory?(System.Security.AccessControl.FileSystemSecurity)Directory.GetAccessControl(path):File.GetAccessControl(path);if(!User.Equals(security.GetOwner(typeof(System.Security.Principal.SecurityIdentifier)))||!security.AreAccessRulesProtected)throw new IOException("app_private_owner_required");foreach(System.Security.AccessControl.FileSystemAccessRule rule in security.GetAccessRules(true,true,typeof(System.Security.Principal.SecurityIdentifier))){var sid=(System.Security.Principal.SecurityIdentifier)rule.IdentityReference;if(!sid.Equals(User)&&!sid.Equals(SystemSid)&&!sid.Equals(Admins))throw new IOException("app_private_acl_required");}}
+  static System.Security.AccessControl.DirectorySecurity DirectoryAcl(){var acl=new System.Security.AccessControl.DirectorySecurity();acl.SetOwner(User);acl.SetAccessRuleProtection(true,false);foreach(var sid in new[]{User,SystemSid,Admins})acl.AddAccessRule(new System.Security.AccessControl.FileSystemAccessRule(sid,System.Security.AccessControl.FileSystemRights.FullControl,System.Security.AccessControl.InheritanceFlags.ContainerInherit|System.Security.AccessControl.InheritanceFlags.ObjectInherit,System.Security.AccessControl.PropagationFlags.None,System.Security.AccessControl.AccessControlType.Allow));return acl;}
+  static void DirectoryPrivate(string path){if(File.Exists(path))throw new IOException("app_private_directory_required");if(!Directory.Exists(path)){string parent=Path.GetDirectoryName(path);if(!Directory.Exists(parent))throw new IOException("app_private_parent_missing");NativeBootstrap.NoRedirect(parent);Directory.CreateDirectory(path,DirectoryAcl());}Validate(path,true);}
+  internal static string Prepare(string state,string selection){
+   // Never adopt or mutate original legacy profiles. The new fixed namespace is
+   // fresh-only; an existing native profile is reopened by Rust, never reset.
+   foreach(string name in new[]{"deployment.json","state.json","host","gateway","device","service.json",".styx-native-root-v1.json"})if(File.Exists(Path.Combine(state,name))||Directory.Exists(Path.Combine(state,name)))throw new NativeOperationException("app_legacy_migration_required");
+   string defaultState=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"StyxPreview","WindowsFirst");if(String.Equals(state,defaultState,StringComparison.OrdinalIgnoreCase)&&!Directory.Exists(Path.GetDirectoryName(state)))DirectoryPrivate(Path.GetDirectoryName(state));
+   DirectoryPrivate(state);string container=Path.Combine(state,"native-rust-host-v1");bool known=Directory.Exists(container);if(known&&!File.Exists(Path.Combine(container,"runtime-selection.json")))throw new NativeOperationException("app_private_container_recovery_required");DirectoryPrivate(container);string path=Path.Combine(container,"runtime-selection.json");
+   if(!File.Exists(path)){
+    var acl=new System.Security.AccessControl.FileSecurity();acl.SetOwner(User);acl.SetAccessRuleProtection(true,false);foreach(var sid in new[]{User,SystemSid,Admins})acl.AddAccessRule(new System.Security.AccessControl.FileSystemAccessRule(sid,System.Security.AccessControl.FileSystemRights.FullControl,System.Security.AccessControl.AccessControlType.Allow));
+    using(var f=new FileStream(path,FileMode.CreateNew,System.Security.AccessControl.FileSystemRights.Read|System.Security.AccessControl.FileSystemRights.Write,FileShare.Read,4096,FileOptions.None,acl)){byte[] raw=new System.Text.UTF8Encoding(false,true).GetBytes(selection);f.Write(raw,0,raw.Length);f.Flush(true);}
+   }
+   Validate(path,false);if(NativeBootstrap.ReadSmall(path,16384)!=selection)throw new NativeOperationException("app_runtime_selection_changed");Validate(container,true);return container;
+  }
+ }
  sealed class Core:IDisposable {
-  readonly SemaphoreSlim gate=new SemaphoreSlim(1,1); Process child;CancellationTokenRegistration cancellationRegistration;int sequence;
-  internal static string VerifiedNodeBinary(string root){
-   var codec=new JavaScriptSerializer();var manifest=codec.DeserializeObject(File.ReadAllText(Path.Combine(root,"windows-runtime.json")));
-   string binary=Path.Combine(root,"runtime","node.exe"),expected=Json.Str(manifest,"node","sha256");
-   using(var sha=System.Security.Cryptography.SHA256.Create())using(var stream=File.OpenRead(binary)){string actual=BitConverter.ToString(sha.ComputeHash(stream)).Replace("-","").ToLowerInvariant();if(actual!=expected)throw new IOException();}return binary;
-  }
-  internal static ProcessStartInfo NodeStartInfo(string root,string arguments){
-   var info=new ProcessStartInfo(VerifiedNodeBinary(root),arguments);info.WorkingDirectory=root;info.UseShellExecute=false;info.CreateNoWindow=true;info.RedirectStandardOutput=true;info.RedirectStandardError=true;
-   info.EnvironmentVariables.Remove("NODE_OPTIONS");info.EnvironmentVariables.Remove("NODE_PATH");return info;
-  }
-  internal Core(string root,string state,CancellationToken cancellation){
-   var info=NodeStartInfo(root,"\""+Path.Combine(root,"vnext","host","windows","core-bridge.mjs")+"\"");info.RedirectStandardInput=true;
-   info.EnvironmentVariables["STYX_NATIVE_RESOURCES"]=root;info.EnvironmentVariables["STYX_NATIVE_STATE"]=state;
-   child=new Process { StartInfo=info };child.ErrorDataReceived+=(s,e)=>{};try{cancellation.ThrowIfCancellationRequested();child.Start();child.BeginErrorReadLine();cancellationRegistration=cancellation.Register(Dispose);cancellation.ThrowIfCancellationRequested();}catch{Dispose();throw;}
+  readonly SemaphoreSlim gate=new SemaphoreSlim(1,1);readonly NativeBootstrap bootstrap;readonly FileStream selectionPin;Process child;Task stderrDrain;Task<string> pendingRead;CancellationTokenRegistration cancellationRegistration;int sequence;int closed;bool childStarted;
+  internal bool CleanupConfirmed {get;private set;}
+  internal static async Task<string> ReadLineBounded(StreamReader reader,int limit){var text=new System.Text.StringBuilder();var b=new char[1];while(await reader.ReadAsync(b,0,1).ConfigureAwait(false)!=0){if(b[0]=='\n')return text.ToString().TrimEnd('\r');if(text.Length>=limit)throw new IOException("app_frame_too_large");text.Append(b[0]);}if(text.Length!=0)throw new IOException("app_incomplete_frame");return null;}
+  internal static async Task Drain(StreamReader reader){var b=new char[4096];while(await reader.ReadAsync(b,0,b.Length).ConfigureAwait(false)!=0){}}
+  internal Core(NativeBootstrap verified,string state,CancellationToken cancellation){
+   bootstrap=verified;string container=PrivateAppFiles.Prepare(state,verified.Selection);string selection=Path.Combine(container,"runtime-selection.json");selectionPin=new FileStream(selection,FileMode.Open,FileAccess.Read,FileShare.Read);
+   try{var info=bootstrap.StartInfo("__app-core --state-dir "+NativeBootstrap.Quote(Path.Combine(container,"profile"))+" --runtime-selection-file "+NativeBootstrap.Quote(selection));info.RedirectStandardInput=true;
+   child=new Process {StartInfo=info};cancellation.ThrowIfCancellationRequested();if(!child.Start())throw new IOException("app_child_not_started");childStarted=true;stderrDrain=Drain(child.StandardError);cancellationRegistration=cancellation.Register(Dispose);cancellation.ThrowIfCancellationRequested();}catch{Dispose();throw;}
   }
   internal async Task<object> Call(string operation,Dictionary<string,object> input){
-   await gate.WaitAsync();try{if(child==null||child.HasExited)throw new IOException();int id=++sequence;
-    await child.StandardInput.WriteLineAsync(Json.Codec.Serialize(Json.Obj("schema",1,"id",id,"operation",operation,"input",input)));await child.StandardInput.FlushAsync();
-    // Mutations are not replayed after a lost response. The user returns to Settings.
-    var read=child.StandardOutput.ReadLineAsync();if(operation!="prepare"&&operation!="runtimeUpgradePrepare"&&operation!="runtimeUpgradeLaunch"&&operation!="runtimeUpgradeRollback"&&await Task.WhenAny(read,Task.Delay(150000))!=read){Dispose();throw new IOException();}
-    var line=await read;if(line==null||line.Length>2097152)throw new IOException();var response=Json.Codec.DeserializeObject(line);
-    if(Convert.ToInt32(Json.Get(response,"id"))!=id)throw new IOException();if(!Json.Yes(response,"ok"))throw new NativeOperationException(Json.Str(response,"error"),Json.Get(response,"budget"),Json.Yes(response,"preflight"));return Json.Get(response,"result");
-   }finally{gate.Release();}
+   await gate.WaitAsync();try{var p=child;if(Volatile.Read(ref closed)!=0||p==null||p.HasExited||sequence==Int32.MaxValue)throw new IOException("app_core_unavailable");int id=++sequence;string request=Json.Codec.Serialize(Json.Obj("schema",1,"id",id,"operation",operation,"input",input));if(request.Length>65536)throw new IOException("app_request_too_large");
+    await p.StandardInput.WriteLineAsync(request);await p.StandardInput.FlushAsync();pendingRead=ReadLineBounded(p.StandardOutput,2097152);if(await Task.WhenAny(pendingRead,Task.Delay(150000))!=pendingRead){Dispose();throw new IOException("app_result_unknown_no_replay");}
+    string line=await pendingRead;pendingRead=null;if(line==null||Volatile.Read(ref closed)!=0)throw new IOException("app_result_unknown_no_replay");var response=Json.Codec.DeserializeObject(line);if(Convert.ToInt32(Json.Get(response,"id"))!=id){Dispose();throw new IOException("app_correlation_unknown_no_replay");}if(!Json.Yes(response,"ok"))throw new NativeOperationException(Json.Str(response,"error"));return Json.Get(response,"result");
+   }catch(NativeOperationException){throw;}catch{Dispose();throw new IOException("app_result_unknown_no_replay");}finally{gate.Release();}
   }
-  public void Dispose(){var p=Interlocked.Exchange(ref child,null);if(p==null)return;try{p.StandardInput.Close();if(!p.WaitForExit(10000))p.Kill();}catch{}p.Dispose();cancellationRegistration.Dispose();}
+  public void Dispose(){
+   if(Interlocked.Exchange(ref closed,1)!=0)return;var p=child;bool clean=true;if(p!=null&&childStarted){try{p.StandardInput.Close();}catch{clean=false;}try{if(!p.WaitForExit(10000)){clean=false;try{p.Kill();}catch{}}p.WaitForExit();}catch{clean=false;throw new IOException("app_child_cleanup_unknown");}
+    try{var reading=pendingRead;if(reading!=null)reading.GetAwaiter().GetResult();Drain(p.StandardOutput).GetAwaiter().GetResult();if(stderrDrain!=null)stderrDrain.GetAwaiter().GetResult();}catch{clean=false;}CleanupConfirmed=clean&&p.ExitCode==0;p.Dispose();child=null;
+   }else if(p!=null){p.Dispose();child=null;}selectionPin.Dispose();bootstrap.Dispose();cancellationRegistration.Dispose();
+  }
  }
- // The window is visible before this owned child scans the complete package.
- // Hash consistency is not a claim of Windows publisher authentication.
  sealed class PackageProgress {internal string Phase;internal int Completed,Total;}
  sealed class VerificationTiming {
   readonly Stopwatch clock=Stopwatch.StartNew();readonly List<object> progress=new List<object>();double nodeReady=-1,childStarted=-1,childExited=-1;
-  internal void NodeReady(){nodeReady=clock.Elapsed.TotalMilliseconds;}
+  internal void BootstrapReady(){nodeReady=clock.Elapsed.TotalMilliseconds;}
   internal void ChildStarted(){childStarted=clock.Elapsed.TotalMilliseconds;}
   internal void ChildExited(){childExited=clock.Elapsed.TotalMilliseconds;}
   internal void Record(string phase,int completed,int total){if(progress.Count<160)progress.Add(Json.Obj("phase",phase,"completed",completed,"total",total,"elapsedMilliseconds",clock.Elapsed.TotalMilliseconds));}
-  internal object Snapshot(){return Json.Obj("nodeReadyMilliseconds",nodeReady,"childStartedMilliseconds",childStarted,"childExitedMilliseconds",childExited,"progress",progress.ToArray());}
+  internal object Snapshot(){return Json.Obj("schema",2,"bootstrapReadyMilliseconds",nodeReady,"childStartedMilliseconds",childStarted,"childExitedMilliseconds",childExited,"progress",progress.ToArray());}
  }
  static class PackageVerifier {
-  internal static void Verify(string root,IProgress<PackageProgress> progress,CancellationToken cancellation,VerificationTiming timing){
-   cancellation.ThrowIfCancellationRequested();var info=Core.NodeStartInfo(root,"\""+Path.Combine(root,"install-windows-preview.mjs")+"\" verify --progress");timing.NodeReady();
-   using(var child=new Process {StartInfo=info}){
-    child.ErrorDataReceived+=(s,e)=>{};cancellation.ThrowIfCancellationRequested();child.Start();timing.ChildStarted();child.BeginErrorReadLine();
-    using(cancellation.Register(()=>{try{if(!child.HasExited)child.Kill();}catch{}})){
-     var codec=new JavaScriptSerializer {MaxJsonLength=4096};bool verified=false;string line;
-     try{
-      while((line=child.StandardOutput.ReadLine())!=null){
-       cancellation.ThrowIfCancellationRequested();if(line.Length>4096||verified)throw new IOException();var item=codec.DeserializeObject(line);string status=Json.Str(item,"status");
-       if(status=="package_integrity_verified"){if(!Json.Yes(item,"compiled"))throw new IOException();verified=true;}
-       else if(status=="verifying_package"){
-        var completed=Json.Get(item,"completed");var total=Json.Get(item,"total");string phase=Json.Str(item,"phase");
-        if(!(completed is int)||!(total is int)||(int)completed<0||(int)total<1||(int)completed>(int)total||(phase!="files"&&phase!="signed_host"))throw new IOException();
-        timing.Record(phase,(int)completed,(int)total);progress.Report(new PackageProgress {Phase=phase,Completed=(int)completed,Total=(int)total});
-       }else throw new IOException();
-      }
-      child.WaitForExit();timing.ChildExited();cancellation.ThrowIfCancellationRequested();if(child.ExitCode!=0||!verified)throw new IOException();
-     }finally{try{if(!child.HasExited){child.Kill();child.WaitForExit();}}catch{}}
-    }
-   }
+  static string ReadOutput(Task<string> reading,Stopwatch clock){int remaining=150000-(int)Math.Min(150000,clock.ElapsedMilliseconds);if(remaining<=0||Task.WaitAny(new Task[]{reading},remaining)!=0)throw new IOException("app_verification_timeout");return reading.GetAwaiter().GetResult();}
+  internal static NativeBootstrap Verify(string root,IProgress<PackageProgress> progress,CancellationToken cancellation,VerificationTiming timing){
+   cancellation.ThrowIfCancellationRequested();var runtime=new NativeBootstrap(root);Process child=null;Task stderr=null;Task<string> reading=null;CancellationTokenRegistration stop=default(CancellationTokenRegistration);bool transferred=false,started=false;try{
+    var info=runtime.StartInfo("release verify --payload-dir "+NativeBootstrap.Quote(runtime.Payload)+" --publisher-file "+NativeBootstrap.Quote(runtime.Publisher)+" --expected-publisher "+NativeBootstrap.PublisherPin+" --json --runtime-selection");timing.BootstrapReady();timing.Record("files",0,1);progress.Report(new PackageProgress {Phase="files",Completed=0,Total=1});child=new Process {StartInfo=info};if(!child.Start())throw new IOException("app_verify_child_not_started");started=true;timing.ChildStarted();stderr=Core.Drain(child.StandardError);stop=cancellation.Register(()=>{try{if(!child.HasExited)child.Kill();child.WaitForExit();if(stderr!=null)stderr.GetAwaiter().GetResult();}catch{}});var clock=Stopwatch.StartNew();
+    reading=Core.ReadLineBounded(child.StandardOutput,16384);string line=ReadOutput(reading,clock);reading=Core.ReadLineBounded(child.StandardOutput,16384);string extra=ReadOutput(reading,clock);if(!child.WaitForExit(Math.Max(1,150000-(int)Math.Min(150000,clock.ElapsedMilliseconds))))throw new IOException("app_verification_timeout");child.WaitForExit();stderr.GetAwaiter().GetResult();timing.ChildExited();cancellation.ThrowIfCancellationRequested();if(child.ExitCode!=0||line==null||extra!=null)throw new IOException("app_native_release_unverified");var selection=Json.Codec.DeserializeObject(line);if(Convert.ToInt32(Json.Get(selection,"schema"))!=1||Json.Str(selection,"manifest_sha256")!=runtime.ManifestSha||Json.Str(selection,"publisher_spki_sha256")!=NativeBootstrap.PublisherPin||Json.Str(selection,"payload_path")!=runtime.Payload||Json.Str(selection,"publisher_file")!=runtime.Publisher)throw new IOException("app_native_selection_mismatch");
+    runtime.Validate();runtime.Selection=line+"\n";timing.Record("files",1,1);progress.Report(new PackageProgress {Phase="files",Completed=1,Total=1});transferred=true;return runtime;
+   }finally{stop.Dispose();if(child!=null){try{if(started){if(!child.HasExited){child.Kill();child.WaitForExit();}child.WaitForExit();if(reading!=null){try{reading.GetAwaiter().GetResult();}catch{}}if(stderr!=null)stderr.GetAwaiter().GetResult();}}finally{child.Dispose();}}if(!transferred)runtime.Dispose();}
   }
  }
  sealed class StyxContext:ApplicationContext {
@@ -84,7 +104,9 @@ namespace StyxNative {
   VerificationTiming verificationTiming;Core core;bool busy,closing,starting,startupHostUpdateAttempted,actionsGatedDuringStartup=true;int mutationRevision,progressEvents;long firstPaintTicks=-1,verificationStartedTicks=-1,verifiedTicks=-1,readyTicks=-1;object snapshot;Task<object> observation;TaskCompletionSource<bool> mutationDone;readonly Label message;
   internal int ResultCode=2;
   internal object CurrentStatus { get { return snapshot; } }
-  internal bool ManagementOnly { get { return Json.Yes(snapshot,"loadingDetails"); } }
+  internal bool RustHost {get{return Json.Str(snapshot,"mode")=="rust_host";}}
+  internal bool Supports(string operation){var values=Json.Get(snapshot,"supportedOperations") as object[];if(values==null)return false;foreach(var item in values)if(Equals(item,operation))return true;return false;}
+  internal bool ManagementOnly { get { return !RustHost&&Json.Yes(snapshot,"loadingDetails"); } }
   internal bool MutationBusy { get { return busy||starting; } }
   [DllImport("user32.dll")]static extern bool DestroyIcon(IntPtr hIcon);
   internal static Icon BrandIcon(string file){using(var original=Image.FromFile(file))using(var bitmap=new Bitmap(original,new Size(32,32))){IntPtr handle=bitmap.GetHicon();try{return (Icon)Icon.FromHandle(handle).Clone();}finally{DestroyIcon(handle);}}}
@@ -107,22 +129,23 @@ namespace StyxNative {
   }
   internal void RecordFirstPaint(){if(firstPaintTicks<0)firstPaintTicks=startupClock.ElapsedTicks;}
   internal async Task InitializeCore(){
-   if(closing||core!=null)return;starting=true;settings.Startup("Checking app files…",true,false);message.Text="Checking app files…";Core pending=null;bool packageVerified=false;
+   if(closing||core!=null)return;starting=true;settings.Startup("Checking app files…",true,false);message.Text="Checking app files…";Core pending=null;NativeBootstrap verifiedRuntime=null;string startupFailure="";bool packageVerified=false;
    try{
     actionsGatedDuringStartup&=settings.StartupActionsGated;if(!actionsGatedDuringStartup)throw new IOException();verificationStartedTicks=startupClock.ElapsedTicks;verificationTiming=new VerificationTiming();
     var progress=new Progress<PackageProgress>(value=>{if(closing||!starting)return;progressEvents++;actionsGatedDuringStartup&=settings.StartupActionsGated;settings.Startup(value.Phase=="files"?"Checking app files… "+value.Completed+" / "+value.Total:"Checking components…",true,false);});
-    await Task.Run(()=>PackageVerifier.Verify(root,progress,startupCancellation.Token,verificationTiming));packageVerified=true;verifiedTicks=startupClock.ElapsedTicks;
-    if(closing)return;settings.Startup("Opening connection settings…",true,false);
-    pending=await Task.Run(()=>new Core(root,state,startupCancellation.Token));if(closing){pending.Dispose();pending=null;return;}
+    verifiedRuntime=await Task.Run(()=>PackageVerifier.Verify(root,progress,startupCancellation.Token,verificationTiming));packageVerified=true;verifiedTicks=startupClock.ElapsedTicks;
+    if(closing){verifiedRuntime.Dispose();return;}settings.Startup("Opening connection settings…",true,false);
+    pending=await Task.Run(()=>new Core(verifiedRuntime,state,startupCancellation.Token));if(closing){pending.Dispose();pending=null;return;}
     // Do not enable any action until the real Core answers its first status read.
     var latest=await pending.Call("startupStatus",Json.Obj());if(closing){pending.Dispose();pending=null;return;}
-    core=pending;pending=null;snapshot=latest;starting=false;readyTicks=startupClock.ElapsedTicks;PublishStatus();settings.Startup("",false,false);ResultCode=0;
+    if(Json.Str(latest,"mode")!="rust_host"||Json.Get(latest,"supportedOperations") as object[]==null)throw new IOException("app_rust_protocol_required");core=pending;pending=null;snapshot=latest;starting=false;readyTicks=startupClock.ElapsedTicks;PublishStatus();settings.Startup("",false,false);ResultCode=0;
     if(ManagementOnly){if(startupTest)await ObserveStatus();else LoadInitialDetails();}
     if(startupTest){WriteStartupReceipt(true,packageVerified);Quit();}else RecordStartupDiagnostics();return;
-   }catch{}
+   }catch(NativeOperationException error){startupFailure=error.Code;}catch{}
    // Framework's C# compiler cannot await inside catch. Dispose the failed
    // owned child here without blocking the native window or replaying work.
-   var failed=pending??core;core=null;if(failed!=null)await Task.Run(()=>failed.Dispose());if(closing)return;starting=false;
+   var failed=pending??core;core=null;if(failed!=null)await Task.Run(()=>failed.Dispose());else if(verifiedRuntime!=null)verifiedRuntime.Dispose();if(closing)return;starting=false;
+   if(startupFailure=="app_legacy_migration_required"){message.Text="This computer needs an explicit migration. Its original identity and settings were not changed.";settings.Startup(message.Text,false,true);return;}
    message.Text="Styx needs attention. Open Settings to retry.";
    settings.Startup(packageVerified?"Connection settings could not open. Retry to reconnect; your settings are retained.":"Styx could not finish checking the app. Keep the app folder intact, then retry.",false,true);
    if(startupTest){WriteStartupReceipt(false,packageVerified);Quit();}
@@ -130,7 +153,7 @@ namespace StyxNative {
   object StartupTiming(){return Json.Obj("schema",1,"verification",verificationTiming.Snapshot(),"startup",Json.Obj("verificationStartedMilliseconds",(double)verificationStartedTicks*1000/Stopwatch.Frequency,"verifiedMilliseconds",(double)verifiedTicks*1000/Stopwatch.Frequency,"readyMilliseconds",(double)readyTicks*1000/Stopwatch.Frequency));}
   // Optional local diagnostics cannot delay enablement, fail startup, or execute
   // an unverified package. Before Core is trusted, timings remain in memory.
-  async void RecordStartupDiagnostics(){try{if(core!=null)await Call("startupDiagnostics",(Dictionary<string,object>)StartupTiming());}catch{}}
+  async void RecordStartupDiagnostics(){if(RustHost)return;try{if(core!=null)await Call("startupDiagnostics",(Dictionary<string,object>)StartupTiming());}catch{}}
   void WriteStartupReceipt(bool success,bool packageVerified){
    bool paintedFirst=firstPaintTicks>=0&&verificationStartedTicks>=firstPaintTicks;
    bool gated=core==null||verifiedTicks>=verificationStartedTicks&&readyTicks>=verifiedTicks;
@@ -148,7 +171,7 @@ namespace StyxNative {
   internal async Task Run(Func<Task> action,string pending="Working…",string failure="The operation could not be confirmed. Refresh to review current state. Completed steps are retained; an interrupted operation is not automatically repeated."){
    if(busy||starting||core==null)return;string previousMessage=message.Text;busy=true;mutationDone=new TaskCompletionSource<bool>();mutationRevision++;settings.Enabled=false;message.Text=pending;settings.Feedback(pending);
    try{var reading=observation;if(reading!=null){try{await reading;}catch{}if(observation==reading)observation=null;}await action();if(settings.HasFeedback(pending))settings.Feedback("Operation completed. Review the current connection and test evidence below.");}
-   catch(Exception error){string text=failure;var native=error as NativeOperationException;if(native!=null&&native.Code=="host_payload_insufficient_space")text=SpaceFeedback(native.Budget,native.Preflight);else if(native!=null&&native.Code=="windows_native_app_binding_required")text="The desktop test could not start. This package could not verify the current native Styx app. Your settings are retained.";else if(native!=null&&native.Code=="desktop_acceptance_native_app_changed")text="The native Styx app changed during this desktop test. Create a new test in this app before continuing.";else if(native!=null&&native.Code=="work_in_progress")text="A task is still running. Wait for it to finish before quitting or updating Styx.";else if(native!=null&&native.Code=="work_state_unknown")text="Styx could not confirm whether tasks are running. Keep it open and try again after checking the connection.";message.Text="Connection needs attention. Open Settings to review the last result.";settings.Feedback(text);}
+   catch(Exception error){string text=failure;var native=error as NativeOperationException;if(native!=null&&native.Code=="app_system_trust_not_supported")text="This native join currently requires an explicit Gateway CA in the invitation. System-trust-only joining is not supported; no CA or approval was fabricated.";else if(native!=null&&native.Code=="app_operation_not_supported")text="This operation is unavailable in the native Host slice. Existing settings were retained.";else if(native!=null&&native.Code=="host_payload_insufficient_space")text=SpaceFeedback(native.Budget,native.Preflight);else if(native!=null&&native.Code=="windows_native_app_binding_required")text="The desktop test could not start. This package could not verify the current native Styx app. Your settings are retained.";else if(native!=null&&native.Code=="desktop_acceptance_native_app_changed")text="The native Styx app changed during this desktop test. Create a new test in this app before continuing.";else if(native!=null&&native.Code=="work_in_progress")text="A task is still running. Wait for it to finish before quitting or updating Styx.";else if(native!=null&&native.Code=="work_state_unknown")text="Styx could not confirm whether tasks are running. Keep it open and try again after checking the connection.";message.Text="Connection needs attention. Open Settings to review the last result.";settings.Feedback(text);}
    finally{if(message.Text==pending)message.Text=previousMessage;settings.Enabled=true;busy=false;mutationDone.TrySetResult(true);}
    // A mutation invalidates an in-flight startup observation. Resume only that
    // read after settling; never replay the mutation or block the ready controls.
@@ -157,7 +180,7 @@ namespace StyxNative {
   internal async void FinishInviting(){if(core==null)return;try{while(busy)await mutationDone.Task;await Run(async()=>{await Call("closePairing");},"Closing invitation…","The pairing window could not be confirmed closed. Review the connection; the invitation retains its original expiry.");}catch{settings.Feedback("The pairing window could not be confirmed closed. Review the connection before inviting again.");}}
   internal async Task Read(Func<Task> action){try{await action();}catch{settings.ObservationFailed("This information could not be refreshed. Your entries and the last confirmed state are retained.");}}
   internal Task Reconnect(){return Run(async()=>{await Call("connect");await RefreshAfterMutation();settings.Feedback(ReconnectResult(snapshot));},"Reconnecting to this computer…","Reconnect could not be confirmed. Your settings are retained. Refresh status before retrying.");}
-  internal static string ReconnectResult(object data){string state=Json.Str(data,"status","foreground","status"),exec=Json.Str(data,"status","foreground","execConnection");return state=="connected"&&exec=="connected"?"Reconnected. The Exec transport is online; tool execution and your ChatGPT account confirmation are checked separately.":state=="started"?"Reconnect requested. The connection is still starting. Refresh status to confirm the result.":"Reconnect has not established an Exec connection. Review the current state before retrying.";}
+  internal static string ReconnectResult(object data){bool native=Json.Str(data,"mode")=="rust_host";string state=native?Json.Str(data,"foreground","status"):Json.Str(data,"status","foreground","status"),exec=native?Json.Str(data,"foreground","execConnection"):Json.Str(data,"status","foreground","execConnection");return state=="connected"&&exec=="connected"?"Reconnected. The Exec transport is online; tool execution and your ChatGPT account confirmation are checked separately.":state=="started"?"Reconnect requested. The connection is still starting. Refresh status to confirm the result.":"Reconnect has not established an Exec connection. Review the current state before retrying.";}
   internal async Task Refresh(){if(busy||starting||core==null)return;int revision=mutationRevision;try{await ObserveStatus();}catch{if(revision==mutationRevision)settings.ObservationFailed("Connection status could not refresh. You can keep editing and retry. Your last confirmed state is retained.");}}
   internal Task RefreshAfterMutation(){return ObserveStatus();}
   internal void ApplyPreparationResult(object latest){
@@ -171,12 +194,14 @@ namespace StyxNative {
    await CompleteStartupUpdate();
   }
   async Task CompleteStartupUpdate(){
+   if(RustHost)return;
    if(closing||busy||core==null||startupHostUpdateAttempted||Json.Str(snapshot,"status","nativeStartup","status")!="reconciliation_required"||Json.Str(snapshot,"status","nativeStartup","reason")!="host_payload_update_required"||!Json.Yes(snapshot,"status","nativeStartup","automaticUpdate"))return;
    // Core owns the decision. This launch attempts it once; failure remains an
    // explicit recovery action, including when later status reads say to update.
    startupHostUpdateAttempted=true;await UpdateRuntime(false);
   }
   void PublishStatus(){
+   if(RustHost){string phase=Json.Str(snapshot,"foreground","status"),nativeExec=Json.Str(snapshot,"foreground","execConnection");message.Text=phase=="connected"&&nativeExec=="connected"?"Connected to this computer. Exec transport is online; tool execution is checked separately.":Json.Yes(snapshot,"admission_fenced")?"A result or cleanup needs review. Operations are fenced; no action is replayed.":"Connection is paused or awaiting approval. Open Settings to review.";tray.Text=phase=="connected"&&nativeExec=="connected"?"Styx — connected":"Styx — connection settings";settings.ShowStatus(snapshot);return;}
    if(Json.Yes(snapshot,"status","joinRecovery","rollbackRequired")){message.Text="Joining needs recovery. Open Settings to continue.";tray.Text="Styx — joining needs recovery";settings.ShowPage("join-interrupted");return;}
    if(ManagementOnly){message.Text="Reading connection settings… Component update and recovery are available.";tray.Text="Styx — connection not checked";settings.ShowPage("component-start");return;}
    if(Json.Str(snapshot,"status","nativeStartup","status")=="reconciliation_required"&&Json.Str(snapshot,"status","nativeStartup","reason").StartsWith("host_payload_")){message.Text="The installed Styx update needs its components reconciled.";tray.Text="Styx — component update";settings.ShowPage("update-recovery");return;}
@@ -185,7 +210,7 @@ namespace StyxNative {
    message.Text=f=="connected"&&exec=="connected"?"Connected to this computer.\n\nExec transport is online. Tool execution and ChatGPT account confirmation are shown separately in Settings.":f=="started"?"Connecting…\n\nKeep Styx open while this computer connects.":"Connection is paused or unavailable.\n\nOpen Settings to review, prepare or reconnect.";
    tray.Text=f=="connected"&&exec=="connected"?"Styx — connected":"Styx — needs attention";settings.ShowStatus(snapshot);
   }
-  internal async Task<object> Call(string op,Dictionary<string,object> input=null){if(core==null)throw new IOException();return await core.Call(op,input??Json.Obj());}
+  internal async Task<object> Call(string op,Dictionary<string,object> input=null){if(core==null)throw new IOException();if(RustHost&&!Supports(op))throw new NativeOperationException("app_operation_not_supported");return await core.Call(op,input??Json.Obj());}
   internal static string SpaceFeedback(object budget,bool preflight){
    string text=preflight?"Not enough disk space. The upgrade has not started.":"Not enough disk space. The update remains incomplete; review recovery before continuing.";
    var volumes=Json.Get(budget,"volumes") as object[];
@@ -218,7 +243,7 @@ namespace StyxNative {
    if(core==null){Quit();return Task.FromResult(0);}
    OpenSettings();return Run(async()=>{await AdmitQuit();settings.BeginInvoke(new Action(Quit));},"Checking running tasks…","Styx could not confirm that it is ready to quit. Keep it open and try again after checking the connection.");
   }
-  internal void Quit(){if(closing)return;closing=true;startupTimer.Stop();startupTimer.Dispose();startupCancellation.Cancel();tray.Visible=false;settings.Close();settings.Dispose();panel.Close();if(core!=null)core.Dispose();tray.Dispose();icon.Dispose();ExitThread();}
+  internal void Quit(){if(closing)return;closing=true;if(core!=null){core.Dispose();if(!core.CleanupConfirmed){closing=false;settings.Feedback("The owned Rust process did not exit cleanly. No successful quit receipt is claimed; retain this result for recovery.");ResultCode=4;return;}}startupTimer.Stop();startupTimer.Dispose();startupCancellation.Cancel();tray.Visible=false;settings.Close();settings.Dispose();panel.Close();tray.Dispose();icon.Dispose();ExitThread();}
   internal void Verify(){var budget=Json.Obj("volumes",new object[]{Json.Obj("requiredBytes",2147483648d,"availableBytes",1073741824d)});if(!SpaceFeedback(budget,true).Contains("upgrade has not started")||SpaceFeedback(budget,false).Contains("upgrade has not started")||!SpaceFeedback(budget,true).Contains("Required:"))throw new Exception("space_feedback_failed");if(panel.Controls.Count!=1||settings.Controls.Count!=1||icon.Width<16)throw new Exception("native_shell_failed");settings.Verify();}
  }
  sealed class Settings:Form {
@@ -282,6 +307,7 @@ namespace StyxNative {
   async Task ReadLogin(){ApplyLogin(await owner.Call("appLifecycle"));}
   void ApplyLogin(object response){string state=Json.Str(response,"lifecycle","status");Feedback(state=="not_registered"?"Login startup is off.":state=="registered_unverified"?"Login startup is registered. Windows can disable it independently; check Windows startup settings.":"The last startup change is not confirmed. Check Windows startup settings, or choose Enable or Disable again.");}
   internal void ShowPage(string name){if(Json.Yes(owner.CurrentStatus,"status","joinRecovery","rollbackRequired"))name="join-interrupted";if(owner.ManagementOnly&&name!="update-recovery"){if(name!="component-start")requestedPage=name;name="component-start";}if(InvitationPage(page)&&!InvitationPage(name))owner.FinishInviting();page=name;updateRuntime=null;desktopInput=null;desktopInputLabel=null;challengePrompt=null;confirmChat=null;var previous=new Control[content.Controls.Count];content.Controls.CopyTo(previous,0);foreach(var item in previous)if(item!=feedback&&item!=statusReadout&&item!=observationError){var picture=item as PictureBox;if(picture!=null&&picture.Image!=null)picture.Image.Dispose();item.Dispose();}content.Controls.Clear();Status("");owner.Logo(content,48);StyxContext.Heading(content,name=="chat"?"Connect ChatGPT":(name=="overview"||name=="component-start"||name=="update-recovery")?"This computer":"Get started with Styx");
+   if(owner.RustHost){ShowRustPage(name);return;}
    if(name=="welcome"){
     if(Json.Get(owner.CurrentStatus,"status","deployment")!=null){
      bool joining=PendingJoin(owner.CurrentStatus);Explain(joining?"Continue joining your main computer. Your identity and preparation are saved.":"This computer is already configured.");
@@ -326,6 +352,30 @@ namespace StyxNative {
     Explain("Advanced: ZIP plugin setup is experimental. This Windows app keeps the Tunnel setup path. A running tunnel does not verify tool execution or your ChatGPT account.",75);RenderAcceptance();
    }
    if((page=="overview"||page=="chat")&&owner.CurrentStatus!=null)Status(EvidenceStatus(owner.CurrentStatus));content.Controls.Add(statusReadout);content.Controls.Add(observationError);content.Controls.Add(feedback);
+  }
+  void Unavailable(string title){var button=StyxContext.Button(content,title+" — unavailable in this native slice",()=>Task.FromResult(0));button.Enabled=false;}
+  void NativeAction(string title,string operation,Func<Task> action){if(owner.Supports(operation))Action(title,action);else Unavailable(title);}
+  string NativeStatus(object data){var enrollment=Json.Get(data,"enrollment");string text="Exec transport: "+Json.Str(data,"foreground","execConnection")+"\nHost: "+Json.Str(data,"foreground","status");if(Json.Yes(data,"admission_fenced"))text+="\nOperations fenced: review the original result before retrying.";string status=Json.Str(enrollment,"status");if(status.Length>0)text+="\nEnrollment: "+status+"\nDevice: "+Json.Str(enrollment,"device_id");if(status=="awaiting_approval")text+="\nCompare on your Gateway: "+Json.Str(enrollment,"comparison_code")+"\nFingerprint: "+Json.Str(enrollment,"fingerprint")+"\nApproval must be performed on the Gateway. Then check confirmation here.";return text+"\nTool execution, desktop control and target ChatGPT account acceptance are not inferred from connection status.";}
+  void ShowRustPage(string name){
+   if(name=="welcome"){
+    if(Json.Get(owner.CurrentStatus,"configuration")!=null||Json.Get(owner.CurrentStatus,"enrollment")!=null){Explain("This native Host retains its original identity and enrollment progress.",65);Action("Open this computer",ContinueJoiningView,false);}
+    else{Explain("Join a Gateway you own. This native App currently manages this Host only.",65);NativeAction("Join an existing Gateway","inspectJoin",()=>{ShowPage("join");return Task.FromResult(0);});}
+    Unavailable("Set up a Gateway");Unavailable("Login startup");
+   }else if(name=="join"){
+    Capabilities();computer.Checked=false;computer.Enabled=false;browser.Checked=false;browser.Enabled=false;persist.Checked=false;persist.Enabled=false;channel.Enabled=false;
+    Explain("This Windows slice supports Exec. Computer Use and Browser Automation are unavailable here; no desktop permission is granted.",75);
+    joinOrigin="";joinCa="";link=Input("Private pairing link",true);
+    NativeAction("Review pairing link","inspectJoin",async()=>{joinOrigin="";joinCa="";string invitation=link.Text;link.Clear();var result=await owner.Call("inspectJoin",Json.Obj("link",invitation));if(String.IsNullOrEmpty(Json.Str(result,"inspectionId")))throw new IOException();joinOrigin=Json.Str(result,"preview","origin");joinCa=Json.Str(result,"preview","caSha256");Feedback("Gateway: "+joinOrigin+"\nCertificate SHA-256: "+(joinCa.Length>0?joinCa:"System trust is not supported in this slice")+"\nExpires: "+Convert.ToString(Json.Get(result,"preview","expiresAt"))+"\nApprove only after independently checking this Gateway and certificate.");});
+    NativeAction("Approve Gateway and request to join","join",async()=>{if(String.IsNullOrEmpty(joinOrigin))throw new InvalidOperationException();if(String.IsNullOrEmpty(joinCa))throw new NativeOperationException("app_system_trust_not_supported");var choice=Choice();choice["browserChannel"]=null;choice["approvedGatewayOrigin"]=joinOrigin;choice["approvedCaSha256"]=joinCa;joinOrigin="";joinCa="";var result=await owner.Call("join",choice);if(Json.Str(result,"status")!="awaiting_approval")throw new IOException();await owner.RefreshAfterMutation();ShowPage("overview");Feedback("Request submitted. Compare the original code on your Gateway and explicitly approve this device there.");});
+    Action("Return",()=>{ShowPage("welcome");return Task.FromResult(0);},false);
+   }else if(name=="overview"||name=="join-waiting"){
+    Explain("Styx runs this Host while the App remains open. Connection and actual tool effects are separate observations.",75);RefreshAction();string enrollment=Json.Str(owner.CurrentStatus,"enrollment","status");
+    if(enrollment=="awaiting_approval")NativeAction("Check confirmation","claimJoin",async()=>{var result=await owner.Call("claimJoin");string actual=Json.Str(result,"status");if(actual!="awaiting_approval"&&actual!="ready_to_connect")throw new IOException();await owner.RefreshAfterMutation();ShowPage("overview");Feedback(actual=="awaiting_approval"?"The Gateway has not approved this request. No connection was started.":"The Gateway confirmed this identity. Choose Reconnect to start the Host.");});
+    NativeAction("Reconnect","connect",async()=>{await owner.Call("connect");await owner.RefreshAfterMutation();Feedback(StyxContext.ReconnectResult(owner.CurrentStatus));});NativeAction("Pause","disconnect",async()=>{await owner.Call("disconnect");await owner.RefreshAfterMutation();});
+    Unavailable("Add or revoke computers");Unavailable("Edit capabilities");Unavailable("Update runtime components");
+   }else if(name=="chat"){Explain("Use your Gateway's existing MCP connection in ChatGPT. This Host-only App does not configure a Tunnel or issue target-chat acceptance proofs.",100);Unavailable("Configure Secure MCP Tunnel");Unavailable("Create ChatGPT test");Action("Open ChatGPT",()=>{Process.Start("https://chatgpt.com/");return Task.FromResult(0);},false);RefreshAction();}
+   else{Explain("This operation is not implemented by the native Host App. Existing identities and configuration are retained.",80);Unavailable("Legacy operation");Action("Open this computer",ContinueJoiningView,false);}
+   Status(NativeStatus(owner.CurrentStatus));content.Controls.Add(statusReadout);content.Controls.Add(observationError);content.Controls.Add(feedback);
   }
   bool ShowJoinProgress(object snapshot){
    var steps=Json.Get(snapshot,"status","deployment","steps") as object[];
@@ -399,6 +449,7 @@ namespace StyxNative {
    catch(NativeOperationException error){readbackSubmitted=id+":"+window;Feedback(error.Code=="desktop_acceptance_native_app_changed"?"The native Styx app changed. Create a new desktop test before continuing.":"The desktop readback could not be confirmed. Refresh status and create a new test before retrying.");}catch{readbackSubmitted=id+":"+window;Feedback("The desktop readback could not be confirmed. Refresh status and create a new test before retrying.");}finally{readbackInFlight=false;}
   }
   internal void ShowStatus(object data){
+   if(owner.RustHost){SetText(observationError,"",0);if(page=="welcome"&&(Json.Get(data,"configuration")!=null||Json.Get(data,"enrollment")!=null)){ShowPage("overview");return;}if(page=="overview"||page=="join-waiting"){ShowPage("overview");return;}Status(NativeStatus(data));return;}
    if(page=="join-interrupted"&&!Json.Yes(data,"status","joinRecovery","rollbackRequired"))ShowPage("overview");
    if(page=="component-start"&&!owner.ManagementOnly)ShowPage(requestedPage);
    if(updateRuntime!=null)updateRuntime.Visible=CanUpdateRuntime(data);
