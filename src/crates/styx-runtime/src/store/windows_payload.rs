@@ -263,8 +263,7 @@ fn check_pe64(file: &File, len: u64) -> Result<()> {
         dos[60..64].try_into().expect("fixed field"),
     ));
     if &dos[..2] != b"MZ"
-        || offset < 64
-        || offset > 1024 * 1024
+        || !(64..=1024 * 1024).contains(&offset)
         || offset.checked_add(26).is_none_or(|n| n > len)
     {
         return Err(StoreError::Unsupported);

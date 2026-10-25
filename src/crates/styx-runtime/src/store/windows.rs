@@ -1,6 +1,8 @@
 //! Windows protected existing roots and distinct native file-lock resources.
 //! Retained ancestor handles omit delete sharing; regular input handles also
-//! omit write sharing. No journal writes, ACL rewrite or path launch fallback.
+//! omit write sharing. Fixed writes use local NTFS write-through/file flush;
+//! directory flush uses a separately opened, identity-checked writable handle.
+//! No ACL rewrite or path launch fallback.
 #[path = "windows_ffi.rs"]
 mod ffi;
 #[path = "windows_payload.rs"]
@@ -10,7 +12,8 @@ pub(in crate::store) use payload_backend::{PayloadSnapshot, PinnedImage};
 use std::{
     ffi::OsStr,
     fs::{File, TryLockError},
-    io::Read,
+    io::{Read, Write},
+    os::windows::ffi::OsStrExt,
     path::Prefix,
     sync::Arc,
 };
@@ -113,7 +116,249 @@ struct Opened {
     path: PathBuf,
     relative: PathBuf,
 }
+/// A post-mkdir failure keeps the original child when it was successfully
+/// opened, and always preserves whether this call actually created the name.
+pub(super) struct FreshChildError {
+    pub(super) cause: StoreError,
+    pub(super) created: bool,
+    pub(super) root: Option<Root>,
+}
 impl Root {
+    /// Convert only an original protected directory HANDLE into its revalidated
+    /// local path/ancestor pin chain. The supplied handle remains borrowed, and
+    /// its private identity must match the independently opened path both ways.
+    pub(in crate::store) fn from_directory_handle(directory: &File) -> Result<Self> {
+        let identity = root_identity(directory)?;
+        let path = ffi::final_path(directory)?;
+        let root = Self::open(&path)?;
+        if root.identity() != identity
+            || root_identity(directory)? != identity
+            || ffi::final_path(directory)? != path
+        {
+            return Err(StoreError::Changed);
+        }
+        ffi::require_local_ntfs(&root.path, directory)?;
+        root.validate_root()?;
+        Ok(root)
+    }
+    pub(in crate::store) fn validate_journal_name(name: &str) -> Result<()> {
+        component(OsStr::new(name))?;
+        if name.encode_utf16().count() > 255 {
+            return Err(StoreError::InvalidRelativePath);
+        }
+        Ok(())
+    }
+    pub(in crate::store) fn journal_path(&self) -> &Path {
+        &self.path
+    }
+    pub(in crate::store) fn journal_directory(&self, name: &str) -> Result<File> {
+        component(OsStr::new(name))?;
+        self.with_readonly_directory(|_| {
+            let opened = self.open_relative(Path::new(name), true, false, false)?;
+            private_facts(&opened.file, true)?;
+            Ok(opened.file)
+        })
+    }
+    pub(in crate::store) fn create_journal_directory(
+        &self,
+        name: &str,
+        strict: bool,
+    ) -> Result<File> {
+        component(OsStr::new(name))?;
+        self.with_readonly_directory(|_| {
+            ffi::require_local_ntfs(&self.path, &self.directory)?;
+            match ffi::create_new_private_directory(&self.path.join(name)) {
+                Ok(()) => {}
+                Err(StoreError::Io(e))
+                    if !strict && e.kind() == std::io::ErrorKind::AlreadyExists => {}
+                Err(e) => return Err(e),
+            }
+            self.journal_directory(name)
+        })
+    }
+    pub(in crate::store) fn journal_file_identity(file: &File) -> Result<(u64, u64)> {
+        private_facts(file, false)?;
+        file_identity(file)
+    }
+    pub(in crate::store) fn new_journal_file(&self, name: &str) -> Result<File> {
+        component(OsStr::new(name))?;
+        self.with_readonly_directory(|_| {
+            let path = self.path.join(name);
+            let file = ffi::create_new_journal_file(&path)?;
+            ffi::require_no_streams(&path)?;
+            Ok(file)
+        })
+    }
+    pub(in crate::store) fn rename_journal_file(
+        &self,
+        file: &File,
+        name: &str,
+        replace: bool,
+    ) -> Result<()> {
+        self.with_readonly_directory(|directory| {
+            private_facts(file, false)?;
+            let source = ffi::final_path(file)?;
+            if source.parent() != Some(self.path.as_path()) {
+                return Err(StoreError::Changed);
+            }
+            ffi::require_no_streams(&source)?;
+            ffi::rename_journal_file(file, directory, name, replace)?;
+            ffi::flush_file(file)
+        })
+    }
+    pub(in crate::store) fn flush_journal_file(&self, file: &File) -> Result<()> {
+        self.with_readonly_directory(|_| {
+            private_facts(file, false)?;
+            ffi::flush_file(file)
+        })
+    }
+    /// Flush the exact original directory through a separately opened writable
+    /// directory HANDLE. This is the tested ordinary Win32/NTFS operation, not a
+    /// volume flush, privilege escalation, ACL change or power-loss proof.
+    pub(in crate::store) fn sync_directory(&self) -> Result<()> {
+        self.validate_root()?;
+        let result = (|| {
+            let directory = ffi::open(&self.path, true, true, false)?;
+            if root_identity(&directory)? != self.identity() {
+                return Err(StoreError::Changed);
+            }
+            ffi::require_local_ntfs(&self.path, &directory)?;
+            let flushed = ffi::flush_file(&directory);
+            // Recheck the original writable object even if flushing failed.
+            if root_identity(&directory)? != self.identity() {
+                return Err(StoreError::Changed);
+            }
+            flushed
+        })();
+        self.validate_root()?;
+        result
+    }
+    pub(in crate::store) fn sync_journal_file(&self, name: &str) -> Result<()> {
+        component(OsStr::new(name))?;
+        self.with_readonly_directory(|_| {
+            let opened = self.open_relative(Path::new(name), false, true, false)?;
+            private_facts(&opened.file, false)?;
+            ffi::require_no_streams(&opened.path)?;
+            ffi::flush_file(&opened.file)
+        })
+    }
+    pub(super) fn create_fresh_child(
+        &self,
+        name: &OsStr,
+    ) -> std::result::Result<Self, FreshChildError> {
+        let mut created = false;
+        let mut retained = None;
+        let result = (|| {
+            component(name)?;
+            if name.encode_wide().count() > 255 {
+                return Err(StoreError::InvalidRelativePath);
+            }
+            self.validate_root()?;
+            ffi::require_local_ntfs(&self.path, &self.directory)?;
+            let path = self.path.join(name);
+            ffi::create_new_private_directory(&path)?;
+            created = true;
+            let child = Self::open(&path)?;
+            retained = Some(child.clone());
+            child.sync_directory()?;
+            self.sync_directory()?;
+            self.validate_root()?;
+            child.validate_root()?;
+            Ok(child)
+        })();
+        result.map_err(|cause| FreshChildError {
+            cause,
+            created,
+            root: retained,
+        })
+    }
+    /// Store-internal observation only. Retains the original ancestor/directory
+    /// handles and rechecks the original path/identity even when the closure errs.
+    pub(super) fn with_readonly_directory<T>(
+        &self,
+        operation: impl FnOnce(&File) -> Result<T>,
+    ) -> Result<T> {
+        self.validate_root()?;
+        let result = operation(&self.directory);
+        self.validate_root()?;
+        result
+    }
+    pub(super) fn with_configuration_writer_directory<T>(
+        &self,
+        guard: &ConfigurationWriterGuard,
+        operation: impl FnOnce(&File) -> Result<T>,
+    ) -> Result<T> {
+        if guard.identity().resource != LockResource::ConfigurationWriter
+            || guard.identity().root != self.identity()
+            || guard.identity().process != ProcessIdentity::current()?
+        {
+            return Err(StoreError::Changed);
+        }
+        self.validate_root()?;
+        guard.validate()?;
+        let result = operation(&self.directory);
+        self.validate_root()?;
+        guard.validate()?;
+        result
+    }
+    /// Fixed single-file CREATE_NEW under the original writer, following the
+    /// Linux fixed-write failure model: partial final files remain Unknown and
+    /// are never overwritten/adopted/repaired. No extra temporary-name protocol.
+    ///
+    /// Requires a local fixed NTFS volume. WRITE_THROUGH plus FlushFileBuffers
+    /// uses the documented NTFS data/metadata flush semantics, subject to the
+    /// storage device honoring flushes. The original parent directory is also
+    /// actually flushed. This is not an atomic transaction or power-loss test.
+    pub(super) fn create_fixed(
+        &self,
+        guard: &ConfigurationWriterGuard,
+        name: &str,
+        bytes: &[u8],
+        observer: &dyn Fn(&str),
+    ) -> Result<()> {
+        component(OsStr::new(name))?;
+        if name.encode_utf16().count() > 255 || bytes.is_empty() || bytes.len() > 1024 * 1024 {
+            return Err(StoreError::TooLarge);
+        }
+        self.with_configuration_writer_directory(guard, |_| {
+            ffi::require_local_ntfs(&self.path, &self.directory)?;
+            let path = self.path.join(name);
+            let mut file = ffi::create_new_private_file(&path)?;
+            let original = private_facts(&file, false)?;
+            ffi::require_no_streams(&path)?;
+            file.write_all(bytes)?;
+            observer("write");
+            ffi::flush_file(&file)?;
+            observer("file_sync");
+            let written = private_facts(&file, false)?;
+            if original.observation.device != written.observation.device
+                || original.observation.inode != written.observation.inode
+                || written.observation.byte_len != bytes.len() as u64
+            {
+                return Err(StoreError::Changed);
+            }
+            // Readers deny write sharing. Actual writer close must precede
+            // reopen; retain file-ID/length instead of pre-close timestamps,
+            // which Windows may finalize at the last writable-handle close.
+            drop(file);
+            let published = self.read_raw(Path::new(name), bytes.len())?;
+            if published.observation().device != written.observation.device
+                || published.observation().inode != written.observation.inode
+                || published.observation().byte_len != written.observation.byte_len
+                || published.bytes() != bytes
+            {
+                return Err(StoreError::Changed);
+            }
+            self.sync_directory()?;
+            observer("directory_sync");
+            let after = self.read_raw(Path::new(name), bytes.len())?;
+            if after.observation() != published.observation() || after.bytes() != bytes {
+                return Err(StoreError::Changed);
+            }
+            observer("publication_observed");
+            Ok(())
+        })
+    }
     pub(super) fn open(path: &Path) -> Result<Self> {
         let (path, mut ancestors) = absolute_pins(path)?;
         let directory = ancestors.pop().ok_or(StoreError::InvalidRoot)?;
@@ -338,3 +583,7 @@ pub(super) fn process_matches(expected: &ProcessIdentity) -> Result<bool> {
 #[cfg(test)]
 #[path = "windows_tests.rs"]
 mod tests;
+
+#[cfg(test)]
+#[path = "windows_publication_tests.rs"]
+mod publication_tests;

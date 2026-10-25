@@ -133,24 +133,24 @@ impl FreshNativeRoot {
         material: FreshHostFiles<'_>,
         trusted_now_unix_seconds: u64,
     ) -> Result<NativeHostJoinStore, NativeRootFailure> {
-        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        #[cfg(any(target_os = "windows", all(target_os = "linux", target_env = "gnu")))]
         {
             initialize(self, deployment, state, material, trusted_now_unix_seconds)
         }
-        #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+        #[cfg(not(any(target_os = "windows", all(target_os = "linux", target_env = "gnu"))))]
         {
             let _ = (deployment, state, material, trusted_now_unix_seconds);
             Err(NativeRootFailure {
                 error: NativeRootError::Unsupported,
                 ownership: Box::new(Ownership::Root {
                     root: self.root,
-                    writer: self.writer,
+                    writer: Box::new(self.writer),
                 }),
             })
         }
     }
 }
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[cfg(any(target_os = "windows", all(target_os = "linux", target_env = "gnu")))]
 fn initialize(
     mut fresh: FreshNativeRoot,
     deployment: &[u8],
@@ -195,7 +195,7 @@ fn initialize(
                 error,
                 ownership: Box::new(Ownership::Root {
                     root: fresh.root,
-                    writer: fresh.writer,
+                    writer: Box::new(fresh.writer),
                 }),
             });
         }
@@ -258,7 +258,7 @@ fn initialize(
                 error: NativeRootError::Unknown,
                 ownership: Box::new(Ownership::Root {
                     root: fresh.root,
-                    writer: fresh.writer,
+                    writer: Box::new(fresh.writer),
                 }),
             });
         }
@@ -287,7 +287,7 @@ fn initialize(
 }
 impl NativeHostJoinStore {
     pub(crate) fn from_binding(binding: NativeRootBinding) -> Result<Self, NativeRootFailure> {
-        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        #[cfg(any(target_os = "windows", all(target_os = "linux", target_env = "gnu")))]
         {
             let captured = binding.with_binding(|configuration, _| {
                 let state = binding.read_locked(configuration)?;
@@ -334,7 +334,7 @@ impl NativeHostJoinStore {
                 }),
             }
         }
-        #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+        #[cfg(not(any(target_os = "windows", all(target_os = "linux", target_env = "gnu"))))]
         {
             Err(NativeRootFailure {
                 error: NativeRootError::Unsupported,
@@ -428,7 +428,7 @@ impl NativeHostJoinStore {
         if !file.valid_size(bytes.len()) {
             return Err(JournalError::InvalidInput);
         }
-        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        #[cfg(any(target_os = "windows", all(target_os = "linux", target_env = "gnu")))]
         {
             let pin = self.binding.with_binding(|configuration, _| {
                 self.validate_locked(configuration)?;
@@ -470,7 +470,7 @@ impl NativeHostJoinStore {
             self.phases.push(pin);
             Ok(())
         }
-        #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+        #[cfg(not(any(target_os = "windows", all(target_os = "linux", target_env = "gnu"))))]
         {
             let _ = (file, bytes);
             Err(JournalError::Unsupported)

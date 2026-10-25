@@ -527,17 +527,19 @@ async fn run_owned(
             .map(ConnectionSession::Legacy)
             .map_err(|_| ForegroundError("legacy_bootstrap_refused"))
         }
-        HostWireMode::PairedV3 => host
-            .paired_protocol(PairedTrustedProfile {
+        HostWireMode::PairedV3 => {
+            let protocol = host.paired_protocol(PairedTrustedProfile {
                 endpoint: admitted.profile.endpoint().as_str().to_owned(),
                 gateway_namespace: admitted.profile.paired_gateway_namespace(),
                 device_id: device.clone(),
                 host_generation: generation,
-            })
-            .and_then(|protocol| {
-                #[cfg(target_os = "windows")]
-                let protocol = protocol
-                    .with_windows_command_environment(admitted.profile.command_environment());
+            });
+            #[cfg(target_os = "windows")]
+            let protocol = protocol.map(|protocol| {
+                protocol.with_windows_command_environment(admitted.profile.command_environment())
+            });
+            #[cfg(not(target_os = "windows"))]
+            let protocol = protocol.and_then(|protocol| {
                 #[cfg(target_os = "linux")]
                 let protocol = if let Some(source) = &browser {
                     protocol.with_browser_profiles(source.clone())?
@@ -551,9 +553,11 @@ async fn run_owned(
                     protocol
                 };
                 Ok(protocol)
-            })
-            .map(ConnectionSession::Paired)
-            .map_err(|_| ForegroundError("paired_bootstrap_refused")),
+            });
+            protocol
+                .map(ConnectionSession::Paired)
+                .map_err(|_| ForegroundError("paired_bootstrap_refused"))
+        }
     };
     let mut failure = None;
     match session {

@@ -91,7 +91,33 @@ impl EnrollmentJournal<'_> {
                 Ok(())
             })
         }
-        #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+        #[cfg(target_os = "windows")]
+        {
+            let before = self.read_time_floor()?;
+            if before.is_some_and(|floor| now < floor) {
+                return Err(JournalError::Conflict);
+            }
+            let expected = before.map(u64::to_be_bytes);
+            let bytes = now.to_be_bytes();
+            files::with_namespace(self, |dir| {
+                // The Windows primitive owns native replacement/durability and
+                // revalidates the exact expected bytes under this same writer.
+                // Equal floors also require real sync/readback, not a cached ACK.
+                super::super::secure_journal::files::replace_observed(
+                    dir,
+                    NAME,
+                    expected.as_ref().map(|value| value.as_slice()),
+                    &bytes,
+                    self.budget,
+                    &|_| {},
+                )?;
+                if files::read(dir, NAME, 8)?.as_deref() != Some(bytes.as_slice()) {
+                    return Err(JournalError::Unknown);
+                }
+                Ok(())
+            })
+        }
+        #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows")))]
         {
             let _ = now;
             Err(JournalError::Unsupported)

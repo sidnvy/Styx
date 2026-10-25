@@ -60,15 +60,15 @@ pub struct JournalObservation {
     pub total_bytes: usize,
 }
 
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
 use super::{ConfigurationWriterGuard, PrivateRoot};
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
 #[derive(Clone, Copy)]
 pub(super) enum NamespaceName {
     EnrollmentV1,
     ManagementV1,
 }
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "windows"))]
 impl NamespaceName {
     pub(super) const fn as_str(self) -> &'static str {
         match self {
@@ -371,3 +371,7 @@ pub(super) mod files {
             .map_err(unknown)?
     }
 }
+
+#[cfg(target_os = "windows")]
+#[path = "windows_journal.rs"]
+pub(super) mod files;

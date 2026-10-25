@@ -29,7 +29,10 @@ pub struct JoinReport {
 pub struct JoinError {
     code: &'static str,
     exit: u8,
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(
+        all(target_os = "windows", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
+    ))]
     _retained: Option<Box<platform::Retained>>,
 }
 impl JoinError {
@@ -43,7 +46,10 @@ impl JoinError {
         Self {
             code,
             exit,
-            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            #[cfg(any(
+                all(target_os = "windows", target_arch = "x86_64"),
+                all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
+            ))]
             _retained: None,
         }
     }
@@ -62,7 +68,10 @@ impl std::error::Error for JoinError {}
 type Result<T> = std::result::Result<T, JoinError>;
 
 pub async fn request(parent: &Path, name: &OsStr, deployment_file: &Path) -> Result<JoinReport> {
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(
+        all(target_os = "windows", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
+    ))]
     {
         let (parent, name, deployment) = (
             parent.to_path_buf(),
@@ -71,26 +80,38 @@ pub async fn request(parent: &Path, name: &OsStr, deployment_file: &Path) -> Res
         );
         platform::owned(async move { platform::request(parent, name, deployment).await }).await
     }
-    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+    #[cfg(not(any(
+        all(target_os = "windows", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
+    )))]
     {
         let _ = (parent, name, deployment_file);
         Err(JoinError::new("native_join_platform_unsupported", 3))
     }
 }
 pub async fn claim(state_dir: &Path) -> Result<JoinReport> {
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    #[cfg(any(
+        all(target_os = "windows", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
+    ))]
     {
         let path = state_dir.to_path_buf();
         platform::owned(async move { platform::claim(path).await }).await
     }
-    #[cfg(not(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
+    #[cfg(not(any(
+        all(target_os = "windows", target_arch = "x86_64"),
+        all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
+    )))]
     {
         let _ = state_dir;
         Err(JoinError::new("native_join_platform_unsupported", 3))
     }
 }
 
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[cfg(any(
+    all(target_os = "windows", target_arch = "x86_64"),
+    all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
+))]
 mod platform {
     use super::super::{native_join_http as http, native_join_protocol as protocol};
     use super::*;
@@ -120,6 +141,13 @@ mod platform {
     };
     use zeroize::Zeroizing;
     const LIMIT: usize = 1024 * 1024;
+    // Enrollment wire names follow the existing Node/Host protocol, not Rust's
+    // OS identifier: Windows is "win32", never a new device platform spelling.
+    const PLATFORM: &str = if cfg!(target_os = "windows") {
+        "win32"
+    } else {
+        "linux"
+    };
     const HTTP_BUDGET: Duration = Duration::from_secs(30);
     static JOBS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
 
@@ -306,8 +334,21 @@ mod platform {
         path.to_str().map(str::to_owned).ok_or_else(bad)
     }
     fn identity(root: &PrivateRoot) -> NativeRootIdentity {
-        let RootIdentity::Linux { device, inode, uid } = root.identity();
-        NativeRootIdentity::Linux { device, inode, uid }
+        match root.identity() {
+            RootIdentity::Linux { device, inode, uid } => {
+                NativeRootIdentity::Linux { device, inode, uid }
+            }
+            #[cfg(target_os = "windows")]
+            RootIdentity::Windows {
+                volume_serial,
+                file_id,
+                owner_sid,
+            } => NativeRootIdentity::Windows {
+                volume_serial,
+                file_id,
+                owner_sid,
+            },
+        }
     }
     pub(super) struct Work {
         store: NativeHostJoinStore,
@@ -427,7 +468,7 @@ mod platform {
                 || seed.shell != text(&d.host.shell)?
                 || seed.computer_requested != d.host.computer
                 || seed.browser_requested != browser_requested
-                || seed.platform != "linux"
+                || seed.platform != PLATFORM
                 || Sha256Digest::of_bytes(key.public_key().spki_der()) != seed.fingerprint
                 || crate::crypto::DevicePublicKey::from_spki_pem(seed.public_key_pem.as_bytes())
                     .map_err(|_| unknown())?
@@ -524,7 +565,7 @@ mod platform {
                 fingerprint: Sha256Digest::of_bytes(generated.public_key().spki_der()),
                 public_key_pem: generated.public_key_pem().to_owned(),
                 label: d.host.label.clone(),
-                platform: "linux".into(),
+                platform: PLATFORM.into(),
                 cwd: text(&d.host.cwd)?,
                 shell: text(&d.host.shell)?,
                 computer_requested: d.host.computer,

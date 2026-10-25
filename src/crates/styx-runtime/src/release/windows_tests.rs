@@ -76,7 +76,7 @@ async fn actual_signed_windows_runtime_closure_selection_and_refusals() {
         .read_raw("manifest.json", NATIVE_RELEASE_MANIFEST_BYTES)
         .unwrap();
     let signature = valid_root.read_raw("manifest.sig", 64).unwrap();
-    let member_root = PrivateRoot::open(&path.join("member-tampered")).unwrap();
+    let member_root = PrivateRoot::open(path.join("member-tampered")).unwrap();
     assert_eq!(
         member_root
             .read_raw("manifest.json", NATIVE_RELEASE_MANIFEST_BYTES)
@@ -102,7 +102,7 @@ async fn actual_signed_windows_runtime_closure_selection_and_refusals() {
         Err(ReleaseError::Integrity)
     ));
 
-    let signature_root = PrivateRoot::open(&path.join("signature-tampered")).unwrap();
+    let signature_root = PrivateRoot::open(path.join("signature-tampered")).unwrap();
     assert_eq!(
         signature_root
             .read_raw("manifest.json", NATIVE_RELEASE_MANIFEST_BYTES)
@@ -119,7 +119,7 @@ async fn actual_signed_windows_runtime_closure_selection_and_refusals() {
         Err(ReleaseError::Untrusted)
     ));
 
-    let extra_root = PrivateRoot::open(&path.join("extra-member")).unwrap();
+    let extra_root = PrivateRoot::open(path.join("extra-member")).unwrap();
     assert_eq!(
         extra_root
             .read_raw("manifest.json", NATIVE_RELEASE_MANIFEST_BYTES)
@@ -146,7 +146,7 @@ async fn actual_signed_windows_runtime_closure_selection_and_refusals() {
         Err(ReleaseError::Integrity)
     ));
 
-    let foreign = PrivateRoot::open(&path.join("wrong-target")).unwrap();
+    let foreign = PrivateRoot::open(path.join("wrong-target")).unwrap();
     let foreign_raw = foreign
         .read_raw("manifest.json", NATIVE_RELEASE_MANIFEST_BYTES)
         .unwrap();

@@ -4,7 +4,7 @@
 //! No network DTO, pathname, mutex, or flock grants legacy migration authority.
 //! Locks serialize short filesystem closures only; never wait for native work
 //! while holding them. A panic or unsafe observation poisons every handle.
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[cfg(any(target_os = "windows", all(target_os = "linux", target_env = "gnu")))]
 use super::secure_journal::{JournalBudget, NamespaceName, files};
 use super::secure_journal::{JournalError, JournalResult};
 use super::{ConfigurationWriterGuard, PrivateRoot, RootIdentity};
@@ -14,7 +14,7 @@ use std::sync::{
 };
 use styx_contracts::identity::TransactionId;
 
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[cfg(any(target_os = "windows", all(target_os = "linux", target_env = "gnu")))]
 const TOTAL_JOURNAL_BYTES: usize = 64 * 1024 * 1024;
 
 /// Clones share the SAME owned root/guard, never a cloned writer description.
@@ -61,10 +61,10 @@ pub(super) struct ConfigurationState {
     poisoned: bool,
     fence: Option<TransactionId>,
     recovery_required: bool,
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[cfg(any(target_os = "windows", all(target_os = "linux", target_env = "gnu")))]
     namespaces: Vec<NamespaceBinding>,
 }
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[cfg(any(target_os = "windows", all(target_os = "linux", target_env = "gnu")))]
 struct NamespaceBinding {
     name: NamespaceName,
     pin: (u64, u64),
@@ -76,7 +76,7 @@ impl ConfigurationState {
         if self.poisoned {
             return Err(JournalError::Unknown);
         }
-        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        #[cfg(any(target_os = "windows", all(target_os = "linux", target_env = "gnu")))]
         {
             for name in [NamespaceName::EnrollmentV1, NamespaceName::ManagementV1] {
                 if !self
@@ -115,12 +115,12 @@ impl ConfigurationState {
                 })
                 .map_err(|_| JournalError::Unknown)?
         }
-        #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+        #[cfg(not(any(target_os = "windows", all(target_os = "linux", target_env = "gnu"))))]
         {
             Err(JournalError::Unsupported)
         }
     }
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[cfg(any(target_os = "windows", all(target_os = "linux", target_env = "gnu")))]
     pub(super) fn preflight_growth(&self, additional_bytes: usize) -> JournalResult<()> {
         self.root
             .inner
@@ -148,7 +148,7 @@ impl ConfigurationState {
     /// Remaining bytes across BOTH namespaces under this same held writer.
     /// A temporary per-adapter budget can consume this room without inventing
     /// another reservation or retaining a filesystem lock across native work.
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[cfg(any(target_os = "windows", all(target_os = "linux", target_env = "gnu")))]
     pub(super) fn remaining_growth(&self) -> JournalResult<usize> {
         self.root
             .inner
@@ -259,11 +259,11 @@ impl OwnedConfigurationRoot {
             poisoned: false,
             fence: None,
             recovery_required: false,
-            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            #[cfg(any(target_os = "windows", all(target_os = "linux", target_env = "gnu")))]
             namespaces: Vec::with_capacity(2),
         };
         let initialized: JournalResult<()> = (|| {
-            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            #[cfg(any(target_os = "windows", all(target_os = "linux", target_env = "gnu")))]
             for name in [NamespaceName::EnrollmentV1, NamespaceName::ManagementV1] {
                 if state.root.ensure_absent(name.as_str()).is_ok() {
                     continue;
@@ -356,7 +356,7 @@ impl OwnedConfigurationRoot {
         access.completed = true;
         result
     }
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[cfg(any(target_os = "windows", all(target_os = "linux", target_env = "gnu")))]
     pub(super) fn claim_namespace(
         &self,
         name: NamespaceName,
@@ -517,7 +517,7 @@ impl OwnedConfigurationRoot {
         recovery: bool,
     ) -> JournalResult<ConfigurationMaintenance> {
         self.with_state(|state| {
-            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            #[cfg(any(target_os = "windows", all(target_os = "linux", target_env = "gnu")))]
             if state.namespaces.iter().any(|binding| {
                 binding.name.as_str() == NamespaceName::EnrollmentV1.as_str() && binding.claimed
             }) {
@@ -586,7 +586,7 @@ impl ConfigurationMaintenance {
     }
     /// Prove this exact maintenance fence is still active, not just that the
     /// filesystem root has the same identity. This does not settle old writers.
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[cfg(any(target_os = "windows", all(target_os = "linux", target_env = "gnu")))]
     pub(crate) fn validate_active(&self) -> JournalResult<RootIdentity> {
         self.owner
             .with_maintenance(self, |state| Ok(state.root.identity()))

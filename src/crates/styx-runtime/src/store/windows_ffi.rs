@@ -287,6 +287,188 @@ pub(super) fn create_private_directory(path: &Path) -> Result<()> {
     }
     Ok(())
 }
+/// Strict fresh creation: unlike the scratch helper above, an existing name is
+/// an error, never an object to adopt. No directory-flush guarantee is implied.
+pub(super) fn create_new_private_directory(path: &Path) -> Result<()> {
+    let path = wide(path.as_os_str())?;
+    let descriptor = private_descriptor(true)?;
+    let attributes = SECURITY_ATTRIBUTES {
+        nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: descriptor.0,
+        bInheritHandle: 0,
+    };
+    // SAFETY: bounded NUL-terminated path and owned descriptor live through call.
+    if unsafe { CreateDirectoryW(path.as_ptr(), &attributes) } == 0 {
+        return Err(io_error());
+    }
+    Ok(())
+}
+/// Exclusively creates a private regular fixed file. This deliberately does
+/// not change OPEN_ALWAYS used by the existing independent lock-resource port.
+pub(super) fn create_new_private_file(path: &Path) -> Result<File> {
+    create_new_file(path, false)
+}
+pub(super) fn create_new_journal_file(path: &Path) -> Result<File> {
+    create_new_file(path, true)
+}
+fn create_new_file(path: &Path, rename: bool) -> Result<File> {
+    let path = wide(path.as_os_str())?;
+    let descriptor = private_descriptor(false)?;
+    let attributes = SECURITY_ATTRIBUTES {
+        nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
+        lpSecurityDescriptor: descriptor.0,
+        bInheritHandle: 0,
+    };
+    // SAFETY: official CreateFileW ABI, live private descriptor, and valid UTF16.
+    // Fixed files deny write/delete sharing. Rename-capable journal files add
+    // DELETE access and delete sharing, retaining their exact source object even
+    // if its name changes. All writers close before ordinary protected readers.
+    let handle = unsafe {
+        CreateFileW(
+            path.as_ptr(),
+            GENERIC_READ | GENERIC_WRITE | if rename { DELETE } else { 0 },
+            FILE_SHARE_READ | if rename { FILE_SHARE_DELETE } else { 0 },
+            &attributes,
+            CREATE_NEW,
+            FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_WRITE_THROUGH,
+            ptr::null_mut(),
+        )
+    };
+    if handle == INVALID_HANDLE_VALUE {
+        return Err(io_error());
+    }
+    // SAFETY: successful CreateFileW returned one uniquely owned noninherit handle.
+    let file = unsafe { File::from_raw_handle(handle) };
+    if facts(&file)?.directory {
+        return Err(StoreError::NotRegularFile);
+    }
+    private(&file)?;
+    Ok(file)
+}
+/// Flush only this actual writable file/directory HANDLE. The caller validates
+/// its original identity, private ACL and local NTFS support. No volume flush,
+/// administrator elevation or physical power-loss claim is implied.
+pub(super) fn flush_file(file: &File) -> Result<()> {
+    // SAFETY: live owned file/directory handle was opened with GENERIC_WRITE.
+    if unsafe { FlushFileBuffers(file.as_raw_handle()) } == 0 {
+        return Err(io_error());
+    }
+    Ok(())
+}
+/// Obtain a bounded OS-normalized DOS path, not a caller-supplied locator.
+/// The caller must reopen all ancestors without reparse/delete sharing and
+/// compare the original HANDLE identity before using that path.
+pub(super) fn final_path(file: &File) -> Result<PathBuf> {
+    let mut buffer = vec![0u16; 32768];
+    // SAFETY: original retained HANDLE and one bounded output buffer.
+    let length = unsafe {
+        GetFinalPathNameByHandleW(
+            file.as_raw_handle(),
+            buffer.as_mut_ptr(),
+            buffer.len() as u32,
+            FILE_NAME_NORMALIZED | VOLUME_NAME_DOS,
+        )
+    } as usize;
+    if length == 0 {
+        return Err(io_error());
+    }
+    if length >= buffer.len() {
+        return Err(StoreError::InvalidRoot);
+    }
+    let name = String::from_utf16(&buffer[..length]).map_err(|_| StoreError::InvalidRoot)?;
+    // Only the local drive form is accepted by normalized_root, never UNC,
+    // device, volume GUID or an arbitrary path obtained from network data.
+    let local = name
+        .strip_prefix("\\\\?\\")
+        .ok_or(StoreError::InvalidRoot)?;
+    normalized_root(Path::new(local))
+}
+/// Source is the actual original writable/delete-capable HANDLE. Destination
+/// resolves against the original retained namespace HANDLE. No source path is
+/// reopened, no copy/delete fallback or POSIX replacement flags are used.
+/// Caller owns the original configuration writer and validates expected target
+/// bytes for the replace case; this is not hostile-same-UID atomic CAS.
+pub(super) fn rename_journal_file(
+    file: &File,
+    directory: &File,
+    name: &str,
+    replace: bool,
+) -> Result<()> {
+    component(OsStr::new(name))?;
+    let encoded: Vec<u16> = OsStr::new(name).encode_wide().collect();
+    if encoded.len() > 255 {
+        return Err(StoreError::InvalidRelativePath);
+    }
+    let offset = std::mem::offset_of!(FILE_RENAME_INFO, FileName);
+    let total = offset
+        .checked_add((encoded.len() + 1) * 2)
+        .ok_or(StoreError::TooLarge)?;
+    // Word allocation supplies the alignment of official FILE_RENAME_INFO;
+    // zeroed storage includes its padding and the bounded trailing WCHAR array.
+    let mut storage = vec![0usize; total.div_ceil(size_of::<usize>())];
+    let info = storage.as_mut_ptr().cast::<FILE_RENAME_INFO>();
+    // SAFETY: aligned allocation fits all fields and the encoded filename plus
+    // terminator. FileNameLength excludes the terminator per official ABI.
+    unsafe {
+        (*info).Anonymous.ReplaceIfExists = replace;
+        (*info).RootDirectory = directory.as_raw_handle();
+        (*info).FileNameLength = (encoded.len() * 2) as u32;
+        ptr::copy_nonoverlapping(
+            encoded.as_ptr(),
+            ptr::addr_of_mut!((*info).FileName).cast::<u16>(),
+            encoded.len(),
+        );
+        if SetFileInformationByHandle(
+            file.as_raw_handle(),
+            FileRenameInfo,
+            info.cast(),
+            total as u32,
+        ) == 0
+        {
+            return Err(io_error());
+        }
+    }
+    Ok(())
+}
+/// Restrict the new writable port to the local fixed NTFS semantics used by
+/// its write-through contract. Existing read/lease ports retain their behavior.
+pub(super) fn require_local_ntfs(path: &Path, directory: &File) -> Result<()> {
+    let drive: PathBuf = path.components().take(2).collect();
+    let drive = wide(drive.as_os_str())?;
+    // DRIVE_FIXED from the documented GetDriveTypeW enum. A mapped remote drive
+    // is not accepted merely because its drive-letter path looks local.
+    const DRIVE_FIXED: u32 = 3;
+    // SAFETY: normalized absolute drive root, bounded and NUL terminated.
+    if unsafe { GetDriveTypeW(drive.as_ptr()) } != DRIVE_FIXED {
+        return Err(StoreError::InvalidRoot);
+    }
+    let mut filesystem = [0u16; 32];
+    // SAFETY: original directory HANDLE and one fixed-size output buffer. Null
+    // optional metadata outputs are permitted by the official Win32 contract.
+    if unsafe {
+        GetVolumeInformationByHandleW(
+            directory.as_raw_handle(),
+            ptr::null_mut(),
+            0,
+            ptr::null_mut(),
+            ptr::null_mut(),
+            ptr::null_mut(),
+            filesystem.as_mut_ptr(),
+            filesystem.len() as u32,
+        )
+    } == 0
+    {
+        return Err(io_error());
+    }
+    let end = filesystem
+        .iter()
+        .position(|v| *v == 0)
+        .ok_or(StoreError::InvalidRoot)?;
+    if &filesystem[..end] != [b'N' as u16, b'T' as u16, b'F' as u16, b'S' as u16] {
+        return Err(StoreError::InvalidRoot);
+    }
+    Ok(())
+}
 /// Ancestors and every opened directory omit FILE_SHARE_DELETE; regular input
 /// files additionally omit FILE_SHARE_WRITE. Kernel sharing locks pin the names
 /// while retained handles exist. Handles are non-inheritable by default.

@@ -31,7 +31,7 @@ use tokio::{
 
 pub(crate) struct SpawnFailure {
     pub(crate) code: &'static str,
-    child: Option<RunningChild>,
+    child: Option<Box<RunningChild>>,
 }
 impl std::fmt::Debug for SpawnFailure {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -43,7 +43,7 @@ impl std::fmt::Debug for SpawnFailure {
 }
 impl SpawnFailure {
     pub(crate) fn into_owned_child(self) -> Option<RunningChild> {
-        self.child
+        self.child.map(|child| *child)
     }
 }
 fn refused(code: &'static str) -> SpawnFailure {
@@ -336,7 +336,7 @@ impl SuspendedChild {
             Ok(()) => Ok(self.child),
             Err(_) => Err(SpawnFailure {
                 code: "windows_image_verification_failed",
-                child: Some(self.child),
+                child: Some(Box::new(self.child)),
             }),
         }
     }
@@ -446,14 +446,14 @@ pub(crate) fn spawn_suspended(
         Err(_) => {
             return Err(SpawnFailure {
                 code: "windows_birth_unavailable",
-                child: Some(child),
+                child: Some(Box::new(child)),
             });
         }
     };
     if !same_owner(&parent_identity, &birth) {
         return Err(SpawnFailure {
             code: "windows_process_owner_mismatch",
-            child: Some(child),
+            child: Some(Box::new(child)),
         });
     }
     Ok(SuspendedChild {

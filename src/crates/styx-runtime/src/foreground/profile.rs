@@ -11,7 +11,7 @@ use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
     io::Cursor,
-    path::{Component, Path, PathBuf},
+    path::{Path, PathBuf},
     sync::Arc,
     time::Duration,
 };
@@ -525,6 +525,7 @@ fn absolute(path: &Path) -> Result<(), ProfileError> {
     }
     #[cfg(not(target_os = "windows"))]
     {
+        use std::path::Component;
         if !path.is_absolute()
             || path.components().any(|p| {
                 matches!(
