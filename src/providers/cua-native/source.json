@@ -5,24 +5,8 @@
   "upstream_version": "0.36.0",
   "official_archive_sha256": "157acdc2fd0bf5c480af2bdbe4a69f75a709551627f851caee16346234fdedef",
   "patch": "cua-0.36.0-styx-once.patch",
-  "patch_sha256": "9f5e417e772f3492402f1a95fdce0dd4d0e2d883950c6c568e76ba2cca7086d4",
+  "patch_sha256": "01164d2444e7a38b30a22920b2cfc7996d9b45d1b620d424836e19a520f3611b",
   "files": [
-    {
-      "path": "libs/cua-driver/rust/crates/platform-linux/src/tools/impl_.rs",
-      "original_sha256": "1a22d33d7d13ec9fa05aa3dafd0b20bd5e6b0b30d386ac8cbd508c74dfa4cbc0",
-      "original_git_blob_sha1": "3be700798b9310b6cf931725f97ae7c02c619b5a",
-      "final_sha256": "158470dbd72ee54c580de24498d47bc577f7666b4aa32e719c93bd63c6340b8e",
-      "original_bytes": 654449,
-      "final_bytes": 665465
-    },
-    {
-      "path": "libs/cua-driver/rust/crates/platform-linux/src/atspi/native.rs",
-      "original_sha256": "59e3c53a54b4d51dd1259cdcdf347400dcf85dd8ffdae2d0a04462012e21042f",
-      "original_git_blob_sha1": "36451e533335892864981f6f36a69ad318309199",
-      "final_sha256": "a5b1a9e0b13e2e9b914b46e14413dbd2611b5c2ccf7375547ba4c8abaaa7ba51",
-      "original_bytes": 310281,
-      "final_bytes": 324759
-    },
     {
       "path": "libs/cua-driver/rust/crates/cua-driver-core/src/authorization.rs",
       "original_sha256": "1b55a8696da7df98455833a7c1f6d1851eb9a60520050dd76143883820ecc827",
@@ -40,12 +24,132 @@
       "final_bytes": 290196
     },
     {
+      "path": "libs/cua-driver/rust/crates/cua-driver/src/proxy.rs",
+      "original_sha256": "4fef0a24eb37d6ba73ba35ff7acdb205a61ed56e1b45633ff6bb96341e186f18",
+      "original_git_blob_sha1": "810bf385e599980efc9274a76debe5e11b3f8aff",
+      "final_sha256": "01eef755773a04e0f28d8231388bfed22d8a43a6c5cbf79aa1593fdf7df6ac28",
+      "original_bytes": 62011,
+      "final_bytes": 64251
+    },
+    {
+      "path": "libs/cua-driver/rust/crates/cua-driver/src/sdk_adapter.rs",
+      "original_sha256": "efe2333ea22d950cff57182d8ce161b64a46118af4e9cc0482ddb1784a8d8734",
+      "original_git_blob_sha1": "b06386078b2f9b0777592df21c3e30e31fe84bbe",
+      "final_sha256": "61fdb3034f4b99ec35724511d7c970afba4a5ff99d25b9a9f8e8ec349afc10d7",
+      "original_bytes": 27371,
+      "final_bytes": 30363
+    },
+    {
+      "path": "libs/cua-driver/rust/crates/cua-driver/src/serve.rs",
+      "original_sha256": "5af49d759dcbda5a4845c59ce017d0ba955e171615ec3ac28af9062968208796",
+      "original_git_blob_sha1": "d97ca38eacb2981aab13b2bba3fd41708d52aace",
+      "final_sha256": "5a91159e4416ef04b32e10fa4f2936c256d698ecf8bd51b347ae3c60014bab96",
+      "original_bytes": 133753,
+      "final_bytes": 137392
+    },
+    {
+      "path": "libs/cua-driver/rust/crates/cua-driver/src/transport_drain.rs",
+      "original_sha256": null,
+      "original_git_blob_sha1": null,
+      "final_sha256": "421717a6b6cb0257ff689648bdaf424155d3ffa529afd57a24586512c7dfd510",
+      "original_bytes": 0,
+      "final_bytes": 7145
+    },
+    {
+      "path": "libs/cua-driver/rust/crates/platform-linux/src/atspi/native.rs",
+      "original_sha256": "59e3c53a54b4d51dd1259cdcdf347400dcf85dd8ffdae2d0a04462012e21042f",
+      "original_git_blob_sha1": "36451e533335892864981f6f36a69ad318309199",
+      "final_sha256": "a5b1a9e0b13e2e9b914b46e14413dbd2611b5c2ccf7375547ba4c8abaaa7ba51",
+      "original_bytes": 310281,
+      "final_bytes": 324759
+    },
+    {
       "path": "libs/cua-driver/rust/crates/platform-linux/src/atspi/snapshot.rs",
       "original_sha256": "16fee7f6eac68eb2c7bc66bb8a2f6d983e48d6d8f22a9398cb6d8f133da24c21",
       "original_git_blob_sha1": "c3f06cfb2b90c7595b83cce8fe977edf54c15eeb",
       "final_sha256": "a642de13c10354284578e95b6222be0efe4fef34b5cac1e10340799761350e31",
       "original_bytes": 13707,
       "final_bytes": 14702
+    },
+    {
+      "path": "libs/cua-driver/rust/crates/platform-linux/src/tools/impl_.rs",
+      "original_sha256": "1a22d33d7d13ec9fa05aa3dafd0b20bd5e6b0b30d386ac8cbd508c74dfa4cbc0",
+      "original_git_blob_sha1": "3be700798b9310b6cf931725f97ae7c02c619b5a",
+      "final_sha256": "158470dbd72ee54c580de24498d47bc577f7666b4aa32e719c93bd63c6340b8e",
+      "original_bytes": 654449,
+      "final_bytes": 665465
+    },
+    {
+      "path": "libs/cua-driver/rust/crates/platform-macos/src/ax/enablement.rs",
+      "original_sha256": "0c254408f71684bf8687cda4754ab5f9d99d6d3076579b7b656b17b87ae10c90",
+      "original_git_blob_sha1": "cc46e07de9a90bd32cb56f96f91e5d9c00a44205",
+      "final_sha256": "1577750fe1d5df17775e8480c0caace67544def606efa52feac0917c05819180",
+      "original_bytes": 17259,
+      "final_bytes": 17270
+    },
+    {
+      "path": "libs/cua-driver/rust/crates/platform-macos/src/ax/mod.rs",
+      "original_sha256": "b64fbac72081c4cf7ee8b7a22a108890a4d549b40bf8a48b1858d38d3efa6423",
+      "original_git_blob_sha1": "6ad8c6e089bf2303578f5dcd85ded56bef158397",
+      "final_sha256": "51aa64e0e3d5413a6afdd903f781ec6d346908ce69dbcb9c4223d004b5737c20",
+      "original_bytes": 1057,
+      "final_bytes": 1086
+    },
+    {
+      "path": "libs/cua-driver/rust/crates/platform-macos/src/ax/styx_private.rs",
+      "original_sha256": null,
+      "original_git_blob_sha1": null,
+      "final_sha256": "52a8cb5ba77ec4b14c9169e6f3c1c029bc0bc43208dc15512bc7fe5600ef7231",
+      "original_bytes": 0,
+      "final_bytes": 25631
+    },
+    {
+      "path": "libs/cua-driver/rust/crates/platform-macos/src/cursor/overlay.rs",
+      "original_sha256": "2d9a564349a7be2d8362da9160105cafdf7848698e9bf2b79ea9cf7751f8610e",
+      "original_git_blob_sha1": "358037ea5d65f12ea25c6632e98a8885539cb1d3",
+      "final_sha256": "0b2c6bb780aa7dcf5df0a5a7ef9725ac72ab3548142937c764186cbe401adc21",
+      "original_bytes": 65779,
+      "final_bytes": 72569
+    },
+    {
+      "path": "libs/cua-driver/rust/crates/platform-macos/src/session.rs",
+      "original_sha256": "7a14f5b18c8538a8e0332a1808301b36407fb7e53add0dca302facadd80f5421",
+      "original_git_blob_sha1": "80a444c9136879ef6611a9a6b65c174f7e8caf46",
+      "final_sha256": "2440394097e383d1ecc786ad1b866780ff26b57b12c8f1ca3a806a4793466f58",
+      "original_bytes": 2470,
+      "final_bytes": 2622
+    },
+    {
+      "path": "libs/cua-driver/rust/crates/platform-macos/src/session_observation.rs",
+      "original_sha256": null,
+      "original_git_blob_sha1": null,
+      "final_sha256": "fb2241de54cf064c59909558123d6b321199ee81a5254e20657fc6ee1d426f0d",
+      "original_bytes": 0,
+      "final_bytes": 11603
+    },
+    {
+      "path": "libs/cua-driver/rust/crates/platform-macos/src/tools/get_window_state.rs",
+      "original_sha256": "2cb1b688c82cfbd03d79c61bb29e8961384219e251075eccab84dc6536dfbae3",
+      "original_git_blob_sha1": "8c4d118990e6852c30bd200c80fee7f058197806",
+      "final_sha256": "fbbc664275c33a9e1dc313ab006097a8f5b8761c0093a11a0f30f0ac2c10f6dd",
+      "original_bytes": 77660,
+      "final_bytes": 77822
+    },
+    {
+      "path": "libs/cua-driver/rust/crates/platform-macos/src/tools/mod.rs",
+      "original_sha256": "d3ce770798904d85a15669b041d8e234eb61a5e45ac25b569e3ac13bfc33ef30",
+      "original_git_blob_sha1": "cd39cdd64f20d84dccedd18827ff77b8306e6249",
+      "final_sha256": "6a81cc172696e5793a743842d439e71293025511082d5e66ecea62e221caad55",
+      "original_bytes": 57246,
+      "final_bytes": 57733
+    },
+    {
+      "path": "libs/cua-driver/rust/crates/platform-macos/src/tools/styx_private.rs",
+      "original_sha256": null,
+      "original_git_blob_sha1": null,
+      "final_sha256": "2674b24b23c79cf6390ce1f3dea4677321bd527b4bcd771f08288412c702326b",
+      "original_bytes": 0,
+      "final_bytes": 17140
     }
   ],
   "rust_toolchain": "1.97.1",

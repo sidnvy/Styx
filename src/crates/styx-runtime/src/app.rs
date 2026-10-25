@@ -223,6 +223,9 @@ impl ConnectionStatus {
     }
 }
 struct RunningHost {
+    // Same protected enrollment/configuration snapshot for this original role.
+    // App component intent is not an OS permission or a remote operation grant.
+    desktop_intent: Option<Arc<crate::store::native_host_snapshot::NativeHostSnapshot>>,
     cancel: CancellationToken,
     worker: JoinHandle<Result<ForegroundOutcome, ForegroundError>>,
     events: JoinHandle<()>,
@@ -545,8 +548,37 @@ impl HostApp {
         }
         Ok(())
     }
-    fn snapshot(&self) -> Value {
-        json!({"schema":1,"configuration":self.configuration,"foreground":*self.observed.borrow(),"admission_fenced":self.unknown||self.retained.is_some()||self.quit_ticket.is_some(),"cleanup":self.cleanup,"enrollment":self.enrollment,"mode":"rust_host","supportedOperations":["startupStatus","status","inspectJoin","join","requestJoin","claimJoin","inspectHost","connect","disconnect","quitAdmission"]})
+    fn admission_fenced(&self) -> bool {
+        self.unknown || self.retained.is_some() || self.quit_ticket.is_some()
+    }
+    async fn desktop_component_requested(&self) -> bool {
+        if self.admission_fenced() {
+            return false;
+        }
+        let Some(role) = &self.running else {
+            return false;
+        };
+        if role.cancel.is_cancelled() || role.worker.is_finished() {
+            return false;
+        }
+        let Some(original) = role.desktop_intent.clone() else {
+            return false;
+        };
+        // Never acquire a replacement profile on a status request. Original
+        // private file/namespace identities and bytes must still match; only
+        // the successful pairing self-response supplies computer_approved.
+        let requested = tokio::task::spawn_blocking(move || {
+            original.revalidate().is_ok()
+                && original.seed().computer_requested
+                && original.ready().computer_approved
+        })
+        .await
+        .unwrap_or(false);
+        requested && !role.cancel.is_cancelled() && !role.worker.is_finished()
+    }
+    async fn snapshot(&self) -> Value {
+        let computer_requested = self.desktop_component_requested().await;
+        json!({"schema":1,"configuration":self.configuration,"foreground":*self.observed.borrow(),"admission_fenced":self.admission_fenced(),"desktop_intent":{"schema":1,"computer_requested":computer_requested,"source":"approved_host_configuration"},"cleanup":self.cleanup,"enrollment":self.enrollment,"mode":"rust_host","supportedOperations":["startupStatus","status","inspectJoin","join","requestJoin","claimJoin","inspectHost","connect","disconnect","quitAdmission"]})
     }
     async fn dispatch(
         &mut self,
@@ -559,7 +591,7 @@ impl HostApp {
         self.reap().await?;
         if matches!(operation, Operation::Status | Operation::StartupStatus) {
             self.scope.validate()?;
-            return Ok(self.snapshot());
+            return Ok(self.snapshot().await);
         }
         // Stopping our own captured role remains safe even if scope validation
         // has failed. Never leave it running because a configuration write was refused.
@@ -631,6 +663,20 @@ impl HostApp {
             Operation::Connect => {
                 if self.running.is_none() {
                     self.set_desired(NativeRunDesired::Running).await?;
+                    let intent_scope = self.scope.clone();
+                    let desktop_intent = tokio::task::spawn_blocking(move || {
+                        crate::store::native_host_snapshot::NativeHostSnapshot::open_for_app(
+                            intent_scope.state_dir(),
+                            intent_scope.clone(),
+                        )
+                        .ok()
+                        .map(Arc::new)
+                    })
+                    .await
+                    .ok()
+                    .flatten();
+                    // Missing desktop facts disable that optional component;
+                    // they cannot prevent the independent Exec Host starting.
                     let cancel = CancellationToken::new();
                     let worker_cancel = cancel.clone();
                     let scope = self.scope.clone();
@@ -665,18 +711,19 @@ impl HostApp {
                     });
                     let cancel_on_drop = cancel.clone().drop_guard();
                     self.running = Some(RunningHost {
+                        desktop_intent,
                         cancel,
                         worker,
                         events: event_task,
                         _cancel_on_drop: cancel_on_drop,
                     });
                 }
-                Ok(self.snapshot())
+                Ok(self.snapshot().await)
             }
             Operation::Disconnect => {
                 self.settle().await?;
                 self.set_desired(NativeRunDesired::Stopped).await?;
-                Ok(self.snapshot())
+                Ok(self.snapshot().await)
             }
             Operation::QuitAdmission => {
                 // This ticket is only admission. Here admission is deliberately

@@ -63,6 +63,9 @@ final class ProductOwnedCore: @unchecked Sendable {
         if first { try? input.close() }
     }
     private var closed: Bool { stopLock.lock(); defer { stopLock.unlock() }; return eofRequested }
+    // Availability observation only. False withdraws discovery; neither value
+    // is an executor-drain receipt or permission to replace this original child.
+    var isRunning: Bool { !closed && child.isRunning }
     private func line() throws -> Data? {
         while true {
             if let end = buffer.firstIndex(of: 10) {

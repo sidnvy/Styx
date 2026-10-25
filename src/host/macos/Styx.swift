@@ -455,6 +455,14 @@ func styxStatusItemImage(source: NSImage) -> NSImage? {
 
 #if STYX_PRODUCT_UI
 func productComputerUseRequested(_ status: ProductJSON, guiAvailable: Bool) -> Bool {
+    if status["mode"].string == "rust_host" || status["desktop_intent"] != .null {
+        let intent = status["desktop_intent"]
+        return guiAvailable && status["schema"] == .number(1) && status["mode"].string == "rust_host" &&
+            status["admission_fenced"] == .bool(false) &&
+            ["started", "connected"].contains(status["foreground"]["status"].string ?? "") &&
+            intent["schema"] == .number(1) && intent["source"] == .string("approved_host_configuration") &&
+            intent["computer_requested"] == .bool(true)
+    }
     guard guiAvailable, status["deployment"]["roles"]["host"].string == "local" else { return false }
     let change = status["deviceCapabilities"]
     if ["running", "uncertain"].contains(change["status"].string ?? "") { return false }
@@ -466,11 +474,37 @@ func productComputerUseRequested(_ status: ProductJSON, guiAvailable: Bool) -> B
         ["started", "connected", "using_service"].contains(foreground["status"].string ?? "") &&
         ["foreground", "service"].contains(foreground["host"].string ?? "") && foreground["computerRequested"] == .bool(true)
 }
+// Match the existing owned Core operation budget. Expiry withdraws descriptor
+// availability only; it never kills/replaces the daemon or retries a mutation.
+let productDesktopIntentMaxAge: TimeInterval = 150
+func productDesktopIntentFresh(_ observed: TimeInterval?, now: TimeInterval) -> Bool {
+    guard let observed = observed, observed.isFinite, now.isFinite else { return false }
+    let elapsed = now - observed
+    return elapsed >= 0 && elapsed <= productDesktopIntentMaxAge
+}
 func productSystemQuitReason(_ reason: OSType?) -> Bool {
     guard let reason = reason else { return false }
     return [OSType(kAEQuitAll), OSType(kAEShutDown), OSType(kAERestart), OSType(kAEReallyLogOut)].contains(reason)
 }
 #endif
+
+// Synchronous original-child wait runs off AppKit. A forced exit is reported as
+// unknown native cleanup, even though the original OS process has been reaped.
+private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
+    var forced = false
+    if child.isRunning {
+        let limit = ProcessInfo.processInfo.systemUptime + 3
+        while child.isRunning && ProcessInfo.processInfo.systemUptime < limit { Thread.sleep(forTimeInterval: 0.02) }
+        if child.isRunning {
+            forced = true; child.terminate()
+            let termLimit = ProcessInfo.processInfo.systemUptime + 1
+            while child.isRunning && ProcessInfo.processInfo.systemUptime < termLimit { Thread.sleep(forTimeInterval: 0.02) }
+            if child.isRunning { kill(child.processIdentifier, SIGKILL) }
+        }
+    }
+    child.waitUntilExit()
+    return forced || child.terminationReason != .exit || child.terminationStatus != 0
+}
 
 @MainActor final class StyxDelegate: NSObject, NSApplicationDelegate {
     var setupProcess: Process?
@@ -488,6 +522,9 @@ func productSystemQuitReason(_ reason: OSType?) -> Bool {
     var nativeCoreAttempted = false
     var componentTimer: Timer?
     var componentObservationPending = false
+    var nativeComponentObservation: UUID?
+    var nativeDesktopIntentObservedAt: TimeInterval?
+    var computerPermissionRecoveryRequired = false
     var computerUseRequested = false
     #endif
     var terminationPreservesRecovery = false
@@ -502,6 +539,7 @@ func productSystemQuitReason(_ reason: OSType?) -> Bool {
     let setupPreference = "Styx.SetupWindowOpened.v1"
     var runtime: RuntimeDirectory?
     var daemon: Process?
+    var daemonStopTask: Task<Void, Never>?
     var lifetimeWriter: FileHandle?
     var timer: Timer?
     var statusItem: NSStatusItem?
@@ -607,9 +645,14 @@ func productSystemQuitReason(_ reason: OSType?) -> Bool {
                 guard !terminationPending else { core.requestEOF(); return }
                 nativeCore = core
                 let model = ProductModel(owned: core)
+                model.recoverComputerUse = { [weak self, weak core] in
+                    guard let owner = self, let original = core else { throw ProductWorkflowError.computerPermissionRecoveryRequired }
+                    try await owner.recoverComputerUseAfterPermissions(original)
+                }
                 setupWindow = ProductWindowController(model: model)
                 await model.bootstrap()
                 guard model.loaded else { core.requestEOF(); nativeCore = nil; throw ProductOwnedCoreError.unavailable }
+                observeProductComponents(core)
                 setupStatusLine?.title = "Native Host settings ready"
                 if setupOpenRequested { setupWindow?.present(); setupOpenRequested = false }
             } catch { setupStatusLine?.title = "Native package unavailable; original identity retained" }
@@ -756,9 +799,12 @@ func productSystemQuitReason(_ reason: OSType?) -> Bool {
         // Observe a change before accepting Continue, even if the 200ms poll
         // has not run yet. Only this explicit action may restore this stop cause.
         poll()
-        if phase == "permissions_changed" {
+        if phase == "permissions_changed" || computerPermissionRecoveryRequired {
+            await stopAndJoin()
             guard computerUseRequested, daemon == nil else { throw ProductWorkflowError.computerPermissionRecoveryRequired }
-            try start()
+            computerPermissionRecoveryRequired = false
+            do { try start() }
+            catch { computerPermissionRecoveryRequired = true; throw error }
         }
         guard daemon?.isRunning == true else { throw ProductWorkflowError.computerPermissionRecoveryRequired }
         // A live owned child is not native GUI or chat-account acceptance.
@@ -773,6 +819,100 @@ func productSystemQuitReason(_ reason: OSType?) -> Bool {
         openSettings(); return true
     }
     #if STYX_PRODUCT_UI
+    func withdrawNativeComputerUse(_ message: String) {
+        nativeDesktopIntentObservedAt = nil
+        computerUseRequested = false
+        stop()
+        statusLine?.title = message
+    }
+    func checkNativeComponentAvailability(_ core: ProductOwnedCore) {
+        guard nativeCore === core else { return }
+        if !core.isRunning {
+            withdrawNativeComputerUse("Core connection stopped; Computer Use unavailable")
+        } else if !productDesktopIntentFresh(nativeDesktopIntentObservedAt, now: ProcessInfo.processInfo.systemUptime) {
+            // A busy Core is not a capability revocation. Keep custody of the
+            // original daemon, but expose no descriptor while its intent is stale.
+            if let runtime = runtime { unlink(runtime.descriptor) }
+        }
+    }
+    func observeProductComponents(_ core: ProductOwnedCore) {
+        componentTimer?.invalidate()
+        nativeComponentObservation = nil; nativeDesktopIntentObservedAt = nil
+        componentTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self, weak core] _ in
+            guard let owner = self, let original = core else { return }
+            Task { @MainActor in
+                owner.checkNativeComponentAvailability(original)
+                await owner.refreshProductComponents(original)
+            }
+        }
+        Task { @MainActor in await refreshProductComponents(core) }
+    }
+    func refreshProductComponents(_ core: ProductOwnedCore) async {
+        guard nativeCore === core, nativeComponentObservation == nil, !terminationPending else { return }
+        checkNativeComponentAvailability(core)
+        guard core.isRunning, setupWindow?.model.busy != true else { return }
+        let observation = UUID(), requestedAt = ProcessInfo.processInfo.systemUptime
+        nativeComponentObservation = observation
+        defer { if nativeComponentObservation == observation { nativeComponentObservation = nil } }
+        do {
+            let status = try await core.call("status")
+            guard nativeCore === core, nativeComponentObservation == observation, !terminationPending else { return }
+            guard core.isRunning else { withdrawNativeComputerUse("Core connection stopped; Computer Use unavailable"); return }
+            guard productDesktopIntentFresh(requestedAt, now: ProcessInfo.processInfo.systemUptime) else {
+                nativeDesktopIntentObservedAt = nil
+                if let runtime = runtime { unlink(runtime.descriptor) }
+                return
+            }
+            guard status["mode"].string == "rust_host" else { withdrawNativeComputerUse("Core status invalid; Computer Use unavailable"); return }
+            nativeDesktopIntentObservedAt = requestedAt
+            let session = CGSessionCopyCurrentDictionary() as? [String: Any]
+            let requested = productComputerUseRequested(status, guiAvailable: session?[kCGSessionOnConsoleKey as String] as? Bool == true)
+            let changed = requested != computerUseRequested
+            computerUseRequested = requested
+            if requested {
+                // Daemon exits and permission changes still require an explicit
+                // recovery action; a periodic read is not a restart policy.
+                if changed && !computerPermissionRecoveryRequired {
+                    if runtime == nil { runtime = try RuntimeDirectory() }
+                    try start()
+                }
+            } else { stop(); statusLine?.title = "Computer Use is not enabled in this session" }
+        } catch {
+            guard nativeCore === core, nativeComponentObservation == observation else { return }
+            withdrawNativeComputerUse("Core status unavailable; Computer Use withdrawn")
+        }
+    }
+    func recoverComputerUseAfterPermissions(_ core: ProductOwnedCore) async throws {
+        guard nativeCore === core, core.isRunning, !terminationPending else { throw ProductWorkflowError.computerPermissionRecoveryRequired }
+        let requestedAt = ProcessInfo.processInfo.systemUptime
+        let status: ProductJSON
+        do { status = try await core.call("status") }
+        catch {
+            if nativeCore === core { withdrawNativeComputerUse("Core status unavailable; Computer Use withdrawn") }
+            throw error
+        }
+        let session = CGSessionCopyCurrentDictionary() as? [String: Any]
+        guard nativeCore === core, !terminationPending else { throw ProductWorkflowError.computerPermissionRecoveryRequired }
+        guard core.isRunning, status["mode"].string == "rust_host",
+              productComputerUseRequested(status, guiAvailable: session?[kCGSessionOnConsoleKey as String] as? Bool == true) else {
+            withdrawNativeComputerUse("Computer Use is not enabled in this session")
+            throw ProductWorkflowError.computerPermissionRecoveryRequired
+        }
+        guard productDesktopIntentFresh(requestedAt, now: ProcessInfo.processInfo.systemUptime),
+              AXIsProcessTrusted(), CGPreflightScreenCaptureAccess() else { throw ProductWorkflowError.computerPermissionRecoveryRequired }
+        nativeDesktopIntentObservedAt = requestedAt
+        computerUseRequested = true
+        poll()
+        if computerPermissionRecoveryRequired {
+            await stopAndJoin()
+            guard nativeCore === core, core.isRunning, !terminationPending else { throw ProductWorkflowError.computerPermissionRecoveryRequired }
+            computerPermissionRecoveryRequired = false
+            do { try start() }
+            catch { computerPermissionRecoveryRequired = true; throw error }
+        }
+        guard daemon?.isRunning == true, daemonStopTask == nil else { throw ProductWorkflowError.computerPermissionRecoveryRequired }
+        // Permission recovery remains distinct from native effect acceptance.
+    }
     func observeProductComponents(_ url: URL) {
         componentTimer?.invalidate()
         componentTimer = Timer.scheduledTimer(withTimeInterval: 2, repeats: true) { [weak self] _ in
@@ -807,7 +947,9 @@ func productSystemQuitReason(_ reason: OSType?) -> Bool {
     func stopSetup() {
         #if STYX_PRODUCT_UI
         nativeCore?.requestEOF(); nativeCore = nil
+        nativeComponentObservation = nil; nativeDesktopIntentObservedAt = nil
         componentTimer?.invalidate(); componentTimer = nil; computerUseRequested = false
+        stop()
         #endif
         setupWindow?.close(); setupWindow = nil
         setupOutput?.fileHandleForReading.readabilityHandler = nil
@@ -829,8 +971,14 @@ func productSystemQuitReason(_ reason: OSType?) -> Bool {
     func start() throws {
         #if STYX_PRODUCT_UI
         let session = CGSessionCopyCurrentDictionary() as? [String: Any]
-        guard computerUseRequested, session?[kCGSessionOnConsoleKey as String] as? Bool == true else { throw HostError.daemonUnavailable }
+        guard computerUseRequested, !computerPermissionRecoveryRequired,
+              session?[kCGSessionOnConsoleKey as String] as? Bool == true else { throw HostError.daemonUnavailable }
+        if nativeCoreAttempted {
+            guard nativeCore?.isRunning == true,
+                  productDesktopIntentFresh(nativeDesktopIntentObservedAt, now: ProcessInfo.processInfo.systemUptime) else { throw HostError.daemonUnavailable }
+        }
         #endif
+        guard daemonStopTask == nil else { throw HostError.daemonUnavailable }
         guard let runtime = runtime, daemon == nil else { return }
         // A released owner lock does not prove a prior crashed owner's child
         // exited. Never unlink an existing endpoint to replace a live daemon.
@@ -867,10 +1015,24 @@ func productSystemQuitReason(_ reason: OSType?) -> Bool {
         }
     }
     func poll() {
-        guard let runtime = runtime, let daemon = daemon, daemon.isRunning else { return }
+        guard let runtime = runtime, let daemon = daemon, daemon.isRunning, daemonStopTask == nil else { return }
+        #if STYX_PRODUCT_UI
+        if nativeCoreAttempted {
+            guard let core = nativeCore, core.isRunning else { withdrawNativeComputerUse("Core connection stopped; Computer Use unavailable"); return }
+            guard computerUseRequested,
+                  productDesktopIntentFresh(nativeDesktopIntentObservedAt, now: ProcessInfo.processInfo.systemUptime) else { unlink(runtime.descriptor); return }
+        }
+        let session = CGSessionCopyCurrentDictionary() as? [String: Any]
+        guard session?[kCGSessionOnConsoleKey as String] as? Bool == true else {
+            computerUseRequested = false; stop(); statusLine?.title = "Computer Use is not available in this session"; return
+        }
+        #endif
         let ax = AXIsProcessTrusted(), screen = CGPreflightScreenCaptureAccess()
         let grants = "\(ax):\(screen)"
         if let previous = lastGrants, previous != grants {
+            #if STYX_PRODUCT_UI
+            computerPermissionRecoveryRequired = true
+            #endif
             stop(); phase = "permissions_changed"
             statusLine?.title = "Permissions changed; review Computer Use permissions in Styx"; return
         }
@@ -895,28 +1057,31 @@ func productSystemQuitReason(_ reason: OSType?) -> Bool {
     }
     func stop() {
         timer?.invalidate(); timer = nil
-        // Withdraw the advertised generation before terminating its daemon.
+        // Withdraw synchronously, before asking the original child to drain.
         if let runtime = runtime { unlink(runtime.descriptor) }
-        let ownedChild = daemon != nil
-        // Prefer upstream orderly EOF shutdown. Fall back only on this owned child.
+        guard daemonStopTask == nil else { return }
         try? lifetimeWriter?.close(); lifetimeWriter = nil
-        if let child = daemon {
-            child.terminationHandler = nil
-            if child.isRunning {
-                let limit = Date().addingTimeInterval(3)
-                while child.isRunning && Date() < limit { Thread.sleep(forTimeInterval: 0.02) }
-                if child.isRunning {
-                    child.terminate()
-                    let termLimit = Date().addingTimeInterval(1)
-                    while child.isRunning && Date() < termLimit { Thread.sleep(forTimeInterval: 0.02) }
-                    if child.isRunning { kill(child.processIdentifier, SIGKILL) }
-                }
-                child.waitUntilExit()
-            }
+        guard let child = daemon else {
+            if phase != "cleanup_unknown" { phase = "stopped" }
+            return
         }
-        daemon = nil
-        if ownedChild { runtime?.clear() }
-        phase = "stopped"
+        child.terminationHandler = nil
+        phase = "stopping"
+        daemonStopTask = Task { [self] in
+            // AppKit must remain free to consume native cleanup/frame callbacks.
+            // Custody stays with this exact Process until its actual wait ends.
+            let forced = await Task.detached { stopAndWaitForOwnedDaemon(child) }.value
+            if daemon === child {
+                daemon = nil; runtime?.clear()
+                if forced { phase = "cleanup_unknown"; statusLine?.title = "Cua exited; native cleanup was not confirmed" }
+                else if phase == "stopping" { phase = "stopped" }
+            }
+            daemonStopTask = nil
+        }
+    }
+    func stopAndJoin() async {
+        stop()
+        await daemonStopTask?.value
     }
     @objc func requestPermissions() {
         #if STYX_PRODUCT_UI
@@ -925,7 +1090,7 @@ func productSystemQuitReason(_ reason: OSType?) -> Bool {
         openSettings()
         if let model = setupWindow?.model {
             model.observePermissions()
-            model.page = model.computerApproved ? .permissions : .settings
+            model.page = model.computerApproved || nativeCore != nil && computerUseRequested ? .permissions : .settings
         }
         #else
         // Only an explicit local menu action can trigger OS-owned permission UI.
@@ -938,24 +1103,41 @@ func productSystemQuitReason(_ reason: OSType?) -> Bool {
         #endif
     }
     @objc func restart() {
-        stop()
-        do { try start() } catch { statusLine?.title = "Restart blocked: \(error)" }
+        Task {
+            await stopAndJoin()
+            do { try start() } catch { statusLine?.title = "Restart blocked: \(error)" }
+        }
     }
     @objc func quit() { terminationPreservesRecovery = false; NSApp.terminate(nil) }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        #if STYX_PRODUCT_UI
         if terminationPending { return .terminateLater }
+        #if STYX_PRODUCT_UI
         if nativeCoreAttempted {
             // Original bootstrap worker still owns its child until it completes.
             // A UI close cannot make an in-flight verified launch ownerless.
             if nativeCoreStarting { return .terminateCancel }
-            guard let _ = nativeCore else { stop(); return .terminateNow }
+            guard let _ = nativeCore else {
+                guard daemon != nil || daemonStopTask != nil else { return .terminateNow }
+                terminationPending = true
+                Task { await stopAndJoin(); terminationPending = false; sender.reply(toApplicationShouldTerminate: true) }
+                return .terminateLater
+            }
             terminationPending = true
             setupWindow?.prepareToQuit { [weak self] approved in
                 guard let owner = self else { sender.reply(toApplicationShouldTerminate: false); return }
-                owner.terminationPending = false
-                if approved { owner.nativeCore = nil; owner.stop() }
-                sender.reply(toApplicationShouldTerminate: approved)
+                if approved {
+                    owner.nativeCore = nil
+                    owner.nativeComponentObservation = nil; owner.nativeDesktopIntentObservedAt = nil
+                    owner.componentTimer?.invalidate(); owner.componentTimer = nil
+                    Task {
+                        await owner.stopAndJoin()
+                        owner.terminationPending = false
+                        sender.reply(toApplicationShouldTerminate: true)
+                    }
+                } else {
+                    owner.terminationPending = false
+                    sender.reply(toApplicationShouldTerminate: false)
+                }
             }
             return .terminateLater
         }
@@ -973,15 +1155,31 @@ func productSystemQuitReason(_ reason: OSType?) -> Bool {
             terminationPending = true
             setupWindow?.prepareToQuit { [weak self] approved in
                 guard let owner = self else { sender.reply(toApplicationShouldTerminate: false); return }
-                owner.terminationPending = false
                 owner.terminationApproved = approved
-                if approved { owner.stopSetup(); owner.stop() }
-                sender.reply(toApplicationShouldTerminate: approved)
+                if approved {
+                    owner.stopSetup()
+                    Task {
+                        await owner.stopAndJoin()
+                        owner.terminationPending = false
+                        sender.reply(toApplicationShouldTerminate: true)
+                    }
+                } else {
+                    owner.terminationPending = false
+                    sender.reply(toApplicationShouldTerminate: false)
+                }
             }
             return .terminateLater
         }
         #endif
-        stopSetup(); stop(); return .terminateNow
+        stopSetup()
+        guard daemon != nil || daemonStopTask != nil else { return .terminateNow }
+        terminationPending = true
+        Task {
+            await stopAndJoin()
+            terminationPending = false
+            sender.reply(toApplicationShouldTerminate: true)
+        }
+        return .terminateLater
     }
 }
 
@@ -1132,6 +1330,35 @@ if CommandLine.arguments.contains("--self-test") {
     precondition(!productComputerUseRequested(.object([:]), guiAvailable: true))
     let disabledStatus: ProductJSON = .object(["deployment": requestedStatus["deployment"], "foreground": approvedForeground, "deviceCapabilities": .object(["status": .string("updated"), "phase": .string("complete"), "computer": .bool(false)])])
     precondition(!productComputerUseRequested(disabledStatus, guiAvailable: true))
+    let nativeApproved: ProductJSON = .object(["schema": .number(1), "mode": .string("rust_host"),
+        "admission_fenced": .bool(false), "foreground": .object(["status": .string("connected")]), "desktop_intent": .object([
+        "schema": .number(1), "source": .string("approved_host_configuration"), "computer_requested": .bool(true)])])
+    precondition(productComputerUseRequested(nativeApproved, guiAvailable: true))
+    precondition(!productComputerUseRequested(nativeApproved, guiAvailable: false))
+    let invalidNativeIntents: [ProductJSON] = [.null, .object([:]), .object(["schema": .number(1), "source": .string("requestJoin"), "computer_requested": .bool(true)]),
+                                      .object(["schema": .number(1), "source": .string("approved_host_configuration"), "computer_requested": .bool(false)]),
+                                      .object(["schema": .number(2), "source": .string("approved_host_configuration"), "computer_requested": .bool(true)]),
+                                      .object(["schema": .number(1), "source": .string("approved_host_configuration"), "computer_requested": .string("true")])]
+    for invalidIntent in invalidNativeIntents {
+        var invalid = nativeApproved.object
+        invalid["desktop_intent"] = invalidIntent
+        invalid["deployment"] = requestedStatus["deployment"]
+        invalid["foreground"] = approvedForeground
+        precondition(!productComputerUseRequested(.object(invalid), guiAvailable: true))
+    }
+    let inconsistentNativeFields: [(String, ProductJSON)] = [
+        ("schema", .number(2)), ("schema", .null), ("admission_fenced", .bool(true)),
+        ("admission_fenced", .null), ("admission_fenced", .string("false")),
+        ("foreground", .object(["status": .string("not_running")])), ("foreground", .null)]
+    for (key, value) in inconsistentNativeFields {
+        var invalid = nativeApproved.object; invalid[key] = value
+        precondition(!productComputerUseRequested(.object(invalid), guiAvailable: true))
+    }
+    precondition(productDesktopIntentFresh(10, now: 160))
+    precondition(!productDesktopIntentFresh(10, now: 160.001))
+    precondition(!productDesktopIntentFresh(nil, now: 10))
+    precondition(!productDesktopIntentFresh(11, now: 10))
+    precondition(!productDesktopIntentFresh(0, now: .infinity))
     precondition(!productSystemQuitReason(nil))
     precondition(productSystemQuitReason(OSType(kAEReallyLogOut)))
     precondition(productSystemQuitReason(OSType(kAERestart)))
