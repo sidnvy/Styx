@@ -7,9 +7,15 @@
 pub mod native;
 pub mod native_gateway;
 pub mod native_join;
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[cfg(any(
+    all(target_os = "windows", target_arch = "x86_64"),
+    all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
+))]
 mod native_join_http;
-#[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[cfg(any(
+    all(target_os = "windows", target_arch = "x86_64"),
+    all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
+))]
 mod native_join_protocol;
 use crate::store::{PrivateRoot, RawFile, StoreError};
 use serde::{
