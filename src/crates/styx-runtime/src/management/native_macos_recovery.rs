@@ -35,6 +35,20 @@ fn prepare(
     runtime: Handle,
     permit: SemaphorePermit<'static>,
 ) -> Result<Prepared> {
+    // Read-only format routing, before acquiring ANY configuration writer.
+    // A race is refused by the selected route under its one original writer.
+    let root = crate::store::PrivateRoot::open(&path)
+        .map_err(|_| NativeManagementError::new(ErrorKind::Unavailable))?;
+    if root
+        .ensure_absent(crate::store::native_root::NATIVE_MARKER_FILE)
+        .is_ok()
+    {
+        return crate::store::native_transaction::begin_mac_legacy_recovery(
+            path, id, None, runtime, permit,
+        )
+        .map(Prepared::Running)
+        .map_err(migration_error);
+    }
     let transactions = platform::open(&path)?;
     let selected = (|| -> Result<bool> {
         let state = transactions

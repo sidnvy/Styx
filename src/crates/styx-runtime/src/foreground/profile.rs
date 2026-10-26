@@ -35,6 +35,8 @@ mod fresh;
 mod native_materials;
 #[path = "profile_release.rs"]
 mod release;
+#[cfg(target_os = "macos")]
+pub(crate) use native_materials::read_recovered_pair_materials;
 #[cfg(any(
     all(target_os = "linux", target_env = "gnu"),
     target_os = "windows",
@@ -865,6 +867,32 @@ fn load_source(
     mode: GatewayWireMode,
     source: ProfileSource,
 ) -> Result<LoadedLegacyProfile, ProfileError> {
+    load_source_inner(
+        state_dir,
+        mode,
+        source,
+        #[cfg(target_os = "macos")]
+        None,
+    )
+}
+// The borrowed retirement port is accepted only by the private original-material
+// reader. It is never stored in or exposed through an ordinary runtime profile.
+fn load_source_inner(
+    state_dir: &Path,
+    mode: GatewayWireMode,
+    source: ProfileSource,
+    #[cfg(target_os = "macos")] retired_materials: Option<
+        &crate::store::MacRetiredMaterialSource<'_>,
+    >,
+) -> Result<LoadedLegacyProfile, ProfileError> {
+    #[cfg(target_os = "macos")]
+    if let Some(retired) = retired_materials {
+        if !matches!(&source, ProfileSource::OriginalMaterials) || retired.state_dir() != state_dir
+        {
+            return Err(ProfileError::Invalid);
+        }
+        retired.validate().map_err(|_| ProfileError::Changed)?;
+    }
     source.revalidate()?;
     #[cfg(any(
         all(target_os = "linux", target_env = "gnu"),
@@ -1045,7 +1073,19 @@ fn load_source(
             target_os = "macos"
         ))]
         ProfileSource::OriginalMaterials => {
-            zeroize::Zeroizing::new(capture.read(base, "device/host.token", 4096)?)
+            #[cfg(target_os = "macos")]
+            if let Some(retired) = retired_materials {
+                let root = PrivateRoot::open(base).map_err(|_| ProfileError::ProtectedRead)?;
+                retired
+                    .read_retired_token(&root)
+                    .map_err(|_| ProfileError::Changed)?
+            } else {
+                zeroize::Zeroizing::new(capture.read(base, "device/host.token", 4096)?)
+            }
+            #[cfg(not(target_os = "macos"))]
+            {
+                zeroize::Zeroizing::new(capture.read(base, "device/host.token", 4096)?)
+            }
         }
         #[cfg(all(target_os = "linux", target_env = "gnu"))]
         ProfileSource::Maintenance(binding) => {
@@ -1324,6 +1364,10 @@ fn load_source(
         source,
     };
     loaded.revalidate()?;
+    #[cfg(target_os = "macos")]
+    if let Some(retired) = retired_materials {
+        retired.validate().map_err(|_| ProfileError::Changed)?;
+    }
     Ok(loaded)
 }
 #[cfg(test)]

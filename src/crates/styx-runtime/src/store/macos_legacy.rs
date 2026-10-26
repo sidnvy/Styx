@@ -554,3 +554,147 @@ impl MacTokenRetirement {
         })
     }
 }
+
+/// Borrowed read-only material bridge for the original pre-cutover transaction.
+/// It cannot be constructed from paths/receipts alone or become a runtime profile.
+pub(crate) struct MacRetiredMaterialSource<'a> {
+    token: &'a MacTokenRetirement,
+    custody: &'a MacBootRecoveryEffects,
+    held: &'a crate::store::management::handoff::LegacyGuardsHeld,
+    plan: &'a crate::store::management::migration_plan::OriginalMigrationPlan,
+    root: PrivateRoot,
+    preservation: &'a [u8],
+}
+impl<'a> MacRetiredMaterialSource<'a> {
+    pub(in crate::store) fn open(
+        state_dir: &Path,
+        journal: &crate::store::management::OwnedManagementJournal,
+        plan: &'a crate::store::management::migration_plan::OriginalMigrationPlan,
+        token: &'a MacTokenRetirement,
+        custody: &'a MacBootRecoveryEffects,
+        held: &'a crate::store::management::handoff::LegacyGuardsHeld,
+    ) -> JournalResult<Self> {
+        let saved = journal.resync_native_migration_plan(&token.maintenance)?;
+        if !saved.complete()
+            || saved.raw_header != plan.raw_header
+            || saved.before != plan.before
+            || saved.preservation != plan.preservation
+            || saved.selected != plan.selected
+            || !plan.matches_recovery(held.prepared().intent())
+        {
+            return Err(JournalError::Conflict);
+        }
+        let (prepared, retired) = journal
+            .reopen_native_retirement(&token.maintenance, token.maintenance.transaction_id())?;
+        MacTokenRetirement::validate_recovery_binding(
+            &token.owner,
+            &token.maintenance,
+            &prepared,
+            custody,
+            held,
+        )?;
+        let retired = retired.ok_or(JournalError::Conflict)?;
+        if prepared.intent() != &plan.retirement
+            || prepared.raw_intent_sha256() != Sha256Digest::of_bytes(plan.retirement_raw())
+            || token.validate_retired()? != *retired.post_stamp()
+            || !token.matches_binding(
+                &token.owner,
+                &plan.pair.host_root,
+                plan.pair.credential_sha256,
+            )
+        {
+            return Err(JournalError::Conflict);
+        }
+        let preservation = plan.preservation.as_deref().ok_or(JournalError::Conflict)?;
+        #[derive(serde::Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Row {
+            path: PathBuf,
+            sha256: Sha256Digest,
+            bytes: u64,
+            observation: serde_json::Value,
+        }
+        let rows: Vec<Row> =
+            serde_json::from_slice(preservation).map_err(|_| JournalError::Conflict)?;
+        let source = token.host.path.join("device/host.token");
+        let matching: Vec<_> = rows.iter().filter(|row| row.path == source).collect();
+        let [row] = matching.as_slice() else {
+            return Err(JournalError::Conflict);
+        };
+        let original = &token.original;
+        let observation = FileObservation {
+            device: original.device,
+            inode: original.inode,
+            byte_len: original.byte_len,
+            modified_seconds: original.modified_seconds,
+            modified_nanoseconds: original.modified_nanoseconds,
+            changed_seconds: original.changed_seconds,
+            changed_nanoseconds: original.changed_nanoseconds,
+        };
+        if row.sha256 != original.sha256
+            || row.bytes != original.byte_len
+            || row.observation
+                != serde_json::to_value(&observation).map_err(|_| JournalError::Conflict)?
+        {
+            return Err(JournalError::Conflict);
+        }
+        let value = Self {
+            token,
+            custody,
+            held,
+            plan,
+            root: PrivateRoot::open(state_dir).map_err(|_| JournalError::Unknown)?,
+            preservation,
+        };
+        value.validate()?;
+        Ok(value)
+    }
+    pub(crate) fn validate(&self) -> JournalResult<()> {
+        if !self.token.maintenance.matches(&self.token.owner)
+            || self.plan.pair.config_root != native_root(self.root.identity())?
+            || self.plan.pair.transaction_id != *self.token.maintenance.transaction_id()
+            || !self.token.matches_binding(
+                &self.token.owner,
+                &self.plan.pair.host_root,
+                self.plan.pair.credential_sha256,
+            )
+        {
+            return Err(JournalError::Conflict);
+        }
+        self.custody.validate_retained(self.held)?;
+        self.token.validate_retired()?;
+        // This source is only for the original canonical state. The applied
+        // cutover owns its own later canonical/token checks, never this reader.
+        let before = self
+            .root
+            .read_raw("state.json", 1024 * 1024)
+            .map_err(|_| JournalError::Unknown)?;
+        if Some(before.bytes()) != self.plan.before.as_deref() {
+            return Err(JournalError::Unknown);
+        }
+        unknown(self.root.inner.validate_root())
+    }
+    pub(crate) fn state_dir(&self) -> &Path {
+        &self.root.inner.path
+    }
+    pub(crate) fn host_root_identity(&self) -> &NativeRootIdentity {
+        &self.plan.pair.host_root
+    }
+    pub(crate) fn original_pair(
+        &self,
+    ) -> &styx_contracts::native_management::NativePreservedHostPair {
+        &self.plan.pair
+    }
+    pub(crate) fn preservation_raw(&self) -> &[u8] {
+        self.preservation
+    }
+    pub(crate) fn read_retired_token(
+        &self,
+        host: &PrivateRoot,
+    ) -> JournalResult<Zeroizing<Vec<u8>>> {
+        self.validate()?;
+        let bytes = self.token.read_retired(host)?;
+        self.validate()?;
+        Ok(bytes)
+    }
+}

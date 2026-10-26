@@ -21,12 +21,36 @@ pub(crate) enum MacMigrationRecoveryStart {
 pub(crate) struct MacMigrationRecoveryFailure {
     error: NativeTransactionError,
     process_teardown_required: bool,
+    _app_scope: Option<Arc<crate::app::HostScope>>,
     _ownership: FailedOwner,
 }
 enum FailedOwner {
-    Transactions { _owner: Box<NativeTransactions> },
-    Running { _owner: Box<MacMigrationRecovery> },
+    Transactions {
+        _owner: Box<NativeTransactions>,
+    },
+    Running {
+        _owner: Box<MacMigrationRecovery>,
+    },
+    Unstarted,
+    Opening {
+        _owner: Box<crate::store::configuration::ConfigurationOpenFailure>,
+    },
+    Configuration {
+        _owner: OwnedConfigurationRoot,
+    },
+    Legacy {
+        _owner: Box<LegacyRecoveryOwner>,
+    },
+    Committed {
+        _owner: Box<crate::store::platform::MacMigrationCommittedScope>,
+    },
 }
+struct LegacyRecoveryOwner {
+    owner: OwnedConfigurationRoot,
+    journal: OwnedManagementJournal,
+    maintenance: Option<Arc<ConfigurationMaintenance>>,
+}
+
 impl MacMigrationRecoveryFailure {
     pub(crate) fn error(&self) -> NativeTransactionError {
         self.error
@@ -38,6 +62,7 @@ impl MacMigrationRecoveryFailure {
         Box::new(Self {
             error,
             process_teardown_required: false,
+            _app_scope: None,
             _ownership: FailedOwner::Transactions {
                 _owner: Box::new(owner),
             },
@@ -46,7 +71,9 @@ impl MacMigrationRecoveryFailure {
 }
 #[must_use = "the actual worker and original binding must remain owned until joined"]
 pub(crate) struct MacMigrationRecovery {
-    binding: NativeRootBinding,
+    // None exists only for a legacy root whose original writer is held by the
+    // running task. Bind its new native marker only after actual joined commit.
+    binding: Option<NativeRootBinding>,
     task: MacMigrationOwnerTask,
     transaction: TransactionId,
 }
@@ -182,7 +209,7 @@ impl NativeTransactions {
             Arc::new(permit),
         );
         Ok(MacMigrationRecoveryStart::Running(MacMigrationRecovery {
-            binding,
+            binding: Some(binding),
             task,
             transaction: id,
         }))
@@ -202,10 +229,17 @@ impl MacMigrationRecovery {
         Box<MacMigrationRecoveryFailure>,
     > {
         let result = self.task.observe().await;
-        if !matches!(&result, Ok(o) if o.stage == "resumed_committed_admission_released") {
+        let expected_stage = if self.binding.is_some() {
+            "resumed_committed_admission_released"
+        } else {
+            "committed_admission_released"
+        };
+        if !matches!(&result, Ok(o) if o.stage == expected_stage && o.transaction_id == self.transaction)
+        {
             return Err(Box::new(MacMigrationRecoveryFailure {
                 error: NativeTransactionError::UnknownInspect,
                 process_teardown_required: result.is_ok(),
+                _app_scope: None,
                 _ownership: FailedOwner::Running {
                     _owner: Box::new(self),
                 },
@@ -217,6 +251,7 @@ impl MacMigrationRecovery {
                 return Err(Box::new(MacMigrationRecoveryFailure {
                     error: NativeTransactionError::UnknownInspect,
                     process_teardown_required: false,
+                    _app_scope: None,
                     _ownership: FailedOwner::Running {
                         _owner: Box::new(self),
                     },
@@ -224,8 +259,22 @@ impl MacMigrationRecovery {
             }
         };
         let retained_permit = scope.recovery_permit.clone();
+        let binding = match self.binding {
+            Some(binding) => binding,
+            None => match crate::store::native_root::bind_owned_native(scope.owner.clone()) {
+                Ok(binding) => binding,
+                Err(_) => {
+                    return Err(Box::new(MacMigrationRecoveryFailure {
+                        error: NativeTransactionError::UnknownInspect,
+                        process_teardown_required: false,
+                        _app_scope: None,
+                        _ownership: FailedOwner::Committed { _owner: scope },
+                    }));
+                }
+            },
+        };
         let transactions = NativeTransactions {
-            binding: self.binding,
+            binding,
             journal: scope.journal,
             retained_maintenance: None,
         };
@@ -270,4 +319,122 @@ impl MacMigrationRecovery {
             )),
         }
     }
+}
+
+/// Explicit pre-cutover recovery. Format selection happens before any writer is
+/// acquired; under the acquired writer marker absence is checked again. No
+/// fallback ever abandons an acquired native coordinator to open another one.
+pub(crate) fn begin_mac_legacy_recovery(
+    state_dir: PathBuf,
+    id: TransactionId,
+    app_scope: Option<Arc<crate::app::HostScope>>,
+    runtime: Handle,
+    permit: SemaphorePermit<'static>,
+) -> Result<MacMigrationRecovery, Box<MacMigrationRecoveryFailure>> {
+    let failed = |error: NativeTransactionError, ownership: FailedOwner| {
+        Box::new(MacMigrationRecoveryFailure {
+            error,
+            process_teardown_required: false,
+            _app_scope: app_scope.clone(),
+            _ownership: ownership,
+        })
+    };
+    let root = crate::store::PrivateRoot::open(&state_dir).map_err(|_| {
+        failed(
+            NativeTransactionError::UnknownInspect,
+            FailedOwner::Unstarted,
+        )
+    })?;
+    let writer = root
+        .try_existing_configuration_writer()
+        .map_err(|_| failed(NativeTransactionError::Conflict, FailedOwner::Unstarted))?;
+    let owner = OwnedConfigurationRoot::open_existing_retaining(root, writer)
+        .map_err(|error| failed(error.error.into(), FailedOwner::Opening { _owner: error }))?;
+    let journal =
+        match OwnedManagementJournal::open_existing(owner.clone(), JournalBudget::default()) {
+            Ok(journal) => journal,
+            Err(error) => {
+                return Err(failed(
+                    error.into(),
+                    FailedOwner::Configuration { _owner: owner },
+                ));
+            }
+        };
+    let mut original = LegacyRecoveryOwner {
+        owner,
+        journal,
+        maintenance: None,
+    };
+    let preflight = (|| -> Result<_, NativeTransactionError> {
+        let maintenance = Arc::new(original.owner.begin_standalone_native(id.clone(), true)?);
+        original.maintenance = Some(maintenance.clone());
+        original.owner.with_maintenance(&maintenance, |state| {
+            state
+                .root
+                .ensure_absent(crate::store::native_root::NATIVE_MARKER_FILE)
+                .map_err(|_| JournalError::Conflict)
+        })?;
+        let plan = original
+            .journal
+            .resync_native_migration_plan(&maintenance)?;
+        if !plan.complete()
+            || plan.retirement.transaction_id != id
+            || plan.desired.gateway.is_some()
+            || !plan.desired.host.as_ref().is_some_and(|host| {
+                host.autostart == NativeAutostartDesired::Disabled
+                    && host.manager != NativeManager::PersistentService
+            })
+        {
+            return Err(NativeTransactionError::Conflict);
+        }
+        match (
+            plan.desired.host.as_ref().map(|host| host.manager),
+            &app_scope,
+        ) {
+            (Some(NativeManager::ForegroundCli), None) => {}
+            (Some(NativeManager::AppManaged), Some(scope)) if scope.state_dir() == state_dir => {
+                scope
+                    .validate()
+                    .map_err(|_| NativeTransactionError::UnknownInspect)?;
+            }
+            _ => return Err(NativeTransactionError::Conflict),
+        }
+        let candidate = Arc::new(
+            crate::release::verify_selected(&plan.selection)
+                .map_err(|_| NativeTransactionError::UnknownInspect)?,
+        );
+        if candidate.report().manifest_sha256 != plan.retirement.candidate_manifest_sha256
+            || candidate.report().publisher_spki_sha256
+                != plan.retirement.publisher_spki_sha256.to_hex()
+        {
+            return Err(NativeTransactionError::Conflict);
+        }
+        Ok((candidate, maintenance))
+    })();
+    let (candidate, maintenance) = match preflight {
+        Ok(value) => value,
+        Err(error) => {
+            return Err(failed(
+                error,
+                FailedOwner::Legacy {
+                    _owner: Box::new(original),
+                },
+            ));
+        }
+    };
+    let task = crate::store::platform::start_resume_pre_cutover_host_migration(
+        runtime,
+        state_dir,
+        original.owner,
+        maintenance,
+        original.journal,
+        candidate,
+        app_scope,
+        Arc::new(permit),
+    );
+    Ok(MacMigrationRecovery {
+        binding: None,
+        task,
+        transaction: id,
+    })
 }

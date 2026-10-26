@@ -857,32 +857,64 @@ async fn run_original_scope(
         &retired,
         &applied
     );
+    finish_applied_migration(
+        runtime,
+        owner.clone(),
+        maintenance.clone(),
+        journal,
+        candidate.clone(),
+        app_scope,
+        applied,
+        sender,
+        None,
+    )
+    .await;
+}
+
+/// Finish one already-applied original migration using actual joined probes.
+/// The caller must await this inside the same non-abortable owner job: `applied`
+/// borrows its original materials/C/held/token, keeping that caller frame alive.
+/// No probe retry or historical-report substitution is performed here.
+async fn finish_applied_migration(
+    runtime: Handle,
+    owner: OwnedConfigurationRoot,
+    maintenance: Arc<ConfigurationMaintenance>,
+    mut journal: OwnedManagementJournal,
+    candidate: Arc<VerifiedNativeRelease>,
+    app_scope: Option<Arc<crate::app::HostScope>>,
+    applied: MacCanonicalCutover<'_, '_>,
+    mut sender: Option<oneshot::Sender<MacMigrationObservation>>,
+    recovery_permit: Option<Arc<tokio::sync::SemaphorePermit<'static>>>,
+) {
+    let transaction = maintenance.transaction_id().clone();
+    macro_rules! keep {
+        ($result:expr, $stage:literal $(, $held:expr)* $(,)?) => {
+            match $result {
+                Ok(value) => value,
+                Err(_) => retain_scope(
+                    (&owner, &maintenance, &journal, &candidate, &app_scope,
+                        &recovery_permit, &applied, $($held,)*),
+                    &mut sender,
+                    MacMigrationObservation {
+                        transaction_id: transaction.clone(),
+                        stage: $stage,
+                        local_exec_report: None,
+                        pair_admission_report: None,
+                        rejected_scope: None,
+                        committed_scope: None,
+                    },
+                ).await,
+            }
+        };
+    }
     let profile = keep!(
         load_applied_mac_maintenance_profile(&applied),
         "unknown_maintenance_profile",
-        &root,
-        &host,
-        &materials,
-        &preservation,
-        &before,
-        &token,
-        &effects,
-        &held,
-        &retired,
         &applied
     );
     let mut probe = keep!(
         MacCandidateExecProbe::prepare(&profile),
         "unknown_probe_prepare",
-        &root,
-        &host,
-        &materials,
-        &preservation,
-        &before,
-        &token,
-        &effects,
-        &held,
-        &retired,
         &applied,
         &profile
     );
@@ -892,15 +924,6 @@ async fn run_original_scope(
                 .map_err(|_| crate::migration::mac_exec_validation::MacExecValidationError::Unknown)
         }),
         "unknown_exec_cleanup_or_report",
-        &root,
-        &host,
-        &materials,
-        &preservation,
-        &before,
-        &token,
-        &effects,
-        &held,
-        &retired,
         &applied,
         &profile,
         &probe
@@ -908,15 +931,6 @@ async fn run_original_scope(
     keep!(
         probe.revalidate_success(),
         "unknown_after_local_probe",
-        &root,
-        &host,
-        &materials,
-        &preservation,
-        &before,
-        &token,
-        &effects,
-        &held,
-        &retired,
         &applied,
         &profile,
         &probe
@@ -924,15 +938,6 @@ async fn run_original_scope(
     keep!(
         applied.validate_applied(),
         "unknown_after_local_applied",
-        &root,
-        &host,
-        &materials,
-        &preservation,
-        &before,
-        &token,
-        &effects,
-        &held,
-        &retired,
         &applied,
         &profile,
         &probe
@@ -943,8 +948,6 @@ async fn run_original_scope(
         &profile,
         &probe,
         &applied,
-        &effects,
-        &token
     );
     let pair_report_raw = keep!(
         pair_probe.run_joined(&runtime).and_then(|report| {
@@ -956,8 +959,6 @@ async fn run_original_scope(
         &probe,
         &pair_probe,
         &applied,
-        &effects,
-        &token
     );
     keep!(
         pair_probe.revalidate_success(),
@@ -966,8 +967,6 @@ async fn run_original_scope(
         &probe,
         &pair_probe,
         &applied,
-        &effects,
-        &token
     );
     keep!(
         probe.revalidate_success(),
@@ -976,8 +975,6 @@ async fn run_original_scope(
         &probe,
         &pair_probe,
         &applied,
-        &effects,
-        &token
     );
     keep!(
         app_scope.as_ref().map_or(Ok(()), |scope| {
@@ -988,8 +985,6 @@ async fn run_original_scope(
         &probe,
         &pair_probe,
         &applied,
-        &effects,
-        &token
     );
     let committed = keep!(
         applied.commit_validated(&mut journal, &mut probe, &mut pair_probe),
@@ -998,8 +993,6 @@ async fn run_original_scope(
         &probe,
         &pair_probe,
         &applied,
-        &effects,
-        &token
     );
     keep!(
         committed.release_admission(&journal, &mut probe, &mut pair_probe, app_scope.as_deref()),
@@ -1008,8 +1001,6 @@ async fn run_original_scope(
         &probe,
         &pair_probe,
         &applied,
-        &effects,
-        &token
     );
     // Both workers are already settled. Drop the local execution lease BEFORE
     // transferring the same owner; it must not obstruct ordinary runtime start.
@@ -1023,7 +1014,7 @@ async fn run_original_scope(
             pair_admission_report: Some(pair_report_raw),
             rejected_scope: None,
             committed_scope: Some(Box::new(MacMigrationCommittedScope {
-                recovery_permit: None,
+                recovery_permit,
                 app_scope,
                 owner: owner.clone(),
                 journal,
@@ -1254,3 +1245,7 @@ fn render_target(
 #[path = "macos_migration_resume.rs"]
 mod resume;
 pub(in crate::store) use resume::{MacResumedCutover, start_resume_validated_host_migration};
+
+#[path = "macos_migration_pre_cutover.rs"]
+mod pre_cutover;
+pub(in crate::store) use pre_cutover::start_resume_pre_cutover_host_migration;

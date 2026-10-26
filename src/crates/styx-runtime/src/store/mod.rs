@@ -65,7 +65,7 @@ mod platform;
 mod platform;
 
 #[cfg(target_os = "macos")]
-pub(crate) use platform::{MacCanonicalCutover, MacCommittedCutover};
+pub(crate) use platform::{MacCanonicalCutover, MacCommittedCutover, MacRetiredMaterialSource};
 
 #[cfg(target_os = "windows")]
 pub(crate) use platform::WindowsLocalExecutable;

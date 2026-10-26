@@ -30,6 +30,8 @@ impl InputPin {
 /// The borrowed fence cannot be dropped while these original observations live.
 pub(crate) struct OriginalNativePairMaterials<'a> {
     maintenance: &'a ConfigurationMaintenance,
+    #[cfg(target_os = "macos")]
+    retired_materials: Option<&'a crate::store::MacRetiredMaterialSource<'a>>,
     state_dir: PathBuf,
     config_root: NativeRootIdentity,
     host_root: NativeRootIdentity,
@@ -65,6 +67,36 @@ pub(crate) fn read_original_pair_materials<'a>(
     state_dir: &Path,
     maintenance: &'a ConfigurationMaintenance,
 ) -> Result<OriginalNativePairMaterials<'a>, ProfileError> {
+    read_pair_materials_inner(
+        state_dir,
+        maintenance,
+        #[cfg(target_os = "macos")]
+        None,
+    )
+}
+/// Only the original retained OS retirement and same-journal plan can provide
+/// this source. No caller path, credential bytes or JSON boolean substitutes it.
+#[cfg(target_os = "macos")]
+pub(crate) fn read_recovered_pair_materials<'a>(
+    state_dir: &Path,
+    maintenance: &'a ConfigurationMaintenance,
+    source: &'a crate::store::MacRetiredMaterialSource<'a>,
+) -> Result<OriginalNativePairMaterials<'a>, ProfileError> {
+    source.validate().map_err(|_| ProfileError::Changed)?;
+    if source.state_dir() != state_dir
+        || &source.original_pair().transaction_id != maintenance.transaction_id()
+    {
+        return Err(ProfileError::Invalid);
+    }
+    read_pair_materials_inner(state_dir, maintenance, Some(source))
+}
+fn read_pair_materials_inner<'a>(
+    state_dir: &Path,
+    maintenance: &'a ConfigurationMaintenance,
+    #[cfg(target_os = "macos")] retired_materials: Option<
+        &'a crate::store::MacRetiredMaterialSource<'a>,
+    >,
+) -> Result<OriginalNativePairMaterials<'a>, ProfileError> {
     absolute(state_dir)?;
     let active_root = maintenance
         .validate_active()
@@ -73,10 +105,12 @@ pub(crate) fn read_original_pair_materials<'a>(
     if root.identity() != active_root {
         return Err(ProfileError::Changed);
     }
-    let original = load_source(
+    let original = load_source_inner(
         state_dir,
         GatewayWireMode::PairedV3,
         ProfileSource::OriginalMaterials,
+        #[cfg(target_os = "macos")]
+        retired_materials,
     )?;
     let mut pins = Vec::with_capacity(original.observed.len());
     for observed in &original.observed {
@@ -120,6 +154,8 @@ pub(crate) fn read_original_pair_materials<'a>(
         .map_err(|_| ProfileError::Invalid)?;
     let result = OriginalNativePairMaterials {
         maintenance,
+        #[cfg(target_os = "macos")]
+        retired_materials,
         state_dir: state_dir.to_owned(),
         config_root: native_root(active_root),
         host_root: native_root(host.identity()),
@@ -131,10 +167,106 @@ pub(crate) fn read_original_pair_materials<'a>(
         ca_path: host_profile.gateway_ca_file.ok_or(ProfileError::Invalid)?,
         publisher,
     };
+    #[cfg(target_os = "macos")]
+    let result = if let Some(source) = retired_materials {
+        let mut result = result;
+        result.restore_preserved_rows(source)?;
+        result
+    } else {
+        result
+    };
     result.revalidate()?;
     Ok(result)
 }
 impl OriginalNativePairMaterials<'_> {
+    #[cfg(target_os = "macos")]
+    fn restore_preserved_rows(
+        &mut self,
+        source: &crate::store::MacRetiredMaterialSource<'_>,
+    ) -> Result<(), ProfileError> {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct Row {
+            path: PathBuf,
+            sha256: Sha256Digest,
+            bytes: u64,
+            observation: serde_json::Value,
+        }
+        source.validate().map_err(|_| ProfileError::Changed)?;
+        let pair = source.original_pair();
+        if self.config_root != pair.config_root
+            || &self.host_root != source.host_root_identity()
+            || self.host_root != pair.host_root
+            || Sha256Digest::of_bytes(source.preservation_raw()) != pair.preservation_sha256
+        {
+            return Err(ProfileError::Changed);
+        }
+        let rows: Vec<Row> = decode(source.preservation_raw())?;
+        if rows.is_empty() || rows.len() > 128 {
+            return Err(ProfileError::Invalid);
+        }
+        // The common loader includes publisher, active selector, its ORIGINAL
+        // manifest/signature and both configured CA paths. Require equality of
+        // the WHOLE deduplicated path set, not just the rows we happen to use.
+        let current: BTreeMap<_, _> = self
+            .pins
+            .iter()
+            .map(|pin| (pin.path.clone(), pin))
+            .collect();
+        let token_path = self.original.host_base_dir.join("device/host.token");
+        if current.contains_key(&token_path) || rows.len() != current.len() + 1 {
+            return Err(ProfileError::Changed);
+        }
+        let host = PrivateRoot::open(&self.original.host_base_dir)
+            .map_err(|_| ProfileError::ProtectedRead)?;
+        let token = source
+            .read_retired_token(&host)
+            .map_err(|_| ProfileError::Changed)?;
+        if Sha256Digest::of_bytes(&token) != pair.credential_sha256 {
+            return Err(ProfileError::Changed);
+        }
+        let mut seen = std::collections::BTreeSet::new();
+        let mut entries = Vec::with_capacity(rows.len());
+        for row in rows {
+            absolute(&row.path)?;
+            if !seen.insert(row.path.clone()) || row.bytes == 0 || row.bytes > JSON_LIMIT as u64 {
+                return Err(ProfileError::Invalid);
+            }
+            if row.path == token_path {
+                // Source construction binds this historical row's FULL original
+                // observation to the actual token's pre-stamp. A post-rename
+                // descriptor is not represented as a pin at the absent source.
+                if row.sha256 != pair.credential_sha256 || row.bytes != token.len() as u64 {
+                    return Err(ProfileError::Changed);
+                }
+            } else {
+                let pin = current.get(&row.path).ok_or(ProfileError::Changed)?;
+                if pin.sha256 != row.sha256
+                    || pin.observation.byte_len != row.bytes
+                    || serde_json::to_value(&pin.observation).map_err(|_| ProfileError::Invalid)?
+                        != row.observation
+                {
+                    return Err(ProfileError::Changed);
+                }
+                pin.revalidate()?;
+            }
+            entries.push(PreservationEntry {
+                path: row.path,
+                sha256: row.sha256,
+                bytes: row.bytes,
+            });
+        }
+        if !seen.contains(&token_path) || current.keys().any(|path| !seen.contains(path)) {
+            return Err(ProfileError::Changed);
+        }
+        // Keep the original historical source row for pair/preservation DATA;
+        // all live pins remain at their actual current paths.
+        self.original.diagnostics.preservation = entries;
+        if self.pair_binding(pair.preservation_sha256)? != *pair {
+            return Err(ProfileError::Changed);
+        }
+        source.validate().map_err(|_| ProfileError::Changed)
+    }
     pub(crate) fn preservation_entries(&self) -> &[PreservationEntry] {
         &self.original.diagnostics.preservation
     }
@@ -163,10 +295,18 @@ impl OriginalNativePairMaterials<'_> {
         Ok(())
     }
     pub(crate) fn revalidate(&self) -> Result<(), ProfileError> {
+        #[cfg(target_os = "macos")]
+        if let Some(source) = self.retired_materials {
+            source.validate().map_err(|_| ProfileError::Changed)?;
+        }
         self.validate_fence_and_roots()?;
         self.original.revalidate()?;
         for pin in &self.pins {
             pin.revalidate()?;
+        }
+        #[cfg(target_os = "macos")]
+        if let Some(source) = self.retired_materials {
+            source.validate().map_err(|_| ProfileError::Changed)?;
         }
         self.validate_fence_and_roots()
     }
@@ -192,6 +332,14 @@ impl OriginalNativePairMaterials<'_> {
         self.validate_fence_and_roots()
     }
     fn digest(&self, path: &Path) -> Result<Sha256Digest, ProfileError> {
+        #[cfg(target_os = "macos")]
+        if let Some(source) = self.retired_materials
+            && path == self.original.host_base_dir.join("device/host.token")
+        {
+            // Historical source digest, authenticated by the actual retirement
+            // port; never a fabricated pin at the now-absent source pathname.
+            return Ok(source.original_pair().credential_sha256);
+        }
         self.pins
             .iter()
             .find(|pin| pin.path == path)

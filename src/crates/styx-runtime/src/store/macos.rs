@@ -556,6 +556,7 @@ mod publication_tests;
 
 #[path = "macos_legacy.rs"]
 mod legacy_effect;
+pub(crate) use legacy_effect::MacRetiredMaterialSource;
 pub(in crate::store) use legacy_effect::MacTokenRetirement;
 
 #[path = "macos_previous_boot.rs"]
@@ -573,6 +574,7 @@ pub(crate) use native_cutover::{MacCanonicalCutover, MacCommittedCutover};
 #[path = "macos_migration_owner.rs"]
 mod migration_owner;
 pub(in crate::store) use migration_owner::{
-    MacMigrationObservation, MacMigrationOwnerTask, MacResumedCutover,
-    start_previous_boot_host_migration, start_resume_validated_host_migration,
+    MacMigrationCommittedScope, MacMigrationObservation, MacMigrationOwnerTask, MacResumedCutover,
+    start_previous_boot_host_migration, start_resume_pre_cutover_host_migration,
+    start_resume_validated_host_migration,
 };
