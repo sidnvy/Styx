@@ -58,3 +58,16 @@ The same original C07 owner, mutex, writer, maintenance transaction and manageme
 Construct the maintenance validation plan while the original canonical state/profile is still readable, **before canonical apply**. The retained original plan/profile/dual-scope proof must survive apply and actual cleanup; no second writer, journal, fresh enrollment snapshot or post-apply reconstruction substitutes for them. Ordinary admission remains fenced. Schema2 currently rejects Verified/Committed because local candidate Exec validation is not a paired Gateway verdict. Actual paired network validation, final migration commit/activation and ordinary certificate lifecycle remain unfinished.
 
 Implementation and exact scope: [R33 original-CA maintenance notes](r33-original-ca-maintenance.md).
+
+
+## ADR-090 — Recover an inactive failed macOS registration without a new identity
+
+Status: incremental implementation, 2026-10-27. This does not change product scope, account/principal, publisher or administrator authority. Native verification and actual recovery remain required.
+
+The installed Gateway can have Persistent/Running/Enabled intent while launchd retains a registered job whose first generation failed before readiness. The live Stop RPC correctly requires the original running process; absence of a PID must not be represented as a successful Stop, clean exit or joined internal jobs. Creating a new configuration root would bypass the failed state and lose continuity.
+
+Keep the same root, UID, label, original root-owned plist file identity/bytes and original signed release. A non-deserializable proof captures two equal launchd observations with registered `not running`, no PID, runs greater than zero and known failed history, plus the original canonical bytes/file identity. The consumer holds the original C07 writer, service-operation and execution leases. Changed identity, canonical before-image, job generation or observation permanently fences the proof as Unknown; no mutation is replayed.
+
+First implemented boundary: explicit `mac-service prepare-recovery --authorize` with transaction ID and expected revision commits only the original Gateway's Stopped/Disabled intent through C07. It preserves runtime selection, identity and opaque extensions. Native OS observation is refreshed after commit; uncertain publication retains the original owner. The command neither disables/unregisters a launchd job nor installs/restarts a release, and its configuration-only report is not a service recovery verdict.
+
+Next boundaries remain: a closed typed Persistent Gateway runtime-selection transition retaining both original-signed C08 releases and failed-registration proof; an exact old-registration to new-definition administrator repair; then fresh readiness, independent execution and original Stop. Generic foreground/App update must not be widened. Administrator refusal or lost acknowledgement leaves registration/readiness Unknown and never triggers automatic bootout/bootstrap replay. No new ledger, account or root is introduced.

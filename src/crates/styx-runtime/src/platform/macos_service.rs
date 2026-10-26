@@ -311,6 +311,87 @@ pub(crate) struct InstallationMaterial<'a> {
     pub(crate) label: &'a str,
     pub(crate) requires_initial_disabled: bool,
 }
+/// Original registered job observed inactive after a known failed generation.
+/// This is not a live ServiceScope, administrator grant, or cleanup receipt.
+/// Consumers retain it with the original C07 writer/operation/execution leases.
+/// It cannot be reconstructed from a report or a caller-provided pathname.
+pub(crate) struct RegisteredInactiveProof {
+    definition: Arc<Definition>,
+    observation: ServiceObservation,
+    initial_state: store::RawFile,
+    fenced: std::sync::atomic::AtomicBool,
+}
+impl RegisteredInactiveProof {
+    pub(crate) fn original_definition(&self) -> &Arc<Definition> {
+        &self.definition
+    }
+    pub(crate) fn observation(&self) -> &ServiceObservation {
+        &self.observation
+    }
+    /// Original canonical bytes AND file identity, for the consumer's exact
+    /// expected-revision/transaction comparison before any C07 publication.
+    pub(crate) fn initial_state(&self) -> &store::RawFile {
+        &self.initial_state
+    }
+    /// Synchronous full original-material check: call only on an owned bounded
+    /// blocking job. This does not refresh launchd state. The async consumer
+    /// must also revalidate before/after C07 under its original exclusion leases.
+    pub(crate) fn validate_owner(&self, owner: &store::OwnedConfigurationRoot) -> Result<()> {
+        use std::sync::atomic::Ordering;
+        let result: Result<()> = (|| {
+            if self.fenced.load(Ordering::Acquire)
+                || owner.identity().map_err(unknown)? != self.definition.root_identity
+            {
+                return Err(ServiceError::Unknown);
+            }
+            self.definition.validate_identity()?;
+            Ok(())
+        })();
+        if result.is_err() {
+            self.fenced.store(true, Ordering::Release);
+            return Err(ServiceError::Unknown);
+        }
+        Ok(())
+    }
+    /// Original registration only: a legitimate same-writer C07 selection
+    /// successor does not rebind this proof to a replacement plist or image.
+    /// Two stable observations are bounded evidence, never an atomic OS lock.
+    pub(crate) async fn revalidate(self: &Arc<Self>) -> Result<()> {
+        use std::sync::atomic::Ordering;
+        if self.fenced.load(Ordering::Acquire) {
+            return Err(ServiceError::Unknown);
+        }
+        let result: Result<()> = async {
+            let first = self.definition.inspect_registered_identity().await?;
+            if !same_failed_inactive(&self.observation, &first) {
+                return Err(ServiceError::Unknown);
+            }
+            let second = self.definition.inspect_registered_identity().await?;
+            if !same_failed_inactive(&first, &second) {
+                return Err(ServiceError::Unknown);
+            }
+            Ok(())
+        }
+        .await;
+        if result.is_err() {
+            // Keep the original Arc/pins; a later quiet observation cannot
+            // restore a proof that already observed a restart or replacement.
+            self.fenced.store(true, Ordering::Release);
+            return Err(ServiceError::Unknown);
+        }
+        Ok(())
+    }
+}
+fn failed_inactive(observed: &ServiceObservation) -> bool {
+    observed.pid.is_none()
+        && observed.runs > 0
+        && observed.state == "not running"
+        && (observed.signaled_exit || observed.last_exit_code.is_some_and(|code| code != 0))
+}
+fn same_failed_inactive(original: &ServiceObservation, current: &ServiceObservation) -> bool {
+    failed_inactive(original) && failed_inactive(current) && original == current
+}
+
 impl Definition {
     pub(crate) fn prepare(path: &Path, role: ServiceRole) -> Result<Self> {
         Self::prepare_owned(path, role, false)
@@ -669,8 +750,21 @@ impl Definition {
         format!("system/{}", self.label)
     }
     pub(crate) async fn inspect(self: &Arc<Self>) -> Result<ServiceObservation> {
+        self.inspect_registered(true).await
+    }
+    async fn inspect_registered_identity(self: &Arc<Self>) -> Result<ServiceObservation> {
+        self.inspect_registered(false).await
+    }
+    async fn inspect_registered(self: &Arc<Self>, full_state: bool) -> Result<ServiceObservation> {
         let checked = self.clone();
-        blocking_read(move || checked.validate()).await?;
+        blocking_read(move || {
+            if full_state {
+                checked.validate()
+            } else {
+                checked.validate_identity()
+            }
+        })
+        .await?;
         if self.pin.is_none() {
             return Err(ServiceError::Unavailable);
         }
@@ -684,8 +778,83 @@ impl Definition {
             return Err(ServiceError::Conflict);
         }
         let checked = self.clone();
-        blocking_read(move || checked.validate()).await?;
+        blocking_read(move || {
+            if full_state {
+                checked.validate()
+            } else {
+                checked.validate_identity()
+            }
+        })
+        .await?;
         Ok(observed)
+    }
+    /// Capture only an already-installed, exact original Gateway definition.
+    /// Any error leaves the caller responsible for retaining this Definition
+    /// and its C07 owner; failure never authorizes a fresh install or retry.
+    pub(crate) async fn capture_registered_inactive(
+        self: &Arc<Self>,
+    ) -> Result<Arc<RegisteredInactiveProof>> {
+        let checked = self.clone();
+        let initial_state = blocking_read(move || {
+            let (state, hash) = checked.state_observation()?;
+            if checked.install_preparation
+                || checked.pin.is_none()
+                || checked.role != ServiceRole::Gateway
+                || state.mode
+                    != styx_contracts::native_management::NativeDeploymentMode::CreateLocal
+                || state.desired.host.is_some()
+                || state.has_migration_binding()
+                || state
+                    .desired
+                    .gateway
+                    .as_ref()
+                    .is_none_or(|role| role.manager != NativeManager::PersistentService)
+            {
+                return Err(ServiceError::Conflict);
+            }
+            let raw = checked
+                .root
+                .read_raw("state.json", 1024 * 1024)
+                .map_err(changed)?;
+            if Sha256Digest::of_bytes(raw.bytes()) != hash {
+                return Err(ServiceError::Unknown);
+            }
+            Ok(raw)
+        })
+        .await?;
+        let first = self
+            .inspect_registered_identity()
+            .await
+            .map_err(|_| ServiceError::Unknown)?;
+        let second = self
+            .inspect_registered_identity()
+            .await
+            .map_err(|_| ServiceError::Unknown)?;
+        if !same_failed_inactive(&first, &second) {
+            return Err(ServiceError::Unknown);
+        }
+        let checked = self.clone();
+        let initial_state = blocking_read(move || {
+            checked.validate()?;
+            let current = checked
+                .root
+                .read_raw("state.json", 1024 * 1024)
+                .map_err(changed)?;
+            if current.observation() != initial_state.observation()
+                || current.bytes() != initial_state.bytes()
+            {
+                return Err(ServiceError::Unknown);
+            }
+            Ok(initial_state)
+        })
+        .await
+        .map_err(|_| ServiceError::Unknown)?;
+        Ok(Arc::new(RegisteredInactiveProof {
+            definition: self.clone(),
+            observation: first,
+            initial_state,
+            fenced: std::sync::atomic::AtomicBool::new(false),
+        }))
     }
     fn arguments(&self) -> Vec<String> {
         vec![
@@ -1323,5 +1492,46 @@ mod stop_observation_tests {
                 .unwrap()
                 .signaled_exit
         );
+    }
+}
+
+#[cfg(test)]
+mod registered_inactive_tests {
+    use super::*;
+    #[test]
+    fn failed_generation_requires_stable_registered_inactive_evidence() {
+        let original = ServiceObservation {
+            path: PathBuf::from("/Library/LaunchDaemons/owned.plist"),
+            program: PathBuf::from("/private/owned/bin/styx"),
+            username: "owned".into(),
+            arguments: vec!["__service-run".into()],
+            pid: None,
+            runs: 1,
+            last_exit_code: Some(4),
+            signaled_exit: false,
+            state: "not running".into(),
+        };
+        assert!(same_failed_inactive(&original, &original));
+        let mut changed = original.clone();
+        changed.pid = Some(123);
+        assert!(!same_failed_inactive(&original, &changed));
+        changed = original.clone();
+        changed.runs += 1;
+        assert!(!same_failed_inactive(&original, &changed));
+        changed = original.clone();
+        changed.program = PathBuf::from("/other/bin/styx");
+        assert!(!same_failed_inactive(&original, &changed));
+        changed = original.clone();
+        changed.state = "waiting".into();
+        assert!(!same_failed_inactive(&original, &changed));
+        changed = original.clone();
+        changed.last_exit_code = None;
+        assert!(!failed_inactive(&changed));
+        changed.last_exit_code = Some(0);
+        assert!(!failed_inactive(&changed));
+        changed.signaled_exit = true;
+        assert!(failed_inactive(&changed)); // failed history, never clean exit
+        changed.runs = 0;
+        assert!(!failed_inactive(&changed));
     }
 }

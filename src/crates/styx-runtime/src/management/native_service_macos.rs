@@ -13,6 +13,9 @@ pub enum ServiceAction {
     Stop,
     PrepareInstall,
     PrepareFirstStart,
+    /// Commit Stopped/Disabled intent for a proven failed inactive registration.
+    /// This neither stops an OS job nor claims that it is repaired.
+    PrepareRecovery,
 }
 #[derive(Serialize)]
 pub struct ServiceReport {
@@ -94,7 +97,9 @@ pub async fn manage(
 ) -> Result<ServiceReport> {
     if matches!(
         action,
-        ServiceAction::PrepareInstall | ServiceAction::PrepareFirstStart
+        ServiceAction::PrepareInstall
+            | ServiceAction::PrepareFirstStart
+            | ServiceAction::PrepareRecovery
     ) {
         if !matches!(component, NativeComponent::Gateway) {
             return Err(NativeManagementError::new(ErrorKind::Unsupported));
@@ -145,7 +150,8 @@ pub async fn manage(
             ServiceAction::Status => "status",
             ServiceAction::Stop
             | ServiceAction::PrepareInstall
-            | ServiceAction::PrepareFirstStart => unreachable!("mutation uses its owned operation"),
+            | ServiceAction::PrepareFirstStart
+            | ServiceAction::PrepareRecovery => unreachable!("mutation uses its owned operation"),
         },
         configuration_only: action == ServiceAction::Definition,
         revision: before.revision,
@@ -176,6 +182,7 @@ struct PreparationOwner {
     transactions: NativeTransactions,
     _execution: crate::store::ExecutionLeaseGuard,
     definition: Arc<Definition>,
+    inactive: Option<Arc<crate::platform::macos_service::RegisteredInactiveProof>>,
 }
 fn prepare_target(
     before: &NativeState,
@@ -207,6 +214,11 @@ fn prepare_target(
             run: NativeRunDesired::Stopped,
             autostart: NativeAutostartDesired::Disabled,
         },
+        ServiceAction::PrepareRecovery => NativeComponentDesired {
+            manager: NativeManager::PersistentService,
+            run: NativeRunDesired::Running,
+            autostart: NativeAutostartDesired::Enabled,
+        },
         _ => return Err(NativeManagementError::new(ErrorKind::Invalid)),
     };
     if *gateway != expected {
@@ -216,6 +228,9 @@ fn prepare_target(
     if action == ServiceAction::PrepareFirstStart {
         gateway.run = NativeRunDesired::Running;
         gateway.autostart = NativeAutostartDesired::Enabled;
+    } else if action == ServiceAction::PrepareRecovery {
+        gateway.run = NativeRunDesired::Stopped;
+        gateway.autostart = NativeAutostartDesired::Disabled;
     }
     target.revision = revision
         .checked_add(1)
@@ -269,25 +284,59 @@ async fn prepare_intent(
                     let definition = if action == ServiceAction::PrepareInstall {
                         Definition::prepare_install(&open_path)
                     } else { Definition::prepare(&open_path, ServiceRole::Gateway) }.map_err(os)?;
-                    definition.require_pending_registration().map_err(os)?;
+                    if action != ServiceAction::PrepareRecovery {
+                        definition.require_pending_registration().map_err(os)?;
+                    }
                     Ok((execution, definition))
                 })();
                 match prepared {
                     Ok((execution, definition)) => Ok(PreparationOwner {
-                        transactions, _execution:execution, definition:Arc::new(definition) }),
+                        transactions, _execution:execution, definition:Arc::new(definition), inactive:None }),
                     Err(error) if error.exit_code() == 4 => Err(error.keep(transactions)),
                     Err(error) => Err(error),
                 }
             })())).await.map_err(os)??)));
+            if action == ServiceAction::PrepareRecovery {
+                let checked = owner.as_ref().expect("original preparation owner").clone();
+                let definition = blocking_read(move || {
+                    Ok(checked.lock().map_err(|_| ServiceError::Unknown)?.definition.clone())
+                }).await.map_err(os)?;
+                let proof = definition.capture_registered_inactive().await.map_err(os)?;
+                let checked = owner.as_ref().expect("original preparation owner").clone();
+                blocking_read(move || {
+                    let mut held = checked.lock().map_err(|_| ServiceError::Unknown)?;
+                    proof.validate_owner(&held.transactions.configuration_root())?;
+                    held.inactive = Some(proof);
+                    Ok(())
+                }).await.map_err(os)?;
+            }
             let checked = owner.as_ref().expect("original preparation owner").clone();
             let attempted_commit = attempted.clone();
             let operation = operation.as_ref().expect("original operation lease").clone();
-            blocking_read(move || Ok((|| -> Result<ServiceReport> {
+            let report = blocking_read(move || Ok((|| -> Result<ServiceReport> {
                 operation.validate().map_err(|_| NativeManagementError::new(ErrorKind::Conflict))?;
                 let mut owner = checked.lock().map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?;
                 let before = owner.transactions.readstate().map_err(NativeManagementError::transaction)?;
                 let target = prepare_target(before.state(), action, &id, revision)?;
                 owner.definition.validate().map_err(os)?;
+                if let Some(proof) = &owner.inactive {
+                    proof.validate_owner(&owner.transactions.configuration_root()).map_err(os)?;
+                    let root = crate::store::PrivateRoot::open(owner.definition.state_dir())
+                        .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?;
+                    if root.identity() != owner.transactions.configuration_root().identity()
+                        .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))? {
+                        return Err(NativeManagementError::new(ErrorKind::Unknown));
+                    }
+                    let raw = root.read_raw("state.json", 1024 * 1024)
+                        .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?;
+                    if !Arc::ptr_eq(proof.original_definition(), &owner.definition)
+                        || raw.observation() != proof.initial_state().observation()
+                        || raw.bytes() != proof.initial_state().bytes()
+                        || before.raw_bytes() != raw.bytes() {
+                        return Err(NativeManagementError::new(ErrorKind::Unknown));
+                    }
+                }
+                owner._execution.validate().map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?;
                 let bytes = serde_json::to_vec(&target).map_err(|_| NativeManagementError::new(ErrorKind::Invalid))?;
                 owner.transactions.validate_target(&bytes).map_err(NativeManagementError::transaction)?;
                 attempted_commit.store(true, std::sync::atomic::Ordering::Release);
@@ -297,7 +346,13 @@ async fn prepare_intent(
                     || commit.canonical_raw_sha256 != Sha256Digest::of_bytes(&bytes) {
                     return Err(NativeManagementError::new(ErrorKind::Unknown));
                 }
-                let next = Arc::new(owner.definition.reopen_after_preparation().map_err(os)?);
+                // Recovery retains the exact already-installed definition pin.
+                // The absent-registration reopen belongs only to fresh install.
+                let next = if owner.inactive.is_some() {
+                    owner.definition.clone()
+                } else {
+                    Arc::new(owner.definition.reopen_after_preparation().map_err(os)?)
+                };
                 let (observed, raw_hash) = next.state_observation().map_err(os)?;
                 if raw_hash != commit.canonical_raw_sha256 || serde_json::to_vec(&observed).ok() != Some(bytes) {
                     return Err(NativeManagementError::new(ErrorKind::Unknown));
@@ -307,12 +362,20 @@ async fn prepare_intent(
                 } else { None };
                 let material = next.installation_material().map_err(os)?;
                 let report = ServiceReport { schema:1,
-                    operation:if action == ServiceAction::PrepareInstall { "prepare_install" } else { "prepare_first_start" },
+                    operation:match action {
+                        ServiceAction::PrepareInstall => "prepare_install",
+                        ServiceAction::PrepareFirstStart => "prepare_first_start",
+                        ServiceAction::PrepareRecovery => "prepare_recovery",
+                        _ => unreachable!("preparation action was checked"),
+                    },
                     configuration_only:true, revision:target.revision, desired:target.desired,
                     definition_path:material.path, definition_plist:std::str::from_utf8(material.bytes)
                         .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?.to_owned(),
                     uid:material.uid,label:material.label.to_owned(),requires_initial_disabled:material.requires_initial_disabled,
-                    runtime_selection:next.runtime_selection().map_err(os)?.clone(), os:None,operations_replayed:false,
+                    runtime_selection:next.runtime_selection().map_err(os)?.clone(),
+                    os:owner.inactive.as_ref().map(|proof| serde_json::to_value(proof.observation())
+                        .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))).transpose()?,
+                    operations_replayed:false,
                     transaction_observation:Some(serde_json::json!({"status":"committed","state_scope":"committed_target",
                         "transaction_id":commit.transaction_id,"revision":target.revision,
                         "canonical_raw_sha256":raw_hash,"receipt":commit.committed})),
@@ -320,7 +383,17 @@ async fn prepare_intent(
                 operation.validate().map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?;
                 owner.definition = next;
                 Ok(report)
-            })())).await.map_err(os)?
+            })())).await.map_err(os)??;
+            let checked = owner.as_ref().expect("original preparation owner").clone();
+            let proof = blocking_read(move || {
+                Ok(checked.lock().map_err(|_| ServiceError::Unknown)?.inactive.clone())
+            }).await.map_err(os)?;
+            if let Some(proof) = proof {
+                // launchd and C07 are separate authorities. Any changed job
+                // generation after publication is Unknown, never a stop receipt.
+                proof.revalidate().await.map_err(os)?;
+            }
+            Ok(report)
         }.await;
         match result {
             Ok(report) => {
@@ -749,6 +822,76 @@ mod tests {
             )
             .is_err()
         );
+    }
+    #[test]
+    fn mac_failed_service_recovery_intent_preserves_identity_and_refuses_adoption() {
+        let (mut before, _, _, id) = fixture();
+        before.desired.host = None;
+        // The parser/policy target is not failed-generation authority: only
+        // manage's retained native proof plus leases can publish this target.
+        let target = prepare_target(
+            &before,
+            ServiceAction::PrepareRecovery,
+            &id,
+            before.revision,
+        )
+        .unwrap();
+        let mut expected = before.clone();
+        let gateway = expected.desired.gateway.as_mut().unwrap();
+        gateway.run = NativeRunDesired::Stopped;
+        gateway.autostart = NativeAutostartDesired::Disabled;
+        expected.revision += 1;
+        expected.last_transaction = Some(NativeStateTransaction {
+            transaction_id: id.clone(),
+            sequence: 10,
+        });
+        assert_eq!(
+            serde_json::to_vec(&target).unwrap(),
+            serde_json::to_vec(&expected).unwrap()
+        );
+        assert!(
+            prepare_target(
+                &target,
+                ServiceAction::PrepareRecovery,
+                &id,
+                target.revision
+            )
+            .is_err()
+        );
+        assert!(
+            prepare_target(
+                &before,
+                ServiceAction::PrepareRecovery,
+                &id,
+                before.revision + 1
+            )
+            .is_err()
+        );
+        for mutate in [
+            |s: &mut NativeState| s.desired.host = s.desired.gateway,
+            |s: &mut NativeState| {
+                s.desired.gateway.as_mut().unwrap().manager = NativeManager::AppManaged
+            },
+            |s: &mut NativeState| {
+                s.desired.gateway.as_mut().unwrap().manager = NativeManager::ForegroundCli
+            },
+            |s: &mut NativeState| {
+                s.desired.gateway.as_mut().unwrap().autostart = NativeAutostartDesired::Disabled
+            },
+            |s: &mut NativeState| s.mode = NativeDeploymentMode::JoinExisting,
+        ] {
+            let mut changed = before.clone();
+            mutate(&mut changed);
+            assert!(
+                prepare_target(
+                    &changed,
+                    ServiceAction::PrepareRecovery,
+                    &id,
+                    changed.revision
+                )
+                .is_err()
+            );
+        }
     }
     #[test]
     fn mac_gateway_stop_never_accepts_replayed_or_app_owned_transition() {

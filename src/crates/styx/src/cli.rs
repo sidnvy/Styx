@@ -290,6 +290,8 @@ enum MacServiceActionArg {
     Status,
     PrepareInstall,
     PrepareFirstStart,
+    /// Prepare same-identity recovery of a registered but failed inactive Gateway.
+    PrepareRecovery,
     Stop,
 }
 #[cfg(target_os = "macos")]
@@ -301,6 +303,7 @@ impl MacServiceActionArg {
             Self::Status => ServiceAction::Status,
             Self::PrepareInstall => ServiceAction::PrepareInstall,
             Self::PrepareFirstStart => ServiceAction::PrepareFirstStart,
+            Self::PrepareRecovery => ServiceAction::PrepareRecovery,
             Self::Stop => ServiceAction::Stop,
         }
     }
@@ -970,6 +973,7 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
                 action,
                 MacServiceActionArg::PrepareInstall
                     | MacServiceActionArg::PrepareFirstStart
+                    | MacServiceActionArg::PrepareRecovery
                     | MacServiceActionArg::Stop
             ) {
                 if !authorize {
