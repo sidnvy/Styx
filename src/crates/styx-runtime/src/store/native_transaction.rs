@@ -116,6 +116,26 @@ impl NativeTransactions {
             )?;
         Ok(())
     }
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    pub(crate) fn reconcile_committed_legacy_migration(
+        &mut self,
+        snapshot: std::sync::Arc<super::committed_runtime::CommittedRuntimeSnapshot>,
+    ) -> Result<(), NativeTransactionError> {
+        if self.marker().reader_floor
+            != styx_contracts::management::ReaderContract::NativeMigratedStateV1
+            || self.retained_maintenance.is_some()
+        {
+            return Err(NativeTransactionError::Conflict);
+        }
+        self.readstate()?;
+        let owner = self.configuration_root();
+        let _recovered = super::committed_runtime::RecoveredCommittedRuntime::reopen_with_journal(
+            &owner,
+            snapshot,
+            &self.journal,
+        )?;
+        Ok(())
+    }
     pub fn marker(&self) -> &styx_contracts::native_management::NativeRootMarker {
         self.binding.marker()
     }

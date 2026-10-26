@@ -32,6 +32,7 @@ pub(crate) struct CommittedRuntimeSnapshot {
     original: cutover::OriginalCutover,
     retirement: handoff::ObservedRetirement,
     state: NativeState,
+    canonical: Vec<u8>,
     selection: NativeRuntimeSelection,
 }
 impl CommittedRuntimeSnapshot {
@@ -63,10 +64,15 @@ impl CommittedRuntimeSnapshot {
         {
             return Err(JournalError::Conflict);
         }
-        cutover::check_canonical_root(&root, &original, true)?;
+        cutover::check_committed_successor_root(&root, &original, &scan)?;
         let marker = super::native_state::decode_marker(&original.marker)
             .map_err(|_| JournalError::Conflict)?;
-        let state = super::native_state::decode_state(&original.target, &marker)
+        let canonical = root
+            .read_raw("state.json", MAX)
+            .map_err(|_| JournalError::Unknown)?
+            .bytes()
+            .to_vec();
+        let state = super::native_state::decode_state(&canonical, &marker)
             .map_err(|_| JournalError::Conflict)?;
         let state = state.state().clone();
         let migration = state.migration.as_ref().ok_or(JournalError::Conflict)?;
@@ -141,6 +147,7 @@ impl CommittedRuntimeSnapshot {
             original,
             retirement,
             state,
+            canonical,
             selection,
         };
         snapshot.revalidate()?;
@@ -186,7 +193,7 @@ impl CommittedRuntimeSnapshot {
                             return Err(JournalError::Unknown);
                         }
                     }
-                    cutover::check_canonical_root(&self.root, &self.original, true)?;
+                    cutover::check_committed_successor_root(&self.root, &self.original, &scan)?;
                     let after = files::scan(&self.namespace, JournalBudget::default())?;
                     if after.files.len() != scan.files.len()
                         || after
@@ -230,7 +237,16 @@ impl CommittedRuntimeSnapshot {
         &self.original.before
     }
     pub(crate) fn canonical(&self) -> &[u8] {
-        &self.original.target
+        &self.canonical
+    }
+    pub(crate) fn committed_receipt(
+        &self,
+    ) -> JournalResult<&styx_core::management::transaction::JournalReceipt> {
+        self.original
+            .phases
+            .last()
+            .filter(|receipt| receipt.stage == DurableStage::Committed)
+            .ok_or(JournalError::Conflict)
     }
     pub(crate) fn selection(&self) -> &NativeRuntimeSelection {
         &self.selection

@@ -204,6 +204,35 @@ pub(super) fn inventory(scan: &JournalObservation) -> JournalResult<ManagementIn
         })
     };
 
+    // Legacy schema2 and native schema4 have different original material
+    // codecs, but both reserve the same one C07 sequence. Never mix anchors.
+    let completed_legacy_anchor = {
+        let mut completed = cutover_inventory.records.iter().filter(|c| {
+            c.intent.schema == 2
+                && c.last_stage == DurableStage::Committed
+                && c.validation_report().is_some()
+                && c.paired_validation_report().is_some()
+        });
+        let first = completed.next();
+        if completed.next().is_some() {
+            return Err(JournalError::Conflict);
+        }
+        first.map(|c| {
+            (
+                c.intent.transaction_id.clone(),
+                c.intent.sequence,
+                c.intent.before_state_sha256,
+                c.intent.target_state_sha256,
+            )
+        })
+    };
+    if completed_legacy_anchor.is_some() && completed_native_anchor.is_some() {
+        return Err(JournalError::Conflict);
+    }
+    let completed_anchor = completed_native_anchor
+        .as_ref()
+        .or(completed_legacy_anchor.as_ref());
+
     #[cfg(any(
         all(target_os = "linux", target_env = "gnu"),
         target_os = "macos",
@@ -223,13 +252,11 @@ pub(super) fn inventory(scan: &JournalObservation) -> JournalResult<ManagementIn
             return Err(JournalError::Conflict);
         }
         high_water = high_water.max(record.sequence);
-        let completed = completed_native_anchor
-            .as_ref()
-            .is_some_and(|(id, seq, before, _)| {
-                id == &record.transaction_id
-                    && *seq == record.sequence
-                    && *before == before_state_sha256
-            });
+        let completed = completed_anchor.is_some_and(|(id, seq, before, _)| {
+            id == &record.transaction_id
+                && *seq == record.sequence
+                && *before == before_state_sha256
+        });
         if transactions.iter().any(|tx| {
             tx.intent.sequence == record.sequence
                 || (tx.intent.sequence > record.sequence && !completed)
@@ -401,7 +428,7 @@ pub(super) fn inventory(scan: &JournalObservation) -> JournalResult<ManagementIn
         if !committed && index + 1 != transactions.len() {
             return Err(JournalError::Conflict);
         }
-        let previous = if let Some((_, sequence, _, target)) = &completed_native_anchor {
+        let previous = if let Some((_, sequence, _, target)) = completed_anchor {
             if tx.intent.sequence > *sequence
                 && (index == 0 || transactions[index - 1].intent.sequence < *sequence)
             {
@@ -422,17 +449,25 @@ pub(super) fn inventory(scan: &JournalObservation) -> JournalResult<ManagementIn
     }
     Ok(ManagementInventory {
         high_water,
-        committed_cutover_anchor: completed_native_anchor
-            .as_ref()
+        committed_cutover_anchor: completed_anchor
             .filter(|(id, seq, _, _)| {
-                handoff_inventory.records.is_empty()
+                let legacy = completed_legacy_anchor.is_some()
+                    && cutover_inventory.records.len() == 1
+                    && cutover_inventory.native_records.is_empty()
+                    && handoff_inventory.records.len() == 1
+                    && handoff_inventory.native_records.is_empty()
+                    && owner_recoveries.is_empty()
+                    && migration_plans.is_empty();
+                let native = completed_native_anchor.is_some()
+                    && handoff_inventory.records.is_empty()
                     && handoff_inventory.native_records.len() == 1
                     && owner_recoveries.len() == 1
                     && owner_recoveries.iter().all(|(rid, rseq, stage)| {
                         rid == id
                             && rseq == seq
                             && *stage == Some(handoff::OwnerRecoveryStage::GuardsHeld)
-                    })
+                    });
+                legacy || native
             })
             .map(|(_, seq, _, target)| (*seq, *target)),
         transactions,

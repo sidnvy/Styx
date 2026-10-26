@@ -93,6 +93,10 @@ pub struct NativeManagementError {
     _app_scope: Option<Arc<crate::app::HostScope>>,
 }
 enum Retained {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    LinuxMigration {
+        _owner: Box<crate::migration::legacy_entry::LegacyMigrationFailure>,
+    },
     #[cfg(target_os = "windows")]
     WindowsMigrationPreparation {
         _owner: Box<crate::store::native_transaction::WindowsMigrationPreparationFailure>,
@@ -116,10 +120,18 @@ impl NativeManagementError {
         self._app_scope = Some(scope);
         self
     }
-    /// Only an observed retained Mac migration task requires whole-process CLI
+    /// Only an observed retained migration task requires whole-process CLI
     /// teardown. Library/App callers retain this error and never exit here.
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "windows",
+        all(target_os = "linux", target_env = "gnu")
+    ))]
     pub fn requires_process_teardown(&self) -> bool {
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        if let Some(Retained::LinuxMigration { _owner }) = &self._retained {
+            return _owner.requires_process_teardown();
+        }
         #[cfg(target_os = "windows")]
         if let Some(Retained::WindowsMigrationPreparation { _owner }) = &self._retained {
             return _owner.process_teardown_required();
@@ -127,11 +139,15 @@ impl NativeManagementError {
         #[cfg(target_os = "macos")]
         return matches!(&self._retained, Some(Retained::MacMigration { _owner })
             if _owner.process_teardown_required());
-        #[cfg(target_os = "windows")]
+        #[cfg(any(target_os = "windows", all(target_os = "linux", target_env = "gnu")))]
         false
     }
     /// Redacted original transaction facts; never contains credentials.
     pub fn migration_diagnostic(&self) -> Option<serde_json::Value> {
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        if let Some(Retained::LinuxMigration { _owner }) = &self._retained {
+            return Some(_owner.diagnostic());
+        }
         #[cfg(target_os = "windows")]
         if let Some(Retained::WindowsMigrationPreparation { _owner }) = &self._retained {
             return _owner.diagnostic();
@@ -532,7 +548,25 @@ pub async fn migrate_with_approval(
         )
         .await
     }
-    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    {
+        if approved.is_some() {
+            return Err(NativeManagementError::new(ErrorKind::Invalid));
+        }
+        let id = parse_transaction_id(transaction_id)?;
+        linux_migration::migrate(
+            state_dir.to_owned(),
+            runtime_selection_file.to_owned(),
+            id,
+            run,
+        )
+        .await
+    }
+    #[cfg(not(any(
+        target_os = "macos",
+        target_os = "windows",
+        all(target_os = "linux", target_env = "gnu")
+    )))]
     {
         let _ = (
             state_dir,
@@ -869,6 +903,24 @@ mod platform {
         require_scope(path, scope)?;
         let state = transactions.readstate().map_err(tx)?;
         require_state(state.state(), scope.is_some())?;
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        if state.state().reader_contract
+            == styx_contracts::management::ReaderContract::NativeMigratedStateV1
+            && admission(transactions)?
+        {
+            let snapshot = std::sync::Arc::new(
+                crate::store::committed_runtime::CommittedRuntimeSnapshot::open(path)
+                    .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?,
+            );
+            transactions
+                .reconcile_committed_legacy_migration(snapshot)
+                .map_err(tx)?;
+            require_state(
+                transactions.readstate().map_err(tx)?.state(),
+                scope.is_some(),
+            )?;
+            require_scope(path, scope)?;
+        }
         if state.state().reader_contract
             == styx_contracts::management::ReaderContract::NativeMigratedStateV2
             && admission(transactions)?
@@ -1344,3 +1396,7 @@ mod macos_recovery;
 #[cfg(target_os = "windows")]
 #[path = "native_windows_recovery.rs"]
 mod windows_recovery;
+
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[path = "native_linux_migration.rs"]
+mod linux_migration;

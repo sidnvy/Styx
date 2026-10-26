@@ -371,7 +371,11 @@ fn native_recovery_result<T: serde::Serialize>(
     json: bool,
     summary: &'static str,
 ) -> ExitCode {
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    #[cfg(any(
+        target_os = "macos",
+        target_os = "windows",
+        all(target_os = "linux", target_env = "gnu")
+    ))]
     if let Err(value) = &result
         && value.requires_process_teardown()
     {

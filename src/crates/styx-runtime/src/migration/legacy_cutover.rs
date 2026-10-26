@@ -275,12 +275,18 @@ impl SettledLegacyRuntime {
     }
 }
 impl PreparedLegacyCutover {
-    #[cfg(test)]
-    pub(super) fn promoted_service(&self) -> Option<&crate::enrollment::shared::SharedEnrollment> {
+    pub(in crate::migration) fn promoted_service(
+        &self,
+    ) -> Option<&crate::enrollment::shared::SharedEnrollment> {
         self.ordinary.as_ref()
     }
     pub fn report(&self) -> &LegacyCutoverReport {
         &self.report
+    }
+    /// Consume the report after the entry coordinator has settled its readers.
+    /// This accessor supplies no commit or cleanup authority of its own.
+    pub(crate) fn into_report(self) -> LegacyCutoverReport {
+        self.report
     }
     /// Uncancellable short filesystem transition; caller still owns this object
     /// on error. It does not mark C07 Verified/Committed or clear any fence.

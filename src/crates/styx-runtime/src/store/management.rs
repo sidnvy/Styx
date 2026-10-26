@@ -78,9 +78,11 @@ pub(super) fn validate_readonly_native_tip(
     canonical: &super::native_state::ValidatedNativeState,
     marker: &styx_contracts::native_management::NativeRootMarker,
 ) -> JournalResult<()> {
-    if canonical.state().reader_contract
-        == styx_contracts::management::ReaderContract::NativeMigratedStateV2
-    {
+    if matches!(
+        canonical.state().reader_contract,
+        styx_contracts::management::ReaderContract::NativeMigratedStateV1
+            | styx_contracts::management::ReaderContract::NativeMigratedStateV2
+    ) {
         return validate_migrated_native_tip(scan, canonical, marker, None);
     }
     let inventory = readonly_inventory(scan)?;
@@ -140,7 +142,7 @@ pub(super) fn validate_readonly_native_tip(
     .map_err(|_| JournalError::Conflict)
 }
 
-/// Formal chain replay after the one committed schema4 conversion. No owner
+/// Formal chain replay after one committed schema2/schema4 conversion. No owner
 /// release is implied. `pending` is used only by original transaction append
 /// while its canonical target already exists; ordinary readers always pass None.
 #[cfg(any(
@@ -160,30 +162,62 @@ fn validate_migrated_native_tip(
         return Err(JournalError::Conflict);
     }
     let cutovers = cutover::scan_cutovers(scan)?;
-    if !cutovers.records.is_empty() || cutovers.native_records.len() != 1 {
-        return Err(JournalError::Conflict);
-    }
-    let anchor = &cutovers.native_records[0];
-    if anchor.intent.schema != 4
-        || anchor.last_stage != DurableStage::Committed
-        || anchor.validation_report().is_none()
-        || anchor.paired_validation_report().is_none()
-    {
+    let reader = canonical.state().reader_contract;
+    let (anchor_marker, anchor_target, anchor_sequence, anchor_digest) = match reader {
+        ReaderContract::NativeMigratedStateV1 => {
+            if cutovers.records.len() != 1 || !cutovers.native_records.is_empty() {
+                return Err(JournalError::Conflict);
+            }
+            let anchor = &cutovers.records[0];
+            if anchor.intent.schema != 2
+                || anchor.last_stage != DurableStage::Committed
+                || anchor.validation_report().is_none()
+                || anchor.paired_validation_report().is_none()
+            {
+                return Err(JournalError::Conflict);
+            }
+            (
+                anchor.marker.as_slice(),
+                anchor.target.as_slice(),
+                anchor.intent.sequence,
+                anchor.intent.target_state_sha256,
+            )
+        }
+        ReaderContract::NativeMigratedStateV2 => {
+            if !cutovers.records.is_empty() || cutovers.native_records.len() != 1 {
+                return Err(JournalError::Conflict);
+            }
+            let anchor = &cutovers.native_records[0];
+            if anchor.intent.schema != 4
+                || anchor.last_stage != DurableStage::Committed
+                || anchor.validation_report().is_none()
+                || anchor.paired_validation_report().is_none()
+            {
+                return Err(JournalError::Conflict);
+            }
+            (
+                anchor.marker.as_slice(),
+                anchor.target.as_slice(),
+                anchor.intent.sequence,
+                anchor.intent.target_state_sha256,
+            )
+        }
+        _ => return Err(JournalError::Conflict),
+    };
+    if inventory.committed_cutover_anchor != Some((anchor_sequence, anchor_digest)) {
         return Err(JournalError::Conflict);
     }
     let original_marker =
-        super::native_state::decode_marker(&anchor.marker).map_err(|_| JournalError::Conflict)?;
-    if &original_marker != marker
-        || canonical.state().reader_contract != ReaderContract::NativeMigratedStateV2
-    {
+        super::native_state::decode_marker(anchor_marker).map_err(|_| JournalError::Conflict)?;
+    if &original_marker != marker {
         return Err(JournalError::Conflict);
     }
-    let mut previous = super::native_state::decode_state(&anchor.target, marker)
+    let mut previous = super::native_state::decode_state(anchor_target, marker)
         .map_err(|_| JournalError::Conflict)?;
     for tx in inventory
         .transactions
         .into_iter()
-        .filter(|tx| tx.intent.sequence > anchor.intent.sequence)
+        .filter(|tx| tx.intent.sequence > anchor_sequence)
     {
         let committed = tx
             .phase_receipts
@@ -193,9 +227,7 @@ fn validate_migrated_native_tip(
             return Err(JournalError::Conflict);
         }
         let original = parser::original_observed(scan, tx)?;
-        if original.before != previous.raw_bytes()
-            || original.intent.reader != ReaderContract::NativeMigratedStateV2
-        {
+        if original.before != previous.raw_bytes() || original.intent.reader != reader {
             return Err(JournalError::Conflict);
         }
         let before = super::native_state::decode_state(&original.before, marker)
@@ -331,8 +363,9 @@ pub struct ManagementInventory {
 }
 impl ManagementInventory {
     /// Historical presence is distinct from an unresolved migration stage.
-    /// Only a complete schema4 successor, exact retirement and GuardsHeld
-    /// original C chain resolve this barrier. This is data, not owner release.
+    /// A complete schema2 successor with original retirement, or schema4 with
+    /// its exact retirement/GuardsHeld chain, resolves this historical barrier.
+    /// This is data, not owner release.
     #[cfg(any(
         all(target_os = "linux", target_env = "gnu"),
         target_os = "macos",

@@ -1584,3 +1584,152 @@ fn preserved_remote_report_versions_keep_exact_bytes_and_refuse_mixed_evidence()
     drop(p);
     cleanup(f);
 }
+
+// Actual protected journal files with synthetic original cutover/probe records.
+// These exercise the shared byte scanner and continuation rules, not OS owner
+// settlement, native execution or migration admission authority.
+fn persisted_tip_case(f: &Fixture, label: &str, scan: JournalObservation) -> JournalObservation {
+    let path = f.path.join(format!("native-tip-{label}"));
+    directory(&path);
+    for file in &scan.files {
+        write(&path.join(&file.name), file.bytes());
+    }
+    let directory = fs::File::open(path).unwrap();
+    directory.sync_all().unwrap();
+    crate::store::secure_journal::files::scan(&directory, JournalBudget::default()).unwrap()
+}
+
+fn append_schema2_successor(
+    scan: &mut JournalObservation,
+    id: &TransactionId,
+    change_binding: bool,
+    break_original_bytes: bool,
+) -> Vec<u8> {
+    use crate::store::management::parser::{PhaseRecord, PreparedRecord, names, phase_name};
+    use crate::store::secure_journal::ObservedJournalFile;
+    let anchor = original(scan, id).unwrap();
+    let marker = decode_marker(&anchor.marker).unwrap();
+    let previous = decode_state(&anchor.target, &marker).unwrap();
+    let mut target = previous.state().clone();
+    target.revision += 1;
+    target.last_transaction = Some(NativeStateTransaction {
+        transaction_id: "schema2-original-next".try_into().unwrap(),
+        sequence: anchor.intent.sequence + 1,
+    });
+    target.desired.host.as_mut().unwrap().run = NativeRunDesired::Running;
+    if change_binding {
+        target.migration.as_mut().unwrap().candidate_manifest_sha256 =
+            Sha256Digest::of_bytes(b"different candidate, self-consistent hashes are insufficient");
+    }
+    let mut before = anchor.target;
+    if break_original_bytes {
+        // Semantically identical JSON with fully recomputed intent/phase hashes
+        // must still fail to extend the exact original canonical byte chain.
+        before.insert(0, b' ');
+    }
+    let target = serde_json::to_vec(&target).unwrap();
+    let next = decode_state(&target, &marker).unwrap();
+    let tx = next.state().last_transaction.as_ref().unwrap();
+    let intent = DesiredStateCommit {
+        transaction_id: tx.transaction_id.clone(),
+        sequence: tx.sequence,
+        deployment_raw_sha256: next.state().deployment_raw_sha256,
+        before_state_sha256: Sha256Digest::of_bytes(&before),
+        target_state_sha256: Sha256Digest::of_bytes(&target),
+        reader: ReaderContract::NativeMigratedStateV1,
+    };
+    let raw_intent = serde_json::to_vec(&intent).unwrap();
+    let raw_intent_sha256 = Sha256Digest::of_bytes(&raw_intent);
+    let prepared = serde_json::to_vec(&PreparedRecord {
+        schema: 1,
+        intent: intent.clone(),
+        raw_intent_sha256,
+        stage: DurableStage::Prepared,
+        previous: None,
+    })
+    .unwrap();
+    let (intent_name, prepared_name, before_name, target_name) = names(&intent);
+    for (name, bytes) in [
+        (intent_name, raw_intent),
+        (prepared_name, prepared.clone()),
+        (before_name, before),
+        (target_name, target.clone()),
+    ] {
+        scan.total_bytes += bytes.len();
+        scan.files.push(ObservedJournalFile { name, bytes });
+    }
+    let mut previous = Sha256Digest::of_bytes(&prepared);
+    for stage in [
+        DurableStage::Applied,
+        DurableStage::Verified,
+        DurableStage::Committed,
+    ] {
+        let bytes = serde_json::to_vec(&PhaseRecord {
+            schema: 1,
+            intent: intent.clone(),
+            raw_intent_sha256,
+            stage,
+            previous,
+            canonical_raw_sha256: intent.target_state_sha256,
+            reconciled: false,
+        })
+        .unwrap();
+        previous = Sha256Digest::of_bytes(&bytes);
+        scan.total_bytes += bytes.len();
+        scan.files.push(ObservedJournalFile {
+            name: phase_name(&intent, stage).unwrap(),
+            bytes,
+        });
+    }
+    scan.files.sort_by(|a, b| a.name.cmp(&b.name));
+    target
+}
+
+#[test]
+fn schema2_committed_tip_requires_original_anchor_binding_and_exact_successor_chain() {
+    with_reader_seed(|f, prepared| {
+        let id = f.retired.transaction_id.clone();
+        let baseline = reader_chain(f, prepared, 2, "linux");
+        let anchor = original(&baseline, &id).unwrap();
+        let marker = decode_marker(&anchor.marker).unwrap();
+        let baseline = persisted_tip_case(f, "anchor", baseline);
+        let canonical = decode_state(&anchor.target, &marker).unwrap();
+        let inventory = super::super::readonly_inventory(&baseline).unwrap();
+        assert_eq!(
+            inventory.committed_cutover_anchor,
+            Some((anchor.intent.sequence, anchor.intent.target_state_sha256))
+        );
+        assert!(!inventory.has_unresolved_legacy_handoffs());
+        super::super::validate_readonly_native_tip(&baseline, &canonical, &marker).unwrap();
+
+        let mut successor = reader_chain(f, prepared, 2, "linux");
+        let target = append_schema2_successor(&mut successor, &id, false, false);
+        let successor = persisted_tip_case(f, "successor", successor);
+        let canonical = decode_state(&target, &marker).unwrap();
+        super::super::validate_readonly_native_tip(&successor, &canonical, &marker).unwrap();
+
+        let mut uncommitted = reader_chain(f, prepared, 2, "linux");
+        let target = append_schema2_successor(&mut uncommitted, &id, false, false);
+        uncommitted
+            .files
+            .retain(|f| f.name != name(&id, "committed"));
+        let uncommitted = persisted_tip_case(f, "uncommitted", uncommitted);
+        let canonical = decode_state(&target, &marker).unwrap();
+        assert!(
+            super::super::validate_readonly_native_tip(&uncommitted, &canonical, &marker).is_err()
+        );
+
+        let mut changed = reader_chain(f, prepared, 2, "linux");
+        let target = append_schema2_successor(&mut changed, &id, true, false);
+        let changed = persisted_tip_case(f, "binding", changed);
+        let canonical = decode_state(&target, &marker).unwrap();
+        assert!(super::super::readonly_inventory(&changed).is_ok());
+        assert!(super::super::validate_readonly_native_tip(&changed, &canonical, &marker).is_err());
+
+        let mut broken = reader_chain(f, prepared, 2, "linux");
+        let target = append_schema2_successor(&mut broken, &id, false, true);
+        let broken = persisted_tip_case(f, "chain", broken);
+        let canonical = decode_state(&target, &marker).unwrap();
+        assert!(super::super::validate_readonly_native_tip(&broken, &canonical, &marker).is_err());
+    });
+}

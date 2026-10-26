@@ -936,6 +936,41 @@ pub(in crate::store) fn check_canonical_root<R: handoff::ProofRoot>(
     original: &OriginalCutover<R>,
     require_target: bool,
 ) -> JournalResult<()> {
+    check_canonical_root_inner(root, original, require_target, None)
+}
+/// A completed Linux migration may be followed only by the complete, validated
+/// native configuration chain in this same journal. Never admits an incomplete
+/// migration or a caller-provided replacement state.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+pub(in crate::store) fn check_committed_successor_root(
+    root: &crate::store::PrivateRoot,
+    original: &OriginalCutover,
+    scan: &JournalObservation,
+) -> JournalResult<()> {
+    if original.intent.schema != 2 || original.last_stage != DurableStage::Committed {
+        return Err(JournalError::Conflict);
+    }
+    let marker = crate::store::native_state::decode_marker(&original.marker)
+        .map_err(|_| JournalError::Conflict)?;
+    let raw = root
+        .read_raw("state.json", MAX_RAW)
+        .map_err(|_| JournalError::Unknown)?;
+    let canonical = crate::store::native_state::decode_state(raw.bytes(), &marker)
+        .map_err(|_| JournalError::Conflict)?;
+    super::validate_readonly_native_tip(scan, &canonical, &marker)?;
+    check_canonical_root_inner(
+        root,
+        original,
+        true,
+        Some(Sha256Digest::of_bytes(raw.bytes())),
+    )
+}
+fn check_canonical_root_inner<R: handoff::ProofRoot>(
+    root: &crate::store::PrivateRoot,
+    original: &OriginalCutover<R>,
+    require_target: bool,
+    validated_successor: Option<Sha256Digest>,
+) -> JournalResult<()> {
     let i = &original.intent;
     if !root_matches(&i.config_root, root.identity()) {
         return Err(JournalError::Conflict);
@@ -948,19 +983,29 @@ pub(in crate::store) fn check_canonical_root<R: handoff::ProofRoot>(
         .read_raw("state.json", MAX_RAW)
         .map_err(|_| JournalError::Unknown)?;
     let hash = Sha256Digest::of_bytes(current.bytes());
-    if require_target
-        || matches!(
-            original.last_stage,
-            DurableStage::Applied | DurableStage::Verified | DurableStage::Committed
-        )
+    if validated_successor.is_some_and(|expected| expected != hash) {
+        return Err(JournalError::Unknown);
+    }
+    if validated_successor.is_none()
+        && (require_target
+            || matches!(
+                original.last_stage,
+                DurableStage::Applied | DurableStage::Verified | DurableStage::Committed
+            ))
     {
         if hash != i.target_state_sha256 {
             return Err(JournalError::Conflict);
         }
-    } else if hash != i.before_state_sha256 && hash != i.target_state_sha256 {
+    } else if validated_successor.is_none()
+        && hash != i.before_state_sha256
+        && hash != i.target_state_sha256
+    {
         return Err(JournalError::Conflict);
     }
-    if hash == i.target_state_sha256 || root.ensure_absent(MARKER).is_err() {
+    if validated_successor.is_some()
+        || hash == i.target_state_sha256
+        || root.ensure_absent(MARKER).is_err()
+    {
         let marker = root
             .read_raw(MARKER, 4096)
             .map_err(|_| JournalError::Unknown)?;

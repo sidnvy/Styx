@@ -8,7 +8,7 @@ use std::sync::Arc;
 pub(crate) struct RecoveredCommittedRuntime {
     owner: OwnedConfigurationRoot,
     snapshot: Arc<CommittedRuntimeSnapshot>,
-    journal: OwnedManagementJournal,
+    _journal: Option<OwnedManagementJournal>,
 }
 impl RecoveredCommittedRuntime {
     pub(crate) fn reopen(
@@ -20,10 +20,24 @@ impl RecoveredCommittedRuntime {
         }
         let journal =
             OwnedManagementJournal::open_existing(owner.clone(), JournalBudget::default())?;
+        let mut proof = Self::reopen_with_journal(&owner, snapshot, &journal)?;
+        proof._journal = Some(journal);
+        Ok(proof)
+    }
+    pub(in crate::store) fn reopen_with_journal(
+        owner: &OwnedConfigurationRoot,
+        snapshot: Arc<CommittedRuntimeSnapshot>,
+        journal: &OwnedManagementJournal,
+    ) -> JournalResult<Self> {
+        if owner.identity()? != snapshot.root_identity()
+            || !journal.configuration_root().same_authority(owner)
+        {
+            return Err(JournalError::Conflict);
+        }
         let proof = Self {
-            owner,
+            owner: owner.clone(),
             snapshot,
-            journal,
+            _journal: None,
         };
         proof.owner.with_state(|state| {
             state.require_recovery_inspection()?;
@@ -35,7 +49,7 @@ impl RecoveredCommittedRuntime {
             if canonical.bytes() != proof.snapshot.canonical() {
                 return Err(JournalError::Conflict);
             }
-            proof.journal.with_directory_locked(state, |directory| {
+            journal.with_directory_locked(state, |directory| {
                 let scan = files::scan(directory, JournalBudget::default())?;
                 let source =
                     cutover::original(&scan, &proof.snapshot.original.intent.transaction_id)?;
@@ -45,6 +59,7 @@ impl RecoveredCommittedRuntime {
                 {
                     return Err(JournalError::Conflict);
                 }
+                cutover::check_committed_successor_root(&state.root, &source, &scan)?;
                 for file in &scan.files {
                     files::sync_file(directory, &file.name)?;
                     if files::read(directory, &file.name, MAX)?.as_deref() != Some(file.bytes()) {
@@ -63,11 +78,20 @@ impl RecoveredCommittedRuntime {
         &self.snapshot.root_identity() == root
     }
     pub(crate) fn validate_owner(&self, owner: &OwnedConfigurationRoot) -> JournalResult<()> {
-        if !self.owner.same_authority(owner) || !self.matches_root(&owner.identity()?) {
+        if !self.owner.same_authority(owner) {
             return Err(JournalError::Conflict);
         }
-        owner.ensure_admission()?;
-        self.snapshot.revalidate()
+        owner.with_state(|state| {
+            if !self.matches_root(&state.root.identity()) {
+                return Err(JournalError::Unknown);
+            }
+            state.ordinary_admission()?;
+            // A changed original material poisons this same owner; do not
+            // leave published admission open after returning an error.
+            self.snapshot
+                .revalidate()
+                .map_err(|_| JournalError::Unknown)
+        })
     }
     pub(crate) fn state(&self) -> &NativeState {
         self.snapshot.state()
