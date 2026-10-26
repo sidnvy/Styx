@@ -1320,3 +1320,193 @@ fn old_cutover_mutations_reject_native_chain_before_writing_scratch_members() {
         assert_eq!(raw_members(&scan(f)), before_partial);
     });
 }
+
+// Report codec/data-link evidence only: original files use the existing journal
+// fixture; the derived remote observation is synthetic and never activated.
+#[test]
+#[ignore = "STYX_TEST_MANAGEMENT_CUTOVER_ROOT; report versions/data links with existing owned journal fixture, not network/native migration acceptance"]
+fn preserved_remote_report_versions_keep_exact_bytes_and_refuse_mixed_evidence() {
+    let parent = PathBuf::from(
+        std::env::var_os("STYX_TEST_MANAGEMENT_CUTOVER_ROOT").expect("explicit fresh owned parent"),
+    );
+    let mut f = fixture(&parent, JournalBudget::default());
+    let data = inputs(&f);
+    let p = f.journal.prepare_cutover(&f.maintenance, data).unwrap();
+    let before_scan = scan(&f);
+    let mut remote = original(&before_scan, &f.retired.transaction_id).unwrap();
+    let root = NativeRootIdentity::Linux {
+        device: 1,
+        inode: 2,
+        uid: 1000,
+    };
+    let hash = Sha256Digest::of_bytes(b"synthetic original remote pairing");
+    let pair = NativePreservedHostPair {
+        schema: 1,
+        transaction_id: remote.intent.transaction_id.clone(),
+        config_root: root.clone(),
+        host_root: root,
+        deployment_raw_sha256: remote.intent.deployment_raw_sha256,
+        device_id: "styx-0123456789abcdef01234567".try_into().unwrap(),
+        fingerprint: hash,
+        gateway_origin: "https://original-gateway.invalid:22022".into(),
+        gateway_ca_pem_sha256: hash,
+        identity_json_sha256: hash,
+        identity_private_pem_sha256: hash,
+        host_profile_sha256: hash,
+        credential_sha256: hash,
+        preservation_sha256: hash,
+    };
+    let pair_bytes = serde_json::to_vec(&pair).unwrap();
+    let source_hash = Sha256Digest::of_bytes(&pair_bytes);
+    remote.intent.schema = 4;
+    remote.intent.endpoint_mode = Some(NativeMigrationEndpointMode::PreservedRemote);
+    remote.intent.history = Some(NativeMigrationHistory::PreservedHostPair {
+        source_bindings_sha256: source_hash,
+    });
+    remote.host_pair = Some(pair_bytes);
+    let v2 = serde_json::json!({
+        "schema":2, "kind":"preserved_remote_host_admission",
+        "transaction_id": remote.intent.transaction_id,
+        "candidate_manifest_sha256":remote.intent.candidate_manifest_sha256,
+        "target_sha256":remote.intent.target_state_sha256,
+        "source_bindings_sha256":source_hash,
+        "origin":pair.gateway_origin, "device_id":pair.device_id,
+        "fingerprint":pair.fingerprint, "gateway_ca_pem_sha256":pair.gateway_ca_pem_sha256,
+        "host_authenticated":true, "protocol_ready":true,
+        "host_protocol_joined":true, "host_link_io_joined":true,
+        "validation_task_joined":true,
+        "migration_committed":false, "ordinary_admission_open":false
+    });
+    let check = |value: &serde_json::Value| {
+        validate_paired_report(&serde_json::to_vec(value).unwrap(), &remote)
+    };
+    assert!(check(&v2).is_ok());
+    // Required observations cannot be omitted or replaced with Unknown/false.
+    for field in [
+        "host_authenticated",
+        "protocol_ready",
+        "host_protocol_joined",
+        "host_link_io_joined",
+        "validation_task_joined",
+    ] {
+        for replacement in [
+            None,
+            Some(serde_json::json!(false)),
+            Some(serde_json::json!("unknown")),
+        ] {
+            let mut bad = v2.clone();
+            match replacement {
+                Some(value) => {
+                    bad[field] = value;
+                }
+                None => {
+                    bad.as_object_mut().unwrap().remove(field);
+                }
+            }
+            assert!(check(&bad).is_err(), "{field}");
+        }
+    }
+    for field in [
+        "transaction_id",
+        "candidate_manifest_sha256",
+        "target_sha256",
+        "source_bindings_sha256",
+        "origin",
+        "device_id",
+        "fingerprint",
+        "gateway_ca_pem_sha256",
+    ] {
+        let mut bad = v2.clone();
+        bad[field] = match field {
+            "transaction_id" => serde_json::json!("foreign-transaction"),
+            "origin" => serde_json::json!("https://other-gateway.invalid:22022"),
+            "device_id" => serde_json::json!("styx-ffffffffffffffffffffffff"),
+            _ => serde_json::json!(Sha256Digest::of_bytes(b"foreign binding")),
+        };
+        assert!(check(&bad).is_err(), "{field}");
+    }
+    for field in ["migration_committed", "ordinary_admission_open"] {
+        let mut bad = v2.clone();
+        bad[field] = serde_json::json!(true);
+        assert!(check(&bad).is_err());
+    }
+    for field in [
+        "sdk_service_joined",
+        "sdk_detached_tasks_joined",
+        "mcp_session_closed",
+        "foreign_owner_refused",
+        "mcp_effect_verified",
+        "executor_exited",
+        "unknown_field",
+    ] {
+        let mut bad = v2.clone();
+        bad[field] = serde_json::json!(true);
+        assert!(check(&bad).is_err(), "{field}");
+    }
+    for version in [0, 1, 3] {
+        let mut bad = v2.clone();
+        bad["schema"] = serde_json::json!(version);
+        assert!(check(&bad).is_err());
+    }
+    let mut bad = v2.clone();
+    bad["kind"] = serde_json::json!("preserved_remote_host");
+    assert!(check(&bad).is_err());
+    let mut v1 = v2.clone();
+    v1["schema"] = serde_json::json!(1);
+    v1["kind"] = serde_json::json!("preserved_remote_host");
+    v1.as_object_mut().unwrap().remove("protocol_ready");
+    v1["exit_code"] = serde_json::json!(0);
+    for field in [
+        "mcp_effect_verified",
+        "foreign_owner_refused",
+        "sdk_service_joined",
+        "sdk_detached_tasks_joined",
+        "mcp_session_closed",
+        "executor_exited",
+        "processes_exited",
+        "reader_task_reaped",
+        "stderr_task_reaped",
+        "supervised_jobs_joined",
+    ] {
+        v1[field] = serde_json::json!(true);
+    }
+    let raw = format!(" \n{}\n ", serde_json::to_string_pretty(&v1).unwrap()).into_bytes();
+    let saved = raw.clone();
+    assert!(validate_paired_report(&raw, &remote).is_ok());
+    assert_eq!(raw, saved); // Original bytes, never normalized into a new hash chain.
+    for field in [
+        "mcp_effect_verified",
+        "foreign_owner_refused",
+        "sdk_service_joined",
+        "sdk_detached_tasks_joined",
+        "mcp_session_closed",
+    ] {
+        let mut bad = v1.clone();
+        bad[field] = serde_json::json!(false);
+        assert!(check(&bad).is_err());
+    }
+    let mut mixed = v1.clone();
+    mixed["schema"] = serde_json::json!(2);
+    mixed["kind"] = serde_json::json!("preserved_remote_host_admission");
+    mixed["protocol_ready"] = serde_json::json!(true);
+    assert!(check(&mixed).is_err());
+    let duplicate = serde_json::to_string(&v2)
+        .unwrap()
+        .replacen('{', "{\"schema\":2,", 1);
+    assert!(validate_paired_report(duplicate.as_bytes(), &remote).is_err());
+    // The real original fixture has no local Exec report: the shared writer must
+    // still refuse a pair report before local validation, irrespective of parser.
+    assert!(
+        f.journal
+            .record_cutover_paired_validation(&f.maintenance, &p, &serde_json::to_vec(&v2).unwrap())
+            .is_err()
+    );
+    assert!(
+        original(&scan(&f), &f.retired.transaction_id)
+            .unwrap()
+            .paired_validation_report()
+            .is_none()
+    );
+    drop(p);
+    cleanup(f);
+}

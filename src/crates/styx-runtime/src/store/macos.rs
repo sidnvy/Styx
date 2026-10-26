@@ -569,3 +569,9 @@ mod legacy_restart;
 mod native_cutover;
 pub(crate) use native_cutover::MacCanonicalCutover;
 pub(in crate::store) use native_cutover::MacCutoverPlan;
+
+#[path = "macos_migration_owner.rs"]
+mod migration_owner;
+pub(in crate::store) use migration_owner::{
+    MacMigrationObservation, MacMigrationOwnerTask, start_previous_boot_host_migration,
+};

@@ -8,3 +8,6 @@ pub mod legacy_enrollment;
 
 #[cfg(target_os = "macos")]
 pub(crate) mod mac_exec_validation;
+
+#[cfg(target_os = "macos")]
+pub(crate) mod mac_pair_validation;

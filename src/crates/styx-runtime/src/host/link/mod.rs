@@ -368,17 +368,24 @@ impl HostWssLink {
         self.stop.cancel();
         let until = tokio::time::Instant::now() + timeout.min(Duration::from_secs(5));
         let mut timed_out = false;
+        let mut task_failed = false;
         for mut task in std::mem::take(&mut self.tasks) {
-            if tokio::time::timeout_at(until, &mut task).await.is_err() {
-                task.abort();
-                // Cancellation of these pure-async IO tasks drops socket halves.
-                // Await the abort so return never falsely claims detached cleanup.
-                let _ = task.await;
-                timed_out = true;
+            match tokio::time::timeout_at(until, &mut task).await {
+                Ok(Ok(())) => {}
+                Ok(Err(_)) => task_failed = true,
+                Err(_) => {
+                    task.abort();
+                    // Pure async IO cancellation drops socket halves. Still
+                    // join every task; failure is not a successful cleanup.
+                    let _ = task.await;
+                    timed_out = true;
+                }
             }
         }
         if timed_out {
             Err(LinkError::Deadline)
+        } else if task_failed {
+            Err(LinkError::Closed)
         } else {
             Ok(())
         }

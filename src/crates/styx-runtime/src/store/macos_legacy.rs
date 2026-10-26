@@ -4,7 +4,7 @@ use super::*;
 use crate::store::{
     configuration::{ConfigurationMaintenance, OwnedConfigurationRoot},
     management::handoff::NativeRetirementFileStamp,
-    management::handoff::{NativePreparedRetirement, NativeRetirementIntent},
+    management::handoff::{NativePreparedRetirement, NativeRetiredRecord, NativeRetirementIntent},
     management::handoff::{ProofStamp, RetirementFileStamp},
     secure_journal::{JournalError, JournalResult},
 };
@@ -157,6 +157,101 @@ impl MacTokenRetirement {
                 retired: false,
                 retired_post: None,
             })
+        })
+    }
+    /// Reopen only an already recorded Retired effect from the original journal
+    /// predecessor. This observes existing bytes; it never renames, re-records,
+    /// repairs permissions, or manufactures a replacement post-effect stamp.
+    pub(in crate::store) fn reopen_recorded_retired(
+        host: &Root,
+        owner: OwnedConfigurationRoot,
+        maintenance: Arc<ConfigurationMaintenance>,
+        prepared: &NativePreparedRetirement,
+        record: &NativeRetiredRecord,
+    ) -> JournalResult<Self> {
+        if !maintenance.matches(&owner)
+            || !prepared.matches_owner(&owner)
+            || !record.matches_prepared(prepared)
+        {
+            return Err(JournalError::Conflict);
+        }
+        let intent = prepared.intent();
+        let host_root = native_root(host.identity())?;
+        let destination = format!(
+            ".styx-retired-host-token-{}",
+            maintenance.transaction_id().as_str()
+        );
+        if intent.transaction_id != *maintenance.transaction_id()
+            || intent.config_root != native_root(owner.identity()?)?
+            || intent.host_root != host_root
+            || intent.token_destination() != Path::new("device").join(&destination)
+            || !intent.original_token.valid_for(&host_root)
+            || !record.post_stamp().valid_for(&host_root)
+            || !intent
+                .original_token
+                .same_file_after_rename(record.post_stamp())
+        {
+            return Err(JournalError::Conflict);
+        }
+        let NativeRetirementFileStamp::Macos { stamp: original } = &intent.original_token else {
+            return Err(JournalError::Conflict);
+        };
+        let NativeRetirementFileStamp::Macos { stamp: post } = record.post_stamp() else {
+            return Err(JournalError::Conflict);
+        };
+        let held_host = host.clone();
+        owner.with_maintenance(&maintenance, |_| {
+            unknown(held_host.validate_root())?;
+            let device = unknown(open_at(
+                &held_host.directory,
+                OsStr::new("device"),
+                OFlag::O_RDONLY | OFlag::O_DIRECTORY,
+                Mode::empty(),
+            ))?;
+            let meta = unknown(journal_private_directory(&device))?;
+            // An absent retired destination or a restored source is not Done.
+            match open_at(
+                &device,
+                OsStr::new("host.token"),
+                OFlag::O_RDONLY | OFlag::O_NONBLOCK,
+                Mode::empty(),
+            ) {
+                Err(StoreError::Io(ref error)) if error.raw_os_error() == Some(libc::ENOENT) => {}
+                _ => return Err(JournalError::Unknown),
+            }
+            let token = unknown(open_at(
+                &device,
+                OsStr::new(&destination),
+                OFlag::O_RDONLY | OFlag::O_NONBLOCK,
+                Mode::empty(),
+            ))?;
+            if stamp(&token)? != *post {
+                return Err(JournalError::Unknown);
+            }
+            let bytes = digest_file(&token, original.byte_len as usize)?;
+            if Sha256Digest::of_bytes(&bytes) != original.sha256 || stamp(&token)? != *post {
+                return Err(JournalError::Unknown);
+            }
+            let reopened = Self {
+                owner: owner.clone(),
+                maintenance: maintenance.clone(),
+                host: held_host.clone(),
+                device,
+                device_identity: (meta.dev(), meta.ino()),
+                token,
+                original: original.clone(),
+                original_bytes: bytes,
+                destination: destination.clone(),
+                // Preserve the one-attempt boundary: retire() must reject this
+                // value, including after a later validation failure.
+                attempted: true,
+                retired: true,
+                retired_post: Some(post.clone()),
+            };
+            if reopened.validate_retired_locked()? != *record.post_stamp() {
+                return Err(JournalError::Unknown);
+            }
+            Ok(reopened)
         })
     }
     pub(in crate::store) fn matches_binding(

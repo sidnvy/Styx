@@ -186,6 +186,22 @@ impl<R, S> PreparedCredentialRetirement<R, S> {
     }
 }
 impl<R, S> RetiredCredentialRecord<R, S> {
+    #[cfg(target_os = "macos")]
+    pub(in crate::store) fn matches_prepared(
+        &self,
+        prepared: &PreparedCredentialRetirement<R, S>,
+    ) -> bool
+    where
+        R: PartialEq,
+        S: PartialEq,
+    {
+        self.prepared.owner.same_authority(&prepared.owner)
+            && self.prepared.namespace == prepared.namespace
+            && self.prepared.raw_intent_sha256 == prepared.raw_intent_sha256
+            && self.prepared.record_sha256 == prepared.record_sha256
+            && self.prepared.intent == prepared.intent
+    }
+
     pub(in crate::store) fn intent(&self) -> &LegacyCredentialRetirementIntent<R, S> {
         &self.prepared.intent
     }

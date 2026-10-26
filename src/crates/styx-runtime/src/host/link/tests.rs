@@ -264,3 +264,33 @@ async fn strict_tls_wss_data_heartbeat_limits_close_cleanup_batch() {
         "strict AWS-LC TLS+actual WSS batch PASS: independent nonce readback, bearer header only/no Origin, no v2 inference, heartbeat while handler holds frame, outbound+remote inbound 2MiB bounds, oversize/explicit-close/full-inbound generations ended, second link refused by partition, tasks+server joined, shared Host budget returned only after delivered frame drop"
     );
 }
+
+// Actual task failure must not become a successful transport-cleanup receipt.
+// The sibling's completion also proves shutdown keeps joining after a failure.
+#[tokio::test]
+async fn failed_io_task_refuses_cleanup_success_and_still_joins_sibling() {
+    let (outgoing, _) = mpsc::channel(1);
+    let (_, incoming) = mpsc::channel(1);
+    let joined = Arc::new(std::sync::atomic::AtomicBool::new(false));
+    let observed = joined.clone();
+    let link = HostWssLink {
+        endpoint: "wss://fixture.invalid/host-link".into(),
+        generation: "failed-io-generation".try_into().unwrap(),
+        outgoing,
+        incoming,
+        out_bytes: Arc::new(Semaphore::new(1)),
+        stop: CancellationToken::new(),
+        tasks: vec![
+            tokio::spawn(async { panic!("injected transport task failure") }),
+            tokio::spawn(async move {
+                tokio::task::yield_now().await;
+                observed.store(true, Ordering::Release);
+            }),
+        ],
+    };
+    assert_eq!(
+        link.shutdown(Duration::from_secs(1)).await,
+        Err(LinkError::Closed)
+    );
+    assert!(joined.load(Ordering::Acquire));
+}

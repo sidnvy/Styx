@@ -325,10 +325,7 @@ struct PreservedRemoteValidation {
 }
 /// Data links and required observations only. Only the upper actual owned
 /// validator may supply this report; JSON booleans are not an OS/network proof.
-pub(super) fn validate_remote_report<R>(
-    raw: &[u8],
-    original: &OriginalCutover<R>,
-) -> JournalResult<()> {
+fn validate_remote_report_v1<R>(raw: &[u8], original: &OriginalCutover<R>) -> JournalResult<()> {
     use styx_contracts::native_management::{NativeMigrationHistory, NativePreservedHostPair};
     let report: PreservedRemoteValidation =
         serde_json::from_slice(raw).map_err(|_| JournalError::InvalidInput)?;
@@ -369,6 +366,89 @@ pub(super) fn validate_remote_report<R>(
         || !report.reader_task_reaped
         || !report.stderr_task_reaped
         || !report.supervised_jobs_joined
+        || !report.validation_task_joined
+        || report.migration_committed
+        || report.ordinary_admission_open
+    {
+        return Err(JournalError::Conflict);
+    }
+    Ok(())
+}
+
+/// Local Host-only migration observations. Remote MCP owner/SDK release
+/// acceptance remains separate; this report cannot claim those resources joined.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct PreservedRemoteAdmission {
+    schema: u16,
+    kind: String,
+    transaction_id: TransactionId,
+    candidate_manifest_sha256: Sha256Digest,
+    target_sha256: Sha256Digest,
+    source_bindings_sha256: Sha256Digest,
+    origin: String,
+    device_id: styx_contracts::identity::DeviceId,
+    fingerprint: Sha256Digest,
+    gateway_ca_pem_sha256: Sha256Digest,
+    host_authenticated: bool,
+    protocol_ready: bool,
+    host_protocol_joined: bool,
+    host_link_io_joined: bool,
+    validation_task_joined: bool,
+    migration_committed: bool,
+    ordinary_admission_open: bool,
+}
+
+/// Select using the original bytes, then strictly decode that version. The
+/// header grants no acceptance: each full decoder rejects unknown/duplicate
+/// fields and the other version's observations. No reserialization/hash change.
+pub(super) fn validate_remote_report<R>(
+    raw: &[u8],
+    original: &OriginalCutover<R>,
+) -> JournalResult<()> {
+    #[derive(Deserialize)]
+    struct Version {
+        schema: u16,
+    }
+    let version: Version = serde_json::from_slice(raw).map_err(|_| JournalError::InvalidInput)?;
+    match version.schema {
+        1 => validate_remote_report_v1(raw, original),
+        2 => validate_remote_admission_v2(raw, original),
+        _ => Err(JournalError::InvalidInput),
+    }
+}
+
+fn validate_remote_admission_v2<R>(raw: &[u8], original: &OriginalCutover<R>) -> JournalResult<()> {
+    use styx_contracts::native_management::{NativeMigrationHistory, NativePreservedHostPair};
+    let report: PreservedRemoteAdmission =
+        serde_json::from_slice(raw).map_err(|_| JournalError::InvalidInput)?;
+    let pair: NativePreservedHostPair = serde_json::from_slice(
+        original
+            .host_pair
+            .as_deref()
+            .ok_or(JournalError::Conflict)?,
+    )
+    .map_err(|_| JournalError::Conflict)?;
+    let Some(NativeMigrationHistory::PreservedHostPair {
+        source_bindings_sha256,
+    }) = original.intent.history.as_ref()
+    else {
+        return Err(JournalError::Conflict);
+    };
+    if report.schema != 2
+        || report.kind != "preserved_remote_host_admission"
+        || report.transaction_id != original.intent.transaction_id
+        || report.candidate_manifest_sha256 != original.intent.candidate_manifest_sha256
+        || report.target_sha256 != original.intent.target_state_sha256
+        || report.source_bindings_sha256 != *source_bindings_sha256
+        || report.origin != pair.gateway_origin
+        || report.device_id != pair.device_id
+        || report.fingerprint != pair.fingerprint
+        || report.gateway_ca_pem_sha256 != pair.gateway_ca_pem_sha256
+        || !report.host_authenticated
+        || !report.protocol_ready
+        || !report.host_protocol_joined
+        || !report.host_link_io_joined
         || !report.validation_task_joined
         || report.migration_committed
         || report.ordinary_admission_open

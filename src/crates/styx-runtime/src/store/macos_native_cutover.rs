@@ -30,58 +30,62 @@ pub(in crate::store) struct MacCutoverPlan<'a, 'm> {
     materials: &'a OriginalNativePairMaterials<'m>,
     pair: NativePreservedHostPair,
     publisher: Sha256Digest,
-    inputs: NativeCutoverInputs,
+    before_sha256: Sha256Digest,
 }
 impl<'a, 'm> MacCutoverPlan<'a, 'm> {
     pub(in crate::store) fn capture(
         materials: &'a OriginalNativePairMaterials<'m>,
-        inputs: NativeCutoverInputs,
+        preservation_sha256: Sha256Digest,
     ) -> JournalResult<Self> {
         materials.revalidate().map_err(|_| JournalError::Unknown)?;
         let pair = materials
-            .pair_binding(Sha256Digest::of_bytes(&inputs.preservation))
+            .pair_binding(preservation_sha256)
             .map_err(|_| JournalError::Unknown)?;
         let publisher = materials
             .publisher_sha256()
             .map_err(|_| JournalError::Unknown)?;
-        if materials
+        let before_sha256 = materials
             .before_sha256()
-            .map_err(|_| JournalError::Unknown)?
-            != Sha256Digest::of_bytes(&inputs.before)
-        {
-            return Err(JournalError::Conflict);
-        }
-        let bytes = serde_json::to_vec(&pair).map_err(|_| JournalError::InvalidInput)?;
-        let supplied = match &inputs.history {
-            NativeCutoverHistoryInputs::PreservedHostPair { bindings }
-            | NativeCutoverHistoryInputs::ImportedLocalGateway { bindings, .. } => bindings,
-        };
-        if supplied != &bytes {
-            return Err(JournalError::Conflict);
-        }
+            .map_err(|_| JournalError::Unknown)?;
         materials.revalidate().map_err(|_| JournalError::Unknown)?;
         Ok(Self {
             materials,
             pair,
             publisher,
-            inputs,
+            before_sha256,
         })
     }
 
     /// Only an actual retained Darwin guard effect and actual retired-token pin
     /// can reach publication. The journal independently checks the retired chain.
-    pub(in crate::store) fn prepare(
+    pub(in crate::store) fn prepare<'scope>(
         self,
         owner: OwnedConfigurationRoot,
-        maintenance: &'a ConfigurationMaintenance,
+        maintenance: &'scope ConfigurationMaintenance,
         journal: &mut OwnedManagementJournal,
-        guards: &'a MacBootRecoveryEffects,
-        held: &'a LegacyGuardsHeld,
-        token: &'a MacTokenRetirement,
-        host: &'a PrivateRoot,
+        guards: &'scope MacBootRecoveryEffects,
+        held: &'scope LegacyGuardsHeld,
+        token: &'scope MacTokenRetirement,
+        host: &'scope PrivateRoot,
         state_dir: &Path,
+        inputs: NativeCutoverInputs,
         candidate: Arc<VerifiedNativeRelease>,
-    ) -> JournalResult<MacCanonicalCutover<'a, 'm>> {
+    ) -> JournalResult<MacCanonicalCutover<'scope, 'm>>
+    where
+        'a: 'scope,
+    {
+        let expected_pair =
+            serde_json::to_vec(&self.pair).map_err(|_| JournalError::InvalidInput)?;
+        let supplied = match &inputs.history {
+            NativeCutoverHistoryInputs::PreservedHostPair { bindings }
+            | NativeCutoverHistoryInputs::ImportedLocalGateway { bindings, .. } => bindings,
+        };
+        if supplied != &expected_pair
+            || Sha256Digest::of_bytes(&inputs.before) != self.before_sha256
+            || Sha256Digest::of_bytes(&inputs.preservation) != self.pair.preservation_sha256
+        {
+            return Err(JournalError::Conflict);
+        }
         if !maintenance.matches(&owner)
             || !guards.matches_owner(&owner)
             || !held.prepared().matches_owner(&owner)
@@ -115,9 +119,9 @@ impl<'a, 'm> MacCutoverPlan<'a, 'm> {
                 &state.root,
                 state_dir,
             )?;
-            let marker = native_state::decode_marker(&self.inputs.marker)
+            let marker = native_state::decode_marker(&inputs.marker)
                 .map_err(|_| JournalError::InvalidInput)?;
-            let target = native_state::decode_state(&self.inputs.target, &marker)
+            let target = native_state::decode_state(&inputs.target, &marker)
                 .map_err(|_| JournalError::InvalidInput)?;
             if target
                 .state()
@@ -131,7 +135,7 @@ impl<'a, 'm> MacCutoverPlan<'a, 'm> {
             Ok(())
         })?;
         let retained_candidate = candidate.clone();
-        let prepared = journal.prepare_native_cutover(maintenance, self.inputs, candidate)?;
+        let prepared = journal.prepare_native_cutover(maintenance, inputs, candidate)?;
         guards.validate_retained(held)?;
         token.validate_retired()?;
         self.materials
@@ -197,6 +201,9 @@ impl MacCanonicalCutover<'_, '_> {
     }
     pub(crate) fn transaction_id(&self) -> &TransactionId {
         &self.prepared.intent().transaction_id
+    }
+    pub(crate) fn target_sha256(&self) -> Sha256Digest {
+        self.prepared.intent().target_state_sha256
     }
     pub(crate) fn before(&self) -> &[u8] {
         self.prepared.before()

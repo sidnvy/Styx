@@ -441,6 +441,11 @@
       "kind": "explicit_external_test_pki",
       "input": "--tls-fixtures; executor explicitly disabled",
       "required_for": "actual TLS/WSS drain negotiation, old peer, stale result IDs/Host generations and lost result; contract faults only, no native acceptance"
+    },
+    "store::management::cutover::tests::preserved_remote_report_versions_keep_exact_bytes_and_refuse_mixed_evidence": {
+      "kind": "explicit_owned_original_cutover_report_codec",
+      "input": "fresh STYX_TEST_MANAGEMENT_CUTOVER_ROOT; original private journal fixture with synthetic remote binding data",
+      "required_for": "v1 byte-preserving decoder and v2 Host-only report strictness; not native migration, TLS, MCP release or final activation acceptance"
     }
   },
   "change_policy": "dependency or ignored-test additions require explicit policy review; preserve mature Cargo tooling rather than replacing its resolver/compiler/lints",
