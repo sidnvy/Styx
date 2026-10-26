@@ -5,6 +5,9 @@
 //! StopUnit has no InvocationID CAS: exact reobservation and fresh non-reused
 //! names protect normal lifecycle races, not a compromised same-UID manager.
 pub(crate) mod legacy;
+#[cfg(target_env = "gnu")]
+#[path = "../native_service.rs"]
+pub(crate) mod persistent;
 
 use crate::{
     foreground::profile,

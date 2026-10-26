@@ -9,6 +9,9 @@ pub(crate) struct RecoveredNativeCommittedRuntime {
     owner: OwnedConfigurationRoot,
     snapshot: Arc<NativeCommittedRuntimeSnapshot>,
     _journal: Option<OwnedManagementJournal>,
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    service_transactions:
+        Option<Arc<std::sync::Mutex<super::super::native_transaction::NativeTransactions>>>,
 }
 impl RecoveredNativeCommittedRuntime {
     pub(crate) fn reopen(
@@ -21,7 +24,20 @@ impl RecoveredNativeCommittedRuntime {
         let journal =
             OwnedManagementJournal::open_existing(owner.clone(), JournalBudget::default())?;
         let mut proof = Self::reopen_with_journal(owner, snapshot, &journal)?;
-        proof._journal = Some(journal);
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        {
+            proof.service_transactions = Some(Arc::new(std::sync::Mutex::new(
+                super::super::native_transaction::NativeTransactions::from_service_journal(
+                    owner.clone(),
+                    journal,
+                )
+                .map_err(|_| JournalError::Unknown)?,
+            )));
+        }
+        #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+        {
+            proof._journal = Some(journal);
+        }
         Ok(proof)
     }
     /// Reuse the management coordinator's already claimed namespace. Acquiring
@@ -40,6 +56,8 @@ impl RecoveredNativeCommittedRuntime {
             owner: owner.clone(),
             snapshot,
             _journal: None,
+            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            service_transactions: None,
         };
         owner.with_state(|state| {
             state.require_recovery_inspection()?;
@@ -111,6 +129,15 @@ impl RecoveredNativeCommittedRuntime {
                 .revalidate()
                 .map_err(|_| JournalError::Unknown)
         })
+    }
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    pub(crate) fn service_transactions(
+        &self,
+    ) -> JournalResult<Arc<std::sync::Mutex<super::super::native_transaction::NativeTransactions>>>
+    {
+        self.service_transactions
+            .clone()
+            .ok_or(JournalError::Conflict)
     }
     pub(crate) fn state(&self) -> &NativeState {
         self.snapshot.state()

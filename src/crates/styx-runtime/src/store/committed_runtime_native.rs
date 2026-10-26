@@ -132,6 +132,8 @@ pub(crate) struct NativeCommittedRuntimeSnapshot {
     guard_materials: Vec<(String, Vec<u8>)>,
     // The original App instance remains alive for every provider using this
     // snapshot. A marker or manager string cannot construct this scope.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    service_tip: Option<super::native_live_tip::ServiceTip>,
     app_scope: Option<Arc<crate::app::HostScope>>,
 }
 fn actual_root(id: RootIdentity) -> JournalResult<NativeRootIdentity> {
@@ -768,11 +770,50 @@ impl NativeCommittedRuntimeSnapshot {
             candidate,
             guard_materials,
             app_scope: None,
+            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            service_tip: None,
         };
         snapshot.revalidate()?;
         Ok(snapshot)
     }
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    pub(crate) fn open_for_service(
+        scope: Arc<crate::platform::linux::native_service::ServiceScope>,
+    ) -> JournalResult<Self> {
+        let mut snapshot = Self::open(scope.state_dir())?;
+        snapshot.service_tip = Some(super::native_live_tip::ServiceTip::open(scope)?);
+        snapshot.revalidate()?;
+        Ok(snapshot)
+    }
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    pub(crate) fn service_tip_status(&self) -> Result<(), super::native_live_tip::LiveTipError> {
+        self.service_tip
+            .as_ref()
+            .map_or(Ok(()), |tip| tip.revalidate())
+    }
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    pub(crate) fn service_canonical_matches(
+        &self,
+        root: &PrivateRoot,
+        raw: &super::RawFile,
+    ) -> Result<Option<bool>, super::native_live_tip::LiveTipError> {
+        if root.identity() != self.root.identity() {
+            return Err(super::native_live_tip::LiveTipError::Changed);
+        }
+        self.service_tip
+            .as_ref()
+            .map(|tip| tip.revalidate_proof().map(|proof| proof.matches_state(raw)))
+            .transpose()
+    }
+
     pub(crate) fn revalidate(&self) -> JournalResult<()> {
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        let successor = self
+            .service_tip
+            .as_ref()
+            .map(|tip| tip.revalidate_proof())
+            .transpose()
+            .map_err(|_| JournalError::Unknown)?;
         if let Some(scope) = &self.app_scope {
             if scope.state_dir() != self.state_dir {
                 return Err(JournalError::Conflict);
@@ -802,15 +843,19 @@ impl NativeCommittedRuntimeSnapshot {
             .inner
             .with_readonly_directory(|d| Ok(files::scan(d, JournalBudget::default())))
             .map_err(|_| JournalError::Unknown)??;
-        if scan.files.len() != self.inventory.len()
-            || scan
+        let expected_scan = scan.files.len() == self.inventory.len()
+            && scan
                 .files
                 .iter()
                 .zip(&self.inventory)
-                .any(|(f, (name, sha))| {
-                    f.name != *name || Sha256Digest::of_bytes(f.bytes()) != *sha
-                })
-        {
+                .all(|(f, (name, sha))| {
+                    f.name == *name && Sha256Digest::of_bytes(f.bytes()) == *sha
+                });
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        let expected_scan = successor
+            .as_ref()
+            .map_or(expected_scan, |proof| proof.matches_scan(&scan));
+        if !expected_scan {
             return Err(JournalError::Unknown);
         }
         let parsed = cutover::original_for::<NativeRootIdentity>(
@@ -824,6 +869,21 @@ impl NativeCommittedRuntimeSnapshot {
             return Err(JournalError::Unknown);
         }
         for pin in &self.pins {
+            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            if let Some(proof) = &successor {
+                if pin.root.identity() == self.root.identity()
+                    && pin.path == Path::new("state.json")
+                {
+                    let raw = pin
+                        .root
+                        .read_raw(&pin.path, pin.max)
+                        .map_err(|_| JournalError::Unknown)?;
+                    if !proof.matches_state(&raw) {
+                        return Err(JournalError::Unknown);
+                    }
+                    continue; // Exact current proof replaces the old canonical expectation.
+                }
+            }
             pin.revalidate()?;
         }
         self.root
@@ -868,20 +928,33 @@ impl NativeCommittedRuntimeSnapshot {
             .inner
             .with_readonly_directory(|d| Ok(files::scan(d, JournalBudget::default())))
             .map_err(|_| JournalError::Unknown)??;
-        if after.files.len() != self.inventory.len()
+        if after.files.len() != scan.files.len()
             || after
                 .files
                 .iter()
-                .zip(&self.inventory)
-                .any(|(f, (name, sha))| {
-                    f.name != *name || Sha256Digest::of_bytes(f.bytes()) != *sha
-                })
+                .zip(&scan.files)
+                .any(|(a, b)| a.name != b.name || a.bytes() != b.bytes())
         {
             return Err(JournalError::Unknown);
         }
         // Bracket the full inventory and canonical read with original material
         // checks. Equal bytes at a replacement inode are still a changed input.
         for pin in &self.pins {
+            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            if let Some(proof) = &successor {
+                if pin.root.identity() == self.root.identity()
+                    && pin.path == Path::new("state.json")
+                {
+                    let raw = pin
+                        .root
+                        .read_raw(&pin.path, pin.max)
+                        .map_err(|_| JournalError::Unknown)?;
+                    if !proof.matches_state(&raw) {
+                        return Err(JournalError::Unknown);
+                    }
+                    continue; // Exact current proof replaces the old canonical expectation.
+                }
+            }
             pin.revalidate()?;
         }
         if PrivateRoot::open(self.state_dir.join(NAMESPACE))

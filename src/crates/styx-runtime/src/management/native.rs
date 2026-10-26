@@ -20,6 +20,10 @@ use styx_contracts::{
     native_management::*,
 };
 
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[path = "native_service.rs"]
+pub mod service;
+
 pub struct NativeCreateOptions {
     pub mode: NativeDeploymentMode,
     pub manager: NativeManager,
@@ -94,6 +98,10 @@ pub struct NativeManagementError {
 }
 enum Retained {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    Service {
+        _job: tokio::task::JoinHandle<()>,
+    },
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
     LinuxMigration {
         _owner: Box<crate::migration::legacy_entry::LegacyMigrationFailure>,
     },
@@ -128,6 +136,10 @@ impl NativeManagementError {
         all(target_os = "linux", target_env = "gnu")
     ))]
     pub fn requires_process_teardown(&self) -> bool {
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        if matches!(self._retained, Some(Retained::Service { .. })) {
+            return true;
+        }
         #[cfg(all(target_os = "linux", target_env = "gnu"))]
         if let Some(Retained::LinuxMigration { _owner }) = &self._retained {
             return _owner.requires_process_teardown();
@@ -939,6 +951,16 @@ mod platform {
             require_scope(path, scope)?;
         }
         Ok(())
+    }
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    pub(super) fn service_open(path: &Path) -> Result<NativeTransactions> {
+        let mut transactions = open(path)?;
+        let checked = prepare_managed_transactions(path, None, &mut transactions)
+            .and_then(|()| reconcile_complete_tip(&mut transactions, false));
+        if let Err(error) = checked {
+            return Err(error.keep(transactions));
+        }
+        Ok(transactions)
     }
     fn require_original_authority(
         transactions: &NativeTransactions,

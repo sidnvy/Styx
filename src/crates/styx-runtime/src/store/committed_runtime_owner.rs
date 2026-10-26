@@ -9,6 +9,9 @@ pub(crate) struct RecoveredCommittedRuntime {
     owner: OwnedConfigurationRoot,
     snapshot: Arc<CommittedRuntimeSnapshot>,
     _journal: Option<OwnedManagementJournal>,
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    service_transactions:
+        Option<Arc<std::sync::Mutex<super::super::native_transaction::NativeTransactions>>>,
 }
 impl RecoveredCommittedRuntime {
     pub(crate) fn reopen(
@@ -21,7 +24,20 @@ impl RecoveredCommittedRuntime {
         let journal =
             OwnedManagementJournal::open_existing(owner.clone(), JournalBudget::default())?;
         let mut proof = Self::reopen_with_journal(&owner, snapshot, &journal)?;
-        proof._journal = Some(journal);
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        {
+            proof.service_transactions = Some(Arc::new(std::sync::Mutex::new(
+                super::super::native_transaction::NativeTransactions::from_service_journal(
+                    owner.clone(),
+                    journal,
+                )
+                .map_err(|_| JournalError::Unknown)?,
+            )));
+        }
+        #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+        {
+            proof._journal = Some(journal);
+        }
         Ok(proof)
     }
     pub(in crate::store) fn reopen_with_journal(
@@ -38,6 +54,8 @@ impl RecoveredCommittedRuntime {
             owner: owner.clone(),
             snapshot,
             _journal: None,
+            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            service_transactions: None,
         };
         proof.owner.with_state(|state| {
             state.require_recovery_inspection()?;
@@ -92,6 +110,15 @@ impl RecoveredCommittedRuntime {
                 .revalidate()
                 .map_err(|_| JournalError::Unknown)
         })
+    }
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    pub(crate) fn service_transactions(
+        &self,
+    ) -> JournalResult<Arc<std::sync::Mutex<super::super::native_transaction::NativeTransactions>>>
+    {
+        self.service_transactions
+            .clone()
+            .ok_or(JournalError::Conflict)
     }
     pub(crate) fn state(&self) -> &NativeState {
         self.snapshot.state()

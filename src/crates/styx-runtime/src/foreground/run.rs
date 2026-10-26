@@ -37,14 +37,53 @@ const HEALTH_OWNERS: &[&str] = &[
     "install/.health-operation-lock",
     "install/.health-recovery-guard",
 ];
+enum RunOwner {
+    Cli,
+    App(Arc<crate::app::HostScope>),
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    Service(Arc<crate::platform::linux::native_service::ServiceScope>),
+}
 struct Admitted {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    service_scope: Option<Arc<crate::platform::linux::native_service::ServiceScope>>,
     profile: Arc<profile::LoadedLegacyProfile>,
     state: PrivateRoot,
     base: PrivateRoot,
     lease: ExecutionLeaseGuard,
 }
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+struct ServiceExecAdmission {
+    admitted: Arc<Admitted>,
+}
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+impl crate::host::coordinator::ExecAdmission for ServiceExecAdmission {
+    fn check(&self) -> Result<(), crate::host::coordinator::CoordinatorError> {
+        use crate::host::coordinator::CoordinatorError;
+        let checked = self.admitted.validate_ownership().and_then(|()| {
+            self.admitted
+                .profile
+                .revalidate_control()
+                .map_err(ForegroundError::from)
+        });
+        checked.map_err(|error| match error.code() {
+            "native_service_configuration_pending" => CoordinatorError::Busy,
+            "native_service_stop_requested" => {
+                CoordinatorError::Admission(styx_contracts::error::ErrorCategory::StateConflict)
+            }
+            _ => {
+                CoordinatorError::Admission(styx_contracts::error::ErrorCategory::IntegrityFailure)
+            }
+        })
+    }
+}
 impl Admitted {
     fn validate_ownership(&self) -> Result<(), ForegroundError> {
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        if let Some(scope) = &self.service_scope {
+            scope
+                .validate()
+                .map_err(|_| ForegroundError("native_service_scope_changed"))?;
+        }
         if self
             .profile
             .validate_committed_ownership(&self.state, &self.base)?
@@ -431,7 +470,7 @@ pub async fn host_run(
     // its lease, pinned payload or native supervisor. Tokio detaches the worker
     // JoinHandle on waiter drop; the running runtime must remain alive for cleanup.
     let _cancel_on_waiter_drop = stop.clone().drop_guard();
-    tokio::spawn(async move { run_owned(&state, mode, stop, events, None).await })
+    tokio::spawn(async move { run_owned(&state, mode, stop, events, RunOwner::Cli).await })
         .await
         .map_err(|_| ForegroundError("foreground_worker_failed"))?
 }
@@ -449,7 +488,43 @@ pub(crate) async fn host_run_for_app(
     let stop = cancel.child_token();
     let _cancel_on_waiter_drop = stop.clone().drop_guard();
     tokio::spawn(async move {
-        run_owned(&state, HostWireMode::PairedV3, stop, events, Some(scope)).await
+        run_owned(
+            &state,
+            HostWireMode::PairedV3,
+            stop,
+            events,
+            RunOwner::App(scope),
+        )
+        .await
+    })
+    .await
+    .map_err(|_| ForegroundError("foreground_worker_failed"))?
+}
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+pub(crate) async fn host_run_for_service(
+    scope: Arc<crate::platform::linux::native_service::ServiceScope>,
+    cancel: CancellationToken,
+    events: mpsc::Sender<ForegroundEvent>,
+) -> Result<ForegroundOutcome, ForegroundError> {
+    use crate::platform::linux::native_service::ServiceRole;
+    if scope.role() != ServiceRole::Host {
+        return Err(ForegroundError("native_service_role_invalid"));
+    }
+    scope
+        .validate()
+        .map_err(|_| ForegroundError("native_service_scope_changed"))?;
+    let path = scope.state_dir().to_owned();
+    let stop = cancel.child_token();
+    let _waiter = stop.clone().drop_guard();
+    tokio::spawn(async move {
+        run_owned(
+            &path,
+            HostWireMode::PairedV3,
+            stop,
+            events,
+            RunOwner::Service(scope),
+        )
+        .await
     })
     .await
     .map_err(|_| ForegroundError("foreground_worker_failed"))?
@@ -459,19 +534,25 @@ async fn run_owned(
     mode: HostWireMode,
     cancel: CancellationToken,
     events: mpsc::Sender<ForegroundEvent>,
-    app_scope: Option<Arc<crate::app::HostScope>>,
+    owner: RunOwner,
 ) -> Result<ForegroundOutcome, ForegroundError> {
     let path = state_dir.to_path_buf();
     // Never abandon a blocking reader/lease acquisition on signal. Join it,
     // then observe cancellation before any native executable is started.
     let admitted = tokio::task::spawn_blocking(move || {
-        let profile = if let Some(scope) = app_scope {
-            profile::load_for_app(scope)?
-        } else {
-            match mode {
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        let service_scope = match &owner {
+            RunOwner::Service(scope) => Some(scope.clone()),
+            _ => None,
+        };
+        let profile = match owner {
+            RunOwner::App(scope) => profile::load_for_app(scope)?,
+            RunOwner::Cli => match mode {
                 HostWireMode::LegacyExplicit => profile::load_legacy(&path)?,
                 HostWireMode::PairedV3 => profile::load_paired(&path)?,
-            }
+            },
+            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            RunOwner::Service(scope) => profile::load_for_service(scope)?,
         };
         let state = PrivateRoot::open(&path).map_err(|_| ForegroundError("state_root_refused"))?;
         let base = PrivateRoot::open(profile.host_base_dir())
@@ -480,6 +561,8 @@ async fn run_owned(
             .try_execution_lease()
             .map_err(|_| ForegroundError("execution_lease_busy"))?;
         let admitted = Arc::new(Admitted {
+            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            service_scope,
             profile: Arc::new(profile),
             state,
             base,
@@ -549,6 +632,20 @@ async fn run_owned(
         Ok(v) => Arc::new(v),
         Err(_) => return Err(ForegroundError("executor_start_failed")),
     };
+    // Install before exposing any paired connection. A failed installation
+    // follows the same owned Host cleanup below; never early-drop the executor.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    let exec_admission_ready = if admitted.service_scope.is_some() {
+        host.authority()
+            .configure_exec_admission(Arc::new(ServiceExecAdmission {
+                admitted: admitted.clone(),
+            }))
+            .is_ok()
+    } else {
+        true
+    };
+    #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+    let exec_admission_ready = true;
     // Browser is an independent optional local capability. Unsupported or
     // unavailable Browser inputs cannot take down an already admitted Exec Host.
     #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
@@ -640,49 +737,57 @@ async fn run_owned(
     // Keep this SAME protocol and executor across transport reconnects. In v3,
     // per-chat owner admission comes only from the authenticated fixed Gateway;
     // loading a device credential does not register a bootstrap MCP owner.
-    let session = match mode {
-        HostWireMode::LegacyExplicit => {
-            let namespace = format!(
-                "legacy.{}",
-                Sha256Digest::of_bytes(admitted.profile.endpoint().as_str().as_bytes()).to_hex()
-            );
-            host.legacy_session(TrustedLegacyGateway {
-                endpoint: admitted.profile.endpoint().as_str().to_owned(),
-                gateway_namespace: namespace.try_into().expect("bounded namespace"),
-            })
-            .map(ConnectionSession::Legacy)
-            .map_err(|_| ForegroundError("legacy_bootstrap_refused"))
-        }
-        HostWireMode::PairedV3 => {
-            let protocol = host.paired_protocol(PairedTrustedProfile {
-                endpoint: admitted.profile.endpoint().as_str().to_owned(),
-                gateway_namespace: admitted.profile.paired_gateway_namespace(),
-                device_id: device.clone(),
-                host_generation: generation,
-            });
-            #[cfg(target_os = "windows")]
-            let protocol = protocol.map(|protocol| {
-                protocol.with_windows_command_environment(admitted.profile.command_environment())
-            });
-            #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
-            let protocol = protocol.and_then(|protocol| {
+    let session = if !exec_admission_ready {
+        Err(ForegroundError(
+            "native_service_admission_configuration_failed",
+        ))
+    } else {
+        match mode {
+            HostWireMode::LegacyExplicit => {
+                let namespace = format!(
+                    "legacy.{}",
+                    Sha256Digest::of_bytes(admitted.profile.endpoint().as_str().as_bytes())
+                        .to_hex()
+                );
+                host.legacy_session(TrustedLegacyGateway {
+                    endpoint: admitted.profile.endpoint().as_str().to_owned(),
+                    gateway_namespace: namespace.try_into().expect("bounded namespace"),
+                })
+                .map(ConnectionSession::Legacy)
+                .map_err(|_| ForegroundError("legacy_bootstrap_refused"))
+            }
+            HostWireMode::PairedV3 => {
+                let protocol = host.paired_protocol(PairedTrustedProfile {
+                    endpoint: admitted.profile.endpoint().as_str().to_owned(),
+                    gateway_namespace: admitted.profile.paired_gateway_namespace(),
+                    device_id: device.clone(),
+                    host_generation: generation,
+                });
+                #[cfg(target_os = "windows")]
+                let protocol = protocol.map(|protocol| {
+                    protocol
+                        .with_windows_command_environment(admitted.profile.command_environment())
+                });
                 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
-                let protocol = if let Some(source) = &browser {
-                    protocol.with_browser_profiles(source.clone())?
-                } else {
-                    protocol
-                };
-                #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-                let protocol = if let Some(source) = &computer {
-                    protocol.with_computer_profiles(source.factory())?
-                } else {
-                    protocol
-                };
-                Ok(protocol)
-            });
-            protocol
-                .map(ConnectionSession::Paired)
-                .map_err(|_| ForegroundError("paired_bootstrap_refused"))
+                let protocol = protocol.and_then(|protocol| {
+                    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+                    let protocol = if let Some(source) = &browser {
+                        protocol.with_browser_profiles(source.clone())?
+                    } else {
+                        protocol
+                    };
+                    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+                    let protocol = if let Some(source) = &computer {
+                        protocol.with_computer_profiles(source.factory())?
+                    } else {
+                        protocol
+                    };
+                    Ok(protocol)
+                });
+                protocol
+                    .map(ConnectionSession::Paired)
+                    .map_err(|_| ForegroundError("paired_bootstrap_refused"))
+            }
         }
     };
     let mut failure = None;
@@ -717,9 +822,29 @@ async fn run_owned(
                         let connection_generation = link.generation().clone();
                         let (ready, mut readiness) = tokio::sync::oneshot::channel();
                         let result = {
+                            let maintenance_stop = CancellationToken::new();
                             let housekeeping = async {
                                 loop {
-                                    tokio::time::sleep(Duration::from_secs(5)).await;
+                                    tokio::select! {
+                                        _=maintenance_stop.cancelled()=>return None::<ForegroundError>,
+                                        _=tokio::time::sleep(Duration::from_secs(5))=>{},
+                                    }
+                                    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+                                    if admitted.service_scope.is_some()
+                                        && let Err(error) = validate(&admitted).await
+                                    {
+                                        match error.code() {
+                                            "native_service_configuration_pending" => {}
+                                            "native_service_stop_requested" => {
+                                                cancel.cancel();
+                                                return None;
+                                            }
+                                            _ => {
+                                                cancel.cancel();
+                                                return Some(error);
+                                            }
+                                        }
+                                    }
                                     let _ = host
                                         .authority()
                                         .collect_provider_retention(Duration::from_secs(1))
@@ -739,14 +864,25 @@ async fn run_owned(
                                     biased;
                                     // A known terminal link wins over a queued
                                     // readiness observation for that same link.
-                                    result=&mut running=>break result,
+                                    result=&mut running=>{
+                                        maintenance_stop.cancel();
+                                        // A blocking read already admitted by this
+                                        // original housekeeping future must join.
+                                        if let Some(error)=housekeeping.await { failure=Some(error); }
+                                        break result;
+                                    },
                                     ready=&mut readiness, if awaiting_ready=>{
                                         awaiting_ready = false;
                                         if ready.is_ok() && !cancel.is_cancelled() {
                                             event(&events,&cancel,"connected",&device,Some(&connection_generation));
                                         }
                                     },
-                                    _=&mut housekeeping=>unreachable!("collector loop does not return"),
+                                    error=&mut housekeeping=>{
+                                        if let Some(error)=error { failure=Some(error); }
+                                        // Stop/failure requests drain the SAME
+                                        // live protocol future, never drop it.
+                                        break running.await;
+                                    },
                                 }
                             }
                         };
@@ -789,6 +925,14 @@ async fn run_owned(
                                 break;
                             }
                             if let Err(error) = validate(&admitted).await {
+                                if error.code() == "native_service_configuration_pending" {
+                                    event(&events, &cancel, "configuration_pending", &device, None);
+                                    continue;
+                                }
+                                if error.code() == "native_service_stop_requested" {
+                                    cancel.cancel();
+                                    break;
+                                }
                                 failure = Some(error);
                                 break;
                             }

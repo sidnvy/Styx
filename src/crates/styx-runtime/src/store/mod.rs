@@ -33,6 +33,8 @@ pub(crate) mod native_host_snapshot;
     target_os = "windows"
 ))]
 pub(crate) mod native_legacy_owners;
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+pub(crate) mod native_live_tip;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod native_migration_inputs;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -188,6 +190,8 @@ impl ProcessIdentity {
 pub enum LockResource {
     ConfigurationWriter,
     Execution,
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    ServiceOperation,
 }
 
 impl LockResource {
@@ -195,6 +199,8 @@ impl LockResource {
         match self {
             Self::ConfigurationWriter => ".styx-configuration-writer.lock",
             Self::Execution => ".styx-execution-lease.lock",
+            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            Self::ServiceOperation => ".styx-service-operation.lock",
         }
     }
 }
@@ -567,6 +573,14 @@ impl PrivateRoot {
                 .try_existing_lock(LockResource::ConfigurationWriter)?,
         ))
     }
+    /// Serialize the explicit C07 + OS service effect across separate CLI
+    /// processes. This grants no configuration-writer or execution authority.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    pub(crate) fn try_service_operation_lease(&self) -> Result<ServiceOperationGuard> {
+        Ok(ServiceOperationGuard(
+            self.inner.try_lock(LockResource::ServiceOperation)?,
+        ))
+    }
     /// Separate resource and type from configuration writer ownership. Neither
     /// lock grants authority over unknown legacy owners/journals or live jobs.
     pub fn try_execution_lease(&self) -> Result<ExecutionLeaseGuard> {
@@ -576,6 +590,14 @@ impl PrivateRoot {
     }
 }
 
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+pub(crate) struct ServiceOperationGuard(platform::Lock);
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+impl ServiceOperationGuard {
+    pub(crate) fn validate(&self) -> Result<()> {
+        self.0.validate()
+    }
+}
 pub struct ConfigurationWriterGuard(platform::Lock);
 pub struct ExecutionLeaseGuard(platform::Lock);
 impl ConfigurationWriterGuard {

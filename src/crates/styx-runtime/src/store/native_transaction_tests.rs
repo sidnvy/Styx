@@ -264,3 +264,110 @@ fn native_transaction_child() {
         "canonical_sha256":state.raw_sha256(),"last_durable_stage":stage,"recovered":recovered,"error":error})
     );
 }
+
+/// Actual private C07 filesystem mutations. The observer reads persisted files,
+/// not the API return value: partial writes fence and complete metadata-only
+/// successors preserve runtime policy, while a valid stop must not be accepted
+/// by the autostart-only runtime reader.
+#[test]
+#[ignore = "requires STYX_TEST_SERVICE_TIP_ROOT; original private C07 fixture"]
+fn native_service_autostart_follow_and_refusal_batch() {
+    use crate::store::{
+        native_live_tip::{AutostartTip, LiveTipError},
+        secure_journal::{JournalBudget, files},
+    };
+    use std::cell::Cell;
+    let base = std::path::PathBuf::from(std::env::var("STYX_TEST_SERVICE_TIP_ROOT").unwrap());
+    fs::create_dir(&base).unwrap();
+    fs::set_permissions(&base, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut tx = create(&base);
+    let mut state = tx.readstate().unwrap().state().clone();
+    state.revision = 1;
+    state.last_transaction = Some(NativeStateTransaction {
+        transaction_id: "service-installed".try_into().unwrap(),
+        sequence: 1,
+    });
+    let host = state.desired.host.as_mut().unwrap();
+    host.manager = NativeManager::PersistentService;
+    host.run = NativeRunDesired::Running;
+    tx.apply_target(&serde_json::to_vec(&state).unwrap())
+        .unwrap();
+    let root = PrivateRoot::open(base.join("native")).unwrap();
+    let namespace = root
+        .inner
+        .with_readonly_directory(|d| Ok(files::directory(d, ".styx-management-journal-v1")))
+        .unwrap()
+        .unwrap();
+    let scan = || files::scan(&namespace, JournalBudget::default()).unwrap();
+    let read = || {
+        root.read_raw("state.json", 1024 * 1024)
+            .unwrap()
+            .bytes()
+            .to_vec()
+    };
+    let original_scan = scan();
+    let original_state = read();
+    let tip = AutostartTip::capture(tx.marker(), &original_state, &original_scan).unwrap();
+    state.revision += 1;
+    state.last_transaction = Some(NativeStateTransaction {
+        transaction_id: "service-autostart-on".try_into().unwrap(),
+        sequence: 2,
+    });
+    state.desired.host.as_mut().unwrap().autostart = NativeAutostartDesired::Enabled;
+    let pending_seen = Cell::new(false);
+    tx.apply_observing(&serde_json::to_vec(&state).unwrap(), &|stage, _| {
+        if stage == "prepared" {
+            assert_eq!(tip.validate(&scan(), &read()), Err(LiveTipError::Pending));
+            pending_seen.set(true);
+        }
+    })
+    .unwrap();
+    assert!(pending_seen.get());
+    assert_eq!(tip.validate(&scan(), &read()), Ok(()));
+    let accepted = AutostartTip::capture(tx.marker(), &read(), &scan()).unwrap();
+    assert_eq!(
+        accepted.validate(&original_scan, &original_state),
+        Err(LiveTipError::Changed),
+        "an accepted successor cannot return to the old history"
+    );
+    state.revision += 1;
+    state.last_transaction = Some(NativeStateTransaction {
+        transaction_id: "service-stop".try_into().unwrap(),
+        sequence: 3,
+    });
+    state.desired.host.as_mut().unwrap().run = NativeRunDesired::Stopped;
+    tx.apply_target(&serde_json::to_vec(&state).unwrap())
+        .unwrap();
+    assert_eq!(
+        accepted.validate(&scan(), &read()),
+        Err(LiveTipError::Changed),
+        "a valid C07 stop is not metadata-only runtime continuation"
+    );
+    let before_stop = native_state::decode_state(&original_state, tx.marker()).unwrap();
+    let stopped = tx.readstate().unwrap();
+    assert!(styx_core::management::state::service_desired_compatible(
+        before_stop.state(),
+        stopped.state()
+    ));
+    let mut substituted = stopped.state().clone();
+    substituted.desired.host.as_mut().unwrap().manager = NativeManager::AppManaged;
+    assert!(!styx_core::management::state::service_desired_compatible(
+        before_stop.state(),
+        &substituted
+    ));
+    let before = tx.readstate().unwrap().raw_bytes().to_vec();
+    state.revision += 1;
+    state.last_transaction = Some(NativeStateTransaction {
+        transaction_id: "service-change-extension".try_into().unwrap(),
+        sequence: 4,
+    });
+    state.extensions.insert(
+        "opaque_extension".into(),
+        serde_json::value::RawValue::from_string("0".into()).unwrap(),
+    );
+    assert!(
+        tx.apply_target(&serde_json::to_vec(&state).unwrap())
+            .is_err()
+    );
+    assert_eq!(tx.readstate().unwrap().raw_bytes(), before);
+}

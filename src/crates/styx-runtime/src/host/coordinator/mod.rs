@@ -181,7 +181,15 @@ fn validate_exec_context(context: &PreparedContext) -> Result<(), ErrorCategory>
     Ok(())
 }
 
+/// Trusted local composition only. This reads the original configuration
+/// authority; no request or DTO can install/replace an admission source.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+pub(crate) trait ExecAdmission: Send + Sync {
+    fn check(&self) -> Result<(), CoordinatorError>;
+}
 struct Inner {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    exec_admission: Mutex<Option<Arc<dyn ExecAdmission>>>,
     bootstrap_device: DeviceId,
     host_generation: HostGeneration,
     adapter: Option<Arc<CodexStdio>>,
@@ -276,6 +284,20 @@ impl HostCleanup {
 }
 
 impl Inner {
+    fn check_exec_admission(&self) -> Result<(), CoordinatorError> {
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        {
+            let source = self
+                .exec_admission
+                .lock()
+                .expect("Exec admission mutex")
+                .clone();
+            if let Some(source) = source {
+                source.check()?;
+            }
+        }
+        Ok(())
+    }
     fn exec_adapter(&self) -> Result<Arc<CodexStdio>, CoordinatorError> {
         self.adapter
             .clone()
@@ -317,6 +339,8 @@ impl HostCoordinator {
         }
         let origin = Instant::now();
         let inner = Arc::new(Inner {
+            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            exec_admission: Mutex::new(None),
             bootstrap_device: trusted_facts.device_id.clone(),
             host_generation: ledger.host_generation().clone(),
             adapter: adapter.map(Arc::new),
@@ -373,6 +397,7 @@ impl HostCoordinator {
         if state.shutting_down {
             return Err(CoordinatorError::Busy);
         }
+        self.inner.check_exec_admission()?;
         state.reserve_exec(owner, context, payload, None, self.now())
     }
     /// Admission commits before returning a ticket. Dropping the ticket cannot drop the job.
@@ -412,6 +437,11 @@ impl HostCoordinator {
         if state.shutting_down {
             return Err(CoordinatorError::Busy);
         }
+        let snapshot = state.ledger.inspect(owner, id, digest)?;
+        if snapshot.state != OperationState::Reserved {
+            return Ok(StartSubmission::Existing(snapshot));
+        }
+        self.inner.check_exec_admission()?;
         let permit = match state.dispatch_exec(owner, id, digest, self.now())? {
             DispatchDisposition::Existing(snapshot) => {
                 return Ok(StartSubmission::Existing(snapshot));
@@ -494,6 +524,9 @@ impl HostCoordinator {
         if state.shutting_down {
             return Err(CoordinatorError::Busy);
         }
+        if matches!(action, ProcessAction::WriteStdin { .. }) {
+            self.inner.check_exec_admission()?;
+        }
         state.reserve_exec(owner, context, payload, Some(target), self.now())
     }
     /// Commit one action before returning a response ticket. Receiver loss does
@@ -532,6 +565,18 @@ impl HostCoordinator {
         let mut state = self.inner.state.lock().expect("Host state mutex");
         if state.shutting_down {
             return Err(CoordinatorError::Busy);
+        }
+        let snapshot = state.ledger.inspect(owner, id, digest)?;
+        if snapshot.state != OperationState::Reserved {
+            return Ok(ActionSubmission::Existing(snapshot));
+        }
+        // Classify only the immutable payload in the original Core record.
+        // Existing receipts and Terminate retain their normal cleanup path.
+        let action: ProcessAction =
+            serde_json::from_slice(state.ledger.inspect_payload(owner, id, digest)?)
+                .map_err(|_| CoordinatorError::Admission(ErrorCategory::ProtocolMismatch))?;
+        if matches!(action, ProcessAction::WriteStdin { .. }) {
+            self.inner.check_exec_admission()?;
         }
         let permit = match state.dispatch_exec(owner, id, digest, self.now())? {
             DispatchDisposition::Existing(snapshot) => {
@@ -828,6 +873,26 @@ impl Drop for UnsettledStart {
     }
 }
 impl HostAuthority {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    pub(crate) fn configure_exec_admission(
+        &self,
+        source: Arc<dyn ExecAdmission>,
+    ) -> Result<(), CoordinatorError> {
+        let state = self.inner.state.lock().expect("Host state mutex");
+        if state.shutting_down {
+            return Err(CoordinatorError::Busy);
+        }
+        let mut current = self
+            .inner
+            .exec_admission
+            .lock()
+            .expect("Exec admission mutex");
+        if current.is_some() {
+            return Err(CoordinatorError::Busy);
+        }
+        *current = Some(source);
+        Ok(())
+    }
     pub fn register_verified_owner(
         &self,
         owner: OwnerId,

@@ -82,6 +82,27 @@ impl SharedEnrollment {
         let mut s = self.inner.blocking_lock();
         self.apply(&mut s, f)
     }
+    /// The service callback is executed under this SAME Core mutex. The owned
+    /// blocking worker retains the slot, callback and all custody if a client leaves.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    pub(crate) async fn service_control<T: Send + 'static>(
+        &self,
+        work: impl FnOnce(&mut EnrollmentService) -> T + Send + 'static,
+    ) -> Result<T, SharedError> {
+        self.require_current()?;
+        let permit = self
+            .jobs
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| SharedError)?;
+        let shared = self.clone();
+        tokio::task::spawn_blocking(move || {
+            let _permit = permit;
+            shared.blocking(work)
+        })
+        .await
+        .map_err(|_| SharedError)?
+    }
     /// Trusted local management port. Waits behind the complete existing
     /// enrollment round trip, then fences the very same configuration owner.
     /// The blocking job retains its bounded slot after caller cancellation;

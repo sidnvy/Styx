@@ -129,6 +129,8 @@ impl EnrollmentService {
             clock: Clock::new(now),
             uncertain: false,
             historical_migration_pending: true,
+            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            service_tip_pending: false,
             migration_binding: Some(binding),
             #[cfg(target_arch = "x86_64")]
             startup_transport_reconciled: true,

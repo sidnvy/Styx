@@ -34,6 +34,7 @@ pub(crate) struct CommittedRuntimeSnapshot {
     state: NativeState,
     canonical: Vec<u8>,
     selection: NativeRuntimeSelection,
+    service_tip: Option<super::native_live_tip::ServiceTip>,
 }
 impl CommittedRuntimeSnapshot {
     pub(crate) fn open(state_dir: &Path) -> JournalResult<Self> {
@@ -149,11 +150,47 @@ impl CommittedRuntimeSnapshot {
             state,
             canonical,
             selection,
+            service_tip: None,
         };
         snapshot.revalidate()?;
         Ok(snapshot)
     }
+    /// Only an OS-authenticated persistent service may follow typed C07
+    /// successors. Existing CLI/migration readers retain exact original pins.
+    pub(crate) fn open_for_service(
+        scope: std::sync::Arc<crate::platform::linux::native_service::ServiceScope>,
+    ) -> JournalResult<Self> {
+        let mut snapshot = Self::open(scope.state_dir())?;
+        snapshot.service_tip = Some(super::native_live_tip::ServiceTip::open(scope)?);
+        snapshot.revalidate()?;
+        Ok(snapshot)
+    }
+    pub(crate) fn service_tip_status(&self) -> Result<(), super::native_live_tip::LiveTipError> {
+        self.service_tip
+            .as_ref()
+            .map_or(Ok(()), |tip| tip.revalidate())
+    }
+    pub(crate) fn service_canonical_matches(
+        &self,
+        root: &PrivateRoot,
+        raw: &super::RawFile,
+    ) -> Result<Option<bool>, super::native_live_tip::LiveTipError> {
+        if root.identity() != self.root.identity() {
+            return Err(super::native_live_tip::LiveTipError::Changed);
+        }
+        self.service_tip
+            .as_ref()
+            .map(|tip| tip.revalidate_proof().map(|proof| proof.matches_state(raw)))
+            .transpose()
+    }
+
     pub(crate) fn revalidate(&self) -> JournalResult<()> {
+        let successor = self
+            .service_tip
+            .as_ref()
+            .map(|tip| tip.revalidate_proof())
+            .transpose()
+            .map_err(|_| JournalError::Unknown)?;
         self.root
             .inner
             .with_readonly_directory(|directory| {
@@ -171,7 +208,20 @@ impl CommittedRuntimeSnapshot {
                         return Err(JournalError::Unknown);
                     }
                     let scan = files::scan(&self.namespace, JournalBudget::default())?;
-                    if scan.files.len() != self.pins.len().saturating_sub(5) {
+                    let journal_matches = successor.as_ref().map_or_else(
+                        || {
+                            scan.files.len() == self.pins.len().saturating_sub(5)
+                                && scan.files.iter().all(|file| {
+                                    let path = format!("{NAMESPACE}/{}", file.name);
+                                    self.pins.iter().any(|p| {
+                                        p.path == path
+                                            && p.digest == Sha256Digest::of_bytes(file.bytes())
+                                    })
+                                })
+                        },
+                        |proof| proof.matches_scan(&scan),
+                    );
+                    if !journal_matches {
                         return Err(JournalError::Conflict);
                     }
                     for pin in &self.pins {
@@ -179,17 +229,19 @@ impl CommittedRuntimeSnapshot {
                             .root
                             .read_raw(&pin.path, MAX)
                             .map_err(|_| JournalError::Unknown)?;
-                        if raw.observation() != &pin.observation
-                            || Sha256Digest::of_bytes(raw.bytes()) != pin.digest
-                        {
-                            return Err(JournalError::Unknown);
-                        }
-                    }
-                    for file in &scan.files {
-                        let path = format!("{NAMESPACE}/{}", file.name);
-                        if !self.pins.iter().any(|p| {
-                            p.path == path && p.digest == Sha256Digest::of_bytes(file.bytes())
-                        }) {
+                        let matches = if pin.path == "state.json" {
+                            successor.as_ref().map_or_else(
+                                || {
+                                    raw.observation() == &pin.observation
+                                        && Sha256Digest::of_bytes(raw.bytes()) == pin.digest
+                                },
+                                |proof| proof.matches_state(&raw),
+                            )
+                        } else {
+                            raw.observation() == &pin.observation
+                                && Sha256Digest::of_bytes(raw.bytes()) == pin.digest
+                        };
+                        if !matches {
                             return Err(JournalError::Unknown);
                         }
                     }
@@ -211,9 +263,19 @@ impl CommittedRuntimeSnapshot {
                             .root
                             .read_raw(&pin.path, MAX)
                             .map_err(|_| JournalError::Unknown)?;
-                        if raw.observation() != &pin.observation
-                            || Sha256Digest::of_bytes(raw.bytes()) != pin.digest
-                        {
+                        let matches = if pin.path == "state.json" {
+                            successor.as_ref().map_or_else(
+                                || {
+                                    raw.observation() == &pin.observation
+                                        && Sha256Digest::of_bytes(raw.bytes()) == pin.digest
+                                },
+                                |proof| proof.matches_state(&raw),
+                            )
+                        } else {
+                            raw.observation() == &pin.observation
+                                && Sha256Digest::of_bytes(raw.bytes()) == pin.digest
+                        };
+                        if !matches {
                             return Err(JournalError::Unknown);
                         }
                     }

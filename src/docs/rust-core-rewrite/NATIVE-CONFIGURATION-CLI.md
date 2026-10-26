@@ -3,8 +3,10 @@
 These commands manage an offline native configuration root through the shared
 Rust management API. They do not start Gateway/Host/services, create a paired
 identity, migrate an old profile, or change permissions. A saved `running` value
-is desired configuration, not a running process. macOS/Windows secure-store
-adapters are not implemented by this slice.
+is desired configuration, not a running process. These statements concern the
+offline configuration commands below; explicit migration and native-service
+commands have their separate effect contracts. Platform acceptance is recorded
+against each exact candidate, not inferred from this command reference.
 
 Use an existing private, current-user-owned parent directory and a private
 schema-1 deployment input. Initialization creates a NEW child; existing/native
@@ -96,3 +98,46 @@ migration receipt nor platform acceptance.
 The original private App pipe now accepts `reviewMigration` with `transactionId` and `run: "stopped"`. Review uses the original App HostScope and returns `plan_sha256` with the canonical plan. This is distinct from the foreground CLI manager: its digest cannot be substituted for an App review. An explicit `startMigration` request echoes that digest as `planSha256`; recovery continues only the original transaction. A review request cannot replace an already observed transaction. A failed review retains any original management custody.
 
 Windows startup projection uses the protected Windows directory handles and the existing journal inventory. A later-boot checkpoint is reported as `waiting_for_later_boot`, not a successful commit or an unknown replayable action. Native Windows compile and device acceptance of these changes remain pending. The private App dispatcher/recovery rejection/EOF join/read-only startup scenario group passes locally on Linux; the shared Darwin workspace typecheck passes. Neither proves Windows OS effects.
+
+
+## Linux persistent user services (development)
+
+The additive `service` command uses the selected, verified C08 Rust CLI and a
+fixed per-profile systemd user unit. It preserves the original identity,
+configuration journal and pairing. It does not enable linger, change login
+policy, acquire root privileges, or claim survival across logout.
+
+```sh
+styx service install --state-dir /private/native --component gateway \
+  --transaction-id install-gateway --expected-revision 4 --authorize --json
+styx service start --state-dir /private/native --component gateway \
+  --transaction-id start-gateway --expected-revision 5 --authorize --json
+styx service status --state-dir /private/native --component gateway --json
+styx service status --state-dir /private/native --component gateway \
+  --transaction-id start-gateway --json
+```
+
+`enable`, `disable`, `stop` and `uninstall` use the same explicit transaction,
+revision and authorization arguments. Install both roles before starting a
+combined profile. A live Gateway remains the single writer for Host start,
+role stop and autostart changes. `status --transaction-id` inspects the original
+transaction; it never resubmits it. Transaction-target revision and current
+canonical revision are separate observations.
+
+The original writer commits desired configuration before the CLI performs the
+single corresponding OS request. A committed desired Start or Stop is not an
+actual process result. Start observes the fixed signed image and actual manager
+invocation. Stop captures the original process birth and cgroup before committing
+intent; completion requires that original birth gone, its held group empty and
+successful manager exit. Unknown or reply loss requires inspection of the same
+transaction and OS state; no automatic retry, force kill or rollback is implied.
+
+A retained service scope can follow only complete same-identity C07 autostart/run
+successors. Incomplete history withdraws new execution admission; a committed
+stop for that role triggers normal draining. Existing result inspection and
+cleanup remain available. Forged environment variables do not grant a service
+scope. CLI/App readers retain their original contracts.
+
+Implementation is under integration. Native systemd lifecycle, logout/boot and
+final signed candidate acceptance must be read from the external per-SHA report;
+this command reference is not a PASS receipt.

@@ -71,6 +71,10 @@ pub enum ProfileError {
     UntrustedRelease,
     #[error("protected legacy input changed")]
     Changed,
+    #[error("persistent service configuration transaction is pending")]
+    ManagementBusy,
+    #[error("persistent service has a committed stop request")]
+    StopRequested,
 }
 impl ProfileError {
     pub fn code(&self) -> &'static str {
@@ -81,6 +85,8 @@ impl ProfileError {
             Self::Invalid => "legacy_profile_invalid",
             Self::UntrustedRelease => "legacy_release_untrusted",
             Self::Changed => "legacy_profile_changed",
+            Self::ManagementBusy => "native_service_configuration_pending",
+            Self::StopRequested => "native_service_stop_requested",
         }
     }
 }
@@ -577,7 +583,10 @@ impl LoadedLegacyProfile {
             let raw = root
                 .read_raw(&o.relative, o.max)
                 .map_err(|_| ProfileError::Changed)?;
-            if raw.sha256() != o.digest.to_hex() {
+            if raw.sha256() != o.digest.to_hex()
+                && !(o.relative == Path::new("state.json")
+                    && self.source.service_canonical_matches(&root, &raw)?)
+            {
                 return Err(ProfileError::Changed);
             }
         }
@@ -714,7 +723,7 @@ enum ProfileSource {
 }
 impl ProfileSource {
     fn revalidate(&self) -> Result<(), ProfileError> {
-        match self {
+        let result = match self {
             Self::Ordinary => Ok(()),
             #[cfg(any(
                 target_os = "macos",
@@ -740,9 +749,58 @@ impl ProfileSource {
                 target_os = "macos"
             ))]
             Self::Fresh(binding) => binding.revalidate().map_err(|_| ProfileError::Changed),
+        };
+        result.map_err(|error| {
+            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            if let Err(status) = self.service_tip_status() {
+                return service_tip_error(status);
+            }
+            error
+        })
+    }
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    fn service_tip_status(&self) -> Result<(), crate::store::native_live_tip::LiveTipError> {
+        match self {
+            Self::NativeCommitted(binding) => binding.service_tip_status(),
+            Self::Committed(binding) => binding.service_tip_status(),
+            Self::Fresh(binding) => binding.service_tip_status(),
+            _ => Ok(()),
+        }
+    }
+    fn service_canonical_matches(
+        &self,
+        root: &PrivateRoot,
+        raw: &crate::store::RawFile,
+    ) -> Result<bool, ProfileError> {
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        {
+            let result = match self {
+                Self::NativeCommitted(binding) => binding.service_canonical_matches(root, raw),
+                Self::Committed(binding) => binding.service_canonical_matches(root, raw),
+                Self::Fresh(binding) => binding.service_canonical_matches(root, raw),
+                _ => Ok(None),
+            };
+            result
+                .map(|matched| matched == Some(true))
+                .map_err(service_tip_error)
+        }
+        #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+        {
+            let _ = (root, raw);
+            Ok(false)
         }
     }
 }
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn service_tip_error(error: crate::store::native_live_tip::LiveTipError) -> ProfileError {
+    use crate::store::native_live_tip::LiveTipError;
+    match error {
+        LiveTipError::Pending => ProfileError::ManagementBusy,
+        LiveTipError::StopRequested => ProfileError::StopRequested,
+        LiveTipError::Changed => ProfileError::Changed,
+    }
+}
+
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 #[path = "profile_migration.rs"]
 mod migration;
@@ -785,6 +843,32 @@ pub(crate) fn load_for_app(
         );
     }
     fresh::load_for_app(scope)
+}
+/// Only the native OS manager can supply this opaque scope. A CLI argument or
+/// environment variable cannot adopt the service's profile or execution lease.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+pub(crate) fn load_for_service(
+    scope: Arc<crate::platform::linux::native_service::ServiceScope>,
+) -> Result<LoadedLegacyProfile, ProfileError> {
+    use crate::platform::linux::native_service::ServiceRole;
+    use styx_contracts::management::ReaderContract;
+    scope.validate().map_err(|_| ProfileError::Changed)?;
+    if scope.role() != ServiceRole::Host {
+        return Err(ProfileError::Invalid);
+    }
+    let path = scope.state_dir().to_owned();
+    let root = PrivateRoot::open(&path).map_err(|_| ProfileError::ProtectedRead)?;
+    let raw = root
+        .read_raw(".styx-native-root-v1.json", 4096)
+        .map_err(|_| ProfileError::Changed)?;
+    let marker = crate::store::native_state::decode_marker(raw.bytes())
+        .map_err(|_| ProfileError::Changed)?;
+    let source = match marker.reader_floor {
+        ReaderContract::NativeMigratedStateV1 => ProfileSource::Committed(Arc::new(crate::store::committed_runtime::CommittedRuntimeSnapshot::open_for_service(scope).map_err(|_| ProfileError::Changed)?)),
+        ReaderContract::NativeMigratedStateV2 => ProfileSource::NativeCommitted(Arc::new(crate::store::committed_runtime_native::NativeCommittedRuntimeSnapshot::open_for_service(scope).map_err(|_| ProfileError::Changed)?)),
+        ReaderContract::NativeManagementStateV1 => return fresh::load_for_service(scope),
+    };
+    load_source(&path, GatewayWireMode::PairedV3, source)
 }
 /// Explicit paired-v3 bridge using the SAME protected original profile and
 /// signed legacy executor closure. No identity, pairing or native-format rewrite.

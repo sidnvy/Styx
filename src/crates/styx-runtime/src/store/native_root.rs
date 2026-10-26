@@ -468,7 +468,7 @@ pub fn create_fresh(
 /// Bind existing native format to the SAME already-owned configuration writer.
 /// This only verifies protected marker/state/deployment bytes. It neither
 /// claims a namespace nor proves migration, settlement or ordinary admission.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", all(target_os = "linux", target_env = "gnu")))]
 pub(crate) fn bind_owned_native(
     owner: OwnedConfigurationRoot,
 ) -> Result<NativeRootBinding, NativeRootFailure> {

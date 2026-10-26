@@ -136,6 +136,155 @@ impl NativeTransactions {
         )?;
         Ok(())
     }
+    /// Transfer the already claimed journal into its one service coordinator.
+    /// No writer or namespace is acquired here; the caller serialized admission.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    pub(crate) fn from_service_journal(
+        owner: OwnedConfigurationRoot,
+        journal: OwnedManagementJournal,
+    ) -> Result<Self, NativeTransactionError> {
+        if !journal.configuration_root().same_authority(&owner) {
+            return Err(NativeTransactionError::Conflict);
+        }
+        let binding = super::native_root::bind_owned_native(owner)
+            .map_err(|_| NativeTransactionError::UnknownInspect)?;
+        Ok(Self {
+            binding,
+            journal,
+            retained_maintenance: None,
+        })
+    }
+    /// The caller holds the original SharedEnrollment mutex and local control gate.
+    /// Only autostart changes; Core/device lanes and all run states are preserved.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    pub(crate) fn set_service_autostart(
+        &mut self,
+        owner: &OwnedConfigurationRoot,
+        component: crate::management::native::NativeComponent,
+        enabled: bool,
+        expected_revision: u64,
+        transaction: TransactionId,
+    ) -> Result<(NativeCommitResult, u64), NativeTransactionError> {
+        use styx_contracts::native_management::NativeAutostartDesired;
+        self.assign_service_desired(owner, component, expected_revision, transaction, |role| {
+            role.autostart = if enabled {
+                NativeAutostartDesired::Enabled
+            } else {
+                NativeAutostartDesired::Disabled
+            };
+        })
+    }
+    /// Desired Stop is committed before notification; it is never an actual-exit receipt.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    pub(crate) fn set_service_stopped(
+        &mut self,
+        owner: &OwnedConfigurationRoot,
+        component: crate::management::native::NativeComponent,
+        expected_revision: u64,
+        transaction: TransactionId,
+    ) -> Result<(NativeCommitResult, u64), NativeTransactionError> {
+        self.assign_service_desired(owner, component, expected_revision, transaction, |role| {
+            role.run = styx_contracts::native_management::NativeRunDesired::Stopped;
+        })
+    }
+    /// Only a Host can be requested Running through the live Gateway writer.
+    /// This changes intent only; the caller's original OS definition starts it.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    pub(crate) fn set_service_host_running(
+        &mut self,
+        owner: &OwnedConfigurationRoot,
+        expected_revision: u64,
+        transaction: TransactionId,
+    ) -> Result<(NativeCommitResult, u64), NativeTransactionError> {
+        self.assign_service_desired(
+            owner,
+            crate::management::native::NativeComponent::Host,
+            expected_revision,
+            transaction,
+            |role| {
+                role.run = styx_contracts::native_management::NativeRunDesired::Running;
+            },
+        )
+    }
+    /// Read this transaction's formally hash-bound target, not today's canonical
+    /// revision and not the independent journal sequence number.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    pub(crate) fn service_transaction_target_revision(
+        &self,
+        transaction: &TransactionId,
+    ) -> Result<u64, NativeTransactionError> {
+        let original = self.journal.read_original(transaction)?;
+        validate_original(&original, self.marker())?;
+        let target = native_state::decode_state(&original.target, self.marker())
+            .map_err(|_| NativeTransactionError::UnknownInspect)?;
+        Ok(target.state().revision)
+    }
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    fn assign_service_desired(
+        &mut self,
+        owner: &OwnedConfigurationRoot,
+        component: crate::management::native::NativeComponent,
+        expected_revision: u64,
+        transaction: TransactionId,
+        assign: impl FnOnce(&mut styx_contracts::native_management::NativeComponentDesired),
+    ) -> Result<(NativeCommitResult, u64), NativeTransactionError> {
+        use styx_contracts::native_management::{
+            NATIVE_STATE_BYTES, NativeManager, NativeStateTransaction,
+        };
+        if !self.configuration_root().same_authority(owner) || self.retained_maintenance.is_some() {
+            return Err(NativeTransactionError::Conflict);
+        }
+        let before = self.readstate()?;
+        if before.state().revision != expected_revision {
+            return Err(NativeTransactionError::Conflict);
+        }
+        let mut target = before.state().clone();
+        let role = match component {
+            crate::management::native::NativeComponent::Host => target.desired.host.as_mut(),
+            crate::management::native::NativeComponent::Gateway => target.desired.gateway.as_mut(),
+        }
+        .ok_or(NativeTransactionError::InvalidInput)?;
+        if role.manager != NativeManager::PersistentService {
+            return Err(NativeTransactionError::Conflict);
+        }
+        assign(role);
+        target.revision = target
+            .revision
+            .checked_add(1)
+            .ok_or(NativeTransactionError::InvalidInput)?;
+        let inventory = self.journal.observe()?;
+        let sequence = inventory
+            .high_water
+            .max(
+                before
+                    .state()
+                    .last_transaction
+                    .as_ref()
+                    .map_or(0, |t| t.sequence),
+            )
+            .checked_add(1)
+            .ok_or(NativeTransactionError::InvalidInput)?;
+        target.last_transaction = Some(NativeStateTransaction {
+            transaction_id: transaction.clone(),
+            sequence,
+        });
+        let bytes =
+            serde_json::to_vec(&target).map_err(|_| NativeTransactionError::InvalidInput)?;
+        if bytes.len() > NATIVE_STATE_BYTES {
+            return Err(NativeTransactionError::InvalidInput);
+        }
+        // Reject conflicts, reused IDs and incomplete predecessors before fencing.
+        let (before, intent) = self.plan(&bytes)?;
+        let maintenance = owner.begin_maintenance(transaction)?;
+        let result = self.apply_prepared(&maintenance, &before, &bytes, &intent, &|_, _| {});
+        match result {
+            Ok(commit) => Ok((commit, target.revision)),
+            Err(error) => {
+                self.retained_maintenance = Some(maintenance);
+                Err(error)
+            }
+        }
+    }
     pub fn marker(&self) -> &styx_contracts::native_management::NativeRootMarker {
         self.binding.marker()
     }

@@ -21,6 +21,32 @@ pub(crate) struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[command(name = "__service-run", hide = true)]
+    ServiceRun {
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(long, value_enum)]
+        role: NativeComponentArg,
+    },
+    /// Explicit native user-service lifecycle; never enables linger or sudo.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    Service {
+        #[arg(value_enum)]
+        action: ServiceActionArg,
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(long, value_enum)]
+        component: NativeComponentArg,
+        #[arg(long)]
+        transaction_id: Option<String>,
+        #[arg(long)]
+        expected_revision: Option<u64>,
+        #[arg(long)]
+        authorize: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Private native App owned-child transport, never a network endpoint.
     #[command(name = "__app-core", hide = true)]
     AppCore {
@@ -210,6 +236,32 @@ enum NativeManagerArg {
 enum NativeComponentArg {
     Host,
     Gateway,
+}
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[derive(Clone, Copy, PartialEq, Eq, ValueEnum)]
+enum ServiceActionArg {
+    Install,
+    Status,
+    Enable,
+    Disable,
+    Start,
+    Stop,
+    Uninstall,
+}
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+impl ServiceActionArg {
+    fn native(self) -> styx_runtime::management::native::service::ServiceAction {
+        use styx_runtime::management::native::service::ServiceAction;
+        match self {
+            Self::Install => ServiceAction::Install,
+            Self::Status => ServiceAction::Status,
+            Self::Enable => ServiceAction::Enable,
+            Self::Disable => ServiceAction::Disable,
+            Self::Start => ServiceAction::Start,
+            Self::Stop => ServiceAction::Stop,
+            Self::Uninstall => ServiceAction::Uninstall,
+        }
+    }
 }
 #[derive(Clone, Copy, ValueEnum)]
 enum NativeRunArg {
@@ -723,6 +775,71 @@ async fn stop_signal() -> io::Result<()> {
 pub(crate) async fn run(cli: Cli) -> ExitCode {
     use styx_runtime::foreground::{self, HostWireMode};
     match cli.command {
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        Command::Service {
+            action,
+            state_dir,
+            component,
+            transaction_id,
+            expected_revision,
+            authorize,
+            json,
+        } => {
+            if action != ServiceActionArg::Status && !authorize {
+                return error("explicit_service_authorization_required");
+            }
+            let transaction_id = match transaction_id
+                .map(styx_contracts::identity::TransactionId::try_from)
+                .transpose()
+            {
+                Ok(v) => v,
+                Err(_) => return error("native_management_invalid_input"),
+            };
+            native_recovery_result(
+                styx_runtime::management::native::service::manage(
+                    &state_dir,
+                    action.native(),
+                    component.native(),
+                    transaction_id,
+                    expected_revision,
+                )
+                .await,
+                json,
+                "Native service observations; inspect canonical intent and actual OS state:",
+            )
+        }
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        Command::ServiceRun { state_dir, role } => {
+            let cancel = CancellationToken::new();
+            let (events, mut received) = tokio::sync::mpsc::channel(16);
+            let output_cancel = cancel.clone();
+            let output = tokio::spawn(async move {
+                let mut healthy = true;
+                while let Some(event) = received.recv().await {
+                    if healthy && write_json(&event).is_err() {
+                        healthy = false;
+                        output_cancel.cancel();
+                    }
+                }
+                healthy
+            });
+            let running = styx_runtime::management::native::service::run(
+                &state_dir,
+                role.native(),
+                cancel.clone(),
+                events,
+            );
+            tokio::pin!(running);
+            let result = tokio::select! {result=&mut running=>result,signal=stop_signal()=>{if signal.is_err(){cancel.cancel();let _=running.await;return error("signal_listener_failed");}cancel.cancel();running.await}};
+            if !output.await.unwrap_or(false) {
+                return error("output_unavailable");
+            }
+            native_recovery_result(
+                result,
+                true,
+                "Native service stopped with physical cleanup observations:",
+            )
+        }
         Command::AppCore {
             state_dir,
             deployment_file,

@@ -143,3 +143,45 @@ pub fn validate_transition(
     }
     Ok(())
 }
+
+/// Runtime policy compatibility for a committed metadata-only successor. This
+/// predicate is not journal, writer, or OS-service authority. Callers must also
+/// validate the complete original C07 chain and every intermediate transition.
+pub fn autostart_only_compatible(before: &NativeState, target: &NativeState) -> bool {
+    runtime_policy_compatible(before, target, false)
+}
+/// A service may observe another role's run request without stopping itself.
+/// Its own Stopped request MUST withdraw admission and initiate owned cleanup;
+/// compatibility alone is never proof of actual process or executor settlement.
+pub fn service_desired_compatible(before: &NativeState, target: &NativeState) -> bool {
+    runtime_policy_compatible(before, target, true)
+}
+fn runtime_policy_compatible(before: &NativeState, target: &NativeState, follow_run: bool) -> bool {
+    fn role(
+        a: Option<NativeComponentDesired>,
+        b: Option<NativeComponentDesired>,
+        follow_run: bool,
+    ) -> bool {
+        match (a, b) {
+            (None, None) => true,
+            (Some(a), Some(b)) => {
+                a.manager == b.manager
+                    && (a.run == b.run
+                        || (follow_run && a.manager == NativeManager::PersistentService))
+                    && (a.autostart == b.autostart || a.manager == NativeManager::PersistentService)
+            }
+            _ => false,
+        }
+    }
+    before.schema == target.schema
+        && before.kind == target.kind
+        && before.runtime_format == target.runtime_format
+        && before.reader_contract == target.reader_contract
+        && before.scope_generation == target.scope_generation
+        && before.deployment_raw_sha256 == target.deployment_raw_sha256
+        && before.mode == target.mode
+        && before.migration == target.migration
+        && before.extensions_preserved_in(target)
+        && role(before.desired.host, target.desired.host, follow_run)
+        && role(before.desired.gateway, target.desired.gateway, follow_run)
+}

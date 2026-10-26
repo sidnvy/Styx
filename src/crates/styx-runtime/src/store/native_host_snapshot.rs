@@ -77,26 +77,82 @@ pub(crate) struct NativeHostSnapshot {
     identity: Zeroizing<Vec<u8>>,
     credential: Zeroizing<Vec<u8>>,
     app_scope: Option<Arc<crate::app::HostScope>>,
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    service_tip: Option<super::native_live_tip::ServiceTip>,
 }
 impl NativeHostSnapshot {
     pub(crate) fn open(path: &Path) -> JournalResult<Self> {
-        Self::open_source(path, None)
+        Self::open_source(
+            path,
+            None,
+            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            None,
+        )
     }
     pub(crate) fn open_for_app(
         path: &Path,
         scope: Arc<crate::app::HostScope>,
     ) -> JournalResult<Self> {
-        Self::open_source(path, Some(scope))
+        Self::open_source(
+            path,
+            Some(scope),
+            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            None,
+        )
     }
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    pub(crate) fn open_for_service(
+        scope: Arc<crate::platform::linux::native_service::ServiceScope>,
+    ) -> JournalResult<Self> {
+        let path = scope.state_dir().to_owned();
+        if scope.role() != crate::platform::linux::native_service::ServiceRole::Host {
+            return Err(JournalError::Conflict);
+        }
+        Self::open_source(&path, None, Some(scope))
+    }
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    pub(crate) fn service_tip_status(&self) -> Result<(), super::native_live_tip::LiveTipError> {
+        self.service_tip
+            .as_ref()
+            .map_or(Ok(()), |tip| tip.revalidate())
+    }
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    pub(crate) fn service_canonical_matches(
+        &self,
+        root: &PrivateRoot,
+        raw: &super::RawFile,
+    ) -> Result<Option<bool>, super::native_live_tip::LiveTipError> {
+        if root.identity() != self.root.identity() {
+            return Err(super::native_live_tip::LiveTipError::Changed);
+        }
+        self.service_tip
+            .as_ref()
+            .map(|tip| tip.revalidate_proof().map(|proof| proof.matches_state(raw)))
+            .transpose()
+    }
+
     fn open_source(
         path: &Path,
         app_scope: Option<Arc<crate::app::HostScope>>,
+        #[cfg(all(target_os = "linux", target_env = "gnu"))] service_scope: Option<
+            Arc<crate::platform::linux::native_service::ServiceScope>,
+        >,
     ) -> JournalResult<Self> {
         validate_app_scope(app_scope.as_deref(), path)?;
         let manager = if app_scope.is_some() {
             NativeManager::AppManaged
         } else {
             NativeManager::ForegroundCli
+        };
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        let manager = if let Some(scope) = &service_scope {
+            if scope.state_dir() != path || app_scope.is_some() {
+                return Err(JournalError::Conflict);
+            }
+            scope.validate().map_err(|_| JournalError::Conflict)?;
+            NativeManager::PersistentService
+        } else {
+            manager
         };
         if !path.is_absolute() {
             return Err(JournalError::InvalidInput);
@@ -160,7 +216,8 @@ impl NativeHostSnapshot {
             || !state.desired.host.as_ref().is_some_and(|d| {
                 d.run == NativeRunDesired::Running
                     && d.manager == manager
-                    && d.autostart == NativeAutostartDesired::Disabled
+                    && (manager == NativeManager::PersistentService
+                        || d.autostart == NativeAutostartDesired::Disabled)
             })
             || state.deployment_raw_sha256 != Sha256Digest::of_bytes(&deployment_raw)
         {
@@ -219,11 +276,22 @@ impl NativeHostSnapshot {
             identity,
             credential,
             app_scope,
+            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            service_tip: service_scope
+                .map(super::native_live_tip::ServiceTip::open)
+                .transpose()?,
         };
         snapshot.revalidate()?;
         Ok(snapshot)
     }
     pub(crate) fn revalidate(&self) -> JournalResult<()> {
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        let successor = self
+            .service_tip
+            .as_ref()
+            .map(|tip| tip.revalidate_proof())
+            .transpose()
+            .map_err(|_| JournalError::Unknown)?;
         validate_app_scope(self.app_scope.as_deref(), &self.state_dir)?;
         ownership(&self.root)?;
         self.root
@@ -236,12 +304,23 @@ impl NativeHostSnapshot {
                     {
                         return Err(JournalError::Unknown);
                     }
-                    self.check_pins()?;
+                    self.check_pins(
+                        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+                        successor.as_ref(),
+                    )?;
                     let scan = files::scan(&self.namespace, JournalBudget::default())?;
-                    if !same_scan(&scan, &self.journal) {
+                    let matches = same_scan(&scan, &self.journal);
+                    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+                    let matches = successor
+                        .as_ref()
+                        .map_or(matches, |proof| proof.matches_scan(&scan));
+                    if !matches {
                         return Err(JournalError::Unknown);
                     }
-                    self.check_pins()?;
+                    self.check_pins(
+                        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+                        successor.as_ref(),
+                    )?;
                     let final_directory = files::directory(directory, NAMESPACE)?;
                     if directory_identity(&final_directory)? != self.namespace_identity {
                         return Err(JournalError::Unknown);
@@ -253,15 +332,26 @@ impl NativeHostSnapshot {
             })
             .map_err(|_| JournalError::Unknown)?
     }
-    fn check_pins(&self) -> JournalResult<()> {
+    fn check_pins(
+        &self,
+        #[cfg(all(target_os = "linux", target_env = "gnu"))] successor: Option<
+            &super::native_live_tip::ServiceTipProof,
+        >,
+    ) -> JournalResult<()> {
         for pin in &self.pins {
             let raw = self
                 .root
                 .read_raw(&pin.path, pin.limit)
                 .map_err(|_| JournalError::Unknown)?;
-            if raw.observation() != &pin.observation
-                || Sha256Digest::of_bytes(raw.bytes()) != pin.digest
-            {
+            let matches = raw.observation() == &pin.observation
+                && Sha256Digest::of_bytes(raw.bytes()) == pin.digest;
+            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            let matches = if pin.path == "state.json" {
+                successor.map_or(matches, |proof| proof.matches_state(&raw))
+            } else {
+                matches
+            };
+            if !matches {
                 return Err(JournalError::Unknown);
             }
         }

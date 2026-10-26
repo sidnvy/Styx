@@ -46,7 +46,7 @@ enum Retained {
         _failure: crate::store::native_transaction::NativeTransactionOpenFailure,
     },
     Transactions {
-        _transactions: crate::store::native_transaction::NativeTransactions,
+        _transactions: Arc<std::sync::Mutex<crate::store::native_transaction::NativeTransactions>>,
     },
 }
 #[must_use]
@@ -225,6 +225,8 @@ async fn bootstrap_owned(
     }
 }
 
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+pub(crate) use platform::open_existing_for_service;
 #[cfg(any(
     all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
     all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"),
@@ -573,15 +575,49 @@ mod platform {
         pub(crate) origin: String,
         pub(crate) admin_token: Zeroizing<Vec<u8>>,
         pub(crate) model_token: Zeroizing<Vec<u8>>,
-        transactions: NativeTransactions,
+        transactions: Arc<std::sync::Mutex<NativeTransactions>>,
         candidate: VerifiedNativeRelease,
         inputs: Vec<RawFile>,
         state_raw: Vec<u8>,
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        service_tip: std::sync::OnceLock<crate::store::native_live_tip::ServiceTip>,
         app_scope: Option<Arc<crate::app::HostScope>>,
     }
     impl FreshGatewayRuntime {
         pub(crate) fn configuration_root(&self) -> OwnedConfigurationRoot {
-            self.transactions.configuration_root()
+            self.transactions
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .configuration_root()
+        }
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        pub(crate) fn service_transactions(&self) -> Arc<std::sync::Mutex<NativeTransactions>> {
+            self.transactions.clone()
+        }
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        pub(crate) fn enable_service_control(
+            &self,
+            scope: Arc<crate::platform::linux::native_service::ServiceScope>,
+        ) -> Result<(), BootstrapError> {
+            if crate::store::PrivateRoot::open(scope.state_dir())
+                .map_err(|_| changed())?
+                .identity()
+                != self.root.identity()
+            {
+                return Err(changed());
+            }
+            self.validate()?;
+            let tip =
+                crate::store::native_live_tip::ServiceTip::open(scope).map_err(|_| changed())?;
+            self.service_tip.set(tip).map_err(|_| changed())
+        }
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        pub(crate) fn service_tip_status(
+            &self,
+        ) -> Result<(), crate::store::native_live_tip::LiveTipError> {
+            self.service_tip
+                .get()
+                .map_or(Ok(()), |tip| tip.revalidate())
         }
         pub(crate) fn validate(&self) -> Result<(), BootstrapError> {
             if let Some(scope) = &self.app_scope {
@@ -591,29 +627,62 @@ mod platform {
             self.configuration_root()
                 .ensure_admission()
                 .map_err(|_| changed())?;
-            let state = self.transactions.readstate().map_err(|_| changed())?;
-            if state.raw_bytes() != self.state_raw {
-                return Err(changed());
+            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            if let Some(tip) = self.service_tip.get() {
+                tip.revalidate().map_err(|_| changed())?;
+            } else {
+                self.validate_original_state()?;
             }
+            #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+            self.validate_original_state()?;
             for raw in &self.inputs {
                 reobserve(&self.root, raw)?;
             }
             Ok(())
         }
+        fn validate_original_state(&self) -> Result<(), BootstrapError> {
+            let transactions = self.transactions.lock().unwrap_or_else(|e| e.into_inner());
+            let state = transactions.readstate().map_err(|_| changed())?;
+            if state.raw_bytes() != self.state_raw {
+                return Err(changed());
+            }
+            Ok(())
+        }
     }
     pub(crate) fn open_existing(path: &Path) -> Result<FreshGatewayRuntime, BootstrapError> {
-        open_existing_owned(path, None)
+        open_existing_owned(
+            path,
+            None,
+            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            None,
+        )
     }
     pub(crate) fn open_existing_for_app(
         scope: Arc<crate::app::HostScope>,
     ) -> Result<FreshGatewayRuntime, BootstrapError> {
         let path = scope.state_dir().to_owned();
-        open_existing_owned(&path, Some(scope.clone()))
-            .map_err(|error| error.with_app_scope(Some(scope)))
+        open_existing_owned(
+            &path,
+            Some(scope.clone()),
+            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            None,
+        )
+        .map_err(|error| error.with_app_scope(Some(scope)))
+    }
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    pub(crate) fn open_existing_for_service(
+        scope: Arc<crate::platform::linux::native_service::ServiceScope>,
+    ) -> Result<FreshGatewayRuntime, BootstrapError> {
+        scope.validate().map_err(|_| changed())?;
+        let path = scope.state_dir().to_owned();
+        open_existing_owned(&path, None, Some(scope))
     }
     fn open_existing_owned(
         path: &Path,
         app_scope: Option<Arc<crate::app::HostScope>>,
+        #[cfg(all(target_os = "linux", target_env = "gnu"))] service_scope: Option<
+            Arc<crate::platform::linux::native_service::ServiceScope>,
+        >,
     ) -> Result<FreshGatewayRuntime, BootstrapError> {
         if let Some(scope) = &app_scope {
             if scope.state_dir() != path {
@@ -683,18 +752,38 @@ mod platform {
                     .get(),
             )
             .map_err(|_| bad())?;
+            let manager = if app_scope.is_some() {
+                NativeManager::AppManaged
+            } else {
+                NativeManager::ForegroundCli
+            };
+            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            let service_owned = if let Some(scope) = &service_scope {
+                if app_scope.is_some()
+                    || scope.state_dir() != path
+                    || scope.role() != crate::platform::linux::native_service::ServiceRole::Gateway
+                {
+                    return Err(bad());
+                }
+                scope.validate().map_err(|_| changed())?;
+                true
+            } else {
+                false
+            };
+            #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+            let service_owned = false;
+            let manager = if service_owned {
+                NativeManager::PersistentService
+            } else {
+                manager
+            };
             if state_value.has_migration_binding()
                 || state_value.mode != NativeDeploymentMode::CreateLocal
                 || state_value.desired.host.is_some()
                 || state_value.desired.gateway.as_ref().is_none_or(|d| {
-                    d.manager
-                        != if app_scope.is_some() {
-                            NativeManager::AppManaged
-                        } else {
-                            NativeManager::ForegroundCli
-                        }
+                    d.manager != manager
                         || d.run != NativeRunDesired::Running
-                        || d.autostart != NativeAutostartDesired::Disabled
+                        || (!service_owned && d.autostart != NativeAutostartDesired::Disabled)
                 })
                 || expected_binding != Sha256Digest::of_bytes(ready_raw.bytes())
                 || selected != ready.runtime
@@ -770,7 +859,7 @@ mod platform {
             Ok(value) => value,
             Err(error) => {
                 return Err(error.retaining(Retained::Transactions {
-                    _transactions: transactions,
+                    _transactions: Arc::new(std::sync::Mutex::new(transactions)),
                 }));
             }
         };
@@ -781,10 +870,12 @@ mod platform {
             origin,
             admin_token,
             model_token,
-            transactions,
+            transactions: Arc::new(std::sync::Mutex::new(transactions)),
             candidate,
             inputs,
             state_raw,
+            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            service_tip: std::sync::OnceLock::new(),
             app_scope,
         };
         if let Err(error) = runtime.validate() {

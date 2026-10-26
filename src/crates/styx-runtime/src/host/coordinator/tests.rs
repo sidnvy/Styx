@@ -3,6 +3,19 @@ use crate::providers::codex::OwnedExecutorConfig;
 use std::collections::BTreeMap;
 use styx_contracts::{capability::*, error::Recovery};
 
+/// Controlled trusted-composition source; this is not OS ServiceScope evidence.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+struct PendingExecAdmission(std::sync::atomic::AtomicBool);
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+impl ExecAdmission for PendingExecAdmission {
+    fn check(&self) -> Result<(), CoordinatorError> {
+        if self.0.load(std::sync::atomic::Ordering::Acquire) {
+            Err(CoordinatorError::Busy)
+        } else {
+            Ok(())
+        }
+    }
+}
 fn facts() -> AdmissionFacts {
     AdmissionFacts {
         device_id: DeviceId::try_from("styx-owned-coordinator").unwrap(),
@@ -432,6 +445,14 @@ async fn real_host_action_nonce_drop_ticket_and_terminate_scenario() {
         1,
     )
     .unwrap();
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    let admission = Arc::new(PendingExecAdmission(std::sync::atomic::AtomicBool::new(
+        false,
+    )));
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    authority
+        .configure_exec_admission(admission.clone())
+        .unwrap();
     let authority = Arc::new(authority);
     let worker_authority = authority.clone();
     let worker_host = host.clone();
@@ -508,6 +529,72 @@ async fn real_host_action_nonce_drop_ticket_and_terminate_scenario() {
                 &no_send,
             )
             .unwrap();
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        {
+            let blocked = spec(&root, "pending-start-effect", "MUST_NOT_START");
+            let reserved = host
+                .prepare_start(&owner, context(&host, 1), &blocked)
+                .unwrap();
+            admission
+                .0
+                .store(true, std::sync::atomic::Ordering::Release);
+            assert!(matches!(
+                host.prepare_start(&owner, context(&host, 1), &blocked),
+                Err(CoordinatorError::Busy)
+            ));
+            assert!(matches!(
+                host.prepare_action(
+                    &owner,
+                    resource_target(&resource),
+                    context(&host, 1),
+                    &no_send
+                ),
+                Err(CoordinatorError::Busy)
+            ));
+            assert!(matches!(
+                host.dispatch_start(&owner, &reserved.id, reserved.payload_digest),
+                Err(CoordinatorError::Busy)
+            ));
+            assert_eq!(
+                host.inspect_start(&owner, &reserved.id, reserved.payload_digest)
+                    .unwrap()
+                    .state,
+                OperationState::Reserved
+            );
+            assert!(matches!(
+                host.dispatch_action(&owner, &pending.id, pending.payload_digest),
+                Err(CoordinatorError::Busy)
+            ));
+            assert_eq!(
+                host.inspect_action(&owner, &pending.id, pending.payload_digest)
+                    .unwrap()
+                    .state,
+                OperationState::Reserved
+            );
+            // Existing receipts/read are cleanup/observation, not new I/O admission.
+            assert!(matches!(
+                host.dispatch_start(&owner, &resource.id, resource.payload_digest)
+                    .unwrap(),
+                StartSubmission::Existing(_)
+            ));
+            let observed = host
+                .read(
+                    &owner,
+                    &resource.id,
+                    resource.payload_digest,
+                    &context(&host, 1),
+                    65536,
+                    Duration::from_millis(20),
+                )
+                .await
+                .unwrap();
+            assert_eq!(observed.liveness, ExecutionLiveness::Running);
+            assert!(!root.join("pending-start-effect").exists());
+            assert!(!root.join("host-action-effect").exists());
+            admission
+                .0
+                .store(false, std::sync::atomic::Ordering::Release);
+        }
         let ticket = submitted_action(&host, &owner, &write);
         // This current-thread test has not yielded since spawn. The complete
         // guard must be owned by the job, not dropped in dispatch_action.
@@ -631,6 +718,18 @@ async fn real_host_action_nonce_drop_ticket_and_terminate_scenario() {
             host.dispatch_action(&owner, &expired.id, expired.payload_digest),
             Err(CoordinatorError::Admission(ErrorCategory::OperationTimeout))
         ));
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        {
+            admission
+                .0
+                .store(true, std::sync::atomic::Ordering::Release);
+            assert!(matches!(
+                host.dispatch_action(&owner, &write.id, write.payload_digest)
+                    .unwrap(),
+                ActionSubmission::Existing(_)
+            ));
+        }
+        // Pending remains active across this read and the actual Terminate below.
         let output = host
             .read(
                 &owner,
@@ -716,6 +815,37 @@ async fn real_host_action_nonce_drop_ticket_and_terminate_scenario() {
             std::fs::read_to_string(root.join("host-action-effect")).unwrap(),
             format!("{nonce}\n")
         );
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        {
+            // Recovery grants no replay: use a NEW operation and independent file.
+            admission
+                .0
+                .store(false, std::sync::atomic::Ordering::Release);
+            let resumed_nonce = uuid::Uuid::new_v4().to_string();
+            let resumed = host
+                .prepare_start(
+                    &owner,
+                    context(&host, 1),
+                    &spec(&root, "admission-resumed-effect", &resumed_nonce),
+                )
+                .unwrap();
+            let completed = submitted(&host, &owner, &resumed).wait().await.unwrap();
+            assert_eq!(completed.dispatch, DispatchEvidence::Started);
+            drain(&host, &owner, &resumed, 1).await;
+            assert_eq!(
+                std::fs::read_to_string(root.join("admission-resumed-effect")).unwrap(),
+                format!("{resumed_nonce}\n")
+            );
+            assert!(!root.join("pending-start-effect").exists());
+            assert_eq!(
+                std::fs::read_to_string(root.join("host-action-effect")).unwrap(),
+                format!("{nonce}\n")
+            );
+            println!(
+                "EXEC_ADMISSION_CONTRACT {}",
+                serde_json::json!({"scope":"trusted mock admission contract with real Codex file effect; NOT ServiceScope/C07/platform acceptance","prepareStartPendingDenied":true,"reservedStartPendingDenied":true,"prepareWritePendingDenied":true,"reservedWritePendingDenied":true,"existingReadAndTerminateWhilePending":true,"newOperationAfterRecovery":resumed.id,"resumedNonce":resumed_nonce})
+            );
+        }
         authority.revoke_owner(&owner).unwrap();
         assert!(matches!(
             host.inspect_action(&owner, &write.id, write.payload_digest),
