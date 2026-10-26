@@ -387,6 +387,126 @@ impl HostApp {
             .map_err(|e| self.management_error(e))?;
         LocalGateway::open(scope).await
     }
+    fn require_unstarted_local_inputs(&self) -> Result<(), AppError> {
+        self.scope.validate()?;
+        let parent = &self.scope.container.parent;
+        for name in [
+            "app-join-input-v1.json",
+            "app-join-ca-v1.pem",
+            "app-join-invitation-v1",
+        ] {
+            parent
+                .ensure_absent(name)
+                .map_err(|_| AppError("app_local_checkpoint_refused"))?;
+        }
+        let host_name = self
+            .scope
+            .state_dir
+            .file_name()
+            .ok_or(AppError("app_scope_invalid"))?;
+        parent
+            .ensure_absent(Path::new(host_name))
+            .map_err(|_| AppError("app_local_checkpoint_refused"))
+    }
+    /// Inspection only: it cannot bypass an in-process Unknown or retry any
+    /// previously-issued invite. Reopened setup must still have zero enrollment.
+    pub(super) async fn check_pre_invite_local(&mut self) -> Result<(), AppError> {
+        self.scope.validate()?;
+        if self.scope.root.get().is_some()
+            || self.retained.is_some()
+            || self.running.is_some()
+            || self.input_writer.is_some()
+            || self.migration.is_some()
+            || self.committed_migration
+            || self
+                .local_gateway
+                .as_ref()
+                .is_some_and(|g| g.is_running() || g.is_fenced())
+        {
+            return Err(AppError("app_local_checkpoint_refused"));
+        }
+        self.require_unstarted_local_inputs()?;
+        let parent = &self.scope.container.parent;
+        let scope = Arc::new(self.scope.gateway_sibling()?);
+        let root = scope
+            .root
+            .get()
+            .ok_or(AppError("app_local_checkpoint_refused"))?;
+        let original_input = parent
+            .read_raw("app-local-gateway-input-v1.json", 128 * 1024)
+            .map_err(|_| AppError("app_local_checkpoint_refused"))?;
+        let original_deployment = root
+            .read_raw("deployment.json", 128 * 1024)
+            .map_err(|_| AppError("app_local_checkpoint_refused"))?;
+        if original_input.bytes() != original_deployment.bytes() {
+            return Err(AppError("app_local_checkpoint_refused"));
+        }
+        let selection = self
+            .runtime_selection_file
+            .clone()
+            .ok_or(AppError("app_runtime_selection_invalid"))?;
+        let result = tokio::task::spawn_blocking(move || {
+            crate::management::native_gateway::inspect_pre_invite_for_app(scope, &selection)
+        })
+        .await
+        .map_err(|_| AppError("app_local_checkpoint_unknown"))?;
+        if let Err(error) = result {
+            let code = error.code();
+            self.retained = Some(RetainedFailure::Bootstrap(error));
+            return Err(AppError(code));
+        }
+        // Reobserve the fixed input bytes and kernel identity after the reader.
+        let current = parent
+            .read_raw(original_input.relative_path(), 128 * 1024)
+            .map_err(|_| AppError("app_local_checkpoint_refused"))?;
+        if current.observation() != original_input.observation()
+            || current.bytes() != original_input.bytes()
+        {
+            return Err(AppError("app_local_checkpoint_refused"));
+        }
+        self.scope.validate()
+    }
+    pub(super) async fn resume_local(&mut self, input: LocalInput) -> Result<(), AppError> {
+        if !self.resume_local_available
+            || self.quit_ticket.is_some()
+            || self
+                .local_gateway
+                .as_ref()
+                .is_none_or(|g| g.is_running() || g.is_fenced())
+        {
+            return Err(AppError("app_local_checkpoint_refused"));
+        }
+        let gateway = self
+            .local_gateway
+            .as_ref()
+            .ok_or(AppError("app_gateway_not_configured"))?;
+        if gateway.origin != format!("https://127.0.0.1:{}", input.port) {
+            return Err(AppError("app_local_checkpoint_refused"));
+        }
+        let choice = JoinInput {
+            approved_gateway_origin: String::new(),
+            approved_ca_sha256: None,
+            label: input.label,
+            computer: input.computer,
+            browser: input.browser,
+            browser_channel: input.browser_channel,
+            persist_login: input.persist_login,
+        };
+        validate_choice(&choice)?;
+        self.resume_local_available = false;
+        self.enrollment =
+            Some(json!({"status":"local_setup_continuation_dispatched","can_resume_local":false}));
+        self.check_pre_invite_local().await?;
+        self.input_writer = Some(
+            self.scope
+                .container
+                .parent
+                .try_configuration_writer()
+                .map_err(|_| AppError("app_input_writer_busy"))?,
+        );
+        self.unknown = true;
+        self.finish_local_pairing(choice).await
+    }
     pub(super) async fn create_local(&mut self, input: LocalInput) -> Result<(), AppError> {
         self.available()?;
         if self.scope.root.get().is_some()
@@ -456,6 +576,9 @@ impl HostApp {
             return Err(AppError(code));
         }
         self.local_gateway = Some(self.load_local_gateway(scope).await?);
+        self.finish_local_pairing(choice).await
+    }
+    async fn finish_local_pairing(&mut self, choice: JoinInput) -> Result<(), AppError> {
         let gateway = self
             .local_gateway
             .as_mut()
@@ -507,5 +630,50 @@ impl HostApp {
             Some(serde_json::to_value(claimed).map_err(|_| AppError("app_response_invalid"))?);
         self.unknown = false;
         Ok(())
+    }
+}
+
+#[cfg(all(test, target_os = "linux", target_env = "gnu"))]
+mod continuation_tests {
+    use super::*;
+    use std::{
+        io::Write,
+        os::unix::fs::{DirBuilderExt, OpenOptionsExt},
+    };
+
+    #[tokio::test]
+    async fn continuation_requires_absent_host_and_all_join_inputs() {
+        let path =
+            std::env::temp_dir().join(format!("styx-app-pre-invite-{}", uuid::Uuid::new_v4()));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&path)
+            .unwrap();
+        let app = HostApp::open(&path.join("profile"), &path.join("app-join-input-v1.json"))
+            .await
+            .unwrap();
+        app.require_unstarted_local_inputs().unwrap();
+        for name in [
+            "app-join-input-v1.json",
+            "app-join-ca-v1.pem",
+            "app-join-invitation-v1",
+        ] {
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(0o600)
+                .open(path.join(name))
+                .unwrap();
+            file.write_all(b"existing partial input").unwrap();
+            assert!(app.require_unstarted_local_inputs().is_err(), "{name}");
+            std::fs::remove_file(path.join(name)).unwrap();
+        }
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(path.join("profile"))
+            .unwrap();
+        assert!(app.require_unstarted_local_inputs().is_err());
+        drop(app);
+        std::fs::remove_dir_all(path).unwrap();
     }
 }

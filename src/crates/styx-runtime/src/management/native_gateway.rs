@@ -235,7 +235,9 @@ pub(crate) use platform::open_existing_for_service;
         any(target_arch = "x86_64", target_arch = "aarch64")
     )
 ))]
-pub(crate) use platform::{FreshGatewayRuntime, open_existing, open_existing_for_app};
+pub(crate) use platform::{
+    FreshGatewayRuntime, inspect_pre_invite_for_app, open_existing, open_existing_for_app,
+};
 #[cfg(any(
     all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
     all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"),
@@ -668,6 +670,45 @@ mod platform {
             None,
         )
         .map_err(|error| error.with_app_scope(Some(scope)))
+    }
+    /// Original ready/canonical/TLS/C08 checks and enrollment inspection share
+    /// this one existing coordinator. No bootstrap, namespace claim or pairing.
+    pub(crate) fn inspect_pre_invite_for_app(
+        scope: Arc<crate::app::HostScope>,
+        selection_file: &Path,
+    ) -> Result<(), BootstrapError> {
+        let runtime = open_existing_for_app(scope.clone())?;
+        let checked = (|| {
+            runtime.validate()?;
+            let (selection_root, raw) = private_input(selection_file)?;
+            let supplied: NativeRuntimeSelection =
+                serde_json::from_slice(raw.bytes()).map_err(|_| bad())?;
+            if runtime
+                .candidate
+                .runtime_selection()
+                .map_err(|_| changed())?
+                != supplied
+            {
+                return Err(BootstrapError::new(
+                    "original_runtime_selection_required",
+                    2,
+                ));
+            }
+            runtime
+                .configuration_root()
+                .require_pre_invite_enrollment(now()?)
+                .map_err(|_| BootstrapError::new("app_local_checkpoint_refused", 3))?;
+            reobserve(&selection_root, &raw)?;
+            runtime.validate()?;
+            Ok(())
+        })();
+        checked.map_err(|error| {
+            error
+                .retaining(Retained::Transactions {
+                    _transactions: runtime.transactions,
+                })
+                .with_app_scope(Some(scope))
+        })
     }
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     pub(crate) fn open_existing_for_service(

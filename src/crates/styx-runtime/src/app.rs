@@ -179,6 +179,7 @@ enum Operation {
     StartupStatus,
     Status,
     CreateLocal,
+    ResumeLocal,
     RequestJoin,
     InspectJoin,
     Join,
@@ -307,6 +308,7 @@ impl RetainedFailure {
 struct HostApp {
     migration: Option<migration::State>,
     local_gateway: Option<local_gateway::LocalGateway>,
+    resume_local_available: bool,
     committed_migration: bool,
     migrated_shared: bool,
     deployment_file: PathBuf,
@@ -343,6 +345,7 @@ impl HostApp {
         let mut app = Self {
             migration: None,
             local_gateway: None,
+            resume_local_available: false,
             committed_migration: false,
             migrated_shared: false,
             scope,
@@ -437,6 +440,19 @@ impl HostApp {
                 }
             } else {
                 app.unknown = true;
+                match app.check_pre_invite_local().await {
+                    Ok(()) => {
+                        app.resume_local_available = true;
+                        app.enrollment = Some(
+                            json!({"status":"local_setup_pre_invite","can_resume_local":true}),
+                        );
+                    }
+                    Err(error) => {
+                        app.enrollment = Some(
+                            json!({"status":"incomplete","error":error.code(),"can_resume_local":false}),
+                        );
+                    }
+                }
             }
             app.local_gateway = Some(gateway);
         } else if app
@@ -896,7 +912,7 @@ impl HostApp {
     }
     async fn snapshot(&self) -> Value {
         let computer_requested = self.desktop_component_requested().await;
-        json!({"schema":1,"migration":self.migration,"configuration":self.configuration,"foreground":*self.observed.borrow(),"admission_fenced":self.admission_fenced(),"desktop_intent":{"schema":1,"computer_requested":computer_requested,"source":if self.committed_migration {"committed_original_local_intent"} else {"approved_host_configuration"}},"cleanup":self.cleanup,"gateway":self.local_gateway.as_ref().map(|g| g.status()),"enrollment":self.enrollment,"mode":"rust_host","supportedOperations":["startupStatus","status","createLocal","inspectJoin","join","requestJoin","claimJoin","inspectHost","connect","disconnect","quitAdmission","reviewMigration","startMigration","recoverMigration"]})
+        json!({"schema":1,"migration":self.migration,"configuration":self.configuration,"foreground":*self.observed.borrow(),"admission_fenced":self.admission_fenced(),"desktop_intent":{"schema":1,"computer_requested":computer_requested,"source":if self.committed_migration {"committed_original_local_intent"} else {"approved_host_configuration"}},"cleanup":self.cleanup,"gateway":self.local_gateway.as_ref().map(|g| g.status()),"enrollment":self.enrollment,"mode":"rust_host","supportedOperations":["startupStatus","status","createLocal","resumeLocal","inspectJoin","join","requestJoin","claimJoin","inspectHost","connect","disconnect","quitAdmission","reviewMigration","startMigration","recoverMigration"]})
     }
     async fn dispatch(
         &mut self,
@@ -908,6 +924,7 @@ impl HostApp {
             Operation::InspectJoin
                 | Operation::Join
                 | Operation::CreateLocal
+                | Operation::ResumeLocal
                 | Operation::ReviewMigration
                 | Operation::StartMigration
                 | Operation::RecoverMigration
@@ -932,6 +949,30 @@ impl HostApp {
                 matches!(operation, Operation::RecoverMigration),
             )?;
             return Ok(self.snapshot().await);
+        }
+        if matches!(operation, Operation::ResumeLocal) {
+            self.resume_local(decode_input(&input)?).await?;
+            self.connect_host().await?;
+            return Ok(self.snapshot().await);
+        }
+        if matches!(operation, Operation::QuitAdmission) && self.resume_local_available {
+            // This is a positively revalidated never-dispatched checkpoint,
+            // not permission to clear an arbitrary failed pairing/role outcome.
+            self.check_pre_invite_local().await?;
+            // Only the positively checked never-dispatched setup is known;
+            // settle itself must not inherit that incomplete-setup sentinel.
+            self.unknown = false;
+            if let Err(error) = self.settle_all().await.and_then(|()| self.scope.validate()) {
+                self.unknown = true;
+                return Err(error);
+            }
+            let ticket = uuid::Uuid::new_v4().simple().to_string();
+            self.quit_ticket = Some(ticket.clone());
+            self.resume_local_available = false;
+            self.unknown = false;
+            return Ok(
+                json!({"quit":{"status":"ready_to_quit","ticketId":ticket},"cleanup":self.cleanup,"gateway":self.local_gateway.as_ref().map(|g| g.status())}),
+            );
         }
         // A queued native migration owns its original writer. A UI Quit must
         // return promptly and must never abort it or pretend it has settled.
@@ -959,6 +1000,7 @@ impl HostApp {
         }
         self.available()?;
         match operation {
+            Operation::ResumeLocal => Err(AppError("app_local_checkpoint_refused")),
             Operation::CreateLocal => {
                 let choice: LocalInput = decode_input(&input)?;
                 self.create_local(choice).await?;

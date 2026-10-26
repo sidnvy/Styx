@@ -253,6 +253,30 @@ enum ProductRestorationPolicy {
         && status["configuration"] == .null && status["enrollment"] == .null && status["gateway"] == .null
         && status["supportedOperations"].array.contains { $0.string == "createLocal" }
     }
+    var nativeCanResumeLocal: Bool {
+        nativeHost && !nativeMigrationPending && !nativeLocalSetupSubmitted
+        && status["enrollment"]["status"].string == "local_setup_pre_invite"
+        && status["enrollment"]["can_resume_local"] == .bool(true)
+        && status["supportedOperations"].array.contains { $0.string == "resumeLocal" }
+    }
+    func resumeLocalSetup() {
+        guard nativeCanResumeLocal, !busy else { return }
+        let name = label.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !name.isEmpty, let origin = status["gateway"]["origin"].string,
+              let port = URLComponents(string: origin)?.port else { return }
+        perform { [self] in
+            guard nativeCanResumeLocal else { throw ProductCoreError.rejected }
+            nativeLocalSetupSubmitted = true
+            // Explicit confirmation only; a failed or lost response is never replayed.
+            let choice: [String: ProductJSON] = ["label": .string(name), "computer": .bool(false), "browser": .bool(false), "browserChannel": .null, "persistLogin": .bool(false), "port": .number(Double(port))]
+            do {
+                try applyNative(try await client.native("resumeLocal", choice))
+                page = .overview
+            } catch {
+                self.error = productText("继续设置的结果尚未确认。原有设置已保留，请刷新检查；不会自动重试配对。", "The continuation result is unconfirmed. Your settings are retained. Refresh to review; pairing will not retry automatically.")
+            }
+        }
+    }
     @Published var recoveringJoin = false
     @Published var joinRecovery: ProductJSON = .null
     @Published var tunnelID = ""

@@ -500,6 +500,40 @@ impl OwnedConfigurationRoot {
             Ok(pin)
         })
     }
+    /// Read-only checkpoint for explicit App continuation before ANY enrollment
+    /// operation. This neither claims the enrollment domain nor clears a fence.
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "windows",
+        target_os = "macos"
+    ))]
+    pub(crate) fn require_pre_invite_enrollment(&self, trusted_now: u64) -> JournalResult<()> {
+        self.with_state(|state| {
+            state.ordinary_admission()?;
+            let binding = state
+                .namespaces
+                .iter()
+                .find(|b| b.name.as_str() == NamespaceName::EnrollmentV1.as_str())
+                .ok_or(JournalError::Conflict)?;
+            if binding.claimed {
+                return Err(JournalError::Conflict);
+            }
+            state
+                .root
+                .inner
+                .with_configuration_writer_directory(&state.writer, |directory| {
+                    Ok((|| {
+                        if files::existing_namespace(directory, binding.name)? != binding.pin {
+                            return Err(JournalError::Unknown);
+                        }
+                        let dir = files::directory(directory, binding.name.as_str())?;
+                        let observed = files::scan(&dir, binding.budget)?;
+                        require_pre_invite_clock(&observed, trusted_now)
+                    })())
+                })
+                .map_err(|_| JournalError::Unknown)?
+        })
+    }
     /// The original maintenance owner may initialize exactly its management
     /// namespace for migration. No new writer, enrollment namespace or fresh
     /// root authority is created; an unexpected existing name is not adopted.
@@ -681,6 +715,32 @@ impl OwnedConfigurationRoot {
         })
     }
 }
+#[cfg(any(
+    all(target_os = "linux", target_env = "gnu"),
+    target_os = "windows",
+    target_os = "macos"
+))]
+fn require_pre_invite_clock(
+    observed: &super::secure_journal::JournalObservation,
+    now: u64,
+) -> JournalResult<()> {
+    let [clock] = observed.files.as_slice() else {
+        return Err(JournalError::Conflict);
+    };
+    if clock.name != "clock.floor" {
+        return Err(JournalError::Conflict);
+    }
+    let raw: [u8; 8] = clock
+        .bytes()
+        .try_into()
+        .map_err(|_| JournalError::Unknown)?;
+    let floor = u64::from_be_bytes(raw);
+    if floor == 0 || floor > now {
+        return Err(JournalError::Conflict);
+    }
+    Ok(())
+}
+
 /// Opaque in-process fence capability. Dropping a waiter/handle never reopens
 /// admission. This is NOT a durable transaction, Host maintenance, or cutover.
 /// Persistent management reconciliation must own release in the next adapter.
@@ -716,3 +776,73 @@ impl ConfigurationMaintenance {
 #[cfg(test)]
 #[path = "configuration_tests.rs"]
 mod tests;
+
+#[cfg(all(test, target_os = "linux", target_env = "gnu"))]
+mod pre_invite_tests {
+    use super::*;
+    use crate::store::enrollment::{EnrollmentJournal, OwnedEnrollmentJournal};
+    use std::{
+        io::Write,
+        os::unix::fs::{DirBuilderExt, OpenOptionsExt},
+    };
+
+    #[test]
+    fn pre_invite_is_read_only_unclaimed_and_refuses_existing_records_or_fence() {
+        let base = std::env::temp_dir().join(format!("styx-pre-invite-{}", uuid::Uuid::new_v4()));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&base)
+            .unwrap();
+        for extra in [
+            None,
+            Some("txn-existing.intent"),
+            Some("txn-existing.prepared"),
+            Some("orphan.temporary"),
+        ] {
+            let path = base.join(uuid::Uuid::new_v4().to_string());
+            std::fs::DirBuilder::new()
+                .mode(0o700)
+                .create(&path)
+                .unwrap();
+            let root = PrivateRoot::open(&path).unwrap();
+            let mut writer = root.try_configuration_writer().unwrap();
+            EnrollmentJournal::open(&root, &mut writer, JournalBudget::default())
+                .unwrap()
+                .record_time_floor(100)
+                .unwrap();
+            if let Some(name) = extra {
+                let mut file = std::fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(0o600)
+                    .open(path.join(NamespaceName::EnrollmentV1.as_str()).join(name))
+                    .unwrap();
+                file.write_all(b"retained").unwrap();
+            }
+            let owner = OwnedConfigurationRoot::open_existing(root, writer).unwrap();
+            if extra.is_some() {
+                assert!(owner.require_pre_invite_enrollment(100).is_err());
+            } else {
+                owner.require_pre_invite_enrollment(100).unwrap();
+                assert!(owner.require_pre_invite_enrollment(99).is_err());
+                // A successful inspection did not mint/consume the singleton.
+                let mut journal = OwnedEnrollmentJournal::from_configuration(
+                    owner.clone(),
+                    JournalBudget::default(),
+                )
+                .unwrap();
+                journal
+                    .with_journal(|j| {
+                        assert_eq!(j.read_time_floor()?, Some(100));
+                        Ok(())
+                    })
+                    .unwrap();
+                assert!(owner.require_pre_invite_enrollment(100).is_err());
+                let tx = uuid::Uuid::new_v4().to_string().try_into().unwrap();
+                let _maintenance = owner.begin_maintenance(tx).unwrap();
+                assert!(owner.require_pre_invite_enrollment(100).is_err());
+            }
+        }
+        std::fs::remove_dir_all(base).unwrap();
+    }
+}

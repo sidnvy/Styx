@@ -48,7 +48,12 @@ struct ProductView: View {
                         if model.error != nil { Button(productText("重试读取", "Retry reading")) { Task { await model.bootstrap() } } }
                     } else if model.nativeMigrationPending {
                         migration
+                    } else if model.nativeCanResumeLocal {
+                        resumeLocalSetup
                     } else {
+                        if model.nativeHost && model.status["enrollment"]["error"].string == "original_runtime_selection_required" {
+                            Text(productText("此设置仍绑定原已签名运行组件。请保留原 App 和设置；此版本不能以新组件替换后继续设置。", "This setup still requires its original signed runtime. Keep the original App and settings; this version cannot replace that runtime to continue setup.")).foregroundStyle(.secondary)
+                        }
                         switch model.page {
                         case .welcome: welcome
                         case .invitation: invitation
@@ -110,6 +115,16 @@ struct ProductView: View {
                 }
                 Button(productText("刷新状态", "Refresh status")) { Task { await model.refresh() } }.disabled(model.busy)
             }
+        }
+    }
+    private var resumeLocalSetup: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            heading(productText("继续本机设置", "Continue local setup"), productText("原管理端已准备完成，配对尚未开始。继续将保留原身份、证书和运行组件。", "The original Gateway is prepared and pairing has not started. Continuing preserves its identity, certificates and runtime."))
+            TextField(productText("电脑名称", "Computer name"), text: $model.label)
+            Text(productText("本次只启用命令执行；Computer Use 和 Browser 保持关闭。确认后仅提交一次配对。", "This enables command execution only. Computer Use and Browser remain off. Confirming submits pairing once.")).font(.callout).foregroundStyle(.secondary)
+            Button(productText("确认并继续设置", "Confirm and continue setup")) { model.resumeLocalSetup() }
+                .buttonStyle(.borderedProminent)
+                .disabled(model.busy || model.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
         }
     }
     private var welcome: some View {

@@ -27,4 +27,22 @@ npm run gateway -- --state-dir /absolute/private/profile
 
 The runtime examples require an explicitly configured native profile and the matching manager intent. Use the Rust CLI help for supported commands, including `host`, `gateway`, `release`, `plan`, `apply`, `migrate`, `recover`, and Linux `service`. Old onboarding commands such as `create`, `advance` and `foreground` are not accepted by these aliases; fresh setup parity is still incomplete. Historical fixture and interoperability scripts remain available explicitly. Production installers and existing signed packages are unchanged by this source-checkout entrypoint switch.
 
+`npm run build:checked -- ...` now invokes the official native runtime packager directly: `python3 src/tools/release/build-native-runtime.py`. It consumes an already built Rust binary and its original passing build receipt, the exact clean source revision, target, version, externally trusted publisher pin, and any selected signed worker closure. It performs the existing input and signature checks; it does not compile the CLI or install a profile.
+
+```sh
+npm run build:checked -- --help
+npm run build:checked -- \
+  --binary /absolute/native-build/styx \
+  --build-receipt /absolute/native-build/receipt.json \
+  --output /absolute/fresh/native-runtime \
+  --source-revision FULL_SOURCE_SHA --target x86_64-unknown-linux-gnu \
+  --version CANDIDATE_VERSION --expected-publisher ORIGINAL_PUBLIC_PIN \
+  --publisher-file /absolute/original-publisher.pem --prepare-signing \
+  --worker-release /absolute/signed-worker-release \
+  --worker-publisher-file /absolute/original-worker-publisher.pem \
+  --worker-kind codex_exec
+```
+
+Replace the placeholders with the exact reviewed inputs. This example prepares an unsigned manifest for the producer's existing detached-signature flow; it is not a signed delivery. The completed output is a native runtime candidate, not an App, installer, or proof of fresh setup parity. App wrapping and platform signing remain separate steps. The old Node-Core preview builder is available only through explicit `npm run build:legacy:checked -- ...` for historical fixtures and interoperability; there is no fallback from the native build command.
+
 Source migration does not rename deployed state, pairing identities, publisher pins, protocol identifiers or signed bundle members. Existing native packages retain their verified internal layout. Historical candidates and test receipts remain bound to their original SHA.

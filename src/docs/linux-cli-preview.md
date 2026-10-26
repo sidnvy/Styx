@@ -1,4 +1,6 @@
-# Linux CLI preview
+# Historical Linux Node-Core CLI preview
+
+**Historical, non-default packaging and command reference.** This page describes the old Node-Core preview and its fixtures, not the current Rust runtime distribution. See the [current Rust checkout and native packaging instructions](../../README.md). The default `npm run build:checked` now invokes the official native runtime producer; it does not accept the legacy `linux CONFIG EVIDENCE` arguments below. Native runtime packaging is separate from App/installer packaging, and fresh CLI setup parity is not complete.
 
 This portable Arch/headless Linux x64 preview runs the existing onboarding CLI
 and Core. It does not install an App, create an identity at build time, enable
@@ -14,7 +16,7 @@ Build an optional Host bundle with `buildHostRelease` using the same publisher
 key and actual pinned Codex/Cua binaries. Then run:
 
 ```sh
-npm run build:checked -- linux /absolute/private/build.json /absolute/fresh/build-evidence
+npm run build:legacy:checked -- linux /absolute/private/build.json /absolute/fresh/build-evidence
 ```
 
 The private build file contains `destination`, `version`, `privateKeyFile`,

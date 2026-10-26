@@ -11,7 +11,8 @@
   "scripts": {
     "test": "npm --prefix src run test:all",
     "quality": "node src/ci/quality.mjs",
-    "build:checked": "node src/ci/build-checked.mjs",
+    "build:checked": "python3 src/tools/release/build-native-runtime.py",
+    "build:legacy:checked": "node src/ci/build-checked.mjs",
     "styx": "cargo run --locked --package styx --",
     "gateway": "cargo run --locked --package styx -- gateway run"
   }
