@@ -645,7 +645,7 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
         nativeCoreAttempted = true
         if let _ = nativeCore { setupWindow?.present(); return }
         guard !nativeCoreStarting else { return }; nativeCoreStarting = true
-        Task {
+        Task { [self] in
             defer { nativeCoreStarting = false }
             do {
                 let core = try await Task.detached { try ProductOwnedCore.open(resources: resources) }.value
