@@ -181,6 +181,10 @@ impl<R, S> PreparedCredentialRetirement<R, S> {
     pub(in crate::store) fn intent(&self) -> &LegacyCredentialRetirementIntent<R, S> {
         &self.intent
     }
+    #[cfg(target_os = "macos")]
+    pub(in crate::store) fn raw_intent_sha256(&self) -> Sha256Digest {
+        self.raw_intent_sha256
+    }
     pub(in crate::store) fn record_sha256(&self) -> Sha256Digest {
         self.record_sha256
     }

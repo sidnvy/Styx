@@ -169,10 +169,73 @@ impl MacTokenRetirement {
         prepared: &NativePreparedRetirement,
         record: &NativeRetiredRecord,
     ) -> JournalResult<Self> {
-        if !maintenance.matches(&owner)
-            || !prepared.matches_owner(&owner)
-            || !record.matches_prepared(prepared)
+        if !record.matches_prepared(prepared) {
+            return Err(JournalError::Conflict);
+        }
+        Self::reopen_existing_retired(
+            host,
+            owner,
+            maintenance,
+            prepared,
+            Some(record.post_stamp()),
+        )
+    }
+    /// Recover the rename-before-receipt interruption by observation only.
+    /// Both original C custody and the original Prepared journal must remain
+    /// live. Missing/restored/replaced files are refused, never renamed again.
+    pub(in crate::store) fn reopen_unrecorded_retired(
+        host: &Root,
+        owner: OwnedConfigurationRoot,
+        maintenance: Arc<ConfigurationMaintenance>,
+        journal: &crate::store::management::OwnedManagementJournal,
+        prepared: &NativePreparedRetirement,
+        custody: &MacBootRecoveryEffects,
+        held: &crate::store::management::handoff::LegacyGuardsHeld,
+    ) -> JournalResult<Self> {
+        Self::validate_recovery_binding(&owner, &maintenance, prepared, custody, held)?;
+        journal.validate_native_prepared(&maintenance, prepared)?;
+        let reopened = Self::reopen_existing_retired(host, owner, maintenance, prepared, None)?;
+        custody.validate_retained(held)?;
+        journal.validate_native_prepared(&reopened.maintenance, prepared)?;
+        reopened.validate_retired()?;
+        Ok(reopened)
+    }
+    fn validate_recovery_binding(
+        owner: &OwnedConfigurationRoot,
+        maintenance: &ConfigurationMaintenance,
+        prepared: &NativePreparedRetirement,
+        custody: &MacBootRecoveryEffects,
+        held: &crate::store::management::handoff::LegacyGuardsHeld,
+    ) -> JournalResult<()> {
+        let original = held.prepared().intent();
+        let intent = prepared.intent();
+        if !maintenance.matches(owner)
+            || !prepared.matches_owner(owner)
+            || !custody.matches_owner(owner)
+            || custody.maintenance().transaction_id() != maintenance.transaction_id()
+            || original.transaction_id != intent.transaction_id
+            || original.sequence != intent.sequence
+            || original.config_root != intent.config_root
+            || original.deployment_raw_sha256 != intent.deployment_raw_sha256
+            || original.before_state_sha256 != intent.before_state_sha256
+            || original.candidate_manifest_sha256 != intent.candidate_manifest_sha256
+            || original.publisher_spki_sha256 != intent.publisher_spki_sha256
+            || original.successor_retirement_intent_sha256 != prepared.raw_intent_sha256()
         {
+            return Err(JournalError::Conflict);
+        }
+        custody.validate_retained(held)
+    }
+    /// Shared fixed-path observation. None means no post stamp was durably
+    /// recorded: prove the original inode/content and sync the existing rename.
+    fn reopen_existing_retired(
+        host: &Root,
+        owner: OwnedConfigurationRoot,
+        maintenance: Arc<ConfigurationMaintenance>,
+        prepared: &NativePreparedRetirement,
+        expected_post: Option<&NativeRetirementFileStamp>,
+    ) -> JournalResult<Self> {
+        if !maintenance.matches(&owner) || !prepared.matches_owner(&owner) {
             return Err(JournalError::Conflict);
         }
         let intent = prepared.intent();
@@ -186,17 +249,13 @@ impl MacTokenRetirement {
             || intent.host_root != host_root
             || intent.token_destination() != Path::new("device").join(&destination)
             || !intent.original_token.valid_for(&host_root)
-            || !record.post_stamp().valid_for(&host_root)
-            || !intent
-                .original_token
-                .same_file_after_rename(record.post_stamp())
+            || expected_post.is_some_and(|post| {
+                !post.valid_for(&host_root) || !intent.original_token.same_file_after_rename(post)
+            })
         {
             return Err(JournalError::Conflict);
         }
         let NativeRetirementFileStamp::Macos { stamp: original } = &intent.original_token else {
-            return Err(JournalError::Conflict);
-        };
-        let NativeRetirementFileStamp::Macos { stamp: post } = record.post_stamp() else {
             return Err(JournalError::Conflict);
         };
         let held_host = host.clone();
@@ -225,11 +284,17 @@ impl MacTokenRetirement {
                 OFlag::O_RDONLY | OFlag::O_NONBLOCK,
                 Mode::empty(),
             ))?;
-            if stamp(&token)? != *post {
+            let post = stamp(&token)?;
+            let native_post = NativeRetirementFileStamp::Macos {
+                stamp: post.clone(),
+            };
+            if !intent.original_token.same_file_after_rename(&native_post)
+                || expected_post.is_some_and(|expected| expected != &native_post)
+            {
                 return Err(JournalError::Unknown);
             }
             let bytes = digest_file(&token, original.byte_len as usize)?;
-            if Sha256Digest::of_bytes(&bytes) != original.sha256 || stamp(&token)? != *post {
+            if Sha256Digest::of_bytes(&bytes) != original.sha256 || stamp(&token)? != post {
                 return Err(JournalError::Unknown);
             }
             let reopened = Self {
@@ -248,8 +313,16 @@ impl MacTokenRetirement {
                 retired: true,
                 retired_post: Some(post.clone()),
             };
-            if reopened.validate_retired_locked()? != *record.post_stamp() {
+            if reopened.validate_retired_locked()? != native_post {
                 return Err(JournalError::Unknown);
+            }
+            if expected_post.is_none() {
+                unknown(sync_private_file(&reopened.token))?;
+                unknown(sync_private_directory(&reopened.device))?;
+                unknown(reopened.host.sync_directory())?;
+                if reopened.validate_retired_locked()? != native_post {
+                    return Err(JournalError::Unknown);
+                }
             }
             Ok(reopened)
         })
@@ -385,6 +458,27 @@ impl MacTokenRetirement {
         let post = self.retire(prepared)?;
         let record =
             journal.record_native_credential_retired(&self.maintenance, prepared, &post)?;
+        if self.validate_retired()? != *record.post_stamp() {
+            return Err(JournalError::Unknown);
+        }
+        Ok(record)
+    }
+    /// Record only a physically observed original rename. The caller retains
+    /// this value and C custody on every error; there is no rename/retry path.
+    pub(in crate::store) fn record_observed_retirement(
+        &mut self,
+        journal: &mut crate::store::management::OwnedManagementJournal,
+        prepared: &NativePreparedRetirement,
+        custody: &MacBootRecoveryEffects,
+        held: &crate::store::management::handoff::LegacyGuardsHeld,
+    ) -> JournalResult<NativeRetiredRecord> {
+        Self::validate_recovery_binding(&self.owner, &self.maintenance, prepared, custody, held)?;
+        self.validate_intent(prepared.intent())?;
+        journal.validate_native_prepared(&self.maintenance, prepared)?;
+        let post = self.validate_retired()?;
+        let record =
+            journal.record_native_credential_retired(&self.maintenance, prepared, &post)?;
+        custody.validate_retained(held)?;
         if self.validate_retired()? != *record.post_stamp() {
             return Err(JournalError::Unknown);
         }

@@ -411,6 +411,32 @@ impl MacBootRecoveryEffects {
         value.environment()?;
         Ok(value)
     }
+    /// Reopen the original GuardsHeld chain before canonical cutover. Both
+    /// journal observations require the original before-state and transaction.
+    /// This only restores physical custody; it performs no recovery effects.
+    pub(in crate::store) fn reopen_guards_held(
+        owner: OwnedConfigurationRoot,
+        maintenance: Arc<ConfigurationMaintenance>,
+        root: &Root,
+        host: &Root,
+        journal: &OwnedManagementJournal,
+    ) -> JournalResult<(Self, LegacyGuardsHeld)> {
+        if !maintenance.matches(&owner) || !journal.configuration_root().same_authority(&owner) {
+            return Err(JournalError::Conflict);
+        }
+        let prepared =
+            journal.resync_legacy_owner_recovery(&maintenance, maintenance.transaction_id())?;
+        if !journal.owner_recovery_prepared_matches(&prepared) {
+            return Err(JournalError::Conflict);
+        }
+        let (value, held) =
+            Self::reopen_guards_held_custody(owner, maintenance.clone(), root, host, prepared)?;
+        let rechecked = journal
+            .resync_legacy_owner_recovery(&maintenance, maintenance.transaction_id())?
+            .into_guards_held()?;
+        value.validate_retained(&rechecked)?;
+        Ok((value, held))
+    }
     /// Reopen only the ORIGINAL completed C chain and its actual private files.
     /// No rename, guard creation, phase append or scope-settlement inference.
     /// A canonical successor exception is checked only by the original journal
@@ -430,6 +456,25 @@ impl MacBootRecoveryEffects {
         if !journal.owner_recovery_prepared_matches(&prepared) {
             return Err(JournalError::Conflict);
         }
+        let (value, held) =
+            Self::reopen_guards_held_custody(owner, maintenance.clone(), root, host, prepared)?;
+        // Recheck the SAME original journal binding after all physical reads;
+        // no receipt is reconstructed from newly observed filesystem facts.
+        let rechecked = journal
+            .resync_legacy_owner_recovery_for_cutover(&maintenance, cutover)?
+            .into_guards_held()?;
+        value.validate_retained(&rechecked)?;
+        Ok((value, held))
+    }
+    /// Restore actual file custody only from an opaque original journal chain.
+    /// The caller must recheck its corresponding journal observation afterward.
+    fn reopen_guards_held_custody(
+        owner: OwnedConfigurationRoot,
+        maintenance: Arc<ConfigurationMaintenance>,
+        root: &Root,
+        host: &Root,
+        prepared: PreparedLegacyOwnerRecovery,
+    ) -> JournalResult<(Self, LegacyGuardsHeld)> {
         let held = prepared.into_guards_held()?;
         let prepared = held.prepared();
         let mut value =
@@ -548,12 +593,6 @@ impl MacBootRecoveryEffects {
             }
             Ok(())
         })?;
-        // Recheck the SAME original journal binding after all physical reads;
-        // no receipt is reconstructed from newly observed filesystem facts.
-        let rechecked = journal
-            .resync_legacy_owner_recovery_for_cutover(&maintenance, cutover)?
-            .into_guards_held()?;
-        value.validate_retained(&rechecked)?;
         Ok((value, held))
     }
     fn environment(&self) -> JournalResult<()> {

@@ -363,4 +363,84 @@ fn native_owner_recovery_continues_original_partial_archive_without_second_trans
     );
     assert_eq!(fs::read(path.join("state.json")).unwrap(), before);
     assert!(owner.ensure_admission().is_err());
+
+    // Reification preserves original bytes/file identity, keeps the same writer
+    // and leaves the physical token effect to its actual OS owner.
+    let journal_files = || -> BTreeMap<_, _> {
+        fs::read_dir(&namespace)
+            .unwrap()
+            .map(|entry| {
+                let entry = entry.unwrap();
+                let metadata = entry.metadata().unwrap();
+                (
+                    entry.file_name(),
+                    (
+                        fs::read(entry.path()).unwrap(),
+                        metadata.dev(),
+                        metadata.ino(),
+                    ),
+                )
+            })
+            .collect()
+    };
+    let exact_prepared = journal_files();
+    let (reopened, not_retired) = journal.reopen_native_retirement(&maintenance, &tx).unwrap();
+    assert!(journal.native_prepared_matches(&reopened));
+    assert!(reopened.matches_owner(&owner));
+    assert!(reopened.intent() == retirement.intent());
+    assert_eq!(reopened.record_sha256(), retirement.record_sha256());
+    assert!(not_retired.is_none());
+    assert_eq!(exact_prepared, journal_files());
+    let foreign: TransactionId = "foreign-retirement".try_into().unwrap();
+    assert!(
+        journal
+            .reopen_native_retirement(&maintenance, &foreign)
+            .is_err()
+    );
+    assert_eq!(exact_prepared, journal_files());
+
+    let source = host.join(successor.token_source());
+    let destination = host.join(successor.token_destination());
+    fs::rename(&source, &destination).unwrap();
+    fs::File::open(host.join("device"))
+        .unwrap()
+        .sync_all()
+        .unwrap();
+    let post = observed(&destination);
+    let recorded = journal
+        .record_native_credential_retired(&maintenance, &reopened, &post)
+        .unwrap();
+    let exact_retired = journal_files();
+    let (again, retired) = journal.reopen_native_retirement(&maintenance, &tx).unwrap();
+    let retired = retired.unwrap();
+    assert!(journal.native_prepared_matches(&again));
+    assert!(retired.prepared.matches_owner(&owner));
+    assert_eq!(retired.record_sha256, recorded.record_sha256);
+    assert!(retired.post_stamp == post);
+    assert_eq!(exact_retired, journal_files());
+    assert!(observed(&destination) == post);
+    assert!(!source.exists());
+
+    // Refuse changed canonical inputs and orphan records without repairing them.
+    fs::write(path.join("state.json"), b"{\"schema\":1,\"changed\":true}").unwrap();
+    assert!(journal.reopen_native_retirement(&maintenance, &tx).is_err());
+    assert_eq!(exact_retired, journal_files());
+    fs::write(path.join("state.json"), before).unwrap();
+    write(
+        &namespace.join("unexpected-original"),
+        b"owned-negative-fixture",
+    );
+    let with_orphan = journal_files();
+    assert!(journal.reopen_native_retirement(&maintenance, &tx).is_err());
+    assert_eq!(with_orphan, journal_files());
+    fs::remove_file(namespace.join("unexpected-original")).unwrap();
+
+    // A torn fixture retaining only intent must not mint Prepared or append it.
+    let [_, prepared_name, retired_name] = names(&tx);
+    fs::remove_file(namespace.join(retired_name)).unwrap();
+    fs::remove_file(namespace.join(prepared_name)).unwrap();
+    let intent_only = journal_files();
+    assert!(journal.reopen_native_retirement(&maintenance, &tx).is_err());
+    assert_eq!(intent_only, journal_files());
+    assert!(owner.ensure_admission().is_err());
 }

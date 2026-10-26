@@ -397,6 +397,57 @@ impl OwnedManagementJournal {
             })
         })
     }
+    /// Reopen an already Prepared/Retired original before canonical cutover.
+    /// Resync attests only original journal durability, never token rename or
+    /// old-owner settlement. The caller must retain/revalidate its OS custody.
+    pub(in crate::store) fn reopen_native_retirement(
+        &self,
+        maintenance: &ConfigurationMaintenance,
+        id: &TransactionId,
+    ) -> JournalResult<(NativePreparedRetirement, Option<NativeRetiredRecord>)> {
+        if maintenance.transaction_id() != id {
+            return Err(JournalError::Conflict);
+        }
+        self.owner.with_maintenance(maintenance, |state| {
+            self.with_directory_locked(state, |dir| {
+                let before = original_native(&files::scan(dir, self.budget)?, id)?;
+                // An intent-only write is not a Prepared capability. Recovery
+                // must not manufacture the missing phase or replay preparation.
+                if before.prepared.is_none() {
+                    return Err(JournalError::Conflict);
+                }
+                canonical(state, &before.intent)?;
+                let [raw_name, prepared_name, retired_name] = names(id);
+                for name in [raw_name, prepared_name] {
+                    files::sync_file(dir, &name)?;
+                }
+                if before.retired.is_some() {
+                    files::sync_file(dir, &retired_name)?;
+                }
+                super::super::platform::sync_directory(dir)?;
+                let after = original_native(&files::scan(dir, self.budget)?, id)?;
+                if before.intent != after.intent
+                    || before.raw != after.raw
+                    || before.prepared != after.prepared
+                    || before.retired != after.retired
+                    || before.post != after.post
+                {
+                    return Err(JournalError::Unknown);
+                }
+                canonical(state, &after.intent).map_err(|_| JournalError::Unknown)?;
+                let retired = match (after.retired, after.post.as_ref()) {
+                    (Some(record_sha256), Some(post_stamp)) => Some(RetiredCredentialRecord {
+                        prepared: prepared(self, &after)?,
+                        record_sha256,
+                        post_stamp: post_stamp.clone(),
+                    }),
+                    (None, None) => None,
+                    _ => return Err(JournalError::Unknown),
+                };
+                Ok((prepared(self, &after)?, retired))
+            })
+        })
+    }
     pub(in crate::store) fn resync_native_retirement(
         &self,
         maintenance: &ConfigurationMaintenance,
