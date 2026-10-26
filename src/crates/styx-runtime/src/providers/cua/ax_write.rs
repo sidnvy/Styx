@@ -165,6 +165,20 @@ fn acquired_target(value: &CallToolResult, request: &AxWriteRequest) -> Result<S
         .ok_or(CuaError::ProtocolMismatch)?;
     Ok(target.into())
 }
+/// Opt-in diagnostic labels only. Never log values, targets, paths or raw errors,
+/// and never use diagnostic success/failure as an admission or execution fact.
+pub(super) fn diagnostic(stage: &'static str, code: &str) {
+    if std::env::var_os("STYX_CUA_DIAGNOSTICS").as_deref() != Some(std::ffi::OsStr::new("1")) {
+        return;
+    }
+    use std::io::Write as _;
+    let _ = writeln!(
+        std::io::stderr().lock(),
+        "{}",
+        serde_json::json!({"event":"styx_cua_refusal", "stage":stage, "code":code})
+    );
+}
+
 fn pre_send_code(code: &str) -> bool {
     matches!(
         code,
@@ -250,7 +264,10 @@ pub(super) async fn invoke(
         Some(Ok(Ok(CallToolResponse::Complete(value)))) => {
             match acquired_target(&value, &request) {
                 Ok(target) => target,
-                Err(cause) => return (CuaEvidence::NotDispatched, None, Some(cause)),
+                Err(cause) => {
+                    diagnostic("private_acquire_reply", cause.code());
+                    return (CuaEvidence::NotDispatched, None, Some(cause));
+                }
             }
         }
         _ => {
@@ -270,7 +287,10 @@ pub(super) async fn invoke(
     };
     match authorized {
         Some(Ok(Ok(()))) if !stop.is_cancelled() && Instant::now() < until => {}
-        Some(Ok(Err(cause))) => return (CuaEvidence::NotDispatched, None, Some(cause)),
+        Some(Ok(Err(cause))) => {
+            diagnostic("late_write_gate", cause.code());
+            return (CuaEvidence::NotDispatched, None, Some(cause));
+        }
         _ => return (CuaEvidence::NotDispatched, None, Some(CuaError::Unknown)),
     }
     // Cua reserves `target` for its public typed desktop selector. This private
@@ -298,11 +318,24 @@ pub(super) async fn invoke(
                 }))),
                 None,
             ),
-            CuaEvidence::NotDispatched => (
-                CuaEvidence::NotDispatched,
-                None,
-                Some(CuaError::PermissionDenied),
-            ),
+            CuaEvidence::NotDispatched => {
+                // Only write_evidence's exact four-field not-dispatched proof
+                // can reach here. Never emit an unvalidated native error/code.
+                if let Some(code) = value
+                    .structured_content
+                    .as_ref()
+                    .and_then(|data| data.get("code"))
+                    .and_then(Value::as_str)
+                    .filter(|code| pre_send_code(code))
+                {
+                    diagnostic("private_write_reply", code);
+                }
+                (
+                    CuaEvidence::NotDispatched,
+                    None,
+                    Some(CuaError::PermissionDenied),
+                )
+            }
             CuaEvidence::Unknown => (CuaEvidence::Unknown, None, Some(CuaError::Unknown)),
         },
         _ => (CuaEvidence::Unknown, None, Some(CuaError::Unknown)),

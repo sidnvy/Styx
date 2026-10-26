@@ -997,26 +997,29 @@ impl CuaActionSlot {
         write_gate: Option<AxWriteGate>,
     ) -> CuaReceipt {
         let operation = permit.id().clone();
-        let refused = |cause| CuaReceipt {
-            operation: operation.clone(),
-            evidence: CuaEvidence::NotDispatched,
-            result: None,
-            cause: Some(cause),
+        let refused = |stage, cause: CuaError| {
+            ax_write::diagnostic(stage, cause.code());
+            CuaReceipt {
+                operation: operation.clone(),
+                evidence: CuaEvidence::NotDispatched,
+                result: None,
+                cause: Some(cause),
+            }
         };
         let action: CuaAction = match serde_json::from_slice(permit.payload()) {
             Ok(v) => v,
-            Err(_) => return refused(CuaError::InvalidRequest),
+            Err(_) => return refused("permit_payload", CuaError::InvalidRequest),
         };
         #[cfg(target_os = "windows")]
         if self.live.config.launch.source.fenced() {
-            return refused(CuaError::StaleObservation);
+            return refused("desktop_source_fenced", CuaError::StaleObservation);
         }
         if let Err(e) = action.validate() {
-            return refused(e);
+            return refused("action_validation", e);
         }
         let capability = match action.capability() {
             Ok(v) => v,
-            Err(e) => return refused(e),
+            Err(e) => return refused("action_capability", e),
         };
         if let Err(e) = permit_binding(
             &permit,
@@ -1025,31 +1028,31 @@ impl CuaActionSlot {
             &self.resource.session,
             capability,
         ) {
-            return refused(e);
+            return refused("permit_binding", e);
         }
         let write_request = match action.accessibility_write_request() {
             Ok(value) => value,
-            Err(error) => return refused(error),
+            Err(error) => return refused("write_request", error),
         };
         let write_attempt = permit.purpose() == OperationPurpose::DesktopAccessibilityWriteAttempt;
         if write_attempt != write_request.is_some()
             || (write_attempt && (!self.live.ax_once_available || write_gate.is_none()))
         {
-            return refused(CuaError::PermissionDenied);
+            return refused("write_contract", CuaError::PermissionDenied);
         }
         if permit.purpose() != OperationPurpose::Execute
             && !write_attempt
             && !matches!(action.desktop_read_request(), Ok(Some(request)) if request.purpose() == permit.purpose())
         {
-            return refused(CuaError::PermissionDenied);
+            return refused("operation_purpose", CuaError::PermissionDenied);
         }
         if action.mutates() && permit.context().observation.is_none() {
-            return refused(CuaError::PermissionDenied);
+            return refused("missing_observation", CuaError::PermissionDenied);
         }
         let digest = Sha256Digest::of_bytes(permit.payload());
         if let Some((old, evidence, cause, old_capability)) = self.live.actions.get(&operation) {
             if old != &digest || old_capability != &capability {
-                return refused(CuaError::PermissionDenied);
+                return refused("operation_binding", CuaError::PermissionDenied);
             }
             return CuaReceipt {
                 operation,
@@ -1063,28 +1066,28 @@ impl CuaActionSlot {
             || self.live.uncertain
             || self.resource.stop.is_cancelled()
         {
-            return refused(CuaError::Unknown);
+            return refused("worker_unavailable", CuaError::Unknown);
         }
         if self.live.actions.len() >= ACTION_RECORDS {
-            return refused(CuaError::Busy);
+            return refused("action_capacity", CuaError::Busy);
         }
         if self.live.config.validate().is_err() {
-            return refused(CuaError::PermissionDenied);
+            return refused("configuration_revalidation", CuaError::PermissionDenied);
         }
         #[cfg(target_os = "macos")]
         if let Err(error) = {
             let config = self.live.config.clone();
             macos::preflight(&mut self.live, &config, until).await
         } {
-            return refused(error);
+            return refused("native_preflight", error);
         }
         let Some(client) = self.live.client.as_ref() else {
-            return refused(CuaError::ProtocolMismatch);
+            return refused("native_client_missing", CuaError::ProtocolMismatch);
         };
         let peer = client.peer().clone();
         let params = CallToolRequestParams::new(action.name).with_arguments(action.arguments);
         if bounded_bytes(&params, REQUEST_BYTES - 1024).is_err() {
-            return refused(CuaError::InvalidRequest);
+            return refused("request_bound", CuaError::InvalidRequest);
         }
         self.live.actions.insert(
             operation.clone(),
