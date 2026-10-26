@@ -244,7 +244,7 @@ def complete_external_macos_signature(args, output, receipt, target, inputs):
     requirement = '=identifier "' + identifier + '" and certificate leaf = H"' + identity + '"'
     prefix = output / 'macos-signing-certificate-'
     commands = [('verify', ['/usr/bin/codesign', '--verify', '--strict', '-R', requirement, str(binary)]),
-                ('certificate', ['/usr/bin/codesign', '-d', '--extract-certificates', str(prefix), str(binary)])]
+                ('certificate', ['/usr/bin/codesign', '-d', '--extract-certificates=' + str(prefix), str(binary)])]
     observations = []
     for kind, argv in commands:
         with (output / ('macos-' + kind + '.stdout')).open('xb') as out, \

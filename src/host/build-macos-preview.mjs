@@ -399,7 +399,7 @@ export function completeNativeMacPreview(config){
  run('/usr/bin/codesign',['--verify','--strict','-R',requirement,originalApp]);
  for(const file of machOFiles(originalApp))run('/usr/bin/codesign',['--verify','--strict','-R',`=certificate leaf = H"${local.certificateSha1}"`,file]);
  fs.mkdirSync(destination,{mode:0o700});
- const prefix=path.join(destination,'app-signing-certificate-');run('/usr/bin/codesign',['-d','--extract-certificates',prefix,originalApp]);
+ const prefix=path.join(destination,'app-signing-certificate-');run('/usr/bin/codesign',['-d','--extract-certificates='+prefix,originalApp]);
  const certificate=prefix+'0',st=fs.lstatSync(certificate);
  assert(st.isFile()&&!st.isSymbolicLink()&&st.nlink===1&&st.size<=65536&&st.uid===process.getuid()&&!(st.mode&0o022)&&sha(certificate)===local.certificateSha256,'original_native_app_certificate_mismatch');
  const original=verifyNativeMacRuntime(inputFor(originalApp),metadata.arch);
