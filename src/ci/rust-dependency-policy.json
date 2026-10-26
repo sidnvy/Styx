@@ -20,6 +20,9 @@
       ],
       "external_allowed": [
         "thiserror"
+      ],
+      "dev_external_allowed": [
+        "serde_json"
       ]
     },
     "styx-runtime": {

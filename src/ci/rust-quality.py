@@ -168,7 +168,9 @@ def metadata_errors(metadata, policy, root):
         rule = policy["members"][name]
         allowed = set(rule["workspace_allowed"]) | set(rule["external_allowed"])
         for dep in package["dependencies"]:
-            if dep["name"] not in allowed:
+            # A test-only approval cannot authorize a runtime or build dependency.
+            dev_allowed = rule.get("dev_external_allowed", []) if dep.get("kind") == "dev" else []
+            if dep["name"] not in allowed and dep["name"] not in dev_allowed:
                 errors.append(f"{name}:unreviewed_dependency:{dep['name']}")
             if dep["name"] in packages:
                 if dep["name"] not in rule["workspace_allowed"]:
