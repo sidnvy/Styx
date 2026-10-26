@@ -583,10 +583,6 @@ mod platform {
             self.store.append(file, bytes).map_err(|_| unknown())?;
             self.validate()
         }
-        fn read(&self, file: File) -> Result<Option<Zeroizing<Vec<u8>>>> {
-            self.validate()?;
-            self.store.read(file).map_err(|_| unknown())
-        }
         fn report(
             &self,
             operation: &'static str,
@@ -689,9 +685,13 @@ mod platform {
             }
             let candidate = release::verify_selected(&selected)
                 .map_err(|_| JoinError::new("native_join_candidate_untrusted", 2))?;
+            // verify_selected already performed complete original-root/publisher
+            // validation and exact selection comparison. Reader support is part
+            // of that same immutable authenticated manifest, not a new boundary.
             if !candidate
+                .manifest()
+                .minimum_reader
                 .supports_state_reader(state.state().reader_contract)
-                .map_err(|_| unknown())?
             {
                 return Err(bad());
             }
@@ -704,7 +704,6 @@ mod platform {
                 || seed.anchor_sha256 != d.gateway.expected_ca_sha256
                 || &seed.runtime != bootstrap
                 || selected.publisher_spki_sha256 != seed.runtime.publisher_spki_sha256
-                || candidate.runtime_selection().map_err(|_| unknown())? != selected
                 || seed.label != d.host.label
                 || seed.cwd != text(&d.host.cwd)?
                 || seed.shell != text(&d.host.shell)?
@@ -776,9 +775,8 @@ mod platform {
             serde_json::from_slice(&selection_input.raw).map_err(|_| bad())?;
         let candidate = release::verify_selected(&selection)
             .map_err(|_| JoinError::new("native_join_candidate_untrusted", 2))?;
-        if candidate.runtime_selection().map_err(|_| bad())? != selection {
-            return Err(bad());
-        }
+        // verify_selected already binds the exact original selection. The full
+        // release is checked again below at the actual root-creation boundary.
         let ca = Input::open(&d.gateway.ca_file, 128 * 1024)?;
         let _ = tls(&ca.raw, d.gateway.expected_ca_sha256)?;
         let invitation_input = Input::open(&d.invitation_file, 4096)?;
@@ -1075,13 +1073,24 @@ mod platform {
     ) -> Result<JoinReport> {
         let work = blocking(move || open(&path, app_scope)).await?;
         let (work, (reply, ready_raw, mut credential, confirm_dispatched)) = io(work, |w| {
-            Ok((
-                w.read(File::JoinReply)?
-                    .ok_or_else(|| JoinError::new("native_join_dispatch_unknown_no_retry", 4))?,
-                w.read(File::Ready)?,
-                w.read(File::Credential)?,
-                w.read(File::ConfirmDispatched)?.is_some(),
-            ))
+            // One read-only prefix under the same original writer, as in
+            // inspect above. Every store.read still verifies its original pins
+            // and journal tip; no append or HTTP occurs between these reads.
+            w.validate()?;
+            let reply = w
+                .store
+                .read(File::JoinReply)
+                .map_err(|_| unknown())?
+                .ok_or_else(|| JoinError::new("native_join_dispatch_unknown_no_retry", 4))?;
+            let ready = w.store.read(File::Ready).map_err(|_| unknown())?;
+            let credential = w.store.read(File::Credential).map_err(|_| unknown())?;
+            let confirm = w
+                .store
+                .read(File::ConfirmDispatched)
+                .map_err(|_| unknown())?
+                .is_some();
+            w.validate()?;
+            Ok((reply, ready, credential, confirm))
         })
         .await?;
         let historical = ready_raw.is_some() || (credential.is_some() && confirm_dispatched);
