@@ -72,9 +72,7 @@ fn pending_actual_leaf_and_explicit_identity_gate_the_original_approval_body() {
             _ => unreachable!(),
         }
         // This is the production helper called before the sole approval POST.
-        let error = approval_body(&rows, &wrong)
-            .err()
-            .expect("wrong explicit selection denied");
+        let error = approval_body(&rows, &wrong).expect_err("wrong explicit selection denied");
         assert_eq!(error.code(), "native_gateway_approval_binding_mismatch");
         assert_eq!(error.outcome(), "not_dispatched");
         assert_eq!(error.exit_code(), 2);
@@ -104,16 +102,12 @@ fn pending_actual_leaf_and_explicit_identity_gate_the_original_approval_body() {
 #[test]
 fn actual_http_rejection_and_postdispatch_uncertainty_are_not_not_dispatched() {
     for status in [400, 401, 403, 404, 409, 429] {
-        let error = accepted_status(status)
-            .err()
-            .expect("explicit server rejection");
+        let error = accepted_status(status).expect_err("explicit server rejection");
         assert_eq!(error.outcome(), "rejected");
         assert_eq!(error.exit_code(), 2);
     }
     for status in [202, 301, 500, 503] {
-        let error = accepted_status(status)
-            .err()
-            .expect("no proof of completed admin mutation");
+        let error = accepted_status(status).expect_err("no proof of completed admin mutation");
         assert_eq!(error.outcome(), "unknown");
         assert_eq!(error.exit_code(), 4);
     }
