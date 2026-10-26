@@ -5,8 +5,6 @@
 //! are reobserved before returning; that is not a transactional snapshot against
 //! an uncoordinated legacy writer. CLI and future UI use this same entry point.
 pub mod native;
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
-pub(crate) mod service_control;
 pub mod native_gateway;
 pub mod native_join;
 #[cfg(any(
@@ -27,6 +25,8 @@ pub(crate) mod native_join_http;
     all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
 ))]
 mod native_join_protocol;
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+pub(crate) mod service_control;
 use crate::store::{PrivateRoot, RawFile, StoreError};
 use serde::{
     Deserialize, Serialize,

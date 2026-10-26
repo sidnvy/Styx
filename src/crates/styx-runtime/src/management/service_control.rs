@@ -16,7 +16,7 @@ use tokio::{
     net::{UnixListener, UnixStream},
 };
 use tokio_util::sync::CancellationToken;
-const SOCKET: &str = ".styx-service-control-v1.sock";
+const SOCKET: &str = crate::platform::linux::native_service::CONTROL_SOCKET_NAME;
 const FRAME: usize = 4096;
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

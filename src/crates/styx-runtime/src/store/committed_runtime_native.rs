@@ -870,19 +870,18 @@ impl NativeCommittedRuntimeSnapshot {
         }
         for pin in &self.pins {
             #[cfg(all(target_os = "linux", target_env = "gnu"))]
-            if let Some(proof) = &successor {
-                if pin.root.identity() == self.root.identity()
-                    && pin.path == Path::new("state.json")
-                {
-                    let raw = pin
-                        .root
-                        .read_raw(&pin.path, pin.max)
-                        .map_err(|_| JournalError::Unknown)?;
-                    if !proof.matches_state(&raw) {
-                        return Err(JournalError::Unknown);
-                    }
-                    continue; // Exact current proof replaces the old canonical expectation.
+            if let Some(proof) = &successor
+                && pin.root.identity() == self.root.identity()
+                && pin.path == Path::new("state.json")
+            {
+                let raw = pin
+                    .root
+                    .read_raw(&pin.path, pin.max)
+                    .map_err(|_| JournalError::Unknown)?;
+                if !proof.matches_state(&raw) {
+                    return Err(JournalError::Unknown);
                 }
+                continue; // Exact current proof replaces the old canonical expectation.
             }
             pin.revalidate()?;
         }
@@ -941,19 +940,18 @@ impl NativeCommittedRuntimeSnapshot {
         // checks. Equal bytes at a replacement inode are still a changed input.
         for pin in &self.pins {
             #[cfg(all(target_os = "linux", target_env = "gnu"))]
-            if let Some(proof) = &successor {
-                if pin.root.identity() == self.root.identity()
-                    && pin.path == Path::new("state.json")
-                {
-                    let raw = pin
-                        .root
-                        .read_raw(&pin.path, pin.max)
-                        .map_err(|_| JournalError::Unknown)?;
-                    if !proof.matches_state(&raw) {
-                        return Err(JournalError::Unknown);
-                    }
-                    continue; // Exact current proof replaces the old canonical expectation.
+            if let Some(proof) = &successor
+                && pin.root.identity() == self.root.identity()
+                && pin.path == Path::new("state.json")
+            {
+                let raw = pin
+                    .root
+                    .read_raw(&pin.path, pin.max)
+                    .map_err(|_| JournalError::Unknown)?;
+                if !proof.matches_state(&raw) {
+                    return Err(JournalError::Unknown);
                 }
+                continue; // Exact current proof replaces the old canonical expectation.
             }
             pin.revalidate()?;
         }

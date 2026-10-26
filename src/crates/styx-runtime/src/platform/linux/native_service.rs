@@ -38,6 +38,7 @@ impl ServiceRole {
     }
 }
 pub(crate) type ServiceError = ManagerError;
+pub(crate) const CONTROL_SOCKET_NAME: &str = ".styx-service-control-v1.sock";
 type ServiceResult<T> = std::result::Result<T, ServiceError>;
 fn invalid<T>(_: T) -> ServiceError {
     ServiceError::Invalid
@@ -212,6 +213,11 @@ impl Definition {
             return Err(ServiceError::Conflict);
         }
         let canonical = read_state(&root)?;
+        // Check the actual platform address contract before any C07/OS effect.
+        // No truncated path, alias, or fallback endpoint may select another root.
+        if canonical.desired.gateway.is_some() {
+            nix::sys::socket::UnixAddr::new(&path.join(CONTROL_SOCKET_NAME)).map_err(invalid)?;
+        }
         role.desired(&canonical).ok_or(ServiceError::Invalid)?;
         let selection = selection(&canonical)?;
         let candidate = Arc::new(crate::release::verify_selected(&selection).map_err(changed)?);
@@ -345,14 +351,14 @@ impl Definition {
         if !output.success
             || get("Id")? != self.unit
             || load != "loaded"
-            || get("SourcePath")? != ""
+            || !get("SourcePath")?.is_empty()
             || get("FragmentPath")?
                 != self
                     .parent_path
                     .join(&self.unit)
                     .to_str()
                     .ok_or(ServiceError::Invalid)?
-            || get("DropInPaths")? != ""
+            || !get("DropInPaths")?.is_empty()
             || get("NeedDaemonReload")? != "no"
             || get("Transient")? != "no"
             || get("Restart")? != "no"

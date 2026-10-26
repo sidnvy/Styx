@@ -105,7 +105,10 @@ Windows startup projection uses the protected Windows directory handles and the 
 The additive `service` command uses the selected, verified C08 Rust CLI and a
 fixed per-profile systemd user unit. It preserves the original identity,
 configuration journal and pairing. It does not enable linger, change login
-policy, acquire root privileges, or claim survival across logout.
+policy, acquire root privileges, or claim survival across logout. The canonical
+profile path must fit the platform Unix socket address limit when Gateway is
+selected; an excessive path is rejected before configuration or service effects,
+without truncation or a fallback endpoint.
 
 ```sh
 styx service install --state-dir /private/native --component gateway \
