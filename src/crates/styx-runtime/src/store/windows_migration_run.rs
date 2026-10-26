@@ -896,13 +896,15 @@ async fn run_resume(
         &retired
     );
     let custody = WindowsCutoverCustody::new(owner.clone(), effects, held, &os, &token, &host);
+    // Preparing consumes the data plan. Original guards, materials, OS effects
+    // and retirement custody remain borrowed from this frame; the applied
+    // object retains that same custody on success. Never clone a second plan.
     let mut applied = keep!(
         plan.prepare(custody, &mut journal, &state_dir, inputs, candidate.clone()),
         "unknown_windows_cutover_prepared",
         &guarded,
         &materials,
         &preservation,
-        &plan,
         &token,
         &retirement,
         &retired
@@ -913,7 +915,6 @@ async fn run_resume(
         &guarded,
         &materials,
         &preservation,
-        &plan,
         &token,
         &retirement,
         &retired,
