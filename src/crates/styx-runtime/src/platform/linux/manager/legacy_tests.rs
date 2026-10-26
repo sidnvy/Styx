@@ -105,8 +105,15 @@ fn original_pidfd_distinguishes_live_read_failure_zombie_and_reaped_birth() {
     )
     .expect("original pidfd");
     assert!(original.still_current().unwrap());
+    // While the original birth is still present, an incomplete stopping read
+    // can only remain pending. Before stopping it is still a strict failure.
+    assert!(!original_exit_ready(&pidfd).unwrap());
     assert_eq!(
         observe_main_exit(&original, Some(&pidfd), || Err(LegacyError::Unknown)),
+        Ok(false)
+    );
+    assert_eq!(
+        observe_main_exit(&original, None, || Err(LegacyError::Unknown)),
         Err(LegacyError::Unknown)
     );
     assert_eq!(

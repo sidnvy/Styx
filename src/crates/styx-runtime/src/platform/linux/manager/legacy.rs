@@ -1741,16 +1741,18 @@ fn observe_main_exit(
     }
     match check_live() {
         Ok(()) => Ok(false),
-        Err(error @ (LegacyError::Unknown | LegacyError::Unavailable))
-            if original_pidfd.is_some() =>
-        {
+        Err(LegacyError::Unknown | LegacyError::Unavailable) if original_pidfd.is_some() => {
             if !original.still_current().map_err(unknown)? {
                 return Ok(true);
             }
-            if original_exit_ready(original_pidfd.expect("checked original descriptor"))? {
-                return Ok(false);
-            }
-            Err(error)
+            // Exit tears down /proc image/argv before pidfd readiness is
+            // necessarily visible. After the one original TERM, incomplete
+            // reads can only keep this bounded observation pending. They do
+            // not prove liveness, exit, or settlement and cause no new signal.
+            // Poll errors remain errors; both readiness states require the
+            // original birth to disappear before final settlement is possible.
+            original_exit_ready(original_pidfd.expect("checked original descriptor"))?;
+            Ok(false)
         }
         Err(error) => Err(error),
     }
