@@ -422,11 +422,24 @@ impl Root {
         bytes: &[u8],
         observer: &dyn Fn(&str),
     ) -> Result<()> {
+        self.with_configuration_writer_directory(guard, |_| {
+            self.create_private_export(name, bytes, observer)
+        })
+    }
+    // Only the store's bounded invitation exporter may use this without a
+    // configuration writer. Existing CREATE_NEW, private ownership and flush
+    // semantics are identical; failed or partial files are never replaced.
+    pub(super) fn create_private_export(
+        &self,
+        name: &str,
+        bytes: &[u8],
+        observer: &dyn Fn(&str),
+    ) -> Result<()> {
         component(OsStr::new(name))?;
         if name.encode_utf16().count() > 255 || bytes.is_empty() || bytes.len() > 1024 * 1024 {
             return Err(StoreError::TooLarge);
         }
-        self.with_configuration_writer_directory(guard, |_| {
+        self.with_readonly_directory(|_| {
             ffi::require_local_ntfs(&self.path, &self.directory)?;
             let path = self.path.join(name);
             let mut file = ffi::create_new_private_file(&path)?;

@@ -255,11 +255,24 @@ impl Root {
         bytes: &[u8],
         observer: &dyn Fn(&str),
     ) -> Result<()> {
+        self.with_configuration_writer_directory(guard, |_| {
+            self.create_private_export(name, bytes, observer)
+        })
+    }
+    // Only the store's bounded invitation exporter may use this without a
+    // configuration writer. Existing CREATE_NEW, private ownership and flush
+    // semantics are identical; failed or partial files are never replaced.
+    pub(super) fn create_private_export(
+        &self,
+        name: &str,
+        bytes: &[u8],
+        observer: &dyn Fn(&str),
+    ) -> Result<()> {
         journal_component(name)?;
         if bytes.is_empty() || bytes.len() > 1024 * 1024 {
             return Err(StoreError::TooLarge);
         }
-        self.with_configuration_writer_directory(guard, |directory| {
+        self.with_readonly_directory(|directory| {
             let mut file = open_at(
                 directory,
                 OsStr::new(name),

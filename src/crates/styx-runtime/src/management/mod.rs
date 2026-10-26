@@ -6,6 +6,7 @@
 //! an uncoordinated legacy writer. CLI and future UI use this same entry point.
 pub mod native;
 pub mod native_gateway;
+pub mod native_gateway_admin;
 pub mod native_join;
 #[cfg(any(
     all(target_os = "windows", target_arch = "x86_64"),

@@ -161,6 +161,23 @@ pub(crate) async fn exchange_local_admin(
     )
     .await
 }
+/// Fixed read-only admin discovery; never retries a failed mutation.
+pub(crate) async fn exchange_local_pending(
+    origin: &url::Url,
+    tls: &GatewayClientTls,
+    bearer: &[u8],
+) -> Result<JoinHttpResponse, JoinHttpError> {
+    exchange_once(
+        origin,
+        tls,
+        hyper::Method::GET,
+        "/styx/enroll/pending",
+        &[],
+        Some(bearer),
+        MAX_TIMEOUT,
+    )
+    .await
+}
 fn post_path(path: &str) -> bool {
     matches!(
         path,
@@ -193,10 +210,11 @@ async fn exchange_once(
         || (method == hyper::Method::GET
             && body.is_empty()
             && bearer.is_some()
-            && path
-                .strip_prefix("/styx/enroll/self/")
-                .and_then(|p| p.strip_suffix("/capabilities"))
-                .is_some_and(device_path_component));
+            && (path == "/styx/enroll/pending"
+                || path
+                    .strip_prefix("/styx/enroll/self/")
+                    .and_then(|p| p.strip_suffix("/capabilities"))
+                    .is_some_and(device_path_component)));
     if !allowed
         || body.len() > REQUEST_BYTES
         || origin.as_str().len() > 2048

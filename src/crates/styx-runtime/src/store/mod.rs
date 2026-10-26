@@ -415,6 +415,44 @@ impl PrivateRoot {
         self.inner.create_runtime_asset(name, bytes)
     }
 
+    /// Export one invitation as a private, exclusively created input file.
+    /// This is not a configuration mutation or a management-writer lease.
+    /// Callers validate the output parent before dispatch and report Unknown
+    /// if publication fails after the Gateway may have created an invitation.
+    /// Partial output remains for inspection; no implicit delete or retry.
+    pub(crate) fn create_pairing_invitation(
+        &self,
+        name: &std::ffi::OsStr,
+        bytes: &[u8],
+    ) -> Result<RawFile> {
+        let path = checked_relative(Path::new(name))?;
+        if path.components().count() != 1 {
+            return Err(StoreError::InvalidRelativePath);
+        }
+        if bytes.is_empty() || bytes.len() > 32 * 1024 {
+            return Err(StoreError::TooLarge);
+        }
+        #[cfg(any(
+            target_os = "windows",
+            target_os = "macos",
+            all(target_os = "linux", target_env = "gnu")
+        ))]
+        {
+            self.inner.create_private_export(
+                path.to_str().ok_or(StoreError::InvalidRelativePath)?,
+                bytes,
+                &|_| {},
+            )?;
+            self.read_raw(path, bytes.len())
+        }
+        #[cfg(not(any(
+            target_os = "windows",
+            target_os = "macos",
+            all(target_os = "linux", target_env = "gnu")
+        )))]
+        Err(StoreError::Unsupported)
+    }
+
     /// App onboarding input only: fixed destinations, exclusive creation and
     /// native private-file publication. Caller retains the writer on failure;
     /// partial material is never overwritten or automatically retried.
@@ -632,3 +670,6 @@ fn sha256(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, any(target_os = "linux", target_os = "macos")))]
+mod invitation_export_tests;

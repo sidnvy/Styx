@@ -356,6 +356,47 @@ enum HostJoinCommand {
 
 #[derive(Subcommand)]
 enum GatewayCommand {
+    /// Create one invitation and publish its secret only to a new private file.
+    Invite {
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(long)]
+        invitation_file: PathBuf,
+        #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u64).range(60..=600))]
+        ttl_seconds: u64,
+        #[arg(long, required = true)]
+        authorize: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Observe authoritative pending identities; never approves or claims them.
+    Pending {
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Approve exactly one explicitly compared pending identity.
+    Approve {
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(long)]
+        request_id: String,
+        #[arg(long)]
+        device_id: String,
+        #[arg(long)]
+        fingerprint: String,
+        #[arg(long)]
+        comparison_code: String,
+        #[arg(long)]
+        enable_computer: bool,
+        #[arg(long)]
+        enable_browser: bool,
+        #[arg(long, required = true)]
+        authorize: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Initialize fresh Gateway-only foreground configuration; no service launch or legacy adoption.
     Bootstrap {
         #[arg(long)]
@@ -468,6 +509,39 @@ fn native_result<T: serde::Serialize>(
         }
         Err(value) => {
             eprintln!("{}", native_error_output(&value));
+            ExitCode::from(value.exit_code())
+        }
+    }
+}
+fn gateway_admin_result(
+    result: Result<
+        styx_runtime::management::native_gateway_admin::AdminReport,
+        styx_runtime::management::native_gateway_admin::AdminError,
+    >,
+    json: bool,
+) -> ExitCode {
+    match result {
+        Ok(report) => {
+            if !json {
+                eprintln!("Native Gateway admin observation; invitation secrets are file-only:");
+            }
+            if write_json(&report).is_ok() {
+                ExitCode::SUCCESS
+            } else if matches!(report.operation, "gateway_invite" | "gateway_approve") {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({"schema":1,"error":"native_gateway_admin_response_unknown","outcome":"unknown","operations_replayed":false})
+                );
+                ExitCode::from(4)
+            } else {
+                error("output_unavailable")
+            }
+        }
+        Err(value) => {
+            eprintln!(
+                "{}",
+                serde_json::json!({"schema":1,"error":value.code(),"outcome":value.outcome(),"operations_replayed":false})
+            );
             ExitCode::from(value.exit_code())
         }
     }
@@ -1180,6 +1254,64 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
                     json,
                 },
         } => transient_manager::stop(state_dir, owner_file, expected, json).await,
+        Command::Gateway {
+            command:
+                GatewayCommand::Invite {
+                    state_dir,
+                    invitation_file,
+                    ttl_seconds,
+                    json,
+                    ..
+                },
+        } => gateway_admin_result(
+            styx_runtime::management::native_gateway_admin::invite(
+                &state_dir,
+                &invitation_file,
+                ttl_seconds,
+            )
+            .await,
+            json,
+        ),
+        Command::Gateway {
+            command: GatewayCommand::Pending { state_dir, json },
+        } => gateway_admin_result(
+            styx_runtime::management::native_gateway_admin::pending(&state_dir).await,
+            json,
+        ),
+        Command::Gateway {
+            command:
+                GatewayCommand::Approve {
+                    state_dir,
+                    request_id,
+                    device_id,
+                    fingerprint,
+                    comparison_code,
+                    enable_computer,
+                    enable_browser,
+                    json,
+                    ..
+                },
+        } => {
+            let Ok(device_id) = styx_contracts::identity::DeviceId::try_from(device_id) else {
+                return error("native_gateway_admin_input");
+            };
+            let Ok(fingerprint) = styx_contracts::identity::Sha256Digest::try_from(fingerprint)
+            else {
+                return error("native_gateway_admin_input");
+            };
+            let selected = styx_runtime::management::native_gateway_admin::ApprovalSelection {
+                request_id,
+                device_id,
+                fingerprint,
+                comparison_code,
+                enable_computer,
+                enable_browser,
+            };
+            gateway_admin_result(
+                styx_runtime::management::native_gateway_admin::approve(&state_dir, selected).await,
+                json,
+            )
+        }
         Command::Gateway {
             command:
                 GatewayCommand::Bootstrap {
