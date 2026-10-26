@@ -561,7 +561,14 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
         for number in [SIGTERM, SIGINT] {
             signal(number, SIG_IGN)
             let source = DispatchSource.makeSignalSource(signal: number, queue: .main)
-            source.setEventHandler { [weak self] in self?.terminationPreservesRecovery = true; NSApp.terminate(nil) }
+            source.setEventHandler { [weak self] in
+                self?.terminationPreservesRecovery = true
+                #if STYX_PRODUCT_UI
+                productScheduleApplicationTermination()
+                #else
+                NSApp.terminate(nil)
+                #endif
+            }
             source.resume(); signalSources.append(source)
         }
         let item = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
@@ -1108,7 +1115,14 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
             do { try start() } catch { statusLine?.title = "Restart blocked: \(error)" }
         }
     }
-    @objc func quit() { terminationPreservesRecovery = false; NSApp.terminate(nil) }
+    @objc func quit() {
+        terminationPreservesRecovery = false
+        #if STYX_PRODUCT_UI
+        productScheduleApplicationTermination()
+        #else
+        NSApp.terminate(nil)
+        #endif
+    }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         if terminationPending { return .terminateLater }
         #if STYX_PRODUCT_UI
