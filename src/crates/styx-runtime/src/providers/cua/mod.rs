@@ -872,9 +872,10 @@ fn selected_native_catalog() -> Result<FixedNativeCatalog> {
     }
 }
 fn validate_catalog(tools: &[rmcp::model::Tool]) -> Result<bool> {
-    let extended = validate_native_catalog(tools, selected_native_catalog()?)?;
-    // Windows private UIA once implementation is still pending audit.
-    Ok(extended && !cfg!(target_os = "windows"))
+    // Every platform must advertise both exact private schemas before the
+    // observed-target write path is available. The original signed worker,
+    // Core grant/owner/generation checks and late once-only gate still apply.
+    validate_native_catalog(tools, selected_native_catalog()?)
 }
 fn validate_native_catalog(
     tools: &[rmcp::model::Tool],
