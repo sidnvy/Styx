@@ -549,13 +549,20 @@ mod platform {
             let bootstrap = update
                 .as_ref()
                 .map_or(&selected, |update| &update.bootstrap_runtime);
+            // Keep a complete pinned-release check at every existing Work
+            // boundary, but derive reader support from that same authenticated
+            // immutable manifest. The publication getters would scan the entire
+            // payload three times here; no validation is cached across calls.
+            self.candidate
+                .revalidate_matches_selection(&selected)
+                .map_err(|_| unknown())?;
             if bootstrap != &self.seed.runtime
                 || selected.publisher_spki_sha256 != self.seed.runtime.publisher_spki_sha256
                 || !self
                     .candidate
+                    .manifest()
+                    .minimum_reader
                     .supports_state_reader(state.state().reader_contract)
-                    .map_err(|_| unknown())?
-                || self.candidate.runtime_selection().map_err(|_| unknown())? != selected
                 || self.store.seed_binding().map_err(|_| unknown())? != self.seed_raw.as_slice()
                 || self
                     .store
