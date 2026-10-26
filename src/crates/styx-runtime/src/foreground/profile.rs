@@ -27,22 +27,22 @@ use styx_contracts::{
 #[path = "profile_fresh.rs"]
 mod fresh;
 #[cfg(any(
-    all(target_os = "linux", target_env = "gnu"),
-    target_os = "windows",
-    target_os = "macos"
+    target_os = "macos",
+    all(test, target_os = "linux", target_env = "gnu")
 ))]
 #[path = "profile_native_materials.rs"]
 mod native_materials;
 #[path = "profile_release.rs"]
 mod release;
 #[cfg(target_os = "macos")]
-pub(crate) use native_materials::read_recovered_pair_materials;
+pub(crate) use native_materials::OriginalNativePairMaterials;
 #[cfg(any(
-    all(target_os = "linux", target_env = "gnu"),
-    target_os = "windows",
-    target_os = "macos"
+    target_os = "macos",
+    all(test, target_os = "linux", target_env = "gnu")
 ))]
-pub(crate) use native_materials::{OriginalNativePairMaterials, read_original_pair_materials};
+pub(crate) use native_materials::read_original_pair_materials;
+#[cfg(target_os = "macos")]
+pub(crate) use native_materials::read_recovered_pair_materials;
 
 #[cfg(target_os = "macos")]
 pub(crate) use native_materials::{
@@ -683,9 +683,8 @@ enum ProfileSource {
     // Only the private material loader can choose this mode. Its result has no
     // ordinary-profile conversion or execution/credential accessor.
     #[cfg(any(
-        all(target_os = "linux", target_env = "gnu"),
-        target_os = "windows",
-        target_os = "macos"
+        target_os = "macos",
+        all(test, target_os = "linux", target_env = "gnu")
     ))]
     OriginalMaterials,
     #[cfg(any(
@@ -710,9 +709,8 @@ impl ProfileSource {
         match self {
             Self::Ordinary => Ok(()),
             #[cfg(any(
-                all(target_os = "linux", target_env = "gnu"),
-                target_os = "windows",
-                target_os = "macos"
+                target_os = "macos",
+                all(test, target_os = "linux", target_env = "gnu")
             ))]
             Self::OriginalMaterials => Ok(()),
             #[cfg(any(
@@ -944,26 +942,19 @@ fn load_source_inner(
         _ => canonical.as_slice(),
     };
     let state: LegacyState = decode(legacy_source)?;
-    let original_history_only = {
+    let original_history_only = match &source {
+        #[cfg(any(
+            target_os = "macos",
+            all(test, target_os = "linux", target_env = "gnu")
+        ))]
+        ProfileSource::OriginalMaterials => true,
         #[cfg(any(
             all(target_os = "linux", target_env = "gnu"),
             target_os = "windows",
             target_os = "macos"
         ))]
-        {
-            matches!(
-                &source,
-                ProfileSource::OriginalMaterials | ProfileSource::NativeCommitted(_)
-            )
-        }
-        #[cfg(not(any(
-            all(target_os = "linux", target_env = "gnu"),
-            target_os = "windows",
-            target_os = "macos"
-        )))]
-        {
-            false
-        }
+        ProfileSource::NativeCommitted(_) => true,
+        _ => false,
     };
     if state.schema != 1
         || state.mode != deployment.mode
@@ -1068,9 +1059,8 @@ fn load_source_inner(
             zeroize::Zeroizing::new(capture.read(base, "device/host.token", 4096)?)
         }
         #[cfg(any(
-            all(target_os = "linux", target_env = "gnu"),
-            target_os = "windows",
-            target_os = "macos"
+            target_os = "macos",
+            all(test, target_os = "linux", target_env = "gnu")
         ))]
         ProfileSource::OriginalMaterials => {
             #[cfg(target_os = "macos")]
@@ -1241,9 +1231,8 @@ fn load_source_inner(
         ProfileSource::Fresh(_) => return Err(ProfileError::Invalid),
         ProfileSource::Ordinary => active.manifest_sha256,
         #[cfg(any(
-            all(target_os = "linux", target_env = "gnu"),
-            target_os = "windows",
-            target_os = "macos"
+            target_os = "macos",
+            all(test, target_os = "linux", target_env = "gnu")
         ))]
         ProfileSource::OriginalMaterials => active.manifest_sha256,
         #[cfg(any(

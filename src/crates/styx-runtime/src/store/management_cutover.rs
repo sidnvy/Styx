@@ -458,6 +458,7 @@ fn root_matches<R: handoff::ProofRoot>(expected: &R, actual: RootIdentity) -> bo
 #[path = "management_cutover_native.rs"]
 mod native_writer;
 pub(in crate::store) use native_writer::CutoverProofRoot;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub(crate) use native_writer::{NativeCutoverHistoryInputs, NativeCutoverInputs};
 fn validate_materials<R: handoff::ProofRoot>(original: &OriginalCutover<R>) -> JournalResult<()> {
     let i = &original.intent;
@@ -1058,6 +1059,7 @@ fn sync_existing(
     super::platform::sync_directory(dir)
 }
 impl OwnedManagementJournal {
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub(in crate::store) fn cutover_prepared_matches<R>(
         &self,
         prepared: &PreparedCutover<R>,
@@ -1133,6 +1135,7 @@ impl OwnedManagementJournal {
             })
         })
     }
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub(in crate::store) fn prepare_native_cutover(
         &mut self,
         maintenance: &ConfigurationMaintenance,
@@ -1695,6 +1698,7 @@ impl OwnedManagementJournal {
     ) -> JournalResult<OriginalCutover> {
         self.resync_cutover_for::<handoff::RetirementLinuxRoot>(maintenance, id)
     }
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub(in crate::store) fn resync_native_cutover(
         &self,
         maintenance: &ConfigurationMaintenance,

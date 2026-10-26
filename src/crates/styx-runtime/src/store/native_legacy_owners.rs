@@ -160,6 +160,7 @@ fn observe(root: &PrivateRoot, relative: &str) -> JournalResult<Option<Present>>
         sha256: Sha256Digest::of_bytes(raw.bytes()),
     }))
 }
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 fn capture_root(path: &Path, names: &[&str]) -> JournalResult<OwnerRoot> {
     if !path_valid(path) {
         return Err(JournalError::InvalidInput);
@@ -217,6 +218,7 @@ fn deployment(state: &PrivateRoot) -> JournalResult<(Deployment, Present)> {
 }
 /// Capture only after the caller validated original fences/scopes. This function
 /// neither interprets owner-file contents nor attests that their owners stopped.
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 pub(crate) fn capture_native_legacy_owners(
     state: &PrivateRoot,
     state_dir: &Path,

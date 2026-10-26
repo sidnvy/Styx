@@ -55,6 +55,7 @@ impl CutoverProofRoot for NativeRootIdentity {
 }
 
 /// Raw local composition input, never a network DTO or activation capability.
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub(crate) struct NativeCutoverInputs {
     pub history: NativeCutoverHistoryInputs,
     pub endpoint_mode: styx_contracts::native_management::NativeMigrationEndpointMode,
@@ -65,6 +66,7 @@ pub(crate) struct NativeCutoverInputs {
     pub target: Vec<u8>,
     pub endpoint: Option<CutoverEndpointInputs>,
 }
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub(crate) enum NativeCutoverHistoryInputs {
     PreservedHostPair {
         bindings: Vec<u8>,
@@ -107,6 +109,7 @@ impl From<CutoverInputs> for NormalizedInputs {
         }
     }
 }
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 impl TryFrom<NativeCutoverInputs> for NormalizedInputs {
     type Error = JournalError;
     fn try_from(i: NativeCutoverInputs) -> JournalResult<Self> {

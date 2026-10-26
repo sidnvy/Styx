@@ -1,7 +1,9 @@
 //! Same-transaction PRE-EFFECT inputs. These bytes are DATA, never settlement,
 //! candidate verification, Prepared authority, or permission to release a fence.
 use super::*;
-use crate::store::secure_journal::{JournalObservation, ObservedJournalFile, files};
+use crate::store::secure_journal::JournalObservation;
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+use crate::store::secure_journal::{ObservedJournalFile, files};
 use handoff::{NativeRetirementIntent, ProofRoot, ProofStamp};
 use serde::{Deserialize, Serialize};
 use serde_json::value::RawValue;
@@ -41,6 +43,7 @@ struct PlanHeader {
 /// No Debug/Clone/Serde: no credential bytes belong in this input or header.
 /// Random marker generation must happen ONCE, before this immutable header.
 /// On restart missing attachments may only be supplied with these exact hashes.
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 pub(in crate::store) struct MigrationPlanInputs {
     pub retirement: Vec<u8>,
     pub host_pair: Vec<u8>,
@@ -56,10 +59,13 @@ pub(in crate::store) struct MigrationPlanInputs {
 /// are a known unfinished plan, not permission to start ANY source-file effect.
 pub(in crate::store) struct OriginalMigrationPlan {
     pub retirement: NativeRetirementIntent,
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub pair: NativePreservedHostPair,
     pub desired: NativeDesired,
     pub marker: NativeRootMarker,
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub selection: NativeRuntimeSelection,
+    #[cfg(any(target_os = "macos", target_os = "windows", test))]
     pub raw_header: Vec<u8>,
     header: PlanHeader,
     pub before: Option<Vec<u8>>,
@@ -143,6 +149,7 @@ pub(in crate::store) struct MigrationPlanInventory {
     pub used: BTreeSet<String>,
     pub records: Vec<OriginalMigrationPlan>,
 }
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 fn actual_root(root: crate::store::RootIdentity) -> JournalResult<NativeRootIdentity> {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     {
@@ -183,9 +190,11 @@ fn names(id: &TransactionId) -> [String; 4] {
         format!("{p}-selected"),
     ]
 }
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 fn raw(bytes: &[u8]) -> JournalResult<Box<RawValue>> {
     serde_json::from_slice(bytes).map_err(|_| JournalError::InvalidInput)
 }
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 fn binding(bytes: &[u8]) -> JournalResult<MaterialBinding> {
     if bytes.is_empty() || bytes.len() > MATERIAL_LIMIT {
         return Err(JournalError::BudgetExceeded);
@@ -195,6 +204,7 @@ fn binding(bytes: &[u8]) -> JournalResult<MaterialBinding> {
         bytes: bytes.len(),
     })
 }
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 fn encode(input: &MigrationPlanInputs) -> JournalResult<Vec<u8>> {
     let header = PlanHeader {
         schema: 1,
@@ -285,10 +295,13 @@ fn parse(bytes: &[u8]) -> JournalResult<OriginalMigrationPlan> {
     }
     Ok(OriginalMigrationPlan {
         retirement: i,
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         pair,
         desired,
         marker,
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         selection,
+        #[cfg(any(target_os = "macos", target_os = "windows", test))]
         raw_header: bytes.to_vec(),
         header: h,
         before: None,
@@ -353,6 +366,7 @@ pub(in crate::store) fn scan_plans(
 }
 /// Only for FIRST C preparation. Drop this exact complete plan from a baseline
 /// inventory AFTER checking its original successor hash. No other names disappear.
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 pub(in crate::store) fn recovery_baseline(
     scan: &JournalObservation,
     intent: &handoff::LegacyOwnerRecoveryIntent,
@@ -380,6 +394,7 @@ pub(in crate::store) fn recovery_baseline(
     }
     Ok(Some(without(scan, &used)))
 }
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 fn without(scan: &JournalObservation, names: &BTreeSet<String>) -> JournalObservation {
     let files: Vec<_> = scan
         .files
@@ -395,6 +410,7 @@ fn without(scan: &JournalObservation, names: &BTreeSet<String>) -> JournalObserv
         files,
     }
 }
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 pub(in crate::store) fn retirement_continuation(
     scan: &JournalObservation,
     intent: &NativeRetirementIntent,
@@ -406,6 +422,7 @@ pub(in crate::store) fn retirement_continuation(
         .first()
         .is_some_and(|p| p.complete() && p.retirement == *intent && p.retirement_raw() == raw))
 }
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 impl OwnedManagementJournal {
     /// Full input budget and immutable header precede any SOURCE mutation. A
     /// partial plan can only fill exact missing attachments; changing even the

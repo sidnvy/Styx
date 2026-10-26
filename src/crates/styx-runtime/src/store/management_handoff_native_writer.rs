@@ -6,13 +6,16 @@ use styx_contracts::native_management::NativeRootIdentity;
 
 pub(in crate::store) type NativeRetirementIntent =
     LegacyCredentialRetirementIntent<NativeRootIdentity, NativeRetirementFileStamp>;
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 pub(in crate::store) type NativePreparedRetirement =
     PreparedCredentialRetirement<NativeRootIdentity, NativeRetirementFileStamp>;
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 pub(in crate::store) type NativeRetiredRecord =
     RetiredCredentialRecord<NativeRootIdentity, NativeRetirementFileStamp>;
 pub(in crate::store) type NativeOriginalRetirement =
     OriginalCredentialRetirement<NativeRootIdentity, NativeRetirementFileStamp>;
 
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 pub(super) fn actual_root(root: RootIdentity) -> JournalResult<NativeRootIdentity> {
     #[cfg(target_os = "macos")]
     {
@@ -82,6 +85,7 @@ pub(in crate::store) fn reject_migration_v2_collision(raw: &[u8]) -> JournalResu
         .map(|_| ())
         .map_err(|_| JournalError::Conflict)
 }
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 fn canonical(state: &ConfigurationState, intent: &NativeRetirementIntent) -> JournalResult<()> {
     // Native schema3 may not borrow Linux-v1 successor exceptions. The native
     // cutover port must later supply its own exact prepared-target capability.
@@ -105,6 +109,7 @@ fn canonical(state: &ConfigurationState, intent: &NativeRetirementIntent) -> Jou
     }
     Ok(())
 }
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 fn original_native(
     scan: &JournalObservation,
     id: &TransactionId,
@@ -123,6 +128,7 @@ fn original_native(
     }
     Ok(original)
 }
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 fn recovery_continuation(
     scan: &JournalObservation,
     intent: &NativeRetirementIntent,
@@ -142,6 +148,7 @@ fn recovery_continuation(
         && record.intent.publisher_spki_sha256 == intent.publisher_spki_sha256
         && record.intent.successor_retirement_intent_sha256 == Sha256Digest::of_bytes(raw))
 }
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 impl OwnedManagementJournal {
     pub(in crate::store) fn native_prepared_matches(
         &self,
@@ -149,6 +156,7 @@ impl OwnedManagementJournal {
     ) -> bool {
         self.owner.same_authority(&prepared.owner) && self.namespace == prepared.namespace
     }
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub(in crate::store) fn validate_native_prepared(
         &self,
         maintenance: &ConfigurationMaintenance,
@@ -400,6 +408,10 @@ impl OwnedManagementJournal {
     /// Reopen an already Prepared/Retired original before canonical cutover.
     /// Resync attests only original journal durability, never token rename or
     /// old-owner settlement. The caller must retain/revalidate its OS custody.
+    #[cfg(any(
+        target_os = "macos",
+        all(test, target_os = "linux", target_env = "gnu")
+    ))]
     pub(in crate::store) fn reopen_native_retirement(
         &self,
         maintenance: &ConfigurationMaintenance,
@@ -448,6 +460,7 @@ impl OwnedManagementJournal {
             })
         })
     }
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub(in crate::store) fn resync_native_retirement(
         &self,
         maintenance: &ConfigurationMaintenance,

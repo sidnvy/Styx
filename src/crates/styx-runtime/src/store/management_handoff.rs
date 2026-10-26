@@ -175,6 +175,7 @@ pub(in crate::store) struct RetiredCredentialRecord<
     post_stamp: S,
 }
 impl<R, S> PreparedCredentialRetirement<R, S> {
+    #[cfg(any(target_os = "macos", target_os = "windows", test))]
     pub(in crate::store) fn matches_owner(&self, owner: &OwnedConfigurationRoot) -> bool {
         self.owner.same_authority(owner)
     }
@@ -732,16 +733,25 @@ mod tests;
 #[path = "management_handoff_native_writer.rs"]
 mod native_writer;
 pub(in crate::store) use native_writer::{
-    NativeOriginalRetirement, NativePreparedRetirement, NativeRetiredRecord,
-    NativeRetirementIntent, reject_migration_v2_collision,
+    NativeOriginalRetirement, NativeRetirementIntent, reject_migration_v2_collision,
 };
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub(in crate::store) use native_writer::{NativePreparedRetirement, NativeRetiredRecord};
 
 #[path = "management_owner_recovery.rs"]
 mod owner_recovery;
+#[cfg(target_os = "macos")]
+pub(in crate::store) use owner_recovery::ArchivedLegacyOwnerRecovery;
+#[cfg(target_os = "windows")]
+pub(in crate::store) use owner_recovery::RecoveryBasis;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub(in crate::store) use owner_recovery::{LegacyGuardsHeld, PreparedLegacyOwnerRecovery};
 pub(in crate::store) use owner_recovery::{
-    ArchivedLegacyOwnerRecovery, LegacyGuardsHeld, LegacyOwnerRecoveryIntent, OwnerRecoveryPlan,
-    OwnerRecoveryStage, PreparedLegacyOwnerRecovery, RecoveryBasis, RecoveryBoot, RecoveryGuard,
-    RecoveryGuardBinding, RecoveryGuardName, RecoveryGuardPost, RecoveryKind, RecoveryOriginal,
-    RecoveryOriginalBinding, RecoveryOriginalName, RecoveryOriginalPost, RecoveryRestartBinding,
-    WindowsRestartProcess, WindowsStartupCheckpoint, scan_owner_recoveries,
+    LegacyOwnerRecoveryIntent, OwnerRecoveryPlan, OwnerRecoveryStage, scan_owner_recoveries,
+};
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+pub(in crate::store) use owner_recovery::{
+    RecoveryBoot, RecoveryGuard, RecoveryGuardBinding, RecoveryGuardName, RecoveryGuardPost,
+    RecoveryKind, RecoveryOriginal, RecoveryOriginalBinding, RecoveryOriginalName,
+    RecoveryOriginalPost, RecoveryRestartBinding,
 };

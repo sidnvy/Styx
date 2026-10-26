@@ -40,6 +40,7 @@ pub(crate) struct OriginalNativePairMaterials<'a> {
     fingerprint: Sha256Digest,
     gateway_origin: String,
     ca_path: PathBuf,
+    #[cfg(target_os = "macos")]
     publisher: Sha256Digest,
 }
 fn native_root(root: RootIdentity) -> NativeRootIdentity {
@@ -150,7 +151,7 @@ fn read_pair_materials_inner<'a>(
     let gateway_origin = origin(&deployment.gateway.url, "https")?
         .origin()
         .ascii_serialization();
-    let publisher = Sha256Digest::try_from(original.diagnostics.publisher_sha256.clone())
+    let _publisher = Sha256Digest::try_from(original.diagnostics.publisher_sha256.clone())
         .map_err(|_| ProfileError::Invalid)?;
     let result = OriginalNativePairMaterials {
         maintenance,
@@ -165,7 +166,8 @@ fn read_pair_materials_inner<'a>(
             .map_err(|_| ProfileError::Invalid)?,
         gateway_origin,
         ca_path: host_profile.gateway_ca_file.ok_or(ProfileError::Invalid)?,
-        publisher,
+        #[cfg(target_os = "macos")]
+        publisher: _publisher,
     };
     #[cfg(target_os = "macos")]
     let result = if let Some(source) = retired_materials {
@@ -267,9 +269,11 @@ impl OriginalNativePairMaterials<'_> {
         }
         source.validate().map_err(|_| ProfileError::Changed)
     }
+    #[cfg(target_os = "macos")]
     pub(crate) fn preservation_entries(&self) -> &[PreservationEntry] {
         &self.original.diagnostics.preservation
     }
+    #[cfg(target_os = "macos")]
     pub(crate) fn executor_configured(&self) -> bool {
         self.original.executor_enabled()
     }
@@ -350,6 +354,7 @@ impl OriginalNativePairMaterials<'_> {
         self.revalidate()?;
         self.digest(&self.state_dir.join("state.json"))
     }
+    #[cfg(target_os = "macos")]
     pub(crate) fn publisher_sha256(&self) -> Result<Sha256Digest, ProfileError> {
         self.revalidate()?;
         Ok(self.publisher)

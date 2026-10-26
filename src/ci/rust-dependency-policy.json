@@ -462,6 +462,16 @@
       "kind": "explicit_owned_private_journal_files",
       "input": "protected STYX_TEST_MANAGEMENT_HANDOFF_ROOT; unique fixture child",
       "required_for": "actual partial C close/reopen using original saved guards; unknown phase and corrupted guard zero-write rejection; not native Mac migration acceptance"
+    },
+    "store::management::handoff::native_writer::tests::native_first_promotion_collision_preserves_original_files": {
+      "kind": "explicit_owned_private_journal_files",
+      "input": "protected STYX_TEST_MANAGEMENT_HANDOFF_ROOT; unique private fixture child; no installed configuration",
+      "required_for": "Actual private-file reserved-key collision refusal before retirement; exact state/token bytes, inode and journal inventory preserved. Not native migration acceptance."
+    },
+    "store::management::handoff::native_writer::tests::native_owner_recovery_continues_original_partial_archive_without_second_transaction": {
+      "kind": "explicit_owned_private_journal_files",
+      "input": "protected STYX_TEST_MANAGEMENT_HANDOFF_ROOT; unique private fixture child; no installed configuration",
+      "required_for": "Actual private-file partial rename and original journal reconciliation, same transaction/bytes/inodes retained, foreign transaction/canonical/orphan negatives. Synthetic boot facts; not Mac process recovery."
     }
   },
   "change_policy": "dependency or ignored-test additions require explicit policy review; preserve mature Cargo tooling rather than replacing its resolver/compiler/lints",

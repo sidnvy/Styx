@@ -169,6 +169,7 @@ pub(in crate::store) struct OwnerRecoveryPlan {
 impl OwnerRecoveryPlan {
     /// Exact entries of the original schema1 preparation, for bounded resync
     /// after a partial write. No later phase or OS effect is represented here.
+    #[cfg(any(target_os = "macos", target_os = "windows", test))]
     pub(in crate::store) fn preparation_entries(&self) -> JournalResult<Vec<(String, Vec<u8>)>> {
         let intent = self.validated_intent()?;
         let phase = RecoveryPhase {
@@ -264,6 +265,14 @@ pub(in crate::store) struct RecoveryGuardPost {
     pub name: RecoveryGuardName,
     pub stamp: NativeRetirementFileStamp,
 }
+// Effect observations only; this private input does not confer authorization.
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
+struct OwnerRecoveryObservations {
+    originals: Vec<RecoveryOriginalPost>,
+    guards: Vec<RecoveryGuardPost>,
+    startup_post: Option<NativeRetirementFileStamp>,
+    boot_observation: Option<RecoveryBoot>,
+}
 #[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct RecoveryPhase {
@@ -312,21 +321,27 @@ pub(in crate::store) struct OwnerRecoveryInventory {
 }
 /// These values can only be minted by original-byte parser under the owned
 /// writer. They retain it; cancellation/Drop neither clears it nor undoes work.
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 pub(in crate::store) struct PreparedLegacyOwnerRecovery {
     owner: OwnedConfigurationRoot,
     namespace: (u64, u64),
     original: OriginalOwnerRecovery,
 }
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 pub(in crate::store) struct ArchivedLegacyOwnerRecovery {
     prepared: PreparedLegacyOwnerRecovery,
 }
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 pub(in crate::store) struct LegacyGuardsHeld {
     archived: ArchivedLegacyOwnerRecovery,
 }
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 impl PreparedLegacyOwnerRecovery {
+    #[cfg(target_os = "windows")]
     pub(in crate::store) fn startup_checkpoint(&self) -> Option<&WindowsStartupCheckpoint> {
         self.original.intent.startup_checkpoint.as_ref()
     }
+    #[cfg(target_os = "windows")]
     pub(in crate::store) fn startup_raw(&self) -> Option<&[u8]> {
         self.original.startup_raw.as_deref()
     }
@@ -354,6 +369,7 @@ impl PreparedLegacyOwnerRecovery {
         }
         Ok(ArchivedLegacyOwnerRecovery { prepared: self })
     }
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub(in crate::store) fn into_guards_held(self) -> JournalResult<LegacyGuardsHeld> {
         if self.stage() != Some(OwnerRecoveryStage::GuardsHeld) {
             return Err(JournalError::Conflict);
@@ -371,12 +387,15 @@ impl PreparedLegacyOwnerRecovery {
     pub(in crate::store) fn guard_bytes(&self) -> &[RecoveryGuard] {
         &self.original.guards
     }
+    #[cfg(target_os = "windows")]
     pub(in crate::store) fn authorization_plan(&self) -> Option<&[u8]> {
         self.original.authorization_plan.as_deref()
     }
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub(in crate::store) fn guards_held_posts(&self) -> Option<&[RecoveryGuardPost]> {
         self.original.guards_held_posts()
     }
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub(in crate::store) fn archived_original_posts(&self) -> Option<&[RecoveryOriginalPost]> {
         self.original
             .phases
@@ -385,11 +404,13 @@ impl PreparedLegacyOwnerRecovery {
             .map(|(_, p)| p.originals.as_slice())
     }
 }
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 impl ArchivedLegacyOwnerRecovery {
     pub(in crate::store) fn prepared(&self) -> &PreparedLegacyOwnerRecovery {
         &self.prepared
     }
 }
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 impl LegacyGuardsHeld {
     pub(in crate::store) fn prepared(&self) -> &PreparedLegacyOwnerRecovery {
         &self.archived.prepared
@@ -670,6 +691,7 @@ fn validate_authorization_plan(
     }
     Ok(())
 }
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 fn validate_current_authorization(
     state: &ConfigurationState,
     i: &LegacyOwnerRecoveryIntent,
@@ -916,6 +938,7 @@ pub(in crate::store) fn scan_owner_recoveries(
     }
     Ok(result)
 }
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 fn original(scan: &JournalObservation, id: &TransactionId) -> JournalResult<OriginalOwnerRecovery> {
     let mut records = scan_owner_recoveries(scan)?.records;
     if records.len() != 1 || records[0].intent.transaction_id != *id {
@@ -923,6 +946,7 @@ fn original(scan: &JournalObservation, id: &TransactionId) -> JournalResult<Orig
     }
     Ok(records.remove(0))
 }
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 fn canonical(state: &ConfigurationState, intent: &LegacyOwnerRecoveryIntent) -> JournalResult<()> {
     if native_writer::actual_root(state.root.identity())? != intent.config_root {
         return Err(JournalError::Conflict);
@@ -948,6 +972,7 @@ fn canonical(state: &ConfigurationState, intent: &LegacyOwnerRecoveryIntent) -> 
 /// Prepared must be absent and every existing member must match the exact same
 /// original request. The projected baseline is for admission/budget inspection,
 /// never an alternate parser or a modified on-disk journal.
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 fn incomplete_startup_preparation(
     scan: &JournalObservation,
     intent: &LegacyOwnerRecoveryIntent,
@@ -999,6 +1024,7 @@ fn incomplete_startup_preparation(
     }))
 }
 
+#[cfg(any(target_os = "macos", target_os = "windows", test))]
 impl OwnedManagementJournal {
     pub(in crate::store) fn owner_recovery_prepared_matches(
         &self,
@@ -1046,6 +1072,7 @@ impl OwnedManagementJournal {
         }
         self.prepare_owner_recovery(maintenance, intent, originals, guards, None, None)
     }
+    #[cfg(target_os = "windows")]
     pub(in crate::store) fn prepare_authorized_legacy_owner_recovery(
         &mut self,
         maintenance: &ConfigurationMaintenance,
@@ -1068,6 +1095,7 @@ impl OwnedManagementJournal {
     }
     /// Private same-journal preparation; caller's explicit reviewed-plan authority
     /// is separate. ALL attachments and Prepared must be durable before any effect.
+    #[cfg(target_os = "windows")]
     pub(in crate::store) fn prepare_windows_restart_checkpoint(
         &mut self,
         maintenance: &ConfigurationMaintenance,
@@ -1234,11 +1262,14 @@ impl OwnedManagementJournal {
         maintenance: &ConfigurationMaintenance,
         prepared: &PreparedLegacyOwnerRecovery,
         stage: OwnerRecoveryStage,
-        originals: Vec<RecoveryOriginalPost>,
-        guards: Vec<RecoveryGuardPost>,
-        startup_post: Option<NativeRetirementFileStamp>,
-        boot_observation: Option<RecoveryBoot>,
+        observations: OwnerRecoveryObservations,
     ) -> JournalResult<PreparedLegacyOwnerRecovery> {
+        let OwnerRecoveryObservations {
+            originals,
+            guards,
+            startup_post,
+            boot_observation,
+        } = observations;
         if !prepared.matches_owner(&self.owner)
             || prepared.namespace != self.namespace
             || maintenance.transaction_id() != &prepared.intent().transaction_id
@@ -1320,6 +1351,7 @@ impl OwnedManagementJournal {
     /// Resume ONLY a complete immutable checkpoint whose final Prepared file
     /// was not published. The original scanner must already validate every raw
     /// attachment; no Windows effect was authorized before this append succeeds.
+    #[cfg(target_os = "windows")]
     pub(in crate::store) fn record_windows_restart_prepared(
         &mut self,
         maintenance: &ConfigurationMaintenance,
@@ -1329,14 +1361,17 @@ impl OwnedManagementJournal {
             maintenance,
             prepared,
             OwnerRecoveryStage::Prepared,
-            Vec::new(),
-            Vec::new(),
-            None,
-            None,
+            OwnerRecoveryObservations {
+                originals: Vec::new(),
+                guards: Vec::new(),
+                startup_post: None,
+                boot_observation: None,
+            },
         )
     }
     /// Actual retained OS effect producer supplies the post; this record attests
     /// the durable bytes/chain only, never derives OS completion from a DTO.
+    #[cfg(target_os = "windows")]
     pub(in crate::store) fn record_legacy_restart_excluded(
         &mut self,
         maintenance: &ConfigurationMaintenance,
@@ -1347,12 +1382,15 @@ impl OwnedManagementJournal {
             maintenance,
             prepared,
             OwnerRecoveryStage::RestartExcluded,
-            Vec::new(),
-            Vec::new(),
-            Some(post),
-            None,
+            OwnerRecoveryObservations {
+                originals: Vec::new(),
+                guards: Vec::new(),
+                startup_post: Some(post),
+                boot_observation: None,
+            },
         )
     }
+    #[cfg(target_os = "windows")]
     pub(in crate::store) fn record_legacy_boot_observed(
         &mut self,
         maintenance: &ConfigurationMaintenance,
@@ -1363,10 +1401,12 @@ impl OwnedManagementJournal {
             maintenance,
             prepared,
             OwnerRecoveryStage::BootObserved,
-            Vec::new(),
-            Vec::new(),
-            prepared.startup_post().cloned(),
-            Some(actual_boot),
+            OwnerRecoveryObservations {
+                originals: Vec::new(),
+                guards: Vec::new(),
+                startup_post: prepared.startup_post().cloned(),
+                boot_observation: Some(actual_boot),
+            },
         )
     }
     pub(in crate::store) fn record_legacy_owner_archived(
@@ -1380,10 +1420,12 @@ impl OwnedManagementJournal {
                 maintenance,
                 prepared,
                 OwnerRecoveryStage::Archived,
-                originals,
-                Vec::new(),
-                prepared.startup_post().cloned(),
-                prepared.boot_observation().cloned(),
+                OwnerRecoveryObservations {
+                    originals,
+                    guards: Vec::new(),
+                    startup_post: prepared.startup_post().cloned(),
+                    boot_observation: prepared.boot_observation().cloned(),
+                },
             )?,
         })
     }
@@ -1408,10 +1450,12 @@ impl OwnedManagementJournal {
                     maintenance,
                     &archived.prepared,
                     OwnerRecoveryStage::GuardsHeld,
-                    originals,
-                    guards,
-                    archived.prepared.startup_post().cloned(),
-                    archived.prepared.boot_observation().cloned(),
+                    OwnerRecoveryObservations {
+                        originals,
+                        guards,
+                        startup_post: archived.prepared.startup_post().cloned(),
+                        boot_observation: archived.prepared.boot_observation().cloned(),
+                    },
                 )?,
             },
         })
