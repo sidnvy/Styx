@@ -110,3 +110,48 @@ fn disabled_override_observation_is_not_inferred_from_garbage() {
         .is_err()
     );
 }
+
+/// Native Darwin socket regression, not a launchd or service-readiness proof.
+#[test]
+fn ordinary_state_root_socket_roundtrip_and_oversized_preflight() {
+    use std::{
+        io::{Read, Write},
+        os::unix::{
+            ffi::OsStrExt,
+            fs::DirBuilderExt,
+            net::{UnixListener, UnixStream},
+        },
+    };
+    let base = Path::new("/private/tmp");
+    let mut name = format!("styx-socket-{}-", uuid::Uuid::new_v4().simple());
+    let padding = 85 - base.as_os_str().as_bytes().len() - 1 - name.len();
+    name.push_str(&"x".repeat(padding));
+    let root = base.join(name);
+    assert_eq!(root.as_os_str().as_bytes().len(), 85);
+    std::fs::DirBuilder::new()
+        .mode(0o700)
+        .create(&root)
+        .unwrap();
+    let old = root.join(".styx-service-control-v1.sock");
+    assert!(
+        UnixListener::bind(&old).is_err(),
+        "old 115-byte endpoint cannot bind on Darwin"
+    );
+    validate_control_path(&root).unwrap();
+    let endpoint = root.join(CONTROL_SOCKET_NAME);
+    let listener = UnixListener::bind(&endpoint).unwrap();
+    let mut client = UnixStream::connect(&endpoint).unwrap();
+    let (mut server, _) = listener.accept().unwrap();
+    server
+        .set_read_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
+    let nonce = *uuid::Uuid::new_v4().as_bytes();
+    client.write_all(&nonce).unwrap();
+    let mut observed = [0; 16];
+    server.read_exact(&mut observed).unwrap();
+    assert_eq!(observed, nonce);
+    assert!(validate_control_path(&base.join("x".repeat(104))).is_err());
+    drop((client, server, listener));
+    std::fs::remove_file(&endpoint).unwrap();
+    std::fs::remove_dir(&root).unwrap();
+}

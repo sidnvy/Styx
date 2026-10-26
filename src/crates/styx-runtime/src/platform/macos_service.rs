@@ -42,7 +42,9 @@ use tokio::{
 const LIMIT: usize = 64 * 1024;
 const LAUNCHCTL: &str = "/bin/launchctl";
 const PLIST_PARENT: &str = "/Library/LaunchDaemons";
-pub(crate) const CONTROL_SOCKET_NAME: &str = ".styx-service-control-v1.sock";
+// Darwin sockaddr_un is shorter than Linux's. Keep the endpoint in the same
+// original private state root, with unchanged peer and protocol authentication.
+pub(crate) const CONTROL_SOCKET_NAME: &str = ".styx.sock";
 static TOOLS: Semaphore = Semaphore::const_new(2);
 // Separate from TOOLS: a utility may retain its tool permit while waiting for a
 // checked read, so sharing that semaphore would permit a self-deadlock.
@@ -126,6 +128,11 @@ fn path_text(path: &Path) -> Result<&str> {
         return Err(ServiceError::Invalid);
     }
     Ok(v)
+}
+fn validate_control_path(state_dir: &Path) -> Result<()> {
+    nix::sys::socket::UnixAddr::new(&state_dir.join(CONTROL_SOCKET_NAME))
+        .map(|_| ())
+        .map_err(|_| ServiceError::Invalid)
 }
 fn xml(v: &str) -> String {
     v.replace('&', "&amp;")
@@ -314,6 +321,9 @@ impl Definition {
     }
     fn prepare_owned(path: &Path, role: ServiceRole, install_preparation: bool) -> Result<Self> {
         path_text(path)?;
+        // Reject an unusable native endpoint before preparing C07 or an
+        // administrator package, rather than failing after system registration.
+        validate_control_path(path)?;
         let root = PrivateRoot::open(path).map_err(unavailable)?;
         let RootIdentity::Macos { device, inode, uid } = root.identity() else {
             return Err(ServiceError::Invalid);
