@@ -756,6 +756,34 @@ impl NativeTransactions {
         {
             return Err(NativeTransactionError::UnknownInspect);
         }
+        // The original coordinator may have completed finish_native before its
+        // caller lost the reply. Confirm that already-admitted complete tip;
+        // do not try to acquire a recovery fence that no longer exists. This
+        // never releases a fence or adopts another transaction/owner.
+        if self.marker().reader_floor
+            == styx_contracts::management::ReaderContract::NativeManagementStateV1
+            && transaction.snapshot().last_durable_stage == DurableStage::Committed
+            && self.retained_maintenance.is_none()
+            && self.configuration_root().ensure_admission().is_ok()
+        {
+            self.revalidate_runtime_custody()?;
+            if canonical.raw_sha256() != original.intent.target_state_sha256 {
+                return Err(NativeTransactionError::UnknownInspect);
+            }
+            self.validate_complete_chain(&canonical)?;
+            let committed = original
+                .phases
+                .last()
+                .filter(|receipt| receipt.stage == DurableStage::Committed)
+                .cloned()
+                .ok_or(NativeTransactionError::UnknownInspect)?;
+            return Ok(NativeCommitResult {
+                transaction_id: id.clone(),
+                canonical_raw_sha256: canonical.raw_sha256(),
+                committed,
+                recovered: true,
+            });
+        }
         let maintenance = match self.retained_maintenance.take() {
             Some(maintenance) if maintenance.transaction_id() == id => maintenance,
             Some(other) => {

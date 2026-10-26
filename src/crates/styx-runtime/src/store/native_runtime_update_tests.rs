@@ -518,6 +518,20 @@ fn app_scope_update_retains_original_writer_and_recovers_exact_transaction() {
     }));
     assert!(lost.is_err());
     assert!(tx.has_runtime_update_custody());
+    // finish_native already ran: response loss does not recreate a recovery
+    // fence, but the original C08/execution custody must still be settled.
+    assert!(tx.configuration_root().ensure_admission().is_ok());
+    assert!(tx.retained_maintenance.is_none());
+    assert_eq!(
+        tx.query(&id)
+            .unwrap()
+            .unwrap()
+            .phase_receipts
+            .last()
+            .unwrap()
+            .stage,
+        DurableStage::Committed
+    );
     assert!(matches!(
         PrivateRoot::open(parent.join("native"))
             .unwrap()
@@ -554,6 +568,23 @@ fn app_scope_update_retains_original_writer_and_recovers_exact_transaction() {
     );
     assert!(!tx.has_runtime_update_custody());
     complete_chain(&tx);
+    // The same confirmation also serves an ordinary desired-state stop reply,
+    // without runtime custody, new phases, or reopening the writer.
+    let desired_id: TransactionId = "app-original-desired".try_into().unwrap();
+    let desired = successor(&tx, desired_id.as_str(), 2);
+    let applied = tx.apply_target(&desired).unwrap();
+    let phases = tx.query(&desired_id).unwrap().unwrap().phase_receipts;
+    let confirmed = tx.recover_original(&desired_id).unwrap();
+    assert_eq!(confirmed.committed, applied.committed);
+    assert!(confirmed.recovered);
+    assert_eq!(
+        tx.query(&desired_id).unwrap().unwrap().phase_receipts,
+        phases
+    );
+    assert_eq!(tx.readstate().unwrap().raw_bytes(), desired);
+    assert!(tx.configuration_root().ensure_admission().is_ok());
+    assert!(tx.recover_original(&id).is_err());
+    assert!(tx.configuration_root().ensure_admission().is_ok());
     assert_eq!(
         fs::read(parent.join("native/host-identity.pem")).unwrap(),
         identity
