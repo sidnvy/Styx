@@ -173,6 +173,21 @@ final class ProductOwnedCore: @unchecked Sendable {
         return originalExists ? original : separate
     }
     private static func privateDirectory(_ url: URL) throws {
+        // Only create the requested leaf. Existing ancestors must remain real
+        // directories owned by this user/root, without other-user write bits.
+        // Never follow a substituted Application Support/home directory, create
+        // missing ancestors, or repair permissions on an existing path.
+        guard url.isFileURL, url.path.hasPrefix("/"),
+              url.path == url.standardizedFileURL.path else { throw ProductOwnedCoreError.invalidPackage }
+        var parent = url.deletingLastPathComponent()
+        while true {
+            var ancestor = stat()
+            guard lstat(parent.path, &ancestor) == 0, ancestor.st_mode & S_IFMT == S_IFDIR,
+                  ancestor.st_uid == 0 || ancestor.st_uid == getuid(),
+                  ancestor.st_mode & 0o022 == 0 else { throw ProductOwnedCoreError.invalidPackage }
+            if parent.path == "/" { break }
+            parent.deleteLastPathComponent()
+        }
         if mkdir(url.path, 0o700) != 0 && errno != EEXIST { throw ProductOwnedCoreError.invalidPackage }
         var st = stat()
         guard lstat(url.path, &st) == 0, st.st_mode & S_IFMT == S_IFDIR,
@@ -254,7 +269,9 @@ final class ProductOwnedCore: @unchecked Sendable {
               chosen["manifest_sha256"].string == metadata["manifestSha256"].string,
               chosen["payload_path"].string == payload.path, chosen["publisher_file"].string == pub.path else { throw ProductOwnedCoreError.invalidPackage }
         let support = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support/Styx")
-        guard FileManager.default.fileExists(atPath: support.path) else { throw ProductOwnedCoreError.invalidPackage }
+        // Package/selection verification above must succeed before any fresh
+        // App container is created. Rust remains the sole profile/state writer.
+        try privateDirectory(support)
         let state = try selectedState(support)
         let container = support.appendingPathComponent("NativeRustHost-v1"); try privateDirectory(container)
         let selectionURL: URL

@@ -11,7 +11,7 @@ use crate::{
     host::{
         bootstrap::OwnedExecHost,
         link::{HostWssLink, LinkAuthentication, LinkEndpoint, SecretBearer},
-        protocol::PairedTrustedProfile,
+        protocol::{PairedTrustedProfile, wire::TransportDrainOutcome},
     },
     providers::codex::TerminationEvidence,
     store::{
@@ -31,6 +31,76 @@ use tokio::{
     net::{TcpListener, TcpStream},
     sync::{Semaphore, oneshot},
 };
+
+/// Redacted observations only. This handle cannot authorize an operation.
+#[derive(Clone, Serialize)]
+pub(crate) struct NetworkValidationObservation {
+    stage: &'static str,
+    elapsed_millis: u64,
+    failure_stage: Option<&'static str>,
+    failure_kind: Option<&'static str>,
+    negative_http: [Option<(u16, &'static str)>; 4],
+    negative_wss: [Option<&'static str>; 4],
+    cleanup: Option<NetworkCleanupObservation>,
+}
+#[derive(Clone, Serialize)]
+struct NetworkCleanupObservation {
+    mcp_connections_joined: bool,
+    mcp_lifecycle_jobs_joined: bool,
+    mcp_session_transports_joined: bool,
+    unconfirmed_owner_cleanups: usize,
+    unresolved_sessions: usize,
+    protocol_joined: bool,
+    link_closed: bool,
+    remote_transport_drain: Option<TransportDrainOutcome>,
+    server_joined: bool,
+    server_connections_joined: bool,
+    server_blocking_jobs_joined: bool,
+    native_settled: bool,
+    unconfirmed_transport_drains: usize,
+}
+#[derive(Clone)]
+pub(crate) struct NetworkValidationObserver {
+    state: Arc<Mutex<NetworkValidationObservation>>,
+    started: std::time::Instant,
+}
+impl NetworkValidationObserver {
+    pub(crate) fn new() -> Self {
+        Self {
+            started: std::time::Instant::now(),
+            state: Arc::new(Mutex::new(NetworkValidationObservation {
+                stage: "plan_binding",
+                elapsed_millis: 0,
+                failure_stage: None,
+                failure_kind: None,
+                negative_http: [None; 4],
+                negative_wss: [None; 4],
+                cleanup: None,
+            })),
+        }
+    }
+    pub(crate) fn snapshot(&self) -> Option<NetworkValidationObservation> {
+        self.state.lock().ok().map(|state| state.clone())
+    }
+    fn update(&self, operation: impl FnOnce(&mut NetworkValidationObservation)) {
+        if let Ok(mut state) = self.state.lock() {
+            state.elapsed_millis =
+                u64::try_from(self.started.elapsed().as_millis()).unwrap_or(u64::MAX);
+            operation(&mut state);
+        }
+    }
+    pub(super) fn stage(&self, stage: &'static str) {
+        self.update(|state| state.stage = stage);
+    }
+    pub(super) fn failure(&self, kind: &'static str) {
+        self.update(|state| {
+            if state.failure_stage.is_none() {
+                state.failure_stage = Some(state.stage);
+                state.failure_kind = Some(kind);
+            }
+        });
+    }
+}
 
 #[derive(Serialize)]
 pub struct PairedGatewayValidationReport {
@@ -53,6 +123,8 @@ pub struct PairedGatewayValidationReport {
     pub mcp_lifecycle_jobs_joined: bool,
     pub mcp_session_transports_joined: bool,
     pub unconfirmed_owner_cleanups: usize,
+    pub remote_transport_drain: Option<TransportDrainOutcome>,
+    pub unconfirmed_transport_drains: usize,
     pub sdk_service_joined: bool,
     pub sdk_detached_tasks_joined: Option<bool>,
     pub host_protocol_joined: bool,
@@ -256,15 +328,29 @@ impl PreparedGatewayValidation {
         self,
         probe: MigrationValidationProbe,
     ) -> Result<PairedGatewayValidation, TransitionError> {
+        self.validate_observed(probe, NetworkValidationObserver::new())
+            .await
+    }
+    pub(crate) async fn validate_observed(
+        self,
+        probe: MigrationValidationProbe,
+        observer: NetworkValidationObserver,
+    ) -> Result<PairedGatewayValidation, TransitionError> {
         if !Arc::ptr_eq(probe.original_runtime(), &self.original)
             || !probe.report().probe_task_joined
         {
             return Err(TransitionError::Conflict);
         }
         let (send, receive) = oneshot::channel();
-        let job = tokio::spawn(run_owned(self, Arc::new(probe), send));
-        let mut proof = receive.await.map_err(|_| TransitionError::Unknown)??;
-        job.await.map_err(|_| TransitionError::Unknown)?;
+        let job = tokio::spawn(run_owned(self, Arc::new(probe), send, observer.clone()));
+        let mut proof = receive.await.map_err(|_| {
+            observer.failure("validation_response_lost");
+            TransitionError::Unknown
+        })??;
+        job.await.map_err(|_| {
+            observer.failure("validation_job_join_failed");
+            TransitionError::Unknown
+        })?;
         proof.report.validation_task_joined = true;
         Ok(proof)
     }
@@ -273,14 +359,18 @@ async fn run_owned(
     plan: PreparedGatewayValidation,
     local: Arc<MigrationValidationProbe>,
     sender: oneshot::Sender<Result<PairedGatewayValidation, TransitionError>>,
+    observer: NetworkValidationObserver,
 ) {
+    observer.stage("http_client_prepare");
     let client = match http_client(&plan) {
         Ok(c) => c,
         Err(e) => {
+            observer.failure("stage_rejected");
             let _ = sender.send(Err(e));
             return;
         }
     };
+    observer.stage("protected_host_root");
     let origin = plan.endpoint.origin.clone();
     let endpoint = plan.endpoint.clone();
     let address = plan.address;
@@ -293,6 +383,7 @@ async fn run_owned(
     let base = match PrivateRoot::open(plan.profile.host_base_dir()) {
         Ok(b) => b,
         Err(_) => {
+            observer.failure("stage_unknown");
             let _ = sender.send(Err(TransitionError::Unknown));
             return;
         }
@@ -313,6 +404,7 @@ async fn run_owned(
         nonce_name,
         effect: Mutex::new(None),
     });
+    observer.stage("protected_inputs_and_executor_config");
     let before = custody.clone();
     let prepared = tokio::task::spawn_blocking(move || {
         before.validate_fixed()?;
@@ -332,14 +424,18 @@ async fn run_owned(
     let config = match prepared {
         Ok(Ok(c)) => c,
         _ => {
+            observer.failure("stage_unknown");
             let _ = sender.send(Err(TransitionError::Unknown));
             return;
         }
     };
+    observer.stage("original_scopes_revalidate");
     if let Err(e) = custody.original.revalidate().await {
+        observer.failure("stage_rejected");
         let _ = sender.send(Err(e));
         return;
     }
+    observer.stage("gateway_setup");
     let partition = Arc::new(Semaphore::new(styx_contracts::HOST_QUEUED_BYTES));
     let setup = (|| {
         let relay = RelayHandle::new(
@@ -362,20 +458,24 @@ async fn run_owned(
         .map_err(|_| TransitionError::Conflict)?;
         let mcp = GatewayHttp::new(plan.policy, backend, budget);
         let mcp_stop = mcp.paired_shutdown_handle();
-        let app = EnrollmentHttp::new_paired(plan.tls, shared, relay, mcp, vec![host_header])
-            .map_err(|_| TransitionError::Conflict)?;
-        Ok::<_, TransitionError>((app, mcp_stop))
+        let app =
+            EnrollmentHttp::new_paired(plan.tls, shared, relay.clone(), mcp, vec![host_header])
+                .map_err(|_| TransitionError::Conflict)?;
+        Ok::<_, TransitionError>((app, mcp_stop, relay))
     })();
-    let (app, mcp_stop) = match setup {
+    let (app, mcp_stop, relay) = match setup {
         Ok(v) => v,
         Err(e) => {
+            observer.failure("stage_rejected");
             let _ = sender.send(Err(e));
             return;
         }
     };
+    observer.stage("listener_bind");
     let listener = match TcpListener::bind(address).await {
         Ok(l) => l,
         Err(_) => {
+            observer.failure("stage_busy");
             let _ = sender.send(Err(TransitionError::Busy));
             return;
         }
@@ -388,55 +488,237 @@ async fn run_owned(
     let mut protocol_job = None;
     let mut host: Option<Arc<OwnedExecHost>> = None;
     let mut bootstrap_unknown = false;
-    let execution=async {
-        let reservation=OwnedExecHost::reserve(host_generation.clone(),super::probe::facts(custody.profile.device_id().clone()),2).map_err(|_|TransitionError::Conflict)?;
+    let execution = async {
+        observer.stage("executor_reservation");
+        let reservation = OwnedExecHost::reserve(
+            host_generation.clone(),
+            super::probe::facts(custody.profile.device_id().clone()),
+            2,
+        )
+        .map_err(|_| TransitionError::Conflict)?;
         // Typed HTTP maintenance gate must reject real requests, regardless of
         // the caller presenting the original Gateway's model credential.
-        for (method,path) in [(reqwest::Method::GET,"/styx/enroll/devices".to_owned()),(reqwest::Method::POST,"/styx/enroll/invitations".to_owned()),(reqwest::Method::POST,"/styx/enroll/capabilities".to_owned()),(reqwest::Method::GET,format!("/styx/enroll/self/{}/capabilities",custody.profile.device_id().as_str()))] {
-            let response=client.request(method,format!("{origin}{path}")).bearer_auth(plan.model_token.as_str()).header("content-type","application/json").body("{}").send().await.map_err(|_|TransitionError::Unknown)?;
-            if response.status()!=reqwest::StatusCode::SERVICE_UNAVAILABLE {return Err(TransitionError::Unknown);}
-            let body:serde_json::Value=response.json().await.map_err(|_|TransitionError::Unknown)?;
-            if body["error"]!="migration_commit_required" {return Err(TransitionError::Unknown);}
+        for (index, (method, path)) in [
+            (reqwest::Method::GET, "/styx/enroll/devices".to_owned()),
+            (reqwest::Method::POST, "/styx/enroll/invitations".to_owned()),
+            (
+                reqwest::Method::POST,
+                "/styx/enroll/capabilities".to_owned(),
+            ),
+            (
+                reqwest::Method::GET,
+                format!(
+                    "/styx/enroll/self/{}/capabilities",
+                    custody.profile.device_id().as_str()
+                ),
+            ),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            observer.stage(match index {
+                0 => "negative_http_devices",
+                1 => "negative_http_invitation",
+                2 => "negative_http_capabilities",
+                _ => "negative_http_self",
+            });
+            let response = client
+                .request(method, format!("{origin}{path}"))
+                .bearer_auth(plan.model_token.as_str())
+                .header("content-type", "application/json")
+                .body("{}")
+                .send()
+                .await
+                .map_err(|error| {
+                    observer.failure(if error.is_timeout() {
+                        "http_timeout"
+                    } else if error.is_connect() {
+                        "http_connect"
+                    } else {
+                        "http_transport"
+                    });
+                    TransitionError::Unknown
+                })?;
+            let status = response.status();
+            observer.update(|state| {
+                state.negative_http[index] = Some((status.as_u16(), "body_not_read"))
+            });
+            if status != reqwest::StatusCode::SERVICE_UNAVAILABLE {
+                observer.failure("unexpected_http_status");
+                return Err(TransitionError::Unknown);
+            }
+            let body: serde_json::Value = response.json().await.map_err(|_| {
+                observer.failure("http_body_rejected");
+                TransitionError::Unknown
+            })?;
+            let expected = body["error"] == "migration_commit_required";
+            observer.update(|state| {
+                state.negative_http[index] = Some((
+                    status.as_u16(),
+                    if expected {
+                        "migration_commit_required"
+                    } else {
+                        "unexpected_error"
+                    },
+                ))
+            });
+            if !expected {
+                observer.failure("unexpected_http_error");
+                return Err(TransitionError::Unknown);
+            }
         }
-        let original_endpoint=custody.profile.endpoint().as_str().to_owned();
-        let mut wrong=url::Url::parse(&original_endpoint).map_err(|_|TransitionError::Conflict)?;
-        let other=format!("styx-{}",&uuid::Uuid::new_v4().simple().to_string()[..24]);
+        observer.stage("negative_wss_prepare");
+        let original_endpoint = custody.profile.endpoint().as_str().to_owned();
+        let mut wrong =
+            url::Url::parse(&original_endpoint).map_err(|_| TransitionError::Conflict)?;
+        let other = format!("styx-{}", &uuid::Uuid::new_v4().simple().to_string()[..24]);
         wrong.set_path(&format!("/styx/host/v3/{other}/exec"));
-        let bad=SecretBearer::from_protected_reader(uuid::Uuid::new_v4().to_string()).map_err(|_|TransitionError::Conflict)?;
-        for (text,bearer) in [(wrong.to_string(),custody.profile.bearer()),(original_endpoint.replace("/exec","/browser"),custody.profile.bearer()),(original_endpoint.replace("/exec","/computer"),custody.profile.bearer()),(original_endpoint.clone(),&bad)] {
-            let endpoint=LinkEndpoint::parse(&text).map_err(|_|TransitionError::Conflict)?;
-            let tcp=TcpStream::connect(address).await.map_err(|_|TransitionError::Unknown)?;
-            let attempt=HostWssLink::connect(&endpoint,custody.profile.tls(),tcp,LinkAuthentication::Bearer(bearer),ConnectionGeneration::try_from(uuid::Uuid::new_v4().to_string()).map_err(|_|TransitionError::Conflict)?,reservation.link_budget()).await;
-            match attempt {Err(crate::host::link::LinkError::HandshakeRejected)=>{},Ok(link)=>{let _=link.shutdown(Duration::from_secs(5)).await;return Err(TransitionError::Unknown);},Err(_)=>return Err(TransitionError::Unknown)}
+        let bad = SecretBearer::from_protected_reader(uuid::Uuid::new_v4().to_string())
+            .map_err(|_| TransitionError::Conflict)?;
+        for (index, (text, bearer)) in [
+            (wrong.to_string(), custody.profile.bearer()),
+            (
+                original_endpoint.replace("/exec", "/browser"),
+                custody.profile.bearer(),
+            ),
+            (
+                original_endpoint.replace("/exec", "/computer"),
+                custody.profile.bearer(),
+            ),
+            (original_endpoint.clone(), &bad),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            observer.stage(match index {
+                0 => "negative_wss_device",
+                1 => "negative_wss_browser",
+                2 => "negative_wss_computer",
+                _ => "negative_wss_bearer",
+            });
+            let endpoint = LinkEndpoint::parse(&text).map_err(|_| TransitionError::Conflict)?;
+            let tcp = TcpStream::connect(address)
+                .await
+                .map_err(|_| TransitionError::Unknown)?;
+            let attempt = HostWssLink::connect(
+                &endpoint,
+                custody.profile.tls(),
+                tcp,
+                LinkAuthentication::Bearer(bearer),
+                ConnectionGeneration::try_from(uuid::Uuid::new_v4().to_string())
+                    .map_err(|_| TransitionError::Conflict)?,
+                reservation.link_budget(),
+            )
+            .await;
+            match attempt {
+                Err(crate::host::link::LinkError::HandshakeRejected) => {
+                    observer.update(|state| state.negative_wss[index] = Some("handshake_rejected"))
+                }
+                Ok(link) => {
+                    observer
+                        .update(|state| state.negative_wss[index] = Some("unexpected_acceptance"));
+                    observer.failure("negative_wss_accepted");
+                    let _ = link.shutdown(Duration::from_secs(5)).await;
+                    return Err(TransitionError::Unknown);
+                }
+                Err(error) => {
+                    observer.update(|state| {
+                        state.negative_wss[index] = Some(match error {
+                            crate::host::link::LinkError::Deadline => "deadline",
+                            crate::host::link::LinkError::UpgradeStatus(_) => "upgrade_status",
+                            _ => "other",
+                        })
+                    });
+                    observer.failure("negative_wss_unexpected_error");
+                    return Err(TransitionError::Unknown);
+                }
+            }
         }
-        let tcp=TcpStream::connect(address).await.map_err(|_|TransitionError::Unknown)?;
-        let mut link=HostWssLink::connect(custody.profile.endpoint(),custody.profile.tls(),tcp,LinkAuthentication::Bearer(custody.profile.bearer()),ConnectionGeneration::try_from(uuid::Uuid::new_v4().to_string()).map_err(|_|TransitionError::Conflict)?,reservation.link_budget()).await.map_err(|_|TransitionError::Unknown)?;
+        observer.stage("positive_wss_connect");
+        let tcp = TcpStream::connect(address)
+            .await
+            .map_err(|_| TransitionError::Unknown)?;
+        let mut link = HostWssLink::connect(
+            custody.profile.endpoint(),
+            custody.profile.tls(),
+            tcp,
+            LinkAuthentication::Bearer(custody.profile.bearer()),
+            ConnectionGeneration::try_from(uuid::Uuid::new_v4().to_string())
+                .map_err(|_| TransitionError::Conflict)?,
+            reservation.link_budget(),
+        )
+        .await
+        .map_err(|_| TransitionError::Unknown)?;
         // Original credential/TLS admission precedes actual native bootstrap.
-        let candidate=match reservation.spawn(config).await {Ok(h)=>Arc::new(h),Err(_)=>{bootstrap_unknown=true;let _=link.shutdown(Duration::from_secs(5)).await;return Err(TransitionError::Unknown);}};
-        host=Some(candidate.clone());
-        let device=custody.profile.device_id().clone();let namespace=custody.profile.paired_gateway_namespace();let cancel=protocol_stop.clone();
-        protocol_job=Some(tokio::spawn(async move {
-            let protocol=candidate.paired_protocol(PairedTrustedProfile{endpoint:original_endpoint,gateway_namespace:namespace,device_id:device,host_generation});
-            let result=match protocol {Ok(protocol)=>tokio::select!{value=protocol.run_connection(&mut link)=>value.map_err(|_|TransitionError::Unknown),_=cancel.cancelled()=>Err(TransitionError::Unknown)},Err(_)=>Err(TransitionError::Conflict)};
-            let cleanup=link.shutdown(Duration::from_secs(5)).await;
-            (result,cleanup.is_ok())
+        observer.stage("native_bootstrap");
+        let candidate = match reservation.spawn(config).await {
+            Ok(h) => Arc::new(h),
+            Err(_) => {
+                bootstrap_unknown = true;
+                let _ = link.shutdown(Duration::from_secs(5)).await;
+                return Err(TransitionError::Unknown);
+            }
+        };
+        host = Some(candidate.clone());
+        let device = custody.profile.device_id().clone();
+        let namespace = custody.profile.paired_gateway_namespace();
+        let cancel = protocol_stop.clone();
+        protocol_job = Some(tokio::spawn(async move {
+            let protocol = candidate.paired_protocol(PairedTrustedProfile {
+                endpoint: original_endpoint,
+                gateway_namespace: namespace,
+                device_id: device,
+                host_generation,
+            });
+            let result = match protocol {
+                Ok(protocol) => protocol
+                    .run_connection_with_stop(&mut link, &cancel)
+                    .await
+                    .map_err(|_| TransitionError::Unknown),
+                Err(_) => Err(TransitionError::Conflict),
+            };
+            let cleanup = link.shutdown(Duration::from_secs(5)).await;
+            (result, cleanup.is_ok())
         }));
-        super::network_client::exercise(client,&origin,plan.model_token.as_str(),custody.profile.device_id(),custody.profile.host_base_dir().to_str().ok_or(TransitionError::Unsupported)?,&custody.nonce_name,&nonce).await
-    }.await;
-    // Even an unknown action result proceeds through physical cleanup; it never
-    // becomes success merely because a late nonce file eventually appears.
-    stop.cancel();
-    // Gateway owner cleanup needs the Host protocol/executor still alive.
-    // First close MCP lifetimes and await their physical owner settlement;
-    // only then stop the Host link and native executor.
-    let server_join = tokio::time::timeout(Duration::from_secs(25), &mut server).await;
+        observer.stage("sdk_journey");
+        super::network_client::exercise_observed(
+            client,
+            &origin,
+            plan.model_token.as_str(),
+            custody.profile.device_id(),
+            custody
+                .profile
+                .host_base_dir()
+                .to_str()
+                .ok_or(TransitionError::Unsupported)?,
+            (&custody.nonce_name, &nonce),
+            observer.clone(),
+        )
+        .await
+    }
+    .await;
+    if execution.is_err() {
+        observer.failure("execution_rejected_or_unknown");
+    }
+    // Original MCP owners settle while the Host is online. The Host then drains
+    // over that same live Gateway control connection; EOF is not a drain ACK.
+    observer.stage("mcp_cleanup");
     let mcp_cleanup = mcp_stop.shutdown(Duration::from_secs(10)).await;
+    observer.stage("host_transport_drain");
     protocol_stop.cancel();
     let protocol_join = if let Some(job) = protocol_job.as_mut() {
         Some(tokio::time::timeout(Duration::from_secs(10), job).await)
     } else {
         None
     };
+    let remote_transport_drain = match &protocol_join {
+        Some(Ok(Ok((Ok(outcome), _)))) => *outcome,
+        _ => None,
+    };
+    observer.stage("server_cleanup");
+    stop.cancel();
+    let server_join = tokio::time::timeout(Duration::from_secs(25), &mut server).await;
+    observer.stage("native_cleanup");
     let native_cleanup = if let Some(host) = &host {
         Some(host.shutdown_owned(Duration::from_secs(30)).await)
     } else {
@@ -446,10 +728,44 @@ async fn run_owned(
         Ok(Ok(Ok(f))) => Some(f),
         _ => None,
     };
-    let protocol_closed = matches!(protocol_join, Some(Ok(Ok((_, true)))))
+    let protocol_closed = matches!(&protocol_join, Some(Ok(Ok((_, true)))))
         || (protocol_job.is_none() && host.is_none() && !bootstrap_unknown);
     let native = native_cleanup.as_ref().and_then(|r| r.as_ref().ok());
+    let unconfirmed_transport_drains = relay.unconfirmed_transport_drains();
+    observer.update(|state| {
+        state.cleanup = Some(NetworkCleanupObservation {
+            mcp_connections_joined: mcp_cleanup.connections_joined,
+            mcp_lifecycle_jobs_joined: mcp_cleanup.lifecycle_jobs_joined,
+            mcp_session_transports_joined: mcp_cleanup.session_transports_joined,
+            unconfirmed_owner_cleanups: mcp_cleanup.unconfirmed_owner_cleanups,
+            unresolved_sessions: mcp_cleanup.unresolved_sessions,
+            protocol_joined: matches!(&protocol_join, Some(Ok(Ok(_)))),
+            link_closed: protocol_closed,
+            remote_transport_drain,
+            server_joined: matches!(&server_join, Ok(Ok(Ok(_)))),
+            server_connections_joined: server_facts.is_some_and(|facts| facts.connections_joined),
+            server_blocking_jobs_joined: server_facts
+                .is_some_and(|facts| facts.blocking_jobs_joined),
+            native_settled: native.is_some_and(|facts| {
+                facts.supervised_jobs_joined
+                    && facts.ancillary_providers_settled()
+                    && facts.native.as_ref().is_some_and(|native| {
+                        native.executor_exited
+                            && native.reader_task_reaped
+                            && native.stderr_task_reaped
+                            && native
+                                .processes
+                                .iter()
+                                .all(|(_, e)| matches!(e, TerminationEvidence::ProcessExited(_)))
+                    })
+            }),
+            unconfirmed_transport_drains,
+        })
+    });
     let clean = !bootstrap_unknown
+        && (host.is_none() || remote_transport_drain == Some(TransportDrainOutcome::Complete))
+        && unconfirmed_transport_drains == 0
+        && mcp_cleanup.unresolved_sessions == 0
         && server_facts.is_some_and(|f| {
             f.connections_joined
                 && f.blocking_jobs_joined
@@ -479,6 +795,8 @@ async fn run_owned(
             }))
         && protocol_closed;
     if !clean {
+        observer.failure("physical_cleanup_unconfirmed");
+        observer.failure("stage_unknown");
         let _ = sender.send(Err(TransitionError::Unknown));
         // Explicit incomplete recovery: retain every original lease plus actual
         // native/transport handle on Unknown. No restart, replay or fake join.
@@ -489,10 +807,12 @@ async fn run_owned(
     let observed = match execution {
         Ok(o) => o,
         Err(e) => {
+            observer.failure("stage_rejected");
             let _ = sender.send(Err(e));
             return;
         }
     };
+    observer.stage("nonce_effect_revalidate");
     let checked = custody.clone();
     let expected = nonce.clone();
     if !matches!(
@@ -503,6 +823,7 @@ async fn run_owned(
         .await,
         Ok(Ok(()))
     ) {
+        observer.failure("stage_unknown");
         let _ = sender.send(Err(TransitionError::Unknown));
         return;
     }
@@ -532,6 +853,8 @@ async fn run_owned(
             mcp_lifecycle_jobs_joined: true,
             mcp_session_transports_joined: true,
             unconfirmed_owner_cleanups: 0,
+            remote_transport_drain,
+            unconfirmed_transport_drains,
             sdk_service_joined: observed.sdk_service_joined,
             sdk_detached_tasks_joined: mcp_cleanup.sdk_detached_tasks_joined,
             host_protocol_joined: true,
@@ -547,7 +870,10 @@ async fn run_owned(
         },
         custody,
     };
+    observer.stage("final_proof_revalidate");
     if let Err(e) = proof.revalidate(None).await {
+        observer.failure("final_proof_rejected");
+        observer.failure("stage_rejected");
         let _ = sender.send(Err(e));
         return;
     }

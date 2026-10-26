@@ -1,7 +1,7 @@
 //! Official MCP client for the one fixed maintenance validation journey.
 //! SDK-local join is not remote owner cleanup: rmcp deliberately logs and
 //! swallows DELETE failures. Only the outer owned server/Host can prove that.
-use super::TransitionError;
+use super::{TransitionError, network::NetworkValidationObserver};
 use rmcp::{
     ClientServiceExt, RoleClient,
     model::{
@@ -57,6 +57,7 @@ fn data(result: CallToolResult) -> Result<Value, TransitionError> {
 }
 /// Caller supplies the original-CA-only reqwest client. This helper never
 /// constructs a dangerous TLS verifier, credential, alternative endpoint or tool.
+#[cfg(test)]
 pub(super) async fn exercise(
     client: reqwest::Client,
     origin: &str,
@@ -66,6 +67,28 @@ pub(super) async fn exercise(
     nonce_name: &str,
     nonce: &str,
 ) -> Result<ClientObservation, TransitionError> {
+    exercise_observed(
+        client,
+        origin,
+        model_token,
+        device,
+        cwd,
+        (nonce_name, nonce),
+        NetworkValidationObserver::new(),
+    )
+    .await
+}
+pub(super) async fn exercise_observed(
+    client: reqwest::Client,
+    origin: &str,
+    model_token: &str,
+    device: &DeviceId,
+    cwd: &str,
+    nonce_input: (&str, &str),
+    observer: NetworkValidationObserver,
+) -> Result<ClientObservation, TransitionError> {
+    let (nonce_name, nonce) = nonce_input;
+    observer.stage("sdk_input_preflight");
     if !atom(nonce_name)
         || !atom(nonce)
         || !(32..=4096).contains(&model_token.len())
@@ -107,7 +130,16 @@ pub(super) async fn exercise(
     // Caller cancellation detaches this ONE owned journey instead of dropping
     // its session mid-dispatch. There is no start/action retry in this worker.
     let job = tokio::spawn(async move {
-        exercise_owned(client, uri, token, device, cwd, nonce_name, nonce).await
+        exercise_owned(
+            client,
+            uri,
+            token,
+            device,
+            cwd,
+            (nonce_name, nonce),
+            observer,
+        )
+        .await
     });
     job.await.map_err(|_| TransitionError::Unknown)?
 }
@@ -117,9 +149,11 @@ async fn exercise_owned(
     token: Zeroizing<String>,
     device: DeviceId,
     cwd: String,
-    nonce_name: String,
-    nonce: String,
+    nonce_input: (String, String),
+    observer: NetworkValidationObserver,
 ) -> Result<ClientObservation, TransitionError> {
+    let (nonce_name, nonce) = nonce_input;
+    observer.stage("sdk_initialize");
     let config = StreamableHttpClientTransportConfig::with_uri(uri)
         .auth_header(token.to_string())
         .reinit_on_expired_session(false)
@@ -138,23 +172,37 @@ async fn exercise_owned(
     // An initialize error/timeout is Unknown, never a known clean session.
     let owner = tokio::time::timeout(RPC_BUDGET, connect)
         .await
-        .map_err(|_| TransitionError::Unknown)?
-        .map_err(|_| TransitionError::Unknown)?;
+        .map_err(|_| {
+            observer.failure("sdk_initialize_timeout");
+            TransitionError::Unknown
+        })?
+        .map_err(|_| {
+            observer.failure("sdk_initialize_rejected");
+            TransitionError::Unknown
+        })?;
     let result = tokio::time::timeout(
         JOURNEY_BUDGET,
-        calls(&owner, &device, &cwd, &nonce_name, &nonce),
+        calls(&owner, &device, &cwd, &nonce_name, &nonce, &observer),
     )
     .await
-    .unwrap_or(Err(TransitionError::Unknown));
+    .unwrap_or_else(|_| {
+        observer.failure("sdk_journey_timeout");
+        Err(TransitionError::Unknown)
+    });
+    if result.is_err() {
+        observer.failure("sdk_call_rejected_or_unknown");
+    }
     // Always attempt explicit SDK cancellation after any initialized-session
     // outcome, including schema, readiness, dispatch or read failure. Timeout
     // never aborts the cleanup future: its owned task keeps the local service.
+    observer.stage("sdk_close");
     let mut close = tokio::spawn(async move { owner.cancel().await });
     let joined = matches!(
         tokio::time::timeout(CLOSE_BUDGET, &mut close).await,
         Ok(Ok(Ok(_)))
     );
     if !joined {
+        observer.failure("sdk_close_unconfirmed");
         return Err(TransitionError::Unknown);
     }
     let stdout_bytes = result?;
@@ -173,7 +221,9 @@ async fn calls(
     cwd: &str,
     nonce_name: &str,
     nonce: &str,
+    observer: &NetworkValidationObserver,
 ) -> Result<usize, TransitionError> {
+    observer.stage("sdk_list_tools");
     let listed = tokio::time::timeout(RPC_BUDGET, owner.list_tools(None))
         .await
         .map_err(|_| TransitionError::Unknown)?
@@ -188,6 +238,7 @@ async fn calls(
     {
         return Err(TransitionError::Conflict);
     }
+    observer.stage("sdk_readiness");
     let until = tokio::time::Instant::now() + Duration::from_secs(10);
     loop {
         let status = tokio::time::timeout_at(
@@ -222,6 +273,7 @@ async fn calls(
     let command = format!(
         "set -e; umask 077; set -C; printf '%s' '{nonce}' > './{nonce_name}'; printf '%s' '{nonce}'"
     );
+    observer.stage("sdk_exec_once");
     let started = tokio::time::timeout(
         RPC_BUDGET,
         owner.call_tool(call(
@@ -235,6 +287,7 @@ async fn calls(
     .await
     .map_err(|_| TransitionError::Unknown)?
     .map_err(|_| TransitionError::Unknown)?;
+    observer.stage("sdk_exec_result");
     let mut page = data(started)?;
     let mut stdout = String::new();
     let mut original_session = None;
@@ -264,6 +317,7 @@ async fn calls(
         original_session = Some(session);
         // Empty stdin is strictly a read. A lost reply is Unknown, never a new
         // start, repeated input, cursor restart, or automatic session reinit.
+        observer.stage("sdk_empty_read");
         page = data(
             tokio::time::timeout(
                 RPC_BUDGET,

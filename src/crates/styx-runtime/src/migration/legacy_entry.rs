@@ -40,6 +40,8 @@ pub(crate) struct LegacyMigrationStatus {
     pub error: Option<TransitionError>,
     pub terminal: bool,
     pub effects_started: bool,
+    pub settlement: Option<serde_json::Value>,
+    pub network: Option<serde_json::Value>,
 }
 #[must_use = "observe and finish the original job; dropping a waiter does not cancel it"]
 pub(crate) struct LegacyMigrationTask {
@@ -69,6 +71,8 @@ impl LegacyMigrationFailure {
         serde_json::json!({"schema":1,"transaction_id":self.status.transaction_id,
             "stage":self.status.stage,"error":self.code.to_string(),
             "effects_started":self.status.effects_started,
+            "settlement":self.status.settlement,
+            "network":self.status.network,
             "operations_replayed":false,"cleanup_confirmed":false})
     }
 }
@@ -146,6 +150,8 @@ pub(crate) fn start(
         error: None,
         terminal: false,
         effects_started: false,
+        settlement: None,
+        network: None,
     });
     let job = tokio::spawn(run(
         state_dir,
@@ -260,8 +266,23 @@ async fn capture_gateway(gateway: &mut LegacyGatewayTransition) -> Result<(), Tr
     .await
     .map_err(|_| TransitionError::Unknown)?
 }
+fn publish_settlement(
+    status: &watch::Sender<LegacyMigrationStatus>,
+    fact: super::legacy_service::SettlementObservation,
+) {
+    // Only bounded lifecycle facts; no credentials, commands or private paths.
+    status.send_modify(|s| s.settlement = Some(serde_json::json!({
+        "observed_at_stage":s.stage,"observation_only":true,
+        "checkpoint":fact.checkpoint,"elapsed_millis":fact.elapsed_millis,
+        "term_attempted":fact.term_attempted,"signal_accepted":fact.signal_accepted,
+        "original_main_exited":fact.original_main_exited,"original_cgroup_empty":fact.original_cgroup_empty,
+        "manager_reported_success":fact.manager_reported_success,"worker_joined":fact.worker_joined,
+        "failure":fact.failure.map(|error|error.to_string())
+    })));
+}
 async fn settle_host(
     host: &LegacyServiceTransition,
+    status: &watch::Sender<LegacyMigrationStatus>,
 ) -> Result<SettledLegacyService, TransitionError> {
     host.begin_settlement(Duration::from_secs(15), CancellationToken::new())?;
     tokio::time::timeout(Duration::from_secs(25), async {
@@ -269,6 +290,7 @@ async fn settle_host(
             let fact = host
                 .settlement_observation()?
                 .ok_or(TransitionError::Unknown)?;
+            publish_settlement(status, fact);
             match fact.status {
                 SettlementStatus::Unknown => return Err(TransitionError::Unknown),
                 SettlementStatus::Confirmed => match host.consume_settlement() {
@@ -286,6 +308,7 @@ async fn settle_host(
 }
 async fn settle_gateway(
     gateway: &LegacyGatewayTransition,
+    status: &watch::Sender<LegacyMigrationStatus>,
 ) -> Result<SettledLegacyRuntime, TransitionError> {
     gateway.begin_settlement(Duration::from_secs(15), CancellationToken::new())?;
     tokio::time::timeout(Duration::from_secs(25), async {
@@ -293,6 +316,7 @@ async fn settle_gateway(
             let fact = gateway
                 .settlement_observation()?
                 .ok_or(TransitionError::Unknown)?;
+            publish_settlement(status, fact);
             match fact.status {
                 SettlementStatus::Unknown => return Err(TransitionError::Unknown),
                 SettlementStatus::Confirmed => match gateway.consume_settlement() {
@@ -425,8 +449,13 @@ async fn run(
     }
     step!(capture_host(step!(custody.host.as_mut().ok_or(TransitionError::Unknown))).await);
     publish(&status, "host_settlement");
-    let settled =
-        step!(settle_host(step!(custody.host.as_ref().ok_or(TransitionError::Unknown))).await);
+    let settled = step!(
+        settle_host(
+            step!(custody.host.as_ref().ok_or(TransitionError::Unknown)),
+            &status
+        )
+        .await
+    );
     publish(&status, "credential_retirement");
     match settled.retire_legacy_credential() {
         Ok(retired) => custody.retired = Some(Arc::new(retired)),
@@ -451,9 +480,10 @@ async fn run(
     );
     publish(&status, "gateway_settlement");
     let combined = Arc::new(step!(
-        settle_gateway(step!(
-            custody.gateway.as_ref().ok_or(TransitionError::Unknown)
-        ))
+        settle_gateway(
+            step!(custody.gateway.as_ref().ok_or(TransitionError::Unknown)),
+            &status
+        )
         .await
     ));
     custody.combined = Some(combined.clone());
@@ -498,7 +528,16 @@ async fn run(
     publish(&status, "candidate_exec_validation");
     let probe = step!(combined.validate_candidate_exec(&state_dir).await);
     publish(&status, "original_pair_network_validation");
-    let network = step!(network_plan.validate(probe).await);
+    let observation = super::legacy_service::NetworkValidationObserver::new();
+    let network = network_plan
+        .validate_observed(probe, observation.clone())
+        .await;
+    status.send_modify(|s| {
+        s.network = observation
+            .snapshot()
+            .and_then(|value| serde_json::to_value(value).ok());
+    });
+    let network = step!(network);
     publish(&status, "canonical_apply");
     step!(
         step!(custody.cutover.as_mut().ok_or(TransitionError::Unknown))

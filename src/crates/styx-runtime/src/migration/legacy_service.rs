@@ -483,3 +483,5 @@ mod network;
 #[path = "legacy_network_client.rs"]
 mod network_client;
 pub use network::{PairedGatewayValidation, PairedGatewayValidationReport};
+
+pub(crate) use network::NetworkValidationObserver;
