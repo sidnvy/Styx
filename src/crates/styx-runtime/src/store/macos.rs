@@ -574,7 +574,7 @@ pub(crate) use native_cutover::{MacCanonicalCutover, MacCommittedCutover};
 #[path = "macos_migration_owner.rs"]
 mod migration_owner;
 pub(in crate::store) use migration_owner::{
-    MacMigrationCommittedScope, MacMigrationObservation, MacMigrationOwnerTask, MacResumedCutover,
-    start_previous_boot_host_migration, start_resume_pre_cutover_host_migration,
-    start_resume_validated_host_migration,
+    MacMigrationCommittedScope, MacMigrationObservation, MacMigrationOwnerTask,
+    MacMigrationRejectedScope, MacResumedCutover, start_previous_boot_host_migration,
+    start_resume_pre_cutover_host_migration, start_resume_validated_host_migration,
 };

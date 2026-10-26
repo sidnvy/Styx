@@ -701,5 +701,5 @@ mod macos_recovery;
 #[cfg(target_os = "macos")]
 pub(crate) use macos_recovery::{
     MacMigrationRecovery, MacMigrationRecoveryFailure, MacMigrationRecoveryStart,
-    begin_mac_legacy_recovery,
+    begin_mac_host_migration, begin_mac_legacy_recovery,
 };

@@ -49,6 +49,7 @@ pub(in crate::store) struct MacMigrationObservation {
 /// Retained original capabilities after a strictly ZERO-effect rejection.
 /// No Clone/Serde and no fence-clear method; caller gets its original scope back.
 pub(in crate::store) struct MacMigrationRejectedScope {
+    pub(in crate::store) permit: Arc<tokio::sync::SemaphorePermit<'static>>,
     pub(in crate::store) app_scope: Option<Arc<crate::app::HostScope>>,
     pub(in crate::store) owner: OwnedConfigurationRoot,
     pub(in crate::store) maintenance: Arc<ConfigurationMaintenance>,
@@ -126,9 +127,10 @@ impl MacMigrationOwnerTask {
 /// Moves only already-acquired ORIGINAL capabilities into one owned task.
 /// No writer/journal is acquired by path here; no caller command/token is read.
 /// `desired` is an explicit local plan; unsupported service/autostart is refused.
-/// INTERNAL UNFINISHED COMPOSITION ONLY: do not expose to CLI/App or execute on
-/// a real profile until interrupted recovery consumers are implemented. The normal path commits using real probes and transfers its
-/// same writer; failure retains the original scope without replay.
+/// Supports previous-boot foreground ownership recovery and preserves the
+/// explicit manager. Normal completion uses real validation before commit;
+/// Unknown retains the original transaction without replay. This is not a
+/// declaration of complete platform acceptance.
 pub(in crate::store) fn start_previous_boot_host_migration(
     runtime: Handle,
     state_dir: PathBuf,
@@ -138,6 +140,7 @@ pub(in crate::store) fn start_previous_boot_host_migration(
     candidate: Arc<VerifiedNativeRelease>,
     desired: NativeDesired,
     app_scope: Option<Arc<crate::app::HostScope>>,
+    permit: Arc<tokio::sync::SemaphorePermit<'static>>,
 ) -> MacMigrationOwnerTask {
     let (sender, observation) = oneshot::channel();
     let executor = runtime.clone();
@@ -145,6 +148,7 @@ pub(in crate::store) fn start_previous_boot_host_migration(
     // Construct all borrowed profile/guard values INSIDE this same job. No
     // borrowed guard is sent to another 'static task and no mem::forget is used.
     let job = runtime.spawn_blocking(move || {
+        let _permit = permit.clone();
         executor.block_on(run_original_scope(
             executor.clone(),
             state_dir,
@@ -155,6 +159,7 @@ pub(in crate::store) fn start_previous_boot_host_migration(
             desired,
             app_scope,
             sender,
+            permit,
         ));
     });
     MacMigrationOwnerTask {
@@ -193,6 +198,7 @@ async fn run_original_scope(
     desired: NativeDesired,
     app_scope: Option<Arc<crate::app::HostScope>>,
     sender: oneshot::Sender<MacMigrationObservation>,
+    permit: Arc<tokio::sync::SemaphorePermit<'static>>,
 ) {
     let transaction = maintenance.transaction_id().clone();
     let mut sender = Some(sender);
@@ -202,7 +208,7 @@ async fn run_original_scope(
         ($result:expr, $stage:literal $(, $held:expr)* $(,)?) => {
             match $result {
                 Ok(value) => value,
-                Err(_) => retain_scope((&owner, &maintenance, &journal, &candidate, &app_scope, $($held,)*), &mut sender,
+                Err(_) => retain_scope((&owner, &maintenance, &journal, &candidate, &app_scope, &permit, $($held,)*), &mut sender,
                     MacMigrationObservation { transaction_id: transaction.clone(), stage: $stage, local_exec_report: None, pair_admission_report: None, rejected_scope: None, committed_scope: None }).await,
             }
         };
@@ -215,6 +221,7 @@ async fn run_original_scope(
                     // No C/retirement/canonical/probe operation has been called.
                     // Transfer actual original capabilities back, do not park.
                     let rejected = MacMigrationRejectedScope {
+                        permit: permit.clone(),
                         app_scope: app_scope.clone(),
                         owner: owner.clone(),
                         maintenance: maintenance.clone(),
@@ -866,7 +873,7 @@ async fn run_original_scope(
         app_scope,
         applied,
         sender,
-        None,
+        Some(permit),
     )
     .await;
 }

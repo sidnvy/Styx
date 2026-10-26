@@ -1,6 +1,6 @@
-//! Offline native configuration commands shared by CLI/future Control clients.
-//! No service/runtime activation, pairing, legacy adoption or implicit pending
-//! transaction recovery. Blocking jobs keep their bounded permit after waiter loss.
+//! Native configuration commands and explicit original-owner migration.
+//! Ordinary configuration commands do not activate services. Migration performs
+//! joined validation before commit; blocking jobs retain permits after waiter loss.
 use crate::store::{
     native_root::{NativeRootError, NativeRootFailure},
     native_transaction::{
@@ -116,6 +116,14 @@ impl NativeManagementError {
     pub fn requires_process_teardown(&self) -> bool {
         matches!(&self._retained, Some(Retained::MacMigration { _owner })
             if _owner.process_teardown_required())
+    }
+    /// Redacted original transaction facts; never contains credentials.
+    pub fn migration_diagnostic(&self) -> Option<serde_json::Value> {
+        #[cfg(target_os = "macos")]
+        if let Some(Retained::MacMigration { _owner }) = &self._retained {
+            return _owner.diagnostic();
+        }
+        None
     }
     pub fn code(&self) -> &'static str {
         match self.kind {
@@ -320,6 +328,30 @@ fn parse_transaction_id(value: &str) -> Result<TransactionId> {
     }
     TransactionId::try_from(value).map_err(|_| NativeManagementError::new(ErrorKind::Invalid))
 }
+/// Explicit foreground Host migration. Unsupported platforms fail before I/O.
+pub async fn migrate(
+    state_dir: &Path,
+    runtime_selection_file: &Path,
+    transaction_id: &str,
+    run: NativeRunDesired,
+) -> Result<NativeManagementReport> {
+    #[cfg(target_os = "macos")]
+    {
+        let id = parse_transaction_id(transaction_id)?;
+        macos_recovery::migrate(
+            state_dir.to_owned(),
+            runtime_selection_file.to_owned(),
+            id,
+            run,
+        )
+        .await
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (state_dir, runtime_selection_file, transaction_id, run);
+        Err(NativeManagementError::new(ErrorKind::Unsupported))
+    }
+}
 pub async fn recover(state_dir: &Path, transaction_id: &str) -> Result<NativeManagementReport> {
     let path = state_dir.to_owned();
     let id = parse_transaction_id(transaction_id)?;
@@ -398,7 +430,7 @@ mod platform {
             _ => ErrorKind::Unknown,
         })
     }
-    fn private_file(path: &Path, limit: usize) -> Result<RawFile> {
+    pub(super) fn private_file(path: &Path, limit: usize) -> Result<RawFile> {
         if !path.is_absolute() {
             return Err(NativeManagementError::new(ErrorKind::Invalid));
         }

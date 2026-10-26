@@ -100,6 +100,21 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Migrate the original paired foreground Host using an explicit candidate.
+    Migrate {
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(long)]
+        runtime_selection_file: PathBuf,
+        #[arg(long)]
+        transaction_id: String,
+        #[arg(long, value_enum)]
+        run: NativeRunArg,
+        #[arg(long, required = true)]
+        authorize: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Reconcile the original native transaction; never mint a replacement ID.
     Recover {
         #[arg(long)]
@@ -323,6 +338,40 @@ fn write_json(value: &impl serde::Serialize) -> io::Result<()> {
     output.write_all(b"\n")?;
     output.flush()
 }
+fn native_error_output(
+    value: &styx_runtime::management::native::NativeManagementError,
+) -> serde_json::Value {
+    let mut output = serde_json::json!({"schema":1,"error":value.code()});
+    if let Some(diagnostic) = value.migration_diagnostic() {
+        output["migration"] = diagnostic;
+    }
+    output
+}
+/// An unresolved owned migration/recovery job must survive until explicit
+/// whole-process teardown. Dropping its result would leave runtime shutdown
+/// waiting for the original blocking custody job.
+fn native_recovery_result<T: serde::Serialize>(
+    result: Result<T, styx_runtime::management::native::NativeManagementError>,
+    json: bool,
+    summary: &'static str,
+) -> ExitCode {
+    #[cfg(target_os = "macos")]
+    if let Err(value) = &result
+        && value.requires_process_teardown()
+    {
+        let mut output = native_error_output(value);
+        output["outcome"] = serde_json::json!("unknown");
+        output["operations_replayed"] = serde_json::json!(false);
+        output["cleanup_confirmed"] = serde_json::json!(false);
+        output["process_exit"] = serde_json::json!("explicit_scope_teardown");
+        eprintln!("{output}");
+        let _ = io::stdout().flush();
+        let _ = io::stderr().flush();
+        // Keep the entire original result alive; this is not successful cleanup.
+        std::process::exit(i32::from(value.exit_code()));
+    }
+    native_result(result, json, summary)
+}
 fn native_result<T: serde::Serialize>(
     result: Result<T, styx_runtime::management::native::NativeManagementError>,
     json: bool,
@@ -340,7 +389,7 @@ fn native_result<T: serde::Serialize>(
             }
         }
         Err(value) => {
-            eprintln!("{}", serde_json::json!({"schema":1,"error":value.code()}));
+            eprintln!("{}", native_error_output(&value));
             ExitCode::from(value.exit_code())
         }
     }
@@ -780,6 +829,29 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
                 "Native desired-state transaction; inspect report for completion:",
             )
         }
+        Command::Migrate {
+            state_dir,
+            runtime_selection_file,
+            transaction_id,
+            run,
+            authorize,
+            json,
+        } => {
+            if !authorize {
+                return error("authorization_required");
+            }
+            native_recovery_result(
+                styx_runtime::management::native::migrate(
+                    &state_dir,
+                    &runtime_selection_file,
+                    &transaction_id,
+                    run.native(),
+                )
+                .await,
+                json,
+                "Original paired Host migration; inspect the report for completion:",
+            )
+        }
         Command::Recover {
             state_dir,
             transaction_id,
@@ -791,28 +863,7 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
             }
             let result =
                 styx_runtime::management::native::recover(&state_dir, &transaction_id).await;
-            #[cfg(target_os = "macos")]
-            if let Err(error) = &result {
-                if error.requires_process_teardown() {
-                    // The actual recovery job is retaining Unknown custody.
-                    // Keep `result` alive until explicit whole-process teardown;
-                    // runtime Drop would wait forever for that blocking job.
-                    // Durable original journal/guards remain for next recovery.
-                    use std::io::Write;
-                    eprintln!(
-                        "{}",
-                        serde_json::json!({
-                            "schema": 1, "error": error.code(), "outcome": "unknown",
-                            "operations_replayed": false, "cleanup_confirmed": false,
-                            "process_exit": "explicit_scope_teardown",
-                        })
-                    );
-                    let _ = std::io::stdout().flush();
-                    let _ = std::io::stderr().flush();
-                    std::process::exit(i32::from(error.exit_code()));
-                }
-            }
-            native_result(
+            native_recovery_result(
                 result,
                 json,
                 "Original native transaction reconciliation; no automatic service start:",

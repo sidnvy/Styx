@@ -18,6 +18,7 @@ fn migration_error(
 fn completed(
     transactions: NativeTransactions,
     committed: crate::store::native_transaction::NativeCommitResult,
+    operation: &'static str,
 ) -> Result<NativeManagementReport> {
     let transaction = NativeTransactionReport {
         transaction_id: committed.transaction_id,
@@ -26,7 +27,9 @@ fn completed(
         receipt: Some(committed.committed),
         recovered: committed.recovered,
     };
-    let result = platform::report(&transactions, "recover_migration", Some(transaction));
+    // Reopening an earlier Committed transaction proves historical validation,
+    // not whether an ordinary Host is running now.
+    let result = platform::report(&transactions, operation, Some(transaction));
     result.map_err(|error| error.keep(transactions))
 }
 fn prepare(
@@ -74,7 +77,7 @@ fn prepare(
         .map_err(migration_error)?
     {
         MacMigrationRecoveryStart::Complete(transactions, result) => {
-            completed(transactions, result).map(Prepared::Complete)
+            completed(transactions, result, "recover_migration").map(Prepared::Complete)
         }
         MacMigrationRecoveryStart::Running(task) => Ok(Prepared::Running(task)),
     }
@@ -91,16 +94,50 @@ pub(super) async fn recover(path: PathBuf, id: TransactionId) -> Result<NativeMa
         .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))??;
     match prepared {
         Prepared::Complete(report) => Ok(report),
-        Prepared::Running(task) => {
-            let (transactions, result, permit) = task.finish().await.map_err(migration_error)?;
-            // The original budget stays held through final report generation;
-            // a new request cannot turn an already committed result into Busy.
-            tokio::task::spawn_blocking(move || {
-                let _permit = permit;
-                completed(transactions, result)
-            })
-            .await
-            .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?
-        }
+        Prepared::Running(task) => finish(task, "recover_migration").await,
     }
+}
+async fn finish(
+    task: MacMigrationRecovery,
+    operation: &'static str,
+) -> Result<NativeManagementReport> {
+    let (transactions, result, permit) = task.finish().await.map_err(migration_error)?;
+    // Retain the original budget through reporting after the real task joins.
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        completed(transactions, result, operation).map(|mut report| {
+            report.configuration_only = false;
+            report.runtime_health = "validation_workers_joined_runtime_not_observed";
+            report
+        })
+    })
+    .await
+    .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?
+}
+pub(super) async fn migrate(
+    path: PathBuf,
+    selection_path: PathBuf,
+    id: TransactionId,
+    run: NativeRunDesired,
+) -> Result<NativeManagementReport> {
+    let permit = WORKERS
+        .try_acquire()
+        .map_err(|_| NativeManagementError::new(ErrorKind::Busy))?;
+    let runtime = Handle::current();
+    let task = tokio::task::spawn_blocking(move || {
+        let raw = platform::private_file(&selection_path, NATIVE_STATE_BYTES)?;
+        let selection: NativeRuntimeSelection = serde_json::from_slice(raw.bytes())
+            .map_err(|_| NativeManagementError::new(ErrorKind::Invalid))?;
+        let candidate = Arc::new(
+            crate::release::verify_selected(&selection)
+                .map_err(|_| NativeManagementError::new(ErrorKind::Invalid))?,
+        );
+        crate::store::native_transaction::begin_mac_host_migration(
+            path, id, candidate, run, None, runtime, permit,
+        )
+        .map_err(migration_error)
+    })
+    .await
+    .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))??;
+    finish(task, "migrate").await
 }
