@@ -13,8 +13,13 @@ mod effects;
 #[path = "windows_filetime_projection.rs"]
 mod filetime_projection;
 pub(in crate::store) use effects::{
-    WindowsBootRecoveryEffects, WindowsLegacyMaintenancePlan, WindowsRecoveryOpenFailure,
-    WindowsRestartCheckpoint,
+    WindowsBootRecoveryEffects, WindowsCheckpointResumeFailure, WindowsCheckpointRetainedScope,
+    WindowsLegacyMaintenancePlan, WindowsMigrationCheckpointJob, WindowsMigrationCheckpointPlan,
+    WindowsMigrationCheckpointResume, WindowsMigrationRecoveredGuards,
+    WindowsMigrationWaitingForBoot, WindowsRecoveryOpenFailure, WindowsRestartCheckpoint,
+    WindowsRestartMigrationReview, WindowsResumedCutover, resume_recorded_windows_checkpoint,
+    review_windows_restart_host_migration, start_resume_validated_windows_host_migration,
+    start_resume_windows_restart_host_migration, start_windows_restart_host_migration,
 };
 
 #[derive(Deserialize)]

@@ -302,36 +302,57 @@ impl StartupLinkCustody {
         maintenance: &ConfigurationMaintenance,
         os: &WindowsLegacyObservation,
     ) -> JournalResult<NativeRetirementFileStamp> {
-        self.owner.with_maintenance(maintenance, |s| {
-            let fixed_archive = s
-                .root
-                .inner
-                .path
-                .join("foreground-recovery")
-                .join(self.original.transaction.as_str());
-            let profile = s.root.inner.path.parent().ok_or(JournalError::Conflict)?;
-            let expected_arguments = format!("--startup --state-dir \"{}\"", profile.display());
-            if self.archive.path != fixed_archive || self.original.arguments != expected_arguments {
-                return Err(JournalError::Conflict);
-            }
-            let RootIdentity::Windows {
-                volume_serial,
-                file_id,
-                owner_sid,
-            } = s.root.identity()
-            else {
-                return Err(JournalError::Conflict);
-            };
-            if (NativeRootIdentity::Windows {
-                volume_serial,
-                file_id,
-                owner_sid,
-            }) != self.original.config_root
-            {
-                return Err(JournalError::Conflict);
-            }
-            Ok(())
+        self.owner.with_maintenance(maintenance, |state| {
+            self.validate_binding_locked(state, &self.owner, maintenance)
         })?;
+        self.validate_physical(os)
+    }
+    fn validate_binding_locked(
+        &self,
+        s: &crate::store::configuration::ConfigurationState,
+        owner: &OwnedConfigurationRoot,
+        maintenance: &ConfigurationMaintenance,
+    ) -> JournalResult<()> {
+        if !self.owner.same_authority(owner)
+            || !maintenance.matches(owner)
+            || maintenance.transaction_id() != &self.original.transaction
+        {
+            return Err(JournalError::Conflict);
+        }
+        s.require_native_maintenance(&self.original.transaction)?;
+        let fixed_archive = s
+            .root
+            .inner
+            .path
+            .join("foreground-recovery")
+            .join(self.original.transaction.as_str());
+        let profile = s.root.inner.path.parent().ok_or(JournalError::Conflict)?;
+        let expected_arguments = format!("--startup --state-dir \"{}\"", profile.display());
+        if self.archive.path != fixed_archive || self.original.arguments != expected_arguments {
+            return Err(JournalError::Conflict);
+        }
+        let RootIdentity::Windows {
+            volume_serial,
+            file_id,
+            owner_sid,
+        } = s.root.identity()
+        else {
+            return Err(JournalError::Conflict);
+        };
+        if (NativeRootIdentity::Windows {
+            volume_serial,
+            file_id,
+            owner_sid,
+        }) != self.original.config_root
+        {
+            return Err(JournalError::Conflict);
+        }
+        Ok(())
+    }
+    fn validate_physical(
+        &self,
+        os: &WindowsLegacyObservation,
+    ) -> JournalResult<NativeRetirementFileStamp> {
         self.archive.validate_root().map_err(failed)?;
         if normalized_root(&current_startup_directory().map_err(failed)?).map_err(failed)?
             != self.startup
@@ -381,6 +402,21 @@ impl StartupLinkCustody {
             return Err(JournalError::Conflict);
         }
         self.validate(maintenance, os)
+    }
+    /// Same original binding/physical checks when the caller already holds the
+    /// configuration mutex. Never recursively acquires that mutex.
+    pub(in crate::store) fn validate_excluded_locked(
+        &self,
+        state: &crate::store::configuration::ConfigurationState,
+        owner: &OwnedConfigurationRoot,
+        maintenance: &ConfigurationMaintenance,
+        os: &WindowsLegacyObservation,
+    ) -> JournalResult<NativeRetirementFileStamp> {
+        if self.location != StartupLocation::Archived {
+            return Err(JournalError::Conflict);
+        }
+        self.validate_binding_locked(state, owner, maintenance)?;
+        self.validate_physical(os)
     }
     pub(in crate::store) fn matches_prepared(
         &self,

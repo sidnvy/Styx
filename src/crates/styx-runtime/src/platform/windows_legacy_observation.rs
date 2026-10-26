@@ -283,3 +283,264 @@ mod tests {
         }
     }
 }
+
+/// Retains the original kernel process object, not just its PID. This is a
+/// read-only source binding; it cannot close, terminate or settle that process.
+pub(crate) struct RetainedLegacyProcess {
+    handle: std::os::windows::io::OwnedHandle,
+    identity: crate::store::ProcessIdentity,
+    image: std::path::PathBuf,
+    session: u32,
+}
+impl RetainedLegacyProcess {
+    fn capture(pid: u32, expected: &std::path::Path, sid: &str) -> Result<Self> {
+        use std::os::windows::io::{FromRawHandle, OwnedHandle};
+        use windows_sys::Win32::System::{
+            RemoteDesktop::ProcessIdToSessionId,
+            Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_SYNCHRONIZE},
+        };
+        // SAFETY: successful OpenProcess transfers exactly one owned HANDLE.
+        let raw = unsafe {
+            OpenProcess(
+                PROCESS_QUERY_LIMITED_INFORMATION | PROCESS_SYNCHRONIZE,
+                0,
+                pid,
+            )
+        };
+        if raw.is_null() {
+            return Err(ObservationError::Native);
+        }
+        let handle = unsafe { OwnedHandle::from_raw_handle(raw) };
+        let identity = crate::store::ProcessIdentity::observe(pid).map_err(native)?;
+        let crate::store::ProcessIdentity::Windows {
+            owner_sid,
+            creation_time_100ns,
+            ..
+        } = &identity
+        else {
+            return Err(ObservationError::Invalid);
+        };
+        if owner_sid != sid || *creation_time_100ns != process_birth(&handle)? {
+            return Err(ObservationError::Changed);
+        }
+        let image = process_image(&handle)?;
+        if image != expected {
+            return Err(ObservationError::Changed);
+        }
+        let mut session = 0;
+        if unsafe { ProcessIdToSessionId(pid, &mut session) } == 0 || session == 0 {
+            return Err(ObservationError::Invalid);
+        }
+        let this = Self {
+            handle,
+            identity,
+            image,
+            session,
+        };
+        // The second kernel wait closes PID-reuse / observed-token sampling gaps.
+        this.revalidate()?;
+        Ok(this)
+    }
+    pub(crate) fn pid_and_birth(&self) -> (u32, u64) {
+        let crate::store::ProcessIdentity::Windows {
+            pid,
+            creation_time_100ns,
+            ..
+        } = self.identity
+        else {
+            unreachable!("Windows process source")
+        };
+        (pid, creation_time_100ns)
+    }
+    pub(crate) fn revalidate(&self) -> Result<()> {
+        use std::os::windows::io::AsRawHandle;
+        use windows_sys::Win32::{
+            Foundation::WAIT_TIMEOUT, System::Threading::WaitForSingleObject,
+        };
+        if unsafe { WaitForSingleObject(self.handle.as_raw_handle(), 0) } != WAIT_TIMEOUT
+            || process_birth(&self.handle)? != self.pid_and_birth().1
+            || process_image(&self.handle)? != self.image
+            || !self.identity.still_current().map_err(native)?
+        {
+            return Err(ObservationError::Changed);
+        }
+        Ok(())
+    }
+}
+fn process_birth(handle: &std::os::windows::io::OwnedHandle) -> Result<u64> {
+    use std::os::windows::io::AsRawHandle;
+    use windows_sys::Win32::{Foundation::FILETIME, System::Threading::GetProcessTimes};
+    let (mut c, mut e, mut k, mut u) = (
+        FILETIME::default(),
+        FILETIME::default(),
+        FILETIME::default(),
+        FILETIME::default(),
+    );
+    if unsafe { GetProcessTimes(handle.as_raw_handle(), &mut c, &mut e, &mut k, &mut u) } == 0 {
+        return Err(ObservationError::Native);
+    }
+    Ok((u64::from(c.dwHighDateTime) << 32) | u64::from(c.dwLowDateTime))
+}
+fn process_image(handle: &std::os::windows::io::OwnedHandle) -> Result<std::path::PathBuf> {
+    use std::{
+        ffi::OsString,
+        os::windows::{ffi::OsStringExt, io::AsRawHandle},
+    };
+    let mut text = vec![0u16; 32768];
+    let mut len = text.len() as u32;
+    if unsafe {
+        windows_sys::Win32::System::Threading::QueryFullProcessImageNameW(
+            handle.as_raw_handle(),
+            0,
+            text.as_mut_ptr(),
+            &mut len,
+        )
+    } == 0
+        || len == 0
+        || len as usize >= text.len()
+    {
+        return Err(ObservationError::Native);
+    }
+    text.truncate(len as usize);
+    Ok(OsString::from_wide(&text).into())
+}
+
+/// A single actual App -> Node parent relationship. Both original process
+/// HANDLEs remain held; no command line, environment or secret is collected.
+pub(crate) struct RetainedLegacyAppCore {
+    app: RetainedLegacyProcess,
+    core: RetainedLegacyProcess,
+}
+impl RetainedLegacyAppCore {
+    pub(crate) fn capture(
+        app_image: &std::path::Path,
+        core_image: &std::path::Path,
+        sid: &str,
+    ) -> Result<Self> {
+        use std::{
+            collections::BTreeMap,
+            mem::size_of,
+            os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
+        };
+        use windows_sys::Win32::{
+            Foundation::{ERROR_NO_MORE_FILES, INVALID_HANDLE_VALUE},
+            System::Diagnostics::ToolHelp::{
+                CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+                TH32CS_SNAPPROCESS,
+            },
+        };
+        let raw = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+        if raw == INVALID_HANDLE_VALUE {
+            return Err(ObservationError::Native);
+        }
+        let snapshot = unsafe { OwnedHandle::from_raw_handle(raw) };
+        let mut entry = PROCESSENTRY32W {
+            dwSize: size_of::<PROCESSENTRY32W>() as u32,
+            ..Default::default()
+        };
+        let mut rows = BTreeMap::new();
+        let mut ok = unsafe { Process32FirstW(snapshot.as_raw_handle(), &mut entry) };
+        while ok != 0 {
+            if rows.len() >= 65536 {
+                return Err(ObservationError::Invalid);
+            }
+            let end = entry
+                .szExeFile
+                .iter()
+                .position(|n| *n == 0)
+                .ok_or(ObservationError::Invalid)?;
+            let name = String::from_utf16(&entry.szExeFile[..end]).map_err(native)?;
+            if rows
+                .insert(entry.th32ProcessID, (entry.th32ParentProcessID, name))
+                .is_some()
+            {
+                return Err(ObservationError::Changed);
+            }
+            ok = unsafe { Process32NextW(snapshot.as_raw_handle(), &mut entry) };
+        }
+        if std::io::Error::last_os_error().raw_os_error() != Some(ERROR_NO_MORE_FILES as i32) {
+            return Err(ObservationError::Native);
+        }
+        let mut found = None;
+        for (&pid, (parent, name)) in &rows {
+            if !name.eq_ignore_ascii_case("node.exe")
+                || !rows
+                    .get(parent)
+                    .is_some_and(|(_, n)| n.eq_ignore_ascii_case("StyxPreview.exe"))
+            {
+                continue;
+            }
+            let app = RetainedLegacyProcess::capture(*parent, app_image, sid)?;
+            let core = RetainedLegacyProcess::capture(pid, core_image, sid)?;
+            if app.session != core.session
+                || app.pid_and_birth().1 > core.pid_and_birth().1
+                || found.is_some()
+            {
+                return Err(ObservationError::Changed);
+            }
+            found = Some(Self { app, core });
+        }
+        let found = found.ok_or(ObservationError::Invalid)?;
+        found.revalidate()?;
+        Ok(found)
+    }
+    pub(crate) fn app(&self) -> (u32, u64) {
+        self.app.pid_and_birth()
+    }
+    pub(crate) fn core(&self) -> (u32, u64) {
+        self.core.pid_and_birth()
+    }
+    pub(crate) fn revalidate(&self) -> Result<()> {
+        self.app.revalidate()?;
+        self.core.revalidate()?;
+        if retained_parent(self.core.pid_and_birth().0)? != self.app.pid_and_birth().0 {
+            return Err(ObservationError::Changed);
+        }
+        self.core.revalidate()?;
+        self.app.revalidate()
+    }
+}
+
+// A fresh snapshot is taken while BOTH original process HANDLEs are alive.
+// This rejects a PID reused between the initial census and opening the child.
+fn retained_parent(pid: u32) -> Result<u32> {
+    use std::{
+        mem::size_of,
+        os::windows::io::{AsRawHandle, FromRawHandle, OwnedHandle},
+    };
+    use windows_sys::Win32::{
+        Foundation::{ERROR_NO_MORE_FILES, INVALID_HANDLE_VALUE},
+        System::Diagnostics::ToolHelp::{
+            CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW,
+            TH32CS_SNAPPROCESS,
+        },
+    };
+    let raw = unsafe { CreateToolhelp32Snapshot(TH32CS_SNAPPROCESS, 0) };
+    if raw == INVALID_HANDLE_VALUE {
+        return Err(ObservationError::Native);
+    }
+    let snapshot = unsafe { OwnedHandle::from_raw_handle(raw) };
+    let mut entry = PROCESSENTRY32W {
+        dwSize: size_of::<PROCESSENTRY32W>() as u32,
+        ..Default::default()
+    };
+    let mut count = 0usize;
+    let mut result = None;
+    let mut ok = unsafe { Process32FirstW(snapshot.as_raw_handle(), &mut entry) };
+    while ok != 0 {
+        count += 1;
+        if count > 65536 {
+            return Err(ObservationError::Invalid);
+        }
+        if entry.th32ProcessID == pid {
+            if result.replace(entry.th32ParentProcessID).is_some() {
+                return Err(ObservationError::Changed);
+            }
+        }
+        ok = unsafe { Process32NextW(snapshot.as_raw_handle(), &mut entry) };
+    }
+    if std::io::Error::last_os_error().raw_os_error() != Some(ERROR_NO_MORE_FILES as i32) {
+        return Err(ObservationError::Native);
+    }
+    result.ok_or(ObservationError::Changed)
+}

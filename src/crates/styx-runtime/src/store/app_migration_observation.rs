@@ -7,11 +7,13 @@ pub(crate) enum AppMigrationObservation {
     NotMigration,
     #[cfg(any(
         target_os = "macos",
+        target_os = "windows",
         all(test, target_os = "linux", target_env = "gnu")
     ))]
     Required,
     #[cfg(any(
         target_os = "macos",
+        target_os = "windows",
         all(test, target_os = "linux", target_env = "gnu")
     ))]
     Pending {
@@ -19,6 +21,7 @@ pub(crate) enum AppMigrationObservation {
     },
     #[cfg(any(
         target_os = "macos",
+        target_os = "windows",
         all(test, target_os = "linux", target_env = "gnu")
     ))]
     Blocked {
@@ -29,6 +32,7 @@ pub(crate) enum AppMigrationObservation {
 pub(crate) fn observe(scope: Arc<crate::app::HostScope>) -> JournalResult<AppMigrationObservation> {
     #[cfg(any(
         target_os = "macos",
+        target_os = "windows",
         all(test, target_os = "linux", target_env = "gnu")
     ))]
     {
@@ -36,6 +40,7 @@ pub(crate) fn observe(scope: Arc<crate::app::HostScope>) -> JournalResult<AppMig
     }
     #[cfg(not(any(
         target_os = "macos",
+        target_os = "windows",
         all(test, target_os = "linux", target_env = "gnu")
     )))]
     {
@@ -46,6 +51,7 @@ pub(crate) fn observe(scope: Arc<crate::app::HostScope>) -> JournalResult<AppMig
 
 #[cfg(any(
     target_os = "macos",
+    target_os = "windows",
     all(test, target_os = "linux", target_env = "gnu")
 ))]
 mod platform {
@@ -55,7 +61,9 @@ mod platform {
         native_root::NATIVE_MARKER_FILE,
         secure_journal::{JournalBudget, JournalError, JournalObservation, files},
     };
-    use std::{collections::BTreeSet, fs::File, os::unix::fs::MetadataExt};
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
+    use std::{collections::BTreeSet, fs::File};
     use styx_core::management::transaction::DurableStage;
 
     const NAMESPACE: &str = ".styx-management-journal-v1";
@@ -71,9 +79,17 @@ mod platform {
             .map(Some)
             .map_err(|_| JournalError::Unknown)
     }
+    #[cfg(unix)]
     fn identity(file: &File) -> JournalResult<(u64, u64)> {
         let metadata = file.metadata().map_err(|_| JournalError::Unknown)?;
         Ok((metadata.dev(), metadata.ino()))
+    }
+    #[cfg(target_os = "windows")]
+    fn identity(file: &File) -> JournalResult<(u64, u64)> {
+        // These are the original and independently reopened protected directory
+        // HANDLES returned by Windows files::directory, not Unix FD metadata.
+        // directory/scan validate the same current-SID root and ancestor pins.
+        crate::store::windows_file_identity(file).map_err(|_| JournalError::Unknown)
     }
     fn same_scan(a: &JournalObservation, b: &JournalObservation) -> bool {
         a.total_bytes == b.total_bytes
@@ -124,7 +140,7 @@ mod platform {
             state.as_ref(),
             scan.as_ref(),
         );
-        // Reopen named protected inputs and namespace, not just the held FDs.
+        // Reopen named protected inputs and namespace, not just held OS handles.
         if root.identity() != original_root
             || PrivateRoot::open(scope.state_dir())
                 .map_err(|_| JournalError::Unknown)?

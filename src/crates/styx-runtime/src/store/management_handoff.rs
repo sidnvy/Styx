@@ -742,12 +742,14 @@ pub(in crate::store) use native_writer::{NativePreparedRetirement, NativeRetired
 mod owner_recovery;
 #[cfg(target_os = "macos")]
 pub(in crate::store) use owner_recovery::ArchivedLegacyOwnerRecovery;
-#[cfg(target_os = "windows")]
-pub(in crate::store) use owner_recovery::RecoveryBasis;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 pub(in crate::store) use owner_recovery::{LegacyGuardsHeld, PreparedLegacyOwnerRecovery};
 pub(in crate::store) use owner_recovery::{
     LegacyOwnerRecoveryIntent, OwnerRecoveryPlan, OwnerRecoveryStage, scan_owner_recoveries,
+};
+#[cfg(target_os = "windows")]
+pub(in crate::store) use owner_recovery::{
+    RecoveryBasis, WindowsRestartProcess, WindowsStartupCheckpoint,
 };
 #[cfg(any(target_os = "macos", target_os = "windows", test))]
 pub(in crate::store) use owner_recovery::{

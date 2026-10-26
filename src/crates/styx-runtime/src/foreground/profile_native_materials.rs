@@ -269,11 +269,11 @@ impl OriginalNativePairMaterials<'_> {
         }
         source.validate().map_err(|_| ProfileError::Changed)
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub(crate) fn preservation_entries(&self) -> &[PreservationEntry] {
         &self.original.diagnostics.preservation
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub(crate) fn executor_configured(&self) -> bool {
         self.original.executor_enabled()
     }
@@ -358,6 +358,13 @@ impl OriginalNativePairMaterials<'_> {
     pub(crate) fn publisher_sha256(&self) -> Result<Sha256Digest, ProfileError> {
         self.revalidate()?;
         Ok(self.publisher)
+    }
+    /// Exact original manifest bytes already bound by the verified release and
+    /// retained capture. This digest alone grants no package or runtime authority.
+    #[cfg(target_os = "windows")]
+    pub(crate) fn original_release_manifest_sha256(&self) -> Result<Sha256Digest, ProfileError> {
+        self.revalidate()?;
+        self.digest(&self.original.release_root.join("manifest.json"))
     }
     pub(crate) fn pair_binding(
         &self,

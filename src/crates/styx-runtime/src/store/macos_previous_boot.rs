@@ -309,6 +309,8 @@ impl MacPreviousBootInput {
             .map_err(|_| JournalError::InvalidInput)?,
             originals: self.originals,
             guards,
+            authorization_plan: None,
+            startup_raw: None,
         };
         plan.validated_intent()?;
         Ok(plan)

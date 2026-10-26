@@ -407,6 +407,8 @@ fn original_c_inputs(f: &Fixture) -> handoff::OwnerRecoveryPlan {
         intent: raw(&json(&intent)).unwrap(),
         originals,
         guards,
+        authorization_plan: None,
+        startup_raw: None,
     }
 }
 #[test]

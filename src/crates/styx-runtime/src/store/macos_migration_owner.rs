@@ -1,32 +1,27 @@
 //! One original-owner Darwin migration through actual validation and commit.
 //! Source plan is durable before effects; interrupted recovery consumer is still internal work.
 use super::*;
+pub(in crate::store) use crate::store::native_migration_job::{
+    NativeMigrationCommittedScope as MacMigrationCommittedScope,
+    NativeMigrationObservation as MacMigrationObservation,
+    NativeMigrationOwnerTask as MacMigrationOwnerTask,
+    NativeMigrationRejectedScope as MacMigrationRejectedScope,
+};
+use crate::store::native_migration_job::{finish_applied_migration, retain_scope};
 use crate::{
-    foreground::profile::{
-        OriginalNativePairMaterials, load_applied_mac_maintenance_profile,
-        read_original_pair_materials,
-    },
-    migration::{
-        mac_exec_validation::MacCandidateExecProbe, mac_pair_validation::MacPairReadinessProbe,
-    },
+    foreground::profile::read_original_pair_materials,
     release::VerifiedNativeRelease,
     store::{
         configuration::{ConfigurationMaintenance, OwnedConfigurationRoot},
         management::{
             OwnedManagementJournal,
-            cutover::{NativeCutoverHistoryInputs, NativeCutoverInputs},
-            handoff::{
-                self, LegacyGuardsHeld, NativeRetirementIntent, OwnerRecoveryStage, RetirementKind,
-            },
+            handoff::{self, NativeRetirementIntent, RetirementKind},
             migration_plan::MigrationPlanInputs,
         },
-        native_state,
+        native_migration_inputs::{Preservation, migration_marker, render_target, scope_bindings},
         secure_journal::{JournalError, JournalResult, files},
     },
 };
-use serde::Serialize;
-use serde_json::value::RawValue;
-use std::collections::BTreeMap;
 use styx_contracts::{
     identity::{Sha256Digest, TransactionId},
     management::ReaderContract,
@@ -34,96 +29,8 @@ use styx_contracts::{
     native_release::{NativeExternalWorker, NativeReleaseScope},
 };
 use styx_core::management::transaction::DurableStage;
-use tokio::{runtime::Handle, sync::oneshot, task::JoinHandle};
+use tokio::{runtime::Handle, sync::oneshot};
 
-/// One-shot observation data, optionally transferring original owned resources.
-/// A dropped observer does not abort the original blocking job or release scope.
-pub(in crate::store) struct MacMigrationObservation {
-    pub(in crate::store) transaction_id: TransactionId,
-    pub(in crate::store) stage: &'static str,
-    pub(in crate::store) local_exec_report: Option<Vec<u8>>,
-    pub(in crate::store) pair_admission_report: Option<Vec<u8>>,
-    pub(in crate::store) rejected_scope: Option<Box<MacMigrationRejectedScope>>,
-    committed_scope: Option<Box<MacMigrationCommittedScope>>,
-}
-/// Retained original capabilities after a strictly ZERO-effect rejection.
-/// No Clone/Serde and no fence-clear method; caller gets its original scope back.
-pub(in crate::store) struct MacMigrationRejectedScope {
-    pub(in crate::store) permit: Arc<tokio::sync::SemaphorePermit<'static>>,
-    pub(in crate::store) app_scope: Option<Arc<crate::app::HostScope>>,
-    pub(in crate::store) owner: OwnedConfigurationRoot,
-    pub(in crate::store) maintenance: Arc<ConfigurationMaintenance>,
-    pub(in crate::store) journal: OwnedManagementJournal,
-    pub(in crate::store) candidate: Arc<VerifiedNativeRelease>,
-}
-/// Final commit returned the SAME configuration writer and domain journal.
-/// Only the actual joined owner task returns this scope to an ordinary caller.
-pub(in crate::store) struct MacMigrationCommittedScope {
-    pub(in crate::store) recovery_permit: Option<Arc<tokio::sync::SemaphorePermit<'static>>>,
-    pub(in crate::store) app_scope: Option<Arc<crate::app::HostScope>>,
-    pub(in crate::store) owner: OwnedConfigurationRoot,
-    pub(in crate::store) journal: OwnedManagementJournal,
-    pub(in crate::store) candidate: Arc<VerifiedNativeRelease>,
-}
-#[must_use = "retain the original non-aborted job and its observation"]
-pub(in crate::store) struct MacMigrationOwnerTask {
-    observation: oneshot::Receiver<MacMigrationObservation>,
-    observed: bool,
-    rejected_observed: bool,
-    committed_scope: Option<Box<MacMigrationCommittedScope>>,
-    worker_joined: bool,
-    worker_failed: bool,
-    _job: JoinHandle<()>,
-}
-impl MacMigrationOwnerTask {
-    /// Cancelling this WAIT leaves the original receiver and job in self.
-    pub(in crate::store) async fn observe(&mut self) -> JournalResult<MacMigrationObservation> {
-        if self.observed {
-            return Err(JournalError::Conflict);
-        }
-        let mut result = (&mut self.observation)
-            .await
-            .map_err(|_| JournalError::Unknown);
-        self.observed = true;
-        if let Ok(observation) = &mut result {
-            self.rejected_observed = observation.rejected_scope.is_some();
-            self.committed_scope = observation.committed_scope.take();
-        }
-        result
-    }
-    /// Return the original scope only AFTER the actual worker join. Cancelling
-    /// this wait retains both its handle and the scope in this task object.
-    pub(in crate::store) async fn join_committed(
-        &mut self,
-    ) -> JournalResult<Box<MacMigrationCommittedScope>> {
-        if self.committed_scope.is_none() {
-            return Err(JournalError::Conflict);
-        }
-        self.join_worker().await?;
-        self.committed_scope.take().ok_or(JournalError::Conflict)
-    }
-    async fn join_worker(&mut self) -> JournalResult<()> {
-        if self.worker_failed {
-            return Err(JournalError::Unknown);
-        }
-        if !self.worker_joined {
-            if (&mut self._job).await.is_err() {
-                self.worker_failed = true;
-                return Err(JournalError::Unknown);
-            }
-            self.worker_joined = true;
-        }
-        Ok(())
-    }
-    /// A zero-effect rejection actually returns from the worker. This is its
-    /// real join; Unknown cannot use this port to discard scope.
-    pub(in crate::store) async fn join_rejected(&mut self) -> JournalResult<()> {
-        if !self.rejected_observed {
-            return Err(JournalError::Conflict);
-        }
-        self.join_worker().await
-    }
-}
 /// Moves only already-acquired ORIGINAL capabilities into one owned task.
 /// No writer/journal is acquired by path here; no caller command/token is read.
 /// `desired` is an explicit local plan; unsupported service/autostart is refused.
@@ -162,31 +69,7 @@ pub(in crate::store) fn start_previous_boot_host_migration(
             permit,
         ));
     });
-    MacMigrationOwnerTask {
-        observation,
-        observed: false,
-        rejected_observed: false,
-        committed_scope: None,
-        worker_joined: false,
-        worker_failed: false,
-        _job: job,
-    }
-}
-async fn retain_scope<T>(
-    held: T,
-    sender: &mut Option<oneshot::Sender<MacMigrationObservation>>,
-    observation: MacMigrationObservation,
-) -> ! {
-    if let Some(sender) = sender.take() {
-        let _ = sender.send(observation);
-    }
-    // An Unknown effect retains every ORIGINAL value in this frame until an
-    // explicit recovery consumer can reconcile it. The successful path returns.
-    // There is intentionally no caller boolean that drops/clears this fence.
-    loop {
-        std::future::pending::<()>().await;
-        std::hint::black_box(&held);
-    }
+    MacMigrationOwnerTask::from_job(observation, job)
 }
 async fn run_original_scope(
     runtime: Handle,
@@ -867,7 +750,7 @@ async fn run_original_scope(
     finish_applied_migration(
         runtime,
         owner.clone(),
-        maintenance.clone(),
+        &maintenance,
         journal,
         candidate.clone(),
         app_scope,
@@ -878,158 +761,6 @@ async fn run_original_scope(
     .await;
 }
 
-/// Finish one already-applied original migration using actual joined probes.
-/// The caller must await this inside the same non-abortable owner job: `applied`
-/// borrows its original materials/C/held/token, keeping that caller frame alive.
-/// No probe retry or historical-report substitution is performed here.
-async fn finish_applied_migration(
-    runtime: Handle,
-    owner: OwnedConfigurationRoot,
-    maintenance: Arc<ConfigurationMaintenance>,
-    mut journal: OwnedManagementJournal,
-    candidate: Arc<VerifiedNativeRelease>,
-    app_scope: Option<Arc<crate::app::HostScope>>,
-    applied: MacCanonicalCutover<'_, '_>,
-    mut sender: Option<oneshot::Sender<MacMigrationObservation>>,
-    recovery_permit: Option<Arc<tokio::sync::SemaphorePermit<'static>>>,
-) {
-    let transaction = maintenance.transaction_id().clone();
-    macro_rules! keep {
-        ($result:expr, $stage:literal $(, $held:expr)* $(,)?) => {
-            match $result {
-                Ok(value) => value,
-                Err(_) => retain_scope(
-                    (&owner, &maintenance, &journal, &candidate, &app_scope,
-                        &recovery_permit, &applied, $($held,)*),
-                    &mut sender,
-                    MacMigrationObservation {
-                        transaction_id: transaction.clone(),
-                        stage: $stage,
-                        local_exec_report: None,
-                        pair_admission_report: None,
-                        rejected_scope: None,
-                        committed_scope: None,
-                    },
-                ).await,
-            }
-        };
-    }
-    let profile = keep!(
-        load_applied_mac_maintenance_profile(&applied),
-        "unknown_maintenance_profile",
-        &applied
-    );
-    let mut probe = keep!(
-        MacCandidateExecProbe::prepare(&profile),
-        "unknown_probe_prepare",
-        &applied,
-        &profile
-    );
-    let report_raw = keep!(
-        probe.run_joined(&runtime).and_then(|report| {
-            serde_json::to_vec(report)
-                .map_err(|_| crate::migration::mac_exec_validation::MacExecValidationError::Unknown)
-        }),
-        "unknown_exec_cleanup_or_report",
-        &applied,
-        &profile,
-        &probe
-    );
-    keep!(
-        probe.revalidate_success(),
-        "unknown_after_local_probe",
-        &applied,
-        &profile,
-        &probe
-    );
-    keep!(
-        applied.validate_applied(),
-        "unknown_after_local_applied",
-        &applied,
-        &profile,
-        &probe
-    );
-    let mut pair_probe = keep!(
-        MacPairReadinessProbe::prepare(&profile),
-        "unknown_pair_probe_prepare",
-        &profile,
-        &probe,
-        &applied,
-    );
-    let pair_report_raw = keep!(
-        pair_probe.run_joined(&runtime).and_then(|report| {
-            serde_json::to_vec(report)
-                .map_err(|_| crate::migration::mac_pair_validation::MacPairValidationError::Unknown)
-        }),
-        "unknown_original_pair_readiness_or_cleanup",
-        &profile,
-        &probe,
-        &pair_probe,
-        &applied,
-    );
-    keep!(
-        pair_probe.revalidate_success(),
-        "unknown_pair_revalidation",
-        &profile,
-        &probe,
-        &pair_probe,
-        &applied,
-    );
-    keep!(
-        probe.revalidate_success(),
-        "unknown_local_effect_after_pair_validation",
-        &profile,
-        &probe,
-        &pair_probe,
-        &applied,
-    );
-    keep!(
-        app_scope.as_ref().map_or(Ok(()), |scope| {
-            scope.validate().map_err(|_| JournalError::Unknown)
-        }),
-        "unknown_app_scope_before_commit",
-        &profile,
-        &probe,
-        &pair_probe,
-        &applied,
-    );
-    let committed = keep!(
-        applied.commit_validated(&mut journal, &mut probe, &mut pair_probe),
-        "unknown_final_validation_or_commit",
-        &profile,
-        &probe,
-        &pair_probe,
-        &applied,
-    );
-    keep!(
-        committed.release_admission(&journal, &mut probe, &mut pair_probe, app_scope.as_deref()),
-        "unknown_committed_admission_release",
-        &profile,
-        &probe,
-        &pair_probe,
-        &applied,
-    );
-    // Both workers are already settled. Drop the local execution lease BEFORE
-    // transferring the same owner; it must not obstruct ordinary runtime start.
-    drop(pair_probe);
-    drop(probe);
-    if let Some(sender) = sender.take() {
-        let _ = sender.send(MacMigrationObservation {
-            transaction_id: transaction,
-            stage: "committed_admission_released",
-            local_exec_report: Some(report_raw),
-            pair_admission_report: Some(pair_report_raw),
-            rejected_scope: None,
-            committed_scope: Some(Box::new(MacMigrationCommittedScope {
-                recovery_permit,
-                app_scope,
-                owner: owner.clone(),
-                journal,
-                candidate: candidate.clone(),
-            })),
-        });
-    }
-}
 fn native_id(identity: RootIdentity) -> JournalResult<NativeRootIdentity> {
     match identity {
         RootIdentity::Macos { device, inode, uid } => {
@@ -1037,216 +768,6 @@ fn native_id(identity: RootIdentity) -> JournalResult<NativeRootIdentity> {
         }
         _ => Err(JournalError::Unsupported),
     }
-}
-#[derive(Serialize)]
-struct PreservationRow {
-    path: PathBuf,
-    sha256: Sha256Digest,
-    bytes: u64,
-    observation: FileObservation,
-}
-struct PreservationPin {
-    root: PrivateRoot,
-    name: PathBuf,
-    observation: FileObservation,
-    digest: Sha256Digest,
-    max: usize,
-}
-struct Preservation {
-    rows: Vec<PreservationRow>,
-    pins: Vec<PreservationPin>,
-}
-impl Preservation {
-    fn capture(materials: &OriginalNativePairMaterials<'_>) -> JournalResult<Self> {
-        materials.revalidate().map_err(|_| JournalError::Unknown)?;
-        let entries = materials.preservation_entries();
-        if entries.is_empty() || entries.len() > 128 {
-            return Err(JournalError::BudgetExceeded);
-        }
-        let mut rows = BTreeMap::new();
-        let mut pins = Vec::new();
-        for entry in entries {
-            let root = PrivateRoot::open(entry.path.parent().ok_or(JournalError::InvalidInput)?)
-                .map_err(|_| JournalError::Unknown)?;
-            let name = PathBuf::from(entry.path.file_name().ok_or(JournalError::InvalidInput)?);
-            let max = usize::try_from(entry.bytes)
-                .map_err(|_| JournalError::BudgetExceeded)?
-                .checked_add(1)
-                .ok_or(JournalError::BudgetExceeded)?;
-            if max > NATIVE_STATE_BYTES + 1 {
-                return Err(JournalError::BudgetExceeded);
-            }
-            let raw = root
-                .read_raw(&name, max)
-                .map_err(|_| JournalError::Unknown)?;
-            if Sha256Digest::of_bytes(raw.bytes()) != entry.sha256
-                || raw.bytes().len() as u64 != entry.bytes
-            {
-                return Err(JournalError::Unknown);
-            }
-            if let Some(old) = rows.get(&entry.path) {
-                let old: &PreservationRow = old;
-                if old.sha256 != entry.sha256 || old.observation != *raw.observation() {
-                    return Err(JournalError::Unknown);
-                }
-            } else {
-                rows.insert(
-                    entry.path.clone(),
-                    PreservationRow {
-                        path: entry.path.clone(),
-                        sha256: entry.sha256,
-                        bytes: entry.bytes,
-                        observation: raw.observation().clone(),
-                    },
-                );
-            }
-            pins.push(PreservationPin {
-                root,
-                name,
-                observation: raw.observation().clone(),
-                digest: entry.sha256,
-                max,
-            });
-        }
-        let value = Self {
-            rows: rows.into_values().collect(),
-            pins,
-        };
-        value.validate_original()?;
-        materials.revalidate().map_err(|_| JournalError::Unknown)?;
-        Ok(value)
-    }
-    fn validate_original(&self) -> JournalResult<()> {
-        for pin in &self.pins {
-            let raw = pin
-                .root
-                .read_raw(&pin.name, pin.max)
-                .map_err(|_| JournalError::Unknown)?;
-            if raw.observation() != &pin.observation
-                || Sha256Digest::of_bytes(raw.bytes()) != pin.digest
-            {
-                return Err(JournalError::Unknown);
-            }
-        }
-        Ok(())
-    }
-}
-fn scope_bindings(
-    owner: &OwnedConfigurationRoot,
-    maintenance: &ConfigurationMaintenance,
-    journal: &OwnedManagementJournal,
-    held: &LegacyGuardsHeld,
-) -> JournalResult<Vec<u8>> {
-    owner.with_maintenance(maintenance, |state| journal.with_directory_locked(state, |directory| {
-        let scan = files::scan(directory, journal.budget())?;
-        let records = handoff::scan_owner_recoveries(&scan)?;
-        if records.records.len() != 1 { return Err(JournalError::Conflict); }
-        let original = &records.records[0];
-        if original.stage() != Some(OwnerRecoveryStage::GuardsHeld) || original.intent != *held.prepared().intent() { return Err(JournalError::Conflict); }
-        serde_json::to_vec(&serde_json::json!({"schema":1,"kind":"mac_original_previous_boot_guards_held","transaction_id":original.intent.transaction_id,"config_root":original.intent.config_root,"original_recovery_intent_sha256":Sha256Digest::of_bytes(&original.raw_intent),"guard_posts":original.guards_held_posts().ok_or(JournalError::Conflict)?,"historical_outcome":"unknown_not_replayed"})).map_err(|_| JournalError::InvalidInput)
-    }))
-}
-fn raw<T: Serialize>(value: &T) -> JournalResult<Box<RawValue>> {
-    RawValue::from_string(serde_json::to_string(value).map_err(|_| JournalError::InvalidInput)?)
-        .map_err(|_| JournalError::InvalidInput)
-}
-fn migration_marker(retirement: &NativeRetirementIntent) -> JournalResult<NativeRootMarker> {
-    let mut entropy = [0u8; 32];
-    getrandom::fill(&mut entropy).map_err(|_| JournalError::Unknown)?;
-    Ok(NativeRootMarker {
-        schema: NATIVE_MARKER_SCHEMA,
-        kind: NativeRootKind::StyxConfigurationRoot,
-        runtime_format: NativeRuntimeFormat::NativeRustV1,
-        root_identity: retirement.config_root.clone(),
-        scope_generation: Sha256Digest::from_bytes(entropy),
-        reader_floor: ReaderContract::NativeMigratedStateV2,
-    })
-}
-fn render_target(
-    candidate: &VerifiedNativeRelease,
-    retirement: &NativeRetirementIntent,
-    marker: &NativeRootMarker,
-    retired_sha256: Sha256Digest,
-    pair: &NativePreservedHostPair,
-    preservation: Vec<u8>,
-    scopes: Vec<u8>,
-    owners: Box<RawValue>,
-    before: &[u8],
-    desired: NativeDesired,
-) -> JournalResult<NativeCutoverInputs> {
-    if marker.root_identity != retirement.config_root
-        || marker.reader_floor != ReaderContract::NativeMigratedStateV2
-    {
-        return Err(JournalError::Conflict);
-    }
-    let pair_raw = serde_json::to_vec(pair).map_err(|_| JournalError::InvalidInput)?;
-    let binding = NativeMigrationBindingV2 {
-        schema: 2,
-        transaction_id: retirement.transaction_id.clone(),
-        root_identity: retirement.config_root.clone(),
-        original_state_sha256: retirement.before_state_sha256,
-        retired_receipt_sha256: retired_sha256,
-        candidate_manifest_sha256: retirement.candidate_manifest_sha256,
-        publisher_spki_sha256: retirement.publisher_spki_sha256,
-        preservation_sha256: Sha256Digest::of_bytes(&preservation),
-        scope_bindings_sha256: Sha256Digest::of_bytes(&scopes),
-        original_token_relative_path: retirement
-            .token_destination()
-            .to_str()
-            .ok_or(JournalError::Unsupported)?
-            .to_owned(),
-        host_pair_sha256: Sha256Digest::of_bytes(&pair_raw),
-        endpoint_mode: NativeMigrationEndpointMode::PreservedRemote,
-        history: NativeMigrationHistory::PreservedHostPair {
-            source_bindings_sha256: Sha256Digest::of_bytes(&pair_raw),
-        },
-    };
-    let original = RawValue::from_string(
-        std::str::from_utf8(before)
-            .map_err(|_| JournalError::InvalidInput)?
-            .to_owned(),
-    )
-    .map_err(|_| JournalError::InvalidInput)?;
-    let extensions = BTreeMap::from([
-        ("original_legacy_state".into(), original),
-        (NATIVE_MIGRATION_V2_KEY.into(), raw(&binding)?),
-        (
-            "runtime_selection_v1".into(),
-            raw(&candidate
-                .runtime_selection()
-                .map_err(|_| JournalError::Unknown)?)?,
-        ),
-        ("legacy_owner_bindings_v2".into(), owners),
-    ]);
-    let target = NativeState {
-        schema: NATIVE_STATE_SCHEMA,
-        kind: NativeStateKind::StyxDesiredState,
-        runtime_format: NativeRuntimeFormat::NativeRustV1,
-        reader_contract: marker.reader_floor,
-        scope_generation: marker.scope_generation,
-        deployment_raw_sha256: retirement.deployment_raw_sha256,
-        mode: NativeDeploymentMode::JoinExisting,
-        revision: 1,
-        last_transaction: Some(NativeStateTransaction {
-            transaction_id: retirement.transaction_id.clone(),
-            sequence: retirement.sequence,
-        }),
-        desired,
-        migration: None,
-        extensions,
-    };
-    styx_core::management::state::validate_state(&target, &marker)
-        .map_err(|_| JournalError::InvalidInput)?;
-    Ok(NativeCutoverInputs {
-        history: NativeCutoverHistoryInputs::PreservedHostPair { bindings: pair_raw },
-        endpoint_mode: NativeMigrationEndpointMode::PreservedRemote,
-        preservation,
-        scope_bindings: scopes,
-        marker: serde_json::to_vec(&marker).map_err(|_| JournalError::InvalidInput)?,
-        before: before.to_vec(),
-        target: serde_json::to_vec(&target).map_err(|_| JournalError::InvalidInput)?,
-        endpoint: None,
-    })
 }
 
 #[path = "macos_migration_resume.rs"]

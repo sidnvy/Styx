@@ -197,7 +197,7 @@ impl Active {
 }
 /// Paths derived only from the original preserved selector, using the same
 /// codec as the original profile reader. This does not select a runtime.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub(crate) fn original_release_metadata_paths(
     base: &Path,
     raw: &[u8],

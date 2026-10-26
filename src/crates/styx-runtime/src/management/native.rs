@@ -81,6 +81,8 @@ enum ErrorKind {
     Unsupported,
     Unknown,
     Busy,
+    #[cfg(target_os = "windows")]
+    WaitingForRestart,
 }
 /// Error ownership is intentional: inspecting/printing a curated code must not
 /// silently discard an unresolved bootstrap/coordinator. No background registry.
@@ -91,6 +93,10 @@ pub struct NativeManagementError {
     _app_scope: Option<Arc<crate::app::HostScope>>,
 }
 enum Retained {
+    #[cfg(target_os = "windows")]
+    WindowsMigrationPreparation {
+        _owner: Box<crate::store::native_transaction::WindowsMigrationPreparationFailure>,
+    },
     #[cfg(target_os = "macos")]
     MacMigration {
         _owner: Box<crate::store::native_transaction::MacMigrationRecoveryFailure>,
@@ -112,13 +118,24 @@ impl NativeManagementError {
     }
     /// Only an observed retained Mac migration task requires whole-process CLI
     /// teardown. Library/App callers retain this error and never exit here.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub fn requires_process_teardown(&self) -> bool {
-        matches!(&self._retained, Some(Retained::MacMigration { _owner })
-            if _owner.process_teardown_required())
+        #[cfg(target_os = "windows")]
+        if let Some(Retained::WindowsMigrationPreparation { _owner }) = &self._retained {
+            return _owner.process_teardown_required();
+        }
+        #[cfg(target_os = "macos")]
+        return matches!(&self._retained, Some(Retained::MacMigration { _owner })
+            if _owner.process_teardown_required());
+        #[cfg(target_os = "windows")]
+        false
     }
     /// Redacted original transaction facts; never contains credentials.
     pub fn migration_diagnostic(&self) -> Option<serde_json::Value> {
+        #[cfg(target_os = "windows")]
+        if let Some(Retained::WindowsMigrationPreparation { _owner }) = &self._retained {
+            return _owner.diagnostic();
+        }
         #[cfg(target_os = "macos")]
         if let Some(Retained::MacMigration { _owner }) = &self._retained {
             return _owner.diagnostic();
@@ -133,6 +150,8 @@ impl NativeManagementError {
             ErrorKind::Unsupported => "native_management_unsupported",
             ErrorKind::Unknown => "native_management_unknown_inspect",
             ErrorKind::Busy => "native_management_busy",
+            #[cfg(target_os = "windows")]
+            ErrorKind::WaitingForRestart => "native_migration_waiting_for_later_boot",
         }
     }
     pub fn exit_code(&self) -> u8 {
@@ -140,6 +159,8 @@ impl NativeManagementError {
             ErrorKind::Invalid | ErrorKind::Conflict => 2,
             ErrorKind::Unavailable | ErrorKind::Unsupported | ErrorKind::Busy => 3,
             ErrorKind::Unknown => 4,
+            #[cfg(target_os = "windows")]
+            ErrorKind::WaitingForRestart => 3,
         }
     }
     fn new(kind: ErrorKind) -> Self {
@@ -328,6 +349,138 @@ fn parse_transaction_id(value: &str) -> Result<TransactionId> {
     }
     TransactionId::try_from(value).map_err(|_| NativeManagementError::new(ErrorKind::Invalid))
 }
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+fn completed_migration(
+    transactions: NativeTransactions,
+    committed: crate::store::native_transaction::NativeCommitResult,
+    operation: &'static str,
+    scope: Option<&Arc<crate::app::HostScope>>,
+) -> Result<NativeManagementReport> {
+    let transaction = NativeTransactionReport {
+        transaction_id: committed.transaction_id,
+        sequence: committed.committed.sequence,
+        observed_stage: Some(DurableStage::Committed),
+        receipt: Some(committed.committed),
+        recovered: committed.recovered,
+    };
+    // Reopening an earlier Committed transaction proves historical validation,
+    // not whether an ordinary Host is running now.
+    let result = (|| {
+        if let Some(scope) = scope {
+            scope
+                .validate()
+                .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?;
+        }
+        let report = platform::report(&transactions, operation, Some(transaction))?;
+        if let Some(scope) = scope {
+            scope
+                .validate()
+                .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?;
+        }
+        Ok(report)
+    })();
+    result.map_err(|error: NativeManagementError| {
+        let error = error.keep(transactions);
+        match scope {
+            Some(scope) => error.with_app_scope(scope.clone()),
+            None => error,
+        }
+    })
+}
+/// A canonical Windows migration request for explicit review. The digest is
+/// echoed when submitting the migration; it is not a reusable bearer grant.
+#[derive(Serialize)]
+pub struct NativeMigrationReview {
+    pub schema: u16,
+    pub transaction_id: TransactionId,
+    pub plan_sha256: Sha256Digest,
+    pub canonical_plan: String,
+}
+/// Review the original Windows Host migration. May initialize the same private
+/// management namespace; never excludes Startup or retires credentials.
+pub async fn review_migration(
+    state_dir: &Path,
+    runtime_selection_file: &Path,
+    transaction_id: &str,
+    run: NativeRunDesired,
+) -> Result<NativeMigrationReview> {
+    review_migration_scoped(state_dir, runtime_selection_file, transaction_id, run, None).await
+}
+pub(crate) async fn review_migration_for_app(
+    scope: Arc<crate::app::HostScope>,
+    selection: &Path,
+    tx: &str,
+) -> Result<NativeMigrationReview> {
+    let path = scope.state_dir().to_owned();
+    let retained = scope.clone();
+    review_migration_scoped(&path, selection, tx, NativeRunDesired::Stopped, Some(scope))
+        .await
+        .map_err(|error| error.with_app_scope(retained))
+}
+async fn review_migration_scoped(
+    state_dir: &Path,
+    runtime_selection_file: &Path,
+    transaction_id: &str,
+    run: NativeRunDesired,
+    scope: Option<Arc<crate::app::HostScope>>,
+) -> Result<NativeMigrationReview> {
+    #[cfg(target_os = "windows")]
+    {
+        let path = state_dir.to_owned();
+        let selection_path = runtime_selection_file.to_owned();
+        let id = parse_transaction_id(transaction_id)?;
+        blocking(move || {
+            platform::require_scope(&path, scope.as_ref())?;
+            let raw = platform::private_file(&selection_path, NATIVE_STATE_BYTES)?;
+            let selection: NativeRuntimeSelection = serde_json::from_slice(raw.bytes())
+                .map_err(|_| NativeManagementError::new(ErrorKind::Invalid))?;
+            let candidate = Arc::new(
+                crate::release::verify_selected(&selection)
+                    .map_err(|_| NativeManagementError::new(ErrorKind::Invalid))?,
+            );
+            let review = crate::store::native_transaction::review_windows_host_migration(
+                path,
+                id,
+                candidate,
+                run,
+                scope.clone(),
+            )
+            .map_err(|owner| {
+                let kind = match owner.error() {
+                    NativeTransactionError::InvalidInput => ErrorKind::Invalid,
+                    NativeTransactionError::Conflict => ErrorKind::Conflict,
+                    NativeTransactionError::Unsupported => ErrorKind::Unsupported,
+                    NativeTransactionError::UnknownInspect => ErrorKind::Unknown,
+                };
+                NativeManagementError {
+                    kind,
+                    _retained: Some(Retained::WindowsMigrationPreparation { _owner: owner }),
+                    _app_scope: scope.clone(),
+                }
+            })?;
+            let canonical_plan = String::from_utf8(review.raw)
+                .map_err(|_| NativeManagementError::new(ErrorKind::Invalid))?;
+            Ok(NativeMigrationReview {
+                schema: 1,
+                transaction_id: review.transaction_id,
+                plan_sha256: review.plan_sha256,
+                canonical_plan,
+            })
+        })
+        .await
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (
+            state_dir,
+            runtime_selection_file,
+            transaction_id,
+            run,
+            scope,
+        );
+        Err(NativeManagementError::new(ErrorKind::Unsupported))
+    }
+}
 /// Explicit foreground Host migration. Unsupported platforms fail before I/O.
 pub async fn migrate(
     state_dir: &Path,
@@ -335,8 +488,26 @@ pub async fn migrate(
     transaction_id: &str,
     run: NativeRunDesired,
 ) -> Result<NativeManagementReport> {
+    migrate_with_approval(state_dir, runtime_selection_file, transaction_id, run, None).await
+}
+pub async fn migrate_with_approval(
+    state_dir: &Path,
+    runtime_selection_file: &Path,
+    transaction_id: &str,
+    run: NativeRunDesired,
+    approved_plan_sha256: Option<&str>,
+) -> Result<NativeManagementReport> {
+    let approved = approved_plan_sha256
+        .map(|value| {
+            Sha256Digest::try_from(value.to_owned())
+                .map_err(|_| NativeManagementError::new(ErrorKind::Invalid))
+        })
+        .transpose()?;
     #[cfg(target_os = "macos")]
     {
+        if approved.is_some() {
+            return Err(NativeManagementError::new(ErrorKind::Invalid));
+        }
         let id = parse_transaction_id(transaction_id)?;
         macos_recovery::migrate(
             state_dir.to_owned(),
@@ -347,9 +518,29 @@ pub async fn migrate(
         )
         .await
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
     {
-        let _ = (state_dir, runtime_selection_file, transaction_id, run);
+        let approved = approved.ok_or_else(|| NativeManagementError::new(ErrorKind::Invalid))?;
+        let id = parse_transaction_id(transaction_id)?;
+        windows_recovery::migrate(
+            state_dir.to_owned(),
+            runtime_selection_file.to_owned(),
+            id,
+            run,
+            None,
+            approved,
+        )
+        .await
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = (
+            state_dir,
+            runtime_selection_file,
+            transaction_id,
+            run,
+            approved,
+        );
         Err(NativeManagementError::new(ErrorKind::Unsupported))
     }
 }
@@ -360,9 +551,13 @@ pub(crate) async fn migrate_for_app(
     selection: &Path,
     tx: &str,
     run: NativeRunDesired,
+    approved_plan: Option<Sha256Digest>,
 ) -> Result<NativeManagementReport> {
     #[cfg(target_os = "macos")]
     {
+        if approved_plan.is_some() {
+            return Err(NativeManagementError::new(ErrorKind::Invalid).with_app_scope(scope));
+        }
         let retained = scope.clone();
         let result = async {
             let id = parse_transaction_id(tx)?;
@@ -378,9 +573,29 @@ pub(crate) async fn migrate_for_app(
         .await;
         result.map_err(|error| error.with_app_scope(retained))
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
     {
-        let _ = (selection, tx, run);
+        let retained = scope.clone();
+        let result = async {
+            let approved =
+                approved_plan.ok_or_else(|| NativeManagementError::new(ErrorKind::Invalid))?;
+            let id = parse_transaction_id(tx)?;
+            windows_recovery::migrate(
+                scope.state_dir().to_owned(),
+                selection.to_owned(),
+                id,
+                run,
+                Some(scope),
+                approved,
+            )
+            .await
+        }
+        .await;
+        result.map_err(|error| error.with_app_scope(retained))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    {
+        let _ = (selection, tx, run, approved_plan);
         Err(NativeManagementError::new(ErrorKind::Unsupported).with_app_scope(scope))
     }
 }
@@ -400,7 +615,17 @@ pub(crate) async fn recover_migration_for_app(
         .await;
         result.map_err(|error| error.with_app_scope(retained))
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        let retained = scope.clone();
+        let result = async {
+            let id = parse_transaction_id(tx)?;
+            windows_recovery::recover(scope.state_dir().to_owned(), id, Some(scope)).await
+        }
+        .await;
+        result.map_err(|error| error.with_app_scope(retained))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         let _ = tx;
         Err(NativeManagementError::new(ErrorKind::Unsupported).with_app_scope(scope))
@@ -413,7 +638,11 @@ pub async fn recover(state_dir: &Path, transaction_id: &str) -> Result<NativeMan
     {
         macos_recovery::recover(path, id, None).await
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(target_os = "windows")]
+    {
+        windows_recovery::recover(path, id, None).await
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     {
         blocking(move || platform::recover(&path, &id)).await
     }
@@ -1028,7 +1257,7 @@ mod platform {
         };
         report(transactions, "recover", Some(transaction))
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub(super) fn recover_owned(
         mut transactions: NativeTransactions,
         path: &Path,
@@ -1038,7 +1267,7 @@ mod platform {
             .and_then(|()| recover_in_place(&mut transactions, id));
         result.map_err(|error| error.keep(transactions))
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     pub(super) fn recover(path: &Path, id: &TransactionId) -> Result<NativeManagementReport> {
         use_managed_transactions(path, None, |transactions| {
             recover_in_place(transactions, id)
@@ -1111,3 +1340,7 @@ mod platform {
 #[cfg(target_os = "macos")]
 #[path = "native_macos_recovery.rs"]
 mod macos_recovery;
+
+#[cfg(target_os = "windows")]
+#[path = "native_windows_recovery.rs"]
+mod windows_recovery;

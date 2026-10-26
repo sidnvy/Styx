@@ -45,27 +45,31 @@ namespace StyxNative {
   static void Validate(string path,bool directory){NativeBootstrap.NoRedirect(path);System.Security.AccessControl.FileSystemSecurity security=directory?(System.Security.AccessControl.FileSystemSecurity)Directory.GetAccessControl(path):File.GetAccessControl(path);if(!User.Equals(security.GetOwner(typeof(System.Security.Principal.SecurityIdentifier)))||!security.AreAccessRulesProtected)throw new IOException("app_private_owner_required");foreach(System.Security.AccessControl.FileSystemAccessRule rule in security.GetAccessRules(true,true,typeof(System.Security.Principal.SecurityIdentifier))){var sid=(System.Security.Principal.SecurityIdentifier)rule.IdentityReference;if(!sid.Equals(User)&&!sid.Equals(SystemSid)&&!sid.Equals(Admins))throw new IOException("app_private_acl_required");}}
   static System.Security.AccessControl.DirectorySecurity DirectoryAcl(){var acl=new System.Security.AccessControl.DirectorySecurity();acl.SetOwner(User);acl.SetAccessRuleProtection(true,false);foreach(var sid in new[]{User,SystemSid,Admins})acl.AddAccessRule(new System.Security.AccessControl.FileSystemAccessRule(sid,System.Security.AccessControl.FileSystemRights.FullControl,System.Security.AccessControl.InheritanceFlags.ContainerInherit|System.Security.AccessControl.InheritanceFlags.ObjectInherit,System.Security.AccessControl.PropagationFlags.None,System.Security.AccessControl.AccessControlType.Allow));return acl;}
   static void DirectoryPrivate(string path){if(File.Exists(path))throw new IOException("app_private_directory_required");if(!Directory.Exists(path)){string parent=Path.GetDirectoryName(path);if(!Directory.Exists(parent))throw new IOException("app_private_parent_missing");NativeBootstrap.NoRedirect(parent);Directory.CreateDirectory(path,DirectoryAcl());}Validate(path,true);}
-  internal static string Prepare(string state,string selection){
-   // Never adopt or mutate original legacy profiles. The new fixed namespace is
-   // fresh-only; an existing native profile is reopened by Rust, never reset.
-   foreach(string name in new[]{"deployment.json","state.json","host","gateway","device","service.json",".styx-native-root-v1.json"})if(File.Exists(Path.Combine(state,name))||Directory.Exists(Path.Combine(state,name)))throw new NativeOperationException("app_legacy_migration_required");
+  internal static string Prepare(string state,string selection,out string profile){
+   // Only the original Core's fixed deployment child may enter migration. It is
+   // validated as-is, never created, repaired, moved or replaced by the UI.
+   string original=Path.Combine(state,"deployment");if(File.Exists(original))throw new NativeOperationException("app_legacy_migration_required");bool legacy=Directory.Exists(original);
+   foreach(string name in legacy?new[]{"deployment.json","state.json",".styx-native-root-v1.json"}:new[]{"deployment.json","state.json","host","gateway","device","service.json",".styx-native-root-v1.json"})if(File.Exists(Path.Combine(state,name))||Directory.Exists(Path.Combine(state,name)))throw new NativeOperationException("app_legacy_migration_required");
+   if(legacy)Validate(original,true);
+   string container=Path.Combine(state,"native-rust-host-v1"),fresh=Path.Combine(container,"profile");if(legacy&&(File.Exists(fresh)||Directory.Exists(fresh)))throw new NativeOperationException("app_migration_scope_ambiguous");
    string defaultState=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"StyxPreview","WindowsFirst");if(String.Equals(state,defaultState,StringComparison.OrdinalIgnoreCase)&&!Directory.Exists(Path.GetDirectoryName(state)))DirectoryPrivate(Path.GetDirectoryName(state));
-   DirectoryPrivate(state);string container=Path.Combine(state,"native-rust-host-v1");bool known=Directory.Exists(container);if(known&&!File.Exists(Path.Combine(container,"runtime-selection.json")))throw new NativeOperationException("app_private_container_recovery_required");DirectoryPrivate(container);string path=Path.Combine(container,"runtime-selection.json");
+   DirectoryPrivate(state);bool known=Directory.Exists(container);if(known&&!File.Exists(Path.Combine(container,"runtime-selection.json")))throw new NativeOperationException("app_private_container_recovery_required");DirectoryPrivate(container);string path=Path.Combine(container,"runtime-selection.json");
    if(!File.Exists(path)){
     var acl=new System.Security.AccessControl.FileSecurity();acl.SetOwner(User);acl.SetAccessRuleProtection(true,false);foreach(var sid in new[]{User,SystemSid,Admins})acl.AddAccessRule(new System.Security.AccessControl.FileSystemAccessRule(sid,System.Security.AccessControl.FileSystemRights.FullControl,System.Security.AccessControl.AccessControlType.Allow));
     using(var f=new FileStream(path,FileMode.CreateNew,System.Security.AccessControl.FileSystemRights.Read|System.Security.AccessControl.FileSystemRights.Write,FileShare.Read,4096,FileOptions.None,acl)){byte[] raw=new System.Text.UTF8Encoding(false,true).GetBytes(selection);f.Write(raw,0,raw.Length);f.Flush(true);}
    }
-   Validate(path,false);if(NativeBootstrap.ReadSmall(path,16384)!=selection)throw new NativeOperationException("app_runtime_selection_changed");Validate(container,true);return container;
+   Validate(path,false);if(NativeBootstrap.ReadSmall(path,16384)!=selection)throw new NativeOperationException("app_runtime_selection_changed");Validate(container,true);if(legacy){Validate(original,true);if(File.Exists(fresh)||Directory.Exists(fresh))throw new NativeOperationException("app_migration_scope_ambiguous");}profile=legacy?original:fresh;return container;
   }
  }
  sealed class Core:IDisposable {
   readonly SemaphoreSlim gate=new SemaphoreSlim(1,1);readonly NativeBootstrap bootstrap;readonly FileStream selectionPin;Process child;Task stderrDrain;Task<string> pendingRead;CancellationTokenRegistration cancellationRegistration;int sequence;int closed;bool childStarted;
   internal bool CleanupConfirmed {get;private set;}
+  internal readonly string ProfileDirectory;
   internal static async Task<string> ReadLineBounded(StreamReader reader,int limit){var text=new System.Text.StringBuilder();var b=new char[1];while(await reader.ReadAsync(b,0,1).ConfigureAwait(false)!=0){if(b[0]=='\n')return text.ToString().TrimEnd('\r');if(text.Length>=limit)throw new IOException("app_frame_too_large");text.Append(b[0]);}if(text.Length!=0)throw new IOException("app_incomplete_frame");return null;}
   internal static async Task Drain(StreamReader reader){var b=new char[4096];while(await reader.ReadAsync(b,0,b.Length).ConfigureAwait(false)!=0){}}
   internal Core(NativeBootstrap verified,string state,CancellationToken cancellation){
-   bootstrap=verified;string container=PrivateAppFiles.Prepare(state,verified.Selection);string selection=Path.Combine(container,"runtime-selection.json");selectionPin=new FileStream(selection,FileMode.Open,FileAccess.Read,FileShare.Read);
-   try{var info=bootstrap.StartInfo("__app-core --state-dir "+NativeBootstrap.Quote(Path.Combine(container,"profile"))+" --runtime-selection-file "+NativeBootstrap.Quote(selection));info.RedirectStandardInput=true;
+   bootstrap=verified;string profile;string container=PrivateAppFiles.Prepare(state,verified.Selection,out profile);ProfileDirectory=profile;string selection=Path.Combine(container,"runtime-selection.json");selectionPin=new FileStream(selection,FileMode.Open,FileAccess.Read,FileShare.Read);
+   try{var info=bootstrap.StartInfo("__app-core --state-dir "+NativeBootstrap.Quote(ProfileDirectory)+" --runtime-selection-file "+NativeBootstrap.Quote(selection));info.RedirectStandardInput=true;
    child=new Process {StartInfo=info};cancellation.ThrowIfCancellationRequested();if(!child.Start())throw new IOException("app_child_not_started");childStarted=true;stderrDrain=Drain(child.StandardError);cancellationRegistration=cancellation.Register(Dispose);cancellation.ThrowIfCancellationRequested();}catch{Dispose();throw;}
   }
   internal async Task<object> Call(string operation,Dictionary<string,object> input){
@@ -105,6 +109,7 @@ namespace StyxNative {
   internal int ResultCode=2;
   internal object CurrentStatus { get { return snapshot; } }
   internal bool RustHost {get{return Json.Str(snapshot,"mode")=="rust_host";}}
+  internal string ConfigurationDirectory {get{return core==null?"":core.ProfileDirectory;}}
   internal bool Supports(string operation){var values=Json.Get(snapshot,"supportedOperations") as object[];if(values==null)return false;foreach(var item in values)if(Equals(item,operation))return true;return false;}
   internal bool ManagementOnly { get { return !RustHost&&Json.Yes(snapshot,"loadingDetails"); } }
   internal bool MutationBusy { get { return busy||starting; } }
@@ -145,6 +150,7 @@ namespace StyxNative {
    // Framework's C# compiler cannot await inside catch. Dispose the failed
    // owned child here without blocking the native window or replaying work.
    var failed=pending??core;core=null;if(failed!=null)await Task.Run(()=>failed.Dispose());else if(verifiedRuntime!=null)verifiedRuntime.Dispose();if(closing)return;starting=false;
+   if(startupFailure=="app_migration_scope_ambiguous"){message.Text="Both original and fresh configurations exist. Styx will not choose or replace either configuration. Review them before continuing.";settings.Startup(message.Text,false,true);return;}
    if(startupFailure=="app_legacy_migration_required"){message.Text="This computer needs an explicit migration. Its original identity and settings were not changed.";settings.Startup(message.Text,false,true);return;}
    message.Text="Styx needs attention. Open Settings to retry.";
    settings.Startup(packageVerified?"Connection settings could not open. Retry to reconnect; your settings are retained.":"Styx could not finish checking the app. Keep the app folder intact, then retry.",false,true);
@@ -181,7 +187,12 @@ namespace StyxNative {
     case "native_join_app_scope_changed":case "native_join_already_exists":
     case "native_join_persistence_unknown":case "native_join_unknown_inspect":
     case "native_join_configuration_busy":case "native_join_busy":case "native_join_worker_unknown":
-    case "native_join_platform_unsupported":case "native_join_response_rejected":return code;
+    case "native_join_platform_unsupported":case "native_join_response_rejected":
+    case "app_migration_authorization_required":case "app_migration_owner_busy":case "app_migration_not_required":
+    case "app_migration_in_progress":case "app_migration_pending":case "app_migration_original_transaction_required":
+    case "app_migration_review_required":case "app_migration_review_mismatch":case "app_migration_plan_invalid":case "app_migration_scope_ambiguous":
+    case "app_migration_observation_invalid":case "app_migration_observation_unavailable":
+    case "native_migration_waiting_for_later_boot":return code;
     default:return "";
    }
   }
@@ -218,7 +229,7 @@ namespace StyxNative {
    startupHostUpdateAttempted=true;await UpdateRuntime(false);
   }
   void PublishStatus(){
-   if(RustHost){string phase=Json.Str(snapshot,"foreground","status"),nativeExec=Json.Str(snapshot,"foreground","execConnection");message.Text=phase=="connected"&&nativeExec=="connected"?"Connected to this computer. Exec transport is online; tool execution is checked separately.":Json.Yes(snapshot,"admission_fenced")?"A result or cleanup needs review. Operations are fenced; no action is replayed.":"Connection is paused or awaiting approval. Open Settings to review.";tray.Text=phase=="connected"&&nativeExec=="connected"?"Styx — connected":"Styx — connection settings";settings.ShowStatus(snapshot);return;}
+   if(RustHost){string phase=Json.Str(snapshot,"foreground","status"),nativeExec=Json.Str(snapshot,"foreground","execConnection");message.Text=Json.Str(snapshot,"migration","status")=="waiting_for_later_boot"?"Migration is waiting for a later Windows restart. It is not complete; Windows will not restart automatically.":phase=="connected"&&nativeExec=="connected"?"Connected to this computer. Exec transport is online; tool execution is checked separately.":Json.Yes(snapshot,"admission_fenced")?"A result or cleanup needs review. Operations are fenced; no action is replayed.":"Connection is paused or awaiting approval. Open Settings to review.";tray.Text=phase=="connected"&&nativeExec=="connected"?"Styx — connected":"Styx — connection settings";settings.ShowStatus(snapshot);return;}
    if(Json.Yes(snapshot,"status","joinRecovery","rollbackRequired")){message.Text="Joining needs recovery. Open Settings to continue.";tray.Text="Styx — joining needs recovery";settings.ShowPage("join-interrupted");return;}
    if(ManagementOnly){message.Text="Reading connection settings… Component update and recovery are available.";tray.Text="Styx — connection not checked";settings.ShowPage("component-start");return;}
    if(Json.Str(snapshot,"status","nativeStartup","status")=="reconciliation_required"&&Json.Str(snapshot,"status","nativeStartup","reason").StartsWith("host_payload_")){message.Text="The installed Styx update needs its components reconciled.";tray.Text="Styx — component update";settings.ShowPage("update-recovery");return;}
@@ -266,6 +277,7 @@ namespace StyxNative {
  sealed class Settings:Form {
   sealed class CapabilityDraft {internal string Label=Environment.MachineName;internal bool Computer=true,Browser;internal int Channel;internal CheckState Persist=CheckState.Checked;}
   readonly StyxContext owner;readonly FlowLayoutPanel content,navigation;readonly TableLayoutPanel startupPanel;readonly Label startupText;readonly ProgressBar startupProgress;readonly Button retryStartup;readonly Label feedback,statusReadout,observationError;readonly Dictionary<string,CapabilityDraft> capabilityDrafts=new Dictionary<string,CapabilityDraft>();
+  string migrationTransaction="",migrationPlanSha="",migrationCanonical="",migrationRenderKey="";bool migrationSubmitted;
   string page="welcome",requestedPage="overview",joinOrigin,joinCa,challengeId,tunnelDraft="",keyDraft="",readbackSubmitted;object acceptance;bool readbackInFlight,renderedRustMode,localCreationSubmitted;TextBox label,link,tunnel,key,desktopInput,challengePrompt;Label desktopInputLabel;Button confirmChat,updateRuntime;CheckBox computer,browser,persist;ComboBox channel;readonly System.Windows.Forms.Timer desktopTimer;
   internal Settings(StyxContext context,Icon icon){owner=context;Text="Styx Settings";Icon=icon;ClientSize=new Size(590,720);MinimumSize=new Size(550,650);Font=new Font("Segoe UI",10);BackColor=Color.FromArgb(249,249,247);AutoScaleMode=AutoScaleMode.Dpi;StartPosition=FormStartPosition.CenterScreen;var outer=new TableLayoutPanel { Dock=DockStyle.Fill,RowCount=3,ColumnCount=1,Padding=new Padding(0) };outer.RowStyles.Add(new RowStyle(SizeType.Absolute,62));outer.RowStyles.Add(new RowStyle(SizeType.AutoSize));outer.RowStyles.Add(new RowStyle(SizeType.Percent,100));Controls.Add(outer);navigation=new FlowLayoutPanel { Dock=DockStyle.Fill,WrapContents=false,Padding=new Padding(15,8,0,0) };outer.Controls.Add(navigation,0,0);StyxContext.Button(navigation,"General",()=>{ShowPage("welcome");return Task.FromResult(0);}).MinimumSize=new Size(100,32);StyxContext.Button(navigation,"Computers",()=>{ShowPage("overview");return Task.FromResult(0);}).MinimumSize=new Size(100,32);StyxContext.Button(navigation,"ChatGPT",()=>{ShowPage("chat");return Task.FromResult(0);}).MinimumSize=new Size(100,32);foreach(Control item in navigation.Controls){item.AutoSize=false;item.Width=165;item.Height=36;}startupPanel=new TableLayoutPanel {Dock=DockStyle.Top,AutoSize=true,ColumnCount=2,RowCount=2,Padding=new Padding(26,8,26,12),Visible=false};startupPanel.ColumnStyles.Add(new ColumnStyle(SizeType.Percent,100));startupPanel.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));startupText=new Label {AutoSize=true,MaximumSize=new Size(390,0),Margin=new Padding(0,0,10,8)};startupProgress=new ProgressBar {Dock=DockStyle.Top,Height=8,Style=ProgressBarStyle.Marquee,MarqueeAnimationSpeed=25};retryStartup=new Button {Text="Retry",AutoSize=true,MinimumSize=new Size(75,32)};retryStartup.Click+=async(s,e)=>await owner.InitializeCore();startupPanel.Controls.Add(startupText,0,0);startupPanel.Controls.Add(retryStartup,1,0);startupPanel.Controls.Add(startupProgress,0,1);startupPanel.SetColumnSpan(startupProgress,2);startupText.Paint+=(s,e)=>owner.RecordFirstPaint();outer.Controls.Add(startupPanel,0,1);content=new FlowLayoutPanel {Dock=DockStyle.Fill,FlowDirection=FlowDirection.TopDown,WrapContents=false,AutoScroll=true,Padding=new Padding(26)};outer.Controls.Add(content,0,2);feedback=new Label {Width=490,Height=100,ForeColor=Color.FromArgb(95,70,35)};statusReadout=new Label {Width=490,Height=140};observationError=new Label {Width=490,Height=65,ForeColor=Color.FromArgb(130,65,35)};desktopTimer=new System.Windows.Forms.Timer {Interval=1000};desktopTimer.Tick+=async(s,e)=>await ObserveDesktopReadback();desktopTimer.Start();FormClosing+=(s,e)=>{if(e.CloseReason==CloseReason.UserClosing){e.Cancel=true;Hide();if(InvitationPage(page))owner.FinishInviting();}};ShowPage("welcome");}
   internal bool StartupActionsGated {get{return !navigation.Enabled&&!content.Enabled;}}
@@ -372,8 +384,9 @@ namespace StyxNative {
   }
   void Unavailable(string title){var button=StyxContext.Button(content,title+" — unavailable in this native slice",()=>Task.FromResult(0));button.Enabled=false;}
   void NativeAction(string title,string operation,Func<Task> action){if(owner.Supports(operation))Action(title,action);else Unavailable(title);}
-  string NativeStatus(object data){var enrollment=Json.Get(data,"enrollment");string text="Exec transport: "+Json.Str(data,"foreground","execConnection")+"\nHost: "+Json.Str(data,"foreground","status");if(Json.Get(data,"gateway")!=null)text+="\nLocal gateway address: "+Json.Str(data,"gateway","origin")+"\nLocal gateway: "+(Json.Yes(data,"gateway","running")&&Json.Yes(data,"gateway","listening")?"running":"status not confirmed");if(Json.Yes(data,"admission_fenced"))text+="\nThe last setup result is unconfirmed. Refresh status to review it; your existing settings have been retained.";string status=Json.Str(enrollment,"status");if(status.Length>0)text+="\nEnrollment: "+status+"\nDevice: "+Json.Str(enrollment,"device_id");if(status=="awaiting_approval")text+="\nCompare on your Gateway: "+Json.Str(enrollment,"comparison_code")+"\nFingerprint: "+Json.Str(enrollment,"fingerprint")+"\nApproval must be performed on the Gateway. Then check confirmation here.";return text+"\nTool execution, desktop control and target ChatGPT account acceptance are not inferred from connection status.";}
+  string NativeStatus(object data){var enrollment=Json.Get(data,"enrollment");string text="Exec transport: "+Json.Str(data,"foreground","execConnection")+"\nHost: "+Json.Str(data,"foreground","status");if(Json.Get(data,"gateway")!=null)text+="\nLocal gateway address: "+Json.Str(data,"gateway","origin")+"\nLocal gateway: "+(Json.Yes(data,"gateway","running")&&Json.Yes(data,"gateway","listening")?"running":"status not confirmed");if(Json.Get(data,"migration")!=null)text+="\n"+MigrationStatus(data);else if(Json.Yes(data,"admission_fenced"))text+="\nThe last setup result is unconfirmed. Refresh status to review it; your existing settings have been retained.";string status=Json.Str(enrollment,"status");if(status.Length>0)text+="\nEnrollment: "+status+"\nDevice: "+Json.Str(enrollment,"device_id");if(status=="awaiting_approval")text+="\nCompare on your Gateway: "+Json.Str(enrollment,"comparison_code")+"\nFingerprint: "+Json.Str(enrollment,"fingerprint")+"\nApproval must be performed on the Gateway. Then check confirmation here.";return text+"\nTool execution, desktop control and target ChatGPT account acceptance are not inferred from connection status.";}
   void ShowRustPage(string name){
+   if(MigrationPending(owner.CurrentStatus)||name=="migration"){page="migration";ShowMigrationPage();Status(NativeStatus(owner.CurrentStatus));content.Controls.Add(statusReadout);content.Controls.Add(observationError);content.Controls.Add(feedback);return;}
    if(name=="welcome"){
     if(localCreationSubmitted||Json.Yes(owner.CurrentStatus,"admission_fenced")||Json.Get(owner.CurrentStatus,"gateway")!=null||Json.Get(owner.CurrentStatus,"configuration")!=null||Json.Get(owner.CurrentStatus,"enrollment")!=null){Explain("Your existing settings and setup progress have been retained. Open this computer to review the current status.",65);Action("Open this computer",ContinueJoiningView,false);}
     else{Explain("Set up a local gateway and connect this computer, or join a gateway you already own.",65);NativeAction("Set up this computer","createLocal",()=>{ShowPage("create");return Task.FromResult(0);});NativeAction("Join an existing Gateway","inspectJoin",()=>{ShowPage("join");return Task.FromResult(0);});}
@@ -414,6 +427,61 @@ namespace StyxNative {
    else{Explain("This operation is not implemented by the native Host App. Existing identities and configuration are retained.",80);Unavailable("Legacy operation");Action("Open this computer",ContinueJoiningView,false);}
    Status(NativeStatus(owner.CurrentStatus));content.Controls.Add(statusReadout);content.Controls.Add(observationError);content.Controls.Add(feedback);
   }
+
+  static bool MigrationPending(object data){return Json.Get(data,"migration")!=null&&Json.Str(data,"migration","status")!="committed";}
+  static string MigrationRenderKey(object data){return Json.Str(data,"migration","status")+"|"+Json.Str(data,"migration","transaction_id")+"|"+Json.Yes(data,"migration","can_recover");}
+  static bool ValidTransaction(string value){return !String.IsNullOrEmpty(value)&&value.Length<=128&&System.Text.RegularExpressions.Regex.IsMatch(value,"^[A-Za-z0-9._-]+$");}
+  static bool ValidPlanSha(string value){return System.Text.RegularExpressions.Regex.IsMatch(value??"","^[a-f0-9]{64}$");}
+  static string MigrationStatus(object data){
+   string status=Json.Str(data,"migration","status");string text="Migration: "+status;
+   if(status=="waiting_for_later_boot")return text+"\nStartup exclusion was recorded. A later Windows restart is required. Migration is incomplete; Styx does not restart Windows. After restarting, reopen this native App manually and recover this original transaction.";
+   if(status=="running")return text+"\nThe original migration worker is still owned. Refresh status; do not submit another attempt.";
+   if(status=="unknown")return text+"\nThe result is unconfirmed. Original records are retained; no action is automatically replayed.";
+   if(status=="blocked")return text+"\nMigration is blocked. Keep the original configuration and transaction for review; do not create a replacement identity.";
+   if(status=="committed")return text+"\nMigration committed. The Host remains stopped until you explicitly choose Reconnect.";
+   return text+"\nThe original identity and configuration are retained. Review what will happen before preparing the migration.";
+  }
+  void ShowMigrationPage(){
+   migrationRenderKey=MigrationRenderKey(owner.CurrentStatus);string status=Json.Str(owner.CurrentStatus,"migration","status"),original=Json.Str(owner.CurrentStatus,"migration","transaction_id");
+   StyxContext.Heading(content,"Migrate this computer");Explain("Original configuration: "+owner.ConfigurationDirectory,65);Explain(MigrationStatus(owner.CurrentStatus),155);RefreshAction();
+   if(status=="committed"){Action("Open this computer",ContinueJoiningView,false);return;}
+   if(status=="required"&&original.Length==0&&!migrationSubmitted){
+    Explain("Review the migration while keeping this computer's identity, pairing and settings. Styx checks the package publisher and original configuration before asking you to continue.",105);
+    NativeAction("Review migration","reviewMigration",async()=>{
+     if(migrationSubmitted)throw new NativeOperationException("app_migration_in_progress");
+     if(migrationTransaction.Length==0)migrationTransaction=Guid.NewGuid().ToString("D");
+     migrationPlanSha="";migrationCanonical="";
+     var result=await owner.Call("reviewMigration",Json.Obj("transactionId",migrationTransaction,"run","stopped"));
+     string tx=Json.Str(result,"transaction_id"),sha=Json.Str(result,"plan_sha256"),plan=Json.Str(result,"canonical_plan");
+     if(Convert.ToInt32(Json.Get(result,"schema"))!=1||tx!=migrationTransaction||!ValidTransaction(tx)||!ValidPlanSha(sha)||plan.Length==0||plan.Length>65536)throw new NativeOperationException("app_migration_review_mismatch");
+     byte[] bytes=new System.Text.UTF8Encoding(false,true).GetBytes(plan);using(var memory=new MemoryStream(bytes)){if(NativeBootstrap.Hash(memory)!=sha)throw new NativeOperationException("app_migration_review_mismatch");}
+     var canonical=Json.Codec.DeserializeObject(plan);if(Json.Str(canonical,"action")!="migrate_windows_preserved_host_pair_after_restart"||Json.Str(canonical,"transaction_id")!=tx||Json.Str(canonical,"desired","host","run")!="stopped"||!ValidPlanSha(Json.Str(canonical,"candidate_manifest_sha256"))||!ValidPlanSha(Json.Str(canonical,"publisher_spki_sha256")))throw new NativeOperationException("app_migration_review_mismatch");
+     migrationPlanSha=sha;migrationCanonical=plan;ShowPage("migration");Feedback("Review ready. Your identity, pairing and settings will be kept. Read what happens next, then choose whether to prepare the migration.");
+    });
+    if(ValidPlanSha(migrationPlanSha)&&migrationCanonical.Length>0){
+     Explain("Keep this computer's identity, Gateway pairing and settings. After migration it stays paused until you choose Reconnect. Preparing requires a later Windows restart; Styx will not restart Windows automatically.",105);
+     var plan=Json.Codec.DeserializeObject(migrationCanonical);var technicalToggle=new CheckBox {Text="Technical details",Width=490,Height=32,Checked=false};content.Controls.Add(technicalToggle);
+     var technical=new FlowLayoutPanel {Width=490,Height=345,FlowDirection=FlowDirection.TopDown,WrapContents=false,Visible=false};
+     var canonical=new TextBox {Width=480,Height=330,Multiline=true,ReadOnly=true,ScrollBars=ScrollBars.Both,WordWrap=false,Text="Candidate manifest SHA-256: "+Json.Str(plan,"candidate_manifest_sha256")+"\r\nPublisher SPKI SHA-256: "+Json.Str(plan,"publisher_spki_sha256")+"\r\nReviewed transaction: "+migrationTransaction+"\r\nPlan SHA-256: "+migrationPlanSha+"\r\n\r\nCanonical plan:\r\n"+migrationCanonical};canonical.AccessibleName="Exact reviewed migration plan";technical.Controls.Add(canonical);content.Controls.Add(technical);technicalToggle.CheckedChanged+=(s,e)=>technical.Visible=technicalToggle.Checked;
+     var consent=new CheckBox {Text="Keep my identity and settings, and prepare this migration",Width=490,Height=50,Checked=false};content.Controls.Add(consent);
+     if(owner.Supports("startMigration")){
+      var approve=StyxContext.Button(content,"Prepare migration",()=>owner.Run(async()=>{
+       if(!consent.Checked||migrationSubmitted||!ValidPlanSha(migrationPlanSha))throw new NativeOperationException("app_migration_authorization_required");
+       string tx=migrationTransaction,sha=migrationPlanSha;migrationSubmitted=true;consent.Checked=false;
+       await owner.Call("startMigration",Json.Obj("transactionId",tx,"authorize",true,"run","stopped","planSha256",sha));
+       await owner.RefreshAfterMutation();ShowPage("migration");Feedback("Migration was submitted once. Refresh its original transaction; no restart or repeated mutation is automatic.");
+      },"Submitting the reviewed migration…"));approve.Enabled=false;consent.CheckedChanged+=(s,e)=>approve.Enabled=consent.Checked&&!migrationSubmitted;
+     }else Unavailable("Prepare migration");
+    }
+   }else if(ValidTransaction(original)&&Json.Yes(owner.CurrentStatus,"migration","can_recover")&&!migrationSubmitted&&status!="waiting_for_later_boot"&&status!="running"){
+    Explain("Recover inspects only the original recorded transaction. It does not create a new identity, new transaction or new approval, and cannot turn an unknown operation into a successful result.",85);
+    NativeAction("Recover original migration","recoverMigration",async()=>{
+     string tx=Json.Str(owner.CurrentStatus,"migration","transaction_id");if(!ValidTransaction(tx)||tx!=original||!Json.Yes(owner.CurrentStatus,"migration","can_recover"))throw new NativeOperationException("app_migration_original_transaction_required");
+     migrationSubmitted=true;await owner.Call("recoverMigration",Json.Obj("transactionId",tx,"authorize",true,"run","stopped"));await owner.RefreshAfterMutation();ShowPage("migration");Feedback("Recovery was submitted once for the original transaction. Refresh to observe its result; no operation is retried automatically.");
+    });
+   }else if(migrationSubmitted&&status=="required")Explain("An attempt was already submitted in this App. Its result must be inspected; this window will not submit it again.",70);
+  }
+
   bool ShowJoinProgress(object snapshot){
    var steps=Json.Get(snapshot,"status","deployment","steps") as object[];
    if(Json.Str(snapshot,"status","deployment","mode")!="join-existing"||steps==null)return false;
@@ -486,7 +554,7 @@ namespace StyxNative {
    catch(NativeOperationException error){readbackSubmitted=id+":"+window;Feedback(error.Code=="desktop_acceptance_native_app_changed"?"The native Styx app changed. Create a new desktop test before continuing.":"The desktop readback could not be confirmed. Refresh status and create a new test before retrying.");}catch{readbackSubmitted=id+":"+window;Feedback("The desktop readback could not be confirmed. Refresh status and create a new test before retrying.");}finally{readbackInFlight=false;}
   }
   internal void ShowStatus(object data){
-   if(owner.RustHost){SetText(observationError,"",0);if(!renderedRustMode){ShowPage(page=="welcome"&&(Json.Get(data,"configuration")!=null||Json.Get(data,"enrollment")!=null)?"overview":page);return;}if(page=="welcome"&&(Json.Get(data,"configuration")!=null||Json.Get(data,"enrollment")!=null)){ShowPage("overview");return;}if(page=="overview"||page=="join-waiting"){ShowPage("overview");return;}Status(NativeStatus(data));return;}
+   if(owner.RustHost){SetText(observationError,"",0);if(MigrationPending(data)||page=="migration"){string key=MigrationRenderKey(data);if(!renderedRustMode||page!="migration"||migrationRenderKey!=key){ShowPage("migration");return;}Status(NativeStatus(data));return;}if(!renderedRustMode){ShowPage(page=="welcome"&&(Json.Get(data,"configuration")!=null||Json.Get(data,"enrollment")!=null)?"overview":page);return;}if(page=="welcome"&&(Json.Get(data,"configuration")!=null||Json.Get(data,"enrollment")!=null)){ShowPage("overview");return;}if(page=="overview"||page=="join-waiting"){ShowPage("overview");return;}Status(NativeStatus(data));return;}
    if(page=="join-interrupted"&&!Json.Yes(data,"status","joinRecovery","rollbackRequired"))ShowPage("overview");
    if(page=="component-start"&&!owner.ManagementOnly)ShowPage(requestedPage);
    if(updateRuntime!=null)updateRuntime.Visible=CanUpdateRuntime(data);

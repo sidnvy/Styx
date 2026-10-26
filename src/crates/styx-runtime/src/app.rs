@@ -187,6 +187,7 @@ enum Operation {
     Connect,
     Disconnect,
     QuitAdmission,
+    ReviewMigration,
     StartMigration,
     RecoverMigration,
 }
@@ -895,7 +896,7 @@ impl HostApp {
     }
     async fn snapshot(&self) -> Value {
         let computer_requested = self.desktop_component_requested().await;
-        json!({"schema":1,"migration":self.migration,"configuration":self.configuration,"foreground":*self.observed.borrow(),"admission_fenced":self.admission_fenced(),"desktop_intent":{"schema":1,"computer_requested":computer_requested,"source":if self.committed_migration {"committed_original_local_intent"} else {"approved_host_configuration"}},"cleanup":self.cleanup,"gateway":self.local_gateway.as_ref().map(|g| g.status()),"enrollment":self.enrollment,"mode":"rust_host","supportedOperations":["startupStatus","status","createLocal","inspectJoin","join","requestJoin","claimJoin","inspectHost","connect","disconnect","quitAdmission","startMigration","recoverMigration"]})
+        json!({"schema":1,"migration":self.migration,"configuration":self.configuration,"foreground":*self.observed.borrow(),"admission_fenced":self.admission_fenced(),"desktop_intent":{"schema":1,"computer_requested":computer_requested,"source":if self.committed_migration {"committed_original_local_intent"} else {"approved_host_configuration"}},"cleanup":self.cleanup,"gateway":self.local_gateway.as_ref().map(|g| g.status()),"enrollment":self.enrollment,"mode":"rust_host","supportedOperations":["startupStatus","status","createLocal","inspectJoin","join","requestJoin","claimJoin","inspectHost","connect","disconnect","quitAdmission","reviewMigration","startMigration","recoverMigration"]})
     }
     async fn dispatch(
         &mut self,
@@ -907,6 +908,7 @@ impl HostApp {
             Operation::InspectJoin
                 | Operation::Join
                 | Operation::CreateLocal
+                | Operation::ReviewMigration
                 | Operation::StartMigration
                 | Operation::RecoverMigration
         ) {
@@ -917,6 +919,9 @@ impl HostApp {
         if matches!(operation, Operation::Status | Operation::StartupStatus) {
             self.scope.validate()?;
             return Ok(self.snapshot().await);
+        }
+        if matches!(operation, Operation::ReviewMigration) {
+            return self.review_migration(decode_input(&input)?).await;
         }
         if matches!(
             operation,
@@ -1061,6 +1066,7 @@ impl HostApp {
             }
             Operation::StartupStatus
             | Operation::Status
+            | Operation::ReviewMigration
             | Operation::StartMigration
             | Operation::RecoverMigration => unreachable!(),
         }

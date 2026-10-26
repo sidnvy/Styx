@@ -1075,5 +1075,15 @@ mod tests {
 mod binding;
 
 pub(in crate::store) use binding::{
-    WindowsLegacyMaintenancePlan, WindowsRecoveryOpenFailure, WindowsRestartCheckpoint,
+    WindowsCheckpointResumeFailure, WindowsCheckpointRetainedScope, WindowsLegacyMaintenancePlan,
+    WindowsMigrationCheckpointJob, WindowsMigrationCheckpointPlan,
+    WindowsMigrationCheckpointResume, WindowsMigrationRecoveredGuards,
+    WindowsMigrationWaitingForBoot, WindowsRecoveryOpenFailure, WindowsRestartCheckpoint,
+    WindowsRestartMigrationReview, resume_recorded_windows_checkpoint,
+    review_windows_restart_host_migration, start_resume_windows_restart_host_migration,
+    start_windows_restart_host_migration,
+};
+
+pub(in crate::store) use binding::{
+    WindowsResumedCutover, start_resume_validated_windows_host_migration,
 };

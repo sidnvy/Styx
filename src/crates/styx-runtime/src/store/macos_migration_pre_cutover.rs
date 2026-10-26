@@ -3,6 +3,7 @@
 use super::*;
 use crate::foreground::profile::read_recovered_pair_materials;
 use crate::store::MacRetiredMaterialSource;
+use crate::store::management::cutover::NativeCutoverHistoryInputs;
 use tokio::sync::SemaphorePermit;
 
 pub(in crate::store) fn start_resume_pre_cutover_host_migration(
@@ -30,15 +31,7 @@ pub(in crate::store) fn start_resume_pre_cutover_host_migration(
             sender,
         ));
     });
-    MacMigrationOwnerTask {
-        observation,
-        observed: false,
-        rejected_observed: false,
-        committed_scope: None,
-        worker_joined: false,
-        worker_failed: false,
-        _job: job,
-    }
+    MacMigrationOwnerTask::from_job(observation, job)
 }
 async fn run(
     runtime: Handle,
@@ -372,7 +365,7 @@ async fn run(
     finish_applied_migration(
         runtime,
         owner.clone(),
-        maintenance.clone(),
+        &maintenance,
         journal,
         candidate.clone(),
         app_scope,

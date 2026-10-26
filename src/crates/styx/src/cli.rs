@@ -100,6 +100,19 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
+    /// Review Windows migration; may initialize its private journal, without retiring the owner.
+    MigrateReview {
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(long)]
+        runtime_selection_file: PathBuf,
+        #[arg(long)]
+        transaction_id: String,
+        #[arg(long, value_enum)]
+        run: NativeRunArg,
+        #[arg(long)]
+        json: bool,
+    },
     /// Migrate the original paired foreground Host using an explicit candidate.
     Migrate {
         #[arg(long)]
@@ -112,6 +125,9 @@ enum Command {
         run: NativeRunArg,
         #[arg(long, required = true)]
         authorize: bool,
+        /// Exact digest returned by Windows migrate-review.
+        #[arg(long)]
+        plan_sha256: Option<String>,
         #[arg(long)]
         json: bool,
     },
@@ -355,12 +371,18 @@ fn native_recovery_result<T: serde::Serialize>(
     json: bool,
     summary: &'static str,
 ) -> ExitCode {
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     if let Err(value) = &result
         && value.requires_process_teardown()
     {
         let mut output = native_error_output(value);
-        output["outcome"] = serde_json::json!("unknown");
+        output["outcome"] = serde_json::json!(if value.code()
+            == "native_migration_waiting_for_later_boot"
+        {
+            "pending"
+        } else {
+            "unknown"
+        });
         output["operations_replayed"] = serde_json::json!(false);
         output["cleanup_confirmed"] = serde_json::json!(false);
         output["process_exit"] = serde_json::json!("explicit_scope_teardown");
@@ -829,23 +851,42 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
                 "Native desired-state transaction; inspect report for completion:",
             )
         }
+        Command::MigrateReview {
+            state_dir,
+            runtime_selection_file,
+            transaction_id,
+            run,
+            json,
+        } => native_result(
+            styx_runtime::management::native::review_migration(
+                &state_dir,
+                &runtime_selection_file,
+                &transaction_id,
+                run.native(),
+            )
+            .await,
+            json,
+            "Review the exact migration request before authorizing Startup exclusion:",
+        ),
         Command::Migrate {
             state_dir,
             runtime_selection_file,
             transaction_id,
             run,
             authorize,
+            plan_sha256,
             json,
         } => {
             if !authorize {
                 return error("authorization_required");
             }
             native_recovery_result(
-                styx_runtime::management::native::migrate(
+                styx_runtime::management::native::migrate_with_approval(
                     &state_dir,
                     &runtime_selection_file,
                     &transaction_id,
                     run.native(),
+                    plan_sha256.as_deref(),
                 )
                 .await,
                 json,

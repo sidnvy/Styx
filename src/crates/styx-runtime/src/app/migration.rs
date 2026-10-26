@@ -10,6 +10,15 @@ pub(super) struct Input {
     transaction_id: TransactionId,
     authorize: bool,
     run: NativeRunDesired,
+    #[serde(default)]
+    plan_sha256: Option<styx_contracts::identity::Sha256Digest>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields, rename_all = "camelCase")]
+pub(super) struct ReviewInput {
+    transaction_id: TransactionId,
+    run: NativeRunDesired,
 }
 
 #[derive(Serialize)]
@@ -44,6 +53,53 @@ impl State {
 }
 
 impl HostApp {
+    pub(super) async fn review_migration(&mut self, input: ReviewInput) -> Result<Value, AppError> {
+        self.scope.validate()?;
+        if input.run != NativeRunDesired::Stopped {
+            return Err(AppError("app_migration_authorization_required"));
+        }
+        if self.running.is_some()
+            || self.local_gateway.is_some()
+            || self.input_writer.is_some()
+            || self.retained.is_some()
+            || self.unknown
+            || self.quit_ticket.is_some()
+        {
+            return Err(AppError("app_migration_owner_busy"));
+        }
+        let migration = self
+            .migration
+            .as_ref()
+            .ok_or(AppError("app_migration_not_required"))?;
+        if migration.job.is_some()
+            || migration.status != "required"
+            || migration.transaction_id.is_some()
+        {
+            return Err(AppError("app_migration_original_transaction_required"));
+        }
+        let selection = self
+            .runtime_selection_file
+            .clone()
+            .ok_or(AppError("app_runtime_selection_invalid"))?;
+        match native::review_migration_for_app(
+            self.scope.clone(),
+            &selection,
+            input.transaction_id.as_str(),
+        )
+        .await
+        {
+            Ok(review) => {
+                serde_json::to_value(review).map_err(|_| AppError("app_migration_review_invalid"))
+            }
+            Err(error) => {
+                let code = error.code();
+                // A failed original writer acquisition may retain custody. Do
+                // not discard it and allow a second attempt through this App.
+                self.retained = Some(RetainedFailure::Management(error));
+                Err(AppError(code))
+            }
+        }
+    }
     pub(super) async fn observe_migration(&mut self) {
         let scope = self.scope.clone();
         self.migration =
@@ -53,11 +109,13 @@ impl HostApp {
                 Ok(Ok(AppMigrationObservation::NotMigration)) => None,
                 #[cfg(any(
                     target_os = "macos",
+                    target_os = "windows",
                     all(test, target_os = "linux", target_env = "gnu")
                 ))]
                 Ok(Ok(AppMigrationObservation::Required)) => Some(State::required(None)),
                 #[cfg(any(
                     target_os = "macos",
+                    target_os = "windows",
                     all(test, target_os = "linux", target_env = "gnu")
                 ))]
                 Ok(Ok(AppMigrationObservation::Pending { transaction_id })) => {
@@ -68,6 +126,7 @@ impl HostApp {
                 }
                 #[cfg(any(
                     target_os = "macos",
+                    target_os = "windows",
                     all(test, target_os = "linux", target_env = "gnu")
                 ))]
                 Ok(Ok(AppMigrationObservation::Blocked { code })) => Some(State::blocked(code)),
@@ -88,6 +147,14 @@ impl HostApp {
         self.scope.validate()?;
         if !input.authorize || input.run != NativeRunDesired::Stopped {
             return Err(AppError("app_migration_authorization_required"));
+        }
+        // Recovery refers to the original recorded plan; it cannot approve a
+        // replacement candidate. Windows first admission requires its review.
+        if (recover && input.plan_sha256.is_some())
+            || (cfg!(target_os = "windows") && !recover && input.plan_sha256.is_none())
+            || (cfg!(target_os = "macos") && input.plan_sha256.is_some())
+        {
+            return Err(AppError("app_migration_plan_invalid"));
         }
         if self.running.is_some()
             || self.local_gateway.is_some()
@@ -128,8 +195,14 @@ impl HostApp {
             if recover {
                 native::recover_migration_for_app(scope, id.as_str()).await
             } else {
-                native::migrate_for_app(scope, &selection, id.as_str(), NativeRunDesired::Stopped)
-                    .await
+                native::migrate_for_app(
+                    scope,
+                    &selection,
+                    id.as_str(),
+                    NativeRunDesired::Stopped,
+                    input.plan_sha256,
+                )
+                .await
             }
         }));
         Ok(())
@@ -191,7 +264,10 @@ impl HostApp {
                 }
             }
             Ok(Err(error)) => {
-                migration.status = if error.exit_code() == 4 {
+                let waiting = error.code() == "native_migration_waiting_for_later_boot";
+                migration.status = if waiting {
+                    "waiting_for_later_boot"
+                } else if error.exit_code() == 4 {
                     "unknown"
                 } else {
                     "blocked"
@@ -201,7 +277,9 @@ impl HostApp {
                 // Even Conflict/Unavailable may retain an acquired transaction
                 // owner. Never release it to open a second recovery writer.
                 self.retained = Some(RetainedFailure::Management(error));
-                self.unknown = true;
+                if !waiting {
+                    self.unknown = true;
+                }
             }
             Err(_) => {
                 migration.status = "unknown";
@@ -334,7 +412,8 @@ mod tests {
                     Input {
                         transaction_id: tx.try_into().expect("id"),
                         authorize,
-                        run
+                        run,
+                        plan_sha256: None,
                     },
                     recover
                 )
@@ -347,6 +426,39 @@ mod tests {
             );
             assert!(state.job.is_none());
         }
+        let replacement_approval = app.start_migration(
+            Input {
+                transaction_id: "original-migration".try_into().expect("id"),
+                authorize: true,
+                run: NativeRunDesired::Stopped,
+                plan_sha256: Some("a".repeat(64).try_into().expect("digest")),
+            },
+            true,
+        );
+        assert_eq!(
+            replacement_approval
+                .expect_err("new approval refused in recovery")
+                .code(),
+            "app_migration_plan_invalid"
+        );
+        assert!(
+            app.migration
+                .as_ref()
+                .expect("original state")
+                .job
+                .is_none()
+        );
+        // The real private dispatcher must not replace an already observed
+        // transaction with a newly reviewed candidate or initialize its inputs.
+        let review = serde_json::value::RawValue::from_string(
+            json!({"transactionId":"replacement","run":"stopped"}).to_string(),
+        )
+        .expect("request");
+        let rejected = app.dispatch(Operation::ReviewMigration, review).await;
+        assert_eq!(
+            rejected.expect_err("replacement review rejected").code(),
+            "app_migration_original_transaction_required"
+        );
         assert!(
             !fixture.0.join("profile").exists(),
             "refusals cannot initialize a fresh root"

@@ -33,6 +33,10 @@ pub(crate) mod native_host_snapshot;
     target_os = "windows"
 ))]
 pub(crate) mod native_legacy_owners;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+mod native_migration_inputs;
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+mod native_migration_job;
 pub mod native_root;
 pub mod native_state;
 pub mod native_transaction;

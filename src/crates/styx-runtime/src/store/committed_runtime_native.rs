@@ -54,14 +54,14 @@ impl MaterialPin {
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum RequiredStage {
     Committed,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     Validated(DurableStage),
 }
 impl RequiredStage {
     fn stage(self) -> DurableStage {
         match self {
             Self::Committed => DurableStage::Committed,
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             Self::Validated(stage) => stage,
         }
     }
@@ -69,11 +69,11 @@ impl RequiredStage {
 
 /// Read-only incomplete-migration observation. No writer, grant, credential
 /// accessor, ordinary profile conversion or constructor from report JSON.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub(in crate::store) struct NativeValidatedMigrationSnapshot {
     inner: NativeCommittedRuntimeSnapshot,
 }
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 impl NativeValidatedMigrationSnapshot {
     pub(in crate::store) fn open(path: &Path, stage: DurableStage) -> JournalResult<Self> {
         if !matches!(stage, DurableStage::Applied | DurableStage::Verified) {
@@ -118,7 +118,7 @@ pub(crate) struct NativeCommittedRuntimeSnapshot {
     required_stage: RequiredStage,
     root: Arc<PrivateRoot>,
     state_dir: PathBuf,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     host_base_dir: PathBuf,
     host: Arc<PrivateRoot>,
     namespace: PrivateRoot,
@@ -376,7 +376,7 @@ impl NativeCommittedRuntimeSnapshot {
             RequiredStage::Committed => {
                 management::validate_readonly_native_tip(&scan, &canonical, &marker)?
             }
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             RequiredStage::Validated(_) => {
                 validate_pending_chain(&scan, &original)?;
                 cutover::check_canonical_root(&root, &original, true)?;
@@ -641,7 +641,7 @@ impl NativeCommittedRuntimeSnapshot {
         hash_matches(&token, pair.credential_sha256)?;
         host.ensure_absent("device/host.token")
             .map_err(|_| JournalError::Conflict)?;
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         if matches!(required_stage, RequiredStage::Validated(_)) {
             // Reopen the FULL original immutable preservation set, including
             // publisher and legacy active selector. Only the two effects this
@@ -751,7 +751,7 @@ impl NativeCommittedRuntimeSnapshot {
             required_stage,
             root,
             state_dir: path.to_owned(),
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             host_base_dir: base,
             host,
             namespace,
@@ -844,7 +844,7 @@ impl NativeCommittedRuntimeSnapshot {
             RequiredStage::Committed => {
                 management::validate_readonly_native_tip(&scan, &canonical, &marker)?
             }
-            #[cfg(target_os = "macos")]
+            #[cfg(any(target_os = "macos", target_os = "windows"))]
             RequiredStage::Validated(_) => {
                 validate_pending_chain(&scan, &parsed)?;
                 cutover::check_canonical_root(&self.root, &parsed, true)?;
@@ -893,7 +893,7 @@ impl NativeCommittedRuntimeSnapshot {
         }
         Ok(())
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     fn revalidate_pending_materials(&self) -> JournalResult<()> {
         if !matches!(self.required_stage, RequiredStage::Validated(_)) {
             return Err(JournalError::Conflict);
@@ -1036,7 +1036,7 @@ impl NativeCommittedRuntimeSnapshot {
 
 /// The already strict original cutover parser verified BOTH successful reports.
 /// This adds complete pre-effect plan + exact tip constraints, not new authority.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn validate_pending_chain(
     scan: &super::secure_journal::JournalObservation,
     original: &cutover::OriginalCutover<NativeRootIdentity>,
@@ -1072,7 +1072,7 @@ fn validate_pending_chain(
 
 /// Pin the CURRENT protected nonce after matching the original durable effect
 /// hash/length/path. This is not a recovered historical inode or JoinHandle.
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 fn pin_original_nonce(
     host: &Arc<PrivateRoot>,
     original: &cutover::OriginalCutover<NativeRootIdentity>,

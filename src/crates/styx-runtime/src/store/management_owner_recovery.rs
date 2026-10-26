@@ -165,15 +165,19 @@ pub(in crate::store) struct OwnerRecoveryPlan {
     pub intent: Box<serde_json::value::RawValue>,
     pub originals: Vec<RecoveryOriginal>,
     pub guards: Vec<RecoveryGuard>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub authorization_plan: Option<Vec<u8>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub startup_raw: Option<Vec<u8>>,
 }
 impl OwnerRecoveryPlan {
-    /// Exact entries of the original schema1 preparation, for bounded resync
+    /// Exact entries of the original preparation, for bounded resync
     /// after a partial write. No later phase or OS effect is represented here.
     #[cfg(any(target_os = "macos", target_os = "windows", test))]
     pub(in crate::store) fn preparation_entries(&self) -> JournalResult<Vec<(String, Vec<u8>)>> {
         let intent = self.validated_intent()?;
         let phase = RecoveryPhase {
-            schema: 1,
+            schema: intent.schema,
             kind: RecoveryKind::LegacyOwnerRecovery,
             transaction_id: intent.transaction_id.clone(),
             sequence: intent.sequence,
@@ -207,6 +211,36 @@ impl OwnerRecoveryPlan {
                 g.raw.clone(),
             )
         }));
+        if let Some(raw) = &self.authorization_plan {
+            entries.push((
+                member(&intent.transaction_id, "authorization-plan"),
+                raw.clone(),
+            ));
+        }
+        if let Some(raw) = &self.startup_raw {
+            entries.push((
+                member(&intent.transaction_id, "startup-original"),
+                raw.clone(),
+            ));
+        }
+        if intent.schema == 3 {
+            // Match the original writer: publish Prepared only after attachments.
+            let prepared = entries.remove(1);
+            entries.push(prepared);
+        }
+        let synthetic = JournalObservation {
+            total_bytes: entries.iter().map(|(_, bytes)| bytes.len()).sum(),
+            files: entries
+                .iter()
+                .map(
+                    |(name, bytes)| crate::store::secure_journal::ObservedJournalFile {
+                        name: name.clone(),
+                        bytes: bytes.clone(),
+                    },
+                )
+                .collect(),
+        };
+        original(&synthetic, &intent.transaction_id)?;
         Ok(entries)
     }
     pub(in crate::store) fn validated_intent(&self) -> JournalResult<LegacyOwnerRecoveryIntent> {
@@ -215,9 +249,8 @@ impl OwnerRecoveryPlan {
         valid_intent(&intent)?;
         // The existing C writer emits canonical intent bytes; require its exact
         // original encoding up front rather than normalizing recorded history.
-        if intent.schema != 1
-            || serde_json::to_vec(&intent).map_err(|_| JournalError::InvalidInput)?
-                != self.intent.get().as_bytes()
+        if serde_json::to_vec(&intent).map_err(|_| JournalError::InvalidInput)?
+            != self.intent.get().as_bytes()
             || self.originals.len() != intent.originals.len()
             || self.guards.len() != intent.guards.len()
         {
@@ -240,6 +273,17 @@ impl OwnerRecoveryPlan {
             {
                 return Err(JournalError::Conflict);
             }
+        }
+        validate_authorization_plan(&intent, self.authorization_plan.as_deref())?;
+        match (&intent.startup_checkpoint, &self.startup_raw) {
+            (None, None) => {}
+            (Some(checkpoint), Some(raw))
+                if !raw.is_empty()
+                    && raw.len() <= MAX_RECOVERY_RAW
+                    && matches!(&checkpoint.original_link, NativeRetirementFileStamp::Windows { byte_len, .. } if *byte_len == raw.len() as u64)
+                    && Sha256Digest::of_bytes(raw) == checkpoint.original_link.content_sha256() => {
+            }
+            _ => return Err(JournalError::Conflict),
         }
         Ok(intent)
     }
@@ -1462,7 +1506,7 @@ impl OwnedManagementJournal {
     }
     /// Original chain synchronization only. It returns its observed last stage;
     /// the platform may continue only OS items proven Pending under original pins.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub(in crate::store) fn resync_legacy_owner_recovery_for_cutover(
         &self,
         maintenance: &ConfigurationMaintenance,

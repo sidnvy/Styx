@@ -15,43 +15,6 @@ fn migration_error(
     report._retained = Some(Retained::MacMigration { _owner: error });
     report
 }
-fn completed(
-    transactions: NativeTransactions,
-    committed: crate::store::native_transaction::NativeCommitResult,
-    operation: &'static str,
-    scope: Option<&Arc<crate::app::HostScope>>,
-) -> Result<NativeManagementReport> {
-    let transaction = NativeTransactionReport {
-        transaction_id: committed.transaction_id,
-        sequence: committed.committed.sequence,
-        observed_stage: Some(DurableStage::Committed),
-        receipt: Some(committed.committed),
-        recovered: committed.recovered,
-    };
-    // Reopening an earlier Committed transaction proves historical validation,
-    // not whether an ordinary Host is running now.
-    let result = (|| {
-        if let Some(scope) = scope {
-            scope
-                .validate()
-                .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?;
-        }
-        let report = platform::report(&transactions, operation, Some(transaction))?;
-        if let Some(scope) = scope {
-            scope
-                .validate()
-                .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?;
-        }
-        Ok(report)
-    })();
-    result.map_err(|error: NativeManagementError| {
-        let error = error.keep(transactions);
-        match scope {
-            Some(scope) => error.with_app_scope(scope.clone()),
-            None => error,
-        }
-    })
-}
 fn prepare(
     path: PathBuf,
     id: TransactionId,
@@ -102,7 +65,7 @@ fn prepare(
         .map_err(migration_error)?
     {
         MacMigrationRecoveryStart::Complete(transactions, result) => {
-            completed(transactions, result, "recover_migration", scope.as_ref())
+            completed_migration(transactions, result, "recover_migration", scope.as_ref())
                 .map(Prepared::Complete)
         }
         MacMigrationRecoveryStart::Running(task) => Ok(Prepared::Running(task)),
@@ -140,12 +103,17 @@ async fn finish(
     scope: Option<Arc<crate::app::HostScope>>,
 ) -> Result<NativeManagementReport> {
     let (transactions, result, permit) = task.finish().await.map_err(migration_error)?;
+    let recovered = result.recovered;
     // Retain the original budget through reporting after the real task joins.
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        completed(transactions, result, operation, scope.as_ref()).map(|mut report| {
+        completed_migration(transactions, result, operation, scope.as_ref()).map(|mut report| {
             report.configuration_only = false;
-            report.runtime_health = "validation_workers_joined_runtime_not_observed";
+            report.runtime_health = if recovered {
+                "recorded_validation_rechecked_runtime_not_observed"
+            } else {
+                "validation_workers_joined_runtime_not_observed"
+            };
             report
         })
     })

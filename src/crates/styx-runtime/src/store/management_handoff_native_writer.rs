@@ -357,7 +357,7 @@ impl OwnedManagementJournal {
     }
     /// Reify only the recorded Retired predecessor of this original validated
     /// cutover. No rename, new post stamp or source-token restoration occurs.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub(in crate::store) fn reopen_retired_for_cutover(
         &self,
         maintenance: &ConfigurationMaintenance,

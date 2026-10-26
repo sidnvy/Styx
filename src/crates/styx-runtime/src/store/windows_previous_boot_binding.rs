@@ -702,4 +702,17 @@ mod tests;
 
 #[path = "windows_legacy_maintenance.rs"]
 mod legacy;
-pub(in crate::store) use legacy::{WindowsLegacyMaintenancePlan, WindowsRestartCheckpoint};
+pub(in crate::store) use legacy::{
+    WindowsCheckpointResumeFailure, WindowsCheckpointRetainedScope, WindowsLegacyMaintenancePlan,
+    WindowsMigrationCheckpointJob, WindowsMigrationCheckpointPlan,
+    WindowsMigrationCheckpointResume, WindowsMigrationRecoveredGuards,
+    WindowsMigrationWaitingForBoot, WindowsRestartCheckpoint, WindowsRestartMigrationReview,
+    resume_recorded_windows_checkpoint, review_windows_restart_host_migration,
+    start_resume_windows_restart_host_migration, start_windows_restart_host_migration,
+};
+
+#[path = "windows_migration_resume.rs"]
+mod validated_resume;
+pub(in crate::store) use validated_resume::{
+    WindowsResumedCutover, start_resume_validated_windows_host_migration,
+};

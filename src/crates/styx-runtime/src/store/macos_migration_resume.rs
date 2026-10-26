@@ -59,15 +59,7 @@ pub(in crate::store) fn start_resume_validated_host_migration(
             sender,
         ));
     });
-    MacMigrationOwnerTask {
-        observation,
-        observed: false,
-        rejected_observed: false,
-        committed_scope: None,
-        worker_joined: false,
-        worker_failed: false,
-        _job: job,
-    }
+    MacMigrationOwnerTask::from_job(observation, job)
 }
 async fn run_resume(
     state_dir: PathBuf,

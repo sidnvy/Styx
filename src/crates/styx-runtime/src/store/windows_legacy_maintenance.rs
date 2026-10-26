@@ -670,3 +670,13 @@ mod tests;
 #[path = "windows_restart_checkpoint.rs"]
 mod restart_checkpoint;
 pub(in crate::store) use restart_checkpoint::WindowsRestartCheckpoint;
+
+#[path = "windows_migration_owner.rs"]
+mod migration_owner;
+pub(in crate::store) use migration_owner::{
+    WindowsCheckpointResumeFailure, WindowsCheckpointRetainedScope, WindowsMigrationCheckpointJob,
+    WindowsMigrationCheckpointPlan, WindowsMigrationCheckpointResume,
+    WindowsMigrationRecoveredGuards, WindowsMigrationWaitingForBoot, WindowsRestartMigrationReview,
+    resume_recorded_windows_checkpoint, review_windows_restart_host_migration,
+    start_resume_windows_restart_host_migration, start_windows_restart_host_migration,
+};

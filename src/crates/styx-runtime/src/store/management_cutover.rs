@@ -1076,7 +1076,7 @@ impl OwnedManagementJournal {
     /// Capacity only, before the native token effect. This does not publish a
     /// target or attest a future retired receipt. The caller supplies encoded
     /// size inputs; fixed-width digest values do not change their byte lengths.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub(in crate::store) fn preflight_host_cutover_capacity(
         &self,
         maintenance: &ConfigurationMaintenance,
@@ -1601,8 +1601,8 @@ impl OwnedManagementJournal {
         })
     }
     /// Reopen an already validated native successor. This recovers journal
-    /// ownership only; the Mac coordinator separately reopens actual OS custody.
-    #[cfg(target_os = "macos")]
+    /// ownership only; the platform coordinator separately reopens actual OS custody.
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub(in crate::store) fn reopen_validated_native_cutover(
         &self,
         maintenance: &ConfigurationMaintenance,
@@ -1630,7 +1630,7 @@ impl OwnedManagementJournal {
     /// Called while the original owner and journal are already locked. Never
     /// acquire another mutex here. Only exact successful report bytes survive
     /// resumption; newer phases may append to, never replace, the original chain.
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub(in crate::store) fn validated_native_cutover_locked(
         &self,
         state: &ConfigurationState,

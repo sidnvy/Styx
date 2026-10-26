@@ -507,3 +507,50 @@ fn checkpoint_before_app_is_rejected(intent: &LegacyOwnerRecoveryIntent) {
     checkpoint.core.birth_filetime = checkpoint.app.birth_filetime - 1;
     assert!(valid_intent(&bad).is_err());
 }
+
+// Parser/repair contract only: synthetic bytes do not prove Windows OS effects.
+#[test]
+fn saved_windows_plan_preserves_exact_preparation_and_rejects_attachment_substitution() {
+    let fixture = StartupFixture::new();
+    let original = original(&fixture.prefix(1), &fixture.intent.transaction_id).unwrap();
+    let plan = OwnerRecoveryPlan {
+        intent: serde_json::value::RawValue::from_string(
+            String::from_utf8(original.raw_intent).unwrap(),
+        )
+        .unwrap(),
+        originals: original.originals,
+        guards: original.guards,
+        authorization_plan: original.authorization_plan,
+        startup_raw: original.startup_raw,
+    };
+    let saved = serde_json::to_vec(&plan).unwrap();
+    let restored: OwnerRecoveryPlan = serde_json::from_slice(&saved).unwrap();
+    let entries = restored.preparation_entries().unwrap();
+    let mut expected = fixture.entries.clone();
+    expected.push(fixture.phases[0].clone());
+    assert_eq!(entries, expected);
+    for length in 1..entries.len() {
+        let prefix = observation(&entries[..length]);
+        assert!(
+            incomplete_startup_preparation(&prefix, &fixture.intent, &entries)
+                .unwrap()
+                .unwrap()
+                .files
+                .is_empty()
+        );
+    }
+    for attachment in ["authorization_plan", "startup_raw"] {
+        let mut changed: serde_json::Value = serde_json::from_slice(&saved).unwrap();
+        changed.as_object_mut().unwrap().remove(attachment);
+        let missing: OwnerRecoveryPlan = serde_json::from_value(changed).unwrap();
+        assert!(missing.validated_intent().is_err());
+        let mut changed: OwnerRecoveryPlan = serde_json::from_slice(&saved).unwrap();
+        let bytes = if attachment == "authorization_plan" {
+            changed.authorization_plan.as_mut().unwrap()
+        } else {
+            changed.startup_raw.as_mut().unwrap()
+        };
+        bytes.push(0);
+        assert!(changed.validated_intent().is_err());
+    }
+}
