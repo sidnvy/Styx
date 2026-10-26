@@ -304,7 +304,10 @@ def execute(args):
         # known failing build or spend native fixtures on an invalid baseline.
         if clippy["status"] != "PASS":
             raise ValueError("workspace_lint_or_compile_precondition_failed")
-        tests = gate.run("workspace-tests", ["cargo", "test", "--workspace", "--locked", "--offline"])
+        # Real-descriptor fixtures share the libtest process. Isolate unrelated
+        # fixture lifetimes from another test's fork/exec descriptor window;
+        # scenarios retain their own explicit concurrency and child processes.
+        tests = gate.run("workspace-tests", ["cargo", "test", "--workspace", "--locked", "--offline", "--", "--test-threads=1"])
         if tests["status"] != "PASS":
             raise ValueError("workspace_regression_precondition_failed")
         # Child helper stdout can interleave with libtest's progress output.
