@@ -19,6 +19,7 @@ fn completed(
     transactions: NativeTransactions,
     committed: crate::store::native_transaction::NativeCommitResult,
     operation: &'static str,
+    scope: Option<&Arc<crate::app::HostScope>>,
 ) -> Result<NativeManagementReport> {
     let transaction = NativeTransactionReport {
         transaction_id: committed.transaction_id,
@@ -29,15 +30,36 @@ fn completed(
     };
     // Reopening an earlier Committed transaction proves historical validation,
     // not whether an ordinary Host is running now.
-    let result = platform::report(&transactions, operation, Some(transaction));
-    result.map_err(|error| error.keep(transactions))
+    let result = (|| {
+        if let Some(scope) = scope {
+            scope
+                .validate()
+                .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?;
+        }
+        let report = platform::report(&transactions, operation, Some(transaction))?;
+        if let Some(scope) = scope {
+            scope
+                .validate()
+                .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?;
+        }
+        Ok(report)
+    })();
+    result.map_err(|error: NativeManagementError| {
+        let error = error.keep(transactions);
+        match scope {
+            Some(scope) => error.with_app_scope(scope.clone()),
+            None => error,
+        }
+    })
 }
 fn prepare(
     path: PathBuf,
     id: TransactionId,
     runtime: Handle,
     permit: SemaphorePermit<'static>,
+    scope: Option<Arc<crate::app::HostScope>>,
 ) -> Result<Prepared> {
+    platform::require_scope(&path, scope.as_ref())?;
     // Read-only format routing, before acquiring ANY configuration writer.
     // A race is refused by the selected route under its one original writer.
     let root = crate::store::PrivateRoot::open(&path)
@@ -47,7 +69,7 @@ fn prepare(
         .is_ok()
     {
         return crate::store::native_transaction::begin_mac_legacy_recovery(
-            path, id, None, runtime, permit,
+            path, id, scope, runtime, permit,
         )
         .map(Prepared::Running)
         .map_err(migration_error);
@@ -57,7 +79,7 @@ fn prepare(
         let state = transactions
             .readstate()
             .map_err(NativeManagementError::transaction)?;
-        platform::require_state(state.state(), false)?;
+        platform::require_state(state.state(), scope.is_some())?;
         let migration = state
             .state()
             .migration_v2()
@@ -69,43 +91,59 @@ fn prepare(
         Err(error) => return Err(error.keep(transactions)),
     };
     if !selected {
+        if scope.is_some() {
+            return Err(NativeManagementError::new(ErrorKind::Conflict).keep(transactions));
+        }
         // Ordinary desired-state recovery keeps THIS coordinator and permit.
         return platform::recover_owned(transactions, &path, &id).map(Prepared::Complete);
     }
     match transactions
-        .begin_mac_migration_recovery(path, id, None, runtime, permit)
+        .begin_mac_migration_recovery(path, id, scope.clone(), runtime, permit)
         .map_err(migration_error)?
     {
         MacMigrationRecoveryStart::Complete(transactions, result) => {
-            completed(transactions, result, "recover_migration").map(Prepared::Complete)
+            completed(transactions, result, "recover_migration", scope.as_ref())
+                .map(Prepared::Complete)
         }
         MacMigrationRecoveryStart::Running(task) => Ok(Prepared::Running(task)),
     }
 }
-pub(super) async fn recover(path: PathBuf, id: TransactionId) -> Result<NativeManagementReport> {
+pub(super) async fn recover(
+    path: PathBuf,
+    id: TransactionId,
+    scope: Option<Arc<crate::app::HostScope>>,
+) -> Result<NativeManagementReport> {
     let permit = WORKERS
         .try_acquire()
         .map_err(|_| NativeManagementError::new(ErrorKind::Busy))?;
     let runtime = Handle::current();
     // Once started, dropping this JoinHandle never aborts acquisition/recovery.
     // The permit moves into the actual recovery job, including its Unknown path.
-    let prepared = tokio::task::spawn_blocking(move || prepare(path, id, runtime, permit))
-        .await
-        .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))??;
+    let reporting_scope = scope.clone();
+    let prepared = tokio::task::spawn_blocking(move || {
+        let retained = scope.clone();
+        prepare(path, id, runtime, permit, scope).map_err(|error| match retained {
+            Some(scope) => error.with_app_scope(scope),
+            None => error,
+        })
+    })
+    .await
+    .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))??;
     match prepared {
         Prepared::Complete(report) => Ok(report),
-        Prepared::Running(task) => finish(task, "recover_migration").await,
+        Prepared::Running(task) => finish(task, "recover_migration", reporting_scope).await,
     }
 }
 async fn finish(
     task: MacMigrationRecovery,
     operation: &'static str,
+    scope: Option<Arc<crate::app::HostScope>>,
 ) -> Result<NativeManagementReport> {
     let (transactions, result, permit) = task.finish().await.map_err(migration_error)?;
     // Retain the original budget through reporting after the real task joins.
     tokio::task::spawn_blocking(move || {
         let _permit = permit;
-        completed(transactions, result, operation).map(|mut report| {
+        completed(transactions, result, operation, scope.as_ref()).map(|mut report| {
             report.configuration_only = false;
             report.runtime_health = "validation_workers_joined_runtime_not_observed";
             report
@@ -119,12 +157,15 @@ pub(super) async fn migrate(
     selection_path: PathBuf,
     id: TransactionId,
     run: NativeRunDesired,
+    scope: Option<Arc<crate::app::HostScope>>,
 ) -> Result<NativeManagementReport> {
     let permit = WORKERS
         .try_acquire()
         .map_err(|_| NativeManagementError::new(ErrorKind::Busy))?;
     let runtime = Handle::current();
+    let reporting_scope = scope.clone();
     let task = tokio::task::spawn_blocking(move || {
+        platform::require_scope(&path, scope.as_ref())?;
         let raw = platform::private_file(&selection_path, NATIVE_STATE_BYTES)?;
         let selection: NativeRuntimeSelection = serde_json::from_slice(raw.bytes())
             .map_err(|_| NativeManagementError::new(ErrorKind::Invalid))?;
@@ -133,11 +174,21 @@ pub(super) async fn migrate(
                 .map_err(|_| NativeManagementError::new(ErrorKind::Invalid))?,
         );
         crate::store::native_transaction::begin_mac_host_migration(
-            path, id, candidate, run, None, runtime, permit,
+            path,
+            id,
+            candidate,
+            run,
+            scope.clone(),
+            runtime,
+            permit,
         )
         .map_err(migration_error)
+        .map_err(|error| match scope {
+            Some(scope) => error.with_app_scope(scope),
+            None => error,
+        })
     })
     .await
     .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))??;
-    finish(task, "migrate").await
+    finish(task, "migrate", reporting_scope).await
 }

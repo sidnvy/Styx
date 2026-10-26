@@ -3,6 +3,7 @@
 //! arbitrary call-supplied paths, legacy adoption or mutation replay lives here.
 mod local_gateway;
 mod migrated;
+mod migration;
 mod pairing_link;
 
 use crate::{
@@ -186,6 +187,8 @@ enum Operation {
     Connect,
     Disconnect,
     QuitAdmission,
+    StartMigration,
+    RecoverMigration,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -301,6 +304,7 @@ impl RetainedFailure {
     }
 }
 struct HostApp {
+    migration: Option<migration::State>,
     local_gateway: Option<local_gateway::LocalGateway>,
     committed_migration: bool,
     migrated_shared: bool,
@@ -323,19 +327,27 @@ struct HostApp {
 }
 impl HostApp {
     async fn open(state_dir: &Path, deployment_file: &Path) -> Result<Self, AppError> {
+        Self::open_with_selection(state_dir, deployment_file, None).await
+    }
+    async fn open_with_selection(
+        state_dir: &Path,
+        deployment_file: &Path,
+        selection: Option<PathBuf>,
+    ) -> Result<Self, AppError> {
         if !deployment_file.is_absolute() {
             return Err(AppError("app_deployment_invalid"));
         }
         let scope = Arc::new(HostScope::open(state_dir)?);
         let (status, observed) = watch::channel(ConnectionStatus::stopped());
         let mut app = Self {
+            migration: None,
             local_gateway: None,
             committed_migration: false,
             migrated_shared: false,
             scope,
             deployment_file: deployment_file.to_owned(),
             configuration: None,
-            runtime_selection_file: None,
+            runtime_selection_file: selection,
             inspected_join: None,
             enrollment: None,
             input_writer: None,
@@ -348,6 +360,12 @@ impl HostApp {
             quit_ticket: None,
         };
         if app.scope.root.get().is_some() {
+            if app.runtime_selection_file.is_some() {
+                app.observe_migration().await;
+                if app.migration.is_some() {
+                    return Ok(app);
+                }
+            }
             if let Err(error) = app.read_configuration().await {
                 if app.retained.is_none() {
                     return Err(error);
@@ -386,11 +404,11 @@ impl HostApp {
             .parent()
             .ok_or(AppError("app_scope_invalid"))?
             .join("app-join-input-v1.json");
-        let mut app = Self::open(state_dir, &deployment).await?;
-        app.runtime_selection_file = Some(selection.to_owned());
+        let mut app =
+            Self::open_with_selection(state_dir, &deployment, Some(selection.to_owned())).await?;
         // A committed original Host-only root is not a fresh split App setup.
         // Its original remote Gateway and pairing are never reconstructed.
-        if app.committed_migration {
+        if app.committed_migration || app.migration.is_some() {
             return Ok(app);
         }
         let gateway_scope = Arc::new(app.scope.gateway_sibling()?);
@@ -534,6 +552,9 @@ impl HostApp {
     }
     fn available(&self) -> Result<(), AppError> {
         self.scope.validate()?;
+        if self.migration_fenced() {
+            return Err(AppError("app_migration_pending"));
+        }
         if let Some(error) = &self.retained {
             return Err(AppError(error.code()));
         }
@@ -668,6 +689,9 @@ impl HostApp {
         Ok(())
     }
     async fn settle_all(&mut self) -> Result<(), AppError> {
+        // EOF waits for the original dispatched migration. Dropping the pipe
+        // is never cancellation, a new writer, or a successful cleanup receipt.
+        self.reap_migration(true).await;
         let host = self.settle().await;
         let gateway = match &mut self.local_gateway {
             Some(gateway) => gateway.settle().await,
@@ -839,7 +863,8 @@ impl HostApp {
         Ok(())
     }
     fn admission_fenced(&self) -> bool {
-        self.unknown
+        self.migration_fenced()
+            || self.unknown
             || self.retained.is_some()
             || self.quit_ticket.is_some()
             || self
@@ -870,7 +895,7 @@ impl HostApp {
     }
     async fn snapshot(&self) -> Value {
         let computer_requested = self.desktop_component_requested().await;
-        json!({"schema":1,"configuration":self.configuration,"foreground":*self.observed.borrow(),"admission_fenced":self.admission_fenced(),"desktop_intent":{"schema":1,"computer_requested":computer_requested,"source":if self.committed_migration {"committed_original_local_intent"} else {"approved_host_configuration"}},"cleanup":self.cleanup,"gateway":self.local_gateway.as_ref().map(|g| g.status()),"enrollment":self.enrollment,"mode":"rust_host","supportedOperations":["startupStatus","status","createLocal","inspectJoin","join","requestJoin","claimJoin","inspectHost","connect","disconnect","quitAdmission"]})
+        json!({"schema":1,"migration":self.migration,"configuration":self.configuration,"foreground":*self.observed.borrow(),"admission_fenced":self.admission_fenced(),"desktop_intent":{"schema":1,"computer_requested":computer_requested,"source":if self.committed_migration {"committed_original_local_intent"} else {"approved_host_configuration"}},"cleanup":self.cleanup,"gateway":self.local_gateway.as_ref().map(|g| g.status()),"enrollment":self.enrollment,"mode":"rust_host","supportedOperations":["startupStatus","status","createLocal","inspectJoin","join","requestJoin","claimJoin","inspectHost","connect","disconnect","quitAdmission","startMigration","recoverMigration"]})
     }
     async fn dispatch(
         &mut self,
@@ -879,14 +904,34 @@ impl HostApp {
     ) -> Result<Value, AppError> {
         if !matches!(
             operation,
-            Operation::InspectJoin | Operation::Join | Operation::CreateLocal
+            Operation::InspectJoin
+                | Operation::Join
+                | Operation::CreateLocal
+                | Operation::StartMigration
+                | Operation::RecoverMigration
         ) {
             let _: EmptyInput = decode_input(&input)?;
         }
+        self.reap_migration(false).await;
         self.reap().await?;
         if matches!(operation, Operation::Status | Operation::StartupStatus) {
             self.scope.validate()?;
             return Ok(self.snapshot().await);
+        }
+        if matches!(
+            operation,
+            Operation::StartMigration | Operation::RecoverMigration
+        ) {
+            self.start_migration(
+                decode_input(&input)?,
+                matches!(operation, Operation::RecoverMigration),
+            )?;
+            return Ok(self.snapshot().await);
+        }
+        // A queued native migration owns its original writer. A UI Quit must
+        // return promptly and must never abort it or pretend it has settled.
+        if matches!(operation, Operation::QuitAdmission) && self.migration_running() {
+            return Err(AppError("app_migration_in_progress"));
         }
         // Stopping our own captured role remains safe even if scope validation
         // has failed. Never leave it running because a configuration write was refused.
@@ -894,6 +939,18 @@ impl HostApp {
             self.settle_all().await?;
         } else if matches!(operation, Operation::Disconnect) {
             self.settle().await?;
+        }
+        if matches!(operation, Operation::QuitAdmission)
+            && self.migration_fenced()
+            && !self.unknown
+            && self.retained.is_none()
+        {
+            self.scope.validate()?;
+            let ticket = uuid::Uuid::new_v4().simple().to_string();
+            self.quit_ticket = Some(ticket.clone());
+            return Ok(
+                json!({"quit":{"status":"ready_to_quit","ticketId":ticket},"migration":self.migration}),
+            );
         }
         self.available()?;
         match operation {
@@ -1002,7 +1059,10 @@ impl HostApp {
                     json!({"quit":{"status":"ready_to_quit","ticketId":ticket},"cleanup":self.cleanup,"gateway":self.local_gateway.as_ref().map(|g|g.status())}),
                 )
             }
-            Operation::StartupStatus | Operation::Status => unreachable!(),
+            Operation::StartupStatus
+            | Operation::Status
+            | Operation::StartMigration
+            | Operation::RecoverMigration => unreachable!(),
         }
     }
 }
@@ -1084,7 +1144,9 @@ async fn serve_app<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         let result = app.dispatch(request.operation, request.input).await;
         let response = match result {
             Ok(result) => json!({"id":request.id,"ok":true,"result":result}),
-            Err(error) => json!({"id":request.id,"ok":false,"error":error.code()}),
+            Err(error) => {
+                json!({"id":request.id,"ok":false,"error":error.code(),"migration":app.migration})
+            }
         };
         let encoded =
             serde_json::to_string(&response).map_err(|_| AppError("app_response_invalid"));

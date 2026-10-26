@@ -343,6 +343,7 @@ pub async fn migrate(
             runtime_selection_file.to_owned(),
             id,
             run,
+            None,
         )
         .await
     }
@@ -352,12 +353,65 @@ pub async fn migrate(
         Err(NativeManagementError::new(ErrorKind::Unsupported))
     }
 }
+/// Original App custody is retained throughout the same native migration producer.
+/// Unsupported platforms refuse before reading selection or configuration files.
+pub(crate) async fn migrate_for_app(
+    scope: Arc<crate::app::HostScope>,
+    selection: &Path,
+    tx: &str,
+    run: NativeRunDesired,
+) -> Result<NativeManagementReport> {
+    #[cfg(target_os = "macos")]
+    {
+        let retained = scope.clone();
+        let result = async {
+            let id = parse_transaction_id(tx)?;
+            macos_recovery::migrate(
+                scope.state_dir().to_owned(),
+                selection.to_owned(),
+                id,
+                run,
+                Some(scope),
+            )
+            .await
+        }
+        .await;
+        result.map_err(|error| error.with_app_scope(retained))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = (selection, tx, run);
+        Err(NativeManagementError::new(ErrorKind::Unsupported).with_app_scope(scope))
+    }
+}
+/// Recover only this App's original migration; never route a foreign transaction
+/// through the ordinary desired-state recovery fallback.
+pub(crate) async fn recover_migration_for_app(
+    scope: Arc<crate::app::HostScope>,
+    tx: &str,
+) -> Result<NativeManagementReport> {
+    #[cfg(target_os = "macos")]
+    {
+        let retained = scope.clone();
+        let result = async {
+            let id = parse_transaction_id(tx)?;
+            macos_recovery::recover(scope.state_dir().to_owned(), id, Some(scope)).await
+        }
+        .await;
+        result.map_err(|error| error.with_app_scope(retained))
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = tx;
+        Err(NativeManagementError::new(ErrorKind::Unsupported).with_app_scope(scope))
+    }
+}
 pub async fn recover(state_dir: &Path, transaction_id: &str) -> Result<NativeManagementReport> {
     let path = state_dir.to_owned();
     let id = parse_transaction_id(transaction_id)?;
     #[cfg(target_os = "macos")]
     {
-        macos_recovery::recover(path, id).await
+        macos_recovery::recover(path, id, None).await
     }
     #[cfg(not(target_os = "macos"))]
     {
@@ -549,7 +603,10 @@ mod platform {
         }
         Ok(())
     }
-    fn require_scope(path: &Path, scope: Option<&Arc<crate::app::HostScope>>) -> Result<()> {
+    pub(super) fn require_scope(
+        path: &Path,
+        scope: Option<&Arc<crate::app::HostScope>>,
+    ) -> Result<()> {
         if let Some(scope) = scope {
             if scope.state_dir() != path {
                 return Err(NativeManagementError::new(ErrorKind::Invalid));

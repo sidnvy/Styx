@@ -1,4 +1,5 @@
 import Foundation
+import AppKit
 import CryptoKit
 import Security
 import Darwin
@@ -6,7 +7,11 @@ import Darwin
 // Original rc12 publisher/certificate, independently recovered from retained
 // signed delivery. Local-certificate preview is not Developer ID/notarization.
 enum ProductOwnedCoreError: Error {
-    case originalPackageRequired, invalidPackage, unavailable, unknownNoReplay, cleanupUnknown
+    case originalPackageRequired, invalidPackage, unavailable, unknownNoReplay, cleanupUnknown, selectionCancelled
+}
+// Retain structured failure facts for the UI; never log response bodies.
+struct ProductOwnedCoreRejection: Error, Sendable {
+    let response: ProductJSON
 }
 private let productOriginalMacPublisher = "ebb36f9dff7022d8921443bdc30c6236d18dd0535aa2cdce838d1c5b327bab67"
 private let productOriginalAppRequirement = "identifier \"app.styx.host\" and certificate leaf = H\"cb50cee601419f28b43756f4fc8aefdbf60abae2\""
@@ -26,7 +31,7 @@ final class ProductOwnedCore: @unchecked Sendable {
     private var eofRequested = false
     private var sequence = 0
     private var buffer = Data()
-    private static let operations: Set<String> = ["startupStatus", "status", "createLocal", "inspectJoin", "join", "requestJoin", "claimJoin", "inspectHost", "connect", "disconnect", "quitAdmission"]
+    private static let operations: Set<String> = ["startupStatus", "status", "createLocal", "inspectJoin", "join", "requestJoin", "claimJoin", "inspectHost", "connect", "disconnect", "quitAdmission", "startMigration", "recoverMigration"]
 
     // Only the fixed package bootstrap below can construct this owner.
     private init(cli: URL, selection: URL, state: URL, cliPin: FileHandle, selectionPin: FileHandle) throws {
@@ -101,7 +106,7 @@ final class ProductOwnedCore: @unchecked Sendable {
                     guard let response = try line(), !closed else { throw ProductOwnedCoreError.unknownNoReplay }
                     let value = try JSONDecoder().decode(ProductJSON.self, from: response)
                     guard value["id"].number == Double(id) else { throw ProductOwnedCoreError.unknownNoReplay }
-                    guard value["ok"].bool else { continuation.resume(throwing: ProductCoreError.rejected); return }
+                    guard value["ok"].bool else { continuation.resume(throwing: ProductOwnedCoreRejection(response: value)); return }
                     continuation.resume(returning: value["result"])
                 } catch {
                     // EOF requests original Rust cleanup. Retain/wait the same
@@ -127,6 +132,46 @@ final class ProductOwnedCore: @unchecked Sendable {
     // Async teardown without a completion claim; queued work retains custody.
     func requestEOF() { eof(); queue.async { [self] in eof(); while !(output.availableData.isEmpty) {}; child.waitUntilExit(); stderrJoined.wait() } }
 
+    private static func existingPrivateDirectory(_ url: URL) throws -> Bool {
+        var st = stat()
+        if lstat(url.path, &st) != 0 {
+            guard errno == ENOENT else { throw ProductOwnedCoreError.invalidPackage }
+            return false
+        }
+        guard st.st_mode & S_IFMT == S_IFDIR, st.st_uid == getuid(), st.st_mode & 0o077 == 0 else {
+            throw ProductOwnedCoreError.invalidPackage
+        }
+        return true
+    }
+    @MainActor private static func chooseExistingProfile() -> Bool? {
+        let alert = NSAlert()
+        alert.messageText = productText("选择要打开的 Styx 设置", "Choose your Styx settings")
+        alert.informativeText = productText("发现原有设置和单独创建的新设置。请选择本次使用哪一份；两份设置不会合并或覆盖。", "Both your original settings and a separately created profile were found. Choose which to open; neither will be merged or overwritten.")
+        alert.addButton(withTitle: productText("使用原有设置", "Use original settings"))
+        alert.addButton(withTitle: productText("使用单独的新设置", "Use separate profile"))
+        alert.addButton(withTitle: productText("取消", "Cancel"))
+        switch alert.runModal() {
+        case .alertFirstButtonReturn: return true
+        case .alertSecondButtonReturn: return false
+        default: return nil
+        }
+    }
+    private static func selectedState(_ support: URL) throws -> URL {
+        let original = support.appendingPathComponent("Setup/deployment")
+        let separate = support.appendingPathComponent("NativeRustHost-v1/profile")
+        let originalExists = try existingPrivateDirectory(original)
+        let separateExists = try existingPrivateDirectory(separate)
+        if originalExists && separateExists {
+            // open() normally runs off AppKit. Only the choice is on its actor;
+            // package verification and process I/O remain off the UI thread.
+            let choice: Bool? = Thread.isMainThread
+                ? MainActor.assumeIsolated { chooseExistingProfile() }
+                : DispatchQueue.main.sync { chooseExistingProfile() }
+            guard let choice else { throw ProductOwnedCoreError.selectionCancelled }
+            return choice ? original : separate
+        }
+        return originalExists ? original : separate
+    }
     private static func privateDirectory(_ url: URL) throws {
         if mkdir(url.path, 0o700) != 0 && errno != EEXIST { throw ProductOwnedCoreError.invalidPackage }
         var st = stat()
@@ -210,6 +255,7 @@ final class ProductOwnedCore: @unchecked Sendable {
               chosen["payload_path"].string == payload.path, chosen["publisher_file"].string == pub.path else { throw ProductOwnedCoreError.invalidPackage }
         let support = URL(fileURLWithPath: NSHomeDirectory()).appendingPathComponent("Library/Application Support/Styx")
         guard FileManager.default.fileExists(atPath: support.path) else { throw ProductOwnedCoreError.invalidPackage }
+        let state = try selectedState(support)
         let container = support.appendingPathComponent("NativeRustHost-v1"); try privateDirectory(container)
         let selectionURL = container.appendingPathComponent("runtime-selection.json")
         if !FileManager.default.fileExists(atPath: selectionURL.path) {
@@ -221,7 +267,8 @@ final class ProductOwnedCore: @unchecked Sendable {
         // This first bridge deliberately does not upgrade an existing App
         // profile's selected release. A changed selection requires migration.
         guard originalSelection == selection else { throw ProductOwnedCoreError.invalidPackage }
-        // Existing legacy Setup/deployment is never adopted or rewritten.
-        return try ProductOwnedCore(cli: cli, selection: selectionURL, state: container.appendingPathComponent("profile"), cliPin: cliPin, selectionPin: selectionPin)
+        // The original root is passed in place. Rust must inspect it under the
+        // original scope before an explicitly authorized migration can begin.
+        return try ProductOwnedCore(cli: cli, selection: selectionURL, state: state, cliPin: cliPin, selectionPin: selectionPin)
     }
 }

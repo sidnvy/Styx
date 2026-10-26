@@ -172,7 +172,7 @@ enum ProductRestorationPolicy {
 @MainActor final class ProductModel: ObservableObject {
     let client: ProductCoreClient
     var nativeHost: Bool { client.isNativeHost }
-    func nativeClaim() { perform { [self] in _ = try await client.native("claimJoin") } }
+    func nativeClaim() { guard !nativeMigrationPending else { return }; perform { [self] in _ = try await client.native("claimJoin") } }
     func nativePause() { perform { [self] in _ = try await client.native("disconnect") } }
     #if STYX_TESTING
     var testSuppressObservations = false
@@ -207,8 +207,49 @@ enum ProductRestorationPolicy {
     @Published var joining = false
     // UI duplicate-submit guard only. Core remains the durable setup authority.
     @Published private(set) var nativeLocalSetupSubmitted = false
+    @Published private(set) var nativeMigrationTransactionID: String?
+    @Published private(set) var nativeMigrationFailure: ProductJSON = .null
+    private var nativeMigrationSubmitted = false
+    var nativeMigrationStatus: String? { status["migration"]["status"].string }
+    var nativeMigrationPending: Bool {
+        nativeHost && nativeMigrationStatus != "committed"
+            && (status["migration"] != .null || nativeMigrationSubmitted)
+    }
+    var nativeCanStartMigration: Bool {
+        nativeHost && nativeMigrationStatus == "required"
+            && nativeMigrationTransactionID == nil && !nativeMigrationSubmitted
+    }
+    var nativeCanRecoverMigration: Bool {
+        nativeMigrationPending && nativeMigrationTransactionID != nil
+            && status["migration"]["can_recover"] == .bool(true)
+            && ["required", "blocked", "unknown"].contains(nativeMigrationStatus ?? "unknown")
+    }
+    func startNativeMigration() {
+        guard !busy, nativeCanStartMigration else { return }
+        perform { [self] in
+            guard nativeCanStartMigration else { throw ProductCoreError.rejected }
+            let transaction = "app-migration-" + UUID().uuidString.lowercased()
+            nativeMigrationTransactionID = transaction; nativeMigrationSubmitted = true
+            nativeMigrationFailure = .null
+            // Submit once; status observes the retained job. No automatic
+            // connection, alternate transaction, or replay after uncertainty.
+            try applyNative(try await client.native("startMigration", [
+                "transactionId": .string(transaction), "authorize": .bool(true), "run": .string("stopped")
+            ]))
+        }
+    }
+    func recoverNativeMigration() {
+        guard !busy, nativeCanRecoverMigration, let transaction = nativeMigrationTransactionID else { return }
+        perform { [self] in
+            guard nativeCanRecoverMigration, nativeMigrationTransactionID == transaction else { throw ProductCoreError.rejected }
+            nativeMigrationSubmitted = true; nativeMigrationFailure = .null
+            try applyNative(try await client.native("recoverMigration", [
+                "transactionId": .string(transaction), "authorize": .bool(true), "run": .string("stopped")
+            ]))
+        }
+    }
     var nativeCanCreateLocal: Bool {
-        !nativeLocalSetupSubmitted && status["admission_fenced"] == .bool(false)
+        !nativeMigrationPending && !nativeLocalSetupSubmitted && status["admission_fenced"] == .bool(false)
         && status["configuration"] == .null && status["enrollment"] == .null && status["gateway"] == .null
         && status["supportedOperations"].array.contains { $0.string == "createLocal" }
     }
@@ -271,7 +312,8 @@ enum ProductRestorationPolicy {
                 while !Task.isCancelled {
                     guard let self = self else { return }
                     await self.bootstrap()
-                    if self.tunnelAttempt != .connecting { await self.refreshMenu() }
+                    if self.nativeHost { await self.refresh() }
+                    else if self.tunnelAttempt != .connecting { await self.refreshMenu() }
                     do { try await Task.sleep(nanoseconds: 3_000_000_000) } catch { return }
                 }
             }
@@ -349,10 +391,19 @@ enum ProductRestorationPolicy {
     }
     private func applyNative(_ value: ProductJSON) throws {
         guard value["mode"].string == "rust_host" else { throw ProductCoreError.invalidResponse }
+        if let transaction = value["migration"]["transaction_id"].string {
+            guard nativeMigrationTransactionID == nil || nativeMigrationTransactionID == transaction else {
+                throw ProductCoreError.invalidResponse
+            }
+            nativeMigrationTransactionID = transaction; nativeMigrationSubmitted = true
+        }
+        let wasCommitted = nativeMigrationStatus == "committed"
         status = value; journey = .null; browserObservation = .null; acceptance = .null
+        if nativeMigrationPending { page = .overview }
+        if nativeMigrationStatus == "committed" && !wasCommitted { nativeMigrationFailure = .null; error = nil; page = .overview }
         if !restoredPage {
             restoredPage = true
-            page = value["configuration"] == .null && value["enrollment"] == .null && value["gateway"] == .null && value["admission_fenced"] == .bool(false) ? .welcome : .overview
+            page = !nativeMigrationPending && value["configuration"] == .null && value["enrollment"] == .null && value["gateway"] == .null && value["admission_fenced"] == .bool(false) ? .welcome : .overview
         }
     }
     init(sessionURL: URL, permissionReader: @escaping () -> (accessibility: Bool, screenRecording: Bool) = {
@@ -494,6 +545,13 @@ enum ProductRestorationPolicy {
     }
     private func reportFailure(_ failure: Error? = nil) {
         ProductNativeDiagnostics.event("operation_failed page=" + String(describing: page))
+        if let rejection = failure as? ProductOwnedCoreRejection {
+            nativeMigrationFailure = rejection.response
+        }
+        if nativeMigrationPending {
+            error = productText("迁移结果尚未确认。请刷新状态查看；继续沿用原事务和配对，不会自动重试或另起迁移。", "The migration result is not yet confirmed. Refresh status to review it. The original transaction and pairing are retained; migration will not retry automatically or start a new transaction.")
+            return
+        }
         // Never interpolate raw transport errors, response bodies or secrets.
         switch failure as? ProductWorkflowError {
         case .browserPreparationNeedsReview:
@@ -578,7 +636,7 @@ enum ProductRestorationPolicy {
     }
     func createAndPrepare() {
         if nativeHost {
-            guard !busy else { return }
+            guard !busy, !nativeMigrationPending else { return }
             let name = label.trimmingCharacters(in: .whitespacesAndNewlines)
             guard !name.isEmpty else { return }
             let joinExisting = joining
@@ -942,7 +1000,7 @@ enum ProductRestorationPolicy {
         }
     }
     func resumeForeground() {
-        if nativeHost { perform { [self] in _ = try await client.native("connect") }; return }
+        if nativeHost { guard !nativeMigrationPending else { return }; perform { [self] in _ = try await client.native("connect") }; return }
         perform { [self] in
             _ = try await client.write("foreground", ["authorize": .bool(true)])
             foregroundRecoveryNeeded = false

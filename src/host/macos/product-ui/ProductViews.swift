@@ -46,6 +46,8 @@ struct ProductView: View {
                         ProductBrand(size: 56).frame(maxWidth: .infinity)
                         ProgressView(model.loadingMessage).frame(maxWidth: .infinity)
                         if model.error != nil { Button(productText("重试读取", "Retry reading")) { Task { await model.bootstrap() } } }
+                    } else if model.nativeMigrationPending {
+                        migration
                     } else {
                         switch model.page {
                         case .welcome: welcome
@@ -83,6 +85,31 @@ struct ProductView: View {
         VStack(alignment: .leading, spacing: 9) {
             Text(title).font(.system(size: 23, weight: .semibold))
             if !subtitle.isEmpty { Text(subtitle).foregroundStyle(.secondary).fixedSize(horizontal: false, vertical: true) }
+        }
+    }
+    private var migration: some View {
+        VStack(alignment: .leading, spacing: 20) {
+            heading(productText("保留原有 Styx 设置", "Keep your existing Styx settings"),
+                    productText("迁移将保留这台电脑的身份和配对。完成后保持断开，由你决定何时连接。", "Migration preserves this computer’s identity and pairing. It stays disconnected afterward until you choose to connect."))
+            ProductPanel(title: productText("迁移状态", "Migration status")) {
+                if model.nativeMigrationStatus == "running" {
+                    ProgressView(productText("正在迁移，请稍候…", "Migrating, please wait…"))
+                    Text(productText("正在检查原设置和连接，完成后会更新这里的状态。", "Your existing settings and connection are being checked. This status will update when finished.")).foregroundStyle(.secondary)
+                } else if model.nativeCanStartMigration {
+                    Text(productText("原设置已找到。迁移前请先结束使用这台电脑的任务。", "Your original settings were found. Finish tasks using this computer before migrating.")).foregroundStyle(.secondary)
+                    Button(productText("保留设置并迁移，暂不连接", "Keep settings and migrate without connecting")) { model.startNativeMigration() }
+                        .buttonStyle(.borderedProminent).disabled(model.busy)
+                } else {
+                    Text(productText("上次迁移尚未完成或结果未确认。请先刷新状态；继续沿用原事务和配对，不另起迁移。", "The last migration is incomplete or its result is unconfirmed. Refresh status first. Keep the original transaction and pairing; do not start a new migration.")).foregroundStyle(.secondary)
+                    if model.nativeCanRecoverMigration {
+                        Button(productText("继续原迁移，暂不连接", "Continue the original migration without connecting")) { model.recoverNativeMigration() }.disabled(model.busy)
+                    }
+                }
+                if let transaction = model.nativeMigrationTransactionID {
+                    Text(productText("迁移记录：", "Migration reference: ") + transaction).font(.caption).textSelection(.enabled)
+                }
+                Button(productText("刷新状态", "Refresh status")) { Task { await model.refresh() } }.disabled(model.busy)
+            }
         }
     }
     private var welcome: some View {
@@ -331,6 +358,9 @@ struct ProductView: View {
             heading("Styx", productText("查看这台电脑的功能和连接。", "Check this computer’s features and connection."))
             ProductPanel(title: productText("这台电脑", "This computer")) {
                 if model.nativeHost {
+                    if model.nativeMigrationStatus == "committed" {
+                        Text(productText("原设置已迁移。请按需连接这台电脑。", "Your original settings have been migrated. Connect this computer when needed.")).foregroundStyle(.secondary)
+                    }
                     if model.status["gateway"] != .null {
                         Text(productText("本机网关地址：", "Local gateway address: ") + (model.status["gateway"]["origin"].string ?? productText("状态未确认", "status not confirmed")))
                         Text(productText("本机网关：", "Local gateway: ") + (model.status["gateway"]["running"] == .bool(true) && model.status["gateway"]["listening"] == .bool(true) ? productText("运行中", "running") : productText("状态未确认", "status not confirmed")))

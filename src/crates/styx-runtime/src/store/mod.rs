@@ -7,6 +7,7 @@
 //! a committed transaction. Unsupported platform operations fail explicitly.
 //! Secrets are not included in Debug output or preservation manifests.
 
+pub(crate) mod app_migration_observation;
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 pub(crate) mod committed_runtime;
 #[cfg(any(
