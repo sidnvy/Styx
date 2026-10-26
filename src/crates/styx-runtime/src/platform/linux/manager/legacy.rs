@@ -1526,7 +1526,7 @@ async fn run_settlement(
         if Instant::now() >= deadline || cancel.is_cancelled() {
             return Err(LegacyError::Unknown);
         }
-        let observed = observe_original_with_exit(&scope, Some(&pidfd)).await?;
+        let observed = observe_original_with_exit(&scope, Some(&pidfd), Some(tx.clone())).await?;
         fact.original_main_exited = observed.original_main_exited;
         fact.original_cgroup_empty = observed.original_cgroup_empty;
         fact.manager_reported_success = observed.manager_reported_success;
@@ -1567,21 +1567,34 @@ impl OriginalObservation {
     }
 }
 async fn observe_original(scope: &Arc<LegacyManagedScope>) -> LegacyResult<OriginalObservation> {
-    observe_original_with_exit(scope, None).await
+    observe_original_with_exit(scope, None, None).await
+}
+// Fixed diagnostic labels only; this sender carries no control authority.
+fn observation_checkpoint(
+    progress: &Option<watch::Sender<LegacySettlementObservation>>,
+    checkpoint: &'static str,
+) {
+    if let Some(progress) = progress {
+        progress.send_modify(|fact| fact.checkpoint = checkpoint);
+    }
 }
 async fn observe_original_with_exit(
     scope: &Arc<LegacyManagedScope>,
     original_pidfd: Option<&OwnedFd>,
+    progress: Option<watch::Sender<LegacySettlementObservation>>,
 ) -> LegacyResult<OriginalObservation> {
     // This duplicates the SAME birth-bound descriptor used for the one TERM.
     // It only observes exit readiness; no new pid lookup or signal is made.
+    observation_checkpoint(&progress, "exit_pidfd_clone");
     let original_pidfd = original_pidfd
         .map(OwnedFd::try_clone)
         .transpose()
         .map_err(unknown)?;
+    observation_checkpoint(&progress, "exit_manager_proxy");
     let bus = zbus::fdo::DBusProxy::new(&scope.connection)
         .await
         .map_err(unknown)?;
+    observation_checkpoint(&progress, "exit_manager_owner");
     if bus
         .get_name_owner("org.freedesktop.systemd1".try_into().map_err(conflict)?)
         .await
@@ -1592,6 +1605,7 @@ async fn observe_original_with_exit(
     {
         return Err(LegacyError::Conflict);
     }
+    observation_checkpoint(&progress, "exit_unit_proxy");
     let unit = live_proxy(
         &scope.connection,
         scope.manager_owner.as_str(),
@@ -1600,6 +1614,7 @@ async fn observe_original_with_exit(
     )
     .await
     .map_err(unknown)?;
+    observation_checkpoint(&progress, "exit_service_proxy");
     let service = live_proxy(
         &scope.connection,
         scope.manager_owner.as_str(),
@@ -1608,7 +1623,9 @@ async fn observe_original_with_exit(
     )
     .await
     .map_err(unknown)?;
+    observation_checkpoint(&progress, "exit_invocation");
     let invocation: Vec<u8> = unit.get_property("InvocationID").await.map_err(unknown)?;
+    observation_checkpoint(&progress, "exit_control_group");
     let current_cgroup = property_string(&service, "ControlGroup").await?;
     if invocation.len() != 16
         || invocation
@@ -1620,11 +1637,14 @@ async fn observe_original_with_exit(
     {
         return Err(LegacyError::Conflict);
     }
+    observation_checkpoint(&progress, "exit_dropins");
     let dropins: Vec<String> = unit.get_property("DropInPaths").await.map_err(unknown)?;
+    observation_checkpoint(&progress, "exit_reload");
     let reload: bool = unit
         .get_property("NeedDaemonReload")
         .await
         .map_err(unknown)?;
+    observation_checkpoint(&progress, "exit_fragment");
     if !dropins.is_empty()
         || reload
         || property_string(&unit, "FragmentPath").await?
@@ -1636,34 +1656,46 @@ async fn observe_original_with_exit(
     {
         return Err(LegacyError::Conflict);
     }
+    observation_checkpoint(&progress, "exit_main_pid");
     let pid: u32 = service.get_property("MainPID").await.map_err(unknown)?;
     let original_pid = match &scope.main {
         ProcessIdentity::Linux { pid, .. } => *pid,
     };
+    observation_checkpoint(&progress, "exit_exec_pid");
     let exec_pid: u32 = service.get_property("ExecMainPID").await.map_err(unknown)?;
     if (pid != 0 && pid != original_pid) || exec_pid != original_pid {
         return Err(LegacyError::Conflict);
     }
+    observation_checkpoint(&progress, "exit_active");
     let active = property_string(&unit, "ActiveState").await?;
     if current_cgroup.is_empty() && (pid != 0 || active != "inactive") {
         return Err(LegacyError::Conflict);
     }
+    observation_checkpoint(&progress, "exit_result");
     let result = property_string(&service, "Result").await?;
+    observation_checkpoint(&progress, "exit_code");
     let code: i32 = service
         .get_property("ExecMainCode")
         .await
         .map_err(unknown)?;
+    observation_checkpoint(&progress, "exit_status");
     let status: i32 = service
         .get_property("ExecMainStatus")
         .await
         .map_err(unknown)?;
+    observation_checkpoint(&progress, "exit_blocking_dispatch");
     let source = scope.clone();
     let (original_main_exited, original_cgroup_empty) = legacy_blocking(move || {
+        observation_checkpoint(&progress, "exit_fence");
         source.inputs.verify_fence(&source.fence)?;
+        observation_checkpoint(&progress, "exit_birth_and_image");
         let exited = observe_main_exit(&source.main, original_pidfd.as_ref(), || {
+            observation_checkpoint(&progress, "exit_process_cgroup");
             require_process_cgroup(original_pid, &source.cgroup_path, &source.cgroup_stat)?;
+            observation_checkpoint(&progress, "exit_live_image");
             check_live_image(&source)
         })?;
+        observation_checkpoint(&progress, "exit_held_cgroup");
         let path = Path::new("/sys/fs/cgroup").join(source.cgroup_path.trim_start_matches('/'));
         let empty =
             observe_held_cgroup(&source.cgroup, &source.cgroup_stat, &source.events, || {
