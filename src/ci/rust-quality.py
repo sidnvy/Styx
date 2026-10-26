@@ -29,6 +29,7 @@ MANAGEMENT_PREPARATION_TEST = "store::management::tests::durable_prepare_preserv
 NATIVE_ROOT_TEST = "store::native_root::tests::fresh_native_root_genesis_reopen_and_retained_unknown_batch"
 MANAGEMENT_PHASE_TEST = "store::management::phase_tests::original_phase_chain_and_unknown_orphans_are_preserved_batch"
 NATIVE_TRANSACTION_TEST = "store::native_transaction::tests::native_commit_reopen_and_scope_rejections_batch"
+NATIVE_SERVICE_TIP_TEST = "store::native_transaction::tests::native_service_autostart_follow_and_refusal_batch"
 ENROLLMENT_OWNED_TEST = "store::enrollment::owned::tests::owned_journal_thread_move_keeps_writer_and_initial_namespace_identity"
 ENROLLMENT_PROFILE_TEST = "enrollment::profile::tests::actual_node22_profile_join_and_capability_proofs"
 ENROLLMENT_SERVICE_TEST = "enrollment::service::tests::actual_strict_tls_enrollment_service_full_journey"
@@ -387,6 +388,7 @@ def execute(args):
                 ("native-root", NATIVE_ROOT_TEST, "STYX_TEST_NATIVE_ROOT_ROOT"),
                 ("management-phases", MANAGEMENT_PHASE_TEST, "STYX_TEST_MANAGEMENT_PHASE_ROOT"),
                 ("native-transaction", NATIVE_TRANSACTION_TEST, "STYX_TEST_NATIVE_TRANSACTION_ROOT"),
+                ("native-service-tip", NATIVE_SERVICE_TIP_TEST, "STYX_TEST_SERVICE_TIP_ROOT"),
                 ("credential-journal", "store::management::handoff::tests::credential_retirement_same_journal_and_pending_barrier_files_batch", "STYX_TEST_MANAGEMENT_HANDOFF_ROOT"),
                 ("credential-interrupted", "store::management::handoff::tests::credential_retirement_preflight_and_interrupted_originals_batch", "STYX_TEST_MANAGEMENT_HANDOFF_ROOT"),
                 ("historical-recovery", "enrollment::recovery::historical::tests::linux::historical_baseline_boot_chain_and_publication_fence", "STYX_TEST_HISTORICAL_RECOVERY_ROOT"),
@@ -592,7 +594,7 @@ def execute(args):
         if args.linux_discovery:
             required |= {"linux-discovery", "cli-desktop-candidates"}
         if args.enrollment_store:
-            required |= {"payload-store", "enrollment-store", "enrollment-clock", "enrollment-recovery", "enrollment-owned", "configuration-owner", "configuration-maintenance", "management-preparation", "native-root", "management-phases", "native-transaction", "credential-journal", "credential-interrupted", "historical-recovery", "management-cutover"}
+            required |= {"payload-store", "enrollment-store", "enrollment-clock", "enrollment-recovery", "enrollment-owned", "configuration-owner", "configuration-maintenance", "management-preparation", "native-root", "management-phases", "native-transaction", "native-service-tip", "credential-journal", "credential-interrupted", "historical-recovery", "management-cutover"}
         if args.enrollment_service:
             required |= {"enrollment-profile", "enrollment-controller", "enrollment-service"}
         if args.paired_host:

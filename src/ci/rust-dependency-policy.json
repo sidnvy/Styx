@@ -295,6 +295,11 @@
       "input": "STYX_TEST_NATIVE_TRANSACTION_ROOT; native-only canonical commit/reopen/stale recovery rejection batch",
       "required_for": "native-only configuration transaction evidence; not legacy cutover or OS service acceptance"
     },
+    "store::native_transaction::tests::native_service_autostart_follow_and_refusal_batch": {
+      "kind": "explicit_owned_filesystem",
+      "input": "STYX_TEST_SERVICE_TIP_ROOT; original C07 commit, partial-write admission fence and successor refusal fixture",
+      "required_for": "--enrollment-store; persisted service policy evidence, not OS ServiceScope or platform service acceptance"
+    },
     "store::native_transaction::tests::native_transaction_child": {
       "kind": "owned_subprocess_helper",
       "input": "independent native-apply-oracle controller; explicit root/action/fault; never production CLI",
