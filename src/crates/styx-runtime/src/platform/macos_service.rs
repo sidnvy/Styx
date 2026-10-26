@@ -333,6 +333,126 @@ impl RegisteredInactiveProof {
     pub(crate) fn initial_state(&self) -> &store::RawFile {
         &self.initial_state
     }
+    /// Fixed installer DATA only. Caller holds the original C07 writer,
+    /// operation and execution exclusions and asynchronously revalidates the
+    /// failed registration before/after this bounded blocking observation.
+    pub(crate) fn repair_request(
+        &self,
+        candidate: &VerifiedNativeRelease,
+        id: &styx_contracts::identity::TransactionId,
+        revision: u64,
+        canonical: &Sha256Digest,
+    ) -> Result<serde_json::Value> {
+        use std::sync::atomic::Ordering;
+        if self.fenced.load(Ordering::Acquire) {
+            return Err(ServiceError::Unknown);
+        }
+        let old = &self.definition;
+        old.validate_identity()?;
+        let pin = old.pin.as_ref().ok_or(ServiceError::Conflict)?;
+        let marker_raw = old
+            .root
+            .read_raw(".styx-native-root-v1.json", 4096)
+            .map_err(changed)?;
+        let marker = native_state::decode_marker(marker_raw.bytes()).map_err(changed)?;
+        let raw = old
+            .root
+            .read_raw("state.json", 1024 * 1024)
+            .map_err(changed)?;
+        let state = native_state::decode_state(raw.bytes(), &marker).map_err(changed)?;
+        let current = crate::store::native_host_snapshot::validated_runtime_selection(
+            &old.root, &state, &marker,
+        )
+        .map_err(changed)?;
+        let selected = candidate.runtime_selection().map_err(changed)?;
+        let value = state.state();
+        let update = value
+            .runtime_update()
+            .map_err(changed)?
+            .ok_or(ServiceError::Conflict)?;
+        if old.role != ServiceRole::Gateway
+            || value.mode != styx_contracts::native_management::NativeDeploymentMode::CreateLocal
+            || value.desired.host.is_some()
+            || value.has_migration_binding()
+            || value.desired.gateway
+                != Some(NativeComponentDesired {
+                    manager: NativeManager::PersistentService,
+                    run: NativeRunDesired::Running,
+                    autostart: styx_contracts::native_management::NativeAutostartDesired::Enabled,
+                })
+            || value.reader_contract
+                != styx_contracts::management::ReaderContract::NativeServiceRuntimeSelectedStateV1
+            || value.schema != 5
+            || value.revision != revision
+            || value
+                .last_transaction
+                .as_ref()
+                .is_none_or(|tx| &tx.transaction_id != id || *tx != update.transaction)
+            || update.previous_runtime != old.selection
+            || selected != current
+            || selected == old.selection
+            || selected.publisher_spki_sha256 != old.selection.publisher_spki_sha256
+            || candidate.report().target != old.candidate.report().target
+            || Sha256Digest::of_bytes(raw.bytes()) != *canonical
+            || !candidate
+                .supports_state_reader(value.reader_contract)
+                .map_err(changed)?
+        {
+            return Err(ServiceError::Conflict);
+        }
+        let executable = Path::new(&selected.payload_path).join(candidate.report().entrypoint);
+        path_text(&executable)?;
+        if executable
+            .components()
+            .any(|part| part.as_os_str().to_string_lossy().ends_with(".app"))
+        {
+            return Err(ServiceError::Invalid);
+        }
+        let bytes = definition_bytes(
+            &old.label,
+            &old.username,
+            &old.home,
+            &executable,
+            &old.path,
+            ServiceRole::Gateway,
+        )?;
+        let member = candidate
+            .manifest()
+            .files
+            .iter()
+            .find(|member| member.path == candidate.manifest().entrypoint && member.executable)
+            .ok_or(ServiceError::Conflict)?;
+        let RootIdentity::Macos { device, inode, uid } = old.root_identity else {
+            return Err(ServiceError::Conflict);
+        };
+        let request = serde_json::json!({"schema":1,"kind":"launchd_failed_registration_repair",
+            "uid":old.uid,"username":old.username,"role":"gateway",
+            "state_dir":old.path,"state_root":{"device":device,"inode":inode,"uid":uid},
+            "canonical_sha256":canonical,"transaction_id":id,"revision":revision,
+            "definition_path":Path::new(PLIST_PARENT).join(&old.filename),
+            "definition_plist":std::str::from_utf8(&bytes).map_err(unknown)?,
+            "definition_sha256":Sha256Digest::of_bytes(&bytes),"label":old.label,
+            "executable_path":executable,"executable_sha256":member.sha256,"runtime_selection":selected,
+            "old_definition_sha256":Sha256Digest::of_bytes(&pin.raw),
+            "old_definition_identity":{"device":pin.stamp.dev,"inode":pin.stamp.ino,
+                "uid":pin.stamp.uid,"mode":pin.stamp.mode & 0o7777,"links":pin.stamp.links},
+            "old_runtime_selection":old.selection,"original_registration":self.observation});
+        // No executable Definition(B) is minted while installed Definition(A)
+        // still exists. Recheck both original authorities after reading DATA.
+        candidate.revalidate().map_err(changed)?;
+        old.validate_identity()?;
+        let after = old
+            .root
+            .read_raw("state.json", 1024 * 1024)
+            .map_err(changed)?;
+        if after.observation() != raw.observation()
+            || after.bytes() != raw.bytes()
+            || self.fenced.load(Ordering::Acquire)
+        {
+            return Err(ServiceError::Unknown);
+        }
+        Ok(request)
+    }
     /// Synchronous full original-material check: call only on an owned bounded
     /// blocking job. This does not refresh launchd state. The async consumer
     /// must also revalidate before/after C07 under its original exclusion leases.

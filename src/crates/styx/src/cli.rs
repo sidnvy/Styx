@@ -62,6 +62,9 @@ enum Command {
         transaction_id: Option<String>,
         #[arg(long)]
         expected_revision: Option<u64>,
+        /// Original-publisher signed candidate, only for prepare-runtime-repair.
+        #[arg(long)]
+        runtime_selection_file: Option<PathBuf>,
         #[arg(long)]
         authorize: bool,
         #[arg(long)]
@@ -292,6 +295,7 @@ enum MacServiceActionArg {
     PrepareFirstStart,
     /// Prepare same-identity recovery of a registered but failed inactive Gateway.
     PrepareRecovery,
+    PrepareRuntimeRepair,
     Stop,
 }
 #[cfg(target_os = "macos")]
@@ -304,6 +308,7 @@ impl MacServiceActionArg {
             Self::PrepareInstall => ServiceAction::PrepareInstall,
             Self::PrepareFirstStart => ServiceAction::PrepareFirstStart,
             Self::PrepareRecovery => ServiceAction::PrepareRecovery,
+            Self::PrepareRuntimeRepair => ServiceAction::PrepareRuntimeRepair,
             Self::Stop => ServiceAction::Stop,
         }
     }
@@ -966,6 +971,7 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
             component,
             transaction_id,
             expected_revision,
+            runtime_selection_file,
             authorize,
             json,
         } => {
@@ -974,6 +980,7 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
                 MacServiceActionArg::PrepareInstall
                     | MacServiceActionArg::PrepareFirstStart
                     | MacServiceActionArg::PrepareRecovery
+                    | MacServiceActionArg::PrepareRuntimeRepair
                     | MacServiceActionArg::Stop
             ) {
                 if !authorize {
@@ -990,7 +997,22 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
                 Ok(value) => value,
                 Err(_) => return error("native_management_invalid_input"),
             };
-            native_recovery_result(
+            let result = if action == MacServiceActionArg::PrepareRuntimeRepair {
+                let (Some(selection), Some(id), Some(revision)) = (
+                    runtime_selection_file.as_deref(),
+                    transaction_id,
+                    expected_revision,
+                ) else {
+                    return error("explicit_service_repair_inputs_required");
+                };
+                styx_runtime::management::native::service::prepare_runtime_repair(
+                    &state_dir, selection, id, revision,
+                )
+                .await
+            } else {
+                if runtime_selection_file.is_some() {
+                    return error("runtime_selection_only_for_service_repair");
+                }
                 styx_runtime::management::native::service::manage(
                     &state_dir,
                     action.native(),
@@ -998,7 +1020,10 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
                     transaction_id,
                     expected_revision,
                 )
-                .await,
+                .await
+            };
+            native_recovery_result(
+                result,
                 json,
                 "Native launchd intent and observations; prepared installation does not prove registration or readiness:",
             )
@@ -1784,13 +1809,14 @@ fn native_build_info() -> serde_json::Value {
     };
     serde_json::json!({
         "schema": 1, "target": target,
-        "minimum_release_reader": styx_contracts::native_release::NativeReleaseReader::NativeAppRuntimeSelectedV1,
+        "minimum_release_reader": styx_contracts::native_release::NativeReleaseReader::NativeServiceRuntimeSelectedV1,
         "supported_state_readers": [
             styx_contracts::management::ReaderContract::NativeManagementStateV1,
             styx_contracts::management::ReaderContract::NativeMigratedStateV1,
             styx_contracts::management::ReaderContract::NativeMigratedStateV2,
             styx_contracts::management::ReaderContract::NativeRuntimeSelectedStateV1,
-            styx_contracts::management::ReaderContract::NativeAppRuntimeSelectedStateV1
+            styx_contracts::management::ReaderContract::NativeAppRuntimeSelectedStateV1,
+            styx_contracts::management::ReaderContract::NativeServiceRuntimeSelectedStateV1
         ]
     })
 }

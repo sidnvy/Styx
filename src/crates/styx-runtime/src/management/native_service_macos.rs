@@ -16,6 +16,8 @@ pub enum ServiceAction {
     /// Commit Stopped/Disabled intent for a proven failed inactive registration.
     /// This neither stops an OS job nor claims that it is repaired.
     PrepareRecovery,
+    /// Uses prepare_runtime_repair with an explicit signed selection input.
+    PrepareRuntimeRepair,
 }
 #[derive(Serialize)]
 pub struct ServiceReport {
@@ -95,6 +97,9 @@ pub async fn manage(
     transaction_id: Option<TransactionId>,
     expected_revision: Option<u64>,
 ) -> Result<ServiceReport> {
+    if action == ServiceAction::PrepareRuntimeRepair {
+        return Err(NativeManagementError::new(ErrorKind::Invalid));
+    }
     if matches!(
         action,
         ServiceAction::PrepareInstall
@@ -151,7 +156,10 @@ pub async fn manage(
             ServiceAction::Stop
             | ServiceAction::PrepareInstall
             | ServiceAction::PrepareFirstStart
-            | ServiceAction::PrepareRecovery => unreachable!("mutation uses its owned operation"),
+            | ServiceAction::PrepareRecovery
+            | ServiceAction::PrepareRuntimeRepair => {
+                unreachable!("mutation uses its owned operation")
+            }
         },
         configuration_only: action == ServiceAction::Definition,
         revision: before.revision,
@@ -180,9 +188,197 @@ static OPERATIONS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1)
 
 struct PreparationOwner {
     transactions: NativeTransactions,
-    _execution: crate::store::ExecutionLeaseGuard,
+    _execution: Option<crate::store::ExecutionLeaseGuard>,
     definition: Arc<Definition>,
     inactive: Option<Arc<crate::platform::macos_service::RegisteredInactiveProof>>,
+}
+/// Explicit same-root failed-service selection repair. The administrator
+/// request is DATA; this actor does not alter launchd or replay an OS action.
+pub async fn prepare_runtime_repair(
+    state_dir: &Path,
+    selection_file: &Path,
+    id: TransactionId,
+    revision: u64,
+) -> Result<ServiceReport> {
+    let permit = OPERATIONS
+        .try_acquire()
+        .map_err(|_| NativeManagementError::new(ErrorKind::Busy))?;
+    let path = state_dir.to_owned();
+    let selection_path = selection_file.to_owned();
+    let (send, receive) = tokio::sync::oneshot::channel();
+    let job = tokio::spawn(async move {
+        let _permit = permit;
+        let mut operation = None;
+        let mut owner = None;
+        let attempted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let result: Result<ServiceReport> = async {
+            let lease_path = path.clone();
+            operation = Some(Arc::new(blocking_read(move || {
+                crate::store::PrivateRoot::open(lease_path)
+                    .and_then(|root| root.try_service_operation_lease())
+                    .map_err(|error| match error { crate::store::StoreError::Busy(_) => ServiceError::Busy,
+                        _ => ServiceError::Unavailable })
+            }).await.map_err(os)?));
+            let open_path = path.clone();
+            owner = Some(Arc::new(std::sync::Mutex::new(blocking_read(move || Ok((|| -> Result<PreparationOwner> {
+                let transactions = platform::service_open(&open_path)?;
+                let checked = (|| -> Result<_> {
+                    let state = transactions.readstate().map_err(NativeManagementError::transaction)?;
+                    require_repair_before(state.state(), revision)?;
+                    let execution = crate::store::PrivateRoot::open(&open_path)
+                        .and_then(|root| root.try_execution_lease())
+                        .map_err(|_| NativeManagementError::new(ErrorKind::Busy))?;
+                    let definition = Definition::prepare(&open_path, ServiceRole::Gateway).map_err(os)?;
+                    Ok((execution, definition))
+                })();
+                match checked {
+                    Ok((execution, definition)) => Ok(PreparationOwner {
+                        transactions, _execution:Some(execution), definition:Arc::new(definition), inactive:None,
+                    }),
+                    Err(error) if error.exit_code() == 4 => Err(error.keep(transactions)),
+                    Err(error) => Err(error),
+                }
+            })())).await.map_err(os)??)));
+            let checked = owner.as_ref().expect("repair owner").clone();
+            let definition = blocking_read(move || Ok(checked.lock().map_err(|_| ServiceError::Unknown)?.definition.clone()))
+                .await.map_err(os)?;
+            let proof = definition.capture_registered_inactive().await.map_err(os)?;
+            proof.revalidate().await.map_err(os)?;
+            let checked = owner.as_ref().expect("repair owner").clone();
+            let binding = proof.clone();
+            let operation = operation.as_ref().expect("repair operation").clone();
+            let attempted_commit = attempted.clone();
+            let report = blocking_read(move || Ok((|| -> Result<ServiceReport> {
+                operation.validate().map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?;
+                let mut owner = checked.lock().map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?;
+                binding.validate_owner(&owner.transactions.configuration_root()).map_err(os)?;
+                let before = owner.transactions.readstate().map_err(NativeManagementError::transaction)?;
+                require_repair_before(before.state(), revision)?;
+                let original_root = crate::store::PrivateRoot::open(owner.definition.state_dir())
+                    .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?;
+                if original_root.identity() != owner.transactions.configuration_root().identity()
+                    .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))? {
+                    return Err(NativeManagementError::new(ErrorKind::Unknown));
+                }
+                let original_raw = original_root.read_raw("state.json", NATIVE_STATE_BYTES)
+                    .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?;
+                if !Arc::ptr_eq(binding.original_definition(), &owner.definition)
+                    || original_raw.observation() != binding.initial_state().observation()
+                    || original_raw.bytes() != binding.initial_state().bytes()
+                    || before.raw_bytes() != original_raw.bytes() {
+                    return Err(NativeManagementError::new(ErrorKind::Unknown));
+                }
+                owner.inactive = Some(binding.clone());
+                let raw = platform::private_file(&selection_path, NATIVE_STATE_BYTES)?;
+                let selected: NativeRuntimeSelection = serde_json::from_slice(raw.bytes())
+                    .map_err(|_| NativeManagementError::new(ErrorKind::Invalid))?;
+                let previous = before.state().runtime_selection()
+                    .map_err(|_| NativeManagementError::new(ErrorKind::Invalid))?
+                    .ok_or_else(|| NativeManagementError::new(ErrorKind::Invalid))?;
+                if previous.publisher_spki_sha256 != selected.publisher_spki_sha256 {
+                    return Err(NativeManagementError::new(ErrorKind::Conflict));
+                }
+                let old_release = crate::release::verify_selected(&previous)
+                    .map_err(|_| NativeManagementError::new(ErrorKind::Invalid))?;
+                let candidate = crate::release::verify_selected(&selected)
+                    .map_err(|_| NativeManagementError::new(ErrorKind::Invalid))?;
+                let sequence = owner.transactions.runtime_update_high_water()
+                    .map_err(NativeManagementError::transaction)?.checked_add(1)
+                    .ok_or_else(|| NativeManagementError::new(ErrorKind::Invalid))?;
+                if previous == selected || candidate.manifest().target != old_release.manifest().target
+                    || !candidate.supports_state_reader(
+                    styx_contracts::management::ReaderContract::NativeServiceRuntimeSelectedStateV1,
+                ).map_err(|_| NativeManagementError::new(ErrorKind::Invalid))? {
+                    return Err(NativeManagementError::new(ErrorKind::Invalid));
+                }
+                let execution = owner._execution.take().ok_or_else(|| NativeManagementError::new(ErrorKind::Conflict))?;
+                attempted_commit.store(true, std::sync::atomic::Ordering::Release);
+                let committed = owner.transactions.update_runtime_for_failed_service(
+                    old_release, candidate, id.clone(), sequence, binding, execution,
+                ).map_err(NativeManagementError::transaction)?;
+                let current = owner.transactions.readstate().map_err(NativeManagementError::transaction)?;
+                if current.state().revision != revision.checked_add(1).ok_or_else(|| NativeManagementError::new(ErrorKind::Invalid))?
+                    || current.raw_sha256() != committed.canonical_raw_sha256 {
+                    return Err(NativeManagementError::new(ErrorKind::Unknown));
+                }
+                let request = owner.transactions.failed_service_repair_request(
+                    &id, current.state().revision, &committed.canonical_raw_sha256,
+                ).map_err(NativeManagementError::transaction)?;
+                let text = |key: &str| -> Result<String> { request.get(key).and_then(serde_json::Value::as_str)
+                    .map(str::to_owned).ok_or_else(|| NativeManagementError::new(ErrorKind::Unknown)) };
+                let report = ServiceReport {
+                    schema:1, operation:"prepare_runtime_repair", configuration_only:true,
+                    revision:current.state().revision, desired:current.state().desired.clone(),
+                    definition_path:PathBuf::from(text("definition_path")?), definition_plist:text("definition_plist")?,
+                    uid:request.get("uid").and_then(serde_json::Value::as_u64).and_then(|v|u32::try_from(v).ok())
+                        .ok_or_else(|| NativeManagementError::new(ErrorKind::Unknown))?,
+                    label:text("label")?, requires_initial_disabled:true, runtime_selection:selected,
+                    os:Some(serde_json::to_value(owner.inactive.as_ref().expect("original proof").observation())
+                        .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?),
+                    operations_replayed:false,
+                    transaction_observation:Some(serde_json::json!({"status":"committed","state_scope":"committed_target",
+                        "transaction_id":id,"revision":current.state().revision,
+                        "canonical_raw_sha256":committed.canonical_raw_sha256,"receipt":committed.committed})),
+                    installation_request_v1:Some(request),
+                };
+                operation.validate().map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?;
+                Ok(report)
+            })())).await.map_err(os)??;
+            proof.revalidate().await.map_err(os)?;
+            Ok(report)
+        }.await;
+        match result {
+            Ok(report) => {
+                let _ = send.send(Ok(report));
+            }
+            Err(error)
+                if attempted.load(std::sync::atomic::Ordering::Acquire)
+                    || error._retained.is_some()
+                    || matches!(error.kind, ErrorKind::Unknown) =>
+            {
+                let _ = send.send(Err((ErrorKind::Unknown, true)));
+                std::future::pending::<()>().await;
+                drop(error);
+            }
+            Err(error) => {
+                let _ = send.send(Err((error.kind, false)));
+            }
+        }
+        drop((owner, operation));
+    });
+    match receive.await {
+        Ok(Ok(report)) => {
+            job.await
+                .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?;
+            Ok(report)
+        }
+        Ok(Err((kind, false))) => {
+            job.await
+                .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?;
+            Err(NativeManagementError::new(kind))
+        }
+        Ok(Err((_, true))) | Err(_) => {
+            let mut error = NativeManagementError::new(ErrorKind::Unknown);
+            error._retained = Some(Retained::Service { _job: job });
+            Err(error)
+        }
+    }
+}
+fn require_repair_before(before: &NativeState, revision: u64) -> Result<()> {
+    if before.revision != revision
+        || before.mode != NativeDeploymentMode::CreateLocal
+        || before.has_migration_binding()
+        || before.desired.host.is_some()
+        || before.desired.gateway
+            != Some(NativeComponentDesired {
+                manager: NativeManager::PersistentService,
+                run: NativeRunDesired::Stopped,
+                autostart: NativeAutostartDesired::Disabled,
+            })
+    {
+        return Err(NativeManagementError::new(ErrorKind::Conflict));
+    }
+    Ok(())
 }
 fn prepare_target(
     before: &NativeState,
@@ -291,7 +487,7 @@ async fn prepare_intent(
                 })();
                 match prepared {
                     Ok((execution, definition)) => Ok(PreparationOwner {
-                        transactions, _execution:execution, definition:Arc::new(definition), inactive:None }),
+                        transactions, _execution:Some(execution), definition:Arc::new(definition), inactive:None }),
                     Err(error) if error.exit_code() == 4 => Err(error.keep(transactions)),
                     Err(error) => Err(error),
                 }
@@ -336,7 +532,7 @@ async fn prepare_intent(
                         return Err(NativeManagementError::new(ErrorKind::Unknown));
                     }
                 }
-                owner._execution.validate().map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?;
+                owner._execution.as_ref().ok_or_else(|| NativeManagementError::new(ErrorKind::Conflict))?.validate().map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?;
                 let bytes = serde_json::to_vec(&target).map_err(|_| NativeManagementError::new(ErrorKind::Invalid))?;
                 owner.transactions.validate_target(&bytes).map_err(NativeManagementError::transaction)?;
                 attempted_commit.store(true, std::sync::atomic::Ordering::Release);

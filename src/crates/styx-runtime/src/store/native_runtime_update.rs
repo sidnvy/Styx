@@ -7,8 +7,9 @@ use styx_contracts::{
     management::ReaderContract,
     native_management::{
         NATIVE_APP_RUNTIME_SELECTED_STATE_SCHEMA, NATIVE_RUNTIME_SELECTED_STATE_SCHEMA,
-        NATIVE_RUNTIME_SELECTION_KEY, NATIVE_RUNTIME_UPDATE_KEY, NativeRuntimeSelection,
-        NativeRuntimeUpdate, NativeState, NativeStateTransaction,
+        NATIVE_RUNTIME_SELECTION_KEY, NATIVE_RUNTIME_UPDATE_KEY,
+        NATIVE_SERVICE_RUNTIME_SELECTED_STATE_SCHEMA, NativeRuntimeSelection, NativeRuntimeUpdate,
+        NativeState, NativeStateTransaction,
     },
 };
 
@@ -20,9 +21,29 @@ pub(super) struct RuntimeUpdateCustody {
     transaction: TransactionId,
     execution: Option<ExecutionLeaseGuard>,
     app_scope: Option<std::sync::Arc<crate::app::HostScope>>,
+    #[cfg(target_os = "macos")]
+    service_scope: Option<std::sync::Arc<crate::platform::macos_service::RegisteredInactiveProof>>,
 }
 impl RuntimeUpdateCustody {
-    fn validate(&self) -> Result<(), NativeTransactionError> {
+    fn service_owned(&self) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            self.service_scope.is_some()
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            false
+        }
+    }
+    fn validate(&self, owner: &OwnedConfigurationRoot) -> Result<(), NativeTransactionError> {
+        #[cfg(not(target_os = "macos"))]
+        let _ = owner;
+        #[cfg(target_os = "macos")]
+        if let Some(proof) = &self.service_scope {
+            proof
+                .validate_owner(owner)
+                .map_err(|_| NativeTransactionError::UnknownInspect)?;
+        }
         if let Some(scope) = &self.app_scope {
             scope
                 .validate()
@@ -65,6 +86,13 @@ fn runtime_transition(
     )
     .is_ok()
         || styx_core::management::state::validate_app_runtime_transition(
+            before.state(),
+            target.state(),
+            marker,
+            intent,
+        )
+        .is_ok()
+        || styx_core::management::state::validate_service_runtime_repair_transition(
             before.state(),
             target.state(),
             marker,
@@ -123,6 +151,14 @@ impl NativeTransactions {
         observer: &dyn Fn(&str, &str),
     ) -> Result<NativeCommitResult, NativeTransactionError> {
         self.retain_update(previous, candidate, id.clone(), scope)?;
+        self.apply_retained_runtime_update(id, sequence, observer)
+    }
+    fn apply_retained_runtime_update(
+        &mut self,
+        id: TransactionId,
+        sequence: u64,
+        observer: &dyn Fn(&str, &str),
+    ) -> Result<NativeCommitResult, NativeTransactionError> {
         let result = (|| {
             let before = self.readstate()?;
             self.validate_complete_chain(&before)?;
@@ -142,12 +178,31 @@ impl NativeTransactions {
             }
             let mut target = before.state().clone();
             let app_owned = held.app_scope.is_some();
-            target.schema = if app_owned {
+            let service_owned = held.service_owned();
+            #[cfg(target_os = "macos")]
+            if let Some(proof) = &held.service_scope {
+                if before.raw_bytes() != proof.initial_state().bytes() {
+                    return Err(NativeTransactionError::Conflict);
+                }
+                let gateway = target
+                    .desired
+                    .gateway
+                    .as_mut()
+                    .ok_or(NativeTransactionError::Conflict)?;
+                gateway.run = styx_contracts::native_management::NativeRunDesired::Running;
+                gateway.autostart =
+                    styx_contracts::native_management::NativeAutostartDesired::Enabled;
+            }
+            target.schema = if service_owned {
+                NATIVE_SERVICE_RUNTIME_SELECTED_STATE_SCHEMA
+            } else if app_owned {
                 NATIVE_APP_RUNTIME_SELECTED_STATE_SCHEMA
             } else {
                 NATIVE_RUNTIME_SELECTED_STATE_SCHEMA
             };
-            target.reader_contract = if app_owned {
+            target.reader_contract = if service_owned {
+                ReaderContract::NativeServiceRuntimeSelectedStateV1
+            } else if app_owned {
                 ReaderContract::NativeAppRuntimeSelectedStateV1
             } else {
                 ReaderContract::NativeRuntimeSelectedStateV1
@@ -193,7 +248,14 @@ impl NativeTransactions {
                 target_state_sha256: Sha256Digest::of_bytes(&bytes),
                 reader: target.reader_contract,
             };
-            if app_owned {
+            if service_owned {
+                styx_core::management::state::validate_service_runtime_repair_transition(
+                    before.state(),
+                    &target,
+                    self.marker(),
+                    &intent,
+                )
+            } else if app_owned {
                 styx_core::management::state::validate_app_runtime_transition(
                     before.state(),
                     &target,
@@ -229,10 +291,95 @@ impl NativeTransactions {
             }
             result
         })();
-        if result.is_ok() {
+        // A service repair keeps both signed releases, original proof and the
+        // transferred execution lease through post-commit OS observation and
+        // generation of the exact administrator request. Dropping its original
+        // owner after success releases custody; failure retains that owner.
+        if result.is_ok()
+            && self
+                .retained_runtime_update
+                .as_ref()
+                .is_some_and(|held| !held.service_owned())
+        {
             self.retained_runtime_update = None;
         }
         result
+    }
+    #[cfg(target_os = "macos")]
+    #[allow(clippy::too_many_arguments)]
+    pub(crate) fn update_runtime_for_failed_service(
+        &mut self,
+        previous: VerifiedNativeRelease,
+        candidate: VerifiedNativeRelease,
+        id: TransactionId,
+        sequence: u64,
+        proof: std::sync::Arc<crate::platform::macos_service::RegisteredInactiveProof>,
+        execution: ExecutionLeaseGuard,
+    ) -> Result<NativeCommitResult, NativeTransactionError> {
+        if self.retained_runtime_update.is_some() {
+            return Err(NativeTransactionError::Conflict);
+        }
+        proof
+            .validate_owner(&self.configuration_root())
+            .map_err(|_| NativeTransactionError::UnknownInspect)?;
+        if execution.identity().root != self.configuration_root().identity()? {
+            return Err(NativeTransactionError::Conflict);
+        }
+        execution
+            .validate()
+            .map_err(|_| NativeTransactionError::UnknownInspect)?;
+        let before = previous
+            .runtime_selection()
+            .map_err(|_| NativeTransactionError::InvalidInput)?;
+        let target = candidate
+            .runtime_selection()
+            .map_err(|_| NativeTransactionError::InvalidInput)?;
+        let trusted = before
+            == *proof
+                .original_definition()
+                .runtime_selection()
+                .map_err(|_| NativeTransactionError::Conflict)?
+            && before.publisher_spki_sha256 == target.publisher_spki_sha256
+            && previous.manifest().target == candidate.manifest().target
+            && candidate
+                .supports_state_reader(ReaderContract::NativeServiceRuntimeSelectedStateV1)
+                .map_err(|_| NativeTransactionError::InvalidInput)?;
+        self.retained_runtime_update = Some(RuntimeUpdateCustody {
+            previous,
+            candidate,
+            before,
+            target,
+            transaction: id.clone(),
+            execution: Some(execution),
+            app_scope: None,
+            service_scope: Some(proof),
+        });
+        if !trusted {
+            return Err(NativeTransactionError::InvalidInput);
+        }
+        self.revalidate_runtime_custody()?;
+        self.apply_retained_runtime_update(id, sequence, &|_, _| {})
+    }
+    #[cfg(target_os = "macos")]
+    pub(crate) fn failed_service_repair_request(
+        &self,
+        id: &TransactionId,
+        revision: u64,
+        canonical: &Sha256Digest,
+    ) -> Result<serde_json::Value, NativeTransactionError> {
+        let held = self
+            .retained_runtime_update
+            .as_ref()
+            .ok_or(NativeTransactionError::Conflict)?;
+        if &held.transaction != id {
+            return Err(NativeTransactionError::Conflict);
+        }
+        held.validate(&self.configuration_root())?;
+        held.service_scope
+            .as_ref()
+            .ok_or(NativeTransactionError::Conflict)?
+            .repair_request(&held.candidate, id, revision, canonical)
+            .map_err(|_| NativeTransactionError::UnknownInspect)
     }
     /// Return only the original hash-bound before/target selections of a genuine
     /// update. This observation grants neither release trust nor replay authority.
@@ -334,7 +481,7 @@ impl NativeTransactions {
         {
             return Err(NativeTransactionError::Conflict);
         }
-        held.validate()?;
+        held.validate(&self.configuration_root())?;
         let result = self.recover_original(id);
         if result.is_ok() {
             self.retained_runtime_update = None;
@@ -419,6 +566,8 @@ impl NativeTransactions {
             transaction: id,
             execution: None,
             app_scope: scope,
+            #[cfg(target_os = "macos")]
+            service_scope: None,
         });
         if !trusted {
             return Err(NativeTransactionError::InvalidInput);
@@ -458,7 +607,7 @@ impl NativeTransactions {
     }
     pub(super) fn revalidate_runtime_custody(&self) -> Result<(), NativeTransactionError> {
         if let Some(held) = &self.retained_runtime_update {
-            held.validate()?;
+            held.validate(&self.configuration_root())?;
         }
         Ok(())
     }
@@ -479,13 +628,30 @@ impl NativeTransactions {
             .map_err(|_| NativeTransactionError::UnknownInspect)?;
         let target = native_state::decode_state(target, self.marker())
             .map_err(|_| NativeTransactionError::UnknownInspect)?;
-        if intent.transaction_id != held.transaction
+        let service_transition =
+            styx_core::management::state::validate_service_runtime_repair_transition(
+                before.state(),
+                target.state(),
+                self.marker(),
+                intent,
+            )
+            .is_ok();
+        let app_transition = styx_core::management::state::validate_app_runtime_transition(
+            before.state(),
+            target.state(),
+            self.marker(),
+            intent,
+        )
+        .is_ok();
+        if service_transition != held.service_owned()
+            || app_transition != held.app_scope.is_some()
+            || intent.transaction_id != held.transaction
             || selection(before.state())? != held.before
             || selection(target.state())? != held.target
         {
             return Err(NativeTransactionError::Conflict);
         }
-        held.validate()
+        held.validate(&self.configuration_root())
     }
     pub(super) fn validate_update_recovery_chain(
         &self,

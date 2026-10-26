@@ -862,7 +862,8 @@ pub(crate) fn load_for_service(
         ReaderContract::NativeMigratedStateV1 => return Err(ProfileError::Invalid),
         ReaderContract::NativeMigratedStateV2 => ProfileSource::NativeCommitted(Arc::new(crate::store::committed_runtime_native::NativeCommittedRuntimeSnapshot::open_for_service(scope).map_err(|_| ProfileError::Changed)?)),
         ReaderContract::NativeManagementStateV1 => return fresh::load_for_service(scope),
-        ReaderContract::NativeRuntimeSelectedStateV1 | ReaderContract::NativeAppRuntimeSelectedStateV1 => return Err(ProfileError::Invalid),
+        ReaderContract::NativeRuntimeSelectedStateV1 | ReaderContract::NativeAppRuntimeSelectedStateV1
+            | ReaderContract::NativeServiceRuntimeSelectedStateV1 => return Err(ProfileError::Invalid),
     };
     load_source(&path, GatewayWireMode::PairedV3, source)
 }

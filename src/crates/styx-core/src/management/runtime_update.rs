@@ -54,6 +54,19 @@ pub(super) fn validate_selected_state(state: &NativeState) -> Result<()> {
             }
             NATIVE_APP_RUNTIME_SELECTED_STATE_SCHEMA
         }
+        ReaderContract::NativeServiceRuntimeSelectedStateV1 => {
+            if state.mode != NativeDeploymentMode::CreateLocal
+                || state.desired.host.is_some()
+                || state
+                    .desired
+                    .gateway
+                    .as_ref()
+                    .is_none_or(|role| role.manager != NativeManager::PersistentService)
+            {
+                return Err(NativeStateRuleError::InvalidState);
+            }
+            NATIVE_SERVICE_RUNTIME_SELECTED_STATE_SCHEMA
+        }
         _ => return Err(NativeStateRuleError::InvalidState),
     };
     if state.schema != expected_schema
@@ -87,6 +100,7 @@ pub fn validate_committed_transition(
     validate_transition(before, target, marker, intent)
         .or_else(|_| validate_runtime_transition(before, target, marker, intent))
         .or_else(|_| validate_app_runtime_transition(before, target, marker, intent))
+        .or_else(|_| validate_service_runtime_repair_transition(before, target, marker, intent))
 }
 /// Closed fresh-root, stopped foreground transition. Callers must retain the
 /// original writer/execution exclusion and both verified C08 releases as well.
@@ -124,6 +138,52 @@ pub fn validate_app_runtime_transition(
         NATIVE_APP_RUNTIME_SELECTED_STATE_SCHEMA,
     )
 }
+/// Pure history grammar for explicitly repairing a failed registered Gateway.
+/// Native publication also requires the original non-deserializable registration
+/// proof, writer/operation/execution exclusion and both original signed releases.
+/// Running/Enabled is only the requested post-installer intent, never readiness.
+pub fn validate_service_runtime_repair_transition(
+    before: &NativeState,
+    target: &NativeState,
+    marker: &NativeRootMarker,
+    intent: &DesiredStateCommit,
+) -> Result<()> {
+    let NativeRootIdentity::Macos { uid, .. } = marker.root_identity else {
+        return Err(invalid());
+    };
+    if uid == 0
+        || before.mode != NativeDeploymentMode::CreateLocal
+        || before.desired.host.is_some()
+        || target.desired.host.is_some()
+        || target.desired.gateway
+            != Some(NativeComponentDesired {
+                manager: NativeManager::PersistentService,
+                run: NativeRunDesired::Running,
+                autostart: NativeAutostartDesired::Enabled,
+            })
+    {
+        return Err(invalid());
+    }
+    for value in [
+        selection(before)?,
+        selection(target)?,
+        record(target)?.bootstrap_runtime,
+    ] {
+        if !matches!(value.payload_root, NativeRootIdentity::Macos { uid: owner, .. } if owner == uid)
+        {
+            return Err(invalid());
+        }
+    }
+    validate_selection_transition(
+        before,
+        target,
+        marker,
+        intent,
+        NativeManager::PersistentService,
+        ReaderContract::NativeServiceRuntimeSelectedStateV1,
+        NATIVE_SERVICE_RUNTIME_SELECTED_STATE_SCHEMA,
+    )
+}
 fn validate_selection_transition(
     before: &NativeState,
     target: &NativeState,
@@ -139,9 +199,18 @@ fn validate_selection_transition(
     let next = selection(target)?;
     let update = record(target)?;
     let transaction = target.last_transaction.as_ref().ok_or_else(invalid)?;
+    let service_repair = manager == NativeManager::PersistentService;
+    let mut expected_desired = before.desired.clone();
+    if service_repair {
+        let gateway = expected_desired.gateway.as_mut().ok_or_else(invalid)?;
+        gateway.run = NativeRunDesired::Running;
+        gateway.autostart = NativeAutostartDesired::Enabled;
+    }
     if marker.reader_floor != ReaderContract::NativeManagementStateV1
         || (before.reader_contract != ReaderContract::NativeManagementStateV1
-            && before.reader_contract != reader)
+            && before.reader_contract != reader
+            && !(service_repair
+                && before.reader_contract == ReaderContract::NativeRuntimeSelectedStateV1))
         || target.reader_contract != reader
         || target.schema != schema
         || before.has_migration_binding()
@@ -150,7 +219,7 @@ fn validate_selection_transition(
         || intent.validate().is_err()
         || target.revision != before.revision.checked_add(1).ok_or_else(invalid)?
         || before.mode != target.mode
-        || before.desired != target.desired
+        || expected_desired != target.desired
         || before.deployment_raw_sha256 != target.deployment_raw_sha256
         || target.deployment_raw_sha256 != intent.deployment_raw_sha256
         || intent.reader != target.reader_contract
@@ -181,7 +250,10 @@ fn validate_selection_transition(
             return Err(invalid());
         }
         current
-    } else if before.reader_contract == reader {
+    } else if before.reader_contract == reader
+        || (service_repair
+            && before.reader_contract == ReaderContract::NativeRuntimeSelectedStateV1)
+    {
         record(before)?.bootstrap_runtime
     } else {
         return Err(invalid());
@@ -298,12 +370,23 @@ mod tests {
             .desired
             .host
             .is_some_and(|role| role.manager == NativeManager::AppManaged);
-        target.schema = if app {
+        let service = before
+            .desired
+            .gateway
+            .is_some_and(|role| role.manager == NativeManager::PersistentService);
+        target.schema = if service {
+            NATIVE_SERVICE_RUNTIME_SELECTED_STATE_SCHEMA
+        } else if app {
             NATIVE_APP_RUNTIME_SELECTED_STATE_SCHEMA
         } else {
             NATIVE_RUNTIME_SELECTED_STATE_SCHEMA
         };
-        target.reader_contract = if app {
+        target.reader_contract = if service {
+            let role = target.desired.gateway.as_mut().unwrap();
+            role.run = NativeRunDesired::Running;
+            role.autostart = NativeAutostartDesired::Enabled;
+            ReaderContract::NativeServiceRuntimeSelectedStateV1
+        } else if app {
             ReaderContract::NativeAppRuntimeSelectedStateV1
         } else {
             ReaderContract::NativeRuntimeSelectedStateV1
@@ -385,6 +468,100 @@ mod tests {
         unbound.schema = 3;
         unbound.reader_contract = ReaderContract::NativeRuntimeSelectedStateV1;
         assert!(validate_state(&unbound, &marker).is_err());
+    }
+    #[test]
+    fn failed_service_repair_has_a_distinct_reader_and_cannot_adopt_other_roles() {
+        use styx_contracts::native_release::NativeReleaseReader;
+        let (mut marker, mut before) = fixture();
+        marker.root_identity = NativeRootIdentity::Macos {
+            device: 1,
+            inode: 4,
+            uid: 501,
+        };
+        before.mode = NativeDeploymentMode::CreateLocal;
+        let mut gateway = before.desired.host.take().unwrap();
+        gateway.manager = NativeManager::PersistentService;
+        before.desired.gateway = Some(gateway);
+        let mut old = selection_at("old");
+        old.payload_root = NativeRootIdentity::Macos {
+            device: 1,
+            inode: 2,
+            uid: 501,
+        };
+        before.extensions.insert(
+            NATIVE_RUNTIME_SELECTION_KEY.into(),
+            serde_json::value::to_raw_value(&old).unwrap(),
+        );
+        let mut next = selection_at("new");
+        next.payload_root = NativeRootIdentity::Macos {
+            device: 1,
+            inode: 3,
+            uid: 501,
+        };
+        let (target, intent) = update(&before, next.clone(), 1);
+        assert!(
+            validate_service_runtime_repair_transition(&before, &target, &marker, &intent).is_ok()
+        );
+        assert!(validate_committed_transition(&before, &target, &marker, &intent).is_ok());
+        assert!(validate_transition(&before, &target, &marker, &intent).is_err());
+        assert!(validate_runtime_transition(&before, &target, &marker, &intent).is_err());
+        assert!(validate_app_runtime_transition(&before, &target, &marker, &intent).is_err());
+        assert_eq!(target.schema, 5);
+        assert!(
+            !NativeReleaseReader::NativeAppRuntimeSelectedV1
+                .supports_state_reader(target.reader_contract)
+        );
+        assert!(
+            NativeReleaseReader::NativeServiceRuntimeSelectedV1
+                .supports_state_reader(target.reader_contract)
+        );
+        assert_eq!(record(&target).unwrap().bootstrap_runtime, old);
+        assert_eq!(
+            before.extensions["preserve"].get(),
+            target.extensions["preserve"].get()
+        );
+        for mutate in [
+            |state: &mut NativeState| state.desired.host = state.desired.gateway,
+            |state: &mut NativeState| {
+                state.desired.gateway.as_mut().unwrap().run = NativeRunDesired::Running
+            },
+            |state: &mut NativeState| {
+                state.desired.gateway.as_mut().unwrap().manager = NativeManager::ForegroundCli
+            },
+        ] {
+            let mut changed = before.clone();
+            mutate(&mut changed);
+            assert!(
+                validate_service_runtime_repair_transition(&changed, &target, &marker, &intent)
+                    .is_err()
+            );
+        }
+        let mut other = next.clone();
+        other.publisher_spki_sha256 = Sha256Digest::of_bytes(b"foreign");
+        let (foreign, foreign_intent) = update(&before, other, 1);
+        assert!(
+            validate_service_runtime_repair_transition(&before, &foreign, &marker, &foreign_intent)
+                .is_err()
+        );
+        let mut wrong_uid = next;
+        wrong_uid.payload_root = NativeRootIdentity::Macos {
+            device: 1,
+            inode: 3,
+            uid: 502,
+        };
+        let (foreign, foreign_intent) = update(&before, wrong_uid, 1);
+        assert!(
+            validate_service_runtime_repair_transition(&before, &foreign, &marker, &foreign_intent)
+                .is_err()
+        );
+        let mut old_reader = target.clone();
+        old_reader.schema = 4;
+        old_reader.reader_contract = ReaderContract::NativeAppRuntimeSelectedStateV1;
+        assert!(validate_committed_transition(&before, &old_reader, &marker, &intent).is_err());
+        assert!(
+            validate_service_runtime_repair_transition(&before, &target, &marker, &intent).is_ok()
+        );
+        // Pure grammar grants no native inactive-registration or writer custody.
     }
     #[test]
     fn app_update_reader_barrier_and_forward_rollback_keep_original_authority() {

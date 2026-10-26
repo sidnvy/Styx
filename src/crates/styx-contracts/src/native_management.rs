@@ -12,6 +12,7 @@ pub const NATIVE_STATE_SCHEMA: u16 = 2;
 /// Only the explicit runtime-selection reader may consume this state schema.
 pub const NATIVE_RUNTIME_SELECTED_STATE_SCHEMA: u16 = 3;
 pub const NATIVE_APP_RUNTIME_SELECTED_STATE_SCHEMA: u16 = 4;
+pub const NATIVE_SERVICE_RUNTIME_SELECTED_STATE_SCHEMA: u16 = 5;
 pub const NATIVE_MARKER_BYTES: usize = 4096;
 pub const NATIVE_STATE_BYTES: usize = 1024 * 1024;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -305,6 +306,7 @@ impl NativeState {
             self.reader_contract,
             ReaderContract::NativeRuntimeSelectedStateV1
                 | ReaderContract::NativeAppRuntimeSelectedStateV1
+                | ReaderContract::NativeServiceRuntimeSelectedStateV1
         ) {
             return Ok(None);
         }

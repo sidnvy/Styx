@@ -17,6 +17,7 @@ pub fn validate_marker(marker: &NativeRootMarker) -> Result<(), NativeStateRuleE
             marker.reader_floor,
             styx_contracts::management::ReaderContract::NativeRuntimeSelectedStateV1
                 | styx_contracts::management::ReaderContract::NativeAppRuntimeSelectedStateV1
+                | styx_contracts::management::ReaderContract::NativeServiceRuntimeSelectedStateV1
         )
     {
         return Err(NativeStateRuleError::InvalidMarker);
@@ -40,7 +41,13 @@ pub fn validate_state(
             == styx_contracts::management::ReaderContract::NativeAppRuntimeSelectedStateV1
         && marker.reader_floor
             == styx_contracts::management::ReaderContract::NativeManagementStateV1;
-    if (!original_reader && !selected_reader && !app_selected_reader)
+    let service_selected_reader = state.schema == NATIVE_SERVICE_RUNTIME_SELECTED_STATE_SCHEMA
+        && state.reader_contract
+            == styx_contracts::management::ReaderContract::NativeServiceRuntimeSelectedStateV1
+        && marker.reader_floor
+            == styx_contracts::management::ReaderContract::NativeManagementStateV1
+        && matches!(marker.root_identity, NativeRootIdentity::Macos { .. });
+    if (!original_reader && !selected_reader && !app_selected_reader && !service_selected_reader)
         || state.scope_generation != marker.scope_generation
     {
         return Err(NativeStateRuleError::InvalidState);
@@ -53,7 +60,8 @@ pub fn validate_state(
         (
             None,
             styx_contracts::management::ReaderContract::NativeRuntimeSelectedStateV1
-            | styx_contracts::management::ReaderContract::NativeAppRuntimeSelectedStateV1,
+            | styx_contracts::management::ReaderContract::NativeAppRuntimeSelectedStateV1
+            | styx_contracts::management::ReaderContract::NativeServiceRuntimeSelectedStateV1,
         ) => {
             runtime_update::validate_selected_state(state)?;
         }
@@ -216,4 +224,5 @@ fn runtime_policy_compatible(before: &NativeState, target: &NativeState, follow_
 mod runtime_update;
 pub use runtime_update::{
     validate_app_runtime_transition, validate_committed_transition, validate_runtime_transition,
+    validate_service_runtime_repair_transition,
 };

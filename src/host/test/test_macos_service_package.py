@@ -27,6 +27,27 @@ def fixture():
     return report
 
 
+def repair_fixture():
+    report = fixture(); request = report['installation_request_v1']
+    old = copy.deepcopy(request['runtime_selection']); old['payload_path'] = '/Users/test/old runtime'
+    old['payload_root']['inode'] = 788; old['manifest_sha256'] = 'd' * 64
+    observed = {'path': request['definition_path'], 'program': old['payload_path'] + '/bin/styx', 'username': request['username'], 'arguments': [old['payload_path'] + '/bin/styx', '__service-run', '--state-dir', request['state_dir'], '--role', 'gateway'], 'pid': None, 'runs': 2, 'last_exit_code': 4, 'signaled_exit': False, 'state': 'not running'}
+    request.update(kind='launchd_failed_registration_repair', old_definition_sha256='e' * 64, old_definition_identity={'device': 123, 'inode': 321, 'uid': 0, 'mode': 0o644, 'links': 1}, old_runtime_selection=old, original_registration=observed)
+    report.update(operation='prepare_runtime_repair', os=copy.deepcopy(observed))
+    return report
+
+
+def printed_registration(request):
+    observed = request['original_registration']
+    rows = ['system/' + request['label'] + ' = {']
+    rows += [' ' + key + ' = ' + str(observed[key]) for key in ['path', 'program', 'username']]
+    rows += [' arguments = {'] + [' ' + value for value in observed['arguments']] + [' }']
+    rows += [' runs = ' + str(observed['runs']), ' state = ' + observed['state']]
+    if observed['last_exit_code'] is not None: rows += [' last exit code = ' + str(observed['last_exit_code'])]
+    if observed['signaled_exit']: rows += [' last terminating signal = Killed: 9']
+    return '\n'.join(rows + ['}']) + '\n'
+
+
 class MacServicePackageTests(unittest.TestCase):
     def test_prepare_preserves_exact_plist_and_fixed_nonexecuting_plan(self):
         report = fixture()
@@ -83,6 +104,47 @@ class MacServicePackageTests(unittest.TestCase):
         raw = request['definition_plist'].replace('<key>Label</key>', '<key>Label</key><string>foreign</string><key>Label</key>', 1)
         request['definition_plist'] = raw; request['definition_sha256'] = m.digest(raw.encode()); report['definition_plist'] = raw
         with self.assertRaisesRegex(ValueError, 'duplicate_plist_key'): m.validate(report)
+
+
+class MacServiceRepairTests(unittest.TestCase):
+    def test_repair_keeps_fixed_program_and_once_only_admin_order(self):
+        report = repair_fixture(); request = m.validate(report)
+        pre, post = [value.decode() for value in m.scripts(request)]
+        for script in [pre, post]:
+            subprocess.run(['/bin/sh', '-n'], input=script, text=True, check=True)
+            self.assertNotIn('sudo', script)
+        self.assertEqual(pre.count('/bin/launchctl disable '), 1)
+        self.assertEqual(pre.count('/bin/launchctl bootout '), 1)
+        self.assertLess(pre.index('original_registration_changed'), pre.index('/bin/launchctl disable '))
+        self.assertLess(pre.index('/bin/launchctl disable '), pre.index('/bin/launchctl bootout '))
+        self.assertNotIn('/bin/launchctl bootstrap ', pre)
+        self.assertEqual(post.count('/bin/launchctl enable '), 1)
+        self.assertEqual(post.count('/bin/launchctl bootstrap system '), 1)
+        self.assertIn('old_definition_identity', pre)
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / 'request.json'; source.write_text(json.dumps(report))
+            receipt = m.build(source, Path(tmp) / 'out', '0.4.0', prepare_only=True)
+            self.assertEqual(receipt['installation_kind'], 'launchd_failed_registration_repair')
+            self.assertFalse(receipt['installation_performed'])
+
+    def test_registration_parser_rejects_changes_and_never_executes_observed_text(self):
+        request = m.validate(repair_fixture()); raw = printed_registration(request)
+        def result(value):
+            return subprocess.run(['awk', m.registration_check_program(request)], input=value, text=True, capture_output=True).returncode
+        self.assertEqual(result(raw), 0)
+        # Real shell metacharacters in fixture paths are literal AWK data.
+        for changed in [raw.replace(' runs = 2', ' runs = 3'), raw.replace(' state = not running', ' state = running'), raw.replace(' runs = 2', ' pid = 123\n runs = 2'), raw.replace(' runs = 2', ' runs = 2\n runs = 2'), raw.replace(' last exit code = 4', ' last exit code = 0'), raw.replace(' username = test', ' username = other'), raw.replace(' __service-run', ' __other-run'), raw.replace(' last exit code = 4\n', ''), raw.replace(' arguments = {', ' arguments = {\n /bin/sh')]:
+            self.assertNotEqual(result(changed), 0)
+        signaled = repair_fixture(); signaled['installation_request_v1']['original_registration'].update(last_exit_code=None, signaled_exit=True); signaled['os'] = copy.deepcopy(signaled['installation_request_v1']['original_registration'])
+        request = m.validate(signaled)
+        self.assertEqual(result(printed_registration(request)), 0)
+        self.assertNotEqual(result(printed_registration(request).replace(' last terminating signal = Killed: 9\n', '')), 0)
+
+    def test_partial_foreign_live_and_clean_repair_reports_are_refused(self):
+        changes = [lambda q: q['old_definition_identity'].update(uid=501), lambda q: q['old_definition_identity'].update(mode=0o666), lambda q: q['old_runtime_selection'].update(publisher_spki_sha256='f' * 64), lambda q: q['original_registration'].update(pid=123), lambda q: q['original_registration'].update(runs=0), lambda q: q['original_registration'].update(last_exit_code=0), lambda q: q['original_registration'].update(program='/bin/sh'), lambda q: q.pop('old_definition_sha256')]
+        for change in changes:
+            report = repair_fixture(); change(report['installation_request_v1']); report['os'] = copy.deepcopy(report['installation_request_v1']['original_registration'])
+            with self.assertRaises(ValueError): m.validate(report)
 
 
 if __name__ == '__main__':

@@ -23,6 +23,8 @@ pub enum ReaderContract {
     NativeRuntimeSelectedStateV1,
     /// App-owned runtime update history; the foreground selection reader is insufficient.
     NativeAppRuntimeSelectedStateV1,
+    /// Same-identity inactive persistent-service repair history; prior readers reject it.
+    NativeServiceRuntimeSelectedStateV1,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
