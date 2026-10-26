@@ -789,8 +789,31 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
             if !authorize {
                 return error("authorization_required");
             }
+            let result =
+                styx_runtime::management::native::recover(&state_dir, &transaction_id).await;
+            #[cfg(target_os = "macos")]
+            if let Err(error) = &result {
+                if error.requires_process_teardown() {
+                    // The actual recovery job is retaining Unknown custody.
+                    // Keep `result` alive until explicit whole-process teardown;
+                    // runtime Drop would wait forever for that blocking job.
+                    // Durable original journal/guards remain for next recovery.
+                    use std::io::Write;
+                    eprintln!(
+                        "{}",
+                        serde_json::json!({
+                            "schema": 1, "error": error.code(), "outcome": "unknown",
+                            "operations_replayed": false, "cleanup_confirmed": false,
+                            "process_exit": "explicit_scope_teardown",
+                        })
+                    );
+                    let _ = std::io::stdout().flush();
+                    let _ = std::io::stderr().flush();
+                    std::process::exit(i32::from(error.exit_code()));
+                }
+            }
             native_result(
-                styx_runtime::management::native::recover(&state_dir, &transaction_id).await,
+                result,
                 json,
                 "Original native transaction reconciliation; no automatic service start:",
             )

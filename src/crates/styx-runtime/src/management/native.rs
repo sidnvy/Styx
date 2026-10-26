@@ -91,6 +91,10 @@ pub struct NativeManagementError {
     _app_scope: Option<Arc<crate::app::HostScope>>,
 }
 enum Retained {
+    #[cfg(target_os = "macos")]
+    MacMigration {
+        _owner: Box<crate::store::native_transaction::MacMigrationRecoveryFailure>,
+    },
     Bootstrap {
         _owner: NativeRootFailure,
     },
@@ -105,6 +109,13 @@ impl NativeManagementError {
     fn with_app_scope(mut self, scope: Arc<crate::app::HostScope>) -> Self {
         self._app_scope = Some(scope);
         self
+    }
+    /// Only an observed retained Mac migration task requires whole-process CLI
+    /// teardown. Library/App callers retain this error and never exit here.
+    #[cfg(target_os = "macos")]
+    pub fn requires_process_teardown(&self) -> bool {
+        matches!(&self._retained, Some(Retained::MacMigration { _owner })
+            if _owner.process_teardown_required())
     }
     pub fn code(&self) -> &'static str {
         match self.kind {
@@ -312,7 +323,14 @@ fn parse_transaction_id(value: &str) -> Result<TransactionId> {
 pub async fn recover(state_dir: &Path, transaction_id: &str) -> Result<NativeManagementReport> {
     let path = state_dir.to_owned();
     let id = parse_transaction_id(transaction_id)?;
-    blocking(move || platform::recover(&path, &id)).await
+    #[cfg(target_os = "macos")]
+    {
+        macos_recovery::recover(path, id).await
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        blocking(move || platform::recover(&path, &id)).await
+    }
 }
 /// Offline owned-App admission. Only an already complete original C07 tip may
 /// be re-established; an incomplete/pending transaction is never auto-recovered.
@@ -395,7 +413,7 @@ mod platform {
             .read_raw(Path::new(name), limit)
             .map_err(store)
     }
-    fn open(path: &Path) -> Result<NativeTransactions> {
+    pub(super) fn open(path: &Path) -> Result<NativeTransactions> {
         let root = PrivateRoot::open(path).map_err(store)?;
         // Read-only format check before existing-lock acquisition. A missing
         // original lock is refused, never repaired while opening/querying.
@@ -466,7 +484,7 @@ mod platform {
             Err(NativeManagementError::new(ErrorKind::Invalid))
         }
     }
-    fn require_state(state: &NativeState, app_owned: bool) -> Result<()> {
+    pub(super) fn require_state(state: &NativeState, app_owned: bool) -> Result<()> {
         require_desired(&state.desired, app_owned)?;
         let migrated_app = if app_owned
             && state.reader_contract
@@ -517,34 +535,40 @@ mod platform {
     ) -> Result<T> {
         require_scope(path, scope)?;
         use_transactions(path, |transactions| {
-            // Policy is checked after acquiring the original writer, not from
-            // an unlocked preflight or caller-selected manager string.
-            require_scope(path, scope)?;
-            let state = transactions.readstate().map_err(tx)?;
-            require_state(state.state(), scope.is_some())?;
-            if state.state().reader_contract
-                == styx_contracts::management::ReaderContract::NativeMigratedStateV2
-                && admission(transactions)?
-            {
-                // Reuse THIS original transaction journal, not a second namespace
-                // claim or schema4's legacy before bytes as a native transaction.
-                let snapshot = std::sync::Arc::new(
-                    crate::store::committed_runtime_native::NativeCommittedRuntimeSnapshot::open(
-                        path,
-                    )
-                    .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?,
-                );
-                transactions
-                    .reconcile_committed_migration(snapshot)
-                    .map_err(tx)?;
-                let current = transactions.readstate().map_err(tx)?;
-                require_state(current.state(), scope.is_some())?;
-                require_scope(path, scope)?;
-            }
+            prepare_managed_transactions(path, scope, transactions)?;
             let result = job(transactions)?;
             require_scope(path, scope)?;
             Ok(result)
         })
+    }
+    fn prepare_managed_transactions(
+        path: &Path,
+        scope: Option<&Arc<crate::app::HostScope>>,
+        transactions: &mut NativeTransactions,
+    ) -> Result<()> {
+        // Policy is checked after acquiring the original writer, not from
+        // an unlocked preflight or caller-selected manager string.
+        require_scope(path, scope)?;
+        let state = transactions.readstate().map_err(tx)?;
+        require_state(state.state(), scope.is_some())?;
+        if state.state().reader_contract
+            == styx_contracts::management::ReaderContract::NativeMigratedStateV2
+            && admission(transactions)?
+        {
+            // Reuse THIS original transaction journal, not a second namespace
+            // claim or schema4's legacy before bytes as a native transaction.
+            let snapshot = std::sync::Arc::new(
+                crate::store::committed_runtime_native::NativeCommittedRuntimeSnapshot::open(path)
+                    .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?,
+            );
+            transactions
+                .reconcile_committed_migration(snapshot)
+                .map_err(tx)?;
+            let current = transactions.readstate().map_err(tx)?;
+            require_state(current.state(), scope.is_some())?;
+            require_scope(path, scope)?;
+        }
+        Ok(())
     }
     fn require_original_authority(
         transactions: &NativeTransactions,
@@ -569,7 +593,7 @@ mod platform {
             Err(_) => Err(NativeManagementError::new(ErrorKind::Unknown)),
         }
     }
-    fn report(
+    pub(super) fn report(
         transactions: &NativeTransactions,
         operation: &'static str,
         transaction: Option<NativeTransactionReport>,
@@ -900,18 +924,35 @@ mod platform {
             report(transactions, "apply", Some(transaction))
         })
     }
+    fn recover_in_place(
+        transactions: &mut NativeTransactions,
+        id: &TransactionId,
+    ) -> Result<NativeManagementReport> {
+        require_original_authority(transactions, id, false)?;
+        let committed = transactions.recover_original(id).map_err(tx)?;
+        let transaction = NativeTransactionReport {
+            transaction_id: committed.transaction_id,
+            sequence: committed.committed.sequence,
+            observed_stage: Some(DurableStage::Committed),
+            receipt: Some(committed.committed),
+            recovered: committed.recovered,
+        };
+        report(transactions, "recover", Some(transaction))
+    }
+    #[cfg(target_os = "macos")]
+    pub(super) fn recover_owned(
+        mut transactions: NativeTransactions,
+        path: &Path,
+        id: &TransactionId,
+    ) -> Result<NativeManagementReport> {
+        let result = prepare_managed_transactions(path, None, &mut transactions)
+            .and_then(|()| recover_in_place(&mut transactions, id));
+        result.map_err(|error| error.keep(transactions))
+    }
+    #[cfg(not(target_os = "macos"))]
     pub(super) fn recover(path: &Path, id: &TransactionId) -> Result<NativeManagementReport> {
         use_managed_transactions(path, None, |transactions| {
-            require_original_authority(transactions, id, false)?;
-            let committed = transactions.recover_original(id).map_err(tx)?;
-            let transaction = NativeTransactionReport {
-                transaction_id: committed.transaction_id,
-                sequence: committed.committed.sequence,
-                observed_stage: Some(DurableStage::Committed),
-                receipt: Some(committed.committed),
-                recovered: committed.recovered,
-            };
-            report(transactions, "recover", Some(transaction))
+            recover_in_place(transactions, id)
         })
     }
     pub(super) fn inspect_for_app(
@@ -977,3 +1018,7 @@ mod platform {
         Err(NativeManagementError::new(ErrorKind::Unsupported))
     }
 }
+
+#[cfg(target_os = "macos")]
+#[path = "native_macos_recovery.rs"]
+mod macos_recovery;

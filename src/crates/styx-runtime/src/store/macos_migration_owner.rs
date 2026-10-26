@@ -58,6 +58,7 @@ pub(in crate::store) struct MacMigrationRejectedScope {
 /// Final commit returned the SAME configuration writer and domain journal.
 /// Only the actual joined owner task returns this scope to an ordinary caller.
 pub(in crate::store) struct MacMigrationCommittedScope {
+    pub(in crate::store) recovery_permit: Option<Arc<tokio::sync::SemaphorePermit<'static>>>,
     pub(in crate::store) app_scope: Option<Arc<crate::app::HostScope>>,
     pub(in crate::store) owner: OwnedConfigurationRoot,
     pub(in crate::store) journal: OwnedManagementJournal,
@@ -1022,6 +1023,7 @@ async fn run_original_scope(
             pair_admission_report: Some(pair_report_raw),
             rejected_scope: None,
             committed_scope: Some(Box::new(MacMigrationCommittedScope {
+                recovery_permit: None,
                 app_scope,
                 owner: owner.clone(),
                 journal,

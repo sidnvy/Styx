@@ -1,6 +1,6 @@
 # Host-only migration admission report v2
 
-Source implementation integrated after a55f071. No device migration or public entry point is enabled.
+Source implementation integrated after a55f071. Initial device migration remains unexposed. The existing explicit Mac `recover --authorize` command now routes validated original migrations; no device recovery has been executed or accepted.
 
 SPEC §7.2/C07 require original identity, one writer, authenticated original pair,
 actual candidate effect and settlement of this migration's resources. A Host-only
@@ -74,8 +74,8 @@ inode. Ordinary profile readers remain Committed-only. The final release check
 binds the original report bytes and phase prefix, current App scope and lease.
 
 This is internal implementation, not device acceptance. Missing report/Unknown
-attempt recovery, earlier token-rename interruption reconciliation, the external
-stage router and non-Host-only migrations remain incomplete. The public migration
+attempt recovery, earlier token-rename interruption reconciliation and
+non-Host-only migrations remain incomplete. The initial migration
 entry stays disabled. The focused private-journal scenario covers final report/
 prefix rejection; Darwin compilation cannot prove boot/TCC or native recovery.
 
@@ -90,3 +90,25 @@ loading and trust-substitution fixtures pass after the codec extraction.
 Fresh App-managed migration and validated recovery both require the actual
 same-root App scope, retain it on failure and through the joined success handoff,
 and validate it inside the final admission lock. Foreground CLI uses no App scope.
+
+Existing command recovery routing: Mac `recover` acquires the same native
+configuration binding and management journal once, then inspects the original
+migration ID under that owner. Completed migrations reuse the existing complete-tip
+reader before any maintenance fence. Applied/Verified recovery requires the
+original complete material/report chain, derives the signed candidate from it,
+and moves the original journal into the existing recovery task. The coordinator
+is reconstructed from the same binding/journal only after its actual worker join.
+Pure configuration recovery keeps its existing authority and complete-tip policy.
+The CLI supplies no AppScope and therefore cannot recover App-managed state by
+submitting a manager string. Missing markers/reports and earlier unsupported
+stages remain rejected; no new transaction, probe or fresh migration is attempted.
+
+A bounded management permit stays with the actual worker during Unknown and
+through final success reporting, including cancellation of an observation waiter.
+Only a typed error from an actually observed retained Mac recovery job causes the
+one-shot CLI to flush Unknown/no-replay/cleanup-unconfirmed output and explicitly
+terminate its own process. This avoids hanging in Tokio runtime destruction;
+it does not report cancellation, join or cleanup. Original journal/guards remain.
+Library/App code never exits the process. Fresh migration and native App recovery
+entry integration, original-token partial rename recovery, missing-report
+reconciliation and device interruption/exit verification remain pending.

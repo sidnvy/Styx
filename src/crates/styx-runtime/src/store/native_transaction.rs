@@ -694,3 +694,11 @@ mod tests;
 #[cfg(all(test, any(target_os = "windows", target_os = "macos")))]
 #[path = "native_transaction_platform_tests.rs"]
 mod native_tests;
+
+#[cfg(target_os = "macos")]
+#[path = "native_transaction_macos.rs"]
+mod macos_recovery;
+#[cfg(target_os = "macos")]
+pub(crate) use macos_recovery::{
+    MacMigrationRecovery, MacMigrationRecoveryFailure, MacMigrationRecoveryStart,
+};

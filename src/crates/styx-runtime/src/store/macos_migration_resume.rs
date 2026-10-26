@@ -42,10 +42,12 @@ pub(in crate::store) fn start_resume_validated_host_migration(
     journal: OwnedManagementJournal,
     candidate: Arc<VerifiedNativeRelease>,
     app_scope: Option<Arc<crate::app::HostScope>>,
+    permit: Arc<tokio::sync::SemaphorePermit<'static>>,
 ) -> MacMigrationOwnerTask {
     let (sender, observation) = oneshot::channel();
     let executor = runtime.clone();
     let job = runtime.spawn_blocking(move || {
+        let _permit = permit.clone();
         executor.block_on(run_resume(
             state_dir,
             owner,
@@ -53,6 +55,7 @@ pub(in crate::store) fn start_resume_validated_host_migration(
             journal,
             candidate,
             app_scope,
+            permit,
             sender,
         ));
     });
@@ -73,6 +76,7 @@ async fn run_resume(
     mut journal: OwnedManagementJournal,
     candidate: Arc<VerifiedNativeRelease>,
     app_scope: Option<Arc<crate::app::HostScope>>,
+    permit: Arc<tokio::sync::SemaphorePermit<'static>>,
     sender: oneshot::Sender<MacMigrationObservation>,
 ) {
     let transaction = maintenance.transaction_id().clone();
@@ -81,7 +85,7 @@ async fn run_resume(
         ($result:expr, $stage:literal $(, $held:expr)* $(,)?) => {
             match $result {
                 Ok(value) => value,
-                Err(_) => retain_scope((&owner, &maintenance, &journal, &candidate, &app_scope, $($held,)*), &mut sender,
+                Err(_) => retain_scope((&owner, &maintenance, &journal, &candidate, &app_scope, &permit, $($held,)*), &mut sender,
                     MacMigrationObservation { transaction_id: transaction.clone(), stage: $stage, local_exec_report: None, pair_admission_report: None, rejected_scope: None, committed_scope: None }).await,
             }
         };
@@ -453,6 +457,7 @@ async fn run_resume(
             pair_admission_report: Some(pair_raw),
             rejected_scope: None,
             committed_scope: Some(Box::new(MacMigrationCommittedScope {
+                recovery_permit: Some(permit),
                 owner: owner.clone(),
                 journal,
                 candidate: candidate.clone(),
