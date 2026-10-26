@@ -52,6 +52,8 @@ fn unknown<T>(_: T) -> ServiceError {
 fn unavailable<T>(_: T) -> ServiceError {
     ServiceError::Unavailable
 }
+// The fixed user-manager cgroup contains user@UID.service. The literal @
+// is safe in unit paths; systemd expansion characters and whitespace stay denied.
 fn safe_path(path: &Path) -> ServiceResult<&str> {
     let s = path.to_str().ok_or(ServiceError::Invalid)?;
     if !path.is_absolute()
@@ -59,7 +61,7 @@ fn safe_path(path: &Path) -> ServiceResult<&str> {
         || s.contains("//")
         || !s
             .bytes()
-            .all(|b| b.is_ascii_alphanumeric() || b"/._-".contains(&b))
+            .all(|b| b.is_ascii_alphanumeric() || b"/._-@".contains(&b))
         || path
             .components()
             .any(|c| matches!(c, Component::ParentDir | Component::CurDir))
