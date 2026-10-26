@@ -4,9 +4,17 @@ use super::*;
 
 pub struct OwnedEnrollmentJournal {
     owner: crate::store::OwnedConfigurationRoot,
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "windows",
+        target_os = "macos"
+    ))]
     budget: JournalBudget,
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "windows",
+        target_os = "macos"
+    ))]
     namespace: (u64, u64),
 }
 impl OwnedEnrollmentJournal {
@@ -26,7 +34,11 @@ impl OwnedEnrollmentJournal {
         owner: crate::store::OwnedConfigurationRoot,
         budget: JournalBudget,
     ) -> JournalResult<Self> {
-        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "windows",
+            target_os = "macos"
+        ))]
         {
             let namespace = owner.claim_namespace(
                 crate::store::secure_journal::NamespaceName::EnrollmentV1,
@@ -38,7 +50,11 @@ impl OwnedEnrollmentJournal {
                 namespace,
             })
         }
-        #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+        #[cfg(not(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "windows",
+            target_os = "macos"
+        )))]
         {
             let _ = (owner, budget);
             Err(JournalError::Unsupported)
@@ -153,7 +169,11 @@ impl OwnedEnrollmentJournal {
         &mut self,
         operation: impl FnOnce(&mut EnrollmentJournal<'_>) -> JournalResult<T>,
     ) -> JournalResult<T> {
-        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "windows",
+            target_os = "macos"
+        ))]
         {
             self.owner.with_state(|state| {
                 state.ordinary_admission()?;
@@ -162,6 +182,7 @@ impl OwnedEnrollmentJournal {
                     writer: &mut state.writer,
                     budget: self.budget,
                     namespace: self.namespace,
+                    #[cfg(all(target_os = "linux", target_env = "gnu"))]
                     historical_transaction: None,
                 };
                 journal.scan()?;
@@ -170,7 +191,11 @@ impl OwnedEnrollmentJournal {
                 result
             })
         }
-        #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+        #[cfg(not(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "windows",
+            target_os = "macos"
+        )))]
         {
             let _ = operation;
             Err(JournalError::Unsupported)
