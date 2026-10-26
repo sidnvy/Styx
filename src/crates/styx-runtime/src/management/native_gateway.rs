@@ -674,13 +674,13 @@ mod platform {
             if let Some(scope) = &self.app_scope {
                 scope.validate().map_err(|_| changed())?;
             }
-            self.candidate.revalidate().map_err(|_| changed())?;
             self.configuration_root()
                 .ensure_admission()
                 .map_err(|_| changed())?;
             #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
             if let Some(tip) = self.service_tip.get() {
                 tip.revalidate().map_err(|_| changed())?;
+                self.candidate.revalidate().map_err(|_| changed())?;
             } else {
                 self.validate_original_state()?;
             }
@@ -703,10 +703,9 @@ mod platform {
                 transactions.marker(),
             )
             .map_err(|_| changed())?;
-            if self.candidate.runtime_selection().map_err(|_| changed())? != current {
-                return Err(changed());
-            }
-            Ok(())
+            self.candidate
+                .revalidate_matches_selection(&current)
+                .map_err(|_| changed())
         }
     }
     pub(crate) fn open_existing(path: &Path) -> Result<FreshGatewayRuntime, BootstrapError> {
@@ -867,9 +866,13 @@ mod platform {
             if let Some(d) = diagnostic {
                 d.mark("verify_selected_done");
             }
+            // verify_selected just authenticated this same retained manifest.
+            // Reader support is immutable signed metadata; load/reconcile still
+            // perform their complete release validation before admission.
             if !candidate
+                .manifest()
+                .minimum_reader
                 .supports_state_reader(state_value.reader_contract)
-                .map_err(|_| changed())?
             {
                 return Err(bad());
             }

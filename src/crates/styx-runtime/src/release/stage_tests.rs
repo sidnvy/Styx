@@ -104,6 +104,13 @@ async fn signed_stage_is_exact_exclusive_and_keeps_failed_publications() {
     );
     let staged = verify_selected(&selected).unwrap();
     assert_eq!(staged.manifest_file.bytes(), raw);
+    staged.revalidate_matches_selection(&selected).unwrap();
+    let mut other_selection = selected.clone();
+    other_selection.manifest_sha256 = Sha256Digest::of_bytes(b"other release");
+    assert!(matches!(
+        staged.revalidate_matches_selection(&other_selection),
+        Err(ReleaseError::Changed)
+    ));
     assert_eq!(
         fs::metadata(root.join("version-one/payload/bin/styx"))
             .unwrap()
@@ -179,5 +186,12 @@ async fn signed_stage_is_exact_exclusive_and_keeps_failed_publications() {
         .is_err()
     );
     assert!(!root.join("tampered-source").exists());
+    // Same retained release and signed selection must still reject an actual
+    // member mutation; matching metadata alone never establishes freshness.
+    let staged_license = root.join("version-one/payload/LICENSE");
+    let mut bytes = fs::read(&staged_license).unwrap();
+    bytes[0] ^= 1;
+    fs::write(&staged_license, bytes).unwrap();
+    assert!(staged.revalidate_matches_selection(&selected).is_err());
     // Deliberately retain source, destination and failed partial fixtures.
 }

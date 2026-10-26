@@ -170,6 +170,20 @@ impl VerifiedNativeRelease {
         self.revalidate()?;
         Ok(selection)
     }
+    /// Revalidate the entire original retained release once, then compare its
+    /// immutable selection metadata. Callers already holding the authoritative
+    /// C07 selection must not use the publication getter (two full scans) inside
+    /// another full validation. This is not a cross-operation verification cache.
+    pub(crate) fn revalidate_matches_selection(
+        &self,
+        expected: &NativeRuntimeSelection,
+    ) -> Result<()> {
+        self.revalidate()?;
+        if self.selection_metadata()? != *expected {
+            return Err(ReleaseError::Changed);
+        }
+        Ok(())
+    }
     fn selection_metadata(&self) -> Result<NativeRuntimeSelection> {
         if self.manifest.scope != NativeReleaseScope::RuntimeCandidate
             || !self
