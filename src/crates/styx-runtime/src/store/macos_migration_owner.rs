@@ -49,6 +49,7 @@ pub(in crate::store) struct MacMigrationObservation {
 /// Retained original capabilities after a strictly ZERO-effect rejection.
 /// No Clone/Serde and no fence-clear method; caller gets its original scope back.
 pub(in crate::store) struct MacMigrationRejectedScope {
+    pub(in crate::store) app_scope: Option<Arc<crate::app::HostScope>>,
     pub(in crate::store) owner: OwnedConfigurationRoot,
     pub(in crate::store) maintenance: Arc<ConfigurationMaintenance>,
     pub(in crate::store) journal: OwnedManagementJournal,
@@ -57,6 +58,7 @@ pub(in crate::store) struct MacMigrationRejectedScope {
 /// Final commit returned the SAME configuration writer and domain journal.
 /// Only the actual joined owner task returns this scope to an ordinary caller.
 pub(in crate::store) struct MacMigrationCommittedScope {
+    pub(in crate::store) app_scope: Option<Arc<crate::app::HostScope>>,
     pub(in crate::store) owner: OwnedConfigurationRoot,
     pub(in crate::store) journal: OwnedManagementJournal,
     pub(in crate::store) candidate: Arc<VerifiedNativeRelease>,
@@ -134,6 +136,7 @@ pub(in crate::store) fn start_previous_boot_host_migration(
     journal: OwnedManagementJournal,
     candidate: Arc<VerifiedNativeRelease>,
     desired: NativeDesired,
+    app_scope: Option<Arc<crate::app::HostScope>>,
 ) -> MacMigrationOwnerTask {
     let (sender, observation) = oneshot::channel();
     let executor = runtime.clone();
@@ -149,6 +152,7 @@ pub(in crate::store) fn start_previous_boot_host_migration(
             journal,
             candidate,
             desired,
+            app_scope,
             sender,
         ));
     });
@@ -186,6 +190,7 @@ async fn run_original_scope(
     mut journal: OwnedManagementJournal,
     candidate: Arc<VerifiedNativeRelease>,
     desired: NativeDesired,
+    app_scope: Option<Arc<crate::app::HostScope>>,
     sender: oneshot::Sender<MacMigrationObservation>,
 ) {
     let transaction = maintenance.transaction_id().clone();
@@ -196,7 +201,7 @@ async fn run_original_scope(
         ($result:expr, $stage:literal $(, $held:expr)* $(,)?) => {
             match $result {
                 Ok(value) => value,
-                Err(_) => retain_scope((&owner, &maintenance, &journal, &candidate, $($held,)*), &mut sender,
+                Err(_) => retain_scope((&owner, &maintenance, &journal, &candidate, &app_scope, $($held,)*), &mut sender,
                     MacMigrationObservation { transaction_id: transaction.clone(), stage: $stage, local_exec_report: None, pair_admission_report: None, rejected_scope: None, committed_scope: None }).await,
             }
         };
@@ -209,6 +214,7 @@ async fn run_original_scope(
                     // No C/retirement/canonical/probe operation has been called.
                     // Transfer actual original capabilities back, do not park.
                     let rejected = MacMigrationRejectedScope {
+                        app_scope: app_scope.clone(),
                         owner: owner.clone(),
                         maintenance: maintenance.clone(),
                         journal,
@@ -240,6 +246,15 @@ async fn run_original_scope(
                 })
             {
                 return Err(JournalError::Conflict);
+            }
+            match (desired.host.as_ref().map(|host| host.manager), &app_scope) {
+                (Some(NativeManager::AppManaged), Some(scope))
+                    if scope.state_dir() == state_dir =>
+                {
+                    scope.validate().map_err(|_| JournalError::Unknown)?;
+                }
+                (Some(NativeManager::ForegroundCli), None) => {}
+                _ => return Err(JournalError::Conflict),
             }
             candidate.revalidate().map_err(|_| JournalError::Unknown)?;
             let expected_target = match std::env::consts::ARCH {
@@ -572,6 +587,14 @@ async fn run_original_scope(
         &preservation,
         &before,
         &token
+    );
+    // Recheck the same original App instance immediately before the first
+    // durable write; pure preflight failure still returns all original custody.
+    pre!(
+        app_scope.as_ref().map_or(Ok(()), |scope| {
+            scope.validate().map_err(|_| JournalError::Unknown)
+        }),
+        "unknown_app_scope_before_effects"
     );
     let saved_plan = keep!(
         journal.persist_native_migration_plan(&maintenance, &durable_inputs),
@@ -955,6 +978,18 @@ async fn run_original_scope(
         &effects,
         &token
     );
+    keep!(
+        app_scope.as_ref().map_or(Ok(()), |scope| {
+            scope.validate().map_err(|_| JournalError::Unknown)
+        }),
+        "unknown_app_scope_before_commit",
+        &profile,
+        &probe,
+        &pair_probe,
+        &applied,
+        &effects,
+        &token
+    );
     let committed = keep!(
         applied.commit_validated(&mut journal, &mut probe, &mut pair_probe),
         "unknown_final_validation_or_commit",
@@ -966,7 +1001,7 @@ async fn run_original_scope(
         &token
     );
     keep!(
-        committed.release_admission(&journal, &mut probe, &mut pair_probe),
+        committed.release_admission(&journal, &mut probe, &mut pair_probe, app_scope.as_deref()),
         "unknown_committed_admission_release",
         &profile,
         &probe,
@@ -987,6 +1022,7 @@ async fn run_original_scope(
             pair_admission_report: Some(pair_report_raw),
             rejected_scope: None,
             committed_scope: Some(Box::new(MacMigrationCommittedScope {
+                app_scope,
                 owner: owner.clone(),
                 journal,
                 candidate: candidate.clone(),
@@ -1212,3 +1248,7 @@ fn render_target(
         endpoint: None,
     })
 }
+
+#[path = "macos_migration_resume.rs"]
+mod resume;
+pub(in crate::store) use resume::{MacResumedCutover, start_resume_validated_host_migration};

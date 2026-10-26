@@ -831,6 +831,40 @@ fn same_original_cutover_chain_files_and_interruption_boundaries() {
         .unwrap();
     assert_eq!(observed.paired_validation_report(), Some(pair.as_slice()));
     assert_eq!(observed.last_stage, DurableStage::Committed);
+    // Reopened original journal custody must bind the complete recorded prefix
+    // and exact historical reports too. Use this fixture's real committed bytes;
+    // the private test construction does not attest native OS settlement.
+    let mut reopened = PreparedCutover {
+        owner: endpoint.owner.clone(),
+        namespace: p.namespace,
+        original: observed.clone(),
+        candidate: None,
+    };
+    let committed = observed.phases.last().unwrap();
+    let verify = |prepared: &PreparedCutover| {
+        endpoint
+            .owner
+            .with_maintenance(&endpoint.maintenance, |state| {
+                endpoint
+                    .journal
+                    .validate_committed_cutover_locked(state, prepared, committed)
+            })
+    };
+    assert!(verify(&reopened).is_ok());
+    reopened.original.validation.as_mut().unwrap().push(b' ');
+    assert!(matches!(verify(&reopened), Err(JournalError::Conflict)));
+    reopened.original = observed.clone();
+    reopened
+        .original
+        .paired_validation
+        .as_mut()
+        .unwrap()
+        .push(b' ');
+    assert!(matches!(verify(&reopened), Err(JournalError::Conflict)));
+    reopened.original = observed.clone();
+    reopened.original.phases[0].record_sha256 =
+        Sha256Digest::of_bytes(b"foreign historical prefix");
+    assert!(matches!(verify(&reopened), Err(JournalError::Conflict)));
     let pairpath = endpoint
         .path
         .join(NamespaceName::ManagementV1.as_str())

@@ -1418,6 +1418,52 @@ impl OwnedManagementJournal {
     }
     /// Original chain synchronization only. It returns its observed last stage;
     /// the platform may continue only OS items proven Pending under original pins.
+    #[cfg(target_os = "macos")]
+    pub(in crate::store) fn resync_legacy_owner_recovery_for_cutover(
+        &self,
+        maintenance: &ConfigurationMaintenance,
+        cutover: &super::super::cutover::PreparedCutover<
+            styx_contracts::native_management::NativeRootIdentity,
+        >,
+    ) -> JournalResult<PreparedLegacyOwnerRecovery> {
+        if maintenance.transaction_id() != &cutover.intent().transaction_id {
+            return Err(JournalError::Conflict);
+        }
+        self.owner.with_maintenance(maintenance, |state| {
+            self.with_directory_locked(state, |dir| {
+                let scan = files::scan(dir, self.budget)?;
+                let source = self.validated_native_cutover_locked(state, &scan, cutover)?;
+                let before = original(&scan, &source.intent.transaction_id)?;
+                if before.stage() != Some(OwnerRecoveryStage::GuardsHeld)
+                    || before.intent.sequence != source.intent.sequence
+                    || before.intent.config_root != source.intent.config_root
+                    || before.intent.before_state_sha256 != source.intent.before_state_sha256
+                {
+                    return Err(JournalError::Conflict);
+                }
+                for name in &scan_owner_recoveries(&scan)?.used {
+                    files::sync_file(dir, name)?;
+                    if files::read(dir, name, MAX_INTENT)?.as_deref() != bytes(&scan, name)? {
+                        return Err(JournalError::Unknown);
+                    }
+                }
+                super::super::platform::sync_directory(dir)?;
+                let after_scan = files::scan(dir, self.budget)?;
+                self.validated_native_cutover_locked(state, &after_scan, cutover)?;
+                let after = original(&after_scan, &source.intent.transaction_id)?;
+                if after.raw_intent != before.raw_intent
+                    || after.last_digest() != before.last_digest()
+                {
+                    return Err(JournalError::Unknown);
+                }
+                Ok(PreparedLegacyOwnerRecovery {
+                    owner: self.owner.clone(),
+                    namespace: self.namespace,
+                    original: after,
+                })
+            })
+        })
+    }
     pub(in crate::store) fn resync_legacy_owner_recovery(
         &self,
         maintenance: &ConfigurationMaintenance,

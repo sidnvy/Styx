@@ -625,6 +625,7 @@ impl MacCommittedCutover<'_, '_, '_> {
         journal: &OwnedManagementJournal,
         local: &mut MacCandidateExecProbe<'_, '_, '_, '_>,
         pair: &mut MacPairReadinessProbe<'_, '_, '_, '_>,
+        app_scope: Option<&crate::app::HostScope>,
     ) -> JournalResult<()> {
         let (local_raw, pair_raw) = self.guard.validation_bytes(local, pair)?;
         if Sha256Digest::of_bytes(&local_raw) != self.local_sha256
@@ -635,6 +636,9 @@ impl MacCommittedCutover<'_, '_, '_> {
         self.guard
             .owner
             .with_maintenance(self.guard.maintenance, |state| {
+                if let Some(scope) = app_scope {
+                    scope.validate().map_err(|_| JournalError::Unknown)?;
+                }
                 self.validate_locked(journal, state)?;
                 state.finish_mac_cutover(&self, &self.guard.owner)
             })

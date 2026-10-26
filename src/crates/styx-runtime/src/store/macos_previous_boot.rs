@@ -411,6 +411,151 @@ impl MacBootRecoveryEffects {
         value.environment()?;
         Ok(value)
     }
+    /// Reopen only the ORIGINAL completed C chain and its actual private files.
+    /// No rename, guard creation, phase append or scope-settlement inference.
+    /// A canonical successor exception is checked only by the original journal
+    /// using the SAME opaque cutover, never a supplied state/receipt DTO.
+    pub(in crate::store) fn reopen_guards_held_for_cutover(
+        owner: OwnedConfigurationRoot,
+        maintenance: Arc<ConfigurationMaintenance>,
+        root: &Root,
+        host: &Root,
+        journal: &OwnedManagementJournal,
+        cutover: &crate::store::management::cutover::PreparedCutover<NativeRootIdentity>,
+    ) -> JournalResult<(Self, LegacyGuardsHeld)> {
+        if !maintenance.matches(&owner) || !journal.configuration_root().same_authority(&owner) {
+            return Err(JournalError::Conflict);
+        }
+        let prepared = journal.resync_legacy_owner_recovery_for_cutover(&maintenance, cutover)?;
+        if !journal.owner_recovery_prepared_matches(&prepared) {
+            return Err(JournalError::Conflict);
+        }
+        let held = prepared.into_guards_held()?;
+        let prepared = held.prepared();
+        let mut value =
+            Self::from_prepared(owner.clone(), maintenance.clone(), root, host, prepared)?;
+        owner.with_maintenance(&maintenance, |_| {
+            value.environment()?;
+            // Read-only fixed roots: unlike archive(), neither missing parent
+            // nor missing transaction directory is ever created here.
+            let archive = bad(Root::open(
+                &root
+                    .path
+                    .join("foreground-recovery")
+                    .join(prepared.intent().transaction_id.as_str()),
+            ))?;
+            let expected: std::collections::BTreeSet<_> = prepared
+                .originals()
+                .iter()
+                .flat_map(|o| {
+                    [
+                        format!("{}.before", o.name.source_name()),
+                        format!("{}.retired", o.name.source_name()),
+                    ]
+                })
+                .chain(std::iter::once("foreground-recovery.lock.retired".into()))
+                .collect();
+            for entry in std::fs::read_dir(&archive.path).map_err(|_| JournalError::Unknown)? {
+                let name = entry
+                    .map_err(|_| JournalError::Unknown)?
+                    .file_name()
+                    .into_string()
+                    .map_err(|_| JournalError::Conflict)?;
+                if !expected.contains(&name) {
+                    return Err(JournalError::Conflict);
+                }
+            }
+            bad(archive.validate_root())?;
+            // Old Owner/Observer and the temporary recovery marker must remain
+            // absent. foreground.lock is instead the recorded NEW held guard.
+            for name in [
+                "foreground-owner.json",
+                "foreground-observer.json",
+                "foreground-recovery.lock",
+            ] {
+                if maybe_raw(root, name)?.is_some() {
+                    return Err(JournalError::Unknown);
+                }
+            }
+            let posts = prepared
+                .archived_original_posts()
+                .ok_or(JournalError::Conflict)?;
+            if posts.len() != prepared.originals().len() {
+                return Err(JournalError::Conflict);
+            }
+            for (post, original) in posts.iter().zip(prepared.originals()) {
+                if post.name != original.name || !original.stamp.same_file_after_rename(&post.stamp)
+                {
+                    return Err(JournalError::Conflict);
+                }
+                let before = read_pin(
+                    &archive,
+                    &format!("{}.before", original.name.source_name()),
+                    &original.raw,
+                )?;
+                let retired = read_pin(
+                    &archive,
+                    &format!("{}.retired", original.name.source_name()),
+                    &original.raw,
+                )?;
+                if native(&retired)? != post.stamp {
+                    return Err(JournalError::Unknown);
+                }
+                // Keep actual FDs, including exact-byte .before companions;
+                // those companions have no historical identity stamp in C.
+                value.original_pins.push(before);
+                value.original_pins.push(retired);
+            }
+            let posts = prepared.guards_held_posts().ok_or(JournalError::Conflict)?;
+            if posts.len() != prepared.guard_bytes().len() {
+                return Err(JournalError::Conflict);
+            }
+            for (post, binding) in posts.iter().zip(prepared.guard_bytes()) {
+                if post.name != binding.name {
+                    return Err(JournalError::Conflict);
+                }
+                let file = read_pin(root, binding.name.source_name(), &binding.raw)?;
+                if native(&file)? != post.stamp {
+                    return Err(JournalError::Unknown);
+                }
+                value.guards.push(HeldGuard {
+                    name: binding.name,
+                    file,
+                    stamp: post.stamp.clone(),
+                });
+            }
+            let marker_raw = &prepared
+                .guard_bytes()
+                .first()
+                .ok_or(JournalError::Conflict)?
+                .raw;
+            value.marker = Some(read_pin(
+                &archive,
+                "foreground-recovery.lock.retired",
+                marker_raw,
+            )?);
+            value.marker_done = true;
+            value.archive = Some(archive);
+            value.validate_retained(&held)?;
+            for name in [
+                "foreground-owner.json",
+                "foreground-observer.json",
+                "foreground-recovery.lock",
+            ] {
+                if maybe_raw(root, name)?.is_some() {
+                    return Err(JournalError::Unknown);
+                }
+            }
+            Ok(())
+        })?;
+        // Recheck the SAME original journal binding after all physical reads;
+        // no receipt is reconstructed from newly observed filesystem facts.
+        let rechecked = journal
+            .resync_legacy_owner_recovery_for_cutover(&maintenance, cutover)?
+            .into_guards_held()?;
+        value.validate_retained(&rechecked)?;
+        Ok((value, held))
+    }
     fn environment(&self) -> JournalResult<()> {
         self.restart.revalidate()?;
         validate_topology(&self.root, &self.host, &self.deployment)?;

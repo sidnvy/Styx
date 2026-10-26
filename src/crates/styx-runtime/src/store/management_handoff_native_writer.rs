@@ -347,6 +347,56 @@ impl OwnedManagementJournal {
             Ok(result)
         })
     }
+    /// Reify only the recorded Retired predecessor of this original validated
+    /// cutover. No rename, new post stamp or source-token restoration occurs.
+    #[cfg(target_os = "macos")]
+    pub(in crate::store) fn reopen_retired_for_cutover(
+        &self,
+        maintenance: &ConfigurationMaintenance,
+        cutover: &super::super::cutover::PreparedCutover<NativeRootIdentity>,
+    ) -> JournalResult<(NativePreparedRetirement, NativeRetiredRecord)> {
+        if maintenance.transaction_id() != &cutover.intent().transaction_id {
+            return Err(JournalError::Conflict);
+        }
+        self.owner.with_maintenance(maintenance, |state| {
+            self.with_directory_locked(state, |dir| {
+                let scan = files::scan(dir, self.budget)?;
+                let source = self.validated_native_cutover_locked(state, &scan, cutover)?;
+                let before = original_native(&scan, &source.intent.transaction_id)?;
+                if before.retired != Some(source.intent.retired_record_sha256)
+                    || before.intent.sequence != source.intent.sequence
+                    || before.intent.config_root != source.intent.config_root
+                    || before.intent.host_root != source.intent.host_root
+                    || before.intent.candidate_manifest_sha256
+                        != source.intent.candidate_manifest_sha256
+                {
+                    return Err(JournalError::Conflict);
+                }
+                for name in names(&source.intent.transaction_id) {
+                    files::sync_file(dir, &name)?;
+                }
+                super::super::platform::sync_directory(dir)?;
+                let after_scan = files::scan(dir, self.budget)?;
+                self.validated_native_cutover_locked(state, &after_scan, cutover)?;
+                let after = original_native(&after_scan, &source.intent.transaction_id)?;
+                if before.raw != after.raw
+                    || before.prepared != after.prepared
+                    || before.retired != after.retired
+                    || before.post != after.post
+                {
+                    return Err(JournalError::Unknown);
+                }
+                Ok((
+                    prepared(self, &after)?,
+                    RetiredCredentialRecord {
+                        prepared: prepared(self, &after)?,
+                        record_sha256: after.retired.ok_or(JournalError::Conflict)?,
+                        post_stamp: after.post.ok_or(JournalError::Conflict)?,
+                    },
+                ))
+            })
+        })
+    }
     pub(in crate::store) fn resync_native_retirement(
         &self,
         maintenance: &ConfigurationMaintenance,

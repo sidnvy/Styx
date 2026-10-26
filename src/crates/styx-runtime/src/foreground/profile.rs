@@ -172,6 +172,32 @@ struct Active {
     previous: Option<String>,
     runtime_format: Option<String>,
 }
+impl Active {
+    fn parse(raw: &[u8]) -> Result<(Self, &'static str), ProfileError> {
+        let active: Self = decode(raw)?;
+        let format = match (active.schema, active.runtime_format.as_deref()) {
+            (1, None | Some("legacy_js_v1")) => "legacy_js_v1",
+            (2, Some("native_rust_v1")) => "native_rust_v1",
+            _ => return Err(ProfileError::Invalid),
+        };
+        if !version(&active.version) || active.previous.as_ref().is_some_and(|v| !version(v)) {
+            return Err(ProfileError::Invalid);
+        }
+        Ok((active, format))
+    }
+}
+/// Paths derived only from the original preserved selector, using the same
+/// codec as the original profile reader. This does not select a runtime.
+#[cfg(target_os = "macos")]
+pub(crate) fn original_release_metadata_paths(
+    base: &Path,
+    raw: &[u8],
+) -> Result<[PathBuf; 2], ProfileError> {
+    absolute(base)?;
+    let (active, _) = Active::parse(raw)?;
+    let root = base.join("install/releases").join(active.version);
+    Ok([root.join("manifest.json"), root.join("manifest.sig")])
+}
 #[derive(Deserialize)]
 struct Manifest {
     #[cfg(target_os = "linux")]
@@ -1096,15 +1122,8 @@ fn load_source(
         .collect();
     let tls = GatewayClientTls::from_pinned_ca_bundle(&ca, &pins, None)
         .map_err(|_| ProfileError::Invalid)?;
-    let active: Active = decode(&capture.read(base, "install/active.json", JSON_LIMIT)?)?;
-    let expected_format = match (active.schema, active.runtime_format.as_deref()) {
-        (1, None | Some("legacy_js_v1")) => "legacy_js_v1",
-        (2, Some("native_rust_v1")) => "native_rust_v1",
-        _ => return Err(ProfileError::Invalid),
-    };
-    if !version(&active.version) || active.previous.as_ref().is_some_and(|v| !version(v)) {
-        return Err(ProfileError::Invalid);
-    }
+    let (active, expected_format) =
+        Active::parse(&capture.read(base, "install/active.json", JSON_LIMIT)?)?;
     let root = base.join("install/releases").join(&active.version);
     // The preserved active pointer remains an observed original input. After
     // migration it never selects workers; only the committed canonical selection

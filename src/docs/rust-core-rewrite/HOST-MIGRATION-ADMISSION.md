@@ -63,3 +63,30 @@ packagers must preserve the actual declared reader; no packaging flag upgrades
 an older binary. Old readers reject the unknown manifest variant. Downgrade to
 an old reader remains refused while new journal evidence exists; a rollback must
 use the authorized restoration transaction, not reinterpret new bytes as old.
+
+Validated interruption recovery: the internal Mac resume consumer reopens the
+original Applied/Verified transaction only when both successful report attachments
+are durable. It verifies the exact plan/candidate, current protected nonce bytes,
+original guard/archive post stamps, retired token and execution lease, then
+appends only missing Verified/Committed phases under the same writer. It never
+constructs a new Exec/pair probe or claims to recover an old JoinHandle/nonce
+inode. Ordinary profile readers remain Committed-only. The final release check
+binds the original report bytes and phase prefix, current App scope and lease.
+
+This is internal implementation, not device acceptance. Missing report/Unknown
+attempt recovery, earlier token-rename interruption reconciliation, the external
+stage router and non-Host-only migrations remain incomplete. The public migration
+entry stays disabled. The focused private-journal scenario covers final report/
+prefix rejection; Darwin compilation cannot prove boot/TCC or native recovery.
+
+The validated reader rechecks the full original preservation set, including the
+publisher, legacy active selector, both configured CA paths and original release
+manifest/signature. Release metadata paths are derived only after matching the
+selector to its original preserved bytes and file observation, using the same
+selector codec as the original profile loader. Only canonical state replacement
+and token retirement are exempt from matching their old paths; both effects are
+checked separately against the original transaction. Existing signed-profile
+loading and trust-substitution fixtures pass after the codec extraction.
+Fresh App-managed migration and validated recovery both require the actual
+same-root App scope, retain it on failure and through the joined success handoff,
+and validate it inside the final admission lock. Foreground CLI uses no App scope.

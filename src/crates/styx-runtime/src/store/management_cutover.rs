@@ -1573,6 +1573,17 @@ impl OwnedManagementJournal {
             let source = original_for::<R>(&scan, &prepared.intent().transaction_id)?;
             if source.intent != *prepared.intent()
                 || source.raw_intent != prepared.original.raw_intent
+                || !source.phases.starts_with(&prepared.original.phases)
+                || prepared
+                    .original
+                    .validation
+                    .as_ref()
+                    .is_some_and(|raw| source.validation.as_ref() != Some(raw))
+                || prepared
+                    .original
+                    .paired_validation
+                    .as_ref()
+                    .is_some_and(|raw| source.paired_validation.as_ref() != Some(raw))
                 || source.phases.first() != Some(prepared.journal())
                 || source.phases.last() != Some(committed)
                 || committed.stage != DurableStage::Committed
@@ -1585,6 +1596,97 @@ impl OwnedManagementJournal {
             }
             check_canonical(state, &source, true)
         })
+    }
+    /// Reopen an already validated native successor. This recovers journal
+    /// ownership only; the Mac coordinator separately reopens actual OS custody.
+    #[cfg(target_os = "macos")]
+    pub(in crate::store) fn reopen_validated_native_cutover(
+        &self,
+        maintenance: &ConfigurationMaintenance,
+        candidate: std::sync::Arc<crate::release::VerifiedNativeRelease>,
+    ) -> JournalResult<PreparedCutover<NativeRootIdentity>> {
+        let original = self.resync_native_cutover(maintenance, maintenance.transaction_id())?;
+        let prepared = PreparedCutover {
+            owner: self.owner.clone(),
+            namespace: self.namespace,
+            original,
+            candidate: Some(candidate),
+        };
+        self.owner.with_maintenance(maintenance, |state| {
+            self.with_directory_locked(state, |dir| {
+                self.validated_native_cutover_locked(
+                    state,
+                    &files::scan(dir, self.budget)?,
+                    &prepared,
+                )?;
+                Ok(())
+            })
+        })?;
+        Ok(prepared)
+    }
+    /// Called while the original owner and journal are already locked. Never
+    /// acquire another mutex here. Only exact successful report bytes survive
+    /// resumption; newer phases may append to, never replace, the original chain.
+    #[cfg(target_os = "macos")]
+    pub(in crate::store) fn validated_native_cutover_locked(
+        &self,
+        state: &ConfigurationState,
+        scan: &JournalObservation,
+        prepared: &PreparedCutover<NativeRootIdentity>,
+    ) -> JournalResult<OriginalCutover<NativeRootIdentity>> {
+        if !self.cutover_prepared_matches(prepared) {
+            return Err(JournalError::Conflict);
+        }
+        state.require_native_maintenance(&prepared.intent().transaction_id)?;
+        prepared.validate_candidate()?;
+        let source = original_for::<NativeRootIdentity>(scan, &prepared.intent().transaction_id)?;
+        if source.intent.schema != 4
+            || source.intent != *prepared.intent()
+            || source.raw_intent != prepared.original.raw_intent
+            || !source.phases.starts_with(&prepared.original.phases)
+            || !matches!(
+                source.last_stage,
+                DurableStage::Applied | DurableStage::Verified | DurableStage::Committed
+            )
+            || source.validation_report().is_none()
+            || source.paired_validation_report().is_none()
+            || source.validation != prepared.original.validation
+            || source.paired_validation != prepared.original.paired_validation
+        {
+            return Err(JournalError::Conflict);
+        }
+        let plans = super::migration_plan::scan_plans(scan)?;
+        let plan = plans.records.first().ok_or(JournalError::Conflict)?;
+        plan.validate_cutover(&source)?;
+        let candidate = prepared.candidate.as_ref().ok_or(JournalError::Conflict)?;
+        if plan.selection
+            != candidate
+                .runtime_selection()
+                .map_err(|_| JournalError::Unknown)?
+        {
+            return Err(JournalError::Conflict);
+        }
+        crate::store::committed_runtime_native::validate_selected_reader_features(
+            candidate.manifest().minimum_reader,
+            true,
+            source
+                .paired_validation_report()
+                .ok_or(JournalError::Conflict)?,
+        )?;
+        let inventory = super::parser::inventory(scan)?;
+        if !inventory.orphans.is_empty()
+            || inventory.high_water != source.intent.sequence
+            || inventory.transactions.iter().any(|t| {
+                t.intent.sequence >= source.intent.sequence
+                    || t.phase_receipts
+                        .last()
+                        .is_none_or(|p| p.stage != DurableStage::Committed)
+            })
+        {
+            return Err(JournalError::Conflict);
+        }
+        check_canonical(state, &source, true)?;
+        Ok(source)
     }
     pub(in crate::store) fn resync_original_cutover(
         &self,

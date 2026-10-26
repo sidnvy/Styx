@@ -51,10 +51,75 @@ impl MaterialPin {
         Ok(())
     }
 }
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RequiredStage {
+    Committed,
+    #[cfg(target_os = "macos")]
+    Validated(DurableStage),
+}
+impl RequiredStage {
+    fn stage(self) -> DurableStage {
+        match self {
+            Self::Committed => DurableStage::Committed,
+            #[cfg(target_os = "macos")]
+            Self::Validated(stage) => stage,
+        }
+    }
+}
+
+/// Read-only incomplete-migration observation. No writer, grant, credential
+/// accessor, ordinary profile conversion or constructor from report JSON.
+#[cfg(target_os = "macos")]
+pub(in crate::store) struct NativeValidatedMigrationSnapshot {
+    inner: NativeCommittedRuntimeSnapshot,
+}
+#[cfg(target_os = "macos")]
+impl NativeValidatedMigrationSnapshot {
+    pub(in crate::store) fn open(path: &Path, stage: DurableStage) -> JournalResult<Self> {
+        if !matches!(stage, DurableStage::Applied | DurableStage::Verified) {
+            return Err(JournalError::Conflict);
+        }
+        Ok(Self {
+            inner: NativeCommittedRuntimeSnapshot::open_inner(
+                path,
+                RequiredStage::Validated(stage),
+            )?,
+        })
+    }
+    /// Full original inventory AND stage: advancing a phase invalidates it.
+    pub(in crate::store) fn revalidate(&self) -> JournalResult<()> {
+        self.inner.revalidate()
+    }
+    /// After the original writer advances its phase, recheck only physical
+    /// materials. Caller MUST separately validate the new journal/phase chain.
+    /// This is never ordinary admission or proof of the new phase.
+    pub(in crate::store) fn revalidate_materials(&self) -> JournalResult<()> {
+        self.inner.revalidate_pending_materials()
+    }
+    pub(in crate::store) fn original(&self) -> &cutover::OriginalCutover<NativeRootIdentity> {
+        &self.inner.original
+    }
+    pub(in crate::store) fn candidate(&self) -> &Arc<crate::release::VerifiedNativeRelease> {
+        &self.inner.candidate
+    }
+    pub(in crate::store) fn root_identity(&self) -> RootIdentity {
+        self.inner.root.identity()
+    }
+    pub(in crate::store) fn host_root_identity(&self) -> RootIdentity {
+        self.inner.host.identity()
+    }
+    pub(in crate::store) fn host_base_dir(&self) -> &Path {
+        &self.inner.host_base_dir
+    }
+}
+
 /// No Debug/Serde; exact inventory and original credential facts are private.
 pub(crate) struct NativeCommittedRuntimeSnapshot {
+    required_stage: RequiredStage,
     root: Arc<PrivateRoot>,
     state_dir: PathBuf,
+    #[cfg(target_os = "macos")]
+    host_base_dir: PathBuf,
     host: Arc<PrivateRoot>,
     namespace: PrivateRoot,
     pins: Vec<MaterialPin>,
@@ -262,6 +327,9 @@ impl NativeCommittedRuntimeSnapshot {
         Ok(snapshot)
     }
     pub(crate) fn open(path: &Path) -> JournalResult<Self> {
+        Self::open_inner(path, RequiredStage::Committed)
+    }
+    fn open_inner(path: &Path, required_stage: RequiredStage) -> JournalResult<Self> {
         if !absolute(path) {
             return Err(JournalError::InvalidInput);
         }
@@ -291,7 +359,7 @@ impl NativeCommittedRuntimeSnapshot {
             &parsed.native_records[0].intent.transaction_id,
         )?;
         if original.intent.schema != 4
-            || original.last_stage != DurableStage::Committed
+            || original.last_stage != required_stage.stage()
             || original.validation_report().is_none()
             || original.paired_validation_report().is_none()
         {
@@ -304,7 +372,19 @@ impl NativeCommittedRuntimeSnapshot {
             .map_err(|_| JournalError::Unknown)?;
         let canonical = super::native_state::decode_state(canonical_raw.bytes(), &marker)
             .map_err(|_| JournalError::Conflict)?;
-        management::validate_readonly_native_tip(&scan, &canonical, &marker)?;
+        match required_stage {
+            RequiredStage::Committed => {
+                management::validate_readonly_native_tip(&scan, &canonical, &marker)?
+            }
+            #[cfg(target_os = "macos")]
+            RequiredStage::Validated(_) => {
+                validate_pending_chain(&scan, &original)?;
+                cutover::check_canonical_root(&root, &original, true)?;
+                if canonical_raw.bytes() != original.target {
+                    return Err(JournalError::Conflict);
+                }
+            }
+        }
         let state = canonical.state().clone();
         let binding = state
             .migration_v2()
@@ -561,9 +641,118 @@ impl NativeCommittedRuntimeSnapshot {
         hash_matches(&token, pair.credential_sha256)?;
         host.ensure_absent("device/host.token")
             .map_err(|_| JournalError::Conflict)?;
+        #[cfg(target_os = "macos")]
+        if matches!(required_stage, RequiredStage::Validated(_)) {
+            // Reopen the FULL original immutable preservation set, including
+            // publisher and legacy active selector. Only the two effects this
+            // transaction explicitly performed may differ at their old paths.
+            #[derive(serde::Deserialize)]
+            #[serde(deny_unknown_fields)]
+            struct Row {
+                path: PathBuf,
+                sha256: Sha256Digest,
+                bytes: u64,
+                observation: serde_json::Value,
+            }
+            let canonical_path = path.join("state.json");
+            let token_path = base.join("device/host.token");
+            let mut allowed = std::collections::BTreeSet::from([
+                canonical_path.clone(),
+                path.join("deployment.json"),
+                token_path.clone(),
+                base.join("publisher.pem"),
+                base.join("device/identity.json"),
+                base.join("device/identity.pem"),
+                base.join("device/host.json"),
+                base.join("install/active.json"),
+                ca.clone(),
+            ]);
+            if let Some(original_ca) = d.pointer("/gateway/caFile").and_then(|v| v.as_str()) {
+                allowed.insert(PathBuf::from(original_ca));
+            }
+            let rows: Vec<Row> = serde_json::from_slice(&original.preservation)
+                .map_err(|_| JournalError::Conflict)?;
+            let active_path = base.join("install/active.json");
+            let active_row = rows
+                .iter()
+                .find(|row| row.path == active_path)
+                .ok_or(JournalError::Conflict)?;
+            let active_raw = pin(&host, "install/active.json", MAX, &mut pins)?;
+            if Sha256Digest::of_bytes(&active_raw) != active_row.sha256
+                || active_raw.len() as u64 != active_row.bytes
+                || serde_json::to_value(&pins.last().ok_or(JournalError::Conflict)?.observation)
+                    .map_err(|_| JournalError::Conflict)?
+                    != active_row.observation
+            {
+                return Err(JournalError::Unknown);
+            }
+            allowed.extend(
+                crate::foreground::profile::original_release_metadata_paths(&base, &active_raw)
+                    .map_err(|_| JournalError::Conflict)?,
+            );
+            if rows.len() != allowed.len() {
+                return Err(JournalError::Conflict);
+            }
+            let mut seen = std::collections::BTreeSet::new();
+            for row in rows {
+                if !absolute(&row.path)
+                    || !allowed.contains(&row.path)
+                    || !seen.insert(row.path.clone())
+                    || row.bytes == 0
+                    || row.bytes > MAX as u64
+                {
+                    return Err(JournalError::Conflict);
+                }
+                if row.path == canonical_path {
+                    if row.sha256 != original.intent.before_state_sha256
+                        || row.bytes != original.before.len() as u64
+                    {
+                        return Err(JournalError::Conflict);
+                    }
+                    continue;
+                }
+                if row.path == token_path {
+                    if row.sha256 != pair.credential_sha256 || row.bytes != token.len() as u64 {
+                        return Err(JournalError::Conflict);
+                    }
+                    continue;
+                }
+                let material_root = Arc::new(
+                    PrivateRoot::open(row.path.parent().ok_or(JournalError::Conflict)?)
+                        .map_err(|_| JournalError::Unknown)?,
+                );
+                let name = row.path.file_name().ok_or(JournalError::Conflict)?;
+                let current = material_root
+                    .read_raw(name, MAX)
+                    .map_err(|_| JournalError::Unknown)?;
+                if current.bytes().len() as u64 != row.bytes
+                    || Sha256Digest::of_bytes(current.bytes()) != row.sha256
+                    || serde_json::to_value(current.observation())
+                        .map_err(|_| JournalError::Conflict)?
+                        != row.observation
+                {
+                    return Err(JournalError::Unknown);
+                }
+                let observed = Zeroizing::new(pin(&material_root, name, MAX, &mut pins)?);
+                if observed.as_slice() != current.bytes()
+                    || pins
+                        .last()
+                        .is_none_or(|p| &p.observation != current.observation())
+                {
+                    return Err(JournalError::Unknown);
+                }
+            }
+            if seen != allowed {
+                return Err(JournalError::Conflict);
+            }
+            pin_original_nonce(&host, &original, &pair, &mut pins)?;
+        }
         let snapshot = Self {
+            required_stage,
             root,
             state_dir: path.to_owned(),
+            #[cfg(target_os = "macos")]
+            host_base_dir: base,
             host,
             namespace,
             pins,
@@ -630,7 +819,7 @@ impl NativeCommittedRuntimeSnapshot {
         )?;
         if parsed.raw_intent != self.original.raw_intent
             || parsed.phases != self.original.phases
-            || parsed.last_stage != DurableStage::Committed
+            || parsed.last_stage != self.required_stage.stage()
         {
             return Err(JournalError::Unknown);
         }
@@ -651,7 +840,19 @@ impl NativeCommittedRuntimeSnapshot {
             .map_err(|_| JournalError::Unknown)?;
         let canonical = super::native_state::decode_state(raw.bytes(), &marker)
             .map_err(|_| JournalError::Conflict)?;
-        management::validate_readonly_native_tip(&scan, &canonical, &marker)?;
+        match self.required_stage {
+            RequiredStage::Committed => {
+                management::validate_readonly_native_tip(&scan, &canonical, &marker)?
+            }
+            #[cfg(target_os = "macos")]
+            RequiredStage::Validated(_) => {
+                validate_pending_chain(&scan, &parsed)?;
+                cutover::check_canonical_root(&self.root, &parsed, true)?;
+                if raw.bytes() != self.original.target {
+                    return Err(JournalError::Unknown);
+                }
+            }
+        }
         for name in STATE_ABSENT {
             self.root
                 .ensure_absent(name)
@@ -691,6 +892,72 @@ impl NativeCommittedRuntimeSnapshot {
             return Err(JournalError::Unknown);
         }
         Ok(())
+    }
+    #[cfg(target_os = "macos")]
+    fn revalidate_pending_materials(&self) -> JournalResult<()> {
+        if !matches!(self.required_stage, RequiredStage::Validated(_)) {
+            return Err(JournalError::Conflict);
+        }
+        self.candidate
+            .revalidate()
+            .map_err(|_| JournalError::Unknown)?;
+        if PrivateRoot::open(&self.state_dir)
+            .map_err(|_| JournalError::Unknown)?
+            .identity()
+            != self.root.identity()
+            || PrivateRoot::open(&self.host_base_dir)
+                .map_err(|_| JournalError::Unknown)?
+                .identity()
+                != self.host.identity()
+            || PrivateRoot::open(self.state_dir.join(NAMESPACE))
+                .map_err(|_| JournalError::Unknown)?
+                .identity()
+                != self.namespace.identity()
+        {
+            return Err(JournalError::Unknown);
+        }
+        super::native_legacy_owners::validate_native_legacy_owners(
+            self.state
+                .extensions
+                .get("legacy_owner_bindings_v2")
+                .ok_or(JournalError::Conflict)?,
+            &self.root,
+            &self.host,
+            &self.state_dir,
+            self.retirement.intent.service_descriptor_sha256,
+        )?;
+        for material in &self.pins {
+            if !(Arc::ptr_eq(&material.root, &self.root) && material.path.starts_with(NAMESPACE)) {
+                material.revalidate()?;
+            }
+        }
+        let raw = self
+            .root
+            .read_raw("state.json", MAX)
+            .map_err(|_| JournalError::Unknown)?;
+        let marker = self
+            .root
+            .read_raw(".styx-native-root-v1.json", 4096)
+            .map_err(|_| JournalError::Unknown)?;
+        if raw.bytes() != self.original.target || marker.bytes() != self.original.marker {
+            return Err(JournalError::Unknown);
+        }
+        for name in STATE_ABSENT {
+            self.root
+                .ensure_absent(name)
+                .map_err(|_| JournalError::Unknown)?;
+        }
+        for name in HOST_ABSENT {
+            self.host
+                .ensure_absent(name)
+                .map_err(|_| JournalError::Unknown)?;
+        }
+        self.host
+            .ensure_absent("device/host.token")
+            .map_err(|_| JournalError::Unknown)?;
+        self.candidate
+            .revalidate()
+            .map_err(|_| JournalError::Unknown)
     }
     pub(crate) fn state(&self) -> &NativeState {
         &self.state
@@ -765,6 +1032,85 @@ impl NativeCommittedRuntimeSnapshot {
         }
         Ok(())
     }
+}
+
+/// The already strict original cutover parser verified BOTH successful reports.
+/// This adds complete pre-effect plan + exact tip constraints, not new authority.
+#[cfg(target_os = "macos")]
+fn validate_pending_chain(
+    scan: &super::secure_journal::JournalObservation,
+    original: &cutover::OriginalCutover<NativeRootIdentity>,
+) -> JournalResult<()> {
+    if !matches!(
+        original.last_stage,
+        DurableStage::Applied | DurableStage::Verified
+    ) || original.validation_report().is_none()
+        || original.paired_validation_report().is_none()
+    {
+        return Err(JournalError::Conflict);
+    }
+    let inventory = management::readonly_inventory(scan)?;
+    if !inventory.orphans.is_empty()
+        || inventory.high_water != original.intent.sequence
+        || inventory.transactions.iter().any(|tx| {
+            tx.intent.sequence >= original.intent.sequence
+                || tx.prepared.is_none()
+                || tx
+                    .phase_receipts
+                    .last()
+                    .is_none_or(|p| p.stage != DurableStage::Committed)
+        })
+    {
+        return Err(JournalError::Conflict);
+    }
+    let plans = management::migration_plan::scan_plans(scan)?;
+    if plans.records.len() != 1 {
+        return Err(JournalError::Conflict);
+    }
+    plans.records[0].validate_cutover(original)
+}
+
+/// Pin the CURRENT protected nonce after matching the original durable effect
+/// hash/length/path. This is not a recovered historical inode or JoinHandle.
+#[cfg(target_os = "macos")]
+fn pin_original_nonce(
+    host: &Arc<PrivateRoot>,
+    original: &cutover::OriginalCutover<NativeRootIdentity>,
+    pair: &NativePreservedHostPair,
+    pins: &mut Vec<MaterialPin>,
+) -> JournalResult<()> {
+    #[derive(serde::Deserialize)]
+    struct Effect {
+        transaction_id: styx_contracts::identity::TransactionId,
+        candidate_manifest_sha256: Sha256Digest,
+        device_id: styx_contracts::identity::DeviceId,
+        nonce_relative_path: PathBuf,
+        nonce_sha256: Sha256Digest,
+        nonce_bytes: usize,
+    }
+    // The full report was validated by original_for; this is its additional
+    // physical effect projection, never an alternative relaxed report parser.
+    let effect: Effect =
+        serde_json::from_slice(original.validation_report().ok_or(JournalError::Conflict)?)
+            .map_err(|_| JournalError::Conflict)?;
+    let fixed = PathBuf::from(format!(
+        ".styx-migration-probe-{}",
+        original.intent.transaction_id.as_str()
+    ));
+    if effect.transaction_id != original.intent.transaction_id
+        || effect.candidate_manifest_sha256 != original.intent.candidate_manifest_sha256
+        || effect.device_id != pair.device_id
+        || effect.nonce_relative_path != fixed
+        || effect.nonce_bytes == 0
+        || effect.nonce_bytes > 256
+    {
+        return Err(JournalError::Conflict);
+    }
+    let raw = pin(host, &fixed, 256, pins)?;
+    if raw.len() != effect.nonce_bytes {
+        return Err(JournalError::Conflict);
+    }
+    hash_matches(&raw, effect.nonce_sha256)
 }
 
 #[path = "committed_runtime_native_owner.rs"]

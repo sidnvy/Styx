@@ -391,7 +391,7 @@ impl MacTokenRetirement {
         Ok(record)
     }
     /// Exact post-effect observation, never a newly captured replacement stamp.
-    fn validate_retired_locked(&self) -> JournalResult<NativeRetirementFileStamp> {
+    pub(super) fn validate_retired_locked(&self) -> JournalResult<NativeRetirementFileStamp> {
         if !self.retired {
             return Err(JournalError::Unknown);
         }
