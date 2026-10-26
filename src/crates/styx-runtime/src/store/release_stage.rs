@@ -94,7 +94,7 @@ impl ReleaseStage {
             .checked_add(member.bytes)
             .ok_or(StoreError::TooLarge)?;
         // The source payload's bounded inventory plus one <=4KiB public PEM.
-        if self.copied_files >= PayloadLimits::default().max_files + 1
+        if self.copied_files > PayloadLimits::default().max_files
             || next_bytes > PayloadLimits::default().max_total_bytes + 4096
         {
             return Err(StoreError::TooLarge);
