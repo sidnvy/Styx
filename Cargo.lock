@@ -2397,6 +2397,7 @@ dependencies = [
 name = "styx-core"
 version = "0.4.0-dev.1"
 dependencies = [
+ "serde_json",
  "styx-contracts",
  "thiserror 2.0.18",
 ]

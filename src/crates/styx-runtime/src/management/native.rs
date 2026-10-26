@@ -24,6 +24,9 @@ use styx_contracts::{
 #[path = "native_service.rs"]
 pub mod service;
 
+#[path = "native_update.rs"]
+pub mod update;
+
 pub struct NativeCreateOptions {
     pub mode: NativeDeploymentMode,
     pub manager: NativeManager,
@@ -892,7 +895,7 @@ mod platform {
         }
         Ok(())
     }
-    fn use_managed_transactions<T>(
+    pub(super) fn use_managed_transactions<T>(
         path: &Path,
         scope: Option<&Arc<crate::app::HostScope>>,
         job: impl FnOnce(&mut NativeTransactions) -> Result<T>,
@@ -1031,7 +1034,7 @@ mod platform {
     }
     /// Only re-establish an already complete canonical tip. Never complete a
     /// pending phase, adopt an orphan or replay an action as an implicit startup.
-    fn reconcile_complete_tip(
+    pub(super) fn reconcile_complete_tip(
         transactions: &mut NativeTransactions,
         app_owned: bool,
     ) -> Result<()> {
@@ -1321,7 +1324,31 @@ mod platform {
         id: &TransactionId,
     ) -> Result<NativeManagementReport> {
         require_original_authority(transactions, id, false)?;
-        let committed = transactions.recover_original(id).map_err(tx)?;
+        let original = transactions
+            .query(id)
+            .map_err(tx)?
+            .ok_or_else(|| NativeManagementError::new(ErrorKind::Conflict))?;
+        let committed = if original
+            .phase_receipts
+            .last()
+            .is_some_and(|p| p.stage == DurableStage::Committed)
+        {
+            transactions.recover_original(id).map_err(tx)?
+        } else if let Some((before, target)) =
+            transactions.runtime_update_selections(id).map_err(tx)?
+        {
+            // Resume only the same recorded update. Both original signed releases
+            // and real execution exclusion are re-established by its coordinator.
+            let previous = crate::release::verify_selected(&before)
+                .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?;
+            let selected = crate::release::verify_selected(&target)
+                .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?;
+            transactions
+                .recover_runtime_update(previous, selected, id)
+                .map_err(tx)?
+        } else {
+            transactions.recover_original(id).map_err(tx)?
+        };
         let transaction = NativeTransactionReport {
             transaction_id: committed.transaction_id,
             sequence: committed.committed.sequence,

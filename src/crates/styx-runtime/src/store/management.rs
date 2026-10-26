@@ -85,61 +85,113 @@ pub(super) fn validate_readonly_native_tip(
     ) {
         return validate_migrated_native_tip(scan, canonical, marker, None);
     }
+    validate_fresh_native_tip(scan, canonical, marker, None)
+}
+
+/// Replay every original fresh-root assignment, including the one closed runtime
+/// promotion. `pending` is only for the original coordinator after canonical
+/// publication; read-only callers can never accept an unfinished transaction.
+#[cfg(any(
+    all(target_os = "linux", target_env = "gnu"),
+    target_os = "windows",
+    target_os = "macos"
+))]
+fn validate_fresh_native_tip(
+    scan: &super::secure_journal::JournalObservation,
+    canonical: &super::native_state::ValidatedNativeState,
+    marker: &styx_contracts::native_management::NativeRootMarker,
+    pending: Option<&TransactionId>,
+) -> JournalResult<()> {
+    use styx_contracts::management::ReaderContract;
     let inventory = readonly_inventory(scan)?;
-    let state = canonical.state();
+    if marker.reader_floor != ReaderContract::NativeManagementStateV1
+        || canonical.state().has_migration_binding()
+        || !inventory.orphans.is_empty()
+        || inventory.has_legacy_handoffs()
+        || inventory.committed_cutover_anchor.is_some()
+    {
+        return Err(JournalError::Conflict);
+    }
     if scan.files.is_empty() {
-        return if state.revision == 0 && state.last_transaction.is_none() {
+        return if canonical.state().revision == 0
+            && canonical.state().last_transaction.is_none()
+            && canonical.state().reader_contract == ReaderContract::NativeManagementStateV1
+        {
             Ok(())
         } else {
             Err(JournalError::Conflict)
         };
     }
-    let tip = state
-        .last_transaction
-        .as_ref()
-        .ok_or(JournalError::Conflict)?;
-    if !inventory.orphans.is_empty()
-        || inventory.has_legacy_handoffs()
-        || inventory.high_water != tip.sequence
-        || inventory.transactions.last().is_none_or(|tx| {
-            tx.intent.transaction_id != tip.transaction_id || tx.intent.sequence != tip.sequence
-        })
-        || inventory.transactions.iter().any(|tx| {
-            tx.prepared.is_none()
-                || tx
-                    .phase_receipts
-                    .last()
-                    .is_none_or(|p| p.stage != DurableStage::Committed)
-        })
-    {
-        return Err(JournalError::Conflict);
-    }
-    let original = readonly_original(scan, &tip.transaction_id)?;
-    let before = super::native_state::decode_state(&original.before, marker)
-        .map_err(|_| JournalError::Conflict)?;
-    let target = super::native_state::decode_state(&original.target, marker)
-        .map_err(|_| JournalError::Conflict)?;
-    if original.intent.sequence != tip.sequence
-        || original.intent.deployment_raw_sha256 != state.deployment_raw_sha256
-        || original.intent.target_state_sha256 != Sha256Digest::of_bytes(&original.target)
-        || original.intent.before_state_sha256 != Sha256Digest::of_bytes(&original.before)
-        || original
-            .phases
+    let mut previous: Option<super::native_state::ValidatedNativeState> = None;
+    let count = inventory.transactions.len();
+    let mut pending_before = None;
+    for (index, tx) in inventory.transactions.into_iter().enumerate() {
+        let committed = tx
+            .phase_receipts
             .last()
-            .is_none_or(|p| p.stage != DurableStage::Committed)
-        || before.state().has_migration_binding()
-        || target.state().has_migration_binding()
-        || original.target != canonical.raw_bytes()
+            .is_some_and(|p| p.stage == DurableStage::Committed);
+        if tx.prepared.is_none()
+            || (!committed && (pending != Some(&tx.intent.transaction_id) || index + 1 != count))
+        {
+            return Err(JournalError::Conflict);
+        }
+        let original = parser::original_observed(scan, tx)?;
+        let before = super::native_state::decode_state(&original.before, marker)
+            .map_err(|_| JournalError::Conflict)?;
+        let target = super::native_state::decode_state(&original.target, marker)
+            .map_err(|_| JournalError::Conflict)?;
+        if original.intent.before_state_sha256 != before.raw_sha256()
+            || original.intent.target_state_sha256 != target.raw_sha256()
+            || previous
+                .as_ref()
+                .is_some_and(|prior| prior.raw_bytes() != before.raw_bytes())
+            || (previous.is_none()
+                && (before.state().revision != 0
+                    || before.state().last_transaction.is_some()
+                    || before.state().reader_contract != ReaderContract::NativeManagementStateV1))
+        {
+            return Err(JournalError::Conflict);
+        }
+        styx_core::management::state::validate_committed_transition(
+            before.state(),
+            target.state(),
+            marker,
+            &original.intent,
+        )
+        .map_err(|_| JournalError::Conflict)?;
+        if !committed {
+            pending_before = Some(before);
+        }
+        previous = Some(target);
+    }
+    let last = previous.ok_or(JournalError::Conflict)?;
+    if (last.raw_bytes() != canonical.raw_bytes()
+        && pending_before
+            .as_ref()
+            .is_none_or(|before| before.raw_bytes() != canonical.raw_bytes()))
+        || last
+            .state()
+            .last_transaction
+            .as_ref()
+            .is_none_or(|tx| tx.sequence != inventory.high_water)
     {
         return Err(JournalError::Conflict);
     }
-    styx_core::management::state::validate_transition(
-        before.state(),
-        target.state(),
-        marker,
-        &original.intent,
-    )
-    .map_err(|_| JournalError::Conflict)
+    Ok(())
+}
+
+#[cfg(any(
+    all(target_os = "linux", target_env = "gnu"),
+    target_os = "windows",
+    target_os = "macos"
+))]
+pub(super) fn validate_fresh_native_recovery_tip(
+    scan: &super::secure_journal::JournalObservation,
+    canonical: &super::native_state::ValidatedNativeState,
+    marker: &styx_contracts::native_management::NativeRootMarker,
+    pending: &TransactionId,
+) -> JournalResult<()> {
+    validate_fresh_native_tip(scan, canonical, marker, Some(pending))
 }
 
 /// Formal chain replay after one committed schema2/schema4 conversion. No owner
@@ -263,6 +315,15 @@ fn validate_locked_migrated_tip(
     scan: &super::secure_journal::JournalObservation,
     pending: Option<&TransactionId>,
 ) -> JournalResult<()> {
+    // Legacy C07 consumers have no native marker; retain their original opaque
+    // behavior. A present/unreadable native marker is never treated as absent.
+    if state
+        .root
+        .ensure_absent(".styx-native-root-v1.json")
+        .is_ok()
+    {
+        return Ok(());
+    }
     let marker_raw = state
         .root
         .read_raw(".styx-native-root-v1.json", 4096)
@@ -313,7 +374,11 @@ fn validate_locked_migrated_tip(
         .map_err(|_| JournalError::Unknown)?;
     let canonical = super::native_state::decode_state(raw.bytes(), &marker)
         .map_err(|_| JournalError::Conflict)?;
-    validate_migrated_native_tip(scan, &canonical, &marker, pending)
+    if canonical.state().has_migration_binding() {
+        validate_migrated_native_tip(scan, &canonical, &marker, pending)
+    } else {
+        validate_fresh_native_tip(scan, &canonical, &marker, pending)
+    }
 }
 pub struct PreparedPersistence {
     pub intent: DesiredStateCommit,
@@ -613,9 +678,7 @@ impl OwnedManagementJournal {
                 {
                     return Err(JournalError::Conflict);
                 }
-                if inventory.committed_cutover_anchor.is_some() {
-                    validate_locked_migrated_tip(state, &scan, None)?;
-                }
+                validate_locked_migrated_tip(state, &scan, None)?;
                 Ok(())
             })
         }
@@ -868,9 +931,7 @@ mod platform {
                 if !inventory.orphans.is_empty() || inventory.has_unresolved_legacy_handoffs() {
                     return Err(JournalError::Conflict);
                 }
-                if inventory.committed_cutover_anchor.is_some() {
-                    validate_locked_migrated_tip(state, &scan, Some(&intent.transaction_id))?;
-                }
+                validate_locked_migrated_tip(state, &scan, Some(&intent.transaction_id))?;
                 let source = original(&scan, &intent.transaction_id)?;
                 if &source.intent != intent {
                     return Err(JournalError::Conflict);

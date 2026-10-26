@@ -44,6 +44,18 @@ pub mod native_state;
 pub mod native_transaction;
 mod secure_journal;
 pub use configuration::{ConfigurationMaintenance, OwnedConfigurationRoot};
+#[cfg(any(
+    all(target_os = "linux", target_env = "gnu"),
+    target_os = "macos",
+    target_os = "windows"
+))]
+mod release_stage;
+#[cfg(any(
+    all(target_os = "linux", target_env = "gnu"),
+    target_os = "macos",
+    target_os = "windows"
+))]
+pub(crate) use release_stage::{ReleaseCopyMember, ReleaseStage};
 mod payload;
 pub use payload::{PayloadInventory, PayloadLimits, PayloadMember, PinnedExecutable};
 

@@ -648,6 +648,15 @@ mod platform {
             if state.raw_bytes() != self.state_raw {
                 return Err(changed());
             }
+            let current = crate::store::native_host_snapshot::validated_runtime_selection(
+                &self.root,
+                &state,
+                transactions.marker(),
+            )
+            .map_err(|_| changed())?;
+            if self.candidate.runtime_selection().map_err(|_| changed())? != current {
+                return Err(changed());
+            }
             Ok(())
         }
     }
@@ -753,8 +762,6 @@ mod platform {
         {
             return Err(bad());
         }
-        let candidate = release::verify_selected(&ready.runtime)
-            .map_err(|_| BootstrapError::new("fresh_gateway_candidate_untrusted", 2))?;
         let writer = root
             .try_existing_configuration_writer()
             .map_err(|_| BootstrapError::new("fresh_gateway_configuration_busy", 3))?;
@@ -785,14 +792,24 @@ mod platform {
                     .get(),
             )
             .map_err(|_| bad())?;
-            let selected: NativeRuntimeSelection = serde_json::from_str(
-                state_value
-                    .extensions
-                    .get("runtime_selection_v1")
-                    .ok_or_else(bad)?
-                    .get(),
+            let selected = crate::store::native_host_snapshot::validated_runtime_selection(
+                &root,
+                &state,
+                transactions.marker(),
             )
-            .map_err(|_| bad())?;
+            .map_err(|_| changed())?;
+            let bootstrap = state_value
+                .runtime_update()
+                .map_err(|_| bad())?
+                .map_or_else(|| selected.clone(), |update| update.bootstrap_runtime);
+            let candidate = release::verify_selected(&selected)
+                .map_err(|_| BootstrapError::new("fresh_gateway_candidate_untrusted", 2))?;
+            if !candidate
+                .supports_state_reader(state_value.reader_contract)
+                .map_err(|_| changed())?
+            {
+                return Err(bad());
+            }
             let manager = if app_scope.is_some() {
                 NativeManager::AppManaged
             } else {
@@ -827,7 +844,7 @@ mod platform {
                         || (!service_owned && d.autostart != NativeAutostartDesired::Disabled)
                 })
                 || expected_binding != Sha256Digest::of_bytes(ready_raw.bytes())
-                || selected != ready.runtime
+                || bootstrap != ready.runtime
             {
                 return Err(bad());
             }
@@ -894,9 +911,10 @@ mod platform {
                 model_token,
                 inputs,
                 state.raw_bytes().to_vec(),
+                candidate,
             ))
         })();
-        let (tls, admin_token, model_token, inputs, state_raw) = match loaded {
+        let (tls, admin_token, model_token, inputs, state_raw, candidate) = match loaded {
             Ok(value) => value,
             Err(error) => {
                 return Err(error.retaining(Retained::Transactions {

@@ -538,9 +538,25 @@ mod platform {
             {
                 return Err(unknown());
             }
-            // runtime_selection brackets its original metadata read with full
-            // release revalidation; a third adjacent scan adds no new boundary.
-            if self.candidate.runtime_selection().map_err(|_| unknown())? != self.seed.runtime
+            // readstate already checks the complete C07 chain under the original
+            // join-store owner. Immutable seed runtime remains the bootstrap only.
+            let selected = state
+                .state()
+                .runtime_selection()
+                .map_err(|_| unknown())?
+                .ok_or_else(unknown)?;
+            let update = state.state().runtime_update().map_err(|_| unknown())?;
+            let bootstrap = update
+                .as_ref()
+                .map_or(&selected, |update| &update.bootstrap_runtime);
+            if bootstrap != &self.seed.runtime
+                || selected.publisher_spki_sha256 != self.seed.runtime.publisher_spki_sha256
+                || (update.is_some() && self.app_scope.is_some())
+                || !self
+                    .candidate
+                    .supports_state_reader(state.state().reader_contract)
+                    .map_err(|_| unknown())?
+                || self.candidate.runtime_selection().map_err(|_| unknown())? != selected
                 || self.store.seed_binding().map_err(|_| unknown())? != self.seed_raw.as_slice()
                 || self
                     .store
@@ -650,17 +666,32 @@ mod platform {
             let ca = Input::open(&path.join("host-ca.pem"), 128 * 1024)?;
             let private = Input::open(&path.join("host-identity.pem"), 16 * 1024)?;
             let key = DevicePrivateKey::from_pkcs8_pem(&private.raw).map_err(|_| unknown())?;
-            let candidate = release::verify_selected(&seed.runtime)
+            // The original store read above proves the complete C07 history.
+            let selected = state
+                .state()
+                .runtime_selection()
+                .map_err(|_| unknown())?
+                .ok_or_else(unknown)?;
+            let update = state.state().runtime_update().map_err(|_| unknown())?;
+            let bootstrap = update
+                .as_ref()
+                .map_or(&selected, |update| &update.bootstrap_runtime);
+            if update.is_some()
+                && (app_scope.is_some()
+                    || store.read(File::Ready).map_err(|_| unknown())?.is_none())
+            {
+                // Updating an incomplete enrollment cannot authorize replaying a
+                // request/claim/confirm. App-managed updates are not this slice.
+                return Err(bad());
+            }
+            let candidate = release::verify_selected(&selected)
                 .map_err(|_| JoinError::new("native_join_candidate_untrusted", 2))?;
-            let selected: NativeRuntimeSelection = serde_json::from_str(
-                state
-                    .state()
-                    .extensions
-                    .get("runtime_selection_v1")
-                    .ok_or_else(unknown)?
-                    .get(),
-            )
-            .map_err(|_| unknown())?;
+            if !candidate
+                .supports_state_reader(state.state().reader_contract)
+                .map_err(|_| unknown())?
+            {
+                return Err(bad());
+            }
             if seed.schema != 1
                 || seed.root_identity != identity(&root)
                 || seed.scope_generation != state.state().scope_generation
@@ -668,7 +699,8 @@ mod platform {
                 || seed.deployment_raw_sha256 != state.state().deployment_raw_sha256
                 || seed.gateway_origin != d.gateway.url
                 || seed.anchor_sha256 != d.gateway.expected_ca_sha256
-                || seed.runtime != selected
+                || &seed.runtime != bootstrap
+                || selected.publisher_spki_sha256 != seed.runtime.publisher_spki_sha256
                 || candidate.runtime_selection().map_err(|_| unknown())? != selected
                 || seed.label != d.host.label
                 || seed.cwd != text(&d.host.cwd)?

@@ -19,6 +19,8 @@ pub enum ReaderContract {
     NativeMigratedStateV1,
     /// Explicit reader barrier: typed native migration history, including Host-only.
     NativeMigratedStateV2,
+    /// Fresh-root runtime selection transactions; earlier state readers reject it.
+    NativeRuntimeSelectedStateV1,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

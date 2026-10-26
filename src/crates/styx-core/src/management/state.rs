@@ -12,7 +12,10 @@ pub enum NativeStateRuleError {
     ChangedExtensions,
 }
 pub fn validate_marker(marker: &NativeRootMarker) -> Result<(), NativeStateRuleError> {
-    if marker.schema != NATIVE_MARKER_SCHEMA {
+    if marker.schema != NATIVE_MARKER_SCHEMA
+        || marker.reader_floor
+            == styx_contracts::management::ReaderContract::NativeRuntimeSelectedStateV1
+    {
         return Err(NativeStateRuleError::InvalidMarker);
     }
     Ok(())
@@ -22,10 +25,14 @@ pub fn validate_state(
     marker: &NativeRootMarker,
 ) -> Result<(), NativeStateRuleError> {
     validate_marker(marker)?;
-    if state.schema != NATIVE_STATE_SCHEMA
-        || state.scope_generation != marker.scope_generation
-        || state.reader_contract != marker.reader_floor
-    {
+    let original_reader =
+        state.schema == NATIVE_STATE_SCHEMA && state.reader_contract == marker.reader_floor;
+    let selected_reader = state.schema == NATIVE_RUNTIME_SELECTED_STATE_SCHEMA
+        && state.reader_contract
+            == styx_contracts::management::ReaderContract::NativeRuntimeSelectedStateV1
+        && marker.reader_floor
+            == styx_contracts::management::ReaderContract::NativeManagementStateV1;
+    if (!original_reader && !selected_reader) || state.scope_generation != marker.scope_generation {
         return Err(NativeStateRuleError::InvalidState);
     }
     let migration_v2 = state
@@ -33,6 +40,9 @@ pub fn validate_state(
         .map_err(|_| NativeStateRuleError::InvalidState)?;
     match (&state.migration, state.reader_contract) {
         (None, styx_contracts::management::ReaderContract::NativeManagementStateV1) => (),
+        (None, styx_contracts::management::ReaderContract::NativeRuntimeSelectedStateV1) => {
+            runtime_update::validate_selected_state(state)?;
+        }
         (Some(migration), styx_contracts::management::ReaderContract::NativeMigratedStateV1)
             if state.revision > 0
                 && migration.original_token_relative_path
@@ -122,6 +132,8 @@ pub fn validate_transition(
                 .revision
                 .checked_add(1)
                 .ok_or(NativeStateRuleError::InvalidTransition)?
+        || target.schema != before.schema
+        || target.reader_contract != before.reader_contract
         || target.mode != before.mode
         || target.migration != before.migration
         || target.deployment_raw_sha256 != before.deployment_raw_sha256
@@ -185,3 +197,7 @@ fn runtime_policy_compatible(before: &NativeState, target: &NativeState, follow_
         && role(before.desired.host, target.desired.host, follow_run)
         && role(before.desired.gateway, target.desired.gateway, follow_run)
 }
+
+#[path = "runtime_update.rs"]
+mod runtime_update;
+pub use runtime_update::{validate_committed_transition, validate_runtime_transition};

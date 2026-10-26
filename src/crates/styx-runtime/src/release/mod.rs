@@ -1,4 +1,4 @@
-//! Read-only C08 native release verification. No installation, migration,
+//! C08 native release verification and exclusive immutable staging. No migration,
 //! activation, service mutation or child execution. Publisher approval and a
 //! verified closure do not establish runtime health or final release acceptance.
 #[cfg(any(
@@ -740,3 +740,8 @@ mod selection_tests {
     target_env = "msvc"
 ))]
 mod windows_tests;
+
+mod stage;
+pub use stage::stage;
+#[cfg(test)]
+mod stage_tests;

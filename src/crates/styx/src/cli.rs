@@ -418,6 +418,38 @@ enum GatewayCommand {
 
 #[derive(Subcommand)]
 enum ReleaseCommand {
+    /// Commit a verified runtime selection for a stopped fresh foreground profile.
+    Select {
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(long)]
+        runtime_selection_file: PathBuf,
+        #[arg(long)]
+        transaction_id: String,
+        #[arg(long)]
+        sequence: u64,
+        #[arg(long, required = true)]
+        authorize: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Copy a verified runtime to a new private version directory; never activates it.
+    Stage {
+        #[arg(long)]
+        payload_dir: PathBuf,
+        #[arg(long)]
+        publisher_file: PathBuf,
+        #[arg(long)]
+        expected_publisher: String,
+        #[arg(long)]
+        parent_dir: PathBuf,
+        #[arg(long)]
+        name: OsString,
+        #[arg(long, required = true)]
+        authorize: bool,
+        #[arg(long)]
+        json: bool,
+    },
     /// Read-only signature and payload verification; never installs or runs it.
     Verify {
         #[arg(long)]
@@ -1145,6 +1177,105 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
         },
         Command::Release {
             command:
+                ReleaseCommand::Select {
+                    state_dir,
+                    runtime_selection_file,
+                    transaction_id,
+                    sequence,
+                    authorize,
+                    json,
+                },
+        } => {
+            if !authorize {
+                return error("native_management_authorization_required");
+            }
+            match styx_runtime::management::native::update::select_runtime(
+                &state_dir,
+                &runtime_selection_file,
+                &transaction_id,
+                sequence,
+            )
+            .await
+            {
+                Ok(report) => {
+                    if !json {
+                        eprintln!(
+                            "Stopped profile runtime selection committed; start the role explicitly."
+                        );
+                    }
+                    if write_json(&report).is_ok() {
+                        ExitCode::SUCCESS
+                    } else {
+                        eprintln!(
+                            "{}",
+                            serde_json::json!({"schema":1,"error":"output_unavailable","outcome":"unknown","operations_replayed":false})
+                        );
+                        ExitCode::from(4)
+                    }
+                }
+                Err(value) => {
+                    eprintln!("{}", native_error_output(&value));
+                    ExitCode::from(value.exit_code())
+                }
+            }
+        }
+        Command::Release {
+            command:
+                ReleaseCommand::Stage {
+                    payload_dir,
+                    publisher_file,
+                    expected_publisher,
+                    parent_dir,
+                    name,
+                    authorize,
+                    json,
+                },
+        } => {
+            if !authorize {
+                return error("native_release_authorization_required");
+            }
+            match styx_runtime::release::stage(
+                &payload_dir,
+                &publisher_file,
+                &expected_publisher,
+                &parent_dir,
+                &name,
+            )
+            .await
+            {
+                Ok(selection) => {
+                    if !json {
+                        eprintln!(
+                            "Verified runtime staged; no configuration or running component changed."
+                        );
+                    }
+                    if write_json(&serde_json::json!({
+                        "schema": 1, "operation": "release_stage", "staged": true,
+                        "installed": false, "runtime_launched": false, "operations_replayed": false,
+                        "runtime_selection": selection,
+                    }))
+                    .is_ok()
+                    {
+                        ExitCode::SUCCESS
+                    } else {
+                        eprintln!(
+                            "{}",
+                            serde_json::json!({"schema":1,"error":"output_unavailable","outcome":"unknown","operations_replayed":false})
+                        );
+                        ExitCode::from(4)
+                    }
+                }
+                Err(value) => {
+                    eprintln!(
+                        "{}",
+                        serde_json::json!({"schema":1,"error":value.code(),"operations_replayed":false})
+                    );
+                    ExitCode::from(value.exit_code())
+                }
+            }
+        }
+        Command::Release {
+            command:
                 ReleaseCommand::Verify {
                     payload_dir,
                     publisher_file,
@@ -1564,11 +1695,12 @@ fn native_build_info() -> serde_json::Value {
     };
     serde_json::json!({
         "schema": 1, "target": target,
-        "minimum_release_reader": styx_contracts::native_release::NativeReleaseReader::NativeRuntimeMigratedV3,
+        "minimum_release_reader": styx_contracts::native_release::NativeReleaseReader::NativeRuntimeSelectedV1,
         "supported_state_readers": [
             styx_contracts::management::ReaderContract::NativeManagementStateV1,
             styx_contracts::management::ReaderContract::NativeMigratedStateV1,
-            styx_contracts::management::ReaderContract::NativeMigratedStateV2
+            styx_contracts::management::ReaderContract::NativeMigratedStateV2,
+            styx_contracts::management::ReaderContract::NativeRuntimeSelectedStateV1
         ]
     })
 }

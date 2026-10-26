@@ -644,6 +644,7 @@ impl WindowsMigrationRecovery {
             binding,
             journal: scope.journal,
             retained_maintenance: None,
+            retained_runtime_update: None,
         };
         let checked = (|| -> Result<_, NativeTransactionError> {
             if !transactions.configuration_root().same_authority(&owner) {
@@ -722,7 +723,7 @@ impl NativeTransactions {
         };
         let permit = Arc::new(permit);
         let preflight = (|| -> Result<_, NativeTransactionError> {
-            if self.retained_maintenance.is_some() {
+            if self.retained_maintenance.is_some() || self.retained_runtime_update.is_some() {
                 return Err(NativeTransactionError::Conflict);
             }
             let state = self.readstate()?;
@@ -862,6 +863,9 @@ impl NativeTransactions {
             binding,
             journal,
             retained_maintenance: _,
+            // The preflight above refuses runtime-update custody before moving
+            // this coordinator into the unrelated migration worker.
+            retained_runtime_update: _,
         } = self;
         let task = crate::store::platform::start_resume_validated_windows_host_migration(
             runtime,

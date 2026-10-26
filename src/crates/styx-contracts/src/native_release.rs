@@ -29,11 +29,16 @@ pub enum NativeReleaseReader {
     NativeRuntimeMigratedV2,
     /// Host admission v2 and durable migration-plan journal support.
     NativeRuntimeMigratedV3,
+    /// Fresh-root committed runtime update and compatible forward rollback.
+    NativeRuntimeSelectedV1,
 }
 impl NativeReleaseReader {
     /// Signed feature declaration, not evidence of successful migration.
     pub fn supports_host_admission_v2(self) -> bool {
-        self == Self::NativeRuntimeMigratedV3
+        matches!(
+            self,
+            Self::NativeRuntimeMigratedV3 | Self::NativeRuntimeSelectedV1
+        )
     }
 
     /// Signed reader declaration only; no runtime health or activation authority.
@@ -44,16 +49,23 @@ impl NativeReleaseReader {
                 Self::NativeRuntimeV1
                     | Self::NativeRuntimeMigratedV1
                     | Self::NativeRuntimeMigratedV2
-                    | Self::NativeRuntimeMigratedV3,
+                    | Self::NativeRuntimeMigratedV3
+                    | Self::NativeRuntimeSelectedV1,
                 ReaderContract::NativeManagementStateV1
             ) | (
                 Self::NativeRuntimeMigratedV1
                     | Self::NativeRuntimeMigratedV2
-                    | Self::NativeRuntimeMigratedV3,
+                    | Self::NativeRuntimeMigratedV3
+                    | Self::NativeRuntimeSelectedV1,
                 ReaderContract::NativeMigratedStateV1
             ) | (
-                Self::NativeRuntimeMigratedV2 | Self::NativeRuntimeMigratedV3,
+                Self::NativeRuntimeMigratedV2
+                    | Self::NativeRuntimeMigratedV3
+                    | Self::NativeRuntimeSelectedV1,
                 ReaderContract::NativeMigratedStateV2
+            ) | (
+                Self::NativeRuntimeSelectedV1,
+                ReaderContract::NativeRuntimeSelectedStateV1
             )
         )
     }
@@ -319,6 +331,7 @@ impl NativeReleaseManifest {
                     | NativeReleaseReader::NativeRuntimeMigratedV1
                     | NativeReleaseReader::NativeRuntimeMigratedV2
                     | NativeReleaseReader::NativeRuntimeMigratedV3
+                    | NativeReleaseReader::NativeRuntimeSelectedV1
             )
             || !worker_version(&self.version)
             || self.version.contains('+')
@@ -330,7 +343,12 @@ impl NativeReleaseManifest {
                 .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
             || self.entrypoint != self.target.entrypoint()
             || self.contracts.control != 1
-            || self.contracts.management_state != 2
+            || self.contracts.management_state
+                != if self.minimum_reader == NativeReleaseReader::NativeRuntimeSelectedV1 {
+                    3
+                } else {
+                    2
+                }
             || self.files.len() < 3
             || self.files.len() > NATIVE_RUNTIME_RELEASE_FILES
             || self.external_workers.len() > 3

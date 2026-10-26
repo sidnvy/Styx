@@ -23,7 +23,7 @@ use styx_contracts::{
     native_host::{NativeHostJoinSeed, NativeHostReady},
     native_management::{
         NativeAutostartDesired, NativeDeploymentMode, NativeManager, NativeRootIdentity,
-        NativeRunDesired,
+        NativeRunDesired, NativeRuntimeSelection,
     },
 };
 use zeroize::Zeroizing;
@@ -72,6 +72,7 @@ pub(crate) struct NativeHostSnapshot {
     journal: JournalObservation,
     pins: Vec<Pin>,
     seed: NativeHostJoinSeed,
+    current_selection: NativeRuntimeSelection,
     ready: NativeHostReady,
     ca: Vec<u8>,
     identity: Zeroizing<Vec<u8>>,
@@ -260,6 +261,25 @@ impl NativeHostSnapshot {
             return Err(JournalError::Conflict);
         }
         management::validate_readonly_native_tip(&journal, &canonical, &marker)?;
+        let current_selection = validated_runtime_selection(&root, &canonical, &marker)?;
+        let bootstrap = state
+            .runtime_update()
+            .map_err(|_| JournalError::Conflict)?
+            .map_or_else(
+                || current_selection.clone(),
+                |update| update.bootstrap_runtime,
+            );
+        if bootstrap != seed.runtime {
+            return Err(JournalError::Conflict);
+        }
+        let candidate = crate::release::verify_selected(&current_selection)
+            .map_err(|_| JournalError::Conflict)?;
+        if !candidate
+            .supports_state_reader(state.reader_contract)
+            .map_err(|_| JournalError::Conflict)?
+        {
+            return Err(JournalError::Conflict);
+        }
         let snapshot = Self {
             root,
             state_dir: path.to_owned(),
@@ -268,6 +288,7 @@ impl NativeHostSnapshot {
             journal,
             pins,
             seed,
+            current_selection,
             ready,
             ca,
             identity,
@@ -380,6 +401,11 @@ impl NativeHostSnapshot {
     }
     pub(crate) fn seed(&self) -> &NativeHostJoinSeed {
         &self.seed
+    }
+    /// Selected only after the complete original C07 chain and bootstrap binding
+    /// were verified. The caller still retains/revalidates the signed C08 object.
+    pub(crate) fn current_selection(&self) -> &NativeRuntimeSelection {
+        &self.current_selection
     }
     pub(crate) fn ready(&self) -> &NativeHostReady {
         &self.ready
@@ -505,4 +531,105 @@ fn same_scan(a: &JournalObservation, b: &JournalObservation) -> bool {
             .iter()
             .zip(&b.files)
             .all(|(a, b)| a.name == b.name && a.bytes() == b.bytes())
+}
+
+/// Existing-only complete C07 observation on the caller's retained root. No
+/// writer or namespace is created, and returned DATA is not execution authority.
+/// Both canonical/marker pins and the original namespace are checked around the
+/// parser, so an unproven pointer never becomes the current runtime selection.
+pub(crate) fn validated_runtime_selection(
+    root: &PrivateRoot,
+    canonical: &native_state::ValidatedNativeState,
+    marker: &styx_contracts::native_management::NativeRootMarker,
+) -> JournalResult<NativeRuntimeSelection> {
+    if !matches_root(&root.identity(), &marker.root_identity) {
+        return Err(JournalError::Conflict);
+    }
+    let marker_raw = root
+        .read_raw(".styx-native-root-v1.json", 4096)
+        .map_err(|_| JournalError::Unknown)?;
+    let actual_marker =
+        native_state::decode_marker(marker_raw.bytes()).map_err(|_| JournalError::Conflict)?;
+    let state_raw = root
+        .read_raw("state.json", MAX)
+        .map_err(|_| JournalError::Unknown)?;
+    if actual_marker != *marker || state_raw.bytes() != canonical.raw_bytes() {
+        return Err(JournalError::Unknown);
+    }
+    root.inner
+        .with_readonly_directory(|directory| {
+            let result = (|| {
+                let namespace = files::directory(directory, NAMESPACE)?;
+                let identity = directory_identity(&namespace)?;
+                let scan = files::scan(&namespace, JournalBudget::default())?;
+                let mut journal_pins = Vec::with_capacity(scan.files.len());
+                for file in &scan.files {
+                    let raw = root
+                        .read_raw(
+                            format!("{NAMESPACE}/{}", file.name),
+                            JournalBudget::default().max_file_bytes,
+                        )
+                        .map_err(|_| JournalError::Unknown)?;
+                    if raw.bytes() != file.bytes() {
+                        return Err(JournalError::Unknown);
+                    }
+                    journal_pins.push(raw);
+                }
+                management::validate_readonly_native_tip(&scan, canonical, marker)?;
+                let state = canonical.state();
+                let current = state
+                    .runtime_selection()
+                    .map_err(|_| JournalError::Conflict)?
+                    .ok_or(JournalError::Conflict)?;
+                if let Some(update) = state.runtime_update().map_err(|_| JournalError::Conflict)?
+                    && (current.publisher_spki_sha256
+                        != update.bootstrap_runtime.publisher_spki_sha256
+                        || state
+                            .desired
+                            .host
+                            .iter()
+                            .chain(state.desired.gateway.iter())
+                            .any(|d| d.manager == NativeManager::AppManaged))
+                {
+                    return Err(JournalError::Conflict);
+                }
+                let after = files::scan(&namespace, JournalBudget::default())?;
+                let current_namespace = files::directory(directory, NAMESPACE)?;
+                if !same_scan(&scan, &after)
+                    || directory_identity(&namespace)? != identity
+                    || directory_identity(&current_namespace)? != identity
+                {
+                    return Err(JournalError::Unknown);
+                }
+                for before in &journal_pins {
+                    let after = root
+                        .read_raw(
+                            before.relative_path(),
+                            JournalBudget::default().max_file_bytes,
+                        )
+                        .map_err(|_| JournalError::Unknown)?;
+                    if after.bytes() != before.bytes()
+                        || after.observation() != before.observation()
+                    {
+                        return Err(JournalError::Unknown);
+                    }
+                }
+                for (name, before) in [
+                    ("state.json", &state_raw),
+                    (".styx-native-root-v1.json", &marker_raw),
+                ] {
+                    let after = root
+                        .read_raw(name, MAX)
+                        .map_err(|_| JournalError::Unknown)?;
+                    if after.bytes() != before.bytes()
+                        || after.observation() != before.observation()
+                    {
+                        return Err(JournalError::Unknown);
+                    }
+                }
+                Ok(current)
+            })();
+            Ok(result)
+        })
+        .map_err(|_| JournalError::Unknown)?
 }

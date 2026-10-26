@@ -150,7 +150,7 @@ impl NativeTransactions {
         permit: SemaphorePermit<'static>,
     ) -> Result<MacMigrationRecoveryStart, Box<MacMigrationRecoveryFailure>> {
         let preflight = (|| -> Result<_, NativeTransactionError> {
-            if self.retained_maintenance.is_some() {
+            if self.retained_maintenance.is_some() || self.retained_runtime_update.is_some() {
                 return Err(NativeTransactionError::Conflict);
             }
             let state = self.readstate()?;
@@ -236,6 +236,9 @@ impl NativeTransactions {
             binding,
             journal,
             retained_maintenance: _,
+            // The preflight above refuses runtime-update custody before moving
+            // this coordinator into the unrelated migration worker.
+            retained_runtime_update: _,
         } = self;
         let task = start_resume_validated_host_migration(
             runtime,
@@ -352,6 +355,7 @@ impl MacMigrationRecovery {
             binding,
             journal: scope.journal,
             retained_maintenance: None,
+            retained_runtime_update: None,
         };
         let committed = (|| -> Result<_, NativeTransactionError> {
             if !transactions

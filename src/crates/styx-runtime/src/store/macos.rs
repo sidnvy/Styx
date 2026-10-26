@@ -591,3 +591,6 @@ pub(in crate::store) use migration_owner::{
     MacMigrationRejectedScope, MacResumedCutover, start_previous_boot_host_migration,
     start_resume_pre_cutover_host_migration, start_resume_validated_host_migration,
 };
+
+#[path = "release_stage_unix.rs"]
+mod release_staging;

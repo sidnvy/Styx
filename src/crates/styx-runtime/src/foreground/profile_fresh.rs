@@ -116,9 +116,10 @@ fn load_snapshot(
     }
     let bearer =
         SecretBearer::from_protected_reader(token.to_owned()).map_err(|_| ProfileError::Invalid)?;
+    let selection = snapshot.current_selection();
     let expected = PublisherFingerprint::parse(&seed.runtime.publisher_spki_sha256.to_hex())
         .map_err(|_| ProfileError::UntrustedRelease)?;
-    let inventory = release::ProfileRelease::from_native_selection(&seed.runtime, &expected)?;
+    let inventory = release::ProfileRelease::from_native_selection(selection, &expected)?;
     let executor = if inventory.has_worker(NativeExternalWorker::CodexExec) {
         Some(Arc::new(
             inventory.pin_worker(NativeExternalWorker::CodexExec)?,
@@ -225,7 +226,7 @@ fn load_snapshot(
             wire_mode: "paired_v3",
             version: signed_version,
             publisher_sha256: expected.as_hex().to_owned(),
-            manifest_sha256: seed.runtime.manifest_sha256,
+            manifest_sha256: selection.manifest_sha256,
             preservation: capture.public,
             tool_health: "NOT RUN",
             account_acceptance: "NOT RUN",

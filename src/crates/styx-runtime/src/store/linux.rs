@@ -679,3 +679,6 @@ pub(super) fn process_matches(identity: &ProcessIdentity) -> Result<bool> {
 #[path = "linux_payload.rs"]
 mod payload;
 pub(super) use payload::{PayloadSnapshot, PinnedImage};
+
+#[path = "release_stage_unix.rs"]
+mod release_staging;

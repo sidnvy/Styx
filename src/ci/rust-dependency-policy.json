@@ -477,6 +477,16 @@
       "kind": "explicit_owned_private_journal_files",
       "input": "protected STYX_TEST_MANAGEMENT_HANDOFF_ROOT; unique private fixture child; no installed configuration",
       "required_for": "Actual private-file partial rename and original journal reconciliation, same transaction/bytes/inodes retained, foreign transaction/canonical/orphan negatives. Synthetic boot facts; not Mac process recovery."
+    },
+    "store::native_transaction::runtime_update::tests::runtime_update_interruption_and_forward_rollback_batch": {
+      "kind": "explicit_owned_filesystem",
+      "input": "fresh STYX_TEST_NATIVE_RUNTIME_UPDATE_ROOT; signed synthetic C08 and two actual child exits",
+      "required_for": "native stopped runtime update, original C07 recovery and forward rollback; not installed images, App or platform acceptance"
+    },
+    "store::native_transaction::runtime_update::tests::runtime_update_interruption_child": {
+      "kind": "parent_owned_subprocess",
+      "input": "exact parent-owned fixture and persisted-step fault; never run independently",
+      "required_for": "child of runtime_update_interruption_and_forward_rollback_batch; actual process exit, not native execution acceptance"
     }
   },
   "change_policy": "dependency or ignored-test additions require explicit policy review; preserve mature Cargo tooling rather than replacing its resolver/compiler/lints",

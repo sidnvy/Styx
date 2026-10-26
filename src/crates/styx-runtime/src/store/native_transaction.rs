@@ -69,6 +69,7 @@ pub struct NativeTransactions {
     binding: NativeRootBinding,
     journal: OwnedManagementJournal,
     retained_maintenance: Option<ConfigurationMaintenance>,
+    retained_runtime_update: Option<runtime_update::RuntimeUpdateCustody>,
 }
 impl NativeTransactions {
     #[cfg(all(test, target_os = "linux", target_env = "gnu"))]
@@ -84,6 +85,7 @@ impl NativeTransactions {
                 binding,
                 journal,
                 retained_maintenance: None,
+                retained_runtime_update: None,
             }),
             Err(error) => Err(NativeTransactionOpenFailure {
                 error: error.into(),
@@ -156,6 +158,7 @@ impl NativeTransactions {
             binding,
             journal,
             retained_maintenance: None,
+            retained_runtime_update: None,
         })
     }
     /// The caller holds the original SharedEnrollment mutex and local control gate.
@@ -423,6 +426,7 @@ impl NativeTransactions {
         target_raw: &[u8],
     ) -> Result<(Vec<u8>, DesiredStateCommit), NativeTransactionError> {
         let before = self.readstate()?;
+        self.validate_complete_chain(&before)?;
         let target = native_state::decode_state(target_raw, self.binding.marker())
             .map_err(|_| NativeTransactionError::InvalidInput)?;
         let tx = target
@@ -505,6 +509,7 @@ impl NativeTransactions {
             target_os = "macos"
         ))]
         {
+            self.validate_update_publication(before, target, intent)?;
             use super::secure_journal::files;
             #[cfg(all(target_os = "linux", target_env = "gnu"))]
             use nix::fcntl::{RenameFlags, renameat2};
@@ -520,8 +525,13 @@ impl NativeTransactions {
                 let current = self.binding.read_locked(state)?;
                 let parsed_target = native_state::decode_state(target, marker)
                     .map_err(|_| JournalError::InvalidInput)?;
-                validate_transition(current.state(), parsed_target.state(), marker, intent)
-                    .map_err(|_| JournalError::Conflict)?;
+                styx_core::management::state::validate_committed_transition(
+                    current.state(),
+                    parsed_target.state(),
+                    marker,
+                    intent,
+                )
+                .map_err(|_| JournalError::Conflict)?;
                 if current.raw_bytes() != before
                     || current.raw_sha256() != intent.before_state_sha256
                     || parsed_target.raw_sha256() != intent.target_state_sha256
@@ -640,6 +650,7 @@ impl NativeTransactions {
         observer: &dyn Fn(&str, &str),
     ) -> Result<NativeCommitResult, NativeTransactionError> {
         let intent = transaction.snapshot().intent;
+        self.revalidate_runtime_custody()?;
         for stage in [
             DurableStage::Applied,
             DurableStage::Verified,
@@ -649,6 +660,7 @@ impl NativeTransactions {
             if stage_rank(stage) <= stage_rank(last) {
                 continue;
             }
+            self.revalidate_runtime_custody()?;
             self.binding.with_binding(|state, _| {
                 if self.binding.resync_locked(state)?.raw_sha256() != intent.target_state_sha256 {
                     return Err(JournalError::Conflict);
@@ -720,7 +732,19 @@ impl NativeTransactions {
         let original = self.journal.read_original(id)?;
         validate_original(&original, self.binding.marker())?;
         let transaction = replay(&original)?;
+        if transaction.snapshot().last_durable_stage != DurableStage::Committed {
+            self.validate_update_publication(&original.before, &original.target, &original.intent)?;
+        }
         let canonical = self.readstate()?;
+        if self.marker().reader_floor
+            == styx_contracts::management::ReaderContract::NativeManagementStateV1
+        {
+            if transaction.snapshot().last_durable_stage == DurableStage::Committed {
+                self.validate_complete_chain(&canonical)?;
+            } else {
+                self.validate_update_recovery_chain(id, &canonical)?;
+            }
+        }
         if transaction
             .recovery_decision(
                 &original.intent,
@@ -808,8 +832,13 @@ fn validate_original(
     {
         return Err(JournalError::Unknown);
     }
-    validate_transition(before.state(), target.state(), marker, &original.intent)
-        .map_err(|_| JournalError::Unknown)
+    styx_core::management::state::validate_committed_transition(
+        before.state(),
+        target.state(),
+        marker,
+        &original.intent,
+    )
+    .map_err(|_| JournalError::Unknown)
 }
 fn replay(original: &OriginalManagementTransaction) -> JournalResult<ManagementTransaction> {
     let intent = &original.intent;
@@ -885,3 +914,6 @@ pub(crate) use windows_migration::{
     WindowsHostMigrationReview, WindowsMigrationPreparationFailure, WindowsMigrationRecovery,
     begin_windows_host_migration, begin_windows_legacy_recovery, review_windows_host_migration,
 };
+
+#[path = "native_runtime_update.rs"]
+mod runtime_update;

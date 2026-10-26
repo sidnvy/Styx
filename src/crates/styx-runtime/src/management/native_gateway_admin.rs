@@ -291,6 +291,9 @@ impl Material {
             .map_err(|_| refused("native_gateway_admin_material"))?;
         let state = native_state::decode_state(files[1].bytes(), &marker)
             .map_err(|_| refused("native_gateway_admin_material"))?;
+        let selection =
+            crate::store::native_host_snapshot::validated_runtime_selection(&root, &state, &marker)
+                .map_err(|_| refused("native_gateway_admin_material"))?;
         let state = state.state();
         if marker.root_identity != root_identity(&root)
             || marker.reader_floor != ReaderContract::NativeManagementStateV1
@@ -314,25 +317,27 @@ impl Material {
                 .get(),
         )
         .map_err(|_| refused("native_gateway_admin_material"))?;
-        let selection: NativeRuntimeSelection = serde_json::from_str(
-            state
-                .extensions
-                .get("runtime_selection_v1")
-                .ok_or_else(|| refused("native_gateway_admin_material"))?
-                .get(),
-        )
-        .map_err(|_| refused("native_gateway_admin_material"))?;
+        let bootstrap = state
+            .runtime_update()
+            .map_err(|_| refused("native_gateway_admin_material"))?
+            .map_or_else(|| selection.clone(), |update| update.bootstrap_runtime);
         if binding != Sha256Digest::of_bytes(files[3].bytes())
             || ready.schema != 1
             || ready.root_identity != marker.root_identity
             || ready.scope_generation != marker.scope_generation
             || ready.deployment_raw_sha256 != state.deployment_raw_sha256
-            || ready.runtime != selection
+            || ready.runtime != bootstrap
         {
             return Err(refused("native_gateway_admin_material"));
         }
         let candidate = release::verify_selected(&selection)
             .map_err(|_| refused("native_gateway_admin_candidate"))?;
+        if !candidate
+            .supports_state_reader(state.reader_contract)
+            .map_err(|_| refused("native_gateway_admin_candidate"))?
+        {
+            return Err(refused("native_gateway_admin_candidate"));
+        }
         if candidate
             .runtime_selection()
             .map_err(|_| refused("native_gateway_admin_candidate"))?
@@ -421,6 +426,22 @@ impl Material {
         self.candidate
             .revalidate()
             .map_err(|_| refused("native_gateway_admin_material_changed"))?;
+        let marker = native_state::decode_marker(self.files[0].bytes())
+            .map_err(|_| refused("native_gateway_admin_material_changed"))?;
+        let state = native_state::decode_state(self.files[1].bytes(), &marker)
+            .map_err(|_| refused("native_gateway_admin_material_changed"))?;
+        let current = crate::store::native_host_snapshot::validated_runtime_selection(
+            &self.root, &state, &marker,
+        )
+        .map_err(|_| refused("native_gateway_admin_material_changed"))?;
+        if self
+            .candidate
+            .runtime_selection()
+            .map_err(|_| refused("native_gateway_admin_material_changed"))?
+            != current
+        {
+            return Err(refused("native_gateway_admin_material_changed"));
+        }
         for old in &self.files {
             let now = self
                 .root

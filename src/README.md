@@ -8,24 +8,43 @@ The product is implemented under src/ and is independent of deployed
 Charon/Coder services. Merging the candidate does not switch an endpoint or
 decommission an existing installation. Begin with [fresh native onboarding](docs/fresh-onboarding.md).
 
-The native CLI preparation, pairing, signed staging and per-user service helpers
-are implemented. A fresh plugin/account connection is an explicit acceptance
-step; historical native/SDK pilots do not establish it. The macOS precompiled
-preview provides a native menu-bar entry point and bundled local setup UI; see
-[macOS preview installation](docs/macos-preview-install.md). It is not notarized.
-Browser is implemented by the independent Playwright provider; account login and first-install acceptance remain separate release gates.
+The current portable fresh path uses the publisher-signed Rust native CLI and
+separate private Gateway/Host roots. It verifies the payload, bootstraps a
+loopback HTTPS Gateway, commits explicit Running intent with native plan/apply,
+and pairs a fresh Host through invitation, pending comparison, explicit approval
+and claim. Ordinary Gateway/Host foreground processes then provide native Exec.
+See [fresh onboarding](docs/fresh-onboarding.md) and the
+[exact CLI commands and failure outcomes](docs/rust-core-rewrite/NATIVE-CLI-PAIRING.md).
 
-The agreed product boundaries, current implementation gaps and migration acceptance
-criteria are tracked in [product boundaries](docs/product-boundaries.md). App and CLI
-are management surfaces over the same roles; deployment intent is not runtime readiness.
+Claim does not start a Host or refresh credentials. Reopen the same protected
+roots normally; do not pair again or automatically replay Unknown operations.
+Use public read-only environment status and an independently checked nonce effect
+to establish readiness, then close the MCP owner and await original Host/Gateway
+cleanup. A live socket or configuration commit alone is not runtime success.
 
-## Onboarding
+This route is a portable foreground workflow, not installer/update/rollback
+parity or account-side acceptance. Fresh Gateway bootstrap is currently loopback
+only. GUI/TCC, platform service and logout/reboot evidence must be assessed for
+the particular release; do not infer them from a headless Exec result. The
+agreed product boundaries and migration criteria remain in
+[product boundaries](docs/product-boundaries.md).
 
-The deterministic CLI and authenticated local setup UI are documented in
-[onboarding/README.md](onboarding/README.md). The original
-`v0.1.0-dev.20261019` source preview predates these features. Precompiled macOS
-preview packaging bundles the same core; account-side onboarding remains a
-separate acceptance step.
+## Current onboarding
+
+Follow [fresh native onboarding](docs/fresh-onboarding.md). The Node setup UI,
+`host/connect.mjs`, `gateway/cli.mjs` and enrollment helpers described below are
+historical prototypes or explicit interop fixtures. They are not a default
+fresh runtime and there is no automatic JS fallback. Existing installations use
+their separate explicit migration path; never apply fresh bootstrap to old state.
+
+## Historical source and pilot notes
+
+The remaining sections retain earlier source-preview commands and evidence for
+reproduction. Their feature claims and dates describe those prototypes, not the
+current Rust candidate or a completed cross-platform product acceptance. In
+particular, do not use their Node Gateway/Host examples instead of the current
+Rust onboarding above. [onboarding/README.md](onboarding/README.md) and older
+platform preview documents remain useful historical references.
 
 ## Optional CAS continuation experiment (not production)
 
@@ -105,7 +124,7 @@ three operating systems into non-committed host/fixture-cua-OS.json inputs,
 review versions and generate using node host/generate-portable-cua.mjs.
 Run all unit, integration and OS checks. Never silently pull latest binaries.
 
-## Starting a local test Gateway
+## Historical Node Gateway fixture
 
 Use config/targets.example.json only as an example; all endpoints are
 placeholders and there are no committed credentials. Save a private configured
@@ -124,7 +143,7 @@ Production deployment, OS permission changes, Tunnel changes, Coder/Charon
 migration and access to personal applications are explicitly excluded.
 
 
-## Outbound Host execution (implemented in preview)
+## Historical outbound Host execution preview
 
 The Gateway now accepts one authenticated Host-originated WebSocket per
 admitted Host ID. The connector supervises a local pinned Codex Exec
@@ -147,7 +166,7 @@ See docs/outbound-host.md. No production rollouts occurred.
 Outbound Host identity can use either a private bearer token or certificate-pinned WSS mTLS. See docs/outbound-host.md.
 
 
-## New milestone: Cua native MCP over outbound Host WebSocket
+## Historical milestone: Cua native MCP over outbound Host WebSocket
 
 The same installed Styx Host Connector can open a bounded pool of outbound
 Computer connections alongside its Codex Exec connection. Computer WebSockets
@@ -242,7 +261,7 @@ the test execution path. See docs/outbound-computer.md. It does not provision
 a production install or change OS permissions.
 
 
-## Pair a device without SSH/Coder — opt-in prototype
+## Historical pairing without SSH/Coder — opt-in prototype
 
 Gateway enrollment is disabled by default. If the operator additionally
 configures STYX_ENROLLMENT_DIR and STYX_ENROLL_ADMIN_TOKEN_FILE (owner bearer

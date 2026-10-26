@@ -9,6 +9,8 @@ use std::collections::BTreeMap;
 
 pub const NATIVE_MARKER_SCHEMA: u16 = 1;
 pub const NATIVE_STATE_SCHEMA: u16 = 2;
+/// Only the explicit runtime-selection reader may consume this state schema.
+pub const NATIVE_RUNTIME_SELECTED_STATE_SCHEMA: u16 = 3;
 pub const NATIVE_MARKER_BYTES: usize = 4096;
 pub const NATIVE_STATE_BYTES: usize = 1024 * 1024;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -275,4 +277,35 @@ pub struct NativeRuntimeSelection {
     pub manifest_sha256: Sha256Digest,
     pub publisher_file: String,
     pub publisher_spki_sha256: Sha256Digest,
+}
+
+/// Committed runtime-selection history DATA. The same original C07 chain,
+/// configuration/execution custody and signed C08 verifier supply authority.
+pub const NATIVE_RUNTIME_UPDATE_KEY: &str = "runtime_update_v1";
+pub const NATIVE_RUNTIME_SELECTION_KEY: &str = "runtime_selection_v1";
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeRuntimeUpdate {
+    pub schema: u16,
+    /// Original seed/ready runtime; never rewritten or used as a live pointer.
+    pub bootstrap_runtime: NativeRuntimeSelection,
+    pub previous_runtime: NativeRuntimeSelection,
+    pub transaction: NativeStateTransaction,
+}
+impl NativeState {
+    pub fn runtime_selection(&self) -> Result<Option<NativeRuntimeSelection>, serde_json::Error> {
+        self.extensions
+            .get(NATIVE_RUNTIME_SELECTION_KEY)
+            .map(|raw| serde_json::from_str(raw.get()))
+            .transpose()
+    }
+    pub fn runtime_update(&self) -> Result<Option<NativeRuntimeUpdate>, serde_json::Error> {
+        if self.reader_contract != ReaderContract::NativeRuntimeSelectedStateV1 {
+            return Ok(None);
+        }
+        self.extensions
+            .get(NATIVE_RUNTIME_UPDATE_KEY)
+            .map(|raw| serde_json::from_str(raw.get()))
+            .transpose()
+    }
 }

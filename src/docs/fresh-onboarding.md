@@ -1,98 +1,153 @@
 # Fresh native Styx onboarding
 
-This is the native CLI onboarding path for an independent Styx candidate. It
-does not need Charon, Coder, a previous conversation, or a pre-enrolled device.
-It is not a graphical installer or evidence that the actual account-side
-connection has passed. Use the new Styx plugin and its own HTTPS Gateway.
+The default fresh runtime is the Rust CLI from a publisher-signed native C08
+payload. Use [the current CLI command guide](rust-core-rewrite/NATIVE-CLI-PAIRING.md)
+for exact options and error outcomes. This is a portable, foreground pairing
+journey with separate private Gateway and Host directories. It is not an
+installer, an update/rollback flow, or proof of a ChatGPT account connection.
+Fresh Gateway bootstrap currently supports loopback HTTPS. The commands below
+use a Linux shell; they do not establish macOS/Windows GUI or service parity.
 
-Before starting, obtain the exact candidate source/release, native signed Host
-bundle, and trusted publisher public key with its independently confirmed
-SHA-256 SPKI DER fingerprint. Do not trust a fingerprint merely because it is
-beside a downloaded bundle. Bootstrap with a trusted local Node 22+; after
-preparation use the verified bundled Node reported by the command. Public
-artifact URLs/hashes belong in the concrete release handoff, not invented
-examples. Do not use prior pilot state or derive credentials from old services.
+Obtain the exact candidate payload, public publisher PEM and independently
+trusted original publisher SPKI SHA-256 pin from its release handoff. A pin
+beside a download is not an independent trust source. Keep the verified payload
+at its stable private location after creating runtime selection data. The
+headless Exec path requires the signed `codex_exec` worker; it does not require
+a Node Core, Browser or GUI permissions.
 
-## Prepare the native device
+## Verify and prepare a fresh Gateway
 
-Create a fresh private parent directory using the native owner-only permissions
-helper. Do not weaken or silently repair an existing directory. Save an
-owner-private JSON configuration containing these fields (paths are absolute):
-
-| Field | Meaning |
-| --- | --- |
-| `bundle` | Verified publisher's extracted native Host bundle |
-| `publisherKeyFile` | Publisher Ed25519 public PEM file |
-| `publisherSha256` | Independently trusted SHA-256 of its SPKI DER bytes |
-| `baseDir` | Fresh, nonexistent install/state directory under a private parent |
-| `gatewayUrl` | Exact new HTTPS Gateway origin; no credentials/query/path |
-| `label` | Human-readable device label |
-| `computer` | Explicit boolean granting requested GUI capability |
-| `gatewayCaFile` | Optional dedicated CA certificate, never a TLS bypass |
-| `macTeamID` | Required for macOS GUI; verify the already installed signed app |
-| `wayland` | Explicit Linux Wayland opt-in, only when needed |
-
-Run from the trusted candidate source:
+Use absolute paths. Create new owner-private input and profile parent directories
+(mode 0700 on Linux); do not adopt old state or repair an existing directory's
+permissions. Write inputs as mode-0600 files under a private parent. All names
+below are placeholders to replace with the release's actual paths and values.
 
 ```sh
-node src/host/setup-native.mjs prepare /absolute/private/setup.json
+STYX=/absolute/private/payload/bin/styx
+# Use a new output file; retain a failed command's output for inspection.
+(umask 077; set -C; "$STYX" release verify \
+  --payload-dir /absolute/private/payload \
+  --publisher-file /absolute/private/publisher.pem \
+  --expected-publisher ORIGINAL_TRUSTED_PIN --runtime-selection \
+  > /absolute/private/inputs/runtime-selection.json)
 ```
 
-The command verifies the publisher fingerprint, signature, every release file,
-native platform and complete bootstrap before creating state. It stages and
-activates the signed runtime, creates `enrollment.json` and `service.json`, and
-returns a receipt with the bundled `node` and `release_root`. It does not pair,
-request permissions, register a service or start remote execution. A partial
-failure is retained for inspection and cannot be blindly replayed over that
-directory. An existing install must use its separate verified update flow.
+Require verification success before continuing. In the input directory save a
+Gateway deployment, choosing an unused loopback port:
 
-On macOS, GUI preparation requires the publisher-signed `/Applications/Styx.app`
-and exact expected Apple team identity; app installation/signing is a separate
-artifact step. Open the app through LaunchServices and let the user grant TCC.
-The generated computer config connects to its private embedded socket.
-
-## Pair with explicit owner approval
-
-The Gateway owner uses its separate private admin configuration to issue a
-one-use invitation with `gateway/enroll-admin.mjs ... invite`. Transfer it to
-an owner-private local file; never put it in a plugin package or conversation.
-Use the bundled Node and signed release's `host/enroll.mjs`:
-
-```text
-<bundled-node> <release_root>/host/enroll.mjs onboard <baseDir>/enrollment.json <invitation-file>
+```json
+{"schema":1,"mode":"create-local","gateway":{"url":"https://127.0.0.1:22022/","listenHost":"127.0.0.1"}}
 ```
 
-The command shows only the public request ID, device ID and fingerprint. The
-owner compares the exact fingerprint against the native device output, then
-approves it via `gateway/enroll-admin.mjs ... approve REQUEST_ID FINGERPRINT`
-(append `computer` only for explicitly approved GUI). Model-facing MCP tokens
-cannot perform owner approval. Pairing writes private `device/host.json`; it
-does not install/start a service. Run signed `host/doctor.mjs` against that file.
+```sh
+"$STYX" gateway bootstrap --parent-dir /absolute/private/gateway-parent \
+  --name gateway --deployment-file /absolute/private/inputs/gateway.json \
+  --runtime-selection-file /absolute/private/inputs/runtime-selection.json --json
+"$STYX" plan --native --state-dir /absolute/private/gateway-parent/gateway \
+  --component gateway --run running --transaction-id gateway-first-run \
+  --sequence 1 --json
+"$STYX" apply --state-dir /absolute/private/gateway-parent/gateway \
+  --plan-file EXACT_PLAN_FILE_FROM_PREVIOUS_REPORT --authorize --json
+"$STYX" gateway run --state-dir /absolute/private/gateway-parent/gateway
+```
 
-## Enable the independent native service
+Bootstrap creates TLS and enrollment materials with desired Stopped. Plan/apply
+commits explicit Running intent; it does not start a listener. Keep `gateway run`
+in its original terminal and wait for its real listening event. Use another
+terminal for the following commands. Initial sequence 1 applies to this fresh
+root only; subsequent changes must use the actual current transaction sequence.
 
-Use the same bundled Node and signed release helpers. The generated service
-config uses a new product identity and refuses a foreign existing service:
+## Request and compare the original Host identity
 
-- Linux: `host/linux-service.mjs install styx-host.service <baseDir>/service.json`,
-  then explicit `enable` and `start` for that name.
-- macOS: `host/macos-launchagent.mjs install app.styx.connector <baseDir>/service.json`,
-  then `start app.styx.connector`; keep the signed GUI app running in that user.
-- Windows: `powershell.exe -NoProfile -File <release_root>/host/windows-task.ps1
-  -Action install -TaskName Styx-Host -ConfigPath <baseDir>/service.json`, then
-  `-Action start -TaskName Styx-Host` in the intended interactive user session.
+Create a one-use invitation in a new private file outside the Gateway root and
+payload. Its parent must already be private; an existing file is refused.
 
-Recheck local Doctor and service status. Add the new Styx plugin using the
-Gateway's separate model credential via the supported connection flow. Never
-reuse the owner/admin credential for the plugin.
+```sh
+"$STYX" gateway invite --state-dir /absolute/private/gateway-parent/gateway \
+  --invitation-file /absolute/private/inputs/invitation.txt \
+  --ttl-seconds 600 --authorize --json
+```
 
-## Fresh conversation acceptance
+The report exposes the output path and expiry, not the invitation. Keep invitation,
+admin and Host credentials out of argv, conversations and plugin packages. The
+Gateway's model MCP credential is separate from its owner/admin credential.
 
-Use only the new plugin, its instructions and this release's public handoff.
-Discover allowed environments, explicitly select the returned ID, inspect
-passive status, execute an exact marker, exercise PTY/readback/cleanup and a
-self-expiring owned GUI fixture. Verify owner revocation rejects the removed
-device and that a new conversation does not inherit old process/GUI handles.
-Record actual account-side results separately from SDK tests. Do not mark a
-device ready just because its outbound socket connected. Do not silently fall
-back to another plugin or backend when a step fails.
+Create a private Host deployment as described in the
+[CLI guide](rust-core-rewrite/NATIVE-CLI-PAIRING.md). It specifies `join-existing`,
+the same exact Gateway origin, `caFile`, `expectedCaSha256`, a Host `label`,
+private `cwd`, `/bin/bash` shell, `computer:false`, and the absolute
+`runtimeSelectionFile` and `invitationFile` paths. Browser is omitted for this
+headless journey. `expectedCaSha256` is the SHA-256 of the actual CA certificate's
+DER bytes, not its PEM text, SPKI or TLS leaf. For example:
+
+```sh
+openssl x509 -in /absolute/private/gateway-parent/gateway/gateway-ca.pem \
+  -outform DER | sha256sum
+"$STYX" host join request --parent-dir /absolute/private/host-parent \
+  --name host --deployment-file /absolute/private/inputs/host.json --json
+"$STYX" gateway pending --state-dir /absolute/private/gateway-parent/gateway --json
+```
+
+Request exactly once. Compare the Host's request ID, device ID, full fingerprint
+and comparison code with the pending entry. The code binds the original origin,
+verified TLS leaf, request and device fingerprint. Do not approve a different or
+expired request, and do not treat displaying the code as the user's comparison.
+
+```sh
+"$STYX" gateway approve --state-dir /absolute/private/gateway-parent/gateway \
+  --request-id EXACT_REQUEST_ID --device-id EXACT_DEVICE_ID \
+  --fingerprint EXACT_FINGERPRINT --comparison-code EXACT_COMPARISON_CODE \
+  --authorize --json
+"$STYX" host join claim --state-dir /absolute/private/host-parent/host --json
+```
+
+No Computer or Browser capability is enabled by default. `awaiting_approval` is
+not ready. A successful `ready_to_connect` claim requires original claim/confirm
+and current authenticated self proof; it starts no executor. Claim is not a
+credential refresh command and is not part of ordinary reconnect.
+
+## Connect, observe a real effect, and reopen
+
+```sh
+"$STYX" plan --native --state-dir /absolute/private/host-parent/host \
+  --component host --run running --transaction-id host-first-run --sequence 1 --json
+"$STYX" apply --state-dir /absolute/private/host-parent/host \
+  --plan-file EXACT_HOST_PLAN_FILE_FROM_PREVIOUS_REPORT --authorize --json
+"$STYX" host run --state-dir /absolute/private/host-parent/host
+```
+
+Wait for the original Host's connected event. Through the official MCP client or
+supported plugin connection, discover allowed environments, select the returned
+original device ID, and read `get_execution_environment_status`. Require that
+exact environment's access to be allowed and Exec connection to be connected;
+a socket connection alone is not readiness. This is read-only observation, not
+another approval.
+
+Issue one `exec_command` with a fresh nonce and a new file in the chosen private
+Host working directory. Use no-clobber creation, drain its native session to
+exit0, and independently inspect the file's exact bytes. Never repeat an Exec
+because its result is Unknown. Close the original MCP owner with session DELETE
+and client close; a close acknowledgment alone does not prove every remote job
+has joined.
+
+Stop the original foreground Host with Ctrl-C/TERM and wait for its joined
+cleanup and actual exit, including complete remote transport drain. Then stop
+and await Gateway. Preserve the same private roots and signed selection. Start
+Gateway and Host again with the same `gateway run`/`host run` commands, without a
+new invitation, request or claim. Confirm the same identity and pairing, observe
+the exact device connected, and perform a second fresh independent nonce before
+normal cleanup. Foreground exit does not change canonical Running intent.
+
+## Failure and acceptance limits
+
+A wrong approval binding is `not_dispatched`; an authenticated HTTP refusal is
+`rejected`. A lost post-send response or uncertain cleanup remains Unknown.
+Preserve the original transaction, files and process custody for explicit
+reconciliation; do not automatically replay invite, approve, Join, Confirm or
+business actions. Do not overwrite partial state or fall back to a JS runtime.
+
+Signed installer/update/rollback, remote ingress, GUI/TCC, Browser/Computer,
+persistent service and logout/reboot acceptance are separate paths. Native SDK
+proof does not establish actual account-side plugin acceptance. Historical Node
+setup/enrollment/service helpers remain archived implementation and interop
+material, not this default onboarding route.
