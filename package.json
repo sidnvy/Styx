@@ -12,7 +12,7 @@
     "test": "npm --prefix src run test:all",
     "quality": "node src/ci/quality.mjs",
     "build:checked": "node src/ci/build-checked.mjs",
-    "styx": "node src/onboarding/cli.mjs",
-    "gateway": "node src/gateway/cli.mjs"
+    "styx": "cargo run --locked --package styx --",
+    "gateway": "cargo run --locked --package styx -- gateway run"
   }
 }
