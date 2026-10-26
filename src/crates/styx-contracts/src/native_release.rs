@@ -31,13 +31,17 @@ pub enum NativeReleaseReader {
     NativeRuntimeMigratedV3,
     /// Fresh-root committed runtime update and compatible forward rollback.
     NativeRuntimeSelectedV1,
+    /// Original App-scope runtime selection and recovery; a distinct signed barrier.
+    NativeAppRuntimeSelectedV1,
 }
 impl NativeReleaseReader {
     /// Signed feature declaration, not evidence of successful migration.
     pub fn supports_host_admission_v2(self) -> bool {
         matches!(
             self,
-            Self::NativeRuntimeMigratedV3 | Self::NativeRuntimeSelectedV1
+            Self::NativeRuntimeMigratedV3
+                | Self::NativeRuntimeSelectedV1
+                | Self::NativeAppRuntimeSelectedV1
         )
     }
 
@@ -50,22 +54,28 @@ impl NativeReleaseReader {
                     | Self::NativeRuntimeMigratedV1
                     | Self::NativeRuntimeMigratedV2
                     | Self::NativeRuntimeMigratedV3
-                    | Self::NativeRuntimeSelectedV1,
+                    | Self::NativeRuntimeSelectedV1
+                    | Self::NativeAppRuntimeSelectedV1,
                 ReaderContract::NativeManagementStateV1
             ) | (
                 Self::NativeRuntimeMigratedV1
                     | Self::NativeRuntimeMigratedV2
                     | Self::NativeRuntimeMigratedV3
-                    | Self::NativeRuntimeSelectedV1,
+                    | Self::NativeRuntimeSelectedV1
+                    | Self::NativeAppRuntimeSelectedV1,
                 ReaderContract::NativeMigratedStateV1
             ) | (
                 Self::NativeRuntimeMigratedV2
                     | Self::NativeRuntimeMigratedV3
-                    | Self::NativeRuntimeSelectedV1,
+                    | Self::NativeRuntimeSelectedV1
+                    | Self::NativeAppRuntimeSelectedV1,
                 ReaderContract::NativeMigratedStateV2
             ) | (
-                Self::NativeRuntimeSelectedV1,
+                Self::NativeRuntimeSelectedV1 | Self::NativeAppRuntimeSelectedV1,
                 ReaderContract::NativeRuntimeSelectedStateV1
+            ) | (
+                Self::NativeAppRuntimeSelectedV1,
+                ReaderContract::NativeAppRuntimeSelectedStateV1
             )
         )
     }
@@ -332,6 +342,7 @@ impl NativeReleaseManifest {
                     | NativeReleaseReader::NativeRuntimeMigratedV2
                     | NativeReleaseReader::NativeRuntimeMigratedV3
                     | NativeReleaseReader::NativeRuntimeSelectedV1
+                    | NativeReleaseReader::NativeAppRuntimeSelectedV1
             )
             || !worker_version(&self.version)
             || self.version.contains('+')
@@ -344,10 +355,10 @@ impl NativeReleaseManifest {
             || self.entrypoint != self.target.entrypoint()
             || self.contracts.control != 1
             || self.contracts.management_state
-                != if self.minimum_reader == NativeReleaseReader::NativeRuntimeSelectedV1 {
-                    3
-                } else {
-                    2
+                != match self.minimum_reader {
+                    NativeReleaseReader::NativeAppRuntimeSelectedV1 => 4,
+                    NativeReleaseReader::NativeRuntimeSelectedV1 => 3,
+                    _ => 2,
                 }
             || self.files.len() < 3
             || self.files.len() > NATIVE_RUNTIME_RELEASE_FILES

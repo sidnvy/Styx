@@ -45,5 +45,13 @@ internal sealed class StyxSetup:Form {
   }catch(Exception error){status.Text="Setup could not finish. Existing versions and device settings are retained.\n"+error.Message;install.Text="Retry";install.Enabled=true;rollback.Enabled=File.Exists(Path.Combine(root,"installation.json"));desktop.Enabled=true;}
   finally{busy=false;progress.Style=ProgressBarStyle.Blocks;installationMutex.ReleaseMutex();}
  }
- [STAThread]static void Main(){Application.EnableVisualStyles();Application.SetCompatibleTextRenderingDefault(false);Application.Run(new StyxSetup());}
+ [STAThread]static void Main(){
+#if STYX_LEGACY_COMPARISON
+ Application.EnableVisualStyles();Application.SetCompatibleTextRenderingDefault(false);Application.Run(new StyxSetup());
+#else
+ // Native delivery uses the existing Inno engine and fixed Rust verifier.
+ // Embedded Node setup/rollback is not a native management fallback.
+ MessageBox.Show("Use the native Styx Inno installer. This legacy setup launcher cannot install or recover a native runtime.","Styx Setup",MessageBoxButtons.OK,MessageBoxIcon.Information);Environment.ExitCode=2;
+#endif
+ }
 }

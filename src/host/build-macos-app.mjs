@@ -189,12 +189,13 @@ export function macSwiftBuildArguments({source,output,arch=process.arch,sdkPath,
     ...(frameworkSearchPath?['-F',frameworkSearchPath,'-framework','Sparkle','-Xlinker','-rpath','-Xlinker','@executable_path/../Frameworks']:[]),
     ...(additionalSources.length?['-D','STYX_PRODUCT_UI']:[]),source,...additionalSources,'-o',output,'-framework','AppKit','-framework','ApplicationServices','-framework','CoreGraphics','-framework','SwiftUI','-framework','WebKit'];
 }
-export function buildMacApp({app,cuaBinary,version,buildNumber,updateRelease=false,platformUpdate,identity,teamID,notaryProfile,signingMode='distribution',localSigning,sdkPath,moduleCachePath}={}){
+export function buildMacApp({app,cuaBinary,version,buildNumber,updateRelease=false,platformUpdate,nativeRuntime=false,identity,teamID,notaryProfile,signingMode='distribution',localSigning,sdkPath,moduleCachePath}={}){
   assert(process.platform==='darwin','native_macos_build_required');
   const build=macAppBuildMetadata({version,buildNumber,updateRelease});
   // Developer ID output needs a distinct build even before a feed is enabled;
   // signing is not a claim that this artifact has been publicly published.
   if(identity&&signingMode==='distribution'||notaryProfile)assert(buildNumber!==undefined,'macos_distribution_build_number_required');
+  assert(typeof nativeRuntime==='boolean'&&(!nativeRuntime||platformUpdate===undefined),'native_outer_update_handoff_unavailable');
   const updater=normalizeMacPlatformUpdate(platformUpdate,{app,updateRelease});
   const plist=appInfoPlist(version,{buildNumber,updateRelease,platformUpdate,app});
   assert(['distribution','local-development'].includes(signingMode),'invalid_macos_signing_mode');
@@ -251,7 +252,7 @@ export function buildMacApp({app,cuaBinary,version,buildNumber,updateRelease=fal
     fs.copyFileSync(cuaBinary,driver,fs.constants.COPYFILE_EXCL);fs.chmodSync(driver,0o755);
     const inputHash=createHash('sha256').update(fs.readFileSync(cuaBinary)).digest('hex');
     execFileSync('/usr/bin/xcrun',swiftArgs,{stdio:'inherit',timeout:180000});
-    execFileSync('/usr/bin/xcrun',macSwiftBuildArguments({source:UPDATER,output:path.join(macos,'StyxUpdater'),sdkPath,moduleCachePath}),{stdio:'inherit',timeout:180000});
+    execFileSync('/usr/bin/xcrun',[...macSwiftBuildArguments({source:UPDATER,output:path.join(macos,'StyxUpdater'),sdkPath,moduleCachePath}),...(nativeRuntime?['-D','STYX_NATIVE_RUNTIME']:[])],{stdio:'inherit',timeout:180000});
     execFileSync('/usr/bin/plutil',['-lint',path.join(app,'Contents/Info.plist')],{stdio:'inherit'});
     for(const [command,args] of [...(updater?sparkleDistributionSigningPlan({app,identity,signingMode}):[]),...steps]){
       // A local keychain approval must not turn into an unattended long wait.
@@ -259,7 +260,7 @@ export function buildMacApp({app,cuaBinary,version,buildNumber,updateRelease=fal
       if(args[0]==='notarytool')assert(JSON.parse(output).status==='Accepted','notarization_not_accepted');
     }
     return {schema:1,bundle_id:MAC_BUNDLE_ID,version,buildNumber:build.buildNumber,buildNumberSource:build.buildNumberSource,updateRelease:build.updateRelease,arch:process.arch,
-      cua_version:observed,cua_input_sha256:inputHash,app,
+      cua_version:observed,cua_input_sha256:inputHash,app,nativeUpdaterMode:nativeRuntime?'native_handoff_blocked_no_legacy_core':'legacy_comparison',
       platformUpdate:sparkle?{frameworkVersion:sparkle.version,archiveSha256:sparkle.archiveSha256,feedUrl:updater.feedUrl,isolatedProbe:updater.isolatedProbe}:null,
       signing:localSigning!==undefined||identity?'PASS':'NOT RUN',
       signing_detail:localSigning!==undefined?'local_certificate_preview':identity?(signingMode==='local-development'?'apple_development_local_only':'developer_id_verified'):'unsigned_development_bundle',

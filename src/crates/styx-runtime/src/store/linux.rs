@@ -189,8 +189,8 @@ impl Root {
             self.create_private_export(name, bytes, observer)
         })
     }
-    // Only the store's bounded invitation exporter may use this without a
-    // configuration writer. Existing CREATE_NEW, private ownership and flush
+    // The bounded invitation exporter is the only writer-free caller; App
+    // immutable inputs retain their original container writer. CREATE_NEW and flush
     // semantics are identical; failed or partial files are never replaced.
     pub(super) fn create_private_export(
         &self,
@@ -682,3 +682,6 @@ pub(super) use payload::{PayloadSnapshot, PinnedImage};
 
 #[path = "release_stage_unix.rs"]
 mod release_staging;
+
+#[path = "app_runtime_inputs.rs"]
+mod app_runtime_inputs;

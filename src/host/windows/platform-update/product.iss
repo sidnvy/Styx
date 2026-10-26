@@ -1,6 +1,9 @@
 #ifndef SourceDir
   #error SourceDir is required
 #endif
+#ifndef NativePackage
+  #define NativePackage 0
+#endif
 [Setup]
 AppId={#ProductId}
 AppName={#ProductName}
@@ -62,6 +65,9 @@ procedure CaptureOwnedStartup(Gate: String);
 var Shell, Link: Variant; Target, Folder, VersionName, StateRoot: String; I, Code: Integer;
 begin
   StartupOwned := False;
+  // Native App startup remains owned by its original Rust coordinator. Never
+  // reinterpret a legacy registration or retarget it during a blocked upgrade.
+  if '{#NativePackage}' = '1' then exit;
   if not FileExists(StartupPath) then exit;
   if (NativeAttributes(StartupPath) and $400) <> 0 then exit;
   try
@@ -107,8 +113,11 @@ begin
     Result := 'Styx is still running. Finish any tasks, then choose Quit Styx and retry.';
     exit;
   end;
-  if not Exec(Gate, 'check "' + InstallRoot + '"', '', SW_HIDE, ewWaitUntilTerminated, Code) then Code := 2;
-  if Code = 1 then Result := 'Styx files are still in use. Finish any tasks and quit Styx before retrying.'
+  if '{#NativePackage}' = '1' then begin
+    if not Exec(Gate, 'check-native-install "' + InstallRoot + '"', '', SW_HIDE, ewWaitUntilTerminated, Code) then Code := 2;
+  end else if not Exec(Gate, 'check "' + InstallRoot + '"', '', SW_HIDE, ewWaitUntilTerminated, Code) then Code := 2;
+  if Code = 3 then Result := 'This native installer cannot confirm the original App/Core update handoff. Existing versions and device settings have not been changed.'
+  else if Code = 1 then Result := 'Styx files are still in use. Finish any tasks and quit Styx before retrying.'
   else if Code <> 0 then Result := 'Setup could not confirm that Styx has stopped. No program files have been changed. Close Styx and retry.';
 end;
 function PrepareToInstall(var NeedsRestart: Boolean): String;
@@ -135,4 +144,14 @@ begin
   end;
   CaptureOwnedStartup(ExpandConstant('{app}\.installer\StyxInstallGate.exe'));
   Result := True;
+end;
+
+procedure CurStepChanged(CurStep: TSetupStep);
+var Code: Integer; Candidate: String;
+begin
+  if (CurStep = ssPostInstall) and ('{#NativePackage}' = '1') then begin
+    Candidate := InstallRoot + '\versions\{#PackageHash}';
+    if not Exec(ExpandConstant('{app}\.installer\StyxInstallGate.exe'), 'verify-native "' + Candidate + '" "{#PackageHash}"', '', SW_HIDE, ewWaitUntilTerminated, Code) then Code := 2;
+    if Code <> 0 then RaiseException('Native package verification did not complete. Do not open this candidate; original device settings have not been changed.');
+  end;
 end;

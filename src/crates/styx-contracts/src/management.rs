@@ -21,6 +21,8 @@ pub enum ReaderContract {
     NativeMigratedStateV2,
     /// Fresh-root runtime selection transactions; earlier state readers reject it.
     NativeRuntimeSelectedStateV1,
+    /// App-owned runtime update history; the foreground selection reader is insufficient.
+    NativeAppRuntimeSelectedStateV1,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

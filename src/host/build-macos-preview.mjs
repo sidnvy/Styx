@@ -304,14 +304,14 @@ export function prepareNativeMacPreview(config){
  const verified=verifyNativeMacRuntime(nativeRuntime,process.arch);
  assert(sourceRevision===verified.report.source_revision,'native_app_source_revision_mismatch');
  fs.mkdirSync(destination,{mode:0o700});const app=path.join(destination,'image-root/Styx.app');
- const appBuild=buildMacApp({app,cuaBinary,version,buildNumber,sdkPath,moduleCachePath:moduleCachePath??path.join(destination,'swift-module-cache')});
+ const appBuild=buildMacApp({app,nativeRuntime:true,cuaBinary,version,buildNumber,sdkPath,moduleCachePath:moduleCachePath??path.join(destination,'swift-module-cache')});
  const resources=path.join(app,'Contents/Resources');
  const metadata={schema:1,nativeRuntime:copyNativeMacRuntime(nativeRuntime,resources,process.arch)};
  fs.writeFileSync(path.join(resources,'macos-runtime.json'),JSON.stringify(metadata,null,2)+'\n',{flag:'wx',mode:0o600});
  scanPrivateMaterial(app);
  const receipt={schema:1,kind:'prepared_native_rust_app',delivery:'NOT FINALIZED',sourceRevision,version,buildNumber,arch:process.arch,appBuild,
   sourceFiles,nativeRuntime:metadata.nativeRuntime,nativeSignatureSha256:verified.signatureSha256,runtimeSourceRevision:verified.report.source_revision,
-  readerActualWait:true,readerExitCode:0,files:preparedPreviewInventory(app),signing:'NOT RUN',native_gui_acceptance:'NOT RUN',tcc_attribution:'NOT RUN'};
+  nativeUpdater:'native_handoff_blocked_no_legacy_core',readerActualWait:true,readerExitCode:0,files:preparedPreviewInventory(app),signing:'NOT RUN',native_gui_acceptance:'NOT RUN',tcc_attribution:'NOT RUN'};
  assert(Object.entries(sourceFiles).every(([name,digest])=>sha(path.join(ROOT,...name.split('/')))===digest),'native_app_source_changed');
  fs.writeFileSync(path.join(destination,'prepared-native-app.json'),JSON.stringify(receipt,null,2)+'\n',{flag:'wx',mode:0o600});return receipt;
 }

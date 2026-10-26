@@ -37,6 +37,7 @@ function directory(name){const st=requirePrivateDirectory(name);requireNoMacAcl(
 // Authenticate only what is needed to execute the original native verifier.
 // No unverified payload process runs before external Ed25519 pin/raw signature,
 // fixed CLI location, whole CLI SHA and native Mach-O target have been checked.
+const nativeStateSchema=Object.freeze({native_runtime_migrated_v1:2,native_runtime_migrated_v2:2,native_runtime_migrated_v3:2,native_runtime_selected_v1:3,native_app_runtime_selected_v1:4});
 export function withAuthenticatedMacReader(input,arch,operation){
  assert(input&&Object.keys(input).sort().join(',')==='expectedPublisher,payloadDir,publisherFile','complete_native_runtime_inputs_required');
  assert(['x64','arm64'].includes(arch)&&absolute(input.payloadDir)&&absolute(input.publisherFile)&&hex(input.expectedPublisher),'native_macos_inputs_required');
@@ -49,7 +50,7 @@ export function withAuthenticatedMacReader(input,arch,operation){
   assert(key.asymmetricKeyType==='ed25519'&&createHash('sha256').update(key.export({format:'der',type:'spki'})).digest('hex')===input.expectedPublisher,'native_publisher_pin_mismatch');
   assert(verify(null,raw,key,sig),'native_release_signature_invalid');
   const manifest=JSON.parse(raw),target=arch==='x64'?'x86_64-apple-darwin':'aarch64-apple-darwin';
-  assert(manifest.schema===2&&manifest.runtime_format==='native_rust_v1'&&manifest.scope==='runtime_candidate'&&manifest.component==='styx'&&['native_runtime_migrated_v1','native_runtime_migrated_v2','native_runtime_migrated_v3'].includes(manifest.minimum_reader)&&manifest.target===target&&manifest.entrypoint==='bin/styx'&&Array.isArray(manifest.files),'native_macos_c08_required');
+  assert(manifest.schema===2&&manifest.runtime_format==='native_rust_v1'&&manifest.scope==='runtime_candidate'&&manifest.component==='styx'&&Object.hasOwn(nativeStateSchema,manifest.minimum_reader)&&manifest.contracts?.control===1&&manifest.contracts?.management_state===nativeStateSchema[manifest.minimum_reader]&&manifest.target===target&&manifest.entrypoint==='bin/styx'&&Array.isArray(manifest.files),'native_macos_c08_required');
   const entries=manifest.files.filter(m=>m.path==='bin/styx');assert(entries.length===1,'native_fixed_cli_required');const member=entries[0];
   assert(hex(member.sha256)&&member.executable===true&&Number.isSafeInteger(member.size)&&member.size>0&&member.size<=1073741824,'native_fixed_cli_required');
   const cli=path.join(input.payloadDir,'bin/styx'),image=hold(cli,1073741824);assert(image.stat.size===BigInt(member.size)&&digest(image.fd,1073741824)===member.sha256,'native_cli_hash_mismatch');

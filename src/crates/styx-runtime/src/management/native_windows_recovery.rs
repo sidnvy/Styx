@@ -23,6 +23,7 @@ pub(super) fn migration_error(
         kind,
         _retained: Some(Retained::WindowsMigrationPreparation { _owner: owner }),
         _app_scope: None,
+        runtime_update_transaction: None,
     }
 }
 async fn finish(

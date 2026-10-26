@@ -174,6 +174,32 @@ enum ProductRestorationPolicy {
     var nativeHost: Bool { client.isNativeHost }
     func nativeClaim() { guard !nativeMigrationPending else { return }; perform { [self] in _ = try await client.native("claimJoin") } }
     func nativePause() { perform { [self] in _ = try await client.native("disconnect") } }
+    var nativeRuntimeUpdate: ProductJSON { status["runtimeUpdate"] }
+    func nativeStageRuntime() {
+        perform { [self] in try applyNative(try await client.native("stageRuntime", ["authorize": .bool(true)])) }
+    }
+    func nativeCheckRuntimeUpdate() {
+        perform { [self] in try applyNative(try await client.native("runtimeUpdateStatus")) }
+    }
+    func nativeUpdateRuntime() {
+        guard !busy, nativeRuntimeUpdate["status"].string == "staged" else { return }
+        let alert = NSAlert()
+        alert.messageText = productText("更新运行组件？", "Update runtime components?")
+        alert.informativeText = productText("更新会暂停此 App 的连接，并保留身份、配对和设置。完成后请重新连接；未完成时请使用恢复按钮。", "Updating pauses this App’s connections and keeps your identity, pairing and settings. Reconnect when the update completes. If it does not complete, use Recover update.")
+        alert.addButton(withTitle: productText("保留设置并更新", "Keep settings and update"))
+        alert.addButton(withTitle: productText("取消", "Cancel"))
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        let transaction = "app-runtime-" + UUID().uuidString.lowercased()
+        perform { [self] in
+            try applyNative(try await client.native("updateRuntime", ["authorize": .bool(true), "transactionId": .string(transaction)]))
+        }
+    }
+    func nativeRecoverRuntimeUpdate() {
+        guard let transaction = nativeRuntimeUpdate["transaction_id"].string else { return }
+        perform { [self] in
+            try applyNative(try await client.native("recoverRuntimeUpdate", ["authorize": .bool(true), "transactionId": .string(transaction)]))
+        }
+    }
     #if STYX_TESTING
     var testSuppressObservations = false
     var testPreview = false

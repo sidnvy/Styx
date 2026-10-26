@@ -98,6 +98,7 @@ pub struct NativeManagementError {
     _retained: Option<Retained>,
     // Keep the App container until the retained coordinator has been dropped.
     _app_scope: Option<Arc<crate::app::HostScope>>,
+    runtime_update_transaction: Option<TransactionId>,
 }
 enum Retained {
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
@@ -127,6 +128,9 @@ enum Retained {
     },
 }
 impl NativeManagementError {
+    pub(crate) fn runtime_update_transaction(&self) -> Option<&TransactionId> {
+        self.runtime_update_transaction.as_ref()
+    }
     fn with_app_scope(mut self, scope: Arc<crate::app::HostScope>) -> Self {
         self._app_scope = Some(scope);
         self
@@ -199,6 +203,7 @@ impl NativeManagementError {
             kind,
             _retained: None,
             _app_scope: None,
+            runtime_update_transaction: None,
         }
     }
     fn transaction(error: NativeTransactionError) -> Self {
@@ -226,6 +231,7 @@ impl NativeManagementError {
             kind,
             _retained: Some(Retained::Bootstrap { _owner: error }),
             _app_scope: None,
+            runtime_update_transaction: None,
         }
     }
     fn open(error: NativeTransactionOpenFailure) -> Self {
@@ -234,6 +240,7 @@ impl NativeManagementError {
             kind,
             _retained: Some(Retained::Open { _owner: error }),
             _app_scope: None,
+            runtime_update_transaction: None,
         }
     }
 }
@@ -487,6 +494,7 @@ async fn review_migration_scoped(
                     kind,
                     _retained: Some(Retained::WindowsMigrationPreparation { _owner: owner }),
                     _app_scope: scope.clone(),
+                    runtime_update_transaction: None,
                 }
             })?;
             let canonical_plan = String::from_utf8(review.raw)
@@ -1006,7 +1014,7 @@ mod platform {
             transaction,
         })
     }
-    fn observed(
+    pub(super) fn observed(
         transactions: &NativeTransactions,
         id: &TransactionId,
     ) -> Result<NativeTransactionReport> {

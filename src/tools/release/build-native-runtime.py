@@ -402,7 +402,8 @@ def release_reader(receipt, binary_hash, target, inputs):
                 ('native_runtime_migrated_v1', ['native_management_state_v1', 'native_migrated_state_v1']),
                 ('native_runtime_migrated_v2', ['native_management_state_v1', 'native_migrated_state_v1', 'native_migrated_state_v2']),
                 ('native_runtime_migrated_v3', ['native_management_state_v1', 'native_migrated_state_v1', 'native_migrated_state_v2']),
-                    ('native_runtime_selected_v1', ['native_management_state_v1', 'native_migrated_state_v1', 'native_migrated_state_v2', 'native_runtime_selected_state_v1'])],
+                    ('native_runtime_selected_v1', ['native_management_state_v1', 'native_migrated_state_v1', 'native_migrated_state_v2', 'native_runtime_selected_state_v1']),
+                    ('native_app_runtime_selected_v1', ['native_management_state_v1', 'native_migrated_state_v1', 'native_migrated_state_v2', 'native_runtime_selected_state_v1', 'native_app_runtime_selected_state_v1'])],
             'reader_evidence_supported_contract_mismatch')
     return report['minimum_release_reader']
 
@@ -417,7 +418,7 @@ def validate_binary_location(receipt, binary, target, relocated, minimum_reader)
     # A copied artifact is bound by the original producer's SHA and actual
     # build-info observation. Its original locator is provenance, never opened
     # on this machine. This flag cannot upgrade historical receipts.
-    require(minimum_reader in ['native_runtime_migrated_v1', 'native_runtime_migrated_v2', 'native_runtime_migrated_v3', 'native_runtime_selected_v1']
+    require(minimum_reader in ['native_runtime_migrated_v1', 'native_runtime_migrated_v2', 'native_runtime_migrated_v3', 'native_runtime_selected_v1', 'native_app_runtime_selected_v1']
             and receipt.get('producer') == 'src/tools/release/build-native-binary.py'
             and isinstance(receipt.get('cli_build_info'), dict),
             'relocation_original_producer_evidence_required')
@@ -551,7 +552,7 @@ def build(args):
         manifest = dict(schema=2, runtime_format='native_rust_v1', component='styx', scope='runtime_candidate',
                         minimum_reader=minimum_reader, target=args.target, version=args.version,
                         entrypoint=entrypoint, source=dict(revision=args.source_revision, inputs_sha256=sha(source_raw)),
-                        contracts=dict(control=1, management_state=3 if minimum_reader == 'native_runtime_selected_v1' else 2), files=members, external_workers=kinds)
+                        contracts=dict(control=1, management_state=4 if minimum_reader == 'native_app_runtime_selected_v1' else (3 if minimum_reader == 'native_runtime_selected_v1' else 2)), files=members, external_workers=kinds)
         if closures:
             manifest['worker_closures'] = closures
         manifest_raw = encode(manifest)

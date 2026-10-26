@@ -36,6 +36,23 @@ fn write(path: &Path, bytes: &[u8], executable: bool) {
     file.sync_all().unwrap();
 }
 fn candidate(base: &Path, name: &str, key: &SigningKey, selected: bool) -> NativeRuntimeSelection {
+    candidate_reader(
+        base,
+        name,
+        key,
+        if selected {
+            "native_runtime_selected_v1"
+        } else {
+            "native_runtime_migrated_v3"
+        },
+    )
+}
+fn candidate_reader(
+    base: &Path,
+    name: &str,
+    key: &SigningKey,
+    reader: &str,
+) -> NativeRuntimeSelection {
     let payload = base.join(name);
     directory(&payload);
     directory(&payload.join("bin"));
@@ -80,10 +97,10 @@ fn candidate(base: &Path, name: &str, key: &SigningKey, selected: bool) -> Nativ
         .fingerprint()
         .unwrap();
     let manifest = serde_json::json!({"schema":2,"runtime_format":"native_rust_v1","component":"styx", "scope":"runtime_candidate",
-        "minimum_reader": if selected {"native_runtime_selected_v1"} else {"native_runtime_migrated_v3"},
+        "minimum_reader": reader,
         "target":"x86_64-unknown-linux-gnu","version":format!("0.4.0-test.{name}"),"entrypoint":"bin/styx",
         "source":{"revision":"1".repeat(40),"inputs_sha256":Sha256Digest::of_bytes(members[2].1)},
-        "contracts":{"control":1,"management_state":if selected {3} else {2}},"files":files,"external_workers":[]});
+        "contracts":{"control":1,"management_state":match reader { "native_app_runtime_selected_v1" => 4, "native_runtime_selected_v1" => 3, _ => 2 }},"files":files,"external_workers":[]});
     let raw = serde_json::to_vec(&manifest).unwrap();
     write(&payload.join("manifest.json"), &raw, false);
     write(
@@ -109,6 +126,14 @@ fn verified(base: &Path, name: &str) -> VerifiedNativeRelease {
     release::verify_selected(&selection_file(base, name)).unwrap()
 }
 fn create(base: &Path, bootstrap: &NativeRuntimeSelection, identity: &[u8]) -> NativeTransactions {
+    create_for_manager(base, bootstrap, identity, NativeManager::ForegroundCli)
+}
+fn create_for_manager(
+    base: &Path,
+    bootstrap: &NativeRuntimeSelection,
+    identity: &[u8],
+    manager: NativeManager,
+) -> NativeTransactions {
     directory(base);
     let parent = PrivateRoot::open(base).unwrap();
     let fresh = native_root::create_fresh(&parent, OsStr::new("native"))
@@ -126,7 +151,7 @@ fn create(base: &Path, bootstrap: &NativeRuntimeSelection, identity: &[u8]) -> N
         desired: NativeDesired {
             gateway: None,
             host: Some(NativeComponentDesired {
-                manager: NativeManager::ForegroundCli,
+                manager,
                 run: NativeRunDesired::Stopped,
                 autostart: NativeAutostartDesired::Disabled,
             }),
@@ -428,4 +453,168 @@ fn runtime_update_interruption_and_forward_rollback_batch() {
         );
     }
     // Retain every original fixture and interrupted journal for independent read.
+}
+
+#[test]
+fn app_scope_update_retains_original_writer_and_recovers_exact_transaction() {
+    use std::{
+        panic::{AssertUnwindSafe, catch_unwind},
+        sync::Arc,
+    };
+    let base =
+        std::env::temp_dir().join(format!("styx-app-runtime-update-{}", uuid::Uuid::new_v4()));
+    directory(&base);
+    let key = SigningKey::from_bytes(&[63; 32]);
+    let initial = candidate(&base, "initial-app", &key, false);
+    let target = candidate_reader(
+        &base,
+        "selected-app",
+        &key,
+        "native_app_runtime_selected_v1",
+    );
+    candidate(&base, "fore-only", &key, true);
+    let identity = b"synthetic original private identity, never exported";
+    let parent = base.join("app-container");
+    let mut tx = create_for_manager(&parent, &initial, identity, NativeManager::AppManaged);
+    let scope = Arc::new(crate::app::HostScope::open_for_test(&parent.join("native")).unwrap());
+    let foreign_parent = base.join("foreign-container");
+    let foreign_tx = create_for_manager(
+        &foreign_parent,
+        &initial,
+        identity,
+        NativeManager::AppManaged,
+    );
+    let foreign_scope =
+        Arc::new(crate::app::HostScope::open_for_test(&foreign_parent.join("native")).unwrap());
+    let id: TransactionId = "app-original-update".try_into().unwrap();
+    let before = tx.readstate().unwrap().raw_sha256();
+    assert!(
+        tx.update_runtime_for_app(
+            verified(&base, "initial-app"),
+            verified(&base, "selected-app"),
+            id.clone(),
+            1,
+            foreign_scope.clone()
+        )
+        .is_err()
+    );
+    assert_eq!(tx.readstate().unwrap().raw_sha256(), before);
+    assert!(!tx.has_runtime_update_custody());
+    // Lose only the response after the real original commit. The coordinator,
+    // C08 observations, actual scope and execution lock remain in this process.
+    let lost = catch_unwind(AssertUnwindSafe(|| {
+        tx.update_runtime_scoped_observing(
+            verified(&base, "initial-app"),
+            verified(&base, "selected-app"),
+            id.clone(),
+            1,
+            Some(scope.clone()),
+            &|stage, event| {
+                if (stage, event) == ("committed", "reply") {
+                    panic!("synthetic_original_reply_loss");
+                }
+            },
+        )
+    }));
+    assert!(lost.is_err());
+    assert!(tx.has_runtime_update_custody());
+    assert!(matches!(
+        PrivateRoot::open(parent.join("native"))
+            .unwrap()
+            .try_configuration_writer(),
+        Err(crate::store::StoreError::Busy(_))
+    ));
+    assert!(
+        tx.recover_retained_runtime_update_for_app(&foreign_scope, &id)
+            .is_err()
+    );
+    let wrong: TransactionId = "foreign-update-id".try_into().unwrap();
+    assert!(
+        tx.recover_retained_runtime_update_for_app(&scope, &wrong)
+            .is_err()
+    );
+    assert!(tx.has_runtime_update_custody());
+    let recovered = tx
+        .recover_retained_runtime_update_for_app(&scope, &id)
+        .unwrap();
+    assert!(recovered.recovered);
+    assert_eq!(recovered.transaction_id, id);
+    let current = tx.readstate().unwrap();
+    assert_eq!(
+        current.state().schema,
+        NATIVE_APP_RUNTIME_SELECTED_STATE_SCHEMA
+    );
+    assert_eq!(
+        current.state().reader_contract,
+        ReaderContract::NativeAppRuntimeSelectedStateV1
+    );
+    assert_eq!(
+        current.state().runtime_selection().unwrap().unwrap(),
+        target
+    );
+    assert!(!tx.has_runtime_update_custody());
+    complete_chain(&tx);
+    assert_eq!(
+        fs::read(parent.join("native/host-identity.pem")).unwrap(),
+        identity
+    );
+    // A foreground-only new reader cannot be projected into App schema4.
+    let bad_parent = base.join("wrong-reader-container");
+    let mut bad = create_for_manager(&bad_parent, &initial, identity, NativeManager::AppManaged);
+    let bad_scope =
+        Arc::new(crate::app::HostScope::open_for_test(&bad_parent.join("native")).unwrap());
+    let original = bad.readstate().unwrap().raw_sha256();
+    assert!(
+        bad.update_runtime_for_app(
+            verified(&base, "initial-app"),
+            verified(&base, "fore-only"),
+            "wrong-reader".try_into().unwrap(),
+            1,
+            bad_scope
+        )
+        .is_err()
+    );
+    assert_eq!(bad.readstate().unwrap().raw_sha256(), original);
+    assert!(
+        bad.query(&"wrong-reader".try_into().unwrap())
+            .unwrap()
+            .is_none()
+    );
+    // Running desired intent is rejected even if no process is currently live.
+    let run_parent = base.join("running-container");
+    let mut running =
+        create_for_manager(&run_parent, &initial, identity, NativeManager::AppManaged);
+    let run_scope =
+        Arc::new(crate::app::HostScope::open_for_test(&run_parent.join("native")).unwrap());
+    let mut bytes = running.readstate().unwrap().state().clone();
+    bytes.revision += 1;
+    bytes.last_transaction = Some(NativeStateTransaction {
+        transaction_id: "running-desired".try_into().unwrap(),
+        sequence: 1,
+    });
+    bytes.desired.host.as_mut().unwrap().run = NativeRunDesired::Running;
+    running
+        .apply_target(&serde_json::to_vec(&bytes).unwrap())
+        .unwrap();
+    let original = running.readstate().unwrap().raw_sha256();
+    assert!(
+        running
+            .update_runtime_for_app(
+                verified(&base, "initial-app"),
+                verified(&base, "selected-app"),
+                "running-update".try_into().unwrap(),
+                2,
+                run_scope
+            )
+            .is_err()
+    );
+    assert_eq!(running.readstate().unwrap().raw_sha256(), original);
+    assert!(
+        running
+            .query(&"running-update".try_into().unwrap())
+            .unwrap()
+            .is_none()
+    );
+    drop(foreign_tx);
+    // All private fixture files and failed observations intentionally remain.
 }

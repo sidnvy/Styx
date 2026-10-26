@@ -6,9 +6,9 @@ use crate::store::ExecutionLeaseGuard;
 use styx_contracts::{
     management::ReaderContract,
     native_management::{
-        NATIVE_RUNTIME_SELECTED_STATE_SCHEMA, NATIVE_RUNTIME_SELECTION_KEY,
-        NATIVE_RUNTIME_UPDATE_KEY, NativeRuntimeSelection, NativeRuntimeUpdate, NativeState,
-        NativeStateTransaction,
+        NATIVE_APP_RUNTIME_SELECTED_STATE_SCHEMA, NATIVE_RUNTIME_SELECTED_STATE_SCHEMA,
+        NATIVE_RUNTIME_SELECTION_KEY, NATIVE_RUNTIME_UPDATE_KEY, NativeRuntimeSelection,
+        NativeRuntimeUpdate, NativeState, NativeStateTransaction,
     },
 };
 
@@ -19,9 +19,15 @@ pub(super) struct RuntimeUpdateCustody {
     target: NativeRuntimeSelection,
     transaction: TransactionId,
     execution: Option<ExecutionLeaseGuard>,
+    app_scope: Option<std::sync::Arc<crate::app::HostScope>>,
 }
 impl RuntimeUpdateCustody {
     fn validate(&self) -> Result<(), NativeTransactionError> {
+        if let Some(scope) = &self.app_scope {
+            scope
+                .validate()
+                .map_err(|_| NativeTransactionError::UnknownInspect)?;
+        }
         self.previous
             .revalidate()
             .map_err(|_| NativeTransactionError::UnknownInspect)?;
@@ -57,7 +63,14 @@ fn runtime_transition(
         marker,
         intent,
     )
-    .is_ok())
+    .is_ok()
+        || styx_core::management::state::validate_app_runtime_transition(
+            before.state(),
+            target.state(),
+            marker,
+            intent,
+        )
+        .is_ok())
 }
 impl NativeTransactions {
     /// Internally generate the sole permitted selection-changing target. Both
@@ -81,7 +94,35 @@ impl NativeTransactions {
         sequence: u64,
         observer: &dyn Fn(&str, &str),
     ) -> Result<NativeCommitResult, NativeTransactionError> {
-        self.retain_update(previous, candidate, id.clone())?;
+        self.update_runtime_scoped_observing(previous, candidate, id, sequence, None, observer)
+    }
+    pub(crate) fn update_runtime_for_app(
+        &mut self,
+        previous: VerifiedNativeRelease,
+        candidate: VerifiedNativeRelease,
+        id: TransactionId,
+        sequence: u64,
+        scope: std::sync::Arc<crate::app::HostScope>,
+    ) -> Result<NativeCommitResult, NativeTransactionError> {
+        self.update_runtime_scoped_observing(
+            previous,
+            candidate,
+            id,
+            sequence,
+            Some(scope),
+            &|_, _| {},
+        )
+    }
+    fn update_runtime_scoped_observing(
+        &mut self,
+        previous: VerifiedNativeRelease,
+        candidate: VerifiedNativeRelease,
+        id: TransactionId,
+        sequence: u64,
+        scope: Option<std::sync::Arc<crate::app::HostScope>>,
+        observer: &dyn Fn(&str, &str),
+    ) -> Result<NativeCommitResult, NativeTransactionError> {
+        self.retain_update(previous, candidate, id.clone(), scope)?;
         let result = (|| {
             let before = self.readstate()?;
             self.validate_complete_chain(&before)?;
@@ -92,9 +133,25 @@ impl NativeTransactions {
             if selection(before.state())? != held.before {
                 return Err(NativeTransactionError::Conflict);
             }
+            if !held
+                .previous
+                .supports_state_reader(before.state().reader_contract)
+                .map_err(|_| NativeTransactionError::InvalidInput)?
+            {
+                return Err(NativeTransactionError::InvalidInput);
+            }
             let mut target = before.state().clone();
-            target.schema = NATIVE_RUNTIME_SELECTED_STATE_SCHEMA;
-            target.reader_contract = ReaderContract::NativeRuntimeSelectedStateV1;
+            let app_owned = held.app_scope.is_some();
+            target.schema = if app_owned {
+                NATIVE_APP_RUNTIME_SELECTED_STATE_SCHEMA
+            } else {
+                NATIVE_RUNTIME_SELECTED_STATE_SCHEMA
+            };
+            target.reader_contract = if app_owned {
+                ReaderContract::NativeAppRuntimeSelectedStateV1
+            } else {
+                ReaderContract::NativeRuntimeSelectedStateV1
+            };
             target.revision = target
                 .revision
                 .checked_add(1)
@@ -136,12 +193,21 @@ impl NativeTransactions {
                 target_state_sha256: Sha256Digest::of_bytes(&bytes),
                 reader: target.reader_contract,
             };
-            styx_core::management::state::validate_runtime_transition(
-                before.state(),
-                &target,
-                self.marker(),
-                &intent,
-            )
+            if app_owned {
+                styx_core::management::state::validate_app_runtime_transition(
+                    before.state(),
+                    &target,
+                    self.marker(),
+                    &intent,
+                )
+            } else {
+                styx_core::management::state::validate_runtime_transition(
+                    before.state(),
+                    &target,
+                    self.marker(),
+                    &intent,
+                )
+            }
             .map_err(|_| NativeTransactionError::InvalidInput)?;
             let inventory = self.journal.observe()?;
             if sequence <= inventory.high_water
@@ -201,7 +267,7 @@ impl NativeTransactions {
         candidate: VerifiedNativeRelease,
         id: &TransactionId,
     ) -> Result<NativeCommitResult, NativeTransactionError> {
-        self.retain_update(previous, candidate, id.clone())?;
+        self.retain_update(previous, candidate, id.clone(), None)?;
         let result = (|| {
             let expected = self
                 .runtime_update_selections(id)?
@@ -220,12 +286,110 @@ impl NativeTransactions {
         }
         result
     }
+    pub(crate) fn recover_runtime_update_for_app(
+        &mut self,
+        previous: VerifiedNativeRelease,
+        candidate: VerifiedNativeRelease,
+        id: &TransactionId,
+        scope: std::sync::Arc<crate::app::HostScope>,
+    ) -> Result<NativeCommitResult, NativeTransactionError> {
+        self.retain_update(previous, candidate, id.clone(), Some(scope.clone()))?;
+        self.recover_retained_runtime_update_for_app(&scope, id)
+    }
+    pub(crate) fn recover_retained_runtime_update_for_app(
+        &mut self,
+        scope: &std::sync::Arc<crate::app::HostScope>,
+        id: &TransactionId,
+    ) -> Result<NativeCommitResult, NativeTransactionError> {
+        self.validate_runtime_app_scope(scope)?;
+        let expected = self
+            .runtime_update_selections(id)?
+            .ok_or(NativeTransactionError::InvalidInput)?;
+        let held = self
+            .retained_runtime_update
+            .as_ref()
+            .ok_or(NativeTransactionError::Conflict)?;
+        if &held.transaction != id
+            || held
+                .app_scope
+                .as_ref()
+                .is_none_or(|s| !std::sync::Arc::ptr_eq(s, scope))
+            || expected != (held.before.clone(), held.target.clone())
+        {
+            return Err(NativeTransactionError::Conflict);
+        }
+        let original = self.journal.read_original(id)?;
+        let before = native_state::decode_state(&original.before, self.marker())
+            .map_err(|_| NativeTransactionError::UnknownInspect)?;
+        let target = native_state::decode_state(&original.target, self.marker())
+            .map_err(|_| NativeTransactionError::UnknownInspect)?;
+        if !held
+            .previous
+            .supports_state_reader(before.state().reader_contract)
+            .map_err(|_| NativeTransactionError::UnknownInspect)?
+            || !held
+                .candidate
+                .supports_state_reader(target.state().reader_contract)
+                .map_err(|_| NativeTransactionError::UnknownInspect)?
+        {
+            return Err(NativeTransactionError::Conflict);
+        }
+        held.validate()?;
+        let result = self.recover_original(id);
+        if result.is_ok() {
+            self.retained_runtime_update = None;
+        }
+        result
+    }
+    pub(crate) fn pending_app_transaction(
+        &self,
+    ) -> Result<Option<TransactionId>, NativeTransactionError> {
+        let inventory = self.journal.observe()?;
+        if !inventory.orphans.is_empty() {
+            return Err(NativeTransactionError::UnknownInspect);
+        }
+        let Some(last) = inventory.transactions.last() else {
+            return Ok(None);
+        };
+        if last
+            .phase_receipts
+            .last()
+            .is_some_and(|p| p.stage == DurableStage::Committed)
+        {
+            return Ok(None);
+        }
+        Ok(Some(last.intent.transaction_id.clone()))
+    }
+    pub(crate) fn has_runtime_update_custody(&self) -> bool {
+        self.retained_runtime_update.is_some()
+    }
+    pub(crate) fn runtime_update_high_water(&self) -> Result<u64, NativeTransactionError> {
+        Ok(self.journal.observe()?.high_water)
+    }
+    fn validate_runtime_app_scope(
+        &self,
+        scope: &std::sync::Arc<crate::app::HostScope>,
+    ) -> Result<(), NativeTransactionError> {
+        scope
+            .validate()
+            .map_err(|_| NativeTransactionError::UnknownInspect)?;
+        let root = crate::store::PrivateRoot::open(scope.state_dir())
+            .map_err(|_| NativeTransactionError::UnknownInspect)?;
+        if root.identity() != self.configuration_root().identity()? {
+            return Err(NativeTransactionError::Conflict);
+        }
+        Ok(())
+    }
     fn retain_update(
         &mut self,
         previous: VerifiedNativeRelease,
         candidate: VerifiedNativeRelease,
         id: TransactionId,
+        scope: Option<std::sync::Arc<crate::app::HostScope>>,
     ) -> Result<(), NativeTransactionError> {
+        if let Some(scope) = &scope {
+            self.validate_runtime_app_scope(scope)?;
+        }
         if self.retained_runtime_update.is_some() {
             return Err(NativeTransactionError::Conflict);
         }
@@ -238,7 +402,11 @@ impl NativeTransactions {
         let trusted = before.publisher_spki_sha256 == target.publisher_spki_sha256
             && previous.manifest().target == candidate.manifest().target
             && candidate
-                .supports_state_reader(ReaderContract::NativeRuntimeSelectedStateV1)
+                .supports_state_reader(if scope.is_some() {
+                    ReaderContract::NativeAppRuntimeSelectedStateV1
+                } else {
+                    ReaderContract::NativeRuntimeSelectedStateV1
+                })
                 .map_err(|_| NativeTransactionError::InvalidInput)?
             && candidate
                 .supports_state_reader(ReaderContract::NativeManagementStateV1)
@@ -250,6 +418,7 @@ impl NativeTransactions {
             target,
             transaction: id,
             execution: None,
+            app_scope: scope,
         });
         if !trusted {
             return Err(NativeTransactionError::InvalidInput);

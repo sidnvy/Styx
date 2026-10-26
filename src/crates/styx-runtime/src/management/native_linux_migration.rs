@@ -53,6 +53,7 @@ pub(super) async fn migrate(
             _owner: Box::new(owner),
         }),
         _app_scope: None,
+        runtime_update_transaction: None,
     })?;
     // No metadata flag alone grants success. Read the same formal committed
     // migration and its preserved materials after the actual owner task joined.

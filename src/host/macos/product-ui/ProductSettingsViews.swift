@@ -91,6 +91,21 @@ struct ProductSettingsView: View {
                 Text(productText("关闭窗口后，Styx 会在菜单栏继续运行。退出 Styx 后，ChatGPT 将无法使用这台电脑。", "Styx keeps running in the menu bar when you close a window. Quitting Styx makes this computer unavailable to ChatGPT.")).font(.caption).foregroundStyle(.secondary)
             }
             Section { LabeledContent(productText("版本", "Version"), value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—") }
+            if model.nativeHost {
+                VStack(alignment: .leading, spacing: 8) {
+                    Text(productText("原生运行组件", "Native runtime components")).font(.headline)
+                    Text(productText("候选来自此签名 App。更新保留身份、配对和设置，完成后不会自动连接。", "The candidate comes from this signed App. Updating keeps identity, pairing and settings, and does not reconnect automatically.")).font(.caption).foregroundStyle(.secondary)
+                    HStack {
+                        Button(productText("准备候选", "Stage candidate")) { model.nativeStageRuntime() }.disabled(model.busy || ![nil, "not_started", "committed"].contains(model.nativeRuntimeUpdate["status"].string))
+                        Button(productText("更新…", "Update…")) { model.nativeUpdateRuntime() }.disabled(model.busy || model.nativeRuntimeUpdate["status"].string != "staged")
+                        Button(productText("检查状态", "Check status")) { model.nativeCheckRuntimeUpdate() }.disabled(model.busy)
+                        if model.nativeRuntimeUpdate["can_recover"] == .bool(true) {
+                            Button(productText("恢复原事务", "Recover original transaction")) { model.nativeRecoverRuntimeUpdate() }.disabled(model.busy)
+                        }
+                    }
+                    if let state = model.nativeRuntimeUpdate["status"].string { Text(state).font(.caption) }
+                }
+            } else {
             if let notice = componentNotice {
                 Label(notice, systemImage: "exclamationmark.circle")
                     .font(.callout).foregroundStyle(.secondary)
@@ -111,6 +126,7 @@ struct ProductSettingsView: View {
                 if let state = model.payloadUpdateStatus["status"].string {
                     Text(state == "cancelled" ? productText("已取消，当前组件未更改。", "Cancelled. The current components were not changed.") : state == "applied_stopped" ? productText("组件已更新。", "Components updated.") : state == "rolled_back" ? productText("已恢复更新前的组件。", "Previous components restored.") : state == "not_started" ? productText("尚未开始更新。", "The update has not started.") : productText("更新尚未完成。可重试或取消尚未执行的更新；若已经开始更改，请使用更新窗口中的恢复入口。", "The update has not finished. Retry or cancel a pending update; if changes have started, use recovery in the updater window.")).font(.caption).foregroundStyle(.secondary)
                 }
+            }
         }.frame(maxWidth: .infinity, alignment: .leading)
     }
     private var componentNotice: String? {

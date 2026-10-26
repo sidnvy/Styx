@@ -11,6 +11,7 @@ pub const NATIVE_MARKER_SCHEMA: u16 = 1;
 pub const NATIVE_STATE_SCHEMA: u16 = 2;
 /// Only the explicit runtime-selection reader may consume this state schema.
 pub const NATIVE_RUNTIME_SELECTED_STATE_SCHEMA: u16 = 3;
+pub const NATIVE_APP_RUNTIME_SELECTED_STATE_SCHEMA: u16 = 4;
 pub const NATIVE_MARKER_BYTES: usize = 4096;
 pub const NATIVE_STATE_BYTES: usize = 1024 * 1024;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -300,7 +301,11 @@ impl NativeState {
             .transpose()
     }
     pub fn runtime_update(&self) -> Result<Option<NativeRuntimeUpdate>, serde_json::Error> {
-        if self.reader_contract != ReaderContract::NativeRuntimeSelectedStateV1 {
+        if !matches!(
+            self.reader_contract,
+            ReaderContract::NativeRuntimeSelectedStateV1
+                | ReaderContract::NativeAppRuntimeSelectedStateV1
+        ) {
             return Ok(None);
         }
         self.extensions

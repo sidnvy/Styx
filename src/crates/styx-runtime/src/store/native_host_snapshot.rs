@@ -584,12 +584,8 @@ pub(crate) fn validated_runtime_selection(
                 if let Some(update) = state.runtime_update().map_err(|_| JournalError::Conflict)?
                     && (current.publisher_spki_sha256
                         != update.bootstrap_runtime.publisher_spki_sha256
-                        || state
-                            .desired
-                            .host
-                            .iter()
-                            .chain(state.desired.gateway.iter())
-                            .any(|d| d.manager == NativeManager::AppManaged))
+                        || (state.desired.host.iter().chain(state.desired.gateway.iter()).any(|d| d.manager == NativeManager::AppManaged)
+                            != (state.reader_contract == styx_contracts::management::ReaderContract::NativeAppRuntimeSelectedStateV1)))
                 {
                     return Err(JournalError::Conflict);
                 }

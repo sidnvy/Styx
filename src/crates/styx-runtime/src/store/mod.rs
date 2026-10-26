@@ -465,6 +465,62 @@ impl PrivateRoot {
         Err(StoreError::Unsupported)
     }
 
+    /// Fixed App containers only, using the original retained container writer.
+    /// Existing directories are inspected without repairing ownership or permissions.
+    pub(crate) fn prepare_app_runtime_directory(
+        &self,
+        writer: &ConfigurationWriterGuard,
+        name: &str,
+    ) -> Result<Self> {
+        #[cfg(any(
+            target_os = "windows",
+            target_os = "macos",
+            all(target_os = "linux", target_env = "gnu")
+        ))]
+        {
+            Ok(Self {
+                inner: self.inner.app_runtime_directory(writer, name)?,
+            })
+        }
+        #[cfg(not(any(
+            target_os = "windows",
+            target_os = "macos",
+            all(target_os = "linux", target_env = "gnu")
+        )))]
+        {
+            let _ = (writer, name);
+            Err(StoreError::Unsupported)
+        }
+    }
+    /// Exclusive bounded original update inputs, not a replacement state ledger.
+    /// Caller retains its original scope/writer on any post-dispatch failure.
+    pub(crate) fn publish_app_runtime_file(
+        &self,
+        writer: &ConfigurationWriterGuard,
+        directory: &Self,
+        name: &str,
+        bytes: &[u8],
+    ) -> Result<RawFile> {
+        #[cfg(any(
+            target_os = "windows",
+            target_os = "macos",
+            all(target_os = "linux", target_env = "gnu")
+        ))]
+        {
+            self.inner
+                .app_runtime_file(writer, &directory.inner, name, bytes)
+        }
+        #[cfg(not(any(
+            target_os = "windows",
+            target_os = "macos",
+            all(target_os = "linux", target_env = "gnu")
+        )))]
+        {
+            let _ = (writer, directory, name, bytes);
+            Err(StoreError::Unsupported)
+        }
+    }
+
     /// App onboarding input only: fixed destinations, exclusive creation and
     /// native private-file publication. Caller retains the writer on failure;
     /// partial material is never overwritten or automatically retried.

@@ -5,6 +5,7 @@ mod local_gateway;
 mod migrated;
 mod migration;
 mod pairing_link;
+mod runtime_update;
 
 use crate::{
     foreground::{self, ForegroundError, ForegroundOutcome},
@@ -56,6 +57,10 @@ pub(crate) struct HostScope {
     root: OnceLock<PrivateRoot>,
 }
 impl HostScope {
+    #[cfg(test)]
+    pub(crate) fn open_for_test(state_dir: &Path) -> Result<Self, AppError> {
+        Self::open(state_dir)
+    }
     fn open(state_dir: &Path) -> Result<Self, AppError> {
         if !state_dir.is_absolute()
             || state_dir.components().any(|p| {
@@ -191,6 +196,10 @@ enum Operation {
     ReviewMigration,
     StartMigration,
     RecoverMigration,
+    StageRuntime,
+    UpdateRuntime,
+    RuntimeUpdateStatus,
+    RecoverRuntimeUpdate,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -307,6 +316,7 @@ impl RetainedFailure {
 }
 struct HostApp {
     migration: Option<migration::State>,
+    runtime_update: Option<runtime_update::State>,
     local_gateway: Option<local_gateway::LocalGateway>,
     resume_local_available: bool,
     committed_migration: bool,
@@ -344,6 +354,7 @@ impl HostApp {
         let (status, observed) = watch::channel(ConnectionStatus::stopped());
         let mut app = Self {
             migration: None,
+            runtime_update: None,
             local_gateway: None,
             resume_local_available: false,
             committed_migration: false,
@@ -369,6 +380,9 @@ impl HostApp {
                 if app.migration.is_some() {
                     return Ok(app);
                 }
+            }
+            if app.observe_runtime_update()? {
+                return Ok(app);
             }
             if let Err(error) = app.read_configuration().await {
                 if app.retained.is_none() {
@@ -412,7 +426,7 @@ impl HostApp {
             Self::open_with_selection(state_dir, &deployment, Some(selection.to_owned())).await?;
         // A committed original Host-only root is not a fresh split App setup.
         // Its original remote Gateway and pairing are never reconstructed.
-        if app.committed_migration || app.migration.is_some() {
+        if app.committed_migration || app.migration.is_some() || app.runtime_update_fenced() {
             return Ok(app);
         }
         let gateway_scope = Arc::new(app.scope.gateway_sibling()?);
@@ -569,6 +583,9 @@ impl HostApp {
     }
     fn available(&self) -> Result<(), AppError> {
         self.scope.validate()?;
+        if self.runtime_update_fenced() {
+            return Err(AppError("app_runtime_update_pending"));
+        }
         if self.migration_fenced() {
             return Err(AppError("app_migration_pending"));
         }
@@ -709,6 +726,7 @@ impl HostApp {
         // EOF waits for the original dispatched migration. Dropping the pipe
         // is never cancellation, a new writer, or a successful cleanup receipt.
         self.reap_migration(true).await;
+        self.reap_runtime_update(true).await;
         let host = self.settle().await;
         let gateway = match &mut self.local_gateway {
             Some(gateway) => gateway.settle().await,
@@ -717,7 +735,11 @@ impl HostApp {
         if gateway.is_err() {
             self.unknown = true;
         }
-        host.and(gateway)
+        host.and(gateway)?;
+        if self.runtime_update_fenced() {
+            return Err(AppError("app_runtime_update_pending"));
+        }
+        Ok(())
     }
     /// Both actual roles have joined before the one original-root C07 update.
     /// Gateway desired remains Running on Pause, preserving its existing role.
@@ -881,6 +903,7 @@ impl HostApp {
     }
     fn admission_fenced(&self) -> bool {
         self.migration_fenced()
+            || self.runtime_update_fenced()
             || self.unknown
             || self.retained.is_some()
             || self.quit_ticket.is_some()
@@ -912,7 +935,7 @@ impl HostApp {
     }
     async fn snapshot(&self) -> Value {
         let computer_requested = self.desktop_component_requested().await;
-        json!({"schema":1,"migration":self.migration,"configuration":self.configuration,"foreground":*self.observed.borrow(),"admission_fenced":self.admission_fenced(),"desktop_intent":{"schema":1,"computer_requested":computer_requested,"source":if self.committed_migration {"committed_original_local_intent"} else {"approved_host_configuration"}},"cleanup":self.cleanup,"gateway":self.local_gateway.as_ref().map(|g| g.status()),"enrollment":self.enrollment,"mode":"rust_host","supportedOperations":["startupStatus","status","createLocal","resumeLocal","inspectJoin","join","requestJoin","claimJoin","inspectHost","connect","disconnect","quitAdmission","reviewMigration","startMigration","recoverMigration"]})
+        json!({"schema":1,"migration":self.migration,"runtimeUpdate":self.runtime_update,"configuration":self.configuration,"foreground":*self.observed.borrow(),"admission_fenced":self.admission_fenced(),"desktop_intent":{"schema":1,"computer_requested":computer_requested,"source":if self.committed_migration {"committed_original_local_intent"} else {"approved_host_configuration"}},"cleanup":self.cleanup,"gateway":self.local_gateway.as_ref().map(|g| g.status()),"enrollment":self.enrollment,"mode":"rust_host","supportedOperations":["startupStatus","status","createLocal","resumeLocal","inspectJoin","join","requestJoin","claimJoin","inspectHost","connect","disconnect","quitAdmission","reviewMigration","startMigration","recoverMigration","stageRuntime","updateRuntime","runtimeUpdateStatus","recoverRuntimeUpdate"]})
     }
     async fn dispatch(
         &mut self,
@@ -928,13 +951,36 @@ impl HostApp {
                 | Operation::ReviewMigration
                 | Operation::StartMigration
                 | Operation::RecoverMigration
+                | Operation::StageRuntime
+                | Operation::UpdateRuntime
+                | Operation::RecoverRuntimeUpdate
         ) {
             let _: EmptyInput = decode_input(&input)?;
         }
+        self.reap_runtime_update(false).await;
         self.reap_migration(false).await;
         self.reap().await?;
         if matches!(operation, Operation::Status | Operation::StartupStatus) {
             self.scope.validate()?;
+            return Ok(self.snapshot().await);
+        }
+        if matches!(operation, Operation::RuntimeUpdateStatus) {
+            self.scope.validate()?;
+            return Ok(self.snapshot().await);
+        }
+        if matches!(operation, Operation::StageRuntime) {
+            self.stage_runtime(decode_input(&input)?).await?;
+            return Ok(self.snapshot().await);
+        }
+        if matches!(
+            operation,
+            Operation::UpdateRuntime | Operation::RecoverRuntimeUpdate
+        ) {
+            self.update_runtime(
+                decode_input(&input)?,
+                matches!(operation, Operation::RecoverRuntimeUpdate),
+            )
+            .await?;
             return Ok(self.snapshot().await);
         }
         if matches!(operation, Operation::ReviewMigration) {
@@ -976,6 +1022,9 @@ impl HostApp {
         }
         // A queued native migration owns its original writer. A UI Quit must
         // return promptly and must never abort it or pretend it has settled.
+        if matches!(operation, Operation::QuitAdmission) && self.runtime_update_running() {
+            return Err(AppError("app_runtime_update_in_progress"));
+        }
         if matches!(operation, Operation::QuitAdmission) && self.migration_running() {
             return Err(AppError("app_migration_in_progress"));
         }
@@ -1110,7 +1159,11 @@ impl HostApp {
             | Operation::Status
             | Operation::ReviewMigration
             | Operation::StartMigration
-            | Operation::RecoverMigration => unreachable!(),
+            | Operation::RecoverMigration
+            | Operation::StageRuntime
+            | Operation::UpdateRuntime
+            | Operation::RuntimeUpdateStatus
+            | Operation::RecoverRuntimeUpdate => unreachable!(),
         }
     }
 }
@@ -1193,7 +1246,7 @@ async fn serve_app<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         let response = match result {
             Ok(result) => json!({"id":request.id,"ok":true,"result":result}),
             Err(error) => {
-                json!({"id":request.id,"ok":false,"error":error.code(),"migration":app.migration})
+                json!({"id":request.id,"ok":false,"error":error.code(),"migration":app.migration,"runtimeUpdate":app.runtime_update})
             }
         };
         let encoded =

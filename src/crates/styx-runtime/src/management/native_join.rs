@@ -551,7 +551,6 @@ mod platform {
                 .map_or(&selected, |update| &update.bootstrap_runtime);
             if bootstrap != &self.seed.runtime
                 || selected.publisher_spki_sha256 != self.seed.runtime.publisher_spki_sha256
-                || (update.is_some() && self.app_scope.is_some())
                 || !self
                     .candidate
                     .supports_state_reader(state.state().reader_contract)
@@ -676,12 +675,9 @@ mod platform {
             let bootstrap = update
                 .as_ref()
                 .map_or(&selected, |update| &update.bootstrap_runtime);
-            if update.is_some()
-                && (app_scope.is_some()
-                    || store.read(File::Ready).map_err(|_| unknown())?.is_none())
-            {
+            if update.is_some() && store.read(File::Ready).map_err(|_| unknown())?.is_none() {
                 // Updating an incomplete enrollment cannot authorize replaying a
-                // request/claim/confirm. App-managed updates are not this slice.
+                // request/claim/confirm, including App-managed updates.
                 return Err(bad());
             }
             let candidate = release::verify_selected(&selected)
