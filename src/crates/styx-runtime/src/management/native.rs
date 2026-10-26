@@ -476,11 +476,9 @@ mod platform {
                 .migration_v2()
                 .map_err(|_| NativeManagementError::new(ErrorKind::Invalid))?
                 .ok_or_else(|| NativeManagementError::new(ErrorKind::Invalid))?;
-            state.migration.is_none() && match (state.mode,state.desired.host.is_some(),state.desired.gateway.is_some(),binding.history) {
-                (NativeDeploymentMode::JoinExisting,true,false,styx_contracts::native_management::NativeMigrationHistory::PreservedHostPair{..})=>true,
-                (NativeDeploymentMode::CreateLocal,true,true,styx_contracts::native_management::NativeMigrationHistory::ImportedLocalGateway{..})=>true,
-                _=>false,
-            }
+            state.migration.is_none() && matches!((state.mode,state.desired.host.is_some(),state.desired.gateway.is_some(),binding.history),
+                (NativeDeploymentMode::JoinExisting,true,false,styx_contracts::native_management::NativeMigrationHistory::PreservedHostPair{..}) |
+                (NativeDeploymentMode::CreateLocal,true,true,styx_contracts::native_management::NativeMigrationHistory::ImportedLocalGateway{..}))
         } else {
             false
         };

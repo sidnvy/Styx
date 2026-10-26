@@ -327,7 +327,7 @@ fn validate_paired_report<R>(raw: &[u8], original: &OriginalCutover<R>) -> Journ
             .binding,
     )
     .map_err(|_| JournalError::Conflict)?;
-    if !matches!(original.intent.schema, 2 | 3 | 4)
+    if !matches!(original.intent.schema, 2..=4)
         || report.schema != 1
         || report.transaction_id != original.intent.transaction_id
         || report.candidate_manifest_sha256 != original.intent.candidate_manifest_sha256
@@ -386,7 +386,7 @@ fn phase_bytes<R: Clone + Serialize>(
         }
         _ => None,
     };
-    let paired_validation_sha256 = if matches!(original.intent.schema, 2 | 3 | 4)
+    let paired_validation_sha256 = if matches!(original.intent.schema, 2..=4)
         && matches!(stage, DurableStage::Verified | DurableStage::Committed)
     {
         Some(
@@ -521,7 +521,7 @@ fn validate_materials<R: handoff::ProofRoot>(original: &OriginalCutover<R>) -> J
                 return Err(JournalError::Conflict);
             }
         }
-        (2 | 3 | 4, Some(endpoint)) => {
+        (2..=4, Some(endpoint)) => {
             if [
                 endpoint.binding.as_slice(),
                 endpoint.chain.as_slice(),
@@ -819,7 +819,7 @@ fn parse_cutover<R: handoff::ProofRoot, S: handoff::ProofStamp<R>>(
             }
             let record: PhaseRecord<R> =
                 serde_json::from_slice(bytes).map_err(|_| JournalError::Unknown)?;
-            let final_paired = matches!(intent.schema, 2 | 3 | 4)
+            let final_paired = matches!(intent.schema, 2..=4)
                 && matches!(stage, DurableStage::Verified | DurableStage::Committed);
             let expected_schema = if matches!(intent.schema, 3 | 4) {
                 intent.schema
@@ -1324,7 +1324,7 @@ impl OwnedManagementJournal {
                 // Fixed-size digest placeholders reserve bytes only. No future
                 // phase or synthetic validation report is written by prepare.
                 reserved.validation_sha256 = Some(Sha256Digest::from_bytes([0; 32]));
-                if matches!(reserved.intent.schema, 2 | 3 | 4) {
+                if matches!(reserved.intent.schema, 2..=4) {
                     reserved.paired_validation_sha256 = Some(Sha256Digest::from_bytes([0; 32]));
                 }
                 let mut previous = None;
@@ -1346,7 +1346,7 @@ impl OwnedManagementJournal {
                     name(&data.intent.transaction_id, "validation"),
                     Zeroizing::new(vec![0; MAX_VALIDATION]),
                 ));
-                if matches!(data.intent.schema, 2 | 3 | 4) {
+                if matches!(data.intent.schema, 2..=4) {
                     entries.push((
                         name(&data.intent.transaction_id, "paired-validation"),
                         Zeroizing::new(vec![0; MAX_VALIDATION]),
@@ -1578,7 +1578,7 @@ impl OwnedManagementJournal {
                 || committed.stage != DurableStage::Committed
                 || source.last_stage != DurableStage::Committed
                 || source.validation_report().is_none()
-                || (matches!(source.intent.schema, 2 | 3 | 4)
+                || (matches!(source.intent.schema, 2..=4)
                     && source.paired_validation_report().is_none())
             {
                 return Err(JournalError::Conflict);

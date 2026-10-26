@@ -243,8 +243,7 @@ pub(super) fn inventory(scan: &JournalObservation) -> JournalResult<ManagementIn
         }
         if transactions
             .iter()
-            .filter(|tx| tx.intent.sequence < record.sequence)
-            .next_back()
+            .rfind(|tx| tx.intent.sequence < record.sequence)
             .is_some_and(|tx| tx.intent.target_state_sha256 != before_state_sha256)
         {
             return Err(JournalError::Conflict);
@@ -330,22 +329,19 @@ pub(super) fn inventory(scan: &JournalObservation) -> JournalResult<ManagementIn
             .records
             .iter()
             .find(|r| r.intent.transaction_id == i.transaction_id)
+            && !plan.matches_recovery(&c.intent)
         {
-            if !plan.matches_recovery(&c.intent) {
-                return Err(JournalError::Conflict);
-            }
+            return Err(JournalError::Conflict);
         }
         if let Some(r) = handoff_inventory
             .native_records
             .iter()
             .find(|r| r.intent.transaction_id == i.transaction_id)
-        {
-            if !plan.complete()
+            && (!plan.complete()
                 || r.intent != *i
-                || r.observation().intent_sha256 != Sha256Digest::of_bytes(plan.retirement_raw())
-            {
-                return Err(JournalError::Conflict);
-            }
+                || r.observation().intent_sha256 != Sha256Digest::of_bytes(plan.retirement_raw()))
+        {
+            return Err(JournalError::Conflict);
         }
         let cutover = cutover_inventory
             .native_records
@@ -389,8 +385,7 @@ pub(super) fn inventory(scan: &JournalObservation) -> JournalResult<ManagementIn
                         .is_none_or(|p| p.stage != DurableStage::Committed))
         }) || transactions
             .iter()
-            .filter(|t| t.intent.sequence < i.sequence)
-            .next_back()
+            .rfind(|t| t.intent.sequence < i.sequence)
             .is_some_and(|t| t.intent.target_state_sha256 != i.before_state_sha256)
         {
             return Err(JournalError::Conflict);

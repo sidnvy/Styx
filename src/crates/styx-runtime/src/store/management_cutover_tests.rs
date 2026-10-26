@@ -1381,6 +1381,29 @@ fn preserved_remote_report_versions_keep_exact_bytes_and_refuse_mixed_evidence()
         validate_paired_report(&serde_json::to_vec(value).unwrap(), &remote)
     };
     assert!(check(&v2).is_ok());
+    // Reopening must respect the SIGNED reader feature declaration too, not
+    // merely the broad StateV2 reader floor. These are full codec fixtures;
+    // no actual candidate signature or native reopening is claimed here.
+    use crate::store::committed_runtime_native::validate_selected_reader_features;
+    use styx_contracts::native_release::NativeReleaseReader;
+    let v2_raw = serde_json::to_vec(&v2).unwrap();
+    assert!(
+        validate_selected_reader_features(
+            NativeReleaseReader::NativeRuntimeMigratedV2,
+            false,
+            &v2_raw
+        )
+        .is_err()
+    );
+    assert!(
+        validate_selected_reader_features(
+            NativeReleaseReader::NativeRuntimeMigratedV3,
+            false,
+            &v2_raw
+        )
+        .is_ok()
+    );
+
     // Required observations cannot be omitted or replaced with Unknown/false.
     for field in [
         "host_authenticated",
@@ -1474,6 +1497,23 @@ fn preserved_remote_report_versions_keep_exact_bytes_and_refuse_mixed_evidence()
     let saved = raw.clone();
     assert!(validate_paired_report(&raw, &remote).is_ok());
     assert_eq!(raw, saved); // Original bytes, never normalized into a new hash chain.
+    assert!(
+        validate_selected_reader_features(
+            NativeReleaseReader::NativeRuntimeMigratedV2,
+            false,
+            &raw
+        )
+        .is_ok()
+    );
+    assert!(
+        validate_selected_reader_features(NativeReleaseReader::NativeRuntimeMigratedV2, true, &raw)
+            .is_err()
+    );
+    assert!(
+        validate_selected_reader_features(NativeReleaseReader::NativeRuntimeMigratedV3, true, &raw)
+            .is_ok()
+    );
+
     for field in [
         "mcp_effect_verified",
         "foreign_owner_refused",

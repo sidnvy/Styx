@@ -179,6 +179,29 @@ fn stamp_matches(
         && observation.changed_nanoseconds == changed_nanoseconds
         && Sha256Digest::of_bytes(bytes) == stamp.content_sha256()
 }
+/// Signed-reader feature gate AFTER the original journal/report decoder. A
+/// readable StateV2 alone does not declare support for newer journal evidence.
+/// This observation grants no admission and never replaces full report checks.
+pub(in crate::store) fn validate_selected_reader_features(
+    reader: styx_contracts::native_release::NativeReleaseReader,
+    has_migration_plan: bool,
+    paired_report: &[u8],
+) -> JournalResult<()> {
+    #[derive(serde::Deserialize)]
+    struct Header {
+        schema: u16,
+    }
+    let header: Header =
+        serde_json::from_slice(paired_report).map_err(|_| JournalError::Conflict)?;
+    let admission_v2 = header.schema == 2;
+    if !reader.supports_state_reader(ReaderContract::NativeMigratedStateV2)
+        || ((has_migration_plan || admission_v2) && !reader.supports_host_admission_v2())
+    {
+        return Err(JournalError::Unsupported);
+    }
+    Ok(())
+}
+
 impl NativeCommittedRuntimeSnapshot {
     pub(crate) fn open_for_app(
         path: &Path,
@@ -244,7 +267,7 @@ impl NativeCommittedRuntimeSnapshot {
         }
         let root = Arc::new(PrivateRoot::open(path).map_err(|_| JournalError::Unknown)?);
         let namespace =
-            PrivateRoot::open(&path.join(NAMESPACE)).map_err(|_| JournalError::Unknown)?;
+            PrivateRoot::open(path.join(NAMESPACE)).map_err(|_| JournalError::Unknown)?;
         let scan = namespace
             .inner
             .with_readonly_directory(|d| Ok(files::scan(d, JournalBudget::default())))
@@ -309,13 +332,13 @@ impl NativeCommittedRuntimeSnapshot {
         let candidate = Arc::new(
             crate::release::verify_selected(&selection).map_err(|_| JournalError::Unknown)?,
         );
-        if !candidate
-            .manifest()
-            .minimum_reader
-            .supports_state_reader(ReaderContract::NativeMigratedStateV2)
-        {
-            return Err(JournalError::Unsupported);
-        }
+        validate_selected_reader_features(
+            candidate.manifest().minimum_reader,
+            !inventory.migration_plans.is_empty(),
+            original
+                .paired_validation_report()
+                .ok_or(JournalError::Conflict)?,
+        )?;
         let mut pins = Vec::new();
         for file in &scan.files {
             pin(&root, format!("{NAMESPACE}/{}", file.name), MAX, &mut pins)?;
@@ -506,8 +529,7 @@ impl NativeCommittedRuntimeSnapshot {
             pair.gateway_ca_pem_sha256,
         )?;
         let identity: serde_json::Value = serde_json::from_slice(
-            &host
-                .read_raw("device/identity.json", MAX)
+            host.read_raw("device/identity.json", MAX)
                 .map_err(|_| JournalError::Unknown)?
                 .bytes(),
         )
@@ -581,8 +603,8 @@ impl NativeCommittedRuntimeSnapshot {
             &self.state_dir,
             self.retirement.intent.service_descriptor_sha256,
         )?;
-        let current = PrivateRoot::open(&self.state_dir.join(NAMESPACE))
-            .map_err(|_| JournalError::Unknown)?;
+        let current =
+            PrivateRoot::open(self.state_dir.join(NAMESPACE)).map_err(|_| JournalError::Unknown)?;
         if current.identity() != self.namespace.identity() {
             return Err(JournalError::Unknown);
         }
@@ -661,7 +683,7 @@ impl NativeCommittedRuntimeSnapshot {
         for pin in &self.pins {
             pin.revalidate()?;
         }
-        if PrivateRoot::open(&self.state_dir.join(NAMESPACE))
+        if PrivateRoot::open(self.state_dir.join(NAMESPACE))
             .map_err(|_| JournalError::Unknown)?
             .identity()
             != self.namespace.identity()
