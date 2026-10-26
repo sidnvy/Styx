@@ -80,3 +80,105 @@ fn settlement_needs_all_original_physical_and_manager_facts() {
     assert!(!unobserved.term_attempted && !unobserved.signal_accepted && !unobserved.worker_joined);
     // These are pure fact reduction/schema controls, not a native stop test.
 }
+
+#[test]
+fn original_pidfd_distinguishes_live_read_failure_zombie_and_reaped_birth() {
+    use std::io::Write as _;
+    struct Child(std::process::Child);
+    impl Drop for Child {
+        fn drop(&mut self) {
+            self.0.stdin.take();
+            let _ = self.0.wait();
+        }
+    }
+    let mut child = Child(
+        std::process::Command::new("/bin/sh")
+            .args(["-c", "read line; exit 0"])
+            .stdin(std::process::Stdio::piped())
+            .spawn()
+            .expect("owned child"),
+    );
+    let original = ProcessIdentity::observe(child.0.id()).expect("original birth");
+    let pidfd = pidfd_open(
+        Pid::from_raw(child.0.id() as i32).unwrap(),
+        PidfdFlags::empty(),
+    )
+    .expect("original pidfd");
+    assert!(original.still_current().unwrap());
+    assert_eq!(
+        observe_main_exit(&original, Some(&pidfd), || Err(LegacyError::Unknown)),
+        Err(LegacyError::Unknown)
+    );
+    assert_eq!(
+        observe_main_exit(&original, Some(&pidfd), || Err(LegacyError::Conflict)),
+        Err(LegacyError::Conflict)
+    );
+    let exited = observe_main_exit(&original, Some(&pidfd), || {
+        child.0.stdin.take().unwrap().write_all(b"exit\n").unwrap();
+        use nix::poll::{PollFd, PollFlags, poll};
+        let mut watched = [PollFd::new(pidfd.as_fd(), PollFlags::POLLIN)];
+        assert_eq!(poll(&mut watched, 5000u16).unwrap(), 1);
+        // Deliberately do not wait yet: /proc/stat retains the original birth
+        // while /proc/exe is already gone. The production read really fails.
+        assert!(original.still_current().unwrap());
+        let error = File::open(format!("/proc/{}/exe", child.0.id())).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        Err(unknown(error))
+    })
+    .unwrap();
+    assert!(!exited, "pidfd readiness is not final birth disappearance");
+    assert!(
+        !OriginalObservation {
+            original_main_exited: exited,
+            original_cgroup_empty: true,
+            manager_reported_success: true
+        }
+        .confirmed()
+    );
+    assert!(child.0.wait().unwrap().success());
+    assert!(!original.still_current().unwrap());
+    assert!(
+        observe_main_exit(&original, Some(&pidfd), || panic!(
+            "reaped original is not live"
+        ))
+        .unwrap()
+    );
+}
+
+#[test]
+fn removed_held_directory_is_not_a_replacement_or_an_unreadable_live_scope() {
+    let root = std::env::temp_dir().join(format!("styx-held-cgroup-race-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir(&root).unwrap();
+    let path = root.join("original");
+    std::fs::create_dir(&path).unwrap();
+    let held = File::open(&path).unwrap();
+    let original = stat(&held).unwrap();
+    let events_path = root.join("events");
+    std::fs::write(&events_path, b"populated 0\n").unwrap();
+    let events = File::open(&events_path).unwrap();
+    assert_eq!(
+        observe_held_cgroup(&held, &original, &events, || Err(LegacyError::Unavailable)),
+        Err(LegacyError::Unavailable)
+    );
+    // Deterministically remove between held-nlink observation and pathname open.
+    assert!(
+        observe_held_cgroup(&held, &original, &events, || {
+            std::fs::remove_dir(&path).unwrap();
+            File::open(&path).map_err(unavailable)
+        })
+        .unwrap()
+    );
+    let replacement_path = root.join("replacement");
+    std::fs::create_dir(&replacement_path).unwrap();
+    let replacement = File::open(&replacement_path).unwrap();
+    let replacement_stat = stat(&replacement).unwrap();
+    assert_eq!(
+        observe_held_cgroup(&replacement, &replacement_stat, &events, || {
+            File::open(&root).map_err(unavailable)
+        }),
+        Err(LegacyError::Conflict)
+    );
+    std::fs::remove_dir(&replacement_path).unwrap();
+    std::fs::remove_file(&events_path).unwrap();
+    std::fs::remove_dir(&root).unwrap();
+}

@@ -1526,7 +1526,7 @@ async fn run_settlement(
         if Instant::now() >= deadline || cancel.is_cancelled() {
             return Err(LegacyError::Unknown);
         }
-        let observed = observe_original(&scope).await?;
+        let observed = observe_original_with_exit(&scope, Some(&pidfd)).await?;
         fact.original_main_exited = observed.original_main_exited;
         fact.original_cgroup_empty = observed.original_cgroup_empty;
         fact.manager_reported_success = observed.manager_reported_success;
@@ -1567,6 +1567,18 @@ impl OriginalObservation {
     }
 }
 async fn observe_original(scope: &Arc<LegacyManagedScope>) -> LegacyResult<OriginalObservation> {
+    observe_original_with_exit(scope, None).await
+}
+async fn observe_original_with_exit(
+    scope: &Arc<LegacyManagedScope>,
+    original_pidfd: Option<&OwnedFd>,
+) -> LegacyResult<OriginalObservation> {
+    // This duplicates the SAME birth-bound descriptor used for the one TERM.
+    // It only observes exit readiness; no new pid lookup or signal is made.
+    let original_pidfd = original_pidfd
+        .map(OwnedFd::try_clone)
+        .transpose()
+        .map_err(unknown)?;
     let bus = zbus::fdo::DBusProxy::new(&scope.connection)
         .await
         .map_err(unknown)?;
@@ -1648,27 +1660,15 @@ async fn observe_original(scope: &Arc<LegacyManagedScope>) -> LegacyResult<Origi
     let source = scope.clone();
     let (original_main_exited, original_cgroup_empty) = legacy_blocking(move || {
         source.inputs.verify_fence(&source.fence)?;
-        let exited = !source.main.still_current().map_err(unknown)?;
-        if !exited {
+        let exited = observe_main_exit(&source.main, original_pidfd.as_ref(), || {
             require_process_cgroup(original_pid, &source.cgroup_path, &source.cgroup_stat)?;
-            check_live_image(&source)?;
-        }
-        let held = stat(&source.cgroup)?;
-        let empty = if held.nlink == 0 {
-            // Original held directory was removed. A replacement pathname never
-            // becomes the old scope, even if a new unit uses the same name.
-            true
-        } else {
-            let current = open_checked(
-                &Path::new("/sys/fs/cgroup").join(source.cgroup_path.trim_start_matches('/')),
-                true,
-            )?;
-            let current = stat(&current)?;
-            if current.dev != source.cgroup_stat.dev || current.ino != source.cgroup_stat.ino {
-                return Err(LegacyError::Conflict);
-            }
-            cgroup_empty(&source.events)?
-        };
+            check_live_image(&source)
+        })?;
+        let path = Path::new("/sys/fs/cgroup").join(source.cgroup_path.trim_start_matches('/'));
+        let empty =
+            observe_held_cgroup(&source.cgroup, &source.cgroup_stat, &source.events, || {
+                open_checked(&path, true)
+            })?;
         Ok((exited, empty))
     })
     .await?;
@@ -1682,6 +1682,76 @@ async fn observe_original(scope: &Arc<LegacyManagedScope>) -> LegacyResult<Origi
             && status == 0,
     })
 }
+/// Readiness on the original pidfd means exiting (including an unreaped zombie),
+/// not that the original birth has disappeared or its manager reported success.
+fn original_exit_ready(pidfd: &OwnedFd) -> LegacyResult<bool> {
+    use nix::poll::{PollFd, PollFlags, PollTimeout, poll};
+    let mut watched = [PollFd::new(pidfd.as_fd(), PollFlags::POLLIN)];
+    poll(&mut watched, PollTimeout::ZERO).map_err(unknown)?;
+    let events = watched[0].revents().ok_or(LegacyError::Unknown)?;
+    if events.intersects(PollFlags::POLLERR | PollFlags::POLLNVAL) {
+        return Err(LegacyError::Unknown);
+    }
+    Ok(events.contains(PollFlags::POLLIN))
+}
+fn observe_main_exit(
+    original: &ProcessIdentity,
+    original_pidfd: Option<&OwnedFd>,
+    check_live: impl FnOnce() -> LegacyResult<()>,
+) -> LegacyResult<bool> {
+    if !original.still_current().map_err(unknown)? {
+        return Ok(true);
+    }
+    if let Some(fd) = original_pidfd
+        && original_exit_ready(fd)?
+    {
+        return Ok(false);
+    }
+    match check_live() {
+        Ok(()) => Ok(false),
+        Err(error @ (LegacyError::Unknown | LegacyError::Unavailable))
+            if original_pidfd.is_some() =>
+        {
+            if !original.still_current().map_err(unknown)? {
+                return Ok(true);
+            }
+            if original_exit_ready(original_pidfd.expect("checked original descriptor"))? {
+                return Ok(false);
+            }
+            Err(error)
+        }
+        Err(error) => Err(error),
+    }
+}
+fn observe_held_cgroup(
+    held: &File,
+    original: &Stat,
+    events: &File,
+    open_current: impl FnOnce() -> LegacyResult<File>,
+) -> LegacyResult<bool> {
+    let removed = || {
+        let now = stat(held)?;
+        if now.dev != original.dev || now.ino != original.ino {
+            return Err(LegacyError::Conflict);
+        }
+        Ok(now.nlink == 0)
+    };
+    if removed()? {
+        return Ok(true);
+    }
+    let observed = (|| {
+        let current = open_current()?;
+        let now = stat(&current)?;
+        if now.dev != original.dev || now.ino != original.ino {
+            return Err(LegacyError::Conflict);
+        }
+        cgroup_empty(events)
+    })();
+    match observed {
+        Err(LegacyError::Unknown | LegacyError::Unavailable) if removed()? => Ok(true),
+        result => result,
+    }
+}
 fn check_live_image(scope: &LegacyManagedScope) -> LegacyResult<()> {
     let pid = match &scope.main {
         ProcessIdentity::Linux { pid, .. } => *pid,
@@ -1694,14 +1764,21 @@ fn check_live_image(scope: &LegacyManagedScope) -> LegacyResult<()> {
     let expected = scope.inputs.argv();
     let mut file = File::open(format!("/proc/{pid}/cmdline")).map_err(unknown)?;
     let raw = read_file(&mut file, 16 * 1024)?;
+    // A process exiting between exe and cmdline reads can expose no argv.
+    // This is incomplete observation, not evidence of a replacement image.
+    if raw.is_empty() {
+        return Err(LegacyError::Unknown);
+    }
     if raw
         .split(|v| *v == 0)
         .filter(|v| !v.is_empty())
         .collect::<Vec<_>>()
         != expected.iter().map(|v| v.as_bytes()).collect::<Vec<_>>()
-        || !scope.main.still_current().map_err(unknown)?
     {
         return Err(LegacyError::Conflict);
+    }
+    if !scope.main.still_current().map_err(unknown)? {
+        return Err(LegacyError::Unknown);
     }
     Ok(())
 }
