@@ -995,18 +995,20 @@ struct UnitPin {
 impl UnitPin {
     async fn open(profile: &Profile, unit: &str, end: Instant) -> Result<Self> {
         check_scope(profile, unit)?;
-        let stream = timeout_at(
-            end,
-            tokio::net::UnixStream::connect(profile.runtime.join("bus")),
-        )
-        .await
-        .map_err(|_| ManagerError::Unknown)?
-        .map_err(|_| ManagerError::Unavailable)?;
+        Self::open_user(&profile.runtime, profile.identity.uid, unit, end).await
+    }
+    // Callers retain their own exact native unit definition and generation.
+    // This is the same authenticated current-user manager RefUnit port.
+    async fn open_user(runtime: &Path, uid: u32, unit: &str, end: Instant) -> Result<Self> {
+        let stream = timeout_at(end, tokio::net::UnixStream::connect(runtime.join("bus")))
+            .await
+            .map_err(|_| ManagerError::Unknown)?
+            .map_err(|_| ManagerError::Unavailable)?;
         if stream
             .peer_cred()
             .map_err(|_| ManagerError::Unavailable)?
             .uid()
-            != profile.identity.uid
+            != uid
         {
             return Err(ManagerError::Conflict);
         }
@@ -1036,7 +1038,7 @@ impl UnitPin {
                 .get_connection_unix_user(owner.as_ref().into())
                 .await
                 .map_err(|_| ManagerError::Unknown)?
-                != profile.identity.uid
+                != uid
             {
                 return Err(ManagerError::Conflict);
             }
@@ -1065,21 +1067,21 @@ impl UnitPin {
             }
         }
     }
+    async fn unref(&self) -> Result<()> {
+        let manager = SystemdManagerProxy::builder(&self.connection)
+            .destination(self.owner.as_str())
+            .map_err(|_| ManagerError::Invalid)?
+            .build()
+            .await
+            .map_err(|_| ManagerError::Unknown)?;
+        manager
+            .unref_unit(&self.unit)
+            .await
+            .map_err(|_| ManagerError::Unknown)
+    }
     async fn close(self) -> Result<()> {
         let until = Instant::now() + Duration::from_secs(2);
-        let result = async {
-            let manager = SystemdManagerProxy::builder(&self.connection)
-                .destination(self.owner.as_str())
-                .map_err(|_| ManagerError::Invalid)?
-                .build()
-                .await
-                .map_err(|_| ManagerError::Unknown)?;
-            manager
-                .unref_unit(&self.unit)
-                .await
-                .map_err(|_| ManagerError::Unknown)
-        }
-        .await;
+        let result = self.unref().await;
         let closed = timeout_at(until, self.connection.close()).await;
         if !matches!(closed, Ok(Ok(()))) {
             return Err(ManagerError::Unknown);

@@ -198,6 +198,9 @@ pub(crate) struct Definition {
     pin: Option<UnitPin>,
     runtime: PathBuf,
     operation_running: Option<RunningBinding>,
+    // RefUnit prevents GC from erasing this operation's terminal exit facts.
+    // Unknown keeps the original connection in the retained Definition.
+    manager_pin: Option<super::UnitPin>,
 }
 impl Definition {
     /// Installation alone may create missing fixed user-unit directories. No
@@ -271,6 +274,7 @@ impl Definition {
             pin,
             runtime,
             operation_running: None,
+            manager_pin: None,
         };
         result.validate()?;
         Ok(result)
@@ -496,7 +500,7 @@ impl Definition {
     /// Capture BEFORE committing Stopped or asking the original Core to drain.
     /// The actual original birth/CG handles remain here on every later failure.
     pub(crate) async fn prepare_stop(&mut self) -> ServiceResult<()> {
-        if self.operation_running.is_some() {
+        if self.operation_running.is_some() || self.manager_pin.is_some() {
             return Err(ServiceError::Conflict);
         }
         let before = self.inspect().await?;
@@ -504,9 +508,36 @@ impl Definition {
             return Err(ServiceError::Conflict);
         }
         self.operation_running = Some(self.bind_running(&before)?);
+        self.manager_pin = Some(
+            super::UnitPin::open_user(
+                &self.runtime,
+                Uid::current().as_raw(),
+                &self.unit,
+                Instant::now() + Duration::from_secs(5),
+            )
+            .await?,
+        );
+        // RefUnit is not generation authority. Bind only the unchanged original
+        // invocation, retaining the pin even if this observation becomes unknown.
+        let after = self.inspect().await?;
+        if after.main_pid != before.main_pid
+            || after.invocation_id != before.invocation_id
+            || !self
+                .operation_running
+                .as_ref()
+                .ok_or(ServiceError::Conflict)?
+                .birth
+                .still_current()
+                .map_err(unknown)?
+        {
+            return Err(ServiceError::Conflict);
+        }
         Ok(())
     }
-    pub(crate) async fn stop(&self, request_os_stop: bool) -> ServiceResult<ServiceObservation> {
+    pub(crate) async fn stop(
+        &mut self,
+        request_os_stop: bool,
+    ) -> ServiceResult<ServiceObservation> {
         let bound = self
             .operation_running
             .as_ref()
@@ -552,6 +583,14 @@ impl Definition {
                 && !bound.birth.still_current().map_err(unknown)?
                 && empty
             {
+                // Capture the exact terminal report before explicit UnrefUnit.
+                // An uncertain release retains the original pin/owner resources.
+                self.manager_pin
+                    .as_ref()
+                    .ok_or(ServiceError::Conflict)?
+                    .unref()
+                    .await?;
+                drop(self.manager_pin.take());
                 return Ok(status);
             }
             if Instant::now() >= until {
