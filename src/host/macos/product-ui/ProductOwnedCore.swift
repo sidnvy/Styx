@@ -274,29 +274,18 @@ final class ProductOwnedCore: @unchecked Sendable {
         try privateDirectory(support)
         let state = try selectedState(support)
         let container = support.appendingPathComponent("NativeRustHost-v1"); try privateDirectory(container)
-        let selectionURL: URL
-        if state.path == support.appendingPathComponent("Setup/deployment").path {
-            // Immutable candidate input only. The original Core transaction
-            // must commit its canonical selection; this file grants no upgrade
-            // authority and never replaces the separate profile's selection.
-            guard !selection.isEmpty, selection.count <= 16384 else { throw ProductOwnedCoreError.invalidPackage }
-            let candidates = container.appendingPathComponent("migration-candidates")
-            try privateDirectory(candidates)
-            selectionURL = candidates.appendingPathComponent(productDigest(selection) + ".json")
-            let fd = Darwin.open(selectionURL.path, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW | O_CLOEXEC, 0o600)
-            if fd >= 0 {
-                let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true); try handle.write(contentsOf: selection); try handle.synchronize(); try handle.close()
-            } else {
-                guard errno == EEXIST else { throw ProductOwnedCoreError.invalidPackage }
-            }
+        // Every verified package is an immutable candidate input. Preserve
+        // runtime-selection.json and the profile's canonical selection exactly;
+        // only Rust may decide compatibility or commit an authorized update.
+        guard !selection.isEmpty, selection.count <= 16384 else { throw ProductOwnedCoreError.invalidPackage }
+        let candidates = container.appendingPathComponent("migration-candidates")
+        try privateDirectory(candidates)
+        let selectionURL = candidates.appendingPathComponent(productDigest(selection) + ".json")
+        let fd = Darwin.open(selectionURL.path, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW | O_CLOEXEC, 0o600)
+        if fd >= 0 {
+            let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true); try handle.write(contentsOf: selection); try handle.synchronize(); try handle.close()
         } else {
-            // Preserve the independent profile's existing selection exactly.
-            selectionURL = container.appendingPathComponent("runtime-selection.json")
-            if !FileManager.default.fileExists(atPath: selectionURL.path) {
-                let fd = Darwin.open(selectionURL.path, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW | O_CLOEXEC, 0o600)
-                guard fd >= 0 else { throw ProductOwnedCoreError.invalidPackage }
-                let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true); try handle.write(contentsOf: selection); try handle.synchronize(); try handle.close()
-            }
+            guard errno == EEXIST else { throw ProductOwnedCoreError.invalidPackage }
         }
         let (selectionPin, originalSelection) = try pinned(selectionURL, limit: 16384, privateFile: true)
         // Existing candidate files must match exact verified bytes. A partial
