@@ -105,7 +105,7 @@ def source_inputs(root):
     files = [root / "Cargo.toml", root / "Cargo.lock", root / "rust-toolchain.toml", POLICY, Path(__file__).resolve()]
     for base in (root / "src/crates", root / "src/acceptance/oracles", root / "src/acceptance/interop-exec", root / "src/providers/browser-worker", root / "src/tools/release"):
         files += [p for p in base.rglob("*") if p.is_file() and "node_modules" not in p.parts and p.suffix in {".rs", ".toml", ".py", ".json", ".mjs"}]
-    files += [root / "src/packages/styx-browser-provider/playwright-contract-0.0.83.json", root / "src/shared/enrollment-protocol.mjs", root / "src/shared/deployment-scope.mjs", root / "src/scripts/legacy-deployment-hash-vectors.mjs", *[root / "src/docs/rust-core-rewrite" / name for name in ("LEGACY-WIRE-VECTORS-V1.json", "LEGACY-DEPLOYMENT-HASH-VECTORS.json", "CONTRACT-V1.json", "FEATURE-INVENTORY-V1.json", "PUBLIC-MCP-V1.json")]]
+    files += [root / "src/gateway/cua-portable-0.36.0.json", root / "src/packages/styx-browser-provider/playwright-contract-0.0.83.json", root / "src/shared/enrollment-protocol.mjs", root / "src/shared/deployment-scope.mjs", root / "src/scripts/legacy-deployment-hash-vectors.mjs", *[root / "src/docs/rust-core-rewrite" / name for name in ("LEGACY-WIRE-VECTORS-V1.json", "LEGACY-DEPLOYMENT-HASH-VECTORS.json", "CONTRACT-V1.json", "FEATURE-INVENTORY-V1.json", "PUBLIC-MCP-V1.json")]]
     return {str(p.relative_to(root)): sha(p) for p in sorted(set(files))}
 
 

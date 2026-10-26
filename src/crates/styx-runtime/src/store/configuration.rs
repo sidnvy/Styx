@@ -233,12 +233,12 @@ impl ConfigurationState {
         self.recovery_required = false;
         Ok(())
     }
-    /// Only the original Mac owner may consume its fresh committed capability.
+    /// Only the original native owner may consume its fresh committed capability.
     /// The capability has just checked the final chain under this SAME lock.
-    #[cfg(target_os = "macos")]
-    pub(super) fn finish_mac_cutover(
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
+    pub(super) fn finish_native_cutover(
         &mut self,
-        proof: &super::MacCommittedCutover<'_, '_, '_>,
+        proof: &super::NativeCommittedCutover<'_, '_, '_>,
         owner: &OwnedConfigurationRoot,
     ) -> JournalResult<()> {
         if !proof.matches_fenced_owner(owner, &self.root.identity(), self.fence.as_ref()) {

@@ -65,8 +65,15 @@ mod platform;
 #[path = "unsupported.rs"]
 mod platform;
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub(crate) use platform::NativeCommittedCutover;
 #[cfg(target_os = "macos")]
-pub(crate) use platform::{MacCanonicalCutover, MacCommittedCutover, MacRetiredMaterialSource};
+pub(crate) use platform::{MacCanonicalCutover, MacRetiredMaterialSource};
+
+#[cfg(target_os = "macos")]
+pub(crate) use platform::MacCanonicalCutover as NativeCanonicalCutover;
+#[cfg(target_os = "windows")]
+pub(crate) use platform::WindowsCanonicalCutover as NativeCanonicalCutover;
 
 #[cfg(target_os = "windows")]
 pub(crate) use platform::WindowsLocalExecutable;

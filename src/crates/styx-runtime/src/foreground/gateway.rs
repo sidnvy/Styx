@@ -1596,6 +1596,29 @@ mod platform {
 
         #[test]
         fn startup_closure_binds_actual_writer_lease_and_original_input() {
+            // Other parallel tests fork native children. CLOEXEC closes our
+            // lease at exec, not fork: an unrelated pre-exec child can briefly
+            // retain the open-file description after this test drops it. Run
+            // the ownership assertions in one exact-test process, so immediate
+            // release tests our actual owner rather than a sibling fork race.
+            const CHILD: &str = "STYX_TEST_STARTUP_CLOSURE_CHILD";
+            if std::env::var_os(CHILD).is_none() {
+                let status = std::process::Command::new(std::env::current_exe().unwrap())
+                    .args([
+                        "--exact",
+                        "foreground::gateway::platform::tests::startup_closure_binds_actual_writer_lease_and_original_input",
+                        "--nocapture",
+                        "--test-threads=1",
+                    ])
+                    .env(CHILD, "1")
+                    .status()
+                    .unwrap();
+                assert!(
+                    status.success(),
+                    "isolated startup ownership scenario failed"
+                );
+                return;
+            }
             // Preserve this private fixture on assertion failure for inspection.
             let path =
                 std::env::temp_dir().join(format!("styx-startup-closure-{}", uuid::Uuid::new_v4()));

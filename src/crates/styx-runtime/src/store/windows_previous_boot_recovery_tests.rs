@@ -17,7 +17,9 @@ fn first_archive_drop_all_handles_reopen_original_prepared_and_finish() {
         let name = format!("r60-recovery-{}", uuid::Uuid::new_v4().simple());
         let path = base.join(&name);
         let cleanup = Cleanup(path.clone());
-        let root = parent.create_fresh_child(OsStr::new(&name)).unwrap();
+        let root = parent
+            .create_fresh_child(OsStr::new(&name))
+            .unwrap_or_else(|_| panic!("private fixture child creation failed"));
         let private = PrivateRoot {
             inner: root.clone(),
         };

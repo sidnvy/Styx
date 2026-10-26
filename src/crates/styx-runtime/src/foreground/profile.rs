@@ -28,25 +28,32 @@ use styx_contracts::{
 mod fresh;
 #[cfg(any(
     target_os = "macos",
+    target_os = "windows",
     all(test, target_os = "linux", target_env = "gnu")
 ))]
 #[path = "profile_native_materials.rs"]
 mod native_materials;
 #[path = "profile_release.rs"]
 mod release;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", target_os = "windows"))]
 pub(crate) use native_materials::OriginalNativePairMaterials;
 #[cfg(any(
     target_os = "macos",
+    target_os = "windows",
     all(test, target_os = "linux", target_env = "gnu")
 ))]
 pub(crate) use native_materials::read_original_pair_materials;
 #[cfg(target_os = "macos")]
 pub(crate) use native_materials::read_recovered_pair_materials;
 
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub(crate) use native_materials::{
+    AppliedNativeMaintenanceProfile, load_applied_native_maintenance_profile,
+};
 #[cfg(target_os = "macos")]
 pub(crate) use native_materials::{
-    AppliedMacMaintenanceProfile, load_applied_mac_maintenance_profile,
+    AppliedNativeMaintenanceProfile as AppliedMacMaintenanceProfile,
+    load_applied_native_maintenance_profile as load_applied_mac_maintenance_profile,
 };
 
 const JSON_LIMIT: usize = 1024 * 1024;
@@ -684,6 +691,7 @@ enum ProfileSource {
     // ordinary-profile conversion or execution/credential accessor.
     #[cfg(any(
         target_os = "macos",
+        target_os = "windows",
         all(test, target_os = "linux", target_env = "gnu")
     ))]
     OriginalMaterials,
@@ -710,6 +718,7 @@ impl ProfileSource {
             Self::Ordinary => Ok(()),
             #[cfg(any(
                 target_os = "macos",
+                target_os = "windows",
                 all(test, target_os = "linux", target_env = "gnu")
             ))]
             Self::OriginalMaterials => Ok(()),
@@ -945,6 +954,7 @@ fn load_source_inner(
     let original_history_only = match &source {
         #[cfg(any(
             target_os = "macos",
+            target_os = "windows",
             all(test, target_os = "linux", target_env = "gnu")
         ))]
         ProfileSource::OriginalMaterials => true,
@@ -1060,6 +1070,7 @@ fn load_source_inner(
         }
         #[cfg(any(
             target_os = "macos",
+            target_os = "windows",
             all(test, target_os = "linux", target_env = "gnu")
         ))]
         ProfileSource::OriginalMaterials => {
@@ -1232,6 +1243,7 @@ fn load_source_inner(
         ProfileSource::Ordinary => active.manifest_sha256,
         #[cfg(any(
             target_os = "macos",
+            target_os = "windows",
             all(test, target_os = "linux", target_env = "gnu")
         ))]
         ProfileSource::OriginalMaterials => active.manifest_sha256,

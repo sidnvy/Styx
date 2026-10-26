@@ -40,7 +40,7 @@ pub(crate) struct OriginalNativePairMaterials<'a> {
     fingerprint: Sha256Digest,
     gateway_origin: String,
     ca_path: PathBuf,
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     publisher: Sha256Digest,
 }
 fn native_root(root: RootIdentity) -> NativeRootIdentity {
@@ -166,7 +166,7 @@ fn read_pair_materials_inner<'a>(
             .map_err(|_| ProfileError::Invalid)?,
         gateway_origin,
         ca_path: host_profile.gateway_ca_file.ok_or(ProfileError::Invalid)?,
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         publisher: _publisher,
     };
     #[cfg(target_os = "macos")]
@@ -354,7 +354,7 @@ impl OriginalNativePairMaterials<'_> {
         self.revalidate()?;
         self.digest(&self.state_dir.join("state.json"))
     }
-    #[cfg(target_os = "macos")]
+    #[cfg(any(target_os = "macos", target_os = "windows"))]
     pub(crate) fn publisher_sha256(&self) -> Result<Sha256Digest, ProfileError> {
         self.revalidate()?;
         Ok(self.publisher)
@@ -386,11 +386,11 @@ impl OriginalNativePairMaterials<'_> {
 
 /// Maintenance-only borrowed composition. No Clone, Deref, ordinary-profile
 /// conversion or constructor accepting standalone read-only material data.
-/// The owning migration task must retain the entire original Mac scope while
+/// The owning migration task must retain the entire original native scope while
 /// this value (and every Host/protocol/cleanup operation borrowing it) exists.
-#[cfg(target_os = "macos")]
-pub(crate) struct AppliedMacMaintenanceProfile<'borrow, 'effects, 'materials> {
-    guard: &'borrow crate::store::MacCanonicalCutover<'effects, 'materials>,
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub(crate) struct AppliedNativeMaintenanceProfile<'borrow, 'effects, 'materials> {
+    guard: &'borrow crate::store::NativeCanonicalCutover<'effects, 'materials>,
     host: PrivateRoot,
     executor: Arc<PinnedExecutable>,
     bearer: SecretBearer,
@@ -399,10 +399,10 @@ pub(crate) struct AppliedMacMaintenanceProfile<'borrow, 'effects, 'materials> {
 
 /// This is the ONLY construction path: the original applied physical guard,
 /// not a read-only Pair snapshot, receipt, caller locator or serialized report.
-#[cfg(target_os = "macos")]
-pub(crate) fn load_applied_mac_maintenance_profile<'borrow, 'effects, 'materials>(
-    guard: &'borrow crate::store::MacCanonicalCutover<'effects, 'materials>,
-) -> Result<AppliedMacMaintenanceProfile<'borrow, 'effects, 'materials>, ProfileError> {
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+pub(crate) fn load_applied_native_maintenance_profile<'borrow, 'effects, 'materials>(
+    guard: &'borrow crate::store::NativeCanonicalCutover<'effects, 'materials>,
+) -> Result<AppliedNativeMaintenanceProfile<'borrow, 'effects, 'materials>, ProfileError> {
     use styx_contracts::{management::ReaderContract, native_release::NativeReleaseScope};
     guard
         .validate_applied()
@@ -429,15 +429,25 @@ pub(crate) fn load_applied_mac_maintenance_profile<'borrow, 'effects, 'materials
     let selection = candidate
         .runtime_selection()
         .map_err(|_| ProfileError::UntrustedRelease)?;
+    #[cfg(target_os = "macos")]
     let expected_target = match std::env::consts::ARCH {
         "x86_64" => "x86_64-apple-darwin",
         "aarch64" => "aarch64-apple-darwin",
         _ => return Err(ProfileError::Unsupported),
     };
+    #[cfg(target_os = "windows")]
+    let expected_target = match std::env::consts::ARCH {
+        "x86_64" => "x86_64-pc-windows-msvc",
+        _ => return Err(ProfileError::Unsupported),
+    };
+    #[cfg(target_os = "macos")]
+    let native_payload = matches!(selection.payload_root, NativeRootIdentity::Macos { .. });
+    #[cfg(target_os = "windows")]
+    let native_payload = matches!(selection.payload_root, NativeRootIdentity::Windows { .. });
     if candidate.manifest().scope != NativeReleaseScope::RuntimeCandidate
         || report.target != expected_target
         || selection.schema != 1
-        || !matches!(selection.payload_root, NativeRootIdentity::Macos { .. })
+        || !native_payload
         || selection.manifest_sha256 != report.manifest_sha256
         || selection.publisher_spki_sha256.to_hex() != report.publisher_spki_sha256
         || selection.publisher_spki_sha256 != guard.original_materials().publisher
@@ -474,7 +484,7 @@ pub(crate) fn load_applied_mac_maintenance_profile<'borrow, 'effects, 'materials
     }
     let bearer =
         SecretBearer::from_protected_reader(text.to_owned()).map_err(|_| ProfileError::Invalid)?;
-    let profile = AppliedMacMaintenanceProfile {
+    let profile = AppliedNativeMaintenanceProfile {
         guard,
         host,
         executor,
@@ -484,12 +494,12 @@ pub(crate) fn load_applied_mac_maintenance_profile<'borrow, 'effects, 'materials
     profile.revalidate()?;
     Ok(profile)
 }
-#[cfg(target_os = "macos")]
-impl AppliedMacMaintenanceProfile<'_, '_, '_> {
+#[cfg(any(target_os = "macos", target_os = "windows"))]
+impl AppliedNativeMaintenanceProfile<'_, '_, '_> {
     /// Exact retained physical cutover instance, not equality of public IDs.
     pub(crate) fn matches_cutover(
         &self,
-        guard: &crate::store::MacCanonicalCutover<'_, '_>,
+        guard: &crate::store::NativeCanonicalCutover<'_, '_>,
     ) -> bool {
         std::ptr::eq(self.guard, guard)
     }
@@ -534,8 +544,32 @@ impl AppliedMacMaintenanceProfile<'_, '_, '_> {
         self.revalidate()?;
         Ok(self.executor.clone())
     }
+    /// Scratch is created only after the probe holds the actual execution lease.
+    /// The original profile retains the same protected directory as ordinary Host.
+    #[cfg(target_os = "windows")]
+    pub(crate) fn prepare_execution_runtime(
+        &self,
+        base: &PrivateRoot,
+        lease: &crate::store::ExecutionLeaseGuard,
+    ) -> Result<(), ProfileError> {
+        self.revalidate()?;
+        lease.validate().map_err(|_| ProfileError::Changed)?;
+        if native_root(base.identity()) != *self.guard.host_root() {
+            return Err(ProfileError::Changed);
+        }
+        self.original().prepare_runtime_temp(base)?;
+        lease.validate().map_err(|_| ProfileError::Changed)?;
+        self.revalidate()
+    }
     pub(crate) fn executor_config(&self) -> Result<OwnedExecutorConfig, ProfileError> {
         self.revalidate()?;
+        #[cfg(target_os = "windows")]
+        self.original()
+            .runtime_temp
+            .get()
+            .ok_or(ProfileError::ProtectedRead)?
+            .revalidate_runtime_directory()
+            .map_err(|_| ProfileError::Changed)?;
         let binary = self
             .executor
             .source_path_for_suspended_spawn()
@@ -552,6 +586,11 @@ impl AppliedMacMaintenanceProfile<'_, '_, '_> {
         Ok(config)
     }
     pub(crate) fn revalidate(&self) -> Result<(), ProfileError> {
+        #[cfg(target_os = "windows")]
+        if let Some(temp) = self.original().runtime_temp.get() {
+            temp.revalidate_runtime_directory()
+                .map_err(|_| ProfileError::Changed)?;
+        }
         self.guard
             .validate_applied()
             .map_err(|_| ProfileError::Changed)?;

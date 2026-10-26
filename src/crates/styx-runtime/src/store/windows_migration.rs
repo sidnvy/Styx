@@ -8,7 +8,10 @@ use crate::{
         configuration::{ConfigurationMaintenance, OwnedConfigurationRoot},
         management::{
             OwnedManagementJournal,
-            handoff::{NativePreparedRetirement, NativeRetiredRecord, NativeRetirementFileStamp},
+            handoff::{
+                NativePreparedRetirement, NativeRetiredRecord, NativeRetirementFileStamp,
+                ProofStamp,
+            },
         },
         secure_journal::{JournalError, JournalResult},
     },
@@ -93,6 +96,7 @@ pub(in crate::store) struct WindowsTokenRetirement {
     attempted: bool,
     post: Option<NativeRetirementFileStamp>,
     indeterminate: bool,
+    retired_binding: Option<(OwnedConfigurationRoot, Sha256Digest, Sha256Digest)>,
 }
 impl Root {
     /// Caller already holds the SAME configuration writer+maintenance. Opening
@@ -143,6 +147,7 @@ impl Root {
             attempted: false,
             post: None,
             indeterminate: false,
+            retired_binding: None,
         })
     }
 }
@@ -188,6 +193,70 @@ impl WindowsTokenRetirement {
             self.indeterminate = true;
         }
         result
+    }
+    /// Bind this SAME successfully retired HANDLE to the original writer,
+    /// transaction, signed candidate and original Pair. No receipt can mint it.
+    pub(in crate::store) fn validate_cutover_binding(
+        &self,
+        owner: &OwnedConfigurationRoot,
+        maintenance: &ConfigurationMaintenance,
+        pair: &styx_contracts::native_management::NativePreservedHostPair,
+        candidate: &VerifiedNativeRelease,
+    ) -> JournalResult<()> {
+        let (original_owner, manifest, publisher) = self
+            .retired_binding
+            .as_ref()
+            .ok_or(JournalError::Conflict)?;
+        if !original_owner.same_authority(owner)
+            || !maintenance.matches(owner)
+            || maintenance.transaction_id() != &self.transaction
+            || pair.transaction_id != self.transaction
+            || pair.config_root != native(owner.identity()?)?
+            || pair.host_root != self.host_identity()?
+            || pair.credential_sha256 != self.original.content_sha256()
+            || candidate.report().target != "x86_64-pc-windows-msvc"
+            || candidate.report().manifest_sha256 != *manifest
+            || candidate.report().publisher_spki_sha256 != publisher.to_hex()
+        {
+            return Err(JournalError::Conflict);
+        }
+        candidate.revalidate().map_err(unknown)?;
+        owner.with_maintenance(maintenance, |_| self.observed_retired().map(|_| ()))
+    }
+    pub(in crate::store) fn retired_relative_path(&self) -> PathBuf {
+        Path::new("device").join(&self.destination)
+    }
+    /// Read only the retained original retired file under its actual fence.
+    /// This is not an ordinary profile/credential conversion or a path selector.
+    pub(in crate::store) fn read_retired_for_cutover(
+        &self,
+        owner: &OwnedConfigurationRoot,
+        maintenance: &ConfigurationMaintenance,
+        host: &PrivateRoot,
+    ) -> JournalResult<Zeroizing<Vec<u8>>> {
+        let (original_owner, _, _) = self
+            .retired_binding
+            .as_ref()
+            .ok_or(JournalError::Conflict)?;
+        if !original_owner.same_authority(owner)
+            || !maintenance.matches(owner)
+            || maintenance.transaction_id() != &self.transaction
+            || host.identity() != self.host.identity()
+        {
+            return Err(JournalError::Conflict);
+        }
+        owner.with_maintenance(maintenance, |_| {
+            let before = self.observed_retired()?;
+            let bytes = bytes(
+                self.file.as_ref().ok_or(JournalError::Unknown)?,
+                self.bytes.len(),
+            )
+            .map_err(unknown)?;
+            if bytes.as_slice() != self.bytes.as_slice() || self.observed_retired()? != before {
+                return Err(JournalError::Unknown);
+            }
+            Ok(bytes)
+        })
     }
     fn original_matches(&self) -> JournalResult<()> {
         self.host.validate_root().map_err(unknown)?;
@@ -255,6 +324,13 @@ impl WindowsTokenRetirement {
         });
         if result.is_err() && self.attempted {
             self.indeterminate = true;
+        }
+        if result.is_ok() {
+            self.retired_binding = Some((
+                owner.clone(),
+                intent.candidate_manifest_sha256,
+                intent.publisher_spki_sha256,
+            ));
         }
         result
     }

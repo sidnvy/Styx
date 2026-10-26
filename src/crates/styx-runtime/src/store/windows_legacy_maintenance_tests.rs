@@ -17,9 +17,15 @@ fn missing_owner_plan_is_readonly_live_observer_and_changed_review_refuse() {
         let name = format!("r60-legacy-plan-{}", uuid::Uuid::new_v4().simple());
         let path = base.join(&name);
         let cleanup = Cleanup(path.clone());
-        let root = parent.create_fresh_child(OsStr::new(&name)).unwrap();
-        let host_root = root.create_fresh_child(OsStr::new("host")).unwrap();
-        let device_root = host_root.create_fresh_child(OsStr::new("device")).unwrap();
+        let root = parent
+            .create_fresh_child(OsStr::new(&name))
+            .unwrap_or_else(|_| panic!("private fixture child creation failed"));
+        let host_root = root
+            .create_fresh_child(OsStr::new("host"))
+            .unwrap_or_else(|_| panic!("private fixture child creation failed"));
+        let device_root = host_root
+            .create_fresh_child(OsStr::new("device"))
+            .unwrap_or_else(|_| panic!("private fixture child creation failed"));
         let host = PrivateRoot {
             inner: host_root.clone(),
         };

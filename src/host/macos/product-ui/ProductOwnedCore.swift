@@ -257,15 +257,33 @@ final class ProductOwnedCore: @unchecked Sendable {
         guard FileManager.default.fileExists(atPath: support.path) else { throw ProductOwnedCoreError.invalidPackage }
         let state = try selectedState(support)
         let container = support.appendingPathComponent("NativeRustHost-v1"); try privateDirectory(container)
-        let selectionURL = container.appendingPathComponent("runtime-selection.json")
-        if !FileManager.default.fileExists(atPath: selectionURL.path) {
+        let selectionURL: URL
+        if state.path == support.appendingPathComponent("Setup/deployment").path {
+            // Immutable candidate input only. The original Core transaction
+            // must commit its canonical selection; this file grants no upgrade
+            // authority and never replaces the separate profile's selection.
+            guard !selection.isEmpty, selection.count <= 16384 else { throw ProductOwnedCoreError.invalidPackage }
+            let candidates = container.appendingPathComponent("migration-candidates")
+            try privateDirectory(candidates)
+            selectionURL = candidates.appendingPathComponent(productDigest(selection) + ".json")
             let fd = Darwin.open(selectionURL.path, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW | O_CLOEXEC, 0o600)
-            guard fd >= 0 else { throw ProductOwnedCoreError.invalidPackage }
-            let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true); try handle.write(contentsOf: selection); try handle.synchronize(); try handle.close()
+            if fd >= 0 {
+                let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true); try handle.write(contentsOf: selection); try handle.synchronize(); try handle.close()
+            } else {
+                guard errno == EEXIST else { throw ProductOwnedCoreError.invalidPackage }
+            }
+        } else {
+            // Preserve the independent profile's existing selection exactly.
+            selectionURL = container.appendingPathComponent("runtime-selection.json")
+            if !FileManager.default.fileExists(atPath: selectionURL.path) {
+                let fd = Darwin.open(selectionURL.path, O_CREAT | O_EXCL | O_WRONLY | O_NOFOLLOW | O_CLOEXEC, 0o600)
+                guard fd >= 0 else { throw ProductOwnedCoreError.invalidPackage }
+                let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: true); try handle.write(contentsOf: selection); try handle.synchronize(); try handle.close()
+            }
         }
         let (selectionPin, originalSelection) = try pinned(selectionURL, limit: 16384, privateFile: true)
-        // This first bridge deliberately does not upgrade an existing App
-        // profile's selected release. A changed selection requires migration.
+        // Existing candidate files must match exact verified bytes. A partial
+        // or changed file is refused, never overwritten or silently repaired.
         guard originalSelection == selection else { throw ProductOwnedCoreError.invalidPackage }
         // The original root is passed in place. Rust must inspect it under the
         // original scope before an explicitly authorized migration can begin.

@@ -473,7 +473,11 @@ impl OwnedManagementJournal {
             Err(JournalError::Unsupported)
         }
     }
-    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "macos",
+        target_os = "windows"
+    ))]
     pub(super) fn observe_locked(
         &self,
         state: &super::configuration::ConfigurationState,

@@ -67,6 +67,31 @@ fn read_pin(file: &File, expected: &[u8]) -> JournalResult<FileObservation> {
     }
     Ok(before)
 }
+fn cutover_stamp(
+    file: &File,
+    expected: &[u8],
+) -> JournalResult<crate::store::management::handoff::NativeRetirementFileStamp> {
+    let observation = read_pin(file, expected)?;
+    let facts = private_facts(file, false).map_err(failed)?;
+    let owner_sid = ffi::private(file).map_err(failed)?;
+    if facts.observation != observation {
+        return Err(JournalError::Unknown);
+    }
+    Ok(
+        crate::store::management::handoff::NativeRetirementFileStamp::Windows {
+            volume_serial: observation.device,
+            file_id: observation.inode,
+            owner_sid,
+            nlink: u64::from(facts.links),
+            byte_len: observation.byte_len,
+            modified_seconds: observation.modified_seconds,
+            modified_nanoseconds: observation.modified_nanoseconds,
+            changed_seconds: observation.changed_seconds,
+            changed_nanoseconds: observation.changed_nanoseconds,
+            sha256: styx_contracts::identity::Sha256Digest::of_bytes(expected),
+        },
+    )
+}
 fn same_moved(a: &FileObservation, b: &FileObservation) -> bool {
     a.device == b.device
         && a.inode == b.inode
@@ -126,6 +151,98 @@ impl WindowsBootRecoveryEffects {
             marker_retired: false,
             completed: false,
         })
+    }
+    /// Revalidate original C custody for canonical publication. This accepts
+    /// only the opaque same-owner GuardsHeld, never serialized cleanup claims.
+    /// All original later-boot/startup checks remain in validate_guards().
+    pub(in crate::store) fn validate_cutover_custody(
+        &self,
+        owner: &OwnedConfigurationRoot,
+        held: &crate::store::management::handoff::LegacyGuardsHeld,
+        observation: &WindowsLegacyObservation,
+    ) -> JournalResult<()> {
+        use crate::store::management::handoff::{OwnerRecoveryStage, ProofStamp};
+        let prepared = held.prepared();
+        let intent = prepared.intent();
+        let actual_root = match self.evidence.root.identity() {
+            RootIdentity::Windows {
+                volume_serial,
+                file_id,
+                owner_sid,
+            } => styx_contracts::native_management::NativeRootIdentity::Windows {
+                volume_serial,
+                file_id,
+                owner_sid,
+            },
+            _ => return Err(JournalError::Conflict),
+        };
+        if !self.owner.same_authority(owner)
+            || !self.maintenance.matches(owner)
+            || !prepared.matches_owner(owner)
+            || intent.transaction_id != self.transaction
+            || self.maintenance.transaction_id() != &self.transaction
+            || intent.config_root != actual_root
+            || prepared.stage() != Some(OwnerRecoveryStage::GuardsHeld)
+            || (intent.schema == 3 && self.startup.is_none())
+        {
+            return Err(JournalError::Conflict);
+        }
+        self.validate_guards(observation)?;
+        let originals = prepared
+            .archived_original_posts()
+            .ok_or(JournalError::Conflict)?;
+        let guards = prepared.guards_held_posts().ok_or(JournalError::Conflict)?;
+        if originals.len() != prepared.originals().len()
+            || originals.len() != self.original_pins.len()
+            || guards.len() != prepared.guard_bytes().len()
+            || guards.len() != GUARDS.len()
+        {
+            return Err(JournalError::Conflict);
+        }
+        self.owner.with_maintenance(&self.maintenance, |_| {
+            for (original, post) in prepared.originals().iter().zip(originals) {
+                if original.name != post.name || !original.stamp.same_file_after_rename(&post.stamp)
+                {
+                    return Err(JournalError::Conflict);
+                }
+                let pin = self
+                    .original_pins
+                    .iter()
+                    .find(|pin| {
+                        self.evidence.originals[pin.index].relative_path()
+                            == Path::new(original.name.source_name())
+                    })
+                    .ok_or(JournalError::Unknown)?;
+                let saved = &self.evidence.originals[pin.index];
+                if saved.bytes() != original.raw
+                    || cutover_stamp(
+                        pin.handle.as_ref().ok_or(JournalError::Unknown)?,
+                        &original.raw,
+                    )? != post.stamp
+                {
+                    return Err(JournalError::Unknown);
+                }
+            }
+            for (binding, post) in prepared.guard_bytes().iter().zip(guards) {
+                if binding.name != post.name || binding.raw != self.guard_bytes {
+                    return Err(JournalError::Conflict);
+                }
+                let pin = self
+                    .created
+                    .iter()
+                    .find(|pin| pin.name == binding.name.source_name())
+                    .ok_or(JournalError::Unknown)?;
+                if cutover_stamp(
+                    pin.handle.as_ref().ok_or(JournalError::Unknown)?,
+                    &binding.raw,
+                )? != post.stamp
+                {
+                    return Err(JournalError::Unknown);
+                }
+            }
+            Ok(())
+        })?;
+        self.validate_guards(observation)
     }
     /// Private OS engine. Parent verifies the opaque Prepared's exact owner,
     /// original receipts, boot epoch, tx, archive path and guard digest before

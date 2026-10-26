@@ -5,6 +5,10 @@
 //! No ACL rewrite or path launch fallback.
 #[path = "windows_migration.rs"]
 mod migration;
+#[path = "windows_native_cutover.rs"]
+mod native_cutover;
+pub(crate) use native_cutover::{NativeCommittedCutover, WindowsCanonicalCutover};
+pub(in crate::store) use native_cutover::{WindowsCutoverCustody, WindowsCutoverPlan};
 #[path = "windows_previous_boot.rs"]
 mod previous_boot;
 pub(in crate::store) use migration::{WindowsOriginalMaterials, WindowsTokenRetirement};
