@@ -183,12 +183,12 @@ fn validate_exec_context(context: &PreparedContext) -> Result<(), ErrorCategory>
 
 /// Trusted local composition only. This reads the original configuration
 /// authority; no request or DTO can install/replace an admission source.
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
 pub(crate) trait ExecAdmission: Send + Sync {
     fn check(&self) -> Result<(), CoordinatorError>;
 }
 struct Inner {
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
     exec_admission: Mutex<Option<Arc<dyn ExecAdmission>>>,
     bootstrap_device: DeviceId,
     host_generation: HostGeneration,
@@ -285,7 +285,7 @@ impl HostCleanup {
 
 impl Inner {
     fn check_exec_admission(&self) -> Result<(), CoordinatorError> {
-        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
         {
             let source = self
                 .exec_admission
@@ -339,7 +339,7 @@ impl HostCoordinator {
         }
         let origin = Instant::now();
         let inner = Arc::new(Inner {
-            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
             exec_admission: Mutex::new(None),
             bootstrap_device: trusted_facts.device_id.clone(),
             host_generation: ledger.host_generation().clone(),
@@ -873,7 +873,7 @@ impl Drop for UnsettledStart {
     }
 }
 impl HostAuthority {
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
     pub(crate) fn configure_exec_admission(
         &self,
         source: Arc<dyn ExecAdmission>,

@@ -9,7 +9,7 @@ pub(crate) struct RecoveredNativeCommittedRuntime {
     owner: OwnedConfigurationRoot,
     snapshot: Arc<NativeCommittedRuntimeSnapshot>,
     _journal: Option<OwnedManagementJournal>,
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
     service_transactions:
         Option<Arc<std::sync::Mutex<super::super::native_transaction::NativeTransactions>>>,
 }
@@ -24,7 +24,7 @@ impl RecoveredNativeCommittedRuntime {
         let journal =
             OwnedManagementJournal::open_existing(owner.clone(), JournalBudget::default())?;
         let mut proof = Self::reopen_with_journal(owner, snapshot, &journal)?;
-        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
         {
             proof.service_transactions = Some(Arc::new(std::sync::Mutex::new(
                 super::super::native_transaction::NativeTransactions::from_service_journal(
@@ -34,7 +34,7 @@ impl RecoveredNativeCommittedRuntime {
                 .map_err(|_| JournalError::Unknown)?,
             )));
         }
-        #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+        #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
         {
             proof._journal = Some(journal);
         }
@@ -56,7 +56,7 @@ impl RecoveredNativeCommittedRuntime {
             owner: owner.clone(),
             snapshot,
             _journal: None,
-            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
             service_transactions: None,
         };
         owner.with_state(|state| {
@@ -130,7 +130,7 @@ impl RecoveredNativeCommittedRuntime {
                 .map_err(|_| JournalError::Unknown)
         })
     }
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
     pub(crate) fn service_transactions(
         &self,
     ) -> JournalResult<Arc<std::sync::Mutex<super::super::native_transaction::NativeTransactions>>>

@@ -132,7 +132,7 @@ pub(crate) struct NativeCommittedRuntimeSnapshot {
     guard_materials: Vec<(String, Vec<u8>)>,
     // The original App instance remains alive for every provider using this
     // snapshot. A marker or manager string cannot construct this scope.
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
     service_tip: Option<super::native_live_tip::ServiceTip>,
     app_scope: Option<Arc<crate::app::HostScope>>,
 }
@@ -770,28 +770,28 @@ impl NativeCommittedRuntimeSnapshot {
             candidate,
             guard_materials,
             app_scope: None,
-            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
             service_tip: None,
         };
         snapshot.revalidate()?;
         Ok(snapshot)
     }
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
     pub(crate) fn open_for_service(
-        scope: Arc<crate::platform::linux::native_service::ServiceScope>,
+        scope: Arc<crate::platform::native_service::ServiceScope>,
     ) -> JournalResult<Self> {
         let mut snapshot = Self::open(scope.state_dir())?;
         snapshot.service_tip = Some(super::native_live_tip::ServiceTip::open(scope)?);
         snapshot.revalidate()?;
         Ok(snapshot)
     }
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
     pub(crate) fn service_tip_status(&self) -> Result<(), super::native_live_tip::LiveTipError> {
         self.service_tip
             .as_ref()
             .map_or(Ok(()), |tip| tip.revalidate())
     }
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
     pub(crate) fn service_canonical_matches(
         &self,
         root: &PrivateRoot,
@@ -810,7 +810,7 @@ impl NativeCommittedRuntimeSnapshot {
     }
 
     pub(crate) fn revalidate(&self) -> JournalResult<()> {
-        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
         let successor = self
             .service_tip
             .as_ref()
@@ -854,11 +854,11 @@ impl NativeCommittedRuntimeSnapshot {
                 .all(|(f, (name, sha))| {
                     f.name == *name && Sha256Digest::of_bytes(f.bytes()) == *sha
                 });
-        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
         let expected_scan = successor
             .as_ref()
             .map_or(expected_scan, |proof| proof.matches_scan(&scan));
-        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
         if let Some(proof) = &successor {
             proof.check_scan(&scan)?;
         }
@@ -876,7 +876,7 @@ impl NativeCommittedRuntimeSnapshot {
             return Err(JournalError::Unknown);
         }
         for pin in &self.pins {
-            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
             if let Some(proof) = &successor
                 && pin.root.identity() == self.root.identity()
                 && pin.path == Path::new("state.json")
@@ -895,7 +895,7 @@ impl NativeCommittedRuntimeSnapshot {
             .map_err(|_| JournalError::Unknown)?;
         let marker = super::native_state::decode_marker(&self.original.marker)
             .map_err(|_| JournalError::Conflict)?;
-        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
         let raw = if let Some(proof) = &successor {
             proof.read_state(&self.root, MAX)?
         } else {
@@ -903,12 +903,12 @@ impl NativeCommittedRuntimeSnapshot {
                 .read_raw("state.json", MAX)
                 .map_err(|_| JournalError::Unknown)?
         };
-        #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+        #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
         let raw = self
             .root
             .read_raw("state.json", MAX)
             .map_err(|_| JournalError::Unknown)?;
-        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
         if let Some(proof) = &successor {
             proof.check_state(&raw)?;
         }
@@ -942,7 +942,7 @@ impl NativeCommittedRuntimeSnapshot {
             .inner
             .with_readonly_directory(|d| Ok(files::scan(d, JournalBudget::default())))
             .map_err(|_| JournalError::Unknown)??;
-        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
         if let Some(proof) = &successor {
             proof.check_scan(&after)?;
         }
@@ -958,7 +958,7 @@ impl NativeCommittedRuntimeSnapshot {
         // Bracket the full inventory and canonical read with original material
         // checks. Equal bytes at a replacement inode are still a changed input.
         for pin in &self.pins {
-            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
             if let Some(proof) = &successor
                 && pin.root.identity() == self.root.identity()
                 && pin.path == Path::new("state.json")

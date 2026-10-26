@@ -6,7 +6,7 @@ use super::{
     FileObservation, PrivateRoot, RawFile, management, native_state,
     secure_journal::{JournalBudget, JournalError, JournalObservation, JournalResult, files},
 };
-use crate::platform::linux::native_service::ServiceScope;
+use crate::platform::native_service::ServiceScope;
 use std::{
     collections::BTreeMap,
     fs::File,
@@ -187,7 +187,7 @@ impl AutostartTip {
     }
 }
 fn append_temporary(name: &str) -> bool {
-    files::append_temporary_name(name)
+    super::secure_journal::append_temporary_name(name)
 }
 fn c07_name(name: &str) -> bool {
     if let Some(tail) = name.strip_prefix("txn-") {
@@ -498,6 +498,6 @@ impl ServiceTip {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, target_os = "linux"))]
 #[path = "native_live_tip_tests.rs"]
 mod tests;

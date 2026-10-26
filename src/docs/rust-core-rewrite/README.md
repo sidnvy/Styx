@@ -2,7 +2,7 @@
 
 2026-10-24 · Owner-directed implementation choice: **Rust is the final Styx core runtime**.
 
-状态（2026-10-26）：Rust 是 Styx 自有核心的唯一目标实现，goal active；尚未完成三平台产品交付。`ab97cc8` 同源 Linux 原签候选的 Exec、headless Browser、Cua 实际效果/拒绝/清理场景已通过；Windows 原签 Runtime 与未做 Authenticode 的原生 App 已构建，配对/Exec 有实际证据，最终完整生命周期仍未通过；Mac ARM 原证书 App 已完成签包，尚未安装或运行。Mac Intel 正在接通原机编译→原签名机签发→原机校验，保留原身份，不安装未经授权的 Rosetta。新增 Windows Browser 已实现，`5beac76` 整合字节本地完整门禁通过，NAB5 原生编译发现的两个接点已在 `76b7c61` 修复，原生场景尚待验收。这些状态不能推导出跨平台三能力、同身份迁移、JS 管理层退役、安装/更新/回滚或最终账号验收已完成。`src/` 是唯一产品源码，已有成熟 Codex/Cua/Playwright 与必要原生桥继续复用。精确源码、安装包、进程及效果证据以外部 Owner Control Report 和不可变 receipts 为准，旧包结果不自动继承给新源码。行为/旧格式参考基线仍为 `44cf1470e6b0cfdfd2c2372e54e84ebd279c59c3`。
+状态（2026-10-26）：Rust 是 Styx 自有核心的唯一目标实现，goal active，三平台产品交付尚未完成。Linux 已有原签候选、真实 Exec/headless Browser 和同身份更新/回滚证据；Mac x64 原签 App 已安装到 pho，ARM Swift 修复已原机编译；Windows 三能力原签 Runtime 和原生开发 App 已构建，最新完整业务场景尚未通过，原生 Gateway 启动超时仍待解决。当前收敛正在补齐 Mac 常驻服务的安装准备、首次启动和停止链路；编译及合同测试通过不能替代系统注册、实际效果或注销恢复验收。`src/` 是唯一产品源码，成熟 Codex/Cua/Playwright 与必要原生桥继续复用。最终候选必须同一源码提交；已构建、已部署和已验收的证据分别记录于 Owner Control Report 和不可变 receipts，旧包结论不继承给新源码。Stable NO-GO；行为/旧格式参考基线仍为 `44cf1470e6b0cfdfd2c2372e54e84ebd279c59c3`。
 
 阅读顺序：
 

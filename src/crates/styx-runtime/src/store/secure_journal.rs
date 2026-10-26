@@ -13,10 +13,10 @@ pub enum JournalError {
     #[error("journal observation or persistence outcome unknown")]
     Unknown,
     /// Internal live-service read classification; never a commit or admission proof.
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
     #[error("service configuration observation pending")]
     ConfigurationPending,
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
     #[error("service stop requested")]
     ServiceStopRequested,
     #[error("journal scan budget exceeded")]
@@ -96,6 +96,17 @@ impl NamespaceName {
         }
     }
 }
+#[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+pub(in crate::store) fn append_temporary_name(name: &str) -> bool {
+    name.strip_prefix("orphan-")
+        .and_then(|s| s.strip_suffix(".temporary"))
+        .is_some_and(|s| {
+            s.len() == 64
+                && s.bytes()
+                    .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        })
+}
+
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 pub(super) mod files {
     use super::*;
@@ -140,15 +151,6 @@ pub(super) mod files {
             return Err(JournalError::Unknown);
         }
         Ok(m)
-    }
-    pub(in crate::store) fn append_temporary_name(name: &str) -> bool {
-        name.strip_prefix("orphan-")
-            .and_then(|s| s.strip_suffix(".temporary"))
-            .is_some_and(|s| {
-                s.len() == 64
-                    && s.bytes()
-                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
-            })
     }
     pub(in crate::store) fn read(
         dir: &File,

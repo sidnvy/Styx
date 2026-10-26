@@ -365,7 +365,7 @@ pub struct EnrollmentService {
     uncertain: bool,
     // A historical enrollment commit does not commit the enclosing C07 handoff.
     historical_migration_pending: bool,
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
     service_tip_pending: bool,
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     migration_binding: Option<crate::migration::legacy_service::GatewayMaintenanceBinding>,
@@ -413,7 +413,7 @@ impl EnrollmentService {
             clock: Clock::new(now),
             uncertain: false,
             historical_migration_pending: recovered.facts.historical_baseline.is_some(),
-            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
             service_tip_pending: false,
             #[cfg(all(target_os = "linux", target_env = "gnu"))]
             migration_binding: None,
@@ -482,7 +482,7 @@ impl EnrollmentService {
     pub(crate) fn configuration_root(&self) -> crate::store::OwnedConfigurationRoot {
         self.store.configuration_root()
     }
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
     pub(crate) fn service_control_owner(&self) -> crate::store::OwnedConfigurationRoot {
         // This returns the SAME owner for transaction inspection even while its
         // admission fence is retained. Mutations separately require admission.
@@ -498,13 +498,13 @@ impl EnrollmentService {
             .begin_maintenance(transaction)
             .map_err(|_| ServiceError::new(503, "configuration_maintenance_unavailable"))
     }
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
     pub(crate) fn set_service_tip_pending(&mut self, pending: bool) {
         self.service_tip_pending = pending;
     }
     fn ordinary_admission(&self) -> Result<(), ServiceError> {
         self.healthy()?;
-        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
         if self.service_tip_pending {
             return Err(ServiceError::new(503, "service_control_pending"));
         }

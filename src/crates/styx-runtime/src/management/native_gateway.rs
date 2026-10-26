@@ -10,6 +10,54 @@ use std::{
 };
 use styx_contracts::identity::Sha256Digest;
 
+/// Diagnostic observations only: never consulted for admission or settlement.
+#[derive(Clone)]
+pub(crate) struct StartupDiagnostic {
+    started: std::time::Instant,
+    stage: Arc<std::sync::Mutex<(&'static str, std::time::Instant)>>,
+}
+impl StartupDiagnostic {
+    pub(crate) fn from_env() -> Option<Self> {
+        (std::env::var_os("STYX_GATEWAY_STARTUP_DIAGNOSTICS").as_deref() == Some(OsStr::new("1")))
+            .then(|| Self {
+                started: std::time::Instant::now(),
+                stage: Arc::new(std::sync::Mutex::new((
+                    "scheduled",
+                    std::time::Instant::now(),
+                ))),
+            })
+    }
+    pub(crate) fn mark(&self, stage: &'static str) {
+        let (previous, elapsed) = {
+            let mut current = self.stage.lock().unwrap_or_else(|e| e.into_inner());
+            let previous = current.0;
+            let elapsed = current.1.elapsed().as_millis();
+            *current = (stage, std::time::Instant::now());
+            (previous, elapsed)
+        };
+        self.emit(stage, previous, elapsed);
+    }
+    pub(crate) fn report(&self, event: &'static str) {
+        let (stage, elapsed) = {
+            let current = self.stage.lock().unwrap_or_else(|e| e.into_inner());
+            (current.0, current.1.elapsed().as_millis())
+        };
+        self.emit(event, stage, elapsed);
+    }
+    fn emit(&self, event: &'static str, stage: &'static str, elapsed: u128) {
+        // All labels are compile-time constants; no paths, tokens or error text.
+        use std::io::Write as _;
+        // Logging failure must not replace the original startup outcome.
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "{}",
+            serde_json::json!({"event":"styx_gateway_startup", "stage":event,
+            "previous_stage":stage, "stage_elapsed_ms":elapsed,
+            "elapsed_ms":self.started.elapsed().as_millis()})
+        );
+    }
+}
+
 #[derive(Serialize)]
 pub struct BootstrapReport {
     pub schema: u16,
@@ -225,7 +273,7 @@ async fn bootstrap_owned(
     }
 }
 
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
 pub(crate) use platform::open_existing_for_service;
 #[cfg(any(
     all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
@@ -236,7 +284,8 @@ pub(crate) use platform::open_existing_for_service;
     )
 ))]
 pub(crate) use platform::{
-    FreshGatewayRuntime, inspect_pre_invite_for_app, open_existing, open_existing_for_app,
+    FreshGatewayRuntime, inspect_pre_invite_for_app, open_existing,
+    open_existing_for_app_diagnostic,
 };
 #[cfg(any(
     all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
@@ -581,7 +630,7 @@ mod platform {
         candidate: VerifiedNativeRelease,
         inputs: Vec<RawFile>,
         state_raw: Vec<u8>,
-        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
         service_tip: std::sync::OnceLock<crate::store::native_live_tip::ServiceTip>,
         app_scope: Option<Arc<crate::app::HostScope>>,
     }
@@ -592,14 +641,14 @@ mod platform {
                 .unwrap_or_else(|e| e.into_inner())
                 .configuration_root()
         }
-        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
         pub(crate) fn service_transactions(&self) -> Arc<std::sync::Mutex<NativeTransactions>> {
             self.transactions.clone()
         }
-        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
         pub(crate) fn enable_service_control(
             &self,
-            scope: Arc<crate::platform::linux::native_service::ServiceScope>,
+            scope: Arc<crate::platform::native_service::ServiceScope>,
         ) -> Result<(), BootstrapError> {
             if crate::store::PrivateRoot::open(scope.state_dir())
                 .map_err(|_| changed())?
@@ -613,7 +662,7 @@ mod platform {
                 crate::store::native_live_tip::ServiceTip::open(scope).map_err(|_| changed())?;
             self.service_tip.set(tip).map_err(|_| changed())
         }
-        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
         pub(crate) fn service_tip_status(
             &self,
         ) -> Result<(), crate::store::native_live_tip::LiveTipError> {
@@ -629,13 +678,13 @@ mod platform {
             self.configuration_root()
                 .ensure_admission()
                 .map_err(|_| changed())?;
-            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
             if let Some(tip) = self.service_tip.get() {
                 tip.revalidate().map_err(|_| changed())?;
             } else {
                 self.validate_original_state()?;
             }
-            #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+            #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
             self.validate_original_state()?;
             for raw in &self.inputs {
                 reobserve(&self.root, raw)?;
@@ -664,18 +713,26 @@ mod platform {
         open_existing_owned(
             path,
             None,
-            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            None,
+            #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
             None,
         )
     }
     pub(crate) fn open_existing_for_app(
         scope: Arc<crate::app::HostScope>,
     ) -> Result<FreshGatewayRuntime, BootstrapError> {
+        open_existing_for_app_diagnostic(scope, None)
+    }
+    pub(crate) fn open_existing_for_app_diagnostic(
+        scope: Arc<crate::app::HostScope>,
+        diagnostic: Option<&super::StartupDiagnostic>,
+    ) -> Result<FreshGatewayRuntime, BootstrapError> {
         let path = scope.state_dir().to_owned();
         open_existing_owned(
             &path,
             Some(scope.clone()),
-            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            diagnostic,
+            #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
             None,
         )
         .map_err(|error| error.with_app_scope(Some(scope)))
@@ -719,20 +776,20 @@ mod platform {
                 .with_app_scope(Some(scope))
         })
     }
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
     pub(crate) fn open_existing_for_service(
-        scope: Arc<crate::platform::linux::native_service::ServiceScope>,
+        scope: Arc<crate::platform::native_service::ServiceScope>,
     ) -> Result<FreshGatewayRuntime, BootstrapError> {
         scope.validate().map_err(|_| changed())?;
         let path = scope.state_dir().to_owned();
-        open_existing_owned(&path, None, Some(scope))
+        open_existing_owned(&path, None, None, Some(scope))
     }
     fn open_existing_owned(
         path: &Path,
         app_scope: Option<Arc<crate::app::HostScope>>,
-        #[cfg(all(target_os = "linux", target_env = "gnu"))] service_scope: Option<
-            Arc<crate::platform::linux::native_service::ServiceScope>,
-        >,
+        diagnostic: Option<&super::StartupDiagnostic>,
+        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+        service_scope: Option<Arc<crate::platform::native_service::ServiceScope>>,
     ) -> Result<FreshGatewayRuntime, BootstrapError> {
         if let Some(scope) = &app_scope {
             if scope.state_dir() != path {
@@ -802,8 +859,14 @@ mod platform {
                 .runtime_update()
                 .map_err(|_| bad())?
                 .map_or_else(|| selected.clone(), |update| update.bootstrap_runtime);
+            if let Some(d) = diagnostic {
+                d.mark("verify_selected");
+            }
             let candidate = release::verify_selected(&selected)
                 .map_err(|_| BootstrapError::new("fresh_gateway_candidate_untrusted", 2))?;
+            if let Some(d) = diagnostic {
+                d.mark("verify_selected_done");
+            }
             if !candidate
                 .supports_state_reader(state_value.reader_contract)
                 .map_err(|_| changed())?
@@ -815,11 +878,11 @@ mod platform {
             } else {
                 NativeManager::ForegroundCli
             };
-            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
             let service_owned = if let Some(scope) = &service_scope {
                 if app_scope.is_some()
                     || scope.state_dir() != path
-                    || scope.role() != crate::platform::linux::native_service::ServiceRole::Gateway
+                    || scope.role() != crate::platform::native_service::ServiceRole::Gateway
                 {
                     return Err(bad());
                 }
@@ -828,7 +891,7 @@ mod platform {
             } else {
                 false
             };
-            #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+            #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
             let service_owned = false;
             let manager = if service_owned {
                 NativeManager::PersistentService
@@ -933,14 +996,20 @@ mod platform {
             candidate,
             inputs,
             state_raw,
-            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
             service_tip: std::sync::OnceLock::new(),
             app_scope,
         };
+        if let Some(d) = diagnostic {
+            d.mark("fresh_validate");
+        }
         if let Err(error) = runtime.validate() {
             return Err(error.retaining(Retained::Transactions {
                 _transactions: runtime.transactions,
             }));
+        }
+        if let Some(d) = diagnostic {
+            d.mark("fresh_validate_done");
         }
         Ok(runtime)
     }

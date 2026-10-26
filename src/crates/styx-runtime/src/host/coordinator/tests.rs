@@ -4,9 +4,9 @@ use std::collections::BTreeMap;
 use styx_contracts::{capability::*, error::Recovery};
 
 /// Controlled trusted-composition source; this is not OS ServiceScope evidence.
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
 struct PendingExecAdmission(std::sync::atomic::AtomicBool);
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
 impl ExecAdmission for PendingExecAdmission {
     fn check(&self) -> Result<(), CoordinatorError> {
         if self.0.load(std::sync::atomic::Ordering::Acquire) {
@@ -445,11 +445,11 @@ async fn real_host_action_nonce_drop_ticket_and_terminate_scenario() {
         1,
     )
     .unwrap();
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
     let admission = Arc::new(PendingExecAdmission(std::sync::atomic::AtomicBool::new(
         false,
     )));
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
     authority
         .configure_exec_admission(admission.clone())
         .unwrap();
@@ -529,7 +529,7 @@ async fn real_host_action_nonce_drop_ticket_and_terminate_scenario() {
                 &no_send,
             )
             .unwrap();
-        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
         {
             let blocked = spec(&root, "pending-start-effect", "MUST_NOT_START");
             let reserved = host
@@ -718,7 +718,7 @@ async fn real_host_action_nonce_drop_ticket_and_terminate_scenario() {
             host.dispatch_action(&owner, &expired.id, expired.payload_digest),
             Err(CoordinatorError::Admission(ErrorCategory::OperationTimeout))
         ));
-        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
         {
             admission
                 .0
@@ -815,7 +815,7 @@ async fn real_host_action_nonce_drop_ticket_and_terminate_scenario() {
             std::fs::read_to_string(root.join("host-action-effect")).unwrap(),
             format!("{nonce}\n")
         );
-        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
         {
             // Recovery grants no replay: use a NEW operation and independent file.
             admission

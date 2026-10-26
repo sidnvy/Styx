@@ -1,7 +1,7 @@
 //! Private local control for the already authenticated service's original writer.
 //! This socket is not MCP, and neither a request nor a transaction ID is authority.
 use super::native::NativeComponent;
-use crate::platform::linux::native_service::{ServicePeer, ServiceRole, ServiceScope};
+use crate::platform::native_service::{ServicePeer, ServiceRole, ServiceScope};
 use futures_util::future::BoxFuture;
 use serde::{Deserialize, Serialize};
 use std::{
@@ -16,7 +16,7 @@ use tokio::{
     net::{UnixListener, UnixStream},
 };
 use tokio_util::sync::CancellationToken;
-const SOCKET: &str = crate::platform::linux::native_service::CONTROL_SOCKET_NAME;
+const SOCKET: &str = crate::platform::native_service::CONTROL_SOCKET_NAME;
 const FRAME: usize = 4096;
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -121,6 +121,34 @@ pub(crate) type Handler =
 fn error() -> ServiceControlError {
     ServiceControlError::new("service_control_unknown_inspect_transaction")
 }
+// macOS service observations include complete signed-payload validation.
+// Retain the original scope/peer and a bounded permit until the blocking job
+// finishes, including when the async caller stops waiting.
+#[cfg(target_os = "macos")]
+async fn checked_io<T: Send + 'static>(
+    work: impl FnOnce() -> Result<T> + Send + 'static,
+) -> Result<T> {
+    static READERS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(2);
+    let permit = READERS.try_acquire().map_err(|_| error())?;
+    tokio::task::spawn_blocking(move || {
+        let _permit = permit;
+        work()
+    })
+    .await
+    .map_err(|_| error())?
+}
+async fn validate_scope(scope: Arc<ServiceScope>) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    return checked_io(move || scope.validate().map_err(|_| error())).await;
+    #[cfg(not(target_os = "macos"))]
+    scope.validate().map_err(|_| error())
+}
+async fn validate_peer(peer: Arc<ServicePeer>) -> Result<()> {
+    #[cfg(target_os = "macos")]
+    return checked_io(move || peer.validate().map_err(|_| error())).await;
+    #[cfg(not(target_os = "macos"))]
+    peer.validate().map_err(|_| error())
+}
 async fn frame(read: &mut BufReader<tokio::net::unix::OwnedReadHalf>) -> Result<Vec<u8>> {
     let mut out = Vec::new();
     loop {
@@ -186,6 +214,12 @@ pub(crate) struct ControlServer {
     handler: Handler,
 }
 impl ControlServer {
+    pub(crate) async fn bind_owned(scope: Arc<ServiceScope>, handler: Handler) -> Result<Self> {
+        #[cfg(target_os = "macos")]
+        return checked_io(move || Self::bind(scope, handler)).await;
+        #[cfg(not(target_os = "macos"))]
+        Self::bind(scope, handler)
+    }
     pub(crate) fn bind(scope: Arc<ServiceScope>, handler: Handler) -> Result<Self> {
         scope.validate().map_err(|_| error())?;
         if scope.role() != ServiceRole::Gateway {
@@ -231,7 +265,7 @@ impl ControlServer {
         loop {
             let (stream, _) = tokio::select! { _=stop.cancelled()=>return self.pin.remove(), v=self.listener.accept()=>v.map_err(|_| error())? };
             self.pin.validate()?;
-            self.scope.validate().map_err(|_| error())?;
+            validate_scope(self.scope.clone()).await?;
             let peer = stream.peer_cred().map_err(|_| error())?;
             if peer.uid() != nix::unistd::Uid::current().as_raw() || peer.pid().is_none() {
                 continue;
@@ -247,7 +281,7 @@ impl ControlServer {
                 continue;
             }
             self.pin.validate()?;
-            self.scope.validate().map_err(|_| error())?;
+            validate_scope(self.scope.clone()).await?;
             // NO select/timeout/drop around the dispatched original owner job.
             let result = (self.handler)(request).await;
             let response = match result {
@@ -274,7 +308,7 @@ async fn exchange(path: &Path, request: ServiceRequest) -> Result<ServiceControl
     let peer = ServicePeer::observe(path, ServiceRole::Gateway)
         .await
         .map_err(|_| error())?;
-    peer.validate().map_err(|_| error())?;
+    validate_peer(peer.clone()).await?;
     let stream = tokio::time::timeout(
         Duration::from_secs(2),
         UnixStream::connect(path.join(SOCKET)),
@@ -288,7 +322,7 @@ async fn exchange(path: &Path, request: ServiceRequest) -> Result<ServiceControl
     {
         return Err(error());
     }
-    peer.validate().map_err(|_| error())?;
+    validate_peer(peer.clone()).await?;
     let stopping = matches!(&request, ServiceRequest::SetStopped { .. });
     let id = request.transaction_id().clone();
     let (read, mut write) = stream.into_split();
@@ -307,7 +341,7 @@ async fn exchange(path: &Path, request: ServiceRequest) -> Result<ServiceControl
     // A verified same-socket Stop ACK remains a configuration receipt if its
     // original service already exited. Physical completion is checked by caller.
     if !stopping {
-        peer.validate().map_err(|_| error())?;
+        validate_peer(peer.clone()).await?;
     }
     if response.schema != 1 || !response.ok {
         return Err(error());

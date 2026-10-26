@@ -348,6 +348,35 @@ def main():
             original, original_hash, binary, external_signing_inputs = complete_external_macos_signature(
                 args, args.output, receipt, target, inputs)
         else:
+            # Archive inventories bind bytes, not Cargo's mtime-based reuse.
+            # Remove only this workspace's RELEASE artifacts for this target;
+            # preserve third-party dependencies and every debug cache. External
+            # signing completion above never cleans or rebuilds an original image.
+            clean_argv = ['cargo', 'clean', '--release', '--target', target,
+                          '-p', 'styx-contracts', '-p', 'styx-core',
+                          '-p', 'styx-runtime', '-p', 'styx', '--locked', '--offline']
+            clean = {'command': clean_argv, 'actual_wait': False,
+                     'exit_code': None, 'scope': 'workspace_packages_release_target_only'}
+            receipt['workspace_clean'] = clean
+            clean_started = time.monotonic()
+            clean_log = args.output / 'cargo-clean.log'
+            try:
+                with clean_log.open('x') as log:
+                    try:
+                        cleaned = subprocess.run(clean_argv, cwd=ROOT, env=env,
+                                                 stdin=subprocess.DEVNULL, stdout=log,
+                                                 stderr=subprocess.STDOUT, timeout=900)
+                        clean.update(actual_wait=True, exit_code=cleaned.returncode)
+                    except subprocess.TimeoutExpired:
+                        # Like the build below, run kills and actually waits its
+                        # original direct child before reporting timeout; not PASS.
+                        clean.update(actual_wait=True, timeout=True)
+                        raise RuntimeError('native_workspace_clean_timeout') from None
+                require(cleaned.returncode == 0, 'native_workspace_clean_failed')
+            finally:
+                clean['elapsed_seconds'] = time.monotonic() - clean_started
+                if clean_log.is_file():
+                    clean['log_sha256'] = sha(clean_log)
             argv = ['cargo', 'build', '--release', '-p', 'styx', '--target', target, '--locked', '--offline']
             receipt['command'] = argv
             with (args.output / 'cargo-build.log').open('x') as log:

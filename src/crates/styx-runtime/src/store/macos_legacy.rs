@@ -9,10 +9,7 @@ use crate::store::{
     secure_journal::{JournalError, JournalResult},
 };
 use std::os::unix::fs::FileExt;
-use styx_contracts::{
-    identity::{Sha256Digest, TransactionId},
-    native_management::NativeRootIdentity,
-};
+use styx_contracts::{identity::Sha256Digest, native_management::NativeRootIdentity};
 use zeroize::Zeroizing;
 
 /// Retain this SAME value on Unknown. Neither Drop nor a pathname is cleanup.

@@ -272,8 +272,10 @@ impl LocalGateway {
             }
             ready.send_replace(false);
         });
+        let diagnostic = crate::management::native_gateway::StartupDiagnostic::from_env();
+        let worker_diagnostic = diagnostic.clone();
         let worker = tokio::spawn(async move {
-            foreground::gateway_run_for_app(scope, worker_cancel, events).await
+            foreground::gateway_run_for_app(scope, worker_cancel, events, worker_diagnostic).await
         });
         self.running = Some(RunningGateway {
             worker,
@@ -289,7 +291,10 @@ impl LocalGateway {
                 if self.running.as_ref().is_none_or(|r| r.worker.is_finished()) { return Ok(false); }
                 tokio::select! { changed = self.observed.changed() => { if changed.is_err() { return Err(AppError("app_gateway_start_failed")); } }, _ = tokio::time::sleep(Duration::from_millis(50)) => {} }
             }
-        }).await.map_err(|_| AppError("app_gateway_start_timeout"))??;
+        }).await.map_err(|_| {
+            if let Some(d) = &diagnostic { d.report("ready_timeout"); }
+            AppError("app_gateway_start_timeout")
+        })??;
         if !ready {
             // Join the original finished role outside the readiness timeout so
             // that it cannot drop a settlement waiter and lose error custody.

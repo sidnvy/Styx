@@ -1,0 +1,773 @@
+//! Existing-UID launchd intent preparation, authenticated service entry, and
+//! Gateway Stop through its original C07 writer. Preparation changes C07 only;
+//! administrator registration is performed by the separately reviewed package.
+use super::*;
+use crate::platform::macos_service::{
+    Definition, ServiceError, ServiceRole, ServiceScope, blocking_read,
+};
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum ServiceAction {
+    Definition,
+    Status,
+    Stop,
+    PrepareInstall,
+    PrepareFirstStart,
+}
+#[derive(Serialize)]
+pub struct ServiceReport {
+    pub schema: u16,
+    pub operation: &'static str,
+    pub configuration_only: bool,
+    pub revision: u64,
+    pub desired: NativeDesired,
+    pub definition_path: PathBuf,
+    pub definition_plist: String,
+    pub uid: u32,
+    pub label: String,
+    pub requires_initial_disabled: bool,
+    pub runtime_selection: NativeRuntimeSelection,
+    pub os: Option<serde_json::Value>,
+    pub operations_replayed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub transaction_observation: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub installation_request_v1: Option<serde_json::Value>,
+}
+fn role(component: NativeComponent) -> ServiceRole {
+    match component {
+        NativeComponent::Host => ServiceRole::Host,
+        NativeComponent::Gateway => ServiceRole::Gateway,
+    }
+}
+fn os(error: ServiceError) -> NativeManagementError {
+    NativeManagementError::new(match error {
+        ServiceError::Invalid => ErrorKind::Invalid,
+        ServiceError::Conflict => ErrorKind::Conflict,
+        ServiceError::Unavailable => ErrorKind::Unavailable,
+        ServiceError::Busy => ErrorKind::Busy,
+        ServiceError::Unknown => ErrorKind::Unknown,
+    })
+}
+// Owned report DATA only; borrowed protected installation material never
+// escapes the original blocking read.
+struct ReportMaterial {
+    path: PathBuf,
+    plist: String,
+    uid: u32,
+    label: String,
+    requires_initial_disabled: bool,
+    selection: NativeRuntimeSelection,
+}
+async fn read_report_material(definition: Arc<Definition>) -> Result<ReportMaterial> {
+    blocking_read(move || {
+        let material = definition.installation_material()?;
+        Ok(ReportMaterial {
+            path: material.path,
+            plist: std::str::from_utf8(material.bytes)
+                .map_err(|_| ServiceError::Unknown)?
+                .to_owned(),
+            uid: material.uid,
+            label: material.label.to_owned(),
+            requires_initial_disabled: material.requires_initial_disabled,
+            selection: definition.runtime_selection()?.clone(),
+        })
+    })
+    .await
+    .map_err(os)
+}
+async fn validate_operation(lease: Arc<crate::store::ServiceOperationGuard>) -> Result<()> {
+    blocking_read(move || lease.validate().map_err(|_| ServiceError::Conflict))
+        .await
+        .map_err(os)
+}
+
+/// Definition/Status remain readonly. Stop delegates exactly once to the
+/// original running Gateway's writer; no action invokes mutating launchctl.
+/// Missing/unknown registration is never reported as inactive.
+pub async fn manage(
+    state_dir: &Path,
+    action: ServiceAction,
+    component: NativeComponent,
+    transaction_id: Option<TransactionId>,
+    expected_revision: Option<u64>,
+) -> Result<ServiceReport> {
+    if matches!(
+        action,
+        ServiceAction::PrepareInstall | ServiceAction::PrepareFirstStart
+    ) {
+        if !matches!(component, NativeComponent::Gateway) {
+            return Err(NativeManagementError::new(ErrorKind::Unsupported));
+        }
+        return prepare_intent(
+            state_dir,
+            action,
+            transaction_id.ok_or_else(|| NativeManagementError::new(ErrorKind::Invalid))?,
+            expected_revision.ok_or_else(|| NativeManagementError::new(ErrorKind::Invalid))?,
+        )
+        .await;
+    }
+    if action == ServiceAction::Stop {
+        if !matches!(component, NativeComponent::Gateway) {
+            return Err(NativeManagementError::new(ErrorKind::Unsupported));
+        }
+        let id = transaction_id.ok_or_else(|| NativeManagementError::new(ErrorKind::Invalid))?;
+        let revision =
+            expected_revision.ok_or_else(|| NativeManagementError::new(ErrorKind::Invalid))?;
+        return stop_gateway(state_dir, id, revision).await;
+    }
+    if transaction_id.is_some() || expected_revision.is_some() {
+        return Err(NativeManagementError::new(ErrorKind::Invalid));
+    }
+    let path = state_dir.to_owned();
+    let definition = Arc::new(
+        blocking_read(move || Definition::prepare(&path, role(component)))
+            .await
+            .map_err(os)?,
+    );
+    let checked = definition.clone();
+    let before = blocking_read(move || checked.state()).await.map_err(os)?;
+    let before_bytes =
+        serde_json::to_vec(&before).map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?;
+    let observation = if action == ServiceAction::Status {
+        Some(
+            serde_json::to_value(definition.inspect().await.map_err(os)?)
+                .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?,
+        )
+    } else {
+        None
+    };
+    let material = read_report_material(definition.clone()).await?;
+    let report = ServiceReport {
+        schema: 1,
+        operation: match action {
+            ServiceAction::Definition => "definition",
+            ServiceAction::Status => "status",
+            ServiceAction::Stop
+            | ServiceAction::PrepareInstall
+            | ServiceAction::PrepareFirstStart => unreachable!("mutation uses its owned operation"),
+        },
+        configuration_only: action == ServiceAction::Definition,
+        revision: before.revision,
+        desired: before.desired.clone(),
+        definition_path: material.path,
+        definition_plist: material.plist,
+        uid: material.uid,
+        label: material.label.to_owned(),
+        requires_initial_disabled: material.requires_initial_disabled,
+        runtime_selection: material.selection,
+        os: observation,
+        operations_replayed: false,
+        transaction_observation: None,
+        installation_request_v1: None,
+    };
+    let checked = definition.clone();
+    let after = blocking_read(move || checked.state()).await.map_err(os)?;
+    if serde_json::to_vec(&after).map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?
+        != before_bytes
+    {
+        return Err(NativeManagementError::new(ErrorKind::Conflict));
+    }
+    Ok(report)
+}
+static OPERATIONS: tokio::sync::Semaphore = tokio::sync::Semaphore::const_new(1);
+
+struct PreparationOwner {
+    transactions: NativeTransactions,
+    _execution: crate::store::ExecutionLeaseGuard,
+    definition: Arc<Definition>,
+}
+fn prepare_target(
+    before: &NativeState,
+    action: ServiceAction,
+    id: &TransactionId,
+    revision: u64,
+) -> Result<NativeState> {
+    if before.revision != revision
+        || before.mode != NativeDeploymentMode::CreateLocal
+        || before.has_migration_binding()
+        || before.desired.host.is_some()
+    {
+        return Err(NativeManagementError::new(ErrorKind::Conflict));
+    }
+    let mut target = before.clone();
+    let gateway = target
+        .desired
+        .gateway
+        .as_mut()
+        .ok_or_else(|| NativeManagementError::new(ErrorKind::Conflict))?;
+    let expected = match action {
+        ServiceAction::PrepareInstall => NativeComponentDesired {
+            manager: NativeManager::ForegroundCli,
+            run: NativeRunDesired::Stopped,
+            autostart: NativeAutostartDesired::Disabled,
+        },
+        ServiceAction::PrepareFirstStart => NativeComponentDesired {
+            manager: NativeManager::PersistentService,
+            run: NativeRunDesired::Stopped,
+            autostart: NativeAutostartDesired::Disabled,
+        },
+        _ => return Err(NativeManagementError::new(ErrorKind::Invalid)),
+    };
+    if *gateway != expected {
+        return Err(NativeManagementError::new(ErrorKind::Conflict));
+    }
+    gateway.manager = NativeManager::PersistentService;
+    if action == ServiceAction::PrepareFirstStart {
+        gateway.run = NativeRunDesired::Running;
+        gateway.autostart = NativeAutostartDesired::Enabled;
+    }
+    target.revision = revision
+        .checked_add(1)
+        .ok_or_else(|| NativeManagementError::new(ErrorKind::Invalid))?;
+    target.last_transaction = Some(NativeStateTransaction {
+        transaction_id: id.clone(),
+        sequence: before
+            .last_transaction
+            .as_ref()
+            .map_or(0, |tx| tx.sequence)
+            .checked_add(1)
+            .ok_or_else(|| NativeManagementError::new(ErrorKind::Invalid))?,
+    });
+    Ok(target)
+}
+async fn prepare_intent(
+    path: &Path,
+    action: ServiceAction,
+    id: TransactionId,
+    revision: u64,
+) -> Result<ServiceReport> {
+    let permit = OPERATIONS
+        .try_acquire()
+        .map_err(|_| NativeManagementError::new(ErrorKind::Busy))?;
+    let path = path.to_owned();
+    let (send, receive) = tokio::sync::oneshot::channel();
+    let job = tokio::spawn(async move {
+        let _permit = permit;
+        let mut operation = None;
+        let mut owner = None;
+        let attempted = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let result: Result<ServiceReport> = async {
+            let lease_path = path.clone();
+            operation = Some(Arc::new(blocking_read(move || {
+                crate::store::PrivateRoot::open(lease_path).and_then(|root| root.try_service_operation_lease())
+                    .map_err(|error| match error { crate::store::StoreError::Busy(_) => ServiceError::Busy,
+                        _=>ServiceError::Unavailable })
+            }).await.map_err(os)?));
+            let open_path = path.clone();
+            let open_id = id.clone();
+            // Nested Result preserves any original retained transaction-open
+            // failure; converting it to ServiceError would discard custody.
+            owner = Some(Arc::new(std::sync::Mutex::new(blocking_read(move || Ok((|| -> Result<PreparationOwner> {
+                let transactions = platform::service_open(&open_path)?;
+                let prepared = (|| -> Result<_> {
+                    let before = transactions.readstate().map_err(NativeManagementError::transaction)?;
+                    prepare_target(before.state(), action, &open_id, revision)?;
+                    let execution = crate::store::PrivateRoot::open(&open_path)
+                        .and_then(|root| root.try_execution_lease())
+                        .map_err(|_| NativeManagementError::new(ErrorKind::Busy))?;
+                    let definition = if action == ServiceAction::PrepareInstall {
+                        Definition::prepare_install(&open_path)
+                    } else { Definition::prepare(&open_path, ServiceRole::Gateway) }.map_err(os)?;
+                    definition.require_pending_registration().map_err(os)?;
+                    Ok((execution, definition))
+                })();
+                match prepared {
+                    Ok((execution, definition)) => Ok(PreparationOwner {
+                        transactions, _execution:execution, definition:Arc::new(definition) }),
+                    Err(error) if error.exit_code() == 4 => Err(error.keep(transactions)),
+                    Err(error) => Err(error),
+                }
+            })())).await.map_err(os)??)));
+            let checked = owner.as_ref().expect("original preparation owner").clone();
+            let attempted_commit = attempted.clone();
+            let operation = operation.as_ref().expect("original operation lease").clone();
+            blocking_read(move || Ok((|| -> Result<ServiceReport> {
+                operation.validate().map_err(|_| NativeManagementError::new(ErrorKind::Conflict))?;
+                let mut owner = checked.lock().map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?;
+                let before = owner.transactions.readstate().map_err(NativeManagementError::transaction)?;
+                let target = prepare_target(before.state(), action, &id, revision)?;
+                owner.definition.validate().map_err(os)?;
+                let bytes = serde_json::to_vec(&target).map_err(|_| NativeManagementError::new(ErrorKind::Invalid))?;
+                owner.transactions.validate_target(&bytes).map_err(NativeManagementError::transaction)?;
+                attempted_commit.store(true, std::sync::atomic::Ordering::Release);
+                let commit = owner.transactions.apply_target(&bytes).map_err(NativeManagementError::transaction)?;
+                let current = owner.transactions.readstate().map_err(NativeManagementError::transaction)?;
+                if current.raw_bytes() != bytes || commit.transaction_id != id
+                    || commit.canonical_raw_sha256 != Sha256Digest::of_bytes(&bytes) {
+                    return Err(NativeManagementError::new(ErrorKind::Unknown));
+                }
+                let next = Arc::new(owner.definition.reopen_after_preparation().map_err(os)?);
+                let (observed, raw_hash) = next.state_observation().map_err(os)?;
+                if raw_hash != commit.canonical_raw_sha256 || serde_json::to_vec(&observed).ok() != Some(bytes) {
+                    return Err(NativeManagementError::new(ErrorKind::Unknown));
+                }
+                let request = if action == ServiceAction::PrepareFirstStart {
+                    Some(next.first_start_request(&id, target.revision, &raw_hash).map_err(os)?)
+                } else { None };
+                let material = next.installation_material().map_err(os)?;
+                let report = ServiceReport { schema:1,
+                    operation:if action == ServiceAction::PrepareInstall { "prepare_install" } else { "prepare_first_start" },
+                    configuration_only:true, revision:target.revision, desired:target.desired,
+                    definition_path:material.path, definition_plist:std::str::from_utf8(material.bytes)
+                        .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?.to_owned(),
+                    uid:material.uid,label:material.label.to_owned(),requires_initial_disabled:material.requires_initial_disabled,
+                    runtime_selection:next.runtime_selection().map_err(os)?.clone(), os:None,operations_replayed:false,
+                    transaction_observation:Some(serde_json::json!({"status":"committed","state_scope":"committed_target",
+                        "transaction_id":commit.transaction_id,"revision":target.revision,
+                        "canonical_raw_sha256":raw_hash,"receipt":commit.committed})),
+                    installation_request_v1:request };
+                operation.validate().map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?;
+                owner.definition = next;
+                Ok(report)
+            })())).await.map_err(os)?
+        }.await;
+        match result {
+            Ok(report) => {
+                let _ = send.send(Ok(report));
+            }
+            Err(error)
+                if attempted.load(std::sync::atomic::Ordering::Acquire)
+                    || error._retained.is_some()
+                    || matches!(error.kind, ErrorKind::Unknown) =>
+            {
+                let _ = send.send(Err((ErrorKind::Unknown, true)));
+                std::future::pending::<()>().await;
+                drop(error);
+            }
+            Err(error) => {
+                let _ = send.send(Err((error.kind, false)));
+            }
+        }
+        drop((owner, operation));
+    });
+    match receive.await {
+        Ok(Ok(report)) => {
+            job.await
+                .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?;
+            Ok(report)
+        }
+        Ok(Err((kind, false))) => {
+            job.await
+                .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?;
+            Err(NativeManagementError::new(kind))
+        }
+        Ok(Err((kind, true))) => {
+            let mut error = NativeManagementError::new(kind);
+            error._retained = Some(Retained::Service { _job: job });
+            Err(error)
+        }
+        Err(_) => {
+            let mut error = NativeManagementError::new(ErrorKind::Unknown);
+            error._retained = Some(Retained::Service { _job: job });
+            Err(error)
+        }
+    }
+}
+
+/// Validate the exact reply's target, not an arbitrary newer current revision.
+/// Other role intent, selection, opaque fields and identity must be unchanged.
+fn validate_stop_target(
+    before: &NativeState,
+    after: &NativeState,
+    raw_sha256: &styx_contracts::identity::Sha256Digest,
+    report: &crate::management::service_control::ServiceControlReport,
+    id: &TransactionId,
+) -> Result<()> {
+    use styx_contracts::native_management::NativeStateTransaction;
+    let mut expected = before.clone();
+    let gateway = expected
+        .desired
+        .gateway
+        .as_mut()
+        .ok_or_else(|| NativeManagementError::new(ErrorKind::Conflict))?;
+    if gateway.manager != NativeManager::PersistentService
+        || gateway.run != NativeRunDesired::Running
+    {
+        return Err(NativeManagementError::new(ErrorKind::Conflict));
+    }
+    gateway.run = NativeRunDesired::Stopped;
+    expected.revision = expected
+        .revision
+        .checked_add(1)
+        .ok_or_else(|| NativeManagementError::new(ErrorKind::Conflict))?;
+    // Journal high-water can exceed the last committed state's sequence.
+    // The complete chain reader validates the exact sequence; never equate it
+    // to revision or require last committed + 1 here.
+    let transaction = after
+        .last_transaction
+        .as_ref()
+        .filter(|tx| {
+            &tx.transaction_id == id
+                && tx.sequence
+                    > before
+                        .last_transaction
+                        .as_ref()
+                        .map_or(0, |old| old.sequence)
+        })
+        .ok_or_else(|| NativeManagementError::new(ErrorKind::Unknown))?;
+    expected.last_transaction = Some(NativeStateTransaction {
+        transaction_id: id.clone(),
+        sequence: transaction.sequence,
+    });
+    let expected_bytes = serde_json::to_vec(&expected)
+        .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?;
+    let after_bytes =
+        serde_json::to_vec(after).map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?;
+    if report.schema != 1
+        || &report.transaction_id != id
+        || report.status != "configuration_committed_stop_pending"
+        || report.state_scope != "committed_target"
+        || report.revision != expected.revision
+        || &report.canonical_raw_sha256 != raw_sha256
+        || expected_bytes != after_bytes
+    {
+        return Err(NativeManagementError::new(ErrorKind::Unknown));
+    }
+    Ok(())
+}
+
+/// Caller loss never cancels or resends the original mutation. Any uncertainty
+/// after dispatch retains operation lease, definition, original instance and
+/// transaction identity until whole-process teardown, as on Linux.
+async fn stop_gateway(path: &Path, id: TransactionId, revision: u64) -> Result<ServiceReport> {
+    let permit = OPERATIONS
+        .try_acquire()
+        .map_err(|_| NativeManagementError::new(ErrorKind::Busy))?;
+    let path = path.to_owned();
+    let (send, receive) = tokio::sync::oneshot::channel();
+    let job = tokio::spawn(async move {
+        let _permit = permit;
+        let mut operation_lease = None;
+        let mut definition = None;
+        let mut instance = None;
+        let mut dispatched = false;
+        let result = async {
+            let lease_path = path.clone();
+            operation_lease = Some(Arc::new(
+                blocking_read(move || {
+                    crate::store::PrivateRoot::open(lease_path)
+                        .and_then(|root| root.try_service_operation_lease())
+                        .map_err(|error| match error {
+                            crate::store::StoreError::Busy(_) => ServiceError::Busy,
+                            _ => ServiceError::Unavailable,
+                        })
+                })
+                .await
+                .map_err(os)?,
+            ));
+            let prepared_path = path.clone();
+            definition = Some(Arc::new(
+                blocking_read(move || Definition::prepare(&prepared_path, ServiceRole::Gateway))
+                    .await
+                    .map_err(os)?,
+            ));
+            let definition = definition.as_ref().expect("original definition");
+            let checked = definition.clone();
+            let before = blocking_read(move || checked.state()).await.map_err(os)?;
+            if before.revision != revision
+                || before.desired.gateway.is_none_or(|desired| {
+                    desired.manager != NativeManager::PersistentService
+                        || desired.run != NativeRunDesired::Running
+                })
+            {
+                return Err(NativeManagementError::new(ErrorKind::Conflict));
+            }
+            // Pins exact root-owned installed plist + registered process UID,
+            // kernel birth and original signed executable before C07 dispatch.
+            instance = Some(definition.prepare_stop().await.map_err(os)?);
+            validate_operation(operation_lease.as_ref().expect("operation lease").clone()).await?;
+            dispatched = true;
+            let committed = crate::management::service_control::set_run(
+                &path,
+                NativeComponent::Gateway,
+                NativeRunDesired::Stopped,
+                revision,
+                id.clone(),
+            )
+            .await
+            .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?;
+            // The same original Gateway now cancels/drains itself. Never send
+            // launchctl kill or retry Stop, even if ACK or actual exit is lost.
+            let stopped = definition.wait_original_stop().await.map_err(os)?;
+            let checked = definition.clone();
+            let (after, raw_sha256) = blocking_read(move || checked.state_observation())
+                .await
+                .map_err(os)?;
+            validate_stop_target(&before, &after, &raw_sha256, &committed, &id)?;
+            validate_operation(operation_lease.as_ref().expect("operation lease").clone())
+                .await
+                .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?;
+            let material = read_report_material(definition.clone()).await?;
+            Ok(ServiceReport {
+                schema: 1,
+                operation: "stop",
+                configuration_only: false,
+                revision: after.revision,
+                desired: after.desired,
+                definition_path: material.path,
+                definition_plist: material.plist,
+                uid: material.uid,
+                label: material.label.to_owned(),
+                requires_initial_disabled: material.requires_initial_disabled,
+                runtime_selection: material.selection,
+                // Original signed __service-run exits zero only after its
+                // Gateway outcome is complete. OS absence alone is insufficient;
+                // this does not claim independent per-worker waitpid observation.
+                os: Some(serde_json::json!({"stop":stopped,
+                    "product_settlement_basis":"original_signed_service_clean_exit",
+                    "independent_worker_wait":"not_observed"})),
+                operations_replayed: false,
+                transaction_observation: Some(
+                    serde_json::to_value(committed)
+                        .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?,
+                ),
+                installation_request_v1: None,
+            })
+        }
+        .await;
+        match result {
+            Ok(report) => {
+                let _ = send.send(Ok(report));
+            }
+            Err(error) if dispatched => {
+                let _ = send.send(Err((ErrorKind::Unknown, true)));
+                std::future::pending::<()>().await;
+                drop(error);
+            }
+            Err(error) => {
+                let _ = send.send(Err((error.kind, false)));
+            }
+        }
+        drop((instance, definition, operation_lease, id));
+    });
+    match receive.await {
+        Ok(Ok(report)) => {
+            job.await
+                .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?;
+            Ok(report)
+        }
+        Ok(Err((kind, false))) => {
+            job.await
+                .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?;
+            Err(NativeManagementError::new(kind))
+        }
+        Ok(Err((kind, true))) => {
+            let mut error = NativeManagementError::new(kind);
+            error._retained = Some(Retained::Service { _job: job });
+            Err(error)
+        }
+        Err(_) => {
+            let mut error = NativeManagementError::new(ErrorKind::Unknown);
+            error._retained = Some(Retained::Service { _job: job });
+            Err(error)
+        }
+    }
+}
+
+/// Only the exact launchd-registered PID/birth/code identity can obtain this
+/// scope. Shell invocation and lookalike environment variables grant nothing.
+pub async fn run(
+    state_dir: &Path,
+    component: NativeComponent,
+    cancel: tokio_util::sync::CancellationToken,
+    events: tokio::sync::mpsc::Sender<crate::foreground::ForegroundEvent>,
+) -> Result<serde_json::Value> {
+    let scope = ServiceScope::authenticate(state_dir, role(component))
+        .await
+        .map_err(os)?;
+    match component {
+        NativeComponent::Host => {
+            let outcome = crate::foreground::host_run_for_service(scope, cancel, events)
+                .await
+                .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?;
+            if !outcome.is_complete() {
+                return Err(NativeManagementError::new(ErrorKind::Unknown));
+            }
+            serde_json::to_value(outcome)
+                .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))
+        }
+        NativeComponent::Gateway => {
+            let outcome = crate::foreground::gateway_run_for_service(scope, cancel, events)
+                .await
+                .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?;
+            if !outcome.is_complete() {
+                return Err(NativeManagementError::new(ErrorKind::Unknown));
+            }
+            serde_json::to_value(outcome)
+                .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::management::service_control::ServiceControlReport;
+
+    // Pure consumer contract only: no launchd, service registration, or native
+    // process/settlement claim is made by this fixture.
+    fn fixture() -> (
+        NativeState,
+        NativeState,
+        ServiceControlReport,
+        TransactionId,
+    ) {
+        let id: TransactionId = "mac-gateway-stop-contract".try_into().unwrap();
+        let digest = Sha256Digest::of_bytes(b"consumer-contract");
+        let desired = NativeComponentDesired {
+            manager: NativeManager::PersistentService,
+            run: NativeRunDesired::Running,
+            autostart: NativeAutostartDesired::Enabled,
+        };
+        let before = NativeState {
+            schema: 2,
+            kind: NativeStateKind::StyxDesiredState,
+            runtime_format: NativeRuntimeFormat::NativeRustV1,
+            reader_contract: styx_contracts::management::ReaderContract::NativeManagementStateV1,
+            scope_generation: digest.clone(),
+            deployment_raw_sha256: digest,
+            mode: NativeDeploymentMode::CreateLocal,
+            revision: 4,
+            last_transaction: Some(NativeStateTransaction {
+                transaction_id: "previous-stop-contract".try_into().unwrap(),
+                sequence: 9,
+            }),
+            desired: NativeDesired {
+                gateway: Some(desired),
+                host: Some(desired),
+            },
+            migration: None,
+            extensions: Default::default(),
+        };
+        let mut after = before.clone();
+        after.revision = 5;
+        // Deliberate journal sequence gap, independent of revision.
+        after.last_transaction = Some(NativeStateTransaction {
+            transaction_id: id.clone(),
+            sequence: 12,
+        });
+        after.desired.gateway.as_mut().unwrap().run = NativeRunDesired::Stopped;
+        let hash = Sha256Digest::of_bytes(&serde_json::to_vec(&after).unwrap());
+        let report = ServiceControlReport {
+            schema: 1,
+            transaction_id: id.clone(),
+            revision: 5,
+            canonical_raw_sha256: hash,
+            status: "configuration_committed_stop_pending".into(),
+            state_scope: "committed_target".into(),
+        };
+        (before, after, report, id)
+    }
+    #[test]
+    fn mac_gateway_stop_target_binds_original_role_transaction_and_raw_canonical() {
+        let (before, after, report, id) = fixture();
+        let hash = report.canonical_raw_sha256.clone();
+        assert!(validate_stop_target(&before, &after, &hash, &report, &id).is_ok());
+        let mut changed = after.clone();
+        changed.desired.host.as_mut().unwrap().run = NativeRunDesired::Stopped;
+        assert!(validate_stop_target(&before, &changed, &hash, &report, &id).is_err());
+        changed = after.clone();
+        changed.desired.gateway.as_mut().unwrap().autostart = NativeAutostartDesired::Disabled;
+        assert!(validate_stop_target(&before, &changed, &hash, &report, &id).is_err());
+        changed = after.clone();
+        changed.scope_generation = Sha256Digest::of_bytes(b"replacement-root");
+        assert!(validate_stop_target(&before, &changed, &hash, &report, &id).is_err());
+        assert!(
+            validate_stop_target(
+                &before,
+                &after,
+                &Sha256Digest::of_bytes(b"wrong-raw"),
+                &report,
+                &id
+            )
+            .is_err()
+        );
+        let mut wrong_reply = report;
+        wrong_reply.status = "committed".into();
+        assert!(validate_stop_target(&before, &after, &hash, &wrong_reply, &id).is_err());
+    }
+    #[test]
+    fn mac_prepare_intent_refuses_manager_adoption_running_and_extra_roles() {
+        let (mut before, _, _, id) = fixture();
+        before.desired.host = None;
+        let gateway = before.desired.gateway.as_mut().unwrap();
+        gateway.manager = NativeManager::ForegroundCli;
+        gateway.run = NativeRunDesired::Stopped;
+        gateway.autostart = NativeAutostartDesired::Disabled;
+        assert!(
+            prepare_target(&before, ServiceAction::PrepareInstall, &id, before.revision).is_ok()
+        );
+        let mut refused = before.clone();
+        refused.desired.gateway.as_mut().unwrap().manager = NativeManager::AppManaged;
+        assert!(
+            prepare_target(
+                &refused,
+                ServiceAction::PrepareInstall,
+                &id,
+                before.revision
+            )
+            .is_err()
+        );
+        refused = before.clone();
+        refused.desired.gateway.as_mut().unwrap().run = NativeRunDesired::Running;
+        assert!(
+            prepare_target(
+                &refused,
+                ServiceAction::PrepareInstall,
+                &id,
+                before.revision
+            )
+            .is_err()
+        );
+        refused = before.clone();
+        refused.desired.host = refused.desired.gateway;
+        assert!(
+            prepare_target(
+                &refused,
+                ServiceAction::PrepareInstall,
+                &id,
+                before.revision
+            )
+            .is_err()
+        );
+        assert!(
+            prepare_target(
+                &before,
+                ServiceAction::PrepareFirstStart,
+                &id,
+                before.revision
+            )
+            .is_err()
+        );
+        assert!(
+            prepare_target(
+                &before,
+                ServiceAction::PrepareInstall,
+                &id,
+                before.revision + 1
+            )
+            .is_err()
+        );
+    }
+    #[test]
+    fn mac_gateway_stop_never_accepts_replayed_or_app_owned_transition() {
+        let (mut before, mut after, mut report, id) = fixture();
+        after.last_transaction.as_mut().unwrap().sequence = 9;
+        assert!(
+            validate_stop_target(&before, &after, &report.canonical_raw_sha256, &report, &id)
+                .is_err()
+        );
+        after.last_transaction.as_mut().unwrap().sequence = 12;
+        report.transaction_id = "foreign-stop-contract".try_into().unwrap();
+        assert!(
+            validate_stop_target(&before, &after, &report.canonical_raw_sha256, &report, &id)
+                .is_err()
+        );
+        before.desired.gateway.as_mut().unwrap().manager = NativeManager::AppManaged;
+        assert!(
+            validate_stop_target(&before, &after, &report.canonical_raw_sha256, &report, &id)
+                .is_err()
+        );
+    }
+}

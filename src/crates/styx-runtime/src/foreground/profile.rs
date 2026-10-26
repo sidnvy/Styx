@@ -50,11 +50,6 @@ pub(crate) use native_materials::read_recovered_pair_materials;
 pub(crate) use native_materials::{
     AppliedNativeMaintenanceProfile, load_applied_native_maintenance_profile,
 };
-#[cfg(target_os = "macos")]
-pub(crate) use native_materials::{
-    AppliedNativeMaintenanceProfile as AppliedMacMaintenanceProfile,
-    load_applied_native_maintenance_profile as load_applied_mac_maintenance_profile,
-};
 
 const JSON_LIMIT: usize = 1024 * 1024;
 #[derive(Debug, Clone, Copy, thiserror::Error)]
@@ -754,10 +749,11 @@ impl ProfileSource {
         root: &PrivateRoot,
         raw: &crate::store::RawFile,
     ) -> Result<bool, ProfileError> {
-        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
         {
             let result = match self {
                 Self::NativeCommitted(binding) => binding.service_canonical_matches(root, raw),
+                #[cfg(all(target_os = "linux", target_env = "gnu"))]
                 Self::Committed(binding) => binding.service_canonical_matches(root, raw),
                 Self::Fresh(binding) => binding.service_canonical_matches(root, raw),
                 _ => Ok(None),
@@ -766,7 +762,7 @@ impl ProfileSource {
                 .map(|matched| matched == Some(true))
                 .map_err(service_tip_error)
         }
-        #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
+        #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
         {
             let _ = (root, raw);
             Ok(false)
@@ -774,7 +770,7 @@ impl ProfileSource {
     }
 }
 fn journal_profile_error(error: crate::store::enrollment::JournalError) -> ProfileError {
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
     match error {
         crate::store::enrollment::JournalError::ConfigurationPending => {
             return ProfileError::ManagementBusy;
@@ -787,7 +783,7 @@ fn journal_profile_error(error: crate::store::enrollment::JournalError) -> Profi
     let _ = error;
     ProfileError::Changed
 }
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
 fn service_tip_error(error: crate::store::native_live_tip::LiveTipError) -> ProfileError {
     use crate::store::native_live_tip::LiveTipError;
     match error {
@@ -842,11 +838,11 @@ pub(crate) fn load_for_app(
 }
 /// Only the native OS manager can supply this opaque scope. A CLI argument or
 /// environment variable cannot adopt the service's profile or execution lease.
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
+#[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
 pub(crate) fn load_for_service(
-    scope: Arc<crate::platform::linux::native_service::ServiceScope>,
+    scope: Arc<crate::platform::native_service::ServiceScope>,
 ) -> Result<LoadedLegacyProfile, ProfileError> {
-    use crate::platform::linux::native_service::ServiceRole;
+    use crate::platform::native_service::ServiceRole;
     use styx_contracts::management::ReaderContract;
     scope.validate().map_err(|_| ProfileError::Changed)?;
     if scope.role() != ServiceRole::Host {
@@ -860,7 +856,10 @@ pub(crate) fn load_for_service(
     let marker = crate::store::native_state::decode_marker(raw.bytes())
         .map_err(|_| ProfileError::Changed)?;
     let source = match marker.reader_floor {
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
         ReaderContract::NativeMigratedStateV1 => ProfileSource::Committed(Arc::new(crate::store::committed_runtime::CommittedRuntimeSnapshot::open_for_service(scope).map_err(|_| ProfileError::Changed)?)),
+        #[cfg(target_os = "macos")]
+        ReaderContract::NativeMigratedStateV1 => return Err(ProfileError::Invalid),
         ReaderContract::NativeMigratedStateV2 => ProfileSource::NativeCommitted(Arc::new(crate::store::committed_runtime_native::NativeCommittedRuntimeSnapshot::open_for_service(scope).map_err(|_| ProfileError::Changed)?)),
         ReaderContract::NativeManagementStateV1 => return fresh::load_for_service(scope),
         ReaderContract::NativeRuntimeSelectedStateV1 | ReaderContract::NativeAppRuntimeSelectedStateV1 => return Err(ProfileError::Invalid),

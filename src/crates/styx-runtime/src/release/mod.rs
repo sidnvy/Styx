@@ -323,6 +323,16 @@ impl VerifiedNativeRelease {
         self.revalidate()?;
         Ok(pinned)
     }
+    /// Code identity of the retained, publisher-verified CLI, for a platform
+    /// service to compare against its original running process. Data only;
+    /// this does not authorize a process, writer or service registration.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn macos_executable_cdhash(&self) -> Result<Vec<u8>> {
+        self.revalidate()?;
+        let cdhash = self.executable.expected_cdhash()?;
+        self.revalidate()?;
+        Ok(cdhash)
+    }
     /// Returns only the fixed, retained native image's kernel FD path. This
     /// function does not spawn, install, activate or authorize arbitrary commands.
     pub fn launch_path(&self) -> Result<PathBuf> {
