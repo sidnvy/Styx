@@ -696,7 +696,7 @@ mod platform {
             }
             runtime
                 .configuration_root()
-                .require_pre_invite_enrollment(now()?)
+                .require_pre_invite_enrollment(now()?.checked_mul(1000).ok_or_else(bad)?)
                 .map_err(|_| BootstrapError::new("app_local_checkpoint_refused", 3))?;
             reobserve(&selection_root, &raw)?;
             runtime.validate()?;

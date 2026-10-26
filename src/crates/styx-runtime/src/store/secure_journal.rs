@@ -12,6 +12,13 @@ pub enum JournalError {
     Conflict,
     #[error("journal observation or persistence outcome unknown")]
     Unknown,
+    /// Internal live-service read classification; never a commit or admission proof.
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[error("service configuration observation pending")]
+    ConfigurationPending,
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[error("service stop requested")]
+    ServiceStopRequested,
     #[error("journal scan budget exceeded")]
     BudgetExceeded,
 }
@@ -134,6 +141,15 @@ pub(super) mod files {
         }
         Ok(m)
     }
+    pub(in crate::store) fn append_temporary_name(name: &str) -> bool {
+        name.strip_prefix("orphan-")
+            .and_then(|s| s.strip_suffix(".temporary"))
+            .is_some_and(|s| {
+                s.len() == 64
+                    && s.bytes()
+                        .all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+            })
+    }
     pub(in crate::store) fn read(
         dir: &File,
         name: &str,
@@ -160,14 +176,22 @@ pub(super) mod files {
             .read_to_end(&mut bytes)
             .map_err(unknown)?;
         let after = regular(&f)?;
+        if after.len() > max as u64 || bytes.len() > max {
+            return Err(JournalError::BudgetExceeded);
+        }
         let current = File::from(
-            openat(
+            match openat(
                 dir,
                 name,
                 OFlag::O_RDONLY | OFlag::O_NONBLOCK | OFlag::O_NOFOLLOW | OFlag::O_CLOEXEC,
                 Mode::empty(),
-            )
-            .map_err(unknown)?,
+            ) {
+                Ok(fd) => fd,
+                Err(Errno::ENOENT) if append_temporary_name(name) => {
+                    return Err(JournalError::ConfigurationPending);
+                }
+                Err(error) => return Err(unknown(error)),
+            },
         );
         let current = regular(&current)?;
         let identity = |m: &std::fs::Metadata| {
@@ -185,6 +209,14 @@ pub(super) mod files {
             || identity(&after) != identity(&current)
             || bytes.len() as u64 != after.len()
         {
+            if append_temporary_name(name)
+                && (before.dev(), before.ino()) == (after.dev(), after.ino())
+                && (after.dev(), after.ino()) == (current.dev(), current.ino())
+            {
+                // Only a still-private, same-file publication temporary is
+                // changing. This is a refusal, never permission to ignore it.
+                return Err(JournalError::ConfigurationPending);
+            }
             return Err(JournalError::Unknown);
         }
         Ok(Some(bytes))
@@ -205,6 +237,28 @@ pub(super) mod files {
     pub(in crate::store) fn scan(
         dir: &File,
         budget: JournalBudget,
+    ) -> JournalResult<JournalObservation> {
+        scan_with_observer(
+            dir,
+            budget,
+            #[cfg(test)]
+            &|_| {},
+        )
+    }
+    // The existing writer already exposes fault observation; this matching
+    // local read hook makes enumeration/open races deterministic in FS tests.
+    #[cfg(test)]
+    pub(in crate::store) fn scan_observing(
+        dir: &File,
+        budget: JournalBudget,
+        observe: &impl Fn(&str),
+    ) -> JournalResult<JournalObservation> {
+        scan_with_observer(dir, budget, observe)
+    }
+    fn scan_with_observer(
+        dir: &File,
+        budget: JournalBudget,
+        #[cfg(test)] observe: &impl Fn(&str),
     ) -> JournalResult<JournalObservation> {
         // A fresh directory description avoids shared seek offsets across scans.
         let mut iterator = Dir::openat(
@@ -230,8 +284,16 @@ pub(super) mod files {
                 .max_bytes
                 .checked_sub(total_bytes)
                 .ok_or(JournalError::BudgetExceeded)?;
-            let bytes = read(dir, &name, budget.max_file_bytes.min(remaining))?
-                .ok_or(JournalError::Unknown)?;
+            #[cfg(test)]
+            observe(&name);
+            let bytes =
+                read(dir, &name, budget.max_file_bytes.min(remaining))?.ok_or_else(|| {
+                    if append_temporary_name(&name) {
+                        JournalError::ConfigurationPending
+                    } else {
+                        JournalError::Unknown
+                    }
+                })?;
             total_bytes = total_bytes
                 .checked_add(bytes.len())
                 .ok_or(JournalError::BudgetExceeded)?;

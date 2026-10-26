@@ -531,14 +531,14 @@ impl LoadedLegacyProfile {
         if let ProfileSource::NativeCommitted(binding) = &self.source {
             binding
                 .validate_legacy_owners(state, host)
-                .map_err(|_| ProfileError::Changed)?;
+                .map_err(journal_profile_error)?;
             return Ok(true);
         }
         #[cfg(all(target_os = "linux", target_env = "gnu"))]
         if let ProfileSource::Committed(binding) = &self.source {
             binding
                 .validate_legacy_owners(state, host)
-                .map_err(|_| ProfileError::Changed)?;
+                .map_err(journal_profile_error)?;
             return Ok(true);
         }
         #[cfg(any(
@@ -547,7 +547,7 @@ impl LoadedLegacyProfile {
             target_os = "macos"
         ))]
         if let ProfileSource::Fresh(binding) = &self.source {
-            binding.revalidate().map_err(|_| ProfileError::Changed)?;
+            binding.revalidate().map_err(journal_profile_error)?;
             if state.identity() != binding.root_identity()
                 || host.identity() != binding.root_identity()
                 || self.host_base_dir != binding.state_dir()
@@ -723,7 +723,7 @@ enum ProfileSource {
 }
 impl ProfileSource {
     fn revalidate(&self) -> Result<(), ProfileError> {
-        let result = match self {
+        match self {
             Self::Ordinary => Ok(()),
             #[cfg(any(
                 target_os = "macos",
@@ -736,35 +736,17 @@ impl ProfileSource {
                 target_os = "windows",
                 target_os = "macos"
             ))]
-            Self::NativeCommitted(binding) => {
-                binding.revalidate().map_err(|_| ProfileError::Changed)
-            }
+            Self::NativeCommitted(binding) => binding.revalidate().map_err(journal_profile_error),
             #[cfg(all(target_os = "linux", target_env = "gnu"))]
             Self::Maintenance(binding) => binding.revalidate().map_err(|_| ProfileError::Changed),
             #[cfg(all(target_os = "linux", target_env = "gnu"))]
-            Self::Committed(binding) => binding.revalidate().map_err(|_| ProfileError::Changed),
+            Self::Committed(binding) => binding.revalidate().map_err(journal_profile_error),
             #[cfg(any(
                 all(target_os = "linux", target_env = "gnu"),
                 target_os = "windows",
                 target_os = "macos"
             ))]
-            Self::Fresh(binding) => binding.revalidate().map_err(|_| ProfileError::Changed),
-        };
-        result.map_err(|error| {
-            #[cfg(all(target_os = "linux", target_env = "gnu"))]
-            if let Err(status) = self.service_tip_status() {
-                return service_tip_error(status);
-            }
-            error
-        })
-    }
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    fn service_tip_status(&self) -> Result<(), crate::store::native_live_tip::LiveTipError> {
-        match self {
-            Self::NativeCommitted(binding) => binding.service_tip_status(),
-            Self::Committed(binding) => binding.service_tip_status(),
-            Self::Fresh(binding) => binding.service_tip_status(),
-            _ => Ok(()),
+            Self::Fresh(binding) => binding.revalidate().map_err(journal_profile_error),
         }
     }
     fn service_canonical_matches(
@@ -790,6 +772,20 @@ impl ProfileSource {
             Ok(false)
         }
     }
+}
+fn journal_profile_error(error: crate::store::enrollment::JournalError) -> ProfileError {
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    match error {
+        crate::store::enrollment::JournalError::ConfigurationPending => {
+            return ProfileError::ManagementBusy;
+        }
+        crate::store::enrollment::JournalError::ServiceStopRequested => {
+            return ProfileError::StopRequested;
+        }
+        _ => (),
+    }
+    let _ = error;
+    ProfileError::Changed
 }
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 fn service_tip_error(error: crate::store::native_live_tip::LiveTipError) -> ProfileError {

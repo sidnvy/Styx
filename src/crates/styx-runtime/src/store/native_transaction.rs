@@ -71,6 +71,10 @@ pub struct NativeTransactions {
     retained_maintenance: Option<ConfigurationMaintenance>,
 }
 impl NativeTransactions {
+    #[cfg(all(test, target_os = "linux", target_env = "gnu"))]
+    pub(in crate::store) fn journal_for_test(&mut self) -> &mut OwnedManagementJournal {
+        &mut self.journal
+    }
     pub fn open(binding: NativeRootBinding) -> Result<Self, NativeTransactionOpenFailure> {
         match OwnedManagementJournal::open_existing(
             binding.configuration_root(),

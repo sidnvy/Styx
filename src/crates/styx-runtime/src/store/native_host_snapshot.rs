@@ -111,12 +111,6 @@ impl NativeHostSnapshot {
         Self::open_source(&path, None, Some(scope))
     }
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    pub(crate) fn service_tip_status(&self) -> Result<(), super::native_live_tip::LiveTipError> {
-        self.service_tip
-            .as_ref()
-            .map_or(Ok(()), |tip| tip.revalidate())
-    }
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
     pub(crate) fn service_canonical_matches(
         &self,
         root: &PrivateRoot,
@@ -127,7 +121,10 @@ impl NativeHostSnapshot {
         }
         self.service_tip
             .as_ref()
-            .map(|tip| tip.revalidate_proof().map(|proof| proof.matches_state(raw)))
+            .map(|tip| {
+                tip.revalidate_proof()
+                    .and_then(|proof| proof.matches_observed_state(raw))
+            })
             .transpose()
     }
 
@@ -291,7 +288,7 @@ impl NativeHostSnapshot {
             .as_ref()
             .map(|tip| tip.revalidate_proof())
             .transpose()
-            .map_err(|_| JournalError::Unknown)?;
+            .map_err(super::native_live_tip::LiveTipError::journal)?;
         validate_app_scope(self.app_scope.as_deref(), &self.state_dir)?;
         ownership(&self.root)?;
         self.root
@@ -309,6 +306,10 @@ impl NativeHostSnapshot {
                         successor.as_ref(),
                     )?;
                     let scan = files::scan(&self.namespace, JournalBudget::default())?;
+                    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+                    if let Some(proof) = &successor {
+                        proof.check_scan(&scan)?;
+                    }
                     let matches = same_scan(&scan, &self.journal);
                     #[cfg(all(target_os = "linux", target_env = "gnu"))]
                     let matches = successor
@@ -339,6 +340,17 @@ impl NativeHostSnapshot {
         >,
     ) -> JournalResult<()> {
         for pin in &self.pins {
+            #[cfg(all(target_os = "linux", target_env = "gnu"))]
+            let raw = if pin.path == "state.json"
+                && let Some(proof) = successor
+            {
+                proof.read_state(&self.root, pin.limit)?
+            } else {
+                self.root
+                    .read_raw(&pin.path, pin.limit)
+                    .map_err(|_| JournalError::Unknown)?
+            };
+            #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
             let raw = self
                 .root
                 .read_raw(&pin.path, pin.limit)
@@ -352,6 +364,12 @@ impl NativeHostSnapshot {
                 matches
             };
             if !matches {
+                #[cfg(all(target_os = "linux", target_env = "gnu"))]
+                if pin.path == "state.json"
+                    && let Some(proof) = successor
+                {
+                    proof.check_state(&raw)?;
+                }
                 return Err(JournalError::Unknown);
             }
         }

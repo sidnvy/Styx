@@ -180,7 +180,10 @@ impl CommittedRuntimeSnapshot {
         }
         self.service_tip
             .as_ref()
-            .map(|tip| tip.revalidate_proof().map(|proof| proof.matches_state(raw)))
+            .map(|tip| {
+                tip.revalidate_proof()
+                    .and_then(|proof| proof.matches_observed_state(raw))
+            })
             .transpose()
     }
 
@@ -190,7 +193,7 @@ impl CommittedRuntimeSnapshot {
             .as_ref()
             .map(|tip| tip.revalidate_proof())
             .transpose()
-            .map_err(|_| JournalError::Unknown)?;
+            .map_err(super::native_live_tip::LiveTipError::journal)?;
         self.root
             .inner
             .with_readonly_directory(|directory| {
@@ -208,6 +211,9 @@ impl CommittedRuntimeSnapshot {
                         return Err(JournalError::Unknown);
                     }
                     let scan = files::scan(&self.namespace, JournalBudget::default())?;
+                    if let Some(proof) = &successor {
+                        proof.check_scan(&scan)?;
+                    }
                     let journal_matches = successor.as_ref().map_or_else(
                         || {
                             scan.files.len() == self.pins.len().saturating_sub(5)
@@ -225,10 +231,15 @@ impl CommittedRuntimeSnapshot {
                         return Err(JournalError::Conflict);
                     }
                     for pin in &self.pins {
-                        let raw = self
-                            .root
-                            .read_raw(&pin.path, MAX)
-                            .map_err(|_| JournalError::Unknown)?;
+                        let raw = if pin.path == "state.json"
+                            && let Some(proof) = &successor
+                        {
+                            proof.read_state(&self.root, MAX)?
+                        } else {
+                            self.root
+                                .read_raw(&pin.path, MAX)
+                                .map_err(|_| JournalError::Unknown)?
+                        };
                         let matches = if pin.path == "state.json" {
                             successor.as_ref().map_or_else(
                                 || {
@@ -242,11 +253,19 @@ impl CommittedRuntimeSnapshot {
                                 && Sha256Digest::of_bytes(raw.bytes()) == pin.digest
                         };
                         if !matches {
+                            if pin.path == "state.json"
+                                && let Some(proof) = &successor
+                            {
+                                proof.check_state(&raw)?;
+                            }
                             return Err(JournalError::Unknown);
                         }
                     }
                     cutover::check_committed_successor_root(&self.root, &self.original, &scan)?;
                     let after = files::scan(&self.namespace, JournalBudget::default())?;
+                    if let Some(proof) = &successor {
+                        proof.check_scan(&after)?;
+                    }
                     if after.files.len() != scan.files.len()
                         || after
                             .files
@@ -259,10 +278,15 @@ impl CommittedRuntimeSnapshot {
                     // A same-bytes file/namespace replacement is still a changed
                     // original observation, not an acceptable cached selection.
                     for pin in &self.pins {
-                        let raw = self
-                            .root
-                            .read_raw(&pin.path, MAX)
-                            .map_err(|_| JournalError::Unknown)?;
+                        let raw = if pin.path == "state.json"
+                            && let Some(proof) = &successor
+                        {
+                            proof.read_state(&self.root, MAX)?
+                        } else {
+                            self.root
+                                .read_raw(&pin.path, MAX)
+                                .map_err(|_| JournalError::Unknown)?
+                        };
                         let matches = if pin.path == "state.json" {
                             successor.as_ref().map_or_else(
                                 || {
@@ -276,6 +300,11 @@ impl CommittedRuntimeSnapshot {
                                 && Sha256Digest::of_bytes(raw.bytes()) == pin.digest
                         };
                         if !matches {
+                            if pin.path == "state.json"
+                                && let Some(proof) = &successor
+                            {
+                                proof.check_state(&raw)?;
+                            }
                             return Err(JournalError::Unknown);
                         }
                     }

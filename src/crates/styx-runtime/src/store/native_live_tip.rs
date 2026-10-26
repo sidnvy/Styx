@@ -32,9 +32,22 @@ pub(crate) enum LiveTipError {
     StopRequested,
     Changed,
 }
+impl LiveTipError {
+    pub(crate) fn journal(self) -> JournalError {
+        match self {
+            Self::Pending => JournalError::ConfigurationPending,
+            Self::StopRequested => JournalError::ServiceStopRequested,
+            Self::Changed => JournalError::Unknown,
+        }
+    }
+}
 impl From<JournalError> for LiveTipError {
-    fn from(_: JournalError) -> Self {
-        Self::Changed
+    fn from(error: JournalError) -> Self {
+        match error {
+            JournalError::ConfigurationPending => Self::Pending,
+            JournalError::ServiceStopRequested => Self::StopRequested,
+            _ => Self::Changed,
+        }
     }
 }
 pub(crate) struct AutostartTip {
@@ -96,8 +109,17 @@ impl AutostartTip {
             .iter()
             .filter(|f| !self.files.contains_key(&f.name))
             .collect::<Vec<_>>();
-        if added.iter().any(|f| !c07_name(&f.name)) {
+        if added
+            .iter()
+            .any(|f| !c07_name(&f.name) && !append_temporary(&f.name))
+        {
             return Err(LiveTipError::Changed);
+        }
+        if added.iter().any(|f| append_temporary(&f.name)) {
+            // This shape is the existing writer's publication temporary. Its
+            // origin is NOT proven by its name: it can only fence admission,
+            // never be ignored, adopted, or classified as a committed entry.
+            return Err(LiveTipError::Pending);
         }
         if added.is_empty() {
             return if raw == self.baseline.raw_bytes() {
@@ -164,6 +186,9 @@ impl AutostartTip {
         Ok(())
     }
 }
+fn append_temporary(name: &str) -> bool {
+    files::append_temporary_name(name)
+}
 fn c07_name(name: &str) -> bool {
     if let Some(tail) = name.strip_prefix("txn-") {
         return tail.rsplit_once('.').is_some_and(|(id, phase)| {
@@ -192,8 +217,82 @@ pub(crate) struct ServiceTipProof {
     canonical_pin: FileObservation,
     canonical_digest: Sha256Digest,
     journal: BTreeMap<String, Sha256Digest>,
+    marker: NativeRootMarker,
+    state: styx_contracts::native_management::NativeState,
 }
 impl ServiceTipProof {
+    pub(crate) fn read_state(&self, root: &PrivateRoot, max: usize) -> JournalResult<RawFile> {
+        read_service_state(root, max).map_err(LiveTipError::journal)
+    }
+    pub(crate) fn check_state(&self, raw: &RawFile) -> JournalResult<()> {
+        if self.matches_state(raw) {
+            return Ok(());
+        }
+        let digest = Sha256Digest::of_bytes(raw.bytes());
+        if digest == self.canonical_digest {
+            return Err(JournalError::Unknown);
+        }
+        let current = native_state::decode_state(raw.bytes(), &self.marker)
+            .map_err(|_| JournalError::Unknown)?;
+        if current.state().revision > self.state.revision
+            && service_desired_compatible(&self.state, current.state())
+        {
+            // A later assignment is not validated by this proof. Withdraw and
+            // let the next ORIGINAL observation validate its full C07 chain.
+            Err(JournalError::ConfigurationPending)
+        } else {
+            Err(JournalError::Unknown)
+        }
+    }
+    pub(crate) fn matches_observed_state(&self, raw: &RawFile) -> Result<bool, LiveTipError> {
+        if self.matches_state(raw) {
+            return Ok(true);
+        }
+        if Sha256Digest::of_bytes(raw.bytes()) == self.canonical_digest {
+            return Err(LiveTipError::Changed);
+        }
+        let observed = native_state::decode_state(raw.bytes(), &self.marker)
+            .map_err(|_| LiveTipError::Changed)?;
+        if observed.state().revision != self.state.revision
+            && service_desired_compatible(&self.state, observed.state())
+        {
+            // The caller read before this proof was captured. Refuse this
+            // attempt; a cached earlier observation never grants admission.
+            Err(LiveTipError::Pending)
+        } else {
+            Err(LiveTipError::Changed)
+        }
+    }
+    pub(crate) fn check_scan(&self, scan: &JournalObservation) -> JournalResult<()> {
+        let current: BTreeMap<_, _> = scan
+            .files
+            .iter()
+            .map(|f| (f.name.as_str(), Sha256Digest::of_bytes(f.bytes())))
+            .collect();
+        if self
+            .journal
+            .iter()
+            .any(|(n, h)| current.get(n.as_str()) != Some(h))
+        {
+            return Err(JournalError::Unknown); // accepted history changed/removed
+        }
+        let added: Vec<_> = scan
+            .files
+            .iter()
+            .filter(|f| !self.journal.contains_key(&f.name))
+            .collect();
+        if added
+            .iter()
+            .any(|f| !c07_name(&f.name) && !append_temporary(&f.name))
+        {
+            return Err(JournalError::Unknown);
+        }
+        if added.is_empty() {
+            Ok(())
+        } else {
+            Err(JournalError::ConfigurationPending)
+        }
+    }
     pub(crate) fn matches_state(&self, raw: &RawFile) -> bool {
         raw.observation() == &self.canonical_pin
             && Sha256Digest::of_bytes(raw.bytes()) == self.canonical_digest
@@ -221,6 +320,19 @@ struct AcceptedTip {
     tip: AutostartTip,
     canonical_pin: FileObservation,
     pins: Vec<(String, FileObservation, Sha256Digest)>,
+}
+fn read_service_state(root: &PrivateRoot, max: usize) -> Result<RawFile, LiveTipError> {
+    root.inner
+        .read_service_state(max)
+        .map_err(|error| match error {
+            super::platform::ServiceStateReadError::PublicationChanged => LiveTipError::Pending,
+            // Keep the original store category distinct from mutable publication;
+            // none of these errors is a reason to let a live service keep admitting.
+            super::platform::ServiceStateReadError::Store(error) => {
+                let _ = error;
+                LiveTipError::Changed
+            }
+        })
 }
 fn journal_pins(
     root: &PrivateRoot,
@@ -291,7 +403,9 @@ impl ServiceTip {
         self.revalidate_proof().map(|_| ())
     }
     pub(crate) fn revalidate_proof(&self) -> Result<ServiceTipProof, LiveTipError> {
-        self.scope.validate().map_err(|_| LiveTipError::Changed)?;
+        self.scope
+            .validate_identity()
+            .map_err(|_| LiveTipError::Changed)?;
         let current =
             PrivateRoot::open(self.scope.state_dir()).map_err(|_| LiveTipError::Changed)?;
         if current.identity() != self.root.identity() {
@@ -316,9 +430,7 @@ impl ServiceTip {
             }
         }
         let before = files::scan(&self.namespace, JournalBudget::default())?;
-        let raw = current
-            .read_raw("state.json", MAX)
-            .map_err(|_| LiveTipError::Pending)?;
+        let raw = read_service_state(&current, MAX)?;
         if raw.bytes() == accepted.tip.baseline.raw_bytes()
             && raw.observation() != &accepted.canonical_pin
         {
@@ -336,9 +448,7 @@ impl ServiceTip {
         {
             return Err(LiveTipError::Pending);
         }
-        let final_raw = current
-            .read_raw("state.json", MAX)
-            .map_err(|_| LiveTipError::Pending)?;
+        let final_raw = read_service_state(&current, MAX)?;
         if final_raw.observation() != raw.observation() || final_raw.bytes() != raw.bytes() {
             return Err(LiveTipError::Pending);
         }
@@ -358,6 +468,8 @@ impl ServiceTip {
             canonical_pin: raw.observation().clone(),
             canonical_digest: Sha256Digest::of_bytes(raw.bytes()),
             journal: next.files.clone(),
+            marker: next.marker.clone(),
+            state: next.baseline.state().clone(),
         };
         *accepted = AcceptedTip {
             tip: next,
@@ -385,3 +497,7 @@ impl ServiceTip {
         Ok(())
     }
 }
+
+#[cfg(test)]
+#[path = "native_live_tip_tests.rs"]
+mod tests;

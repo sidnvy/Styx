@@ -802,7 +802,10 @@ impl NativeCommittedRuntimeSnapshot {
         }
         self.service_tip
             .as_ref()
-            .map(|tip| tip.revalidate_proof().map(|proof| proof.matches_state(raw)))
+            .map(|tip| {
+                tip.revalidate_proof()
+                    .and_then(|proof| proof.matches_observed_state(raw))
+            })
             .transpose()
     }
 
@@ -813,7 +816,7 @@ impl NativeCommittedRuntimeSnapshot {
             .as_ref()
             .map(|tip| tip.revalidate_proof())
             .transpose()
-            .map_err(|_| JournalError::Unknown)?;
+            .map_err(super::native_live_tip::LiveTipError::journal)?;
         if let Some(scope) = &self.app_scope {
             if scope.state_dir() != self.state_dir {
                 return Err(JournalError::Conflict);
@@ -855,6 +858,10 @@ impl NativeCommittedRuntimeSnapshot {
         let expected_scan = successor
             .as_ref()
             .map_or(expected_scan, |proof| proof.matches_scan(&scan));
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        if let Some(proof) = &successor {
+            proof.check_scan(&scan)?;
+        }
         if !expected_scan {
             return Err(JournalError::Unknown);
         }
@@ -874,13 +881,8 @@ impl NativeCommittedRuntimeSnapshot {
                 && pin.root.identity() == self.root.identity()
                 && pin.path == Path::new("state.json")
             {
-                let raw = pin
-                    .root
-                    .read_raw(&pin.path, pin.max)
-                    .map_err(|_| JournalError::Unknown)?;
-                if !proof.matches_state(&raw) {
-                    return Err(JournalError::Unknown);
-                }
+                let raw = proof.read_state(&pin.root, pin.max)?;
+                proof.check_state(&raw)?;
                 continue; // Exact current proof replaces the old canonical expectation.
             }
             pin.revalidate()?;
@@ -893,10 +895,23 @@ impl NativeCommittedRuntimeSnapshot {
             .map_err(|_| JournalError::Unknown)?;
         let marker = super::native_state::decode_marker(&self.original.marker)
             .map_err(|_| JournalError::Conflict)?;
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        let raw = if let Some(proof) = &successor {
+            proof.read_state(&self.root, MAX)?
+        } else {
+            self.root
+                .read_raw("state.json", MAX)
+                .map_err(|_| JournalError::Unknown)?
+        };
+        #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
         let raw = self
             .root
             .read_raw("state.json", MAX)
             .map_err(|_| JournalError::Unknown)?;
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        if let Some(proof) = &successor {
+            proof.check_state(&raw)?;
+        }
         let canonical = super::native_state::decode_state(raw.bytes(), &marker)
             .map_err(|_| JournalError::Conflict)?;
         match self.required_stage {
@@ -927,6 +942,10 @@ impl NativeCommittedRuntimeSnapshot {
             .inner
             .with_readonly_directory(|d| Ok(files::scan(d, JournalBudget::default())))
             .map_err(|_| JournalError::Unknown)??;
+        #[cfg(all(target_os = "linux", target_env = "gnu"))]
+        if let Some(proof) = &successor {
+            proof.check_scan(&after)?;
+        }
         if after.files.len() != scan.files.len()
             || after
                 .files
@@ -944,13 +963,8 @@ impl NativeCommittedRuntimeSnapshot {
                 && pin.root.identity() == self.root.identity()
                 && pin.path == Path::new("state.json")
             {
-                let raw = pin
-                    .root
-                    .read_raw(&pin.path, pin.max)
-                    .map_err(|_| JournalError::Unknown)?;
-                if !proof.matches_state(&raw) {
-                    return Err(JournalError::Unknown);
-                }
+                let raw = proof.read_state(&pin.root, pin.max)?;
+                proof.check_state(&raw)?;
                 continue; // Exact current proof replaces the old canonical expectation.
             }
             pin.revalidate()?;

@@ -80,8 +80,10 @@ impl Admitted {
     fn validate_ownership(&self) -> Result<(), ForegroundError> {
         #[cfg(all(target_os = "linux", target_env = "gnu"))]
         if let Some(scope) = &self.service_scope {
+            // OS identity is stable across a desired-state commit. The profile
+            // immediately below owns the full typed C07 admission decision.
             scope
-                .validate()
+                .validate_identity()
                 .map_err(|_| ForegroundError("native_service_scope_changed"))?;
         }
         if self

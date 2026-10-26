@@ -501,13 +501,17 @@ impl OwnedConfigurationRoot {
         })
     }
     /// Read-only checkpoint for explicit App continuation before ANY enrollment
-    /// operation. This neither claims the enrollment domain nor clears a fence.
+    /// operation. The enrollment clock uses Unix milliseconds, including its
+    /// bootstrap floor. This neither claims the domain nor clears a fence.
     #[cfg(any(
         all(target_os = "linux", target_env = "gnu"),
         target_os = "windows",
         target_os = "macos"
     ))]
-    pub(crate) fn require_pre_invite_enrollment(&self, trusted_now: u64) -> JournalResult<()> {
+    pub(crate) fn require_pre_invite_enrollment(
+        &self,
+        trusted_now_millis: u64,
+    ) -> JournalResult<()> {
         self.with_state(|state| {
             state.ordinary_admission()?;
             let binding = state
@@ -528,7 +532,7 @@ impl OwnedConfigurationRoot {
                         }
                         let dir = files::directory(directory, binding.name.as_str())?;
                         let observed = files::scan(&dir, binding.budget)?;
-                        require_pre_invite_clock(&observed, trusted_now)
+                        require_pre_invite_clock(&observed, trusted_now_millis)
                     })())
                 })
                 .map_err(|_| JournalError::Unknown)?
@@ -722,7 +726,7 @@ impl OwnedConfigurationRoot {
 ))]
 fn require_pre_invite_clock(
     observed: &super::secure_journal::JournalObservation,
-    now: u64,
+    now_millis: u64,
 ) -> JournalResult<()> {
     let [clock] = observed.files.as_slice() else {
         return Err(JournalError::Conflict);
@@ -735,7 +739,7 @@ fn require_pre_invite_clock(
         .try_into()
         .map_err(|_| JournalError::Unknown)?;
     let floor = u64::from_be_bytes(raw);
-    if floor == 0 || floor > now {
+    if floor == 0 || floor > now_millis {
         return Err(JournalError::Conflict);
     }
     Ok(())

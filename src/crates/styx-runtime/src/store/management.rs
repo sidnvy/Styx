@@ -778,7 +778,7 @@ impl OwnedManagementJournal {
         }
     }
     #[cfg(all(test, target_os = "linux", target_env = "gnu"))]
-    fn prepare_observing(
+    pub(in crate::store) fn prepare_observing(
         &mut self,
         maintenance: &ConfigurationMaintenance,
         raw_intent: &[u8],

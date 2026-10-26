@@ -21,6 +21,23 @@ pub(super) struct Root {
     identity: RootIdentity,
 }
 
+/// Only the fixed live-service canonical reader may return this refusal.
+/// It does not validate a new state, grant admission, or authorize a retry.
+#[derive(Debug)]
+pub(super) enum ServiceStateReadError {
+    PublicationChanged,
+    Store(StoreError),
+}
+impl From<StoreError> for ServiceStateReadError {
+    fn from(error: StoreError) -> Self {
+        Self::Store(error)
+    }
+}
+impl From<std::io::Error> for ServiceStateReadError {
+    fn from(error: std::io::Error) -> Self {
+        Self::Store(StoreError::Io(error))
+    }
+}
 fn open_at(parent: &File, name: &OsStr, flags: OFlag, mode: Mode) -> Result<File> {
     // nix owns the newly opened descriptor; File::from(OwnedFd) preserves it
     // without handwritten raw-descriptor lifetime or conversion code.
@@ -325,6 +342,114 @@ impl Root {
         } else {
             Err(StoreError::Changed)
         }
+    }
+    /// Fixed state.json observation, retaining the ordinary reader's immutable
+    /// root/parent/private-file checks. A fully checked atomic replacement only
+    /// withdraws admission; ordinary read_raw retains its original semantics.
+    pub(super) fn read_service_state(
+        &self,
+        max: usize,
+    ) -> std::result::Result<RawFile, ServiceStateReadError> {
+        self.read_service_state_inner(
+            max,
+            #[cfg(test)]
+            || Ok(()),
+        )
+    }
+    #[cfg(test)]
+    pub(super) fn read_service_state_after_read_for_test(
+        &self,
+        max: usize,
+        after_read: impl FnOnce() -> Result<()>,
+    ) -> std::result::Result<RawFile, ServiceStateReadError> {
+        self.read_service_state_inner(max, after_read)
+    }
+    fn read_service_state_inner(
+        &self,
+        max: usize,
+        #[cfg(test)] after_read: impl FnOnce() -> Result<()>,
+    ) -> std::result::Result<RawFile, ServiceStateReadError> {
+        self.validate_root()?;
+        let result = (|| -> std::result::Result<RawFile, ServiceStateReadError> {
+            let relative = Path::new("state.json");
+            let (directory, name) = self.parent(relative)?;
+            let directory_identity = root_identity(&directory.metadata()?);
+            let mut file = open_at(
+                &directory,
+                &name,
+                OFlag::O_RDONLY | OFlag::O_NONBLOCK,
+                Mode::empty(),
+            )?;
+            let before = private_file(&file)?;
+            if before.len() > max as u64 {
+                return Err(StoreError::TooLarge.into());
+            }
+            let mut bytes = Vec::new();
+            (&mut file)
+                .take((max as u64).saturating_add(1))
+                .read_to_end(&mut bytes)?;
+            if bytes.len() > max {
+                return Err(StoreError::TooLarge.into());
+            }
+            #[cfg(test)]
+            after_read()?;
+            // A replaced ORIGINAL inode can have nlink0. No other read port
+            // accepts that state, and even here it can only produce a refusal.
+            let after = file.metadata()?;
+            private(&after)?;
+            if !after.is_file() || after.nlink() > 1 {
+                return Err(StoreError::NotRegularFile.into());
+            }
+            let payload = |m: &Metadata| (m.dev(), m.ino(), m.len(), m.mtime(), m.mtime_nsec());
+            if payload(&before) != payload(&after) || bytes.len() as u64 != after.len() {
+                return Err(StoreError::Changed.into());
+            }
+            let current = open_at(
+                &directory,
+                &name,
+                OFlag::O_RDONLY | OFlag::O_NONBLOCK,
+                Mode::empty(),
+            )?;
+            let current = private_file(&current)?;
+            let (parent, renamed) = self.parent(relative)?;
+            if root_identity(&parent.metadata()?) != directory_identity {
+                return Err(StoreError::Changed.into());
+            }
+            let rechecked = open_at(
+                &parent,
+                &renamed,
+                OFlag::O_RDONLY | OFlag::O_NONBLOCK,
+                Mode::empty(),
+            )?;
+            if observation(&current) != observation(&private_file(&rechecked)?) {
+                return Err(StoreError::Changed.into());
+            }
+            if current.dev() != before.dev() {
+                return Err(StoreError::Changed.into());
+            }
+            if current.ino() != before.ino() {
+                if after.nlink() != 0 {
+                    return Err(StoreError::Changed.into());
+                }
+                return Err(ServiceStateReadError::PublicationChanged);
+            }
+            if after.nlink() != 1
+                || observation(&before) != observation(&after)
+                || observation(&after) != observation(&current)
+            {
+                return Err(StoreError::Changed.into());
+            }
+            Ok(RawFile {
+                relative_path: relative.to_owned(),
+                sha256: sha256(&bytes),
+                bytes,
+                observation: observation(&after),
+            })
+        })();
+        // This executes even if a publication changed or another read failed.
+        // A root replacement is fatal and cannot hide behind Pending.
+        self.validate_root()?;
+        result
     }
     pub(super) fn read_raw(&self, relative: &Path, max_bytes: usize) -> Result<RawFile> {
         self.read_raw_observing(relative, max_bytes, || Ok(()))

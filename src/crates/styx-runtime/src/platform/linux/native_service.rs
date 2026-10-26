@@ -280,6 +280,15 @@ impl Definition {
         Ok(result)
     }
     pub(crate) fn validate(&self) -> ServiceResult<()> {
+        self.validate_identity()?;
+        if selection(&read_state(&self.root)?)? != self.selection {
+            return Err(ServiceError::Conflict);
+        }
+        Ok(())
+    }
+    // Physical authority is independent of a concurrent desired-state commit.
+    // Ordinary manager calls still use validate(), including state selection.
+    fn validate_identity(&self) -> ServiceResult<()> {
         if self.root.identity() != self.root_identity
             || PrivateRoot::open(&self.path)
                 .map_err(unavailable)?
@@ -289,7 +298,6 @@ impl Definition {
             || identity(&checked_directory(&self.parent_path, false)?)? != self.parent_identity
             || identity(&self.image)? != self.image_identity
             || identity(&File::open(&self.executable).map_err(unavailable)?)? != self.image_identity
-            || selection(&read_state(&self.root)?)? != self.selection
         {
             return Err(ServiceError::Conflict);
         }
@@ -834,8 +842,14 @@ impl ServicePeer {
             .role
             .desired(&self.definition.state()?)
             .ok_or(ServiceError::Invalid)?;
-        if desired.manager != NativeManager::PersistentService
-            || !self.running.birth.still_current().map_err(unknown)?
+        if desired.manager != NativeManager::PersistentService {
+            return Err(ServiceError::Conflict);
+        }
+        self.validate_identity()
+    }
+    fn validate_identity(&self) -> ServiceResult<()> {
+        self.definition.validate_identity()?;
+        if !self.running.birth.still_current().map_err(unknown)?
             || identity(&self.running.cgroup)? != self.running.cgroup_identity
             || identity(&checked_directory(
                 &self.definition.cgroup_path(&self.running.cgroup_path)?,
@@ -875,5 +889,11 @@ impl ServiceScope {
         // This already-minted scope remains the original process while an
         // explicit Stopped target drains it. New scopes still require Running.
         self.peer.validate()
+    }
+    /// Retained OS authority only. ServiceTip must separately validate its full
+    /// original C07 state chain before admitting work; this cannot mint a scope
+    /// or accept a different manager, runtime selection, or execution process.
+    pub(crate) fn validate_identity(&self) -> ServiceResult<()> {
+        self.peer.validate_identity()
     }
 }
