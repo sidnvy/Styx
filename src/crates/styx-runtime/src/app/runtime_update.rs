@@ -960,14 +960,12 @@ impl HostApp {
             self.runtime_update = Some(state);
             return Err(AppError("app_runtime_update_in_progress"));
         };
-        if !recover {
-            if let Some(gateway) = &self.local_gateway {
-                work.roles.push(Role {
-                    scope: gateway.scope.clone(),
-                    retained: None,
-                    retained_transaction: None,
-                });
-            }
+        if !recover && let Some(gateway) = &self.local_gateway {
+            work.roles.push(Role {
+                scope: gateway.scope.clone(),
+                retained: None,
+                retained_transaction: None,
+            });
         }
         state.status = "updating";
         state.transaction_id = Some(input.transaction_id.clone());
@@ -1056,20 +1054,20 @@ impl HostApp {
                     serde_json::to_value(enrollment)
                         .map_err(|_| AppError("app_response_invalid"))?,
                 );
-                if self.local_gateway.is_none() {
-                    if let Some(scope) = gateway_scope {
-                        self.local_gateway = Some(self.load_local_gateway(scope).await?);
-                    }
+                if self.local_gateway.is_none()
+                    && let Some(scope) = gateway_scope
+                {
+                    self.local_gateway = Some(self.load_local_gateway(scope).await?);
                 }
                 self.scope.validate()
             }
             .await;
-            if let Err(error) = refreshed {
-                if let Some(state) = &mut self.runtime_update {
-                    state.status = "unknown";
-                    state.error = Some(error.code());
-                    state.can_recover = true;
-                }
+            if let Err(error) = refreshed
+                && let Some(state) = &mut self.runtime_update
+            {
+                state.status = "unknown";
+                state.error = Some(error.code());
+                state.can_recover = true;
             }
         }
     }
