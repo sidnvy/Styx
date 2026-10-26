@@ -41,6 +41,7 @@ pub(crate) struct NetworkValidationObservation {
     failure_kind: Option<&'static str>,
     negative_http: [Option<(u16, &'static str)>; 4],
     negative_wss: [Option<&'static str>; 4],
+    negative_wss_status: [Option<u16>; 4],
     cleanup: Option<NetworkCleanupObservation>,
 }
 #[derive(Clone, Serialize)]
@@ -75,6 +76,7 @@ impl NetworkValidationObserver {
                 failure_kind: None,
                 negative_http: [None; 4],
                 negative_wss: [None; 4],
+                negative_wss_status: [None; 4],
                 cleanup: None,
             })),
         }
@@ -611,8 +613,16 @@ async fn run_owned(
             )
             .await;
             match attempt {
-                Err(crate::host::link::LinkError::HandshakeRejected) => {
-                    observer.update(|state| state.negative_wss[index] = Some("handshake_rejected"))
+                // The current transport preserves an HTTP rejection as
+                // UpgradeStatus. A generic handshake failure does not prove
+                // that the intended authorization/route gate rejected it.
+                Err(crate::host::link::LinkError::UpgradeStatus(status))
+                    if status == [403, 404, 404, 403][index] =>
+                {
+                    observer.update(|state| {
+                        state.negative_wss[index] = Some("expected_http_rejection");
+                        state.negative_wss_status[index] = Some(status);
+                    })
                 }
                 Ok(link) => {
                     observer
@@ -625,7 +635,10 @@ async fn run_owned(
                     observer.update(|state| {
                         state.negative_wss[index] = Some(match error {
                             crate::host::link::LinkError::Deadline => "deadline",
-                            crate::host::link::LinkError::UpgradeStatus(_) => "upgrade_status",
+                            crate::host::link::LinkError::UpgradeStatus(status) => {
+                                state.negative_wss_status[index] = Some(status);
+                                "unexpected_upgrade_status"
+                            }
                             _ => "other",
                         })
                     });
