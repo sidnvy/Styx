@@ -172,7 +172,10 @@ impl<'profile, 'borrow, 'effects, 'materials>
             }
             return Err(error);
         }
-        let report = self.report.as_mut().ok_or(MacExecValidationError::Unknown)?;
+        let report = self
+            .report
+            .as_mut()
+            .ok_or(MacExecValidationError::Unknown)?;
         report.probe_task_joined = true;
         Ok(report)
     }
@@ -309,6 +312,25 @@ impl<'profile, 'borrow, 'effects, 'materials>
         });
         self.revalidate_success()?;
         Ok(())
+    }
+    /// Only this actual completed probe can supply final-journal data. Caller
+    /// JSON cannot construct the probe or substitute a different applied scope.
+    pub(crate) fn validated_report_for(
+        &mut self,
+        guard: &crate::store::MacCanonicalCutover<'_, '_>,
+    ) -> Result<Vec<u8>> {
+        if !self.profile.matches_cutover(guard) {
+            return Err(MacExecValidationError::Conflict);
+        }
+        self.revalidate_success()?;
+        let report = self
+            .report
+            .as_ref()
+            .ok_or(MacExecValidationError::Unknown)?;
+        if !report.probe_task_joined {
+            return Err(MacExecValidationError::Unknown);
+        }
+        serde_json::to_vec(report).map_err(|_| MacExecValidationError::Unknown)
     }
     pub(crate) fn revalidate_success(&mut self) -> Result<()> {
         let result = self.validate_success_inner();

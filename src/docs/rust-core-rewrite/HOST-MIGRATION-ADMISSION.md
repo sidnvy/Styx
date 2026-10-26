@@ -52,3 +52,14 @@ forward and rollback readers must both support it, or rollback must restore the
 original legacy state through the existing authorized transaction. Merely
 passing the state reader floor is insufficient. This compatibility gate and the
 unfinished final commit/recovery paths keep the internal Mac entry unexposed.
+
+
+Signed package compatibility: `NativeRuntimeMigratedV3` declares Host admission
+v2 plus the durable migration-plan journal feature. It continues to read the
+existing StateV2 shape. V1/V2 release declarations do not imply these journal
+features. The Mac preflight and final commit must reject them before writing a
+v2 report. Build-info, original build receipts, package manifests and native App
+packagers must preserve the actual declared reader; no packaging flag upgrades
+an older binary. Old readers reject the unknown manifest variant. Downgrade to
+an old reader remains refused while new journal evidence exists; a rollback must
+use the authorized restoration transaction, not reinterpret new bytes as old.

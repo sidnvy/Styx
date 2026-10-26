@@ -65,17 +65,17 @@ mod platform;
 mod platform;
 
 #[cfg(target_os = "macos")]
-pub(crate) use platform::MacCanonicalCutover;
+pub(crate) use platform::{MacCanonicalCutover, MacCommittedCutover};
 
+#[cfg(target_os = "windows")]
+pub(crate) use platform::WindowsLocalExecutable;
+#[cfg(target_os = "windows")]
+pub(crate) use platform::file_identity as windows_file_identity;
 #[cfg(target_os = "windows")]
 pub(in crate::store) use platform::{
     WindowsBootRecoveryEffects, WindowsLegacyMaintenancePlan, WindowsRecoveryOpenFailure,
     WindowsRestartCheckpoint,
 };
-#[cfg(target_os = "windows")]
-pub(crate) use platform::WindowsLocalExecutable;
-#[cfg(target_os = "windows")]
-pub(crate) use platform::file_identity as windows_file_identity;
 
 #[derive(Debug, Error)]
 pub enum StoreError {

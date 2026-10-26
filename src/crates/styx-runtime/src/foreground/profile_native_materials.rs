@@ -333,6 +333,13 @@ pub(crate) fn load_applied_mac_maintenance_profile<'borrow, 'effects, 'materials
 }
 #[cfg(target_os = "macos")]
 impl AppliedMacMaintenanceProfile<'_, '_, '_> {
+    /// Exact retained physical cutover instance, not equality of public IDs.
+    pub(crate) fn matches_cutover(
+        &self,
+        guard: &crate::store::MacCanonicalCutover<'_, '_>,
+    ) -> bool {
+        std::ptr::eq(self.guard, guard)
+    }
     pub(crate) fn original_pair(&self) -> &NativePreservedHostPair {
         self.guard.original_pair()
     }

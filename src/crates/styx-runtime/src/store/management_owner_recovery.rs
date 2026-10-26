@@ -143,14 +143,105 @@ pub(in crate::store) struct LegacyOwnerRecoveryIntent {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub startup_checkpoint: Option<WindowsStartupCheckpoint>,
 }
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(in crate::store) struct RecoveryOriginal {
     pub name: RecoveryOriginalName,
     pub raw: Vec<u8>,
     pub stamp: NativeRetirementFileStamp,
 }
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub(in crate::store) struct RecoveryGuard {
     pub name: RecoveryGuardName,
     pub raw: Vec<u8>,
+}
+/// Original producer DATA captured before its first durable preparation.
+/// Keeping every nonce here permits exact partial preparation repair, never
+/// regenerating a missing guard after restart. This is not a Prepared capability.
+#[derive(Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(in crate::store) struct OwnerRecoveryPlan {
+    pub intent: Box<serde_json::value::RawValue>,
+    pub originals: Vec<RecoveryOriginal>,
+    pub guards: Vec<RecoveryGuard>,
+}
+impl OwnerRecoveryPlan {
+    /// Exact entries of the original schema1 preparation, for bounded resync
+    /// after a partial write. No later phase or OS effect is represented here.
+    pub(in crate::store) fn preparation_entries(&self) -> JournalResult<Vec<(String, Vec<u8>)>> {
+        let intent = self.validated_intent()?;
+        let phase = RecoveryPhase {
+            schema: 1,
+            kind: RecoveryKind::LegacyOwnerRecovery,
+            transaction_id: intent.transaction_id.clone(),
+            sequence: intent.sequence,
+            raw_intent_sha256: Sha256Digest::of_bytes(self.intent.get().as_bytes()),
+            stage: OwnerRecoveryStage::Prepared,
+            previous: None,
+            originals: Vec::new(),
+            guards: Vec::new(),
+            startup_post: None,
+            boot_observation: None,
+        };
+        let mut entries = vec![
+            (
+                member(&intent.transaction_id, "intent"),
+                self.intent.get().as_bytes().to_vec(),
+            ),
+            (
+                member(&intent.transaction_id, "prepared"),
+                serde_json::to_vec(&phase).map_err(|_| JournalError::InvalidInput)?,
+            ),
+        ];
+        entries.extend(self.originals.iter().map(|o| {
+            (
+                member(&intent.transaction_id, o.name.suffix()),
+                o.raw.clone(),
+            )
+        }));
+        entries.extend(self.guards.iter().map(|g| {
+            (
+                member(&intent.transaction_id, g.name.suffix()),
+                g.raw.clone(),
+            )
+        }));
+        Ok(entries)
+    }
+    pub(in crate::store) fn validated_intent(&self) -> JournalResult<LegacyOwnerRecoveryIntent> {
+        let intent: LegacyOwnerRecoveryIntent =
+            serde_json::from_str(self.intent.get()).map_err(|_| JournalError::InvalidInput)?;
+        valid_intent(&intent)?;
+        // The existing C writer emits canonical intent bytes; require its exact
+        // original encoding up front rather than normalizing recorded history.
+        if intent.schema != 1
+            || serde_json::to_vec(&intent).map_err(|_| JournalError::InvalidInput)?
+                != self.intent.get().as_bytes()
+            || self.originals.len() != intent.originals.len()
+            || self.guards.len() != intent.guards.len()
+        {
+            return Err(JournalError::Conflict);
+        }
+        for (raw, binding) in self.originals.iter().zip(&intent.originals) {
+            if raw.name != binding.name
+                || raw.stamp != binding.stamp
+                || raw.raw.is_empty()
+                || raw.raw.len() > MAX_RECOVERY_RAW
+                || Sha256Digest::of_bytes(&raw.raw) != binding.stamp.content_sha256()
+            {
+                return Err(JournalError::Conflict);
+            }
+        }
+        for (raw, binding) in self.guards.iter().zip(&intent.guards) {
+            if raw.name != binding.name
+                || raw.raw.len() as u64 != binding.byte_len
+                || Sha256Digest::of_bytes(&raw.raw) != binding.sha256
+            {
+                return Err(JournalError::Conflict);
+            }
+        }
+        Ok(intent)
+    }
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -1094,8 +1185,15 @@ impl OwnedManagementJournal {
             self.with_directory_locked(state, |dir| {
                 let scan = files::scan(dir, self.budget)?;
                 let baseline = incomplete_startup_preparation(&scan, intent, &entries)?;
-                let inventory =
-                    super::super::platform::inventory(baseline.as_ref().unwrap_or(&scan))?;
+                let baseline_scan = baseline.as_ref().unwrap_or(&scan);
+                let plan_baseline = super::super::migration_plan::recovery_baseline(
+                    baseline_scan,
+                    intent,
+                    &entries,
+                )?;
+                let inventory = super::super::platform::inventory(
+                    plan_baseline.as_ref().unwrap_or(baseline_scan),
+                )?;
                 if !inventory.orphans.is_empty()
                     || inventory.has_legacy_handoffs()
                     || intent.sequence <= inventory.high_water

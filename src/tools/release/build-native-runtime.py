@@ -400,7 +400,8 @@ def release_reader(receipt, binary_hash, target, inputs):
             'reader_evidence_typed_report_mismatch')
     require((report.get('minimum_release_reader'), report.get('supported_state_readers')) in [
                 ('native_runtime_migrated_v1', ['native_management_state_v1', 'native_migrated_state_v1']),
-                ('native_runtime_migrated_v2', ['native_management_state_v1', 'native_migrated_state_v1', 'native_migrated_state_v2'])],
+                ('native_runtime_migrated_v2', ['native_management_state_v1', 'native_migrated_state_v1', 'native_migrated_state_v2']),
+                ('native_runtime_migrated_v3', ['native_management_state_v1', 'native_migrated_state_v1', 'native_migrated_state_v2'])],
             'reader_evidence_supported_contract_mismatch')
     return report['minimum_release_reader']
 
@@ -415,7 +416,7 @@ def validate_binary_location(receipt, binary, target, relocated, minimum_reader)
     # A copied artifact is bound by the original producer's SHA and actual
     # build-info observation. Its original locator is provenance, never opened
     # on this machine. This flag cannot upgrade historical receipts.
-    require(minimum_reader in ['native_runtime_migrated_v1', 'native_runtime_migrated_v2']
+    require(minimum_reader in ['native_runtime_migrated_v1', 'native_runtime_migrated_v2', 'native_runtime_migrated_v3']
             and receipt.get('producer') == 'src/tools/release/build-native-binary.py'
             and isinstance(receipt.get('cli_build_info'), dict),
             'relocation_original_producer_evidence_required')

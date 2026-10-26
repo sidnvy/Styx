@@ -318,6 +318,86 @@ pub(super) fn inventory(scan: &JournalObservation) -> JournalResult<ManagementIn
             })
             .collect()
     };
+    // A PRE-EFFECT plan reserves the SAME original transaction/sequence.
+    // It is unfinished until the existing schema4 chain actually COMMITs.
+    let migration_plan_inventory = super::migration_plan::scan_plans(scan)?;
+    used.extend(migration_plan_inventory.used.iter().cloned());
+    let mut migration_plans = Vec::new();
+    for plan in &migration_plan_inventory.records {
+        let i = &plan.retirement;
+        let recovery = handoff::scan_owner_recoveries(scan)?;
+        if let Some(c) = recovery
+            .records
+            .iter()
+            .find(|r| r.intent.transaction_id == i.transaction_id)
+        {
+            if !plan.matches_recovery(&c.intent) {
+                return Err(JournalError::Conflict);
+            }
+        }
+        if let Some(r) = handoff_inventory
+            .native_records
+            .iter()
+            .find(|r| r.intent.transaction_id == i.transaction_id)
+        {
+            if !plan.complete()
+                || r.intent != *i
+                || r.observation().intent_sha256 != Sha256Digest::of_bytes(plan.retirement_raw())
+            {
+                return Err(JournalError::Conflict);
+            }
+        }
+        let cutover = cutover_inventory
+            .native_records
+            .iter()
+            .find(|c| c.intent.transaction_id == i.transaction_id);
+        if let Some(c) = cutover {
+            plan.validate_cutover(c)?;
+        }
+        let resolved = cutover
+            .is_some_and(|c| c.intent.schema == 4 && c.last_stage == DurableStage::Committed);
+        if ids.contains(&i.transaction_id) {
+            // Existing C/retirement must be the exact continuation checked above,
+            // never a pure transaction or Linux-v1 record with a matching id.
+            if !sequences.contains(&i.sequence)
+                || transactions
+                    .iter()
+                    .any(|t| t.intent.transaction_id == i.transaction_id)
+                || handoff_inventory
+                    .records
+                    .iter()
+                    .any(|r| r.intent.transaction_id == i.transaction_id)
+            {
+                return Err(JournalError::Conflict);
+            }
+        } else {
+            if !ids.insert(i.transaction_id.clone())
+                || !sequences.insert(i.sequence)
+                || !handoff_inventory.records.is_empty()
+                || !handoff_inventory.native_records.is_empty()
+                || !owner_recoveries.is_empty()
+            {
+                return Err(JournalError::Conflict);
+            }
+        }
+        if transactions.iter().any(|t| {
+            t.intent.sequence == i.sequence
+                || (t.intent.sequence > i.sequence && !resolved)
+                || (t.intent.sequence < i.sequence
+                    && t.phase_receipts
+                        .last()
+                        .is_none_or(|p| p.stage != DurableStage::Committed))
+        }) || transactions
+            .iter()
+            .filter(|t| t.intent.sequence < i.sequence)
+            .next_back()
+            .is_some_and(|t| t.intent.target_state_sha256 != i.before_state_sha256)
+        {
+            return Err(JournalError::Conflict);
+        }
+        high_water = high_water.max(i.sequence);
+        migration_plans.push((i.transaction_id.clone(), i.sequence, resolved));
+    }
     for (index, tx) in transactions.iter().enumerate() {
         let committed = tx
             .phase_receipts
@@ -361,6 +441,7 @@ pub(super) fn inventory(scan: &JournalObservation) -> JournalResult<ManagementIn
             })
             .map(|(_, seq, _, target)| (*seq, *target)),
         transactions,
+        migration_plans,
         #[cfg(any(
             all(target_os = "linux", target_env = "gnu"),
             target_os = "macos",

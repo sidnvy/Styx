@@ -567,8 +567,8 @@ mod legacy_restart;
 
 #[path = "macos_native_cutover.rs"]
 mod native_cutover;
-pub(crate) use native_cutover::MacCanonicalCutover;
 pub(in crate::store) use native_cutover::MacCutoverPlan;
+pub(crate) use native_cutover::{MacCanonicalCutover, MacCommittedCutover};
 
 #[path = "macos_migration_owner.rs"]
 mod migration_owner;

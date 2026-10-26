@@ -187,3 +187,16 @@ test('native staging refuses foreign target, unexpected member and source overla
 });
 
 test('missing native selection never silently falls back to Node management',()=>{assert.throws(()=>buildWindowsApp({}),/explicit_legacy_comparison_required/);});
+
+// Package compatibility only; the fixture PE is never executed or installed.
+test('native staging preserves declared migrated readers and refuses unknown versions',t=>{
+ for(const reader of ['native_runtime_migrated_v2','native_runtime_migrated_v3']){
+  const f=nativeFixture(t);f.manifest.minimum_reader=reader;f.publish();
+  const original=fs.readFileSync(path.join(f.payloadDir,'manifest.json'));
+  buildWindowsApp(f.nativeConfig);
+  assert.deepEqual(fs.readFileSync(path.join(f.nativeConfig.output,'native/manifest.json')),original);
+ }
+ const f=nativeFixture(t);f.manifest.minimum_reader='native_runtime_migrated_v4';f.publish();
+ assert.throws(()=>buildWindowsApp(f.nativeConfig),/native_windows_c08_runtime_required/);
+ assert.equal(fs.existsSync(f.nativeConfig.output),false);
+});

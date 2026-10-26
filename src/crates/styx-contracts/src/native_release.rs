@@ -27,8 +27,15 @@ pub enum NativeReleaseReader {
     NativeRuntimeMigratedV1,
     /// Typed Host-only/local-Gateway migration reader; earlier readers reject it.
     NativeRuntimeMigratedV2,
+    /// Host admission v2 and durable migration-plan journal support.
+    NativeRuntimeMigratedV3,
 }
 impl NativeReleaseReader {
+    /// Signed feature declaration, not evidence of successful migration.
+    pub fn supports_host_admission_v2(self) -> bool {
+        self == Self::NativeRuntimeMigratedV3
+    }
+
     /// Signed reader declaration only; no runtime health or activation authority.
     pub fn supports_state_reader(self, reader: ReaderContract) -> bool {
         matches!(
@@ -36,13 +43,16 @@ impl NativeReleaseReader {
             (
                 Self::NativeRuntimeV1
                     | Self::NativeRuntimeMigratedV1
-                    | Self::NativeRuntimeMigratedV2,
+                    | Self::NativeRuntimeMigratedV2
+                    | Self::NativeRuntimeMigratedV3,
                 ReaderContract::NativeManagementStateV1
             ) | (
-                Self::NativeRuntimeMigratedV1 | Self::NativeRuntimeMigratedV2,
+                Self::NativeRuntimeMigratedV1
+                    | Self::NativeRuntimeMigratedV2
+                    | Self::NativeRuntimeMigratedV3,
                 ReaderContract::NativeMigratedStateV1
             ) | (
-                Self::NativeRuntimeMigratedV2,
+                Self::NativeRuntimeMigratedV2 | Self::NativeRuntimeMigratedV3,
                 ReaderContract::NativeMigratedStateV2
             )
         )
@@ -308,6 +318,7 @@ impl NativeReleaseManifest {
                 NativeReleaseReader::NativeRuntimeV1
                     | NativeReleaseReader::NativeRuntimeMigratedV1
                     | NativeReleaseReader::NativeRuntimeMigratedV2
+                    | NativeReleaseReader::NativeRuntimeMigratedV3
             )
             || !worker_version(&self.version)
             || self.version.contains('+')

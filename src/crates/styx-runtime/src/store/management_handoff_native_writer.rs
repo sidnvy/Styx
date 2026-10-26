@@ -233,7 +233,12 @@ impl OwnedManagementJournal {
                     || !handoffs.records.is_empty()
                     || !handoffs.native_records.is_empty()
                     || (intent.sequence <= inventory.high_water
-                        && !recovery_continuation(&scan, intent, &entries[0].1)?)
+                        && !recovery_continuation(&scan, intent, &entries[0].1)?
+                        && !super::super::migration_plan::retirement_continuation(
+                            &scan,
+                            intent,
+                            &entries[0].1,
+                        )?)
                     || inventory.transactions.iter().any(|tx| {
                         tx.intent.transaction_id == intent.transaction_id
                             || !tx

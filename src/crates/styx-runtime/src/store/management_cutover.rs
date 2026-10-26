@@ -1071,6 +1071,68 @@ impl OwnedManagementJournal {
     ) -> JournalResult<PreparedCutover> {
         self.prepare_cutover_for::<handoff::RetirementLinuxRoot>(maintenance, inputs.into())
     }
+    /// Capacity only, before the native token effect. This does not publish a
+    /// target or attest a future retired receipt. The caller supplies encoded
+    /// size inputs; fixed-width digest values do not change their byte lengths.
+    #[cfg(target_os = "macos")]
+    pub(in crate::store) fn preflight_host_cutover_capacity(
+        &self,
+        maintenance: &ConfigurationMaintenance,
+        inputs: &NativeCutoverInputs,
+    ) -> JournalResult<()> {
+        let NativeCutoverHistoryInputs::PreservedHostPair { bindings } = &inputs.history else {
+            return Err(JournalError::Unsupported);
+        };
+        if inputs.endpoint.is_some() || inputs.target.len() > MAX_RAW {
+            return Err(JournalError::BudgetExceeded);
+        }
+        let sizes = [
+            inputs.preservation.len(),
+            inputs.scope_bindings.len(),
+            inputs.marker.len(),
+            inputs.before.len(),
+            inputs.target.len(),
+            bindings.len(),
+        ];
+        if sizes
+            .iter()
+            .any(|n| *n == 0 || *n > self.budget.max_file_bytes || *n > MAX_RAW)
+            || self.budget.max_file_bytes < MAX_INTENT.max(MAX_VALIDATION)
+        {
+            return Err(JournalError::BudgetExceeded);
+        }
+        // Six material members; intent + four phases + retirement completion;
+        // two validation reports; one apply temporary. Reserve bounded metadata
+        // and the apply peak conservatively; no placeholder bytes are written.
+        let extra = sizes
+            .iter()
+            .try_fold(0usize, |a, b| a.checked_add(*b))
+            .and_then(|n| n.checked_add(6 * MAX_INTENT + 2 * MAX_VALIDATION))
+            .and_then(|n| n.checked_add(inputs.target.len()))
+            .ok_or(JournalError::BudgetExceeded)?;
+        self.owner.with_maintenance(maintenance, |state| {
+            self.with_directory_locked(state, |dir| {
+                let scan = files::scan(dir, self.budget)?;
+                if scan
+                    .total_bytes
+                    .checked_add(extra)
+                    .is_none_or(|n| n > self.budget.max_bytes)
+                    || scan
+                        .files
+                        .len()
+                        .checked_add(15)
+                        .is_none_or(|n| n > self.budget.max_files)
+                {
+                    return Err(JournalError::BudgetExceeded);
+                }
+                state.preflight_growth(
+                    extra
+                        .checked_add(inputs.marker.len())
+                        .ok_or(JournalError::BudgetExceeded)?,
+                )
+            })
+        })
+    }
     pub(in crate::store) fn prepare_native_cutover(
         &mut self,
         maintenance: &ConfigurationMaintenance,

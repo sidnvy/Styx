@@ -49,7 +49,7 @@ export function withAuthenticatedMacReader(input,arch,operation){
   assert(key.asymmetricKeyType==='ed25519'&&createHash('sha256').update(key.export({format:'der',type:'spki'})).digest('hex')===input.expectedPublisher,'native_publisher_pin_mismatch');
   assert(verify(null,raw,key,sig),'native_release_signature_invalid');
   const manifest=JSON.parse(raw),target=arch==='x64'?'x86_64-apple-darwin':'aarch64-apple-darwin';
-  assert(manifest.schema===2&&manifest.runtime_format==='native_rust_v1'&&manifest.scope==='runtime_candidate'&&manifest.component==='styx'&&manifest.minimum_reader==='native_runtime_migrated_v1'&&manifest.target===target&&manifest.entrypoint==='bin/styx'&&Array.isArray(manifest.files),'native_macos_c08_required');
+  assert(manifest.schema===2&&manifest.runtime_format==='native_rust_v1'&&manifest.scope==='runtime_candidate'&&manifest.component==='styx'&&['native_runtime_migrated_v1','native_runtime_migrated_v2','native_runtime_migrated_v3'].includes(manifest.minimum_reader)&&manifest.target===target&&manifest.entrypoint==='bin/styx'&&Array.isArray(manifest.files),'native_macos_c08_required');
   const entries=manifest.files.filter(m=>m.path==='bin/styx');assert(entries.length===1,'native_fixed_cli_required');const member=entries[0];
   assert(hex(member.sha256)&&member.executable===true&&Number.isSafeInteger(member.size)&&member.size>0&&member.size<=1073741824,'native_fixed_cli_required');
   const cli=path.join(input.payloadDir,'bin/styx'),image=hold(cli,1073741824);assert(image.stat.size===BigInt(member.size)&&digest(image.fd,1073741824)===member.sha256,'native_cli_hash_mismatch');
@@ -77,7 +77,7 @@ export function verifyNativeMacRuntime(input,arch=process.arch){
  return withAuthenticatedMacReader(input,arch,reader=>{
   assert(process.platform==='darwin'&&process.arch===arch,'native_macos_reader_execution_required');
   const stdout=execFileSync(reader.cli,['release','verify','--payload-dir',input.payloadDir,'--publisher-file',input.publisherFile,'--expected-publisher',input.expectedPublisher,'--json'],{encoding:'utf8',timeout:150000,maxBuffer:65536,stdio:['ignore','pipe','pipe'],env:{HOME:process.env.HOME,PATH:'/usr/bin:/bin:/usr/sbin:/sbin',TMPDIR:process.env.TMPDIR??'/tmp'}});
-  const report=JSON.parse(stdout);assert(report.schema===1&&report.scope==='runtime_candidate'&&report.runtime_format==='native_rust_v1'&&report.minimum_reader==='native_runtime_migrated_v1'&&report.target===reader.target&&report.entrypoint==='bin/styx'&&report.source_revision===reader.manifest.source?.revision&&report.source_inputs_sha256===reader.manifest.source?.inputs_sha256&&report.manifest_sha256===reader.manifestSha256&&report.publisher_spki_sha256===input.expectedPublisher&&report.installed===false&&report.runtime_launched===false,'native_original_reader_report_mismatch');
+  const report=JSON.parse(stdout);assert(report.schema===1&&report.scope==='runtime_candidate'&&report.runtime_format==='native_rust_v1'&&report.minimum_reader===reader.manifest.minimum_reader&&report.target===reader.target&&report.entrypoint==='bin/styx'&&report.source_revision===reader.manifest.source?.revision&&report.source_inputs_sha256===reader.manifest.source?.inputs_sha256&&report.manifest_sha256===reader.manifestSha256&&report.publisher_spki_sha256===input.expectedPublisher&&report.installed===false&&report.runtime_launched===false,'native_original_reader_report_mismatch');
   return {...reader,report,readerActualWait:true,readerExitCode:0};
  });
 }

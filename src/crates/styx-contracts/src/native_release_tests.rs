@@ -306,3 +306,52 @@ fn migrated_runtime_reader_is_explicit_and_old_manifest_shape_does_not_claim_it(
     unknown["minimum_reader"] = "native_runtime_unknown_v1".into();
     assert!(serde_json::from_value::<NativeReleaseManifest>(unknown).is_err());
 }
+
+/// These are manifest compatibility controls, not signed-package acceptance.
+#[test]
+fn host_admission_report_requires_explicit_signed_reader_declaration() {
+    for old in [
+        NativeReleaseReader::NativeReleaseV1,
+        NativeReleaseReader::NativeRuntimeV1,
+        NativeReleaseReader::NativeRuntimeMigratedV1,
+        NativeReleaseReader::NativeRuntimeMigratedV2,
+    ] {
+        assert!(!old.supports_host_admission_v2());
+    }
+    for target in [
+        NativeReleaseTarget::LinuxX86_64Gnu,
+        NativeReleaseTarget::MacosAarch64,
+        NativeReleaseTarget::MacosX86_64,
+        NativeReleaseTarget::WindowsX86_64Msvc,
+    ] {
+        let mut package = runtime(target, &[]);
+        package.minimum_reader = NativeReleaseReader::NativeRuntimeMigratedV3;
+        let decoded: NativeReleaseManifest =
+            serde_json::from_slice(&serde_json::to_vec(&package).unwrap()).unwrap();
+        decoded.validate().unwrap();
+        assert!(decoded.minimum_reader.supports_host_admission_v2());
+        assert!(
+            decoded
+                .minimum_reader
+                .supports_state_reader(ReaderContract::NativeMigratedStateV2)
+        );
+        assert!(
+            decoded
+                .minimum_reader
+                .supports_state_reader(ReaderContract::NativeMigratedStateV1)
+        );
+        assert!(
+            decoded
+                .minimum_reader
+                .supports_state_reader(ReaderContract::NativeManagementStateV1)
+        );
+        let mut unsupported = serde_json::to_value(package).unwrap();
+        unsupported["minimum_reader"] = "native_runtime_migrated_v4".into();
+        assert!(
+            serde_json::from_slice::<NativeReleaseManifest>(
+                &serde_json::to_vec(&unsupported).unwrap()
+            )
+            .is_err()
+        );
+    }
+}

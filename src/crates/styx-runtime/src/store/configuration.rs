@@ -233,6 +233,21 @@ impl ConfigurationState {
         self.recovery_required = false;
         Ok(())
     }
+    /// Only the original Mac owner may consume its fresh committed capability.
+    /// The capability has just checked the final chain under this SAME lock.
+    #[cfg(target_os = "macos")]
+    pub(super) fn finish_mac_cutover(
+        &mut self,
+        proof: &super::MacCommittedCutover<'_, '_, '_>,
+        owner: &OwnedConfigurationRoot,
+    ) -> JournalResult<()> {
+        if !proof.matches_fenced_owner(owner, &self.root.identity(), self.fence.as_ref()) {
+            return Err(JournalError::Conflict);
+        }
+        self.fence = None;
+        self.recovery_required = false;
+        Ok(())
+    }
     /// Fresh boot reopens only the fully re-synced original committed successor.
     /// An Applied/Verified transaction never reaches this capability.
     #[cfg(all(target_os = "linux", target_env = "gnu"))]

@@ -34,6 +34,14 @@ pub(in crate::store) mod cutover;
 #[path = "management_parser.rs"]
 mod parser;
 
+#[cfg(any(
+    all(target_os = "linux", target_env = "gnu"),
+    target_os = "macos",
+    target_os = "windows"
+))]
+#[path = "management_migration_plan.rs"]
+pub(in crate::store) mod migration_plan;
+
 /// Read-only reuse of the canonical journal parser. Observations are not new
 /// durability receipts, writer authority, or permission to recover/apply.
 #[cfg(any(
@@ -311,6 +319,13 @@ pub struct ManagementInventory {
         target_os = "windows"
     ))]
     pub(super) owner_recoveries: Vec<(TransactionId, u64, Option<handoff::OwnerRecoveryStage>)>,
+    /// Same original migration transaction, not an additional sequence or grant.
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "macos",
+        target_os = "windows"
+    ))]
+    pub(super) migration_plans: Vec<(TransactionId, u64, bool)>,
     /// Retained unknown names/materials/temporary files; never silently deleted.
     pub orphans: Vec<String>,
 }
@@ -325,6 +340,10 @@ impl ManagementInventory {
     ))]
     pub(super) fn has_unresolved_legacy_handoffs(&self) -> bool {
         !self.orphans.is_empty()
+            || self
+                .migration_plans
+                .iter()
+                .any(|(_, _, resolved)| !resolved)
             || (self.has_legacy_handoffs() && self.committed_cutover_anchor.is_none())
     }
     #[cfg(any(
@@ -359,7 +378,12 @@ impl ManagementInventory {
             target_os = "windows"
         ))]
         {
-            !self.handoffs.is_empty() || !self.owner_recoveries.is_empty()
+            !self.handoffs.is_empty()
+                || !self.owner_recoveries.is_empty()
+                || self
+                    .migration_plans
+                    .iter()
+                    .any(|(_, _, resolved)| !resolved)
         }
     }
 }
@@ -449,7 +473,7 @@ impl OwnedManagementJournal {
             Err(JournalError::Unsupported)
         }
     }
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
     pub(super) fn observe_locked(
         &self,
         state: &super::configuration::ConfigurationState,

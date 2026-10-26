@@ -392,7 +392,8 @@ def main():
         require(report.get('schema') == 1 and report.get('target') == target
                 and (report.get('minimum_release_reader'), report.get('supported_state_readers')) in [
                     ('native_runtime_migrated_v1', ['native_management_state_v1', 'native_migrated_state_v1']),
-                    ('native_runtime_migrated_v2', ['native_management_state_v1', 'native_migrated_state_v1', 'native_migrated_state_v2'])],
+                    ('native_runtime_migrated_v2', ['native_management_state_v1', 'native_migrated_state_v1', 'native_migrated_state_v2']),
+                    ('native_runtime_migrated_v3', ['native_management_state_v1', 'native_migrated_state_v1', 'native_migrated_state_v2'])],
                 'native_build_info_reader_contract_mismatch')
         if args.source_archive_manifest is None:
             source_stable = (command(['git', 'rev-parse', 'HEAD']) == args.source_revision

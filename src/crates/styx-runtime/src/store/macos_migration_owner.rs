@@ -1,5 +1,5 @@
-//! One original-owner Darwin migration job through actual local Exec validation.
-//! No public clear/retry, new journal, final COMMIT or remote-auth claim.
+//! One original-owner Darwin migration through actual validation and commit.
+//! Source plan is durable before effects; interrupted recovery consumer is still internal work.
 use super::*;
 use crate::{
     foreground::profile::{
@@ -18,6 +18,7 @@ use crate::{
             handoff::{
                 self, LegacyGuardsHeld, NativeRetirementIntent, OwnerRecoveryStage, RetirementKind,
             },
+            migration_plan::MigrationPlanInputs,
         },
         native_state,
         secure_journal::{JournalError, JournalResult, files},
@@ -35,7 +36,7 @@ use styx_contracts::{
 use styx_core::management::transaction::DurableStage;
 use tokio::{runtime::Handle, sync::oneshot, task::JoinHandle};
 
-/// One-shot observation DATA. PendingFinal is expressly not migration success.
+/// One-shot observation data, optionally transferring original owned resources.
 /// A dropped observer does not abort the original blocking job or release scope.
 pub(in crate::store) struct MacMigrationObservation {
     pub(in crate::store) transaction_id: TransactionId,
@@ -43,6 +44,7 @@ pub(in crate::store) struct MacMigrationObservation {
     pub(in crate::store) local_exec_report: Option<Vec<u8>>,
     pub(in crate::store) pair_admission_report: Option<Vec<u8>>,
     pub(in crate::store) rejected_scope: Option<Box<MacMigrationRejectedScope>>,
+    committed_scope: Option<Box<MacMigrationCommittedScope>>,
 }
 /// Retained original capabilities after a strictly ZERO-effect rejection.
 /// No Clone/Serde and no fence-clear method; caller gets its original scope back.
@@ -52,11 +54,21 @@ pub(in crate::store) struct MacMigrationRejectedScope {
     pub(in crate::store) journal: OwnedManagementJournal,
     pub(in crate::store) candidate: Arc<VerifiedNativeRelease>,
 }
+/// Final commit returned the SAME configuration writer and domain journal.
+/// Only the actual joined owner task returns this scope to an ordinary caller.
+pub(in crate::store) struct MacMigrationCommittedScope {
+    pub(in crate::store) owner: OwnedConfigurationRoot,
+    pub(in crate::store) journal: OwnedManagementJournal,
+    pub(in crate::store) candidate: Arc<VerifiedNativeRelease>,
+}
 #[must_use = "retain the original non-aborted job and its observation"]
 pub(in crate::store) struct MacMigrationOwnerTask {
     observation: oneshot::Receiver<MacMigrationObservation>,
     observed: bool,
     rejected_observed: bool,
+    committed_scope: Option<Box<MacMigrationCommittedScope>>,
+    worker_joined: bool,
+    worker_failed: bool,
     _job: JoinHandle<()>,
 }
 impl MacMigrationOwnerTask {
@@ -65,31 +77,55 @@ impl MacMigrationOwnerTask {
         if self.observed {
             return Err(JournalError::Conflict);
         }
-        let result = (&mut self.observation)
+        let mut result = (&mut self.observation)
             .await
             .map_err(|_| JournalError::Unknown);
         self.observed = true;
-        if let Ok(observation) = &result {
+        if let Ok(observation) = &mut result {
             self.rejected_observed = observation.rejected_scope.is_some();
+            self.committed_scope = observation.committed_scope.take();
         }
         result
     }
+    /// Return the original scope only AFTER the actual worker join. Cancelling
+    /// this wait retains both its handle and the scope in this task object.
+    pub(in crate::store) async fn join_committed(
+        &mut self,
+    ) -> JournalResult<Box<MacMigrationCommittedScope>> {
+        if self.committed_scope.is_none() {
+            return Err(JournalError::Conflict);
+        }
+        self.join_worker().await?;
+        self.committed_scope.take().ok_or(JournalError::Conflict)
+    }
+    async fn join_worker(&mut self) -> JournalResult<()> {
+        if self.worker_failed {
+            return Err(JournalError::Unknown);
+        }
+        if !self.worker_joined {
+            if (&mut self._job).await.is_err() {
+                self.worker_failed = true;
+                return Err(JournalError::Unknown);
+            }
+            self.worker_joined = true;
+        }
+        Ok(())
+    }
     /// A zero-effect rejection actually returns from the worker. This is its
-    /// real join; Unknown/PendingFinal cannot use this port to discard scope.
+    /// real join; Unknown cannot use this port to discard scope.
     pub(in crate::store) async fn join_rejected(&mut self) -> JournalResult<()> {
         if !self.rejected_observed {
             return Err(JournalError::Conflict);
         }
-        (&mut self._job).await.map_err(|_| JournalError::Unknown)
+        self.join_worker().await
     }
 }
 /// Moves only already-acquired ORIGINAL capabilities into one owned task.
 /// No writer/journal is acquired by path here; no caller command/token is read.
 /// `desired` is an explicit local plan; unsupported service/autostart is refused.
 /// INTERNAL UNFINISHED COMPOSITION ONLY: do not expose to CLI/App or execute on
-/// a real profile until remote validation + same-fence final commit continuation
-/// is implemented. PendingFinal currently retains this entire worker; it is not
-/// a usable user-facing migration endpoint and has no release/clear command.
+/// a real profile until interrupted recovery consumers are implemented. The normal path commits using real probes and transfers its
+/// same writer; failure retains the original scope without replay.
 pub(in crate::store) fn start_previous_boot_host_migration(
     runtime: Handle,
     state_dir: PathBuf,
@@ -120,6 +156,9 @@ pub(in crate::store) fn start_previous_boot_host_migration(
         observation,
         observed: false,
         rejected_observed: false,
+        committed_scope: None,
+        worker_joined: false,
+        worker_failed: false,
         _job: job,
     }
 }
@@ -131,8 +170,8 @@ async fn retain_scope<T>(
     if let Some(sender) = sender.take() {
         let _ = sender.send(observation);
     }
-    // Until an actual final-validation/recovery consumer exists, both Unknown
-    // and local-success-pending-final retain every ORIGINAL value in this frame.
+    // An Unknown effect retains every ORIGINAL value in this frame until an
+    // explicit recovery consumer can reconcile it. The successful path returns.
     // There is intentionally no caller boolean that drops/clears this fence.
     loop {
         std::future::pending::<()>().await;
@@ -158,7 +197,7 @@ async fn run_original_scope(
             match $result {
                 Ok(value) => value,
                 Err(_) => retain_scope((&owner, &maintenance, &journal, &candidate, $($held,)*), &mut sender,
-                    MacMigrationObservation { transaction_id: transaction.clone(), stage: $stage, local_exec_report: None, pair_admission_report: None, rejected_scope: None }).await,
+                    MacMigrationObservation { transaction_id: transaction.clone(), stage: $stage, local_exec_report: None, pair_admission_report: None, rejected_scope: None, committed_scope: None }).await,
             }
         };
     }
@@ -182,6 +221,7 @@ async fn run_original_scope(
                             local_exec_report: None,
                             pair_admission_report: None,
                             rejected_scope: Some(Box::new(rejected)),
+                            committed_scope: None,
                         });
                     }
                     return;
@@ -216,6 +256,10 @@ async fn run_original_scope(
                 || selection.publisher_spki_sha256.to_hex()
                     != candidate.report().publisher_spki_sha256
                 || candidate.manifest().scope != NativeReleaseScope::RuntimeCandidate
+                || !candidate
+                    .manifest()
+                    .minimum_reader
+                    .supports_host_admission_v2()
                 || !candidate
                     .manifest()
                     .minimum_reader
@@ -470,8 +514,83 @@ async fn run_original_scope(
         &before,
         &token
     );
+    let recovery_inputs = pre!(
+        input.plan(&intent),
+        "unknown_original_recovery_plan",
+        &root,
+        &host,
+        &materials,
+        &preservation,
+        &before,
+        &token
+    );
+    let recovery_intent = pre!(
+        recovery_inputs.validated_intent(),
+        "unknown_recovery_plan_encoding",
+        &root,
+        &host,
+        &materials,
+        &preservation,
+        &before,
+        &token
+    );
+    let marker = pre!(
+        migration_marker(&intent),
+        "unknown_marker_generation",
+        &root,
+        &host,
+        &materials,
+        &preservation,
+        &before,
+        &token
+    );
+    let durable_inputs = pre!(
+        (|| -> JournalResult<MigrationPlanInputs> {
+            Ok(MigrationPlanInputs {
+                retirement: serde_json::to_vec(&intent).map_err(|_| JournalError::InvalidInput)?,
+                host_pair: serde_json::to_vec(&pair).map_err(|_| JournalError::InvalidInput)?,
+                desired: serde_json::to_vec(&desired).map_err(|_| JournalError::InvalidInput)?,
+                marker: serde_json::to_vec(&marker).map_err(|_| JournalError::InvalidInput)?,
+                runtime_selection: serde_json::to_vec(
+                    &candidate
+                        .runtime_selection()
+                        .map_err(|_| JournalError::Unknown)?,
+                )
+                .map_err(|_| JournalError::InvalidInput)?,
+                owner_recovery: Some(
+                    serde_json::to_vec(&recovery_inputs).map_err(|_| JournalError::InvalidInput)?,
+                ),
+                before: before.bytes().to_vec(),
+                preservation: preservation_raw.clone(),
+                selected: selected.clone(),
+            })
+        })(),
+        "unknown_pre_effect_plan_encoding",
+        &root,
+        &host,
+        &materials,
+        &preservation,
+        &before,
+        &token
+    );
+    let saved_plan = keep!(
+        journal.persist_native_migration_plan(&maintenance, &durable_inputs),
+        "unknown_pre_effect_plan_publication",
+        &root,
+        &host,
+        &materials,
+        &preservation,
+        &before,
+        &token,
+        &recovery_inputs
+    );
     let recovery = keep!(
-        input.prepare(&mut journal, &maintenance, &intent),
+        journal.prepare_legacy_owner_recovery(
+            &maintenance,
+            &recovery_intent,
+            recovery_inputs.originals,
+            recovery_inputs.guards
+        ),
         "unknown_c_prepared",
         &root,
         &host,
@@ -585,6 +704,43 @@ async fn run_original_scope(
         &held,
         &retirement
     );
+    // Size-only rendering: the future receipt digest has fixed-width encoding.
+    // These bytes are never written or used as a migration/canonical proof.
+    let sizing = keep!(
+        render_target(
+            &candidate,
+            &intent,
+            &saved_plan.marker,
+            Sha256Digest::from_bytes([0; 32]),
+            &pair,
+            preservation_raw.clone(),
+            scopes.clone(),
+            owners.clone(),
+            before.bytes(),
+            desired.clone()
+        ),
+        "unknown_target_size_preflight",
+        &materials,
+        &preservation,
+        &before,
+        &token,
+        &effects,
+        &held,
+        &retirement
+    );
+    keep!(
+        journal.preflight_host_cutover_capacity(&maintenance, &sizing),
+        "unknown_future_cutover_capacity",
+        &materials,
+        &preservation,
+        &before,
+        &token,
+        &effects,
+        &held,
+        &retirement
+    );
+    let expected_target_bytes = sizing.target.len();
+    drop(sizing);
     let retired = keep!(
         token.retire_and_record(&mut journal, &retirement),
         "unknown_token_retirement",
@@ -604,6 +760,7 @@ async fn run_original_scope(
         render_target(
             &candidate,
             &intent,
+            &saved_plan.marker,
             retired.record_sha256(),
             &pair,
             preservation_raw,
@@ -615,6 +772,21 @@ async fn run_original_scope(
         "unknown_target_render",
         &root,
         &host,
+        &materials,
+        &preservation,
+        &before,
+        &token,
+        &effects,
+        &held,
+        &retired
+    );
+    keep!(
+        if cutover_inputs.target.len() == expected_target_bytes {
+            Ok(())
+        } else {
+            Err(JournalError::Unknown)
+        },
+        "unknown_target_size_changed_after_retirement",
         &materials,
         &preservation,
         &before,
@@ -783,36 +955,44 @@ async fn run_original_scope(
         &effects,
         &token
     );
-    retain_scope(
-        (
-            &owner,
-            &maintenance,
-            &journal,
-            &candidate,
-            &root,
-            &host,
-            &materials,
-            &preservation,
-            &before,
-            &token,
-            &effects,
-            &held,
-            &retired,
-            &applied,
-            &profile,
-            &probe,
-            &pair_probe,
-        ),
-        &mut sender,
-        MacMigrationObservation {
+    let committed = keep!(
+        applied.commit_validated(&mut journal, &mut probe, &mut pair_probe),
+        "unknown_final_validation_or_commit",
+        &profile,
+        &probe,
+        &pair_probe,
+        &applied,
+        &effects,
+        &token
+    );
+    keep!(
+        committed.release_admission(&journal, &mut probe, &mut pair_probe),
+        "unknown_committed_admission_release",
+        &profile,
+        &probe,
+        &pair_probe,
+        &applied,
+        &effects,
+        &token
+    );
+    // Both workers are already settled. Drop the local execution lease BEFORE
+    // transferring the same owner; it must not obstruct ordinary runtime start.
+    drop(pair_probe);
+    drop(probe);
+    if let Some(sender) = sender.take() {
+        let _ = sender.send(MacMigrationObservation {
             transaction_id: transaction,
-            stage: "local_exec_and_original_pair_validated_pending_final",
+            stage: "committed_admission_released",
             local_exec_report: Some(report_raw),
             pair_admission_report: Some(pair_report_raw),
             rejected_scope: None,
-        },
-    )
-    .await;
+            committed_scope: Some(Box::new(MacMigrationCommittedScope {
+                owner: owner.clone(),
+                journal,
+                candidate: candidate.clone(),
+            })),
+        });
+    }
 }
 fn native_id(identity: RootIdentity) -> JournalResult<NativeRootIdentity> {
     match identity {
@@ -934,9 +1114,22 @@ fn raw<T: Serialize>(value: &T) -> JournalResult<Box<RawValue>> {
     RawValue::from_string(serde_json::to_string(value).map_err(|_| JournalError::InvalidInput)?)
         .map_err(|_| JournalError::InvalidInput)
 }
+fn migration_marker(retirement: &NativeRetirementIntent) -> JournalResult<NativeRootMarker> {
+    let mut entropy = [0u8; 32];
+    getrandom::fill(&mut entropy).map_err(|_| JournalError::Unknown)?;
+    Ok(NativeRootMarker {
+        schema: NATIVE_MARKER_SCHEMA,
+        kind: NativeRootKind::StyxConfigurationRoot,
+        runtime_format: NativeRuntimeFormat::NativeRustV1,
+        root_identity: retirement.config_root.clone(),
+        scope_generation: Sha256Digest::from_bytes(entropy),
+        reader_floor: ReaderContract::NativeMigratedStateV2,
+    })
+}
 fn render_target(
     candidate: &VerifiedNativeRelease,
     retirement: &NativeRetirementIntent,
+    marker: &NativeRootMarker,
     retired_sha256: Sha256Digest,
     pair: &NativePreservedHostPair,
     preservation: Vec<u8>,
@@ -945,16 +1138,11 @@ fn render_target(
     before: &[u8],
     desired: NativeDesired,
 ) -> JournalResult<NativeCutoverInputs> {
-    let mut entropy = [0u8; 32];
-    getrandom::fill(&mut entropy).map_err(|_| JournalError::Unknown)?;
-    let marker = NativeRootMarker {
-        schema: NATIVE_MARKER_SCHEMA,
-        kind: NativeRootKind::StyxConfigurationRoot,
-        runtime_format: NativeRuntimeFormat::NativeRustV1,
-        root_identity: retirement.config_root.clone(),
-        scope_generation: Sha256Digest::from_bytes(entropy),
-        reader_floor: ReaderContract::NativeMigratedStateV2,
-    };
+    if marker.root_identity != retirement.config_root
+        || marker.reader_floor != ReaderContract::NativeMigratedStateV2
+    {
+        return Err(JournalError::Conflict);
+    }
     let pair_raw = serde_json::to_vec(pair).map_err(|_| JournalError::InvalidInput)?;
     let binding = NativeMigrationBindingV2 {
         schema: 2,

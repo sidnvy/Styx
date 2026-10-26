@@ -234,12 +234,10 @@ impl MacPreviousBootInput {
         })
     }
     /// The exact successor is decided before preparation; no second transaction.
-    pub(in crate::store) fn prepare(
+    pub(in crate::store) fn plan(
         self,
-        journal: &mut OwnedManagementJournal,
-        maintenance: &ConfigurationMaintenance,
         successor: &NativeRetirementIntent,
-    ) -> JournalResult<PreparedLegacyOwnerRecovery> {
+    ) -> JournalResult<OwnerRecoveryPlan> {
         self.restart.revalidate()?;
         if self.restart.service_sha256() != Some(successor.service_descriptor_sha256) {
             return Err(JournalError::Unsupported);
@@ -304,7 +302,16 @@ impl MacPreviousBootInput {
                 })
                 .collect(),
         };
-        journal.prepare_legacy_owner_recovery(maintenance, &intent, self.originals, guards)
+        let plan = OwnerRecoveryPlan {
+            intent: serde_json::value::RawValue::from_string(
+                serde_json::to_string(&intent).map_err(|_| JournalError::InvalidInput)?,
+            )
+            .map_err(|_| JournalError::InvalidInput)?,
+            originals: self.originals,
+            guards,
+        };
+        plan.validated_intent()?;
+        Ok(plan)
     }
 }
 fn root_id(id: RootIdentity) -> JournalResult<NativeRootIdentity> {
