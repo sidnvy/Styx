@@ -21,7 +21,8 @@
     "test:windows": "node --test --test-concurrency=1 host/windows/*.test.mjs",
     "test:ci": "node --test --test-concurrency=1 ci/test/*.test.mjs",
     "quality": "node ci/quality.mjs",
-    "build:checked": "node ci/build-checked.mjs"
+    "build:checked": "python3 tools/release/build-native-runtime.py",
+    "build:legacy:checked": "node ci/build-checked.mjs"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.1",
