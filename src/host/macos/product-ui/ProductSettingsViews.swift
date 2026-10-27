@@ -87,7 +87,11 @@ struct ProductSettingsView: View {
             }
             Section {
                 Toggle(productText("登录时启动 Styx", "Open Styx at login"), isOn: Binding(get: { model.loginEnabled }, set: { model.setLoginEnabled($0) }))
-                    .disabled(!model.loginPreferenceKnown || model.busy)
+                    .disabled(!model.loginChangeAllowed || model.busy)
+                if let notice = model.loginNotice {
+                    Text(notice).font(.caption).foregroundStyle(.secondary)
+                    Button(productText("登录项设置…", "Login Items settings…")) { model.openLoginSettings() }
+                }
                 Text(productText("关闭窗口后，Styx 会在菜单栏继续运行。退出 Styx 后，ChatGPT 将无法使用这台电脑。", "Styx keeps running in the menu bar when you close a window. Quitting Styx makes this computer unavailable to ChatGPT.")).font(.caption).foregroundStyle(.secondary)
             }
             Section { LabeledContent(productText("版本", "Version"), value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—") }

@@ -143,6 +143,10 @@ pub struct VerifiedNativeRelease {
     signature_file: RawFile,
     publisher_root: PrivateRoot,
     publisher_file: RawFile,
+    // RawFile preserves the byte/identity observation, while this original
+    // Windows reader HANDLE also excludes physical publisher replacement.
+    #[cfg(target_os = "windows")]
+    _publisher_file_pin: std::fs::File,
     expected: PublisherFingerprint,
     manifest: NativeReleaseManifest,
     inventory: PayloadInventory,
@@ -581,6 +585,8 @@ fn verify_native(
     let name = publisher_path.file_name().ok_or(ReleaseError::Invalid)?;
     let publisher_root = PrivateRoot::open(parent)?;
     let publisher_file = publisher_root.read_raw(Path::new(name), 4096)?;
+    #[cfg(target_os = "windows")]
+    let publisher_file_pin = publisher_root.retain_raw_file(&publisher_file)?;
     let root = PrivateRoot::open(payload)?;
     let manifest_file = root.read_raw("manifest.json", NATIVE_RELEASE_MANIFEST_BYTES)?;
     let signature_file = root.read_raw("manifest.sig", 64)?;
@@ -730,6 +736,8 @@ fn verify_native(
         signature_file,
         publisher_root,
         publisher_file,
+        #[cfg(target_os = "windows")]
+        _publisher_file_pin: publisher_file_pin,
         expected: expected.clone(),
         manifest,
         inventory,

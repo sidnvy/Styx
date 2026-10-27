@@ -17,7 +17,7 @@ enum ProductNativeDiagnostics {
     }
     static func lifecycle(_ stage: LifecycleStage, operation: String? = nil, id: Int? = nil, ok: Bool? = nil) {
         guard CommandLine.arguments.contains("--native-diagnostics") else { return }
-        let operations: Set<String> = ["startupStatus", "status", "createLocal", "resumeLocal", "inspectJoin", "join", "requestJoin", "claimJoin", "inspectHost", "connect", "disconnect", "quitAdmission", "startMigration", "recoverMigration", "stageRuntime", "updateRuntime", "runtimeUpdateStatus", "recoverRuntimeUpdate"]
+        let operations: Set<String> = ["startupStatus", "status", "createLocal", "resumeLocal", "inspectJoin", "join", "requestJoin", "claimJoin", "inspectHost", "connect", "disconnect", "quitAdmission", "appLifecycle", "appLogin", "appLoginResult", "startMigration", "recoverMigration", "stageRuntime", "updateRuntime", "runtimeUpdateStatus", "recoverRuntimeUpdate"]
         if let operation { guard operations.contains(operation) else { return } }
         var message = "lifecycle stage=" + stage.rawValue
         if let operation { message += " operation=" + operation }
@@ -66,7 +66,7 @@ indirect enum ProductJSON: Codable, Equatable, Sendable {
     var object: [String: ProductJSON] { if case .object(let v) = self { return v }; return [:] }
 }
 
-enum ProductCoreError: Error { case invalidBootstrap, unavailable, rejected, invalidResponse, workInProgress, workStateUnknown; case insufficientSpace(ProductJSON, Bool) }
+enum ProductCoreError: Error { case invalidBootstrap, unavailable, rejected, invalidResponse, workInProgress, workStateUnknown, loginChangeUnconfirmed; case insufficientSpace(ProductJSON, Bool) }
 
 final class ProductRedirectBlocker: NSObject, URLSessionTaskDelegate {
     func urlSession(_ session: URLSession, task: URLSessionTask,
@@ -82,6 +82,10 @@ final class ProductCoreClient {
     private let token: String?
     private let owned: ProductOwnedCore?
     var isNativeHost: Bool { owned != nil }
+    // A transient no-replay guard, never a saved preference. Only the OS owns
+    // the registration, and Core owns the one-shot intent ticket.
+    private var nativeLoginUnconfirmed = false
+    var nativeLoginChangeAllowed: Bool { !nativeLoginUnconfirmed }
     private var csrf: String?
     private let transport: URLSession?
     private let redirectBlocker = ProductRedirectBlocker()
@@ -120,6 +124,14 @@ final class ProductCoreClient {
     deinit { transport?.invalidateAndCancel(); owned?.requestEOF() }
     func read(_ route: String) async throws -> ProductJSON {
         if isNativeHost {
+            #if STYX_PRODUCT_UI
+            if route == "app/lifecycle" {
+                let observed = await ProductLoginStartup.observe()
+                let result = try await native("appLifecycle", ["observation": observed.wire])
+                if result["login"]["status"].string == "unknown" { nativeLoginUnconfirmed = true }
+                return result
+            }
+            #endif
             guard route == "status" || route == "native-status" else { throw ProductCoreError.rejected }; return try await native("status")
         }
         guard Self.reads.contains(route) else { throw ProductCoreError.rejected }
@@ -131,12 +143,47 @@ final class ProductCoreClient {
             case "pairing-link/inspect": return try await native("inspectJoin", body)
             case "foreground": return try await native("connect")
             case "foreground/stop": return try await native("disconnect")
+            #if STYX_PRODUCT_UI
+            case "app/login": return try await changeNativeLogin(body)
+            #endif
             default: throw ProductCoreError.rejected
             }
         }
         guard Self.writes.contains(route), csrf != nil else { throw ProductCoreError.rejected }
         return try await request(route, body: .object(body))
     }
+    #if STYX_PRODUCT_UI
+    private func changeNativeLogin(_ body: [String: ProductJSON]) async throws -> ProductJSON {
+        guard nativeLoginChangeAllowed else { throw ProductCoreError.loginChangeUnconfirmed }
+        guard body.count == 2, body["authorize"] == .bool(true),
+              case .bool(let enabled)? = body["enabled"] else { throw ProductCoreError.rejected }
+        let before = await ProductLoginStartup.observe()
+        let prepared = try await native("appLogin", ["authorize": .bool(true), "enabled": .bool(enabled), "observation": before.wire])
+        guard prepared["login"]["status"].string == "authorized",
+              prepared["login"]["enabled"] == .bool(enabled),
+              let ticket = prepared["login"]["ticketId"].string,
+              ticket.range(of: "^[a-f0-9]{32}$", options: .regularExpression) != nil else { throw ProductCoreError.invalidResponse }
+        // apply reobserves on the main actor immediately before the one OS call.
+        let applied = await ProductLoginStartup.apply(enabled: enabled, before: before)
+        if applied.outcome == "unknown" { nativeLoginUnconfirmed = true }
+        let result: ProductJSON
+        do {
+            result = try await native("appLoginResult", ["ticketId": .string(ticket),
+                "outcome": .string(applied.outcome), "observation": applied.observation.wire])
+        } catch {
+            // A result acknowledgement may have been lost. Do not resend it
+            // and do not repeat the already-dispatched OS mutation.
+            nativeLoginUnconfirmed = true
+            throw ProductCoreError.loginChangeUnconfirmed
+        }
+        if applied.outcome == "unknown" || result["login"]["status"].string == "unknown" {
+            nativeLoginUnconfirmed = true
+            throw ProductCoreError.loginChangeUnconfirmed
+        }
+        guard applied.outcome == "succeeded", result["login"]["status"].string == "succeeded" else { throw ProductCoreError.rejected }
+        return result
+    }
+    #endif
     // ZIP export shares the owning App's loopback session and CSRF boundary.
     // The route and filename are fixed; no URL/path comes from web content.
     func exportPlugin() async throws -> Data {

@@ -84,6 +84,30 @@ fn same(a: &Observed, b: &Observed) -> bool {
     a.facts == b.facts && a.executable == b.executable
 }
 impl Root {
+    /// Bind this original byte observation before retaining the existing
+    /// ordinary-reader HANDLE. In particular, equal bytes in a new file ID
+    /// between read_raw and this open must not become the approved input.
+    pub(in crate::store) fn retain_raw_file(&self, original: &RawFile) -> Result<File> {
+        self.validate_root()?;
+        let opened = self.open_relative(original.relative_path(), false, false, false)?;
+        let observed = observe(&opened, false)?;
+        if observed.facts.observation != *original.observation()
+            || observed.facts.observation.byte_len != original.bytes().len() as u64
+            || stream_hash(&opened.file, observed.facts.observation.byte_len)?
+                != Sha256Digest::of_bytes(original.bytes())
+        {
+            return Err(StoreError::Changed);
+        }
+        let current = self.open_relative(original.relative_path(), false, false, false)?;
+        if !same(&observed, &observe(&opened, false)?)
+            || !same(&observed, &observe(&current, false)?)
+        {
+            return Err(StoreError::Changed);
+        }
+        self.validate_root()?;
+        Ok(opened.file)
+    }
+
     fn payload_directory(&self, path: &Path) -> Result<Opened> {
         if path.as_os_str().is_empty() {
             return Ok(Opened {
@@ -361,6 +385,44 @@ mod batch_tests {
         let mut output = ffi::create_new_private_file(destination).unwrap();
         std::io::copy(&mut input, &mut output).unwrap();
         ffi::flush_file(&output).unwrap();
+    }
+
+    #[test]
+    fn windows_raw_file_pin_refuses_same_bytes_replacement_before_handle_and_rename_after() {
+        let container = std::env::temp_dir().join(format!(
+            "styx-raw-file-pin-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        ffi::create_new_private_directory(&container).unwrap();
+        {
+            let parent = Root::open(&container).unwrap();
+            let root = parent
+                .create_fresh_child(OsStr::new("input"))
+                .unwrap_or_else(|_| panic!("fresh private raw input"));
+            let original_path = root.path.join("publisher.pem");
+            {
+                let mut file = ffi::create_new_private_file(&original_path).unwrap();
+                file.write_all(b"same original public input").unwrap();
+                ffi::flush_file(&file).unwrap();
+            }
+            let original = root.read_raw(Path::new("publisher.pem"), 4096).unwrap();
+            let replacement = container.join("replacement.pem");
+            private_copy(&original_path, &replacement);
+            std::fs::rename(&replacement, &original_path).unwrap();
+            assert_eq!(std::fs::read(&original_path).unwrap(), original.bytes());
+            assert!(matches!(
+                root.retain_raw_file(&original),
+                Err(StoreError::Changed)
+            ));
+            let current = root.read_raw(Path::new("publisher.pem"), 4096).unwrap();
+            let pin = root.retain_raw_file(&current).unwrap();
+            assert!(std::fs::rename(&original_path, root.path.join("moved.pem")).is_err());
+            let after = root.read_raw(Path::new("publisher.pem"), 4096).unwrap();
+            assert_eq!(after.observation(), current.observation());
+            assert_eq!(after.bytes(), current.bytes());
+            drop(pin);
+        }
+        std::fs::remove_dir_all(&container).unwrap();
     }
 
     #[test]

@@ -385,8 +385,22 @@ enum ProductRestorationPolicy {
     @Published var approveComputer = false
     @Published var approveBrowser = false
     @Published var loginStartup = "unknown"
-    var loginEnabled: Bool { loginStartup == "enabled" }
-    var loginPreferenceKnown: Bool { ["enabled", "disabled", "not_installed"].contains(loginStartup) }
+    @Published var loginOperation = "observed"
+    var loginEnabled: Bool { ["enabled", "requires_approval"].contains(loginStartup) }
+    var loginPreferenceKnown: Bool { ["enabled", "disabled", "not_installed", "not_registered", "requires_approval"].contains(loginStartup) }
+    var loginChangeAllowed: Bool { loginPreferenceKnown && !["pending", "unknown"].contains(loginOperation) && client.nativeLoginChangeAllowed }
+    var loginNotice: String? {
+        if loginOperation == "unknown" {
+            return productText("上次更改的结果未确认，Styx 不会重复执行。可在系统设置中核对，或退出后重新打开以读取系统状态。", "The last change is unconfirmed and will not be repeated. Check System Settings, or quit and reopen Styx to read the system state.")
+        }
+        switch loginStartup {
+        case "requires_approval": return productText("已登记登录启动，仍需在系统设置中允许。", "Login startup is registered and needs approval in System Settings.")
+        case "foreign": return productText("已有登录启动项需要迁移或核对；Styx 保留了该启动项。", "An existing login entry needs migration or review. Styx has preserved it.")
+        case "not_found": return productText("无法确认已安装的 Styx App，登录启动未更改。", "The installed Styx app could not be confirmed. Login startup was not changed.")
+        case "unknown": return productText("暂时无法读取登录启动状态。", "Login startup could not be observed.")
+        default: return nil
+        }
+    }
     private var handoffTimer: Timer?
     private var copiedCredential: String?
     private var copiedCredentialChangeCount: Int?
@@ -476,6 +490,7 @@ enum ProductRestorationPolicy {
             loadingMessage = productText("正在连接本机 Styx…", "Connecting to Styx on this Mac…")
             if nativeHost {
                 try applyNative(try await client.native("startupStatus"))
+                await refreshNativeLogin()
                 label = Host.current().localizedName ?? "Mac"; loaded = true; return
             }
             session = try await client.read("session")
@@ -527,7 +542,7 @@ enum ProductRestorationPolicy {
         }
     }
     private func reload() async throws {
-        if nativeHost { try applyNative(try await client.native("status")); return }
+        if nativeHost { try applyNative(try await client.native("status")); await refreshNativeLogin(); return }
         // Native permission observation must not depend on a successful Core read.
         observePermissions()
         let revision = mutationRevision
@@ -593,8 +608,29 @@ enum ProductRestorationPolicy {
             }
         }
     }
+    private func refreshNativeLogin() async {
+        guard status["supportedOperations"].array.contains(where: { $0.string == "appLifecycle" }) else {
+            publish(\.loginStartup, "unknown"); return
+        }
+        do {
+            let result = try await client.read("app/lifecycle")
+            let lifecycle = result["lifecycle"]
+            guard lifecycle["schema"] == .number(1), lifecycle["platform"].string == "macos",
+                  let observed = lifecycle["status"].string,
+                  ["enabled", "disabled", "not_registered", "requires_approval", "not_found", "registered_unverified", "foreign", "unknown"].contains(observed),
+                  let operation = result["login"]["status"].string,
+                  ["pending", "unknown", "observed"].contains(operation) else { throw ProductCoreError.invalidResponse }
+            publish(\.loginStartup, observed); publish(\.loginOperation, operation)
+        } catch { publish(\.loginStartup, "unknown") }
+    }
+    func openLoginSettings() { ProductLoginStartup.openSettings() }
     private func reportFailure(_ failure: Error? = nil) {
         ProductNativeDiagnostics.event("operation_failed page=" + String(describing: page))
+        if let core = failure as? ProductCoreError, case .loginChangeUnconfirmed = core {
+            loginOperation = "unknown"
+            error = productText("登录启动更改的结果未确认，Styx 不会重复执行。请在系统设置中核对当前状态。", "The login startup change is unconfirmed and will not be repeated. Check its current state in System Settings.")
+            return
+        }
         if let rejection = failure as? ProductOwnedCoreRejection {
             nativeMigrationFailure = rejection.response
         }

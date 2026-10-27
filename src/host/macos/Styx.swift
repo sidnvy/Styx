@@ -554,6 +554,11 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
     var signalSources: [DispatchSourceSignal] = []
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // SMAppService.mainApp uses the launch Apple Event, not a command-line
+        // flag. Login startup stays in the menu bar, including a first launch.
+        let launchEvent = NSAppleEventManager.shared().currentAppleEvent
+        let launchedAtLogin = launchEvent?.eventID == AEEventID(kAEOpenApplication)
+            && launchEvent?.paramDescriptor(forKeyword: AEKeyword(keyAEPropData))?.enumCodeValue == OSType(keyAELaunchedAsLogInItem)
         #if STYX_PRODUCT_UI
         platformUpdate = ProductPlatformUpdate.configured()
         #endif
@@ -618,13 +623,13 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
         // Product startup is exclusively Rust. Missing native metadata is a
         // refusal, never an implicit selection of the historical Node helper.
         #if STYX_PRODUCT_UI
-        do { try startSetup(openWindow: !UserDefaults.standard.bool(forKey: setupPreference)) }
+        do { try startSetup(openWindow: !launchedAtLogin && !UserDefaults.standard.bool(forKey: setupPreference)) }
         catch { setupStatusLine?.title = "Native Host settings unavailable; original identity retained" }
         #else
         // A competing Cua owner does not prevent opening this app's setup UI.
         if let resources = Bundle.main.resourceURL,
            (FileManager.default.isExecutableFile(atPath: bundledCoreExecutable(resources).path) || FileManager.default.fileExists(atPath: resources.appendingPathComponent("macos-runtime.json").path)) {
-            do { try startSetup(openWindow: !UserDefaults.standard.bool(forKey: setupPreference)) }
+            do { try startSetup(openWindow: !launchedAtLogin && !UserDefaults.standard.bool(forKey: setupPreference)) }
             catch { setupStatusLine?.title = "Local setup unavailable; reopen Settings" }
         }
         #endif

@@ -1,7 +1,10 @@
 //! Private owned-child App composition. Local UI is an entry point, not an OS
 //! privilege or a second policy/configuration authority. No network listener,
 //! arbitrary call-supplied paths, legacy adoption or mutation replay lives here.
+#[cfg(all(test, target_os = "linux", target_env = "gnu"))]
+mod control_binding_tests;
 mod local_gateway;
+mod login;
 mod migrated;
 mod migration;
 mod pairing_link;
@@ -193,6 +196,9 @@ enum Operation {
     Connect,
     Disconnect,
     QuitAdmission,
+    AppLifecycle,
+    AppLogin,
+    AppLoginResult,
     ReviewMigration,
     StartMigration,
     RecoverMigration,
@@ -335,6 +341,7 @@ struct HostApp {
     retained: Option<RetainedFailure>,
     unknown: bool,
     quit_ticket: Option<String>,
+    login: login::Login,
     // Last owner drops only after role workers, retained failures and writers.
     scope: Arc<HostScope>,
 }
@@ -373,6 +380,7 @@ impl HostApp {
             retained: None,
             unknown: false,
             quit_ticket: None,
+            login: login::Login::default(),
         };
         if app.scope.root.get().is_some() {
             if app.runtime_selection_file.is_some() {
@@ -942,7 +950,7 @@ impl HostApp {
     }
     async fn snapshot(&self) -> Value {
         let computer_requested = self.desktop_component_requested().await;
-        json!({"schema":1,"migration":self.migration,"runtimeUpdate":self.runtime_update,"configuration":self.configuration,"foreground":*self.observed.borrow(),"admission_fenced":self.admission_fenced(),"desktop_intent":{"schema":1,"computer_requested":computer_requested,"source":if self.committed_migration {"committed_original_local_intent"} else {"approved_host_configuration"}},"cleanup":self.cleanup,"gateway":self.local_gateway.as_ref().map(|g| g.status()),"enrollment":self.enrollment,"mode":"rust_host","supportedOperations":["startupStatus","status","createLocal","resumeLocal","inspectJoin","join","requestJoin","claimJoin","inspectHost","connect","disconnect","quitAdmission","reviewMigration","startMigration","recoverMigration","stageRuntime","updateRuntime","runtimeUpdateStatus","recoverRuntimeUpdate"]})
+        json!({"schema":1,"migration":self.migration,"runtimeUpdate":self.runtime_update,"configuration":self.configuration,"foreground":*self.observed.borrow(),"admission_fenced":self.admission_fenced(),"desktop_intent":{"schema":1,"computer_requested":computer_requested,"source":if self.committed_migration {"committed_original_local_intent"} else {"approved_host_configuration"}},"cleanup":self.cleanup,"gateway":self.local_gateway.as_ref().map(|g| g.status()),"enrollment":self.enrollment,"mode":"rust_host","supportedOperations":["appLifecycle","appLogin","appLoginResult","startupStatus","status","createLocal","resumeLocal","inspectJoin","join","requestJoin","claimJoin","inspectHost","connect","disconnect","quitAdmission","reviewMigration","startMigration","recoverMigration","stageRuntime","updateRuntime","runtimeUpdateStatus","recoverRuntimeUpdate"]})
     }
     async fn dispatch(
         &mut self,
@@ -961,12 +969,24 @@ impl HostApp {
                 | Operation::StageRuntime
                 | Operation::UpdateRuntime
                 | Operation::RecoverRuntimeUpdate
+                | Operation::AppLifecycle
+                | Operation::AppLogin
+                | Operation::AppLoginResult
         ) {
             let _: EmptyInput = decode_input(&input)?;
         }
         self.reap_runtime_update(false).await;
         self.reap_migration(false).await;
         self.reap().await?;
+        match operation {
+            Operation::AppLifecycle => return self.login_read(input),
+            Operation::AppLogin => return self.login_authorize(input),
+            Operation::AppLoginResult => return self.login_complete(input),
+            Operation::QuitAdmission if self.login.pending() => {
+                return Err(AppError("app_login_in_progress"));
+            }
+            _ => (),
+        }
         if matches!(operation, Operation::Status | Operation::StartupStatus) {
             self.scope.validate()?;
             return Ok(self.snapshot().await);
@@ -1162,7 +1182,10 @@ impl HostApp {
                     json!({"quit":{"status":"ready_to_quit","ticketId":ticket},"cleanup":self.cleanup,"gateway":self.local_gateway.as_ref().map(|g|g.status())}),
                 )
             }
-            Operation::StartupStatus
+            Operation::AppLifecycle
+            | Operation::AppLogin
+            | Operation::AppLoginResult
+            | Operation::StartupStatus
             | Operation::Status
             | Operation::ReviewMigration
             | Operation::StartMigration

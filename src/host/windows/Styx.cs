@@ -103,9 +103,119 @@ namespace StyxNative {
    }finally{stop.Dispose();if(child!=null){try{if(started){if(!child.HasExited){child.Kill();child.WaitForExit();}child.WaitForExit();if(reading!=null){try{reading.GetAwaiter().GetResult();}catch{}}if(stderr!=null)stderr.GetAwaiter().GetResult();}}finally{child.Dispose();}}if(!transferred)runtime.Dispose();}
   }
  }
+ // Exact file-handle identity and deletion for the one Startup shortcut.
+ // No unsafe code; every owned kernel handle and security descriptor is closed.
+ sealed class NativeLoginFile:IDisposable {
+  [StructLayout(LayoutKind.Sequential)]struct Information {public uint Attributes;public System.Runtime.InteropServices.ComTypes.FILETIME Created,Accessed,Written;public uint Volume,SizeHigh,SizeLow,Links,IndexHigh,IndexLow;}
+  [StructLayout(LayoutKind.Sequential)]struct Disposition {public byte Delete;}
+  [DllImport("kernel32.dll",CharSet=CharSet.Unicode,ExactSpelling=true,SetLastError=true)]static extern Microsoft.Win32.SafeHandles.SafeFileHandle CreateFileW(string path,uint access,uint share,IntPtr security,uint creation,uint flags,IntPtr template);
+  [DllImport("kernel32.dll",SetLastError=true)][return:MarshalAs(UnmanagedType.Bool)]static extern bool GetFileInformationByHandle(Microsoft.Win32.SafeHandles.SafeFileHandle file,out Information value);
+  [DllImport("kernel32.dll",SetLastError=true)][return:MarshalAs(UnmanagedType.Bool)]static extern bool SetFileInformationByHandle(Microsoft.Win32.SafeHandles.SafeFileHandle file,int kind,ref Disposition value,uint size);
+  [DllImport("advapi32.dll")]static extern uint GetSecurityInfo(Microsoft.Win32.SafeHandles.SafeFileHandle file,int objectType,uint information,out IntPtr owner,out IntPtr group,out IntPtr dacl,out IntPtr sacl,out IntPtr descriptor);
+  [DllImport("kernel32.dll")]static extern IntPtr LocalFree(IntPtr value);
+  Microsoft.Win32.SafeHandles.SafeFileHandle handle;FileStream stream;internal readonly string Identity,Owner;readonly bool deleteAccess;
+  internal NativeLoginFile(string path,bool canDelete,bool permitDelete){
+   deleteAccess=canDelete;handle=CreateFileW(path,0x80000000u|(canDelete?0x00010000u:0u),1u|(permitDelete?4u:0u),IntPtr.Zero,3,0x00200000,IntPtr.Zero);
+   try{
+    if(handle.IsInvalid)throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());Information info;if(!GetFileInformationByHandle(handle,out info))throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());
+    if((info.Attributes&((uint)FileAttributes.Directory|(uint)FileAttributes.ReparsePoint))!=0||info.Links!=1)throw new IOException("app_login_shortcut_redirected");
+    Identity=info.Volume.ToString("x8")+":"+info.IndexHigh.ToString("x8")+info.IndexLow.ToString("x8")+":"+((uint)info.Created.dwHighDateTime).ToString("x8")+((uint)info.Created.dwLowDateTime).ToString("x8");
+    IntPtr owner,group,dacl,sacl,descriptor;uint result=GetSecurityInfo(handle,1,1,out owner,out group,out dacl,out sacl,out descriptor);
+    try{if(result!=0||owner==IntPtr.Zero)throw new IOException("app_login_shortcut_owner_unknown");Owner=new System.Security.Principal.SecurityIdentifier(owner).Value;}finally{if(descriptor!=IntPtr.Zero)LocalFree(descriptor);}
+    stream=new FileStream(handle,FileAccess.Read,4096,false);if(stream.Length>65536)throw new IOException("app_login_shortcut_too_large");
+   }catch{Dispose();throw;}
+  }
+  internal string Digest(){if(stream==null)throw new ObjectDisposedException("NativeLoginFile");return NativeBootstrap.Hash(stream);}
+  internal void Delete(){if(!deleteAccess||handle==null||handle.IsClosed)throw new IOException("app_login_delete_handle_required");var disposition=new Disposition {Delete=1};if(!SetFileInformationByHandle(handle,4,ref disposition,(uint)Marshal.SizeOf(typeof(Disposition))))throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error());}
+  public void Dispose(){if(stream!=null){stream.Dispose();stream=null;}if(handle!=null){handle.Dispose();handle=null;}}
+ }
+ // Current-user OS adapter. No saved preference, registry StartupApproved,
+ // service account, task scheduler or second management authority lives here.
+ static class NativeLoginStartup {
+  internal sealed class Observation:IDisposable {
+   internal string Status,Fingerprint;
+   internal NativeLoginFile Pin;
+   internal Dictionary<string,object> Wire {get{return Json.Obj("schema",1,"platform","windows","status",Status,"fingerprint",Fingerprint);}}
+   public void Dispose(){if(Pin!=null){Pin.Dispose();Pin=null;}}
+  }
+  internal sealed class Result {internal string Outcome;internal Observation Observation;}
+  static object ComGet(object value,string name){return value.GetType().InvokeMember(name,System.Reflection.BindingFlags.GetProperty,null,value,null);}
+  static void ComSet(object value,string name,object property){value.GetType().InvokeMember(name,System.Reflection.BindingFlags.SetProperty,null,value,new[]{property});}
+  static object ComCall(object value,string name,params object[] args){return value.GetType().InvokeMember(name,System.Reflection.BindingFlags.InvokeMethod,null,value,args);}
+  static void Release(object value){if(value!=null&&Marshal.IsComObject(value))Marshal.FinalReleaseComObject(value);}
+  static bool Same(string left,string right){return !String.IsNullOrEmpty(left)&&!String.IsNullOrEmpty(right)&&Path.IsPathRooted(left)&&Path.IsPathRooted(right)&&String.Equals(Path.GetFullPath(left).TrimEnd('\\'),Path.GetFullPath(right).TrimEnd('\\'),StringComparison.OrdinalIgnoreCase);}
+  static string Fingerprint(params object[] values){using(var bytes=new MemoryStream(new System.Text.UTF8Encoding(false,true).GetBytes(Json.Codec.Serialize(values))))return NativeBootstrap.Hash(bytes);}
+  static string ShortcutPath(){string folder=Environment.GetFolderPath(Environment.SpecialFolder.Startup);if(String.IsNullOrEmpty(folder)||!Path.IsPathRooted(folder)||!Directory.Exists(folder))throw new IOException("app_login_startup_unavailable");NativeBootstrap.NoRedirect(folder);return Path.Combine(folder,"Styx.lnk");}
+  static string Arguments(string state){return "--startup --state-dir "+NativeBootstrap.Quote(Path.GetFullPath(state));}
+  static string App(string root){string exe=Path.GetFullPath(Application.ExecutablePath);if(!Same(Path.GetDirectoryName(exe),root))throw new IOException("app_login_native_app_changed");NativeBootstrap.NoRedirect(exe);return exe;}
+  internal static Observation Observe(string root,string state,bool retain=false){
+   NativeLoginFile pin=null;
+   try{
+    string app=App(root),arguments=Arguments(state),link=ShortcutPath(),sid=System.Security.Principal.WindowsIdentity.GetCurrent().User.Value;
+    FileAttributes attributes;try{attributes=File.GetAttributes(link);}catch(FileNotFoundException){return new Observation {Status="not_registered",Fingerprint=Fingerprint(1,"windows",sid,link,app,arguments,Path.GetFullPath(root),false)};}catch(DirectoryNotFoundException){throw new IOException("app_login_startup_changed");}
+    if((attributes&(FileAttributes.Directory|FileAttributes.ReparsePoint))!=0)return new Observation {Status="foreign",Fingerprint=Fingerprint(1,"windows",sid,link,(int)attributes)};
+    NativeBootstrap.NoRedirect(link);pin=new NativeLoginFile(link,false,true);string owner=pin.Owner;
+    object shell=null,shortcut=null;string target,observedArguments,workingDirectory,digest;
+    {
+     digest=pin.Digest();
+     try{shell=Activator.CreateInstance(Type.GetTypeFromProgID("WScript.Shell",true));shortcut=ComCall(shell,"CreateShortcut",link);target=Convert.ToString(ComGet(shortcut,"TargetPath"));observedArguments=Convert.ToString(ComGet(shortcut,"Arguments"));workingDirectory=Convert.ToString(ComGet(shortcut,"WorkingDirectory"));}
+     finally{Release(shortcut);Release(shell);}
+     if(digest!=pin.Digest())throw new IOException("app_login_shortcut_changed");
+    }
+    NativeBootstrap.NoRedirect(link);bool owned=owner==sid&&Same(target,app)&&observedArguments==arguments&&Same(workingDirectory,root);
+    // A retained pre-admission pin permits deletion but prevents file-ID reuse.
+    // Reopen the path to refuse a replacement during the COM observation.
+    using(var rebound=new NativeLoginFile(link,false,true)){if(rebound.Identity!=pin.Identity||rebound.Digest()!=digest||rebound.Owner!=owner)throw new IOException("app_login_shortcut_changed");}
+    var observation=new Observation {Status=owned?"registered_unverified":"foreign",Fingerprint=Fingerprint(1,"windows",sid,link,app,arguments,Path.GetFullPath(root),true,owner,pin.Identity,digest,target,observedArguments,workingDirectory),Pin=retain?pin:null};if(retain)pin=null;return observation;
+   }catch{return new Observation {Status="unknown",Fingerprint=null};}finally{if(pin!=null)pin.Dispose();}
+  }
+  internal static void CreateOwnedShortcut(string file,string app,string arguments,string directory){
+   object shell=null,shortcut=null;try{shell=Activator.CreateInstance(Type.GetTypeFromProgID("WScript.Shell",true));shortcut=ComCall(shell,"CreateShortcut",file);ComSet(shortcut,"TargetPath",app);ComSet(shortcut,"Arguments",arguments);ComSet(shortcut,"WorkingDirectory",directory);ComSet(shortcut,"Description","Styx");ComCall(shortcut,"Save");}finally{Release(shortcut);Release(shell);}
+   // An administrator token may otherwise create an Administrators-owned file.
+   // Set only the owner; preserve the private state directory's inherited DACL.
+   NativeBootstrap.NoRedirect(file);var security=File.GetAccessControl(file,System.Security.AccessControl.AccessControlSections.Owner);security.SetOwner(System.Security.Principal.WindowsIdentity.GetCurrent().User);File.SetAccessControl(file,security);
+  }
+  internal static NativeLoginFile OpenMatchedDeleteHandle(string link,NativeLoginFile observed){
+   if(observed==null)throw new IOException("app_login_original_read_handle_required");
+   var deleter=new NativeLoginFile(link,true,false);
+   try{
+    // WScript reads only under READ pins. Capture DELETE after every COM object
+    // is released, then refuse even a same-byte replacement before capture.
+    if(deleter.Identity!=observed.Identity||deleter.Owner!=observed.Owner||deleter.Digest()!=observed.Digest()){deleter.Dispose();return null;}
+    return deleter;
+   }catch{deleter.Dispose();throw;}
+  }
+  internal static Result Apply(string root,string state,bool enabled,Observation before){
+   var current=Observe(root,state,true);
+   string temporary=null;bool dispatched=false;
+   try{
+    if(current.Status!=before.Status||current.Fingerprint!=before.Fingerprint||String.IsNullOrEmpty(current.Fingerprint)||current.Status=="foreign"||current.Status=="unknown")return new Result {Outcome="failed",Observation=current};
+    if(enabled&&current.Status=="registered_unverified"||!enabled&&current.Status=="not_registered")return new Result {Outcome="succeeded",Observation=current};
+    string link=ShortcutPath();
+    if(enabled){
+     NativeBootstrap.NoRedirect(state);temporary=Path.Combine(state,"app-login-"+Guid.NewGuid().ToString("N")+".lnk");
+     dispatched=true;CreateOwnedShortcut(temporary,App(root),Arguments(state),Path.GetFullPath(root));
+     // Exclusive publication cannot overwrite a concurrently created entry.
+     // The temporary shortcut lives in the private App state, never Startup.
+     current.Dispose();current=Observe(root,state,true);if(current.Status!=before.Status||current.Fingerprint!=before.Fingerprint)return new Result {Outcome="failed",Observation=current};
+     File.Move(temporary,link);temporary=null;
+    }else{
+     using(var deleter=OpenMatchedDeleteHandle(link,current.Pin)){
+      if(deleter==null)return new Result {Outcome="failed",Observation=current};
+      dispatched=true;deleter.Delete();
+     }
+     // Close DELETE and every pre-admission READ pin before independently
+     // observing the resulting Startup name; never run COM under DELETE access.
+     current.Dispose();before.Dispose();
+    }
+    var after=Observe(root,state);return new Result {Outcome=after.Status==(enabled?"registered_unverified":"not_registered")?"succeeded":"unknown",Observation=after};
+   }catch{current.Dispose();if(dispatched)before.Dispose();return new Result {Outcome=dispatched?"unknown":"failed",Observation=Observe(root,state)};}
+   finally{current.Dispose();if(temporary!=null){try{File.Delete(temporary);}catch{}}}
+  }
+ }
  sealed class StyxContext:ApplicationContext {
   readonly string root,state;readonly NotifyIcon tray;readonly Icon icon;readonly Form panel;readonly Settings settings;readonly CancellationTokenSource startupCancellation=new CancellationTokenSource();readonly Stopwatch startupClock=Stopwatch.StartNew();readonly bool startupTest,loginStartup;readonly System.Windows.Forms.Timer startupTimer;
-  VerificationTiming verificationTiming;Core core;bool busy,closing,starting,startupHostUpdateAttempted,actionsGatedDuringStartup=true;int mutationRevision,progressEvents;long firstPaintTicks=-1,verificationStartedTicks=-1,verifiedTicks=-1,readyTicks=-1;object snapshot;Task<object> observation;TaskCompletionSource<bool> mutationDone;readonly Label message;
+  VerificationTiming verificationTiming;Core core;bool busy,closing,starting,startupHostUpdateAttempted,loginChangeUnconfirmed,actionsGatedDuringStartup=true;int mutationRevision,progressEvents;long firstPaintTicks=-1,verificationStartedTicks=-1,verifiedTicks=-1,readyTicks=-1;object snapshot;Task<object> observation;TaskCompletionSource<bool> mutationDone;readonly Label message;
   internal int ResultCode=2;
   internal object CurrentStatus { get { return snapshot; } }
   internal bool RustHost {get{return Json.Str(snapshot,"mode")=="rust_host";}}
@@ -113,6 +223,7 @@ namespace StyxNative {
   internal bool Supports(string operation){var values=Json.Get(snapshot,"supportedOperations") as object[];if(values==null)return false;foreach(var item in values)if(Equals(item,operation))return true;return false;}
   internal bool ManagementOnly { get { return !RustHost&&Json.Yes(snapshot,"loadingDetails"); } }
   internal bool MutationBusy { get { return busy||starting; } }
+  internal bool LoginChangeAllowed {get{return !loginChangeUnconfirmed;}}
   [DllImport("user32.dll")]static extern bool DestroyIcon(IntPtr hIcon);
   internal static Icon BrandIcon(string file){using(var original=Image.FromFile(file))using(var bitmap=new Bitmap(original,new Size(32,32))){IntPtr handle=bitmap.GetHicon();try{return (Icon)Icon.FromHandle(handle).Clone();}finally{DestroyIcon(handle);}}}
   internal StyxContext(string resourceRoot,string stateDirectory,bool test,bool testStartup=false,bool fromLogin=false){
@@ -199,7 +310,7 @@ namespace StyxNative {
   internal async Task Run(Func<Task> action,string pending="Working…",string failure="The operation could not be confirmed. Refresh to review current state. Completed steps are retained; an interrupted operation is not automatically repeated."){
    if(busy||starting||core==null)return;string previousMessage=message.Text;busy=true;mutationDone=new TaskCompletionSource<bool>();mutationRevision++;settings.Enabled=false;message.Text=pending;settings.Feedback(pending);
    try{var reading=observation;if(reading!=null){try{await reading;}catch{}if(observation==reading)observation=null;}await action();if(settings.HasFeedback(pending))settings.Feedback("Operation completed. Review the current connection and test evidence below.");}
-   catch(Exception error){string text=failure;var native=error as NativeOperationException;if(native!=null&&native.Code=="app_system_trust_not_supported")text="This native join currently requires an explicit Gateway CA in the invitation. System-trust-only joining is not supported; no CA or approval was fabricated.";else if(native!=null&&native.Code=="app_operation_not_supported")text="This operation is unavailable in the native Host slice. Existing settings were retained.";else if(native!=null&&native.Code=="host_payload_insufficient_space")text=SpaceFeedback(native.Budget,native.Preflight);else if(native!=null&&native.Code=="windows_native_app_binding_required")text="The desktop test could not start. This package could not verify the current native Styx app. Your settings are retained.";else if(native!=null&&native.Code=="desktop_acceptance_native_app_changed")text="The native Styx app changed during this desktop test. Create a new test in this app before continuing.";else if(native!=null&&native.Code=="work_in_progress")text="A task is still running. Wait for it to finish before quitting or updating Styx.";else if(native!=null&&native.Code=="work_state_unknown")text="Styx could not confirm whether tasks are running. Keep it open and try again after checking the connection.";if(native!=null){string diagnostic=NativeFailureCode(native.Code);if(diagnostic.Length>0)text+="\nNative result: "+diagnostic;}message.Text="Connection needs attention. Open Settings to review the last result.";settings.Feedback(text);}
+   catch(Exception error){string text=failure;var native=error as NativeOperationException;if(native!=null&&native.Code=="app_system_trust_not_supported")text="This native join currently requires an explicit Gateway CA in the invitation. System-trust-only joining is not supported; no CA or approval was fabricated.";else if(native!=null&&native.Code=="app_operation_not_supported")text="This operation is unavailable in the native Host slice. Existing settings were retained.";else if(native!=null&&native.Code=="host_payload_insufficient_space")text=SpaceFeedback(native.Budget,native.Preflight);else if(native!=null&&native.Code=="windows_native_app_binding_required")text="The desktop test could not start. This package could not verify the current native Styx app. Your settings are retained.";else if(native!=null&&native.Code=="desktop_acceptance_native_app_changed")text="The native Styx app changed during this desktop test. Create a new test in this app before continuing.";else if(native!=null&&native.Code=="app_login_result_unknown_no_replay")text="The login startup change is unconfirmed and will not be repeated. Check Windows startup settings. Quit and reopen Styx to read the system state.";else if(native!=null&&native.Code=="app_login_observation_changed")text="The Startup entry changed before the operation could finish. Styx preserved the current entry. Check its current state before making another explicit change.";else if(native!=null&&native.Code=="work_in_progress")text="A task is still running. Wait for it to finish before quitting or updating Styx.";else if(native!=null&&native.Code=="work_state_unknown")text="Styx could not confirm whether tasks are running. Keep it open and try again after checking the connection.";if(native!=null){string diagnostic=NativeFailureCode(native.Code);if(diagnostic.Length>0)text+="\nNative result: "+diagnostic;}message.Text="Connection needs attention. Open Settings to review the last result.";settings.Feedback(text);}
    finally{if(message.Text==pending)message.Text=previousMessage;settings.Enabled=true;busy=false;mutationDone.TrySetResult(true);}
    // A mutation invalidates an in-flight startup observation. Resume only that
    // read after settling; never replay the mutation or block the ready controls.
@@ -238,7 +349,24 @@ namespace StyxNative {
    message.Text=f=="connected"&&exec=="connected"?"Connected to this computer.\n\nExec transport is online. Tool execution and ChatGPT account confirmation are shown separately in Settings.":f=="started"?"Connecting…\n\nKeep Styx open while this computer connects.":"Connection is paused or unavailable.\n\nOpen Settings to review, prepare or reconnect.";
    tray.Text=f=="connected"&&exec=="connected"?"Styx — connected":"Styx — needs attention";settings.ShowStatus(snapshot);
   }
-  internal async Task<object> Call(string op,Dictionary<string,object> input=null){if(core==null)throw new IOException();if(RustHost&&!Supports(op))throw new NativeOperationException("app_operation_not_supported");return await core.Call(op,input??Json.Obj());}
+  internal async Task<object> Call(string op,Dictionary<string,object> input=null){
+   if(core==null)throw new IOException();if(RustHost&&!Supports(op))throw new NativeOperationException("app_operation_not_supported");
+   if(RustHost&&op=="appLifecycle"){
+    var result=await core.Call("appLifecycle",Json.Obj("observation",NativeLoginStartup.Observe(root,state).Wire));if(Json.Str(result,"login","status")=="unknown")loginChangeUnconfirmed=true;return result;
+   }
+   if(RustHost&&op=="appLogin"){
+    if(loginChangeUnconfirmed)throw new NativeOperationException("app_login_result_unknown_no_replay");if(input==null||input.Count!=1||!(Json.Get(input,"enabled") is bool))throw new NativeOperationException("app_input_invalid");bool enabled=Json.Yes(input,"enabled");using(var before=NativeLoginStartup.Observe(root,state,true)){
+    var prepared=await core.Call("appLogin",Json.Obj("authorize",true,"enabled",enabled,"observation",before.Wire));string ticket=Json.Str(prepared,"login","ticketId");
+    if(Json.Str(prepared,"login","status")!="authorized"||!Equals(Json.Get(prepared,"login","enabled"),enabled)||!System.Text.RegularExpressions.Regex.IsMatch(ticket,"^[a-f0-9]{32}$"))throw new IOException("app_login_authorization_invalid");
+    var applied=NativeLoginStartup.Apply(root,state,enabled,before);if(applied.Outcome=="unknown")loginChangeUnconfirmed=true;object result;
+    try{result=await core.Call("appLoginResult",Json.Obj("ticketId",ticket,"outcome",applied.Outcome,"observation",applied.Observation.Wire));}
+    catch{loginChangeUnconfirmed=true;throw new NativeOperationException("app_login_result_unknown_no_replay");}
+    if(applied.Outcome=="unknown"||Json.Str(result,"login","status")=="unknown"){loginChangeUnconfirmed=true;throw new NativeOperationException("app_login_result_unknown_no_replay");}
+    if(applied.Outcome!="succeeded"||Json.Str(result,"login","status")!="succeeded")throw new NativeOperationException("app_login_observation_changed");return result;
+    }
+   }
+   return await core.Call(op,input??Json.Obj());
+  }
   internal static string SpaceFeedback(object budget,bool preflight){
    string text=preflight?"Not enough disk space. The upgrade has not started.":"Not enough disk space. The update remains incomplete; review recovery before continuing.";
    var volumes=Json.Get(budget,"volumes") as object[];
@@ -334,7 +462,7 @@ namespace StyxNative {
   Dictionary<string,object> Choice(){var values=Json.Obj("label",label.Text.Trim(),"computer",computer.Checked,"browser",browser.Checked);if(label.Text.Trim().Length==0)throw new InvalidOperationException();values["browserChannel"]=channel.SelectedIndex==1?"msedge":channel.SelectedIndex==2?"chrome":"auto";values["persistLogin"]=persist.Checked;return values;}
   static bool InvitationPage(string name){return name=="add-computer"||name=="pending-computers";}
   async Task ReadLogin(){ApplyLogin(await owner.Call("appLifecycle"));}
-  void ApplyLogin(object response){string state=Json.Str(response,"lifecycle","status");Feedback(state=="not_registered"?"Login startup is off.":state=="registered_unverified"?"Login startup is registered. Windows can disable it independently; check Windows startup settings.":"The last startup change is not confirmed. Check Windows startup settings, or choose Enable or Disable again.");}
+  void ApplyLogin(object response){string state=Json.Str(response,"lifecycle","status"),operation=Json.Str(response,"login","status");Feedback(!owner.LoginChangeAllowed||operation=="unknown"?"The last login startup change is unconfirmed and will not be repeated. Check Windows startup settings. Quit and reopen Styx to read the system state.":operation=="pending"?"A login startup change is awaiting its result. Styx will not repeat it.":state=="not_registered"?"Login startup is off.":state=="registered_unverified"?"Login startup is registered. Windows can disable it independently; check Windows startup settings.":state=="foreign"?"The existing Startup entry belongs to another app or installation. Styx preserved it.":"Login startup could not be observed. Check Windows startup settings; no startup entry was changed.");}
   internal void ShowPage(string name){if(Json.Yes(owner.CurrentStatus,"status","joinRecovery","rollbackRequired"))name="join-interrupted";if(owner.ManagementOnly&&name!="update-recovery"){if(name!="component-start")requestedPage=name;name="component-start";}if(InvitationPage(page)&&!InvitationPage(name))owner.FinishInviting();page=name;updateRuntime=null;desktopInput=null;desktopInputLabel=null;challengePrompt=null;confirmChat=null;var previous=new Control[content.Controls.Count];content.Controls.CopyTo(previous,0);foreach(var item in previous)if(item!=feedback&&item!=statusReadout&&item!=observationError){var picture=item as PictureBox;if(picture!=null&&picture.Image!=null)picture.Image.Dispose();item.Dispose();}content.Controls.Clear();Status("");owner.Logo(content,48);StyxContext.Heading(content,name=="chat"?"Connect ChatGPT":(name=="overview"||name=="component-start"||name=="update-recovery")?"This computer":"Get started with Styx");
    renderedRustMode=owner.RustHost;if(renderedRustMode){ShowRustPage(name);return;}
    if(name=="welcome"){
@@ -390,7 +518,12 @@ namespace StyxNative {
    if(name=="welcome"){
     if(localCreationSubmitted||Json.Yes(owner.CurrentStatus,"admission_fenced")||Json.Get(owner.CurrentStatus,"gateway")!=null||Json.Get(owner.CurrentStatus,"configuration")!=null||Json.Get(owner.CurrentStatus,"enrollment")!=null){Explain("Your existing settings and setup progress have been retained. Open this computer to review the current status.",65);Action("Open this computer",ContinueJoiningView,false);}
     else{Explain("Set up a local gateway and connect this computer, or join a gateway you already own.",65);NativeAction("Set up this computer","createLocal",()=>{ShowPage("create");return Task.FromResult(0);});NativeAction("Join an existing Gateway","inspectJoin",()=>{ShowPage("join");return Task.FromResult(0);});}
-    Unavailable("Login startup");
+    NativeAction("Login startup","appLifecycle",async()=>{ShowPage("login-startup");await ReadLogin();});
+   }else if(name=="login-startup"){
+    Explain("Start Styx in the system tray when you sign in. Windows controls whether the registered entry is allowed to run. Quitting Styx keeps the next-login registration and does not restart this session.",110);
+    if(owner.LoginChangeAllowed){NativeAction("Enable login startup","appLogin",async()=>{ApplyLogin(await owner.Call("appLogin",Json.Obj("enabled",true)));});NativeAction("Disable login startup","appLogin",async()=>{ApplyLogin(await owner.Call("appLogin",Json.Obj("enabled",false)));});}
+    else Explain("The last change is unconfirmed. Styx will not repeat it. Check Windows startup settings, or quit and reopen Styx to read the system state.",85);
+    Action("Windows startup settings",()=>{Process.Start("ms-settings:startupapps");return Task.FromResult(0);},false);NativeAction("Check status","appLifecycle",ReadLogin);
    }else if(name=="create"){
     Capabilities();computer.Checked=false;computer.Enabled=false;persist.Checked=false;persist.Enabled=false;
     channel.Items[0]="Choose Microsoft Edge or Google Chrome";channel.Enabled=browser.Checked;browser.CheckedChanged+=(s,e)=>channel.Enabled=browser.Checked;
