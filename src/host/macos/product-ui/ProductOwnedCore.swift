@@ -36,7 +36,7 @@ final class ProductOwnedCore: @unchecked Sendable {
     private var maintenanceUnknown = false
     private var sequence = 0
     private var buffer = Data()
-    private static let operations: Set<String> = ["startupStatus", "status", "createLocal", "resumeLocal", "inspectJoin", "join", "requestJoin", "claimJoin", "inspectHost", "connect", "disconnect", "quitAdmission", "appLifecycle", "appLogin", "appLoginResult", "startMigration", "recoverMigration", "stageRuntime", "updateRuntime", "runtimeUpdateStatus", "recoverRuntimeUpdate", "transferToService", "serviceStatus", "prepareServiceFirstStart", "stopService", "prepareAppMaintenance", "appMaintenanceStatus", "cancelAppMaintenance"]
+    private static let operations: Set<String> = ["startupStatus", "status", "createLocal", "resumeLocal", "inspectJoin", "join", "requestJoin", "claimJoin", "inspectHost", "connect", "disconnect", "quitAdmission", "appLifecycle", "appLogin", "appLoginResult", "stageRuntime", "updateRuntime", "runtimeUpdateStatus", "recoverRuntimeUpdate", "transferToService", "serviceStatus", "prepareServiceFirstStart", "stopService", "prepareAppMaintenance", "appMaintenanceStatus", "cancelAppMaintenance"]
 
     // Only the fixed package bootstrap below can construct this owner.
     private init(cli: URL, selection: URL, state: URL, cliPin: FileHandle, selectionPin: FileHandle) throws {
@@ -401,8 +401,7 @@ final class ProductOwnedCore: @unchecked Sendable {
         // Existing candidate files must match exact verified bytes. A partial
         // or changed file is refused, never overwritten or silently repaired.
         guard originalSelection == selection else { throw ProductOwnedCoreError.invalidPackage }
-        // The original root is passed in place. Rust must inspect it under the
-        // original scope before an explicitly authorized migration can begin.
+        // Pass the selected profile in place; Core owns its validation.
         return try ProductOwnedCore(cli: cli, selection: selectionURL, state: state, cliPin: cliPin, selectionPin: selectionPin)
     }
 }

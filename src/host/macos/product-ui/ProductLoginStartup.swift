@@ -28,7 +28,7 @@ enum ProductLoginStartup {
             || (try? FileManager.default.destinationOfSymbolicLink(atPath: legacy.path)) != nil
         let status: String
         if legacyExists {
-            // Preserve the old registration for its explicit migration path.
+            // Preserve the old registration for manual removal or review.
             // Registering another owner would hide an unresolved login runner.
             status = "foreign"
         } else if bundle.bundleIdentifier != "app.styx.host"
