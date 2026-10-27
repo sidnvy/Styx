@@ -194,7 +194,9 @@ pub async fn bootstrap(
     deployment_file: &Path,
     runtime_selection_file: &Path,
 ) -> Result<BootstrapReport, BootstrapError> {
-    bootstrap_owned(parent, name, deployment_file, runtime_selection_file, None).await
+    bootstrap_owned(parent, name, deployment_file, runtime_selection_file, None)
+        .await
+        .map(|(report, _candidate)| report)
 }
 
 /// The App supplies its retained scope, never a wire-selected role or manager.
@@ -202,7 +204,7 @@ pub(crate) async fn bootstrap_for_app(
     scope: Arc<crate::app::HostScope>,
     deployment_file: &Path,
     runtime_selection_file: &Path,
-) -> Result<BootstrapReport, BootstrapError> {
+) -> Result<(BootstrapReport, Arc<crate::release::VerifiedNativeRelease>), BootstrapError> {
     let path = scope.state_dir().to_owned();
     let parent = path.parent().ok_or_else(|| {
         BootstrapError::new("fresh_gateway_input_invalid", 2).with_app_scope(Some(scope.clone()))
@@ -226,7 +228,7 @@ async fn bootstrap_owned(
     deployment_file: &Path,
     runtime_selection_file: &Path,
     app_scope: Option<Arc<crate::app::HostScope>>,
-) -> Result<BootstrapReport, BootstrapError> {
+) -> Result<(BootstrapReport, Arc<crate::release::VerifiedNativeRelease>), BootstrapError> {
     #[cfg(any(
         all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
         all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"),
@@ -457,7 +459,7 @@ mod platform {
         deployment_file: &Path,
         selection_file: &Path,
         app_scope: Option<Arc<crate::app::HostScope>>,
-    ) -> Result<BootstrapReport, BootstrapError> {
+    ) -> Result<(BootstrapReport, Arc<VerifiedNativeRelease>), BootstrapError> {
         if let Some(scope) = &app_scope {
             if scope.state_dir() != parent.join(name) {
                 return Err(bad());
@@ -469,11 +471,15 @@ mod platform {
         let (origin, _) = endpoint(deployment.bytes())?;
         let selection: NativeRuntimeSelection =
             serde_json::from_slice(selection_raw.bytes()).map_err(|_| bad())?;
-        let candidate = release::verify_selected(&selection)
-            .map_err(|_| BootstrapError::new("fresh_gateway_candidate_untrusted", 2))?;
-        if candidate.runtime_selection().map_err(|_| bad())? != selection {
-            return Err(bad());
-        }
+        let candidate = Arc::new(
+            release::verify_selected(&selection)
+                .map_err(|_| BootstrapError::new("fresh_gateway_candidate_untrusted", 2))?,
+        );
+        // Match the original selection directly. The publication getter would
+        // repeat this complete inventory walk twice at the same boundary.
+        candidate
+            .revalidate_matches_selection(&selection)
+            .map_err(|_| bad())?;
         // All validation/crypto precedes root creation. This never rotates or
         // repairs an existing CA; an interrupted bootstrap must remain closed.
         let clock = now()?;
@@ -606,17 +612,20 @@ mod platform {
             return Err(changed().retaining(Retained::Binding { _binding: binding }));
         }
         let _ = binding;
-        Ok(BootstrapReport {
-            schema: 1,
-            operation: "fresh_gateway_bootstrap",
-            state_dir: parent.join(name),
-            origin,
-            candidate_manifest_sha256: selection.manifest_sha256,
-            certificate_pin: ca.anchor_pin.as_hex(),
-            endpoint_not_after_unix: leaf.not_after_unix,
-            service_started: false,
-            runtime_health: "not_started",
-        })
+        Ok((
+            BootstrapReport {
+                schema: 1,
+                operation: "fresh_gateway_bootstrap",
+                state_dir: parent.join(name),
+                origin,
+                candidate_manifest_sha256: selection.manifest_sha256,
+                certificate_pin: ca.anchor_pin.as_hex(),
+                endpoint_not_after_unix: leaf.not_after_unix,
+                service_started: false,
+                runtime_health: "not_started",
+            },
+            candidate,
+        ))
     }
 
     pub(crate) struct FreshGatewayRuntime {
@@ -627,7 +636,7 @@ mod platform {
         pub(crate) admin_token: Zeroizing<Vec<u8>>,
         pub(crate) model_token: Zeroizing<Vec<u8>>,
         transactions: Arc<std::sync::Mutex<NativeTransactions>>,
-        candidate: VerifiedNativeRelease,
+        candidate: Arc<VerifiedNativeRelease>,
         inputs: Vec<RawFile>,
         state_raw: Vec<u8>,
         #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
@@ -713,6 +722,7 @@ mod platform {
             path,
             None,
             None,
+            None,
             #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
             None,
         )
@@ -720,17 +730,19 @@ mod platform {
     pub(crate) fn open_existing_for_app(
         scope: Arc<crate::app::HostScope>,
     ) -> Result<FreshGatewayRuntime, BootstrapError> {
-        open_existing_for_app_diagnostic(scope, None)
+        open_existing_for_app_diagnostic(scope, None, None)
     }
     pub(crate) fn open_existing_for_app_diagnostic(
         scope: Arc<crate::app::HostScope>,
         diagnostic: Option<&super::StartupDiagnostic>,
+        retained_candidate: Option<Arc<VerifiedNativeRelease>>,
     ) -> Result<FreshGatewayRuntime, BootstrapError> {
         let path = scope.state_dir().to_owned();
         open_existing_owned(
             &path,
             Some(scope.clone()),
             diagnostic,
+            retained_candidate,
             #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
             None,
         )
@@ -781,15 +793,21 @@ mod platform {
     ) -> Result<FreshGatewayRuntime, BootstrapError> {
         scope.validate().map_err(|_| changed())?;
         let path = scope.state_dir().to_owned();
-        open_existing_owned(&path, None, None, Some(scope))
+        open_existing_owned(&path, None, None, None, Some(scope))
     }
     fn open_existing_owned(
         path: &Path,
         app_scope: Option<Arc<crate::app::HostScope>>,
         diagnostic: Option<&super::StartupDiagnostic>,
+        retained_candidate: Option<Arc<VerifiedNativeRelease>>,
         #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
         service_scope: Option<Arc<crate::platform::native_service::ServiceScope>>,
     ) -> Result<FreshGatewayRuntime, BootstrapError> {
+        // Retained verification is an App-owned startup input, never a CLI or
+        // service bypass. It cannot replace this original scope/coordinator.
+        if retained_candidate.is_some() && app_scope.is_none() {
+            return Err(bad());
+        }
         if let Some(scope) = &app_scope {
             if scope.state_dir() != path {
                 return Err(bad());
@@ -858,15 +876,37 @@ mod platform {
                 .runtime_update()
                 .map_err(|_| bad())?
                 .map_or_else(|| selected.clone(), |update| update.bootstrap_runtime);
+            let retained = retained_candidate.is_some();
             if let Some(d) = diagnostic {
-                d.mark("verify_selected");
+                d.mark(if retained {
+                    "retained_candidate"
+                } else {
+                    "verify_selected"
+                });
             }
-            let candidate = release::verify_selected(&selected)
-                .map_err(|_| BootstrapError::new("fresh_gateway_candidate_untrusted", 2))?;
+            let candidate = match retained_candidate {
+                Some(candidate) => {
+                    // Same formal C08 object from this App's successful bootstrap.
+                    // A mismatch is a closed failure, never a cold-load fallback.
+                    candidate
+                        .revalidate_matches_selection(&selected)
+                        .map_err(|_| changed())?;
+                    candidate
+                }
+                None => Arc::new(
+                    release::verify_selected(&selected)
+                        .map_err(|_| BootstrapError::new("fresh_gateway_candidate_untrusted", 2))?,
+                ),
+            };
             if let Some(d) = diagnostic {
-                d.mark("verify_selected_done");
+                d.mark(if retained {
+                    "retained_candidate_done"
+                } else {
+                    "verify_selected_done"
+                });
             }
-            // verify_selected just authenticated this same retained manifest.
+            // Formal verification or exact-selection revalidation authenticated
+            // this same retained manifest.
             // Reader support is immutable signed metadata; load/reconcile still
             // perform their complete release validation before admission.
             if !candidate

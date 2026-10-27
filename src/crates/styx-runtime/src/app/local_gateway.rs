@@ -21,6 +21,7 @@ pub(super) struct LocalGateway {
     pub cleanup: Option<foreground::GatewayForegroundOutcome>,
     retained: Option<native::NativeManagementError>,
     startup_failure: Option<foreground::AppGatewayError>,
+    startup_candidate: Option<Arc<crate::release::VerifiedNativeRelease>>,
     failed: bool,
     pub scope: Arc<HostScope>,
 }
@@ -89,6 +90,7 @@ impl LocalGateway {
             cleanup: None,
             retained: None,
             startup_failure: None,
+            startup_candidate: None,
             failed: false,
         };
         result.validate()?;
@@ -170,6 +172,7 @@ impl LocalGateway {
                 cleanup: None,
                 retained: None,
                 startup_failure: None,
+                startup_candidate: None,
                 failed: false,
                 scope,
             })
@@ -274,8 +277,18 @@ impl LocalGateway {
         });
         let diagnostic = crate::management::native_gateway::StartupDiagnostic::from_env();
         let worker_diagnostic = diagnostic.clone();
+        // Move the original bootstrap object only after the original C07 startup
+        // transition has settled. Unknown startup never repopulates or retries it.
+        let startup_candidate = self.startup_candidate.take();
         let worker = tokio::spawn(async move {
-            foreground::gateway_run_for_app(scope, worker_cancel, events, worker_diagnostic).await
+            foreground::gateway_run_for_app(
+                scope,
+                worker_cancel,
+                events,
+                worker_diagnostic,
+                startup_candidate,
+            )
+            .await
         });
         self.running = Some(RunningGateway {
             worker,
@@ -569,18 +582,23 @@ impl HostApp {
             .container
             .parent_path
             .join("app-local-gateway-input-v1.json");
-        if let Err(error) = crate::management::native_gateway::bootstrap_for_app(
+        let startup_candidate = match crate::management::native_gateway::bootstrap_for_app(
             scope.clone(),
             &input_path,
             &selection,
         )
         .await
         {
-            let code = error.code();
-            self.retained = Some(RetainedFailure::Bootstrap(error));
-            return Err(AppError(code));
-        }
-        self.local_gateway = Some(self.load_local_gateway(scope).await?);
+            Ok((_report, candidate)) => candidate,
+            Err(error) => {
+                let code = error.code();
+                self.retained = Some(RetainedFailure::Bootstrap(error));
+                return Err(AppError(code));
+            }
+        };
+        let mut gateway = self.load_local_gateway(scope).await?;
+        gateway.startup_candidate = Some(startup_candidate);
+        self.local_gateway = Some(gateway);
         self.finish_local_pairing(choice).await
     }
     async fn finish_local_pairing(&mut self, choice: JoinInput) -> Result<(), AppError> {

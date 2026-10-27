@@ -63,7 +63,7 @@ pub async fn gateway_run(
                 events,
                 None,
                 None,
-                None,
+                (None, None),
                 #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
                 None,
             )
@@ -99,9 +99,9 @@ pub(crate) async fn gateway_run_for_service(
     let path = scope.state_dir().to_owned();
     let stop = cancel.child_token();
     let _waiter = stop.clone().drop_guard();
-    tokio::spawn(
-        async move { platform::run(path, stop, events, None, None, None, Some(scope)).await },
-    )
+    tokio::spawn(async move {
+        platform::run(path, stop, events, None, None, (None, None), Some(scope)).await
+    })
     .await
     .map_err(|_| ForegroundError("gateway_foreground_worker_failed"))?
 }
@@ -167,6 +167,7 @@ pub(crate) async fn gateway_run_for_app(
     cancel: CancellationToken,
     events: mpsc::Sender<ForegroundEvent>,
     diagnostic: Option<crate::management::native_gateway::StartupDiagnostic>,
+    retained_candidate: Option<std::sync::Arc<crate::release::VerifiedNativeRelease>>,
 ) -> Result<GatewayForegroundOutcome, AppGatewayError> {
     #[cfg(any(
         all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
@@ -190,7 +191,7 @@ pub(crate) async fn gateway_run_for_app(
                 events,
                 Some(scope),
                 Some(loader_failure),
-                diagnostic,
+                (diagnostic, retained_candidate),
                 #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
                 None,
             )
@@ -232,7 +233,7 @@ pub(crate) async fn gateway_run_for_app(
         )
     )))]
     {
-        let _ = (scope, cancel, events);
+        let _ = (scope, cancel, events, diagnostic, retained_candidate);
         Err(AppGatewayError {
             foreground: ForegroundError("gateway_foreground_platform_unsupported"),
             _retained: None,
@@ -802,6 +803,7 @@ mod platform {
                 None,
                 None,
                 None,
+                None,
                 #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
                 None,
             );
@@ -868,7 +870,7 @@ mod platform {
         }
         let state = Arc::new(PrivateRoot::open(path).map_err(|_| error("gateway_protected_read"))?);
         if state.ensure_absent("gateway-ready-v1.json").is_err() {
-            return load_fresh(path, None, None, None, Some(scope));
+            return load_fresh(path, None, None, None, None, Some(scope));
         }
         let marker_raw = state
             .read_raw(".styx-native-root-v1.json", 4096)
@@ -893,6 +895,7 @@ mod platform {
         scope: Arc<crate::app::HostScope>,
         failure: Option<AppStartupFailure>,
         diagnostic: Option<&crate::management::native_gateway::StartupDiagnostic>,
+        retained_candidate: Option<Arc<crate::release::VerifiedNativeRelease>>,
     ) -> Result<Loaded, ForegroundError> {
         if scope.state_dir() != path {
             return Err(error("app_scope_changed"));
@@ -911,9 +914,13 @@ mod platform {
                 Some(scope),
                 failure,
                 diagnostic,
+                retained_candidate,
                 #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
                 None,
             );
+        }
+        if retained_candidate.is_some() {
+            return Err(error("app_gateway_retained_candidate_requires_fresh_root"));
         }
         let snapshot = Arc::new(
             crate::store::committed_runtime_native::NativeCommittedRuntimeSnapshot::open_for_app_gateway(
@@ -1198,6 +1205,7 @@ mod platform {
         app_scope: Option<Arc<crate::app::HostScope>>,
         app_failure: Option<AppStartupFailure>,
         diagnostic: Option<&crate::management::native_gateway::StartupDiagnostic>,
+        retained_candidate: Option<Arc<crate::release::VerifiedNativeRelease>>,
         #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
         service_scope: Option<Arc<crate::platform::native_service::ServiceScope>>,
     ) -> Result<Loaded, ForegroundError> {
@@ -1219,7 +1227,9 @@ mod platform {
                         return Err(error("app_scope_changed"));
                     }
                     crate::management::native_gateway::open_existing_for_app_diagnostic(
-                        scope, diagnostic,
+                        scope,
+                        diagnostic,
+                        retained_candidate,
                     )
                 }
                 None => crate::management::native_gateway::open_existing(path),
@@ -1662,10 +1672,17 @@ mod platform {
         events: mpsc::Sender<ForegroundEvent>,
         app_scope: Option<Arc<crate::app::HostScope>>,
         app_failure: Option<AppStartupFailure>,
-        diagnostic: Option<crate::management::native_gateway::StartupDiagnostic>,
+        startup: (
+            Option<crate::management::native_gateway::StartupDiagnostic>,
+            Option<Arc<crate::release::VerifiedNativeRelease>>,
+        ),
         #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
         service_scope: Option<Arc<crate::platform::native_service::ServiceScope>>,
     ) -> Result<GatewayForegroundOutcome, ForegroundError> {
+        let (diagnostic, retained_candidate) = startup;
+        if retained_candidate.is_some() && app_scope.is_none() {
+            return Err(error("app_scope_required_for_retained_gateway_runtime"));
+        }
         let permit = LOADERS
             .try_acquire()
             .map_err(|_| error("gateway_reader_busy"))?;
@@ -1691,7 +1708,13 @@ mod platform {
                     return load_service(&path, scope);
                 }
                 match app_scope {
-                    Some(scope) => load_app(&path, scope, app_failure, loader_diagnostic.as_ref()),
+                    Some(scope) => load_app(
+                        &path,
+                        scope,
+                        app_failure,
+                        loader_diagnostic.as_ref(),
+                        retained_candidate,
+                    ),
                     None => load(&path),
                 }
             })

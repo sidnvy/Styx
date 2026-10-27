@@ -401,9 +401,12 @@ impl NativeHostSnapshot {
                     .map_err(|_| JournalError::Conflict)?,
             ),
         };
+        // The boundary above just fully verified/revalidated this exact object.
+        // Reader support is immutable signed metadata, not another I/O boundary.
         if !candidate
+            .manifest()
+            .minimum_reader
             .supports_state_reader(state.reader_contract)
-            .map_err(|_| JournalError::Conflict)?
         {
             return Err(JournalError::Conflict);
         }
