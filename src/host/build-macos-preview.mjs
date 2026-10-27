@@ -315,11 +315,113 @@ export function prepareNativeMacPreview(config){
  assert(Object.entries(sourceFiles).every(([name,digest])=>sha(path.join(ROOT,...name.split('/')))===digest),'native_app_source_changed');
  fs.writeFileSync(path.join(destination,'prepared-native-app.json'),JSON.stringify(receipt,null,2)+'\n',{flag:'wx',mode:0o600});return receipt;
 }
+// Artifact creation is after the App and C08 seals. No code is signed or
+// changed here; mounting is verification, never an installation or App launch.
+export function assertNativeMacAppInventory(app,expected){
+ assert(JSON.stringify(preparedPreviewInventory(app))===JSON.stringify(expected),'native_archive_app_inventory_changed');
+}
+// A nonzero/timeout attach can still have mounted the image. Consult the
+// platform's structured inventory before cleaning only our exact fresh mount.
+export function withNativeMacDmgMount({image,mount,verification,run},inspect){
+ const initial=fs.lstatSync(image,{bigint:true});
+ assert(initial.isFile()&&!initial.isSymbolicLink(),'native_dmg_regular_image_required');
+ const imageSha=sha(image);
+ const parent=fs.lstatSync(mount,{bigint:true});
+ assert(parent.isDirectory()&&!parent.isSymbolicLink()&&fs.readdirSync(mount).length===0,'native_dmg_fresh_mountpoint_required');
+ verification.mountpoint=mount;verification.detachAttempted=false;verification.detached=false;
+ let attached=false;
+ try{
+  run('/usr/bin/hdiutil',['attach','-readonly','-nobrowse','-mountpoint',mount,image],90000);attached=true;
+  inspect();
+ }finally{
+  if(!attached){
+   verification.failedAttachObservation='unknown';
+   try{
+    const plist=run('/usr/bin/hdiutil',['info','-plist'],30000);
+    const info=JSON.parse(run('/usr/bin/plutil',['-convert','json','-o','-','-'],30000,plist));
+    assert(info&&Array.isArray(info.images)&&info.images.length<=1024,'native_dmg_info_invalid');
+    const matches=[];
+    for(const entry of info.images){
+     assert(entry&&typeof entry==='object'&&Array.isArray(entry['system-entities']),'native_dmg_info_invalid');
+     for(const entity of entry['system-entities']){
+      assert(entity&&typeof entity==='object','native_dmg_info_invalid');
+      if(entity['mount-point']===mount)matches.push(entry);
+     }
+    }
+    const current=fs.lstatSync(image,{bigint:true});
+    assert(['dev','ino','size','mtimeNs','ctimeNs'].every(k=>current[k]===initial[k])&&sha(image)===imageSha,'native_dmg_image_changed');
+    if(matches.length===1&&matches[0]['image-path']===image){
+     verification.failedAttachObservation='exact_owned_image_mounted';attached=true;
+    }else if(matches.length===0){
+     const currentMount=fs.lstatSync(mount,{bigint:true});
+     assert(currentMount.dev===parent.dev&&currentMount.ino===parent.ino&&fs.readdirSync(mount).length===0,'native_dmg_mountpoint_changed');
+     verification.failedAttachObservation='not_mounted';
+    }
+   }catch{
+    // Unknown is retained, not permission to detach some other image or force.
+    verification.failedAttachObservation='unknown';
+   }
+  }
+  if(attached){
+   verification.detachAttempted=true;
+   run('/usr/bin/hdiutil',['detach',mount],90000);
+   verification.detached=true;
+   fs.rmdirSync(mount);
+  }
+ }
+}
+function nativeMacArtifacts({destination,app,metadata,expectedPublisherSha256,createDmg=true}){
+ assert(typeof createDmg==='boolean','invalid_native_create_dmg');
+ const files=preparedPreviewInventory(app),observations=[];
+ const verification={schema:1,status:'FAIL',readonlyMount:true,appLaunched:false,observations};
+ const run=(command,args,timeout=30000,input)=>{
+  const fact={command:[command,...args],actualWait:false,exitCode:null};observations.push(fact);
+  try{const output=execFileSync(command,args,{stdio:'pipe',timeout,input,maxBuffer:1048576});fact.actualWait=true;fact.exitCode=0;return output;}
+  catch(error){fact.actualWait=Number.isInteger(error.status);fact.exitCode=error.status??null;fact.signal=error.signal??null;throw error;}
+ };
+ const inputFor=target=>({payloadDir:path.join(target,'Contents/Resources/native'),publisherFile:path.join(target,'Contents/Resources/native-publisher.pem'),expectedPublisher:expectedPublisherSha256});
+ const original=authenticateNativeMacRuntimeEnvelope(inputFor(app),metadata.arch);
+ const check=target=>{
+  assertNativeMacAppInventory(target,files);
+  run('/usr/bin/codesign',['--verify','--deep','--strict',target]);
+  run('/usr/bin/codesign',['--verify','--strict','-R',`=identifier "${MAC_BUNDLE_ID}" and certificate leaf = H"cb50cee601419f28b43756f4fc8aefdbf60abae2"`,target]);
+  const copied=authenticateNativeMacRuntimeEnvelope(inputFor(target),metadata.arch);
+  assert(copied.manifestSha256===original.manifestSha256&&copied.signatureSha256===original.signatureSha256&&copied.cliSha256===original.cliSha256&&copied.publisherSha256===original.publisherSha256,'native_archive_c08_changed');
+  assertNativeMacAppInventory(target,files);
+ };
+ try{
+  check(app);
+  const zip='Styx-'+metadata.version+'-native-macos-'+metadata.arch+'.zip';
+  run('/usr/bin/ditto',['-c','-k','--keepParent',app,path.join(destination,zip)],180000);
+  run('/usr/bin/unzip',['-tq',path.join(destination,zip)],180000);
+  const names=[zip];let primaryArtifact=zip;
+  if(createDmg){
+   const image=path.dirname(app);
+   fs.symlinkSync('/Applications',path.join(image,'Applications'));
+   fs.writeFileSync(path.join(image,'READ-ME.txt'),'Drag Styx.app to Applications, then open it from Applications.\nThis development build uses the original local signing identity and is not notarized.\nPKG is only for explicit advanced persistent-service installation or repair.\n',{flag:'wx',mode:0o644});
+   const dmg='Styx-'+metadata.version+'-native-macos-'+metadata.arch+'.dmg';
+   run('/usr/bin/hdiutil',['create','-volname','Styx','-srcfolder',image,'-format','UDZO',path.join(destination,dmg)],300000);
+   run('/usr/bin/hdiutil',['verify',path.join(destination,dmg)],180000);
+   const mount=fs.mkdtempSync(path.join(destination,'verify-native-image-'));
+   withNativeMacDmgMount({image:path.join(destination,dmg),mount,verification,run},()=>{
+    const link=path.join(mount,'Applications');assert(fs.lstatSync(link).isSymbolicLink()&&fs.readlinkSync(link)==='/Applications','native_dmg_applications_link_changed');
+    assert(fs.readFileSync(path.join(mount,'READ-ME.txt'),'utf8')===fs.readFileSync(path.join(image,'READ-ME.txt'),'utf8'),'native_dmg_instructions_changed');
+    check(path.join(mount,'Styx.app'));
+   });
+   names.push(dmg);primaryArtifact=dmg;
+  }
+  assertNativeMacAppInventory(app,files);
+  verification.status='PASS';
+  return {primaryArtifact,installMethod:createDmg?'drag_to_applications':'internal_transport_only',artifacts:names.map(name=>({name,sha256:sha(path.join(destination,name)),bytes:fs.statSync(path.join(destination,name)).size})),archiveVerification:verification};
+ }finally{
+  fs.writeFileSync(path.join(destination,'native-archive-verification.json'),JSON.stringify(verification,null,2)+'\n',{flag:'wx',mode:0o600});
+ }
+}
 export function finalizeNativeMacPreview(config){
  assert(process.platform==='darwin','native_macos_signing_required');
- assert(config&&Object.keys(config).every(k=>['nativePreparedSource','preparedReceiptSha256','destination','localSigning','expectedPublisherSha256','crossArchSignOnly'].includes(k)),'invalid_native_app_finalization');
- const {nativePreparedSource,preparedReceiptSha256,destination,localSigning,expectedPublisherSha256,crossArchSignOnly=false}=config;
- assert(typeof crossArchSignOnly==='boolean','invalid_cross_arch_sign_only');
+ assert(config&&Object.keys(config).every(k=>['nativePreparedSource','preparedReceiptSha256','destination','localSigning','expectedPublisherSha256','crossArchSignOnly','createDmg'].includes(k)),'invalid_native_app_finalization');
+ const {nativePreparedSource,preparedReceiptSha256,destination,localSigning,expectedPublisherSha256,crossArchSignOnly=false,createDmg=true}=config;
+ assert(typeof crossArchSignOnly==='boolean'&&typeof createDmg==='boolean','invalid_cross_arch_sign_only');
  assert(ABS(nativePreparedSource)&&ABS(destination)&&!fs.existsSync(destination)&&/^[a-f0-9]{64}$/.test(preparedReceiptSha256??'')&&/^[a-f0-9]{64}$/.test(expectedPublisherSha256??''),'native_app_finalization_inputs_required');
  const relative=path.relative(nativePreparedSource,destination),reverse=path.relative(destination,nativePreparedSource),outside=p=>p==='..'||p.startsWith('..'+path.sep)||path.isAbsolute(p);
  assert(outside(relative)&&outside(reverse),'native_app_destination_overlap');
@@ -368,20 +470,20 @@ export function finalizeNativeMacPreview(config){
    nativeReaderActualWait:false,nativeReaderExitCode:null,native_ui_acceptance:'NOT RUN',tcc_attribution:'NOT RUN',installation:'NOT RUN'};
   fs.writeFileSync(path.join(destination,'signed-pending-app.json'),JSON.stringify(pending,null,2)+'\n',{flag:'wx',mode:0o600});return pending;
  }
- const zip='Styx-'+metadata.version+'-native-macos-'+metadata.arch+'.zip';execFileSync('/usr/bin/ditto',['-c','-k','--keepParent',app,path.join(destination,zip)],{stdio:'pipe',timeout:180000});
- execFileSync('/usr/bin/unzip',['-tq',path.join(destination,zip)],{stdio:'pipe',timeout:180000});
+ const archives=nativeMacArtifacts({destination,app,metadata,expectedPublisherSha256,createDmg});
  const receipt={schema:1,kind:'native_rust_local_certificate_preview',app,sourceRevision:metadata.sourceRevision,runtimeSourceRevision:metadata.runtimeSourceRevision,
   sourceFiles:metadata.sourceFiles,nativeRuntime:metadata.nativeRuntime,nativeSignatureSha256:after.signatureSha256,...previewSigningReceipt(localSigning),compiler:metadata.appBuild.compiler,
   sealedRuntimeCodesign:'verified_only_never_resigned',coreManagementRuntime:'owned_rust_stdio_no_node_core',nativeReaderActualWait:true,nativeReaderExitCode:0,
-  artifacts:[{name:zip,sha256:sha(path.join(destination,zip)),bytes:fs.statSync(path.join(destination,zip)).size}],native_ui_acceptance:'NOT RUN',tcc_attribution:'NOT RUN',installation:'NOT RUN'};
+  ...archives,native_ui_acceptance:'NOT RUN',tcc_attribution:'NOT RUN',installation:'NOT RUN'};
  fs.writeFileSync(path.join(destination,'native-app-receipt.json'),JSON.stringify(receipt,null,2)+'\n',{flag:'wx',mode:0o600});return receipt;
 }
 // Native completion is read/verify/copy/package only. It never signs or opens
 // a private key, and never treats a cross-machine pending receipt as readiness.
 export function completeNativeMacPreview(config){
  assert(process.platform==='darwin','native_macos_completion_required');
- assert(config&&Object.keys(config).every(k=>['signedPendingSource','pendingReceiptSha256','destination','expectedPublisherSha256'].includes(k)),'invalid_native_app_completion');
- const {signedPendingSource,pendingReceiptSha256,destination,expectedPublisherSha256}=config;
+ assert(config&&Object.keys(config).every(k=>['signedPendingSource','pendingReceiptSha256','destination','expectedPublisherSha256','createDmg'].includes(k)),'invalid_native_app_completion');
+ const {signedPendingSource,pendingReceiptSha256,destination,expectedPublisherSha256,createDmg=true}=config;
+ assert(typeof createDmg==='boolean','invalid_native_create_dmg');
  assert(ABS(signedPendingSource)&&ABS(destination)&&!fs.existsSync(destination)&&/^[a-f0-9]{64}$/.test(pendingReceiptSha256??'')&&expectedPublisherSha256==='ebb36f9dff7022d8921443bdc30c6236d18dd0535aa2cdce838d1c5b327bab67','native_app_completion_inputs_required');
  const relative=path.relative(signedPendingSource,destination),reverse=path.relative(destination,signedPendingSource),outside=p=>p==='..'||p.startsWith('..'+path.sep)||path.isAbsolute(p);
  assert(outside(relative)&&outside(reverse),'native_app_destination_overlap');
@@ -412,16 +514,14 @@ export function completeNativeMacPreview(config){
  const copied=verifyNativeMacRuntime(inputFor(app),metadata.arch);
  assert(copied.manifestSha256===original.manifestSha256&&copied.signatureSha256===original.signatureSha256&&copied.cliSha256===original.cliSha256,'sealed_native_payload_changed');
  scanPrivateMaterial(app);
- const zip='Styx-'+metadata.version+'-native-macos-'+metadata.arch+'.zip';
- run('/usr/bin/ditto',['-c','-k','--keepParent',app,path.join(destination,zip)],180000);
- run('/usr/bin/unzip',['-tq',path.join(destination,zip)],180000);
+ const archives=nativeMacArtifacts({destination,app,metadata,expectedPublisherSha256,createDmg});
  assert(sha(receiptPath)===pendingReceiptSha256&&JSON.stringify(preparedPreviewInventory(originalApp))===JSON.stringify(metadata.files)&&JSON.stringify(preparedPreviewInventory(app))===JSON.stringify(metadata.files),'signed_native_inputs_changed');
  const receipt={schema:1,kind:'native_rust_local_certificate_preview',app,sourceRevision:metadata.sourceRevision,runtimeSourceRevision:metadata.runtimeSourceRevision,
   sourceFiles:metadata.sourceFiles,nativeRuntime:metadata.nativeRuntime,nativeSignatureSha256:copied.signatureSha256,
   signing:'local_certificate_preview',notarization:'NOT RUN',local_signing:local,private_key_in_artifact:false,compiler:metadata.compiler,
   completion:'native_architecture_verification_after_original_cross_signing',signedPendingReceiptSha256:pendingReceiptSha256,
   sealedRuntimeCodesign:'verified_only_never_resigned',coreManagementRuntime:'owned_rust_stdio_no_node_core',nativeReaderActualWait:true,nativeReaderExitCode:0,
-  nativeVerification:observations,artifacts:[{name:zip,sha256:sha(path.join(destination,zip)),bytes:fs.statSync(path.join(destination,zip)).size}],native_ui_acceptance:'NOT RUN',tcc_attribution:'NOT RUN',installation:'NOT RUN'};
+  nativeVerification:observations,...archives,native_ui_acceptance:'NOT RUN',tcc_attribution:'NOT RUN',installation:'NOT RUN'};
  fs.writeFileSync(path.join(destination,'native-app-receipt.json'),JSON.stringify(receipt,null,2)+'\n',{flag:'wx',mode:0o600});return receipt;
 }
 if(process.argv[1]&&fs.realpathSync(process.argv[1])===fs.realpathSync(fileURLToPath(import.meta.url))){

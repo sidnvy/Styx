@@ -1,53 +1,58 @@
-# Install the precompiled macOS preview
+# Install the native macOS preview
 
-Choose the release asset explicitly labeled for your Mac architecture. An arm64
-build is for Apple silicon; it is not an Intel or universal build. The source
-archives are optional developer materials, not the end-user installer.
+The default macOS download is a DMG containing Styx.app and an Applications link.
+Choose the asset for your architecture: arm64 for Apple silicon, x64 for Intel.
+Source archives and ZIPs used for internal build transport are not the normal
+installation journey.
 
-1. Download the Styx disk image or application archive and its published checksum
-   from the same official release. The checksum checks file integrity, not an
-   Apple-verified publisher identity.
-2. Open the disk image, or extract the archive. Quit an existing Styx app before
-   replacing it and preserve its private state. Drag Styx.app into Applications.
-   Do not run it from the read-only disk image or a temporary download directory.
-3. Open Styx from Applications. This preview is not notarized. If macOS refuses
-   an unidentified developer, inspect System Settings → Privacy & Security and
-   use Open Anyway for this app only if you trust its source. macOS may ask for
-   local authentication. Do not disable Gatekeeper for the whole machine.
-4. Styx's menu bar provides setup/settings. Its local browser interface is started
-   by the app with bundled Node and bundled software; you do not compile anything
-   or install a development environment. Keep the private setup link private.
-5. Choose a local Gateway plus Host, or join an existing reachable Gateway. Review
-   the device name and desired capabilities. Use the explicit setup actions to
-   prepare, pair and verify the device. Bundled artifact paths are prefilled.
-6. For desktop control, use Styx → Request macOS permissions, then grant
-   Accessibility and Screen Recording in System Settings. Quit and reopen Styx
-   if macOS requests it. Permission approval is never automated by Codex.
-7. Enable desired user services in settings. Stop a foreground Gateway before
-   switching it to a background service. Keep Styx open for desktop control.
-   Background Host/Gateway service status and app/desktop readiness are separate.
+1. Download the DMG and its published checksum from the same release. A checksum
+   checks file integrity; use the release handoff to check the publisher and
+   signing identity.
+2. Quit the existing Styx app before replacing it. Preserve its private
+   configuration, identity and pairing materials.
+3. Open the DMG and drag Styx.app onto Applications. Eject the image, then open
+   Styx from Applications. Do not run it from the mounted image or a temporary
+   download directory.
+4. Use Styx setup to create a local Gateway plus Host, or join the existing
+   Gateway with its invitation. A joining device does not create another
+   Gateway or plugin. Keep setup links and invitation material private.
+5. Enable only the capabilities intended for this device. For desktop control,
+   grant the requested Accessibility and Screen Recording permissions in System
+   Settings to the original signed Styx app. A CLI connection or successful
+   pairing does not grant desktop permissions.
 
-A local setup success does not connect an account plugin automatically. Codex
-can guide the separate independent Gateway reachability and account/plugin
-connection flow. Local-only Gateway access is not public Internet access.
+A PKG is an explicit advanced path for a persistent system service or its
+same-identity repair. It may require local administrator authentication because
+it registers a service outside the App. It is not a prerequisite for ordinary
+App installation. Removing or replacing Styx.app does not remove a separately
+registered service or its private state.
 
-## Preview limits
+## Development preview limits
 
-This build has no Apple Developer ID publisher identity or notarization. An
-ad-hoc signature can change when upgrading; macOS permissions may need to be
-approved again after a changed build. Uninstalling/replacing an app must not
-silently erase user data or pretend to preserve grants across builds.
+Current development candidates use the retained local development signing
+identity and publisher. They are not Apple Developer ID notarized releases.
+If Gatekeeper blocks the app, inspect System Settings → Privacy & Security and
+use Open Anyway only if you trust that candidate. Do not disable Gatekeeper for
+the machine. Permission approval is a local user action.
 
-The packaged software includes native execution capabilities. Select only the
-capabilities intended for this device. Generated local development TLS
-certificates last 30 days; automatic production renewal is not implemented.
-Do not expose the local settings server publicly.
+The native Rust App packaging path now defaults to DMG. Its actual drag-and-drop
+installation journey, normal Quit, login recovery and outer App update remain
+acceptance gates; packaging code or a successful isolated service PKG does not
+establish that these journeys passed. Consult the candidate-specific handoff
+for what was built, installed and verified. Preserve the original signing
+identity when upgrading; do not treat a new signature as proof that TCC grants
+survive.
+
+Account/plugin connection, Gateway ingress, persistent services and headless CLI
+operation have separate setup and acceptance. See [fresh native onboarding](fresh-onboarding.md)
+for the CLI journey. Installing the app does not connect an account or expose a
+Gateway to the Internet automatically.
 
 ## Stop or remove
 
-Use settings to stop and disable the installed Host and Gateway user services
-first. Quit Styx to stop its desktop helper and local settings process. Removing
-the app alone does not uninstall a separately installed user service or erase
-private deployment state. Preserve that state for recovery or explicitly remove
-only the confirmed Styx-owned state after a private backup. Keep unrelated apps,
-SSH configuration, Codex settings and shared runtimes.
+Use the App’s explicit Quit action and require its owned components to stop.
+Closing a settings window alone is not Quit. Independently managed CLI or
+persistent services have their own stop and removal operations; do not terminate
+unrelated processes or delete configuration to make an installation appear
+healthy. Preserve private state for recovery, and back it up before any explicit
+removal.

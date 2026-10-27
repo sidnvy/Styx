@@ -37,7 +37,7 @@ function directory(name){const st=requirePrivateDirectory(name);requireNoMacAcl(
 // Authenticate only what is needed to execute the original native verifier.
 // No unverified payload process runs before external Ed25519 pin/raw signature,
 // fixed CLI location, whole CLI SHA and native Mach-O target have been checked.
-const nativeStateSchema=Object.freeze({native_runtime_migrated_v1:2,native_runtime_migrated_v2:2,native_runtime_migrated_v3:2,native_runtime_selected_v1:3,native_app_runtime_selected_v1:4});
+const nativeStateSchema=Object.freeze({native_runtime_migrated_v1:2,native_runtime_migrated_v2:2,native_runtime_migrated_v3:2,native_runtime_selected_v1:3,native_app_runtime_selected_v1:4,native_service_runtime_selected_v1:5});
 export function withAuthenticatedMacReader(input,arch,operation){
  assert(input&&Object.keys(input).sort().join(',')==='expectedPublisher,payloadDir,publisherFile','complete_native_runtime_inputs_required');
  assert(['x64','arm64'].includes(arch)&&absolute(input.payloadDir)&&absolute(input.publisherFile)&&hex(input.expectedPublisher),'native_macos_inputs_required');
