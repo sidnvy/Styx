@@ -14,7 +14,7 @@
 - A new worktree needs a concrete conflict/isolation reason, a recorded owner and a cleanup outcome. Builds and test evidence belong outside tracked source, not in new worktrees.
 - Before checkout removal, save its HEAD in a durable ref and record dirty/untracked/ignored input ownership. Never force-remove unknown work. Preserve live process paths and cross-tree dependency symlinks.
 - Keep Gateway/Host/Core boundaries and existing product scope. No new UI redesign, tenants, Browser takeover modes or autonomous-task features during convergence.
-- Preserve existing signed artifacts, device identity, pairing credentials, permission responsibility and publisher pins. A new Rust package layout is allowed only through the versioned manifest/bootstrap/migration contract; never mutate old signed bytes or bypass their reader rules. Repository paths and installed members are distinct contracts.
+- Release scope is `src/docs/rust-core-rewrite/REDUCED-SCOPE.md` (owner decision 2026-10-27). Legacy migration, mixed-runtime interop and old-install cutover are out of scope: devices get a fresh Rust install and re-pair. Keep each machine's publisher signing keys and pins; never transfer private keys. Persistent OS services, the custom App maintenance protocol and auto-update are deferred until v1 ships.
 - Unknown outcomes are not replayed. Native actions require fresh target-bound observation. Never operate piermini or reboot the development Workstation.
 - Report Product, Architecture, Integration, Release, Reliability and Decision as changes from the prior report, with evidence. Tests, packages, installation and real acceptance are distinct. Stable remains NO-GO until its explicit gates close.
 

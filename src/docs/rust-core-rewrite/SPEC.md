@@ -146,6 +146,8 @@ Desktop按Window、Capture、Input、可选Accessibility报告实际支持。保
 
 ## 7. Migration and removal of the JS core
 
+> **Superseded 2026-10-27:** the migration gates in §7.1–7.2 are out of the release scope. See [REDUCED-SCOPE.md](REDUCED-SCOPE.md). JS core removal (gate 5's last step) remains.
+
 ### 7.1 New implementation, preserved trust
 
 旧代码是行为/缺陷/证据来源，不是新结构模板。仅保留有外部兼容价值的合同：公开工具、设备身份、配对签名、publisher/CA、必要的CLI与状态迁移。内部组织和状态schema可以明确改变，必须有版本、迁移和恢复。
