@@ -84,7 +84,11 @@ impl SharedEnrollment {
     }
     /// The service callback is executed under this SAME Core mutex. The owned
     /// blocking worker retains the slot, callback and all custody if a client leaves.
-    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "macos",
+        target_os = "windows"
+    ))]
     pub(crate) async fn service_control<T: Send + 'static>(
         &self,
         work: impl FnOnce(&mut EnrollmentService) -> T + Send + 'static,

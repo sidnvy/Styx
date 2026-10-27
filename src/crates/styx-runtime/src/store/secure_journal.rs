@@ -13,10 +13,18 @@ pub enum JournalError {
     #[error("journal observation or persistence outcome unknown")]
     Unknown,
     /// Internal live-service read classification; never a commit or admission proof.
-    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "macos",
+        target_os = "windows"
+    ))]
     #[error("service configuration observation pending")]
     ConfigurationPending,
-    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "macos",
+        target_os = "windows"
+    ))]
     #[error("service stop requested")]
     ServiceStopRequested,
     #[error("journal scan budget exceeded")]
@@ -96,7 +104,11 @@ impl NamespaceName {
         }
     }
 }
-#[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+#[cfg(any(
+    all(target_os = "linux", target_env = "gnu"),
+    target_os = "macos",
+    target_os = "windows"
+))]
 pub(in crate::store) fn append_temporary_name(name: &str) -> bool {
     name.strip_prefix("orphan-")
         .and_then(|s| s.strip_suffix(".temporary"))

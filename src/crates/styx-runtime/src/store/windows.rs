@@ -145,7 +145,29 @@ pub(super) struct FreshChildError {
     pub(super) created: bool,
     pub(super) root: Option<Root>,
 }
+/// Only the fixed live-service canonical reader may return this refusal.
+/// It does not validate a new state, grant admission, or authorize a retry.
+#[derive(Debug)]
+pub(super) enum ServiceStateReadError {
+    PublicationChanged,
+    Store(StoreError),
+}
+impl From<StoreError> for ServiceStateReadError {
+    fn from(error: StoreError) -> Self {
+        match error {
+            StoreError::Changed => Self::PublicationChanged,
+            error => Self::Store(error),
+        }
+    }
+}
 impl Root {
+    /// A replacement observed during the checked read is a pending publication.
+    pub(super) fn read_service_state(
+        &self,
+        max: usize,
+    ) -> std::result::Result<RawFile, ServiceStateReadError> {
+        Ok(self.read_raw(Path::new("state.json"), max)?)
+    }
     /// Convert only an original protected directory HANDLE into its revalidated
     /// local path/ancestor pin chain. The supplied handle remains borrowed, and
     /// its private identity must match the independently opened path both ways.

@@ -105,7 +105,7 @@ impl Endpoint {
                 .map_err(|_| error())?;
         let name = format!(
             r"\\.\pipe\Styx-ServiceControl-v1-{}",
-            Sha256Digest::of_bytes(input).to_hex()
+            Sha256Digest::of_bytes(&input).to_hex()
         );
         let result = Self {
             root,

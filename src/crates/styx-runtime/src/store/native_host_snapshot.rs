@@ -13,14 +13,7 @@ use super::{
     FileObservation, PrivateRoot, RootIdentity, management, native_state,
     secure_journal::{JournalBudget, JournalError, JournalObservation, JournalResult, files},
 };
-#[cfg(any(
-    any(
-        all(target_os = "linux", target_env = "gnu"),
-        target_os = "macos",
-        target_os = "windows"
-    ),
-    target_os = "macos"
-))]
+#[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
 use std::os::unix::fs::MetadataExt;
 use std::{
     collections::BTreeSet,
@@ -685,10 +678,7 @@ fn directory_identity(directory: &File) -> JournalResult<(u64, u64)> {
     {
         super::windows_file_identity(directory).map_err(|_| JournalError::Unknown)
     }
-    #[cfg(any(
-        any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"),
-        target_os = "macos"
-    ))]
+    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
     {
         let metadata = directory.metadata().map_err(|_| JournalError::Unknown)?;
         Ok((metadata.dev(), metadata.ino()))
