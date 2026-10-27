@@ -108,6 +108,11 @@
   ],
   "source_guard_limit": "lexical defense in depth; imports/aliases/macros/FFI still need review; not a Rust sandbox or a proof of no IO",
   "known_ignored": {
+    "app::control_binding_tests::completed_stopped_host_control_binding_preserves_execution_refusal_and_integrity": {
+      "kind": "explicit_signed_native_payload",
+      "input": "STYX_TEST_APP_CONTROL_SELECTION absolute protected NativeRuntimeSelection file; isolated strict-TLS enrollment roots only",
+      "required_for": "Stopped App control binding versus execution refusal, Ready/CA integrity and unchanged root/C07; not installed App or release acceptance"
+    },
     "crypto::tests::legacy_node22_bidirectional_crypto_batch": {
       "kind": "explicit_external_runtime",
       "input": "--node22 absolute binary",
