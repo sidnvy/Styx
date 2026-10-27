@@ -76,6 +76,7 @@ pub(crate) struct NativeHostSnapshot {
     pins: Vec<Pin>,
     seed: NativeHostJoinSeed,
     current_selection: NativeRuntimeSelection,
+    verified_release: Arc<crate::release::VerifiedNativeRelease>,
     ready: NativeHostReady,
     ca: Vec<u8>,
     identity: Zeroizing<Vec<u8>>,
@@ -374,6 +375,7 @@ impl NativeHostSnapshot {
             pins,
             seed,
             current_selection,
+            verified_release: Arc::new(candidate),
             ready,
             ca,
             identity,
@@ -493,9 +495,14 @@ impl NativeHostSnapshot {
         &self.seed
     }
     /// Selected only after the complete original C07 chain and bootstrap binding
-    /// were verified. The caller still retains/revalidates the signed C08 object.
+    /// were verified. The caller still revalidates the retained signed C08 object.
     pub(crate) fn current_selection(&self) -> &NativeRuntimeSelection {
         &self.current_selection
+    }
+    /// Exact formal C08 authority retained by this snapshot's original loader.
+    /// The receiver must revalidate it against current_selection before use.
+    pub(crate) fn verified_release(&self) -> Arc<crate::release::VerifiedNativeRelease> {
+        self.verified_release.clone()
     }
     pub(crate) fn ready(&self) -> &NativeHostReady {
         &self.ready

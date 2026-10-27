@@ -119,7 +119,11 @@ fn load_snapshot(
     let selection = snapshot.current_selection();
     let expected = PublisherFingerprint::parse(&seed.runtime.publisher_spki_sha256.to_hex())
         .map_err(|_| ProfileError::UntrustedRelease)?;
-    let inventory = release::ProfileRelease::from_native_selection(selection, &expected)?;
+    let inventory = release::ProfileRelease::from_retained_native(
+        selection,
+        &expected,
+        snapshot.verified_release(),
+    )?;
     let executor = if inventory.has_worker(NativeExternalWorker::CodexExec) {
         Some(Arc::new(
             inventory.pin_worker(NativeExternalWorker::CodexExec)?,

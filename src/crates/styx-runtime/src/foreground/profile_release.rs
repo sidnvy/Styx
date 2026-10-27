@@ -11,6 +11,7 @@ use serde::Deserialize;
 use std::{
     collections::{BTreeMap, BTreeSet},
     path::{Path, PathBuf},
+    sync::Arc,
 };
 use styx_contracts::{
     identity::Sha256Digest,
@@ -27,7 +28,7 @@ enum RetainedRelease {
         inventory: PayloadInventory,
     },
     Native {
-        verified: Box<VerifiedNativeRelease>,
+        verified: Arc<VerifiedNativeRelease>,
     },
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     Maintenance {
@@ -76,6 +77,35 @@ impl ProfileRelease {
             return Err(ProfileError::UntrustedRelease);
         }
         let verified = crate::release::verify_selected(selection).map_err(load_error)?;
+        Self::from_verified_native(Arc::new(verified))
+    }
+    /// Reuse only the exact formal release retained by the fresh Host snapshot.
+    /// Full original inventory, publisher and selection identities are checked
+    /// again at this boundary; a report or selected pathname cannot supply it.
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "windows",
+        target_os = "macos"
+    ))]
+    pub(super) fn from_retained_native(
+        selection: &styx_contracts::native_management::NativeRuntimeSelection,
+        expected: &PublisherFingerprint,
+        verified: Arc<VerifiedNativeRelease>,
+    ) -> Result<Self, ProfileError> {
+        if selection.publisher_spki_sha256.to_hex() != expected.as_hex() {
+            return Err(ProfileError::UntrustedRelease);
+        }
+        verified
+            .revalidate_matches_selection(selection)
+            .map_err(load_error)?;
+        Self::from_verified_native(verified)
+    }
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "windows",
+        target_os = "macos"
+    ))]
+    fn from_verified_native(verified: Arc<VerifiedNativeRelease>) -> Result<Self, ProfileError> {
         let manifest = verified.manifest();
         #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
         let node_version = manifest
@@ -97,9 +127,7 @@ impl ProfileRelease {
         let version = manifest.version.clone();
         let root = verified.runtime_root().map_err(load_error)?;
         Ok(Self {
-            retained: RetainedRelease::Native {
-                verified: Box::new(verified),
-            },
+            retained: RetainedRelease::Native { verified },
             root,
             version,
             #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
@@ -315,7 +343,7 @@ pub(super) fn load(
             let signed_version = manifest.version.clone();
             Ok(ProfileRelease {
                 retained: RetainedRelease::Native {
-                    verified: Box::new(verified),
+                    verified: Arc::new(verified),
                 },
                 root: release.to_path_buf(),
                 version: signed_version,
@@ -477,3 +505,7 @@ fn load_legacy(
         cua_version,
     })
 }
+
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[path = "profile_release_tests.rs"]
+mod tests;
