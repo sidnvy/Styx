@@ -91,31 +91,6 @@ impl SharedEnrollment {
         .await
         .map_err(|_| SharedError)?
     }
-    /// Trusted local management port. Waits behind the complete existing
-    /// enrollment round trip, then fences the very same configuration owner.
-    /// The blocking job retains its bounded slot after caller cancellation;
-    /// dropping its result leaves admission fenced, never resumes implicitly.
-    pub async fn begin_configuration_maintenance(
-        &self,
-        transaction: styx_contracts::identity::TransactionId,
-    ) -> Result<crate::store::ConfigurationMaintenance, SharedError> {
-        self.require_current()?;
-        let permit = self
-            .jobs
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| SharedError)?;
-        let shared = self.clone();
-        tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            shared
-                .blocking(|service| service.begin_configuration_maintenance(transaction))
-                .map_err(|_| SharedError)?
-                .map_err(|_| SharedError)
-        })
-        .await
-        .map_err(|_| SharedError)?
-    }
     pub(crate) async fn profiles(
         &self,
     ) -> Result<Vec<super::service::GatewayExecProfile>, SharedError> {

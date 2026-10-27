@@ -489,16 +489,6 @@ impl EnrollmentService {
         // admission fence is retained. Mutations separately require admission.
         self.store.configuration_root()
     }
-    pub(crate) fn begin_configuration_maintenance(
-        &self,
-        transaction: styx_contracts::identity::TransactionId,
-    ) -> Result<crate::store::ConfigurationMaintenance, ServiceError> {
-        self.healthy()?;
-        self.store
-            .configuration_root()
-            .begin_maintenance(transaction)
-            .map_err(|_| ServiceError::new(503, "configuration_maintenance_unavailable"))
-    }
     #[cfg(any(
         all(target_os = "linux", target_env = "gnu"),
         target_os = "macos",

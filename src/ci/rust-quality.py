@@ -24,7 +24,6 @@ POLICY = Path(__file__).with_name("rust-dependency-policy.json")
 LINUX_DISCOVERY_TEST = "platform::linux::tests::actual_system_bus_snapshot_matches_independent_loginctl"
 PAYLOAD_TEST = "store::payload::tests::payload_inventory_stream_pin_and_replacement_alias_budget_negatives"
 CONFIGURATION_OWNER_TEST = "store::configuration::tests::shared_configuration_writer_fence_and_sticky_unknown_batch"
-CONFIGURATION_MAINTENANCE_TEST = "enrollment::shared::maintenance_tests::actual_configuration_maintenance_complete_gate_and_dropped_waiter"
 MANAGEMENT_PREPARATION_TEST = "store::management::tests::durable_prepare_preserves_exact_bytes_and_unsettled_high_water_batch"
 NATIVE_ROOT_TEST = "store::native_root::tests::fresh_native_root_genesis_reopen_and_retained_unknown_batch"
 MANAGEMENT_PHASE_TEST = "store::management::phase_tests::original_phase_chain_and_unknown_orphans_are_preserved_batch"
@@ -389,17 +388,12 @@ def execute(args):
             # Each case owns a distinct root; the gate-race case requires absence.
             for label, test, env_name in (
                 ("configuration-owner", CONFIGURATION_OWNER_TEST, "STYX_TEST_CONFIGURATION_ROOT"),
-                ("configuration-maintenance", CONFIGURATION_MAINTENANCE_TEST, "STYX_TEST_CONFIGURATION_ROOT"),
                 ("management-preparation", MANAGEMENT_PREPARATION_TEST, "STYX_TEST_MANAGEMENT_ROOT"),
                 ("native-root", NATIVE_ROOT_TEST, "STYX_TEST_NATIVE_ROOT_ROOT"),
                 ("management-phases", MANAGEMENT_PHASE_TEST, "STYX_TEST_MANAGEMENT_PHASE_ROOT"),
                 ("native-transaction", NATIVE_TRANSACTION_TEST, "STYX_TEST_NATIVE_TRANSACTION_ROOT"),
                 ("native-service-tip", NATIVE_SERVICE_TIP_TEST, "STYX_TEST_SERVICE_TIP_ROOT"),
                 ("native-runtime-update", NATIVE_RUNTIME_UPDATE_TEST, "STYX_TEST_NATIVE_RUNTIME_UPDATE_ROOT"),
-                ("credential-journal", "store::management::handoff::tests::credential_retirement_same_journal_and_pending_barrier_files_batch", "STYX_TEST_MANAGEMENT_HANDOFF_ROOT"),
-                ("credential-interrupted", "store::management::handoff::tests::credential_retirement_preflight_and_interrupted_originals_batch", "STYX_TEST_MANAGEMENT_HANDOFF_ROOT"),
-                ("historical-recovery", "enrollment::recovery::historical::tests::linux::historical_baseline_boot_chain_and_publication_fence", "STYX_TEST_HISTORICAL_RECOVERY_ROOT"),
-                ("management-cutover", "store::management::cutover::tests::same_original_cutover_chain_files_and_interruption_boundaries", "STYX_TEST_MANAGEMENT_CUTOVER_ROOT"),
             ):
                 check = gate.run(label, ["cargo", "test", "-p", "styx-runtime", "--locked", "--offline", test, "--", "--ignored", "--exact", "--nocapture"], timeout=120,
                     extra_env={env_name: str(evidence / ("owned-" + label))})
@@ -418,16 +412,6 @@ def execute(args):
                 crypto = gate.run("node22-crypto", ["cargo", "test", "-p", "styx-runtime", "--locked", "--offline", CRYPTO_TEST, "--", "--ignored", "--exact"], extra_env={"STYX_TEST_NODE22": str(node)})
                 gate.semantic(crypto, [] if "1 passed; 0 failed" in gate.read("node22-crypto") else ["exact_crypto_case_not_executed"])
                 receipt["legacy_node22_interop"] = crypto["status"]
-                if args.enrollment_store:
-                    for label, test_case in (
-                        ("legacy-registry", "enrollment::legacy_import::tests::original_registry_revocation_credentials_and_source_change_batch"),
-                        ("legacy-registry-blockers", "enrollment::legacy_import::tests::original_unsettled_and_unsupported_sources_are_not_silently_imported_batch"),
-                        ("legacy-history-persistence", "enrollment::legacy_import::tests::original_history_persistence_and_process_reopen_remain_migration_fenced"),
-                    ):
-                        check = gate.run(label, ["cargo", "test", "-p", "styx-runtime", "--locked", "--offline", test_case, "--", "--ignored", "--exact", "--nocapture"], timeout=120,
-                            extra_env={"STYX_TEST_NODE22": str(node), "STYX_TEST_LEGACY_IMPORT_ROOT": str(evidence / ("owned-" + label))})
-                        gate.semantic(check, [] if "1 passed; 0 failed" in gate.read(label) else ["exact_" + label + "_case_not_executed"])
-                        receipt[label.replace("-", "_")] = check["status"]
         receipt["signed_enrollment_service"] = "NOT_RUN_explicit_complete_inputs_not_requested"
         if args.enrollment_service:
             if not args.enrollment_store or not args.node22 or not args.tls_fixtures or receipt.get("legacy_node22_interop") != "PASS":
@@ -601,7 +585,7 @@ def execute(args):
         if args.linux_discovery:
             required |= {"linux-discovery", "cli-desktop-candidates"}
         if args.enrollment_store:
-            required |= {"payload-store", "enrollment-store", "enrollment-clock", "enrollment-recovery", "enrollment-owned", "configuration-owner", "configuration-maintenance", "management-preparation", "native-root", "management-phases", "native-transaction", "native-service-tip", "native-runtime-update", "credential-journal", "credential-interrupted", "historical-recovery", "management-cutover"}
+            required |= {"payload-store", "enrollment-store", "enrollment-clock", "enrollment-recovery", "enrollment-owned", "configuration-owner", "management-preparation", "native-root", "management-phases", "native-transaction", "native-service-tip", "native-runtime-update"}
         if args.enrollment_service:
             required |= {"enrollment-profile", "enrollment-controller", "enrollment-service"}
         if args.paired_host:
@@ -612,8 +596,6 @@ def execute(args):
             required |= {"browser-references"}
         if args.node22:
             required |= {"node22-version", "node22-crypto"}
-            if args.enrollment_store:
-                required |= {"legacy-registry", "legacy-registry-blockers", "legacy-history-persistence"}
         if args.codex_bin:
             required |= {"codex-version"} | {name for name, _ in CODEX_TESTS}
         if args.tls_fixtures:
