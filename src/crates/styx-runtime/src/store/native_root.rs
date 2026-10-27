@@ -465,56 +465,6 @@ pub fn create_fresh(
         })
     }
 }
-/// Bind existing native format to the SAME already-owned configuration writer.
-/// This only verifies protected marker/state/deployment bytes. It neither
-/// claims a namespace nor proves migration, settlement or ordinary admission.
-#[cfg(any(
-    target_os = "windows",
-    target_os = "macos",
-    all(target_os = "linux", target_env = "gnu")
-))]
-pub(crate) fn bind_owned_native(
-    owner: OwnedConfigurationRoot,
-) -> Result<NativeRootBinding, NativeRootFailure> {
-    let read = owner.with_state(|state| {
-        use super::secure_journal::JournalError;
-        let raw = state
-            .root
-            .read_raw(
-                NATIVE_MARKER_FILE,
-                styx_contracts::native_management::NATIVE_MARKER_BYTES,
-            )
-            .map_err(|_| JournalError::Unknown)?;
-        let marker = native_state::decode_marker(raw.bytes()).map_err(|_| JournalError::Unknown)?;
-        verify_read(&state.root, &marker, raw.bytes(), raw.observation())
-            .map_err(|_| JournalError::Unknown)?;
-        Ok((marker, raw.bytes().to_vec(), raw.observation().clone()))
-    });
-    let (marker, marker_bytes, marker_observation) = match read {
-        Ok(value) => value,
-        Err(_) => {
-            return Err(NativeRootFailure {
-                error: NativeRootError::Unknown,
-                ownership: Box::new(Ownership::Configuration(owner)),
-            });
-        }
-    };
-    let binding = NativeRootBinding {
-        owner,
-        marker,
-        marker_bytes,
-        marker_observation,
-    };
-    // The first mutex has been released: use the normal binding verifier, not
-    // a nested owner lock or a separate native-state interpretation.
-    if let Err(error) = binding.validated_readstate() {
-        return Err(NativeRootFailure {
-            error,
-            ownership: Box::new(Ownership::Configuration(binding.owner)),
-        });
-    }
-    Ok(binding)
-}
 pub fn reopen_native(
     root: PrivateRoot,
     writer: ConfigurationWriterGuard,

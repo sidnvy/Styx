@@ -1,6 +1,6 @@
-//! Native configuration commands and explicit original-owner migration.
-//! Ordinary configuration commands do not activate services. Migration performs
-//! joined validation before commit; blocking jobs retain permits after waiter loss.
+//! Native configuration commands for fresh native roots.
+//! Ordinary configuration commands do not activate services; blocking jobs
+//! retain permits after waiter loss.
 use crate::store::{
     native_root::{NativeRootError, NativeRootFailure},
     native_transaction::{
@@ -95,8 +95,6 @@ enum ErrorKind {
     Unsupported,
     Unknown,
     Busy,
-    #[cfg(target_os = "windows")]
-    WaitingForRestart,
 }
 /// Error ownership is intentional: inspecting/printing a curated code must not
 /// silently discard an unresolved bootstrap/coordinator. No background registry.
@@ -134,7 +132,7 @@ impl NativeManagementError {
         self._app_scope = Some(scope);
         self
     }
-    /// Only an observed retained migration task requires whole-process CLI
+    /// An observed retained service task requires whole-process CLI
     /// teardown. Library/App callers retain this error and never exit here.
     #[cfg(any(
         target_os = "macos",
@@ -160,8 +158,6 @@ impl NativeManagementError {
             ErrorKind::Unsupported => "native_management_unsupported",
             ErrorKind::Unknown => "native_management_unknown_inspect",
             ErrorKind::Busy => "native_management_busy",
-            #[cfg(target_os = "windows")]
-            ErrorKind::WaitingForRestart => "native_migration_waiting_for_later_boot",
         }
     }
     pub fn exit_code(&self) -> u8 {
@@ -169,8 +165,6 @@ impl NativeManagementError {
             ErrorKind::Invalid | ErrorKind::Conflict => 2,
             ErrorKind::Unavailable | ErrorKind::Unsupported | ErrorKind::Busy => 3,
             ErrorKind::Unknown => 4,
-            #[cfg(target_os = "windows")]
-            ErrorKind::WaitingForRestart => 3,
         }
     }
     fn new(kind: ErrorKind) -> Self {
@@ -505,32 +499,17 @@ mod platform {
     }
     pub(super) fn require_state(state: &NativeState, app_owned: bool) -> Result<()> {
         require_desired(&state.desired, app_owned)?;
-        let migrated_app = if app_owned
-            && state.reader_contract
-                == styx_contracts::management::ReaderContract::NativeMigratedStateV2
-        {
-            let binding = state
-                .migration_v2()
-                .map_err(|_| NativeManagementError::new(ErrorKind::Invalid))?
-                .ok_or_else(|| NativeManagementError::new(ErrorKind::Invalid))?;
-            state.migration.is_none() && matches!((state.mode,state.desired.host.is_some(),state.desired.gateway.is_some(),binding.history),
-                (NativeDeploymentMode::JoinExisting,true,false,styx_contracts::native_management::NativeMigrationHistory::PreservedHostPair{..}) |
-                (NativeDeploymentMode::CreateLocal,true,true,styx_contracts::native_management::NativeMigrationHistory::ImportedLocalGateway{..}))
-        } else {
-            false
-        };
         if app_owned
-            && ((state.has_migration_binding() && !migrated_app)
-                || (!migrated_app
-                    && !matches!(
-                        (
-                            state.mode,
-                            state.desired.host.is_some(),
-                            state.desired.gateway.is_some()
-                        ),
-                        (NativeDeploymentMode::JoinExisting, true, false)
-                            | (NativeDeploymentMode::CreateLocal, false, true)
-                    )))
+            && (state.has_migration_binding()
+                || !matches!(
+                    (
+                        state.mode,
+                        state.desired.host.is_some(),
+                        state.desired.gateway.is_some()
+                    ),
+                    (NativeDeploymentMode::JoinExisting, true, false)
+                        | (NativeDeploymentMode::CreateLocal, false, true)
+                ))
         {
             return Err(NativeManagementError::new(ErrorKind::Invalid));
         }
@@ -573,41 +552,6 @@ mod platform {
         require_scope(path, scope)?;
         let state = transactions.readstate().map_err(tx)?;
         require_state(state.state(), scope.is_some())?;
-        #[cfg(all(target_os = "linux", target_env = "gnu"))]
-        if state.state().reader_contract
-            == styx_contracts::management::ReaderContract::NativeMigratedStateV1
-            && admission(transactions)?
-        {
-            let snapshot = std::sync::Arc::new(
-                crate::store::committed_runtime::CommittedRuntimeSnapshot::open(path)
-                    .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?,
-            );
-            transactions
-                .reconcile_committed_legacy_migration(snapshot)
-                .map_err(tx)?;
-            require_state(
-                transactions.readstate().map_err(tx)?.state(),
-                scope.is_some(),
-            )?;
-            require_scope(path, scope)?;
-        }
-        if state.state().reader_contract
-            == styx_contracts::management::ReaderContract::NativeMigratedStateV2
-            && admission(transactions)?
-        {
-            // Reuse THIS original transaction journal, not a second namespace
-            // claim or schema4's legacy before bytes as a native transaction.
-            let snapshot = std::sync::Arc::new(
-                crate::store::committed_runtime_native::NativeCommittedRuntimeSnapshot::open(path)
-                    .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?,
-            );
-            transactions
-                .reconcile_committed_migration(snapshot)
-                .map_err(tx)?;
-            let current = transactions.readstate().map_err(tx)?;
-            require_state(current.state(), scope.is_some())?;
-            require_scope(path, scope)?;
-        }
         Ok(())
     }
     #[cfg(any(
@@ -848,34 +792,10 @@ mod platform {
         change: NativeDesiredChange,
         scope: Option<&Arc<crate::app::HostScope>>,
     ) -> Result<NativeManagementPlan> {
-        plan_inner(path, change, scope, None)
-    }
-    fn plan_inner(
-        path: &Path,
-        change: NativeDesiredChange,
-        scope: Option<&Arc<crate::app::HostScope>>,
-        gateway_run: Option<NativeRunDesired>,
-    ) -> Result<NativeManagementPlan> {
         use_managed_transactions(path, scope, |transactions| {
             reconcile_complete_tip(transactions, scope.is_some())?;
             let before = transactions.readstate().map_err(tx)?;
             let mut target = before.state().clone();
-            if let Some(run) = gateway_run {
-                let binding = target
-                    .migration_v2()
-                    .map_err(|_| NativeManagementError::new(ErrorKind::Invalid))?
-                    .ok_or_else(|| NativeManagementError::new(ErrorKind::Invalid))?;
-                if scope.is_none() || target.mode!=NativeDeploymentMode::CreateLocal || target.desired.host.is_none()
-                    || !matches!(binding.history,styx_contracts::native_management::NativeMigrationHistory::ImportedLocalGateway{..}) {
-                    return Err(NativeManagementError::new(ErrorKind::Invalid));
-                }
-                let gateway = target
-                    .desired
-                    .gateway
-                    .as_mut()
-                    .ok_or_else(|| NativeManagementError::new(ErrorKind::Invalid))?;
-                gateway.run = run;
-            }
             let component = match change.component {
                 NativeComponent::Host => target.desired.host.as_mut(),
                 NativeComponent::Gateway => target.desired.gateway.as_mut(),

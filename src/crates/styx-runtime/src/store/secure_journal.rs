@@ -398,25 +398,6 @@ pub(super) mod files {
         let m = dir.metadata().map_err(unknown)?;
         Ok((m.dev(), m.ino()))
     }
-    /// Original-owner migration bootstrap only. Unlike fresh setup's helper,
-    /// an existing name is a conflict and is never adopted after an absence race.
-    pub(in crate::store) fn create_new_namespace(
-        root: &File,
-        name: NamespaceName,
-    ) -> JournalResult<(u64, u64)> {
-        mkdirat(root, name.as_str(), Mode::S_IRWXU).map_err(|error| {
-            if error == Errno::EEXIST {
-                JournalError::Conflict
-            } else {
-                JournalError::Unknown
-            }
-        })?;
-        let dir = directory(root, name.as_str())?;
-        dir.sync_all().map_err(unknown)?;
-        root.sync_all().map_err(unknown)?;
-        let m = dir.metadata().map_err(unknown)?;
-        Ok((m.dev(), m.ino()))
-    }
     pub(in crate::store) fn create_namespace(
         root: &File,
         name: NamespaceName,

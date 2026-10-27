@@ -1,10 +1,7 @@
-//! Current-UID, explicit transient Host actions. The private legacy migration
-//! adapter authenticates installed service scopes separately; it never widens
-//! native transient selection or policy. Observations are not desired
-//! configuration, a migration grant, autostart, or Host/tool readiness.
+//! Current-UID, explicit transient Host actions. Observations are not desired
+//! configuration, autostart, or Host/tool readiness.
 //! StopUnit has no InvocationID CAS: exact reobservation and fresh non-reused
 //! names protect normal lifecycle races, not a compromised same-UID manager.
-pub(crate) mod legacy;
 #[cfg(target_env = "gnu")]
 #[path = "../native_service.rs"]
 pub(crate) mod persistent;

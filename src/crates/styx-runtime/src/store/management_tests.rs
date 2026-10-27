@@ -6,7 +6,7 @@ use crate::store::{PrivateRoot, secure_journal::NamespaceName};
 use std::{
     fs,
     io::Write,
-    os::unix::fs::{OpenOptionsExt, PermissionsExt},
+    os::unix::fs::{DirBuilderExt, OpenOptionsExt, PermissionsExt},
     path::{Path, PathBuf},
 };
 use styx_contracts::identity::{Sha256Digest, TransactionId};
@@ -50,6 +50,51 @@ fn intent(id: &str, sequence: u64) -> DesiredStateCommit {
         target_state_sha256: Sha256Digest::of_bytes(TARGET),
         reader: ReaderContract::NativeManagementStateV1,
     }
+}
+#[test]
+fn retired_record_families_are_orphans_and_refuse_preparation() {
+    let base = std::env::temp_dir().join(format!("styx-retired-records-{}", uuid::Uuid::new_v4()));
+    fs::DirBuilder::new().mode(0o700).create(&base).unwrap();
+    for extra in [
+        None,
+        Some("txn-retired.handoff-intent"),
+        Some("txn-retired.cutover-intent"),
+        Some("txn-retired.native-migration-plan"),
+        Some("unknown.record"),
+    ] {
+        let (path, owner) = fixture(&base);
+        let journal =
+            OwnedManagementJournal::open_existing(owner.clone(), JournalBudget::default()).unwrap();
+        let original = intent("ordinary", 1);
+        let raw = serde_json::to_vec(&original).unwrap();
+        let directory = path.join(NamespaceName::ManagementV1.as_str());
+        if let Some(name) = extra {
+            // Even decodable transaction bytes cannot make a retired name ordinary.
+            write_private(&directory.join(name), &raw);
+        }
+        let inventory = journal.observe().unwrap();
+        assert_eq!(inventory.high_water, 0);
+        assert!(inventory.transactions.is_empty());
+        assert_eq!(inventory.orphans, extra.into_iter().collect::<Vec<_>>());
+        let fence = owner
+            .begin_maintenance(original.transaction_id.clone())
+            .unwrap();
+        let result = journal.prepare(&fence, &raw, BEFORE, TARGET);
+        if let Some(name) = extra {
+            assert!(matches!(result, Err(JournalError::Conflict)), "{name}");
+            assert_eq!(fs::read(directory.join(name)).unwrap(), raw);
+            assert_eq!(fs::read_dir(&directory).unwrap().count(), 1);
+        } else {
+            assert_eq!(result.unwrap().journal.stage, DurableStage::Prepared);
+        }
+        assert_eq!(fs::read(path.join("state.json")).unwrap(), BEFORE);
+        assert_eq!(fs::read(path.join("deployment.json")).unwrap(), DEPLOYMENT);
+        drop(fence);
+        drop(journal);
+        drop(owner);
+        fs::remove_dir_all(path).unwrap();
+    }
+    fs::remove_dir(base).unwrap();
 }
 #[test]
 #[ignore = "requires STYX_TEST_MANAGEMENT_ROOT; real private files, preparation/fence/restart/orphan aggregate, not canonical apply"]

@@ -12,20 +12,8 @@ pub struct SharedEnrollment {
     readers_closing: Arc<AtomicBool>,
     active_generation: Arc<AtomicU64>,
     epoch: u64,
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    promotion: Arc<std::sync::Mutex<Option<Promotion>>>,
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    promotion_worker: Arc<tokio::sync::Semaphore>,
 }
 
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
-struct Promotion {
-    from_epoch: u64,
-    epoch: u64,
-    proof: Arc<crate::store::legacy_handoff::CommittedNativeCutover>,
-    jobs: Arc<tokio::sync::Semaphore>,
-    readers_closing: Arc<AtomicBool>,
-}
 #[derive(Debug, thiserror::Error)]
 #[error("enrollment authority is unavailable")]
 pub struct SharedError;
@@ -38,10 +26,6 @@ impl SharedEnrollment {
             readers_closing: Arc::new(AtomicBool::new(false)),
             active_generation: Arc::new(AtomicU64::new(1)),
             epoch: 1,
-            #[cfg(all(target_os = "linux", target_env = "gnu"))]
-            promotion: Arc::new(std::sync::Mutex::new(None)),
-            #[cfg(all(target_os = "linux", target_env = "gnu"))]
-            promotion_worker: Arc::new(tokio::sync::Semaphore::new(1)),
         }
     }
     fn require_current(&self) -> Result<(), SharedError> {
@@ -174,20 +158,6 @@ impl SharedEnrollment {
         tokio::time::timeout_at(until, self.jobs.clone().acquire_many_owned(8))
             .await
             .is_ok_and(|r| r.is_ok())
-    }
-
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    fn promoted(&self, completed: &Promotion) -> Self {
-        Self {
-            inner: self.inner.clone(),
-            failed: self.failed.clone(),
-            jobs: completed.jobs.clone(),
-            readers_closing: completed.readers_closing.clone(),
-            active_generation: self.active_generation.clone(),
-            epoch: completed.epoch,
-            promotion: self.promotion.clone(),
-            promotion_worker: self.promotion_worker.clone(),
-        }
     }
 
     #[cfg(all(test, target_os = "linux", target_env = "gnu"))]

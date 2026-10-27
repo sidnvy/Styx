@@ -269,39 +269,6 @@ impl Root {
         guard.validate()?;
         result
     }
-    /// Fixed legacy Host/device descriptor port. Only the store's original
-    /// maintenance/fence coordinator may call this; it does not acquire a Host
-    /// writer or accept a caller-selected path. Revalidate the original root and
-    /// child directory even when the operation itself reports an error.
-    pub(super) fn with_legacy_device_directory<T>(
-        &self,
-        operation: impl FnOnce(&File) -> Result<T>,
-    ) -> Result<T> {
-        self.validate_root()?;
-        let device = open_at(
-            &self.directory,
-            OsStr::new("device"),
-            OFlag::O_RDONLY | OFlag::O_DIRECTORY,
-            Mode::empty(),
-        )?;
-        let before = device.metadata()?;
-        if !before.is_dir() || before.uid() != current_uid() || before.mode() & 0o7777 != 0o700 {
-            return Err(StoreError::NotPrivate);
-        }
-        let result = operation(&device);
-        self.validate_root()?;
-        let named = open_at(
-            &self.directory,
-            OsStr::new("device"),
-            OFlag::O_RDONLY | OFlag::O_DIRECTORY,
-            Mode::empty(),
-        )?;
-        let after = named.metadata()?;
-        if root_identity(&before) != root_identity(&after) || after.mode() & 0o7777 != 0o700 {
-            return Err(StoreError::Changed);
-        }
-        result
-    }
     pub(super) fn identity(&self) -> RootIdentity {
         self.identity.clone()
     }

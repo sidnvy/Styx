@@ -200,37 +200,3 @@ pub(super) fn rename_exclusive(
     }
     Ok(())
 }
-
-/// Fixed legacy boot clock projection, from the actual SDK timeval. Read-only;
-/// this is separate from kern.bootsessionuuid and never substitutes for it.
-pub(super) fn legacy_boot_time() -> Result<(u64, u32)> {
-    let mut value = MaybeUninit::<libc::timeval>::uninit();
-    let mut length = std::mem::size_of::<libc::timeval>();
-    // SAFETY: fixed read-only sysctl, SDK-provided repr(C) object and exact
-    // output capacity. Only exact successful length permits assume_init.
-    let result = unsafe {
-        libc::sysctlbyname(
-            c"kern.boottime".as_ptr(),
-            value.as_mut_ptr().cast(),
-            &mut length,
-            std::ptr::null_mut(),
-            0,
-        )
-    };
-    if result != 0 {
-        return Err(StoreError::Io(std::io::Error::last_os_error()));
-    }
-    if length != std::mem::size_of::<libc::timeval>() {
-        return Err(StoreError::ProcessIdentityUnavailable);
-    }
-    // SAFETY: kernel returned exactly the complete timeval above.
-    let value = unsafe { value.assume_init() };
-    let seconds =
-        u64::try_from(value.tv_sec).map_err(|_| StoreError::ProcessIdentityUnavailable)?;
-    let micros =
-        u32::try_from(value.tv_usec).map_err(|_| StoreError::ProcessIdentityUnavailable)?;
-    if seconds == 0 || micros >= 1_000_000 {
-        return Err(StoreError::ProcessIdentityUnavailable);
-    }
-    Ok((seconds, micros))
-}

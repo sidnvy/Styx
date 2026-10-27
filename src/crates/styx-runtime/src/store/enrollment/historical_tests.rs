@@ -1,7 +1,7 @@
 //! Actual private-file adapter cases only; no legacy stop, enrollment crypto,
 //! Core attestation, C07 completion, activation, or power-loss claim.
 use super::*;
-use crate::store::{ConfigurationMaintenance, OwnedConfigurationRoot, RootIdentity};
+use crate::store::RootIdentity;
 use std::{fs, os::unix::fs::PermissionsExt, path::PathBuf};
 
 struct Fixture(PathBuf);
@@ -252,95 +252,4 @@ fn historical_orphans_native_pending_wrong_root_and_budget_never_get_absorbed() 
             _ => unreachable!(),
         }
     }
-}
-fn owner(fixture: &Fixture) -> OwnedConfigurationRoot {
-    let root = PrivateRoot::open(&fixture.0).unwrap();
-    let writer = root.try_configuration_writer().unwrap();
-    OwnedConfigurationRoot::open_existing(root, writer).unwrap()
-}
-fn maintenance(owner: &OwnedConfigurationRoot) -> ConfigurationMaintenance {
-    owner
-        .begin_maintenance("historical-fixture".try_into().unwrap())
-        .unwrap()
-}
-#[test]
-fn historical_owned_access_requires_original_maintenance_and_keeps_ordinary_admission_fenced() {
-    let fixture = Fixture::new();
-    let other = Fixture::new();
-    let owner = owner(&fixture);
-    let foreign_owner = self::owner(&other);
-    let maintenance = maintenance(&owner);
-    let foreign = self::maintenance(&foreign_owner);
-    assert!(matches!(
-        OwnedEnrollmentJournal::open_for_historical(
-            owner.clone(),
-            &foreign,
-            JournalBudget::default()
-        ),
-        Err(JournalError::Conflict)
-    ));
-    let mut journal = OwnedEnrollmentJournal::open_for_historical(
-        owner.clone(),
-        &maintenance,
-        JournalBudget::default(),
-    )
-    .unwrap();
-    assert_eq!(
-        journal.with_journal(|_| Ok(())),
-        Err(JournalError::Conflict)
-    );
-    let entered = std::cell::Cell::new(false);
-    assert_eq!(
-        journal.with_historical_journal(&foreign, |_| {
-            entered.set(true);
-            Ok(())
-        }),
-        Err(JournalError::Conflict)
-    );
-    assert!(!entered.get());
-    journal
-        .with_historical_journal(&maintenance, |j| {
-            let bytes = b"whole-bundle-fixture-token\n".to_vec();
-            let reference = MaterialRef {
-                kind: MaterialKind::Token,
-                digest: Sha256Digest::of_bytes(&bytes),
-            };
-            let materials = vec![(reference.clone(), zeroize::Zeroizing::new(bytes))];
-            let mut baseline = body(j.root, vec![reference.clone()]);
-            assert_eq!(j.root_identity()?, j.root.identity());
-            baseline.migration = "different-transaction".try_into().unwrap();
-            let wrong = historical_contract::encode(&baseline).unwrap();
-            assert_eq!(
-                j.preflight_historical_bundle(&wrong, &materials),
-                Err(JournalError::Conflict)
-            );
-            assert_eq!(j.prepare_historical(&wrong), Err(JournalError::Conflict));
-            assert!(j.read(HISTORICAL_INTENT)?.is_none());
-            baseline.migration = maintenance.transaction_id().clone();
-            let raw = historical_contract::encode(&baseline).unwrap();
-            let corrupt = vec![(
-                reference.clone(),
-                zeroize::Zeroizing::new(b"different fixture bytes".to_vec()),
-            )];
-            assert_eq!(
-                j.preflight_historical_bundle(&raw, &corrupt),
-                Err(JournalError::InvalidInput)
-            );
-            assert!(j.scan()?.files.is_empty());
-            j.preflight_historical_bundle(&raw, &materials)?;
-            assert_eq!(j.put_material(reference.kind, &materials[0].1)?, reference);
-            assert_eq!(
-                j.preflight_historical_bundle(&raw, &materials),
-                Err(JournalError::Conflict)
-            );
-            let prepared = j.prepare_historical(&raw)?;
-            j.commit_historical(&prepared)?;
-            Ok(())
-        })
-        .unwrap();
-    assert_eq!(
-        journal.with_journal(|_| Ok(())),
-        Err(JournalError::Conflict)
-    );
-    assert!(owner.ensure_admission().is_err());
 }

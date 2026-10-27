@@ -308,6 +308,8 @@ pub(in crate::store) fn existing_namespace(
 ) -> JournalResult<(u64, u64)> {
     directory_pin(&directory(root, name.as_str())?)
 }
+// Exclusive namespace creation is exercised by native filesystem publication tests.
+#[cfg(test)]
 pub(in crate::store) fn create_new_namespace(
     root: &File,
     name: NamespaceName,

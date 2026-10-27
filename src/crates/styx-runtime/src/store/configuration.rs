@@ -173,32 +173,6 @@ impl ConfigurationState {
             })
             .map_err(|_| JournalError::Unknown)?
     }
-    /// Remaining bytes across BOTH namespaces under this same held writer.
-    /// A temporary per-adapter budget can consume this room without inventing
-    /// another reservation or retaining a filesystem lock across native work.
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    pub(super) fn remaining_growth(&self) -> JournalResult<usize> {
-        self.root
-            .inner
-            .with_configuration_writer_directory(&self.writer, |directory| {
-                Ok((|| {
-                    let mut total = 0usize;
-                    for binding in &self.namespaces {
-                        if files::existing_namespace(directory, binding.name)? != binding.pin {
-                            return Err(JournalError::Unknown);
-                        }
-                        let dir = files::directory(directory, binding.name.as_str())?;
-                        total = total
-                            .checked_add(files::scan(&dir, binding.budget)?.total_bytes)
-                            .ok_or(JournalError::BudgetExceeded)?;
-                    }
-                    TOTAL_JOURNAL_BYTES
-                        .checked_sub(total)
-                        .ok_or(JournalError::BudgetExceeded)
-                })())
-            })
-            .map_err(|_| JournalError::Unknown)?
-    }
     pub(super) fn require_native_maintenance(
         &self,
         transaction: &TransactionId,
@@ -217,64 +191,6 @@ impl ConfigurationState {
         }
         self.fence = None;
         self.recovery_required = false;
-        Ok(())
-    }
-    /// Only the original completed cutover can retire this live maintenance
-    /// fence. The caller has re-read its final chain under this same lock.
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    pub(super) fn finish_legacy_cutover(
-        &mut self,
-        proof: &super::legacy_handoff::CommittedNativeCutover,
-    ) -> JournalResult<()> {
-        if !proof.matches_fenced_root(&self.root.identity(), self.fence.as_ref()) {
-            return Err(JournalError::Conflict);
-        }
-        self.fence = None;
-        self.recovery_required = false;
-        Ok(())
-    }
-    /// Fresh boot reopens only the fully re-synced original committed successor.
-    /// An Applied/Verified transaction never reaches this capability.
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    pub(super) fn finish_recovered_cutover(
-        &mut self,
-        proof: &super::committed_runtime::RecoveredCommittedRuntime,
-    ) -> JournalResult<()> {
-        self.require_recovery_inspection()?;
-        if !proof.matches_root(&self.root.identity()) {
-            return Err(JournalError::Conflict);
-        }
-        self.recovery_required = false;
-        Ok(())
-    }
-    /// Only the writer-owned, re-synced schema4 chain can reopen its native root.
-    #[cfg(any(
-        all(target_os = "linux", target_env = "gnu"),
-        target_os = "macos",
-        target_os = "windows"
-    ))]
-    pub(super) fn finish_recovered_native_cutover(
-        &mut self,
-        proof: &super::committed_runtime_native::RecoveredNativeCommittedRuntime,
-    ) -> JournalResult<()> {
-        self.require_recovery_inspection()?;
-        if !proof.matches_root(&self.root.identity()) {
-            return Err(JournalError::Conflict);
-        }
-        self.recovery_required = false;
-        Ok(())
-    }
-    /// Existing pending management data can be inspected after a fresh boot,
-    /// never used to reopen ordinary service or manufacture maintenance proof.
-    #[cfg(any(
-        all(target_os = "linux", target_env = "gnu"),
-        target_os = "macos",
-        target_os = "windows"
-    ))]
-    pub(super) fn require_recovery_inspection(&self) -> JournalResult<()> {
-        if !self.recovery_required || self.fence.is_some() {
-            return Err(JournalError::Conflict);
-        }
         Ok(())
     }
     pub(super) fn ordinary_admission(&self) -> JournalResult<()> {
@@ -497,102 +413,6 @@ impl OwnedConfigurationRoot {
                 .map_err(|_| JournalError::Unknown)?
         })
     }
-    /// The original maintenance owner may initialize exactly its management
-    /// namespace for migration. No new writer, enrollment namespace or fresh
-    /// root authority is created; an unexpected existing name is not adopted.
-    #[cfg(any(
-        all(target_os = "linux", target_env = "gnu"),
-        target_os = "macos",
-        target_os = "windows"
-    ))]
-    pub(super) fn claim_legacy_management_namespace(
-        &self,
-        maintenance: &ConfigurationMaintenance,
-        budget: JournalBudget,
-    ) -> JournalResult<(u64, u64)> {
-        if !budget.valid() {
-            return Err(JournalError::InvalidInput);
-        }
-        self.with_maintenance(maintenance, |state| {
-            let name = NamespaceName::ManagementV1;
-            if let Some(binding) = state
-                .namespaces
-                .iter_mut()
-                .find(|binding| binding.name.as_str() == name.as_str())
-            {
-                if binding.claimed {
-                    return Err(JournalError::Conflict);
-                }
-                binding.claimed = true;
-                binding.budget = budget;
-                return Ok(binding.pin);
-            }
-            state
-                .root
-                .ensure_absent(name.as_str())
-                .map_err(|_| JournalError::Conflict)?;
-            let pin = state
-                .root
-                .inner
-                .with_configuration_writer_directory(&state.writer, |directory| {
-                    Ok(files::create_new_namespace(directory, name))
-                })
-                .map_err(|_| JournalError::Unknown)??;
-            state.namespaces.push(NamespaceBinding {
-                name,
-                pin,
-                budget,
-                claimed: true,
-            });
-            Ok(pin)
-        })
-    }
-    /// Initialize only the fixed enrollment namespace under this original
-    /// root's active migration fence. It does not settle any legacy writer or
-    /// release maintenance; an unexpected appearing namespace is never adopted.
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    pub(super) fn claim_legacy_enrollment_namespace(
-        &self,
-        maintenance: &ConfigurationMaintenance,
-        budget: JournalBudget,
-    ) -> JournalResult<(u64, u64)> {
-        if !budget.valid() {
-            return Err(JournalError::InvalidInput);
-        }
-        self.with_maintenance(maintenance, |state| {
-            let name = NamespaceName::EnrollmentV1;
-            if let Some(binding) = state
-                .namespaces
-                .iter_mut()
-                .find(|b| b.name.as_str() == name.as_str())
-            {
-                if binding.claimed {
-                    return Err(JournalError::Conflict);
-                }
-                binding.claimed = true;
-                binding.budget = budget;
-                return Ok(binding.pin);
-            }
-            state
-                .root
-                .ensure_absent(name.as_str())
-                .map_err(|_| JournalError::Conflict)?;
-            let pin = state
-                .root
-                .inner
-                .with_configuration_writer_directory(&state.writer, |directory| {
-                    Ok(files::create_new_namespace(directory, name))
-                })
-                .map_err(|_| JournalError::Unknown)??;
-            state.namespaces.push(NamespaceBinding {
-                name,
-                pin,
-                budget,
-                claimed: true,
-            });
-            Ok(pin)
-        })
-    }
     // Hot checks consume only published rejection facts. Actual store access
     // still validates the guarded root and full namespace inventory before/after.
     pub(crate) fn ensure_usable(&self) -> JournalResult<()> {
@@ -717,17 +537,6 @@ impl ConfigurationMaintenance {
     }
     pub fn root_identity(&self) -> JournalResult<RootIdentity> {
         self.owner.identity()
-    }
-    /// Prove this exact maintenance fence is still active, not just that the
-    /// filesystem root has the same identity. This does not settle old writers.
-    #[cfg(any(
-        all(target_os = "linux", target_env = "gnu"),
-        target_os = "macos",
-        target_os = "windows"
-    ))]
-    pub(crate) fn validate_active(&self) -> JournalResult<RootIdentity> {
-        self.owner
-            .with_maintenance(self, |state| Ok(state.root.identity()))
     }
     pub(crate) fn matches(&self, owner: &OwnedConfigurationRoot) -> bool {
         self.owner.same_authority(owner)

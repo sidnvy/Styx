@@ -173,18 +173,6 @@ impl Active {
         Ok((active, format))
     }
 }
-/// Paths derived only from the original preserved selector, using the same
-/// codec as the original profile reader. This does not select a runtime.
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-pub(crate) fn original_release_metadata_paths(
-    base: &Path,
-    raw: &[u8],
-) -> Result<[PathBuf; 2], ProfileError> {
-    absolute(base)?;
-    let (active, _) = Active::parse(raw)?;
-    let root = base.join("install/releases").join(active.version);
-    Ok([root.join("manifest.json"), root.join("manifest.sig")])
-}
 #[derive(Deserialize)]
 struct Manifest {
     #[cfg(target_os = "linux")]

@@ -711,9 +711,6 @@ mod publication_tests;
 mod browser;
 pub(crate) use browser::LocalExecutable as WindowsLocalExecutable;
 
-#[path = "windows_restart_effects.rs"]
-mod restart;
-
 #[path = "release_stage_windows.rs"]
 mod release_staging;
 

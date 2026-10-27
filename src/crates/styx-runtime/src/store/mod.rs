@@ -7,18 +7,8 @@
 //! a committed transaction. Unsupported platform operations fail explicitly.
 //! Secrets are not included in Debug output or preservation manifests.
 
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
-pub(crate) mod committed_runtime;
-#[cfg(any(
-    all(target_os = "linux", target_env = "gnu"),
-    target_os = "windows",
-    target_os = "macos"
-))]
-pub(crate) mod committed_runtime_native;
 mod configuration;
 pub mod enrollment;
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
-pub mod legacy_handoff;
 pub mod management;
 #[cfg(any(
     all(target_os = "linux", target_env = "gnu"),
@@ -26,12 +16,6 @@ pub mod management;
     target_os = "macos"
 ))]
 pub(crate) mod native_host_snapshot;
-#[cfg(any(
-    all(target_os = "linux", target_env = "gnu"),
-    target_os = "macos",
-    target_os = "windows"
-))]
-pub(crate) mod native_legacy_owners;
 #[cfg(any(
     all(target_os = "linux", target_env = "gnu"),
     target_os = "macos",

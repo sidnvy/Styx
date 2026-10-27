@@ -30,11 +30,6 @@ enum RetainedRelease {
     Native {
         verified: Arc<VerifiedNativeRelease>,
     },
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    Maintenance {
-        original: Box<ProfileRelease>,
-        candidate: std::sync::Arc<VerifiedNativeRelease>,
-    },
 }
 pub(super) struct ProfileRelease {
     retained: RetainedRelease,
@@ -64,21 +59,6 @@ fn load_error(error: ReleaseError) -> ProfileError {
     }
 }
 impl ProfileRelease {
-    #[cfg(any(
-        all(target_os = "linux", target_env = "gnu"),
-        target_os = "windows",
-        target_os = "macos"
-    ))]
-    pub(super) fn from_native_selection(
-        selection: &styx_contracts::native_management::NativeRuntimeSelection,
-        expected: &PublisherFingerprint,
-    ) -> Result<Self, ProfileError> {
-        if selection.publisher_spki_sha256.to_hex() != expected.as_hex() {
-            return Err(ProfileError::UntrustedRelease);
-        }
-        let verified = crate::release::verify_selected(selection).map_err(load_error)?;
-        Self::from_verified_native(Arc::new(verified))
-    }
     /// Reuse only the exact formal release retained by the fresh Host snapshot.
     /// Full original inventory, publisher and selection identities are checked
     /// again at this boundary; a report or selected pathname cannot supply it.
@@ -136,59 +116,6 @@ impl ProfileRelease {
             cua_version,
         })
     }
-    /// Original active inventory remains an immutable preservation input. Only
-    /// the already publisher-verified candidate supplies validation executors.
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    pub(super) fn for_maintenance(
-        original: Self,
-        candidate: std::sync::Arc<VerifiedNativeRelease>,
-        expected: &PublisherFingerprint,
-    ) -> Result<Self, ProfileError> {
-        original.revalidate()?;
-        candidate.revalidate().map_err(load_error)?;
-        let report = candidate.report();
-        let manifest = candidate.manifest();
-        if manifest.scope != NativeReleaseScope::RuntimeCandidate
-            || report.target != "x86_64-unknown-linux-gnu"
-            || report.publisher_spki_sha256 != expected.as_hex()
-        {
-            return Err(ProfileError::UntrustedRelease);
-        }
-        #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
-        let node_version = manifest
-            .worker_closures
-            .iter()
-            .find(|worker| worker.kind == NativeExternalWorker::BrowserNode22)
-            .map(|worker| worker.version.clone());
-        #[cfg(any(target_os = "linux", target_os = "windows"))]
-        let cua_version = manifest
-            .worker_closures
-            .iter()
-            .find(|worker| worker.kind == NativeExternalWorker::CuaNative)
-            .map(|worker| {
-                format!(
-                    "cua-driver {}",
-                    worker
-                        .version
-                        .strip_prefix("cua-driver ")
-                        .unwrap_or(&worker.version)
-                )
-            });
-        let version = manifest.version.clone();
-        let root = candidate.runtime_root().map_err(load_error)?;
-        Ok(Self {
-            retained: RetainedRelease::Maintenance {
-                original: Box::new(original),
-                candidate,
-            },
-            root,
-            version,
-            #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
-            node_version,
-            #[cfg(any(target_os = "linux", target_os = "windows"))]
-            cua_version,
-        })
-    }
     pub(super) fn revalidate(&self) -> Result<(), ProfileError> {
         match &self.retained {
             RetainedRelease::Legacy { inventory } => {
@@ -196,14 +123,6 @@ impl ProfileRelease {
             }
             RetainedRelease::Native { verified } => {
                 verified.revalidate().map_err(|_| ProfileError::Changed)
-            }
-            #[cfg(all(target_os = "linux", target_env = "gnu"))]
-            RetainedRelease::Maintenance {
-                original,
-                candidate,
-            } => {
-                original.revalidate()?;
-                candidate.revalidate().map_err(load_error)
             }
         }
     }
@@ -217,10 +136,6 @@ impl ProfileRelease {
                 .map_err(|_| ProfileError::UntrustedRelease),
             // This original retained inventory is the only native pin factory.
             RetainedRelease::Native { verified } => verified.pin_worker(kind).map_err(load_error),
-            #[cfg(all(target_os = "linux", target_env = "gnu"))]
-            RetainedRelease::Maintenance { candidate, .. } => {
-                candidate.pin_worker(kind).map_err(load_error)
-            }
         }
     }
     /// Signed package membership, never a Core grant, live health or readiness.
@@ -236,12 +151,6 @@ impl ProfileRelease {
                 .worker_closures
                 .iter()
                 .any(|worker| worker.kind == kind),
-            #[cfg(all(target_os = "linux", target_env = "gnu"))]
-            RetainedRelease::Maintenance { candidate, .. } => candidate
-                .manifest()
-                .worker_closures
-                .iter()
-                .any(|worker| worker.kind == kind),
         }
     }
     /// Locator only. The caller still requires Browser membership and its pin,
@@ -251,8 +160,6 @@ impl ProfileRelease {
         match &self.retained {
             RetainedRelease::Legacy { .. } => self.root.clone(),
             RetainedRelease::Native { .. } => self.root.join("workers/browser-node22"),
-            #[cfg(all(target_os = "linux", target_env = "gnu"))]
-            RetainedRelease::Maintenance { .. } => self.root.join("workers/browser-node22"),
         }
     }
     #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
@@ -267,8 +174,6 @@ impl ProfileRelease {
         match &self.retained {
             RetainedRelease::Legacy { .. } => "legacy_js_v1",
             RetainedRelease::Native { .. } => "native_rust_v1",
-            #[cfg(all(target_os = "linux", target_env = "gnu"))]
-            RetainedRelease::Maintenance { .. } => "native_rust_v1",
         }
     }
     pub(super) fn version(&self) -> &str {

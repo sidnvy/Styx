@@ -124,16 +124,11 @@ pub(crate) struct AppGatewayError {
 }
 enum AppStartupOwner {
     Fresh(crate::management::native_gateway::BootstrapError),
-    Native {
-        _owner: crate::store::OwnedConfigurationRoot,
-        _scope: std::sync::Arc<crate::app::HostScope>,
-    },
 }
 impl AppStartupOwner {
     fn code(&self) -> &'static str {
         match self {
             Self::Fresh(error) => error.code(),
-            Self::Native { .. } => "committed_app_gateway_scope_unsettled",
         }
     }
 }
@@ -223,9 +218,6 @@ pub(crate) async fn gateway_run_for_app(
         let retained = failure.lock().unwrap_or_else(|e| e.into_inner()).take();
         match (result, retained) {
             (Ok(outcome), None) => Ok(outcome),
-            (Ok(outcome), Some(AppStartupOwner::Native { .. })) if outcome.is_complete() => {
-                Ok(outcome)
-            }
             (Err(foreground), retained) => Err(AppGatewayError {
                 foreground,
                 _retained: retained,
@@ -286,173 +278,13 @@ mod platform {
         },
         tls::GatewayServerTls,
     };
-    use crate::{
-        store::RawFile,
-        tls::{GatewayLeafPin, PrivateKeyPem},
-    };
-    use serde::Deserialize;
-    use std::{io::Cursor, net::IpAddr};
     use std::{net::SocketAddr, path::PathBuf, sync::Arc, time::Duration};
     use styx_contracts::identity::{GatewayEpoch, GatewayId, Sha256Digest};
     use styx_core::enrollment::Limits;
     use tokio::{net::TcpListener, sync::Semaphore};
 
-    const LIMIT: usize = 1024 * 1024;
     static LOADERS: Semaphore = Semaphore::const_new(2);
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-    const OWNERS: &[&str] = &[
-        "foreground.lock",
-        "foreground-recovery.lock",
-        "background.lock",
-        "advance.lock",
-        "capabilities.lock",
-        "gateway-runtime-recovery.lock",
-        "host-payload-migration-recovery.lock",
-        "host-update-recovery.lock",
-        "account-acceptance.lock",
-        "onboarding-plugin.lock",
-        "tunnel/owner.lock",
-    ];
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-    const GATEWAY_OWNERS: &[&str] = &[
-        "service.json",
-        "runtime-change.json",
-        "foreground.lock",
-        "background.lock",
-        "install/.health-update-lock",
-        "install/.health-operation-lock",
-        "install/.health-recovery-guard",
-    ];
-    #[derive(Deserialize)]
-    struct Deployment {
-        schema: u32,
-        mode: String,
-        gateway: Gateway,
-    }
-    #[derive(Deserialize)]
-    struct Gateway {
-        url: String,
-        #[serde(rename = "listenHost")]
-        listen_host: Option<String>,
-        #[cfg(all(target_os = "linux", target_env = "gnu"))]
-        runtime: Option<RuntimeLocator>,
-        #[serde(rename = "deviceIngress")]
-        device_ingress: Option<Ingress>,
-    }
-    #[derive(Deserialize)]
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-    struct RuntimeLocator {
-        #[serde(rename = "baseDir")]
-        base_dir: PathBuf,
-    }
-    #[derive(Deserialize)]
-    struct Ingress {
-        enabled: bool,
-    }
-    #[derive(Deserialize)]
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-    struct DeploymentState {
-        schema: u32,
-        mode: String,
-        #[serde(rename = "configSha256")]
-        config_sha256: String,
-        steps: Vec<Step>,
-        #[serde(default)]
-        uncertain: bool,
-        #[serde(rename = "activeStep")]
-        active_step: Option<serde_json::Value>,
-        #[serde(rename = "hostServiceMaintenance")]
-        host_maintenance: Option<Maintenance>,
-        #[serde(rename = "gatewayServiceMaintenance")]
-        gateway_maintenance: Option<Maintenance>,
-        #[serde(rename = "gatewayMaintenance", default)]
-        gateway_operations: Vec<Step>,
-        #[serde(default)]
-        maintenance: Vec<Step>,
-    }
-    #[derive(Deserialize)]
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-    struct Maintenance {
-        #[serde(rename = "hasUncertainMutation", default)]
-        has_uncertain_mutation: bool,
-    }
-    #[derive(Deserialize)]
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-    struct Step {
-        id: Option<String>,
-        status: String,
-        evidence: Option<EvidenceSet>,
-    }
-    #[derive(Deserialize)]
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-    struct EvidenceSet {
-        runtime: Option<Evidence>,
-        certificate: Option<Evidence>,
-        #[serde(rename = "ownerConfiguration")]
-        owner: Option<Evidence>,
-    }
-    #[derive(Deserialize)]
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-    struct Evidence {
-        path: PathBuf,
-        sha256: String,
-    }
-    #[derive(Deserialize)]
-    #[serde(deny_unknown_fields)]
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-    struct Runtime {
-        schema: u32,
-        url: String,
-        #[serde(rename = "listenHost")]
-        listen_host: String,
-        #[serde(rename = "tlsCertificateFile")]
-        certificate: PathBuf,
-        #[serde(rename = "tlsPrivateKeyFile")]
-        key: PathBuf,
-        #[serde(rename = "modelTokenFile")]
-        model_token: PathBuf,
-        #[serde(rename = "adminTokenFile")]
-        admin_token: PathBuf,
-        #[serde(rename = "enrollmentDir")]
-        enrollment: PathBuf,
-        #[serde(rename = "catalogFile")]
-        catalog: PathBuf,
-    }
-    #[derive(Deserialize)]
-    #[serde(deny_unknown_fields)]
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-    struct Catalog {
-        version: u32,
-        targets: Vec<Box<serde_json::value::RawValue>>,
-    }
-    #[derive(Deserialize)]
-    #[serde(deny_unknown_fields)]
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-    struct LegacyEnrollment {
-        version: u32,
-        invitations: Vec<Box<serde_json::value::RawValue>>,
-        pending: Vec<Box<serde_json::value::RawValue>>,
-        devices: Vec<Box<serde_json::value::RawValue>>,
-    }
-    #[derive(Deserialize)]
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-    struct Owner {
-        gateway_url: String,
-        gateway_ca_file: PathBuf,
-        admin_token_file: PathBuf,
-    }
-    struct Input {
-        root: Arc<PrivateRoot>,
-        raw: RawFile,
-    }
     struct Admitted {
-        state: Arc<PrivateRoot>,
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-        gateway: Arc<PrivateRoot>,
-        #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-        runtime_root: Option<PrivateRoot>,
-        inputs: Vec<Input>,
-        absent_inputs: Vec<(Arc<PrivateRoot>, &'static str)>,
         lease: ExecutionLeaseGuard,
         // Retains the SAME writer even if service boot fails after uncertain I/O.
         _configuration: OwnedConfigurationRoot,
@@ -530,78 +362,6 @@ mod platform {
     }
     fn error(code: &'static str) -> ForegroundError {
         ForegroundError(code)
-    }
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-    fn ownership(
-        state: &PrivateRoot,
-        gateway: &PrivateRoot,
-        runtime: Option<&PrivateRoot>,
-    ) -> Result<(), ForegroundError> {
-        for name in OWNERS {
-            state
-                .ensure_absent(name)
-                .map_err(|_| error("legacy_gateway_owner_reconciliation_required"))?;
-        }
-        // Without an OS service observer, a service config never proves stopped.
-        for root in std::iter::once(gateway).chain(runtime) {
-            for name in GATEWAY_OWNERS {
-                root.ensure_absent(name)
-                    .map_err(|_| error("legacy_gateway_service_reconciliation_required"))?;
-            }
-        }
-        // Conservatively refuse existing Host payload transactions, including
-        // historical completed journals, rather than infer a cutover grant.
-        state
-            .ensure_absent("host-payload-migration.json")
-            .map_err(|_| error("legacy_gateway_migration_reconciliation_required"))?;
-        Ok(())
-    }
-    fn read(
-        root: &Arc<PrivateRoot>,
-        path: &str,
-        inputs: &mut Vec<Input>,
-    ) -> Result<usize, ForegroundError> {
-        let raw = root
-            .read_raw(path, LIMIT)
-            .map_err(|_| error("gateway_protected_read"))?;
-        inputs.push(Input {
-            root: root.clone(),
-            raw,
-        });
-        Ok(inputs.len() - 1)
-    }
-    fn decode<T: serde::de::DeserializeOwned>(input: &Input) -> Result<T, ForegroundError> {
-        serde_json::from_slice(input.raw.bytes())
-            .map_err(|_| error("gateway_configuration_invalid"))
-    }
-    #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-    fn evidence(
-        expected: &Option<Evidence>,
-        path: &Path,
-        input: &Input,
-    ) -> Result<(), ForegroundError> {
-        let e = expected
-            .as_ref()
-            .ok_or(error("gateway_prepare_evidence_required"))?;
-        if e.path != path || e.sha256 != input.raw.sha256() {
-            return Err(error("gateway_prepare_evidence_changed"));
-        }
-        Ok(())
-    }
-    fn token(input: &Input) -> Result<&[u8], ForegroundError> {
-        // Original Gateway readers trim token-file whitespace. Keep/pin the
-        // original file bytes; normalize only the admission input in memory.
-        let value = std::str::from_utf8(input.raw.bytes())
-            .map_err(|_| error("gateway_token_invalid"))?
-            .trim();
-        if !(32..=4096).contains(&value.len())
-            || !value
-                .bytes()
-                .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'_' | b'-'))
-        {
-            return Err(error("gateway_token_invalid"));
-        }
-        Ok(value.as_bytes())
     }
     struct Loaded {
         admitted: Arc<Admitted>,
@@ -783,13 +543,6 @@ mod platform {
         .map_err(|_| error("gateway_namespace_invalid"))?;
         let tls = runtime.tls.clone();
         let admitted = Arc::new(Admitted {
-            state: runtime.root.clone(),
-            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-            gateway: runtime.root.clone(),
-            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
-            runtime_root: None,
-            inputs: vec![],
-            absent_inputs: vec![],
             lease,
             _configuration: configuration,
             #[cfg(any(
@@ -810,34 +563,6 @@ mod platform {
             host: authority,
             gateway_id,
         })
-    }
-    /// Ordinary native startup consumes a fresh complete committed chain. The
-    /// state-root writer remains the ONLY configuration writer; imported device
-    /// history is read there, never from the old child enrollment runtime.
-    fn native_root_identity(
-        root: crate::store::RootIdentity,
-    ) -> styx_contracts::native_management::NativeRootIdentity {
-        use crate::store::RootIdentity;
-        use styx_contracts::native_management::NativeRootIdentity;
-        match root {
-            RootIdentity::Linux { device, inode, uid } => {
-                NativeRootIdentity::Linux { device, inode, uid }
-            }
-            #[cfg(target_os = "macos")]
-            RootIdentity::Macos { device, inode, uid } => {
-                NativeRootIdentity::Macos { device, inode, uid }
-            }
-            #[cfg(target_os = "windows")]
-            RootIdentity::Windows {
-                volume_serial,
-                file_id,
-                owner_sid,
-            } => NativeRootIdentity::Windows {
-                volume_serial,
-                file_id,
-                owner_sid,
-            },
-        }
     }
     fn emit(events: &mpsc::Sender<ForegroundEvent>, stop: &CancellationToken, name: &'static str) {
         if events

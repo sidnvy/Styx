@@ -14,7 +14,6 @@ pub(super) struct LocalGateway {
     pub ca_sha: String,
     tls: GatewayClientTls,
     inputs: Vec<RawFile>,
-    migration: Option<Arc<crate::store::committed_runtime_native::NativeCommittedRuntimeSnapshot>>,
     running: Option<RunningGateway>,
     observed: watch::Receiver<bool>,
     ready: watch::Sender<bool>,
@@ -83,7 +82,6 @@ impl LocalGateway {
             ca_sha,
             tls,
             inputs,
-            migration: None,
             running: None,
             observed,
             ready,
@@ -103,11 +101,6 @@ impl LocalGateway {
         self.scope.validate()?;
         if self.failed || self.retained.is_some() || self.startup_failure.is_some() {
             return Err(AppError("app_gateway_fenced"));
-        }
-        if let Some(original) = &self.migration {
-            return original
-                .revalidate()
-                .map_err(|_| AppError("app_gateway_input_changed"));
         }
         let root = self
             .scope
@@ -153,9 +146,6 @@ impl LocalGateway {
             .gateway
             .is_none_or(|g| g.run != NativeRunDesired::Running)
         {
-            if self.migration.is_some() {
-                return Err(AppError("app_shared_gateway_plan_required"));
-            }
             let change = native::NativeDesiredChange {
                 component: native::NativeComponent::Gateway,
                 run: NativeRunDesired::Running,
@@ -247,9 +237,6 @@ impl LocalGateway {
         );
         // Latch before dispatch: any lost/invalid reply keeps this original role
         // fenced. No retry of invitation or approval, including after restart.
-        if self.migration.is_some() {
-            return Err(AppError("app_migrated_pairing_already_committed"));
-        }
         self.failed = true;
         let response = native_join_http::exchange_local_admin(
             &origin,
