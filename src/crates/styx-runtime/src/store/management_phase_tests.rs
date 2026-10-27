@@ -44,7 +44,7 @@ fn fixture(
     let root = PrivateRoot::open(&path).unwrap();
     let writer = root.try_configuration_writer().unwrap();
     let owner = OwnedConfigurationRoot::open_existing(root, writer).unwrap();
-    let mut journal =
+    let journal =
         OwnedManagementJournal::open_existing(owner.clone(), JournalBudget::default()).unwrap();
     let intent = DesiredStateCommit {
         transaction_id: "phases-1".try_into().unwrap(),
@@ -79,7 +79,7 @@ fn checkpoint(path: &Path) {
 fn original_phase_chain_and_unknown_orphans_are_preserved_batch() {
     let base = PathBuf::from(std::env::var("STYX_TEST_MANAGEMENT_PHASE_ROOT").unwrap());
     fs::create_dir_all(&base).unwrap();
-    let (path, owner, mut journal, fence, intent, prepared) = fixture(&base);
+    let (path, owner, journal, fence, intent, prepared) = fixture(&base);
     assert!(matches!(
         journal.append_phase(
             &fence,
@@ -249,7 +249,7 @@ fn original_phase_chain_and_unknown_orphans_are_preserved_batch() {
     drop(journal);
     fs::remove_dir_all(&path).unwrap();
 
-    let (path, owner, mut journal, fence, intent, prepared) = fixture(&base);
+    let (path, owner, journal, fence, intent, prepared) = fixture(&base);
     checkpoint(&path);
     let namespace = path.join(NamespaceName::ManagementV1.as_str());
     let orphan = namespace.join("txn-phases-1.state-temporary");
@@ -288,7 +288,7 @@ fn original_phase_chain_and_unknown_orphans_are_preserved_batch() {
     fs::remove_dir_all(&path).unwrap();
 
     // Tampered chain is not silently repaired or treated as an observed ACK.
-    let (path, owner, mut journal, fence, intent, prepared) = fixture(&base);
+    let (path, owner, journal, fence, intent, prepared) = fixture(&base);
     checkpoint(&path);
     journal
         .append_phase(

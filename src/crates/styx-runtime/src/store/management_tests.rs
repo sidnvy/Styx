@@ -57,7 +57,7 @@ fn durable_prepare_preserves_exact_bytes_and_unsettled_high_water_batch() {
     let base = PathBuf::from(std::env::var("STYX_TEST_MANAGEMENT_ROOT").unwrap());
     fs::create_dir_all(&base).unwrap();
     let (path, owner) = fixture(&base);
-    let mut journal =
+    let journal =
         OwnedManagementJournal::open_existing(owner.clone(), JournalBudget::default()).unwrap();
     let original = intent("management-original", 7);
     // Preserve whitespace/field order of the exact caller-approved intent too.
@@ -142,7 +142,7 @@ fn durable_prepare_preserves_exact_bytes_and_unsettled_high_water_batch() {
     // Intent-only and an orphan temporary survive restart; not silently
     // completed, not recycled and not counted as durable Prepared.
     let (path, owner) = fixture(&base);
-    let mut journal =
+    let journal =
         OwnedManagementJournal::open_existing(owner.clone(), JournalBudget::default()).unwrap();
     let original = intent("interrupted", 19);
     let raw = serde_json::to_vec(&original).unwrap();
@@ -193,7 +193,7 @@ fn durable_prepare_preserves_exact_bytes_and_unsettled_high_water_batch() {
         file.set_len(1024 * 1024).unwrap();
     }
     let budget_owner = reopen(&budget_path);
-    let mut budget_journal =
+    let budget_journal =
         OwnedManagementJournal::open_existing(budget_owner.clone(), JournalBudget::default())
             .unwrap();
     let budget_intent = intent("budget-original", 1);
@@ -229,7 +229,7 @@ fn durable_prepare_preserves_exact_bytes_and_unsettled_high_water_batch() {
     // A foreign change after durable Prepared cannot be reported as ordinary
     // pre-write Conflict. This test changes only its own synthetic canonical file.
     let (changed_path, changed_owner) = fixture(&base);
-    let mut changed_journal =
+    let changed_journal =
         OwnedManagementJournal::open_existing(changed_owner.clone(), JournalBudget::default())
             .unwrap();
     let changed_intent = intent("changed-after-prepare", 1);
@@ -267,8 +267,7 @@ fn durable_prepare_preserves_exact_bytes_and_unsettled_high_water_batch() {
     // Unrelated writer/transaction capabilities cannot be substituted.
     let (_, owner_a) = fixture(&base);
     let (_, owner_b) = fixture(&base);
-    let mut journal =
-        OwnedManagementJournal::open_existing(owner_a, JournalBudget::default()).unwrap();
+    let journal = OwnedManagementJournal::open_existing(owner_a, JournalBudget::default()).unwrap();
     let original = intent("foreign-fence", 1);
     let foreign = owner_b
         .begin_maintenance(original.transaction_id.clone())
@@ -302,7 +301,7 @@ fn management_preparation_child() {
         .unwrap();
     let writer = root.try_configuration_writer().unwrap();
     let owner = OwnedConfigurationRoot::open_existing(root, writer).unwrap();
-    let mut journal =
+    let journal =
         OwnedManagementJournal::open_existing(owner.clone(), JournalBudget::default()).unwrap();
     if action == "prepare" {
         let intent = DesiredStateCommit {

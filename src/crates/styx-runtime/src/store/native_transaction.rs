@@ -67,14 +67,14 @@ impl NativeCommitProof {
 }
 pub struct NativeTransactions {
     binding: NativeRootBinding,
-    journal: OwnedManagementJournal,
+    journal: std::sync::Arc<OwnedManagementJournal>,
     retained_maintenance: Option<ConfigurationMaintenance>,
     retained_runtime_update: Option<runtime_update::RuntimeUpdateCustody>,
 }
 impl NativeTransactions {
     #[cfg(all(test, target_os = "linux", target_env = "gnu"))]
-    pub(in crate::store) fn journal_for_test(&mut self) -> &mut OwnedManagementJournal {
-        &mut self.journal
+    pub(in crate::store) fn journal_for_test(&self) -> &OwnedManagementJournal {
+        &self.journal
     }
     pub fn open(binding: NativeRootBinding) -> Result<Self, NativeTransactionOpenFailure> {
         match OwnedManagementJournal::open_existing(
@@ -83,7 +83,7 @@ impl NativeTransactions {
         ) {
             Ok(journal) => Ok(Self {
                 binding,
-                journal,
+                journal: std::sync::Arc::new(journal),
                 retained_maintenance: None,
                 retained_runtime_update: None,
             }),
@@ -156,7 +156,7 @@ impl NativeTransactions {
             .map_err(|_| NativeTransactionError::UnknownInspect)?;
         Ok(Self {
             binding,
-            journal,
+            journal: std::sync::Arc::new(journal),
             retained_maintenance: None,
             retained_runtime_update: None,
         })
@@ -945,3 +945,6 @@ pub(crate) use windows_migration::{
 
 #[path = "native_runtime_update.rs"]
 mod runtime_update;
+
+#[cfg(target_os = "macos")]
+pub(crate) use runtime_update::OriginalServiceRuntimeRepair;

@@ -296,6 +296,8 @@ enum MacServiceActionArg {
     /// Prepare same-identity recovery of a registered but failed inactive Gateway.
     PrepareRecovery,
     PrepareRuntimeRepair,
+    /// Recover the exact original target; never reissue an uncertain admin request.
+    RecoverRuntimeRepair,
     Stop,
 }
 #[cfg(target_os = "macos")]
@@ -309,6 +311,7 @@ impl MacServiceActionArg {
             Self::PrepareFirstStart => ServiceAction::PrepareFirstStart,
             Self::PrepareRecovery => ServiceAction::PrepareRecovery,
             Self::PrepareRuntimeRepair => ServiceAction::PrepareRuntimeRepair,
+            Self::RecoverRuntimeRepair => ServiceAction::RecoverRuntimeRepair,
             Self::Stop => ServiceAction::Stop,
         }
     }
@@ -981,6 +984,7 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
                     | MacServiceActionArg::PrepareFirstStart
                     | MacServiceActionArg::PrepareRecovery
                     | MacServiceActionArg::PrepareRuntimeRepair
+                    | MacServiceActionArg::RecoverRuntimeRepair
                     | MacServiceActionArg::Stop
             ) {
                 if !authorize {
@@ -1007,6 +1011,17 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
                 };
                 styx_runtime::management::native::service::prepare_runtime_repair(
                     &state_dir, selection, id, revision,
+                )
+                .await
+            } else if action == MacServiceActionArg::RecoverRuntimeRepair {
+                if runtime_selection_file.is_some() {
+                    return error("runtime_selection_only_for_service_repair");
+                }
+                let (Some(id), Some(revision)) = (transaction_id, expected_revision) else {
+                    return error("explicit_service_repair_inputs_required");
+                };
+                styx_runtime::management::native::service::recover_runtime_repair(
+                    &state_dir, id, revision,
                 )
                 .await
             } else {

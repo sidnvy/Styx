@@ -285,6 +285,38 @@ pub struct NativeRuntimeSelection {
 /// configuration/execution custody and signed C08 verifier supply authority.
 pub const NATIVE_RUNTIME_UPDATE_KEY: &str = "runtime_update_v1";
 pub const NATIVE_RUNTIME_SELECTION_KEY: &str = "runtime_selection_v1";
+/// Persisted repair DATA. Native file pins, manager observations and the
+/// original writer/execution leases must be re-established before recovery.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeServiceDefinitionIdentity {
+    pub device: u64,
+    pub inode: u64,
+    pub uid: u32,
+    pub mode: u32,
+    pub links: u64,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeServiceRegistrationObservation {
+    pub path: std::path::PathBuf,
+    pub program: std::path::PathBuf,
+    pub username: String,
+    pub arguments: Vec<String>,
+    pub pid: Option<u32>,
+    pub runs: u64,
+    pub last_exit_code: Option<i32>,
+    pub signaled_exit: bool,
+    pub state: String,
+}
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NativeServiceRepairBinding {
+    pub schema: u16,
+    pub old_definition_identity: NativeServiceDefinitionIdentity,
+    pub old_definition_sha256: Sha256Digest,
+    pub original_registration: NativeServiceRegistrationObservation,
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct NativeRuntimeUpdate {
@@ -293,6 +325,10 @@ pub struct NativeRuntimeUpdate {
     pub bootstrap_runtime: NativeRuntimeSelection,
     pub previous_runtime: NativeRuntimeSelection,
     pub transaction: NativeStateTransaction,
+    /// Schema5 repair provenance only; earlier foreground/App histories retain
+    /// their exact serialized shape and cannot smuggle this field.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub service_repair: Option<NativeServiceRepairBinding>,
 }
 impl NativeState {
     pub fn runtime_selection(&self) -> Result<Option<NativeRuntimeSelection>, serde_json::Error> {

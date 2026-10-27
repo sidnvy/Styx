@@ -494,6 +494,9 @@ pub(super) struct OriginalManagementTransaction {
     /// Includes Prepared and every validated successor in order.
     pub phases: Vec<JournalReceipt>,
 }
+/// File mutations are serialized by the original configuration owner mutex and
+/// require its opaque maintenance lease. The journal metadata is immutable;
+/// sharing this handle never claims a second writer or namespace.
 pub struct OwnedManagementJournal {
     owner: OwnedConfigurationRoot,
     #[cfg(any(
@@ -759,7 +762,7 @@ impl OwnedManagementJournal {
         }
     }
     pub(super) fn append_phase(
-        &mut self,
+        &self,
         maintenance: &ConfigurationMaintenance,
         intent: &DesiredStateCommit,
         stage: DurableStage,
@@ -794,7 +797,7 @@ impl OwnedManagementJournal {
     }
     #[cfg(all(test, target_os = "linux", target_env = "gnu"))]
     pub(super) fn append_phase_observing(
-        &mut self,
+        &self,
         maintenance: &ConfigurationMaintenance,
         intent: &DesiredStateCommit,
         stage: DurableStage,
@@ -816,7 +819,7 @@ impl OwnedManagementJournal {
     /// transaction. Actual canonical before bytes are checked before AND after
     /// preparation; external writers are not made cooperative by this mutex.
     pub fn prepare(
-        &mut self,
+        &self,
         maintenance: &ConfigurationMaintenance,
         raw_intent: &[u8],
         before: &[u8],
@@ -842,7 +845,7 @@ impl OwnedManagementJournal {
     }
     #[cfg(all(test, target_os = "linux", target_env = "gnu"))]
     pub(in crate::store) fn prepare_observing(
-        &mut self,
+        &self,
         maintenance: &ConfigurationMaintenance,
         raw_intent: &[u8],
         before: &[u8],
@@ -911,7 +914,7 @@ mod platform {
         Ok(())
     }
     pub(super) fn append(
-        journal: &mut OwnedManagementJournal,
+        journal: &OwnedManagementJournal,
         maintenance: &ConfigurationMaintenance,
         intent: &DesiredStateCommit,
         stage: DurableStage,
@@ -1035,7 +1038,7 @@ mod platform {
         Ok(())
     }
     pub(super) fn prepare(
-        journal: &mut OwnedManagementJournal,
+        journal: &OwnedManagementJournal,
         maintenance: &ConfigurationMaintenance,
         raw: &[u8],
         before: &[u8],

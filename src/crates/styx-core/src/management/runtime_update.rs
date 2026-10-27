@@ -36,10 +36,16 @@ pub(super) fn validate_selected_state(state: &NativeState) -> Result<()> {
     let current = selection(state)?;
     let update = record(state)?;
     let expected_schema = match state.reader_contract {
-        ReaderContract::NativeRuntimeSelectedStateV1 => NATIVE_RUNTIME_SELECTED_STATE_SCHEMA,
+        ReaderContract::NativeRuntimeSelectedStateV1 => {
+            if update.service_repair.is_some() {
+                return Err(NativeStateRuleError::InvalidState);
+            }
+            NATIVE_RUNTIME_SELECTED_STATE_SCHEMA
+        }
         ReaderContract::NativeAppRuntimeSelectedStateV1 => {
             // App history is a separate reader contract, never a foreground-reader extension.
-            if state.desired.host.is_some() == state.desired.gateway.is_some()
+            if update.service_repair.is_some()
+                || state.desired.host.is_some() == state.desired.gateway.is_some()
                 || state
                     .desired
                     .host
@@ -62,6 +68,42 @@ pub(super) fn validate_selected_state(state: &NativeState) -> Result<()> {
                     .gateway
                     .as_ref()
                     .is_none_or(|role| role.manager != NativeManager::PersistentService)
+            {
+                return Err(NativeStateRuleError::InvalidState);
+            }
+            let binding = update
+                .service_repair
+                .as_ref()
+                .ok_or(NativeStateRuleError::InvalidState)?;
+            let old = &binding.old_definition_identity;
+            let observed = &binding.original_registration;
+            if binding.schema != 1
+                || old.uid != 0
+                || old.inode == 0
+                || old.links != 1
+                || old.mode > 0o7777
+                || old.mode & 0o022 != 0
+                || observed.pid.is_some()
+                || observed.runs == 0
+                || observed.state != "not running"
+                || (!observed.signaled_exit && observed.last_exit_code.is_none_or(|v| v == 0))
+                || observed.username.is_empty()
+                || observed.username.len() > 128
+                || !observed
+                    .username
+                    .bytes()
+                    .all(|b| b.is_ascii_alphanumeric() || b"._-".contains(&b))
+                || observed.arguments.len() != 6
+                || observed.arguments[0]
+                    != format!("{}/bin/styx", update.previous_runtime.payload_path)
+                || observed.program != std::path::Path::new(&observed.arguments[0])
+                || observed.arguments[1] != "__service-run"
+                || observed.arguments[2] != "--state-dir"
+                || !std::path::Path::new(&observed.arguments[3]).is_absolute()
+                || observed.arguments[3].len() > 4096
+                || observed.arguments[3].contains('\0')
+                || observed.arguments[4] != "--role"
+                || observed.arguments[5] != "gateway"
             {
                 return Err(NativeStateRuleError::InvalidState);
             }
@@ -148,7 +190,7 @@ pub fn validate_service_runtime_repair_transition(
     marker: &NativeRootMarker,
     intent: &DesiredStateCommit,
 ) -> Result<()> {
-    let NativeRootIdentity::Macos { uid, .. } = marker.root_identity else {
+    let NativeRootIdentity::Macos { device, inode, uid } = marker.root_identity else {
         return Err(invalid());
     };
     if uid == 0
@@ -161,6 +203,17 @@ pub fn validate_service_runtime_repair_transition(
                 run: NativeRunDesired::Running,
                 autostart: NativeAutostartDesired::Enabled,
             })
+    {
+        return Err(invalid());
+    }
+    let repair = record(target)?.service_repair.ok_or_else(invalid)?;
+    let root_hash = styx_contracts::identity::Sha256Digest::of_bytes(
+        format!("styx-native-system-service-v1:{device}:{inode}:{uid}").as_bytes(),
+    )
+    .to_hex();
+    let label = format!("app.styx.native.{uid}.{}.gateway", &root_hash[..32]);
+    if repair.original_registration.path
+        != std::path::Path::new("/Library/LaunchDaemons").join(format!("{label}.plist"))
     {
         return Err(invalid());
     }
@@ -412,8 +465,55 @@ mod tests {
             serde_json::value::to_raw_value(&NativeRuntimeUpdate {
                 schema: 1,
                 bootstrap_runtime: bootstrap,
-                previous_runtime: previous,
+                previous_runtime: previous.clone(),
                 transaction: transaction.clone(),
+                service_repair: if service {
+                    let NativeRootIdentity::Macos { device, inode, uid } =
+                        before.runtime_selection().unwrap().unwrap().payload_root
+                    else {
+                        panic!("service fixture")
+                    };
+                    let _ = (device, inode);
+                    let hash = Sha256Digest::of_bytes(
+                        format!("styx-native-system-service-v1:1:4:{uid}").as_bytes(),
+                    )
+                    .to_hex();
+                    let program = format!("{}/bin/styx", previous.payload_path);
+                    Some(NativeServiceRepairBinding {
+                        schema: 1,
+                        old_definition_identity: NativeServiceDefinitionIdentity {
+                            device: 1,
+                            inode: 88,
+                            uid: 0,
+                            mode: 0o644,
+                            links: 1,
+                        },
+                        old_definition_sha256: Sha256Digest::of_bytes(b"original registered plist"),
+                        original_registration: NativeServiceRegistrationObservation {
+                            path: std::path::PathBuf::from(format!(
+                                "/Library/LaunchDaemons/app.styx.native.{uid}.{}.gateway.plist",
+                                &hash[..32]
+                            )),
+                            program: std::path::PathBuf::from(&program),
+                            username: "owned".into(),
+                            arguments: vec![
+                                program,
+                                "__service-run".into(),
+                                "--state-dir".into(),
+                                "/private/fixture/state".into(),
+                                "--role".into(),
+                                "gateway".into(),
+                            ],
+                            pid: None,
+                            runs: 1,
+                            last_exit_code: Some(4),
+                            signaled_exit: false,
+                            state: "not running".into(),
+                        },
+                    })
+                } else {
+                    None
+                },
             })
             .unwrap(),
         );
@@ -562,6 +662,84 @@ mod tests {
             validate_service_runtime_repair_transition(&before, &target, &marker, &intent).is_ok()
         );
         // Pure grammar grants no native inactive-registration or writer custody.
+        let original_binding = record(&target).unwrap().service_repair.unwrap();
+        for mutation in 0..6 {
+            let mut changed = target.clone();
+            let mut update = record(&changed).unwrap();
+            match mutation {
+                0 => update.service_repair = None,
+                1 => {
+                    update
+                        .service_repair
+                        .as_mut()
+                        .unwrap()
+                        .original_registration
+                        .pid = Some(123)
+                }
+                2 => {
+                    update
+                        .service_repair
+                        .as_mut()
+                        .unwrap()
+                        .original_registration
+                        .runs = 0
+                }
+                3 => {
+                    update
+                        .service_repair
+                        .as_mut()
+                        .unwrap()
+                        .old_definition_identity
+                        .uid = 501
+                }
+                4 => {
+                    update
+                        .service_repair
+                        .as_mut()
+                        .unwrap()
+                        .old_definition_identity
+                        .mode = 0o666
+                }
+                _ => {
+                    update
+                        .service_repair
+                        .as_mut()
+                        .unwrap()
+                        .original_registration
+                        .path = "/Library/LaunchDaemons/foreign.plist".into()
+                }
+            }
+            changed.extensions.insert(
+                NATIVE_RUNTIME_UPDATE_KEY.into(),
+                serde_json::value::to_raw_value(&update).unwrap(),
+            );
+            assert!(
+                validate_service_runtime_repair_transition(&before, &changed, &marker, &intent)
+                    .is_err()
+            );
+        }
+        let (foreground_marker, foreground_before) = fixture();
+        let (mut foreground_target, foreground_intent) =
+            update(&foreground_before, selection_at("new"), 1);
+        let mut foreground_record = record(&foreground_target).unwrap();
+        // Missing optional provenance preserves the previous four-field wire.
+        let ordinary = serde_json::to_value(&foreground_record).unwrap();
+        assert_eq!(ordinary.as_object().unwrap().len(), 4);
+        assert!(ordinary.get("service_repair").is_none());
+        foreground_record.service_repair = Some(original_binding);
+        foreground_target.extensions.insert(
+            NATIVE_RUNTIME_UPDATE_KEY.into(),
+            serde_json::value::to_raw_value(&foreground_record).unwrap(),
+        );
+        assert!(
+            validate_runtime_transition(
+                &foreground_before,
+                &foreground_target,
+                &foreground_marker,
+                &foreground_intent
+            )
+            .is_err()
+        );
     }
     #[test]
     fn app_update_reader_barrier_and_forward_rollback_keep_original_authority() {

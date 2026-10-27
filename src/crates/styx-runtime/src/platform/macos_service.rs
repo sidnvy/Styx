@@ -301,6 +301,7 @@ pub(crate) struct Definition {
     tool_stamp: Stamp,
     stop: std::sync::Mutex<Option<RunningRecord>>,
     install_preparation: bool,
+    recovery_only: bool,
 }
 /// Borrowed fixed installation DATA for an explicitly authorized one-shot
 /// administrator installer. It grants neither write access nor C07 authority.
@@ -319,6 +320,10 @@ pub(crate) struct RegisteredInactiveProof {
     definition: Arc<Definition>,
     observation: ServiceObservation,
     initial_state: store::RawFile,
+    original: Option<(
+        Arc<store::native_transaction::OriginalServiceRuntimeRepair>,
+        store::OwnedConfigurationRoot,
+    )>,
     fenced: std::sync::atomic::AtomicBool,
 }
 impl RegisteredInactiveProof {
@@ -328,10 +333,94 @@ impl RegisteredInactiveProof {
     pub(crate) fn observation(&self) -> &ServiceObservation {
         &self.observation
     }
-    /// Original canonical bytes AND file identity, for the consumer's exact
-    /// expected-revision/transaction comparison before any C07 publication.
+    /// Actual canonical bytes and file identity at proof creation. A fresh
+    /// capture supplies its original before-state; cold reopen supplies actual
+    /// current A or B, never a fabricated handle to a replaced before inode.
+    /// Fresh publication alone uses this for its exact-before comparison.
     pub(crate) fn initial_state(&self) -> &store::RawFile {
         &self.initial_state
+    }
+    /// Durable history DATA only; it cannot mint a proof when decoded again.
+    /// Invoke on the same bounded blocking owner as validate_owner.
+    pub(crate) fn repair_binding(
+        &self,
+    ) -> Result<styx_contracts::native_management::NativeServiceRepairBinding> {
+        use std::sync::atomic::Ordering;
+        use styx_contracts::native_management::{
+            NativeServiceDefinitionIdentity, NativeServiceRepairBinding,
+        };
+        if self.fenced.load(Ordering::Acquire) || !failed_inactive(&self.observation) {
+            return Err(ServiceError::Unknown);
+        }
+        self.definition.validate_identity()?;
+        let pin = self.definition.pin.as_ref().ok_or(ServiceError::Conflict)?;
+        Ok(NativeServiceRepairBinding {
+            schema: 1,
+            old_definition_identity: NativeServiceDefinitionIdentity {
+                device: pin.stamp.dev,
+                inode: pin.stamp.ino,
+                uid: pin.stamp.uid,
+                mode: pin.stamp.mode & 0o7777,
+                links: pin.stamp.links,
+            },
+            old_definition_sha256: Sha256Digest::of_bytes(&pin.raw),
+            original_registration: self.observation.clone(),
+        })
+    }
+    /// Reopen the original failed generation, never recapture a new one. The
+    /// store's opaque input has already authenticated before/target/intent and
+    /// their original journal chain. Both actual A and actual B canonical names
+    /// are permitted only through that one original transaction's validator.
+    pub(crate) async fn reopen_from_original(
+        path: PathBuf,
+        original: Arc<store::native_transaction::OriginalServiceRuntimeRepair>,
+        owner: store::OwnedConfigurationRoot,
+    ) -> Result<Arc<Self>> {
+        let history = original.clone();
+        let authority = owner.clone();
+        let (definition, initial_state) = blocking_read(move || {
+            history.validate_owner(&authority).map_err(unknown)?;
+            let definition = Definition::prepare_recovery(&path, &history)?;
+            if definition.root_identity != authority.identity().map_err(unknown)? {
+                return Err(ServiceError::Unknown);
+            }
+            let current = definition
+                .root
+                .read_raw("state.json", 1024 * 1024)
+                .map_err(changed)?;
+            if current.bytes() != history.before_bytes()
+                && current.bytes() != history.target_bytes()
+            {
+                return Err(ServiceError::Unknown);
+            }
+            history.validate_owner(&authority).map_err(unknown)?;
+            Ok((Arc::new(definition), current))
+        })
+        .await?;
+        let proof = Arc::new(Self {
+            definition,
+            observation: original.binding().original_registration.clone(),
+            initial_state,
+            original: Some((original, owner)),
+            fenced: std::sync::atomic::AtomicBool::new(false),
+        });
+        let checked = proof.clone();
+        blocking_read(move || {
+            if checked.repair_binding()?
+                != *checked
+                    .original
+                    .as_ref()
+                    .ok_or(ServiceError::Unknown)?
+                    .0
+                    .binding()
+            {
+                return Err(ServiceError::Unknown);
+            }
+            Ok(())
+        })
+        .await?;
+        proof.revalidate().await?;
+        Ok(proof)
     }
     /// Fixed installer DATA only. Caller holds the original C07 writer,
     /// operation and execution exclusions and asynchronously revalidates the
@@ -389,6 +478,7 @@ impl RegisteredInactiveProof {
                 .as_ref()
                 .is_none_or(|tx| &tx.transaction_id != id || *tx != update.transaction)
             || update.previous_runtime != old.selection
+            || update.service_repair.as_ref() != Some(&self.repair_binding()?)
             || selected != current
             || selected == old.selection
             || selected.publisher_spki_sha256 != old.selection.publisher_spki_sha256
@@ -461,6 +551,10 @@ impl RegisteredInactiveProof {
         let result: Result<()> = (|| {
             if self.fenced.load(Ordering::Acquire)
                 || owner.identity().map_err(unknown)? != self.definition.root_identity
+                || self
+                    .original
+                    .as_ref()
+                    .is_some_and(|(_, original_owner)| !owner.same_authority(original_owner))
             {
                 return Err(ServiceError::Unknown);
             }
@@ -473,6 +567,16 @@ impl RegisteredInactiveProof {
         }
         Ok(())
     }
+    async fn revalidate_history(self: &Arc<Self>) -> Result<()> {
+        let checked = self.clone();
+        blocking_read(move || {
+            if let Some((original, owner)) = &checked.original {
+                original.validate_owner(owner).map_err(unknown)?;
+            }
+            Ok(())
+        })
+        .await
+    }
     /// Original registration only: a legitimate same-writer C07 selection
     /// successor does not rebind this proof to a replacement plist or image.
     /// Two stable observations are bounded evidence, never an atomic OS lock.
@@ -482,6 +586,7 @@ impl RegisteredInactiveProof {
             return Err(ServiceError::Unknown);
         }
         let result: Result<()> = async {
+            self.revalidate_history().await?;
             let first = self.definition.inspect_registered_identity().await?;
             if !same_failed_inactive(&self.observation, &first) {
                 return Err(ServiceError::Unknown);
@@ -490,6 +595,7 @@ impl RegisteredInactiveProof {
             if !same_failed_inactive(&first, &second) {
                 return Err(ServiceError::Unknown);
             }
+            self.revalidate_history().await?;
             Ok(())
         }
         .await;
@@ -521,6 +627,20 @@ impl Definition {
         Self::prepare_owned(path, ServiceRole::Gateway, true)
     }
     fn prepare_owned(path: &Path, role: ServiceRole, install_preparation: bool) -> Result<Self> {
+        Self::prepare_observed(path, role, install_preparation, None)
+    }
+    fn prepare_recovery(
+        path: &Path,
+        original: &store::native_transaction::OriginalServiceRuntimeRepair,
+    ) -> Result<Self> {
+        Self::prepare_observed(path, ServiceRole::Gateway, false, Some(original))
+    }
+    fn prepare_observed(
+        path: &Path,
+        role: ServiceRole,
+        install_preparation: bool,
+        original: Option<&store::native_transaction::OriginalServiceRuntimeRepair>,
+    ) -> Result<Self> {
         path_text(path)?;
         // Reject an unusable native endpoint before preparing C07 or an
         // administrator package, rather than failing after system registration.
@@ -537,20 +657,26 @@ impl Definition {
             .map_err(changed)?;
         let marker = native_state::decode_marker(marker.bytes()).map_err(changed)?;
         let raw = root.read_raw("state.json", 1024 * 1024).map_err(changed)?;
-        let state = native_state::decode_state(raw.bytes(), &marker).map_err(changed)?;
+        let observed_state = native_state::decode_state(raw.bytes(), &marker).map_err(changed)?;
+        if original.is_some_and(|history| {
+            raw.bytes() != history.before_bytes() && raw.bytes() != history.target_bytes()
+        }) {
+            return Err(ServiceError::Unknown);
+        }
+        let state = original.map_or(observed_state.state(), |history| history.before());
         let deployment = root
             .read_raw("deployment.json", 1024 * 1024)
             .map_err(changed)?;
-        if Sha256Digest::of_bytes(deployment.bytes()) != state.state().deployment_raw_sha256 {
+        if Sha256Digest::of_bytes(deployment.bytes()) != state.deployment_raw_sha256 {
             return Err(ServiceError::Conflict);
         }
-        let desired = role.desired(state.state()).ok_or(ServiceError::Invalid)?;
-        if state.state().has_migration_binding()
+        let desired = role.desired(state).ok_or(ServiceError::Invalid)?;
+        if state.has_migration_binding()
             || if install_preparation {
                 role != ServiceRole::Gateway
-                    || state.state().mode
+                    || state.mode
                         != styx_contracts::native_management::NativeDeploymentMode::CreateLocal
-                    || state.state().desired.host.is_some()
+                    || state.desired.host.is_some()
                     || desired.manager != NativeManager::ForegroundCli
                     || desired.run != NativeRunDesired::Stopped
                     || desired.autostart
@@ -561,10 +687,36 @@ impl Definition {
         {
             return Err(ServiceError::Conflict);
         }
-        let selection =
-            crate::store::native_host_snapshot::validated_runtime_selection(&root, &state, &marker)
-                .map_err(changed)?;
+        let selection = if original.is_some() {
+            if role != ServiceRole::Gateway
+                || install_preparation
+                || state.mode
+                    != styx_contracts::native_management::NativeDeploymentMode::CreateLocal
+                || state.desired.host.is_some()
+                || state.has_migration_binding()
+            {
+                return Err(ServiceError::Conflict);
+            }
+            state
+                .runtime_selection()
+                .map_err(changed)?
+                .ok_or(ServiceError::Conflict)?
+        } else {
+            crate::store::native_host_snapshot::validated_runtime_selection(
+                &root,
+                &observed_state,
+                &marker,
+            )
+            .map_err(changed)?
+        };
         let candidate = Arc::new(release::verify_selected(&selection).map_err(changed)?);
+        if original.is_some()
+            && !candidate
+                .supports_state_reader(state.reader_contract)
+                .map_err(changed)?
+        {
+            return Err(ServiceError::Conflict);
+        }
         let report = candidate.report();
         if report.target != format!("{}-apple-darwin", std::env::consts::ARCH) {
             return Err(ServiceError::Conflict);
@@ -638,8 +790,13 @@ impl Definition {
             tool_stamp,
             stop: std::sync::Mutex::new(None),
             install_preparation,
+            recovery_only: original.is_some(),
         };
-        result.validate()?;
+        if result.recovery_only {
+            result.validate_identity()?;
+        } else {
+            result.validate()?;
+        }
         Ok(result)
     }
     pub(crate) fn installation_material(&self) -> Result<InstallationMaterial<'_>> {
@@ -702,6 +859,9 @@ impl Definition {
         Ok(())
     }
     pub(crate) fn validate(&self) -> Result<()> {
+        if self.recovery_only {
+            return Err(ServiceError::Conflict);
+        }
         self.validate_identity()?;
         let marker = self
             .root
@@ -788,6 +948,9 @@ impl Definition {
     /// Same original root/candidate/definition after our explicitly committed
     /// configuration transition. No installed object is adopted here.
     pub(crate) fn reopen_after_preparation(&self) -> Result<Self> {
+        if self.recovery_only {
+            return Err(ServiceError::Conflict);
+        }
         self.validate_identity()?;
         let next = Self::prepare(&self.path, self.role)?;
         if next.root_identity != self.root_identity
@@ -973,6 +1136,7 @@ impl Definition {
             definition: self.clone(),
             observation: first,
             initial_state,
+            original: None,
             fenced: std::sync::atomic::AtomicBool::new(false),
         }))
     }
@@ -1194,18 +1358,8 @@ fn definition_bytes(
     }
     Ok(text.into_bytes())
 }
-#[derive(Clone, Debug, PartialEq, Eq, Serialize)]
-pub(crate) struct ServiceObservation {
-    pub(crate) path: PathBuf,
-    pub(crate) program: PathBuf,
-    pub(crate) username: String,
-    pub(crate) arguments: Vec<String>,
-    pub(crate) pid: Option<u32>,
-    pub(crate) runs: u64,
-    pub(crate) last_exit_code: Option<i32>,
-    pub(crate) signaled_exit: bool,
-    pub(crate) state: String,
-}
+pub(crate) type ServiceObservation =
+    styx_contracts::native_management::NativeServiceRegistrationObservation;
 fn parse_disabled(raw: &[u8], label: &str) -> Result<bool> {
     if raw.len() > LIMIT {
         return Err(ServiceError::Unknown);
