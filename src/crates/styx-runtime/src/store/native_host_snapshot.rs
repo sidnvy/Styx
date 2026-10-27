@@ -84,13 +84,53 @@ pub(crate) struct NativeHostSnapshot {
     #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
     service_tip: Option<super::native_live_tip::ServiceTip>,
 }
+// Control-only DATA. This projection cannot supply credentials, executable
+// pins, a retained snapshot, or permission to start a Stopped Host.
+pub(crate) struct HostGatewayBinding {
+    gateway_origin: String,
+    anchor_sha256: Sha256Digest,
+}
+impl HostGatewayBinding {
+    pub(crate) fn gateway_origin(&self) -> &str {
+        &self.gateway_origin
+    }
+    pub(crate) fn anchor_sha256(&self) -> &Sha256Digest {
+        &self.anchor_sha256
+    }
+}
+#[derive(Clone, Copy)]
+enum RunPolicy {
+    Execution,
+    ControlBinding,
+}
 impl NativeHostSnapshot {
+    /// Inspect an already paired App Host's local Gateway association without
+    /// granting runtime admission. The complete original protected observation,
+    /// C07 history, Ready, CA and selected C08 checks remain mandatory. Only the
+    /// two public binding facts escape; a Stopped snapshot never escapes here.
+    pub(crate) fn inspect_gateway_binding_for_app(
+        path: &Path,
+        scope: Arc<crate::app::HostScope>,
+    ) -> JournalResult<HostGatewayBinding> {
+        let snapshot = Self::open_source(
+            path,
+            Some(scope),
+            #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+            None,
+            RunPolicy::ControlBinding,
+        )?;
+        Ok(HostGatewayBinding {
+            gateway_origin: snapshot.seed.gateway_origin.clone(),
+            anchor_sha256: snapshot.seed.anchor_sha256,
+        })
+    }
     pub(crate) fn open(path: &Path) -> JournalResult<Self> {
         Self::open_source(
             path,
             None,
             #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
             None,
+            RunPolicy::Execution,
         )
     }
     pub(crate) fn open_for_app(
@@ -102,6 +142,7 @@ impl NativeHostSnapshot {
             Some(scope),
             #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
             None,
+            RunPolicy::Execution,
         )
     }
     #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
@@ -112,7 +153,7 @@ impl NativeHostSnapshot {
         if scope.role() != crate::platform::native_service::ServiceRole::Host {
             return Err(JournalError::Conflict);
         }
-        Self::open_source(&path, None, Some(scope))
+        Self::open_source(&path, None, Some(scope), RunPolicy::Execution)
     }
     #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
     pub(crate) fn service_canonical_matches(
@@ -137,7 +178,11 @@ impl NativeHostSnapshot {
         app_scope: Option<Arc<crate::app::HostScope>>,
         #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
         service_scope: Option<Arc<crate::platform::native_service::ServiceScope>>,
+        run_policy: RunPolicy,
     ) -> JournalResult<Self> {
+        if matches!(run_policy, RunPolicy::ControlBinding) && app_scope.is_none() {
+            return Err(JournalError::Conflict);
+        }
         validate_app_scope(app_scope.as_deref(), path)?;
         let manager = if app_scope.is_some() {
             NativeManager::AppManaged
@@ -214,7 +259,9 @@ impl NativeHostSnapshot {
             || state.has_migration_binding()
             || state.desired.gateway.is_some()
             || !state.desired.host.as_ref().is_some_and(|d| {
-                d.run == NativeRunDesired::Running
+                (d.run == NativeRunDesired::Running
+                    || (matches!(run_policy, RunPolicy::ControlBinding)
+                        && d.run == NativeRunDesired::Stopped))
                     && d.manager == manager
                     && (manager == NativeManager::PersistentService
                         || d.autostart == NativeAutostartDesired::Disabled)

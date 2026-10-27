@@ -441,14 +441,21 @@ impl HostApp {
             };
             // Existing local setup must retain the original Host enrollment.
             // Missing/partial phases remain inspectable but never auto-paired.
-            if let Ok(snapshot) =
-                crate::store::native_host_snapshot::NativeHostSnapshot::open_for_app(
-                    app.scope.state_dir(),
-                    app.scope.clone(),
+            // Association inspection is not runtime admission: an originally
+            // paired, Stopped Host must remain reopenable and normally quitable.
+            // No credentials or execution-capable Stopped snapshot escape.
+            let host_scope = app.scope.clone();
+            let binding = tokio::task::spawn_blocking(move || {
+                crate::store::native_host_snapshot::NativeHostSnapshot::inspect_gateway_binding_for_app(
+                    host_scope.state_dir(),
+                    host_scope.clone(),
                 )
-            {
-                if snapshot.seed().gateway_origin != gateway.origin
-                    || snapshot.seed().anchor_sha256.to_hex() != gateway.ca_sha
+            })
+            .await
+            .map_err(|_| AppError("app_host_binding_reader_failed"))?;
+            if let Ok(binding) = binding {
+                if binding.gateway_origin() != gateway.origin
+                    || binding.anchor_sha256().to_hex() != gateway.ca_sha
                 {
                     app.unknown = true;
                 }
