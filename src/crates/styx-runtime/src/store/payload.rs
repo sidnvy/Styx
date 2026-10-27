@@ -69,6 +69,32 @@ impl PayloadInventory {
             Err(StoreError::Unsupported)
         }
     }
+    /// Windows native release closure only: CLI plus at most three fixed
+    /// workers. This mints image pins, never publisher or execution authority.
+    #[cfg(target_os = "windows")]
+    pub(crate) fn pin_executables(&self, relative: &[&Path]) -> Result<Vec<PinnedExecutable>> {
+        if relative.is_empty() || relative.len() > 4 {
+            return Err(StoreError::TooLarge);
+        }
+        // Reject the entire request before any filesystem observation. Windows
+        // aliases differing only by case must not mint duplicate image slots.
+        let paths = relative
+            .iter()
+            .map(|path| checked_relative(path))
+            .collect::<Result<Vec<_>>>()?;
+        let mut unique = std::collections::BTreeSet::new();
+        for path in &paths {
+            if !unique.insert(path.to_string_lossy().to_lowercase()) {
+                return Err(StoreError::InvalidRelativePath);
+            }
+        }
+        self.inner.pin_executables(&paths).map(|images| {
+            images
+                .into_iter()
+                .map(|inner| PinnedExecutable { inner })
+                .collect()
+        })
+    }
     pub fn pin_executable(&self, relative: impl AsRef<Path>) -> Result<PinnedExecutable> {
         let relative = checked_relative(relative.as_ref())?;
         #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]

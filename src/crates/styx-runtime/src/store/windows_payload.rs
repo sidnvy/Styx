@@ -219,6 +219,38 @@ impl PayloadSnapshot {
     }
     pub(in crate::store) fn pin_executable(&self, path: &Path) -> Result<PinnedImage> {
         self.revalidate()?;
+        self.pin_original_image(path)
+    }
+    /// The caller checked every relative locator and the bounded batch before
+    /// entering this port. Both full observations refer to this SAME snapshot.
+    pub(in crate::store) fn pin_executables(&self, paths: &[PathBuf]) -> Result<Vec<PinnedImage>> {
+        #[cfg(test)]
+        {
+            self.pin_executables_inner(paths, None)
+        }
+        #[cfg(not(test))]
+        {
+            self.pin_executables_inner(paths)
+        }
+    }
+    fn pin_executables_inner(
+        &self,
+        paths: &[PathBuf],
+        #[cfg(test)] before_final: Option<&mut dyn FnMut() -> Result<()>>,
+    ) -> Result<Vec<PinnedImage>> {
+        self.revalidate()?;
+        let images = paths
+            .iter()
+            .map(|path| self.pin_original_image(path))
+            .collect::<Result<Vec<_>>>()?;
+        #[cfg(test)]
+        if let Some(observe) = before_final {
+            observe()?;
+        }
+        self.revalidate()?;
+        Ok(images)
+    }
+    fn pin_original_image(&self, path: &Path) -> Result<PinnedImage> {
         let observed = self
             .observed
             .get(path)
@@ -316,5 +348,104 @@ impl PinnedImage {
     pub(in crate::store) fn retained_file(&self) -> Result<&File> {
         self.revalidate()?;
         Ok(&self.opened.file)
+    }
+}
+
+#[cfg(test)]
+mod batch_tests {
+    use super::*;
+    use std::io::Write;
+
+    fn private_copy(source: &Path, destination: &Path) {
+        let mut input = File::open(source).unwrap();
+        let mut output = ffi::create_new_private_file(destination).unwrap();
+        std::io::copy(&mut input, &mut output).unwrap();
+        ffi::flush_file(&output).unwrap();
+    }
+
+    #[test]
+    fn windows_batch_pins_refuse_original_nonentry_replacement_between_observations() {
+        // Actual owned NTFS files and PE images; no package signer, process
+        // launch, service, permission grant or external fixture is involved.
+        let container = std::env::temp_dir().join(format!(
+            "styx-payload-batch-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        ffi::create_new_private_directory(&container).unwrap();
+        {
+            let parent = Root::open(&container).unwrap();
+            let root = parent
+                .create_fresh_child(OsStr::new("payload"))
+                .unwrap_or_else(|_| panic!("fresh private payload"));
+            let bin = root
+                .create_fresh_child(OsStr::new("bin"))
+                .unwrap_or_else(|_| panic!("fresh private image directory"));
+            let assets = root
+                .create_fresh_child(OsStr::new("assets"))
+                .unwrap_or_else(|_| panic!("fresh private asset directory"));
+            let one = bin.path.join("one.exe");
+            let two = bin.path.join("two.exe");
+            private_copy(&std::env::current_exe().unwrap(), &one);
+            private_copy(&std::env::current_exe().unwrap(), &two);
+            let member = assets.path.join("member.txt");
+            {
+                let mut file = ffi::create_new_private_file(&member).unwrap();
+                file.write_all(b"same approved member bytes").unwrap();
+                ffi::flush_file(&file).unwrap();
+            }
+            let replacement = container.join("replacement.txt");
+            private_copy(&member, &replacement);
+            let inventory = root.payload_inventory(PayloadLimits::default()).unwrap();
+            let paths = [Path::new("bin/one.exe"), Path::new("bin/two.exe")];
+            let pins = inventory.pin_executables(&paths).unwrap();
+            assert_eq!(pins[0].source_path_for_suspended_spawn().unwrap(), one);
+            assert_eq!(pins[1].source_path_for_suspended_spawn().unwrap(), two);
+            for pin in &pins {
+                pin.revalidate().unwrap();
+                assert!(matches!(pin.launch_path(), Err(StoreError::Unsupported)));
+            }
+            assert!(std::fs::rename(&one, bin.path.join("moved.exe")).is_err());
+            assert!(std::fs::rename(&root.path, container.join("moved-root")).is_err());
+            assert!(matches!(
+                inventory.pin_executables(&[]),
+                Err(StoreError::TooLarge)
+            ));
+            assert!(matches!(
+                inventory.pin_executables(&[paths[0], Path::new("../escape")]),
+                Err(StoreError::InvalidRelativePath)
+            ));
+            assert!(matches!(
+                inventory.pin_executables(&[paths[0], Path::new("BIN/ONE.EXE")]),
+                Err(StoreError::InvalidRelativePath)
+            ));
+            let mut replaced = false;
+            let mut replace = || {
+                // Same bytes, new actual file ID: individual image validation
+                // cannot detect this unrelated signed member substitution.
+                std::fs::rename(&replacement, &member)?;
+                replaced = true;
+                Ok(())
+            };
+            let relative = paths.iter().map(|p| p.to_path_buf()).collect::<Vec<_>>();
+            assert!(matches!(
+                inventory
+                    .inner
+                    .pin_executables_inner(&relative, Some(&mut replace)),
+                Err(StoreError::Changed)
+            ));
+            assert!(replaced);
+            assert_eq!(
+                std::fs::read(&member).unwrap(),
+                b"same approved member bytes"
+            );
+            assert!(matches!(inventory.revalidate(), Err(StoreError::Changed)));
+            // The legacy public single-pin contract is still a full original
+            // inventory observation, not merely this image's PE/hash check.
+            assert!(matches!(
+                inventory.pin_executable(paths[0]),
+                Err(StoreError::Changed)
+            ));
+        }
+        std::fs::remove_dir_all(&container).unwrap();
     }
 }

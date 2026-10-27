@@ -41,6 +41,17 @@ async fn actual_signed_windows_runtime_closure_selection_and_refusals() {
         image.revalidate().expect("original worker kernel identity");
         assert!(matches!(image.launch_path(), Err(StoreError::Unsupported)));
     }
+    // These original HANDLEs reject physical publisher/root replacement;
+    // failure is not inferred from signature metadata or a serialized report.
+    let moved_publisher = path.join(format!("publisher-moved-{}", uuid::Uuid::new_v4().simple()));
+    let moved_root = path.join(format!("payload-moved-{}", uuid::Uuid::new_v4().simple()));
+    assert!(std::fs::rename(&publisher, &moved_publisher).is_err());
+    assert!(std::fs::rename(&payload, &moved_root).is_err());
+    assert!(!moved_publisher.exists() && !moved_root.exists());
+    verified
+        .revalidate()
+        .expect("original publisher/root still pinned");
+
     let selection = verified
         .runtime_selection()
         .expect("original observed Windows selection");
@@ -182,6 +193,12 @@ async fn actual_signed_windows_runtime_closure_selection_and_refusals() {
         Err(ReleaseError::Changed)
     ));
     changed = selection.clone();
+    changed.manifest_sha256 = Sha256Digest::of_bytes(b"not the approved manifest");
+    assert!(matches!(
+        verify_selected(&changed),
+        Err(ReleaseError::Changed)
+    ));
+    changed = selection.clone();
     changed.payload_path.push_str(":hidden-stream");
     assert!(matches!(
         verify_selected(&changed),
@@ -196,6 +213,42 @@ async fn actual_signed_windows_runtime_closure_selection_and_refusals() {
     verified
         .revalidate()
         .expect("all original approved bytes remain retained and unchanged");
+    // Last refusal deliberately changes only a non-executable member in this
+    // disposable signed-package fixture. Equal bytes cannot hide a new file ID
+    // from the retained release or the original single-pin inventory contract.
+    let member = verified
+        .inventory
+        .members()
+        .iter()
+        .find(|member| {
+            !member.executable
+                && member.bytes > 0
+                && member.bytes <= 65536
+                && member.path != Path::new("manifest.json")
+                && member.path != Path::new("manifest.sig")
+        })
+        .expect("actual bounded non-executable signed member");
+    let target = payload.join(&member.path);
+    let bytes = valid_root
+        .read_raw(&member.path, 65536)
+        .unwrap()
+        .bytes()
+        .to_vec();
+    let scratch_name = format!("batch-member-{}", uuid::Uuid::new_v4().simple());
+    let scratch = fixture.create_runtime_child(&scratch_name).unwrap();
+    let (replacement, held) = scratch.create_runtime_asset("replacement", &bytes).unwrap();
+    drop(replacement);
+    drop(held);
+    std::fs::rename(path.join(&scratch_name).join("replacement"), &target).unwrap();
+    assert_eq!(std::fs::read(&target).unwrap(), bytes);
+    assert!(matches!(verified.revalidate(), Err(ReleaseError::Changed)));
+    assert!(matches!(
+        verified
+            .inventory
+            .pin_executable(&verified.manifest.entrypoint),
+        Err(StoreError::Changed)
+    ));
+
     println!(
         "{}",
         serde_json::json!({"schema":1,"status":"PASS_SIGNED_WINDOWS_RELEASE_READ_ONLY", "manifest_sha256":report.manifest_sha256,"target":report.target,"external_worker_count":report.external_worker_count,"selection_reopened":true,"ordinary_launch_refused":true,"runtime_launched":false,"installed":false})

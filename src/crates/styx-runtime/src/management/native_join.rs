@@ -639,6 +639,33 @@ mod platform {
         path: PathBuf,
         app_scope: Option<Arc<crate::app::HostScope>>,
     ) -> Result<Work> {
+        load_with_candidate(store, path, app_scope, None)
+    }
+    fn candidate_for_load(
+        selected: &NativeRuntimeSelection,
+        retained: Option<release::VerifiedNativeRelease>,
+    ) -> Result<release::VerifiedNativeRelease> {
+        let candidate = match retained {
+            Some(candidate) => {
+                // Only create passes its still-owned candidate, within the same
+                // operation. This is a new complete verification boundary, not
+                // reuse of an earlier success or a caller-supplied selection.
+                candidate
+                    .revalidate_matches_selection(selected)
+                    .map_err(|_| JoinError::new("native_join_candidate_untrusted", 2))?;
+                candidate
+            }
+            None => release::verify_selected(selected)
+                .map_err(|_| JoinError::new("native_join_candidate_untrusted", 2))?,
+        };
+        Ok(candidate)
+    }
+    fn load_with_candidate(
+        store: NativeHostJoinStore,
+        path: PathBuf,
+        app_scope: Option<Arc<crate::app::HostScope>>,
+        candidate: Option<release::VerifiedNativeRelease>,
+    ) -> Result<Work> {
         let loaded: Result<_> = (|| {
             validate_app_scope(app_scope.as_deref(), &path)?;
             let state = store.readstate().map_err(|_| unknown())?;
@@ -683,10 +710,10 @@ mod platform {
                 // request/claim/confirm, including App-managed updates.
                 return Err(bad());
             }
-            let candidate = release::verify_selected(&selected)
-                .map_err(|_| JoinError::new("native_join_candidate_untrusted", 2))?;
-            // verify_selected already performed complete original-root/publisher
-            // validation and exact selection comparison. Reader support is part
+            let candidate = candidate_for_load(&selected, candidate)?;
+            // The cold verifier or retained-candidate boundary above performed
+            // complete original-root/publisher validation and exact selection
+            // comparison. Reader support is part
             // of that same immutable authenticated manifest, not a new boundary.
             if !candidate
                 .manifest()
@@ -889,7 +916,10 @@ mod platform {
         let store = fresh
             .initialize_host_pending(&source.raw, &state, material, seconds)
             .map_err(JoinError::root)?;
-        let mut work = load(store, parent.join(name), app_scope)?;
+        // Retain the exact candidate admitted before root creation. The loader
+        // still derives selection from the original store/C07 chain and performs
+        // a complete exact-selection revalidation before retaining it in Work.
+        let mut work = load_with_candidate(store, parent.join(name), app_scope, Some(candidate))?;
         // Before dispatch recheck the caller's original source/CA/invitation too.
         for input in [source, selection_input, ca, invitation_input] {
             if let Err(error) = input.revalidate() {
@@ -1276,5 +1306,116 @@ mod platform {
         };
         (work, ()) = io(work, move |w| w.append(File::Ready, &bytes)).await?;
         Ok(work.report("native_host_claim", "ready_to_connect", &pending))
+    }
+
+    #[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    mod retained_candidate_tests {
+        use super::*;
+        use base64::Engine as _;
+        use ed25519_dalek::{Signer as _, SigningKey, pkcs8::EncodePublicKey as _};
+        use std::{
+            fs,
+            io::Write as _,
+            os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _},
+        };
+
+        // Actual private files and a synthetic signing key; no worker execution,
+        // pairing, external publisher key or platform acceptance is claimed.
+        #[test]
+        fn retained_join_candidate_rejects_selection_other_release_and_changed_member() {
+            fn directory(path: &Path) {
+                fs::DirBuilder::new().mode(0o700).create(path).unwrap();
+            }
+            fn write(path: &Path, bytes: &[u8], executable: bool) {
+                let mut file = fs::OpenOptions::new()
+                    .write(true)
+                    .create_new(true)
+                    .mode(if executable { 0o700 } else { 0o600 })
+                    .open(path)
+                    .unwrap();
+                file.write_all(bytes).unwrap();
+                file.sync_all().unwrap();
+            }
+            let root =
+                std::env::temp_dir().join(format!("styx-join-retained-{}", uuid::Uuid::new_v4()));
+            directory(&root);
+            let key = SigningKey::from_bytes(&[37u8; 32]);
+            let der = key.verifying_key().to_public_key_der().unwrap();
+            let pem = format!(
+                "-----BEGIN PUBLIC KEY-----\n{}\n-----END PUBLIC KEY-----\n",
+                base64::engine::general_purpose::STANDARD.encode(der.as_bytes())
+            );
+            let publisher = root.join("publisher.pem");
+            write(&publisher, pem.as_bytes(), false);
+            let expected = crate::crypto::PublisherVerifyingKey::from_spki_pem(pem.as_bytes())
+                .unwrap()
+                .fingerprint()
+                .unwrap();
+            let make = |name: &str| {
+                let payload = root.join(name);
+                directory(&payload);
+                directory(&payload.join("bin"));
+                let sources = [
+                    (
+                        "LICENSE",
+                        b"synthetic join fixture license".as_slice(),
+                        false,
+                    ),
+                    (
+                        "bin/styx",
+                        b"\x7fELF synthetic join fixture, never executed".as_slice(),
+                        true,
+                    ),
+                    (
+                        "source-inputs.json",
+                        b"synthetic source inputs".as_slice(),
+                        false,
+                    ),
+                ];
+                let files: Vec<_> = sources
+                    .iter()
+                    .map(|(name, bytes, executable)| {
+                        write(&payload.join(name), bytes, *executable);
+                        styx_contracts::native_release::NativeReleaseMember {
+                            path: (*name).to_owned(),
+                            size: bytes.len() as u64,
+                            sha256: Sha256Digest::of_bytes(bytes),
+                            executable: *executable,
+                        }
+                    })
+                    .collect();
+                let manifest = serde_json::json!({"schema":2,"runtime_format":"native_rust_v1","component":"styx",
+                    "scope":"runtime_candidate","minimum_reader":"native_runtime_migrated_v3","target":"x86_64-unknown-linux-gnu",
+                    "version":"0.4.0-test.1","entrypoint":"bin/styx","source":{"revision":"1".repeat(40),
+                    "inputs_sha256":Sha256Digest::of_bytes(sources[2].1)},"contracts":{"control":1,"management_state":2},
+                    "files":files,"external_workers":[]});
+                let raw = serde_json::to_vec(&manifest).unwrap();
+                write(&payload.join("manifest.json"), &raw, false);
+                write(
+                    &payload.join("manifest.sig"),
+                    &key.sign(&raw).to_bytes(),
+                    false,
+                );
+                let verified = release::verify(&payload, &publisher, &expected).unwrap();
+                let selected = verified.runtime_selection().unwrap();
+                (verified, selected)
+            };
+            let (original, selected) = make("original");
+            let accepted = candidate_for_load(&selected, Some(original)).unwrap();
+            let mut wrong = selected.clone();
+            wrong.manifest_sha256 = Sha256Digest::of_bytes(b"wrong manifest");
+            assert!(candidate_for_load(&wrong, Some(accepted)).is_err());
+            let (other, _) = make("other");
+            assert!(candidate_for_load(&selected, Some(other)).is_err());
+            // Cold load is still the original complete verifier.
+            let original = candidate_for_load(&selected, None).unwrap();
+            let member = root.join("original/source-inputs.json");
+            let mut file = fs::OpenOptions::new().write(true).open(member).unwrap();
+            file.write_all(b"changed").unwrap();
+            file.sync_all().unwrap();
+            drop(file);
+            assert!(candidate_for_load(&selected, Some(original)).is_err());
+            fs::remove_dir_all(root).unwrap();
+        }
     }
 }

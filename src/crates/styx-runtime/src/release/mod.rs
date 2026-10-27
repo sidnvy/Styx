@@ -665,11 +665,36 @@ fn verify_native(
             .checked_add(member.bytes)
             .ok_or(ReleaseError::Capacity)?;
     }
-    let executable = inventory.pin_executable(Path::new(&manifest.entrypoint))?;
-    let mut workers = Vec::with_capacity(manifest.worker_closures.len());
-    for worker in &manifest.worker_closures {
-        workers.push((worker.kind, inventory.pin_executable(&worker.entrypoint)?));
-    }
+    #[cfg(target_os = "windows")]
+    let (executable, workers) = {
+        let paths: Vec<&Path> = std::iter::once(Path::new(&manifest.entrypoint))
+            .chain(
+                manifest
+                    .worker_closures
+                    .iter()
+                    .map(|worker| Path::new(&worker.entrypoint)),
+            )
+            .collect();
+        let mut images = inventory.pin_executables(&paths)?.into_iter();
+        let executable = images.next().ok_or(ReleaseError::Integrity)?;
+        let mut workers = Vec::with_capacity(manifest.worker_closures.len());
+        for worker in &manifest.worker_closures {
+            workers.push((worker.kind, images.next().ok_or(ReleaseError::Integrity)?));
+        }
+        if images.next().is_some() {
+            return Err(ReleaseError::Integrity);
+        }
+        (executable, workers)
+    };
+    #[cfg(not(target_os = "windows"))]
+    let (executable, workers) = {
+        let executable = inventory.pin_executable(Path::new(&manifest.entrypoint))?;
+        let mut workers = Vec::with_capacity(manifest.worker_closures.len());
+        for worker in &manifest.worker_closures {
+            workers.push((worker.kind, inventory.pin_executable(&worker.entrypoint)?));
+        }
+        (executable, workers)
+    };
     let report = ReleaseReport {
         schema: 1,
         scope: match manifest.scope {
