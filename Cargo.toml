@@ -69,3 +69,12 @@ all = "warn"
 lto = "thin"
 codegen-units = 1
 strip = "debuginfo"
+
+# R93 timings identify runtime codegen and the final binary as the critical path.
+# Use Cargo's non-incremental default for our two large crates; dependencies
+# retain their existing profile and cache. Keep thin LTO and optimization level.
+[profile.release.package.styx-runtime]
+codegen-units = 16
+
+[profile.release.package.styx]
+codegen-units = 16
