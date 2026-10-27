@@ -2,14 +2,14 @@
 
 The owner requested a pause, a complete inventory and transfer to a new agent. This commit preserves work in progress. **Stable remains NO-GO.** No release, installation or native acceptance is implied by this checkpoint.
 
-The existing `develop` checkout remains the only integration source. This checkpoint preserves the 34 modified and 9 new source files present at pause, plus this note. No historical worktree was merged, removed, reset or cleaned.
+The `develop` checkout at `/home/sid/Developer/Styx` remains the only integration source. This checkpoint preserves the 34 modified and 9 new source files present at pause, plus this note. At that checkpoint no historical worktree was merged, removed, reset or cleaned. The later workspace-only consolidation retired 82 registrations while preserving all original files and refs; see root `WORKSPACE.md`.
 
 ## Evidence and resume entry
 
 On the owner's workstation, read the complete current handoff and next-agent prompt:
 
-- `/home/sid/Documents/Codex/2026-10-27-styx-rust-goal-home-sid-documents/outputs/pause-handoff-20261027/HANDOFF.md`
-- `/home/sid/Documents/Codex/2026-10-27-styx-rust-goal-home-sid-documents/outputs/pause-handoff-20261027/NEW_AGENT_PROMPT.txt`
+- `/home/sid/Developer/Archives/Styx/handoff-20261027/HANDOFF.md`
+- `/home/sid/Developer/Archives/Styx/handoff-20261027/NEW_AGENT_PROMPT.txt`
 - The same directory contains `BRANCHES_AND_WORKTREES.md`, exact source backup/hash manifest and all three agent pause receipts.
 
 The goal is paused. Inventory and remote backup do not resume development. A new agent must obtain the owner's resume instruction before running new builds or device actions.

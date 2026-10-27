@@ -7,6 +7,9 @@
 - Parallel agents/threads must lease disjoint paths and devices. The integrator owns shared contracts, manifests/locks and Git integration; use the work-item DAG, single writer and immutable candidate policy.
 
 - `src/` is the only product source. Root npm commands are management aliases; do not restore a legacy runtime or add a second configuration authority.
+- On the owner's workstation, the only integration checkout is `/home/sid/Developer/Styx` on `develop`; GitHub is `origin`. Never create product source checkouts under Documents/Codex task folders.
+- Worktrees, when explicitly justified, live only under `/home/sid/Developer/worktrees/Styx`. Default to zero new worktrees; at most two additional leased worktrees, including the explicitly retained historical S. Record owner, paths, purpose and retirement before creation. Historical archives are not active development sources.
+- Read root `WORKSPACE.md` for the current layout and handoff. Future build/evidence directories use the stable project artifact location; keep existing validated toolchain/cache and signed/installed paths until a separate scoped migration is verified.
 - Integrate validated changes into the existing `develop` checkout. Reuse assigned checkouts; do not automatically create a worktree per task, build, candidate or subagent.
 - A new worktree needs a concrete conflict/isolation reason, a recorded owner and a cleanup outcome. Builds and test evidence belong outside tracked source, not in new worktrees.
 - Before checkout removal, save its HEAD in a durable ref and record dirty/untracked/ignored input ownership. Never force-remove unknown work. Preserve live process paths and cross-tree dependency symlinks.
