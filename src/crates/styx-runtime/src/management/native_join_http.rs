@@ -80,6 +80,128 @@ fn unknown(kind: JoinHttpErrorKind) -> JoinHttpError {
     }
 }
 
+// Observations only: no upstream text or input/response data is retained.
+#[derive(Clone, Copy, Debug, serde::Serialize)]
+#[serde(rename_all = "snake_case")]
+enum HttpFailureStage {
+    Handshake,
+    Send,
+    Body,
+    Connection,
+}
+#[derive(Default, Debug, serde::Serialize)]
+pub(crate) struct HyperClassification {
+    present: bool,
+    incomplete_message: bool,
+    closed: bool,
+    timeout: bool,
+    parse: bool,
+    canceled: bool,
+    user: bool,
+    body_write_aborted: bool,
+}
+/// Pure fixed predicates for an original Hyper error. No upstream text.
+pub(crate) fn http_error_diagnostic(error: &hyper::Error) -> HyperClassification {
+    HyperClassification {
+        present: true,
+        incomplete_message: error.is_incomplete_message(),
+        closed: error.is_closed(),
+        timeout: error.is_timeout(),
+        parse: error.is_parse(),
+        canceled: error.is_canceled(),
+        user: error.is_user(),
+        body_write_aborted: error.is_body_write_aborted(),
+    }
+}
+#[derive(Debug, serde::Serialize)]
+struct HttpFailureObservation {
+    schema: u8,
+    event: &'static str,
+    code: &'static str,
+    certainty: &'static str,
+    stage: HttpFailureStage,
+    response_received: bool,
+    body_complete: bool,
+    hyper: HyperClassification,
+    io_kind: Option<&'static str>,
+}
+impl HttpFailureObservation {
+    fn capture(
+        error: JoinHttpError,
+        stage: HttpFailureStage,
+        cause: &(dyn std::error::Error + 'static),
+        response_received: bool,
+        body_complete: bool,
+    ) -> Self {
+        let mut hyper = HyperClassification::default();
+        let mut io_kind = None;
+        let mut current = Some(cause);
+        // The original error source chain need not be acyclic or bounded.
+        // Only typed predicates are inspected; never upstream Display/Debug.
+        for _ in 0..8 {
+            let Some(cause) = current else { break };
+            if let Some(value) = cause.downcast_ref::<hyper::Error>() {
+                let facts = http_error_diagnostic(value);
+                hyper.present |= facts.present;
+                hyper.incomplete_message |= facts.incomplete_message;
+                hyper.closed |= facts.closed;
+                hyper.timeout |= facts.timeout;
+                hyper.parse |= facts.parse;
+                hyper.canceled |= facts.canceled;
+                hyper.user |= facts.user;
+                hyper.body_write_aborted |= facts.body_write_aborted;
+            }
+            if io_kind.is_none()
+                && let Some(value) = cause.downcast_ref::<std::io::Error>()
+            {
+                io_kind = Some(match value.kind() {
+                    std::io::ErrorKind::ConnectionReset => "connection_reset",
+                    std::io::ErrorKind::ConnectionAborted => "connection_aborted",
+                    std::io::ErrorKind::BrokenPipe => "broken_pipe",
+                    std::io::ErrorKind::UnexpectedEof => "unexpected_eof",
+                    std::io::ErrorKind::TimedOut => "timed_out",
+                    std::io::ErrorKind::NotConnected => "not_connected",
+                    std::io::ErrorKind::WouldBlock => "would_block",
+                    std::io::ErrorKind::Interrupted => "interrupted",
+                    _ => "other",
+                });
+            }
+            current = cause.source();
+        }
+        Self {
+            schema: 1,
+            event: "styx_join_http_failure",
+            code: error.code(),
+            certainty: match error.certainty {
+                JoinHttpCertainty::NotDispatched => "not_dispatched",
+                JoinHttpCertainty::ResultUnknown => "result_unknown",
+            },
+            stage,
+            response_received,
+            body_complete,
+            hyper,
+            io_kind,
+        }
+    }
+}
+fn observe_http_failure(
+    error: JoinHttpError,
+    stage: HttpFailureStage,
+    cause: &(dyn std::error::Error + 'static),
+    response_received: bool,
+    body_complete: bool,
+) -> JoinHttpError {
+    if std::env::var("STYX_GATEWAY_STARTUP_DIAGNOSTICS").as_deref() == Ok("1") {
+        let facts =
+            HttpFailureObservation::capture(error, stage, cause, response_received, body_complete);
+        use std::io::Write as _;
+        // A lost diagnostic sink must not replace the original HTTP error.
+        let _ = writeln!(std::io::stderr().lock(), "{}", serde_json::json!(facts));
+    }
+    // Logging cannot grant a successful response or change dispatch certainty.
+    error
+}
+
 // Bytes retains this zeroizing owner until the official HTTP body releases its
 // last reference. This does not promise zeroization of TLS/Hyper internal copies.
 struct RequestBytes(Zeroizing<Vec<u8>>);
@@ -317,16 +439,29 @@ async fn exchange_once(
         let (mut sender, connection) = builder
             .handshake::<_, Full<Bytes>>(TokioIo::new(stream))
             .await
-            .map_err(|_| refusal(JoinHttpErrorKind::Http))?;
+            .map_err(|cause| {
+                observe_http_failure(
+                    refusal(JoinHttpErrorKind::Http),
+                    HttpFailureStage::Handshake,
+                    &cause,
+                    false,
+                    false,
+                )
+            })?;
         let started = &mut dispatched;
         let request_once = async move {
             // Conservative dispatch boundary: never infer NotDispatched from
             // a send/response error. There is exactly one send_request call.
             *started = true;
-            let response = sender
-                .send_request(request)
-                .await
-                .map_err(|_| unknown(JoinHttpErrorKind::Http))?;
+            let response = sender.send_request(request).await.map_err(|cause| {
+                observe_http_failure(
+                    unknown(JoinHttpErrorKind::Http),
+                    HttpFailureStage::Send,
+                    &cause,
+                    false,
+                    false,
+                )
+            })?;
             let status = response.status();
             if status.is_redirection() {
                 return Err(unknown(JoinHttpErrorKind::RedirectRefused));
@@ -335,11 +470,12 @@ async fn exchange_once(
                 .collect()
                 .await
                 .map_err(|e| {
-                    unknown(if e.is::<LengthLimitError>() {
+                    let error = unknown(if e.is::<LengthLimitError>() {
                         JoinHttpErrorKind::ResponseTooLarge
                     } else {
                         JoinHttpErrorKind::Http
-                    })
+                    });
+                    observe_http_failure(error, HttpFailureStage::Body, e.as_ref(), true, false)
                 })?
                 .to_bytes();
             Ok(JoinHttpResponse {
@@ -352,7 +488,15 @@ async fn exchange_once(
         // request future and dropped on completion/error, closing admission.
         let (response, io) = tokio::join!(request_once, connection);
         let response = response?;
-        io.map_err(|_| unknown(JoinHttpErrorKind::Http))?;
+        io.map_err(|cause| {
+            observe_http_failure(
+                unknown(JoinHttpErrorKind::Http),
+                HttpFailureStage::Connection,
+                &cause,
+                true,
+                true,
+            )
+        })?;
         Ok(response)
     })
     .await;
@@ -367,4 +511,130 @@ async fn exchange_once(
     // Timeout/caller cancellation drops the inline connection and its TLS/TCP
     // handle. No spawned connection task or sender survives this future. This
     // is local transport closure, not proof that the server rolled back effects.
+}
+
+#[cfg(test)]
+mod diagnostic_tests {
+    use super::*;
+    use std::error::Error;
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    // A real backend cause may have sensitive Display/Debug text. Diagnostics
+    // must use only the underlying typed classification, not copy that text.
+    #[derive(Debug)]
+    struct PrivateContext(hyper::Error);
+    impl fmt::Display for PrivateContext {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("https://private.example/credential Bearer SYNTHETIC_SECRET")
+        }
+    }
+    impl Error for PrivateContext {
+        fn source(&self) -> Option<&(dyn Error + 'static)> {
+            Some(&self.0)
+        }
+    }
+    async fn failure_from_wire(raw: &'static [u8]) -> HttpFailureObservation {
+        let (client, mut peer) = tokio::io::duplex(8192);
+        let server = tokio::spawn(async move {
+            let mut request = Vec::new();
+            let mut chunk = [0u8; 1024];
+            while !request.windows(4).any(|part| part == b"\r\n\r\n") {
+                let read = peer.read(&mut chunk).await.unwrap();
+                assert!(read > 0 && request.len() + read <= 4096);
+                request.extend_from_slice(&chunk[..read]);
+            }
+            peer.write_all(raw).await.unwrap();
+            peer.shutdown().await.unwrap();
+        });
+        let (mut sender, connection) =
+            hyper::client::conn::http1::handshake::<_, Full<Bytes>>(TokioIo::new(client))
+                .await
+                .unwrap();
+        let request = Request::builder()
+            .uri("/credential")
+            .header(header::HOST, "private.example")
+            .header(header::CONNECTION, "close")
+            .body(Full::new(Bytes::new()))
+            .unwrap();
+        let read_response = async move {
+            let error = unknown(JoinHttpErrorKind::Http);
+            match sender.send_request(request).await {
+                Err(cause) => HttpFailureObservation::capture(
+                    error,
+                    HttpFailureStage::Send,
+                    &PrivateContext(cause),
+                    false,
+                    false,
+                ),
+                Ok(response) => {
+                    let cause = response.into_body().collect().await.unwrap_err();
+                    HttpFailureObservation::capture(
+                        error,
+                        HttpFailureStage::Body,
+                        &PrivateContext(cause),
+                        true,
+                        false,
+                    )
+                }
+            }
+        };
+        let (observation, _connection_result) = tokio::join!(read_response, connection);
+        server.await.unwrap();
+        observation
+    }
+    fn assert_private_safe(observation: &HttpFailureObservation) -> serde_json::Value {
+        let raw = serde_json::to_string(observation).unwrap();
+        for secret in [
+            "private.example",
+            "/credential",
+            "Bearer",
+            "SYNTHETIC_SECRET",
+            "HEADER_SECRET",
+            "BODY_SECRET",
+        ] {
+            assert!(
+                !raw.contains(secret),
+                "upstream text escaped fixed diagnostics"
+            );
+        }
+        let value: serde_json::Value = serde_json::from_str(&raw).unwrap();
+        assert_eq!(value["code"], "join_http_exchange_failed");
+        assert_eq!(value["certainty"], "result_unknown");
+        assert_eq!(value["hyper"]["present"], true);
+        value
+    }
+    #[tokio::test]
+    async fn malformed_response_keeps_actual_parse_classification_private() {
+        let observation = failure_from_wire(
+            b"HTTP/1.1 INVALID SYNTHETIC_SECRET\r\nX-Private: HEADER_SECRET\r\n\r\n",
+        )
+        .await;
+        let value = assert_private_safe(&observation);
+        assert_eq!(value["stage"], "send");
+        assert_eq!(value["hyper"]["parse"], true);
+        assert_eq!(value["response_received"], false);
+        assert_eq!(value["body_complete"], false);
+    }
+    #[tokio::test]
+    async fn truncated_headers_keep_actual_incomplete_message_classification() {
+        let observation = failure_from_wire(b"HTTP/1.1 200 OK\r\nContent-Length: 10").await;
+        let value = assert_private_safe(&observation);
+        assert_eq!(value["stage"], "send");
+        assert_eq!(value["hyper"]["incomplete_message"], true);
+        assert_eq!(value["response_received"], false);
+        assert_eq!(value["body_complete"], false);
+    }
+    #[tokio::test]
+    async fn truncated_response_keeps_incomplete_body_distinct_from_complete() {
+        let observation = failure_from_wire(
+            b"HTTP/1.1 200 OK\r\nContent-Length: 1000\r\nX-Private: HEADER_SECRET\r\n\r\nBODY_SECRET",
+        ).await;
+        let value = assert_private_safe(&observation);
+        assert_eq!(value["stage"], "body");
+        // Hyper wraps this body framing failure around an actual I/O EOF;
+        // do not relabel it as its distinct incomplete-head error variant.
+        assert_eq!(value["io_kind"], "unexpected_eof");
+        assert_eq!(value["response_received"], true);
+        assert_eq!(value["body_complete"], false);
+    }
 }

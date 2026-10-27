@@ -1902,7 +1902,10 @@ mod platform {
                         }
                         #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
                         Ok(Validation::StopRequested)=>stop.cancel(),
-                        Err(_)=> {invalidated=true;emit(&events,&stop,"gateway_inputs_changed");stop.cancel();}
+                        Err(error)=> {
+                            if let Some(d) = &diagnostic { d.report(error.code()); }
+                            invalidated=true;emit(&events,&stop,"gateway_inputs_changed");stop.cancel();
+                        }
                     }
                 }
             }

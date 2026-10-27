@@ -378,7 +378,19 @@ impl EnrollmentHttp {
                 tokio::select! {
                     _ = stop.cancelled() => { connection.as_mut().graceful_shutdown(); let _=tokio::time::timeout(Duration::from_secs(2), &mut connection).await; },
                     _ = tokio::time::sleep(Duration::from_secs(120)) => { connection.as_mut().graceful_shutdown(); let _=tokio::time::timeout(Duration::from_secs(2), &mut connection).await; },
-                    _ = &mut connection => {}
+                    result = &mut connection => {
+                        if let Err(error) = result
+                            && std::env::var_os("STYX_GATEWAY_STARTUP_DIAGNOSTICS").as_deref()
+                                == Some(std::ffi::OsStr::new("1"))
+                        {
+                            use std::io::Write as _;
+                            // Fixed typed predicates only: never a peer address,
+                            // request, credential or backend Display string.
+                            let _ = writeln!(std::io::stderr().lock(), "{}",
+                                serde_json::json!({"event":"styx_enrollment_http_connection_failed",
+                                    "hyper":crate::management::native_join_http::http_error_diagnostic(&error)}));
+                        }
+                    }
                 }
             });
         }
