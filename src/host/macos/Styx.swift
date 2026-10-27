@@ -667,6 +667,12 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
                 ProductNativeDiagnostics.lifecycle(.windowCreated)
                 await model.bootstrap()
                 guard model.loaded else { core.requestEOF(); nativeCore = nil; throw ProductOwnedCoreError.unavailable }
+                platformUpdate?.bind(client: model.client, report: { [weak self, weak model] message in
+                    model?.reportNativeAppUpdateFailure(message)
+                    // Present feedback after the deferred termination reply has
+                    // returned; a modal alert must never hold that reply open.
+                    DispatchQueue.main.async { [weak self] in self?.setupWindow?.showSettings(.general) }
+                })
                 ProductNativeDiagnostics.lifecycle(.bootstrapCompleted)
                 observeProductComponents(core)
                 setupStatusLine?.title = "Native Host settings ready"
@@ -1144,6 +1150,7 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
         }
         #if STYX_PRODUCT_UI
         if nativeCoreAttempted {
+            guard platformUpdate?.permitsApplicationQuit() != false else { return .terminateCancel }
             // Original bootstrap worker still owns its child until it completes.
             // A UI close cannot make an in-flight verified launch ownerless.
             if nativeCoreStarting { ProductNativeDiagnostics.lifecycle(.terminateCancelStarting); return .terminateCancel }
@@ -1167,11 +1174,20 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
                 ProductNativeDiagnostics.lifecycle(.terminateAdmission, ok: approved)
                 guard let owner = self else { ProductNativeDiagnostics.lifecycle(.terminateReply, ok: false); sender.reply(toApplicationShouldTerminate: false); return }
                 if approved {
-                    owner.nativeCore = nil
-                    owner.nativeComponentObservation = nil; owner.nativeDesktopIntentObservedAt = nil
-                    owner.componentTimer?.invalidate(); owner.componentTimer = nil
                     Task {
                         await owner.stopAndJoin()
+                        // The original Core has already been actually joined by
+                        // prepareToQuit. Replacement also requires clean native
+                        // Cua settlement, never forced process exit or absence.
+                        let nativeClean = owner.daemon == nil && owner.daemonStopTask == nil && owner.phase != "cleanup_unknown"
+                        guard owner.platformUpdate?.nativeOwnerDidJoin(clean: nativeClean) != false else {
+                            owner.terminationPending = false
+                            ProductNativeDiagnostics.lifecycle(.terminateReply, ok: false)
+                            sender.reply(toApplicationShouldTerminate: false); return
+                        }
+                        owner.nativeCore = nil
+                        owner.nativeComponentObservation = nil; owner.nativeDesktopIntentObservedAt = nil
+                        owner.componentTimer?.invalidate(); owner.componentTimer = nil
                         owner.terminationPending = false
                         ProductNativeDiagnostics.lifecycle(.terminateReply, ok: true)
                         sender.reply(toApplicationShouldTerminate: true)

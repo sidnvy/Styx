@@ -17,7 +17,7 @@ enum ProductNativeDiagnostics {
     }
     static func lifecycle(_ stage: LifecycleStage, operation: String? = nil, id: Int? = nil, ok: Bool? = nil) {
         guard CommandLine.arguments.contains("--native-diagnostics") else { return }
-        let operations: Set<String> = ["startupStatus", "status", "createLocal", "resumeLocal", "inspectJoin", "join", "requestJoin", "claimJoin", "inspectHost", "connect", "disconnect", "quitAdmission", "appLifecycle", "appLogin", "appLoginResult", "startMigration", "recoverMigration", "stageRuntime", "updateRuntime", "runtimeUpdateStatus", "recoverRuntimeUpdate", "transferToService", "serviceStatus", "prepareServiceFirstStart", "stopService"]
+        let operations: Set<String> = ["startupStatus", "status", "createLocal", "resumeLocal", "inspectJoin", "join", "requestJoin", "claimJoin", "inspectHost", "connect", "disconnect", "quitAdmission", "appLifecycle", "appLogin", "appLoginResult", "startMigration", "recoverMigration", "stageRuntime", "updateRuntime", "runtimeUpdateStatus", "recoverRuntimeUpdate", "transferToService", "serviceStatus", "prepareServiceFirstStart", "stopService", "prepareAppMaintenance", "appMaintenanceStatus", "cancelAppMaintenance"]
         if let operation { guard operations.contains(operation) else { return } }
         var message = "lifecycle stage=" + stage.rawValue
         if let operation { message += " operation=" + operation }
@@ -117,6 +117,14 @@ final class ProductCoreClient {
         guard let owner = owned else { throw ProductCoreError.unavailable }; return try await owner.call(operation, input)
     }
     func quitNative() async throws { guard let owner = owned else { throw ProductCoreError.unavailable }; try await owner.quitAndJoin() }
+    func prepareNativeAppMaintenance(requestId: String) async throws -> ProductJSON {
+        guard let owner = owned else { throw ProductCoreError.unavailable }
+        return try await owner.prepareAppMaintenance(requestId: requestId)
+    }
+    func cancelNativeAppMaintenance(ticketId: String) async throws {
+        guard let owner = owned else { throw ProductCoreError.unavailable }
+        try await owner.cancelAppMaintenance(ticketId: ticketId)
+    }
     #if STYX_PRODUCT_UI
     func changeNativeService(_ operation: String) async throws -> ProductJSON {
         guard ["transferToService", "prepareServiceFirstStart", "stopService"].contains(operation) else { throw ProductCoreError.rejected }

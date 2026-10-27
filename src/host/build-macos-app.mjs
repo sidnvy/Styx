@@ -195,7 +195,7 @@ export function buildMacApp({app,cuaBinary,version,buildNumber,updateRelease=fal
   // Developer ID output needs a distinct build even before a feed is enabled;
   // signing is not a claim that this artifact has been publicly published.
   if(identity&&signingMode==='distribution'||notaryProfile)assert(buildNumber!==undefined,'macos_distribution_build_number_required');
-  assert(typeof nativeRuntime==='boolean'&&(!nativeRuntime||platformUpdate===undefined),'native_outer_update_handoff_unavailable');
+  assert(typeof nativeRuntime==='boolean','native_runtime_boolean_required');
   const updater=normalizeMacPlatformUpdate(platformUpdate,{app,updateRelease});
   const plist=appInfoPlist(version,{buildNumber,updateRelease,platformUpdate,app});
   assert(['distribution','local-development'].includes(signingMode),'invalid_macos_signing_mode');

@@ -6,6 +6,10 @@ use std::process::ExitCode;
 
 fn main() -> ExitCode {
     let arguments = cli::Cli::parse();
+    #[cfg(target_os = "windows")]
+    if let Some(result) = arguments.dispatch_windows_service() {
+        return result;
+    }
     let worker = arguments.is_desktop_probe_worker();
     // A worker must be constrained before any Tokio threads/buffers exist.
     // Limits apply only to this child process, never a normal Host or CLI.

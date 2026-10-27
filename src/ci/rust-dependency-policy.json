@@ -505,6 +505,11 @@
       "kind": "explicit_owned_private_journal_files",
       "input": "fresh STYX_TEST_APP_SERVICE_TRANSFER_ROOT; disposable synthetic signed C08 and original App container; no installed profile",
       "required_for": "actual original-scope C07 transfer, generic/other-root refusal and immutable runtime history/identity preservation; not enrollment, registered service or installed App acceptance"
+    },
+    "app::maintenance_integration_tests::original_app_maintenance_distinguishes_live_c07_from_launch_and_history": {
+      "kind": "explicit_signed_native_payload",
+      "input": "STYX_TEST_APP_CONTROL_SELECTION absolute protected signed Linux NativeRuntimeSelection supporting native_app_runtime_selected_v1; new disposable strict-TLS enrollment and C07 runtime staging only",
+      "required_for": "original live App maintenance current-runtime independence, immutable launch/bootstrap history, same-ticket cancel/full Quit and same-bytes input replacement Unknown; no installed App, service registration or native process exit acceptance"
     }
   },
   "change_policy": "dependency or ignored-test additions require explicit policy review; preserve mature Cargo tooling rather than replacing its resolver/compiler/lints",

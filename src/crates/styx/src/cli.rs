@@ -21,7 +21,11 @@ pub(crate) struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
-    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "macos",
+        target_os = "windows"
+    ))]
     #[command(name = "__service-run", hide = true)]
     ServiceRun {
         #[arg(long)]
@@ -330,6 +334,18 @@ enum NativeRunArg {
     Stopped,
 }
 impl Cli {
+    /// SCM must attach on the original process main thread before Tokio exists.
+    #[cfg(target_os = "windows")]
+    pub(crate) fn dispatch_windows_service(&self) -> Option<ExitCode> {
+        let Command::ServiceRun { state_dir, role } = &self.command else {
+            return None;
+        };
+        Some(native_recovery_result(
+            styx_runtime::management::native::service::dispatch(state_dir, role.native()),
+            true,
+            "Original Windows service dispatcher and drain observations:",
+        ))
+    }
     pub(crate) fn is_desktop_probe_worker(&self) -> bool {
         matches!(
             self.command,
@@ -1092,6 +1108,10 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
                 true,
                 "Native service stopped with physical cleanup observations:",
             )
+        }
+        #[cfg(target_os = "windows")]
+        Command::ServiceRun { .. } => {
+            error("windows_service_requires_original_pre_runtime_dispatch")
         }
         Command::AppCore {
             state_dir,

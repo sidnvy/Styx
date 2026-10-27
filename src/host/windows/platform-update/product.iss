@@ -23,7 +23,9 @@ SolidCompression=yes
 WizardStyle=modern
 CloseApplications=no
 RestartApplications=no
+#if NativePackage == 0
 AppMutex={code:AppMutexName}
+#endif
 SetupMutex={code:SetupMutexName}
 Uninstallable=yes
 UninstallFilesDir={app}\.installer
@@ -45,7 +47,7 @@ Name: "{userstartup}\Styx"; Filename: "{app}\versions\{#PackageHash}\StyxPreview
 Type: files; Name: "{userstartup}\Styx.lnk"; Check: OwnedStartupUnchanged
 
 [Code]
-var StartupOwned: Boolean; StartupHash, StartupArgs: String;
+var StartupOwned, NativeMaintenanceAttempted: Boolean; StartupHash, StartupArgs: String;
 function NativeAttributes(Name: String): Cardinal;
   external 'GetFileAttributesW@kernel32.dll stdcall';
 function StartupPath: String;
@@ -105,18 +107,29 @@ function SetupMutexName(Param: String): String;
 begin
   Result := 'Global\Styx.Install.' + MutexScope;
 end;
-function CheckIdle(Gate: String): String;
+function CheckIdle(Gate, Operation: String): String;
 var Code: Integer;
 begin
   Result := '';
-  if CheckForMutexes(AppMutexName('')) then begin
-    Result := 'Styx is still running. Finish any tasks, then choose Quit Styx and retry.';
-    exit;
-  end;
   if '{#NativePackage}' = '1' then begin
-    if not Exec(Gate, 'check-native-install "' + InstallRoot + '"', '', SW_HIDE, ewWaitUntilTerminated, Code) then Code := 2;
-  end else if not Exec(Gate, 'check "' + InstallRoot + '"', '', SW_HIDE, ewWaitUntilTerminated, Code) then Code := 2;
-  if Code = 3 then Result := 'This native installer cannot confirm the original App/Core update handoff. Existing versions and device settings have not been changed.'
+    // The original App must consent and settle through its original Core.
+    // Never automatically repeat a possibly dispatched maintenance mutation.
+    if NativeMaintenanceAttempted then begin
+      Result := 'This Setup attempt already requested an App handoff. Review its result before starting a new Setup attempt.';
+      exit;
+    end;
+    NativeMaintenanceAttempted := True;
+    if Operation = 'upgrade' then begin
+      if not Exec(Gate, 'maintain-native-install "' + InstallRoot + '" upgrade "{#PackageHash}"', '', SW_HIDE, ewWaitUntilTerminated, Code) then Code := 2;
+    end else if not Exec(Gate, 'maintain-native-install "' + InstallRoot + '" uninstall -', '', SW_HIDE, ewWaitUntilTerminated, Code) then Code := 2;
+  end else begin
+    if CheckForMutexes(AppMutexName('')) then begin
+      Result := 'Styx is still running. Finish any tasks, then choose Quit Styx and retry.';
+      exit;
+    end;
+    if not Exec(Gate, 'check "' + InstallRoot + '"', '', SW_HIDE, ewWaitUntilTerminated, Code) then Code := 2;
+  end;
+  if Code = 3 then Result := 'Setup could not confirm the original App/Core handoff. Open the installed Styx fully and review its request. An older or closed App requires a supported migration; no program files were changed.'
   else if Code = 1 then Result := 'Styx files are still in use. Finish any tasks and quit Styx before retrying.'
   else if Code <> 0 then Result := 'Setup could not confirm that Styx has stopped. No program files have been changed. Close Styx and retry.';
 end;
@@ -128,7 +141,7 @@ begin
   end;
   ExtractTemporaryFile('StyxInstallGate.exe');
   // SetupMutex is held here. Recheck AppMutex to close the startup race.
-  Result := CheckIdle(ExpandConstant('{tmp}\StyxInstallGate.exe'));
+  Result := CheckIdle(ExpandConstant('{tmp}\StyxInstallGate.exe'), 'upgrade');
   if Result = '' then CaptureOwnedStartup(ExpandConstant('{tmp}\StyxInstallGate.exe'));
 end;
 function InitializeUninstall: Boolean;
@@ -137,7 +150,7 @@ begin
   Result := False;
   if CheckForMutexes(SetupMutexName('')) then exit;
   CreateMutex(SetupMutexName(''));
-  Problem := CheckIdle(ExpandConstant('{app}\.installer\StyxInstallGate.exe'));
+  Problem := CheckIdle(ExpandConstant('{app}\.installer\StyxInstallGate.exe'), 'uninstall');
   if Problem <> '' then begin
     if not UninstallSilent then MsgBox(Problem, mbInformation, MB_OK);
     exit;

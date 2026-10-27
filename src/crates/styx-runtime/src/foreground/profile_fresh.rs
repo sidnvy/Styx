@@ -43,7 +43,11 @@ pub(super) fn load_for_app_retained(
     );
     load_snapshot(&path, snapshot)
 }
-#[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+#[cfg(any(
+    all(target_os = "linux", target_env = "gnu"),
+    target_os = "macos",
+    target_os = "windows"
+))]
 pub(super) fn load_for_service(
     scope: Arc<crate::platform::native_service::ServiceScope>,
 ) -> Result<LoadedLegacyProfile, ProfileError> {

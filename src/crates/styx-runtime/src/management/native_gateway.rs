@@ -275,7 +275,11 @@ async fn bootstrap_owned(
     }
 }
 
-#[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+#[cfg(any(
+    all(target_os = "linux", target_env = "gnu"),
+    target_os = "macos",
+    target_os = "windows"
+))]
 pub(crate) use platform::open_existing_for_service;
 #[cfg(any(
     all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
@@ -639,7 +643,11 @@ mod platform {
         candidate: Arc<VerifiedNativeRelease>,
         inputs: Vec<RawFile>,
         state_raw: Vec<u8>,
-        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "macos",
+            target_os = "windows"
+        ))]
         service_tip: std::sync::OnceLock<crate::store::native_live_tip::ServiceTip>,
         app_scope: Option<Arc<crate::app::HostScope>>,
     }
@@ -650,11 +658,19 @@ mod platform {
                 .unwrap_or_else(|e| e.into_inner())
                 .configuration_root()
         }
-        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "macos",
+            target_os = "windows"
+        ))]
         pub(crate) fn service_transactions(&self) -> Arc<std::sync::Mutex<NativeTransactions>> {
             self.transactions.clone()
         }
-        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "macos",
+            target_os = "windows"
+        ))]
         pub(crate) fn enable_service_control(
             &self,
             scope: Arc<crate::platform::native_service::ServiceScope>,
@@ -671,7 +687,11 @@ mod platform {
                 crate::store::native_live_tip::ServiceTip::open(scope).map_err(|_| changed())?;
             self.service_tip.set(tip).map_err(|_| changed())
         }
-        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "macos",
+            target_os = "windows"
+        ))]
         pub(crate) fn service_tip_status(
             &self,
         ) -> Result<(), crate::store::native_live_tip::LiveTipError> {
@@ -686,14 +706,22 @@ mod platform {
             self.configuration_root()
                 .ensure_admission()
                 .map_err(|_| changed())?;
-            #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+            #[cfg(any(
+                all(target_os = "linux", target_env = "gnu"),
+                target_os = "macos",
+                target_os = "windows"
+            ))]
             if let Some(tip) = self.service_tip.get() {
                 tip.revalidate().map_err(|_| changed())?;
                 self.candidate.revalidate().map_err(|_| changed())?;
             } else {
                 self.validate_original_state()?;
             }
-            #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
+            #[cfg(not(any(
+                all(target_os = "linux", target_env = "gnu"),
+                target_os = "macos",
+                target_os = "windows"
+            )))]
             self.validate_original_state()?;
             for raw in &self.inputs {
                 reobserve(&self.root, raw)?;
@@ -723,7 +751,11 @@ mod platform {
             None,
             None,
             None,
-            #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+            #[cfg(any(
+                all(target_os = "linux", target_env = "gnu"),
+                target_os = "macos",
+                target_os = "windows"
+            ))]
             None,
         )
     }
@@ -743,7 +775,11 @@ mod platform {
             Some(scope.clone()),
             diagnostic,
             retained_candidate,
-            #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+            #[cfg(any(
+                all(target_os = "linux", target_env = "gnu"),
+                target_os = "macos",
+                target_os = "windows"
+            ))]
             None,
         )
         .map_err(|error| error.with_app_scope(Some(scope)))
@@ -787,7 +823,11 @@ mod platform {
                 .with_app_scope(Some(scope))
         })
     }
-    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "macos",
+        target_os = "windows"
+    ))]
     pub(crate) fn open_existing_for_service(
         scope: Arc<crate::platform::native_service::ServiceScope>,
     ) -> Result<FreshGatewayRuntime, BootstrapError> {
@@ -800,7 +840,11 @@ mod platform {
         app_scope: Option<Arc<crate::app::HostScope>>,
         diagnostic: Option<&super::StartupDiagnostic>,
         retained_candidate: Option<Arc<VerifiedNativeRelease>>,
-        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "macos",
+            target_os = "windows"
+        ))]
         service_scope: Option<Arc<crate::platform::native_service::ServiceScope>>,
     ) -> Result<FreshGatewayRuntime, BootstrapError> {
         // Retained verification is an App-owned startup input, never a CLI or
@@ -921,7 +965,11 @@ mod platform {
             } else {
                 NativeManager::ForegroundCli
             };
-            #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+            #[cfg(any(
+                all(target_os = "linux", target_env = "gnu"),
+                target_os = "macos",
+                target_os = "windows"
+            ))]
             let service_owned = if let Some(scope) = &service_scope {
                 if app_scope.is_some()
                     || scope.state_dir() != path
@@ -934,7 +982,11 @@ mod platform {
             } else {
                 false
             };
-            #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
+            #[cfg(not(any(
+                all(target_os = "linux", target_env = "gnu"),
+                target_os = "macos",
+                target_os = "windows"
+            )))]
             let service_owned = false;
             let manager = if service_owned {
                 NativeManager::PersistentService
@@ -1039,7 +1091,11 @@ mod platform {
             candidate,
             inputs,
             state_raw,
-            #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+            #[cfg(any(
+                all(target_os = "linux", target_env = "gnu"),
+                target_os = "macos",
+                target_os = "windows"
+            ))]
             service_tip: std::sync::OnceLock::new(),
             app_scope,
         };

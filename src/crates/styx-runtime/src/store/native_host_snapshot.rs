@@ -1,7 +1,11 @@
 //! Existing-only native Host profile observation. No writer, recovery, fsync,
 //! remote grant, migration proof, or signed-release authority is minted here.
 #![cfg(any(
-    any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"),
+    any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "macos",
+        target_os = "windows"
+    ),
     target_os = "windows",
     target_os = "macos"
 ))]
@@ -10,7 +14,11 @@ use super::{
     secure_journal::{JournalBudget, JournalError, JournalObservation, JournalResult, files},
 };
 #[cfg(any(
-    any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"),
+    any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "macos",
+        target_os = "windows"
+    ),
     target_os = "macos"
 ))]
 use std::os::unix::fs::MetadataExt;
@@ -82,7 +90,11 @@ pub(crate) struct NativeHostSnapshot {
     identity: Zeroizing<Vec<u8>>,
     credential: Zeroizing<Vec<u8>>,
     app_scope: Option<Arc<crate::app::HostScope>>,
-    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "macos",
+        target_os = "windows"
+    ))]
     service_tip: Option<super::native_live_tip::ServiceTip>,
 }
 // Control-only DATA. This projection cannot supply credentials, executable
@@ -133,7 +145,11 @@ impl NativeHostSnapshot {
         let snapshot = Self::open_source(
             path,
             Some(scope),
-            #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+            #[cfg(any(
+                all(target_os = "linux", target_env = "gnu"),
+                target_os = "macos",
+                target_os = "windows"
+            ))]
             None,
             RunPolicy::ControlBinding,
         )?;
@@ -161,7 +177,11 @@ impl NativeHostSnapshot {
         Self::open_source(
             path,
             None,
-            #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+            #[cfg(any(
+                all(target_os = "linux", target_env = "gnu"),
+                target_os = "macos",
+                target_os = "windows"
+            ))]
             None,
             RunPolicy::Execution,
         )
@@ -173,7 +193,11 @@ impl NativeHostSnapshot {
         Self::open_source(
             path,
             Some(scope),
-            #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+            #[cfg(any(
+                all(target_os = "linux", target_env = "gnu"),
+                target_os = "macos",
+                target_os = "windows"
+            ))]
             None,
             RunPolicy::Execution,
         )
@@ -186,13 +210,21 @@ impl NativeHostSnapshot {
         Self::open_source_retained(
             path,
             Some(scope),
-            #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+            #[cfg(any(
+                all(target_os = "linux", target_env = "gnu"),
+                target_os = "macos",
+                target_os = "windows"
+            ))]
             None,
             RunPolicy::Execution,
             Some(runtime),
         )
     }
-    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "macos",
+        target_os = "windows"
+    ))]
     pub(crate) fn open_for_service(
         scope: Arc<crate::platform::native_service::ServiceScope>,
     ) -> JournalResult<Self> {
@@ -202,7 +234,11 @@ impl NativeHostSnapshot {
         }
         Self::open_source(&path, None, Some(scope), RunPolicy::Execution)
     }
-    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "macos",
+        target_os = "windows"
+    ))]
     pub(crate) fn service_canonical_matches(
         &self,
         root: &PrivateRoot,
@@ -223,14 +259,22 @@ impl NativeHostSnapshot {
     fn open_source(
         path: &Path,
         app_scope: Option<Arc<crate::app::HostScope>>,
-        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "macos",
+            target_os = "windows"
+        ))]
         service_scope: Option<Arc<crate::platform::native_service::ServiceScope>>,
         run_policy: RunPolicy,
     ) -> JournalResult<Self> {
         Self::open_source_retained(
             path,
             app_scope,
-            #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+            #[cfg(any(
+                all(target_os = "linux", target_env = "gnu"),
+                target_os = "macos",
+                target_os = "windows"
+            ))]
             service_scope,
             run_policy,
             None,
@@ -239,7 +283,11 @@ impl NativeHostSnapshot {
     fn open_source_retained(
         path: &Path,
         app_scope: Option<Arc<crate::app::HostScope>>,
-        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "macos",
+            target_os = "windows"
+        ))]
         service_scope: Option<Arc<crate::platform::native_service::ServiceScope>>,
         run_policy: RunPolicy,
         runtime: Option<Arc<crate::release::VerifiedNativeRelease>>,
@@ -255,7 +303,11 @@ impl NativeHostSnapshot {
         } else {
             NativeManager::ForegroundCli
         };
-        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "macos",
+            target_os = "windows"
+        ))]
         let manager = if let Some(scope) = &service_scope {
             if scope.state_dir() != path || app_scope.is_some() {
                 return Err(JournalError::Conflict);
@@ -425,7 +477,11 @@ impl NativeHostSnapshot {
             identity,
             credential,
             app_scope,
-            #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+            #[cfg(any(
+                all(target_os = "linux", target_env = "gnu"),
+                target_os = "macos",
+                target_os = "windows"
+            ))]
             service_tip: service_scope
                 .map(super::native_live_tip::ServiceTip::open)
                 .transpose()?,
@@ -434,7 +490,11 @@ impl NativeHostSnapshot {
         Ok(snapshot)
     }
     pub(crate) fn revalidate(&self) -> JournalResult<()> {
-        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "macos",
+            target_os = "windows"
+        ))]
         let successor = self
             .service_tip
             .as_ref()
@@ -456,17 +516,26 @@ impl NativeHostSnapshot {
                     self.check_pins(
                         #[cfg(any(
                             all(target_os = "linux", target_env = "gnu"),
-                            target_os = "macos"
+                            target_os = "macos",
+                            target_os = "windows"
                         ))]
                         successor.as_ref(),
                     )?;
                     let scan = files::scan(&self.namespace, JournalBudget::default())?;
-                    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+                    #[cfg(any(
+                        all(target_os = "linux", target_env = "gnu"),
+                        target_os = "macos",
+                        target_os = "windows"
+                    ))]
                     if let Some(proof) = &successor {
                         proof.check_scan(&scan)?;
                     }
                     let matches = same_scan(&scan, &self.journal);
-                    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+                    #[cfg(any(
+                        all(target_os = "linux", target_env = "gnu"),
+                        target_os = "macos",
+                        target_os = "windows"
+                    ))]
                     let matches = successor
                         .as_ref()
                         .map_or(matches, |proof| proof.matches_scan(&scan));
@@ -476,7 +545,8 @@ impl NativeHostSnapshot {
                     self.check_pins(
                         #[cfg(any(
                             all(target_os = "linux", target_env = "gnu"),
-                            target_os = "macos"
+                            target_os = "macos",
+                            target_os = "windows"
                         ))]
                         successor.as_ref(),
                     )?;
@@ -493,11 +563,19 @@ impl NativeHostSnapshot {
     }
     fn check_pins(
         &self,
-        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "macos",
+            target_os = "windows"
+        ))]
         successor: Option<&super::native_live_tip::ServiceTipProof>,
     ) -> JournalResult<()> {
         for pin in &self.pins {
-            #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+            #[cfg(any(
+                all(target_os = "linux", target_env = "gnu"),
+                target_os = "macos",
+                target_os = "windows"
+            ))]
             let raw = if pin.path == "state.json"
                 && let Some(proof) = successor
             {
@@ -507,21 +585,33 @@ impl NativeHostSnapshot {
                     .read_raw(&pin.path, pin.limit)
                     .map_err(|_| JournalError::Unknown)?
             };
-            #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
+            #[cfg(not(any(
+                all(target_os = "linux", target_env = "gnu"),
+                target_os = "macos",
+                target_os = "windows"
+            )))]
             let raw = self
                 .root
                 .read_raw(&pin.path, pin.limit)
                 .map_err(|_| JournalError::Unknown)?;
             let matches = raw.observation() == &pin.observation
                 && Sha256Digest::of_bytes(raw.bytes()) == pin.digest;
-            #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+            #[cfg(any(
+                all(target_os = "linux", target_env = "gnu"),
+                target_os = "macos",
+                target_os = "windows"
+            ))]
             let matches = if pin.path == "state.json" {
                 successor.map_or(matches, |proof| proof.matches_state(&raw))
             } else {
                 matches
             };
             if !matches {
-                #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+                #[cfg(any(
+                    all(target_os = "linux", target_env = "gnu"),
+                    target_os = "macos",
+                    target_os = "windows"
+                ))]
                 if pin.path == "state.json"
                     && let Some(proof) = successor
                 {

@@ -351,6 +351,13 @@ impl VerifiedNativeRelease {
         self.revalidate()?;
         Ok(cdhash)
     }
+    /// Original native CLI pin for SCM identity comparisons only. This does not
+    /// enable pathname-based spawning on Windows.
+    #[cfg(target_os = "windows")]
+    pub(crate) fn windows_executable(&self) -> Result<&PinnedExecutable> {
+        self.revalidate()?;
+        Ok(&self.executable)
+    }
     /// Returns only the fixed, retained native image's kernel FD path. This
     /// function does not spawn, install, activate or authorize arbitrary commands.
     pub fn launch_path(&self) -> Result<PathBuf> {

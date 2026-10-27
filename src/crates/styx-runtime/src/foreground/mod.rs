@@ -77,7 +77,11 @@ pub async fn inspect(state_dir: &Path) -> Result<ProfileDiagnostics, ForegroundE
     .map_err(Into::into)
 }
 mod run;
-#[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+#[cfg(any(
+    all(target_os = "linux", target_env = "gnu"),
+    target_os = "macos",
+    target_os = "windows"
+))]
 pub(crate) use gateway::gateway_run_for_service;
 pub use run::host_run;
 #[cfg(any(
@@ -86,7 +90,11 @@ pub use run::host_run;
     target_os = "macos"
 ))]
 pub(crate) use run::host_run_for_app;
-#[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+#[cfg(any(
+    all(target_os = "linux", target_env = "gnu"),
+    target_os = "macos",
+    target_os = "windows"
+))]
 pub(crate) use run::host_run_for_service;
 mod gateway;
 #[cfg(any(

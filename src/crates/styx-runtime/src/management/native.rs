@@ -27,6 +27,10 @@ pub mod service;
 #[path = "native_service_macos.rs"]
 pub mod service;
 
+#[cfg(target_os = "windows")]
+#[path = "native_service_windows.rs"]
+pub mod service;
+
 #[path = "native_update.rs"]
 pub mod update;
 
@@ -104,7 +108,11 @@ pub struct NativeManagementError {
     runtime_update_transaction: Option<TransactionId>,
 }
 enum Retained {
-    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "macos",
+        target_os = "windows"
+    ))]
     Service {
         _job: tokio::task::JoinHandle<()>,
     },
@@ -146,7 +154,11 @@ impl NativeManagementError {
         all(target_os = "linux", target_env = "gnu")
     ))]
     pub fn requires_process_teardown(&self) -> bool {
-        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "macos",
+            target_os = "windows"
+        ))]
         if matches!(self._retained, Some(Retained::Service { .. })) {
             return true;
         }
@@ -966,7 +978,11 @@ mod platform {
         }
         Ok(())
     }
-    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "macos",
+        target_os = "windows"
+    ))]
     pub(super) fn service_open(path: &Path) -> Result<NativeTransactions> {
         let mut transactions = open(path)?;
         let checked = prepare_managed_transactions(path, None, &mut transactions)

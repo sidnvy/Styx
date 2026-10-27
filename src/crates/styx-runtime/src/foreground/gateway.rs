@@ -64,7 +64,11 @@ pub async fn gateway_run(
                 None,
                 None,
                 (None, None),
-                #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+                #[cfg(any(
+                    all(target_os = "linux", target_env = "gnu"),
+                    target_os = "macos",
+                    target_os = "windows"
+                ))]
                 None,
             )
             .await
@@ -87,7 +91,11 @@ pub async fn gateway_run(
 }
 
 /// Service admission comes only from the authenticated original OS unit.
-#[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+#[cfg(any(
+    all(target_os = "linux", target_env = "gnu"),
+    target_os = "macos",
+    target_os = "windows"
+))]
 pub(crate) async fn gateway_run_for_service(
     scope: std::sync::Arc<crate::platform::native_service::ServiceScope>,
     cancel: CancellationToken,
@@ -192,7 +200,11 @@ pub(crate) async fn gateway_run_for_app(
                 Some(scope),
                 Some(loader_failure),
                 (diagnostic, retained_candidate),
-                #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+                #[cfg(any(
+                    all(target_os = "linux", target_env = "gnu"),
+                    target_os = "macos",
+                    target_os = "windows"
+                ))]
                 None,
             )
             .await
@@ -511,7 +523,11 @@ mod platform {
                     .ok_or(error("committed_migration_binding_required")),
             }
         }
-        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "macos",
+            target_os = "windows"
+        ))]
         fn service_tip_status(&self) -> Result<(), crate::store::native_live_tip::LiveTipError> {
             match self {
                 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -559,7 +575,11 @@ mod platform {
                 Self::Native(p) => p.validate_owner(owner),
             }
         }
-        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "macos",
+            target_os = "windows"
+        ))]
         fn service_transactions(
             &self,
         ) -> Result<
@@ -604,7 +624,11 @@ mod platform {
         address: SocketAddr,
         native: Option<NativeCommittedAdmission>,
         fresh: Option<crate::management::native_gateway::FreshGatewayRuntime>,
-        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "macos",
+            target_os = "windows"
+        ))]
         control_gate: std::sync::Mutex<()>,
     }
     /// One-shot bootstrap evidence for this exact cooperating Rust foreground
@@ -629,14 +653,22 @@ mod platform {
     }
     impl Admitted {
         fn validate(&self) -> Result<(), ForegroundError> {
-            #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+            #[cfg(any(
+                all(target_os = "linux", target_env = "gnu"),
+                target_os = "macos",
+                target_os = "windows"
+            ))]
             let _gate = self
                 .control_gate
                 .lock()
                 .map_err(|_| error("service_control_unknown"))?;
             self.validate_inner()
         }
-        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "macos",
+            target_os = "windows"
+        ))]
         fn service_tip_status(&self) -> Result<(), crate::store::native_live_tip::LiveTipError> {
             if let Some(fresh) = &self.fresh {
                 fresh.service_tip_status()
@@ -804,7 +836,11 @@ mod platform {
                 None,
                 None,
                 None,
-                #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+                #[cfg(any(
+                    all(target_os = "linux", target_env = "gnu"),
+                    target_os = "macos",
+                    target_os = "windows"
+                ))]
                 None,
             );
         }
@@ -841,7 +877,11 @@ mod platform {
                     gateway,
                     CommittedSnapshot::Native(snapshot),
                     None,
-                    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+                    #[cfg(any(
+                        all(target_os = "linux", target_env = "gnu"),
+                        target_os = "macos",
+                        target_os = "windows"
+                    ))]
                     None,
                 );
             }
@@ -855,7 +895,11 @@ mod platform {
             Err(error("fresh_native_gateway_required"))
         }
     }
-    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "macos",
+        target_os = "windows"
+    ))]
     fn load_service(
         path: &Path,
         scope: Arc<crate::platform::native_service::ServiceScope>,
@@ -915,7 +959,11 @@ mod platform {
                 failure,
                 diagnostic,
                 retained_candidate,
-                #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+                #[cfg(any(
+                    all(target_os = "linux", target_env = "gnu"),
+                    target_os = "macos",
+                    target_os = "windows"
+                ))]
                 None,
             );
         }
@@ -939,7 +987,11 @@ mod platform {
                 scope,
                 failure.ok_or(error("app_gateway_startup_owner_required"))?,
             )),
-            #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+            #[cfg(any(
+                all(target_os = "linux", target_env = "gnu"),
+                target_os = "macos",
+                target_os = "windows"
+            ))]
             None,
         )
     }
@@ -1182,7 +1234,11 @@ mod platform {
             absent_inputs,
             lease,
             _configuration: configuration,
-            #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+            #[cfg(any(
+                all(target_os = "linux", target_env = "gnu"),
+                target_os = "macos",
+                target_os = "windows"
+            ))]
             control_gate: std::sync::Mutex::new(()),
             address,
             native: None,
@@ -1206,13 +1262,25 @@ mod platform {
         app_failure: Option<AppStartupFailure>,
         diagnostic: Option<&crate::management::native_gateway::StartupDiagnostic>,
         retained_candidate: Option<Arc<crate::release::VerifiedNativeRelease>>,
-        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "macos",
+            target_os = "windows"
+        ))]
         service_scope: Option<Arc<crate::platform::native_service::ServiceScope>>,
     ) -> Result<Loaded, ForegroundError> {
-        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "macos",
+            target_os = "windows"
+        ))]
         let service_runtime =
             service_scope.map(crate::management::native_gateway::open_existing_for_service);
-        #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
+        #[cfg(not(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "macos",
+            target_os = "windows"
+        )))]
         let service_runtime: Option<
             Result<
                 crate::management::native_gateway::FreshGatewayRuntime,
@@ -1293,7 +1361,11 @@ mod platform {
             absent_inputs: vec![],
             lease,
             _configuration: configuration,
-            #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+            #[cfg(any(
+                all(target_os = "linux", target_env = "gnu"),
+                target_os = "macos",
+                target_os = "windows"
+            ))]
             control_gate: std::sync::Mutex::new(()),
             address: runtime.address,
             native: None,
@@ -1343,7 +1415,11 @@ mod platform {
         gateway: Arc<PrivateRoot>,
         snapshot: CommittedSnapshot,
         app: Option<(Arc<crate::app::HostScope>, AppStartupFailure)>,
-        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "macos",
+            target_os = "windows"
+        ))]
         service_scope: Option<Arc<crate::platform::native_service::ServiceScope>>,
     ) -> Result<Loaded, ForegroundError> {
         use styx_contracts::native_management::{NativeGatewayEndpointBinding, NativeRunDesired};
@@ -1370,7 +1446,11 @@ mod platform {
             } else {
                 NativeManager::ForegroundCli
             };
-            #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+            #[cfg(any(
+                all(target_os = "linux", target_env = "gnu"),
+                target_os = "macos",
+                target_os = "windows"
+            ))]
             let service_owned = if let Some(scope) = &service_scope {
                 scope
                     .validate()
@@ -1382,7 +1462,11 @@ mod platform {
             } else {
                 false
             };
-            #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
+            #[cfg(not(any(
+                all(target_os = "linux", target_env = "gnu"),
+                target_os = "macos",
+                target_os = "windows"
+            )))]
             let service_owned = false;
             let manager = if service_owned {
                 NativeManager::PersistentService
@@ -1585,7 +1669,11 @@ mod platform {
             absent_inputs: vec![],
             lease,
             _configuration: configuration,
-            #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+            #[cfg(any(
+                all(target_os = "linux", target_env = "gnu"),
+                target_os = "macos",
+                target_os = "windows"
+            ))]
             control_gate: std::sync::Mutex::new(()),
             address: SocketAddr::new(ip, port),
             native: Some(NativeCommittedAdmission {
@@ -1622,9 +1710,17 @@ mod platform {
     }
     enum Validation {
         Ready,
-        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "macos",
+            target_os = "windows"
+        ))]
         Pending,
-        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "macos",
+            target_os = "windows"
+        ))]
         StopRequested,
     }
     async fn validate_for_poll(admitted: Arc<Admitted>) -> Result<Validation, ForegroundError> {
@@ -1633,7 +1729,11 @@ mod platform {
             .map_err(|_| error("gateway_reader_busy"))?;
         tokio::task::spawn_blocking(move || {
             let _permit = permit;
-            #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+            #[cfg(any(
+                all(target_os = "linux", target_env = "gnu"),
+                target_os = "macos",
+                target_os = "windows"
+            ))]
             {
                 use crate::store::native_live_tip::LiveTipError;
                 let _gate = admitted
@@ -1650,7 +1750,11 @@ mod platform {
                 }
                 admitted.validate_inner()?;
             }
-            #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
+            #[cfg(not(any(
+                all(target_os = "linux", target_env = "gnu"),
+                target_os = "macos",
+                target_os = "windows"
+            )))]
             admitted.validate()?;
             Ok(Validation::Ready)
         })
@@ -1660,9 +1764,17 @@ mod platform {
     async fn validate(admitted: Arc<Admitted>) -> Result<(), ForegroundError> {
         match validate_for_poll(admitted).await? {
             Validation::Ready => Ok(()),
-            #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+            #[cfg(any(
+                all(target_os = "linux", target_env = "gnu"),
+                target_os = "macos",
+                target_os = "windows"
+            ))]
             Validation::Pending => Err(error("gateway_configuration_pending")),
-            #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+            #[cfg(any(
+                all(target_os = "linux", target_env = "gnu"),
+                target_os = "macos",
+                target_os = "windows"
+            ))]
             Validation::StopRequested => Err(error("gateway_stop_requested")),
         }
     }
@@ -1676,7 +1788,11 @@ mod platform {
             Option<crate::management::native_gateway::StartupDiagnostic>,
             Option<Arc<crate::release::VerifiedNativeRelease>>,
         ),
-        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "macos",
+            target_os = "windows"
+        ))]
         service_scope: Option<Arc<crate::platform::native_service::ServiceScope>>,
     ) -> Result<GatewayForegroundOutcome, ForegroundError> {
         let (diagnostic, retained_candidate) = startup;
@@ -1695,7 +1811,11 @@ mod platform {
             host,
             gateway_id,
         } = {
-            #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+            #[cfg(any(
+                all(target_os = "linux", target_env = "gnu"),
+                target_os = "macos",
+                target_os = "windows"
+            ))]
             let loader_service = service_scope.clone();
             let loader_diagnostic = diagnostic.clone();
             if let Some(d) = &diagnostic {
@@ -1703,7 +1823,11 @@ mod platform {
             }
             tokio::task::spawn_blocking(move || {
                 let _permit = permit;
-                #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+                #[cfg(any(
+                    all(target_os = "linux", target_env = "gnu"),
+                    target_os = "macos",
+                    target_os = "windows"
+                ))]
                 if let Some(scope) = loader_service {
                     return load_service(&path, scope);
                 }
@@ -1800,7 +1924,11 @@ mod platform {
             return Err(error("gateway_start_cancelled"));
         }
         let control_failed = CancellationToken::new();
-        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "macos",
+            target_os = "windows"
+        ))]
         let control = if let Some(scope) = service_scope {
             use crate::management::service_control::{
                 ControlServer, Handler, ServiceControlError, ServiceControlReport, ServiceRequest,
@@ -1915,15 +2043,15 @@ mod platform {
                 _ = interval.tick(), if !stop.is_cancelled() => {
                     match validate_for_poll(admitted.clone()).await {
                         Ok(Validation::Ready)=> {
-                            #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+                            #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos", target_os = "windows"))]
                             if shared.with(|s| s.set_service_tip_pending(false)).await.is_err() {invalidated=true;stop.cancel();}
                         }
-                        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+                        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos", target_os = "windows"))]
                         Ok(Validation::Pending)=> {
-                            #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+                            #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos", target_os = "windows"))]
                             if shared.with(|s| s.set_service_tip_pending(true)).await.is_err() {invalidated=true;stop.cancel();}
                         }
-                        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+                        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos", target_os = "windows"))]
                         Ok(Validation::StopRequested)=>stop.cancel(),
                         Err(error)=> {
                             if let Some(d) = &diagnostic { d.report(error.code()); }
@@ -1933,7 +2061,11 @@ mod platform {
                 }
             }
         };
-        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "macos",
+            target_os = "windows"
+        ))]
         let control_joined = {
             stop.cancel();
             match control {
@@ -1946,7 +2078,11 @@ mod platform {
         // and execution lease while real blocking/read tasks finish.
         let mut joined = facts.blocking_jobs_joined;
         let mut worker_failure = facts.worker_failure_observed;
-        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "macos",
+            target_os = "windows"
+        ))]
         {
             worker_failure |= !control_joined;
         }
@@ -2060,7 +2196,11 @@ mod platform {
                 absent_inputs: vec![],
                 lease: gateway.try_execution_lease().unwrap(),
                 _configuration: owner.clone(),
-                #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+                #[cfg(any(
+                    all(target_os = "linux", target_env = "gnu"),
+                    target_os = "macos",
+                    target_os = "windows"
+                ))]
                 control_gate: std::sync::Mutex::new(()),
                 address: "127.0.0.1:32651".parse().unwrap(),
                 native: None,

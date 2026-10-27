@@ -78,7 +78,26 @@ namespace StyxNative {
     string line=await pendingRead;pendingRead=null;if(line==null||Volatile.Read(ref closed)!=0)throw new IOException("app_result_unknown_no_replay");var response=Json.Codec.DeserializeObject(line);if(Convert.ToInt32(Json.Get(response,"id"))!=id){Dispose();throw new IOException("app_correlation_unknown_no_replay");}if(!Json.Yes(response,"ok"))throw new NativeOperationException(Json.Str(response,"error"));return Json.Get(response,"result");
    }catch(NativeOperationException){throw;}catch{Dispose();throw new IOException("app_result_unknown_no_replay");}finally{gate.Release();}
   }
+  int maintenanceCustody;
+  internal object MaintenanceIdentity(){var p=child;if(p==null||Volatile.Read(ref closed)!=0||p.HasExited)throw new IOException("maintenance_core_unavailable");IntPtr held=p.Handle;return Json.Obj("pid",p.Id,"creationFileTime",MaintenancePeer.Birth(p));}
+  internal async Task BeginMaintenanceCustody(){await gate.WaitAsync();try{if(Volatile.Read(ref closed)!=0||pendingRead!=null||child==null||child.HasExited||Interlocked.CompareExchange(ref maintenanceCustody,1,0)!=0)throw new IOException("maintenance_core_custody_unavailable");}finally{gate.Release();}}
+  internal void ReleaseMaintenanceCustody(){if(Volatile.Read(ref closed)!=0||pendingRead!=null)throw new IOException("maintenance_core_custody_unknown");Interlocked.Exchange(ref maintenanceCustody,0);}
+  internal async Task<object> SettleMaintenance(){
+   await gate.WaitAsync();try{
+    var p=child;if(p==null||Volatile.Read(ref maintenanceCustody)!=1||pendingRead!=null||Interlocked.CompareExchange(ref closed,1,0)!=0)throw new IOException("maintenance_core_custody_unknown");
+    int pid=p.Id;string birth=MaintenancePeer.Birth(p);p.StandardInput.Close();
+    // No deadline or signal: keep this exact Process and both readers until
+    // EOF and actual exit. Core's full quit ticket precedes this method.
+    var stdout=Drain(p.StandardOutput);await Task.Run(()=>p.WaitForExit());await stdout;if(stderrDrain!=null)await stderrDrain;
+    int code=p.ExitCode;if(code!=0)throw new IOException("maintenance_core_exit_unconfirmed");
+    CleanupConfirmed=true;selectionPin.Dispose();bootstrap.Dispose();cancellationRegistration.Dispose();p.Dispose();child=null;
+    return Json.Obj("pid",pid,"creationFileTime",birth,"exitCode",code,"stdinEof",true,"ioJoined",true);
+   }finally{gate.Release();}
+  }
   public void Dispose(){
+   // Maintenance retains its original handles on uncertainty; it never enters
+   // the ordinary UI cleanup deadline/kill path.
+   if(Volatile.Read(ref maintenanceCustody)==1)return;
    if(Interlocked.Exchange(ref closed,1)!=0)return;var p=child;bool clean=true;if(p!=null&&childStarted){try{p.StandardInput.Close();}catch{clean=false;}try{if(!p.WaitForExit(10000)){clean=false;try{p.Kill();}catch{}}p.WaitForExit();}catch{clean=false;throw new IOException("app_child_cleanup_unknown");}
     try{var reading=pendingRead;if(reading!=null)reading.GetAwaiter().GetResult();Drain(p.StandardOutput).GetAwaiter().GetResult();if(stderrDrain!=null)stderrDrain.GetAwaiter().GetResult();}catch{clean=false;}CleanupConfirmed=clean&&p.ExitCode==0;p.Dispose();child=null;
    }else if(p!=null){p.Dispose();child=null;}selectionPin.Dispose();bootstrap.Dispose();cancellationRegistration.Dispose();
@@ -243,6 +262,71 @@ namespace StyxNative {
     if(loginStartup){settings.CreateControl();settings.Handle.ToInt64();startupTimer.Start();}else{settings.Shown+=(s,e)=>startupTimer.Start();OpenSettings();}
    }
   }
+  System.IO.Pipes.NamedPipeServerStream maintenancePipe;Task<bool> maintenanceOwner;bool maintenanceAttempted;
+  static bool Hex(string text,int size){return System.Text.RegularExpressions.Regex.IsMatch(text,"\\A[a-f0-9]{"+size+"}\\z");}
+  string MaintenanceRoot(){string resources=Path.GetFullPath(root).TrimEnd('\\');string hash=Path.GetFileName(resources);var versions=Directory.GetParent(resources);if(versions==null||versions.Name!="versions"||versions.Parent==null||!Hex(hash,64))throw new IOException("maintenance_installed_scope_required");return versions.Parent.FullName;}
+  Task<object> MaintenanceOnUi(Func<Task<object>> action){var done=new TaskCompletionSource<object>();settings.BeginInvoke(new Action(async()=>{try{done.TrySetResult(await action());}catch(Exception error){done.TrySetException(error);}}));return done.Task;}
+  object MaintenanceHello(string install){if(closing||starting||core==null)throw new IOException("maintenance_owner_not_ready");using(var self=Process.GetCurrentProcess())return Json.Obj("schema",1,"kind","styx-native-maintenance-owner","pid",self.Id,"creationFileTime",MaintenancePeer.Birth(self),"ownerSid",System.Security.Principal.WindowsIdentity.GetCurrent().User.Value,"installRoot",install,"resources",Path.GetFullPath(root).TrimEnd('\\'),"packageSha256",Path.GetFileName(Path.GetFullPath(root).TrimEnd('\\')),"core",core.MaintenanceIdentity());}
+  void StartMaintenanceOwner(){
+   if(startupTest||maintenanceOwner!=null||!Supports("prepareAppMaintenance"))return;
+   try{
+    string install=MaintenanceRoot();NativeBootstrap.NoRedirect(root);string package=Path.Combine(root,"windows-package.json");NativeBootstrap.NoRedirect(package);using(var pin=new FileStream(package,FileMode.Open,FileAccess.Read,FileShare.Read))if(NativeBootstrap.Hash(pin)!=Path.GetFileName(Path.GetFullPath(root).TrimEnd('\\')))return;
+    var acl=new System.IO.Pipes.PipeSecurity();var user=System.Security.Principal.WindowsIdentity.GetCurrent().User;acl.SetOwner(user);acl.SetAccessRuleProtection(true,false);foreach(string sid in new[]{user.Value,"S-1-5-18","S-1-5-32-544"})acl.AddAccessRule(new System.IO.Pipes.PipeAccessRule(new System.Security.Principal.SecurityIdentifier(sid),System.IO.Pipes.PipeAccessRights.FullControl,System.Security.AccessControl.AccessControlType.Allow));
+    maintenancePipe=new System.IO.Pipes.NamedPipeServerStream(MaintenancePeer.PipeName(install),System.IO.Pipes.PipeDirection.InOut,1,System.IO.Pipes.PipeTransmissionMode.Byte,System.IO.Pipes.PipeOptions.Asynchronous,4096,4096,acl);
+    var pipe=maintenancePipe;maintenanceOwner=Task.Run(async()=>{bool settled=false;
+     try{
+      await Task.Factory.FromAsync(pipe.BeginWaitForConnection,pipe.EndWaitForConnection,null);using(var requester=MaintenancePeer.Connected(pipe,false)){
+       string image=requester.MainModule.FileName;NativeBootstrap.NoRedirect(image);if(Path.GetFileName(image)!="StyxInstallGate.exe"||!MaintenancePeer.SetupPresent(install))throw new IOException("maintenance_requester_unconfirmed");
+       // Preview helper paths do not establish publisher trust. The current
+       // user still approves the exact operation in this original App below.
+       using(var imagePin=new FileStream(image,FileMode.Open,FileAccess.Read,FileShare.Read))using(var reader=new StreamReader(pipe,new System.Text.UTF8Encoding(false,true),false,4096,true))using(var writer=new StreamWriter(pipe,new System.Text.UTF8Encoding(false),4096,true){AutoFlush=true}){
+        var codec=new JavaScriptSerializer {MaxJsonLength=2097152};object hello=await MaintenanceOnUi(()=>Task.FromResult(MaintenanceHello(install)));await writer.WriteLineAsync(codec.Serialize(hello));
+        string line=await Core.ReadLineBounded(reader,65536);if(line==null)throw new IOException("maintenance_request_missing");var request=codec.DeserializeObject(line);var result=await MaintenanceOnUi(()=>MaintainOriginalApp(install,request,requester));await writer.WriteLineAsync(codec.Serialize(result));await writer.FlushAsync();
+        settled=Json.Str(result,"status")=="settled";
+       }
+      }
+     }catch{if(!closing)try{settings.BeginInvoke(new Action(()=>{if(busy)settings.Feedback("The installation handoff is unconfirmed. Keep this App open for review. No operation will be repeated.");}));}catch{}}
+     finally{pipe.Dispose();}
+     return settled;
+    });
+    maintenanceOwner.ContinueWith(done=>{if(done.Status==TaskStatus.RanToCompletion&&done.Result)try{settings.BeginInvoke(new Action(Quit));}catch{}},TaskScheduler.Default);
+   }catch{if(maintenancePipe!=null){maintenancePipe.Dispose();maintenancePipe=null;}}
+  }
+  void ValidateMaintenance(object value,object request,string expected,string ticket=null){
+   if(!Equals(Json.Get(value,"schema"),1)||Json.Str(value,"status")!=expected||!Hex(Json.Str(value,"ticketId"),32)||ticket!=null&&Json.Str(value,"ticketId")!=ticket||Json.Str(value,"scope")!="original_app"||Json.Str(value,"runtimeReferences")!="outside_install_root"||!Json.Yes(value,"statePreserved")||!Equals(Json.Get(value,"operationsReplayed"),false)||!Json.Yes(value,"requiresOwnedQuit"))throw new IOException("maintenance_ticket_invalid");
+   foreach(string field in new[]{"requestId","operation","installRoot","packageSha256","candidatePackageSha256"})if(!Equals(Json.Get(value,field),Json.Get(request,field)))throw new IOException("maintenance_ticket_changed");
+  }
+  async Task<object> MaintainOriginalApp(string install,object request,Process requester){
+   string action=Json.Str(request,"operation"),hash=Path.GetFileName(Path.GetFullPath(root).TrimEnd('\\')),candidate=Json.Str(request,"candidatePackageSha256");
+   if(closing||starting||busy||core==null||maintenanceAttempted||!RustHost||!Supports("prepareAppMaintenance")||!Equals(Json.Get(request,"schema"),1)||!Hex(Json.Str(request,"requestId"),32)||(action!="upgrade"&&action!="uninstall")||!Equals(Json.Get(request,"installRoot"),install)||Json.Str(request,"packageSha256")!=hash||(action=="upgrade"?!Hex(candidate,64):Json.Get(request,"candidatePackageSha256")!=null)||!MaintenancePeer.SetupPresent(install))return Json.Obj("status","blocked");
+   busy=true;mutationDone=new TaskCompletionSource<bool>();OpenSettings();string prompt=action=="upgrade"?"Setup requests an upgrade of this Styx installation. Running tasks must finish before the original App can close. Device identity, pairing and settings will be retained. Continue?":"Setup requests uninstalling this Styx installation. Its owned login startup entry will be removed through this App. Device identity, pairing and settings will be retained. Continue?";
+   if(MessageBox.Show(settings,prompt,"Styx installation",MessageBoxButtons.OKCancel,MessageBoxIcon.Question)!=DialogResult.OK){busy=false;mutationDone.TrySetResult(true);return Json.Obj("status","cancelled");}
+   if(requester.HasExited||!MaintenancePeer.SetupPresent(install)){busy=false;mutationDone.TrySetResult(true);return Json.Obj("status","blocked");}
+   maintenanceAttempted=true;mutationRevision++;settings.Enabled=false;settings.Feedback("Preparing the original App for Setup…");object prepared=null,login=null,quit=null,exit=null;Exception failure=null;bool custody=false,mutationDispatched=false;
+   try{
+    var reading=observation;if(reading!=null){try{await reading;}catch{}if(observation==reading)observation=null;}
+    await core.BeginMaintenanceCustody();custody=true;
+    if(action=="uninstall"){
+     if(loginChangeUnconfirmed)throw new NativeOperationException("app_login_result_unknown_no_replay");using(var before=NativeLoginStartup.Observe(root,state)){if(before.Status=="registered_unverified"){mutationDispatched=true;await Call("appLogin",Json.Obj("enabled",false));}else if(before.Status!="not_registered")throw new NativeOperationException("app_login_observation_changed");}
+     using(var current=NativeLoginStartup.Observe(root,state)){if(current.Status!="not_registered"||loginChangeUnconfirmed)throw new NativeOperationException("app_login_result_unknown_no_replay");login=current.Wire;}
+    }
+    var input=Json.Obj("schema",1,"authorize",true,"operation",action,"requestId",Json.Str(request,"requestId"),"installRoot",install,"packageSha256",hash,"candidatePackageSha256",Json.Get(request,"candidatePackageSha256"),"loginObservation",login);
+    mutationDispatched=true;prepared=await core.Call("prepareAppMaintenance",input);ValidateMaintenance(Json.Get(prepared,"maintenance"),request,"prepared");
+    // Exactly one original Core admission, retaining every drain/custody field.
+    quit=await core.Call("quitAdmission",Json.Obj());if(Json.Str(quit,"quit","status")!="ready_to_quit"||!Hex(Json.Str(quit,"quit","ticketId"),32))throw new IOException("maintenance_quit_unconfirmed");ValidateMaintenance(Json.Get(quit,"maintenance"),request,"ready_to_exit",Json.Str(prepared,"maintenance","ticketId"));
+    exit=await core.SettleMaintenance();
+   }catch(Exception error){failure=error;}
+   if(failure!=null){
+    bool released=!custody;
+    // Only a local preflight before any dispatched mutation can release custody.
+    // A rejected maintenance Quit fences the original Core as unknown, even if
+    // its error names a busy task. Never cancel or replay that original attempt.
+    if(custody&&!mutationDispatched){try{core.ReleaseMaintenanceCustody();released=true;}catch{}}
+    if(released){busy=false;settings.Enabled=true;mutationDone.TrySetResult(true);settings.Feedback("Setup could not prepare this App. No program files were changed. Review the connection before starting a new Setup attempt.");}else settings.Feedback("The installation handoff is unconfirmed. Keep this App open for review. No operation will be repeated.");
+    return Json.Obj("status",released?"blocked":"unknown");
+   }
+   return Json.Obj("schema",1,"status","settled","requestId",Json.Str(request,"requestId"),"operation",action,"installRoot",install,"packageSha256",hash,"candidatePackageSha256",Json.Get(request,"candidatePackageSha256"),"prepared",prepared,"quitTicket",quit,"loginObservation",login,"coreExit",exit);
+  }
   internal void RecordFirstPaint(){if(firstPaintTicks<0)firstPaintTicks=startupClock.ElapsedTicks;}
   internal async Task InitializeCore(){
    if(closing||core!=null)return;starting=true;settings.Startup("Checking app files…",true,false);message.Text="Checking app files…";Core pending=null;NativeBootstrap verifiedRuntime=null;string startupFailure="";bool packageVerified=false;
@@ -254,7 +338,7 @@ namespace StyxNative {
     pending=await Task.Run(()=>new Core(verifiedRuntime,state,startupCancellation.Token));if(closing){pending.Dispose();pending=null;return;}
     // Do not enable any action until the real Core answers its first status read.
     var latest=await pending.Call("startupStatus",Json.Obj());if(closing){pending.Dispose();pending=null;return;}
-    if(Json.Str(latest,"mode")!="rust_host"||Json.Get(latest,"supportedOperations") as object[]==null)throw new IOException("app_rust_protocol_required");core=pending;pending=null;snapshot=latest;starting=false;readyTicks=startupClock.ElapsedTicks;PublishStatus();settings.Startup("",false,false);ResultCode=0;
+    if(Json.Str(latest,"mode")!="rust_host"||Json.Get(latest,"supportedOperations") as object[]==null)throw new IOException("app_rust_protocol_required");core=pending;pending=null;snapshot=latest;starting=false;readyTicks=startupClock.ElapsedTicks;PublishStatus();settings.Startup("",false,false);ResultCode=0;StartMaintenanceOwner();
     if(ManagementOnly){if(startupTest)await ObserveStatus();else LoadInitialDetails();}
     if(startupTest){WriteStartupReceipt(true,packageVerified);Quit();}else RecordStartupDiagnostics();return;
    }catch(NativeOperationException error){startupFailure=error.Code;}catch{}
@@ -399,7 +483,7 @@ namespace StyxNative {
    if(core==null){Quit();return Task.FromResult(0);}
    OpenSettings();return Run(async()=>{await AdmitQuit();settings.BeginInvoke(new Action(Quit));},"Checking running tasks…","Styx could not confirm that it is ready to quit. Keep it open and try again after checking the connection.");
   }
-  internal void Quit(){if(closing)return;closing=true;if(core!=null){core.Dispose();if(!core.CleanupConfirmed){closing=false;settings.Feedback("The owned Rust process did not exit cleanly. No successful quit receipt is claimed; retain this result for recovery.");ResultCode=4;return;}}startupTimer.Stop();startupTimer.Dispose();startupCancellation.Cancel();tray.Visible=false;settings.Close();settings.Dispose();panel.Close();tray.Dispose();icon.Dispose();ExitThread();}
+  internal void Quit(){if(closing)return;closing=true;if(core!=null){core.Dispose();if(!core.CleanupConfirmed){closing=false;settings.Feedback("The owned Rust process did not exit cleanly. No successful quit receipt is claimed; retain this result for recovery.");ResultCode=4;return;}}if(maintenancePipe!=null)maintenancePipe.Dispose();startupTimer.Stop();startupTimer.Dispose();startupCancellation.Cancel();tray.Visible=false;settings.Close();settings.Dispose();panel.Close();tray.Dispose();icon.Dispose();ExitThread();}
   internal void Verify(){var budget=Json.Obj("volumes",new object[]{Json.Obj("requiredBytes",2147483648d,"availableBytes",1073741824d)});if(!SpaceFeedback(budget,true).Contains("upgrade has not started")||SpaceFeedback(budget,false).Contains("upgrade has not started")||!SpaceFeedback(budget,true).Contains("Required:"))throw new Exception("space_feedback_failed");if(panel.Controls.Count!=1||settings.Controls.Count!=1||icon.Width<16)throw new Exception("native_shell_failed");settings.Verify();}
  }
  sealed class Settings:Form {
@@ -742,6 +826,20 @@ namespace StyxNative {
    desktopInput.Text=Json.Str(proof,"challenge","desktopValue");readbackSubmitted="same-value-attempt";ShowStatus(Json.Obj("acceptance",proof));if(readbackSubmitted!=null||desktopInput.Text!=Json.Str(proof,"challenge","desktopValue"))throw new Exception("pending_same_value_readback_cannot_retry");((Dictionary<string,object>)proof["desktop"])["status"]="verified";readbackSubmitted="verified-attempt";ShowStatus(Json.Obj("acceptance",proof));if(readbackSubmitted!="verified-attempt")throw new Exception("verified_readback_repeated");
    if(!StyxContext.ReconnectResult(Json.Obj("status",Json.Obj("foreground",Json.Obj("status","connected","execConnection","connected")))).StartsWith("Reconnected.")||!StyxContext.ReconnectResult(Json.Obj("status",Json.Obj("foreground",Json.Obj("status","started")))).Contains("still starting")||StyxContext.ReconnectResult(Json.Obj()).StartsWith("Reconnected."))throw new Exception("reconnect_feedback_overclaimed");
    keyDraft="";tunnelDraft="";Feedback("");ShowPage("welcome");Show();CreateControl();PerformLayout();Application.DoEvents();using(var image=new Bitmap(Width,Height)){DrawToBitmap(image,new Rectangle(0,0,Width,Height));image.Save(Path.Combine(AppDomain.CurrentDomain.BaseDirectory,"native-settings.png"));}}
+ }
+ // A connected local pipe identifies a kernel process, never a caller PID claim.
+ static class MaintenancePeer {
+  [DllImport("kernel32.dll",SetLastError=true)]static extern bool GetNamedPipeServerProcessId(Microsoft.Win32.SafeHandles.SafePipeHandle pipe,out uint process);
+  [DllImport("kernel32.dll",SetLastError=true)]static extern bool GetNamedPipeClientProcessId(Microsoft.Win32.SafeHandles.SafePipeHandle pipe,out uint process);
+  [DllImport("advapi32.dll",SetLastError=true)]static extern bool OpenProcessToken(IntPtr process,uint rights,out IntPtr token);
+  [DllImport("kernel32.dll")]static extern bool CloseHandle(IntPtr handle);
+  internal static string Birth(Process process){return process.StartTime.ToUniversalTime().ToFileTimeUtc().ToString(System.Globalization.CultureInfo.InvariantCulture);}
+  internal static string Owner(Process process){IntPtr token;if(!OpenProcessToken(process.Handle,0x000A,out token))throw new IOException("maintenance_process_owner_unknown");try{using(var identity=new System.Security.Principal.WindowsIdentity(token))return identity.User.Value;}finally{CloseHandle(token);}}
+  internal static Process Connected(System.IO.Pipes.PipeStream pipe,bool server){uint pid;bool ok=server?GetNamedPipeServerProcessId(pipe.SafePipeHandle,out pid):GetNamedPipeClientProcessId(pipe.SafePipeHandle,out pid);if(!ok||pid==0||pid>Int32.MaxValue)throw new IOException("maintenance_peer_unknown");var process=Process.GetProcessById((int)pid);try{IntPtr held=process.Handle;if(process.HasExited||Owner(process)!=System.Security.Principal.WindowsIdentity.GetCurrent().User.Value)throw new IOException("maintenance_peer_changed");return process;}catch{process.Dispose();throw;}}
+  internal static bool Same(string a,string b){return String.Equals(Path.GetFullPath(a).TrimEnd('\\'),Path.GetFullPath(b).TrimEnd('\\'),StringComparison.OrdinalIgnoreCase);}
+  internal static string Scope(string root){using(var sha=System.Security.Cryptography.SHA256.Create())return BitConverter.ToString(sha.ComputeHash(System.Text.Encoding.Unicode.GetBytes(Path.GetFullPath(root).TrimEnd('\\').ToLowerInvariant()))).Replace("-","").ToLowerInvariant();}
+  internal static string PipeName(string root){return "Styx.NativeMaintenance.v1."+System.Security.Principal.WindowsIdentity.GetCurrent().User.Value+"."+Scope(root);}
+  internal static bool SetupPresent(string root){Mutex mutex;if(!Mutex.TryOpenExisting("Global\\Styx.Install."+Scope(root),out mutex))return false;mutex.Dispose();return true;}
  }
  static class InstallCoordination {
   // Inno owns versioned program files; Core state remains outside the install tree.

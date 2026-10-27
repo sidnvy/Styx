@@ -5,11 +5,15 @@
 mod control_binding_tests;
 mod local_gateway;
 mod login;
+mod maintenance;
+#[cfg(all(test, target_os = "linux", target_env = "gnu"))]
+mod maintenance_integration_tests;
 mod migrated;
 mod migration;
 mod pairing_link;
 mod runtime_update;
 mod service;
+pub(crate) mod startup_diagnostic;
 
 use crate::{
     foreground::{self, ForegroundError, ForegroundOutcome},
@@ -197,6 +201,9 @@ enum Operation {
     Connect,
     Disconnect,
     QuitAdmission,
+    PrepareAppMaintenance,
+    AppMaintenanceStatus,
+    CancelAppMaintenance,
     AppLifecycle,
     AppLogin,
     AppLoginResult,
@@ -352,6 +359,8 @@ struct HostApp {
     unknown: bool,
     quit_ticket: Option<String>,
     login: login::Login,
+    maintenance: Option<maintenance::State>,
+    startup_diagnostic: Option<startup_diagnostic::StartupDiagnostic>,
     // Last owner drops only after role workers, retained failures and writers.
     scope: Arc<HostScope>,
 }
@@ -394,6 +403,8 @@ impl HostApp {
             unknown: false,
             quit_ticket: None,
             login: login::Login::default(),
+            maintenance: None,
+            startup_diagnostic: None,
         };
         if app.scope.root.get().is_some() {
             if app.observe_service_client().await? {
@@ -706,8 +717,15 @@ impl HostApp {
     }
     async fn connect_host(&mut self) -> Result<(), AppError> {
         if self.running.is_none() {
+            let diagnostic = self.startup_diagnostic.clone();
+            if let Some(d) = &diagnostic {
+                d.report("app_connect_host");
+            }
             if !self.migrated_shared {
                 self.set_desired(NativeRunDesired::Running).await?;
+            }
+            if let Some(d) = &diagnostic {
+                d.report("app_host_desired_ready");
             }
             let desktop_intent =
                 if !self.committed_migration && self.native_computer_requested == Some(false) {
@@ -724,6 +742,9 @@ impl HostApp {
                     .ok()
                     .flatten()
                 };
+            if let Some(d) = &diagnostic {
+                d.report("app_desktop_intent_ready");
+            }
             // Missing desktop facts disable that optional component;
             // they cannot prevent the independent Exec Host starting.
             let cancel = CancellationToken::new();
@@ -760,7 +781,13 @@ impl HostApp {
             } else {
                 self.native_runtime.clone()
             };
+            if let Some(d) = &diagnostic {
+                d.report("app_host_worker_scheduled");
+            }
             let worker = tokio::spawn(async move {
+                if let Some(d) = &diagnostic {
+                    d.report("app_host_worker_started");
+                }
                 foreground::host_run_for_app(scope, worker_cancel, events, verified_runtime).await
             });
             let cancel_on_drop = cancel.clone().drop_guard();
@@ -996,6 +1023,9 @@ impl HostApp {
             "startupStatus",
             "status",
             "quitAdmission",
+            "prepareAppMaintenance",
+            "cancelAppMaintenance",
+            "appMaintenanceStatus",
         ];
         if !self.service_client_or_unknown() {
             supported.extend([
@@ -1042,9 +1072,51 @@ impl HostApp {
         } else if cfg!(target_os = "macos") {
             supported.extend(["serviceStatus", "prepareServiceFirstStart", "stopService"]);
         }
-        json!({"schema":1,"migration":self.migration,"runtimeUpdate":self.runtime_update,"service":self.service,"configuration":configuration,"foreground":*self.observed.borrow(),"admission_fenced":self.admission_fenced(),"desktop_intent":{"schema":1,"computer_requested":computer_requested,"source":if self.committed_migration {"committed_original_local_intent"} else {"approved_host_configuration"}},"cleanup":self.cleanup,"gateway":self.local_gateway.as_ref().map(|g| g.status()),"enrollment":self.enrollment,"mode":"rust_host","supportedOperations":supported})
+        json!({"schema":1,"maintenance":self.maintenance_status()["maintenance"],"migration":self.migration,"runtimeUpdate":self.runtime_update,"service":self.service,"configuration":configuration,"foreground":*self.observed.borrow(),"admission_fenced":self.admission_fenced(),"desktop_intent":{"schema":1,"computer_requested":computer_requested,"source":if self.committed_migration {"committed_original_local_intent"} else {"approved_host_configuration"}},"cleanup":self.cleanup,"gateway":self.local_gateway.as_ref().map(|g| g.status()),"enrollment":self.enrollment,"mode":"rust_host","supportedOperations":supported})
     }
     async fn dispatch(
+        &mut self,
+        operation: Operation,
+        input: Box<serde_json::value::RawValue>,
+    ) -> Result<Value, AppError> {
+        match operation {
+            Operation::PrepareAppMaintenance => {
+                return self.prepare_maintenance(decode_input(&input)?).await;
+            }
+            Operation::CancelAppMaintenance => {
+                return self.cancel_maintenance(decode_input(&input)?).await;
+            }
+            Operation::AppMaintenanceStatus => {
+                let _: EmptyInput = decode_input(&input)?;
+                return Ok(self.maintenance_status());
+            }
+            _ => (),
+        }
+        let quitting = matches!(operation, Operation::QuitAdmission);
+        if quitting && !self.maintenance_quit_allowed() {
+            return Err(AppError("app_maintenance_original_operation_required"));
+        }
+        if self.maintenance_fenced()
+            && !matches!(
+                operation,
+                Operation::QuitAdmission
+                    | Operation::Status
+                    | Operation::StartupStatus
+                    | Operation::AppLifecycle
+                    | Operation::RuntimeUpdateStatus
+                    | Operation::ServiceStatus
+            )
+        {
+            return Err(AppError("app_maintenance_original_operation_required"));
+        }
+        let result = self.dispatch_inner(operation, input).await;
+        if quitting {
+            self.maintenance_quit_result(result).await
+        } else {
+            result
+        }
+    }
+    async fn dispatch_inner(
         &mut self,
         operation: Operation,
         input: Box<serde_json::value::RawValue>,
@@ -1312,7 +1384,10 @@ impl HostApp {
                     json!({"quit":{"status":"ready_to_quit","ticketId":ticket},"cleanup":self.cleanup,"gateway":self.local_gateway.as_ref().map(|g|g.status())}),
                 )
             }
-            Operation::AppLifecycle
+            Operation::PrepareAppMaintenance
+            | Operation::AppMaintenanceStatus
+            | Operation::CancelAppMaintenance
+            | Operation::AppLifecycle
             | Operation::AppLogin
             | Operation::AppLoginResult
             | Operation::StartupStatus

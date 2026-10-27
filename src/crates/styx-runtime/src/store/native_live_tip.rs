@@ -7,10 +7,11 @@ use super::{
     secure_journal::{JournalBudget, JournalError, JournalObservation, JournalResult, files},
 };
 use crate::platform::native_service::ServiceScope;
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
 use std::{
     collections::BTreeMap,
     fs::File,
-    os::unix::fs::MetadataExt,
     sync::{Arc, Mutex},
 };
 use styx_contracts::{
@@ -21,6 +22,23 @@ use styx_contracts::{
 use styx_core::management::state::{
     autostart_only_compatible, service_desired_compatible, validate_transition,
 };
+
+fn namespace_identity(file: &File) -> JournalResult<(u64, u64)> {
+    #[cfg(target_os = "windows")]
+    {
+        // Original private directory HANDLEs forbid delete sharing. Reopening
+        // the same protected namespace below independently checks its name.
+        super::windows_file_identity(file).map_err(|_| JournalError::Unknown)
+    }
+    #[cfg(unix)]
+    {
+        let m = file.metadata().map_err(|_| JournalError::Unknown)?;
+        if m.nlink() == 0 {
+            return Err(JournalError::Unknown);
+        }
+        Ok((m.dev(), m.ino()))
+    }
+}
 const NS: &str = ".styx-management-journal-v1";
 const MAX: usize = 1024 * 1024;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -379,7 +397,7 @@ impl ServiceTip {
             .inner
             .with_readonly_directory(|d| Ok(files::directory(d, NS)))
             .map_err(|_| JournalError::Unknown)??;
-        let m = namespace.metadata().map_err(|_| JournalError::Unknown)?;
+        let identity = namespace_identity(&namespace)?;
         let scan = files::scan(&namespace, JournalBudget::default())?;
         let accepted = AcceptedTip {
             tip: AutostartTip::capture(&marker, canonical.bytes(), &scan)?
@@ -391,7 +409,7 @@ impl ServiceTip {
             scope,
             root,
             namespace,
-            namespace_identity: (m.dev(), m.ino()),
+            namespace_identity: identity,
             marker_pin: marker_raw.observation().clone(),
             marker_digest: Sha256Digest::of_bytes(marker_raw.bytes()),
             accepted: Mutex::new(accepted),
@@ -489,8 +507,9 @@ impl ServiceTip {
             .with_readonly_directory(|d| Ok(files::directory(d, NS)))
             .map_err(|_| LiveTipError::Changed)??;
         for file in [&current, &self.namespace] {
-            let m = file.metadata().map_err(|_| LiveTipError::Changed)?;
-            if (m.dev(), m.ino()) != self.namespace_identity || m.nlink() == 0 {
+            if namespace_identity(file).map_err(|_| LiveTipError::Changed)?
+                != self.namespace_identity
+            {
                 return Err(LiveTipError::Changed);
             }
         }

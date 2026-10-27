@@ -43,22 +43,38 @@ enum RunOwner {
         Arc<crate::app::HostScope>,
         Option<Arc<crate::release::VerifiedNativeRelease>>,
     ),
-    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "macos",
+        target_os = "windows"
+    ))]
     Service(Arc<crate::platform::native_service::ServiceScope>),
 }
 struct Admitted {
-    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "macos",
+        target_os = "windows"
+    ))]
     service_scope: Option<Arc<crate::platform::native_service::ServiceScope>>,
     profile: Arc<profile::LoadedLegacyProfile>,
     state: PrivateRoot,
     base: PrivateRoot,
     lease: ExecutionLeaseGuard,
 }
-#[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+#[cfg(any(
+    all(target_os = "linux", target_env = "gnu"),
+    target_os = "macos",
+    target_os = "windows"
+))]
 struct ServiceExecAdmission {
     admitted: Arc<Admitted>,
 }
-#[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+#[cfg(any(
+    all(target_os = "linux", target_env = "gnu"),
+    target_os = "macos",
+    target_os = "windows"
+))]
 impl crate::host::coordinator::ExecAdmission for ServiceExecAdmission {
     fn check(&self) -> Result<(), crate::host::coordinator::CoordinatorError> {
         use crate::host::coordinator::CoordinatorError;
@@ -81,7 +97,11 @@ impl crate::host::coordinator::ExecAdmission for ServiceExecAdmission {
 }
 impl Admitted {
     fn validate_ownership(&self) -> Result<(), ForegroundError> {
-        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "macos",
+            target_os = "windows"
+        ))]
         if let Some(scope) = &self.service_scope {
             // OS identity is stable across a desired-state commit. The profile
             // immediately below owns the full typed C07 admission decision.
@@ -506,7 +526,11 @@ pub(crate) async fn host_run_for_app(
     .await
     .map_err(|_| ForegroundError("foreground_worker_failed"))?
 }
-#[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+#[cfg(any(
+    all(target_os = "linux", target_env = "gnu"),
+    target_os = "macos",
+    target_os = "windows"
+))]
 pub(crate) async fn host_run_for_service(
     scope: Arc<crate::platform::native_service::ServiceScope>,
     cancel: CancellationToken,
@@ -542,11 +566,25 @@ async fn run_owned(
     events: mpsc::Sender<ForegroundEvent>,
     owner: RunOwner,
 ) -> Result<ForegroundOutcome, ForegroundError> {
+    // Independent foreground-run clock. Opt-in closed labels carry no profile,
+    // path or credential data and never participate in admission decisions.
+    let diagnostic = crate::app::startup_diagnostic::StartupDiagnostic::from_env();
+    if let Some(d) = &diagnostic {
+        d.report("host_run_begin");
+    }
+    let profile_diagnostic = diagnostic.clone();
     let path = state_dir.to_path_buf();
     // Never abandon a blocking reader/lease acquisition on signal. Join it,
     // then observe cancellation before any native executable is started.
     let admitted = tokio::task::spawn_blocking(move || {
-        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+        if let Some(d) = &profile_diagnostic {
+            d.report("host_profile_load_begin");
+        }
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "macos",
+            target_os = "windows"
+        ))]
         let service_scope = match &owner {
             RunOwner::Service(scope) => Some(scope.clone()),
             _ => None,
@@ -558,9 +596,16 @@ async fn run_owned(
                 HostWireMode::LegacyExplicit => profile::load_legacy(&path)?,
                 HostWireMode::PairedV3 => profile::load_paired(&path)?,
             },
-            #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+            #[cfg(any(
+                all(target_os = "linux", target_env = "gnu"),
+                target_os = "macos",
+                target_os = "windows"
+            ))]
             RunOwner::Service(scope) => profile::load_for_service(scope)?,
         };
+        if let Some(d) = &profile_diagnostic {
+            d.report("host_profile_load_returned");
+        }
         let state = PrivateRoot::open(&path).map_err(|_| ForegroundError("state_root_refused"))?;
         let base = PrivateRoot::open(profile.host_base_dir())
             .map_err(|_| ForegroundError("host_root_refused"))?;
@@ -568,7 +613,11 @@ async fn run_owned(
             .try_execution_lease()
             .map_err(|_| ForegroundError("execution_lease_busy"))?;
         let admitted = Arc::new(Admitted {
-            #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+            #[cfg(any(
+                all(target_os = "linux", target_env = "gnu"),
+                target_os = "macos",
+                target_os = "windows"
+            ))]
             service_scope,
             profile: Arc::new(profile),
             state,
@@ -584,6 +633,9 @@ async fn run_owned(
     })
     .await
     .map_err(|_| ForegroundError("profile_reader_failed"))??;
+    if let Some(d) = &diagnostic {
+        d.report("host_profile_admission_returned");
+    }
     let device = admitted.profile.device_id().clone();
     if cancel.is_cancelled() {
         return Ok(empty_outcome());
@@ -598,6 +650,9 @@ async fn run_owned(
     // revalidates the entire signed inventory/raw profile at this spawn boundary;
     // avoid repeating the same full walk immediately before it on an I/O thread.
     let retained = admitted.clone();
+    if let Some(d) = &diagnostic {
+        d.report("host_executor_config_begin");
+    }
     let prepared = tokio::task::spawn_blocking(move || {
         retained.validate_ownership()?;
         if retained.profile.executor_enabled() {
@@ -615,6 +670,9 @@ async fn run_owned(
         }
     })
     .await;
+    if let Some(d) = &diagnostic {
+        d.report("host_executor_config_returned");
+    }
     let config = match prepared {
         Ok(Ok(v)) => v,
         result => {
@@ -627,6 +685,9 @@ async fn run_owned(
     if cancel.is_cancelled() {
         return Ok(empty_outcome());
     }
+    if let Some(d) = &diagnostic {
+        d.report("host_executor_spawn_begin");
+    }
     // Spawn is joined even on signal; cancelling initialization cannot orphan a
     // partially started child. The bounded provider owns its startup cleanup.
     #[cfg(any(target_os = "macos", target_os = "windows"))]
@@ -635,13 +696,20 @@ async fn run_owned(
         .await;
     #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     let started = reservation.spawn_optional(config).await;
+    if let Some(d) = &diagnostic {
+        d.report("host_executor_spawn_returned");
+    }
     let host = match started {
         Ok(v) => Arc::new(v),
         Err(_) => return Err(ForegroundError("executor_start_failed")),
     };
     // Install before exposing any paired connection. A failed installation
     // follows the same owned Host cleanup below; never early-drop the executor.
-    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "macos",
+        target_os = "windows"
+    ))]
     let exec_admission_ready = if admitted.service_scope.is_some() {
         host.authority()
             .configure_exec_admission(Arc::new(ServiceExecAdmission {
@@ -651,7 +719,11 @@ async fn run_owned(
     } else {
         true
     };
-    #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
+    #[cfg(not(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "macos",
+        target_os = "windows"
+    )))]
     let exec_admission_ready = true;
     // Browser is an independent optional local capability. Unsupported or
     // unavailable Browser inputs cannot take down an already admitted Exec Host.
@@ -838,7 +910,8 @@ async fn run_owned(
                                     }
                                     #[cfg(any(
                                         all(target_os = "linux", target_env = "gnu"),
-                                        target_os = "macos"
+                                        target_os = "macos",
+                                        target_os = "windows"
                                     ))]
                                     if admitted.service_scope.is_some()
                                         && let Err(error) = validate(&admitted).await

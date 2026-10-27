@@ -5,6 +5,7 @@ using System.Runtime.InteropServices;
 using System.Text;
 using System.Diagnostics;
 using System.Threading.Tasks;
+using System.Threading;
 using System.Web.Script.Serialization;
 using System.Security.AccessControl;
 using System.Security.Principal;
@@ -119,9 +120,61 @@ internal static class InstallGate {
    }
   }
  }
+ static void Match(object value,string key,string expected){if(StringField(Object(value),key)!=expected)throw new IOException("maintenance_binding_changed");}
+ static Process OriginalChild(object hello,string version){
+  var identity=Object(Object(hello)["core"]);int pid=Convert.ToInt32(identity["pid"]);if(pid<=0)throw new IOException("maintenance_child_unknown");var child=Process.GetProcessById(pid);
+  try{IntPtr held=child.Handle;if(MaintenancePeer.Birth(child)!=StringField(identity,"creationFileTime")||MaintenancePeer.Owner(child)!=WindowsIdentity.GetCurrent().User.Value||!MaintenancePeer.Same(child.MainModule.FileName,Path.Combine(version,"native","bin","styx.exe")))throw new IOException("maintenance_child_changed");return child;}catch{child.Dispose();throw;}
+ }
+ static string ReadFrame(StreamReader reader){var line=new StringBuilder();for(int ch;(ch=reader.Read())>=0;){if(ch=='\n')return line.ToString().TrimEnd('\r');if(line.Length>=2097152)throw new IOException("maintenance_frame_bound");line.Append((char)ch);}throw new IOException("maintenance_eof_unknown");}
+ static int MaintainNative(string[] a){
+  if(a.Length!=4||!Path.IsPathRooted(a[1])||(a[2]!="upgrade"&&a[2]!="uninstall")||!(a[2]=="uninstall"?a[3]=="-":System.Text.RegularExpressions.Regex.IsMatch(a[3],"\\A[a-f0-9]{64}\\z")))return 2;
+  string root=Path.GetFullPath(a[1]),action=a[2],candidate=a[3]=="-"?null:a[3];
+  Mutex setup;if(!Mutex.TryOpenExisting("Global\\Styx.Install."+MaintenancePeer.Scope(root),out setup))return 3;
+  using(setup){
+  if(!Directory.Exists(root))return !File.Exists(root)&&action=="upgrade"?0:3;Regular(root);if(Directory.GetFileSystemEntries(root).Length==0)return action=="upgrade"?0:3;
+  using(var pipe=new System.IO.Pipes.NamedPipeClientStream(".",MaintenancePeer.PipeName(root),System.IO.Pipes.PipeDirection.InOut,System.IO.Pipes.PipeOptions.None)){
+   // Connection timeout precedes any mutation. Once a request is sent, retain
+   // the exact peer/child handles and wait; never infer failure from a deadline.
+   try{pipe.Connect(2000);}catch(TimeoutException){return 3;}
+   using(var app=MaintenancePeer.Connected(pipe,true))using(var reader=new StreamReader(pipe,new UTF8Encoding(false,true),false,4096,true))using(var writer=new StreamWriter(pipe,new UTF8Encoding(false),4096,true){AutoFlush=true}){
+    IntPtr originalAppHandle=app.Handle;string appBirth=MaintenancePeer.Birth(app),appImage=app.MainModule.FileName;Regular(appImage);
+    string version=Path.GetDirectoryName(appImage),hash=Path.GetFileName(version);if(!System.Text.RegularExpressions.Regex.IsMatch(hash,"\\A[a-f0-9]{64}\\z")||!MaintenancePeer.Same(version,Path.Combine(root,"versions",hash))||Path.GetFileName(appImage)!="StyxPreview.exe")return 3;
+    using(var imagePin=new FileStream(appImage,FileMode.Open,FileAccess.Read,FileShare.Read)){
+     if(VerifyNative(new[]{"verify-native",version,hash})!=0)return 3;
+     var codec=new JavaScriptSerializer{MaxJsonLength=2097152};var hello=Object(codec.DeserializeObject(ReadFrame(reader)));
+     if(Convert.ToInt32(hello["schema"])!=1||StringField(hello,"kind")!="styx-native-maintenance-owner"||Convert.ToInt32(hello["pid"])!=app.Id||StringField(hello,"creationFileTime")!=appBirth||StringField(hello,"ownerSid")!=WindowsIdentity.GetCurrent().User.Value||!MaintenancePeer.Same(StringField(hello,"installRoot"),root)||!MaintenancePeer.Same(StringField(hello,"resources"),version)||StringField(hello,"packageSha256")!=hash)return 3;
+     using(var child=OriginalChild(hello,version)){
+      string childBirth=MaintenancePeer.Birth(child),request=Guid.NewGuid().ToString("N");
+      var input=new Dictionary<string,object>{{"schema",1},{"operation",action},{"requestId",request},{"installRoot",root},{"packageSha256",hash},{"candidatePackageSha256",candidate}};
+      writer.WriteLine(codec.Serialize(input));
+      var reply=Object(codec.DeserializeObject(ReadFrame(reader)));if(StringField(reply,"status")!="settled")return 3;
+      Match(reply,"requestId",request);Match(reply,"operation",action);Match(reply,"packageSha256",hash);if(!MaintenancePeer.Same(StringField(reply,"installRoot"),root)||!Equals(reply["candidatePackageSha256"],candidate))return 3;
+      var prepared=Object(reply["prepared"]);var maintenance=Object(prepared["maintenance"]);
+      if(Convert.ToInt32(maintenance["schema"])!=1||StringField(maintenance,"status")!="prepared"||StringField(maintenance,"scope")!="original_app"||StringField(maintenance,"runtimeReferences")!="outside_install_root"||!Equals(maintenance["statePreserved"],true)||!Equals(maintenance["operationsReplayed"],false)||!Equals(maintenance["requiresOwnedQuit"],true)||!System.Text.RegularExpressions.Regex.IsMatch(StringField(maintenance,"ticketId"),"\\A[a-f0-9]{32}\\z"))return 3;
+      Match(maintenance,"requestId",request);Match(maintenance,"operation",action);Match(maintenance,"packageSha256",hash);if(!MaintenancePeer.Same(StringField(maintenance,"installRoot"),root)||!Equals(maintenance["candidatePackageSha256"],candidate))return 3;
+      if(action=="uninstall"){var login=Object(reply["loginObservation"]);if(Convert.ToInt32(login["schema"])!=1||StringField(login,"platform")!="windows"||StringField(login,"status")!="not_registered")return 3;}
+      var quitTicket=Object(reply["quitTicket"]);var ready=Object(quitTicket["maintenance"]);
+      foreach(var pair in maintenance){object value;if(!ready.TryGetValue(pair.Key,out value)||!Equals(value,pair.Key=="status"?(object)"ready_to_exit":pair.Value))return 3;}
+      var quit=Object(quitTicket["quit"]);if(StringField(quit,"status")!="ready_to_quit"||!System.Text.RegularExpressions.Regex.IsMatch(StringField(quit,"ticketId"),"\\A[a-f0-9]{32}\\z"))return 3;
+      var joined=Object(reply["coreExit"]);if(Convert.ToInt32(joined["pid"])!=child.Id||StringField(joined,"creationFileTime")!=childBirth||Convert.ToInt32(joined["exitCode"])!=0||!Equals(joined["stdinEof"],true)||!Equals(joined["ioJoined"],true))return 3;
+      child.WaitForExit();if(child.ExitCode!=0)return 3;
+      app.WaitForExit();if(app.ExitCode!=0)return 3;
+      // These are additional occupancy observations after positive owned waits,
+      // never substitutes for Core's ticket or actual process settlement.
+      Mutex active;if(Mutex.TryOpenExisting("Global\\Styx.App."+MaintenancePeer.Scope(root),out active)){active.Dispose();return 1;}
+      if(!MaintenancePeer.SetupPresent(root))return 3;
+     }
+    }
+   }
+  }
+  return Main(new[]{"check",root});
+  }
+ }
+
  static int Main(string[] args){
   try{
    if(args.Length>0&&args[0]=="verify-native")return VerifyNative(args);
+   if(args.Length>0&&args[0]=="maintain-native-install")return MaintainNative(args);
    if(args.Length==2&&args[0]=="check-native-install"&&Path.IsPathRooted(args[1])){
     string target=Path.GetFullPath(args[1]);if(!Directory.Exists(target)&&!File.Exists(target))return 0;Regular(target);
     // Existing installs require an original App/Core joined handoff. Restart
@@ -143,3 +196,18 @@ internal static class InstallGate {
   }catch(Exception error){Console.Error.WriteLine("admission_read_error:"+error.GetType().Name);return 2;}
  }
 }
+
+ // A connected local pipe identifies a kernel process, never a caller PID claim.
+ static class MaintenancePeer {
+  [DllImport("kernel32.dll",SetLastError=true)]static extern bool GetNamedPipeServerProcessId(Microsoft.Win32.SafeHandles.SafePipeHandle pipe,out uint process);
+  [DllImport("kernel32.dll",SetLastError=true)]static extern bool GetNamedPipeClientProcessId(Microsoft.Win32.SafeHandles.SafePipeHandle pipe,out uint process);
+  [DllImport("advapi32.dll",SetLastError=true)]static extern bool OpenProcessToken(IntPtr process,uint rights,out IntPtr token);
+  [DllImport("kernel32.dll")]static extern bool CloseHandle(IntPtr handle);
+  internal static string Birth(Process process){return process.StartTime.ToUniversalTime().ToFileTimeUtc().ToString(System.Globalization.CultureInfo.InvariantCulture);}
+  internal static string Owner(Process process){IntPtr token;if(!OpenProcessToken(process.Handle,0x000A,out token))throw new IOException("maintenance_process_owner_unknown");try{using(var identity=new System.Security.Principal.WindowsIdentity(token))return identity.User.Value;}finally{CloseHandle(token);}}
+  internal static Process Connected(System.IO.Pipes.PipeStream pipe,bool server){uint pid;bool ok=server?GetNamedPipeServerProcessId(pipe.SafePipeHandle,out pid):GetNamedPipeClientProcessId(pipe.SafePipeHandle,out pid);if(!ok||pid==0||pid>Int32.MaxValue)throw new IOException("maintenance_peer_unknown");var process=Process.GetProcessById((int)pid);try{IntPtr held=process.Handle;if(process.HasExited||Owner(process)!=System.Security.Principal.WindowsIdentity.GetCurrent().User.Value)throw new IOException("maintenance_peer_changed");return process;}catch{process.Dispose();throw;}}
+  internal static bool Same(string a,string b){return String.Equals(Path.GetFullPath(a).TrimEnd('\\'),Path.GetFullPath(b).TrimEnd('\\'),StringComparison.OrdinalIgnoreCase);}
+  internal static string Scope(string root){using(var sha=System.Security.Cryptography.SHA256.Create())return BitConverter.ToString(sha.ComputeHash(System.Text.Encoding.Unicode.GetBytes(Path.GetFullPath(root).TrimEnd('\\').ToLowerInvariant()))).Replace("-","").ToLowerInvariant();}
+  internal static string PipeName(string root){return "Styx.NativeMaintenance.v1."+System.Security.Principal.WindowsIdentity.GetCurrent().User.Value+"."+Scope(root);}
+  internal static bool SetupPresent(string root){Mutex mutex;if(!Mutex.TryOpenExisting("Global\\Styx.Install."+Scope(root),out mutex))return false;mutex.Dispose();return true;}
+ }

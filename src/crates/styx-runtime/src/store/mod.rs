@@ -33,7 +33,11 @@ pub(crate) mod native_host_snapshot;
     target_os = "windows"
 ))]
 pub(crate) mod native_legacy_owners;
-#[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+#[cfg(any(
+    all(target_os = "linux", target_env = "gnu"),
+    target_os = "macos",
+    target_os = "windows"
+))]
 pub(crate) mod native_live_tip;
 #[cfg(any(target_os = "macos", target_os = "windows"))]
 mod native_migration_inputs;
@@ -202,7 +206,11 @@ impl ProcessIdentity {
 pub enum LockResource {
     ConfigurationWriter,
     Execution,
-    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "macos",
+        target_os = "windows"
+    ))]
     ServiceOperation,
 }
 
@@ -211,7 +219,11 @@ impl LockResource {
         match self {
             Self::ConfigurationWriter => ".styx-configuration-writer.lock",
             Self::Execution => ".styx-execution-lease.lock",
-            #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+            #[cfg(any(
+                all(target_os = "linux", target_env = "gnu"),
+                target_os = "macos",
+                target_os = "windows"
+            ))]
             Self::ServiceOperation => ".styx-service-operation.lock",
         }
     }
@@ -683,7 +695,11 @@ impl PrivateRoot {
     }
     /// Serialize the explicit C07 + OS service effect across separate CLI
     /// processes. This grants no configuration-writer or execution authority.
-    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "macos",
+        target_os = "windows"
+    ))]
     pub(crate) fn try_service_operation_lease(&self) -> Result<ServiceOperationGuard> {
         Ok(ServiceOperationGuard(
             self.inner.try_lock(LockResource::ServiceOperation)?,
@@ -698,9 +714,17 @@ impl PrivateRoot {
     }
 }
 
-#[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+#[cfg(any(
+    all(target_os = "linux", target_env = "gnu"),
+    target_os = "macos",
+    target_os = "windows"
+))]
 pub(crate) struct ServiceOperationGuard(platform::Lock);
-#[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+#[cfg(any(
+    all(target_os = "linux", target_env = "gnu"),
+    target_os = "macos",
+    target_os = "windows"
+))]
 impl ServiceOperationGuard {
     pub(crate) fn validate(&self) -> Result<()> {
         self.0.validate()

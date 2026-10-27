@@ -78,8 +78,27 @@ pub(super) struct Login {
     unknown: bool,
 }
 impl Login {
+    pub(super) fn require_unregistered(
+        &self,
+        observation: Option<&Observation>,
+        platform: &str,
+    ) -> Result<(), AppError> {
+        let observation = observation.ok_or(AppError("app_maintenance_login_unconfirmed"))?;
+        observation.validate(platform)?;
+        if self.pending.is_some()
+            || self.unknown
+            || observation.status != Status::NotRegistered
+            || observation.fingerprint.is_none()
+        {
+            return Err(AppError("app_maintenance_login_unconfirmed"));
+        }
+        Ok(())
+    }
     pub(super) fn pending(&self) -> bool {
         self.pending.is_some()
+    }
+    pub(super) fn settled(&self) -> bool {
+        self.pending.is_none() && !self.unknown
     }
     fn authorize(&mut self, input: LoginInput, platform: &str) -> Result<Value, AppError> {
         input.observation.validate(platform)?;
@@ -283,6 +302,7 @@ mod tests {
             )
             .unwrap();
         assert_eq!(view["login"]["status"], "unknown");
+        assert!(!login.settled());
         assert!(
             login
                 .authorize(request(false, Status::NotRegistered), "windows")

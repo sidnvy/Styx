@@ -9,7 +9,11 @@ pub(crate) struct RecoveredNativeCommittedRuntime {
     owner: OwnedConfigurationRoot,
     snapshot: Arc<NativeCommittedRuntimeSnapshot>,
     _journal: Option<OwnedManagementJournal>,
-    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "macos",
+        target_os = "windows"
+    ))]
     service_transactions:
         Option<Arc<std::sync::Mutex<super::super::native_transaction::NativeTransactions>>>,
 }
@@ -24,7 +28,11 @@ impl RecoveredNativeCommittedRuntime {
         let journal =
             OwnedManagementJournal::open_existing(owner.clone(), JournalBudget::default())?;
         let mut proof = Self::reopen_with_journal(owner, snapshot, &journal)?;
-        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "macos",
+            target_os = "windows"
+        ))]
         {
             proof.service_transactions = Some(Arc::new(std::sync::Mutex::new(
                 super::super::native_transaction::NativeTransactions::from_service_journal(
@@ -34,7 +42,11 @@ impl RecoveredNativeCommittedRuntime {
                 .map_err(|_| JournalError::Unknown)?,
             )));
         }
-        #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
+        #[cfg(not(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "macos",
+            target_os = "windows"
+        )))]
         {
             proof._journal = Some(journal);
         }
@@ -56,7 +68,11 @@ impl RecoveredNativeCommittedRuntime {
             owner: owner.clone(),
             snapshot,
             _journal: None,
-            #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+            #[cfg(any(
+                all(target_os = "linux", target_env = "gnu"),
+                target_os = "macos",
+                target_os = "windows"
+            ))]
             service_transactions: None,
         };
         owner.with_state(|state| {
@@ -130,7 +146,11 @@ impl RecoveredNativeCommittedRuntime {
                 .map_err(|_| JournalError::Unknown)
         })
     }
-    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "macos",
+        target_os = "windows"
+    ))]
     pub(crate) fn service_transactions(
         &self,
     ) -> JournalResult<Arc<std::sync::Mutex<super::super::native_transaction::NativeTransactions>>>

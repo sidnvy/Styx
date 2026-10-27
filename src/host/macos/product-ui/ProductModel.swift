@@ -687,6 +687,12 @@ enum ProductRestorationPolicy {
             busy = false
         }
     }
+    func reportNativeAppUpdateFailure(_ message: String) {
+        // Only the native bridge's curated local message reaches this entry.
+        // Raw Core, Sparkle, URL and transport error bodies are never shown.
+        error = message
+        requestSettings(.general)
+    }
     func checkPayloadUpdate() {
         perform { [self] in payloadUpdateStatus = try await client.write("host-payload/handoff/status", [:])["handoff"] }
     }

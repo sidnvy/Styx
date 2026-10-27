@@ -146,7 +146,11 @@ impl NativeTransactions {
     }
     /// Transfer the already claimed journal into its one service coordinator.
     /// No writer or namespace is acquired here; the caller serialized admission.
-    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "macos",
+        target_os = "windows"
+    ))]
     pub(crate) fn from_service_journal(
         owner: OwnedConfigurationRoot,
         journal: OwnedManagementJournal,
@@ -166,7 +170,11 @@ impl NativeTransactions {
     }
     /// The caller holds the original SharedEnrollment mutex and local control gate.
     /// Only autostart changes; Core/device lanes and all run states are preserved.
-    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "macos",
+        target_os = "windows"
+    ))]
     pub(crate) fn set_service_autostart(
         &mut self,
         owner: &OwnedConfigurationRoot,
@@ -185,7 +193,11 @@ impl NativeTransactions {
         })
     }
     /// Desired Stop is committed before notification; it is never an actual-exit receipt.
-    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "macos",
+        target_os = "windows"
+    ))]
     pub(crate) fn set_service_stopped(
         &mut self,
         owner: &OwnedConfigurationRoot,
@@ -199,7 +211,11 @@ impl NativeTransactions {
     }
     /// Only a Host can be requested Running through the live Gateway writer.
     /// This changes intent only; the caller's original OS definition starts it.
-    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "macos",
+        target_os = "windows"
+    ))]
     pub(crate) fn set_service_host_running(
         &mut self,
         owner: &OwnedConfigurationRoot,
@@ -218,7 +234,11 @@ impl NativeTransactions {
     }
     /// Read this transaction's formally hash-bound target, not today's canonical
     /// revision and not the independent journal sequence number.
-    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "macos",
+        target_os = "windows"
+    ))]
     pub(crate) fn service_transaction_target_revision(
         &self,
         transaction: &TransactionId,
@@ -229,7 +249,11 @@ impl NativeTransactions {
             .map_err(|_| NativeTransactionError::UnknownInspect)?;
         Ok(target.state().revision)
     }
-    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "macos",
+        target_os = "windows"
+    ))]
     fn assign_service_desired(
         &mut self,
         owner: &OwnedConfigurationRoot,

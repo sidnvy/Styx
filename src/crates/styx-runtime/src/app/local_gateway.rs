@@ -485,6 +485,10 @@ impl HostApp {
         self.scope.validate()
     }
     pub(super) async fn resume_local(&mut self, input: LocalInput) -> Result<(), AppError> {
+        self.startup_diagnostic = startup_diagnostic::StartupDiagnostic::from_env();
+        if let Some(diagnostic) = &self.startup_diagnostic {
+            diagnostic.report("app_resume_local");
+        }
         if !self.resume_local_available
             || self.quit_ticket.is_some()
             || self
@@ -526,6 +530,10 @@ impl HostApp {
         self.finish_local_pairing(choice).await
     }
     pub(super) async fn create_local(&mut self, input: LocalInput) -> Result<(), AppError> {
+        self.startup_diagnostic = startup_diagnostic::StartupDiagnostic::from_env();
+        if let Some(diagnostic) = &self.startup_diagnostic {
+            diagnostic.report("app_create_local");
+        }
         self.available()?;
         if self.scope.root.get().is_some()
             || self.local_gateway.is_some()
@@ -582,6 +590,9 @@ impl HostApp {
             .container
             .parent_path
             .join("app-local-gateway-input-v1.json");
+        if let Some(diagnostic) = &self.startup_diagnostic {
+            diagnostic.report("app_bootstrap_gateway");
+        }
         let startup_candidate = match crate::management::native_gateway::bootstrap_for_app(
             scope.clone(),
             &input_path,
@@ -596,17 +607,32 @@ impl HostApp {
                 return Err(AppError(code));
             }
         };
+        if let Some(diagnostic) = &self.startup_diagnostic {
+            diagnostic.report("app_bootstrap_gateway_done");
+            diagnostic.report("app_load_gateway");
+        }
         let mut gateway = self.load_local_gateway(scope).await?;
+        if let Some(diagnostic) = &self.startup_diagnostic {
+            diagnostic.report("app_load_gateway_done");
+        }
         gateway.startup_candidate = Some(startup_candidate);
         self.local_gateway = Some(gateway);
         self.finish_local_pairing(choice).await
     }
     async fn finish_local_pairing(&mut self, choice: JoinInput) -> Result<(), AppError> {
+        let diagnostic = self.startup_diagnostic.clone();
+        if let Some(diagnostic) = &diagnostic {
+            diagnostic.report("app_start_gateway");
+        }
         let gateway = self
             .local_gateway
             .as_mut()
             .ok_or(AppError("app_gateway_not_configured"))?;
         gateway.start().await?;
+        if let Some(diagnostic) = &diagnostic {
+            diagnostic.report("app_start_gateway_done");
+            diagnostic.report("app_invite");
+        }
         let invitation = gateway
             .admin_once(false, &json!({"ttl_seconds":600}))
             .await?;
@@ -623,7 +649,15 @@ impl HostApp {
             gateway.ca_sha.clone(),
         );
         let (computer, browser) = (choice.computer, choice.browser);
+        if let Some(diagnostic) = &diagnostic {
+            diagnostic.report("app_invite_done");
+            diagnostic.report("app_write_join_input");
+        }
         self.write_join_input(choice, origin, ca_sha, secret, ca)?;
+        if let Some(diagnostic) = &diagnostic {
+            diagnostic.report("app_write_join_input_done");
+            diagnostic.report("app_request_join");
+        }
         let joined = native_join::request_for_app(self.scope.clone(), &self.deployment_file)
             .await
             .map_err(|e| self.join_error(e))?;
@@ -631,6 +665,10 @@ impl HostApp {
             .request_id
             .as_ref()
             .ok_or(AppError("app_local_pairing_result_unknown"))?;
+        if let Some(diagnostic) = &diagnostic {
+            diagnostic.report("app_request_join_done");
+            diagnostic.report("app_approve_join");
+        }
         let approved = self.local_gateway.as_mut().ok_or(AppError("app_gateway_not_configured"))?
             .admin_once(true, &json!({"request_id":request,"fingerprint":joined.fingerprint,"enable_computer":computer,"enable_browser":browser})).await?;
         if approved["status"] != "approved"
@@ -638,6 +676,10 @@ impl HostApp {
             || approved["fingerprint"] != json!(joined.fingerprint)
         {
             return Err(AppError("app_local_pairing_result_unknown"));
+        }
+        if let Some(diagnostic) = &diagnostic {
+            diagnostic.report("app_approve_join_done");
+            diagnostic.report("app_claim_join");
         }
         let claimed =
             native_join::claim_for_app(self.scope.clone(), Some(joined.verified_runtime.clone()))
@@ -649,12 +691,22 @@ impl HostApp {
         {
             return Err(AppError("app_local_pairing_result_unknown"));
         }
+        if let Some(diagnostic) = &diagnostic {
+            diagnostic.report("app_claim_join_done");
+            diagnostic.report("app_read_configuration");
+        }
         self.read_configuration().await?;
+        if let Some(diagnostic) = &diagnostic {
+            diagnostic.report("app_read_configuration_done");
+        }
         self.native_computer_requested = Some(claimed.computer_requested);
         self.native_runtime = Some(claimed.verified_runtime.clone());
         self.enrollment =
             Some(serde_json::to_value(claimed).map_err(|_| AppError("app_response_invalid"))?);
         self.unknown = false;
+        if let Some(diagnostic) = &diagnostic {
+            diagnostic.report("app_finish_local_pairing_done");
+        }
         Ok(())
     }
 }

@@ -749,7 +749,11 @@ impl ProfileSource {
         root: &PrivateRoot,
         raw: &crate::store::RawFile,
     ) -> Result<bool, ProfileError> {
-        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "macos",
+            target_os = "windows"
+        ))]
         {
             let result = match self {
                 Self::NativeCommitted(binding) => binding.service_canonical_matches(root, raw),
@@ -762,7 +766,11 @@ impl ProfileSource {
                 .map(|matched| matched == Some(true))
                 .map_err(service_tip_error)
         }
-        #[cfg(not(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos")))]
+        #[cfg(not(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "macos",
+            target_os = "windows"
+        )))]
         {
             let _ = (root, raw);
             Ok(false)
@@ -770,7 +778,11 @@ impl ProfileSource {
     }
 }
 fn journal_profile_error(error: crate::store::enrollment::JournalError) -> ProfileError {
-    #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+    #[cfg(any(
+        all(target_os = "linux", target_env = "gnu"),
+        target_os = "macos",
+        target_os = "windows"
+    ))]
     match error {
         crate::store::enrollment::JournalError::ConfigurationPending => {
             return ProfileError::ManagementBusy;
@@ -783,7 +795,11 @@ fn journal_profile_error(error: crate::store::enrollment::JournalError) -> Profi
     let _ = error;
     ProfileError::Changed
 }
-#[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+#[cfg(any(
+    all(target_os = "linux", target_env = "gnu"),
+    target_os = "macos",
+    target_os = "windows"
+))]
 fn service_tip_error(error: crate::store::native_live_tip::LiveTipError) -> ProfileError {
     use crate::store::native_live_tip::LiveTipError;
     match error {
@@ -851,7 +867,11 @@ pub(crate) fn load_for_app_retained(
 }
 /// Only the native OS manager can supply this opaque scope. A CLI argument or
 /// environment variable cannot adopt the service's profile or execution lease.
-#[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+#[cfg(any(
+    all(target_os = "linux", target_env = "gnu"),
+    target_os = "macos",
+    target_os = "windows"
+))]
 pub(crate) fn load_for_service(
     scope: Arc<crate::platform::native_service::ServiceScope>,
 ) -> Result<LoadedLegacyProfile, ProfileError> {
@@ -871,7 +891,7 @@ pub(crate) fn load_for_service(
     let source = match marker.reader_floor {
         #[cfg(all(target_os = "linux", target_env = "gnu"))]
         ReaderContract::NativeMigratedStateV1 => ProfileSource::Committed(Arc::new(crate::store::committed_runtime::CommittedRuntimeSnapshot::open_for_service(scope).map_err(|_| ProfileError::Changed)?)),
-        #[cfg(target_os = "macos")]
+        #[cfg(any(target_os = "macos", target_os = "windows"))]
         ReaderContract::NativeMigratedStateV1 => return Err(ProfileError::Invalid),
         ReaderContract::NativeMigratedStateV2 => ProfileSource::NativeCommitted(Arc::new(crate::store::committed_runtime_native::NativeCommittedRuntimeSnapshot::open_for_service(scope).map_err(|_| ProfileError::Changed)?)),
         ReaderContract::NativeManagementStateV1 => return fresh::load_for_service(scope),
