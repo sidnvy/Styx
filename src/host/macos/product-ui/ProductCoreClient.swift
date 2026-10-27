@@ -3,6 +3,28 @@ import Foundation
 // Opt-in local diagnostics: fixed route names and numeric results only.
 // Never emit request/response bodies, session URLs, headers or credentials.
 enum ProductNativeDiagnostics {
+    // Closed lifecycle vocabulary. Optional operation is checked against the
+    // private JSONL protocol; no arbitrary Error/body/path reaches this sink.
+    enum LifecycleStage: String {
+        case queued, admitted, requestWritten = "request_written", responseDecoded = "response_decoded"
+        case deadlineEOF = "deadline_eof", eofRequested = "eof_requested", eofClosed = "eof_closed"
+        case eofCloseFailed = "eof_close_failed", childJoined = "child_joined", callFailed = "call_failed"
+        case bootstrapEntered = "bootstrap_entered", coreAdopted = "core_adopted", windowCreated = "window_created"
+        case bootstrapCompleted = "bootstrap_completed", bootstrapFailed = "bootstrap_failed"
+        case terminateEntered = "terminate_entered", terminatePending = "terminate_pending"
+        case terminateCancelStarting = "terminate_cancel_starting", terminateCancelNoWindow = "terminate_cancel_no_window"
+        case terminateNow = "terminate_now", terminateLater = "terminate_later", terminateAdmission = "terminate_admission", terminateReply = "terminate_reply"
+    }
+    static func lifecycle(_ stage: LifecycleStage, operation: String? = nil, id: Int? = nil, ok: Bool? = nil) {
+        guard CommandLine.arguments.contains("--native-diagnostics") else { return }
+        let operations: Set<String> = ["startupStatus", "status", "createLocal", "resumeLocal", "inspectJoin", "join", "requestJoin", "claimJoin", "inspectHost", "connect", "disconnect", "quitAdmission", "startMigration", "recoverMigration", "stageRuntime", "updateRuntime", "runtimeUpdateStatus", "recoverRuntimeUpdate"]
+        if let operation { guard operations.contains(operation) else { return } }
+        var message = "lifecycle stage=" + stage.rawValue
+        if let operation { message += " operation=" + operation }
+        if let id { message += " id=" + String(id) }
+        if let ok { message += " ok=" + String(ok) }
+        event(message)
+    }
     static func event(_ message: String) {
         guard CommandLine.arguments.contains("--native-diagnostics") else { return }
         let line = "STYX_NATIVE " + message + "\n"

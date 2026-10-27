@@ -642,6 +642,7 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
         guard setupProcess == nil else { return }
         guard let resources = Bundle.main.resourceURL else { throw HostError.daemonUnavailable }
         #if STYX_PRODUCT_UI
+        ProductNativeDiagnostics.lifecycle(.bootstrapEntered)
         nativeCoreAttempted = true
         if let _ = nativeCore { setupWindow?.present(); return }
         guard !nativeCoreStarting else { return }; nativeCoreStarting = true
@@ -651,18 +652,21 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
                 let core = try await Task.detached { try ProductOwnedCore.open(resources: resources) }.value
                 guard !terminationPending else { core.requestEOF(); return }
                 nativeCore = core
+                ProductNativeDiagnostics.lifecycle(.coreAdopted)
                 let model = ProductModel(owned: core)
                 model.recoverComputerUse = { [weak self, weak core] in
                     guard let owner = self, let original = core else { throw ProductWorkflowError.computerPermissionRecoveryRequired }
                     try await owner.recoverComputerUseAfterPermissions(original)
                 }
                 setupWindow = ProductWindowController(model: model)
+                ProductNativeDiagnostics.lifecycle(.windowCreated)
                 await model.bootstrap()
                 guard model.loaded else { core.requestEOF(); nativeCore = nil; throw ProductOwnedCoreError.unavailable }
+                ProductNativeDiagnostics.lifecycle(.bootstrapCompleted)
                 observeProductComponents(core)
                 setupStatusLine?.title = "Native Host settings ready"
                 if setupOpenRequested { setupWindow?.present(); setupOpenRequested = false }
-            } catch { setupStatusLine?.title = "Native package unavailable; original identity retained" }
+            } catch { ProductNativeDiagnostics.lifecycle(.bootstrapFailed); setupStatusLine?.title = "Native package unavailable; original identity retained" }
         }
         return
         #else
@@ -1124,21 +1128,39 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
         #endif
     }
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
-        if terminationPending { return .terminateLater }
+        #if STYX_PRODUCT_UI
+        ProductNativeDiagnostics.lifecycle(.terminateEntered)
+        #endif
+        if terminationPending {
+            #if STYX_PRODUCT_UI
+            ProductNativeDiagnostics.lifecycle(.terminatePending)
+            #endif
+            return .terminateLater
+        }
         #if STYX_PRODUCT_UI
         if nativeCoreAttempted {
             // Original bootstrap worker still owns its child until it completes.
             // A UI close cannot make an in-flight verified launch ownerless.
-            if nativeCoreStarting { return .terminateCancel }
+            if nativeCoreStarting { ProductNativeDiagnostics.lifecycle(.terminateCancelStarting); return .terminateCancel }
             guard let _ = nativeCore else {
-                guard daemon != nil || daemonStopTask != nil else { return .terminateNow }
+                guard daemon != nil || daemonStopTask != nil else { ProductNativeDiagnostics.lifecycle(.terminateNow); return .terminateNow }
                 terminationPending = true
-                Task { await stopAndJoin(); terminationPending = false; sender.reply(toApplicationShouldTerminate: true) }
+                ProductNativeDiagnostics.lifecycle(.terminateLater)
+                Task { await stopAndJoin(); terminationPending = false; ProductNativeDiagnostics.lifecycle(.terminateReply, ok: true); sender.reply(toApplicationShouldTerminate: true) }
                 return .terminateLater
             }
+            // A live owner without its UI coordinator cannot reply to the
+            // deferred termination request. Refuse this quit, retaining custody.
+            guard let window = setupWindow else {
+                terminationPending = false
+                ProductNativeDiagnostics.lifecycle(.terminateCancelNoWindow)
+                return .terminateCancel
+            }
             terminationPending = true
-            setupWindow?.prepareToQuit { [weak self] approved in
-                guard let owner = self else { sender.reply(toApplicationShouldTerminate: false); return }
+            ProductNativeDiagnostics.lifecycle(.terminateLater)
+            window.prepareToQuit { [weak self] approved in
+                ProductNativeDiagnostics.lifecycle(.terminateAdmission, ok: approved)
+                guard let owner = self else { ProductNativeDiagnostics.lifecycle(.terminateReply, ok: false); sender.reply(toApplicationShouldTerminate: false); return }
                 if approved {
                     owner.nativeCore = nil
                     owner.nativeComponentObservation = nil; owner.nativeDesktopIntentObservedAt = nil
@@ -1146,10 +1168,12 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
                     Task {
                         await owner.stopAndJoin()
                         owner.terminationPending = false
+                        ProductNativeDiagnostics.lifecycle(.terminateReply, ok: true)
                         sender.reply(toApplicationShouldTerminate: true)
                     }
                 } else {
                     owner.terminationPending = false
+                    ProductNativeDiagnostics.lifecycle(.terminateReply, ok: false)
                     sender.reply(toApplicationShouldTerminate: false)
                 }
             }

@@ -63,9 +63,13 @@ final class ProductOwnedCore: @unchecked Sendable {
             while !(handle.availableData.isEmpty) {} // discard; never log bodies
         }
     }
-    private func eof() {
+    private func eof(operation: String? = nil, id: Int? = nil) {
         stopLock.lock(); let first = !eofRequested; eofRequested = true; stopLock.unlock()
-        if first { try? input.close() }
+        if first {
+            ProductNativeDiagnostics.lifecycle(.eofRequested, operation: operation, id: id)
+            do { try input.close(); ProductNativeDiagnostics.lifecycle(.eofClosed, operation: operation, id: id) }
+            catch { ProductNativeDiagnostics.lifecycle(.eofCloseFailed, operation: operation, id: id) }
+        }
     }
     private var closed: Bool { stopLock.lock(); defer { stopLock.unlock() }; return eofRequested }
     // Availability observation only. False withdraws discovery; neither value
@@ -89,6 +93,7 @@ final class ProductOwnedCore: @unchecked Sendable {
     }
     func call(_ operation: String, _ body: [String: ProductJSON] = [:]) async throws -> ProductJSON {
         guard Self.operations.contains(operation) else { throw ProductCoreError.rejected }
+        ProductNativeDiagnostics.lifecycle(.queued, operation: operation)
         // This original queued job retains all child/pipe/pin ownership even if
         // its caller disappears. No cancellation retries or replacement child.
         return try await withCheckedThrowingContinuation { continuation in
@@ -96,22 +101,30 @@ final class ProductOwnedCore: @unchecked Sendable {
                 do {
                     guard !closed, child.isRunning, sequence < Int.max else { throw ProductOwnedCoreError.unavailable }
                     sequence += 1; let id = sequence
+                    ProductNativeDiagnostics.lifecycle(.admitted, operation: operation, id: id)
                     let request = ProductJSON.object(["schema": .number(1), "id": .number(Double(id)), "operation": .string(operation), "input": .object(body)])
                     var raw = try JSONEncoder().encode(request)
                     guard raw.count <= 65536 else { throw ProductCoreError.rejected }; raw.append(10)
-                    let timeout = DispatchWorkItem { [self] in eof() }
+                    let timeout = DispatchWorkItem { [self] in
+                        ProductNativeDiagnostics.lifecycle(.deadlineEOF, operation: operation, id: id)
+                        eof(operation: operation, id: id)
+                    }
                     DispatchQueue.global().asyncAfter(deadline: .now() + 150, execute: timeout)
                     defer { timeout.cancel() }
                     try input.write(contentsOf: raw)
+                    ProductNativeDiagnostics.lifecycle(.requestWritten, operation: operation, id: id)
                     guard let response = try line(), !closed else { throw ProductOwnedCoreError.unknownNoReplay }
                     let value = try JSONDecoder().decode(ProductJSON.self, from: response)
                     guard value["id"].number == Double(id) else { throw ProductOwnedCoreError.unknownNoReplay }
+                    ProductNativeDiagnostics.lifecycle(.responseDecoded, operation: operation, id: id, ok: value["ok"].bool)
                     guard value["ok"].bool else { continuation.resume(throwing: ProductOwnedCoreRejection(response: value)); return }
                     continuation.resume(returning: value["result"])
                 } catch {
                     // EOF requests original Rust cleanup. Retain/wait the same
                     // process; no timer is evidence that its role stopped.
-                    eof(); while !(output.availableData.isEmpty) {}; child.waitUntilExit(); stderrJoined.wait()
+                    ProductNativeDiagnostics.lifecycle(.callFailed, operation: operation)
+                    eof(operation: operation); while !(output.availableData.isEmpty) {}; child.waitUntilExit(); stderrJoined.wait()
+                    ProductNativeDiagnostics.lifecycle(.childJoined, operation: operation)
                     continuation.resume(throwing: error)
                 }
             }
@@ -123,14 +136,15 @@ final class ProductOwnedCore: @unchecked Sendable {
               result["quit"]["ticketId"].string?.range(of: "^[a-f0-9]{32}$", options: .regularExpression) != nil else { throw ProductOwnedCoreError.cleanupUnknown }
         try await withCheckedThrowingContinuation { (continuation: CheckedContinuation<Void, Error>) in
             queue.async { [self] in
-                eof(); while !(output.availableData.isEmpty) {}; child.waitUntilExit(); stderrJoined.wait()
+                eof(operation: "quitAdmission"); while !(output.availableData.isEmpty) {}; child.waitUntilExit(); stderrJoined.wait()
+                ProductNativeDiagnostics.lifecycle(.childJoined, operation: "quitAdmission")
                 if child.terminationReason == .exit && child.terminationStatus == 0 { continuation.resume() }
                 else { continuation.resume(throwing: ProductOwnedCoreError.cleanupUnknown) }
             }
         }
     }
     // Async teardown without a completion claim; queued work retains custody.
-    func requestEOF() { eof(); queue.async { [self] in eof(); while !(output.availableData.isEmpty) {}; child.waitUntilExit(); stderrJoined.wait() } }
+    func requestEOF() { eof(); queue.async { [self] in eof(); while !(output.availableData.isEmpty) {}; child.waitUntilExit(); stderrJoined.wait(); ProductNativeDiagnostics.lifecycle(.childJoined) } }
 
     private static func existingPrivateDirectory(_ url: URL) throws -> Bool {
         var st = stat()
