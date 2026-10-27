@@ -104,6 +104,38 @@ pub(crate) enum ServiceError {
     Unknown,
 }
 type Result<T> = std::result::Result<T, ServiceError>;
+/// Failure observations only. Both arguments must remain static code labels;
+/// never pass paths, OS error Display text, credentials or request material.
+#[allow(unsafe_code)]
+pub(crate) fn report_failure(stage: &'static str, code: &'static str) {
+    let (Ok(stage), Ok(code)) = (std::ffi::CString::new(stage), std::ffi::CString::new(code))
+    else {
+        return;
+    };
+    // SAFETY: the printf format is fixed, both %s arguments are live,
+    // NUL-terminated strings, and syslog does not retain their pointers.
+    unsafe {
+        nix::libc::syslog(
+            nix::libc::LOG_ERR,
+            c"styx_native_service_failure stage=%s code=%s".as_ptr(),
+            stage.as_ptr(),
+            code.as_ptr(),
+        );
+    }
+}
+fn observed_failure(stage: &'static str, error: ServiceError) -> ServiceError {
+    report_failure(
+        stage,
+        match error {
+            ServiceError::Invalid => "service_invalid",
+            ServiceError::Conflict => "service_conflict",
+            ServiceError::Unavailable => "service_unavailable",
+            ServiceError::Busy => "service_busy",
+            ServiceError::Unknown => "service_unknown",
+        },
+    );
+    error
+}
 fn changed<T>(_: T) -> ServiceError {
     ServiceError::Conflict
 }
@@ -1608,7 +1640,10 @@ impl ServiceScope {
     pub(crate) async fn authenticate(path: &Path, role: ServiceRole) -> Result<Arc<Self>> {
         let path = path.to_owned();
         let definition = blocking_read(move || {
-            let definition = Arc::new(Definition::prepare(&path, role)?);
+            let definition = Arc::new(
+                Definition::prepare(&path, role)
+                    .map_err(|e| observed_failure("authenticate_definition", e))?,
+            );
             let current = role
                 .desired(&{
                     let marker = definition
@@ -1631,10 +1666,16 @@ impl ServiceScope {
             }
             Ok(definition)
         })
-        .await?;
-        let peer = ServicePeer::observe_definition(definition).await?;
+        .await
+        .map_err(|e| observed_failure("authenticate_definition_and_desired", e))?;
+        let peer = ServicePeer::observe_definition(definition)
+            .await
+            .map_err(|e| observed_failure("authenticate_original_peer", e))?;
         if peer.pid() != std::process::id() {
-            return Err(ServiceError::Conflict);
+            return Err(observed_failure(
+                "authenticate_self_pid",
+                ServiceError::Conflict,
+            ));
         }
         Ok(Arc::new(Self { peer }))
     }

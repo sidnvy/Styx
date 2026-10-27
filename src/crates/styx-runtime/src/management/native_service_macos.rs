@@ -3,7 +3,7 @@
 //! administrator registration is performed by the separately reviewed package.
 use super::*;
 use crate::platform::macos_service::{
-    Definition, ServiceError, ServiceRole, ServiceScope, blocking_read,
+    Definition, ServiceError, ServiceRole, ServiceScope, blocking_read, report_failure,
 };
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1108,22 +1108,36 @@ pub async fn run(
         NativeComponent::Host => {
             let outcome = crate::foreground::host_run_for_service(scope, cancel, events)
                 .await
-                .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?;
+                .map_err(|error| {
+                    // ForegroundError codes are static labels, not OS Display text.
+                    report_failure("host_foreground", error.code());
+                    NativeManagementError::new(ErrorKind::Unknown)
+                })?;
             if !outcome.is_complete() {
+                report_failure("host_settlement", "service_outcome_incomplete");
                 return Err(NativeManagementError::new(ErrorKind::Unknown));
             }
-            serde_json::to_value(outcome)
-                .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))
+            serde_json::to_value(outcome).map_err(|_| {
+                report_failure("host_report", "service_report_serialization_failed");
+                NativeManagementError::new(ErrorKind::Unknown)
+            })
         }
         NativeComponent::Gateway => {
             let outcome = crate::foreground::gateway_run_for_service(scope, cancel, events)
                 .await
-                .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?;
+                .map_err(|error| {
+                    // ForegroundError codes are static labels, not OS Display text.
+                    report_failure("gateway_foreground", error.code());
+                    NativeManagementError::new(ErrorKind::Unknown)
+                })?;
             if !outcome.is_complete() {
+                report_failure("gateway_settlement", "service_outcome_incomplete");
                 return Err(NativeManagementError::new(ErrorKind::Unknown));
             }
-            serde_json::to_value(outcome)
-                .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))
+            serde_json::to_value(outcome).map_err(|_| {
+                report_failure("gateway_report", "service_report_serialization_failed");
+                NativeManagementError::new(ErrorKind::Unknown)
+            })
         }
     }
 }
