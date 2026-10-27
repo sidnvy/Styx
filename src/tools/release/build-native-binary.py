@@ -274,8 +274,21 @@ def complete_external_macos_signature(args, output, receipt, target, inputs):
     return args.macos_unsigned_image, unsigned_hash, binary, before
 
 
+def cargo_jobs(value):
+    try:
+        jobs = int(value)
+    except (TypeError, ValueError):
+        raise argparse.ArgumentTypeError('jobs must be an integer in 1..256') from None
+    if not 1 <= jobs <= 256:
+        raise argparse.ArgumentTypeError('jobs must be an integer in 1..256')
+    return jobs
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument('--jobs', type=cargo_jobs,
+                        default=os.environ.get('CARGO_BUILD_JOBS', '2'),
+                        help='Cargo jobs, 1..256 (default: CARGO_BUILD_JOBS, otherwise 2)')
     for name in ['source-revision', 'gate-receipt', 'target-dir', 'output']:
         parser.add_argument('--' + name, required=True, type=str if name == 'source-revision' else Path)
     parser.add_argument('--source-archive-manifest', type=Path,
@@ -309,7 +322,8 @@ def main():
     args.output.mkdir(mode=0o700)
     receipt = {'schema': 1, 'status': 'FAIL', 'source_revision': args.source_revision,
                'producer': PRODUCER, 'profile': 'release', 'installed': False,
-               'deployed': False, 'platform_acceptance': False}
+               'deployed': False, 'platform_acceptance': False,
+               'cargo_jobs': None, 'build_elapsed_seconds': None}
     started = time.monotonic()
     try:
         require(args.gate_receipt.stat().st_size <= 16 * 1048576, 'gate_receipt_bound')
@@ -340,7 +354,7 @@ def main():
                     'macos_signing_helper_missing_from_gate_inputs')
         receipt.update(target=target, toolchain=rust, inputs=inputs,
                        gate_receipt_sha256=hashlib.sha256(gate_raw).hexdigest())
-        env = dict(os.environ, CARGO_BUILD_JOBS='2', CARGO_NET_OFFLINE='true',
+        env = dict(os.environ, CARGO_BUILD_JOBS=str(args.jobs), CARGO_NET_OFFLINE='true',
                    CARGO_TERM_COLOR='never', PYTHONDONTWRITEBYTECODE='1',
                    CARGO_TARGET_DIR=str(args.target_dir))
         external_signing_inputs = None
@@ -348,6 +362,8 @@ def main():
             original, original_hash, binary, external_signing_inputs = complete_external_macos_signature(
                 args, args.output, receipt, target, inputs)
         else:
+            # Completion-only never runs Cargo; its actual jobs/time stay None.
+            receipt['cargo_jobs'] = args.jobs
             # Archive inventories bind bytes, not Cargo's mtime-based reuse.
             # Remove only this workspace's RELEASE artifacts for this target;
             # preserve third-party dependencies and every debug cache. External
@@ -377,8 +393,10 @@ def main():
                 clean['elapsed_seconds'] = time.monotonic() - clean_started
                 if clean_log.is_file():
                     clean['log_sha256'] = sha(clean_log)
-            argv = ['cargo', 'build', '--release', '-p', 'styx', '--target', target, '--locked', '--offline']
+            argv = ['cargo', 'build', '--release', '-p', 'styx', '--target', target,
+                    '--locked', '--offline', '--jobs', str(args.jobs), '--timings']
             receipt['command'] = argv
+            build_started = time.monotonic()
             with (args.output / 'cargo-build.log').open('x') as log:
                 try:
                     result = subprocess.run(argv, cwd=ROOT, env=env, stdin=subprocess.DEVNULL,
@@ -388,6 +406,8 @@ def main():
                     # subprocess.run kills and waits its ORIGINAL direct child before raising.
                     receipt.update(build_actual_wait=True, build_timeout=True)
                     raise RuntimeError('native_build_timeout') from None
+                finally:
+                    receipt['build_elapsed_seconds'] = time.monotonic() - build_started
             require(result.returncode == 0, 'native_build_failed')
             name = 'styx.exe' if target.endswith('windows-msvc') else 'styx'
             original = args.target_dir / target / 'release' / name
