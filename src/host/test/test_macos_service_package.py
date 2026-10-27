@@ -13,17 +13,19 @@ m = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(m)
 
 
-def fixture():
+def fixture(role='gateway'):
     uid = 501
     root = {'device': 123, 'inode': 456, 'uid': uid}
-    label = 'app.styx.native.501.' + m.digest(b'styx-native-system-service-v1:123:456:501')[:32] + '.gateway'
+    label = 'app.styx.native.501.' + m.digest(b'styx-native-system-service-v1:123:456:501')[:32] + '.' + role
     selection = {'schema': 1, 'payload_path': '/Users/test/native payload', 'payload_root': {'platform': 'macos', 'device': 123, 'inode': 789, 'uid': uid}, 'manifest_sha256': 'a' * 64, 'publisher_file': '/Users/test/public/publisher.pem', 'publisher_spki_sha256': m.PIN}
     exe = selection['payload_path'] + '/bin/styx'
     state = "/Users/test/profile 'quoted' $(literal)"
-    raw = plistlib.dumps({'Label': label, 'ProgramArguments': [exe, '__service-run', '--state-dir', state, '--role', 'gateway'], 'UserName': 'test', 'WorkingDirectory': '/Users/test', 'EnvironmentVariables': {'HOME': '/Users/test', 'PATH': '/usr/bin:/bin'}, 'RunAtLoad': True, 'KeepAlive': False, 'ProcessType': 'Background'}, sort_keys=False).decode()
-    request = {'schema': 1, 'kind': 'launchd_first_start', 'uid': uid, 'username': 'test', 'role': 'gateway', 'state_dir': state, 'state_root': root, 'canonical_sha256': 'b' * 64, 'transaction_id': 'first-start-1', 'revision': 2, 'definition_path': '/Library/LaunchDaemons/' + label + '.plist', 'definition_plist': raw, 'definition_sha256': m.digest(raw.encode()), 'label': label, 'executable_path': exe, 'executable_sha256': 'c' * 64, 'runtime_selection': selection}
+    raw = plistlib.dumps({'Label': label, 'ProgramArguments': [exe, '__service-run', '--state-dir', state, '--role', role], 'UserName': 'test', 'WorkingDirectory': '/Users/test', 'EnvironmentVariables': {'HOME': '/Users/test', 'PATH': '/usr/bin:/bin'}, 'RunAtLoad': True, 'KeepAlive': False, 'ProcessType': 'Background'}, sort_keys=False).decode()
+    request = {'schema': 1, 'kind': 'launchd_first_start', 'uid': uid, 'username': 'test', 'role': role, 'state_dir': state, 'state_root': root, 'canonical_sha256': 'b' * 64, 'transaction_id': 'first-start-1', 'revision': 2, 'definition_path': '/Library/LaunchDaemons/' + label + '.plist', 'definition_plist': raw, 'definition_sha256': m.digest(raw.encode()), 'label': label, 'executable_path': exe, 'executable_sha256': 'c' * 64, 'runtime_selection': selection}
     report = {k: request[k] for k in ['schema', 'uid', 'revision', 'definition_path', 'definition_plist', 'label', 'runtime_selection']}
-    report.update(operation='prepare_first_start', configuration_only=True, desired={'gateway': {'manager': 'persistent_service', 'run': 'running', 'autostart': 'enabled'}, 'host': None}, requires_initial_disabled=True, os=None, operations_replayed=False, transaction_observation={'status': 'committed', 'state_scope': 'committed_target', 'transaction_id': 'first-start-1', 'revision': 2, 'canonical_raw_sha256': 'b' * 64, 'receipt': {}}, installation_request_v1=request)
+    desired = {'gateway': None, 'host': None}
+    desired[role] = {'manager': 'persistent_service', 'run': 'running', 'autostart': 'enabled'}
+    report.update(operation='prepare_first_start', configuration_only=True, desired=desired, requires_initial_disabled=True, os=None, operations_replayed=False, transaction_observation={'status': 'committed', 'state_scope': 'committed_target', 'transaction_id': 'first-start-1', 'revision': 2, 'canonical_raw_sha256': 'b' * 64, 'receipt': {}}, installation_request_v1=request)
     return report
 
 
@@ -49,6 +51,32 @@ def printed_registration(request):
 
 
 class MacServicePackageTests(unittest.TestCase):
+    def test_host_first_start_keeps_fixed_original_uid_and_single_role(self):
+        report = fixture('host')
+        with tempfile.TemporaryDirectory() as tmp:
+            source = Path(tmp) / 'host-request.json'; source.write_text(json.dumps(report))
+            out = Path(tmp) / 'out'
+            receipt = m.build(source, out, '0.4.0', prepare_only=True)
+            request = report['installation_request_v1']
+            payload = out / 'payload/Library/LaunchDaemons' / (request['label'] + '.plist')
+            self.assertEqual(payload.read_bytes(), request['definition_plist'].encode())
+            plist = plistlib.loads(payload.read_bytes())
+            self.assertEqual(plist['ProgramArguments'], [request['executable_path'], '__service-run', '--state-dir', request['state_dir'], '--role', 'host'])
+            self.assertEqual(plist['UserName'], request['username'])
+            self.assertFalse(receipt['registration_dispatched'])
+            self.assertFalse(receipt['installation_performed'])
+            for script in ['preinstall', 'postinstall']:
+                subprocess.run(['/bin/sh', '-n', str(out / 'scripts' / script)], check=True)
+        for change in [
+                lambda r: r['desired'].update(gateway=copy.deepcopy(r['desired']['host'])),
+                lambda r: r['desired']['host'].update(manager='app_managed'),
+                lambda r: r['installation_request_v1'].update(role='gateway'),
+                lambda r: r['installation_request_v1'].update(role='other')]:
+            refused = fixture('host'); change(refused)
+            with self.assertRaises(ValueError): m.validate(refused)
+        refused = repair_fixture(); refused['installation_request_v1']['role'] = 'host'
+        with self.assertRaisesRegex(ValueError, 'service_install_role_refused'): m.validate(refused)
+
     def test_prepare_preserves_exact_plist_and_fixed_nonexecuting_plan(self):
         report = fixture()
         with tempfile.TemporaryDirectory() as tmp:

@@ -990,7 +990,13 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
                 if !authorize {
                     return error("explicit_service_authorization_required");
                 }
-                if !matches!(component, NativeComponentArg::Gateway) {
+                if matches!(
+                    action,
+                    MacServiceActionArg::PrepareRecovery
+                        | MacServiceActionArg::PrepareRuntimeRepair
+                        | MacServiceActionArg::RecoverRuntimeRepair
+                ) && !matches!(component, NativeComponentArg::Gateway)
+                {
                     return error("native_service_gateway_only");
                 }
             }

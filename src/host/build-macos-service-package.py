@@ -83,7 +83,9 @@ def validate(report):
     closed(request, REQUEST_FIELDS | (REPAIR_FIELDS if repair else set()), "closed_installation_request")
     operation = "prepare_runtime_repair" if repair else "prepare_first_start"
     require(report["schema"] == 1 and type(report["schema"]) is int and report["operation"] == operation and report["configuration_only"] is True and report["operations_replayed"] is False, "configuration_only_report_required")
-    require(type(request["schema"]) is int and request["schema"] == 1 and request["kind"] == ("launchd_failed_registration_repair" if repair else "launchd_first_start") and request["role"] == "gateway", "gateway_install_kind_required")
+    require(type(request["schema"]) is int and request["schema"] == 1 and request["kind"] == ("launchd_failed_registration_repair" if repair else "launchd_first_start"), "service_install_kind_required")
+    role = request["role"]
+    require(role == "gateway" if repair else role in ["gateway", "host"], "service_install_role_refused")
     require(report["os"] == request["original_registration"] if repair else report["os"] is None, "registration_report_binding")
     uid = integer(request["uid"], 1, (1 << 32) - 1)
     user = text(request["username"], 128)
@@ -96,7 +98,7 @@ def validate(report):
     tx = text(request["transaction_id"], 128)
     require(re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._-]*", tx), "transaction_shape")
     integer(request["revision"], 1)
-    label = "app.styx.native.%d.%s.gateway" % (uid, digest(("styx-native-system-service-v1:%d:%d:%d" % (root["device"], root["inode"], uid)).encode())[:32])
+    label = "app.styx.native.%d.%s.%s" % (uid, digest(("styx-native-system-service-v1:%d:%d:%d" % (root["device"], root["inode"], uid)).encode())[:32], role)
     require(request["label"] == label and request["definition_path"] == "/Library/LaunchDaemons/" + label + ".plist", "fixed_profile_label_and_destination")
     exe = path(request["executable_path"])
     require(not any(part.endswith(".app") for part in exe.parts), "stable_non_app_runtime_required")
@@ -114,13 +116,15 @@ def validate(report):
         require(all(children[i].tag == "key" for i in range(0, len(children), 2)) and len(keys) == len(set(keys)), "duplicate_plist_key")
     plist = plistlib.loads(raw)
     closed(plist, PLIST_FIELDS, "closed_launchd_keys")
-    require(plist["Label"] == label and plist["ProgramArguments"] == [str(exe), "__service-run", "--state-dir", str(state), "--role", "gateway"] and plist["UserName"] == user, "fixed_original_uid_command")
+    require(plist["Label"] == label and plist["ProgramArguments"] == [str(exe), "__service-run", "--state-dir", str(state), "--role", role] and plist["UserName"] == user, "fixed_original_uid_command")
     home = path(plist["WorkingDirectory"])
     require(plist["EnvironmentVariables"] == {"HOME": str(home), "PATH": "/usr/bin:/bin"} and plist["RunAtLoad"] is True and plist["KeepAlive"] is False and plist["ProcessType"] == "Background", "fixed_launchd_policy")
     for key in ["uid", "revision", "label", "definition_path", "definition_plist", "runtime_selection"]:
         require(report[key] == request[key], "report_request_binding")
     require(report["requires_initial_disabled"] is True, "original_definition_contract")
-    require(report["desired"] == {"gateway": {"manager": "persistent_service", "run": "running", "autostart": "enabled"}, "host": None}, "fresh_gateway_only_running_enabled")
+    expected_desired = {"gateway": None, "host": None}
+    expected_desired[role] = {"manager": "persistent_service", "run": "running", "autostart": "enabled"}
+    require(report["desired"] == expected_desired, "fresh_single_role_running_enabled")
     observed = report["transaction_observation"]
     closed(observed, {"status", "state_scope", "transaction_id", "revision", "canonical_raw_sha256", "receipt"}, "committed_target_observation")
     require(observed["status"] == "committed" and observed["state_scope"] == "committed_target" and observed["transaction_id"] == tx and observed["revision"] == request["revision"] and observed["canonical_raw_sha256"] == request["canonical_sha256"] and isinstance(observed["receipt"], dict), "original_committed_target_binding")

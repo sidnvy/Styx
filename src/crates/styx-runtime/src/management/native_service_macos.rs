@@ -1,5 +1,6 @@
 //! Existing-UID launchd intent preparation, authenticated service entry, and
-//! Gateway Stop through its original C07 writer. Preparation changes C07 only;
+//! single-role preparation and Stop through the original C07 writer.
+//! Preparation changes C07 only;
 //! administrator registration is performed by the separately reviewed package.
 use super::*;
 use crate::platform::macos_service::{
@@ -90,7 +91,8 @@ async fn validate_operation(lease: Arc<crate::store::ServiceOperationGuard>) -> 
 }
 
 /// Definition/Status remain readonly. Stop delegates exactly once to the
-/// original running Gateway's writer; no action invokes mutating launchctl.
+/// original running Gateway's writer or the fresh Host-only original C07;
+/// no action invokes mutating launchctl.
 /// Missing/unknown registration is never reported as inactive.
 pub async fn manage(
     state_dir: &Path,
@@ -111,25 +113,25 @@ pub async fn manage(
             | ServiceAction::PrepareFirstStart
             | ServiceAction::PrepareRecovery
     ) {
-        if !matches!(component, NativeComponent::Gateway) {
+        if action == ServiceAction::PrepareRecovery
+            && !matches!(component, NativeComponent::Gateway)
+        {
             return Err(NativeManagementError::new(ErrorKind::Unsupported));
         }
         return prepare_intent(
             state_dir,
             action,
+            component,
             transaction_id.ok_or_else(|| NativeManagementError::new(ErrorKind::Invalid))?,
             expected_revision.ok_or_else(|| NativeManagementError::new(ErrorKind::Invalid))?,
         )
         .await;
     }
     if action == ServiceAction::Stop {
-        if !matches!(component, NativeComponent::Gateway) {
-            return Err(NativeManagementError::new(ErrorKind::Unsupported));
-        }
         let id = transaction_id.ok_or_else(|| NativeManagementError::new(ErrorKind::Invalid))?;
         let revision =
             expected_revision.ok_or_else(|| NativeManagementError::new(ErrorKind::Invalid))?;
-        return stop_gateway(state_dir, id, revision).await;
+        return stop_component(state_dir, component, id, revision).await;
     }
     if transaction_id.is_some() || expected_revision.is_some() {
         return Err(NativeManagementError::new(ErrorKind::Invalid));
@@ -642,22 +644,23 @@ fn require_repair_before(before: &NativeState, revision: u64) -> Result<()> {
 fn prepare_target(
     before: &NativeState,
     action: ServiceAction,
+    component: NativeComponent,
     id: &TransactionId,
     revision: u64,
 ) -> Result<NativeState> {
     if before.revision != revision
-        || before.mode != NativeDeploymentMode::CreateLocal
-        || before.has_migration_binding()
-        || before.desired.host.is_some()
+        || !crate::platform::macos_service::fresh_single_role(before, role(component))
+        || action == ServiceAction::PrepareRecovery
+            && !matches!(component, NativeComponent::Gateway)
     {
         return Err(NativeManagementError::new(ErrorKind::Conflict));
     }
     let mut target = before.clone();
-    let gateway = target
-        .desired
-        .gateway
-        .as_mut()
-        .ok_or_else(|| NativeManagementError::new(ErrorKind::Conflict))?;
+    let desired = match component {
+        NativeComponent::Host => target.desired.host.as_mut(),
+        NativeComponent::Gateway => target.desired.gateway.as_mut(),
+    }
+    .ok_or_else(|| NativeManagementError::new(ErrorKind::Conflict))?;
     let expected = match action {
         ServiceAction::PrepareInstall => NativeComponentDesired {
             manager: NativeManager::ForegroundCli,
@@ -676,16 +679,16 @@ fn prepare_target(
         },
         _ => return Err(NativeManagementError::new(ErrorKind::Invalid)),
     };
-    if *gateway != expected {
+    if *desired != expected {
         return Err(NativeManagementError::new(ErrorKind::Conflict));
     }
-    gateway.manager = NativeManager::PersistentService;
+    desired.manager = NativeManager::PersistentService;
     if action == ServiceAction::PrepareFirstStart {
-        gateway.run = NativeRunDesired::Running;
-        gateway.autostart = NativeAutostartDesired::Enabled;
+        desired.run = NativeRunDesired::Running;
+        desired.autostart = NativeAutostartDesired::Enabled;
     } else if action == ServiceAction::PrepareRecovery {
-        gateway.run = NativeRunDesired::Stopped;
-        gateway.autostart = NativeAutostartDesired::Disabled;
+        desired.run = NativeRunDesired::Stopped;
+        desired.autostart = NativeAutostartDesired::Disabled;
     }
     target.revision = revision
         .checked_add(1)
@@ -704,6 +707,7 @@ fn prepare_target(
 async fn prepare_intent(
     path: &Path,
     action: ServiceAction,
+    component: NativeComponent,
     id: TransactionId,
     revision: u64,
 ) -> Result<ServiceReport> {
@@ -732,13 +736,13 @@ async fn prepare_intent(
                 let transactions = platform::service_open(&open_path)?;
                 let prepared = (|| -> Result<_> {
                     let before = transactions.readstate().map_err(NativeManagementError::transaction)?;
-                    prepare_target(before.state(), action, &open_id, revision)?;
+                    prepare_target(before.state(), action, component, &open_id, revision)?;
                     let execution = crate::store::PrivateRoot::open(&open_path)
                         .and_then(|root| root.try_execution_lease())
                         .map_err(|_| NativeManagementError::new(ErrorKind::Busy))?;
                     let definition = if action == ServiceAction::PrepareInstall {
-                        Definition::prepare_install(&open_path)
-                    } else { Definition::prepare(&open_path, ServiceRole::Gateway) }.map_err(os)?;
+                        Definition::prepare_install(&open_path, role(component))
+                    } else { Definition::prepare(&open_path, role(component)) }.map_err(os)?;
                     if action != ServiceAction::PrepareRecovery {
                         definition.require_pending_registration().map_err(os)?;
                     }
@@ -772,7 +776,7 @@ async fn prepare_intent(
                 operation.validate().map_err(|_| NativeManagementError::new(ErrorKind::Conflict))?;
                 let mut owner = checked.lock().map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?;
                 let before = owner.transactions.readstate().map_err(NativeManagementError::transaction)?;
-                let target = prepare_target(before.state(), action, &id, revision)?;
+                let target = prepare_target(before.state(), action, component, &id, revision)?;
                 owner.definition.validate().map_err(os)?;
                 if let Some(proof) = &owner.inactive {
                     proof.validate_owner(&owner.transactions.configuration_root()).map_err(os)?;
@@ -901,20 +905,21 @@ fn validate_stop_target(
     raw_sha256: &styx_contracts::identity::Sha256Digest,
     report: &crate::management::service_control::ServiceControlReport,
     id: &TransactionId,
+    component: NativeComponent,
 ) -> Result<()> {
     use styx_contracts::native_management::NativeStateTransaction;
     let mut expected = before.clone();
-    let gateway = expected
-        .desired
-        .gateway
-        .as_mut()
-        .ok_or_else(|| NativeManagementError::new(ErrorKind::Conflict))?;
-    if gateway.manager != NativeManager::PersistentService
-        || gateway.run != NativeRunDesired::Running
+    let desired = match component {
+        NativeComponent::Host => expected.desired.host.as_mut(),
+        NativeComponent::Gateway => expected.desired.gateway.as_mut(),
+    }
+    .ok_or_else(|| NativeManagementError::new(ErrorKind::Conflict))?;
+    if desired.manager != NativeManager::PersistentService
+        || desired.run != NativeRunDesired::Running
     {
         return Err(NativeManagementError::new(ErrorKind::Conflict));
     }
-    gateway.run = NativeRunDesired::Stopped;
+    desired.run = NativeRunDesired::Stopped;
     expected.revision = expected
         .revision
         .checked_add(1)
@@ -955,10 +960,69 @@ fn validate_stop_target(
     Ok(())
 }
 
+/// Fresh Host-only metadata Stop through the caller's retained original C07
+/// writer. This report is a committed target, never an actual-exit claim.
+fn commit_host_stop(
+    transactions: &mut NativeTransactions,
+    before: &NativeState,
+    id: &TransactionId,
+    revision: u64,
+) -> Result<crate::management::service_control::ServiceControlReport> {
+    if before.revision != revision
+        || !crate::platform::macos_service::fresh_single_role(before, ServiceRole::Host)
+        || before.desired.host.is_none_or(|desired| {
+            desired.manager != NativeManager::PersistentService
+                || desired.run != NativeRunDesired::Running
+        })
+    {
+        return Err(NativeManagementError::new(ErrorKind::Conflict));
+    }
+    let current = transactions
+        .readstate()
+        .map_err(NativeManagementError::transaction)?;
+    if serde_json::to_vec(current.state())
+        .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?
+        != serde_json::to_vec(before).map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?
+    {
+        return Err(NativeManagementError::new(ErrorKind::Conflict));
+    }
+    let authority = transactions.configuration_root();
+    // Existing typed C07 operation chooses journal high-water + 1 itself.
+    let (commit, target_revision) = transactions
+        .set_service_stopped(&authority, NativeComponent::Host, revision, id.clone())
+        .map_err(NativeManagementError::transaction)?;
+    let report = crate::management::service_control::ServiceControlReport {
+        schema: 1,
+        transaction_id: id.clone(),
+        revision: target_revision,
+        canonical_raw_sha256: commit.canonical_raw_sha256,
+        status: "configuration_committed_stop_pending".into(),
+        state_scope: "committed_target".into(),
+    };
+    let after = transactions
+        .readstate()
+        .map_err(NativeManagementError::transaction)?;
+    let raw_hash = Sha256Digest::of_bytes(after.raw_bytes());
+    validate_stop_target(
+        before,
+        after.state(),
+        &raw_hash,
+        &report,
+        id,
+        NativeComponent::Host,
+    )?;
+    Ok(report)
+}
+
 /// Caller loss never cancels or resends the original mutation. Any uncertainty
 /// after dispatch retains operation lease, definition, original instance and
 /// transaction identity until whole-process teardown, as on Linux.
-async fn stop_gateway(path: &Path, id: TransactionId, revision: u64) -> Result<ServiceReport> {
+async fn stop_component(
+    path: &Path,
+    component: NativeComponent,
+    id: TransactionId,
+    revision: u64,
+) -> Result<ServiceReport> {
     let permit = OPERATIONS
         .try_acquire()
         .map_err(|_| NativeManagementError::new(ErrorKind::Busy))?;
@@ -969,6 +1033,7 @@ async fn stop_gateway(path: &Path, id: TransactionId, revision: u64) -> Result<S
         let mut operation_lease = None;
         let mut definition = None;
         let mut instance = None;
+        let mut host_transactions = None;
         let mut dispatched = false;
         let result = async {
             let lease_path = path.clone();
@@ -986,7 +1051,7 @@ async fn stop_gateway(path: &Path, id: TransactionId, revision: u64) -> Result<S
             ));
             let prepared_path = path.clone();
             definition = Some(Arc::new(
-                blocking_read(move || Definition::prepare(&prepared_path, ServiceRole::Gateway))
+                blocking_read(move || Definition::prepare(&prepared_path, role(component)))
                     .await
                     .map_err(os)?,
             ));
@@ -994,35 +1059,68 @@ async fn stop_gateway(path: &Path, id: TransactionId, revision: u64) -> Result<S
             let checked = definition.clone();
             let before = blocking_read(move || checked.state()).await.map_err(os)?;
             if before.revision != revision
-                || before.desired.gateway.is_none_or(|desired| {
+                || role(component).desired(&before).is_none_or(|desired| {
                     desired.manager != NativeManager::PersistentService
                         || desired.run != NativeRunDesired::Running
                 })
+                || matches!(component, NativeComponent::Host)
+                    && !crate::platform::macos_service::fresh_single_role(
+                        &before,
+                        ServiceRole::Host,
+                    )
             {
                 return Err(NativeManagementError::new(ErrorKind::Conflict));
             }
             // Pins exact root-owned installed plist + registered process UID,
             // kernel birth and original signed executable before C07 dispatch.
-            instance = Some(definition.prepare_stop().await.map_err(os)?);
+            instance = Some(Arc::new(definition.prepare_stop().await.map_err(os)?));
+            if matches!(component, NativeComponent::Host) {
+                // The Host runner owns an execution/read scope, not the C07
+                // writer. This existing opener refuses all AppManaged roots.
+                let opened_path = path.clone();
+                host_transactions = Some(Arc::new(std::sync::Mutex::new(
+                    blocking_read(move || Ok(platform::service_open(&opened_path)))
+                        .await
+                        .map_err(os)??,
+                )));
+            }
             validate_operation(operation_lease.as_ref().expect("operation lease").clone()).await?;
             dispatched = true;
-            let committed = crate::management::service_control::set_run(
-                &path,
-                NativeComponent::Gateway,
-                NativeRunDesired::Stopped,
-                revision,
-                id.clone(),
-            )
-            .await
-            .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?;
-            // The same original Gateway now cancels/drains itself. Never send
+            let committed = if let Some(transactions) = &host_transactions {
+                let owner = transactions.clone();
+                let original = instance.as_ref().expect("original Host instance").clone();
+                let expected = before.clone();
+                let transaction = id.clone();
+                blocking_read(move || {
+                    original.validate()?;
+                    Ok((|| -> Result<_> {
+                        let mut transactions = owner
+                            .lock()
+                            .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?;
+                        commit_host_stop(&mut transactions, &expected, &transaction, revision)
+                    })())
+                })
+                .await
+                .map_err(os)??
+            } else {
+                crate::management::service_control::set_run(
+                    &path,
+                    NativeComponent::Gateway,
+                    NativeRunDesired::Stopped,
+                    revision,
+                    id.clone(),
+                )
+                .await
+                .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?
+            };
+            // The same original service now cancels/drains itself. Never send
             // launchctl kill or retry Stop, even if ACK or actual exit is lost.
             let stopped = definition.wait_original_stop().await.map_err(os)?;
             let checked = definition.clone();
             let (after, raw_sha256) = blocking_read(move || checked.state_observation())
                 .await
                 .map_err(os)?;
-            validate_stop_target(&before, &after, &raw_sha256, &committed, &id)?;
+            validate_stop_target(&before, &after, &raw_sha256, &committed, &id, component)?;
             validate_operation(operation_lease.as_ref().expect("operation lease").clone())
                 .await
                 .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?;
@@ -1040,7 +1138,7 @@ async fn stop_gateway(path: &Path, id: TransactionId, revision: u64) -> Result<S
                 requires_initial_disabled: material.requires_initial_disabled,
                 runtime_selection: material.selection,
                 // Original signed __service-run exits zero only after its
-                // Gateway outcome is complete. OS absence alone is insufficient;
+                // role outcome is complete. OS absence alone is insufficient;
                 // this does not claim independent per-worker waitpid observation.
                 os: Some(serde_json::json!({"stop":stopped,
                     "product_settlement_basis":"original_signed_service_clean_exit",
@@ -1058,7 +1156,7 @@ async fn stop_gateway(path: &Path, id: TransactionId, revision: u64) -> Result<S
             Ok(report) => {
                 let _ = send.send(Ok(report));
             }
-            Err(error) if dispatched => {
+            Err(error) if dispatched || error._retained.is_some() => {
                 let _ = send.send(Err((ErrorKind::Unknown, true)));
                 std::future::pending::<()>().await;
                 drop(error);
@@ -1067,7 +1165,7 @@ async fn stop_gateway(path: &Path, id: TransactionId, revision: u64) -> Result<S
                 let _ = send.send(Err((error.kind, false)));
             }
         }
-        drop((instance, definition, operation_lease, id));
+        drop((host_transactions, instance, definition, operation_lease, id));
     });
     match receive.await {
         Ok(Ok(report)) => {
@@ -1147,6 +1245,165 @@ mod tests {
     use super::*;
     use crate::management::service_control::ServiceControlReport;
 
+    #[test]
+    #[ignore = "requires fresh STYX_TEST_MACOS_HOST_MANAGEMENT_ROOT; real C07 filesystem only, no service registration"]
+    fn fresh_host_prepare_first_start_stop_preserves_original_c07_and_refuses_app_adoption() {
+        use crate::store::{
+            PrivateRoot,
+            native_root::{create_fresh, reopen_native},
+        };
+        use std::{collections::BTreeMap, ffi::OsStr, fs, os::unix::fs::PermissionsExt};
+        let base = PathBuf::from(std::env::var("STYX_TEST_MACOS_HOST_MANAGEMENT_ROOT").unwrap());
+        assert!(base.is_absolute());
+        fs::create_dir(&base).unwrap();
+        fs::set_permissions(&base, fs::Permissions::from_mode(0o700)).unwrap();
+        let parent = PrivateRoot::open(&base).unwrap();
+        let fresh = create_fresh(&parent, OsStr::new("native"))
+            .unwrap_or_else(|error| panic!("fresh: {:?}", error.error()));
+        let deployment = b"{\"synthetic_host_c07_only\":true,\"opaque\":900719925474099312345}\n";
+        let state = NativeState {
+            schema: 2,
+            kind: NativeStateKind::StyxDesiredState,
+            runtime_format: NativeRuntimeFormat::NativeRustV1,
+            reader_contract: styx_contracts::management::ReaderContract::NativeManagementStateV1,
+            scope_generation: fresh.marker().scope_generation,
+            deployment_raw_sha256: Sha256Digest::of_bytes(deployment),
+            mode: NativeDeploymentMode::JoinExisting,
+            revision: 0,
+            last_transaction: None,
+            desired: NativeDesired {
+                gateway: None,
+                host: Some(NativeComponentDesired {
+                    manager: NativeManager::ForegroundCli,
+                    run: NativeRunDesired::Stopped,
+                    autostart: NativeAutostartDesired::Disabled,
+                }),
+            },
+            migration: None,
+            extensions: BTreeMap::from([(
+                "host_service_opaque".into(),
+                serde_json::value::RawValue::from_string(
+                    "{\"integer\":900719925474099312345,\"decimal\":1e99999}".into(),
+                )
+                .unwrap(),
+            )]),
+        };
+        let binding = fresh
+            .initialize(deployment, &state)
+            .unwrap_or_else(|error| panic!("genesis: {:?}", error.error()));
+        let mut transactions = NativeTransactions::open(binding)
+            .unwrap_or_else(|error| panic!("transactions: {:?}", error.error()));
+        let root_path = base.join("native");
+        let marker = fs::read(root_path.join(".styx-native-root-v1.json")).unwrap();
+        for (action, name) in [
+            (ServiceAction::PrepareInstall, "host-service-prepare"),
+            (ServiceAction::PrepareFirstStart, "host-service-first-start"),
+        ] {
+            let before = transactions.readstate().unwrap().state().clone();
+            let id = TransactionId::try_from(name).unwrap();
+            let target =
+                prepare_target(&before, action, NativeComponent::Host, &id, before.revision)
+                    .unwrap();
+            transactions
+                .apply_target(&serde_json::to_vec(&target).unwrap())
+                .unwrap();
+            assert!(before.extensions_preserved_in(&target));
+            assert_eq!(
+                transactions.readstate().unwrap().raw_bytes(),
+                serde_json::to_vec(&target).unwrap()
+            );
+            // A previously valid request cannot be replayed after its revision.
+            assert!(
+                prepare_target(&target, action, NativeComponent::Host, &id, before.revision)
+                    .is_err()
+            );
+        }
+        let before = transactions.readstate().unwrap().state().clone();
+        let id = TransactionId::try_from("host-service-stop").unwrap();
+        let report = commit_host_stop(&mut transactions, &before, &id, before.revision).unwrap();
+        let stopped = transactions.readstate().unwrap().state().clone();
+        assert_eq!(report.state_scope, "committed_target");
+        assert_eq!(
+            stopped.desired.host,
+            Some(NativeComponentDesired {
+                manager: NativeManager::PersistentService,
+                run: NativeRunDesired::Stopped,
+                autostart: NativeAutostartDesired::Enabled,
+            })
+        );
+        assert!(before.extensions_preserved_in(&stopped));
+        assert_eq!(
+            fs::read(root_path.join("deployment.json")).unwrap(),
+            deployment
+        );
+        assert_eq!(
+            fs::read(root_path.join(".styx-native-root-v1.json")).unwrap(),
+            marker
+        );
+        assert!(commit_host_stop(&mut transactions, &before, &id, before.revision).is_err());
+        for component in [NativeComponent::Host, NativeComponent::Gateway] {
+            let mut refused = state.clone();
+            refused.desired.host.as_mut().unwrap().manager = NativeManager::AppManaged;
+            let bytes_before = transactions.readstate().unwrap().raw_bytes().to_vec();
+            assert!(
+                prepare_target(
+                    &refused,
+                    ServiceAction::PrepareInstall,
+                    component,
+                    &TransactionId::try_from("refuse-app-manager-adoption").unwrap(),
+                    refused.revision
+                )
+                .is_err()
+            );
+            assert_eq!(transactions.readstate().unwrap().raw_bytes(), bytes_before);
+        }
+        assert!(
+            prepare_target(
+                &stopped,
+                ServiceAction::PrepareRecovery,
+                NativeComponent::Host,
+                &TransactionId::try_from("refuse-host-recovery").unwrap(),
+                stopped.revision
+            )
+            .is_err()
+        );
+        drop(transactions);
+        let root = PrivateRoot::open(&root_path).unwrap();
+        let writer = root.try_existing_configuration_writer().unwrap();
+        let binding = reopen_native(root, writer)
+            .unwrap_or_else(|error| panic!("reopen: {:?}", error.error()));
+        let reopened = NativeTransactions::open(binding)
+            .unwrap_or_else(|error| panic!("coordinator: {:?}", error.error()));
+        assert_eq!(
+            reopened.readstate().unwrap().raw_bytes(),
+            serde_json::to_vec(&stopped).unwrap()
+        );
+        drop(reopened);
+        // Real public CLI opener must still refuse an App-managed root. Give
+        // that separate root its own original C07 namespace before observing
+        // refusal; do not substitute a DTO-only manager check for this port.
+        let app = create_fresh(&parent, OsStr::new("app"))
+            .unwrap_or_else(|error| panic!("app fresh: {:?}", error.error()));
+        let mut app_state = state.clone();
+        app_state.scope_generation = app.marker().scope_generation;
+        app_state.desired.host.as_mut().unwrap().manager = NativeManager::AppManaged;
+        let binding = app
+            .initialize(deployment, &app_state)
+            .unwrap_or_else(|error| panic!("app genesis: {:?}", error.error()));
+        let app_transactions = NativeTransactions::open(binding)
+            .unwrap_or_else(|error| panic!("app coordinator: {:?}", error.error()));
+        let app_before = app_transactions.readstate().unwrap().raw_bytes().to_vec();
+        drop(app_transactions);
+        assert!(platform::service_open(&base.join("app")).is_err());
+        assert_eq!(fs::read(base.join("app/state.json")).unwrap(), app_before);
+        assert_eq!(
+            fs::read(base.join("app/deployment.json")).unwrap(),
+            deployment
+        );
+        drop(parent);
+        fs::remove_dir_all(base).unwrap();
+    }
+
     // Pure consumer contract only: no launchd, service registration, or native
     // process/settlement claim is made by this fixture.
     fn fixture() -> (
@@ -1205,29 +1462,80 @@ mod tests {
     fn mac_gateway_stop_target_binds_original_role_transaction_and_raw_canonical() {
         let (before, after, report, id) = fixture();
         let hash = report.canonical_raw_sha256.clone();
-        assert!(validate_stop_target(&before, &after, &hash, &report, &id).is_ok());
+        assert!(
+            validate_stop_target(
+                &before,
+                &after,
+                &hash,
+                &report,
+                &id,
+                NativeComponent::Gateway
+            )
+            .is_ok()
+        );
         let mut changed = after.clone();
         changed.desired.host.as_mut().unwrap().run = NativeRunDesired::Stopped;
-        assert!(validate_stop_target(&before, &changed, &hash, &report, &id).is_err());
+        assert!(
+            validate_stop_target(
+                &before,
+                &changed,
+                &hash,
+                &report,
+                &id,
+                NativeComponent::Gateway
+            )
+            .is_err()
+        );
         changed = after.clone();
         changed.desired.gateway.as_mut().unwrap().autostart = NativeAutostartDesired::Disabled;
-        assert!(validate_stop_target(&before, &changed, &hash, &report, &id).is_err());
+        assert!(
+            validate_stop_target(
+                &before,
+                &changed,
+                &hash,
+                &report,
+                &id,
+                NativeComponent::Gateway
+            )
+            .is_err()
+        );
         changed = after.clone();
         changed.scope_generation = Sha256Digest::of_bytes(b"replacement-root");
-        assert!(validate_stop_target(&before, &changed, &hash, &report, &id).is_err());
+        assert!(
+            validate_stop_target(
+                &before,
+                &changed,
+                &hash,
+                &report,
+                &id,
+                NativeComponent::Gateway
+            )
+            .is_err()
+        );
         assert!(
             validate_stop_target(
                 &before,
                 &after,
                 &Sha256Digest::of_bytes(b"wrong-raw"),
                 &report,
-                &id
+                &id,
+                NativeComponent::Gateway
             )
             .is_err()
         );
         let mut wrong_reply = report;
         wrong_reply.status = "committed".into();
-        assert!(validate_stop_target(&before, &after, &hash, &wrong_reply, &id).is_err());
+        assert!(
+            validate_stop_target(
+                &before,
+                &after,
+                &hash,
+                &wrong_reply,
+                &id,
+                NativeComponent::Gateway
+            )
+            .is_err()
+        );
     }
     #[test]
     fn mac_prepare_intent_refuses_manager_adoption_running_and_extra_roles() {
@@ -1238,7 +1546,14 @@ mod tests {
         gateway.run = NativeRunDesired::Stopped;
         gateway.autostart = NativeAutostartDesired::Disabled;
         assert!(
-            prepare_target(&before, ServiceAction::PrepareInstall, &id, before.revision).is_ok()
+            prepare_target(
+                &before,
+                ServiceAction::PrepareInstall,
+                NativeComponent::Gateway,
+                &id,
+                before.revision
+            )
+            .is_ok()
         );
         let mut refused = before.clone();
         refused.desired.gateway.as_mut().unwrap().manager = NativeManager::AppManaged;
@@ -1246,6 +1561,7 @@ mod tests {
             prepare_target(
                 &refused,
                 ServiceAction::PrepareInstall,
+                NativeComponent::Gateway,
                 &id,
                 before.revision
             )
@@ -1257,6 +1573,7 @@ mod tests {
             prepare_target(
                 &refused,
                 ServiceAction::PrepareInstall,
+                NativeComponent::Gateway,
                 &id,
                 before.revision
             )
@@ -1268,6 +1585,7 @@ mod tests {
             prepare_target(
                 &refused,
                 ServiceAction::PrepareInstall,
+                NativeComponent::Gateway,
                 &id,
                 before.revision
             )
@@ -1277,6 +1595,7 @@ mod tests {
             prepare_target(
                 &before,
                 ServiceAction::PrepareFirstStart,
+                NativeComponent::Gateway,
                 &id,
                 before.revision
             )
@@ -1286,6 +1605,7 @@ mod tests {
             prepare_target(
                 &before,
                 ServiceAction::PrepareInstall,
+                NativeComponent::Gateway,
                 &id,
                 before.revision + 1
             )
@@ -1301,6 +1621,7 @@ mod tests {
         let target = prepare_target(
             &before,
             ServiceAction::PrepareRecovery,
+            NativeComponent::Gateway,
             &id,
             before.revision,
         )
@@ -1322,6 +1643,7 @@ mod tests {
             prepare_target(
                 &target,
                 ServiceAction::PrepareRecovery,
+                NativeComponent::Gateway,
                 &id,
                 target.revision
             )
@@ -1331,6 +1653,7 @@ mod tests {
             prepare_target(
                 &before,
                 ServiceAction::PrepareRecovery,
+                NativeComponent::Gateway,
                 &id,
                 before.revision + 1
             )
@@ -1355,6 +1678,7 @@ mod tests {
                 prepare_target(
                     &changed,
                     ServiceAction::PrepareRecovery,
+                    NativeComponent::Gateway,
                     &id,
                     changed.revision
                 )
@@ -1367,19 +1691,40 @@ mod tests {
         let (mut before, mut after, mut report, id) = fixture();
         after.last_transaction.as_mut().unwrap().sequence = 9;
         assert!(
-            validate_stop_target(&before, &after, &report.canonical_raw_sha256, &report, &id)
-                .is_err()
+            validate_stop_target(
+                &before,
+                &after,
+                &report.canonical_raw_sha256,
+                &report,
+                &id,
+                NativeComponent::Gateway
+            )
+            .is_err()
         );
         after.last_transaction.as_mut().unwrap().sequence = 12;
         report.transaction_id = "foreign-stop-contract".try_into().unwrap();
         assert!(
-            validate_stop_target(&before, &after, &report.canonical_raw_sha256, &report, &id)
-                .is_err()
+            validate_stop_target(
+                &before,
+                &after,
+                &report.canonical_raw_sha256,
+                &report,
+                &id,
+                NativeComponent::Gateway
+            )
+            .is_err()
         );
         before.desired.gateway.as_mut().unwrap().manager = NativeManager::AppManaged;
         assert!(
-            validate_stop_target(&before, &after, &report.canonical_raw_sha256, &report, &id)
-                .is_err()
+            validate_stop_target(
+                &before,
+                &after,
+                &report.canonical_raw_sha256,
+                &report,
+                &id,
+                NativeComponent::Gateway
+            )
+            .is_err()
         );
     }
 }

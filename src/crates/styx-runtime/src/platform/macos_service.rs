@@ -90,6 +90,27 @@ impl ServiceRole {
         }
     }
 }
+/// Narrow first-install topology, never manager or writer authority. Shared-role
+/// and migrated roots require their own original-owner transfer protocol.
+pub(crate) fn fresh_single_role(
+    state: &styx_contracts::native_management::NativeState,
+    role: ServiceRole,
+) -> bool {
+    use styx_contracts::native_management::NativeDeploymentMode;
+    !state.has_migration_binding()
+        && match role {
+            ServiceRole::Host => {
+                state.mode == NativeDeploymentMode::JoinExisting
+                    && state.desired.host.is_some()
+                    && state.desired.gateway.is_none()
+            }
+            ServiceRole::Gateway => {
+                state.mode == NativeDeploymentMode::CreateLocal
+                    && state.desired.gateway.is_some()
+                    && state.desired.host.is_none()
+            }
+        }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
 pub(crate) enum ServiceError {
     #[error("invalid native system service input")]
@@ -655,8 +676,8 @@ impl Definition {
         Self::prepare_owned(path, role, false)
     }
     /// Derive future fixed installation DATA only; never a runtime scope.
-    pub(crate) fn prepare_install(path: &Path) -> Result<Self> {
-        Self::prepare_owned(path, ServiceRole::Gateway, true)
+    pub(crate) fn prepare_install(path: &Path, role: ServiceRole) -> Result<Self> {
+        Self::prepare_owned(path, role, true)
     }
     fn prepare_owned(path: &Path, role: ServiceRole, install_preparation: bool) -> Result<Self> {
         Self::prepare_observed(path, role, install_preparation, None)
@@ -705,10 +726,7 @@ impl Definition {
         let desired = role.desired(state).ok_or(ServiceError::Invalid)?;
         if state.has_migration_binding()
             || if install_preparation {
-                role != ServiceRole::Gateway
-                    || state.mode
-                        != styx_contracts::native_management::NativeDeploymentMode::CreateLocal
-                    || state.desired.host.is_some()
+                !fresh_single_role(state, role)
                     || desired.manager != NativeManager::ForegroundCli
                     || desired.run != NativeRunDesired::Stopped
                     || desired.autostart
@@ -921,11 +939,7 @@ impl Definition {
         )
         .map_err(changed)?;
         let manager_matches = if self.install_preparation {
-            self.role == ServiceRole::Gateway
-                && state.state().mode
-                    == styx_contracts::native_management::NativeDeploymentMode::CreateLocal
-                && state.state().desired.host.is_none()
-                && !state.state().has_migration_binding()
+            fresh_single_role(state.state(), self.role)
                 && desired.manager == NativeManager::ForegroundCli
                 && desired.run == NativeRunDesired::Stopped
                 && desired.autostart
@@ -1011,15 +1025,12 @@ impl Definition {
     ) -> Result<serde_json::Value> {
         self.require_pending_registration()?;
         let (state, hash) = self.state_observation()?;
-        let gateway = state.desired.gateway.ok_or(ServiceError::Conflict)?;
+        let desired = self.role.desired(&state).ok_or(ServiceError::Conflict)?;
         if self.install_preparation
-            || self.role != ServiceRole::Gateway
-            || state.mode != styx_contracts::native_management::NativeDeploymentMode::CreateLocal
-            || state.desired.host.is_some()
-            || state.has_migration_binding()
-            || gateway.manager != NativeManager::PersistentService
-            || gateway.run != NativeRunDesired::Running
-            || gateway.autostart
+            || !fresh_single_role(&state, self.role)
+            || desired.manager != NativeManager::PersistentService
+            || desired.run != NativeRunDesired::Running
+            || desired.autostart
                 != styx_contracts::native_management::NativeAutostartDesired::Enabled
             || state.revision != revision
             || &hash != canonical
@@ -1041,7 +1052,7 @@ impl Definition {
             .ok_or(ServiceError::Conflict)?;
         let material = self.installation_material()?;
         let request = serde_json::json!({"schema":1,"kind":"launchd_first_start",
-            "uid":self.uid,"username":self.username,"role":"gateway",
+            "uid":self.uid,"username":self.username,"role":self.role.name(),
             "state_dir":self.path,"state_root":{"device":device,"inode":inode,"uid":uid},
             "canonical_sha256":canonical,"transaction_id":id,"revision":revision,
             "definition_path":material.path,"definition_plist":std::str::from_utf8(material.bytes).map_err(unknown)?,
@@ -1546,6 +1557,13 @@ struct RunningRecord {
 }
 pub(crate) struct RunningInstance {
     peer: Arc<ServicePeer>,
+}
+impl RunningInstance {
+    /// Revalidate the SAME captured launchd birth/code/root before C07 dispatch.
+    /// This cannot adopt a newly started job with the same label.
+    pub(crate) fn validate(&self) -> Result<()> {
+        self.peer.validate()
+    }
 }
 pub(crate) struct ServicePeer {
     definition: Arc<Definition>,
