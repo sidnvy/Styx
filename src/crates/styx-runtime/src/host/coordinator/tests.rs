@@ -1367,8 +1367,6 @@ async fn optional_executor_refuses_exec_without_fabricating_cleanup() {
             ErrorCategory::CapabilityUnsupported
         ))
     ));
-    assert!(host.legacy_initialization().is_err());
-    assert!(host.legacy_terminal().is_err());
     let collection = authority
         .collect_provider_retention(Duration::from_millis(100))
         .await

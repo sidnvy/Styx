@@ -4,7 +4,6 @@ use super::{ForegroundError, ForegroundEvent, ForegroundOutcome, HostWireMode, p
 use crate::{
     host::{
         bootstrap::OwnedExecHost,
-        legacy::{LegacyExecSession, TrustedLegacyGateway},
         link::{HostLinkBudget, HostWssLink, LinkAuthentication, LinkError},
         protocol::{HostProtocol, PairedTrustedProfile},
     },
@@ -593,7 +592,6 @@ async fn run_owned(
             RunOwner::App(scope, Some(runtime)) => profile::load_for_app_retained(scope, runtime)?,
             RunOwner::App(scope, None) => profile::load_for_app(scope)?,
             RunOwner::Cli => match mode {
-                HostWireMode::LegacyExplicit => profile::load_legacy(&path)?,
                 HostWireMode::PairedV3 => profile::load_paired(&path)?,
             },
             #[cfg(any(
@@ -822,19 +820,6 @@ async fn run_owned(
         ))
     } else {
         match mode {
-            HostWireMode::LegacyExplicit => {
-                let namespace = format!(
-                    "legacy.{}",
-                    Sha256Digest::of_bytes(admitted.profile.endpoint().as_str().as_bytes())
-                        .to_hex()
-                );
-                host.legacy_session(TrustedLegacyGateway {
-                    endpoint: admitted.profile.endpoint().as_str().to_owned(),
-                    gateway_namespace: namespace.try_into().expect("bounded namespace"),
-                })
-                .map(ConnectionSession::Legacy)
-                .map_err(|_| ForegroundError("legacy_bootstrap_refused"))
-            }
             HostWireMode::PairedV3 => {
                 let protocol = host.paired_protocol(PairedTrustedProfile {
                     endpoint: admitted.profile.endpoint().as_str().to_owned(),
@@ -1127,7 +1112,6 @@ async fn run_owned(
 /// A local composition choice, not a wire fallback. Protocol negotiation never
 /// silently switches to legacy mode if authenticated paired admission fails.
 enum ConnectionSession<'a> {
-    Legacy(LegacyExecSession<'a>),
     Paired(HostProtocol<'a>),
 }
 impl ConnectionSession<'_> {
@@ -1147,17 +1131,6 @@ impl ConnectionSession<'_> {
         ready: Option<tokio::sync::oneshot::Sender<()>>,
     ) -> Result<Option<crate::host::protocol::wire::TransportDrainOutcome>, ()> {
         match self {
-            Self::Legacy(session) => {
-                if !stop.is_cancelled()
-                    && let Some(ready) = ready
-                {
-                    let _ = ready.send(());
-                }
-                tokio::select! {
-                    _ = stop.cancelled() => Ok(None),
-                    result = session.run_connection(link) => result.map(|()| None).map_err(|_| ()),
-                }
-            }
             Self::Paired(protocol) => protocol
                 .run_connection_with_readiness(link, stop, ready)
                 .await

@@ -108,30 +108,6 @@ impl CodexStdio {
         handle: &ProcessHandle,
         write: bool,
     ) -> ActionReceipt {
-        let mut raw = None;
-        self.perform_action_native(permit, handle, write, false, &mut raw)
-            .await
-    }
-    pub(crate) async fn perform_legacy_action(
-        &self,
-        permit: DispatchPermit,
-        handle: &ProcessHandle,
-        write: bool,
-    ) -> super::LegacyActionReceipt {
-        let mut raw_result = None;
-        let action = self
-            .perform_action_native(permit, handle, write, true, &mut raw_result)
-            .await;
-        super::LegacyActionReceipt { action, raw_result }
-    }
-    async fn perform_action_native(
-        &self,
-        permit: DispatchPermit,
-        handle: &ProcessHandle,
-        write: bool,
-        legacy: bool,
-        raw_result: &mut Option<Value>,
-    ) -> ActionReceipt {
         let mut receipt = ActionReceipt {
             operation: permit.id().clone(),
             target: permit.target().cloned(),
@@ -164,30 +140,9 @@ impl CodexStdio {
             // a new dispatch. Preserve it exactly; only annotate this lookup.
             return reject(stored.receipt.clone(), ExecError::AlreadyDispatched);
         }
-        let (action, legacy_write_id): (ProcessAction, Option<String>) = if legacy {
-            let action: super::LegacyAction = match serde_json::from_slice(permit.payload()) {
-                Ok(action) => action,
-                Err(_) => return reject(receipt, ExecError::InvalidRequest),
-            };
-            if action.process_id() != handle.process_id || action.to_operation_payload().is_err() {
-                return reject(receipt, ExecError::InvalidRequest);
-            }
-            match action {
-                super::LegacyAction::Write {
-                    write_id, chunk, ..
-                } => (
-                    ProcessAction::WriteStdin {
-                        input_base64: chunk,
-                    },
-                    Some(write_id),
-                ),
-                super::LegacyAction::Terminate { .. } => (ProcessAction::Terminate {}, None),
-            }
-        } else {
-            match serde_json::from_slice(permit.payload()) {
-                Ok(action) => (action, None),
-                Err(_) => return reject(receipt, ExecError::InvalidRequest),
-            }
+        let action: ProcessAction = match serde_json::from_slice(permit.payload()) {
+            Ok(action) => action,
+            Err(_) => return reject(receipt, ExecError::InvalidRequest),
         };
         if let Err(e) = action.validate() {
             return reject(receipt, e);
@@ -230,8 +185,7 @@ impl CodexStdio {
                 return reject(receipt, ExecError::Capacity);
             }
             if write {
-                receipt.write_id =
-                    Some(legacy_write_id.unwrap_or_else(|| Uuid::new_v4().to_string()));
+                receipt.write_id = Some(Uuid::new_v4().to_string());
             }
             receipt.evidence = ActionEvidence::Unknown;
             actions.insert(
@@ -282,9 +236,6 @@ impl CodexStdio {
             }
         };
         let result = self.rpc.request(method, params).await;
-        if legacy {
-            *raw_result = result.as_ref().ok().cloned();
-        }
         let (evidence, ack, cause) = match result {
             Ok(v) if write && v.get("status").and_then(Value::as_str) == Some("accepted") => (
                 ActionEvidence::Acknowledged,

@@ -33,11 +33,9 @@ pub(crate) use desktop_source::{DesktopSource, source_stop_complete};
 mod desktop_cleanup;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub use desktop_cleanup::DesktopLaneCleanup;
-mod legacy;
 mod owner_cleanup;
-mod session;
-pub(crate) use legacy::{LegacyActionSubmission, LegacyStartSubmission};
 mod retention;
+mod session;
 pub use owner_cleanup::{OwnerCleanupFacts, OwnerCleanupHandle, OwnerCleanupTicket};
 pub use retention::{RetentionBlock, RetentionCollection};
 

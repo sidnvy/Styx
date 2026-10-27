@@ -7,11 +7,6 @@
 //! is discovered, adopted, restarted or replaced.
 mod child;
 mod continuation;
-mod legacy;
-pub use legacy::{
-    LegacyAction, LegacyActionReceipt, LegacyEnvPolicy, LegacyStartProcess, LegacyStartReceipt,
-    LegacyWrite,
-};
 mod output;
 mod retention;
 mod rpc;

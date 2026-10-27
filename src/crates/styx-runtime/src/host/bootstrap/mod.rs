@@ -120,13 +120,6 @@ impl OwnedExecHost {
     ) -> Result<HostProtocol<'_>, ProtocolError> {
         HostProtocol::new_paired(profile, self.coordinator.clone(), &self.authority)
     }
-    /// Explicit old Gateway mode; keep this same session across reconnects.
-    pub fn legacy_session(
-        &self,
-        profile: super::legacy::TrustedLegacyGateway,
-    ) -> Result<super::legacy::LegacyExecSession<'_>, super::legacy::LegacyError> {
-        super::legacy::LegacyExecSession::new(profile, self.coordinator.clone(), &self.authority)
-    }
     /// Explicit Browser lane allocation from this SAME Host budget. This does
     /// not enable a capability or create a worker; trusted policy does that.
     #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]

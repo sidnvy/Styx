@@ -14,7 +14,6 @@ use serde::Serialize;
 use std::path::Path;
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub enum HostWireMode {
-    LegacyExplicit,
     PairedV3,
 }
 #[derive(Serialize)]
