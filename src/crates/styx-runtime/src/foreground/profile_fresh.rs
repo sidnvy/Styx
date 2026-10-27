@@ -206,7 +206,7 @@ fn load_snapshot(
     #[cfg(target_os = "windows")]
     let environment = super::super::windows_env::executor_environment(&BTreeMap::new(), state_dir)?;
     #[cfg(not(target_os = "windows"))]
-    let environment = BTreeMap::new();
+    let environment = unix_executor_environment(&seed.shell)?;
     let signed_version = inventory.version().to_owned();
     let loaded = LoadedLegacyProfile {
         host_base_dir: state_dir.to_path_buf(),
@@ -254,4 +254,48 @@ fn load_snapshot(
     };
     loaded.revalidate()?;
     Ok(loaded)
+}
+
+/// Minimal Exec environment for the Host's own OS user. Nothing is inherited
+/// from the caller; HOME/USER come from the passwd entry of the current UID.
+#[cfg(not(target_os = "windows"))]
+fn unix_executor_environment(shell: &str) -> Result<BTreeMap<String, String>, ProfileError> {
+    let user = nix::unistd::User::from_uid(nix::unistd::Uid::current())
+        .map_err(|_| ProfileError::ProtectedRead)?
+        .ok_or(ProfileError::ProtectedRead)?;
+    let home = user.dir.to_str().ok_or(ProfileError::Invalid)?.to_owned();
+    absolute(Path::new(&home))?;
+    let path = if cfg!(target_os = "macos") {
+        "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+    } else {
+        "/usr/local/bin:/usr/bin:/bin:/usr/local/sbin:/usr/sbin:/sbin"
+    };
+    Ok(BTreeMap::from([
+        ("HOME".into(), home),
+        ("USER".into(), user.name.clone()),
+        ("LOGNAME".into(), user.name),
+        ("SHELL".into(), shell.to_owned()),
+        ("PATH".into(), path.into()),
+        ("LANG".into(), "C.UTF-8".into()),
+    ]))
+}
+
+#[cfg(all(test, not(target_os = "windows")))]
+mod environment_tests {
+    use super::*;
+
+    #[test]
+    fn exec_environment_uses_passwd_home_and_inherits_nothing_else() {
+        let user = nix::unistd::User::from_uid(nix::unistd::Uid::current())
+            .unwrap()
+            .unwrap();
+        let env = unix_executor_environment("/bin/bash").unwrap();
+        assert_eq!(env["HOME"], user.dir.to_str().unwrap());
+        assert_eq!(env["USER"], user.name);
+        assert_eq!(env["SHELL"], "/bin/bash");
+        assert_eq!(
+            env.keys().map(String::as_str).collect::<Vec<_>>(),
+            ["HOME", "LANG", "LOGNAME", "PATH", "SHELL", "USER"]
+        );
+    }
 }
