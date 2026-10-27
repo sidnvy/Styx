@@ -363,16 +363,12 @@ pub struct EnrollmentService {
     hosts: BTreeSet<String>,
     clock: Clock,
     uncertain: bool,
-    // A historical enrollment commit does not commit the enclosing C07 handoff.
-    historical_migration_pending: bool,
     #[cfg(any(
         all(target_os = "linux", target_env = "gnu"),
         target_os = "macos",
         target_os = "windows"
     ))]
     service_tip_pending: bool,
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    migration_binding: Option<crate::migration::legacy_service::GatewayMaintenanceBinding>,
     #[cfg(any(
         all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
         all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"),
@@ -416,15 +412,12 @@ impl EnrollmentService {
             hosts: allowed_hosts.into_iter().collect(),
             clock: Clock::new(now),
             uncertain: false,
-            historical_migration_pending: recovered.facts.historical_baseline.is_some(),
             #[cfg(any(
                 all(target_os = "linux", target_env = "gnu"),
                 target_os = "macos",
                 target_os = "windows"
             ))]
             service_tip_pending: false,
-            #[cfg(all(target_os = "linux", target_env = "gnu"))]
-            migration_binding: None,
             #[cfg(any(
                 all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
                 all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"),
@@ -528,9 +521,6 @@ impl EnrollmentService {
         if self.service_tip_pending {
             return Err(ServiceError::new(503, "service_control_pending"));
         }
-        if self.historical_migration_pending {
-            return Err(ServiceError::new(503, "migration_commit_required"));
-        }
         self.store
             .configuration_root()
             .ensure_admission()
@@ -562,12 +552,6 @@ impl EnrollmentService {
         let read = |j: &mut crate::store::enrollment::EnrollmentJournal<'_>| {
             j.read_material(&MaterialRef { kind, digest })
         };
-        #[cfg(all(target_os = "linux", target_env = "gnu"))]
-        let result = match self.migration_binding.as_ref() {
-            Some(binding) => binding.with_journal(&mut self.store, read),
-            None => self.store.with_journal(read),
-        };
-        #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
         let result = self.store.with_journal(read);
         match result {
             Ok(bytes) => Ok(Zeroizing::new(bytes)),
@@ -1128,7 +1112,6 @@ impl EnrollmentService {
     }
     pub fn authorize_host_frame(&self, lease: &ConnectionLease) -> Result<(), ServiceError> {
         self.healthy()?;
-        self.validate_migration_binding()?;
         self.ledger.authorize_connection(lease)?;
         Ok(())
     }
@@ -1137,17 +1120,7 @@ impl EnrollmentService {
         lease: ConnectionLease,
         certainly_closed: bool,
     ) -> Result<(), ServiceError> {
-        // A lost binding cannot authorize frames, but must not prevent the
-        // existing Core lease from being fenced/closed during owned cleanup.
-        let binding = self.validate_migration_binding();
         self.ledger.connection_ended(lease, certainly_closed)?;
-        binding
-    }
-    fn validate_migration_binding(&self) -> Result<(), ServiceError> {
-        #[cfg(all(target_os = "linux", target_env = "gnu"))]
-        if let Some(binding) = &self.migration_binding {
-            binding.validate_owner(&self.store.configuration_root())?;
-        }
         Ok(())
     }
     fn transport_admission(
@@ -1155,20 +1128,6 @@ impl EnrollmentService {
         id: Option<&DeviceId>,
         lane: Lane,
     ) -> Result<Option<DeviceId>, ServiceError> {
-        #[cfg(all(target_os = "linux", target_env = "gnu"))]
-        if let Some(binding) = &self.migration_binding {
-            self.healthy()?;
-            binding.validate_owner(&self.store.configuration_root())?;
-            let selected = binding.selected_device();
-            if lane != Lane::Exec || id.is_some_and(|id| id != selected) {
-                return Err(ServiceError::transport_unauthorized());
-            }
-            // Always refresh the original device's current Core metadata. No
-            // caller-provided generation or grant creates this selected scope.
-            self.ledger.authentication_target(&self.control, selected)?;
-            return Ok(Some(selected.clone()));
-        }
-        #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
         let _ = (id, lane);
         self.ordinary_admission()?;
         Ok(None)
@@ -1204,15 +1163,3 @@ impl ServiceError {
         Self::new(403, "device_unauthorized")
     }
 }
-
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
-#[path = "service_maintenance.rs"]
-mod maintenance;
-
-#[cfg(any(
-    all(target_os = "linux", target_env = "gnu"),
-    target_os = "macos",
-    target_os = "windows"
-))]
-#[path = "service_native_recovery.rs"]
-mod native_recovery;

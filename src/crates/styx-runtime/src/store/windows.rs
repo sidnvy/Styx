@@ -3,28 +3,6 @@
 //! omit write sharing. Fixed writes use local NTFS write-through/file flush;
 //! directory flush uses a separately opened, identity-checked writable handle.
 //! No ACL rewrite or path launch fallback.
-#[path = "windows_original_app.rs"]
-mod original_app;
-pub(in crate::store) use original_app::WindowsOriginalApp;
-#[path = "windows_migration.rs"]
-mod migration;
-#[path = "windows_native_cutover.rs"]
-mod native_cutover;
-pub(crate) use native_cutover::{NativeCommittedCutover, WindowsCanonicalCutover};
-pub(in crate::store) use native_cutover::{WindowsCutoverCustody, WindowsCutoverPlan};
-#[path = "windows_previous_boot.rs"]
-mod previous_boot;
-pub(in crate::store) use migration::{WindowsOriginalMaterials, WindowsTokenRetirement};
-pub(in crate::store) use previous_boot::{
-    WindowsBootRecoveryEffects, WindowsCheckpointResumeFailure, WindowsCheckpointRetainedScope,
-    WindowsLegacyMaintenancePlan, WindowsMigrationCheckpointJob, WindowsMigrationCheckpointPlan,
-    WindowsMigrationCheckpointResume, WindowsMigrationRecoveredGuards,
-    WindowsMigrationWaitingForBoot, WindowsPreviousBootEvidence, WindowsRecoveryOpenFailure,
-    WindowsRestartCheckpoint, WindowsRestartMigrationReview, WindowsResumedCutover,
-    resume_recorded_windows_checkpoint, review_windows_restart_host_migration,
-    start_resume_validated_windows_host_migration, start_resume_windows_restart_host_migration,
-    start_windows_restart_host_migration,
-};
 #[path = "windows_ffi.rs"]
 mod ffi;
 #[path = "windows_payload.rs"]

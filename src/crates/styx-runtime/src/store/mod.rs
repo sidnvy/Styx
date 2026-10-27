@@ -38,10 +38,6 @@ pub(crate) mod native_legacy_owners;
     target_os = "windows"
 ))]
 pub(crate) mod native_live_tip;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-mod native_migration_inputs;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-mod native_migration_job;
 pub mod native_root;
 pub mod native_state;
 pub mod native_transaction;
@@ -86,25 +82,10 @@ mod platform;
 #[path = "unsupported.rs"]
 mod platform;
 
-#[cfg(target_os = "macos")]
-pub(crate) use platform::MacRetiredMaterialSource;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-pub(crate) use platform::NativeCommittedCutover;
-
-#[cfg(target_os = "macos")]
-pub(crate) use platform::MacCanonicalCutover as NativeCanonicalCutover;
-#[cfg(target_os = "windows")]
-pub(crate) use platform::WindowsCanonicalCutover as NativeCanonicalCutover;
-
 #[cfg(target_os = "windows")]
 pub(crate) use platform::WindowsLocalExecutable;
 #[cfg(target_os = "windows")]
 pub(crate) use platform::file_identity as windows_file_identity;
-#[cfg(target_os = "windows")]
-pub(in crate::store) use platform::{
-    WindowsBootRecoveryEffects, WindowsLegacyMaintenancePlan, WindowsRecoveryOpenFailure,
-    WindowsRestartCheckpoint,
-};
 
 #[derive(Debug, Error)]
 pub enum StoreError {

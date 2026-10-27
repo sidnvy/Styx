@@ -2,8 +2,6 @@
 //! administrator factory. Recovery of file/Core facts does not prove profile
 //! crypto semantics, original transport quiescence or OS/native readiness.
 pub mod http;
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
-pub(crate) mod legacy_import;
 mod profile;
 mod recovery;
 pub mod service;

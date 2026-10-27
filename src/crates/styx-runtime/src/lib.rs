@@ -9,7 +9,6 @@ pub mod gateway;
 pub mod host;
 pub mod ipc;
 pub mod management;
-pub mod migration;
 pub mod platform;
 pub mod providers;
 pub mod session;

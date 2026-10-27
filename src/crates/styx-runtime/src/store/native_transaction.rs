@@ -952,24 +952,6 @@ mod tests;
 #[path = "native_transaction_platform_tests.rs"]
 mod native_tests;
 
-#[cfg(target_os = "macos")]
-#[path = "native_transaction_macos.rs"]
-mod macos_recovery;
-#[cfg(target_os = "macos")]
-pub(crate) use macos_recovery::{
-    MacMigrationRecovery, MacMigrationRecoveryFailure, MacMigrationRecoveryStart,
-    begin_mac_host_migration, begin_mac_legacy_recovery,
-};
-
-#[cfg(target_os = "windows")]
-#[path = "native_transaction_windows.rs"]
-mod windows_migration;
-#[cfg(target_os = "windows")]
-pub(crate) use windows_migration::{
-    WindowsHostMigrationReview, WindowsMigrationPreparationFailure, WindowsMigrationRecovery,
-    begin_windows_host_migration, begin_windows_legacy_recovery, review_windows_host_migration,
-};
-
 #[path = "native_app_service.rs"]
 mod app_service;
 #[path = "native_runtime_update.rs"]

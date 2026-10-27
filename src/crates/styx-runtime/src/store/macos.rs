@@ -698,31 +698,6 @@ mod tests;
 #[path = "macos_publication_tests.rs"]
 mod publication_tests;
 
-#[path = "macos_legacy.rs"]
-mod legacy_effect;
-pub(crate) use legacy_effect::MacRetiredMaterialSource;
-pub(in crate::store) use legacy_effect::MacTokenRetirement;
-
-#[path = "macos_previous_boot.rs"]
-mod previous_boot;
-pub(in crate::store) use previous_boot::{MacBootRecoveryEffects, MacPreviousBootInput};
-
-#[path = "macos_legacy_restart.rs"]
-mod legacy_restart;
-
-#[path = "macos_native_cutover.rs"]
-mod native_cutover;
-pub(in crate::store) use native_cutover::MacCutoverPlan;
-pub(crate) use native_cutover::{MacCanonicalCutover, NativeCommittedCutover};
-
-#[path = "macos_migration_owner.rs"]
-mod migration_owner;
-pub(in crate::store) use migration_owner::{
-    MacMigrationCommittedScope, MacMigrationOwnerTask, MacMigrationRejectedScope,
-    MacResumedCutover, start_previous_boot_host_migration, start_resume_pre_cutover_host_migration,
-    start_resume_validated_host_migration,
-};
-
 #[path = "release_stage_unix.rs"]
 mod release_staging;
 

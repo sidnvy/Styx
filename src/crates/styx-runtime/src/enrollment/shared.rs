@@ -175,68 +175,6 @@ impl SharedEnrollment {
             .await
             .is_ok_and(|r| r.is_ok())
     }
-    /// Retire the closed maintenance listener without replacing its Core/store.
-    /// The owned blocking task survives waiter cancellation. One retained result
-    /// allows the exact same proof to retrieve that task's already-published gate.
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    pub(crate) async fn promote_committed_migration(
-        &self,
-        proof: Arc<crate::store::legacy_handoff::CommittedNativeCutover>,
-    ) -> Result<Self, SharedError> {
-        if !self.readers_closing.load(Ordering::Acquire) {
-            return Err(SharedError);
-        }
-        let permit = self
-            .promotion_worker
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| SharedError)?;
-        let shared = self.clone();
-        tokio::task::spawn_blocking(move || {
-            let _permit = permit;
-            // Lock ordering: service -> promotion. No ordinary method acquires
-            // promotion; this serializes duplicate callers and result retrieval.
-            let mut service = shared.inner.blocking_lock();
-            let mut result = shared.promotion.lock().map_err(|_| SharedError)?;
-            if let Some(existing) = result.as_ref() {
-                if existing.from_epoch != shared.epoch
-                    || !Arc::ptr_eq(&existing.proof, &proof)
-                    || shared.failed.load(Ordering::Acquire)
-                    || shared.active_generation.load(Ordering::Acquire) != existing.epoch
-                {
-                    return Err(SharedError);
-                }
-                return Ok(shared.promoted(existing));
-            }
-            shared.require_current()?;
-            // Holding every permit proves old reader/blocking jobs have really
-            // completed; a dropped caller cannot release an executing job's slot.
-            let _all_jobs = shared
-                .jobs
-                .clone()
-                .try_acquire_many_owned(8)
-                .map_err(|_| SharedError)?;
-            let epoch = shared.epoch.checked_add(1).ok_or(SharedError)?;
-            shared
-                .apply(&mut service, |service| {
-                    service.promote_committed_migration(&proof)
-                })?
-                .map_err(|_| SharedError)?;
-            let completed = Promotion {
-                from_epoch: shared.epoch,
-                epoch,
-                proof,
-                jobs: Arc::new(tokio::sync::Semaphore::new(8)),
-                readers_closing: Arc::new(AtomicBool::new(false)),
-            };
-            let next = shared.promoted(&completed);
-            *result = Some(completed);
-            shared.active_generation.store(epoch, Ordering::Release);
-            Ok(next)
-        })
-        .await
-        .map_err(|_| SharedError)?
-    }
 
     #[cfg(all(target_os = "linux", target_env = "gnu"))]
     fn promoted(&self, completed: &Promotion) -> Self {
@@ -257,11 +195,3 @@ impl SharedEnrollment {
         f(&mut self.inner.try_lock().expect("exclusive test service"))
     }
 }
-
-#[cfg(test)]
-#[path = "maintenance_tests.rs"]
-mod maintenance_tests;
-
-#[cfg(test)]
-#[path = "shared_migration_tests.rs"]
-mod shared_migration_tests;

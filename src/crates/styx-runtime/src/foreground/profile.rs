@@ -26,31 +26,8 @@ use styx_contracts::{
 ))]
 #[path = "profile_fresh.rs"]
 mod fresh;
-#[cfg(any(
-    target_os = "macos",
-    target_os = "windows",
-    all(test, target_os = "linux", target_env = "gnu")
-))]
-#[path = "profile_native_materials.rs"]
-mod native_materials;
 #[path = "profile_release.rs"]
 mod release;
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-pub(crate) use native_materials::OriginalNativePairMaterials;
-#[cfg(any(
-    target_os = "macos",
-    target_os = "windows",
-    all(test, target_os = "linux", target_env = "gnu")
-))]
-pub(crate) use native_materials::read_original_pair_materials;
-#[cfg(target_os = "macos")]
-pub(crate) use native_materials::read_recovered_pair_materials;
-
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-pub(crate) use native_materials::{
-    AppliedNativeMaintenanceProfile, load_applied_native_maintenance_profile,
-};
-
 const JSON_LIMIT: usize = 1024 * 1024;
 #[derive(Debug, Clone, Copy, thiserror::Error)]
 pub enum ProfileError {
@@ -523,24 +500,6 @@ impl LoadedLegacyProfile {
             target_os = "windows",
             target_os = "macos"
         ))]
-        if let ProfileSource::NativeCommitted(binding) = &self.source {
-            binding
-                .validate_legacy_owners(state, host)
-                .map_err(journal_profile_error)?;
-            return Ok(true);
-        }
-        #[cfg(all(target_os = "linux", target_env = "gnu"))]
-        if let ProfileSource::Committed(binding) = &self.source {
-            binding
-                .validate_legacy_owners(state, host)
-                .map_err(journal_profile_error)?;
-            return Ok(true);
-        }
-        #[cfg(any(
-            all(target_os = "linux", target_env = "gnu"),
-            target_os = "windows",
-            target_os = "macos"
-        ))]
         if let ProfileSource::Fresh(binding) = &self.source {
             binding.revalidate().map_err(journal_profile_error)?;
             if state.identity() != binding.root_identity()
@@ -694,22 +653,6 @@ enum ProfileSource {
     // Only the private material loader can choose this mode. Its result has no
     // ordinary-profile conversion or execution/credential accessor.
     #[cfg(any(
-        target_os = "macos",
-        target_os = "windows",
-        all(test, target_os = "linux", target_env = "gnu")
-    ))]
-    OriginalMaterials,
-    #[cfg(any(
-        all(target_os = "linux", target_env = "gnu"),
-        target_os = "windows",
-        target_os = "macos"
-    ))]
-    NativeCommitted(Arc<crate::store::committed_runtime_native::NativeCommittedRuntimeSnapshot>),
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    Maintenance(Arc<crate::migration::legacy_service::RetiredCredentialReadBinding>),
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    Committed(Arc<crate::store::committed_runtime::CommittedRuntimeSnapshot>),
-    #[cfg(any(
         all(target_os = "linux", target_env = "gnu"),
         target_os = "windows",
         target_os = "macos"
@@ -720,22 +663,6 @@ impl ProfileSource {
     fn revalidate(&self) -> Result<(), ProfileError> {
         match self {
             Self::Ordinary => Ok(()),
-            #[cfg(any(
-                target_os = "macos",
-                target_os = "windows",
-                all(test, target_os = "linux", target_env = "gnu")
-            ))]
-            Self::OriginalMaterials => Ok(()),
-            #[cfg(any(
-                all(target_os = "linux", target_env = "gnu"),
-                target_os = "windows",
-                target_os = "macos"
-            ))]
-            Self::NativeCommitted(binding) => binding.revalidate().map_err(journal_profile_error),
-            #[cfg(all(target_os = "linux", target_env = "gnu"))]
-            Self::Maintenance(binding) => binding.revalidate().map_err(|_| ProfileError::Changed),
-            #[cfg(all(target_os = "linux", target_env = "gnu"))]
-            Self::Committed(binding) => binding.revalidate().map_err(journal_profile_error),
             #[cfg(any(
                 all(target_os = "linux", target_env = "gnu"),
                 target_os = "windows",
@@ -756,9 +683,6 @@ impl ProfileSource {
         ))]
         {
             let result = match self {
-                Self::NativeCommitted(binding) => binding.service_canonical_matches(root, raw),
-                #[cfg(all(target_os = "linux", target_env = "gnu"))]
-                Self::Committed(binding) => binding.service_canonical_matches(root, raw),
                 Self::Fresh(binding) => binding.service_canonical_matches(root, raw),
                 _ => Ok(None),
             };
@@ -809,13 +733,6 @@ fn service_tip_error(error: crate::store::native_live_tip::LiveTipError) -> Prof
     }
 }
 
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
-#[path = "profile_migration.rs"]
-mod migration;
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
-pub use migration::LoadedMaintenanceProfile;
-#[cfg(all(target_os = "linux", target_env = "gnu"))]
-pub(crate) use migration::load_for_migration_validation;
 /// Reads the original deployment authority; does not initialize a new profile.
 pub fn load_legacy(state_dir: &Path) -> Result<LoadedLegacyProfile, ProfileError> {
     load(state_dir, GatewayWireMode::Legacy)
@@ -831,25 +748,6 @@ pub(crate) fn load_for_app(
     scope: Arc<crate::app::HostScope>,
 ) -> Result<LoadedLegacyProfile, ProfileError> {
     scope.validate().map_err(|_| ProfileError::Changed)?;
-    let path = scope.state_dir().to_owned();
-    let root = PrivateRoot::open(&path).map_err(|_| ProfileError::ProtectedRead)?;
-    let marker_raw = root
-        .read_raw(".styx-native-root-v1.json", 4096)
-        .map_err(|_| ProfileError::Changed)?;
-    let marker = crate::store::native_state::decode_marker(marker_raw.bytes())
-        .map_err(|_| ProfileError::Changed)?;
-    if marker.reader_floor == styx_contracts::management::ReaderContract::NativeMigratedStateV2 {
-        let snapshot =
-            crate::store::committed_runtime_native::NativeCommittedRuntimeSnapshot::open_for_app(
-                &path, scope,
-            )
-            .map_err(|_| ProfileError::Changed)?;
-        return load_source(
-            &path,
-            GatewayWireMode::PairedV3,
-            ProfileSource::NativeCommitted(Arc::new(snapshot)),
-        );
-    }
     fresh::load_for_app(scope)
 }
 /// Same original fresh App owner and formal runtime. The fresh snapshot still
@@ -881,25 +779,16 @@ pub(crate) fn load_for_service(
     if scope.role() != ServiceRole::Host {
         return Err(ProfileError::Invalid);
     }
-    let path = scope.state_dir().to_owned();
-    let root = PrivateRoot::open(&path).map_err(|_| ProfileError::ProtectedRead)?;
+    let root = PrivateRoot::open(scope.state_dir()).map_err(|_| ProfileError::ProtectedRead)?;
     let raw = root
         .read_raw(".styx-native-root-v1.json", 4096)
         .map_err(|_| ProfileError::Changed)?;
     let marker = crate::store::native_state::decode_marker(raw.bytes())
         .map_err(|_| ProfileError::Changed)?;
-    let source = match marker.reader_floor {
-        #[cfg(all(target_os = "linux", target_env = "gnu"))]
-        ReaderContract::NativeMigratedStateV1 => ProfileSource::Committed(Arc::new(crate::store::committed_runtime::CommittedRuntimeSnapshot::open_for_service(scope).map_err(|_| ProfileError::Changed)?)),
-        #[cfg(any(target_os = "macos", target_os = "windows"))]
-        ReaderContract::NativeMigratedStateV1 => return Err(ProfileError::Invalid),
-        ReaderContract::NativeMigratedStateV2 => ProfileSource::NativeCommitted(Arc::new(crate::store::committed_runtime_native::NativeCommittedRuntimeSnapshot::open_for_service(scope).map_err(|_| ProfileError::Changed)?)),
-        ReaderContract::NativeManagementStateV1 => return fresh::load_for_service(scope),
-        ReaderContract::NativeRuntimeSelectedStateV1 | ReaderContract::NativeAppRuntimeSelectedStateV1
-            | ReaderContract::NativeServiceRuntimeSelectedStateV1
-            | ReaderContract::NativeAppServiceTransferredStateV1 => return Err(ProfileError::Invalid),
-    };
-    load_source(&path, GatewayWireMode::PairedV3, source)
+    if marker.reader_floor != ReaderContract::NativeManagementStateV1 {
+        return Err(ProfileError::Invalid);
+    }
+    fresh::load_for_service(scope)
 }
 /// Explicit paired-v3 bridge using the SAME protected original profile and
 /// signed legacy executor closure. No identity, pairing or native-format rewrite.
@@ -921,62 +810,7 @@ pub fn load_paired(state_dir: &Path) -> Result<LoadedLegacyProfile, ProfileError
             return fresh::load(state_dir);
         }
         if native_present {
-            let marker_raw = root
-                .read_raw(".styx-native-root-v1.json", 4096)
-                .map_err(|_| ProfileError::Changed)?;
-            let marker = crate::store::native_state::decode_marker(marker_raw.bytes())
-                .map_err(|_| ProfileError::Changed)?;
-            if marker.reader_floor
-                == styx_contracts::management::ReaderContract::NativeMigratedStateV2
-            {
-                let snapshot =
-                    crate::store::committed_runtime_native::NativeCommittedRuntimeSnapshot::open(
-                        state_dir,
-                    )
-                    .map_err(|_| ProfileError::Changed)?;
-                // This entry point belongs to the CLI. A completed migration
-                // preserves desired ownership; it never lets a CLI adopt an
-                // App-managed or persistent-service Host.
-                if !snapshot.state().desired.host.as_ref().is_some_and(|h| {
-                    use styx_contracts::native_management::{
-                        NativeAutostartDesired, NativeManager, NativeRunDesired,
-                    };
-                    h.run == NativeRunDesired::Running
-                        && h.manager == NativeManager::ForegroundCli
-                        && h.autostart == NativeAutostartDesired::Disabled
-                }) {
-                    return Err(ProfileError::Invalid);
-                }
-                return load_source(
-                    state_dir,
-                    GatewayWireMode::PairedV3,
-                    ProfileSource::NativeCommitted(Arc::new(snapshot)),
-                );
-            }
-            #[cfg(any(target_os = "windows", target_os = "macos"))]
             return Err(ProfileError::Changed);
-            #[cfg(all(target_os = "linux", target_env = "gnu"))]
-            {
-                let committed =
-                    crate::store::committed_runtime::CommittedRuntimeSnapshot::open(state_dir)
-                        .map_err(|_| ProfileError::Changed)?;
-                if !committed
-                    .state()
-                    .desired
-                    .host
-                    .as_ref()
-                    .is_some_and(|desired| {
-                        desired.run == styx_contracts::native_management::NativeRunDesired::Running
-                    })
-                {
-                    return Err(ProfileError::Invalid);
-                }
-                return load_source(
-                    state_dir,
-                    GatewayWireMode::PairedV3,
-                    ProfileSource::Committed(Arc::new(committed)),
-                );
-            }
         }
     }
     load(state_dir, GatewayWireMode::PairedV3)
@@ -989,13 +823,7 @@ fn load_source(
     mode: GatewayWireMode,
     source: ProfileSource,
 ) -> Result<LoadedLegacyProfile, ProfileError> {
-    load_source_inner(
-        state_dir,
-        mode,
-        source,
-        #[cfg(target_os = "macos")]
-        None,
-    )
+    load_source_inner(state_dir, mode, source)
 }
 // The borrowed retirement port is accepted only by the private original-material
 // reader. It is never stored in or exposed through an ordinary runtime profile.
@@ -1003,18 +831,7 @@ fn load_source_inner(
     state_dir: &Path,
     mode: GatewayWireMode,
     source: ProfileSource,
-    #[cfg(target_os = "macos")] retired_materials: Option<
-        &crate::store::MacRetiredMaterialSource<'_>,
-    >,
 ) -> Result<LoadedLegacyProfile, ProfileError> {
-    #[cfg(target_os = "macos")]
-    if let Some(retired) = retired_materials {
-        if !matches!(&source, ProfileSource::OriginalMaterials) || retired.state_dir() != state_dir
-        {
-            return Err(ProfileError::Invalid);
-        }
-        retired.validate().map_err(|_| ProfileError::Changed)?;
-    }
     source.revalidate()?;
     #[cfg(any(
         all(target_os = "linux", target_env = "gnu"),
@@ -1055,30 +872,10 @@ fn load_source_inner(
     }
     let canonical = capture.read(state_dir, "state.json", JSON_LIMIT)?;
     let legacy_source = match &source {
-        #[cfg(any(
-            all(target_os = "linux", target_env = "gnu"),
-            target_os = "windows",
-            target_os = "macos"
-        ))]
-        ProfileSource::NativeCommitted(committed) => committed.before(),
-        #[cfg(all(target_os = "linux", target_env = "gnu"))]
-        ProfileSource::Committed(committed) => committed.before(),
         _ => canonical.as_slice(),
     };
     let state: LegacyState = decode(legacy_source)?;
     let original_history_only = match &source {
-        #[cfg(any(
-            target_os = "macos",
-            target_os = "windows",
-            all(test, target_os = "linux", target_env = "gnu")
-        ))]
-        ProfileSource::OriginalMaterials => true,
-        #[cfg(any(
-            all(target_os = "linux", target_env = "gnu"),
-            target_os = "windows",
-            target_os = "macos"
-        ))]
-        ProfileSource::NativeCommitted(_) => true,
         _ => false,
     };
     if state.schema != 1
@@ -1168,58 +965,9 @@ fn load_source_inner(
             target_os = "windows",
             target_os = "macos"
         ))]
-        ProfileSource::NativeCommitted(committed) => {
-            let root = PrivateRoot::open(base).map_err(|_| ProfileError::ProtectedRead)?;
-            committed
-                .read_retired_token(&root)
-                .map_err(|_| ProfileError::Changed)?
-        }
-        #[cfg(any(
-            all(target_os = "linux", target_env = "gnu"),
-            target_os = "windows",
-            target_os = "macos"
-        ))]
         ProfileSource::Fresh(_) => return Err(ProfileError::Invalid),
         ProfileSource::Ordinary => {
             zeroize::Zeroizing::new(capture.read(base, "device/host.token", 4096)?)
-        }
-        #[cfg(any(
-            target_os = "macos",
-            target_os = "windows",
-            all(test, target_os = "linux", target_env = "gnu")
-        ))]
-        ProfileSource::OriginalMaterials => {
-            #[cfg(target_os = "macos")]
-            if let Some(retired) = retired_materials {
-                let root = PrivateRoot::open(base).map_err(|_| ProfileError::ProtectedRead)?;
-                retired
-                    .read_retired_token(&root)
-                    .map_err(|_| ProfileError::Changed)?
-            } else {
-                zeroize::Zeroizing::new(capture.read(base, "device/host.token", 4096)?)
-            }
-            #[cfg(not(target_os = "macos"))]
-            {
-                zeroize::Zeroizing::new(capture.read(base, "device/host.token", 4096)?)
-            }
-        }
-        #[cfg(all(target_os = "linux", target_env = "gnu"))]
-        ProfileSource::Maintenance(binding) => {
-            let config_root =
-                PrivateRoot::open(state_dir).map_err(|_| ProfileError::ProtectedRead)?;
-            let host_root = PrivateRoot::open(base).map_err(|_| ProfileError::ProtectedRead)?;
-            // This proof is minted only from the original joined service,
-            // writer, maintenance and durable retirement. No alias from JSON.
-            binding
-                .read_token(&config_root, &host_root)
-                .map_err(|_| ProfileError::Changed)?
-        }
-        #[cfg(all(target_os = "linux", target_env = "gnu"))]
-        ProfileSource::Committed(committed) => {
-            let root = PrivateRoot::open(base).map_err(|_| ProfileError::ProtectedRead)?;
-            committed
-                .read_retired_token(&root)
-                .map_err(|_| ProfileError::Changed)?
         }
     };
     let token = std::str::from_utf8(&raw_token)
@@ -1285,34 +1033,13 @@ fn load_source_inner(
     // migration it never selects workers; only the committed canonical selection
     // and a fresh C08 verification may do that.
     let inventory = match &source {
-        #[cfg(any(
-            all(target_os = "linux", target_env = "gnu"),
-            target_os = "windows",
-            target_os = "macos"
-        ))]
-        ProfileSource::NativeCommitted(committed) => {
-            release::ProfileRelease::from_native_selection(committed.selection(), &expected)?
-        }
-        #[cfg(all(target_os = "linux", target_env = "gnu"))]
-        ProfileSource::Committed(committed) => {
-            release::ProfileRelease::from_native_selection(committed.selection(), &expected)?
-        }
         _ => {
             let inventory =
                 release::load(&mut capture, &root, &active, base, &publisher, &expected)?;
             if inventory.runtime_format() != expected_format {
                 return Err(ProfileError::UntrustedRelease);
             }
-            #[cfg(all(target_os = "linux", target_env = "gnu"))]
-            if let ProfileSource::Maintenance(binding) = &source {
-                release::ProfileRelease::for_maintenance(inventory, binding.candidate(), &expected)?
-            } else {
-                inventory
-            }
-            #[cfg(not(all(target_os = "linux", target_env = "gnu")))]
-            {
-                inventory
-            }
+            inventory
         }
     };
     let exec_enabled = host.exec.as_ref().is_some_and(|exec| exec.enabled);
@@ -1342,12 +1069,6 @@ fn load_source_inner(
         ("native_rust_v1", false) => "native_rust_v1_signed_worker_closure",
         _ => return Err(ProfileError::Unsupported),
     };
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    let runtime_format = if matches!(&source, ProfileSource::Maintenance(_)) {
-        "native_rust_v1_maintenance_validation"
-    } else {
-        runtime_format
-    };
     let diagnostic_manifest = match &source {
         #[cfg(any(
             all(target_os = "linux", target_env = "gnu"),
@@ -1356,22 +1077,6 @@ fn load_source_inner(
         ))]
         ProfileSource::Fresh(_) => return Err(ProfileError::Invalid),
         ProfileSource::Ordinary => active.manifest_sha256,
-        #[cfg(any(
-            target_os = "macos",
-            target_os = "windows",
-            all(test, target_os = "linux", target_env = "gnu")
-        ))]
-        ProfileSource::OriginalMaterials => active.manifest_sha256,
-        #[cfg(any(
-            all(target_os = "linux", target_env = "gnu"),
-            target_os = "windows",
-            target_os = "macos"
-        ))]
-        ProfileSource::NativeCommitted(committed) => committed.selection().manifest_sha256,
-        #[cfg(all(target_os = "linux", target_env = "gnu"))]
-        ProfileSource::Maintenance(binding) => binding.candidate().report().manifest_sha256,
-        #[cfg(all(target_os = "linux", target_env = "gnu"))]
-        ProfileSource::Committed(committed) => committed.selection().manifest_sha256,
     };
     let signed_version = inventory.version().to_owned();
     // An absent Exec profile supplies no Browser workspace authority.
@@ -1480,10 +1185,6 @@ fn load_source_inner(
         source,
     };
     loaded.revalidate()?;
-    #[cfg(target_os = "macos")]
-    if let Some(retired) = retired_materials {
-        retired.validate().map_err(|_| ProfileError::Changed)?;
-    }
     Ok(loaded)
 }
 #[cfg(test)]

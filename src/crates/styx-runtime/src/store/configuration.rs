@@ -233,47 +233,6 @@ impl ConfigurationState {
         self.recovery_required = false;
         Ok(())
     }
-    /// Only the original native owner may consume its fresh committed capability.
-    /// The capability has just checked the final chain under this SAME lock.
-    #[cfg(any(target_os = "macos", target_os = "windows"))]
-    pub(super) fn finish_native_cutover(
-        &mut self,
-        proof: &super::NativeCommittedCutover<'_, '_, '_>,
-        owner: &OwnedConfigurationRoot,
-    ) -> JournalResult<()> {
-        if !proof.matches_fenced_owner(owner, &self.root.identity(), self.fence.as_ref()) {
-            return Err(JournalError::Conflict);
-        }
-        self.fence = None;
-        self.recovery_required = false;
-        Ok(())
-    }
-    #[cfg(target_os = "macos")]
-    pub(super) fn finish_mac_resumed_cutover(
-        &mut self,
-        proof: &super::platform::MacResumedCutover<'_>,
-        owner: &OwnedConfigurationRoot,
-    ) -> JournalResult<()> {
-        if !proof.matches_fenced_owner(owner, &self.root.identity(), self.fence.as_ref()) {
-            return Err(JournalError::Conflict);
-        }
-        self.fence = None;
-        self.recovery_required = false;
-        Ok(())
-    }
-    #[cfg(target_os = "windows")]
-    pub(super) fn finish_windows_resumed_cutover(
-        &mut self,
-        proof: &super::platform::WindowsResumedCutover<'_>,
-        owner: &OwnedConfigurationRoot,
-    ) -> JournalResult<()> {
-        if !proof.matches_fenced_owner(owner, &self.root.identity(), self.fence.as_ref()) {
-            return Err(JournalError::Conflict);
-        }
-        self.fence = None;
-        self.recovery_required = false;
-        Ok(())
-    }
     /// Fresh boot reopens only the fully re-synced original committed successor.
     /// An Applied/Verified transaction never reaches this capability.
     #[cfg(all(target_os = "linux", target_env = "gnu"))]

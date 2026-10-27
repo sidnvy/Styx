@@ -116,18 +116,6 @@ enum Retained {
     Service {
         _job: tokio::task::JoinHandle<()>,
     },
-    #[cfg(all(target_os = "linux", target_env = "gnu"))]
-    LinuxMigration {
-        _owner: Box<crate::migration::legacy_entry::LegacyMigrationFailure>,
-    },
-    #[cfg(target_os = "windows")]
-    WindowsMigrationPreparation {
-        _owner: Box<crate::store::native_transaction::WindowsMigrationPreparationFailure>,
-    },
-    #[cfg(target_os = "macos")]
-    MacMigration {
-        _owner: Box<crate::store::native_transaction::MacMigrationRecoveryFailure>,
-    },
     Bootstrap {
         _owner: NativeRootFailure,
     },
@@ -162,35 +150,7 @@ impl NativeManagementError {
         if matches!(self._retained, Some(Retained::Service { .. })) {
             return true;
         }
-        #[cfg(all(target_os = "linux", target_env = "gnu"))]
-        if let Some(Retained::LinuxMigration { _owner }) = &self._retained {
-            return _owner.requires_process_teardown();
-        }
-        #[cfg(target_os = "windows")]
-        if let Some(Retained::WindowsMigrationPreparation { _owner }) = &self._retained {
-            return _owner.process_teardown_required();
-        }
-        #[cfg(target_os = "macos")]
-        return matches!(&self._retained, Some(Retained::MacMigration { _owner })
-            if _owner.process_teardown_required());
-        #[cfg(any(target_os = "windows", all(target_os = "linux", target_env = "gnu")))]
         false
-    }
-    /// Redacted original transaction facts; never contains credentials.
-    pub fn migration_diagnostic(&self) -> Option<serde_json::Value> {
-        #[cfg(all(target_os = "linux", target_env = "gnu"))]
-        if let Some(Retained::LinuxMigration { _owner }) = &self._retained {
-            return Some(_owner.diagnostic());
-        }
-        #[cfg(target_os = "windows")]
-        if let Some(Retained::WindowsMigrationPreparation { _owner }) = &self._retained {
-            return _owner.diagnostic();
-        }
-        #[cfg(target_os = "macos")]
-        if let Some(Retained::MacMigration { _owner }) = &self._retained {
-            return _owner.diagnostic();
-        }
-        None
     }
     pub fn code(&self) -> &'static str {
         match self.kind {

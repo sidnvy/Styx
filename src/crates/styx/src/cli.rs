@@ -526,11 +526,7 @@ fn write_json(value: &impl serde::Serialize) -> io::Result<()> {
 fn native_error_output(
     value: &styx_runtime::management::native::NativeManagementError,
 ) -> serde_json::Value {
-    let mut output = serde_json::json!({"schema":1,"error":value.code()});
-    if let Some(diagnostic) = value.migration_diagnostic() {
-        output["migration"] = diagnostic;
-    }
-    output
+    serde_json::json!({"schema":1,"error":value.code()})
 }
 /// An unresolved owned migration/recovery job must survive until explicit
 /// whole-process teardown. Dropping its result would leave runtime shutdown
@@ -549,13 +545,7 @@ fn native_recovery_result<T: serde::Serialize>(
         && value.requires_process_teardown()
     {
         let mut output = native_error_output(value);
-        output["outcome"] = serde_json::json!(if value.code()
-            == "native_migration_waiting_for_later_boot"
-        {
-            "pending"
-        } else {
-            "unknown"
-        });
+        output["outcome"] = serde_json::json!("unknown");
         output["operations_replayed"] = serde_json::json!(false);
         output["cleanup_confirmed"] = serde_json::json!(false);
         output["process_exit"] = serde_json::json!("explicit_scope_teardown");
