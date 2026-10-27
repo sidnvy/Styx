@@ -642,7 +642,7 @@ impl WindowsMigrationRecovery {
         let owner = scope.owner.clone();
         let transactions = NativeTransactions {
             binding,
-            journal: scope.journal,
+            journal: Arc::new(scope.journal),
             retained_maintenance: None,
             retained_runtime_update: None,
         };
@@ -862,11 +862,35 @@ impl NativeTransactions {
         let Self {
             binding,
             journal,
-            retained_maintenance: _,
+            retained_maintenance,
             // The preflight above refuses runtime-update custody before moving
             // this coordinator into the unrelated migration worker.
-            retained_runtime_update: _,
+            retained_runtime_update,
         } = self;
+        // Migration requires exclusive original journal custody. Preserve the
+        // coordinator if an opaque frame still retains the same writer.
+        let journal = match Arc::try_unwrap(journal) {
+            Ok(journal) => journal,
+            Err(journal) => {
+                return Err(detailed_failure(
+                    NativeTransactionError::Conflict,
+                    FailedPreparation::Transactions {
+                        _transactions: Box::new(Self {
+                            binding,
+                            journal,
+                            retained_maintenance,
+                            retained_runtime_update,
+                        }),
+                        _permit: permit,
+                        _app_scope: app_scope,
+                    },
+                    &id,
+                    "validated_native_journal_shared",
+                    "unknown",
+                    false,
+                ));
+            }
+        };
         let task = crate::store::platform::start_resume_validated_windows_host_migration(
             runtime,
             state_dir,
