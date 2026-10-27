@@ -29,6 +29,9 @@ pub struct JoinReport {
     // It is never accepted from, or exposed as, a public enrollment DTO.
     #[serde(skip)]
     pub(crate) computer_requested: bool,
+    // Original formal runtime authority, never serialized or accepted from a DTO.
+    #[serde(skip)]
+    pub(crate) verified_runtime: Arc<crate::release::VerifiedNativeRelease>,
 }
 #[must_use]
 pub struct JoinError {
@@ -122,7 +125,7 @@ pub async fn claim(state_dir: &Path) -> Result<JoinReport> {
     ))]
     {
         let path = state_dir.to_path_buf();
-        platform::owned(async move { platform::claim(path, None).await }).await
+        platform::owned(async move { platform::claim(path, None, None).await }).await
     }
     #[cfg(not(any(
         all(target_os = "windows", target_arch = "x86_64"),
@@ -182,7 +185,10 @@ pub(crate) async fn request_for_app(
         Err(JoinError::new("native_join_platform_unsupported", 3))
     }
 }
-pub(crate) async fn claim_for_app(scope: Arc<crate::app::HostScope>) -> Result<JoinReport> {
+pub(crate) async fn claim_for_app(
+    scope: Arc<crate::app::HostScope>,
+    candidate: Option<Arc<crate::release::VerifiedNativeRelease>>,
+) -> Result<JoinReport> {
     #[cfg(any(
         all(target_os = "windows", target_arch = "x86_64"),
         all(
@@ -194,7 +200,7 @@ pub(crate) async fn claim_for_app(scope: Arc<crate::app::HostScope>) -> Result<J
     {
         let path = scope.state_dir().to_owned();
         let retained = scope.clone();
-        platform::owned(async move { platform::claim(path, Some(scope)).await })
+        platform::owned(async move { platform::claim(path, Some(scope), candidate).await })
             .await
             .map_err(|error| error.with_app_scope(retained))
     }
@@ -207,7 +213,7 @@ pub(crate) async fn claim_for_app(scope: Arc<crate::app::HostScope>) -> Result<J
         all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
     )))]
     {
-        let _ = scope;
+        let _ = (scope, candidate);
         Err(JoinError::new("native_join_platform_unsupported", 3))
     }
 }
@@ -525,7 +531,7 @@ mod platform {
         key: DevicePrivateKey,
         tls: GatewayClientTls,
         origin: url::Url,
-        candidate: VerifiedNativeRelease,
+        candidate: Arc<VerifiedNativeRelease>,
         inputs: Vec<Input>,
         app_scope: Option<Arc<crate::app::HostScope>>,
     }
@@ -606,6 +612,7 @@ mod platform {
                 service_started: false,
                 runtime_health: "not_started",
                 computer_requested: self.seed.computer_requested,
+                verified_runtime: self.candidate.clone(),
             }
         }
     }
@@ -639,29 +646,24 @@ mod platform {
         }
         Ok(())
     }
-    fn load(
-        store: NativeHostJoinStore,
-        path: PathBuf,
-        app_scope: Option<Arc<crate::app::HostScope>>,
-    ) -> Result<Work> {
-        load_with_candidate(store, path, app_scope, None)
-    }
     fn candidate_for_load(
         selected: &NativeRuntimeSelection,
-        retained: Option<release::VerifiedNativeRelease>,
-    ) -> Result<release::VerifiedNativeRelease> {
+        retained: Option<Arc<release::VerifiedNativeRelease>>,
+    ) -> Result<Arc<release::VerifiedNativeRelease>> {
         let candidate = match retained {
             Some(candidate) => {
-                // Only create passes its still-owned candidate, within the same
-                // operation. This is a new complete verification boundary, not
-                // reuse of an earlier success or a caller-supplied selection.
+                // Create or the original App owner may pass its formal object.
+                // Each loader fully revalidates the exact selection; an earlier
+                // result or caller-supplied DATA never supplies admission.
                 candidate
                     .revalidate_matches_selection(selected)
                     .map_err(|_| JoinError::new("native_join_candidate_untrusted", 2))?;
                 candidate
             }
-            None => release::verify_selected(selected)
-                .map_err(|_| JoinError::new("native_join_candidate_untrusted", 2))?,
+            None => Arc::new(
+                release::verify_selected(selected)
+                    .map_err(|_| JoinError::new("native_join_candidate_untrusted", 2))?,
+            ),
         };
         Ok(candidate)
     }
@@ -669,7 +671,7 @@ mod platform {
         store: NativeHostJoinStore,
         path: PathBuf,
         app_scope: Option<Arc<crate::app::HostScope>>,
-        candidate: Option<release::VerifiedNativeRelease>,
+        candidate: Option<Arc<release::VerifiedNativeRelease>>,
     ) -> Result<Work> {
         let loaded: Result<_> = (|| {
             validate_app_scope(app_scope.as_deref(), &path)?;
@@ -924,7 +926,12 @@ mod platform {
         // Retain the exact candidate admitted before root creation. The loader
         // still derives selection from the original store/C07 chain and performs
         // a complete exact-selection revalidation before retaining it in Work.
-        let mut work = load_with_candidate(store, parent.join(name), app_scope, Some(candidate))?;
+        let mut work = load_with_candidate(
+            store,
+            parent.join(name),
+            app_scope,
+            Some(Arc::new(candidate)),
+        )?;
         // Before dispatch recheck the caller's original source/CA/invitation too.
         for input in [source, selection_input, ca, invitation_input] {
             if let Err(error) = input.revalidate() {
@@ -1003,6 +1010,13 @@ mod platform {
         Ok(work.report("native_host_request", "awaiting_approval", &pending))
     }
     fn open(path: &Path, app_scope: Option<Arc<crate::app::HostScope>>) -> Result<Work> {
+        open_with_candidate(path, app_scope, None)
+    }
+    fn open_with_candidate(
+        path: &Path,
+        app_scope: Option<Arc<crate::app::HostScope>>,
+        candidate: Option<Arc<release::VerifiedNativeRelease>>,
+    ) -> Result<Work> {
         if !path.is_absolute() {
             return Err(bad());
         }
@@ -1013,7 +1027,7 @@ mod platform {
             .map_err(|_| JoinError::new("native_join_configuration_busy", 3))?;
         let binding = native_root::reopen_native(root, writer).map_err(JoinError::root)?;
         let store = NativeHostJoinStore::from_binding(binding).map_err(JoinError::root)?;
-        load(store, path.to_path_buf(), app_scope)
+        load_with_candidate(store, path.to_path_buf(), app_scope, candidate)
     }
     fn pending(work: &Work, raw: &[u8], historical: bool) -> Result<protocol::PendingJoin> {
         let record: RecordedReply<'_> = serde_json::from_slice(raw).map_err(|_| unknown())?;
@@ -1105,8 +1119,9 @@ mod platform {
     pub(super) async fn claim(
         path: PathBuf,
         app_scope: Option<Arc<crate::app::HostScope>>,
+        candidate: Option<Arc<release::VerifiedNativeRelease>>,
     ) -> Result<JoinReport> {
-        let work = blocking(move || open(&path, app_scope)).await?;
+        let work = blocking(move || open_with_candidate(&path, app_scope, candidate)).await?;
         let (work, (reply, ready_raw, mut credential, confirm_dispatched)) = io(work, |w| {
             // One read-only prefix under the same original writer, as in
             // inspect above. Every store.read still verifies its original pins
@@ -1403,7 +1418,7 @@ mod platform {
                 );
                 let verified = release::verify(&payload, &publisher, &expected).unwrap();
                 let selected = verified.runtime_selection().unwrap();
-                (verified, selected)
+                (Arc::new(verified), selected)
             };
             let (original, selected) = make("original");
             let accepted = candidate_for_load(&selected, Some(original)).unwrap();

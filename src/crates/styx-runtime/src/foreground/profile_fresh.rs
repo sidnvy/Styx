@@ -32,6 +32,17 @@ pub(super) fn load_for_app(
     );
     load_snapshot(&path, snapshot)
 }
+pub(super) fn load_for_app_retained(
+    scope: Arc<crate::app::HostScope>,
+    runtime: Arc<crate::release::VerifiedNativeRelease>,
+) -> Result<LoadedLegacyProfile, ProfileError> {
+    let path = scope.state_dir().to_owned();
+    let snapshot = Arc::new(
+        NativeHostSnapshot::open_for_app_retained(&path, scope, runtime)
+            .map_err(|_| ProfileError::Changed)?,
+    );
+    load_snapshot(&path, snapshot)
+}
 #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
 pub(super) fn load_for_service(
     scope: Arc<crate::platform::native_service::ServiceScope>,

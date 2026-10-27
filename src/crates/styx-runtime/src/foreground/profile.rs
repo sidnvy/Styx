@@ -836,6 +836,19 @@ pub(crate) fn load_for_app(
     }
     fresh::load_for_app(scope)
 }
+/// Same original fresh App owner and formal runtime. The fresh snapshot still
+/// enforces its entire C07/Ready/manager chain and exact signed selection.
+#[cfg(any(
+    all(target_os = "linux", target_env = "gnu"),
+    target_os = "windows",
+    target_os = "macos"
+))]
+pub(crate) fn load_for_app_retained(
+    scope: Arc<crate::app::HostScope>,
+    runtime: Arc<crate::release::VerifiedNativeRelease>,
+) -> Result<LoadedLegacyProfile, ProfileError> {
+    fresh::load_for_app_retained(scope, runtime)
+}
 /// Only the native OS manager can supply this opaque scope. A CLI argument or
 /// environment variable cannot adopt the service's profile or execution lease.
 #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]

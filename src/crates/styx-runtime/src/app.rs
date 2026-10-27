@@ -340,6 +340,8 @@ struct HostApp {
     enrollment: Option<Value>,
     // A verified false may disable optional desktop work; it cannot authorize Exec.
     native_computer_requested: Option<bool>,
+    // Original signed object retained across adjacent enrollment/start boundaries.
+    native_runtime: Option<Arc<crate::release::VerifiedNativeRelease>>,
     // Retain the exact input writer after any partial publication, too.
     input_writer: Option<ConfigurationWriterGuard>,
     running: Option<RunningHost>,
@@ -382,6 +384,7 @@ impl HostApp {
             inspected_join: None,
             enrollment: None,
             native_computer_requested: None,
+            native_runtime: None,
             input_writer: None,
             running: None,
             observed,
@@ -417,6 +420,7 @@ impl HostApp {
                 match native_join::inspect_for_app(app.scope.clone()).await {
                     Ok(report) => {
                         app.native_computer_requested = Some(report.computer_requested);
+                        app.native_runtime = Some(report.verified_runtime.clone());
                         app.enrollment = Some(
                             serde_json::to_value(report)
                                 .map_err(|_| AppError("app_response_invalid"))?,
@@ -751,8 +755,13 @@ impl HostApp {
                 status: "started",
                 exec_connection: "connecting",
             });
+            let verified_runtime = if self.committed_migration {
+                None
+            } else {
+                self.native_runtime.clone()
+            };
             let worker = tokio::spawn(async move {
-                foreground::host_run_for_app(scope, worker_cancel, events).await
+                foreground::host_run_for_app(scope, worker_cancel, events, verified_runtime).await
             });
             let cancel_on_drop = cancel.clone().drop_guard();
             self.running = Some(RunningHost {
@@ -1230,6 +1239,7 @@ impl HostApp {
                         .map_err(|e| self.join_error(e))?;
                 self.read_configuration().await?;
                 self.native_computer_requested = Some(report.computer_requested);
+                self.native_runtime = Some(report.verified_runtime.clone());
                 let value =
                     serde_json::to_value(report).map_err(|_| AppError("app_response_invalid"))?;
                 self.enrollment = Some(value.clone());
@@ -1244,11 +1254,13 @@ impl HostApp {
                 }
                 // Enrollment must not bypass an unresolved C07 operation.
                 self.read_configuration().await?;
-                let report = native_join::claim_for_app(self.scope.clone())
-                    .await
-                    .map_err(|e| self.join_error(e))?;
+                let report =
+                    native_join::claim_for_app(self.scope.clone(), self.native_runtime.clone())
+                        .await
+                        .map_err(|e| self.join_error(e))?;
                 self.read_configuration().await?;
                 self.native_computer_requested = Some(report.computer_requested);
+                self.native_runtime = Some(report.verified_runtime.clone());
                 let value =
                     serde_json::to_value(report).map_err(|_| AppError("app_response_invalid"))?;
                 self.enrollment = Some(value.clone());

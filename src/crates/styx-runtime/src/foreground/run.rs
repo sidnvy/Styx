@@ -39,7 +39,10 @@ const HEALTH_OWNERS: &[&str] = &[
 ];
 enum RunOwner {
     Cli,
-    App(Arc<crate::app::HostScope>),
+    App(
+        Arc<crate::app::HostScope>,
+        Option<Arc<crate::release::VerifiedNativeRelease>>,
+    ),
     #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
     Service(Arc<crate::platform::native_service::ServiceScope>),
 }
@@ -485,6 +488,7 @@ pub(crate) async fn host_run_for_app(
     scope: Arc<crate::app::HostScope>,
     cancel: CancellationToken,
     events: mpsc::Sender<ForegroundEvent>,
+    verified_runtime: Option<Arc<crate::release::VerifiedNativeRelease>>,
 ) -> Result<ForegroundOutcome, ForegroundError> {
     let state = scope.state_dir().to_owned();
     let stop = cancel.child_token();
@@ -495,7 +499,7 @@ pub(crate) async fn host_run_for_app(
             HostWireMode::PairedV3,
             stop,
             events,
-            RunOwner::App(scope),
+            RunOwner::App(scope, verified_runtime),
         )
         .await
     })
@@ -548,7 +552,8 @@ async fn run_owned(
             _ => None,
         };
         let profile = match owner {
-            RunOwner::App(scope) => profile::load_for_app(scope)?,
+            RunOwner::App(scope, Some(runtime)) => profile::load_for_app_retained(scope, runtime)?,
+            RunOwner::App(scope, None) => profile::load_for_app(scope)?,
             RunOwner::Cli => match mode {
                 HostWireMode::LegacyExplicit => profile::load_legacy(&path)?,
                 HostWireMode::PairedV3 => profile::load_paired(&path)?,

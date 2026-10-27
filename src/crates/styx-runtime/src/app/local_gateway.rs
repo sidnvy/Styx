@@ -621,9 +621,10 @@ impl HostApp {
         {
             return Err(AppError("app_local_pairing_result_unknown"));
         }
-        let claimed = native_join::claim_for_app(self.scope.clone())
-            .await
-            .map_err(|e| self.join_error(e))?;
+        let claimed =
+            native_join::claim_for_app(self.scope.clone(), Some(joined.verified_runtime.clone()))
+                .await
+                .map_err(|e| self.join_error(e))?;
         if claimed.status != "ready_to_connect"
             || claimed.device_id != joined.device_id
             || claimed.fingerprint != joined.fingerprint
@@ -632,6 +633,7 @@ impl HostApp {
         }
         self.read_configuration().await?;
         self.native_computer_requested = Some(claimed.computer_requested);
+        self.native_runtime = Some(claimed.verified_runtime.clone());
         self.enrollment =
             Some(serde_json::to_value(claimed).map_err(|_| AppError("app_response_invalid"))?);
         self.unknown = false;

@@ -178,6 +178,20 @@ impl NativeHostSnapshot {
             RunPolicy::Execution,
         )
     }
+    pub(crate) fn open_for_app_retained(
+        path: &Path,
+        scope: Arc<crate::app::HostScope>,
+        runtime: Arc<crate::release::VerifiedNativeRelease>,
+    ) -> JournalResult<Self> {
+        Self::open_source_retained(
+            path,
+            Some(scope),
+            #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+            None,
+            RunPolicy::Execution,
+            Some(runtime),
+        )
+    }
     #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
     pub(crate) fn open_for_service(
         scope: Arc<crate::platform::native_service::ServiceScope>,
@@ -212,6 +226,23 @@ impl NativeHostSnapshot {
         #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
         service_scope: Option<Arc<crate::platform::native_service::ServiceScope>>,
         run_policy: RunPolicy,
+    ) -> JournalResult<Self> {
+        Self::open_source_retained(
+            path,
+            app_scope,
+            #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+            service_scope,
+            run_policy,
+            None,
+        )
+    }
+    fn open_source_retained(
+        path: &Path,
+        app_scope: Option<Arc<crate::app::HostScope>>,
+        #[cfg(any(all(target_os = "linux", target_env = "gnu"), target_os = "macos"))]
+        service_scope: Option<Arc<crate::platform::native_service::ServiceScope>>,
+        run_policy: RunPolicy,
+        runtime: Option<Arc<crate::release::VerifiedNativeRelease>>,
     ) -> JournalResult<Self> {
         if run_policy.control_binding() && app_scope.is_none() {
             return Err(JournalError::Conflict);
@@ -358,8 +389,18 @@ impl NativeHostSnapshot {
         if bootstrap != seed.runtime {
             return Err(JournalError::Conflict);
         }
-        let candidate = crate::release::verify_selected(&current_selection)
-            .map_err(|_| JournalError::Conflict)?;
+        let candidate = match runtime {
+            Some(candidate) => {
+                candidate
+                    .revalidate_matches_selection(&current_selection)
+                    .map_err(|_| JournalError::Conflict)?;
+                candidate
+            }
+            None => Arc::new(
+                crate::release::verify_selected(&current_selection)
+                    .map_err(|_| JournalError::Conflict)?,
+            ),
+        };
         if !candidate
             .supports_state_reader(state.reader_contract)
             .map_err(|_| JournalError::Conflict)?
@@ -375,7 +416,7 @@ impl NativeHostSnapshot {
             pins,
             seed,
             current_selection,
-            verified_release: Arc::new(candidate),
+            verified_release: candidate,
             ready,
             ca,
             identity,
