@@ -89,3 +89,21 @@ Administrator delivery is separate from configuration recovery: if the original 
 ## D12 — macOS default delivery is drag-and-drop DMG
 
 Owner decision, 2026-10-27: the default native macOS distribution is a signed Styx.app in a DMG with an Applications link. The normal journey is drag to Applications and launch. A system-service PKG remains an explicit advanced install/repair path, not a mandatory step for ordinary App setup. Preserve the original bundle identity, Core/Cua signing responsibility and TCC. Final acceptance must exercise the DMG journey; producing a ZIP or testing the isolated Gateway PKG is not evidence of normal macOS installation acceptance.
+
+
+## D13 — original App owner transfer retains runtime history
+
+Implementation continuation, 2026-10-27: preserve the App's original C07 and stable
+selected runtime when transferring a fresh stopped single role to a persistent
+service. Use a distinct state6/signed reader declaration; do not broaden state4's
+App-only meaning or state5's failed-registration repair meaning. Old signed
+releases retain their exact reader declarations and cannot be selected for this
+new state. The App scope and actual exclusion are native custody, never authority
+reconstructed from a decoded state or a private JSON input.
+
+Service uninstall removes its exact OS registration while retaining the original
+PersistentService/Stopped/Disabled configuration, identity and pairing. It does
+not transfer ownership back to a public foreground CLI. OS registration absence
+is a separate observed fact and is never a clean-stop or joined-worker proof.
+Normal Mac distribution remains the ordinary DMG; administrator service packages
+are explicit service-management artifacts.

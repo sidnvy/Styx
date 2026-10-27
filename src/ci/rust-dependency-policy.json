@@ -500,6 +500,11 @@
       "kind": "owned_private_filesystem_fixture",
       "input": "fresh STYX_TEST_MACOS_HOST_MANAGEMENT_ROOT; no installed root or service registration",
       "required_for": "fresh Host-only original C07 prepare/first-start/stopped target custody and App-managed CLI refusal; not authenticated Host or launchd acceptance"
+    },
+    "store::native_transaction::runtime_update::tests::app_service_tests::original_app_scope_transfer_preserves_c07_and_refuses_generic_or_other_root_authority": {
+      "kind": "explicit_owned_private_journal_files",
+      "input": "fresh STYX_TEST_APP_SERVICE_TRANSFER_ROOT; disposable synthetic signed C08 and original App container; no installed profile",
+      "required_for": "actual original-scope C07 transfer, generic/other-root refusal and immutable runtime history/identity preservation; not enrollment, registered service or installed App acceptance"
     }
   },
   "change_policy": "dependency or ignored-test additions require explicit policy review; preserve mature Cargo tooling rather than replacing its resolver/compiler/lints",

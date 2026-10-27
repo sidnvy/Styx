@@ -35,6 +35,8 @@ pub enum NativeReleaseReader {
     NativeAppRuntimeSelectedV1,
     /// Original failed persistent-service registration repair and reader barrier.
     NativeServiceRuntimeSelectedV1,
+    /// Retained App owner transfer into the original persistent-service root.
+    NativeAppServiceTransferredV1,
 }
 impl NativeReleaseReader {
     /// Signed feature declaration, not evidence of successful migration.
@@ -45,6 +47,7 @@ impl NativeReleaseReader {
                 | Self::NativeRuntimeSelectedV1
                 | Self::NativeAppRuntimeSelectedV1
                 | Self::NativeServiceRuntimeSelectedV1
+                | Self::NativeAppServiceTransferredV1
         )
     }
 
@@ -59,7 +62,8 @@ impl NativeReleaseReader {
                     | Self::NativeRuntimeMigratedV3
                     | Self::NativeRuntimeSelectedV1
                     | Self::NativeAppRuntimeSelectedV1
-                    | Self::NativeServiceRuntimeSelectedV1,
+                    | Self::NativeServiceRuntimeSelectedV1
+                    | Self::NativeAppServiceTransferredV1,
                 ReaderContract::NativeManagementStateV1
             ) | (
                 Self::NativeRuntimeMigratedV1
@@ -67,26 +71,34 @@ impl NativeReleaseReader {
                     | Self::NativeRuntimeMigratedV3
                     | Self::NativeRuntimeSelectedV1
                     | Self::NativeAppRuntimeSelectedV1
-                    | Self::NativeServiceRuntimeSelectedV1,
+                    | Self::NativeServiceRuntimeSelectedV1
+                    | Self::NativeAppServiceTransferredV1,
                 ReaderContract::NativeMigratedStateV1
             ) | (
                 Self::NativeRuntimeMigratedV2
                     | Self::NativeRuntimeMigratedV3
                     | Self::NativeRuntimeSelectedV1
                     | Self::NativeAppRuntimeSelectedV1
-                    | Self::NativeServiceRuntimeSelectedV1,
+                    | Self::NativeServiceRuntimeSelectedV1
+                    | Self::NativeAppServiceTransferredV1,
                 ReaderContract::NativeMigratedStateV2
             ) | (
                 Self::NativeRuntimeSelectedV1
                     | Self::NativeAppRuntimeSelectedV1
-                    | Self::NativeServiceRuntimeSelectedV1,
+                    | Self::NativeServiceRuntimeSelectedV1
+                    | Self::NativeAppServiceTransferredV1,
                 ReaderContract::NativeRuntimeSelectedStateV1
             ) | (
-                Self::NativeAppRuntimeSelectedV1 | Self::NativeServiceRuntimeSelectedV1,
+                Self::NativeAppRuntimeSelectedV1
+                    | Self::NativeServiceRuntimeSelectedV1
+                    | Self::NativeAppServiceTransferredV1,
                 ReaderContract::NativeAppRuntimeSelectedStateV1
             ) | (
-                Self::NativeServiceRuntimeSelectedV1,
+                Self::NativeServiceRuntimeSelectedV1 | Self::NativeAppServiceTransferredV1,
                 ReaderContract::NativeServiceRuntimeSelectedStateV1
+            ) | (
+                Self::NativeAppServiceTransferredV1,
+                ReaderContract::NativeAppServiceTransferredStateV1
             )
         )
     }
@@ -355,6 +367,7 @@ impl NativeReleaseManifest {
                     | NativeReleaseReader::NativeRuntimeSelectedV1
                     | NativeReleaseReader::NativeAppRuntimeSelectedV1
                     | NativeReleaseReader::NativeServiceRuntimeSelectedV1
+                    | NativeReleaseReader::NativeAppServiceTransferredV1
             )
             || !worker_version(&self.version)
             || self.version.contains('+')
@@ -368,6 +381,7 @@ impl NativeReleaseManifest {
             || self.contracts.control != 1
             || self.contracts.management_state
                 != match self.minimum_reader {
+                    NativeReleaseReader::NativeAppServiceTransferredV1 => 6,
                     NativeReleaseReader::NativeServiceRuntimeSelectedV1 => 5,
                     NativeReleaseReader::NativeAppRuntimeSelectedV1 => 4,
                     NativeReleaseReader::NativeRuntimeSelectedV1 => 3,

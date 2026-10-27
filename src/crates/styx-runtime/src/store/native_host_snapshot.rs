@@ -102,6 +102,23 @@ impl HostGatewayBinding {
 enum RunPolicy {
     Execution,
     ControlBinding,
+    #[cfg(target_os = "macos")]
+    AppServiceControlBinding,
+}
+impl RunPolicy {
+    fn control_binding(self) -> bool {
+        !matches!(self, Self::Execution)
+    }
+    fn app_service_client(self) -> bool {
+        #[cfg(target_os = "macos")]
+        {
+            matches!(self, Self::AppServiceControlBinding)
+        }
+        #[cfg(not(target_os = "macos"))]
+        {
+            false
+        }
+    }
 }
 impl NativeHostSnapshot {
     /// Inspect an already paired App Host's local Gateway association without
@@ -119,6 +136,21 @@ impl NativeHostSnapshot {
             None,
             RunPolicy::ControlBinding,
         )?;
+        Ok(HostGatewayBinding {
+            gateway_origin: snapshot.seed.gateway_origin.clone(),
+            anchor_sha256: snapshot.seed.anchor_sha256,
+        })
+    }
+    /// Service-client association inspection retains the original App scope
+    /// but never returns execution material or adopts a service execution lease.
+    /// Only a committed state6 transfer can use this projection.
+    #[cfg(target_os = "macos")]
+    pub(crate) fn inspect_gateway_binding_for_app_service(
+        path: &Path,
+        scope: Arc<crate::app::HostScope>,
+    ) -> JournalResult<HostGatewayBinding> {
+        let snapshot =
+            Self::open_source(path, Some(scope), None, RunPolicy::AppServiceControlBinding)?;
         Ok(HostGatewayBinding {
             gateway_origin: snapshot.seed.gateway_origin.clone(),
             anchor_sha256: snapshot.seed.anchor_sha256,
@@ -180,11 +212,13 @@ impl NativeHostSnapshot {
         service_scope: Option<Arc<crate::platform::native_service::ServiceScope>>,
         run_policy: RunPolicy,
     ) -> JournalResult<Self> {
-        if matches!(run_policy, RunPolicy::ControlBinding) && app_scope.is_none() {
+        if run_policy.control_binding() && app_scope.is_none() {
             return Err(JournalError::Conflict);
         }
         validate_app_scope(app_scope.as_deref(), path)?;
-        let manager = if app_scope.is_some() {
+        let manager = if run_policy.app_service_client() {
+            NativeManager::PersistentService
+        } else if app_scope.is_some() {
             NativeManager::AppManaged
         } else {
             NativeManager::ForegroundCli
@@ -255,13 +289,15 @@ impl NativeHostSnapshot {
         let canonical =
             native_state::decode_state(&state_raw, &marker).map_err(|_| JournalError::Conflict)?;
         let state = canonical.state();
-        if state.mode != NativeDeploymentMode::JoinExisting
+        if (run_policy.app_service_client()
+            && state.reader_contract
+                != styx_contracts::management::ReaderContract::NativeAppServiceTransferredStateV1)
+            || state.mode != NativeDeploymentMode::JoinExisting
             || state.has_migration_binding()
             || state.desired.gateway.is_some()
             || !state.desired.host.as_ref().is_some_and(|d| {
                 (d.run == NativeRunDesired::Running
-                    || (matches!(run_policy, RunPolicy::ControlBinding)
-                        && d.run == NativeRunDesired::Stopped))
+                    || (run_policy.control_binding() && d.run == NativeRunDesired::Stopped))
                     && d.manager == manager
                     && (manager == NativeManager::PersistentService
                         || d.autostart == NativeAutostartDesired::Disabled)

@@ -645,6 +645,7 @@ impl WindowsMigrationRecovery {
             journal: Arc::new(scope.journal),
             retained_maintenance: None,
             retained_runtime_update: None,
+            retained_app_service_transfer: None,
         };
         let checked = (|| -> Result<_, NativeTransactionError> {
             if !transactions.configuration_root().same_authority(&owner) {
@@ -723,7 +724,10 @@ impl NativeTransactions {
         };
         let permit = Arc::new(permit);
         let preflight = (|| -> Result<_, NativeTransactionError> {
-            if self.retained_maintenance.is_some() || self.retained_runtime_update.is_some() {
+            if self.retained_maintenance.is_some()
+                || self.retained_runtime_update.is_some()
+                || self.retained_app_service_transfer.is_some()
+            {
                 return Err(NativeTransactionError::Conflict);
             }
             let state = self.readstate()?;
@@ -866,6 +870,7 @@ impl NativeTransactions {
             // The preflight above refuses runtime-update custody before moving
             // this coordinator into the unrelated migration worker.
             retained_runtime_update,
+            retained_app_service_transfer,
         } = self;
         // Migration requires exclusive original journal custody. Preserve the
         // coordinator if an opaque frame still retains the same writer.
@@ -880,6 +885,7 @@ impl NativeTransactions {
                             journal,
                             retained_maintenance,
                             retained_runtime_update,
+                            retained_app_service_transfer,
                         }),
                         _permit: permit,
                         _app_scope: app_scope,

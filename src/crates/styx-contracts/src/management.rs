@@ -25,6 +25,8 @@ pub enum ReaderContract {
     NativeAppRuntimeSelectedStateV1,
     /// Same-identity inactive persistent-service repair history; prior readers reject it.
     NativeServiceRuntimeSelectedStateV1,
+    /// Original App-to-service transfer retaining App runtime history.
+    NativeAppServiceTransferredStateV1,
 }
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

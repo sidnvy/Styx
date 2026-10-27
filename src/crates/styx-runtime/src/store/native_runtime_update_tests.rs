@@ -100,7 +100,7 @@ fn candidate_reader(
         "minimum_reader": reader,
         "target":"x86_64-unknown-linux-gnu","version":format!("0.4.0-test.{name}"),"entrypoint":"bin/styx",
         "source":{"revision":"1".repeat(40),"inputs_sha256":Sha256Digest::of_bytes(members[2].1)},
-        "contracts":{"control":1,"management_state":match reader { "native_app_runtime_selected_v1" => 4, "native_runtime_selected_v1" => 3, _ => 2 }},"files":files,"external_workers":[]});
+        "contracts":{"control":1,"management_state":match reader { "native_app_service_transferred_v1" => 6, "native_app_runtime_selected_v1" => 4, "native_runtime_selected_v1" => 3, _ => 2 }},"files":files,"external_workers":[]});
     let raw = serde_json::to_vec(&manifest).unwrap();
     write(&payload.join("manifest.json"), &raw, false);
     write(
@@ -649,3 +649,7 @@ fn app_scope_update_retains_original_writer_and_recovers_exact_transaction() {
     drop(foreign_tx);
     // All private fixture files and failed observations intentionally remain.
 }
+
+// A descendant reuses only the existing disposable signed-fixture builders.
+#[path = "native_app_service_tests.rs"]
+mod app_service_tests;

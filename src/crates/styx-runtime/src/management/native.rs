@@ -1460,3 +1460,6 @@ mod windows_recovery;
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
 #[path = "native_linux_migration.rs"]
 mod linux_migration;
+
+#[path = "native_app_service.rs"]
+pub(crate) mod app_service;

@@ -17,7 +17,7 @@ enum ProductNativeDiagnostics {
     }
     static func lifecycle(_ stage: LifecycleStage, operation: String? = nil, id: Int? = nil, ok: Bool? = nil) {
         guard CommandLine.arguments.contains("--native-diagnostics") else { return }
-        let operations: Set<String> = ["startupStatus", "status", "createLocal", "resumeLocal", "inspectJoin", "join", "requestJoin", "claimJoin", "inspectHost", "connect", "disconnect", "quitAdmission", "appLifecycle", "appLogin", "appLoginResult", "startMigration", "recoverMigration", "stageRuntime", "updateRuntime", "runtimeUpdateStatus", "recoverRuntimeUpdate"]
+        let operations: Set<String> = ["startupStatus", "status", "createLocal", "resumeLocal", "inspectJoin", "join", "requestJoin", "claimJoin", "inspectHost", "connect", "disconnect", "quitAdmission", "appLifecycle", "appLogin", "appLoginResult", "startMigration", "recoverMigration", "stageRuntime", "updateRuntime", "runtimeUpdateStatus", "recoverRuntimeUpdate", "transferToService", "serviceStatus", "prepareServiceFirstStart", "stopService"]
         if let operation { guard operations.contains(operation) else { return } }
         var message = "lifecycle stage=" + stage.rawValue
         if let operation { message += " operation=" + operation }
@@ -66,7 +66,7 @@ indirect enum ProductJSON: Codable, Equatable, Sendable {
     var object: [String: ProductJSON] { if case .object(let v) = self { return v }; return [:] }
 }
 
-enum ProductCoreError: Error { case invalidBootstrap, unavailable, rejected, invalidResponse, workInProgress, workStateUnknown, loginChangeUnconfirmed; case insufficientSpace(ProductJSON, Bool) }
+enum ProductCoreError: Error { case invalidBootstrap, unavailable, rejected, invalidResponse, workInProgress, workStateUnknown, loginChangeUnconfirmed, serviceChangeUnconfirmed, servicePreparationRequired; case insufficientSpace(ProductJSON, Bool) }
 
 final class ProductRedirectBlocker: NSObject, URLSessionTaskDelegate {
     func urlSession(_ session: URLSession, task: URLSessionTask,
@@ -86,6 +86,13 @@ final class ProductCoreClient {
     // the registration, and Core owns the one-shot intent ticket.
     private var nativeLoginUnconfirmed = false
     var nativeLoginChangeAllowed: Bool { !nativeLoginUnconfirmed }
+    #if STYX_PRODUCT_UI
+    // Process-local duplicate/unknown guard only. The original Rust Core owns
+    // all manager facts, transaction custody and eligibility checks.
+    private var nativeServiceUnconfirmed = false
+    private var nativeServiceMutationInFlight = false
+    var nativeServiceChangeAllowed: Bool { !nativeServiceUnconfirmed && !nativeServiceMutationInFlight && owned?.isRunning == true }
+    #endif
     private var csrf: String?
     private let transport: URLSession?
     private let redirectBlocker = ProductRedirectBlocker()
@@ -110,6 +117,37 @@ final class ProductCoreClient {
         guard let owner = owned else { throw ProductCoreError.unavailable }; return try await owner.call(operation, input)
     }
     func quitNative() async throws { guard let owner = owned else { throw ProductCoreError.unavailable }; try await owner.quitAndJoin() }
+    #if STYX_PRODUCT_UI
+    func changeNativeService(_ operation: String) async throws -> ProductJSON {
+        guard ["transferToService", "prepareServiceFirstStart", "stopService"].contains(operation) else { throw ProductCoreError.rejected }
+        guard nativeServiceChangeAllowed else { throw ProductCoreError.serviceChangeUnconfirmed }
+        nativeServiceMutationInFlight = true
+        defer { nativeServiceMutationInFlight = false }
+        let result: ProductJSON
+        do { result = try await native(operation, ["authorize": .bool(true)]) }
+        catch let failure as ProductOwnedCoreRejection {
+            let code = failure.response["error"].string ?? ""
+            if code == "native_management_unknown_inspect" || code == "app_service_original_operation_unknown" {
+                nativeServiceUnconfirmed = true
+                throw ProductCoreError.serviceChangeUnconfirmed
+            }
+            if operation == "transferToService", code == "native_management_invalid_input" {
+                throw ProductCoreError.servicePreparationRequired
+            }
+            throw failure
+        } catch {
+            // A dispatched request may have committed before its reply was
+            // lost. Never reopen the owner, resend, or clear this on a read.
+            nativeServiceUnconfirmed = true
+            throw ProductCoreError.serviceChangeUnconfirmed
+        }
+        guard result["mode"].string == "rust_host", result["service"]["status"].string == "service_client" else {
+            nativeServiceUnconfirmed = true
+            throw ProductCoreError.serviceChangeUnconfirmed
+        }
+        return result
+    }
+    #endif
     init(sessionURL: URL) throws {
         owned = nil
         guard let bootstrap = Self.bootstrap(sessionURL) else { throw ProductCoreError.invalidBootstrap }

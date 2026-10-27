@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Build one developer-unsigned, profile-bound launchd first-start or failed-registration repair package.
+"""Build one developer-unsigned, profile-bound launchd administrator review package.
 
 No installation, signing, C07 mutation or readiness claim. Installer checkpoints
 are cooperative observations, not an atomic transaction with the original Core.
@@ -22,6 +22,7 @@ LIMIT = 256 * 1024
 PIN = "ebb36f9dff7022d8921443bdc30c6236d18dd0535aa2cdce838d1c5b327bab67"
 REQUEST_FIELDS = set("schema kind uid username role state_dir state_root canonical_sha256 transaction_id revision definition_path definition_plist definition_sha256 label executable_path executable_sha256 runtime_selection".split())
 REPAIR_FIELDS = {"old_definition_sha256", "old_definition_identity", "old_runtime_selection", "original_registration"}
+LIFECYCLE_FIELDS = {"action", "original_desired", "original_definition_identity", "original_registration", "original_enabled"}
 OBSERVATION_FIELDS = set("path program username arguments pid runs last_exit_code signaled_exit state".split())
 REPORT_FIELDS = set("schema operation configuration_only revision desired definition_path definition_plist uid label requires_initial_disabled runtime_selection os operations_replayed transaction_observation installation_request_v1".split())
 PLIST_FIELDS = {"Label", "ProgramArguments", "UserName", "WorkingDirectory", "EnvironmentVariables", "RunAtLoad", "KeepAlive", "ProcessType"}
@@ -80,13 +81,14 @@ def validate(report):
     request = report["installation_request_v1"]
     require(isinstance(request, dict), "installation_request_required")
     repair = request.get("kind") == "launchd_failed_registration_repair"
-    closed(request, REQUEST_FIELDS | (REPAIR_FIELDS if repair else set()), "closed_installation_request")
-    operation = "prepare_runtime_repair" if repair else "prepare_first_start"
+    lifecycle = request.get("kind") == "launchd_registered_lifecycle"
+    closed(request, REQUEST_FIELDS | (LIFECYCLE_FIELDS if lifecycle else REPAIR_FIELDS if repair else set()), "closed_installation_request")
+    operation = request["action"] if lifecycle else "prepare_runtime_repair" if repair else "prepare_first_start"
     require(report["schema"] == 1 and type(report["schema"]) is int and report["operation"] == operation and report["configuration_only"] is True and report["operations_replayed"] is False, "configuration_only_report_required")
-    require(type(request["schema"]) is int and request["schema"] == 1 and request["kind"] == ("launchd_failed_registration_repair" if repair else "launchd_first_start"), "service_install_kind_required")
+    require(type(request["schema"]) is int and request["schema"] == 1 and request["kind"] == ("launchd_registered_lifecycle" if lifecycle else "launchd_failed_registration_repair" if repair else "launchd_first_start"), "service_install_kind_required")
     role = request["role"]
     require(role == "gateway" if repair else role in ["gateway", "host"], "service_install_role_refused")
-    require(report["os"] == request["original_registration"] if repair else report["os"] is None, "registration_report_binding")
+    require(report["os"] == request["original_registration"] if repair or lifecycle else report["os"] is None, "registration_report_binding")
     uid = integer(request["uid"], 1, (1 << 32) - 1)
     user = text(request["username"], 128)
     require(re.fullmatch(r"[A-Za-z0-9_][A-Za-z0-9_.-]*", user), "closed_username")
@@ -124,6 +126,23 @@ def validate(report):
     require(report["requires_initial_disabled"] is True, "original_definition_contract")
     expected_desired = {"gateway": None, "host": None}
     expected_desired[role] = {"manager": "persistent_service", "run": "running", "autostart": "enabled"}
+    if lifecycle:
+        original = request["original_desired"]
+        closed(original, {"manager", "run", "autostart"}, "closed_original_desired")
+        require(original["manager"] == "persistent_service" and original["run"] in ["running", "stopped"] and original["autostart"] in ["enabled", "disabled"], "registered_original_intent")
+        target = dict(original); action = request["action"]
+        require(action in ["start", "enable", "disable", "uninstall"], "registered_lifecycle_action")
+        if action == "start":
+            require(original["run"] == "stopped", "start_original_stopped")
+            target["run"] = "running"
+        elif action in ["enable", "disable"]:
+            value = "enabled" if action == "enable" else "disabled"
+            require(original["autostart"] != value, "autostart_original_transition")
+            target["autostart"] = value
+        else:
+            require(original["run"] == "stopped" and original["autostart"] == "disabled", "uninstall_original_stopped_disabled")
+        require(type(request["original_enabled"]) is bool and request["original_enabled"] == (original["autostart"] == "enabled"), "original_enabled_intent_binding")
+        expected_desired[role] = target
     require(report["desired"] == expected_desired, "fresh_single_role_running_enabled")
     observed = report["transaction_observation"]
     closed(observed, {"status", "state_scope", "transaction_id", "revision", "canonical_raw_sha256", "receipt"}, "committed_target_observation")
@@ -144,6 +163,22 @@ def validate(report):
         require(obs["pid"] is None and obs["state"] == "not running" and type(obs["signaled_exit"]) is bool, "failed_inactive_original_required")
         if obs["last_exit_code"] is not None: integer(obs["last_exit_code"], -(1 << 31), (1 << 31) - 1)
         require(obs["signaled_exit"] or (obs["last_exit_code"] is not None and obs["last_exit_code"] != 0), "known_failed_generation_required")
+    if lifecycle:
+        old = request["original_definition_identity"]
+        closed(old, {"device", "inode", "uid", "mode", "links"}, "closed_original_definition_identity")
+        integer(old["device"]); integer(old["inode"], 1)
+        require(integer(old["uid"]) == 0 and integer(old["links"]) == 1 and integer(old["mode"], 0, 0o7777) & 0o022 == 0, "original_root_definition_required")
+        obs = request["original_registration"]
+        closed(obs, OBSERVATION_FIELDS, "closed_original_registration")
+        require(obs["path"] == request["definition_path"] and obs["username"] == user and obs["program"] == str(exe) and obs["arguments"] == plist["ProgramArguments"], "original_registration_command")
+        integer(obs["runs"], 1)
+        require(type(obs["signaled_exit"]) is bool, "original_signal_observation")
+        if obs["last_exit_code"] is not None: integer(obs["last_exit_code"], -(1 << 31), (1 << 31) - 1)
+        if original["run"] == "running":
+            integer(obs["pid"], 1, (1 << 31) - 1)
+            require(obs["state"] == "running" and action in ["enable", "disable"], "original_running_generation_required")
+        else:
+            require(obs["pid"] is None and obs["state"] == "not running" and obs["last_exit_code"] == 0 and not obs["signaled_exit"], "original_signed_clean_exit_required")
     return request
 
 
@@ -186,7 +221,8 @@ def registration_check_program(request):
     # Match native parse_print's authority subset; OS text is never evaluated.
     obs = request["original_registration"]
     literal = lambda value: json.dumps(str(value), ensure_ascii=False)
-    expected = {"path": obs["path"], "program": obs["program"], "username": obs["username"], "runs": str(obs["runs"]), "state": "not running"}
+    expected = {"path": obs["path"], "program": obs["program"], "username": obs["username"], "runs": str(obs["runs"]), "state": obs["state"]}
+    if obs["pid"] is not None: expected["pid"] = str(obs["pid"])
     init = ["expected[%s]=%s;" % (literal(k), literal(v)) for k, v in expected.items()]
     init += ["argument[%d]=%s;" % (i, literal(v)) for i, v in enumerate(obs["arguments"], 1)]
     init += ["expected_exit=%s; has_exit=%d; expected_signal=%d;" % (literal(obs["last_exit_code"] if obs["last_exit_code"] is not None else ""), obs["last_exit_code"] is not None, obs["signaled_exit"])]
@@ -197,6 +233,7 @@ function equal(a,b) { return ("x" a)==("x" b) }
  line=$0; sub(/^[ \t]+/, "", line); sub(/[ \t]+$/, "", line)
  if (length(line)>4096) die()
  if (NR==1) { if (!equal(line, HEADER)) die(); depth=1; next }
+ if (depth==0) die()
  if (collecting) {
   if (line=="}") { collecting=0; depth--; completed=1; next }
   if (index(line,"{") || index(line,"}") || ++argc>8 || !equal(line,argument[argc])) die()
@@ -212,7 +249,7 @@ function equal(a,b) { return ("x" a)==("x" b) }
    key=substr(line,1,split_at-1); value=substr(line,split_at+3)
    if (key in expected || key=="pid" || key=="last exit code" || key=="last terminating signal") {
     if (seen[key]++) die()
-    if (key=="pid") die()
+    if (key=="pid" && !(key in expected)) die()
     else if (key=="last exit code") { if (!has_exit || !equal(value,expected_exit)) die() }
     else if (key=="last terminating signal") { if ((value!="0")!=expected_signal) die() }
     else if (!equal(value,expected[key])) die()
@@ -240,6 +277,55 @@ def repair_checkpoints(request):
 def inspect_original_registration(request):
     q = shlex.quote
     return "observation=$(/bin/launchctl print " + q("system/" + request["label"]) + " 2>&1) || fail original_registration_unknown\n" + '[ "${#observation}" -le 65536 ] || fail original_registration_bound\n' + '/usr/bin/printf \'%s\\n\' "$observation" | /usr/bin/awk ' + q(registration_check_program(request)) + ' || fail original_registration_changed\nunset observation\n'
+
+
+def disabled_check_program(label, enabled):
+    # Match the native print-disabled parser, including launchd's enabled default.
+    return "BEGIN { label=" + json.dumps(label) + "; wanted=" + ("1" if enabled else "0") + "; value=1 }\n" + r'''
+function die() { failed=1; exit 1 }
+{
+ line=$0; sub(/^[ \t]+/, "", line); sub(/[ \t]+$/, "", line)
+ if (!length(line)) next
+ if (!opened) { if (line!="disabled services = {") die(); opened=1; next }
+ if (closed) die()
+ if (line=="}") { closed=1; next }
+ at=index(line," => "); if (!at) die()
+ name=substr(line,1,at-1); flag=substr(line,at+4); sub(/,$/,"",flag)
+ if (substr(name,1,1)!="\"" || substr(name,length(name),1)!="\"" || length(name)<3) die()
+ if (flag!="true" && flag!="false") die()
+ if (substr(name,2,length(name)-2)==label) { if (seen++) die(); value=(flag=="false") }
+}
+END { if (failed || !opened || !closed || value!=wanted) exit 1 }
+'''
+
+
+def inspect_original_enabled(request, enabled):
+    return "disabled=$(/bin/launchctl print-disabled system 2>&1) || fail disabled_map_unknown\n" + '[ "${#disabled}" -le 65536 ] || fail disabled_map_bound\n' + '/usr/bin/printf \'%s\\n\' "$disabled" | /usr/bin/awk ' + shlex.quote(disabled_check_program(request["label"], enabled)) + ' || fail original_enabled_changed\nunset disabled\n'
+
+
+def lifecycle_scripts(request, prologue, common, destination_checks):
+    q = shlex.quote; label = request["label"]; dest = request["definition_path"]
+    original = repair_checkpoints(dict(request, old_definition_identity=request["original_definition_identity"], old_definition_sha256=request["definition_sha256"]))
+    registration = inspect_original_registration(request)
+    enabled = inspect_original_enabled(request, request["original_enabled"])
+    guard = common + destination_checks + original + registration + enabled + original + common
+    pre = prologue + guard + "exit 0\n"
+    post = prologue + guard + "# One explicitly authorized administrator operation; no retry or fallback.\n"
+    action = request["action"]
+    command = "kickstart" if action == "start" else "bootout" if action == "uninstall" else action
+    post += "/bin/launchctl " + command + " " + q("system/" + label) + " || fail " + command + "_unknown_do_not_replay\n"
+    if action == "uninstall":
+        post += "job_absent " + q(label) + "\n" + common + destination_checks + original
+        post += "/bin/rm -- " + q(dest) + " || fail remove_definition_unknown_do_not_replay\n"
+        post += "[ ! -e " + q(dest) + " ] && [ ! -L " + q(dest) + " ] || fail definition_removal_unknown\njob_absent " + q(label) + "\n" + common
+        post += "/usr/bin/printf '%s\\n' 'styx_OS_uninstalled_C07_persistent_stopped_disabled_preserved'\n"
+    elif action in ["enable", "disable"]:
+        post += common + original + registration + inspect_original_enabled(request, action == "enable") + original
+        post += "/usr/bin/printf '%s\\n' 'styx_autostart_observed_run_intent_preserved_readiness_NOT_PROVEN'\n"
+    else:
+        post += common + original
+        post += "/usr/bin/printf '%s\\n' 'styx_start_dispatched_readiness_NOT_PROVEN'\n"
+    return pre.encode(), (post + "exit 0\n").encode()
 
 def scripts(request):
     q = shlex.quote
@@ -285,6 +371,8 @@ $expected_missing") ;;
     destination_checks = """check_directory /Library
 check_directory /Library/LaunchDaemons
 """
+    if request["kind"] == "launchd_registered_lifecycle":
+        return lifecycle_scripts(request, prologue, common, destination_checks)
     pre = prologue + common + destination_checks + "[ ! -e " + q(dest) + " ] && [ ! -L " + q(dest) + " ] || fail existing_definition\njob_absent " + q(label) + "\n" + common + "exit 0\n"
     post = prologue + common + destination_checks + "[ ! -L " + q(dest) + " ] && [ -f " + q(dest) + " ] || fail installed_definition_type\n[ \"$(/usr/bin/stat -f '%u:%g:%Lp:%l' " + q(dest) + ")\" = '0:0:644:1' ] || fail installed_definition_metadata\nactual=$(/usr/bin/shasum -a 256 " + q(dest) + ") || fail installed_definition_hash_unknown\ncase \"$actual\" in " + q(request["definition_sha256"] + " ") + "*) ;; *) fail installed_definition_hash_changed;; esac\njob_absent " + q(label) + "\n" + common
     if request["kind"] == "launchd_failed_registration_repair":
@@ -320,11 +408,13 @@ def build(report_file, output, version, prepare_only=False):
         directory.chmod(0o755)
     script_dir.mkdir(mode=0o700)
     plist = request["definition_plist"].encode(); pre, post = scripts(request)
-    write_new(payload / "Library/LaunchDaemons" / (request["label"] + ".plist"), plist, 0o644)
+    lifecycle = request["kind"] == "launchd_registered_lifecycle"
+    if not lifecycle:
+        write_new(payload / "Library/LaunchDaemons" / (request["label"] + ".plist"), plist, 0o644)
     write_new(script_dir / "preinstall", pre, 0o755); write_new(script_dir / "postinstall", post, 0o755)
     write_new(output / "installation-report.json", original, 0o600)
-    pkg = output / ("StyxGateway-failed-registration-repair-development-unsigned.pkg" if request["kind"] == "launchd_failed_registration_repair" else "StyxGateway-first-start-development-unsigned.pkg")
-    command = ["/usr/bin/pkgbuild", "--root", str(payload), "--scripts", str(script_dir), "--identifier", request["label"] + ".development", "--version", version, "--install-location", "/", "--ownership", "recommended", str(pkg)]
+    pkg = output / ("StyxService-" + request["action"] + "-development-unsigned.pkg" if lifecycle else "StyxGateway-failed-registration-repair-development-unsigned.pkg" if request["kind"] == "launchd_failed_registration_repair" else "StyxGateway-first-start-development-unsigned.pkg")
+    command = ["/usr/bin/pkgbuild"] + (["--nopayload"] if lifecycle else ["--root", str(payload), "--ownership", "recommended"]) + ["--scripts", str(script_dir), "--identifier", request["label"] + ".development", "--version", version, "--install-location", "/", str(pkg)]
     receipt = {"schema": 1, "status": "PREPARED_NOT_BUILT", "developer_unsigned": True, "installer_signing": "NOT_PERFORMED_NO_IDENTITY", "input_sha256": digest(original), "builder_sha256": digest(Path(__file__).read_bytes()), "native_manifest_sha256": request["runtime_selection"]["manifest_sha256"], "definition_sha256": digest(plist), "preinstall_sha256": digest(pre), "postinstall_sha256": digest(post), "source_transaction_id": request["transaction_id"], "canonical_revision": request["revision"], "state_root": request["state_root"], "uid": request["uid"], "label": request["label"], "runtime_selection": request["runtime_selection"], "command": command, "actual_wait": False, "package_built": False, "installation_performed": False, "registration_dispatched": False, "readiness": "NOT_PROVEN", "atomic_C07_OS_transaction": False, "installation_kind": request["kind"], "limitation": "Cooperative pre/post observations only. The original signed service must authenticate current scope/C07/runtime on startup. Changed state or lost registration result is never replayed."}
     try:
         if not prepare_only:

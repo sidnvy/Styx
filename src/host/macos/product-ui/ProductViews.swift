@@ -383,16 +383,25 @@ struct ProductView: View {
                     if model.status["admission_fenced"].bool || model.status["gateway"]["admission_fenced"].bool {
                         Text(productText("上次设置结果尚未确认，请刷新状态查看；原配置已保留。", "The last setup result is unconfirmed. Refresh status to review it; your existing settings have been retained.")).foregroundStyle(.secondary)
                     }
-                    Text("Host: " + (model.status["foreground"]["status"].string ?? "unknown"))
-                    Text("Exec transport: " + (model.status["foreground"]["execConnection"].string ?? "unknown"))
+                    if model.nativeHasServiceState {
+                        Text(model.nativeServiceStatusText)
+                        Text(productText("Exec 连接尚未在此处验证。可在通用设置中管理后台服务。", "The Exec connection has not been verified here. Manage the background service in General settings.")).font(.caption).foregroundStyle(.secondary)
+                    } else {
+                        Text("Host: " + (model.status["foreground"]["status"].string ?? "unknown"))
+                        Text("Exec transport: " + (model.status["foreground"]["execConnection"].string ?? "unknown"))
+                    }
                     if model.status["enrollment"]["status"].string == "awaiting_approval" {
                         Text(model.status["enrollment"]["comparison_code"].string ?? "").textSelection(.enabled)
                         Text(model.status["enrollment"]["fingerprint"].string ?? "").font(.caption).textSelection(.enabled)
                         Button(productText("检查批准", "Check confirmation")) { model.nativeClaim() }
                     }
-                    Button(productText("重新连接", "Reconnect")) { model.resumeForeground() }.disabled(model.busy || model.status["admission_fenced"].bool)
-                    Button(productText("暂停连接", "Pause connection")) { model.nativePause() }.disabled(model.busy)
-                    Text(productText("关闭设置窗口后 Styx 会继续运行。退出 Styx 会停止它管理的本机连接和网关。", "Styx keeps running when you close Settings. Quitting Styx stops the local connection and gateway it manages."))
+                    if model.nativeSupportsOperation("connect") {
+                        Button(productText("重新连接", "Reconnect")) { model.resumeForeground() }.disabled(model.busy || model.status["admission_fenced"].bool)
+                    }
+                    if model.nativeSupportsOperation("disconnect") {
+                        Button(productText("暂停连接", "Pause connection")) { model.nativePause() }.disabled(model.busy)
+                    }
+                    Text(model.nativeQuitDescription)
                 } else {
                 statusRow(ProductCapabilityKind.cli.title, model.journey["readiness"]["exec"]["status"].string)
                 statusRow(ProductCapabilityKind.browser.title, model.browserNotApproved ? "not_approved" : model.journey["readiness"]["browser"]["status"].string)

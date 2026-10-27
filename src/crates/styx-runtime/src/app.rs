@@ -9,6 +9,7 @@ mod migrated;
 mod migration;
 mod pairing_link;
 mod runtime_update;
+mod service;
 
 use crate::{
     foreground::{self, ForegroundError, ForegroundOutcome},
@@ -206,6 +207,10 @@ enum Operation {
     UpdateRuntime,
     RuntimeUpdateStatus,
     RecoverRuntimeUpdate,
+    TransferToService,
+    ServiceStatus,
+    PrepareServiceFirstStart,
+    StopService,
 }
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -323,6 +328,7 @@ impl RetainedFailure {
 struct HostApp {
     migration: Option<migration::State>,
     runtime_update: Option<runtime_update::State>,
+    service: Option<service::State>,
     local_gateway: Option<local_gateway::LocalGateway>,
     resume_local_available: bool,
     committed_migration: bool,
@@ -362,6 +368,7 @@ impl HostApp {
         let mut app = Self {
             migration: None,
             runtime_update: None,
+            service: None,
             local_gateway: None,
             resume_local_available: false,
             committed_migration: false,
@@ -383,6 +390,9 @@ impl HostApp {
             login: login::Login::default(),
         };
         if app.scope.root.get().is_some() {
+            if app.observe_service_client().await? {
+                return Ok(app);
+            }
             if app.runtime_selection_file.is_some() {
                 app.observe_migration().await;
                 if app.migration.is_some() {
@@ -434,7 +444,11 @@ impl HostApp {
             Self::open_with_selection(state_dir, &deployment, Some(selection.to_owned())).await?;
         // A committed original Host-only root is not a fresh split App setup.
         // Its original remote Gateway and pairing are never reconstructed.
-        if app.committed_migration || app.migration.is_some() || app.runtime_update_fenced() {
+        if app.service_client_or_unknown()
+            || app.committed_migration
+            || app.migration.is_some()
+            || app.runtime_update_fenced()
+        {
             return Ok(app);
         }
         let gateway_scope = Arc::new(app.scope.gateway_sibling()?);
@@ -598,6 +612,9 @@ impl HostApp {
     }
     fn available(&self) -> Result<(), AppError> {
         self.scope.validate()?;
+        if self.service_fenced() {
+            return Err(AppError("app_service_original_operation_unknown"));
+        }
         if self.runtime_update_fenced() {
             return Err(AppError("app_runtime_update_pending"));
         }
@@ -918,6 +935,7 @@ impl HostApp {
     }
     fn admission_fenced(&self) -> bool {
         self.migration_fenced()
+            || self.service_fenced()
             || self.runtime_update_fenced()
             || self.unknown
             || self.retained.is_some()
@@ -950,7 +968,61 @@ impl HostApp {
     }
     async fn snapshot(&self) -> Value {
         let computer_requested = self.desktop_component_requested().await;
-        json!({"schema":1,"migration":self.migration,"runtimeUpdate":self.runtime_update,"configuration":self.configuration,"foreground":*self.observed.borrow(),"admission_fenced":self.admission_fenced(),"desktop_intent":{"schema":1,"computer_requested":computer_requested,"source":if self.committed_migration {"committed_original_local_intent"} else {"approved_host_configuration"}},"cleanup":self.cleanup,"gateway":self.local_gateway.as_ref().map(|g| g.status()),"enrollment":self.enrollment,"mode":"rust_host","supportedOperations":["appLifecycle","appLogin","appLoginResult","startupStatus","status","createLocal","resumeLocal","inspectJoin","join","requestJoin","claimJoin","inspectHost","connect","disconnect","quitAdmission","reviewMigration","startMigration","recoverMigration","stageRuntime","updateRuntime","runtimeUpdateStatus","recoverRuntimeUpdate"]})
+        let configuration = self.service_configuration().or(self.configuration.as_ref());
+        let mut supported = vec![
+            "appLifecycle",
+            "appLogin",
+            "appLoginResult",
+            "startupStatus",
+            "status",
+            "quitAdmission",
+        ];
+        if !self.service_client_or_unknown() {
+            supported.extend([
+                "createLocal",
+                "resumeLocal",
+                "inspectJoin",
+                "join",
+                "requestJoin",
+                "claimJoin",
+                "inspectHost",
+                "connect",
+                "disconnect",
+                "reviewMigration",
+                "startMigration",
+                "recoverMigration",
+                "stageRuntime",
+                "updateRuntime",
+                "runtimeUpdateStatus",
+                "recoverRuntimeUpdate",
+            ]);
+            // Advertise only the supported fresh single-Host composition.
+            // The mutation still revalidates original scope, Ready and C07.
+            if cfg!(target_os = "macos")
+                && !self.admission_fenced()
+                && !self.committed_migration
+                && self.migration.is_none()
+                && self.local_gateway.is_none()
+                && self.configuration.as_ref().is_some_and(|report| {
+                    report.desired.gateway.is_none()
+                        && report.desired.host.is_some_and(|host| {
+                            host.manager == NativeManager::AppManaged
+                                && host.autostart == NativeAutostartDesired::Disabled
+                        })
+                })
+                && self.enrollment.as_ref().is_some_and(|report| {
+                    matches!(
+                        report.get("status").and_then(Value::as_str),
+                        Some("ready_to_connect" | "already_ready")
+                    )
+                })
+            {
+                supported.push("transferToService");
+            }
+        } else if cfg!(target_os = "macos") {
+            supported.extend(["serviceStatus", "prepareServiceFirstStart", "stopService"]);
+        }
+        json!({"schema":1,"migration":self.migration,"runtimeUpdate":self.runtime_update,"service":self.service,"configuration":configuration,"foreground":*self.observed.borrow(),"admission_fenced":self.admission_fenced(),"desktop_intent":{"schema":1,"computer_requested":computer_requested,"source":if self.committed_migration {"committed_original_local_intent"} else {"approved_host_configuration"}},"cleanup":self.cleanup,"gateway":self.local_gateway.as_ref().map(|g| g.status()),"enrollment":self.enrollment,"mode":"rust_host","supportedOperations":supported})
     }
     async fn dispatch(
         &mut self,
@@ -972,6 +1044,9 @@ impl HostApp {
                 | Operation::AppLifecycle
                 | Operation::AppLogin
                 | Operation::AppLoginResult
+                | Operation::TransferToService
+                | Operation::PrepareServiceFirstStart
+                | Operation::StopService
         ) {
             let _: EmptyInput = decode_input(&input)?;
         }
@@ -987,9 +1062,39 @@ impl HostApp {
             }
             _ => (),
         }
+        if matches!(operation, Operation::QuitAdmission) && self.service_client_or_unknown() {
+            return self.service_quit_admission().await;
+        }
+        if matches!(operation, Operation::TransferToService) {
+            self.transfer_to_service(decode_input(&input)?).await?;
+            return Ok(self.snapshot().await);
+        }
+        if matches!(
+            operation,
+            Operation::PrepareServiceFirstStart | Operation::StopService
+        ) {
+            self.manage_service(
+                decode_input(&input)?,
+                matches!(operation, Operation::PrepareServiceFirstStart),
+            )
+            .await?;
+            return Ok(self.snapshot().await);
+        }
+        if matches!(operation, Operation::ServiceStatus) {
+            self.refresh_service_client().await?;
+            return Ok(self.snapshot().await);
+        }
         if matches!(operation, Operation::Status | Operation::StartupStatus) {
             self.scope.validate()?;
+            if self.service_client_or_unknown() && !self.service_fenced() {
+                // A failed observation is represented in service.error; this
+                // read never opens/reconciles a service configuration writer.
+                let _ = self.refresh_service_client().await;
+            }
             return Ok(self.snapshot().await);
+        }
+        if self.service_client_or_unknown() {
+            return Err(AppError("app_role_managed_by_service"));
         }
         if matches!(operation, Operation::RuntimeUpdateStatus) {
             self.scope.validate()?;
@@ -1193,7 +1298,11 @@ impl HostApp {
             | Operation::StageRuntime
             | Operation::UpdateRuntime
             | Operation::RuntimeUpdateStatus
-            | Operation::RecoverRuntimeUpdate => unreachable!(),
+            | Operation::RecoverRuntimeUpdate
+            | Operation::TransferToService
+            | Operation::ServiceStatus
+            | Operation::PrepareServiceFirstStart
+            | Operation::StopService => unreachable!(),
         }
     }
 }

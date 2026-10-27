@@ -18,6 +18,7 @@ pub fn validate_marker(marker: &NativeRootMarker) -> Result<(), NativeStateRuleE
             styx_contracts::management::ReaderContract::NativeRuntimeSelectedStateV1
                 | styx_contracts::management::ReaderContract::NativeAppRuntimeSelectedStateV1
                 | styx_contracts::management::ReaderContract::NativeServiceRuntimeSelectedStateV1
+                | styx_contracts::management::ReaderContract::NativeAppServiceTransferredStateV1
         )
     {
         return Err(NativeStateRuleError::InvalidMarker);
@@ -47,7 +48,16 @@ pub fn validate_state(
         && marker.reader_floor
             == styx_contracts::management::ReaderContract::NativeManagementStateV1
         && matches!(marker.root_identity, NativeRootIdentity::Macos { .. });
-    if (!original_reader && !selected_reader && !app_selected_reader && !service_selected_reader)
+    let app_service_reader = state.schema == NATIVE_APP_SERVICE_TRANSFERRED_STATE_SCHEMA
+        && state.reader_contract
+            == styx_contracts::management::ReaderContract::NativeAppServiceTransferredStateV1
+        && marker.reader_floor
+            == styx_contracts::management::ReaderContract::NativeManagementStateV1;
+    if (!original_reader
+        && !selected_reader
+        && !app_selected_reader
+        && !service_selected_reader
+        && !app_service_reader)
         || state.scope_generation != marker.scope_generation
     {
         return Err(NativeStateRuleError::InvalidState);
@@ -61,7 +71,8 @@ pub fn validate_state(
             None,
             styx_contracts::management::ReaderContract::NativeRuntimeSelectedStateV1
             | styx_contracts::management::ReaderContract::NativeAppRuntimeSelectedStateV1
-            | styx_contracts::management::ReaderContract::NativeServiceRuntimeSelectedStateV1,
+            | styx_contracts::management::ReaderContract::NativeServiceRuntimeSelectedStateV1
+            | styx_contracts::management::ReaderContract::NativeAppServiceTransferredStateV1,
         ) => {
             runtime_update::validate_selected_state(state)?;
         }
@@ -223,6 +234,7 @@ fn runtime_policy_compatible(before: &NativeState, target: &NativeState, follow_
 #[path = "runtime_update.rs"]
 mod runtime_update;
 pub use runtime_update::{
-    validate_app_runtime_transition, validate_committed_transition, validate_runtime_transition,
+    validate_app_runtime_transition, validate_app_service_transfer_transition,
+    validate_committed_transition, validate_runtime_transition,
     validate_service_runtime_repair_transition,
 };

@@ -60,6 +60,20 @@ pub(super) fn validate_selected_state(state: &NativeState) -> Result<()> {
             }
             NATIVE_APP_RUNTIME_SELECTED_STATE_SCHEMA
         }
+        ReaderContract::NativeAppServiceTransferredStateV1 => {
+            if update.service_repair.is_some()
+                || state.desired.host.is_some() == state.desired.gateway.is_some()
+                || state
+                    .desired
+                    .host
+                    .iter()
+                    .chain(state.desired.gateway.iter())
+                    .any(|role| role.manager != NativeManager::PersistentService)
+            {
+                return Err(NativeStateRuleError::InvalidState);
+            }
+            NATIVE_APP_SERVICE_TRANSFERRED_STATE_SCHEMA
+        }
         ReaderContract::NativeServiceRuntimeSelectedStateV1 => {
             if state.mode != NativeDeploymentMode::CreateLocal
                 || state.desired.host.is_some()
@@ -142,6 +156,7 @@ pub fn validate_committed_transition(
     validate_transition(before, target, marker, intent)
         .or_else(|_| validate_runtime_transition(before, target, marker, intent))
         .or_else(|_| validate_app_runtime_transition(before, target, marker, intent))
+        .or_else(|_| validate_app_service_transfer_transition(before, target, marker, intent))
         .or_else(|_| validate_service_runtime_repair_transition(before, target, marker, intent))
 }
 /// Closed fresh-root, stopped foreground transition. Callers must retain the
@@ -179,6 +194,68 @@ pub fn validate_app_runtime_transition(
         ReaderContract::NativeAppRuntimeSelectedStateV1,
         NATIVE_APP_RUNTIME_SELECTED_STATE_SCHEMA,
     )
+}
+/// Closed metadata transfer after the original App has settled its role and
+/// selected a stable runtime. This grammar is history validation only: actual
+/// publication also needs the retained App scope, C07 writer and execution lease.
+pub fn validate_app_service_transfer_transition(
+    before: &NativeState,
+    target: &NativeState,
+    marker: &NativeRootMarker,
+    intent: &DesiredStateCommit,
+) -> Result<()> {
+    validate_state(before, marker)?;
+    validate_state(target, marker)?;
+    let transaction = target.last_transaction.as_ref().ok_or_else(invalid)?;
+    let mut desired = before.desired.clone();
+    if before.reader_contract != ReaderContract::NativeAppRuntimeSelectedStateV1
+        || before.schema != NATIVE_APP_RUNTIME_SELECTED_STATE_SCHEMA
+        || target.reader_contract != ReaderContract::NativeAppServiceTransferredStateV1
+        || target.schema != NATIVE_APP_SERVICE_TRANSFERRED_STATE_SCHEMA
+        || marker.reader_floor != ReaderContract::NativeManagementStateV1
+        || before.has_migration_binding()
+        || target.has_migration_binding()
+        || before.desired.host.is_some() == before.desired.gateway.is_some()
+        || desired
+            .host
+            .iter()
+            .chain(desired.gateway.iter())
+            .any(|role| {
+                *role
+                    != NativeComponentDesired {
+                        manager: NativeManager::AppManaged,
+                        run: NativeRunDesired::Stopped,
+                        autostart: NativeAutostartDesired::Disabled,
+                    }
+            })
+    {
+        return Err(invalid());
+    }
+    for role in desired.host.iter_mut().chain(desired.gateway.iter_mut()) {
+        role.manager = NativeManager::PersistentService;
+    }
+    if desired != target.desired
+        || before.mode != target.mode
+        || before.migration != target.migration
+        || before.scope_generation != target.scope_generation
+        || before.deployment_raw_sha256 != target.deployment_raw_sha256
+        || target.deployment_raw_sha256 != intent.deployment_raw_sha256
+        || target.revision != before.revision.checked_add(1).ok_or_else(invalid)?
+        || intent.validate().is_err()
+        || intent.reader != target.reader_contract
+        || transaction.transaction_id != intent.transaction_id
+        || transaction.sequence != intent.sequence
+        || before
+            .last_transaction
+            .as_ref()
+            .is_none_or(|prior| prior.sequence >= transaction.sequence)
+    {
+        return Err(invalid());
+    }
+    if !before.extensions_preserved_in(target) {
+        return Err(NativeStateRuleError::ChangedExtensions);
+    }
+    Ok(())
 }
 /// Pure history grammar for explicitly repairing a failed registered Gateway.
 /// Native publication also requires the original non-deserializable registration
@@ -412,6 +489,137 @@ mod tests {
             ]),
         };
         (marker, state)
+    }
+    #[test]
+    fn app_service_transfer_preserves_runtime_history_and_requires_separate_reader() {
+        use styx_contracts::native_release::NativeReleaseReader;
+        let (marker, mut seed) = fixture();
+        seed.desired.host.as_mut().unwrap().manager = NativeManager::AppManaged;
+        let (before, _) = update(&seed, selection_at("stable"), 1);
+        let mut target = before.clone();
+        target.schema = NATIVE_APP_SERVICE_TRANSFERRED_STATE_SCHEMA;
+        target.reader_contract = ReaderContract::NativeAppServiceTransferredStateV1;
+        target.desired.host.as_mut().unwrap().manager = NativeManager::PersistentService;
+        target.revision += 1;
+        target.last_transaction = Some(NativeStateTransaction {
+            transaction_id: "original-app-service-transfer".try_into().unwrap(),
+            sequence: 2,
+        });
+        let intent = DesiredStateCommit {
+            transaction_id: target
+                .last_transaction
+                .as_ref()
+                .unwrap()
+                .transaction_id
+                .clone(),
+            sequence: 2,
+            deployment_raw_sha256: target.deployment_raw_sha256,
+            before_state_sha256: Sha256Digest::of_bytes(&serde_json::to_vec(&before).unwrap()),
+            target_state_sha256: Sha256Digest::of_bytes(&serde_json::to_vec(&target).unwrap()),
+            reader: target.reader_contract,
+        };
+        assert!(
+            validate_app_service_transfer_transition(&before, &target, &marker, &intent).is_ok()
+        );
+        assert!(validate_committed_transition(&before, &target, &marker, &intent).is_ok());
+        // A generic writer or runtime selector cannot manufacture transfer.
+        assert!(validate_transition(&before, &target, &marker, &intent).is_err());
+        assert!(validate_app_runtime_transition(&before, &target, &marker, &intent).is_err());
+        assert!(
+            !NativeReleaseReader::NativeServiceRuntimeSelectedV1
+                .supports_state_reader(target.reader_contract)
+        );
+        assert!(
+            NativeReleaseReader::NativeAppServiceTransferredV1
+                .supports_state_reader(target.reader_contract)
+        );
+        for key in [
+            NATIVE_RUNTIME_SELECTION_KEY,
+            NATIVE_RUNTIME_UPDATE_KEY,
+            "preserve",
+        ] {
+            assert_eq!(
+                before.extensions[key].get().as_bytes(),
+                target.extensions[key].get().as_bytes()
+            );
+        }
+        // Service start/autostart are later metadata transactions, not another
+        // transfer or a claim that an OS service has actually started.
+        let mut running = target.clone();
+        let host = running.desired.host.as_mut().unwrap();
+        host.run = NativeRunDesired::Running;
+        host.autostart = NativeAutostartDesired::Enabled;
+        running.revision += 1;
+        running.last_transaction = Some(NativeStateTransaction {
+            transaction_id: "later-service-intent".try_into().unwrap(),
+            sequence: 3,
+        });
+        let next = DesiredStateCommit {
+            transaction_id: running
+                .last_transaction
+                .as_ref()
+                .unwrap()
+                .transaction_id
+                .clone(),
+            sequence: 3,
+            before_state_sha256: intent.target_state_sha256,
+            target_state_sha256: Sha256Digest::of_bytes(&serde_json::to_vec(&running).unwrap()),
+            ..intent.clone()
+        };
+        assert!(validate_transition(&target, &running, &marker, &next).is_ok());
+        assert!(
+            validate_app_service_transfer_transition(&before, &running, &marker, &next).is_err()
+        );
+        assert!(
+            validate_app_service_transfer_transition(&target, &running, &marker, &next).is_err()
+        );
+        for mutation in 0..9 {
+            let mut changed = target.clone();
+            match mutation {
+                0 => changed.scope_generation = Sha256Digest::of_bytes(b"foreign scope"),
+                1 => changed.desired.host.as_mut().unwrap().run = NativeRunDesired::Running,
+                2 => {
+                    changed.desired.host.as_mut().unwrap().autostart =
+                        NativeAutostartDesired::Enabled
+                }
+                3 => changed.desired.host.as_mut().unwrap().manager = NativeManager::AppManaged,
+                4 => changed.last_transaction.as_mut().unwrap().sequence = 1,
+                5 => changed.reader_contract = ReaderContract::NativeServiceRuntimeSelectedStateV1,
+                6 => {
+                    changed.extensions.insert(
+                        "preserve".into(),
+                        serde_json::value::to_raw_value(&"changed").unwrap(),
+                    );
+                }
+                7 => {
+                    changed.extensions.insert(
+                        NATIVE_RUNTIME_SELECTION_KEY.into(),
+                        serde_json::value::to_raw_value(&selection_at("different")).unwrap(),
+                    );
+                }
+                8 => {
+                    changed.extensions.remove(NATIVE_RUNTIME_UPDATE_KEY);
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                validate_app_service_transfer_transition(&before, &changed, &marker, &intent)
+                    .is_err(),
+                "mutation {mutation}"
+            );
+        }
+        let mut unsettled = before.clone();
+        unsettled.desired.host.as_mut().unwrap().run = NativeRunDesired::Running;
+        assert!(
+            validate_app_service_transfer_transition(&unsettled, &target, &marker, &intent)
+                .is_err()
+        );
+        let mut substituted = before.clone();
+        substituted.desired.host.as_mut().unwrap().manager = NativeManager::ForegroundCli;
+        assert!(
+            validate_app_service_transfer_transition(&substituted, &target, &marker, &intent)
+                .is_err()
+        );
     }
     fn update(
         before: &NativeState,

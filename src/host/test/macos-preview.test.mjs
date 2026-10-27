@@ -217,7 +217,7 @@ test('native archive inventory rejects changed bytes, execution modes, extra fil
  const extra=path.join(app,'extra');fs.writeFileSync(extra,'unexpected');assert.throws(()=>assertNativeMacAppInventory(app,expected),/native_archive_app_inventory_changed/);fs.unlinkSync(extra);
  fs.symlinkSync(file,extra);assert.throws(()=>assertNativeMacAppInventory(app,expected),/distribution_symlink_forbidden/);
 });
-test('native service reader envelope requires signed management schema5 and keeps old App schema4',t=>{
+test('native reader envelopes bind signed schemas4/5/6 without upgrading old declarations',t=>{
  const root=scratch(t),payload=path.join(root,'native'),publisher=path.join(root,'publisher.pem');
  fs.chmodSync(root,0o700);fs.mkdirSync(payload,{mode:0o700});fs.mkdirSync(path.join(payload,'bin'),{mode:0o700});
  const {publicKey,privateKey}=generateKeyPairSync('ed25519');fs.writeFileSync(publisher,publicKey.export({type:'spki',format:'pem'}),{mode:0o600});
@@ -230,6 +230,9 @@ test('native service reader envelope requires signed management schema5 and keep
  manifest.contracts.management_state=4;seal();assert.throws(()=>authenticateNativeMacRuntimeEnvelope(input,'x64'),/native_macos_c08_required/);
  manifest.minimum_reader='native_app_runtime_selected_v1';seal();assert.equal(authenticateNativeMacRuntimeEnvelope(input,'x64').manifest.contracts.management_state,4);
  manifest.contracts.management_state=5;seal();assert.throws(()=>authenticateNativeMacRuntimeEnvelope(input,'x64'),/native_macos_c08_required/);
+ manifest.minimum_reader='native_app_service_transferred_v1';seal();assert.throws(()=>authenticateNativeMacRuntimeEnvelope(input,'x64'),/native_macos_c08_required/);
+ manifest.contracts.management_state=6;seal();assert.equal(authenticateNativeMacRuntimeEnvelope(input,'x64').manifest.minimum_reader,'native_app_service_transferred_v1');
+ manifest.minimum_reader='native_service_runtime_selected_v1';seal();assert.throws(()=>authenticateNativeMacRuntimeEnvelope(input,'x64'),/native_macos_c08_required/);
 });
 
 test('failed DMG attach detaches only a structured exact image and fresh mount match',t=>{

@@ -299,6 +299,10 @@ enum MacServiceActionArg {
     /// Recover the exact original target; never reissue an uncertain admin request.
     RecoverRuntimeRepair,
     Stop,
+    Start,
+    Enable,
+    Disable,
+    Uninstall,
 }
 #[cfg(target_os = "macos")]
 impl MacServiceActionArg {
@@ -313,6 +317,10 @@ impl MacServiceActionArg {
             Self::PrepareRuntimeRepair => ServiceAction::PrepareRuntimeRepair,
             Self::RecoverRuntimeRepair => ServiceAction::RecoverRuntimeRepair,
             Self::Stop => ServiceAction::Stop,
+            Self::Start => ServiceAction::Start,
+            Self::Enable => ServiceAction::Enable,
+            Self::Disable => ServiceAction::Disable,
+            Self::Uninstall => ServiceAction::Uninstall,
         }
     }
 }
@@ -986,6 +994,10 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
                     | MacServiceActionArg::PrepareRuntimeRepair
                     | MacServiceActionArg::RecoverRuntimeRepair
                     | MacServiceActionArg::Stop
+                    | MacServiceActionArg::Start
+                    | MacServiceActionArg::Enable
+                    | MacServiceActionArg::Disable
+                    | MacServiceActionArg::Uninstall
             ) {
                 if !authorize {
                     return error("explicit_service_authorization_required");
@@ -1830,14 +1842,15 @@ fn native_build_info() -> serde_json::Value {
     };
     serde_json::json!({
         "schema": 1, "target": target,
-        "minimum_release_reader": styx_contracts::native_release::NativeReleaseReader::NativeServiceRuntimeSelectedV1,
+        "minimum_release_reader": styx_contracts::native_release::NativeReleaseReader::NativeAppServiceTransferredV1,
         "supported_state_readers": [
             styx_contracts::management::ReaderContract::NativeManagementStateV1,
             styx_contracts::management::ReaderContract::NativeMigratedStateV1,
             styx_contracts::management::ReaderContract::NativeMigratedStateV2,
             styx_contracts::management::ReaderContract::NativeRuntimeSelectedStateV1,
             styx_contracts::management::ReaderContract::NativeAppRuntimeSelectedStateV1,
-            styx_contracts::management::ReaderContract::NativeServiceRuntimeSelectedStateV1
+            styx_contracts::management::ReaderContract::NativeServiceRuntimeSelectedStateV1,
+            styx_contracts::management::ReaderContract::NativeAppServiceTransferredStateV1
         ]
     })
 }

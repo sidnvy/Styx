@@ -671,7 +671,222 @@ fn same_failed_inactive(original: &ServiceObservation, current: &ServiceObservat
     failed_inactive(original) && failed_inactive(current) && original == current
 }
 
+/// One already-registered generation, retained by the original operation owner.
+/// Clean historical exit is positive evidence; an absent PID alone grants none.
+/// Serialized installer requests are DATA and cannot recreate this proof.
+pub(crate) struct RegisteredLifecycleProof {
+    definition: Arc<Definition>,
+    observation: ServiceObservation,
+    initial_state: store::RawFile,
+    enabled: bool,
+    running: Option<Arc<ServicePeer>>,
+    fenced: std::sync::atomic::AtomicBool,
+}
+fn clean_registered_stop(observed: &ServiceObservation) -> bool {
+    observed.pid.is_none()
+        && observed.runs > 0
+        && observed.state == "not running"
+        && observed.last_exit_code == Some(0)
+        && !observed.signaled_exit
+}
+impl RegisteredLifecycleProof {
+    pub(crate) fn observation(&self) -> &ServiceObservation {
+        &self.observation
+    }
+    pub(crate) fn initial_state(&self) -> &store::RawFile {
+        &self.initial_state
+    }
+    pub(crate) fn enabled(&self) -> bool {
+        self.enabled
+    }
+    pub(crate) fn validate_owner(&self, owner: &store::OwnedConfigurationRoot) -> Result<()> {
+        if self.fenced.load(std::sync::atomic::Ordering::Acquire)
+            || owner.identity().map_err(unknown)? != self.definition.root_identity
+        {
+            return Err(ServiceError::Unknown);
+        }
+        self.definition.validate()?;
+        let raw = self
+            .definition
+            .root
+            .read_raw("state.json", 1024 * 1024)
+            .map_err(changed)?;
+        if raw.observation() != self.initial_state.observation()
+            || raw.bytes() != self.initial_state.bytes()
+        {
+            return Err(ServiceError::Unknown);
+        }
+        if let Some(peer) = &self.running {
+            peer.validate()?;
+        } else if !clean_registered_stop(&self.observation) {
+            return Err(ServiceError::Unknown);
+        }
+        Ok(())
+    }
+    pub(crate) async fn revalidate(self: &Arc<Self>) -> Result<()> {
+        let result: Result<()> = async {
+            if self.fenced.load(std::sync::atomic::Ordering::Acquire) {
+                return Err(ServiceError::Unknown);
+            }
+            let checked = self.clone();
+            blocking_read(move || {
+                checked.definition.validate()?;
+                if let Some(peer) = &checked.running {
+                    peer.validate()?;
+                }
+                Ok(())
+            })
+            .await?;
+            let first = self.definition.inspect().await?;
+            if first != self.observation || self.definition.enabled().await? != self.enabled {
+                return Err(ServiceError::Unknown);
+            }
+            let second = self.definition.inspect().await?;
+            if second != self.observation {
+                return Err(ServiceError::Unknown);
+            }
+            let checked = self.clone();
+            blocking_read(move || {
+                checked.definition.validate()?;
+                if let Some(peer) = &checked.running {
+                    peer.validate()?;
+                }
+                Ok(())
+            })
+            .await?;
+            Ok(())
+        }
+        .await;
+        if result.is_err() {
+            self.fenced
+                .store(true, std::sync::atomic::Ordering::Release);
+            return Err(ServiceError::Unknown);
+        }
+        Ok(())
+    }
+    /// Fixed, original-profile administrator review DATA. No OS action occurs.
+    pub(crate) fn lifecycle_request(
+        &self,
+        action: &'static str,
+        original_desired: NativeComponentDesired,
+        id: &styx_contracts::identity::TransactionId,
+        revision: u64,
+        canonical: &Sha256Digest,
+    ) -> Result<serde_json::Value> {
+        if self.fenced.load(std::sync::atomic::Ordering::Acquire) {
+            return Err(ServiceError::Unknown);
+        }
+        let old = &self.definition;
+        old.validate()?;
+        let (state, hash) = old.state_observation()?;
+        if !fresh_single_role(&state, old.role)
+            || state.revision != revision
+            || hash != *canonical
+            || state
+                .last_transaction
+                .as_ref()
+                .is_none_or(|tx| &tx.transaction_id != id)
+        {
+            return Err(ServiceError::Conflict);
+        }
+        let pin = old.pin.as_ref().ok_or(ServiceError::Conflict)?;
+        let material = old.installation_material()?;
+        let member = old
+            .candidate
+            .manifest()
+            .files
+            .iter()
+            .find(|member| member.path == old.candidate.manifest().entrypoint && member.executable)
+            .ok_or(ServiceError::Conflict)?;
+        let RootIdentity::Macos { device, inode, uid } = old.root_identity else {
+            return Err(ServiceError::Conflict);
+        };
+        let request = serde_json::json!({"schema":1,"kind":"launchd_registered_lifecycle",
+            "action":action,"original_desired":original_desired,
+            "uid":old.uid,"username":old.username,"role":old.role.name(),
+            "state_dir":old.path,"state_root":{"device":device,"inode":inode,"uid":uid},
+            "canonical_sha256":canonical,"transaction_id":id,"revision":revision,
+            "definition_path":material.path,"definition_plist":std::str::from_utf8(material.bytes).map_err(unknown)?,
+            "definition_sha256":Sha256Digest::of_bytes(material.bytes),"label":old.label,
+            "executable_path":old.executable,"executable_sha256":member.sha256,"runtime_selection":old.selection,
+            "original_definition_identity":{"device":pin.stamp.dev,"inode":pin.stamp.ino,
+                "uid":pin.stamp.uid,"mode":pin.stamp.mode & 0o7777,"links":pin.stamp.links},
+            "original_registration":self.observation,"original_enabled":self.enabled});
+        old.validate()?;
+        Ok(request)
+    }
+}
+
 impl Definition {
+    pub(crate) fn validate_root_identity(&self, identity: &RootIdentity) -> Result<()> {
+        self.validate()?;
+        if &self.root_identity != identity {
+            return Err(ServiceError::Conflict);
+        }
+        Ok(())
+    }
+    pub(crate) async fn capture_registered_lifecycle(
+        self: &Arc<Self>,
+    ) -> Result<Arc<RegisteredLifecycleProof>> {
+        let checked = self.clone();
+        let initial_state = blocking_read(move || {
+            let (state, hash) = checked.state_observation()?;
+            if checked.install_preparation
+                || checked.pin.is_none()
+                || !fresh_single_role(&state, checked.role)
+            {
+                return Err(ServiceError::Conflict);
+            }
+            let raw = checked
+                .root
+                .read_raw("state.json", 1024 * 1024)
+                .map_err(changed)?;
+            if Sha256Digest::of_bytes(raw.bytes()) != hash {
+                return Err(ServiceError::Unknown);
+            }
+            Ok(raw)
+        })
+        .await?;
+        let first = self.inspect().await?;
+        let running = if first.pid.is_some() {
+            if first.state != "running" {
+                return Err(ServiceError::Unknown);
+            }
+            Some(ServicePeer::observe_definition(self.clone()).await?)
+        } else {
+            if !clean_registered_stop(&first) {
+                return Err(ServiceError::Unknown);
+            }
+            None
+        };
+        let enabled = self.enabled().await?;
+        let second = self.inspect().await?;
+        if first != second {
+            return Err(ServiceError::Unknown);
+        }
+        let checked = self.clone();
+        blocking_read(move || {
+            checked.validate()?;
+            let raw = checked
+                .root
+                .read_raw("state.json", 1024 * 1024)
+                .map_err(changed)?;
+            if raw.observation() != initial_state.observation()
+                || raw.bytes() != initial_state.bytes()
+            {
+                return Err(ServiceError::Unknown);
+            }
+            Ok(Arc::new(RegisteredLifecycleProof {
+                definition: checked,
+                observation: first,
+                initial_state,
+                enabled,
+                running,
+                fenced: std::sync::atomic::AtomicBool::new(false),
+            }))
+        })
+        .await
+    }
     pub(crate) fn prepare(path: &Path, role: ServiceRole) -> Result<Self> {
         Self::prepare_owned(path, role, false)
     }
@@ -1077,6 +1292,47 @@ impl Definition {
     }
     pub(crate) async fn inspect(self: &Arc<Self>) -> Result<ServiceObservation> {
         self.inspect_registered(true).await
+    }
+    /// OS registration fact only. An explicit not-found diagnostic proves no
+    /// registration, never that an old service or its children settled.
+    pub(crate) async fn registration_status(self: &Arc<Self>) -> Result<serde_json::Value> {
+        let checked = self.clone();
+        blocking_read(move || checked.validate()).await?;
+        if tool_observation(
+            self.clone(),
+            vec!["print".into(), self.target()],
+            false,
+            true,
+        )
+        .await?
+        .is_none()
+        {
+            return Ok(
+                serde_json::json!({"status":"not_installed","definition_present":self.pin.is_some(),
+                "product_settlement":"not_proven"}),
+            );
+        }
+        Ok(
+            serde_json::json!({"status":"registered","registration":self.inspect().await?,
+            "enabled":self.enabled().await?,"product_settlement":"not_proven"}),
+        )
+    }
+    pub(crate) async fn require_unregistered(self: &Arc<Self>) -> Result<()> {
+        let checked = self.clone();
+        blocking_read(move || checked.require_pending_registration()).await?;
+        if tool_observation(
+            self.clone(),
+            vec!["print".into(), self.target()],
+            false,
+            true,
+        )
+        .await?
+        .is_some()
+        {
+            return Err(ServiceError::Conflict);
+        }
+        let checked = self.clone();
+        blocking_read(move || checked.require_pending_registration()).await
     }
     async fn inspect_registered_identity(self: &Arc<Self>) -> Result<ServiceObservation> {
         self.inspect_registered(false).await
@@ -1743,6 +1999,16 @@ async fn tool(
     arguments: Vec<String>,
     mutation: bool,
 ) -> Result<Vec<u8>> {
+    tool_observation(definition, arguments, mutation, false)
+        .await?
+        .ok_or(ServiceError::Unavailable)
+}
+async fn tool_observation(
+    definition: Arc<Definition>,
+    arguments: Vec<String>,
+    mutation: bool,
+    allow_absent: bool,
+) -> Result<Option<Vec<u8>>> {
     if definition.install_preparation {
         return Err(ServiceError::Invalid);
     }
@@ -1758,6 +2024,7 @@ async fn tool(
                 .env_clear()
                 .env("HOME", &definition.home)
                 .env("PATH", "/usr/bin:/bin")
+                .env("LC_ALL", "C")
                 .stdin(Stdio::null())
                 .stdout(Stdio::piped())
                 .stderr(Stdio::piped())
@@ -1787,22 +2054,39 @@ async fn tool(
             };
             let (out, err) = tokio::join!(a, b);
             let out = out.map_err(unknown)??;
-            err.map_err(unknown)??;
+            let err = err.map_err(unknown)??;
             let checked = definition.clone();
             blocking_read(move || checked.validate_identity()).await?;
             if expired || status.is_none_or(|s| !s.success()) {
+                if !expired
+                    && !mutation
+                    && allow_absent
+                    && ((out.is_empty() && explicit_registration_absent(&err, &definition.label))
+                        || (err.is_empty()
+                            && explicit_registration_absent(&out, &definition.label)))
+                {
+                    return Ok(None);
+                }
                 return Err(if mutation {
                     ServiceError::Unknown
                 } else {
                     ServiceError::Unavailable
                 });
             }
-            Ok(out)
+            Ok(Some(out))
         }
         .await;
         let _ = send.send(result);
     });
     receive.await.map_err(unknown)?
+}
+fn explicit_registration_absent(raw: &[u8], label: &str) -> bool {
+    let Ok(text) = std::str::from_utf8(raw) else {
+        return false;
+    };
+    let missing = format!("Could not find service \"{label}\" in domain for system");
+    text.trim_end_matches('\n') == missing
+        || text.trim_end_matches('\n') == format!("Bad request.\n{missing}")
 }
 #[cfg(test)]
 #[path = "macos_service_tests.rs"]
@@ -1866,5 +2150,72 @@ mod registered_inactive_tests {
         assert!(failed_inactive(&changed)); // failed history, never clean exit
         changed.runs = 0;
         assert!(!failed_inactive(&changed));
+    }
+}
+
+#[cfg(test)]
+mod registered_lifecycle_tests {
+    use super::*;
+    #[test]
+    fn clean_history_requires_a_real_registered_generation_and_no_signal() {
+        let original = ServiceObservation {
+            path: "/Library/LaunchDaemons/label.plist".into(),
+            program: "/private/native/bin/styx".into(),
+            username: "test".into(),
+            arguments: vec![],
+            pid: None,
+            runs: 2,
+            last_exit_code: Some(0),
+            signaled_exit: false,
+            state: "not running".into(),
+        };
+        assert!(clean_registered_stop(&original));
+        for changed in [
+            ServiceObservation {
+                runs: 0,
+                ..original.clone()
+            },
+            ServiceObservation {
+                last_exit_code: None,
+                ..original.clone()
+            },
+            ServiceObservation {
+                last_exit_code: Some(4),
+                ..original.clone()
+            },
+            ServiceObservation {
+                signaled_exit: true,
+                ..original.clone()
+            },
+            ServiceObservation {
+                pid: Some(123),
+                ..original.clone()
+            },
+            ServiceObservation {
+                state: "waiting".into(),
+                ..original.clone()
+            },
+        ] {
+            assert!(!clean_registered_stop(&changed));
+        }
+    }
+    #[test]
+    fn missing_registration_requires_the_exact_system_label_diagnostic() {
+        assert!(explicit_registration_absent(
+            b"Could not find service \"label\" in domain for system\n",
+            "label"
+        ));
+        assert!(explicit_registration_absent(
+            b"Bad request.\nCould not find service \"label\" in domain for system\n",
+            "label"
+        ));
+        for raw in [
+            b"permission denied\n".as_slice(),
+            b"Could not find service \"other\" in domain for system\n",
+            b"Could not find service \"label\" in domain for gui/501\n",
+            b"unknown\nCould not find service \"label\" in domain for system\n",
+        ] {
+            assert!(!explicit_registration_absent(raw, "label"));
+        }
     }
 }

@@ -173,7 +173,7 @@ enum ProductRestorationPolicy {
     let client: ProductCoreClient
     var nativeHost: Bool { client.isNativeHost }
     func nativeClaim() { guard !nativeMigrationPending else { return }; perform { [self] in _ = try await client.native("claimJoin") } }
-    func nativePause() { perform { [self] in _ = try await client.native("disconnect") } }
+    func nativePause() { guard nativeSupportsOperation("disconnect") else { return }; perform { [self] in _ = try await client.native("disconnect") } }
     var nativeRuntimeUpdate: ProductJSON { status["runtimeUpdate"] }
     func nativeStageRuntime() {
         perform { [self] in try applyNative(try await client.native("stageRuntime", ["authorize": .bool(true)])) }
@@ -216,6 +216,11 @@ enum ProductRestorationPolicy {
     @Published var error: String?
     @Published var observationError: String?
     @Published var status: ProductJSON = .null
+    // Export feedback is separate from preparation and contains no manager
+    // preference or installation receipt. Saving never resends Core mutation.
+    @Published var nativeServiceExportURL: URL?
+    @Published var nativeServiceExportError: String?
+    @Published var nativeServiceSaving = false
     @Published var journey: ProductJSON = .null
     @Published var acceptance: ProductJSON = .null
     @Published var session: ProductJSON = .null
@@ -453,7 +458,7 @@ enum ProductRestorationPolicy {
         permissionActions = .system
         computer = false; browser = false; joining = false
     }
-    private func applyNative(_ value: ProductJSON) throws {
+    func applyNative(_ value: ProductJSON) throws {
         guard value["mode"].string == "rust_host" else { throw ProductCoreError.invalidResponse }
         if let transaction = value["migration"]["transaction_id"].string {
             guard nativeMigrationTransactionID == nil || nativeMigrationTransactionID == transaction else {
@@ -630,6 +635,16 @@ enum ProductRestorationPolicy {
             loginOperation = "unknown"
             error = productText("登录启动更改的结果未确认，Styx 不会重复执行。请在系统设置中核对当前状态。", "The login startup change is unconfirmed and will not be repeated. Check its current state in System Settings.")
             return
+        }
+        if let core = failure as? ProductCoreError {
+            if case .serviceChangeUnconfirmed = core {
+                error = productText("后台服务操作的结果未确认，Styx 不会重复执行。请查看当前状态并保留原配置；安全退出 App 不代表服务操作成功。", "The background service operation is unconfirmed and will not be repeated. Review its state and keep the original profile. Quitting the App safely does not confirm that the service operation succeeded.")
+                return
+            }
+            if case .servicePreparationRequired = core {
+                error = productText("请先在“原生运行组件”中准备候选并完成更新，再转为后台管理。现有身份和配对会保留。", "First stage the candidate and complete the update under Native runtime components, then transfer to background management. Identity and pairing will be preserved.")
+                return
+            }
         }
         if let rejection = failure as? ProductOwnedCoreRejection {
             nativeMigrationFailure = rejection.response
@@ -1086,7 +1101,7 @@ enum ProductRestorationPolicy {
         }
     }
     func resumeForeground() {
-        if nativeHost { guard !nativeMigrationPending else { return }; perform { [self] in _ = try await client.native("connect") }; return }
+        if nativeHost { guard !nativeMigrationPending, nativeSupportsOperation("connect") else { return }; perform { [self] in _ = try await client.native("connect") }; return }
         perform { [self] in
             _ = try await client.write("foreground", ["authorize": .bool(true)])
             foregroundRecoveryNeeded = false

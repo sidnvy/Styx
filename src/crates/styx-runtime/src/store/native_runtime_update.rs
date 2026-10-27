@@ -835,6 +835,7 @@ impl NativeTransactions {
         }
     }
     pub(super) fn revalidate_runtime_custody(&self) -> Result<(), NativeTransactionError> {
+        self.revalidate_app_service_custody()?;
         if let Some(held) = &self.retained_runtime_update {
             held.validate(&self.configuration_root())?;
         }
@@ -846,6 +847,7 @@ impl NativeTransactions {
         target: &[u8],
         intent: &DesiredStateCommit,
     ) -> Result<(), NativeTransactionError> {
+        self.validate_app_service_publication(before, target, intent)?;
         if !runtime_transition(before, target, self.marker(), intent)? {
             return Ok(());
         }

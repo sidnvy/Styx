@@ -70,6 +70,7 @@ pub struct NativeTransactions {
     journal: std::sync::Arc<OwnedManagementJournal>,
     retained_maintenance: Option<ConfigurationMaintenance>,
     retained_runtime_update: Option<runtime_update::RuntimeUpdateCustody>,
+    retained_app_service_transfer: Option<app_service::AppServiceTransferCustody>,
 }
 impl NativeTransactions {
     #[cfg(all(test, target_os = "linux", target_env = "gnu"))]
@@ -86,6 +87,7 @@ impl NativeTransactions {
                 journal: std::sync::Arc::new(journal),
                 retained_maintenance: None,
                 retained_runtime_update: None,
+                retained_app_service_transfer: None,
             }),
             Err(error) => Err(NativeTransactionOpenFailure {
                 error: error.into(),
@@ -159,6 +161,7 @@ impl NativeTransactions {
             journal: std::sync::Arc::new(journal),
             retained_maintenance: None,
             retained_runtime_update: None,
+            retained_app_service_transfer: None,
         })
     }
     /// The caller holds the original SharedEnrollment mutex and local control gate.
@@ -943,6 +946,8 @@ pub(crate) use windows_migration::{
     begin_windows_host_migration, begin_windows_legacy_recovery, review_windows_host_migration,
 };
 
+#[path = "native_app_service.rs"]
+mod app_service;
 #[path = "native_runtime_update.rs"]
 mod runtime_update;
 

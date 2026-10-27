@@ -50,3 +50,30 @@ Exec after update/rollback, and complete owned-process settlement. Two versions
 with identical code prove version-selection mechanics only; they do not prove
 compatibility across different code revisions. Native signing, installation,
 permissions and platform lifecycle remain separate gates.
+
+## Original App-to-service transfer (schema6)
+
+The transfer reader is `native_app_service_transferred_state_v1` (state6), with
+signed release declaration `native_app_service_transferred_v1`. Earlier App and
+service-repair declarations do not support it. State4 continues to mean App
+management; state5 continues to mean failed Gateway registration repair.
+
+The closed initial transfer is a fresh single-role App root in Stopped/Disabled
+state4, with an already selected stable runtime outside the outer App bundle.
+Only the manager changes to PersistentService; the original root marker,
+deployment, runtime selection, runtime-update history and opaque extensions stay
+unchanged. The same original C07 records the transfer. Later service run/autostart
+requests retain state6 and its history. Pure grammar does not grant publication:
+the typed path must retain the original App scope, configuration writer, trusted
+selected release and actual execution exclusion after original App workers join.
+Generic apply/recovery and caller-supplied paths cannot substitute for this owner.
+
+A transferred App reopens as a service client, using readonly original-root/C07
+inspection without acquiring the running Gateway's configuration writer. App Quit
+settles its own tasks and does not stop an independent service. Unknown transfer
+or administrator outcomes remain visible and are not automatically retried.
+
+This is an incremental implementation boundary, not installation or device
+acceptance. Split-role transfer, migrated-root transfer, actual launchd actions,
+independent Exec, complete native recovery and outer App replacement remain
+separate required journeys until their concrete receipts pass.

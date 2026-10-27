@@ -39,6 +39,21 @@ def repair_fixture():
     return report
 
 
+def lifecycle_fixture(action='start', role='host', running=False):
+    report = fixture(role); request = report['installation_request_v1']
+    enabled = action == 'disable'
+    original = {'manager': 'persistent_service', 'run': 'running' if running else 'stopped', 'autostart': 'enabled' if enabled else 'disabled'}
+    observed = {'path': request['definition_path'], 'program': request['executable_path'], 'username': request['username'], 'arguments': [request['executable_path'], '__service-run', '--state-dir', request['state_dir'], '--role', role], 'pid': 12345 if running else None, 'runs': 2, 'last_exit_code': 0, 'signaled_exit': False, 'state': 'running' if running else 'not running'}
+    request.update(kind='launchd_registered_lifecycle', action=action, original_desired=original, original_definition_identity={'device': 123, 'inode': 321, 'uid': 0, 'mode': 0o644, 'links': 1}, original_registration=observed, original_enabled=enabled)
+    target = dict(original)
+    if action == 'start': target['run'] = 'running'
+    elif action == 'enable': target['autostart'] = 'enabled'
+    elif action == 'disable': target['autostart'] = 'disabled'
+    report['desired'][role] = target
+    report.update(operation=action, os=copy.deepcopy(observed))
+    return report
+
+
 def printed_registration(request):
     observed = request['original_registration']
     rows = ['system/' + request['label'] + ' = {']
@@ -46,6 +61,7 @@ def printed_registration(request):
     rows += [' arguments = {'] + [' ' + value for value in observed['arguments']] + [' }']
     rows += [' runs = ' + str(observed['runs']), ' state = ' + observed['state']]
     if observed['last_exit_code'] is not None: rows += [' last exit code = ' + str(observed['last_exit_code'])]
+    if observed['pid'] is not None: rows += [' pid = ' + str(observed['pid'])]
     if observed['signaled_exit']: rows += [' last terminating signal = Killed: 9']
     return '\n'.join(rows + ['}']) + '\n'
 
@@ -132,6 +148,77 @@ class MacServicePackageTests(unittest.TestCase):
         raw = request['definition_plist'].replace('<key>Label</key>', '<key>Label</key><string>foreign</string><key>Label</key>', 1)
         request['definition_plist'] = raw; request['definition_sha256'] = m.digest(raw.encode()); report['definition_plist'] = raw
         with self.assertRaisesRegex(ValueError, 'duplicate_plist_key'): m.validate(report)
+
+
+class MacRegisteredLifecycleTests(unittest.TestCase):
+    def test_review_packages_never_replace_original_plist_or_dispatch(self):
+        for role in ['host', 'gateway']:
+            for action in ['start', 'enable', 'disable', 'uninstall']:
+                report = lifecycle_fixture(action, role)
+                with self.subTest(role=role, action=action), tempfile.TemporaryDirectory() as tmp:
+                    source = Path(tmp) / 'request.json'; source.write_text(json.dumps(report))
+                    out = Path(tmp) / 'out'
+                    receipt = m.build(source, out, '0.4.0', prepare_only=True)
+                    self.assertIn('--nopayload', receipt['command'])
+                    self.assertNotIn('--root', receipt['command'])
+                    self.assertEqual(list((out / 'payload').rglob('*.plist')), [])
+                    self.assertFalse(receipt['registration_dispatched'])
+                    self.assertFalse(receipt['installation_performed'])
+                    pre, post = [(out / 'scripts' / name).read_text() for name in ['preinstall', 'postinstall']]
+                    for script in [pre, post]:
+                        subprocess.run(['/bin/sh', '-n'], input=script, text=True, check=True)
+                        self.assertNotIn('sudo', script)
+                        self.assertNotIn('/bin/kill', script)
+                        self.assertNotIn('launchctl kill', script)
+                        self.assertNotIn('bootstrap ', script)
+                    command = 'kickstart' if action == 'start' else 'bootout' if action == 'uninstall' else action
+                    self.assertEqual(post.count('/bin/launchctl ' + command + ' '), 1)
+                    self.assertNotIn('/bin/launchctl ' + command + ' ', pre)
+                    self.assertLess(post.index('original_registration_changed'), post.index('/bin/launchctl ' + command + ' '))
+                    self.assertLess(post.index('original_enabled_changed'), post.index('/bin/launchctl ' + command + ' '))
+                    if action == 'uninstall':
+                        self.assertLess(post.index('/bin/launchctl bootout '), post.index('/bin/rm -- '))
+                        self.assertIn('C07_persistent_stopped_disabled_preserved', post)
+
+    def test_clean_exit_and_exact_transition_are_required(self):
+        for change in [
+                lambda r: r['installation_request_v1']['original_registration'].update(runs=0),
+                lambda r: r['installation_request_v1']['original_registration'].update(last_exit_code=None),
+                lambda r: r['installation_request_v1']['original_registration'].update(signaled_exit=True),
+                lambda r: r['installation_request_v1']['original_registration'].update(pid=123),
+                lambda r: r['installation_request_v1'].update(original_enabled=True),
+                lambda r: r['installation_request_v1']['original_definition_identity'].update(uid=501),
+                lambda r: r['installation_request_v1']['original_definition_identity'].update(links=2),
+                lambda r: r['installation_request_v1']['original_definition_identity'].update(mode=0o666),
+                lambda r: r['desired']['host'].update(manager='foreground_cli'),
+                lambda r: r['desired'].update(gateway=copy.deepcopy(r['desired']['host']))]:
+            report = lifecycle_fixture(); change(report)
+            report['os'] = copy.deepcopy(report['installation_request_v1']['original_registration'])
+            with self.assertRaises(ValueError): m.validate(report)
+        report = lifecycle_fixture('enable')
+        report['installation_request_v1']['original_desired']['autostart'] = 'enabled'
+        report['installation_request_v1']['original_enabled'] = True
+        with self.assertRaisesRegex(ValueError, 'autostart_original_transition'): m.validate(report)
+
+    def test_registration_parser_pins_running_or_clean_original_generation(self):
+        for running in [False, True]:
+            request = m.validate(lifecycle_fixture('disable', 'gateway', running))
+            program = m.registration_check_program(request)
+            original = printed_registration(request)
+            for observed, expected in [(original, 0), (original.replace('runs = 2', 'runs = 3'), 1), (original.replace('state = running', 'state = waiting') if running else original.replace('last exit code = 0', 'last exit code = 1'), 1), (original + 'foreign = 1\n', 1), (original.replace(' pid = 12345\n', '') if running else original.replace(' runs = 2', ' pid = 555\n runs = 2'), 1)]:
+                completed = subprocess.run(['/usr/bin/awk', program], input=observed, text=True, capture_output=True)
+                self.assertEqual(completed.returncode, expected)
+
+    def test_disabled_parser_rejects_unknown_duplicate_and_changed_original(self):
+        label = lifecycle_fixture()['label']
+        for enabled in [False, True]:
+            program = m.disabled_check_program(label, enabled)
+            flag = 'false' if enabled else 'true'
+            row = ' "' + label + '" => ' + flag + '\n'
+            valid = 'disabled services = {\n' + row + '}\n'
+            for raw, expected in [(valid, 0), ('disabled services = {\n}\n', 0 if enabled else 1), (valid.replace(flag, 'true' if enabled else 'false'), 1), ('disabled services = {\n' + row + row + '}\n', 1), ('permission denied\n', 1), (valid + 'trailing\n', 1)]:
+                completed = subprocess.run(['/usr/bin/awk', program], input=raw, text=True, capture_output=True)
+                self.assertEqual(completed.returncode, expected)
 
 
 class MacServiceRepairTests(unittest.TestCase):

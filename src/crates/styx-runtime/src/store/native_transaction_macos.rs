@@ -150,7 +150,10 @@ impl NativeTransactions {
         permit: SemaphorePermit<'static>,
     ) -> Result<MacMigrationRecoveryStart, Box<MacMigrationRecoveryFailure>> {
         let preflight = (|| -> Result<_, NativeTransactionError> {
-            if self.retained_maintenance.is_some() || self.retained_runtime_update.is_some() {
+            if self.retained_maintenance.is_some()
+                || self.retained_runtime_update.is_some()
+                || self.retained_app_service_transfer.is_some()
+            {
                 return Err(NativeTransactionError::Conflict);
             }
             let state = self.readstate()?;
@@ -239,6 +242,7 @@ impl NativeTransactions {
             // The preflight above refuses runtime-update custody before moving
             // this coordinator into the unrelated migration worker.
             retained_runtime_update,
+            retained_app_service_transfer,
         } = self;
         // Migration owns the original journal exclusively. A still-retained
         // opaque repair frame must not be silently detached from its writer.
@@ -252,6 +256,7 @@ impl NativeTransactions {
                         journal,
                         retained_maintenance,
                         retained_runtime_update,
+                        retained_app_service_transfer,
                     },
                 ));
             }
@@ -372,6 +377,7 @@ impl MacMigrationRecovery {
             journal: Arc::new(scope.journal),
             retained_maintenance: None,
             retained_runtime_update: None,
+            retained_app_service_transfer: None,
         };
         let committed = (|| -> Result<_, NativeTransactionError> {
             if !transactions

@@ -92,10 +92,11 @@ struct ProductSettingsView: View {
                     Text(notice).font(.caption).foregroundStyle(.secondary)
                     Button(productText("登录项设置…", "Login Items settings…")) { model.openLoginSettings() }
                 }
-                Text(productText("关闭窗口后，Styx 会在菜单栏继续运行。退出 Styx 后，ChatGPT 将无法使用这台电脑。", "Styx keeps running in the menu bar when you close a window. Quitting Styx makes this computer unavailable to ChatGPT.")).font(.caption).foregroundStyle(.secondary)
+                Text(model.nativeHost ? model.nativeQuitDescription : productText("关闭窗口后，Styx 会在菜单栏继续运行。退出 Styx 后，ChatGPT 将无法使用这台电脑。", "Styx keeps running in the menu bar when you close a window. Quitting Styx makes this computer unavailable to ChatGPT.")).font(.caption).foregroundStyle(.secondary)
             }
             Section { LabeledContent(productText("版本", "Version"), value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—") }
             if model.nativeHost {
+                if model.nativeSupportsOperation("stageRuntime") || model.nativeSupportsOperation("recoverRuntimeUpdate") {
                 VStack(alignment: .leading, spacing: 8) {
                     Text(productText("原生运行组件", "Native runtime components")).font(.headline)
                     Text(productText("候选来自此签名 App。更新保留身份、配对和设置，完成后不会自动连接。", "The candidate comes from this signed App. Updating keeps identity, pairing and settings, and does not reconnect automatically.")).font(.caption).foregroundStyle(.secondary)
@@ -108,6 +109,10 @@ struct ProductSettingsView: View {
                         }
                     }
                     if let state = model.nativeRuntimeUpdate["status"].string { Text(state).font(.caption) }
+                }
+                }
+                if model.nativeSupportsOperation("transferToService") || model.nativeHasServiceState {
+                    ProductServiceSettings(model: model)
                 }
             } else {
             if let notice = componentNotice {
