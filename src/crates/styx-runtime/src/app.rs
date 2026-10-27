@@ -8,8 +8,6 @@ mod login;
 mod maintenance;
 #[cfg(all(test, target_os = "linux", target_env = "gnu"))]
 mod maintenance_integration_tests;
-mod migrated;
-mod migration;
 mod pairing_link;
 mod runtime_update;
 mod service;
@@ -207,9 +205,6 @@ enum Operation {
     AppLifecycle,
     AppLogin,
     AppLoginResult,
-    ReviewMigration,
-    StartMigration,
-    RecoverMigration,
     StageRuntime,
     UpdateRuntime,
     RuntimeUpdateStatus,
@@ -311,7 +306,7 @@ impl ConnectionStatus {
 struct RunningHost {
     // Same protected enrollment/configuration snapshot for this original role.
     // App component intent is not an OS permission or a remote operation grant.
-    desktop_intent: Option<migrated::DesktopIntent>,
+    desktop_intent: Option<Arc<crate::store::native_host_snapshot::NativeHostSnapshot>>,
     cancel: CancellationToken,
     worker: JoinHandle<Result<ForegroundOutcome, ForegroundError>>,
     events: JoinHandle<()>,
@@ -333,13 +328,10 @@ impl RetainedFailure {
     }
 }
 struct HostApp {
-    migration: Option<migration::State>,
     runtime_update: Option<runtime_update::State>,
     service: Option<service::State>,
     local_gateway: Option<local_gateway::LocalGateway>,
     resume_local_available: bool,
-    committed_migration: bool,
-    migrated_shared: bool,
     deployment_file: PathBuf,
     configuration: Option<native::NativeManagementReport>,
     runtime_selection_file: Option<PathBuf>,
@@ -379,13 +371,10 @@ impl HostApp {
         let scope = Arc::new(HostScope::open(state_dir)?);
         let (status, observed) = watch::channel(ConnectionStatus::stopped());
         let mut app = Self {
-            migration: None,
             runtime_update: None,
             service: None,
             local_gateway: None,
             resume_local_available: false,
-            committed_migration: false,
-            migrated_shared: false,
             scope,
             deployment_file: deployment_file.to_owned(),
             configuration: None,
@@ -410,12 +399,6 @@ impl HostApp {
             if app.observe_service_client().await? {
                 return Ok(app);
             }
-            if app.runtime_selection_file.is_some() {
-                app.observe_migration().await;
-                if app.migration.is_some() {
-                    return Ok(app);
-                }
-            }
             if app.observe_runtime_update()? {
                 return Ok(app);
             }
@@ -427,7 +410,7 @@ impl HostApp {
                 app.enrollment = Some(json!({"status":"incomplete","error":error.code()}));
                 return Ok(app);
             }
-            if !app.committed_migration {
+            {
                 match native_join::inspect_for_app(app.scope.clone()).await {
                     Ok(report) => {
                         app.native_computer_requested = Some(report.computer_requested);
@@ -444,10 +427,6 @@ impl HostApp {
                     }
                 }
             }
-            if app.migrated_shared {
-                let gateway = local_gateway::LocalGateway::open_migrated(app.scope.clone()).await?;
-                app.local_gateway = Some(gateway);
-            }
         }
         Ok(app)
     }
@@ -463,11 +442,7 @@ impl HostApp {
             Self::open_with_selection(state_dir, &deployment, Some(selection.to_owned())).await?;
         // A committed original Host-only root is not a fresh split App setup.
         // Its original remote Gateway and pairing are never reconstructed.
-        if app.service_client_or_unknown()
-            || app.committed_migration
-            || app.migration.is_some()
-            || app.runtime_update_fenced()
-        {
+        if app.service_client_or_unknown() || app.runtime_update_fenced() {
             return Ok(app);
         }
         let gateway_scope = Arc::new(app.scope.gateway_sibling()?);
@@ -637,9 +612,6 @@ impl HostApp {
         if self.runtime_update_fenced() {
             return Err(AppError("app_runtime_update_pending"));
         }
-        if self.migration_fenced() {
-            return Err(AppError("app_migration_pending"));
-        }
         if let Some(error) = &self.retained {
             return Err(AppError(error.code()));
         }
@@ -675,22 +647,13 @@ impl HostApp {
     async fn read_configuration(&mut self) -> Result<(), AppError> {
         self.scope.validate()?;
         // Never call a path-only writer while our original role is still live.
-        if self.running.is_some()
-            || (self.migrated_shared && self.local_gateway.as_ref().is_some_and(|g| g.is_running()))
-        {
+        if self.running.is_some() {
             return Err(AppError("app_role_busy"));
         }
         let report = native::inspect_for_app(self.scope.clone())
             .await
             .map_err(|e| self.management_error(e))?;
-        let scope = self.scope.clone();
-        let inspection = tokio::task::spawn_blocking(move || migrated::inspect(scope))
-            .await
-            .map_err(|_| AppError("app_migrated_reader_failed"))??;
-        let shared = inspection
-            .as_ref()
-            .is_some_and(|i| i.topology == migrated::Topology::SharedLocal);
-        if (report.desired.gateway.is_some() && !shared)
+        if report.desired.gateway.is_some()
             || !report.desired.host.is_some_and(|d| {
                 d.manager == NativeManager::AppManaged
                     && d.autostart == NativeAutostartDesired::Disabled
@@ -701,13 +664,6 @@ impl HostApp {
             })
         {
             return Err(AppError("app_manager_refused"));
-        }
-        if let Some(inspection) = inspection {
-            self.committed_migration = true;
-            self.migrated_shared = shared;
-            self.enrollment = Some(inspection.enrollment);
-        } else if self.committed_migration {
-            return Err(AppError("app_migrated_input_changed"));
         }
         if report.admission_fenced {
             return Err(AppError("app_transaction_fenced"));
@@ -721,27 +677,28 @@ impl HostApp {
             if let Some(d) = &diagnostic {
                 d.report("app_connect_host");
             }
-            if !self.migrated_shared {
-                self.set_desired(NativeRunDesired::Running).await?;
-            }
+            self.set_desired(NativeRunDesired::Running).await?;
             if let Some(d) = &diagnostic {
                 d.report("app_host_desired_ready");
             }
-            let desktop_intent =
-                if !self.committed_migration && self.native_computer_requested == Some(false) {
-                    // The original native seed explicitly declined Computer. Starting
-                    // Exec still loads and verifies its own complete Host profile below.
-                    None
-                } else {
-                    let intent_scope = self.scope.clone();
-                    let migrated_source = self.committed_migration;
-                    tokio::task::spawn_blocking(move || {
-                        migrated::DesktopIntent::open(intent_scope, migrated_source).ok()
-                    })
-                    .await
+            let desktop_intent = if self.native_computer_requested == Some(false) {
+                // The original native seed explicitly declined Computer. Starting
+                // Exec still loads and verifies its own complete Host profile below.
+                None
+            } else {
+                let intent_scope = self.scope.clone();
+                tokio::task::spawn_blocking(move || {
+                    crate::store::native_host_snapshot::NativeHostSnapshot::open_for_app(
+                        intent_scope.state_dir(),
+                        intent_scope.clone(),
+                    )
                     .ok()
-                    .flatten()
-                };
+                    .map(Arc::new)
+                })
+                .await
+                .ok()
+                .flatten()
+            };
             if let Some(d) = &diagnostic {
                 d.report("app_desktop_intent_ready");
             }
@@ -776,11 +733,7 @@ impl HostApp {
                 status: "started",
                 exec_connection: "connecting",
             });
-            let verified_runtime = if self.committed_migration {
-                None
-            } else {
-                self.native_runtime.clone()
-            };
+            let verified_runtime = self.native_runtime.clone();
             if let Some(d) = &diagnostic {
                 d.report("app_host_worker_scheduled");
             }
@@ -802,9 +755,6 @@ impl HostApp {
         Ok(())
     }
     async fn settle_all(&mut self) -> Result<(), AppError> {
-        // EOF waits for the original dispatched migration. Dropping the pipe
-        // is never cancellation, a new writer, or a successful cleanup receipt.
-        self.reap_migration(true).await;
         self.reap_runtime_update(true).await;
         let host = self.settle().await;
         let gateway = match &mut self.local_gateway {
@@ -818,70 +768,6 @@ impl HostApp {
         if self.runtime_update_fenced() {
             return Err(AppError("app_runtime_update_pending"));
         }
-        Ok(())
-    }
-    /// Both actual roles have joined before the one original-root C07 update.
-    /// Gateway desired remains Running on Pause, preserving its existing role.
-    async fn set_shared_desired(&mut self, run: NativeRunDesired) -> Result<(), AppError> {
-        self.available()?;
-        if !self.migrated_shared
-            || self.running.is_some()
-            || self.local_gateway.as_ref().is_some_and(|g| g.is_running())
-        {
-            return Err(AppError("app_role_busy"));
-        }
-        self.read_configuration().await?;
-        let report = self
-            .configuration
-            .as_ref()
-            .ok_or(AppError("app_not_configured"))?;
-        if report.desired.host.is_some_and(|h| h.run == run)
-            && report
-                .desired
-                .gateway
-                .is_some_and(|g| g.run == NativeRunDesired::Running)
-        {
-            return Ok(());
-        }
-        let change = native::NativeDesiredChange {
-            component: native::NativeComponent::Host,
-            run,
-            transaction_id: uuid::Uuid::new_v4()
-                .to_string()
-                .try_into()
-                .expect("UUID identity"),
-            sequence: report
-                .revision
-                .checked_add(1)
-                .ok_or(AppError("app_revision_exhausted"))?,
-        };
-        let plan = native::plan_shared_roles_for_app(
-            self.scope.clone(),
-            change,
-            NativeRunDesired::Running,
-        )
-        .await
-        .map_err(|e| self.management_error(e))?;
-        self.scope.validate()?;
-        let report = native::apply_for_app(self.scope.clone(), &plan.plan_file)
-            .await
-            .map_err(|e| self.management_error(e))?;
-        if report.admission_fenced {
-            self.unknown = true;
-            return Err(AppError("app_transaction_fenced"));
-        }
-        self.configuration = Some(report);
-        // The previous read-only snapshot correctly pins the previous canonical
-        // tip. Reopen only after both roles joined and this exact C07 committed;
-        // the original scope/root and immutable migration bindings are retained.
-        let gateway = match local_gateway::LocalGateway::open_migrated(self.scope.clone()).await {
-            Ok(gateway) => gateway,
-            Err(error) => {
-                self.unknown = true;
-                return Err(error);
-            }
-        };
-        self.local_gateway = Some(gateway);
         Ok(())
     }
     async fn set_desired(&mut self, run: NativeRunDesired) -> Result<(), AppError> {
@@ -981,8 +867,7 @@ impl HostApp {
         Ok(())
     }
     fn admission_fenced(&self) -> bool {
-        self.migration_fenced()
-            || self.service_fenced()
+        self.service_fenced()
             || self.runtime_update_fenced()
             || self.unknown
             || self.retained.is_some()
@@ -1008,9 +893,13 @@ impl HostApp {
         // Never acquire a replacement profile on a status request. Original
         // private file/namespace identities and bytes must still match; only
         // the successful pairing self-response supplies computer_approved.
-        let requested = tokio::task::spawn_blocking(move || original.requested())
-            .await
-            .unwrap_or(false);
+        let requested = tokio::task::spawn_blocking(move || {
+            original.seed().computer_requested
+                && original.ready().computer_approved
+                && original.revalidate().is_ok()
+        })
+        .await
+        .unwrap_or(false);
         requested && !role.cancel.is_cancelled() && !role.worker.is_finished()
     }
     async fn snapshot(&self) -> Value {
@@ -1038,9 +927,6 @@ impl HostApp {
                 "inspectHost",
                 "connect",
                 "disconnect",
-                "reviewMigration",
-                "startMigration",
-                "recoverMigration",
                 "stageRuntime",
                 "updateRuntime",
                 "runtimeUpdateStatus",
@@ -1050,8 +936,6 @@ impl HostApp {
             // The mutation still revalidates original scope, Ready and C07.
             if cfg!(target_os = "macos")
                 && !self.admission_fenced()
-                && !self.committed_migration
-                && self.migration.is_none()
                 && self.local_gateway.is_none()
                 && self.configuration.as_ref().is_some_and(|report| {
                     report.desired.gateway.is_none()
@@ -1072,7 +956,7 @@ impl HostApp {
         } else if cfg!(target_os = "macos") {
             supported.extend(["serviceStatus", "prepareServiceFirstStart", "stopService"]);
         }
-        json!({"schema":1,"maintenance":self.maintenance_status()["maintenance"],"migration":self.migration,"runtimeUpdate":self.runtime_update,"service":self.service,"configuration":configuration,"foreground":*self.observed.borrow(),"admission_fenced":self.admission_fenced(),"desktop_intent":{"schema":1,"computer_requested":computer_requested,"source":if self.committed_migration {"committed_original_local_intent"} else {"approved_host_configuration"}},"cleanup":self.cleanup,"gateway":self.local_gateway.as_ref().map(|g| g.status()),"enrollment":self.enrollment,"mode":"rust_host","supportedOperations":supported})
+        json!({"schema":1,"maintenance":self.maintenance_status()["maintenance"],"runtimeUpdate":self.runtime_update,"service":self.service,"configuration":configuration,"foreground":*self.observed.borrow(),"admission_fenced":self.admission_fenced(),"desktop_intent":{"schema":1,"computer_requested":computer_requested,"source":"approved_host_configuration"},"cleanup":self.cleanup,"gateway":self.local_gateway.as_ref().map(|g| g.status()),"enrollment":self.enrollment,"mode":"rust_host","supportedOperations":supported})
     }
     async fn dispatch(
         &mut self,
@@ -1127,9 +1011,6 @@ impl HostApp {
                 | Operation::Join
                 | Operation::CreateLocal
                 | Operation::ResumeLocal
-                | Operation::ReviewMigration
-                | Operation::StartMigration
-                | Operation::RecoverMigration
                 | Operation::StageRuntime
                 | Operation::UpdateRuntime
                 | Operation::RecoverRuntimeUpdate
@@ -1143,7 +1024,6 @@ impl HostApp {
             let _: EmptyInput = decode_input(&input)?;
         }
         self.reap_runtime_update(false).await;
-        self.reap_migration(false).await;
         self.reap().await?;
         match operation {
             Operation::AppLifecycle => return self.login_read(input),
@@ -1207,19 +1087,6 @@ impl HostApp {
             .await?;
             return Ok(self.snapshot().await);
         }
-        if matches!(operation, Operation::ReviewMigration) {
-            return self.review_migration(decode_input(&input)?).await;
-        }
-        if matches!(
-            operation,
-            Operation::StartMigration | Operation::RecoverMigration
-        ) {
-            self.start_migration(
-                decode_input(&input)?,
-                matches!(operation, Operation::RecoverMigration),
-            )?;
-            return Ok(self.snapshot().await);
-        }
         if matches!(operation, Operation::ResumeLocal) {
             self.resume_local(decode_input(&input)?).await?;
             self.connect_host().await?;
@@ -1244,13 +1111,10 @@ impl HostApp {
                 json!({"quit":{"status":"ready_to_quit","ticketId":ticket},"cleanup":self.cleanup,"gateway":self.local_gateway.as_ref().map(|g| g.status())}),
             );
         }
-        // A queued native migration owns its original writer. A UI Quit must
+        // A queued runtime update owns its original writer. A UI Quit must
         // return promptly and must never abort it or pretend it has settled.
         if matches!(operation, Operation::QuitAdmission) && self.runtime_update_running() {
             return Err(AppError("app_runtime_update_in_progress"));
-        }
-        if matches!(operation, Operation::QuitAdmission) && self.migration_running() {
-            return Err(AppError("app_migration_in_progress"));
         }
         // Stopping our own captured role remains safe even if scope validation
         // has failed. Never leave it running because a configuration write was refused.
@@ -1258,18 +1122,6 @@ impl HostApp {
             self.settle_all().await?;
         } else if matches!(operation, Operation::Disconnect) {
             self.settle().await?;
-        }
-        if matches!(operation, Operation::QuitAdmission)
-            && self.migration_fenced()
-            && !self.unknown
-            && self.retained.is_none()
-        {
-            self.scope.validate()?;
-            let ticket = uuid::Uuid::new_v4().simple().to_string();
-            self.quit_ticket = Some(ticket.clone());
-            return Ok(
-                json!({"quit":{"status":"ready_to_quit","ticketId":ticket},"migration":self.migration}),
-            );
         }
         self.available()?;
         match operation {
@@ -1318,9 +1170,6 @@ impl HostApp {
                 Ok(value)
             }
             Operation::ClaimJoin => {
-                if self.committed_migration {
-                    return Err(AppError("app_migrated_pairing_already_committed"));
-                }
                 if self.running.is_some() {
                     return Err(AppError("app_role_busy"));
                 }
@@ -1349,12 +1198,6 @@ impl HostApp {
                 serde_json::to_value(report).map_err(|_| AppError("app_response_invalid"))
             }
             Operation::Connect => {
-                if self.migrated_shared && self.running.is_none() {
-                    if let Some(gateway) = &mut self.local_gateway {
-                        gateway.settle().await?;
-                    }
-                    self.set_shared_desired(NativeRunDesired::Running).await?;
-                }
                 if let Some(gateway) = &mut self.local_gateway {
                     gateway.start().await?;
                 }
@@ -1362,16 +1205,8 @@ impl HostApp {
                 Ok(self.snapshot().await)
             }
             Operation::Disconnect => {
-                if self.migrated_shared {
-                    self.settle_all().await?;
-                    self.set_shared_desired(NativeRunDesired::Stopped).await?;
-                    if let Some(gateway) = &mut self.local_gateway {
-                        gateway.start().await?;
-                    }
-                } else {
-                    self.settle().await?;
-                    self.set_desired(NativeRunDesired::Stopped).await?;
-                }
+                self.settle().await?;
+                self.set_desired(NativeRunDesired::Stopped).await?;
                 Ok(self.snapshot().await)
             }
             Operation::QuitAdmission => {
@@ -1392,9 +1227,6 @@ impl HostApp {
             | Operation::AppLoginResult
             | Operation::StartupStatus
             | Operation::Status
-            | Operation::ReviewMigration
-            | Operation::StartMigration
-            | Operation::RecoverMigration
             | Operation::StageRuntime
             | Operation::UpdateRuntime
             | Operation::RuntimeUpdateStatus
@@ -1485,7 +1317,7 @@ async fn serve_app<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         let response = match result {
             Ok(result) => json!({"id":request.id,"ok":true,"result":result}),
             Err(error) => {
-                json!({"id":request.id,"ok":false,"error":error.code(),"migration":app.migration,"runtimeUpdate":app.runtime_update})
+                json!({"id":request.id,"ok":false,"error":error.code(),"runtimeUpdate":app.runtime_update})
             }
         };
         let encoded =

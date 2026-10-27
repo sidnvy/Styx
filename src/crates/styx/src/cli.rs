@@ -153,37 +153,6 @@ enum Command {
         #[arg(long)]
         json: bool,
     },
-    /// Review Windows migration; may initialize its private journal, without retiring the owner.
-    MigrateReview {
-        #[arg(long)]
-        state_dir: PathBuf,
-        #[arg(long)]
-        runtime_selection_file: PathBuf,
-        #[arg(long)]
-        transaction_id: String,
-        #[arg(long, value_enum)]
-        run: NativeRunArg,
-        #[arg(long)]
-        json: bool,
-    },
-    /// Migrate the original paired foreground Host using an explicit candidate.
-    Migrate {
-        #[arg(long)]
-        state_dir: PathBuf,
-        #[arg(long)]
-        runtime_selection_file: PathBuf,
-        #[arg(long)]
-        transaction_id: String,
-        #[arg(long, value_enum)]
-        run: NativeRunArg,
-        #[arg(long, required = true)]
-        authorize: bool,
-        /// Exact digest returned by Windows migrate-review.
-        #[arg(long)]
-        plan_sha256: Option<String>,
-        #[arg(long)]
-        json: bool,
-    },
     /// Reconcile the original native transaction; never mint a replacement ID.
     Recover {
         #[arg(long)]
@@ -385,8 +354,6 @@ enum HostCommand {
     Run {
         #[arg(long)]
         state_dir: PathBuf,
-        #[arg(long)]
-        legacy_gateway: bool,
     },
     Stop {
         #[arg(long)]
@@ -1245,48 +1212,6 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
                 "Native desired-state transaction; inspect report for completion:",
             )
         }
-        Command::MigrateReview {
-            state_dir,
-            runtime_selection_file,
-            transaction_id,
-            run,
-            json,
-        } => native_result(
-            styx_runtime::management::native::review_migration(
-                &state_dir,
-                &runtime_selection_file,
-                &transaction_id,
-                run.native(),
-            )
-            .await,
-            json,
-            "Review the exact migration request before authorizing Startup exclusion:",
-        ),
-        Command::Migrate {
-            state_dir,
-            runtime_selection_file,
-            transaction_id,
-            run,
-            authorize,
-            plan_sha256,
-            json,
-        } => {
-            if !authorize {
-                return error("authorization_required");
-            }
-            native_recovery_result(
-                styx_runtime::management::native::migrate_with_approval(
-                    &state_dir,
-                    &runtime_selection_file,
-                    &transaction_id,
-                    run.native(),
-                    plan_sha256.as_deref(),
-                )
-                .await,
-                json,
-                "Original paired Host migration; inspect the report for completion:",
-            )
-        }
         Command::Recover {
             state_dir,
             transaction_id,
@@ -1765,11 +1690,7 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
             state_dir: None, ..
         } => error("doctor_input_required"),
         Command::Host {
-            command:
-                HostCommand::Run {
-                    state_dir,
-                    legacy_gateway,
-                },
+            command: HostCommand::Run { state_dir },
         } => {
             let cancel = CancellationToken::new();
             let (events, mut received) = tokio::sync::mpsc::channel(16);
@@ -1788,11 +1709,7 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
             let outcome = {
                 let running = foreground::host_run(
                     &state_dir,
-                    if legacy_gateway {
-                        HostWireMode::LegacyExplicit
-                    } else {
-                        HostWireMode::PairedV3
-                    },
+                    HostWireMode::PairedV3,
                     cancel.clone(),
                     events,
                 );

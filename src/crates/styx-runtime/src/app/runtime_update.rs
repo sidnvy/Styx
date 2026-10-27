@@ -873,7 +873,7 @@ impl HostApp {
             return Err(AppError("app_runtime_authorization_required"));
         }
         self.available()?;
-        if self.committed_migration || self.configuration.is_none() {
+        if self.configuration.is_none() {
             return Err(AppError("app_runtime_profile_unsupported"));
         }
         let selection = self
@@ -918,11 +918,7 @@ impl HostApp {
         if !input.authorize {
             return Err(AppError("app_runtime_authorization_required"));
         }
-        if self.migration_fenced()
-            || self.committed_migration
-            || self.unknown
-            || self.quit_ticket.is_some()
-        {
+        if self.unknown || self.quit_ticket.is_some() {
             return Err(AppError("app_runtime_profile_unsupported"));
         }
         if self.runtime_update_running() {

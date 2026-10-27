@@ -1,36 +1,26 @@
 //! Argument boundaries only. Subprocess/OS effects belong to interop acceptance.
 use super::*;
 #[test]
-fn cli_host_mode_requires_explicit_legacy_and_never_accepts_raw_credentials() {
+fn cli_host_mode_rejects_legacy_gateway_and_raw_credentials() {
     let cli =
         Cli::try_parse_from(["styx", "host", "run", "--state-dir", "/owned/private"]).unwrap();
     assert!(matches!(
         cli.command,
         Command::Host {
-            command: HostCommand::Run {
-                legacy_gateway: false,
-                ..
-            }
+            command: HostCommand::Run { .. }
         }
     ));
-    let cli = Cli::try_parse_from([
-        "styx",
-        "host",
-        "run",
-        "--state-dir",
-        "/owned/private",
-        "--legacy-gateway",
-    ])
-    .unwrap();
-    assert!(matches!(
-        cli.command,
-        Command::Host {
-            command: HostCommand::Run {
-                legacy_gateway: true,
-                ..
-            }
-        }
-    ));
+    assert!(
+        Cli::try_parse_from([
+            "styx",
+            "host",
+            "run",
+            "--state-dir",
+            "/owned/private",
+            "--legacy-gateway",
+        ])
+        .is_err()
+    );
     for option in ["--token", "--bearer", "--codex-bin", "--publisher-pin"] {
         assert!(
             Cli::try_parse_from([
@@ -445,69 +435,4 @@ fn transient_manager_requires_explicit_mode_and_exact_stop_observation() {
             .is_err()
         );
     }
-}
-
-#[test]
-fn migration_requires_explicit_original_transaction_desired_run_and_authorization() {
-    let valid = [
-        "styx",
-        "migrate",
-        "--state-dir",
-        "/owned/private",
-        "--runtime-selection-file",
-        "/owned/selection.json",
-        "--transaction-id",
-        "migration-original-1",
-        "--run",
-        "stopped",
-        "--authorize",
-        "--json",
-    ];
-    let parsed = Cli::try_parse_from(valid).unwrap();
-    assert!(matches!(
-        parsed.command,
-        Command::Migrate {
-            run: NativeRunArg::Stopped,
-            authorize: true,
-            json: true,
-            ..
-        }
-    ));
-    for missing in [
-        "--authorize",
-        "--run",
-        "--transaction-id",
-        "--runtime-selection-file",
-    ] {
-        let mut args = Vec::new();
-        let mut skip_value = false;
-        for arg in valid {
-            if skip_value {
-                skip_value = false;
-                continue;
-            }
-            if arg == missing {
-                skip_value = missing != "--authorize";
-                continue;
-            }
-            args.push(arg);
-        }
-        assert!(Cli::try_parse_from(args).is_err(), "missing {missing}");
-    }
-    for forbidden in ["--manager", "--app-instance", "--token"] {
-        let mut args = valid.to_vec();
-        args.extend([forbidden, "untrusted"]);
-        assert!(Cli::try_parse_from(args).is_err());
-    }
-    let running: Vec<_> = valid
-        .into_iter()
-        .map(|arg| if arg == "stopped" { "running" } else { arg })
-        .collect();
-    assert!(matches!(
-        Cli::try_parse_from(running).unwrap().command,
-        Command::Migrate {
-            run: NativeRunArg::Running,
-            ..
-        }
-    ));
 }

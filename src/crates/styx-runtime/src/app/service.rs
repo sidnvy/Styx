@@ -141,8 +141,7 @@ impl HostApp {
         }
         // This first vertical is the original fresh single Host. Split sibling
         // transfer has no cross-root atomic receipt and remains explicit work.
-        if self.committed_migration || self.local_gateway.is_some() || self.configuration.is_none()
-        {
+        if self.local_gateway.is_some() || self.configuration.is_none() {
             return Err(AppError("app_service_profile_unsupported"));
         }
         self.settle_all().await?;
