@@ -64,3 +64,14 @@ Run sequentially. Do not start the next step until the current one passes.
 - Add a new invariant or check only for a concrete threat to these journeys, and say which one.
 - Use plain names in code and docs. Do not grow vocabulary like "original custody" around ordinary process handles.
 - Device rules stay: never operate piermini, never reboot or log out the Workstation, ask before any new installation outside the existing authorization.
+
+## Current goal (set 2026-10-27)
+
+Finish sequence steps 1–3 on the Linux workstation: legacy code deleted, Linux startup under the targets, Linux v1 journey passing. Stop and report to the owner when any of these happens:
+
+- step 3 passes (write `RESULT.md` under `/home/sid/Developer/Artifacts/Styx/<date>-linux/`);
+- a step needs the owner's device, account, signing key or installation approval;
+- about 2 hours pass on one task without a visible journey step working;
+- the work would add scope beyond this page.
+
+Steps 4–5 (Mac, Windows) are a separate goal that starts with the owner.
