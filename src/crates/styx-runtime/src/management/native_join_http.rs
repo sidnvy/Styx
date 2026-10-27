@@ -87,6 +87,7 @@ enum HttpFailureStage {
     Handshake,
     Send,
     Body,
+    #[cfg(test)]
     Connection,
 }
 #[derive(Default, Debug, serde::Serialize)]
@@ -484,20 +485,7 @@ async fn exchange_once(
                 leaf_pin,
             })
         };
-        // Both futures are owned/polled here. The sender is owned by the
-        // request future and dropped on completion/error, closing admission.
-        let (response, io) = tokio::join!(request_once, connection);
-        let response = response?;
-        io.map_err(|cause| {
-            observe_http_failure(
-                unknown(JoinHttpErrorKind::Http),
-                HttpFailureStage::Connection,
-                &cause,
-                true,
-                true,
-            )
-        })?;
-        Ok(response)
+        finish_response_owned(request_once, connection).await
     })
     .await;
     match result {
@@ -511,6 +499,23 @@ async fn exchange_once(
     // Timeout/caller cancellation drops the inline connection and its TLS/TCP
     // handle. No spawned connection task or sender survives this future. This
     // is local transport closure, not proof that the server rolled back effects.
+}
+
+// The full bounded response, not the later TLS/TCP close, settles this one HTTP
+// exchange. Poll both inline: no detached connection survives cancellation or
+// completion. Dropping Hyper's Connection closes its underlying IO resource.
+// If IO ends first, the original send/body future still validates the whole
+// response; a partial body, parse error or reset remains an unknown result.
+async fn finish_response_owned<R>(
+    response: impl std::future::Future<Output = Result<R, JoinHttpError>>,
+    connection: impl std::future::Future<Output = Result<(), hyper::Error>>,
+) -> Result<R, JoinHttpError> {
+    tokio::pin!(response, connection);
+    tokio::select! {
+        biased;
+        response = &mut response => response,
+        _closed = &mut connection => response.await,
+    }
 }
 
 #[cfg(test)]
@@ -638,3 +643,7 @@ mod diagnostic_tests {
         assert_eq!(value["body_complete"], false);
     }
 }
+
+#[cfg(test)]
+#[path = "native_join_http_transport_tests.rs"]
+mod transport_tests;
