@@ -235,11 +235,27 @@ impl NativeTransactions {
         let Self {
             binding,
             journal,
-            retained_maintenance: _,
+            retained_maintenance,
             // The preflight above refuses runtime-update custody before moving
             // this coordinator into the unrelated migration worker.
-            retained_runtime_update: _,
+            retained_runtime_update,
         } = self;
+        // Migration owns the original journal exclusively. A still-retained
+        // opaque repair frame must not be silently detached from its writer.
+        let journal = match Arc::try_unwrap(journal) {
+            Ok(journal) => journal,
+            Err(journal) => {
+                return Err(MacMigrationRecoveryFailure::transactions(
+                    NativeTransactionError::Conflict,
+                    Self {
+                        binding,
+                        journal,
+                        retained_maintenance,
+                        retained_runtime_update,
+                    },
+                ));
+            }
+        };
         let task = start_resume_validated_host_migration(
             runtime,
             state_dir,
@@ -353,7 +369,7 @@ impl MacMigrationRecovery {
         };
         let transactions = NativeTransactions {
             binding,
-            journal: scope.journal,
+            journal: Arc::new(scope.journal),
             retained_maintenance: None,
             retained_runtime_update: None,
         };
