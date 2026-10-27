@@ -2,7 +2,7 @@
 
 The owner requested a pause, a complete inventory and transfer to a new agent. This commit preserves work in progress. **Stable remains NO-GO.** No release, installation or native acceptance is implied by this checkpoint.
 
-The `develop` checkout at `/home/sid/Developer/Styx` remains the only integration source. This checkpoint preserves the 34 modified and 9 new source files present at pause, plus this note. At that checkpoint no historical worktree was merged, removed, reset or cleaned. The later workspace-only consolidation retired 82 registrations while preserving all original files and refs; see root `WORKSPACE.md`.
+The `develop` checkout at `/home/sid/Developer/Styx` remains the only integration source. This checkpoint preserves the 34 modified and 9 new source files present at pause, plus this note. At that checkpoint no historical worktree was merged, removed, reset or cleaned. The later workspace-only consolidation retired 82 registrations while preserving all original files and refs; see root `WORKSPACE.md`. The owner then approved deleting the redundant original directory copies: 81 were removed, with all 82 verified tar backups retained; one copy remains due to a live executor dependency.
 
 ## Evidence and resume entry
 
