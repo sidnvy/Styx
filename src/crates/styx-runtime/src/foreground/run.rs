@@ -827,10 +827,8 @@ async fn run_owned(
                     device_id: device.clone(),
                     host_generation: generation,
                 });
-                #[cfg(target_os = "windows")]
                 let protocol = protocol.map(|protocol| {
-                    protocol
-                        .with_windows_command_environment(admitted.profile.command_environment())
+                    protocol.with_command_environment(admitted.profile.command_environment())
                 });
                 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
                 let protocol = protocol.and_then(|protocol| {

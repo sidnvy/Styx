@@ -401,7 +401,6 @@ impl LoadedLegacyProfile {
     pub(crate) fn executor_image(&self) -> Option<Arc<PinnedExecutable>> {
         self.executor.clone()
     }
-    #[cfg(target_os = "windows")]
     pub(crate) fn command_environment(&self) -> BTreeMap<String, String> {
         // CODEX_HOME belongs to the supervised executor, not business commands.
         self.environment

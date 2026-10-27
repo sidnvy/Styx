@@ -174,7 +174,6 @@ pub struct HostProtocol<'a> {
     owners: Mutex<OwnerRegistry>,
     paired: bool,
     connection_slot: tokio::sync::Semaphore,
-    #[cfg(target_os = "windows")]
     command_environment: BTreeMap<String, String>,
     #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     browser: Option<browser::BrowserInputs>,
@@ -226,7 +225,6 @@ impl<'a> HostProtocol<'a> {
             owners: Mutex::new(OwnerRegistry::default()),
             paired,
             connection_slot: tokio::sync::Semaphore::new(1),
-            #[cfg(target_os = "windows")]
             command_environment: BTreeMap::new(),
             #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
             browser: None,
@@ -234,25 +232,31 @@ impl<'a> HostProtocol<'a> {
             computer: None,
         })
     }
-    /// Trusted local Windows defaults are resolved BEFORE Core preparation, so
+    /// Trusted local OS defaults are resolved BEFORE Core preparation, so
     /// the operation digest and retained payload include every effective value.
     /// This is bootstrap data, never a post-permit provider environment fallback.
-    #[cfg(target_os = "windows")]
-    pub(crate) fn with_windows_command_environment(
+    pub(crate) fn with_command_environment(
         mut self,
         environment: BTreeMap<String, String>,
     ) -> Self {
         self.command_environment = environment;
         self
     }
-    #[cfg(target_os = "windows")]
     fn command_spec(&self, mut spec: StartProcess) -> Result<StartProcess, ProtocolError> {
+        // Windows variable names are case-insensitive; Unix names are exact.
+        let fold = |key: &str| {
+            if cfg!(target_os = "windows") {
+                key.to_ascii_uppercase()
+            } else {
+                key.to_owned()
+            }
+        };
         let mut names = BTreeSet::new();
         if spec.environment.len() > 64
             || spec.environment.keys().any(|key| {
                 key.is_empty()
                     || !key.bytes().all(|b| b.is_ascii_alphanumeric() || b == b'_')
-                    || !names.insert(key.to_ascii_uppercase())
+                    || !names.insert(fold(key))
             })
         {
             return Err(ProtocolError::InvalidFrame);
@@ -261,7 +265,7 @@ impl<'a> HostProtocol<'a> {
             if let Some(alias) = spec
                 .environment
                 .keys()
-                .find(|name| name.eq_ignore_ascii_case(key))
+                .find(|name| fold(name) == fold(key))
                 .cloned()
             {
                 if spec.environment.get(&alias) != Some(value) {
@@ -561,7 +565,6 @@ impl<'a> HostProtocol<'a> {
                     Ok(v) => v,
                     Err(_) => return invalid(),
                 };
-                #[cfg(target_os = "windows")]
                 let spec = match self.command_spec(spec) {
                     Ok(spec) => spec,
                     Err(_) => return invalid(),
