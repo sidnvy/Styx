@@ -1,6 +1,5 @@
 //! Real private files and a synthetic signed C08; no executable is launched.
 use super::*;
-use base64::Engine as _;
 use ed25519_dalek::{Signer as _, SigningKey, pkcs8::EncodePublicKey as _};
 use std::{
     fs,
