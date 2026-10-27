@@ -30,10 +30,10 @@ impl Drop for State {
         // Only an unresolved typed error is retained until process exit. Normal
         // reports/results drop normally; this is not a successful cleanup or
         // service-transfer receipt. A later App in this process remains busy.
-        if self.retain_until_exit {
-            if let Some(error) = self.retained.take() {
-                std::mem::forget(error);
-            }
+        if self.retain_until_exit
+            && let Some(error) = self.retained.take()
+        {
+            std::mem::forget(error);
         }
     }
 }

@@ -316,13 +316,10 @@ async fn complete_tls_response_is_final_before_connection_tail_but_incomplete_is
         match server.accept(tcp, BUDGET).await {
             Ok(mut tls) => {
                 let mut byte = [0];
-                match tokio::time::timeout(BUDGET, tls.read(&mut byte))
+                tokio::time::timeout(BUDGET, tls.read(&mut byte))
                     .await
                     .unwrap()
-                {
-                    Ok(n) => n,
-                    Err(_) => 0,
-                }
+                    .unwrap_or_default()
             }
             Err(_) => 0,
         }
