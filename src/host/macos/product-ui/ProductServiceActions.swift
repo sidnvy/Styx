@@ -121,9 +121,18 @@ extension ProductModel {
             ? productText("首次启动请求已准备；服务尚未注册。", "The first-start request is prepared; the service is not registered.")
             : productText("已转为后台管理；服务尚未注册。", "Transferred to background management; the service is not registered.")
         case "observed":
-            return nativeService["client"]["os"]["pid"].number == nil
-                ? productText("服务已注册；系统报告未运行。", "The service is registered; the system reports it is not running.")
-                : productText("服务已注册；系统报告运行中。Exec 连接尚未验证。", "The service is registered; the system reports it is running. The Exec connection has not been verified.")
+            let observation = nativeService["client"]["os"]
+            switch observation["status"].string {
+            case "not_installed":
+                return observation["definition_present"] == .bool(true)
+                    ? productText("服务未安装；原服务定义仍在。旧进程结束状态尚未确认。", "The service is not installed; the previous service definition remains. Process settlement has not been confirmed.")
+                    : productText("服务未安装；旧进程结束状态尚未确认。", "The service is not installed. Process settlement has not been confirmed.")
+            case "registered":
+                return observation["registration"]["pid"].number == nil
+                    ? productText("服务已注册；系统报告未运行。", "The service is registered; the system reports it is not running.")
+                    : productText("服务已注册；系统报告运行中。Exec 连接尚未验证。", "The service is registered; the system reports it is running. The Exec connection has not been verified.")
+            default: return productText("后台服务状态尚未确认。", "The background service state has not been confirmed.")
+            }
         default: return productText("后台服务状态尚未确认。", "The background service state has not been confirmed.")
         }
     }
