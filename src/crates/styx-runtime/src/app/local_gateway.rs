@@ -631,6 +631,7 @@ impl HostApp {
             return Err(AppError("app_local_pairing_result_unknown"));
         }
         self.read_configuration().await?;
+        self.native_computer_requested = Some(claimed.computer_requested);
         self.enrollment =
             Some(serde_json::to_value(claimed).map_err(|_| AppError("app_response_invalid"))?);
         self.unknown = false;

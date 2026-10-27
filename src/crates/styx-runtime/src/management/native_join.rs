@@ -25,6 +25,10 @@ pub struct JoinReport {
     pub expires_at: Option<u64>,
     pub service_started: bool,
     pub runtime_health: &'static str,
+    // Original verified seed intent, used only to omit an optional desktop read.
+    // It is never accepted from, or exposed as, a public enrollment DTO.
+    #[serde(skip)]
+    pub(crate) computer_requested: bool,
 }
 #[must_use]
 pub struct JoinError {
@@ -601,6 +605,7 @@ mod platform {
                 expires_at: Some(pending.expires_at),
                 service_started: false,
                 runtime_health: "not_started",
+                computer_requested: self.seed.computer_requested,
             }
         }
     }

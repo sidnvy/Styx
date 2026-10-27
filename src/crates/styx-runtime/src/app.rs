@@ -338,6 +338,8 @@ struct HostApp {
     runtime_selection_file: Option<PathBuf>,
     inspected_join: Option<pairing_link::InspectedLink>,
     enrollment: Option<Value>,
+    // A verified false may disable optional desktop work; it cannot authorize Exec.
+    native_computer_requested: Option<bool>,
     // Retain the exact input writer after any partial publication, too.
     input_writer: Option<ConfigurationWriterGuard>,
     running: Option<RunningHost>,
@@ -379,6 +381,7 @@ impl HostApp {
             runtime_selection_file: selection,
             inspected_join: None,
             enrollment: None,
+            native_computer_requested: None,
             input_writer: None,
             running: None,
             observed,
@@ -413,6 +416,7 @@ impl HostApp {
             if !app.committed_migration {
                 match native_join::inspect_for_app(app.scope.clone()).await {
                     Ok(report) => {
+                        app.native_computer_requested = Some(report.computer_requested);
                         app.enrollment = Some(
                             serde_json::to_value(report)
                                 .map_err(|_| AppError("app_response_invalid"))?,
@@ -701,14 +705,21 @@ impl HostApp {
             if !self.migrated_shared {
                 self.set_desired(NativeRunDesired::Running).await?;
             }
-            let intent_scope = self.scope.clone();
-            let migrated_source = self.committed_migration;
-            let desktop_intent = tokio::task::spawn_blocking(move || {
-                migrated::DesktopIntent::open(intent_scope, migrated_source).ok()
-            })
-            .await
-            .ok()
-            .flatten();
+            let desktop_intent =
+                if !self.committed_migration && self.native_computer_requested == Some(false) {
+                    // The original native seed explicitly declined Computer. Starting
+                    // Exec still loads and verifies its own complete Host profile below.
+                    None
+                } else {
+                    let intent_scope = self.scope.clone();
+                    let migrated_source = self.committed_migration;
+                    tokio::task::spawn_blocking(move || {
+                        migrated::DesktopIntent::open(intent_scope, migrated_source).ok()
+                    })
+                    .await
+                    .ok()
+                    .flatten()
+                };
             // Missing desktop facts disable that optional component;
             // they cannot prevent the independent Exec Host starting.
             let cancel = CancellationToken::new();
@@ -1218,6 +1229,7 @@ impl HostApp {
                         .await
                         .map_err(|e| self.join_error(e))?;
                 self.read_configuration().await?;
+                self.native_computer_requested = Some(report.computer_requested);
                 let value =
                     serde_json::to_value(report).map_err(|_| AppError("app_response_invalid"))?;
                 self.enrollment = Some(value.clone());
@@ -1236,6 +1248,7 @@ impl HostApp {
                     .await
                     .map_err(|e| self.join_error(e))?;
                 self.read_configuration().await?;
+                self.native_computer_requested = Some(report.computer_requested);
                 let value =
                     serde_json::to_value(report).map_err(|_| AppError("app_response_invalid"))?;
                 self.enrollment = Some(value.clone());

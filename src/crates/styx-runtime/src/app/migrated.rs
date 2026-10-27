@@ -125,7 +125,7 @@ impl DesktopIntent {
     pub(super) fn requested(&self) -> bool {
         match self {
             Self::Fresh(p) => {
-                p.revalidate().is_ok() && p.seed().computer_requested && p.ready().computer_approved
+                p.seed().computer_requested && p.ready().computer_approved && p.revalidate().is_ok()
             }
             // Local configuration intent only; the actual Host/Core session performs
             // current remote capability and OS-session/permission checks separately.

@@ -1050,6 +1050,7 @@ impl HostApp {
                 let enrollment = native_join::inspect_for_app(self.scope.clone())
                     .await
                     .map_err(|e| self.join_error(e))?;
+                self.native_computer_requested = Some(enrollment.computer_requested);
                 self.enrollment = Some(
                     serde_json::to_value(enrollment)
                         .map_err(|_| AppError("app_response_invalid"))?,
