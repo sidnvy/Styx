@@ -14,7 +14,7 @@ use std::{collections::BTreeMap, path::Path, sync::Arc, time::Duration};
 use styx_contracts::{
     capability::{Authorization, Availability, CapabilityDescriptor, CapabilityId, Scope},
     error::Recovery,
-    identity::{ConnectionGeneration, DeviceId, HostGeneration, Sha256Digest},
+    identity::{ConnectionGeneration, DeviceId, HostGeneration},
 };
 use styx_core::policy::AdmissionFacts;
 use tokio::{net::TcpStream, sync::mpsc};
@@ -1117,12 +1117,9 @@ enum ConnectionSession<'a> {
 impl ConnectionSession<'_> {
     #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
     async fn drain_browser_inputs(&self) {
-        if let Self::Paired(protocol) = self {
-            #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
-            protocol.drain_browser_inputs().await;
-            #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
-            protocol.drain_computer_inputs().await;
-        }
+        let Self::Paired(protocol) = self;
+        protocol.drain_browser_inputs().await;
+        protocol.drain_computer_inputs().await;
     }
     async fn run_connection_with_readiness(
         &self,

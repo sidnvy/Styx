@@ -486,7 +486,6 @@ fn fixture_adapter(
         limit: 4,
         session_id: "fixture-session".into(),
         provider_id: "fixture-provider".into(),
-        initialization: json!({"sessionId":"fixture-session","environmentInfo":{"providerId":"fixture-provider"}}),
     });
     (adapter, handle, server)
 }

@@ -61,18 +61,6 @@ impl Observation {
         }
     }
 }
-/// Terminal frames share the existing RPC request/response slot budget.
-/// The Arc retains that reservation until the last subscriber/frame releases it.
-pub(crate) struct TerminalFrame {
-    pub text: Arc<str>,
-    pub process_id: String,
-    _permit: tokio::sync::OwnedSemaphorePermit,
-}
-#[derive(Clone)]
-pub(crate) enum TerminalEvent {
-    Frame(Arc<TerminalFrame>),
-    Lost,
-}
 pub(super) struct Rpc {
     _partition: Arc<tokio::sync::OwnedSemaphorePermit>,
     stdin: tokio::sync::Mutex<Option<Box<dyn tokio::io::AsyncWrite + Unpin + Send>>>,
@@ -84,7 +72,6 @@ pub(super) struct Rpc {
     permits: Arc<tokio::sync::Semaphore>,
     observation_limit: usize,
     reader_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
-    terminal: tokio::sync::broadcast::Sender<TerminalEvent>,
 }
 impl Rpc {
     #[cfg(test)]
@@ -129,7 +116,6 @@ impl Rpc {
             permits: Arc::new(tokio::sync::Semaphore::new(MAX_INFLIGHT)),
             observation_limit,
             reader_task: Mutex::new(None),
-            terminal: tokio::sync::broadcast::channel(8).0,
         });
         let weak = Arc::downgrade(&rpc);
         let reader_task = tokio::spawn(async move {
@@ -183,23 +169,6 @@ impl Rpc {
                     .get_mut(id)
                 {
                     observation.notice(method, params);
-                    if self.terminal.receiver_count() > 0 {
-                        if observation.invalid {
-                            let _ = self.terminal.send(TerminalEvent::Lost);
-                        } else if let Ok(permit) = self.permits.clone().try_acquire_owned() {
-                            let _ =
-                                self.terminal
-                                    .send(TerminalEvent::Frame(Arc::new(TerminalFrame {
-                                        text: Arc::from(line),
-                                        process_id: id.to_owned(),
-                                        _permit: permit,
-                                    })));
-                        } else {
-                            // Only the subscribed legacy generation is failed;
-                            // never poison unrelated v2/v3 RPC work to free bytes.
-                            let _ = self.terminal.send(TerminalEvent::Lost);
-                        }
-                    }
                 }
             }
             return Ok(());
@@ -235,16 +204,6 @@ impl Rpc {
         });
         Ok(())
     }
-    pub(super) fn subscribe_terminal(&self) -> tokio::sync::broadcast::Receiver<TerminalEvent> {
-        // Subscribe before reading liveness: fail() either observes this receiver,
-        // or this Acquire observes the earlier closure. No dead executor may
-        // look ready merely because its old Lost notification had no listener.
-        let receiver = self.terminal.subscribe();
-        if self.closed.load(Ordering::Acquire) {
-            let _ = self.terminal.send(TerminalEvent::Lost);
-        }
-        receiver
-    }
     pub fn register(&self, id: &str) -> Result<(), ExecError> {
         let mut observations = self.observations.lock().expect("observation mutex");
         if observations.len() >= self.observation_limit || observations.contains_key(id) {
@@ -271,9 +230,6 @@ impl Rpc {
             return;
         }
         self.permits.close();
-        if self.terminal.receiver_count() > 0 {
-            let _ = self.terminal.send(TerminalEvent::Lost);
-        }
         for (_, pending) in self.pending.lock().expect("pending mutex").drain() {
             let _ = pending.reply.send(BudgetedReply {
                 result: Err(error.clone()),
@@ -503,9 +459,9 @@ mod tests {
         observer.await.unwrap();
     }
     /// Actual owned Tokio I/O EOF, not a synthesized executor result. This
-    /// proves subscription transport fencing, not a native-executor crash journey.
+    /// proves transport fencing, not a native-executor crash journey.
     #[tokio::test]
-    async fn real_io_eof_is_lost_for_later_legacy_subscribers() {
+    async fn real_io_eof_closes_rpc_and_releases_permits() {
         let (rpc, server) = pair(Duration::from_millis(100));
         // There is deliberately no subscriber when EOF first occurs.
         drop(server);
@@ -520,21 +476,6 @@ mod tests {
             .unwrap()
             .unwrap();
         assert!(rpc.closed.load(Ordering::Acquire));
-        let mut subscription = rpc.subscribe_terminal();
-        assert!(matches!(
-            tokio::time::timeout(Duration::from_millis(100), subscription.recv())
-                .await
-                .unwrap(),
-            Ok(TerminalEvent::Lost)
-        ));
-        drop(subscription);
-        let mut reconnect = rpc.subscribe_terminal();
-        assert!(matches!(
-            tokio::time::timeout(Duration::from_millis(100), reconnect.recv())
-                .await
-                .unwrap(),
-            Ok(TerminalEvent::Lost)
-        ));
         assert_eq!(
             rpc.request("initialize", json!({})).await.unwrap_err(),
             ExecError::NotSent

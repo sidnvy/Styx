@@ -363,11 +363,7 @@ impl LoadedLegacyProfile {
             .pin_worker(NativeExternalWorker::BrowserNode22)
             .map_err(|_| ProfileError::UntrustedRelease)
     }
-    /// Only the original publisher-verified, active-manifest exact member can
-    /// mint this pin. It is neither an OS permission nor Core dispatch grant.
-    /// Call on a bounded blocking worker: original closure revalidation hashes
-    /// signed bytes; no executable, subprocess or GUI is started here.
-    #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+    #[cfg(target_os = "macos")]
     pub(crate) fn computer_enabled(&self) -> Result<bool, ProfileError> {
         self.revalidate_control()?;
         computer_selected(
@@ -859,13 +855,9 @@ fn load_source_inner(
         return Err(ProfileError::Invalid);
     }
     let canonical = capture.read(state_dir, "state.json", JSON_LIMIT)?;
-    let legacy_source = match &source {
-        _ => canonical.as_slice(),
-    };
+    let legacy_source = canonical.as_slice();
     let state: LegacyState = decode(legacy_source)?;
-    let original_history_only = match &source {
-        _ => false,
-    };
+    let original_history_only = false;
     if state.schema != 1
         || state.mode != deployment.mode
         || state.config_sha256 != Sha256Digest::of_bytes(&deployment_raw)
@@ -1020,15 +1012,12 @@ fn load_source_inner(
     // The preserved active pointer remains an observed original input. After
     // migration it never selects workers; only the committed canonical selection
     // and a fresh C08 verification may do that.
-    let inventory = match &source {
-        _ => {
-            let inventory =
-                release::load(&mut capture, &root, &active, base, &publisher, &expected)?;
-            if inventory.runtime_format() != expected_format {
-                return Err(ProfileError::UntrustedRelease);
-            }
-            inventory
+    let inventory = {
+        let inventory = release::load(&mut capture, &root, &active, base, &publisher, &expected)?;
+        if inventory.runtime_format() != expected_format {
+            return Err(ProfileError::UntrustedRelease);
         }
+        inventory
     };
     let exec_enabled = host.exec.as_ref().is_some_and(|exec| exec.enabled);
     if matches!(mode, GatewayWireMode::Legacy) && !exec_enabled {

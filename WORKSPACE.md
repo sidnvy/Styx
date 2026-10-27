@@ -21,4 +21,4 @@ Product work now follows `src/docs/rust-core-rewrite/REDUCED-SCOPE.md`; its sequ
 
 Existing evidence, Rust toolchain and Cargo caches referenced by the handoff retain their established paths. Do not rebuild, move signed installations, change identity/pairing, or replay unknown operations merely because the source directory moved.
 
-Active lease (2026-10-27): `/home/sid/Developer/worktrees/Styx/codex-store-legacy-removal`, branch `codex/store-legacy-removal`, owner: Claude session driving REDUCED-SCOPE step 1, worker: Codex. Paths: `src/crates/styx-runtime/src`, `src/crates/styx/src` only. Purpose: remove legacy handoff/cutover/committed-migration store code. Retirement: diff reviewed and merged into develop, then worktree and branch removed. (The earlier `codex-native-ui-migration-removal` lease was merged as 197351d and retired.)
+No active Codex worktree leases. The 2026-10-27 leases `codex-native-ui-migration-removal` (197351d) and `codex-store-legacy-removal` were merged into develop and retired.
