@@ -104,4 +104,20 @@ fn payload_inventory_stream_pin_and_replacement_alias_budget_negatives() {
     let final_inventory = root.payload_inventory(PayloadLimits::default()).unwrap();
     assert_eq!(final_inventory.members().len(), 1);
     final_inventory.revalidate().unwrap();
+    // A recorded digest is reused only while the file's metadata is unchanged.
+    let member = &final_inventory.members()[0];
+    let recorded = Sha256Digest::of_bytes(b"recorded at an earlier full check");
+    let mut known = KnownDigests::new();
+    known.insert(member.path.clone(), (member.observation.clone(), recorded));
+    let reused = root
+        .payload_inventory_with_known(PayloadLimits::default(), &known)
+        .unwrap();
+    assert_eq!(reused.members()[0].sha256, recorded);
+    let mut stale = member.observation.clone();
+    stale.changed_nanoseconds += 1;
+    known.insert(member.path.clone(), (stale, recorded));
+    let rehashed = root
+        .payload_inventory_with_known(PayloadLimits::default(), &known)
+        .unwrap();
+    assert_eq!(rehashed.members()[0].sha256, member.sha256);
 }

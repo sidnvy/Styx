@@ -1,6 +1,8 @@
 //! Bounded protected Windows payload closure. No mutable pathname execution.
 use super::*;
-use crate::store::payload::{PayloadInventory, PayloadLimits, PayloadMember};
+use crate::store::payload::{
+    KnownDigests, PayloadInventory, PayloadLimits, PayloadMember, known_digest,
+};
 use std::{
     collections::{BTreeMap, BTreeSet},
     os::windows::fs::FileExt,
@@ -122,6 +124,7 @@ impl Root {
     fn collect_payload(
         &self,
         limits: PayloadLimits,
+        known: &KnownDigests,
     ) -> Result<(BTreeMap<PathBuf, Observed>, Vec<PayloadMember>)> {
         self.validate_root()?;
         limits.validate()?;
@@ -137,6 +140,7 @@ impl Root {
             &mut members,
             &mut total,
             &mut directories,
+            known,
         )?;
         members.sort_by(|a, b| a.path.cmp(&b.path));
         self.validate_root()?;
@@ -145,8 +149,9 @@ impl Root {
     pub(in crate::store) fn payload_inventory(
         &self,
         limits: PayloadLimits,
+        known: &KnownDigests,
     ) -> Result<PayloadInventory> {
-        let (observed, members) = self.collect_payload(limits)?;
+        let (observed, members) = self.collect_payload(limits, known)?;
         let inner = PayloadSnapshot {
             root: self.clone(),
             observed,
@@ -165,6 +170,7 @@ impl Root {
         members: &mut Vec<PayloadMember>,
         total: &mut u64,
         directories: &mut usize,
+        known: &KnownDigests,
     ) -> Result<()> {
         if depth > limits.max_depth || *directories >= limits.max_directories {
             return Err(StoreError::TooLarge);
@@ -190,6 +196,7 @@ impl Root {
                     members,
                     total,
                     directories,
+                    known,
                 )?;
             } else {
                 if members.len() >= limits.max_files {
@@ -204,7 +211,10 @@ impl Root {
                 if *total > limits.max_total_bytes {
                     return Err(StoreError::TooLarge);
                 }
-                let digest = stream_hash(&opened.file, size)?;
+                let digest = match known_digest(known, &path, &facts.facts.observation) {
+                    Some(digest) => digest,
+                    None => stream_hash(&opened.file, size)?,
+                };
                 let current = self.open_relative(&path, false, false, false)?;
                 if !same(&facts, &observe(&opened, false)?)
                     || !same(&facts, &observe(&current, false)?)
@@ -217,6 +227,7 @@ impl Root {
                     bytes: size,
                     sha256: digest,
                     executable: facts.executable,
+                    observation: facts.facts.observation.clone(),
                 });
                 observed.insert(path, facts);
             }
@@ -235,7 +246,17 @@ impl Root {
 }
 impl PayloadSnapshot {
     pub(in crate::store) fn revalidate(&self) -> Result<()> {
-        let (actual, _) = self.root.collect_payload(self.limits)?;
+        // Unchanged file metadata reuses this snapshot's own digests; only a
+        // changed file is read again. Any difference is still refused below.
+        let known: KnownDigests = self
+            .observed
+            .iter()
+            .filter_map(|(path, seen)| {
+                seen.sha256
+                    .map(|digest| (path.clone(), (seen.facts.observation.clone(), digest)))
+            })
+            .collect();
+        let (actual, _) = self.root.collect_payload(self.limits, &known)?;
         if actual != self.observed {
             return Err(StoreError::Changed);
         }
@@ -346,12 +367,11 @@ impl PinnedImage {
         let current = self
             .root
             .open_relative(&self.relative, false, false, false)?;
+        // The retained handle denies write sharing, so the bytes hashed when this
+        // image was pinned cannot change while it is held; metadata suffices.
         if !same(&self.observed, &observe(&self.opened, false)?)
             || !same(&self.observed, &observe(&current, false)?)
-            || Some(stream_hash(
-                &self.opened.file,
-                self.observed.facts.observation.byte_len,
-            )?) != self.observed.sha256
+            || self.observed.sha256.is_none()
         {
             return Err(StoreError::Changed);
         }
@@ -457,7 +477,9 @@ mod batch_tests {
             }
             let replacement = container.join("replacement.txt");
             private_copy(&member, &replacement);
-            let inventory = root.payload_inventory(PayloadLimits::default()).unwrap();
+            let inventory = root
+                .payload_inventory(PayloadLimits::default(), &crate::store::KnownDigests::new())
+                .unwrap();
             let paths = [Path::new("bin/one.exe"), Path::new("bin/two.exe")];
             let pins = inventory.pin_executables(&paths).unwrap();
             assert_eq!(pins[0].source_path_for_suspended_spawn().unwrap(), one);

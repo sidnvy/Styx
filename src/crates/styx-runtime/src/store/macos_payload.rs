@@ -3,7 +3,9 @@
 #[path = "macos_signed_app.rs"]
 pub(in crate::store) mod signed_app;
 use super::*;
-use crate::store::payload::{PayloadInventory, PayloadLimits, PayloadMember};
+use crate::store::payload::{
+    KnownDigests, PayloadInventory, PayloadLimits, PayloadMember, known_digest,
+};
 use nix::dir::Dir;
 use std::{collections::BTreeMap, os::unix::ffi::OsStringExt};
 use styx_contracts::identity::Sha256Digest;
@@ -87,6 +89,7 @@ impl Root {
     pub(in crate::store) fn payload_inventory(
         &self,
         limits: PayloadLimits,
+        known: &KnownDigests,
     ) -> Result<PayloadInventory> {
         self.validate_root()?;
         let mut observed = BTreeMap::new();
@@ -101,6 +104,7 @@ impl Root {
             &mut members,
             &mut bytes,
             &mut dirs,
+            known,
         )?;
         members.sort_by(|a, b| a.path.cmp(&b.path));
         let inner = PayloadSnapshot {
@@ -120,6 +124,7 @@ impl Root {
         members: &mut Vec<PayloadMember>,
         bytes: &mut u64,
         dirs: &mut usize,
+        known: &KnownDigests,
     ) -> Result<()> {
         if depth > limits.max_depth || *dirs >= limits.max_directories {
             return Err(StoreError::TooLarge);
@@ -159,7 +164,16 @@ impl Root {
                 Mode::empty(),
             )?;
             if file.metadata()?.is_dir() {
-                self.walk_payload(&path, depth + 1, limits, observed, members, bytes, dirs)?;
+                self.walk_payload(
+                    &path,
+                    depth + 1,
+                    limits,
+                    observed,
+                    members,
+                    bytes,
+                    dirs,
+                    known,
+                )?;
                 continue;
             }
             if members.len() >= limits.max_files {
@@ -175,7 +189,10 @@ impl Root {
             if *bytes > limits.max_total_bytes {
                 return Err(StoreError::TooLarge);
             }
-            let digest = stream_hash(&file, facts.facts.byte_len)?;
+            let digest = match known_digest(known, &path, &facts.facts) {
+                Some(digest) => digest,
+                None => stream_hash(&file, facts.facts.byte_len)?,
+            };
             if !same(&facts, &observe(&file, false)?)
                 || !same(&facts, &observe(&child(self, &path, false)?, false)?)
             {
@@ -187,6 +204,7 @@ impl Root {
                 bytes: facts.facts.byte_len,
                 sha256: digest,
                 executable: facts.executable,
+                observation: facts.facts.clone(),
             });
             observed.insert(path, facts);
         }

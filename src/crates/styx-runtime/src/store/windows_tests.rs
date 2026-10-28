@@ -195,7 +195,7 @@ fn windows_owned_root_leases_acl_alias_and_pe_pin() {
         ..PayloadLimits::default()
     };
     assert!(matches!(
-        root.payload_inventory(limits),
+        root.payload_inventory(limits, &crate::store::KnownDigests::new()),
         Err(StoreError::TooLarge)
     ));
     let alias = path.join("alias.json");
@@ -218,7 +218,9 @@ fn windows_owned_root_leases_acl_alias_and_pe_pin() {
     std::fs::create_dir(path.join("bin")).unwrap();
     let image = path.join("bin/owned-fixture.exe");
     std::fs::copy(std::env::current_exe().unwrap(), &image).unwrap();
-    let inventory = root.payload_inventory(PayloadLimits::default()).unwrap();
+    let inventory = root
+        .payload_inventory(PayloadLimits::default(), &crate::store::KnownDigests::new())
+        .unwrap();
     let pin = inventory
         .pin_executable(Path::new("bin/owned-fixture.exe"))
         .unwrap();

@@ -47,6 +47,21 @@ pub struct PayloadMember {
     pub bytes: u64,
     pub sha256: Sha256Digest,
     pub executable: bool,
+    pub observation: FileObservation,
+}
+/// Digests from an earlier full read, keyed by member path. A digest is reused
+/// only while the file's device, inode, size, mtime and ctime are unchanged;
+/// any other file is read and hashed again.
+pub type KnownDigests = std::collections::BTreeMap<PathBuf, (FileObservation, Sha256Digest)>;
+pub(super) fn known_digest(
+    known: &KnownDigests,
+    path: &Path,
+    facts: &FileObservation,
+) -> Option<Sha256Digest> {
+    known
+        .get(path)
+        .filter(|(seen, _)| seen == facts)
+        .map(|(_, digest)| *digest)
 }
 /// Holds the original directory descriptor; revalidation never adopts a replaced
 /// tree. This is a detected-change observation, not an atomic filesystem snapshot.
@@ -169,13 +184,21 @@ impl PrivateRoot {
     }
 
     pub fn payload_inventory(&self, limits: PayloadLimits) -> Result<PayloadInventory> {
+        self.payload_inventory_with_known(limits, &KnownDigests::new())
+    }
+    pub fn payload_inventory_with_known(
+        &self,
+        limits: PayloadLimits,
+        known: &KnownDigests,
+    ) -> Result<PayloadInventory> {
         limits.validate()?;
         #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
         {
-            self.inner.payload_inventory(limits)
+            self.inner.payload_inventory(limits, known)
         }
         #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
         {
+            let _ = known;
             Err(StoreError::Unsupported)
         }
     }

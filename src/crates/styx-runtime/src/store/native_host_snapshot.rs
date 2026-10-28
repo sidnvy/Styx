@@ -442,7 +442,7 @@ impl NativeHostSnapshot {
                 candidate
             }
             None => Arc::new(
-                crate::release::verify_selected(&current_selection)
+                crate::release::verify_selected_cached(&current_selection, path)
                     .map_err(|_| JournalError::Conflict)?,
             ),
         };

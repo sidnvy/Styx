@@ -31,7 +31,9 @@ fn macos_payload_inventory_identity_acl_and_bounds_native() {
     std::fs::set_permissions(&image, std::fs::Permissions::from_mode(0o700)).unwrap();
     file(&path.join("manifest.json"), b"{\"fixture\":true}\n", 0o600);
     let root = Root::open(&path).unwrap();
-    let inventory = root.payload_inventory(PayloadLimits::default()).unwrap();
+    let inventory = root
+        .payload_inventory(PayloadLimits::default(), &crate::store::KnownDigests::new())
+        .unwrap();
     assert_eq!(inventory.members.len(), 2);
     let wanted = inventory
         .members
@@ -54,22 +56,25 @@ fn macos_payload_inventory_identity_acl_and_bounds_native() {
     let mut limits = PayloadLimits::default();
     limits.max_files = 1;
     assert!(matches!(
-        root.payload_inventory(limits),
+        root.payload_inventory(limits, &crate::store::KnownDigests::new()),
         Err(StoreError::TooLarge)
     ));
     let mut limits = PayloadLimits::default();
     limits.max_file_bytes = source_before.len() - 1;
     assert!(matches!(
-        root.payload_inventory(limits),
+        root.payload_inventory(limits, &crate::store::KnownDigests::new()),
         Err(StoreError::TooLarge)
     ));
 
     symlink("bin/codex", path.join("alias")).unwrap();
-    assert!(root.payload_inventory(PayloadLimits::default()).is_err());
+    assert!(
+        root.payload_inventory(PayloadLimits::default(), &crate::store::KnownDigests::new())
+            .is_err()
+    );
     std::fs::remove_file(path.join("alias")).unwrap();
     std::fs::hard_link(&image, path.join("alias")).unwrap();
     assert!(matches!(
-        root.payload_inventory(PayloadLimits::default()),
+        root.payload_inventory(PayloadLimits::default(), &crate::store::KnownDigests::new()),
         Err(StoreError::NotRegularFile)
     ));
     std::fs::remove_file(path.join("alias")).unwrap();
@@ -85,7 +90,7 @@ fn macos_payload_inventory_identity_acl_and_bounds_native() {
         .unwrap();
     assert!(status.success());
     assert!(matches!(
-        root.payload_inventory(PayloadLimits::default()),
+        root.payload_inventory(PayloadLimits::default(), &crate::store::KnownDigests::new()),
         Err(StoreError::NotPrivate)
     ));
     assert!(
@@ -97,7 +102,9 @@ fn macos_payload_inventory_identity_acl_and_bounds_native() {
             .success()
     );
 
-    let fresh = root.payload_inventory(PayloadLimits::default()).unwrap();
+    let fresh = root
+        .payload_inventory(PayloadLimits::default(), &crate::store::KnownDigests::new())
+        .unwrap();
     let held = fresh.inner.pin_executable(Path::new("bin/codex")).unwrap();
     std::fs::rename(&image, path.join("original-held")).unwrap();
     std::fs::copy(path.join("original-held"), &image).unwrap();
@@ -108,7 +115,9 @@ fn macos_payload_inventory_identity_acl_and_bounds_native() {
     std::fs::rename(path.join("original-held"), &image).unwrap();
 
     file(&path.join("bin/script"), b"#!/bin/sh\nexit 0\n", 0o700);
-    let typed = root.payload_inventory(PayloadLimits::default()).unwrap();
+    let typed = root
+        .payload_inventory(PayloadLimits::default(), &crate::store::KnownDigests::new())
+        .unwrap();
     assert!(typed.inner.pin_executable(Path::new("bin/script")).is_err());
     std::fs::remove_file(path.join("bin/script")).unwrap();
     directory(&path.join("deeper"));
@@ -116,7 +125,7 @@ fn macos_payload_inventory_identity_acl_and_bounds_native() {
     let mut limits = PayloadLimits::default();
     limits.max_depth = 1;
     assert!(matches!(
-        root.payload_inventory(limits),
+        root.payload_inventory(limits, &crate::store::KnownDigests::new()),
         Err(StoreError::TooLarge)
     ));
     let source_after = native.metadata().unwrap();

@@ -40,7 +40,7 @@ mod release_stage;
 ))]
 pub(crate) use release_stage::{ReleaseCopyMember, ReleaseStage};
 mod payload;
-pub use payload::{PayloadInventory, PayloadLimits, PayloadMember, PinnedExecutable};
+pub use payload::{KnownDigests, PayloadInventory, PayloadLimits, PayloadMember, PinnedExecutable};
 
 use serde::{
     Serialize,
