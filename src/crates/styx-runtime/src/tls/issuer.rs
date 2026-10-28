@@ -205,6 +205,28 @@ pub(crate) fn issue_server_leaf(
     original_origin: &str,
     trusted_now_unix: u64,
 ) -> Result<IssuedGatewayEndpoint, IssuerError> {
+    issue_server_leaf_with_lan(
+        ca_pem,
+        ca_key,
+        expected_anchor,
+        original_origin,
+        None,
+        trusted_now_unix,
+    )
+}
+
+pub(crate) fn issue_server_leaf_with_lan(
+    ca_pem: &[u8],
+    ca_key: &PrivateKeyPem,
+    expected_anchor: &TrustAnchorPin,
+    original_origin: &str,
+    lan_address: Option<IpAddr>,
+    trusted_now_unix: u64,
+) -> Result<IssuedGatewayEndpoint, IssuerError> {
+    if let Some(address) = lan_address {
+        crate::gateway::auth::lan_address(true, Some(&address.to_string()))
+            .map_err(|_| IssuerError::InvalidOrigin)?;
+    }
     let certificates = certificate_chain(ca_pem).map_err(|_| IssuerError::InvalidMaterial)?;
     if certificates.len() != 1 {
         return Err(IssuerError::InvalidMaterial);
@@ -315,6 +337,14 @@ pub(crate) fn issue_server_leaf(
         .distinguished_name
         .push(DnType::CommonName, "Styx Gateway endpoint");
     params.subject_alt_names = vec![san];
+    if let Some(address) = lan_address {
+        for ip in ["127.0.0.1".parse().expect("fixed loopback"), address] {
+            let san = SanType::IpAddress(ip);
+            if !params.subject_alt_names.contains(&san) {
+                params.subject_alt_names.push(san);
+            }
+        }
+    }
     params.is_ca = IsCa::ExplicitNoCa;
     params.key_usages = vec![KeyUsagePurpose::DigitalSignature];
     params.extended_key_usages = vec![ExtendedKeyUsagePurpose::ServerAuth];

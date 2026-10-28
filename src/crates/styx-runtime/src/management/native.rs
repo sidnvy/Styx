@@ -716,6 +716,7 @@ mod platform {
                     || deployment.gateway.openssl.is_some()
                     || deployment.gateway.openssl_config.is_some()
                     || deployment.gateway.allow_remote_hosts.is_some()
+                    || deployment.gateway.lan_address.is_some()
                     || deployment.pairing_mode.as_deref() == Some("owner-local"))
             || deployment
                 .pairing_mode
@@ -729,6 +730,13 @@ mod platform {
                 .is_some_and(|ingress| ingress.schema != 1)
         {
             return Err(NativeManagementError::new(ErrorKind::Invalid));
+        }
+        if local {
+            crate::gateway::auth::lan_address(
+                deployment.gateway.allow_remote_hosts.unwrap_or(false),
+                deployment.gateway.lan_address.as_deref(),
+            )
+            .map_err(|_| NativeManagementError::new(ErrorKind::Invalid))?;
         }
         let url = url::Url::parse(&deployment.gateway.url)
             .map_err(|_| NativeManagementError::new(ErrorKind::Invalid))?;

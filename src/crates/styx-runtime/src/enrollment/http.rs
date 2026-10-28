@@ -177,6 +177,9 @@ impl EnrollmentHttp {
         slot: Arc<OwnedSemaphorePermit>,
     ) -> Response<BoxBody<Bytes, Infallible>> {
         if request.uri().path().starts_with("/styx/host/") {
+            if !listener_headers(request.headers(), &self.allowed_hosts, false) {
+                return failure(403, "host_or_origin_not_allowed", true).map(BodyExt::boxed);
+            }
             return match &self.relay {
                 Some(relay) => relay.upgrade(request, slot).await.map(BodyExt::boxed),
                 None => failure(404, "not_found", true).map(BodyExt::boxed),
@@ -188,6 +191,35 @@ impl EnrollmentHttp {
             return mcp(request).await;
         }
         self.handle(request).await.map(BodyExt::boxed)
+    }
+    /// Separate route table: no MCP or administrator dispatcher is reachable
+    /// from this listener, even with a valid model/admin bearer.
+    async fn route_lan(
+        self: Arc<Self>,
+        request: Request<hyper::body::Incoming>,
+        slot: Arc<OwnedSemaphorePermit>,
+        host: &str,
+    ) -> Response<BoxBody<Bytes, Infallible>> {
+        match lan_route(request.uri().path()) {
+            Some(LanRoute::HostLink) => {
+                if !listener_headers(request.headers(), &BTreeSet::from([host.to_owned()]), true) {
+                    return failure(403, "host_or_origin_not_allowed", true).map(BodyExt::boxed);
+                }
+                match &self.relay {
+                    Some(relay) => relay.upgrade(request, slot).await.map(BodyExt::boxed),
+                    None => failure(404, "not_found", true).map(BodyExt::boxed),
+                }
+            }
+            Some(LanRoute::Enrollment) => {
+                if !listener_headers(request.headers(), &BTreeSet::from([host.to_owned()]), true) {
+                    return failure(403, "host_or_origin_not_allowed", true).map(BodyExt::boxed);
+                }
+                self.handle_for_hosts(request, &BTreeSet::from([host.to_owned()]), true)
+                    .await
+                    .map(BodyExt::boxed)
+            }
+            None => failure(404, "not_found", true).map(BodyExt::boxed),
+        }
     }
     /// Test-only same-state observation/admission seam; never an HTTP route.
     #[cfg(all(test, target_os = "linux", target_env = "gnu"))]
@@ -211,6 +243,15 @@ impl EnrollmentHttp {
         *workers = active;
     }
     async fn handle(self: Arc<Self>, request: Request<hyper::body::Incoming>) -> HttpResponse {
+        let hosts = self.allowed_hosts.clone();
+        self.handle_for_hosts(request, &hosts, false).await
+    }
+    async fn handle_for_hosts(
+        self: Arc<Self>,
+        request: Request<hyper::body::Incoming>,
+        hosts: &BTreeSet<String>,
+        allow_origin: bool,
+    ) -> HttpResponse {
         let (parts, body) = request.into_parts();
         if parts.uri.query().is_some()
             || parts.uri.scheme().is_some()
@@ -230,9 +271,7 @@ impl EnrollmentHttp {
             }
             _ => {}
         }
-        if parts.headers.contains_key(http::header::ORIGIN)
-            || parts.headers.get_all(http::header::HOST).iter().count() != 1
-        {
+        if !listener_headers(&parts.headers, hosts, allow_origin) {
             return failure(403, "host_or_origin_not_allowed", true);
         }
         let host = match parts
@@ -240,7 +279,7 @@ impl EnrollmentHttp {
             .get(http::header::HOST)
             .and_then(|v| v.to_str().ok())
         {
-            Some(host) if self.allowed_hosts.contains(host) => host.to_owned(),
+            Some(host) if hosts.contains(host) => host.to_owned(),
             _ => return failure(403, "host_or_origin_not_allowed", true),
         };
         let pairing = PairingContext {
@@ -341,6 +380,31 @@ impl EnrollmentHttp {
         listener: TcpListener,
         cancel: CancellationToken,
     ) -> Result<ShutdownFacts, HttpError> {
+        self.run_with_lan(listener, None, cancel).await
+    }
+    /// Both listeners share capacities, the enrollment writer and relay. Their
+    /// connections join before that shared service or relay is closed.
+    pub(crate) async fn run_with_lan(
+        self: Arc<Self>,
+        listener: TcpListener,
+        lan: Option<(TcpListener, String)>,
+        cancel: CancellationToken,
+    ) -> Result<ShutdownFacts, HttpError> {
+        if let Some((lan_listener, host)) = &lan {
+            let address = lan_listener
+                .local_addr()
+                .map_err(|_| HttpError::Configuration)?;
+            if address.to_string() != *host
+                || listener
+                    .local_addr()
+                    .map_err(|_| HttpError::Configuration)?
+                    .port()
+                    != address.port()
+                || crate::gateway::auth::lan_address(true, Some(&address.ip().to_string())).is_err()
+            {
+                return Err(HttpError::Configuration);
+            }
+        }
         if self.run_once.swap(true, Ordering::AcqRel) {
             return Err(HttpError::AlreadyRun);
         }
@@ -352,7 +416,16 @@ impl EnrollmentHttp {
                     self.worker_failure.store(true, Ordering::Release);
                 }
             }
-            let accepted = tokio::select! { _ = cancel.cancelled() => break, accepted = listener.accept() => accepted };
+            let (accepted, lan_host) = tokio::select! {
+                _ = cancel.cancelled() => break,
+                accepted = listener.accept() => (accepted, None),
+                accepted = async {
+                    match &lan {
+                        Some((listener, host)) => (listener.accept().await, Some(host.clone())),
+                        None => std::future::pending().await,
+                    }
+                } => accepted,
+            };
             let (tcp, _) = match accepted {
                 Ok(value) => value,
                 Err(_) => {
@@ -370,7 +443,17 @@ impl EnrollmentHttp {
             connections.spawn(async move {
                 let slot = Arc::new(slot);
                 let tls = tokio::select! { _ = stop.cancelled() => return, result = app.tls.accept(tcp, IO_TIMEOUT) => match result { Ok(tls) => tls, Err(_) => return } };
-                let service = hyper::service::service_fn(move |request| { let app=app.clone(); let slot=slot.clone(); async move { Ok::<_, Infallible>(app.route(request,slot).await) } });
+                let service = hyper::service::service_fn(move |request| {
+                    let app = app.clone();
+                    let slot = slot.clone();
+                    let lan_host = lan_host.clone();
+                    async move {
+                        Ok::<_, Infallible>(match lan_host {
+                            Some(host) => app.route_lan(request, slot, &host).await,
+                            None => app.route(request, slot).await,
+                        })
+                    }
+                });
                 let mut builder = hyper::server::conn::http1::Builder::new();
                 builder.max_headers(64).max_buf_size(16*1024).header_read_timeout(IO_TIMEOUT).timer(hyper_util::rt::TokioTimer::new());
                 let connection = builder.serve_connection(hyper_util::rt::TokioIo::new(tls), service).with_upgrades();
@@ -395,6 +478,7 @@ impl EnrollmentHttp {
             });
         }
         drop(listener);
+        drop(lan);
         let mut joined = true;
         while let Some(result) = connections.join_next().await {
             joined &= result.is_ok();
@@ -460,6 +544,48 @@ impl EnrollmentHttp {
             mcp_lifecycle_jobs_joined: None,
             sdk_detached_tasks_joined: None,
         }
+    }
+}
+fn listener_headers(
+    headers: &http::HeaderMap,
+    hosts: &BTreeSet<String>,
+    allow_origin: bool,
+) -> bool {
+    if headers.get_all(http::header::HOST).iter().count() != 1
+        || headers.get_all(http::header::ORIGIN).iter().count() > 1
+        || headers.contains_key("x-styx-tunnel-context")
+    {
+        return false;
+    }
+    let Some(host) = headers
+        .get(http::header::HOST)
+        .and_then(|v| v.to_str().ok())
+    else {
+        return false;
+    };
+    hosts.contains(host)
+        && headers.get(http::header::ORIGIN).is_none_or(|origin| {
+            allow_origin
+                && origin
+                    .to_str()
+                    .is_ok_and(|origin| origin == format!("https://{host}"))
+        })
+}
+#[derive(Debug, PartialEq, Eq)]
+enum LanRoute {
+    Enrollment,
+    HostLink,
+}
+fn lan_route(path: &str) -> Option<LanRoute> {
+    match path {
+        "/styx/enroll/join" | "/styx/enroll/claim" | "/styx/enroll/confirm" => {
+            Some(LanRoute::Enrollment)
+        }
+        path if path.starts_with("/styx/enroll/self/") && expected_method(path).is_some() => {
+            Some(LanRoute::Enrollment)
+        }
+        path if path.starts_with("/styx/host/") => Some(LanRoute::HostLink),
+        _ => None,
     }
 }
 fn valid_host(host: &str) -> bool {

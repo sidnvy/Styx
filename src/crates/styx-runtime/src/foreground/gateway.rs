@@ -523,7 +523,7 @@ mod platform {
             JournalBudget::default(),
         )
         .map_err(|_| error("existing_native_enrollment_required"))?;
-        let service = EnrollmentService::recover_existing(
+        let mut service = EnrollmentService::recover_existing(
             journal,
             &runtime.admin_token,
             Sha256Digest::of_bytes(&runtime.model_token),
@@ -531,6 +531,11 @@ mod platform {
             Limits::default(),
         )
         .map_err(|e| error(e.code()))?;
+        if let Some(address) = runtime.lan_address {
+            service
+                .allow_remote_host(address.to_string())
+                .map_err(|e| error(e.code()))?;
+        }
         let lease = runtime
             .root
             .try_execution_lease()
@@ -784,6 +789,19 @@ mod platform {
         let listener = TcpListener::bind(admitted.address)
             .await
             .map_err(|_| error("gateway_listen_failed"))?;
+        let lan_listener = match admitted
+            .fresh
+            .as_ref()
+            .and_then(|runtime| runtime.lan_address)
+        {
+            Some(address) => Some((
+                TcpListener::bind(address)
+                    .await
+                    .map_err(|_| error("gateway_lan_listen_failed"))?,
+                address.to_string(),
+            )),
+            None => None,
+        };
         if let Some(d) = &diagnostic {
             d.mark("prelisten_validate");
         }
@@ -899,7 +917,9 @@ mod platform {
         let keep = admitted.clone();
         let mut server = tokio::spawn(async move {
             let _keep = keep;
-            server_app.run(listener, server_stop).await
+            server_app
+                .run_with_lan(listener, lan_listener, server_stop)
+                .await
         });
         if let Some(d) = &diagnostic {
             d.mark("listening");

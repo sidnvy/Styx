@@ -15,6 +15,69 @@ use tokio::{
 const BUDGET: Duration = Duration::from_secs(3);
 const NONCE: &[u8] = b"owned-issuer-loopback-no-business-authority";
 
+#[test]
+fn gateway_lan_certificate_has_loopback_and_private_ip_sans() {
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let ca = generate_gateway_ca(now, now - 60, now + 2 * 86400).unwrap();
+    let issued = issue_server_leaf_with_lan(
+        &ca.certificate_pem,
+        &ca.private_key,
+        &ca.anchor_pin,
+        "https://127.0.0.1:8795",
+        Some("100.64.1.2".parse().unwrap()),
+        now,
+    )
+    .unwrap();
+    let chain = certificate_chain(&issued.certificate_chain_pem).unwrap();
+    let (_, leaf) = x509_parser::parse_x509_certificate(&chain[0]).unwrap();
+    let sans = leaf.subject_alternative_name().unwrap().unwrap();
+    let ips: Vec<_> = sans
+        .value
+        .general_names
+        .iter()
+        .filter_map(|name| match name {
+            x509_parser::extensions::GeneralName::IPAddress(ip) => Some(*ip),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(ips, vec![&[127, 0, 0, 1][..], &[100, 64, 1, 2][..]]);
+    assert_eq!(chain[1], certificate_chain(&ca.certificate_pem).unwrap()[0]);
+    let local = issue_server_leaf(
+        &ca.certificate_pem,
+        &ca.private_key,
+        &ca.anchor_pin,
+        "https://127.0.0.1:8795",
+        now,
+    )
+    .unwrap();
+    let local_chain = certificate_chain(&local.certificate_chain_pem).unwrap();
+    let (_, local_leaf) = x509_parser::parse_x509_certificate(&local_chain[0]).unwrap();
+    assert_eq!(
+        local_leaf
+            .subject_alternative_name()
+            .unwrap()
+            .unwrap()
+            .value
+            .general_names
+            .len(),
+        1
+    );
+    assert!(
+        issue_server_leaf_with_lan(
+            &ca.certificate_pem,
+            &ca.private_key,
+            &ca.anchor_pin,
+            "https://127.0.0.1:8795",
+            Some("8.8.8.8".parse().unwrap()),
+            now
+        )
+        .is_err()
+    );
+}
+
 fn ca_parameters(now: i64) -> CertificateParams {
     let mut params = CertificateParams::new(vec!["localhost".into(), "127.0.0.1".into()]).unwrap();
     params.is_ca = IsCa::Ca(BasicConstraints::Unconstrained);

@@ -1,6 +1,27 @@
 //! Argument boundaries only. Subprocess/OS effects belong to interop acceptance.
 use super::*;
 #[test]
+fn cli_gateway_invite_origin_is_a_closed_optional_selection() {
+    let base = [
+        "styx",
+        "gateway",
+        "invite",
+        "--state-dir",
+        "/private/gateway",
+        "--invitation-file",
+        "/private/invite",
+        "--authorize",
+        "--json",
+    ];
+    assert!(Cli::try_parse_from(base).is_ok());
+    for origin in ["lan", "loopback"] {
+        assert!(Cli::try_parse_from(base.into_iter().chain(["--origin", origin])).is_ok());
+    }
+    for origin in ["public", "https://192.168.1.2:8795"] {
+        assert!(Cli::try_parse_from(base.into_iter().chain(["--origin", origin])).is_err());
+    }
+}
+#[test]
 fn cli_host_mode_rejects_legacy_gateway_and_raw_credentials() {
     let cli =
         Cli::try_parse_from(["styx", "host", "run", "--state-dir", "/owned/private"]).unwrap();

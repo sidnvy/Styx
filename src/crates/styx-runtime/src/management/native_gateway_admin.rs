@@ -92,6 +92,7 @@ pub struct PendingDevice {
     pub expires_at: u64,
     pub computer_requested: bool,
     pub browser_requested: bool,
+    pub gateway_origin: String,
 }
 pub struct ApprovalSelection {
     pub request_id: String,
@@ -107,6 +108,10 @@ pub struct AdminReport {
     pub operation: &'static str,
     pub state_dir: PathBuf,
     pub operations_replayed: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origins: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub invitation_file: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -133,6 +138,8 @@ impl AdminReport {
             operation,
             state_dir,
             operations_replayed: false,
+            origin: None,
+            origins: None,
             invitation_file: None,
             expires_at: None,
             one_use: None,
@@ -146,19 +153,33 @@ impl AdminReport {
     }
 }
 enum Action {
-    Invite(PathBuf, PathBuf, u64),
+    Invite(PathBuf, PathBuf, u64, Option<InvitationOrigin>),
     Pending(PathBuf),
     Approve(PathBuf, ApprovalSelection),
+}
+#[derive(Clone, Copy)]
+pub enum InvitationOrigin {
+    Loopback,
+    Lan,
 }
 pub async fn invite(
     state_dir: &Path,
     invitation_file: &Path,
     ttl_seconds: u64,
 ) -> Result<AdminReport> {
+    invite_with_origin(state_dir, invitation_file, ttl_seconds, None).await
+}
+pub async fn invite_with_origin(
+    state_dir: &Path,
+    invitation_file: &Path,
+    ttl_seconds: u64,
+    origin: Option<InvitationOrigin>,
+) -> Result<AdminReport> {
     owned(Action::Invite(
         state_dir.into(),
         invitation_file.into(),
         ttl_seconds,
+        origin,
     ))
     .await
 }
@@ -226,6 +247,7 @@ struct Material {
     candidate: VerifiedNativeRelease,
     tls: GatewayClientTls,
     origin: url::Url,
+    origins: Vec<String>,
     leaf: GatewayLeafPin,
     token: Zeroizing<Vec<u8>>,
 }
@@ -376,6 +398,15 @@ impl Material {
         {
             return Err(refused("native_gateway_admin_origin"));
         }
+        let endpoints = super::native_gateway::endpoints(files[2].bytes())
+            .map_err(|_| refused("native_gateway_admin_origin"))?;
+        if endpoints.origin != ready.origin {
+            return Err(refused("native_gateway_admin_origin"));
+        }
+        let mut origins = vec![endpoints.origin.clone()];
+        if let Some(origin) = endpoints.lan_origin() {
+            origins.push(origin);
+        }
         let now = clock_ms()? / 1000;
         if ready.not_before_unix < 0
             || ready.not_after_unix <= ready.not_before_unix
@@ -409,6 +440,7 @@ impl Material {
             candidate,
             tls,
             origin,
+            origins,
             leaf,
             token: bearer,
         };
@@ -543,7 +575,7 @@ struct PendingWire {
 }
 fn pending_body(
     raw: &[u8],
-    origin: &url::Url,
+    origins: &[String],
     leaf: &GatewayLeafPin,
     now: u64,
 ) -> Result<Vec<PendingDevice>> {
@@ -561,7 +593,7 @@ fn pending_body(
     let mut result = Vec::with_capacity(rows.len());
     for row in rows {
         let comparison = PairingComparison {
-            gateway_origin: origin.origin().ascii_serialization(),
+            gateway_origin: row.ingress.origin.clone(),
             certificate_sha256: certificate,
             request_id: row.request_id.clone(),
             device_fingerprint: row.fingerprint,
@@ -570,7 +602,7 @@ fn pending_body(
         .map_err(|_| refused("native_gateway_pending_invalid"))?;
         if !ids.insert(row.request_id.clone())
             || row.expires_at <= now
-            || row.ingress.origin != origin.origin().ascii_serialization()
+            || !origins.contains(&row.ingress.origin)
             || row.ingress.certificate_sha256 != certificate
             || row.comparison_code != comparison
         {
@@ -584,6 +616,7 @@ fn pending_body(
             expires_at: row.expires_at,
             computer_requested: row.computer_requested,
             browser_requested: row.browser_requested,
+            gateway_origin: row.ingress.origin,
         });
     }
     Ok(result)
@@ -616,7 +649,7 @@ async fn read_pending(material: &Material) -> Result<Vec<PendingDevice>> {
     }
     pending_body(
         &response.body,
-        &material.origin,
+        &material.origins,
         &response.leaf_pin,
         clock_ms()?,
     )
@@ -660,7 +693,7 @@ struct Approved {
 }
 async fn perform(action: Action) -> Result<AdminReport> {
     let state_dir = match &action {
-        Action::Invite(p, _, _) | Action::Pending(p) | Action::Approve(p, _) => p.clone(),
+        Action::Invite(p, _, _, _) | Action::Pending(p) | Action::Approve(p, _) => p.clone(),
     };
     let material = blocking(move || Material::open(state_dir)).await?;
     match action {
@@ -671,10 +704,12 @@ async fn perform(action: Action) -> Result<AdminReport> {
             report.pending = Some(rows);
             Ok(report)
         }
-        Action::Invite(path, output, ttl) => {
+        Action::Invite(path, output, ttl, selection) => {
             if !(60..=600).contains(&ttl) {
                 return Err(refused("native_gateway_invitation_ttl"));
             }
+            let origin = invitation_origin(&material.origins, selection)?;
+            let origins = material.origins.clone();
             let (material, output) = blocking(move || {
                 material.validate()?;
                 let output = Output::preflight(output, &material)?;
@@ -710,6 +745,8 @@ async fn perform(action: Action) -> Result<AdminReport> {
             report.invitation_file = Some(destination);
             report.expires_at = Some(expires);
             report.one_use = Some(true);
+            report.origin = Some(origin);
+            report.origins = Some(origins);
             Ok(report)
         }
         Action::Approve(path, selected) => {
@@ -747,6 +784,17 @@ async fn perform(action: Action) -> Result<AdminReport> {
             Ok(report)
         }
     }
+}
+fn invitation_origin(origins: &[String], selected: Option<InvitationOrigin>) -> Result<String> {
+    let index = match selected {
+        Some(InvitationOrigin::Loopback) => 0,
+        Some(InvitationOrigin::Lan) => 1,
+        None => usize::from(origins.len() > 1),
+    };
+    origins
+        .get(index)
+        .cloned()
+        .ok_or_else(|| refused("native_gateway_lan_not_enabled"))
 }
 #[cfg(test)]
 #[path = "native_gateway_admin_tests.rs"]

@@ -1,6 +1,59 @@
 //! Pure admin response/binding contract tests; not platform/TLS acceptance.
 use super::*;
 use serde_json::json;
+
+#[test]
+fn gateway_invitation_reports_lan_by_default_but_keeps_loopback_selectable() {
+    let mut origins = vec!["https://127.0.0.1:22345".into()];
+    assert_eq!(invitation_origin(&origins, None).unwrap(), origins[0]);
+    assert!(invitation_origin(&origins, Some(InvitationOrigin::Lan)).is_err());
+    origins.push("https://100.64.0.2:22345".into());
+    assert_eq!(invitation_origin(&origins, None).unwrap(), origins[1]);
+    assert_eq!(
+        invitation_origin(&origins, Some(InvitationOrigin::Lan)).unwrap(),
+        origins[1]
+    );
+    assert_eq!(
+        invitation_origin(&origins, Some(InvitationOrigin::Loopback)).unwrap(),
+        origins[0]
+    );
+}
+
+#[test]
+fn gateway_lan_pending_compares_actual_ingress_and_rejects_foreign_origins_or_leaves() {
+    let (local, leaf, mut row, mut selected) = fixture();
+    let lan = "https://192.168.1.2:22345".to_owned();
+    let origins = vec![local.origin().ascii_serialization(), lan.clone()];
+    let original_code = row["comparison_code"].clone();
+    row["ingress"]["origin"] = json!(lan);
+    let encode = |row: &serde_json::Value| serde_json::to_vec(&vec![row]).unwrap();
+    assert!(pending_body(&encode(&row), &origins, &leaf, 10_000).is_err());
+    selected.comparison_code = PairingComparison {
+        gateway_origin: lan.clone(),
+        certificate_sha256: Sha256Digest::try_from(leaf.as_hex()).unwrap(),
+        request_id: selected.request_id.clone(),
+        device_fingerprint: selected.fingerprint,
+    }
+    .comparison_code()
+    .unwrap();
+    row["comparison_code"] = json!(selected.comparison_code);
+    assert_ne!(row["comparison_code"], original_code);
+    let rows = pending_body(&encode(&row), &origins, &leaf, 10_000).unwrap();
+    assert_eq!(rows[0].gateway_origin, lan);
+    assert!(approval_body(&rows, &selected).is_ok());
+    assert!(pending_body(&encode(&row), &origins[..1], &leaf, 10_000).is_err());
+    assert!(
+        pending_body(
+            &encode(&row),
+            &origins,
+            &GatewayLeafPin::from_certificate_der(b"other"),
+            10_000
+        )
+        .is_err()
+    );
+    row["ingress"]["origin"] = json!("https://192.168.1.3:22345");
+    assert!(pending_body(&encode(&row), &origins, &leaf, 10_000).is_err());
+}
 fn fixture() -> (
     url::Url,
     GatewayLeafPin,
@@ -37,7 +90,13 @@ fn fixture() -> (
 fn pending_actual_leaf_and_explicit_identity_gate_the_original_approval_body() {
     let (origin, leaf, row, selected) = fixture();
     let raw = serde_json::to_vec(&vec![row.clone()]).expect("fixture");
-    let rows = pending_body(&raw, &origin, &leaf, 10_000).expect("verified pending");
+    let rows = pending_body(
+        &raw,
+        &[origin.origin().ascii_serialization()],
+        &leaf,
+        10_000,
+    )
+    .expect("verified pending");
     let wire = approval_body(&rows, &selected).expect("exact explicit binding");
     assert_eq!(
         serde_json::from_slice::<serde_json::Value>(&wire).expect("wire"),
@@ -45,7 +104,7 @@ fn pending_actual_leaf_and_explicit_identity_gate_the_original_approval_body() {
     );
     let error = pending_body(
         &raw,
-        &origin,
+        &[origin.origin().ascii_serialization()],
         &GatewayLeafPin::from_certificate_der(b"other peer"),
         10_000,
     )
@@ -80,19 +139,27 @@ fn pending_actual_leaf_and_explicit_identity_gate_the_original_approval_body() {
     assert!(
         pending_body(
             &serde_json::to_vec(&vec![row.clone(), row.clone()]).expect("duplicate"),
-            &origin,
+            &[origin.origin().ascii_serialization()],
             &leaf,
             10_000
         )
         .is_err()
     );
-    assert!(pending_body(&raw, &origin, &leaf, 20_000).is_err());
+    assert!(
+        pending_body(
+            &raw,
+            &[origin.origin().ascii_serialization()],
+            &leaf,
+            20_000
+        )
+        .is_err()
+    );
     let mut changed = row;
     changed["ingress"]["origin"] = json!("https://127.0.0.1:22346");
     assert!(
         pending_body(
             &serde_json::to_vec(&vec![changed]).expect("origin change"),
-            &origin,
+            &[origin.origin().ascii_serialization()],
             &leaf,
             10_000
         )

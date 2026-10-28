@@ -9,6 +9,29 @@ use std::collections::BTreeSet;
 use styx_contracts::identity::{OwnerId, Sha256Digest};
 use uuid::Uuid;
 
+/// An explicit LAN bind is limited to private networks and user-run overlays.
+/// Never turn a missing address into a wildcard bind.
+pub(crate) fn lan_address(
+    enabled: bool,
+    address: Option<&str>,
+) -> Result<Option<std::net::Ipv4Addr>, GatewayAuthError> {
+    match (enabled, address) {
+        (false, None) => Ok(None),
+        (true, Some(address)) => {
+            let ip: std::net::Ipv4Addr = address
+                .parse()
+                .map_err(|_| GatewayAuthError::InvalidConfiguration)?;
+            let [a, b, _, _] = ip.octets();
+            if ip.is_private() || (a == 100 && (64..=127).contains(&b)) {
+                Ok(Some(ip))
+            } else {
+                Err(GatewayAuthError::InvalidConfiguration)
+            }
+        }
+        _ => Err(GatewayAuthError::InvalidConfiguration),
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum GatewayAuthError {
     #[error("invalid Gateway admission configuration")]
@@ -186,6 +209,43 @@ impl GatewayBearerPolicy {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn gateway_lan_address_requires_explicit_private_or_overlay_ipv4() {
+        assert_eq!(lan_address(false, None).unwrap(), None);
+        for address in [
+            "10.0.0.1",
+            "172.16.0.1",
+            "172.31.255.254",
+            "192.168.1.2",
+            "100.64.0.1",
+            "100.127.255.254",
+        ] {
+            assert!(
+                lan_address(true, Some(address)).unwrap().is_some(),
+                "{address}"
+            );
+        }
+        for address in [
+            "8.8.8.8",
+            "127.0.0.1",
+            "127.0.0.2",
+            "169.254.1.2",
+            "0.0.0.0",
+            "224.0.0.1",
+            "255.255.255.255",
+            "100.63.255.255",
+            "100.128.0.1",
+            "172.15.255.255",
+            "172.32.0.1",
+            "::1",
+            "localhost",
+            "192.168.1.1/24",
+        ] {
+            assert!(lan_address(true, Some(address)).is_err(), "{address}");
+        }
+        assert!(lan_address(true, None).is_err());
+        assert!(lan_address(false, Some("192.168.1.2")).is_err());
+    }
     fn headers() -> HeaderMap {
         let mut h = HeaderMap::new();
         h.insert(HOST, "localhost:8795".parse().unwrap());

@@ -1382,6 +1382,11 @@ mod platform {
                 "runtimeSelectionFile": "/p/sel.json", "invitationFile": "/p/inv.txt"
             });
             assert!(deployment(valid.to_string().as_bytes()).is_ok());
+            for origin in ["https://192.168.1.2:8443", "https://100.64.1.2:8443"] {
+                let mut remote = valid.clone();
+                remote["gateway"]["url"] = origin.into();
+                assert!(deployment(remote.to_string().as_bytes()).is_ok());
+            }
 
             let mut slash = valid.clone();
             slash["gateway"]["url"] = "https://127.0.0.1:8443/".into();

@@ -16,6 +16,10 @@ pub(crate) struct StartupDiagnostic {
     started: std::time::Instant,
     stage: Arc<std::sync::Mutex<(&'static str, std::time::Instant)>>,
 }
+
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+#[path = "native_gateway_tests.rs"]
+mod tests;
 impl StartupDiagnostic {
     pub(crate) fn from_env() -> Option<Self> {
         (std::env::var_os("STYX_GATEWAY_STARTUP_DIAGNOSTICS").as_deref() == Some(OsStr::new("1")))
@@ -290,7 +294,7 @@ pub(crate) use platform::open_existing_for_service;
     )
 ))]
 pub(crate) use platform::{
-    FreshGatewayRuntime, inspect_pre_invite_for_app, open_existing,
+    FreshGatewayRuntime, endpoints, inspect_pre_invite_for_app, open_existing,
     open_existing_for_app_diagnostic,
 };
 #[cfg(any(
@@ -403,8 +407,19 @@ mod platform {
         listen_host: Option<String>,
         #[serde(default)]
         allow_remote_hosts: bool,
+        lan_address: Option<String>,
     }
-    fn endpoint(deployment: &[u8]) -> Result<(String, SocketAddr), BootstrapError> {
+    pub(crate) struct Endpoints {
+        pub(crate) origin: String,
+        pub(crate) address: SocketAddr,
+        pub(crate) lan_address: Option<SocketAddr>,
+    }
+    impl Endpoints {
+        pub(crate) fn lan_origin(&self) -> Option<String> {
+            self.lan_address.map(|address| format!("https://{address}"))
+        }
+    }
+    pub(crate) fn endpoints(deployment: &[u8]) -> Result<Endpoints, BootstrapError> {
         let d: Deployment = serde_json::from_slice(deployment).map_err(|_| bad())?;
         let url = url::Url::parse(&d.gateway.url).map_err(|_| bad())?;
         let ip: IpAddr = url.host_str().ok_or_else(bad)?.parse().map_err(|_| bad())?;
@@ -419,7 +434,6 @@ mod platform {
         if d.schema != 1
             || d.mode != "create-local"
             || d.host.is_some()
-            || d.gateway.allow_remote_hosts
             || url.scheme() != "https"
             || !url.username().is_empty()
             || url.password().is_some()
@@ -433,10 +447,16 @@ mod platform {
         {
             return Err(bad());
         }
-        Ok((
-            url.origin().ascii_serialization(),
-            SocketAddr::new(ip, port),
-        ))
+        let lan = crate::gateway::auth::lan_address(
+            d.gateway.allow_remote_hosts,
+            d.gateway.lan_address.as_deref(),
+        )
+        .map_err(|_| bad())?;
+        Ok(Endpoints {
+            origin: url.origin().ascii_serialization(),
+            address: SocketAddr::new(ip, port),
+            lan_address: lan.map(|ip| SocketAddr::new(ip.into(), port)),
+        })
     }
     #[derive(Deserialize, Serialize)]
     #[serde(deny_unknown_fields)]
@@ -472,7 +492,8 @@ mod platform {
         }
         let (deployment_root, deployment) = private_input(deployment_file)?;
         let (selection_root, selection_raw) = private_input(selection_file)?;
-        let (origin, _) = endpoint(deployment.bytes())?;
+        let endpoints = endpoints(deployment.bytes())?;
+        let origin = endpoints.origin.clone();
         let selection: NativeRuntimeSelection =
             serde_json::from_slice(selection_raw.bytes()).map_err(|_| bad())?;
         let candidate = Arc::new(
@@ -493,13 +514,23 @@ mod platform {
             clock.checked_add(3650 * 86400).ok_or_else(bad)?,
         )
         .map_err(|_| BootstrapError::new("fresh_gateway_ca_generation_failed", 3))?;
-        let leaf = tls::issue_server_leaf(
-            &ca.certificate_pem,
-            &ca.private_key,
-            &ca.anchor_pin,
-            &origin,
-            clock,
-        )
+        let leaf = match endpoints.lan_address {
+            Some(address) => tls::issue_server_leaf_with_lan(
+                &ca.certificate_pem,
+                &ca.private_key,
+                &ca.anchor_pin,
+                &origin,
+                Some(address.ip()),
+                clock,
+            ),
+            None => tls::issue_server_leaf(
+                &ca.certificate_pem,
+                &ca.private_key,
+                &ca.anchor_pin,
+                &origin,
+                clock,
+            ),
+        }
         .map_err(|_| BootstrapError::new("fresh_gateway_leaf_issuance_failed", 3))?;
         if leaf.not_before_unix < ca.not_before_unix || leaf.not_after_unix > ca.not_after_unix {
             return Err(BootstrapError::new("fresh_gateway_validity_invalid", 3));
@@ -636,6 +667,7 @@ mod platform {
         pub(crate) root: Arc<PrivateRoot>,
         pub(crate) tls: Arc<GatewayServerTls>,
         pub(crate) address: SocketAddr,
+        pub(crate) lan_address: Option<SocketAddr>,
         pub(crate) origin: String,
         pub(crate) admin_token: Zeroizing<Vec<u8>>,
         pub(crate) model_token: Zeroizing<Vec<u8>>,
@@ -871,7 +903,9 @@ mod platform {
             .map_err(|_| BootstrapError::new("fresh_gateway_bootstrap_incomplete", 3))?;
         let ready: ReadyBinding = serde_json::from_slice(ready_raw.bytes()).map_err(|_| bad())?;
         let deployment = root.read_raw("deployment.json", LIMIT).map_err(|_| bad())?;
-        let (origin, address) = endpoint(deployment.bytes())?;
+        let endpoints = endpoints(deployment.bytes())?;
+        let origin = endpoints.origin;
+        let address = endpoints.address;
         let clock = i64::try_from(now()?).map_err(|_| bad())?;
         if ready.schema != 1
             || ready.root_identity != native_identity(&root)
@@ -1088,6 +1122,7 @@ mod platform {
             root,
             tls,
             address,
+            lan_address: endpoints.lan_address,
             origin,
             admin_token,
             model_token,

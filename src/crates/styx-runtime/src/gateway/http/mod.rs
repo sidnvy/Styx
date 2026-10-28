@@ -736,3 +736,6 @@ fn plain(status: StatusCode) -> Response<HeldBody> {
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(all(test, target_os = "linux", target_env = "gnu"))]
+mod lan_tests;

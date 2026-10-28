@@ -361,6 +361,7 @@ pub struct EnrollmentService {
     head: Option<Sha256Digest>,
     admin: GatewayBearerPolicy,
     hosts: BTreeSet<String>,
+    remote_hosts: BTreeSet<String>,
     clock: Clock,
     uncertain: bool,
     #[cfg(any(
@@ -410,6 +411,7 @@ impl EnrollmentService {
             head: recovered.facts.head,
             admin,
             hosts: allowed_hosts.into_iter().collect(),
+            remote_hosts: BTreeSet::new(),
             clock: Clock::new(now),
             uncertain: false,
             #[cfg(any(
@@ -631,6 +633,37 @@ impl EnrollmentService {
         })?;
         Ok(p)
     }
+    /// Listener setup adds a Host ingress without extending admin authority.
+    pub(crate) fn allow_remote_host(&mut self, host: String) -> Result<(), ServiceError> {
+        let address: std::net::SocketAddr = host.parse().map_err(|_| invalid())?;
+        crate::gateway::auth::lan_address(true, Some(&address.ip().to_string()))
+            .map_err(|_| invalid())?;
+        if address.port() == 0 || !self.remote_hosts.is_empty() || self.hosts.contains(&host) {
+            return Err(invalid());
+        }
+        self.remote_hosts.insert(host);
+        Ok(())
+    }
+    fn ingress_host<'a>(&self, headers: &'a HeaderMap) -> Result<&'a str, ServiceError> {
+        if headers.get_all(HOST).iter().count() != 1
+            || headers.get_all(ORIGIN).iter().count() > 1
+            || headers.contains_key("x-styx-tunnel-context")
+        {
+            return Err(ServiceError::new(403, "host_or_origin_not_allowed"));
+        }
+        let host = headers
+            .get(HOST)
+            .and_then(|s| s.to_str().ok())
+            .filter(|host| self.hosts.contains(*host) || self.remote_hosts.contains(*host))
+            .ok_or(ServiceError::new(403, "host_not_allowed"))?;
+        if let Some(origin) = headers.get(ORIGIN)
+            && (!self.remote_hosts.contains(host)
+                || origin.to_str().ok() != Some(format!("https://{host}").as_str()))
+        {
+            return Err(ServiceError::new(403, "host_or_origin_not_allowed"));
+        }
+        Ok(host)
+    }
     pub(super) fn preflight(
         &self,
         method: &Method,
@@ -640,17 +673,7 @@ impl EnrollmentService {
     ) -> Result<(), ServiceError> {
         self.ordinary_admission()?;
         let r = route(method, path)?;
-        if headers.get_all(HOST).iter().count() != 1
-            || headers.contains_key(ORIGIN)
-            || headers.contains_key("x-styx-tunnel-context")
-        {
-            return Err(ServiceError::new(403, "host_or_origin_not_allowed"));
-        }
-        let host = headers
-            .get(HOST)
-            .and_then(|s| s.to_str().ok())
-            .filter(|s| self.hosts.contains(*s))
-            .ok_or(ServiceError::new(403, "host_not_allowed"))?;
+        let host = self.ingress_host(headers)?;
         if pairing.origin != format!("https://{host}") {
             return Err(ServiceError::new(403, "listener_tls_identity_mismatch"));
         }
@@ -1068,16 +1091,7 @@ impl EnrollmentService {
         generation: ConnectionGeneration,
         lane: Lane,
     ) -> Result<ConnectionLease, ServiceError> {
-        if headers.get_all(HOST).iter().count() != 1
-            || headers.contains_key(ORIGIN)
-            || headers.contains_key("x-styx-tunnel-context")
-            || !headers
-                .get(HOST)
-                .and_then(|v| v.to_str().ok())
-                .is_some_and(|h| self.hosts.contains(h))
-        {
-            return Err(ServiceError::new(403, "host_or_origin_not_allowed"));
-        }
+        self.ingress_host(headers)?;
         let token = bearer(headers)?;
         self.admit_host(id, token, lane, generation)
     }

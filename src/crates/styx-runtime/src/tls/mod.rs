@@ -418,4 +418,4 @@ impl GatewayServerTls {
 mod tests;
 
 mod issuer;
-pub(crate) use issuer::{generate_gateway_ca, issue_server_leaf};
+pub(crate) use issuer::{generate_gateway_ca, issue_server_leaf, issue_server_leaf_with_lan};

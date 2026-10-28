@@ -418,6 +418,11 @@ enum HostJoinCommand {
     },
 }
 
+#[derive(Clone, Copy, ValueEnum)]
+enum GatewayInviteOrigin {
+    Loopback,
+    Lan,
+}
 #[derive(Subcommand)]
 enum GatewayCommand {
     /// Configure the Gateway-owned Secure MCP Tunnel transport.
@@ -433,6 +438,9 @@ enum GatewayCommand {
         invitation_file: PathBuf,
         #[arg(long, default_value_t = 600, value_parser = clap::value_parser!(u64).range(60..=600))]
         ttl_seconds: u64,
+        /// Origin to report for the Host deployment (default: LAN when enabled).
+        #[arg(long, value_enum)]
+        origin: Option<GatewayInviteOrigin>,
         #[arg(long, required = true)]
         authorize: bool,
         #[arg(long)]
@@ -1640,14 +1648,23 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
                     state_dir,
                     invitation_file,
                     ttl_seconds,
+                    origin,
                     json,
                     ..
                 },
         } => gateway_admin_result(
-            styx_runtime::management::native_gateway_admin::invite(
+            styx_runtime::management::native_gateway_admin::invite_with_origin(
                 &state_dir,
                 &invitation_file,
                 ttl_seconds,
+                origin.map(|origin| match origin {
+                    GatewayInviteOrigin::Loopback => {
+                        styx_runtime::management::native_gateway_admin::InvitationOrigin::Loopback
+                    }
+                    GatewayInviteOrigin::Lan => {
+                        styx_runtime::management::native_gateway_admin::InvitationOrigin::Lan
+                    }
+                }),
             )
             .await,
             json,
