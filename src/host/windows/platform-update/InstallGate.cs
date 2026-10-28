@@ -17,8 +17,12 @@ internal static class InstallGate {
  [DllImport("rstrtmgr.dll",CharSet=CharSet.Unicode)] static extern int RmRegisterResources(uint handle,uint count,string[] files,uint applications,IntPtr processes,uint services,IntPtr names);
  [DllImport("rstrtmgr.dll")] static extern int RmGetList(uint handle,out uint needed,ref uint count,IntPtr processes,ref uint reasons);
  [DllImport("rstrtmgr.dll")] static extern int RmEndSession(uint handle);
+ // Package members under %LOCALAPPDATA%\Programs\Styx\versions\<sha256> exceed MAX_PATH
+ // (deep Browser worker node_modules). Long paths use the extended-length prefix;
+ // Main disables .NET legacy path handling before any System.IO call.
+ static string Long(string path){return path.Length>=240&&path.Length>2&&path[1]==':'?@"\\?\"+path:path;}
  static void Regular(string root){
-  if((File.GetAttributes(root)&FileAttributes.ReparsePoint)!=0)throw new IOException();
+  if((File.GetAttributes(Long(root))&FileAttributes.ReparsePoint)!=0)throw new IOException();
  }
  static bool Image(string file){string ext=Path.GetExtension(file);return String.Equals(ext,".exe",StringComparison.OrdinalIgnoreCase)||String.Equals(ext,".dll",StringComparison.OrdinalIgnoreCase)||String.Equals(ext,".node",StringComparison.OrdinalIgnoreCase);}
  static void Package(string root,List<string> files){
@@ -41,7 +45,7 @@ internal static class InstallGate {
    foreach(string version in Directory.GetDirectories(versions))Package(version,files);
   }
  }
- static string Hash(string file){using(var s=SHA256.Create())using(var f=File.OpenRead(file))return BitConverter.ToString(s.ComputeHash(f)).Replace("-","").ToLowerInvariant();}
+ static string Hash(string file){using(var s=SHA256.Create())using(var f=File.OpenRead(Long(file)))return BitConverter.ToString(s.ComputeHash(f)).Replace("-","").ToLowerInvariant();}
  static bool Equal(string a,string b){return String.Equals(a.TrimEnd(Path.DirectorySeparatorChar,Path.AltDirectorySeparatorChar),b.TrimEnd(Path.DirectorySeparatorChar,Path.AltDirectorySeparatorChar),StringComparison.OrdinalIgnoreCase);}
  static void PrivateFile(string file,string sid){
   Regular(file);var acl=File.GetAccessControl(file);if(acl.GetOwner(typeof(SecurityIdentifier)).Value!=sid)throw new IOException();
@@ -78,12 +82,12 @@ internal static class InstallGate {
   for(string current=path;!String.IsNullOrEmpty(current);current=Path.GetDirectoryName(current))Regular(current);
   return path;
  }
- static string Bounded(string path,int limit){Regular(path);using(var file=new FileStream(path,FileMode.Open,FileAccess.Read,FileShare.Read)){if(file.Length>limit)throw new IOException("native_material_bound");using(var reader=new StreamReader(file,new UTF8Encoding(false,true)))return reader.ReadToEnd();}}
+ static string Bounded(string path,int limit){Regular(path);using(var file=new FileStream(Long(path),FileMode.Open,FileAccess.Read,FileShare.Read)){if(file.Length>limit)throw new IOException("native_material_bound");using(var reader=new StreamReader(file,new UTF8Encoding(false,true)))return reader.ReadToEnd();}}
  static string StringField(Dictionary<string,object> value,string name){object field;if(!value.TryGetValue(name,out field)||!(field is string))throw new IOException("native_field_invalid");return (string)field;}
  static void Collect(string root,string prefix,HashSet<string> actual){
   string directory=prefix==""?root:NativePath(root,prefix);Regular(directory);
-  foreach(string file in Directory.GetFiles(directory)){string relative=prefix==""?Path.GetFileName(file):prefix+"/"+Path.GetFileName(file);NativePath(root,relative);if(relative!="windows-package.json"){if(actual.Count>=8192||!actual.Add(relative))throw new IOException("native_inventory_bound");}}
-  foreach(string child in Directory.GetDirectories(directory)){string relative=prefix==""?Path.GetFileName(child):prefix+"/"+Path.GetFileName(child);if(relative.Split('/').Length>64)throw new IOException("native_inventory_depth");Collect(root,relative,actual);}
+  foreach(string file in Directory.GetFiles(Long(directory))){string relative=prefix==""?Path.GetFileName(file):prefix+"/"+Path.GetFileName(file);NativePath(root,relative);if(relative!="windows-package.json"){if(actual.Count>=8192||!actual.Add(relative))throw new IOException("native_inventory_bound");}}
+  foreach(string child in Directory.GetDirectories(Long(directory))){string relative=prefix==""?Path.GetFileName(child):prefix+"/"+Path.GetFileName(child);if(relative.Split('/').Length>64)throw new IOException("native_inventory_depth");Collect(root,relative,actual);}
  }
  static string Pipe(System.IO.StreamReader reader){var text=new StringBuilder();var buffer=new char[4096];int count;while((count=reader.Read(buffer,0,buffer.Length))>0){if(text.Length+count>2097152)throw new IOException("native_reader_output_bound");text.Append(buffer,0,count);}return text.ToString();}
  static string Quote(string value){if(value.IndexOf('"')>=0||value.IndexOf('\0')>=0||value.EndsWith("\\"))throw new IOException("native_path_invalid");return "\""+value+"\"";}
@@ -96,7 +100,7 @@ internal static class InstallGate {
   if(Convert.ToInt32(package["schema"])!=1||!Equals(package["nativeRuntime"],true)||!Equals(package["compiled"],true)||StringField(package,"arch")!="x64"||StringField(provenance,"status")!="SAME_REVISION_TRACKED_ARCHIVE_BOUND"||StringField(provenance,"sourceRevision")!=revision||!System.Text.RegularExpressions.Regex.IsMatch(revision,"\\A[a-f0-9]{40}\\z"))return 2;
   var actual=new HashSet<string>(StringComparer.OrdinalIgnoreCase);Collect(root,"",actual);
   var expected=new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-  foreach(var item in (System.Collections.IEnumerable)package["files"]){var row=Object(item);string relative=StringField(row,"path"),file=NativePath(root,relative);if(!expected.Add(relative)||!actual.Contains(relative)||new FileInfo(file).Length!=Convert.ToInt64(row["size"])||Hash(file)!=StringField(row,"sha256"))return 2;}
+  foreach(var item in (System.Collections.IEnumerable)package["files"]){var row=Object(item);string relative=StringField(row,"path"),file=NativePath(root,relative);if(!expected.Add(relative)||!actual.Contains(relative)||new FileInfo(Long(file)).Length!=Convert.ToInt64(row["size"])||Hash(file)!=StringField(row,"sha256"))return 2;}
   if(!actual.SetEquals(expected)||Directory.Exists(Path.Combine(root,"vnext"))||Directory.Exists(Path.Combine(root,"runtime")))return 2;
   var descriptor=Object(codec.DeserializeObject(Bounded(NativePath(root,"windows-runtime.json"),16384)));var native=Object(descriptor["nativeRuntime"]);
   if(Convert.ToInt32(descriptor["schema"])!=1||Convert.ToInt32(native["schema"])!=1||StringField(native,"cli")!="native/bin/styx.exe"||StringField(native,"payload")!="native"||StringField(native,"publisher")!="native-publisher.pem"||StringField(native,"publisherSpkiSha256")!=NativePublisher)return 2;
@@ -172,6 +176,8 @@ internal static class InstallGate {
  }
 
  static int Main(string[] args){
+  AppContext.SetSwitch("Switch.System.IO.UseLegacyPathHandling",false);
+  AppContext.SetSwitch("Switch.System.IO.BlockLongPaths",false);
   try{
    if(args.Length>0&&args[0]=="verify-native")return VerifyNative(args);
    if(args.Length>0&&args[0]=="maintain-native-install")return MaintainNative(args);
