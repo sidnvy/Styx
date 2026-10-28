@@ -223,7 +223,18 @@ pub struct CuaAction {
     arguments: Map<String, Value>,
 }
 impl CuaAction {
-    pub fn new(name: String, arguments: Map<String, Value>) -> Result<Self> {
+    pub fn new(name: String, mut arguments: Map<String, Value>) -> Result<Self> {
+        // Window reads are parsed and re-addressed from the structured elements
+        // list; the markdown view carries native tokens and is always removed.
+        // A default (markdown) read would therefore return nothing actionable.
+        if name == "get_window_state"
+            && matches!(
+                arguments.get("tree_format").and_then(Value::as_str),
+                None | Some("markdown")
+            )
+        {
+            arguments.insert("tree_format".into(), Value::String("elements".into()));
+        }
         let value = Self { name, arguments };
         value.validate()?;
         Ok(value)
