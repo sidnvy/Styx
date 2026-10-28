@@ -1,6 +1,6 @@
 # Changing a computer's role without losing other computers (proposal, 2026-10-28)
 
-Status: proposal for owner review. Not implemented. What exists today is the plain role switch (`retireRole` /
+Status: owner decision 2026-10-28 — automatic handover (Flow A) is v1, with LAN reachability as its prerequisite. Not implemented yet. What exists today is the plain role switch (`retireRole` /
 `styx role retire`), which refuses to retire a Gateway that other computers still use unless the owner confirms
 losing them.
 

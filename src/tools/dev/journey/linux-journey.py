@@ -152,38 +152,45 @@ def tool_text(reply):
 
 
 def computer_click(device):
-    """One click on a dialog this script owns; the dialog's exit code is the effect."""
+    """One click on a dialog this script owns; the dialog's exit code is the effect.
+
+    List, read and click run in ONE MCP session, as a model client does:
+    an observation is bound to the session that made it.
+    """
     nonce = uuid.uuid4().hex[:12]
     dialog = subprocess.Popen(["zenity", "--question", "--title", f"styx-click-{nonce}",
         "--text", f"Styx journey click test {nonce}", "--ok-label", "Confirm", "--cancel-label", "Cancel"])
     atexit.register(lambda: dialog.poll() is None and dialog.kill())
-    start = time.monotonic()
-    windows = []
-    while time.monotonic() - start < 15 and not windows:
-        listed = tool_text(mcp("call", "list_windows", json.dumps({"environment_id": device, "pid": dialog.pid})))
-        windows = (listed.get("structuredContent") or {}).get("windows") or []
+    session = subprocess.Popen([sys.executable, "-I", str(Path(__file__).parent / "mcp_client.py"), str(gateway), url,
+        str(gateway / "gateway-ca.pem"), "session"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+
+    def call(name, arguments):
+        session.stdin.write(json.dumps({"name": name, "arguments": {"environment_id": device, **arguments}}) + "\n")
+        session.stdin.flush()
+        return tool_text(json.loads(session.stdout.readline()))
+    try:
+        start = time.monotonic()
+        windows = []
+        while time.monotonic() - start < 15 and not windows:
+            windows = (call("list_windows", {"pid": dialog.pid}).get("structuredContent") or {}).get("windows") or []
+            if not windows:
+                time.sleep(0.5)
+        note("computer_list_windows", seconds=round(time.monotonic() - start, 3), windows=json.dumps(windows)[:600])
         if not windows:
-            time.sleep(0.5)
-    note("computer_list_windows", seconds=round(time.monotonic() - start, 3), windows=json.dumps(windows)[:600])
-    if not windows:
-        raise SystemExit("dialog window not listed")
-    window_id = windows[0].get("window_id", windows[0].get("windowId"))
-    state = tool_text(mcp("call", "get_window_state", json.dumps({"environment_id": device, "pid": dialog.pid,
-        "window_id": window_id, "query": "Confirm", "include_screenshot": False})))
-    structured = state.get("structuredContent") or {}
-    tokens = [e.get("element_token") for e in structured.get("elements", [])
-              if "confirm" in json.dumps(e).lower() and e.get("element_token")]
-    # Default replies carry rows in tree_markdown, addressed as <snapshot_id>:<row>.
-    snapshot = structured.get("snapshot_id")
-    if not tokens and snapshot:
-        import re
-        tokens = [f"{snapshot}:{row}" for row in
-                  re.findall(r"\[(\d+)\][^\n]*Confirm", str(structured.get("tree_markdown", "")))]
-    note("computer_state", tokens=tokens, tree=str(structured.get("tree_markdown", ""))[:600])
-    if not tokens:
-        raise SystemExit("Confirm button not found in the accessibility tree")
-    clicked = tool_text(mcp("call", "click", json.dumps({"environment_id": device, "element_token": tokens[-1]})))
-    note("computer_click_result", result=json.dumps(clicked)[:600])
+            raise SystemExit("dialog window not listed")
+        window_id = windows[0].get("window_id", windows[0].get("windowId"))
+        structured = call("get_window_state", {"pid": dialog.pid, "window_id": window_id, "query": "Confirm",
+                                               "include_screenshot": False}).get("structuredContent") or {}
+        tokens = [e.get("element_token") for e in structured.get("elements", [])
+                  if "confirm" in json.dumps(e).lower() and e.get("element_token")]
+        note("computer_state", tokens=tokens)
+        if not tokens:
+            raise SystemExit("Confirm button not found in the accessibility tree")
+        clicked = call("click", {"element_token": tokens[-1]})
+        note("computer_click_result", result=json.dumps(clicked)[:600])
+    finally:
+        session.stdin.close()
+        session.wait(timeout=30)
     try:
         code = dialog.wait(timeout=10)
     except subprocess.TimeoutExpired:

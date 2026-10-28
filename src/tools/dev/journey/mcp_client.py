@@ -2,6 +2,9 @@
 
 usage: mcp_client.py GATEWAY_ROOT URL CA_FILE list
        mcp_client.py GATEWAY_ROOT URL CA_FILE call TOOL JSON_ARGS
+       mcp_client.py GATEWAY_ROOT URL CA_FILE session
+         one MCP session; reads {"name","arguments"} JSON lines on stdin and
+         writes one reply line each (observations are bound to the session)
 The bearer is read from GATEWAY_ROOT/gateway-model.token and never printed.
 """
 import json, ssl, sys, urllib.request
@@ -60,6 +63,12 @@ try:
     if cmd == "list":
         tools = post({"jsonrpc": "2.0", "method": "tools/list", "params": {}})
         print(json.dumps([t["name"] for t in tools["result"]["tools"]]))
+    elif cmd == "session":
+        for line in sys.stdin:
+            request = json.loads(line)
+            reply = post({"jsonrpc": "2.0", "method": "tools/call", "params": {
+                "name": request["name"], "arguments": request["arguments"]}})
+            print(json.dumps(reply), flush=True)
     elif cmd == "call":
         result = post({"jsonrpc": "2.0", "method": "tools/call", "params": {
             "name": sys.argv[5], "arguments": json.loads(sys.argv[6])}})
