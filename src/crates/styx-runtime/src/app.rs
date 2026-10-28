@@ -256,6 +256,8 @@ struct LocalInput {
     persist_login: bool,
     #[serde(default = "local_port")]
     port: u16,
+    #[serde(default)]
+    lan_address: Option<String>,
 }
 fn local_port() -> u16 {
     22022

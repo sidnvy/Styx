@@ -264,12 +264,19 @@ enum ProductRestorationPolicy {
     @Published var computer = true
     @Published var browser = true
     @Published var label = ""
+    @Published var allowRemoteHosts = false
+    @Published var lanAddress = ""
     @Published var invite = ""
     @Published var inspection: ProductJSON = .null
     @Published var joinAcceptance: ProductJSON = .null
     @Published var joining = false
     // UI duplicate-submit guard only. Core remains the durable setup authority.
     @Published private(set) var nativeLocalSetupSubmitted = false
+    var nativeLanJoinNotice: String? {
+        guard status["gateway"]["lan"]["enabled"].bool,
+              let origin = status["gateway"]["lan"]["origin"].string else { return nil }
+        return productText("网络上的其他电脑可以通过 \(origin) 加入。使用 `styx gateway invite` 创建邀请。", "Other computers on your network can join at \(origin). Create an invitation with `styx gateway invite`.")
+    }
     var nativeCanCreateLocal: Bool {
         !nativeLocalSetupSubmitted && status["admission_fenced"] == .bool(false)
         && status["configuration"] == .null && status["enrollment"] == .null && status["gateway"] == .null
@@ -736,12 +743,20 @@ enum ProductRestorationPolicy {
                     joinAcceptance = .null; inspection = .null; page = .overview
                 } else {
                     guard nativeCanCreateLocal else { throw ProductCoreError.rejected }
+                    if allowRemoteHosts { choice["lanAddress"] = .string(lanAddress.trimmingCharacters(in: .whitespacesAndNewlines)) }
                     nativeLocalSetupSubmitted = true
-                    defer { page = .overview }
+                    defer { if nativeLocalSetupSubmitted { page = .overview } }
                     // One request; omitted port uses Core's fixed default 22022.
                     // perform refreshes status after failure, never this mutation.
                     do { try applyNative(try await client.native("createLocal", choice)) }
                     catch {
+                        if let failure = error as? ProductOwnedCoreRejection,
+                           failure.response["error"].string == "app_lan_address_invalid" {
+                            // Core refused before publishing any setup input.
+                            nativeLocalSetupSubmitted = false
+                            self.error = productText("请输入这台电脑的私有 IPv4 地址，例如 192.168.1.20 或 Tailscale 100.x 地址。", "Enter a private IPv4 address of this computer, e.g. 192.168.1.20 or a Tailscale 100.x address.")
+                            return
+                        }
                         self.error = productText("上次设置结果尚未确认，请刷新状态查看；原配置已保留。", "The last setup result is unconfirmed. Refresh status to review it; your existing settings have been retained.")
                         return
                     }

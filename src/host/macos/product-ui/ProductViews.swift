@@ -93,6 +93,7 @@ struct ProductView: View {
     private var resumeLocalSetup: some View {
         VStack(alignment: .leading, spacing: 20) {
             heading(productText("继续本机设置", "Continue local setup"), productText("原管理端已准备完成，配对尚未开始。继续将保留原身份、证书和运行组件。", "The original Gateway is prepared and pairing has not started. Continuing preserves its identity, certificates and runtime."))
+            if let notice = model.nativeLanJoinNotice { Text(notice).font(.callout).textSelection(.enabled) }
             TextField(productText("电脑名称", "Computer name"), text: $model.label)
             Text(productText("本次只启用命令执行；Computer Use 和 Browser 保持关闭。确认后仅提交一次配对。", "This enables command execution only. Computer Use and Browser remain off. Confirming submits pairing once.")).font(.callout).foregroundStyle(.secondary)
             Button(productText("确认并继续设置", "Confirm and continue setup")) { model.resumeLocalSetup() }
@@ -121,6 +122,13 @@ struct ProductView: View {
                 Text(productText("自动准备专用浏览器；网站登录时由你确认。", "A dedicated browser is prepared for you. Sign in to websites when needed.")).font(.caption).foregroundStyle(.secondary)
             }
             TextField(productText("电脑名称", "Computer name"), text: $model.label)
+            if model.nativeHost && !model.joining {
+                Toggle(productText("允许网络上的其他电脑加入此网关", "Let other computers on my network join this Gateway"), isOn: $model.allowRemoteHosts)
+                if model.allowRemoteHosts {
+                    TextField(productText("这台电脑的 IPv4 地址", "This computer's IPv4 address"), text: $model.lanAddress)
+                    Text(productText("这台电脑的私有地址，例如 192.168.1.20 或 Tailscale 100.x 地址", "a private address of this computer, e.g. 192.168.1.20 or a Tailscale 100.x address")).font(.caption).foregroundStyle(.secondary)
+                }
+            }
             HStack {
                 Button(productText("返回", "Back")) { model.page = model.joining ? .invitation : .welcome }
                 Spacer()
@@ -349,6 +357,7 @@ struct ProductView: View {
                     if model.status["gateway"] != .null {
                         Text(productText("本机网关地址：", "Local gateway address: ") + (model.status["gateway"]["origin"].string ?? productText("状态未确认", "status not confirmed")))
                         Text(productText("本机网关：", "Local gateway: ") + (model.status["gateway"]["running"] == .bool(true) && model.status["gateway"]["listening"] == .bool(true) ? productText("运行中", "running") : productText("状态未确认", "status not confirmed")))
+                        if let notice = model.nativeLanJoinNotice { Text(notice).font(.callout).textSelection(.enabled) }
                     }
                     if model.status["admission_fenced"].bool || model.status["gateway"]["admission_fenced"].bool {
                         Text(productText("上次设置结果尚未确认，请刷新状态查看；原配置已保留。", "The last setup result is unconfirmed. Refresh status to review it; your existing settings have been retained.")).foregroundStyle(.secondary)
