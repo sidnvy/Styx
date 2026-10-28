@@ -33,6 +33,7 @@ These are implemented partly or fully. Freeze them: no new work, no acceptance r
 Not v1 work; revisit after v1 ships.
 
 - App wording: show Gateway as "Hub" and Host as "Computer" (MCP calls the AI app the host). Code, wire and file names stay unchanged.
+- Automatic hub handover (HUB-HANDOVER.md Flow A). v1 keeps the manual role switch: retiring a hub names every computer still using it and needs explicit confirmation; those computers are re-paired by hand.
 - Claude as a client: first Claude Code / Claude Desktop against a local or LAN Gateway (docs and CA trust only); claude.ai connectors need a public route and OAuth on the Gateway and are a separate decision.
 
 ## v1 definition
