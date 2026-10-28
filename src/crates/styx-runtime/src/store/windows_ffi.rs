@@ -51,6 +51,44 @@ fn wide(value: &OsStr) -> Result<Vec<u16>> {
     raw.push(0);
     Ok(raw)
 }
+/// Paths given to CreateFileW-family calls. Installed payloads live under
+/// %LOCALAPPDATA%\Programs\Styx\versions\<sha256>, where deep Browser-worker
+/// members exceed MAX_PATH and LongPathsEnabled is off by default. Long local
+/// drive paths use the extended-length form; shorter paths are unchanged.
+fn wide_path(path: &Path) -> Result<Vec<u16>> {
+    let units: Vec<u16> = path
+        .as_os_str()
+        .encode_wide()
+        .map(|unit| {
+            if unit == u16::from(b'/') {
+                u16::from(b'\\')
+            } else {
+                unit
+            }
+        })
+        .collect();
+    let drive = units.len() > 3
+        && u8::try_from(units[0]).is_ok_and(|c| c.is_ascii_alphabetic())
+        && units[1] == u16::from(b':')
+        && units[2] == u16::from(b'\\');
+    if !drive || units.len() < 248 {
+        return wide(path.as_os_str());
+    }
+    // The extended form disables Win32 normalization: refuse "." and ".." parts.
+    if units
+        .split(|unit| *unit == u16::from(b'\\'))
+        .any(|part| part == [u16::from(b'.')] || part == [u16::from(b'.'), u16::from(b'.')])
+    {
+        return Err(StoreError::InvalidRelativePath);
+    }
+    let mut extended: Vec<u16> = "\\\\?\\".encode_utf16().collect();
+    extended.extend(units);
+    if extended.len() > 32760 || extended.contains(&0) {
+        return Err(StoreError::InvalidRelativePath);
+    }
+    extended.push(0);
+    Ok(extended)
+}
 fn sid_string(sid: Security::PSID) -> Result<String> {
     if sid.is_null() || unsafe { Security::IsValidSid(sid) } == 0 {
         return Err(StoreError::NotPrivate);
@@ -312,7 +350,7 @@ fn private_descriptor(directory: bool) -> Result<Local> {
 /// Creates at most this one child. AlreadyExists conveys no privacy/type proof:
 /// the caller must still reopen without following reparse points and validate.
 pub(super) fn create_private_directory(path: &Path) -> Result<()> {
-    let path = wide(path.as_os_str())?;
+    let path = wide_path(path)?;
     let descriptor = private_descriptor(true)?;
     let attributes = SECURITY_ATTRIBUTES {
         nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
@@ -330,7 +368,7 @@ pub(super) fn create_private_directory(path: &Path) -> Result<()> {
 /// Strict fresh creation: unlike the scratch helper above, an existing name is
 /// an error, never an object to adopt. No directory-flush guarantee is implied.
 pub(super) fn create_new_private_directory(path: &Path) -> Result<()> {
-    let path = wide(path.as_os_str())?;
+    let path = wide_path(path)?;
     let descriptor = private_descriptor(true)?;
     let attributes = SECURITY_ATTRIBUTES {
         nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
@@ -352,7 +390,7 @@ pub(super) fn create_new_journal_file(path: &Path) -> Result<File> {
     create_new_file(path, true)
 }
 fn create_new_file(path: &Path, rename: bool) -> Result<File> {
-    let path = wide(path.as_os_str())?;
+    let path = wide_path(path)?;
     let descriptor = private_descriptor(false)?;
     let attributes = SECURITY_ATTRIBUTES {
         nLength: size_of::<SECURITY_ATTRIBUTES>() as u32,
@@ -389,7 +427,7 @@ fn create_new_file(path: &Path, rename: bool) -> Result<File> {
 /// Caller must compare its original file identity and exact bytes before use.
 /// No write sharing keeps that actual source immutable until its handle closes.
 pub(super) fn open_journal_for_rename(path: &Path) -> Result<File> {
-    let path = wide(path.as_os_str())?;
+    let path = wide_path(path)?;
     // SAFETY: bounded absolute path, official ABI, noninheritable OPEN_EXISTING.
     let handle = unsafe {
         CreateFileW(
@@ -548,7 +586,7 @@ pub(super) fn require_local_ntfs(path: &Path, directory: &File) -> Result<()> {
 /// files additionally omit FILE_SHARE_WRITE. Kernel sharing locks pin the names
 /// while retained handles exist. Handles are non-inheritable by default.
 pub(super) fn open(path: &Path, directory: bool, write: bool, create: bool) -> Result<File> {
-    let path = wide(path.as_os_str())?;
+    let path = wide_path(path)?;
     let descriptor = if create {
         Some(private_descriptor(false)?)
     } else {
@@ -641,7 +679,7 @@ pub(super) fn facts(file: &File) -> Result<Facts> {
     })
 }
 pub(super) fn require_no_streams(path: &Path) -> Result<()> {
-    let path = wide(path.as_os_str())?;
+    let path = wide_path(path)?;
     let mut data = WIN32_FIND_STREAM_DATA::default();
     let handle = unsafe {
         FindFirstStreamW(
@@ -729,6 +767,21 @@ pub(super) fn process_optional(pid: u32) -> Result<Option<ProcessIdentity>> {
 
 #[cfg(test)]
 mod callback_acl_tests {
+    #[test]
+    fn long_drive_paths_use_extended_length_form() {
+        let short = Path::new(r"C:\Users\a\b.txt");
+        assert_eq!(wide_path(short).unwrap(), wide(short.as_os_str()).unwrap());
+        let deep = format!(r"C:\Users\a\{}\x.js", "n".repeat(260));
+        let encoded = wide_path(Path::new(&deep)).unwrap();
+        let text = String::from_utf16(&encoded[..encoded.len() - 1]).unwrap();
+        assert_eq!(text, format!(r"\\?\{deep}"));
+        let mixed = format!("C:/Users/a/{}/x.js", "n".repeat(260));
+        let encoded = wide_path(Path::new(&mixed)).unwrap();
+        assert!(!encoded.contains(&u16::from(b'/')));
+        let dotted = format!(r"C:\Users\a\{}\..\x.js", "n".repeat(260));
+        assert!(wide_path(Path::new(&dotted)).is_err());
+    }
+
     use super::*;
     use windows_sys::Win32::{
         Security::ACCESS_ALLOWED_CALLBACK_ACE,
