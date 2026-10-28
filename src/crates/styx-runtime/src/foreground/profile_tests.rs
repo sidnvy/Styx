@@ -188,7 +188,7 @@ const config=JSON.stringify({schema:1,mode:'join-existing',gateway:{url:'https:/
     /// Real disposable RSA/Ed25519/TLS fixture; only protected loading is
     /// exercised. No native executor, Gateway request or account migration runs.
     #[test]
-    fn paired_route_retains_original_trust_and_uses_configured_normalized_origin() {
+    fn paired_route_retains_original_trust_and_uses_ca_namespace() {
         let f = Fixture::new();
         let protected = [
             f.state.join("deployment.json"),
@@ -224,9 +224,14 @@ const config=JSON.stringify({schema:1,mode:'join-existing',gateway:{url:'https:/
             paired.endpoint().as_str(),
             "wss://127.0.0.1:37719/styx/host/v3/styx-1234567890abcdef12345678/exec"
         );
+        let ca = fs::read(f.base.join("gateway-ca.pem")).unwrap();
+        let ca_der = rustls_pemfile::certs(&mut Cursor::new(&ca))
+            .next()
+            .unwrap()
+            .unwrap();
         let expected = GatewayId::try_from(format!(
             "paired.{}",
-            Sha256Digest::of_bytes(b"https://127.0.0.1:37719").to_hex()
+            Sha256Digest::of_bytes(&ca_der).to_hex()
         ))
         .unwrap();
         assert_eq!(paired.paired_gateway_namespace(), expected);
@@ -244,8 +249,8 @@ const config=JSON.stringify({schema:1,mode:'join-existing',gateway:{url:'https:/
         for (path, original) in protected.iter().zip(&originals) {
             assert_eq!(Sha256Digest::of_bytes(&fs::read(path).unwrap()), *original);
         }
-        // Explicit controlled fixture edits: a normalized origin, not spelling
-        // or a message-supplied namespace, is the stable Gateway authority key.
+        // An origin change still invalidates the captured profile, but loading
+        // that same CA at another address must retain its paired namespace.
         let config_file = f.state.join("deployment.json");
         let state_file = f.state.join("state.json");
         let host_file = f.base.join("device/host.json");
@@ -269,14 +274,7 @@ const config=JSON.stringify({schema:1,mode:'join-existing',gateway:{url:'https:/
             normalized.endpoint().as_str(),
             "wss://localhost/styx/host/v3/styx-1234567890abcdef12345678/exec"
         );
-        assert_eq!(
-            normalized.paired_gateway_namespace(),
-            GatewayId::try_from(format!(
-                "paired.{}",
-                Sha256Digest::of_bytes(b"https://localhost").to_hex()
-            ))
-            .unwrap()
-        );
+        assert_eq!(normalized.paired_gateway_namespace(), expected);
         host["gateway_ws_url"] = serde_json::json!("wss://localhost:444/");
         fs::write(&host_file, serde_json::to_vec(&host).unwrap()).unwrap();
         assert!(matches!(load_paired(&f.state), Err(ProfileError::Invalid)));
@@ -296,6 +294,69 @@ const config=JSON.stringify({schema:1,mode:'join-existing',gateway:{url:'https:/
         assert!(matches!(load_paired(&f.state), Err(ProfileError::Invalid)));
         assert!(matches!(load_legacy(&f.state), Err(ProfileError::Invalid)));
     }
+    #[test]
+    fn paired_gateway_namespace_matches_fresh_profiles_for_loopback_and_private_origins() {
+        let f = Fixture::new();
+        let ca = fs::read(f.base.join("gateway-ca.pem")).unwrap();
+        let der = rustls_pemfile::certs(&mut Cursor::new(&ca))
+            .next()
+            .unwrap()
+            .unwrap();
+        let ca_hash = Sha256Digest::of_bytes(&der);
+        let gateway =
+            crate::tls::paired_gateway_namespace(&TrustAnchorPin::from_certificate_der(&der));
+        let config_file = f.state.join("deployment.json");
+        let state_file = f.state.join("state.json");
+        let host_file = f.base.join("device/host.json");
+        let mut config: serde_json::Value =
+            serde_json::from_slice(&fs::read(&config_file).unwrap()).unwrap();
+        let mut state: serde_json::Value =
+            serde_json::from_slice(&fs::read(&state_file).unwrap()).unwrap();
+        let mut host: serde_json::Value =
+            serde_json::from_slice(&fs::read(&host_file).unwrap()).unwrap();
+        for origin in [
+            "https://127.0.0.1:37719",
+            "https://10.0.2.19:37719",
+            "https://10.118.53.220:37719",
+        ] {
+            config["gateway"]["url"] = serde_json::json!(format!("{origin}/"));
+            host["gateway_ws_url"] =
+                serde_json::json!(format!("{}/", origin.replacen("https:", "wss:", 1)));
+            let raw = serde_json::to_vec(&config).unwrap();
+            state["configSha256"] = serde_json::json!(Sha256Digest::of_bytes(&raw).to_hex());
+            fs::write(&config_file, raw).unwrap();
+            fs::write(&state_file, serde_json::to_vec(&state).unwrap()).unwrap();
+            fs::write(&host_file, serde_json::to_vec(&host).unwrap()).unwrap();
+            let paired = load_paired(&f.state).unwrap();
+            let legacy = load_legacy(&f.state).unwrap();
+            let (endpoint, fresh_namespace, _) =
+                fresh_connection_profile(origin, paired.device_id(), ca_hash, &ca).unwrap();
+            assert_eq!(paired.endpoint().as_str(), endpoint.as_str());
+            assert_eq!(paired.paired_gateway_namespace(), gateway);
+            assert_eq!(legacy.paired_gateway_namespace(), gateway);
+            assert_eq!(fresh_namespace, gateway);
+            paired.revalidate().unwrap();
+        }
+        // No primary Gateway identity can be selected from a multi-CA trust set.
+        // Legacy-v2 still loads exactly that trust set without using paired-v3.
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let other = crate::tls::generate_gateway_ca(now, now - 60, now + 86400).unwrap();
+        for bundle in [
+            [ca.as_slice(), other.certificate_pem.as_slice()].concat(),
+            [other.certificate_pem.as_slice(), ca.as_slice()].concat(),
+        ] {
+            fs::write(f.base.join("gateway-ca.pem"), bundle).unwrap();
+            assert!(matches!(
+                load_paired(&f.state),
+                Err(ProfileError::Unsupported)
+            ));
+            assert!(load_legacy(&f.state).is_ok());
+        }
+    }
+
     #[test]
     fn state_transaction_and_publisher_pins_remain_authoritative() {
         let f = Fixture::new();

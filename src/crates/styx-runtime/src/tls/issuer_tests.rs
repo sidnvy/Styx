@@ -16,18 +16,21 @@ const BUDGET: Duration = Duration::from_secs(3);
 const NONCE: &[u8] = b"owned-issuer-loopback-no-business-authority";
 
 #[test]
-fn gateway_lan_certificate_has_loopback_and_private_ip_sans() {
+fn gateway_lan_certificate_has_loopback_and_every_private_ip_san() {
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap()
         .as_secs();
     let ca = generate_gateway_ca(now, now - 60, now + 2 * 86400).unwrap();
-    let issued = issue_server_leaf_with_lan(
+    let issued = issue_server_leaf_with_lan_addresses(
         &ca.certificate_pem,
         &ca.private_key,
         &ca.anchor_pin,
         "https://127.0.0.1:8795",
-        Some("100.64.1.2".parse().unwrap()),
+        &[
+            "10.118.53.220".parse().unwrap(),
+            "10.0.2.19".parse().unwrap(),
+        ],
         now,
     )
     .unwrap();
@@ -43,7 +46,14 @@ fn gateway_lan_certificate_has_loopback_and_private_ip_sans() {
             _ => None,
         })
         .collect();
-    assert_eq!(ips, vec![&[127, 0, 0, 1][..], &[100, 64, 1, 2][..]]);
+    assert_eq!(
+        ips,
+        vec![
+            &[127, 0, 0, 1][..],
+            &[10, 118, 53, 220][..],
+            &[10, 0, 2, 19][..]
+        ]
+    );
     assert_eq!(chain[1], certificate_chain(&ca.certificate_pem).unwrap()[0]);
     let local = issue_server_leaf(
         &ca.certificate_pem,

@@ -18,6 +18,44 @@ struct FreshHost {
     browser: Option<Value>,
 }
 
+/// The connection portion of a fresh protected Host profile. Both the origin
+/// and CA are local pairing inputs; the peer cannot choose its own namespace.
+pub(crate) fn connection_profile(
+    gateway_origin: &str,
+    device_id: &DeviceId,
+    anchor_sha256: Sha256Digest,
+    ca: &[u8],
+) -> Result<(LinkEndpoint, GatewayId, GatewayClientTls), ProfileError> {
+    let gateway = origin(gateway_origin, "https")?;
+    let normalized_origin = gateway.origin().ascii_serialization();
+    if normalized_origin != gateway_origin {
+        return Err(ProfileError::Invalid);
+    }
+    let mut endpoint = gateway;
+    endpoint
+        .set_scheme("wss")
+        .map_err(|_| ProfileError::Invalid)?;
+    endpoint.set_path(&format!("/styx/host/v3/{}/exec", device_id.as_str()));
+    let endpoint = LinkEndpoint::parse(endpoint.as_str()).map_err(|_| ProfileError::Invalid)?;
+    let certs = rustls_pemfile::certs(&mut Cursor::new(ca))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|_| ProfileError::Invalid)?;
+    if certs.len() != 1
+        || TrustAnchorPin::from_certificate_der(&certs[0]).as_hex() != anchor_sha256.to_hex()
+    {
+        return Err(ProfileError::Invalid);
+    }
+    let paired_namespace =
+        crate::tls::paired_gateway_namespace(&TrustAnchorPin::from_certificate_der(&certs[0]));
+    let tls = GatewayClientTls::from_pinned_ca_bundle(
+        ca,
+        &[TrustAnchorPin::from_certificate_der(&certs[0])],
+        None,
+    )
+    .map_err(|_| ProfileError::Invalid)?;
+    Ok((endpoint, paired_namespace, tls))
+}
+
 pub(super) fn load(state_dir: &Path) -> Result<LoadedLegacyProfile, ProfileError> {
     let snapshot =
         Arc::new(NativeHostSnapshot::open(state_dir).map_err(|_| ProfileError::Changed)?);
@@ -89,38 +127,13 @@ fn load_snapshot(
     {
         return Err(ProfileError::Invalid);
     }
-    let gateway = origin(&seed.gateway_origin, "https")?;
-    let normalized_origin = gateway.origin().ascii_serialization();
-    if normalized_origin != seed.gateway_origin {
-        return Err(ProfileError::Invalid);
-    }
-    let mut endpoint = gateway;
-    endpoint
-        .set_scheme("wss")
-        .map_err(|_| ProfileError::Invalid)?;
-    endpoint.set_path(&format!("/styx/host/v3/{}/exec", seed.device_id.as_str()));
-    let endpoint_text = endpoint.to_string();
-    let endpoint = LinkEndpoint::parse(endpoint.as_str()).map_err(|_| ProfileError::Invalid)?;
-    let paired_namespace = GatewayId::try_from(format!(
-        "paired.{}",
-        Sha256Digest::of_bytes(normalized_origin.as_bytes()).to_hex()
-    ))
-    .map_err(|_| ProfileError::Invalid)?;
-    let ca = snapshot.ca_pem();
-    let certs = rustls_pemfile::certs(&mut Cursor::new(ca))
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|_| ProfileError::Invalid)?;
-    if certs.len() != 1
-        || TrustAnchorPin::from_certificate_der(&certs[0]).as_hex() != seed.anchor_sha256.to_hex()
-    {
-        return Err(ProfileError::Invalid);
-    }
-    let tls = GatewayClientTls::from_pinned_ca_bundle(
-        ca,
-        &[TrustAnchorPin::from_certificate_der(&certs[0])],
-        None,
-    )
-    .map_err(|_| ProfileError::Invalid)?;
+    let (endpoint, paired_namespace, tls) = connection_profile(
+        &seed.gateway_origin,
+        &seed.device_id,
+        seed.anchor_sha256,
+        snapshot.ca_pem(),
+    )?;
+    let endpoint_text = endpoint.as_str().to_owned();
     let token = std::str::from_utf8(snapshot.credential()).map_err(|_| ProfileError::Invalid)?;
     if !(32..=4096).contains(&token.len())
         || !token

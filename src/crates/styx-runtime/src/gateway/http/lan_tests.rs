@@ -6,8 +6,9 @@ use crate::{
     enrollment::{http::EnrollmentHttp, service::EnrollmentService, shared::SharedEnrollment},
     gateway::paired::{PairedGatewayBackend, RelayHandle},
     host::{
+        bootstrap::OwnedExecHost,
         link::{HostLinkBudget, HostWssLink, LinkAuthentication, LinkEndpoint, SecretBearer},
-        protocol::wire,
+        protocol::{PairedTrustedProfile, wire},
     },
     store::{
         PrivateRoot,
@@ -15,7 +16,7 @@ use crate::{
     },
     tls::{
         GatewayClientTls, GatewayLeafPin, GatewayServerTls, generate_gateway_ca,
-        issue_server_leaf_with_lan,
+        issue_server_leaf_with_lan_addresses,
     },
 };
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
@@ -27,6 +28,8 @@ use std::{
     time::{SystemTime, UNIX_EPOCH},
 };
 use styx_contracts::{
+    capability::{Authorization, Availability, CapabilityDescriptor, CapabilityId, Scope},
+    error::Recovery,
     identity::*,
     legacy::{JoinPayload, PairingComparison},
 };
@@ -127,26 +130,48 @@ fn lan_ip() -> Ipv4Addr {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires sockets and assigned private IPv4; optionally set STYX_TEST_LAN_ADDRESS"]
 async fn gateway_two_listeners_lan_join_and_host_link_requires_sockets() {
-    let ip = lan_ip();
+    gateway_lan_scenario(vec![lan_ip()]).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires sockets and two assigned private IPv4s in STYX_TEST_LAN_ADDRESSES"]
+async fn gateway_three_listeners_two_lan_addresses_join_and_host_link_requires_sockets() {
+    let addresses: Vec<_> = std::env::var("STYX_TEST_LAN_ADDRESSES")
+        .expect("set STYX_TEST_LAN_ADDRESSES to two assigned private IPv4s separated by a comma")
+        .split(',')
+        .map(str::to_owned)
+        .collect();
+    let ips = crate::gateway::auth::lan_addresses(true, None, Some(&addresses)).unwrap();
+    assert_eq!(ips.len(), 2);
+    gateway_lan_scenario(ips).await;
+}
+
+async fn gateway_lan_scenario(ips: Vec<Ipv4Addr>) {
     let local_listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let local = local_listener.local_addr().unwrap();
-    let lan = SocketAddr::new(IpAddr::V4(ip), local.port());
-    let lan_listener = TcpListener::bind(lan)
-        .await
-        .expect("LAN address must be assigned locally");
+    let mut lan_listeners = Vec::new();
+    let mut addresses = Vec::new();
+    for ip in &ips {
+        let address = SocketAddr::new(IpAddr::V4(*ip), local.port());
+        let listener = TcpListener::bind(address)
+            .await
+            .expect("LAN address must be assigned locally");
+        lan_listeners.push((listener, address.to_string()));
+        addresses.push(address);
+    }
+    let lan = addresses[0];
     let local_host = local.to_string();
-    let lan_host = lan.to_string();
     let local_origin = format!("https://{local}");
     let lan_origin = format!("https://{lan}");
     let clock = now_ms() / 1000;
     let (ca, leaf, identity) = tokio::task::spawn_blocking(move || {
         let ca = generate_gateway_ca(clock, clock - 60, clock + 86400).unwrap();
-        let leaf = issue_server_leaf_with_lan(
+        let leaf = issue_server_leaf_with_lan_addresses(
             &ca.certificate_pem,
             &ca.private_key,
             &ca.anchor_pin,
             &local_origin,
-            Some(ip.into()),
+            &ips.into_iter().map(IpAddr::V4).collect::<Vec<_>>(),
             clock,
         )
         .unwrap();
@@ -154,6 +179,8 @@ async fn gateway_two_listeners_lan_join_and_host_link_requires_sockets() {
     })
     .await
     .unwrap();
+    let gateway_namespace = crate::tls::paired_gateway_namespace(&ca.anchor_pin);
+    let ca_hash = Sha256Digest::try_from(ca.anchor_pin.as_hex()).unwrap();
     let tls = GatewayClientTls::from_pinned_ca_pem(
         &ca.certificate_pem,
         ca.anchor_pin,
@@ -184,12 +211,14 @@ async fn gateway_two_listeners_lan_join_and_host_link_requires_sockets() {
         Limits::default(),
     )
     .unwrap();
-    service.allow_remote_host(lan_host.clone()).unwrap();
+    for address in &addresses {
+        service.allow_remote_host(address.to_string()).unwrap();
+    }
     let shared = SharedEnrollment::new(service);
     let partition = Arc::new(Semaphore::new(styx_contracts::HOST_QUEUED_BYTES));
     let relay = RelayHandle::new(
         shared.clone(),
-        GatewayId::try_from("lan-test-gateway").unwrap(),
+        gateway_namespace.clone(),
         GatewayEpoch::try_from("lan-test-epoch").unwrap(),
         partition
             .clone()
@@ -222,35 +251,38 @@ async fn gateway_two_listeners_lan_join_and_host_link_requires_sockets() {
     let server_stop = stop.clone();
     let server = tokio::spawn(async move {
         server_app
-            .run_with_lan(local_listener, Some((lan_listener, lan_host)), server_stop)
+            .run_with_lan_addresses(local_listener, lan_listeners, server_stop)
             .await
     });
     let host = lan.to_string();
     // Even genuine administrator/model credentials cannot reach LAN control.
-    for path in [
-        "/mcp",
-        "/styx/enroll/invitations",
-        "/styx/enroll/approve",
-        "/styx/enroll/revoke",
-        "/styx/enroll/pending",
-        "/control",
-    ] {
-        for bearer in [&admin, &model] {
-            assert_eq!(
-                request(
-                    &tls,
-                    lan,
-                    &host,
-                    Method::POST,
-                    path,
-                    Some(bearer),
-                    json!({})
-                )
-                .await
-                .0,
-                404,
-                "{path}"
-            );
+    for address in &addresses {
+        let host = address.to_string();
+        for path in [
+            "/mcp",
+            "/styx/enroll/invitations",
+            "/styx/enroll/approve",
+            "/styx/enroll/revoke",
+            "/styx/enroll/pending",
+            "/control",
+        ] {
+            for bearer in [&admin, &model] {
+                assert_eq!(
+                    request(
+                        &tls,
+                        *address,
+                        &host,
+                        Method::POST,
+                        path,
+                        Some(bearer),
+                        json!({})
+                    )
+                    .await
+                    .0,
+                    404,
+                    "{path}"
+                );
+            }
         }
     }
     assert_eq!(
@@ -404,20 +436,23 @@ async fn gateway_two_listeners_lan_join_and_host_link_requires_sockets() {
         .0,
         200
     );
-    assert_eq!(
-        request(
-            &tls,
-            lan,
-            &host,
-            Method::GET,
-            &format!("/styx/enroll/self/{}/capabilities", device.as_str()),
-            Some(std::str::from_utf8(&credential).unwrap()),
-            Value::Null
-        )
-        .await
-        .0,
-        200
-    );
+    for address in &addresses {
+        let host = address.to_string();
+        assert_eq!(
+            request(
+                &tls,
+                *address,
+                &host,
+                Method::GET,
+                &format!("/styx/enroll/self/{}/capabilities", device.as_str()),
+                Some(std::str::from_utf8(&credential).unwrap()),
+                Value::Null
+            )
+            .await
+            .0,
+            200
+        );
+    }
     let endpoint = LinkEndpoint::parse(&format!(
         "wss://{host}/styx/host/v3/{}/exec",
         device.as_str()
@@ -447,82 +482,144 @@ async fn gateway_two_listeners_lan_join_and_host_link_requires_sockets() {
         SecretBearer::from_protected_reader(std::str::from_utf8(&credential).unwrap().into())
             .unwrap();
     // Recover by reconnecting with the same credential after an observed close.
-    for attempt in 0..2 {
-        let generation =
-            ConnectionGeneration::try_from(format!("lan-host-connection-{attempt}")).unwrap();
-        let mut link = HostWssLink::connect(
-            &endpoint,
-            &tls,
-            TcpStream::connect(lan).await.unwrap(),
-            LinkAuthentication::Bearer(&bearer),
-            generation.clone(),
-            link_budget.clone(),
-        )
-        .await
-        .unwrap();
-        let incoming = tokio::time::timeout(Duration::from_secs(5), link.recv())
-            .await
-            .unwrap()
+    for (attempt, lan) in addresses
+        .iter()
+        .cycle()
+        .take(2.max(addresses.len()))
+        .enumerate()
+    {
+        let configured_origin = format!("https://{lan}");
+        let (endpoint, namespace, profile_tls) =
+            crate::foreground::profile::fresh_connection_profile(
+                &configured_origin,
+                &device,
+                ca_hash,
+                &ca.certificate_pem,
+            )
             .unwrap();
-        let negotiate: wire::Request = serde_json::from_str(incoming.as_str()).unwrap();
-        let wire::Call::Negotiate { challenge, .. } = negotiate.call else {
-            panic!("negotiate required")
-        };
-        let response = wire::Response {
-            request_id: negotiate.request_id,
-            connection_generation: generation.clone(),
-            reply: wire::Reply::Negotiated {
-                version: 3,
-                challenge,
-                device_id: device.clone(),
-                host_generation: HostGeneration::try_from("lan-host-generation").unwrap(),
-                connection_generation: generation,
-                features: [
-                    "owner_open",
-                    "owner_revoke",
-                    "owner_cleanup",
-                    "prepare_start",
-                    "dispatch_start",
-                    "inspect_start",
-                    "read",
-                    "prepare_action",
-                    "dispatch_action",
-                    "inspect_action",
-                ]
-                .into_iter()
-                .map(str::to_owned)
-                .collect(),
-                write: true,
-                terminate: true,
-                read_resume: false,
-                owner_issuance: "gateway_authenticated".into(),
-                grant_revision: Some(1),
-            },
-        };
-        link.send_text(
-            serde_json::to_string(&response).unwrap(),
-            Duration::from_secs(5),
-        )
-        .await
-        .unwrap();
-        let until = tokio::time::Instant::now() + Duration::from_secs(5);
-        loop {
-            if relay
-                .devices()
-                .await
+        assert_eq!(namespace, gateway_namespace);
+        // First reproduce the old origin-hash mismatch, then recover with the
+        // real profile namespace. HTTP 101 alone must never imply connected.
+        for old_origin_namespace in [true, false] {
+            let host_generation = HostGeneration::try_from("lan-host-generation").unwrap();
+            let host = Arc::new(
+                OwnedExecHost::reserve(
+                    host_generation.clone(),
+                    styx_core::policy::AdmissionFacts {
+                        device_id: device.clone(),
+                        grant_revision: 1,
+                        local_policy_allowed: true,
+                        descriptor: CapabilityDescriptor {
+                            contract_version: 1,
+                            capability_id: CapabilityId::ExecRun,
+                            scope: Scope::Host,
+                            provider_id: "codex".try_into().unwrap(),
+                            configured: false,
+                            remote_grant: true,
+                            availability: Availability::Available,
+                            authorization: Authorization::Granted,
+                            target_session: None,
+                            reason: None,
+                            observed_at: 1,
+                            observation_generation: 1,
+                            recovery: Recovery::None,
+                        },
+                        session_state: None,
+                        current_observation: None,
+                    },
+                    2,
+                )
                 .unwrap()
-                .iter()
-                .any(|device| device.online)
-            {
-                break;
-            }
-            assert!(
-                tokio::time::Instant::now() < until,
-                "independent Gateway registry must observe connected Host"
+                .without_executor()
+                .unwrap(),
             );
-            tokio::time::sleep(Duration::from_millis(10)).await;
+            let namespace = if old_origin_namespace {
+                format!(
+                    "paired.{}",
+                    Sha256Digest::of_bytes(configured_origin.as_bytes()).to_hex()
+                )
+                .try_into()
+                .unwrap()
+            } else {
+                namespace.clone()
+            };
+            let protocol_host = host.clone();
+            let profile = PairedTrustedProfile {
+                endpoint: endpoint.as_str().to_owned(),
+                gateway_namespace: namespace,
+                device_id: device.clone(),
+                host_generation: host_generation.clone(),
+            };
+            let mut link = HostWssLink::connect(
+                &endpoint,
+                &profile_tls,
+                TcpStream::connect(lan).await.unwrap(),
+                LinkAuthentication::Bearer(&bearer),
+                ConnectionGeneration::try_from(format!(
+                    "lan-host-{attempt}-{old_origin_namespace}"
+                ))
+                .unwrap(),
+                host.link_budget(),
+            )
+            .await
+            .unwrap();
+            let host_stop = CancellationToken::new();
+            let protocol_stop = host_stop.clone();
+            let (ready, mut readiness) = tokio::sync::oneshot::channel();
+            let mut protocol_job = tokio::spawn(async move {
+                let protocol = protocol_host.paired_protocol(profile).unwrap();
+                let result = protocol
+                    .run_connection_with_readiness(&mut link, &protocol_stop, Some(ready))
+                    .await;
+                let shutdown = link.shutdown(Duration::from_secs(5)).await;
+                (result, shutdown)
+            });
+            if old_origin_namespace {
+                let (result, _) = tokio::time::timeout(Duration::from_secs(5), protocol_job)
+                    .await
+                    .unwrap()
+                    .unwrap();
+                assert_eq!(
+                    result,
+                    Err(crate::host::protocol::ProtocolError::NegotiationRejected)
+                );
+                assert!(
+                    readiness.try_recv().is_err(),
+                    "rejected namespace cannot announce connected"
+                );
+            } else {
+                tokio::select! {
+                    result = tokio::time::timeout(Duration::from_secs(5), &mut readiness) => {
+                        result.expect("bounded real Host connected readiness").expect("real negotiation and drain enable must succeed");
+                    }
+                    result = &mut protocol_job => panic!("Host ended before connected: {result:?}"),
+                }
+                let until = tokio::time::Instant::now() + Duration::from_secs(5);
+                loop {
+                    if relay.devices().await.unwrap().iter().any(|entry| {
+                        entry.device_id == device
+                            && entry.host_generation.as_ref() == Some(&host_generation)
+                            && entry.grant_revision == Some(1)
+                    }) {
+                        break;
+                    }
+                    assert!(
+                        tokio::time::Instant::now() < until,
+                        "Gateway must independently observe negotiated Host"
+                    );
+                    tokio::time::sleep(Duration::from_millis(10)).await;
+                }
+                host_stop.cancel();
+                let (result, shutdown) =
+                    tokio::time::timeout(Duration::from_secs(10), protocol_job)
+                        .await
+                        .unwrap()
+                        .unwrap();
+                assert_eq!(result.unwrap(), Some(wire::TransportDrainOutcome::Complete));
+                shutdown.unwrap();
+            }
+            host.shutdown_owned(Duration::from_secs(5)).await.unwrap();
         }
-        link.shutdown(Duration::from_secs(5)).await.unwrap();
         let until = tokio::time::Instant::now() + Duration::from_secs(5);
         loop {
             if relay
@@ -530,7 +627,7 @@ async fn gateway_two_listeners_lan_join_and_host_link_requires_sockets() {
                 .await
                 .unwrap()
                 .iter()
-                .all(|device| !device.online)
+                .all(|device| device.host_generation.is_none())
             {
                 break;
             }

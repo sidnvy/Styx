@@ -408,15 +408,19 @@ mod platform {
         #[serde(default)]
         allow_remote_hosts: bool,
         lan_address: Option<String>,
+        lan_addresses: Option<Vec<String>>,
     }
     pub(crate) struct Endpoints {
         pub(crate) origin: String,
         pub(crate) address: SocketAddr,
-        pub(crate) lan_address: Option<SocketAddr>,
+        pub(crate) lan_addresses: Vec<SocketAddr>,
     }
     impl Endpoints {
-        pub(crate) fn lan_origin(&self) -> Option<String> {
-            self.lan_address.map(|address| format!("https://{address}"))
+        pub(crate) fn lan_origins(&self) -> Vec<String> {
+            self.lan_addresses
+                .iter()
+                .map(|address| format!("https://{address}"))
+                .collect()
         }
     }
     pub(crate) fn endpoints(deployment: &[u8]) -> Result<Endpoints, BootstrapError> {
@@ -447,15 +451,19 @@ mod platform {
         {
             return Err(bad());
         }
-        let lan = crate::gateway::auth::lan_address(
+        let lan = crate::gateway::auth::lan_addresses(
             d.gateway.allow_remote_hosts,
             d.gateway.lan_address.as_deref(),
+            d.gateway.lan_addresses.as_deref(),
         )
         .map_err(|_| bad())?;
         Ok(Endpoints {
             origin: url.origin().ascii_serialization(),
             address: SocketAddr::new(ip, port),
-            lan_address: lan.map(|ip| SocketAddr::new(ip.into(), port)),
+            lan_addresses: lan
+                .into_iter()
+                .map(|ip| SocketAddr::new(ip.into(), port))
+                .collect(),
         })
     }
     #[derive(Deserialize, Serialize)]
@@ -514,23 +522,18 @@ mod platform {
             clock.checked_add(3650 * 86400).ok_or_else(bad)?,
         )
         .map_err(|_| BootstrapError::new("fresh_gateway_ca_generation_failed", 3))?;
-        let leaf = match endpoints.lan_address {
-            Some(address) => tls::issue_server_leaf_with_lan(
-                &ca.certificate_pem,
-                &ca.private_key,
-                &ca.anchor_pin,
-                &origin,
-                Some(address.ip()),
-                clock,
-            ),
-            None => tls::issue_server_leaf(
-                &ca.certificate_pem,
-                &ca.private_key,
-                &ca.anchor_pin,
-                &origin,
-                clock,
-            ),
-        }
+        let leaf = tls::issue_server_leaf_with_lan_addresses(
+            &ca.certificate_pem,
+            &ca.private_key,
+            &ca.anchor_pin,
+            &origin,
+            &endpoints
+                .lan_addresses
+                .iter()
+                .map(|address| address.ip())
+                .collect::<Vec<_>>(),
+            clock,
+        )
         .map_err(|_| BootstrapError::new("fresh_gateway_leaf_issuance_failed", 3))?;
         if leaf.not_before_unix < ca.not_before_unix || leaf.not_after_unix > ca.not_after_unix {
             return Err(BootstrapError::new("fresh_gateway_validity_invalid", 3));
@@ -666,8 +669,9 @@ mod platform {
     pub(crate) struct FreshGatewayRuntime {
         pub(crate) root: Arc<PrivateRoot>,
         pub(crate) tls: Arc<GatewayServerTls>,
+        pub(crate) ca_pin: tls::TrustAnchorPin,
         pub(crate) address: SocketAddr,
-        pub(crate) lan_address: Option<SocketAddr>,
+        pub(crate) lan_addresses: Vec<SocketAddr>,
         pub(crate) origin: String,
         pub(crate) admin_token: Zeroizing<Vec<u8>>,
         pub(crate) model_token: Zeroizing<Vec<u8>>,
@@ -1089,6 +1093,7 @@ mod platform {
             if certs.len() != 2 || anchors.len() != 1 || certs[1] != anchors[0] {
                 return Err(bad());
             }
+            let ca_pin = tls::TrustAnchorPin::from_certificate_der(&anchors[0]);
             let key = tls::PrivateKeyPem::from_protected_reader_bytes(inputs[5].bytes().to_vec())
                 .map_err(|_| bad())?;
             let tls = Arc::new(
@@ -1103,6 +1108,7 @@ mod platform {
             let model_token = Zeroizing::new(inputs[7].bytes().to_vec());
             Ok((
                 tls,
+                ca_pin,
                 admin_token,
                 model_token,
                 inputs,
@@ -1110,7 +1116,7 @@ mod platform {
                 candidate,
             ))
         })();
-        let (tls, admin_token, model_token, inputs, state_raw, candidate) = match loaded {
+        let (tls, ca_pin, admin_token, model_token, inputs, state_raw, candidate) = match loaded {
             Ok(value) => value,
             Err(error) => {
                 return Err(error.retaining(Retained::Transactions {
@@ -1121,8 +1127,9 @@ mod platform {
         let runtime = FreshGatewayRuntime {
             root,
             tls,
+            ca_pin,
             address,
-            lan_address: endpoints.lan_address,
+            lan_addresses: endpoints.lan_addresses,
             origin,
             admin_token,
             model_token,

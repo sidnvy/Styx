@@ -180,3 +180,106 @@ fn actual_http_rejection_and_postdispatch_uncertainty_are_not_not_dispatched() {
     }
     assert!(accepted_status(200).is_ok());
 }
+
+#[test]
+fn gateway_invitation_selects_only_a_configured_private_address() {
+    let origins = vec![
+        "https://127.0.0.1:22345".into(),
+        "https://10.118.53.220:22345".into(),
+        "https://10.0.2.19:22345".into(),
+    ];
+    assert_eq!(invitation_origin(&origins, None).unwrap(), origins[1]);
+    assert_eq!(
+        invitation_origin(
+            &origins,
+            Some(InvitationOrigin::Address("10.0.2.19".parse().unwrap()))
+        )
+        .unwrap(),
+        origins[2]
+    );
+    for ip in ["127.0.0.1", "10.0.2.20", "8.8.8.8"] {
+        assert_eq!(
+            invitation_origin(
+                &origins,
+                Some(InvitationOrigin::Address(ip.parse().unwrap()))
+            )
+            .unwrap_err()
+            .code(),
+            "native_gateway_origin_address_not_configured"
+        );
+    }
+}
+
+#[test]
+fn gateway_invite_app_link_round_trips_origin_ca_and_expiry() {
+    use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
+    let now = clock_ms().unwrap();
+    let ca =
+        crate::tls::generate_gateway_ca(now / 1000, now / 1000 - 60, now / 1000 + 86400).unwrap();
+    let origin = "https://10.0.2.19:22345";
+    for ttl in [60_000, 600_000] {
+        let invite = Invitation {
+            invitation: Zeroizing::new(URL_SAFE_NO_PAD.encode([7u8; 32])),
+            expires_at: now + ttl,
+            one_use: true,
+        };
+        // This helper is the production invite export path, including caPem.
+        let link = invitation_app_link(&invite, origin, &ca.certificate_pem, now).unwrap();
+        let inspected = crate::app::pairing_link::inspect(&link, now).unwrap();
+        let preview = inspected.preview();
+        assert_eq!(preview.origin, origin);
+        assert_eq!(preview.expires_at, invite.expires_at);
+        assert_eq!(
+            preview.ca_sha256.as_deref(),
+            Some(ca.anchor_pin.as_hex().as_str())
+        );
+        assert!(preview.requires_certificate_approval);
+        let (accepted_origin, invitation, pem, expiry) = inspected
+            .approve(origin, Some(ca.anchor_pin.as_hex().as_str()), now)
+            .unwrap()
+            .into_parts();
+        assert_eq!(accepted_origin, origin);
+        assert_eq!(invitation.as_str(), invite.invitation.as_str());
+        assert_eq!(pem.unwrap().as_bytes(), ca.certificate_pem);
+        assert_eq!(expiry, invite.expires_at);
+        assert!(crate::app::pairing_link::inspect(&link, expiry).is_err());
+    }
+    let mut invite = Invitation {
+        invitation: Zeroizing::new(URL_SAFE_NO_PAD.encode([7u8; 32])),
+        expires_at: now,
+        one_use: true,
+    };
+    assert!(invitation_app_link(&invite, origin, &ca.certificate_pem, now).is_err());
+    invite.expires_at = now + 600_001;
+    assert!(invitation_app_link(&invite, origin, &ca.certificate_pem, now).is_err());
+    invite.expires_at = now + 60_000;
+    assert!(invitation_app_link(&invite, origin, b"invalid CA", now).is_err());
+}
+
+#[cfg(unix)]
+#[test]
+fn gateway_invite_exports_private_link_without_overwriting_existing_file() {
+    use std::os::unix::fs::PermissionsExt;
+    let parent = std::env::current_dir()
+        .unwrap()
+        .join("target")
+        .join(format!("invite-link-{}", uuid::Uuid::new_v4()));
+    std::fs::create_dir_all(&parent).unwrap();
+    std::fs::set_permissions(&parent, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let path = parent.join("app-link");
+    let output = || Output {
+        root: PrivateRoot::open(&parent).unwrap(),
+        path: path.clone(),
+        name: "app-link".into(),
+    };
+    let secret = b"styx://join#synthetic-private-link";
+    assert_eq!(output().publish(secret).unwrap(), path);
+    assert_eq!(std::fs::read(&path).unwrap(), secret);
+    assert_eq!(
+        std::fs::metadata(&path).unwrap().permissions().mode() & 0o777,
+        0o600
+    );
+    assert!(output().publish(b"replacement").is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), secret);
+    std::fs::remove_dir_all(parent).unwrap();
+}

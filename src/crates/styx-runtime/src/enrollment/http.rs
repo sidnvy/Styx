@@ -390,11 +390,26 @@ impl EnrollmentHttp {
         lan: Option<(TcpListener, String)>,
         cancel: CancellationToken,
     ) -> Result<ShutdownFacts, HttpError> {
-        if let Some((lan_listener, host)) = &lan {
+        self.run_with_lan_addresses(listener, lan.into_iter().collect(), cancel)
+            .await
+    }
+    /// All private interfaces share admission, capacities and shutdown ownership.
+    pub(crate) async fn run_with_lan_addresses(
+        self: Arc<Self>,
+        listener: TcpListener,
+        lan: Vec<(TcpListener, String)>,
+        cancel: CancellationToken,
+    ) -> Result<ShutdownFacts, HttpError> {
+        let mut addresses = BTreeSet::new();
+        if lan.len() > 4 {
+            return Err(HttpError::Configuration);
+        }
+        for (lan_listener, host) in &lan {
             let address = lan_listener
                 .local_addr()
                 .map_err(|_| HttpError::Configuration)?;
-            if address.to_string() != *host
+            if !addresses.insert(address.ip())
+                || address.to_string() != *host
                 || listener
                     .local_addr()
                     .map_err(|_| HttpError::Configuration)?
@@ -420,9 +435,13 @@ impl EnrollmentHttp {
                 _ = cancel.cancelled() => break,
                 accepted = listener.accept() => (accepted, None),
                 accepted = async {
-                    match &lan {
-                        Some((listener, host)) => (listener.accept().await, Some(host.clone())),
-                        None => std::future::pending().await,
+                    if lan.is_empty() {
+                        std::future::pending().await
+                    } else {
+                        let accepts = lan.iter().map(|(listener, host)| Box::pin(async move {
+                            (listener.accept().await, Some(host.clone()))
+                        }));
+                        futures_util::future::select_all(accepts).await.0
                     }
                 } => accepted,
             };

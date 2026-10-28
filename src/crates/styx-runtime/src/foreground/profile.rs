@@ -26,6 +26,8 @@ use styx_contracts::{
 ))]
 #[path = "profile_fresh.rs"]
 mod fresh;
+#[cfg(all(test, target_os = "linux", target_env = "gnu"))]
+pub(crate) use fresh::connection_profile as fresh_connection_profile;
 #[path = "profile_release.rs"]
 mod release;
 const JSON_LIMIT: usize = 1024 * 1024;
@@ -327,8 +329,8 @@ impl LoadedLegacyProfile {
     pub fn endpoint(&self) -> &LinkEndpoint {
         &self.endpoint
     }
-    /// Configured normalized HTTPS origin, never a remote wire namespace.
-    /// This is a routing binding only, not a new publisher or device authority.
+    /// Namespace derived from the protected Gateway CA certificate, never a
+    /// remote wire value or the address used to reach this Gateway.
     pub fn paired_gateway_namespace(&self) -> GatewayId {
         self.paired_namespace.clone()
     }
@@ -970,12 +972,6 @@ fn load_source_inner(
     if endpoint != expected_ws {
         return Err(ProfileError::Invalid);
     }
-    let normalized_origin = gateway.origin().ascii_serialization();
-    let paired_namespace = GatewayId::try_from(format!(
-        "paired.{}",
-        Sha256Digest::of_bytes(normalized_origin.as_bytes()).to_hex()
-    ))
-    .map_err(|_| ProfileError::Invalid)?;
     let endpoint_path = match mode {
         GatewayWireMode::Legacy => format!("/styx/hosts/{}/exec", identity.device_id.as_str()),
         GatewayWireMode::PairedV3 => format!("/styx/host/v3/{}/exec", identity.device_id.as_str()),
@@ -1003,6 +999,13 @@ fn load_source_inner(
         .iter()
         .map(|c| TrustAnchorPin::from_certificate_der(c))
         .collect();
+    // Paired-v3 needs one unambiguous Gateway CA identity; bundle order must
+    // never select a paired authority. Explicit legacy-v2 keeps its original
+    // trust set; its paired namespace accessor is not used for v2 negotiation.
+    if matches!(mode, GatewayWireMode::PairedV3) && pins.len() != 1 {
+        return Err(ProfileError::Unsupported);
+    }
+    let paired_namespace = crate::tls::paired_gateway_namespace(&pins[0]);
     let tls = GatewayClientTls::from_pinned_ca_bundle(&ca, &pins, None)
         .map_err(|_| ProfileError::Invalid)?;
     let (active, expected_format) =

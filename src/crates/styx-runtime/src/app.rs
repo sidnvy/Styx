@@ -8,7 +8,7 @@ mod login;
 mod maintenance;
 #[cfg(all(test, target_os = "linux", target_env = "gnu"))]
 mod maintenance_integration_tests;
-mod pairing_link;
+pub(crate) mod pairing_link;
 mod role_retire;
 mod runtime_update;
 mod service;

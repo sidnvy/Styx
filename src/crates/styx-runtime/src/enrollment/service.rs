@@ -638,7 +638,11 @@ impl EnrollmentService {
         let address: std::net::SocketAddr = host.parse().map_err(|_| invalid())?;
         crate::gateway::auth::lan_address(true, Some(&address.ip().to_string()))
             .map_err(|_| invalid())?;
-        if address.port() == 0 || !self.remote_hosts.is_empty() || self.hosts.contains(&host) {
+        if address.port() == 0
+            || self.remote_hosts.len() >= 4
+            || self.remote_hosts.contains(&host)
+            || self.hosts.contains(&host)
+        {
             return Err(invalid());
         }
         self.remote_hosts.insert(host);

@@ -9,7 +9,7 @@ use rustls::{
     pki_types::{CertificateDer, PrivateKeyDer, ServerName},
 };
 use std::{io::Cursor, sync::Arc, time::Duration};
-use styx_contracts::identity::Sha256Digest;
+use styx_contracts::identity::{GatewayId, Sha256Digest};
 use tokio::net::TcpStream;
 use tokio_rustls::{TlsAcceptor, TlsConnector};
 use zeroize::{Zeroize, Zeroizing};
@@ -166,6 +166,15 @@ macro_rules! certificate_pin {
 }
 certificate_pin!(TrustAnchorPin);
 certificate_pin!(GatewayLeafPin);
+
+/// Paired routing identity is bound to the configured Gateway CA certificate
+/// DER, never an endpoint address, PEM spelling, SPKI or rotating leaf. Callers
+/// supply the anchor pin from their already-validated local TLS configuration.
+pub(crate) fn paired_gateway_namespace(anchor: &TrustAnchorPin) -> GatewayId {
+    format!("paired.{}", anchor.as_hex())
+        .try_into()
+        .expect("fixed prefix and SHA256 hex form a valid Gateway ID")
+}
 
 /// Owned bytes supplied by the existing protected reader. This constructor does
 /// not establish that a file was protected; the caller owns that boundary.
@@ -418,4 +427,6 @@ impl GatewayServerTls {
 mod tests;
 
 mod issuer;
-pub(crate) use issuer::{generate_gateway_ca, issue_server_leaf, issue_server_leaf_with_lan};
+#[cfg(test)]
+pub(crate) use issuer::issue_server_leaf;
+pub(crate) use issuer::{generate_gateway_ca, issue_server_leaf_with_lan_addresses};
