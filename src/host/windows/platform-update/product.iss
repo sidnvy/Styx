@@ -2,7 +2,7 @@
   #error SourceDir is required
 #endif
 #ifndef NativePackage
-  #define NativePackage 0
+  #define NativePackage "0"
 #endif
 [Setup]
 AppId={#ProductId}
@@ -23,7 +23,8 @@ SolidCompression=yes
 WizardStyle=modern
 CloseApplications=no
 RestartApplications=no
-#if NativePackage == 0
+// /D defines are strings; compare as one.
+#if NativePackage == "0"
 AppMutex={code:AppMutexName}
 #endif
 SetupMutex={code:SetupMutexName}
