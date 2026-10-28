@@ -21,7 +21,7 @@ Product work now follows `src/docs/rust-core-rewrite/REDUCED-SCOPE.md`; its sequ
 
 Existing evidence, Rust toolchain and Cargo caches referenced by the handoff retain their established paths. Do not rebuild, move signed installations, change identity/pairing, or replay unknown operations merely because the source directory moved.
 
-Active Codex lease (2026-10-28): `/home/sid/Developer/worktrees/Styx/codex-linux-computer`, branch `codex/linux-computer`. Owner: Claude session integrating develop. Purpose: Linux/Windows Computer Use capability evidence. Paths: `host/coordinator/desktop*`, `providers/cua/`, `foreground/computer*.rs`. Retirement: diff reviewed and merged into develop, then worktree and branch removed.
+No active Codex worktree leases. Retired: `codex-linux-computer` (2026-10-28) merged as f6f9a42 and removed.
 
 Retired: `codex-role-switch` (2026-10-28) merged as 08b4750 and removed.
 Retired: `codex-gateway-tunnel` (2026-10-28) merged as 5186c49 and removed.
