@@ -21,6 +21,8 @@ Product work now follows `src/docs/rust-core-rewrite/REDUCED-SCOPE.md`; its sequ
 
 Existing evidence, Rust toolchain and Cargo caches referenced by the handoff retain their established paths. Do not rebuild, move signed installations, change identity/pairing, or replay unknown operations merely because the source directory moved.
 
-Active Codex lease (2026-10-28): `/home/sid/Developer/worktrees/Styx/codex-gateway-tunnel`, branch `codex/gateway-tunnel`. Owner: Claude session integrating develop. Purpose: Rust Gateway Secure MCP Tunnel adapter. Paths: `foreground/gateway.rs`, new `foreground/tunnel.rs`, `styx/src/cli.rs`, `cli_tests.rs`, `build-native-runtime.py`, `NATIVE-CLI-PAIRING.md`. Retirement: diff reviewed and merged into develop, then worktree and branch removed.
+Active Codex lease (2026-10-28): `/home/sid/Developer/worktrees/Styx/codex-role-switch`, branch `codex/role-switch`. Owner: Claude session integrating develop. Purpose: switch an install between Gateway + Host and Host only. Paths: `app.rs`, `app/`, `management/` (new retire module), `styx/src/cli.rs`, `cli_tests.rs`, macOS `product-ui/*.swift`, Windows `Styx.cs`, onboarding docs. Retirement: diff reviewed and merged into develop, then worktree and branch removed.
+
+Retired: `codex-gateway-tunnel` (2026-10-28) merged as 5186c49 and removed.
 
 Earlier: the 2026-10-27 leases `codex-native-ui-migration-removal` (197351d) and `codex-store-legacy-removal` were merged into develop and retired.
