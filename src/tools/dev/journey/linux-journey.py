@@ -14,7 +14,11 @@ from pathlib import Path
 
 payload, publisher, pin, work, port = sys.argv[1:6]
 work = Path(work)
-styx = str(Path(payload) / "bin/styx")
+WINDOWS = os.name == "nt"
+styx = str(Path(payload) / ("bin/styx.exe" if WINDOWS else "bin/styx"))
+# Windows: each role gets its own process group so Ctrl+Break stops it gracefully.
+GROUP = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if WINDOWS else {}
+STOP = signal.CTRL_BREAK_EVENT if WINDOWS else signal.SIGTERM
 inputs, gparent, hparent, hcwd = (work / n for n in ("inputs", "gateway-parent", "host-parent", "host-cwd"))
 for d in (work, inputs, gparent, hparent, hcwd):
     d.mkdir(mode=0o700, parents=False, exist_ok=False)
@@ -56,7 +60,7 @@ def stop_leftovers():
     # Host first, so its transport drains while the Gateway is still up.
     for role in sorted(ROLES, key=lambda r: r.name != "host"):
         if role.p.poll() is None:
-            role.p.send_signal(signal.SIGTERM)
+            role.p.send_signal(STOP)
             try:
                 note(role.name + "_cleanup_stopped", code=role.p.wait(timeout=60))
             except subprocess.TimeoutExpired:
@@ -70,7 +74,7 @@ class Role:
         ROLES.append(self)
         self.name, self.events = name, []
         self.start = time.monotonic()
-        self.p = subprocess.Popen([styx, *args], stdout=subprocess.PIPE, stderr=open(work / f"{name}.stderr.log", "a"), text=True, env=env)
+        self.p = subprocess.Popen([styx, *args], stdout=subprocess.PIPE, stderr=open(work / f"{name}.stderr.log", "a"), text=True, env=env, **GROUP)
         note(name + "_spawned", pid=self.p.pid)
         threading.Thread(target=self._read, daemon=True).start()
 
@@ -101,7 +105,7 @@ class Role:
 
     def stop(self):
         start = time.monotonic()
-        self.p.send_signal(signal.SIGTERM)
+        self.p.send_signal(STOP)
         code = self.p.wait(timeout=120)
         note(self.name + "_stopped", code=code, seconds=round(time.monotonic() - start, 3))
         if code != 0:
@@ -130,14 +134,21 @@ def mcp(cmd, *args):
 def exec_effect(device, label):
     nonce = uuid.uuid4().hex
     target = hcwd / f"effect-{label}-{nonce}.txt"
-    command = f'set -C; printf %s "$HOME:{nonce}" > {target}'
+    if WINDOWS:
+        command = f'<nul set /p ="%USERPROFILE%:{nonce}" > "{target}"'
+    else:
+        command = f'set -C; printf %s "$HOME:{nonce}" > {target}'
     result = mcp("call", "exec_command", json.dumps({"environment_id": device, "cmd": command}))
     note("exec_result_" + label, result=json.dumps(result)[:1500])
     deadline = time.monotonic() + 60
     while time.monotonic() < deadline and not target.exists():
         time.sleep(0.1)
-    import pwd
-    ok = target.exists() and target.read_text() == pwd.getpwuid(os.getuid()).pw_dir + ":" + nonce
+    if WINDOWS:
+        home = os.environ["USERPROFILE"]
+    else:
+        import pwd
+        home = pwd.getpwuid(os.getuid()).pw_dir
+    ok = target.exists() and target.read_text().strip() == home + ":" + nonce
     note("exec_effect_" + label, ok=ok)
     if not ok:
         raise SystemExit("exec effect missing")
@@ -158,8 +169,14 @@ def computer_click(device):
     an observation is bound to the session that made it.
     """
     nonce = uuid.uuid4().hex[:12]
-    dialog = subprocess.Popen(["zenity", "--question", "--title", f"styx-click-{nonce}",
-        "--text", f"Styx journey click test {nonce}", "--ok-label", "Confirm", "--cancel-label", "Cancel"])
+    if WINDOWS:
+        form = (f"Add-Type -AssemblyName System.Windows.Forms; $f=New-Object Windows.Forms.Form; $f.Text='styx-click-{nonce}';"
+                "$b=New-Object Windows.Forms.Button; $b.Text='Confirm'; $b.Add_Click({[Environment]::Exit(0)});"
+                "$f.Controls.Add($b); $f.TopMost=$true; [void]$f.ShowDialog(); exit 3")
+        dialog = subprocess.Popen(["powershell", "-NoProfile", "-Command", form])
+    else:
+        dialog = subprocess.Popen(["zenity", "--question", "--title", f"styx-click-{nonce}",
+            "--text", f"Styx journey click test {nonce}", "--ok-label", "Confirm", "--cancel-label", "Cancel"])
     atexit.register(lambda: dialog.poll() is None and dialog.kill())
     session = subprocess.Popen([sys.executable, "-I", str(Path(__file__).parent / "mcp_client.py"), str(gateway), url,
         str(gateway / "gateway-ca.pem"), "session"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
@@ -213,11 +230,12 @@ g.wait_for(lambda e: "listen" in ev_name(e) or e.get("listening") is True, "list
 # --- pair Host ---------------------------------------------------------------------
 invitation = inputs / "invitation.txt"
 run("gateway_invite", ["gateway", "invite", "--state-dir", str(gateway), "--invitation-file", str(invitation), "--ttl-seconds", "600", "--authorize", "--json"])
-ca_der = subprocess.run(["openssl", "x509", "-in", str(gateway / "gateway-ca.pem"), "-outform", "DER"], capture_output=True, check=True).stdout
+import ssl
+ca_der = ssl.PEM_cert_to_DER_cert((gateway / "gateway-ca.pem").read_text())
 hdep = inputs / "host.json"
 hdep.write_text(json.dumps({"schema": 1, "mode": "join-existing",
     "gateway": {"url": url.rstrip("/"), "caFile": str(gateway / "gateway-ca.pem"), "expectedCaSha256": hashlib.sha256(ca_der).hexdigest()},
-    "host": {"label": "linux-journey", "cwd": str(hcwd), "shell": "/bin/bash", "computer": True, "browser": {"enabled": True, "headless": True, "channel": "chrome", "persistLogin": False}},
+    "host": {"label": "linux-journey", "cwd": str(hcwd), "shell": os.path.join(os.environ.get("SystemRoot", ""), "System32", "cmd.exe") if WINDOWS else "/bin/bash", "computer": True, "browser": {"enabled": True, "headless": True, "channel": "chrome", "persistLogin": False}},
     "runtimeSelectionFile": str(selection), "invitationFile": str(invitation)})); os.chmod(hdep, 0o600)
 req = run("host_join_request", ["host", "join", "request", "--parent-dir", str(hparent), "--name", "host", "--deployment-file", str(hdep), "--json"])
 pending = run("gateway_pending", ["gateway", "pending", "--state-dir", str(gateway), "--json"])
