@@ -26,6 +26,7 @@ pub(crate) struct ParsedAxSnapshot {
     native_snapshot_id: String,
     tokens: BTreeMap<u64, String>,
     response_sha256: Sha256Digest,
+    images_allowed: bool,
 }
 impl ParsedAxSnapshot {
     pub(crate) fn native_snapshot_id(&self) -> &str {
@@ -108,8 +109,18 @@ impl ParsedAxSnapshot {
         }
         bounded_digest(&structured)?;
         // Mature constructor deliberately regenerates a single text JSON view
-        // from the same sanitized structured value. No image/old text survives.
-        let output = CallToolResult::structured(structured);
+        // from the same sanitized structured value. Ordinary authorized reads
+        // retain their image content; acquisition never accepts images.
+        let mut output = CallToolResult::structured(structured);
+        if self.images_allowed {
+            output.content.extend(
+                original
+                    .content
+                    .iter()
+                    .filter(|part| matches!(part, rmcp::model::ContentBlock::Image(_)))
+                    .cloned(),
+            );
+        }
         bounded_digest(&output)?;
         Ok(output)
     }
@@ -120,6 +131,21 @@ pub(crate) fn parse_acquired(
     pid: u32,
     window_id: u64,
 ) -> Result<ParsedAxSnapshot, CuaError> {
+    parse_snapshot(result, pid, window_id, false)
+}
+pub(crate) fn parse_observed(
+    result: &CallToolResult,
+    pid: u32,
+    window_id: u64,
+) -> Result<ParsedAxSnapshot, CuaError> {
+    parse_snapshot(result, pid, window_id, true)
+}
+fn parse_snapshot(
+    result: &CallToolResult,
+    pid: u32,
+    window_id: u64,
+    observed: bool,
+) -> Result<ParsedAxSnapshot, CuaError> {
     if pid == 0 || window_id == 0 {
         return Err(CuaError::InvalidRequest);
     }
@@ -127,12 +153,15 @@ pub(crate) fn parse_acquired(
     if result.is_error == Some(true) {
         return Err(CuaError::Unsupported);
     }
-    // Only this narrow tree-only result is supported. Images/resources/audio
-    // and future result content are not silently stripped into a fake read.
+    // Acquisition accepts only text. An ordinary authorized combined read
+    // may retain images; resources/audio never become an actionable tree.
     let content = serde_json::to_value(&result.content).map_err(|_| CuaError::ProtocolMismatch)?;
     let content = content.as_array().ok_or(CuaError::ProtocolMismatch)?;
     if content.is_empty()
         || content.iter().any(|part| {
+            if observed && part.get("type").and_then(Value::as_str) == Some("image") {
+                return false;
+            }
             part.get("type").and_then(Value::as_str) != Some("text")
                 || !part.get("text").is_some_and(Value::is_string)
         })
@@ -146,7 +175,7 @@ pub(crate) fn parse_acquired(
         .ok_or(CuaError::ProtocolMismatch)?;
     if object.get("pid").and_then(Value::as_u64) != Some(u64::from(pid))
         || object.get("window_id").and_then(Value::as_u64) != Some(window_id)
-        || object.get("tree_format").and_then(Value::as_str) != Some("elements")
+        || (!observed && object.get("tree_format").and_then(Value::as_str) != Some("elements"))
     {
         return Err(CuaError::ProtocolMismatch);
     }
@@ -170,7 +199,7 @@ pub(crate) fn parse_acquired(
         "capture_id",
     ]
     .iter()
-    .any(|key| object.contains_key(*key))
+    .any(|key| object.contains_key(*key) && (!observed || matches!(*key, "since_status" | "since")))
     {
         return Err(CuaError::Unsupported);
     }
@@ -191,14 +220,20 @@ pub(crate) fn parse_acquired(
     if elements.len() > MAX_REFS {
         return Err(CuaError::Busy);
     }
-    for field in [
-        "element_count",
-        "total_element_count",
-        "returned_element_count",
-    ] {
-        if object.get(field).and_then(Value::as_u64) != Some(elements.len() as u64) {
-            return Err(CuaError::ProtocolMismatch);
-        }
+    let returned = object.get("returned_element_count").and_then(Value::as_u64);
+    let total = object.get("total_element_count").and_then(Value::as_u64);
+    let count = object.get("element_count").and_then(Value::as_u64);
+    if returned != Some(elements.len() as u64)
+        || total != count
+        || total.is_none_or(|total| {
+            if observed {
+                total < elements.len() as u64
+            } else {
+                total != elements.len() as u64
+            }
+        })
+    {
+        return Err(CuaError::ProtocolMismatch);
     }
     let mut tokens = BTreeMap::new();
     let mut retained = 128 + native.len();
@@ -233,6 +268,7 @@ pub(crate) fn parse_acquired(
         native_snapshot_id: native.into(),
         tokens,
         response_sha256,
+        images_allowed: observed,
     })
 }
 fn snapshot_id_valid(value: &str) -> bool {
@@ -292,6 +328,7 @@ mod host_alias_tests {
             native_snapshot_id: "s00000001".into(),
             tokens: BTreeMap::from([(2, "s00000001:2".into())]),
             response_sha256: bounded_digest(&Value::Null).unwrap(),
+            images_allowed: false,
         };
         assert_eq!(
             parsed.native_token_for("s00000002", "s00000002:2").unwrap(),

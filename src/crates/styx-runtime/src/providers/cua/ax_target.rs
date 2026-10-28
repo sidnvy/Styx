@@ -94,6 +94,35 @@ impl DesktopReadRequest {
         }
     }
 }
+impl super::CuaAction {
+    pub(crate) fn snapshot_request(&self) -> Result<Option<DesktopReadRequest>> {
+        if self.name != "get_window_state"
+            || self.arguments.get("include_accessibility_tree") == Some(&Value::Bool(false))
+        {
+            return Ok(None);
+        }
+        if self.arguments.contains_key("session") || self.arguments.contains_key("since") {
+            return Err(CuaError::Unsupported);
+        }
+        let pid = self
+            .arguments
+            .get("pid")
+            .and_then(Value::as_u64)
+            .and_then(|v| u32::try_from(v).ok())
+            .filter(|p| *p > 0)
+            .ok_or(CuaError::InvalidRequest)?;
+        let window_id = self
+            .arguments
+            .get("window_id")
+            .and_then(Value::as_u64)
+            .filter(|w| *w > 0)
+            .ok_or(CuaError::InvalidRequest)?;
+        Ok(Some(DesktopReadRequest::Accessibility(AxReadRequest {
+            pid,
+            window_id,
+        })))
+    }
+}
 /// Original proc directory stays pinned until the native reply is settled.
 /// PID alone and a remote window number never establish process ownership.
 #[cfg(any(target_os = "linux", target_os = "macos"))]

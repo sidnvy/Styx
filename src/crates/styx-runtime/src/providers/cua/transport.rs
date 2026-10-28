@@ -18,6 +18,18 @@ use std::{
 use tokio::io::{AsyncRead, AsyncWrite, ReadBuf};
 use tokio_util::sync::CancellationToken;
 
+fn permission_query(name: &str, args: Option<&serde_json::Map<String, serde_json::Value>>) -> bool {
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    {
+        super::permissions::query_allowed(name, args)
+    }
+    #[cfg(target_os = "macos")]
+    {
+        let _ = (name, args);
+        false
+    }
+}
+
 const NOTIFICATIONS_PER_REQUEST: u16 = 64;
 const TOTAL_DROPPED_NOTIFICATIONS: u32 = 4096;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, thiserror::Error)]
@@ -101,6 +113,10 @@ impl Admission {
                             if state.phase == Phase::Ready
                                 && state.catalog_seen
                                 && (capability(value.params.name.as_ref()).is_ok()
+                                    || permission_query(
+                                        value.params.name.as_ref(),
+                                        value.params.arguments.as_ref(),
+                                    )
                                     || super::ax_write::private_name(
                                         value.params.name.as_ref(),
                                     )) =>

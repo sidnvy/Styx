@@ -18,11 +18,12 @@ pub(super) struct OwnedAxObservation {
     binding: SessionBinding,
     source_epoch: u64,
     grant_revision: u64,
-    provider_revision: u64,
     observation: ObservationId,
     alias: String,
     target: DesktopReadTarget,
     parsed: ParsedAxSnapshot,
+    observed_at: Instant,
+    read_capabilities: Vec<CapabilityId>,
 }
 impl OwnedAxObservation {
     fn check(
@@ -36,7 +37,8 @@ impl OwnedAxObservation {
         if &self.owner != owner || &self.resource != resource {
             return Err(ErrorCategory::Unauthorized.into());
         }
-        if lane.source.fenced()
+        if self.observed_at.elapsed() >= Duration::from_secs(30)
+            || lane.source.fenced()
             || lane.source.epoch() != self.source_epoch
             || lane.binding != self.binding
             || state.facts.grant_revision != self.grant_revision
@@ -50,13 +52,11 @@ impl OwnedAxObservation {
             return Err(ErrorCategory::StaleObservation.into());
         }
         self.target.validate()?;
-        let facts =
+        let mut facts =
             super::desktop_read::acquisition_facts(state, CapabilityId::DesktopAccessibility)?;
-        if facts.descriptor.observation_generation != self.provider_revision
-            || facts.current_observation.as_ref() != Some(&self.observation)
-        {
-            return Err(ErrorCategory::StaleObservation.into());
-        }
+        // Provider permission refresh does not replace this retained AX tree.
+        // Owner/source/target/grant/age checks above establish its currentness.
+        facts.current_observation = Some(self.observation.clone());
         Ok(facts)
     }
     fn write_facts(
@@ -104,6 +104,108 @@ impl OwnedAxObservation {
             )?;
         Ok(())
     }
+    fn click_target(
+        &self,
+        state: &State,
+        owner: &OwnerLease,
+        resource: &ResourceTarget,
+        request: &crate::providers::cua::ClickRequest,
+    ) -> Result<crate::providers::cua::ClickRequest, CoordinatorError> {
+        let lane = desktop(state)?;
+        if &self.owner != owner || &self.resource != resource {
+            return Err(ErrorCategory::Unauthorized.into());
+        }
+        if self.observed_at.elapsed() >= Duration::from_secs(30)
+            || lane.source.fenced()
+            || lane.source.epoch() != self.source_epoch
+            || lane.binding != self.binding
+            || state.facts.grant_revision != self.grant_revision
+        {
+            return Err(ErrorCategory::StaleObservation.into());
+        }
+        let DesktopReadRequest::Accessibility(read) = self.target.request else {
+            return Err(ErrorCategory::StaleObservation.into());
+        };
+        if request.pid.is_some_and(|pid| pid != read.pid)
+            || request
+                .window_id
+                .is_some_and(|window| window != read.window_id)
+        {
+            return Err(ErrorCategory::StaleObservation.into());
+        }
+        self.target.validate()?;
+        Ok(crate::providers::cua::ClickRequest {
+            pid: Some(read.pid),
+            window_id: Some(read.window_id),
+            element_token: request.element_token.clone(),
+        })
+    }
+    pub(super) fn click_facts(
+        &self,
+        state: &State,
+        owner: &OwnerLease,
+        resource: &ResourceTarget,
+        context: &PreparedContext,
+        request: &crate::providers::cua::ClickRequest,
+        now: MonotonicMillis,
+    ) -> Result<AdmissionFacts, CoordinatorError> {
+        let request = self.click_target(state, owner, resource, request)?;
+        if context.observation.as_ref() != Some(&self.observation)
+            || !self.parsed.contains_native_token(&request.element_token)
+        {
+            return Err(ErrorCategory::StaleObservation.into());
+        }
+        let action = request.with_native_token(&request.element_token)?;
+        let mut primary = None;
+        let mut capabilities = action.required_capabilities()?;
+        for cap in &self.read_capabilities {
+            if !capabilities.contains(cap) {
+                capabilities.push(*cap);
+            }
+        }
+        for cap in capabilities {
+            let mut facts = super::desktop::facts(state, cap)?;
+            // The observation is the original Core-issued AX read, bound above
+            // to this owner/resource/window/process. A permissions refresh is
+            // not a new tree and must not fabricate or erase target freshness.
+            facts.current_observation = Some(self.observation.clone());
+            let mut required = context.clone();
+            required.capability = cap;
+            styx_core::policy::check_admission(&required, &facts, now)?;
+            if cap == context.capability {
+                primary = Some(facts);
+            }
+        }
+        primary.ok_or_else(|| ErrorCategory::StateConflict.into())
+    }
+    pub(super) fn recheck_click(
+        &self,
+        state: &State,
+        owner: &OwnerLease,
+        operation: &OperationId,
+        digest: Sha256Digest,
+        now: MonotonicMillis,
+    ) -> Result<(), CoordinatorError> {
+        let context = state.ledger.inspect_context(owner, operation, digest)?;
+        let record = state.ledger.inspect(owner, operation, digest)?;
+        let resource = record.target.as_ref().ok_or(ErrorCategory::StateConflict)?;
+        let action: CuaAction =
+            serde_json::from_slice(state.ledger.inspect_payload(owner, operation, digest)?)
+                .map_err(|_| CuaError::InvalidRequest)?;
+        let request = action
+            .click_request()?
+            .ok_or(ErrorCategory::StateConflict)?;
+        let facts = self.click_facts(state, owner, resource, &context, &request, now)?;
+        state.ledger.authorize_resource_access(
+            owner,
+            &resource.operation_id,
+            resource.payload_digest,
+            &context,
+            &facts,
+            now,
+        )?;
+        Ok(())
+    }
     pub(super) fn validate_delivery(&self, state: &State) -> Result<(), CoordinatorError> {
         let lane = desktop(state)?;
         if lane.source.fenced()
@@ -123,6 +225,7 @@ pub(super) struct AcquiredAxObservation {
     pub(super) parsed: ParsedAxSnapshot,
     pub(super) alias: String,
     pub(super) source_epoch: u64,
+    pub(super) read_capabilities: Vec<CapabilityId>,
 }
 pub(super) fn install(
     state: &mut State,
@@ -135,6 +238,7 @@ pub(super) fn install(
         parsed,
         alias,
         source_epoch,
+        read_capabilities,
     } = acquired;
     target.validate()?;
     if state.shutting_down {
@@ -183,18 +287,18 @@ pub(super) fn install(
         .sessions
         .observe_accessibility_read(&binding)
         .map_err(|_| CuaError::PermissionDenied)?;
-    let after = super::desktop_read::acquisition_facts(state, CapabilityId::DesktopAccessibility)?;
     let entry = OwnedAxObservation {
         owner: owner.clone(),
         resource: resource.clone(),
         binding,
         source_epoch,
         grant_revision: state.facts.grant_revision,
-        provider_revision: after.descriptor.observation_generation,
         observation,
         alias,
         target,
         parsed,
+        observed_at: Instant::now(),
+        read_capabilities,
     };
     state
         .desktop
@@ -239,6 +343,40 @@ pub(super) fn validate_dispatch(
         .ok_or(ErrorCategory::StaleObservation)?;
     entry.write_facts(state, owner, resource, context, request, now)
 }
+pub(super) fn prepare_click(
+    state: &State,
+    owner: &OwnerLease,
+    resource: &ResourceTarget,
+    request: &crate::providers::cua::ClickRequest,
+) -> Result<(CuaAction, ObservationId), CoordinatorError> {
+    let entry = desktop(state)?
+        .ax_observation
+        .as_ref()
+        .ok_or(ErrorCategory::StaleObservation)?;
+    let request = entry.click_target(state, owner, resource, request)?;
+    let native = entry
+        .parsed
+        .native_token_for(&entry.alias, &request.element_token)
+        .map_err(|_| ErrorCategory::StaleObservation)?;
+    Ok((
+        request.with_native_token(native)?,
+        entry.observation.clone(),
+    ))
+}
+pub(super) fn validate_click_dispatch(
+    state: &State,
+    owner: &OwnerLease,
+    resource: &ResourceTarget,
+    context: &PreparedContext,
+    request: &crate::providers::cua::ClickRequest,
+    now: MonotonicMillis,
+) -> Result<AdmissionFacts, CoordinatorError> {
+    let entry = desktop(state)?
+        .ax_observation
+        .as_ref()
+        .ok_or(ErrorCategory::StaleObservation)?;
+    entry.click_facts(state, owner, resource, context, request, now)
+}
 /// Root cleanup calls this before native cancellation; a later read completion
 /// must additionally pass fresh authority/resource checks before installing.
 pub(super) fn invalidate(lane: Option<&mut DesktopLane>, owner: Option<&OwnerLease>) {
@@ -251,3 +389,7 @@ pub(super) fn invalidate(lane: Option<&mut DesktopLane>, owner: Option<&OwnerLea
         lane.ax_observation = None;
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "desktop_click_tests.rs"]
+mod tests;

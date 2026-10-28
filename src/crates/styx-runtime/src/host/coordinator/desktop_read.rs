@@ -74,6 +74,7 @@ pub(super) fn settle_acquired_read(
     lane: &mut DesktopLane,
     target: &DesktopReadTarget,
     receipt: &mut CuaReceipt,
+    acquisition: bool,
 ) -> Option<(ParsedAxSnapshot, String)> {
     if receipt.evidence != CuaEvidence::Acknowledged {
         return None;
@@ -83,7 +84,15 @@ pub(super) fn settle_acquired_read(
         let original = receipt.result.as_ref().ok_or(CuaError::Unknown)?;
         match target.request {
             DesktopReadRequest::Accessibility(request) => {
-                let parsed = parse_acquired(original, request.pid, request.window_id)?;
+                let parsed = if acquisition {
+                    parse_acquired(original, request.pid, request.window_id)?
+                } else {
+                    crate::providers::cua::ax_snapshot::parse_observed(
+                        original,
+                        request.pid,
+                        request.window_id,
+                    )?
+                };
                 let mut next = lane.next_read_alias.checked_add(1).ok_or(CuaError::Busy)?;
                 if format!("s{next:08x}") == parsed.native_snapshot_id() {
                     next = next.checked_add(1).ok_or(CuaError::Busy)?;

@@ -400,3 +400,23 @@ pub(crate) type DesktopSourceStop = WatchReport;
 pub(crate) fn source_stop_complete(report: &DesktopSourceStop) -> bool {
     report.child_reaped && report.stdout_joined
 }
+
+#[cfg(test)]
+impl DesktopSource {
+    pub(super) fn for_tests() -> Self {
+        let (requests, _) = mpsc::channel(1);
+        Self {
+            inner: Arc::new(Handle {
+                state: Arc::new(State {
+                    fenced: AtomicBool::new(false),
+                    epoch: AtomicU64::new(1),
+                    lease: Mutex::new(None),
+                }),
+                cancel: CancellationToken::new(),
+                requests,
+                job: AsyncMutex::new(None),
+                terminal: Mutex::new(None),
+            }),
+        }
+    }
+}

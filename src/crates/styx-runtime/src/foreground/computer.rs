@@ -166,6 +166,11 @@ impl LocalComputer {
                 runtime_dir: self.runtime_dir.clone(),
                 wayland_display: self.wayland_display.clone(),
                 hyprland_instance: self.hyprland_instance.clone(),
+                compositor_peer: self
+                    .source
+                    .window_read_evidence()
+                    .map_err(|_| ErrorCategory::SessionDisconnected)?
+                    .source_peer(),
                 session_bus: self.runtime_dir.join("bus"),
             },
             rpc_timeout: RPC_TIMEOUT,

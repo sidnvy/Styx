@@ -15,7 +15,7 @@ use std::{
     io::{Read, Seek, SeekFrom},
     os::{
         fd::AsRawFd,
-        unix::fs::{MetadataExt, OpenOptionsExt},
+        unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt},
     },
     path::{Component, Path, PathBuf},
     process::{ExitStatus, Stdio},
@@ -67,6 +67,7 @@ enum Launch {
     Cua {
         wayland_display: String,
         hyprland_instance: String,
+        x11_display: Option<String>,
     },
 }
 impl ScopeCommand {
@@ -86,12 +87,14 @@ impl ScopeCommand {
         value.validate()?;
         Ok(value)
     }
-    pub(crate) fn cua(
+    pub(crate) async fn cua(
         driver: PathBuf,
         workspace: PathBuf,
         home: PathBuf,
         wayland_display: String,
         hyprland_instance: String,
+        compositor_peer: (u32, u64),
+        until: Instant,
     ) -> Result<Self> {
         // These bounded names come from the trusted association lease, not a
         // request/environment lookup. Shape checks do not authenticate a seat.
@@ -105,6 +108,8 @@ impl ScopeCommand {
         {
             return Err(ScopeError::InvalidRequest);
         }
+        let x11_display =
+            selected_xwayland_display(Path::new("/tmp/.X11-unix"), compositor_peer, until).await;
         let value = Self {
             executable: driver,
             workspace,
@@ -112,6 +117,7 @@ impl ScopeCommand {
             launch: Launch::Cua {
                 wayland_display,
                 hyprland_instance,
+                x11_display,
             },
         };
         value.validate()?;
@@ -136,6 +142,97 @@ impl ScopeCommand {
         Ok(())
     }
 }
+/// Hyprland creates its XWayland listening sockets before passing them to
+/// Xwayland (upstream src/xwayland/Server.cpp). SO_PEERCRED retains the
+/// credentials at listen(), so the selected compositor is the socket peer.
+/// A pathname, inherited DISPLAY or matching UID alone never selects a display.
+async fn selected_xwayland_display(
+    directory: &Path,
+    compositor_peer: (u32, u64),
+    until: Instant,
+) -> Option<String> {
+    let end = until.min(Instant::now() + Duration::from_secs(1));
+    let (pid, birth) = compositor_peer;
+    let identity = ProcessIdentity::observe(pid).ok()?;
+    if !matches!(&identity, ProcessIdentity::Linux { start_ticks, .. } if *start_ticks == birth) {
+        return None;
+    }
+    let mut entries = tokio::fs::read_dir(directory).await.ok()?;
+    let uid = nix::unistd::Uid::current().as_raw();
+    let mut selected = None;
+    let mut count = 0;
+    while let Some(entry) = timeout_at(end, entries.next_entry()).await.ok()?.ok()? {
+        count += 1;
+        if count > 64 {
+            return None;
+        }
+        let name = entry.file_name();
+        let Some(number) = name.to_str().and_then(|name| name.strip_prefix('X')) else {
+            continue;
+        };
+        if number.is_empty()
+            || number.len() > 5
+            || !number.bytes().all(|b| b.is_ascii_digit())
+            || number
+                .parse::<u16>()
+                .ok()
+                .is_none_or(|value| value.to_string() != number)
+        {
+            continue;
+        }
+        let path = entry.path();
+        let Ok(before) = tokio::fs::symlink_metadata(&path).await else {
+            continue;
+        };
+        if !before.file_type().is_socket() || before.uid() != uid {
+            continue;
+        }
+        let Ok(Ok(socket)) = timeout_at(end, UnixStream::connect(&path)).await else {
+            continue;
+        };
+        if !same_compositor_peer(&socket, &identity, uid) {
+            continue;
+        }
+        let after = tokio::fs::symlink_metadata(&path).await.ok()?;
+        if !after.file_type().is_socket()
+            || after.uid() != uid
+            || before.dev() != after.dev()
+            || before.ino() != after.ino()
+            || !identity.still_current().ok()?
+        {
+            return None;
+        }
+        // Multiple matching sockets are ambiguous, never a fallback preference.
+        if selected.replace(format!(":{number}")).is_some() {
+            return None;
+        }
+    }
+    if Instant::now() >= end || !identity.still_current().ok()? {
+        return None;
+    }
+    selected
+}
+
+fn same_compositor_peer(socket: &UnixStream, identity: &ProcessIdentity, uid: u32) -> bool {
+    socket.peer_cred().is_ok_and(|peer| {
+        compositor_peer_matches(
+            identity,
+            uid,
+            peer.uid(),
+            peer.pid().and_then(|pid| u32::try_from(pid).ok()),
+        )
+    })
+}
+fn compositor_peer_matches(
+    identity: &ProcessIdentity,
+    uid: u32,
+    peer_uid: u32,
+    peer_pid: Option<u32>,
+) -> bool {
+    let ProcessIdentity::Linux { pid, .. } = identity;
+    peer_uid == uid && peer_pid == Some(*pid) && identity.still_current().unwrap_or(false)
+}
+
 pub(crate) struct ScopeCleanup {
     pub wrapper_exited: bool,
     pub confirmed: bool,
@@ -263,16 +360,17 @@ impl LinuxOwnedScope {
             Launch::Cua {
                 wayland_display,
                 hyprland_instance,
+                x11_display,
             } => {
-                // This fixed form is selected only by trusted, explicitly
-                // enabled Desktop bootstrap. Opt-in selects the native backend;
-                // it is not evidence of a capture/input permission grant.
                 command
-                    .arg("CUA_DRIVER_RS_ENABLE_WAYLAND=1")
+                    .arg("CUA_DRIVER_RS_TELEMETRY_ENABLED=0")
+                    .arg("DO_NOT_TRACK=1")
                     .arg(format!("WAYLAND_DISPLAY={wayland_display}"))
-                    .arg(format!("HYPRLAND_INSTANCE_SIGNATURE={hyprland_instance}"))
-                    .arg(&input.executable)
-                    .arg("mcp");
+                    .arg(format!("HYPRLAND_INSTANCE_SIGNATURE={hyprland_instance}"));
+                if let Some(display) = x11_display {
+                    command.arg(format!("DISPLAY={display}"));
+                }
+                command.arg(&input.executable).arg("mcp");
             }
         }
         command
@@ -961,6 +1059,143 @@ async fn read_bounded(
 #[cfg(test)]
 mod tests {
     use super::*;
+    struct SocketDirectory(PathBuf);
+    impl SocketDirectory {
+        fn new() -> Self {
+            let target = std::env::var_os("CARGO_TARGET_DIR").map_or_else(
+                || std::env::current_dir().unwrap().join("target"),
+                PathBuf::from,
+            );
+            let path = target.join(format!("x-{:08x}", uuid::Uuid::new_v4().as_u128() as u32));
+            std::fs::create_dir_all(&path).unwrap();
+            Self(path)
+        }
+    }
+    impl Drop for SocketDirectory {
+        fn drop(&mut self) {
+            let _ = std::fs::remove_dir_all(&self.0);
+        }
+    }
+    fn process_peer(pid: u32) -> (u32, u64) {
+        let ProcessIdentity::Linux { start_ticks, .. } = ProcessIdentity::observe(pid).unwrap();
+        (pid, start_ticks)
+    }
+    #[tokio::test]
+    async fn desktop_xwayland_display_requires_the_selected_compositors_kernel_peer() {
+        let directory = SocketDirectory::new();
+        let peer = process_peer(std::process::id());
+        let end = || Instant::now() + Duration::from_secs(2);
+        assert_eq!(
+            selected_xwayland_display(&directory.0, peer, end()).await,
+            None
+        );
+        // socketpair provides real kernel credentials without binding a socket
+        // pathname (bind is prohibited by the implementation-worker sandbox).
+        let (socket, _other) = UnixStream::pair().unwrap();
+        let identity = ProcessIdentity::observe(peer.0).unwrap();
+        let uid = nix::unistd::Uid::current().as_raw();
+        assert!(compositor_peer_matches(&identity, uid, uid, Some(peer.0)));
+        assert!(!compositor_peer_matches(
+            &identity,
+            uid,
+            uid,
+            Some(peer.0 + 1)
+        ));
+        assert!(!compositor_peer_matches(
+            &identity,
+            uid,
+            uid + 1,
+            Some(peer.0)
+        ));
+        assert!(!compositor_peer_matches(&identity, uid, uid, None));
+        let mut stale = identity.clone();
+        let ProcessIdentity::Linux { start_ticks, .. } = &mut stale;
+        *start_ticks += 1;
+        assert!(!compositor_peer_matches(&stale, uid, uid, Some(peer.0)));
+        match socket.peer_cred() {
+            Ok(_) => assert!(same_compositor_peer(&socket, &identity, uid)),
+            Err(error) => {
+                // The worker sandbox also denies SO_PEERCRED. Exercise its
+                // fail-closed outcome; native reviewers exercise the Ok branch.
+                assert_eq!(error.kind(), std::io::ErrorKind::PermissionDenied);
+                assert!(!same_compositor_peer(&socket, &identity, uid));
+            }
+        }
+        assert_eq!(
+            selected_xwayland_display(&directory.0, (peer.0, peer.1 + 1), end()).await,
+            None
+        );
+        assert_eq!(
+            selected_xwayland_display(&directory.0, peer, Instant::now()).await,
+            None
+        );
+        std::fs::write(directory.0.join("X0"), b"not a socket").unwrap();
+        std::os::unix::fs::symlink(directory.0.join("X0"), directory.0.join("X1")).unwrap();
+        assert_eq!(
+            selected_xwayland_display(&directory.0, peer, end()).await,
+            None
+        );
+    }
+    #[tokio::test]
+    async fn desktop_cua_launch_environment_disables_telemetry_without_enabling_wayland() {
+        for display in [Some(":7".to_owned()), None] {
+            let input = ScopeCommand {
+                executable: "/usr/bin/env".into(),
+                workspace: "/unused/workspace".into(),
+                home: "/unused/home".into(),
+                launch: Launch::Cua {
+                    wayland_display: "wayland-2".into(),
+                    hyprland_instance: "selected-instance".into(),
+                    x11_display: display.clone(),
+                },
+            };
+            let (command, _scope) = LinuxOwnedScope::command(input).unwrap();
+            let arguments = command
+                .as_std()
+                .get_args()
+                .map(OsString::from)
+                .collect::<Vec<_>>();
+            let env = arguments
+                .iter()
+                .position(|arg| arg == "/usr/bin/env")
+                .unwrap();
+            assert_eq!(arguments.last().unwrap(), "mcp");
+            // Execute the exact env -i assignments built for the scoped child,
+            // using env as the fixture driver and omitting only its mcp argument.
+            let mut launched = Command::new("/usr/bin/env");
+            launched
+                .args(&arguments[env + 1..arguments.len() - 1])
+                .env("DISPLAY", ":999")
+                .env("CUA_DRIVER_RS_ENABLE_WAYLAND", "1")
+                .env("CUA_DRIVER_RS_TELEMETRY_ENABLED", "1")
+                .env("DO_NOT_TRACK", "0");
+            let output = launched.output().await.unwrap();
+            assert!(output.status.success());
+            let environment = String::from_utf8(output.stdout)
+                .unwrap()
+                .lines()
+                .map(str::to_owned)
+                .collect::<Vec<_>>();
+            assert!(environment.contains(&"CUA_DRIVER_RS_TELEMETRY_ENABLED=0".to_owned()));
+            assert!(environment.contains(&"DO_NOT_TRACK=1".to_owned()));
+            assert!(environment.contains(&"WAYLAND_DISPLAY=wayland-2".to_owned()));
+            assert!(
+                environment.contains(&"HYPRLAND_INSTANCE_SIGNATURE=selected-instance".to_owned())
+            );
+            assert!(
+                !environment
+                    .iter()
+                    .any(|value| value.starts_with("CUA_DRIVER_RS_ENABLE_WAYLAND="))
+            );
+            assert_eq!(
+                environment
+                    .iter()
+                    .find(|value| value.starts_with("DISPLAY="))
+                    .cloned(),
+                display.map(|display| format!("DISPLAY={display}"))
+            );
+        }
+    }
     #[test]
     fn bounded_machine_identity_fields_reject_ambiguous_targets() {
         let unit = "styx-browser-0123456789abcdef0123456789abcdef.service";

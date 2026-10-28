@@ -125,7 +125,7 @@ fn window_read_evidence(source: &DesktopSource) -> Result<ProviderEvidence, Coor
         recovery: styx_contracts::error::Recovery::None,
     })
 }
-fn facts(state: &State, cap: CapabilityId) -> Result<AdmissionFacts, CoordinatorError> {
+pub(super) fn facts(state: &State, cap: CapabilityId) -> Result<AdmissionFacts, CoordinatorError> {
     let lane = desktop(state)?;
     if lane.source.fenced() {
         return Err(ErrorCategory::SessionDisconnected.into());
@@ -215,21 +215,13 @@ impl HostAuthority {
             CapabilityId::DesktopAccessibility,
         ] {
             #[cfg(any(target_os = "linux", target_os = "windows"))]
-            let evidence = ProviderEvidence {
-                capability: cap,
-                provider: "cua-native".try_into().expect("fixed provider"),
-                availability: Availability::Unavailable,
-                authorization: Authorization::Unknown,
-                provenance: "native provider permission acquisition not yet observed".into(),
-                reason: Some(ErrorCategory::PermissionRequired),
-                recovery: styx_contracts::error::Recovery::Rediscover,
-            };
+            let evidence = crate::providers::cua::permissions::unavailable(cap);
             #[cfg(target_os = "macos")]
             let evidence = source
                 .provider_evidence(cap)
                 .map_err(|_| CuaError::PermissionDenied)?;
             #[cfg(any(target_os = "linux", target_os = "windows"))]
-            let lifetime = Duration::from_secs(60);
+            let lifetime = crate::providers::cua::permissions::LIFETIME;
             #[cfg(target_os = "macos")]
             let lifetime = Duration::from_secs(1);
             providers.push((evidence, lifetime));
@@ -370,6 +362,32 @@ impl HostCoordinator {
         ) {
             return Err(CoordinatorError::Busy);
         }
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        let native = {
+            let handles = {
+                let state = self.inner.state.lock().expect("Host state mutex");
+                desktop(&state)?
+                    .handles
+                    .values()
+                    .cloned()
+                    .collect::<Vec<_>>()
+            };
+            let mut replies = Vec::new();
+            let mut busy = false;
+            for handle in handles {
+                match handle.refresh_permissions().await {
+                    Ok(reply) => replies.push(reply),
+                    Err(CuaError::Busy) => {
+                        busy = true;
+                        break;
+                    }
+                    Err(_) => replies.push(None),
+                }
+            }
+            // A final write gate already holds the original worker slot. It
+            // may use only still-unexpired evidence; never renew it from cache.
+            if busy { None } else { Some(replies) }
+        };
         let mut state = self.inner.state.lock().expect("Host state mutex");
         if result.is_err() || source.fenced() {
             super::desktop_observation::invalidate(state.desktop.as_mut(), None);
@@ -394,6 +412,37 @@ impl HostCoordinator {
                 Duration::from_secs(1),
             )
             .map_err(|_| CuaError::PermissionDenied)?;
+        #[cfg(any(target_os = "linux", target_os = "windows"))]
+        if let Some(replies) = native {
+            for cap in [
+                CapabilityId::DesktopWindowsControl,
+                CapabilityId::DesktopCapture,
+                CapabilityId::DesktopPointer,
+                CapabilityId::DesktopKeyboard,
+                CapabilityId::DesktopAccessibility,
+            ] {
+                // Every original live owner worker must prove the fact. Never
+                // borrow another owner's positive evidence for a missing reply.
+                let mut evidence = crate::providers::cua::permissions::unavailable(cap);
+                for reply in &replies {
+                    evidence = reply.as_ref().map_or_else(
+                        || crate::providers::cua::permissions::unavailable(cap),
+                        |reply| reply.evidence(cap),
+                    );
+                    if evidence.availability != Availability::Available {
+                        break;
+                    }
+                }
+                state
+                    .sessions
+                    .provider(
+                        &binding,
+                        evidence,
+                        crate::providers::cua::permissions::LIFETIME,
+                    )
+                    .map_err(|_| CuaError::PermissionDenied)?;
+            }
+        }
         #[cfg(target_os = "macos")]
         for cap in [
             CapabilityId::DesktopWindowsControl,
@@ -518,7 +567,36 @@ impl HostCoordinator {
                         Ok(r) => (r.evidence, None, Some(r.handle)),
                         Err(r) => (r.evidence, Some(r.cause), r.handle),
                     };
+                    #[cfg(any(target_os = "linux", target_os = "windows"))]
+                    let initial_native = if let Some(handle) = opened.as_ref() {
+                        handle.current_permissions().await
+                    } else {
+                        None
+                    };
                     let mut state = inner.state.lock().expect("Host state mutex");
+                    #[cfg(any(target_os = "linux", target_os = "windows"))]
+                    if let Some(lane) = state.desktop.as_ref() {
+                        let binding = lane.binding.clone();
+                        for cap in [
+                            CapabilityId::DesktopWindowsControl,
+                            CapabilityId::DesktopCapture,
+                            CapabilityId::DesktopPointer,
+                            CapabilityId::DesktopKeyboard,
+                            CapabilityId::DesktopAccessibility,
+                        ] {
+                            let evidence = initial_native.as_ref().map_or_else(
+                                || crate::providers::cua::permissions::unavailable(cap),
+                                |reply| reply.evidence(cap),
+                            );
+                            // Publish only facts already acquired during this
+                            // original worker's authenticated startup handshake.
+                            let _ = state.sessions.provider(
+                                &binding,
+                                evidence,
+                                crate::providers::cua::permissions::LIFETIME,
+                            );
+                        }
+                    }
                     if let (Some(h), Some(lane)) = (opened, state.desktop.as_mut()) {
                         lane.handles.insert(operation.clone(), h);
                     }
@@ -573,6 +651,18 @@ impl HostCoordinator {
             return Err(ErrorCategory::ProtocolMismatch.into());
         }
         handle(desktop(&state)?, owner, &target)?;
+        if let Some(request) = action.click_request()? {
+            let (translated, observation) =
+                super::desktop_observation::prepare_click(&state, owner, &target, &request)?;
+            context.observation = Some(observation);
+            return Ok(state.ledger.prepare_targeted(
+                owner,
+                target,
+                context,
+                translated.to_operation_payload()?,
+                self.now(),
+            )?);
+        }
         if let Some(request) = action.accessibility_write_request()? {
             let (translated, observation) =
                 super::desktop_observation::prepare(&state, owner, &target, &request)?;
@@ -655,13 +745,23 @@ impl HostCoordinator {
                     .map_err(|_| CuaError::InvalidRequest)?;
             let acquisition = action.desktop_read_request()?;
             let write = action.accessibility_write_request()?;
+            let click = action.click_request()?;
             if write.is_some()
                 != (state.ledger.inspect_purpose(owner, id, digest)?
                     == styx_core::operations::OperationPurpose::DesktopAccessibilityWriteAttempt)
             {
                 return Err(ErrorCategory::StateConflict.into());
             }
-            let primary = if let Some(request) = write.as_ref() {
+            let primary = if let Some(request) = click.as_ref() {
+                super::desktop_observation::validate_click_dispatch(
+                    &state,
+                    owner,
+                    target,
+                    &context,
+                    request,
+                    self.now(),
+                )?
+            } else if let Some(request) = write.as_ref() {
                 super::desktop_observation::validate_dispatch(
                     &state,
                     owner,
@@ -697,7 +797,7 @@ impl HostCoordinator {
                 }
             }
             for cap in action.required_capabilities()? {
-                if acquisition.is_some() || write.is_some() {
+                if acquisition.is_some() || write.is_some() || click.is_some() {
                     continue;
                 }
                 let required = facts(&state, cap)?;
@@ -709,13 +809,16 @@ impl HostCoordinator {
                 }
                 styx_core::policy::check_admission(&requested, &required, self.now())?;
             }
-            if write.is_none() && action.requires_observed_target()? {
-                // The owned native observation map must authorize the exact target;
-                // a caller-provided observation ID alone is insufficient. This gate
-                // stays closed until a real native snapshot is installed below.
+            if write.is_none() && click.is_none() && action.requires_observed_target()? {
+                // Other native input routes have no Host-owned target map.
+                // Exact element clicks were checked above, with every required
+                // capability and the same retained read observation.
                 return Err(ErrorCategory::StaleObservation.into());
             }
+            let read_acquisition = acquisition.is_some();
+            let read_capabilities = action.required_capabilities()?;
             let mut acquired_target = acquisition
+                .or(action.snapshot_request()?)
                 .map(crate::providers::cua::DesktopReadTarget::acquire)
                 .transpose()?;
             let acquired_epoch = desktop(&state)?.source.epoch();
@@ -732,7 +835,7 @@ impl HostCoordinator {
             };
             // Consume only after the one Core dispatch; a dropped waiter or
             // failed/unknown native reply can never restore this target map.
-            let write_observation = if write.is_some() {
+            let write_observation = if write.is_some() || click.is_some() {
                 state
                     .desktop
                     .as_mut()
@@ -762,6 +865,7 @@ impl HostCoordinator {
                 async move {
                     let _slot = job_slot;
                     let mut receipt = if let Some(observation) = write_observation.as_ref() {
+                        let is_click = click.is_some();
                         let retained = observation.clone();
                         let gate_coordinator = coordinator.clone();
                         let gate_inner = inner.clone();
@@ -777,15 +881,24 @@ impl HostCoordinator {
                                 if state.shutting_down {
                                     return Err(CuaError::StaleObservation);
                                 }
-                                retained
-                                    .recheck_write(
+                                if is_click {
+                                    retained.recheck_click(
                                         &state,
                                         &gate_owner,
                                         &gate_operation,
                                         digest,
                                         gate_inner.now(),
                                     )
-                                    .map_err(|_| CuaError::StaleObservation)
+                                } else {
+                                    retained.recheck_write(
+                                        &state,
+                                        &gate_owner,
+                                        &gate_operation,
+                                        digest,
+                                        gate_inner.now(),
+                                    )
+                                }
+                                .map_err(|_| CuaError::StaleObservation)
                             })
                         });
                         slot.call_once_until_with_write_gate(permit, write_until, gate)
@@ -818,7 +931,18 @@ impl HostCoordinator {
                     let delivery = if fresh.is_err() {
                         Err(ErrorCategory::SessionDisconnected.into())
                     } else {
-                        let f = if acquired_target.is_some() || write_observation.is_some() {
+                        let f = if let (Some(request), Some(observation)) =
+                            (click.as_ref(), write_observation.as_ref())
+                        {
+                            observation.click_facts(
+                                &state,
+                                bound.owner(),
+                                bound.target(),
+                                &delivery_context,
+                                request,
+                                inner.now(),
+                            )
+                        } else if acquired_target.is_some() || write_observation.is_some() {
                             super::desktop_read::acquisition_facts(
                                 &state,
                                 delivery_context.capability,
@@ -827,7 +951,9 @@ impl HostCoordinator {
                             facts(&state, delivery_context.capability)
                         };
                         f.and_then(|f| {
-                            if let Some(observation) = write_observation.as_ref() {
+                            if click.is_none()
+                                && let Some(observation) = write_observation.as_ref()
+                            {
                                 observation.validate_delivery(&state)?;
                                 if receipt.evidence != CuaEvidence::Acknowledged {
                                     return Ok(());
@@ -844,7 +970,7 @@ impl HostCoordinator {
                                     .map(|_| ())
                                     .map_err(CoordinatorError::from);
                             }
-                            if acquired_target.is_some() {
+                            if read_acquisition {
                                 return state
                                     .ledger
                                     .authorize_desktop_read_result(
@@ -881,6 +1007,7 @@ impl HostCoordinator {
                                 lane,
                                 target,
                                 &mut receipt,
+                                read_acquisition,
                             );
                             if let Some((parsed, alias)) = parsed {
                                 let original =
@@ -894,6 +1021,7 @@ impl HostCoordinator {
                                         parsed,
                                         alias,
                                         source_epoch: acquired_epoch,
+                                        read_capabilities,
                                     },
                                 )?;
                             }
@@ -918,5 +1046,38 @@ impl HostCoordinator {
             rx
         };
         rx.await.map_err(|_| CoordinatorError::ResponseLost)?
+    }
+}
+
+#[cfg(all(test, target_os = "linux"))]
+pub(super) fn test_lane(binding: SessionBinding, budget: Arc<CuaIoBudget>) -> DesktopLane {
+    DesktopLane {
+        worker: CuaWorker::new(budget),
+        source: DesktopSource::for_tests(),
+        binding,
+        grants: [
+            CapabilityId::DesktopWindowsRead,
+            CapabilityId::DesktopCapture,
+            CapabilityId::DesktopAccessibility,
+            CapabilityId::DesktopPointer,
+            CapabilityId::DesktopKeyboard,
+            CapabilityId::DesktopWindowsControl,
+        ]
+        .into_iter()
+        .map(|cap| {
+            (
+                cap,
+                DesktopGrant {
+                    configured: true,
+                    remote_grant: true,
+                    local_policy_allowed: true,
+                },
+            )
+        })
+        .collect(),
+        next_read_alias: 2,
+        ax_observation: None,
+        profiles: BTreeMap::new(),
+        handles: BTreeMap::new(),
     }
 }
