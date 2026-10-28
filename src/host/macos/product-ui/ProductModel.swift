@@ -272,6 +272,10 @@ enum ProductRestorationPolicy {
     @Published var joining = false
     // UI duplicate-submit guard only. Core remains the durable setup authority.
     @Published private(set) var nativeLocalSetupSubmitted = false
+    // Native Mac setup: Browser uses the system Google Chrome; Computer Use is not offered yet.
+    var nativeBrowserChoice: [String: ProductJSON] {
+        browser ? ["browser": .bool(true), "browserChannel": .string("chrome")] : ["browser": .bool(false), "browserChannel": .null]
+    }
     var nativeLanJoinNotice: String? {
         guard status["gateway"]["lan"]["enabled"].bool,
               let origin = status["gateway"]["lan"]["origin"].string else { return nil }
@@ -297,7 +301,8 @@ enum ProductRestorationPolicy {
             guard nativeCanResumeLocal else { throw ProductCoreError.rejected }
             nativeLocalSetupSubmitted = true
             // Explicit confirmation only; a failed or lost response is never replayed.
-            let choice: [String: ProductJSON] = ["label": .string(name), "computer": .bool(false), "browser": .bool(false), "browserChannel": .null, "persistLogin": .bool(false), "port": .number(Double(port))]
+            var choice: [String: ProductJSON] = ["label": .string(name), "computer": .bool(false), "persistLogin": .bool(false), "port": .number(Double(port))]
+            choice.merge(nativeBrowserChoice) { _, chosen in chosen }
             do {
                 try applyNative(try await client.native("resumeLocal", choice))
                 page = .overview
@@ -731,9 +736,10 @@ enum ProductRestorationPolicy {
             let joinExisting = joining
             if !joinExisting && !nativeCanCreateLocal { page = .overview; return }
             perform { [self] in
-                // Preserve this Mac slice's existing disabled capabilities.
+                // This Mac slice offers Browser (system Chrome); Computer Use stays off.
                 // Selecting setup never grants desktop permission or invents readiness.
-                var choice: [String: ProductJSON] = ["label": .string(name), "computer": .bool(false), "browser": .bool(false), "browserChannel": .null, "persistLogin": .bool(false)]
+                var choice: [String: ProductJSON] = ["label": .string(name), "computer": .bool(false), "persistLogin": .bool(false)]
+                choice.merge(nativeBrowserChoice) { _, chosen in chosen }
                 if joinExisting {
                     guard let origin = joinAcceptance["origin"].string,
                           let ca = joinAcceptance["caSha256"].string else { throw ProductCoreError.rejected }
