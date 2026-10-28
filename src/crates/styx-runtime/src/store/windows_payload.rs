@@ -52,6 +52,7 @@ fn executable(path: &Path) -> bool {
             "workers/codex-exec/bin/codex.exe",
             "workers/browser-node22/bin/node.exe",
             "workers/cua-native/bin/cua-driver.exe",
+            "workers/tunnel-client/tunnel-client-runtime.exe",
         ]
         .iter()
         .any(|expected| path == Path::new(expected))
