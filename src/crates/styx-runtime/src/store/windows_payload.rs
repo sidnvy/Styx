@@ -192,7 +192,16 @@ impl Root {
             let path = relative.join(name);
             let listing = directory.path.join(name);
             let kind = std::fs::symlink_metadata(&listing)?;
-            let opened = self.open_relative(&path, kind.is_dir(), false, false)?;
+            // This directory and every ancestor are held without delete
+            // sharing, so the listing path still names their original
+            // objects: open the child once instead of re-walking from root.
+            component(name)?;
+            let opened = Opened {
+                file: ffi::open(&listing, kind.is_dir(), false, false)?,
+                _parents: Vec::new(),
+                path: listing,
+                relative: path.clone(),
+            };
             if kind.is_dir() {
                 // The opened directory remains held while recursing through its
                 // ordinary path, so neither it nor an ancestor can be renamed.
@@ -224,10 +233,9 @@ impl Root {
                     Some(digest) => digest,
                     None => stream_hash(&opened.file, size)?,
                 };
-                let current = self.open_relative(&path, false, false, false)?;
-                if !same(&facts, &observe(&opened, false)?)
-                    || !same(&facts, &observe(&current, false)?)
-                {
+                // The held handle denies write and delete sharing; its by-handle
+                // facts (file ID, size, times, links) bind the hashed bytes.
+                if ffi::facts(&opened.file)? != facts.facts {
                     return Err(StoreError::Changed);
                 }
                 facts.sha256 = Some(digest);
