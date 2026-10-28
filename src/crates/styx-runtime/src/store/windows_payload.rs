@@ -14,9 +14,17 @@ struct Observed {
     sha256: Option<Sha256Digest>,
     executable: bool,
 }
+struct Retained {
+    file: File,
+    observed: Observed,
+    names: Option<BTreeSet<std::ffi::OsString>>,
+}
 pub(in crate::store) struct PayloadSnapshot {
     root: Root,
-    observed: BTreeMap<PathBuf, Observed>,
+    // One original HANDLE per entry, including the payload root. Redundant
+    // Opened::_parents are dropped: every parent has its own retained entry.
+    // PayloadLimits bounds these to 4098 files + 4096 directories.
+    observed: BTreeMap<PathBuf, Retained>,
     limits: PayloadLimits,
 }
 pub(in crate::store) struct PinnedImage {
@@ -126,7 +134,7 @@ impl Root {
         &self,
         limits: PayloadLimits,
         known: &KnownDigests,
-    ) -> Result<(BTreeMap<PathBuf, Observed>, Vec<PayloadMember>)> {
+    ) -> Result<(BTreeMap<PathBuf, Retained>, Vec<PayloadMember>)> {
         self.validate_root()?;
         limits.validate()?;
         let mut observed = BTreeMap::new();
@@ -134,7 +142,7 @@ impl Root {
         let mut total = 0;
         let mut directories = 0;
         self.walk_payload(
-            Path::new(""),
+            self.payload_directory(Path::new(""))?,
             0,
             limits,
             &mut observed,
@@ -164,10 +172,10 @@ impl Root {
     #[allow(clippy::too_many_arguments)]
     fn walk_payload(
         &self,
-        relative: &Path,
+        directory: Opened,
         depth: usize,
         limits: PayloadLimits,
-        observed: &mut BTreeMap<PathBuf, Observed>,
+        observed: &mut BTreeMap<PathBuf, Retained>,
         members: &mut Vec<PayloadMember>,
         total: &mut u64,
         directories: &mut usize,
@@ -176,7 +184,7 @@ impl Root {
         if depth > limits.max_depth || *directories >= limits.max_directories {
             return Err(StoreError::TooLarge);
         }
-        let directory = self.payload_directory(relative)?;
+        let relative = &directory.relative;
         let before = observe(&directory, true)?;
         *directories += 1;
         let names = directory_names(&directory.path, limits.max_files + limits.max_directories)?;
@@ -190,7 +198,7 @@ impl Root {
                 // ordinary path, so neither it nor an ancestor can be renamed.
                 private_facts(&opened.file, true)?;
                 self.walk_payload(
-                    &path,
+                    opened,
                     depth + 1,
                     limits,
                     observed,
@@ -230,7 +238,14 @@ impl Root {
                     executable: facts.executable,
                     observation: facts.facts.observation.clone(),
                 });
-                observed.insert(path, facts);
+                observed.insert(
+                    path,
+                    Retained {
+                        file: opened.file,
+                        observed: facts,
+                        names: None,
+                    },
+                );
             }
         }
         let after_names =
@@ -241,25 +256,49 @@ impl Root {
         {
             return Err(StoreError::Changed);
         }
-        observed.insert(relative.to_owned(), before);
+        observed.insert(
+            relative.to_owned(),
+            Retained {
+                file: directory.file,
+                observed: before,
+                names: Some(names),
+            },
+        );
         Ok(())
     }
 }
 impl PayloadSnapshot {
     pub(in crate::store) fn revalidate(&self) -> Result<()> {
-        // Unchanged file metadata reuses this snapshot's own digests; only a
-        // changed file is read again. Any difference is still refused below.
-        let known: KnownDigests = self
-            .observed
+        // Root retains the entire ancestor chain without delete sharing, and
+        // every payload directory is retained below with the same protection.
+        // Thus these ordinary directory listing paths still name the original
+        // objects; no member-file opens or owner/ACL/stream queries are needed.
+        if self
+            .root
+            .ancestors
             .iter()
-            .filter_map(|(path, seen)| {
-                seen.sha256
-                    .map(|digest| (path.clone(), (seen.facts.observation.clone(), digest)))
-            })
-            .collect();
-        let (actual, _) = self.root.collect_payload(self.limits, &known)?;
-        if actual != self.observed {
+            .any(|file| ffi::facts(file).is_err())
+        {
             return Err(StoreError::Changed);
+        }
+        for (path, retained) in &self.observed {
+            // Regular input HANDLEs also deny write sharing, so their approved
+            // bytes cannot change while held. Compare all by-handle facts,
+            // including file ID, link count, size, last-write and change times.
+            if ffi::facts(&retained.file)? != retained.observed.facts {
+                return Err(StoreError::Changed);
+            }
+            if let Some(names) = &retained.names {
+                // Directories permit additions; exact names are checked even
+                // when their timestamps alone would not reveal a change.
+                if directory_names(
+                    &self.root.path.join(path),
+                    self.limits.max_files + self.limits.max_directories,
+                )? != *names
+                {
+                    return Err(StoreError::Changed);
+                }
+            }
         }
         Ok(())
     }
@@ -300,6 +339,7 @@ impl PayloadSnapshot {
         let observed = self
             .observed
             .get(path)
+            .map(|entry| &entry.observed)
             .filter(|o| o.executable && !o.facts.directory)
             .ok_or(StoreError::NotRegularFile)?
             .clone();
@@ -401,6 +441,141 @@ mod batch_tests {
     use super::*;
     use std::io::Write;
 
+    fn with_payload(test: impl FnOnce(&Root, &Path)) {
+        let container = std::env::temp_dir().join(format!(
+            "styx-retained-payload-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        ffi::create_new_private_directory(&container).unwrap();
+        {
+            let parent = Root::open(&container).unwrap();
+            let root = parent
+                .create_fresh_child(OsStr::new("payload"))
+                .unwrap_or_else(|_| panic!("fresh private payload"));
+            let assets = root
+                .create_fresh_child(OsStr::new("assets"))
+                .unwrap_or_else(|_| panic!("fresh private asset directory"));
+            let member = assets.path.join("member.txt");
+            {
+                let mut file = ffi::create_new_private_file(&member).unwrap();
+                file.write_all(b"original payload bytes").unwrap();
+                ffi::flush_file(&file).unwrap();
+            }
+            test(&root, &member);
+        }
+        std::fs::remove_dir_all(&container).unwrap();
+    }
+
+    #[test]
+    fn windows_payload_revalidates_without_reopening_and_retains_original_handles() {
+        with_payload(|root, member| {
+            let inventory = root
+                .payload_inventory(PayloadLimits::default(), &KnownDigests::new())
+                .unwrap();
+            assert_eq!(inventory.inner.observed.len(), 3); // root, assets, member
+            let calls = OPEN_RELATIVE_CALLS.with(|calls| calls.get());
+            inventory.revalidate().unwrap();
+            inventory.revalidate().unwrap();
+            assert_eq!(OPEN_RELATIVE_CALLS.with(|calls| calls.get()), calls);
+            assert!(
+                std::fs::OpenOptions::new()
+                    .write(true)
+                    .open(member)
+                    .is_err()
+            );
+            assert!(std::fs::remove_file(member).is_err());
+            assert!(std::fs::rename(member, member.with_file_name("moved.txt")).is_err());
+            assert!(
+                std::fs::rename(root.path.join("assets"), root.path.join("moved-assets")).is_err()
+            );
+            inventory.revalidate().unwrap();
+            drop(inventory);
+            // Recovery: releasing the snapshot releases the ordinary file pin.
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(member)
+                .unwrap();
+        });
+    }
+
+    #[test]
+    fn windows_payload_refuses_added_name_in_retained_directory() {
+        with_payload(|root, member| {
+            let mut inventory = root
+                .payload_inventory(PayloadLimits::default(), &KnownDigests::new())
+                .unwrap();
+            inventory.revalidate().unwrap();
+            let added = member.with_file_name("added.txt");
+            drop(ffi::create_new_private_file(&added).unwrap());
+            // Isolate the exact-name check from directory timestamp detection:
+            // even if metadata appeared unchanged, the new name must be refused.
+            for retained in inventory.inner.observed.values_mut() {
+                if retained.names.is_some() {
+                    retained.observed.facts = ffi::facts(&retained.file).unwrap();
+                }
+            }
+            assert!(matches!(inventory.revalidate(), Err(StoreError::Changed)));
+            std::fs::remove_file(added).unwrap();
+            drop(inventory);
+            root.payload_inventory(PayloadLimits::default(), &KnownDigests::new())
+                .unwrap()
+                .revalidate()
+                .unwrap();
+        });
+    }
+
+    #[test]
+    fn windows_payload_refuses_changed_facts_from_retained_file_handle() {
+        use std::os::windows::fs::OpenOptionsExt;
+        use windows_sys::Win32::Storage::FileSystem::FILE_WRITE_ATTRIBUTES;
+
+        with_payload(|root, member| {
+            let inventory = root
+                .payload_inventory(PayloadLimits::default(), &KnownDigests::new())
+                .unwrap();
+            inventory.revalidate().unwrap();
+            // Attribute-only access does not request write-data access and is
+            // allowed despite the reader's no-write sharing. Change real NTFS
+            // metadata without releasing or substituting the retained handle.
+            let attributes = std::fs::OpenOptions::new()
+                .access_mode(FILE_WRITE_ATTRIBUTES)
+                .open(member)
+                .unwrap();
+            attributes
+                .set_modified(std::time::UNIX_EPOCH + std::time::Duration::from_secs(1_000_000))
+                .unwrap();
+            drop(attributes);
+            let retained = &inventory.inner.observed[Path::new("assets/member.txt")];
+            assert!(ffi::facts(&retained.file).unwrap() != retained.observed.facts);
+            assert!(matches!(inventory.revalidate(), Err(StoreError::Changed)));
+            assert_eq!(std::fs::read(member).unwrap(), b"original payload bytes");
+        });
+    }
+
+    #[test]
+    fn windows_payload_preserves_matching_known_digests_and_rehashes_stale_ones() {
+        with_payload(|root, _| {
+            let inventory = root
+                .payload_inventory(PayloadLimits::default(), &KnownDigests::new())
+                .unwrap();
+            let member = &inventory.members()[0];
+            let cached = Sha256Digest::of_bytes(b"earlier full check");
+            let mut known = KnownDigests::new();
+            known.insert(member.path.clone(), (member.observation.clone(), cached));
+            let reused = root
+                .payload_inventory(PayloadLimits::default(), &known)
+                .unwrap();
+            assert_eq!(reused.members()[0].sha256, cached);
+            reused.revalidate().unwrap();
+            known.get_mut(&member.path).unwrap().0.changed_nanoseconds += 1;
+            let rehashed = root
+                .payload_inventory(PayloadLimits::default(), &known)
+                .unwrap();
+            assert_eq!(rehashed.members()[0].sha256, member.sha256);
+            rehashed.revalidate().unwrap();
+        });
+    }
+
     fn private_copy(source: &Path, destination: &Path) {
         let mut input = File::open(source).unwrap();
         let mut output = ffi::create_new_private_file(destination).unwrap();
@@ -447,7 +622,7 @@ mod batch_tests {
     }
 
     #[test]
-    fn windows_batch_pins_refuse_original_nonentry_replacement_between_observations() {
+    fn windows_batch_pins_block_nonentry_replacement_and_refuse_addition_between_observations() {
         // Actual owned NTFS files and PE images; no package signer, process
         // launch, service, permission grant or external fixture is involved.
         let container = std::env::temp_dir().join(format!(
@@ -503,26 +678,34 @@ mod batch_tests {
                 inventory.pin_executables(&[paths[0], Path::new("BIN/ONE.EXE")]),
                 Err(StoreError::InvalidRelativePath)
             ));
-            let mut replaced = false;
             let mut replace = || {
-                // Same bytes, new actual file ID: individual image validation
-                // cannot detect this unrelated signed member substitution.
-                std::fs::rename(&replacement, &member)?;
-                replaced = true;
+                // Every member now retains a no-delete-share HANDLE, including
+                // this non-entry file. Same-byte replacement is blocked by NTFS.
+                assert!(std::fs::rename(&replacement, &member).is_err());
                 Ok(())
             };
             let relative = paths.iter().map(|p| p.to_path_buf()).collect::<Vec<_>>();
-            assert!(matches!(
-                inventory
-                    .inner
-                    .pin_executables_inner(&relative, Some(&mut replace)),
-                Err(StoreError::Changed)
-            ));
-            assert!(replaced);
+            inventory
+                .inner
+                .pin_executables_inner(&relative, Some(&mut replace))
+                .unwrap();
             assert_eq!(
                 std::fs::read(&member).unwrap(),
                 b"same approved member bytes"
             );
+            inventory.revalidate().unwrap();
+            let mut add = || {
+                drop(ffi::create_new_private_file(
+                    &assets.path.join("added.txt"),
+                )?);
+                Ok(())
+            };
+            assert!(matches!(
+                inventory
+                    .inner
+                    .pin_executables_inner(&relative, Some(&mut add)),
+                Err(StoreError::Changed)
+            ));
             assert!(matches!(inventory.revalidate(), Err(StoreError::Changed)));
             // The legacy public single-pin contract is still a full original
             // inventory observation, not merely this image's PE/hash check.
