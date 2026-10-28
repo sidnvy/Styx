@@ -83,13 +83,31 @@ struct LocalExecutable {
     uid: u32,
     mode: u32,
     bytes: u64,
-    // mtime and ctime: any write or attribute change after the pin moves ctime.
+    // mtime and (Linux) ctime: any write or attribute change after the pin moves ctime.
     times: (i64, i64, i64, i64),
     digest: Sha256Digest,
 }
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg(target_os = "linux")]
 fn times(m: &std::fs::Metadata) -> (i64, i64, i64, i64) {
     (m.mtime(), m.mtime_nsec(), m.ctime(), m.ctime_nsec())
+}
+// macOS Chrome hard-links its own bundle into a per-launch code_sign_clone
+// directory and unlinks it on exit, so the executable's link count and ctime
+// change with every Chrome start, including the one Styx launches. The same
+// inode, owner, mode, size and mtime still bind the bytes hashed at pin time;
+// rewriting them and restoring mtime needs the bundle owner, who could equally
+// replace the bundle outright.
+#[cfg(target_os = "macos")]
+fn times(m: &std::fs::Metadata) -> (i64, i64, i64, i64) {
+    (m.mtime(), m.mtime_nsec(), 0, 0)
+}
+#[cfg(target_os = "linux")]
+fn single_link(m: &std::fs::Metadata) -> bool {
+    m.nlink() == 1
+}
+#[cfg(target_os = "macos")]
+fn single_link(_: &std::fs::Metadata) -> bool {
+    true
 }
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 impl LocalExecutable {
@@ -105,7 +123,7 @@ impl LocalExecutable {
             .map_err(|_| ErrorCategory::IntegrityFailure)?;
         let uid = nix::unistd::Uid::current().as_raw();
         if !m.is_file()
-            || m.nlink() != 1
+            || !single_link(&m)
             || ![0, uid].contains(&m.uid())
             || m.mode() & 0o022 != 0
             || m.mode() & 0o111 == 0
@@ -146,7 +164,7 @@ impl LocalExecutable {
         for f in [&current, &self.file] {
             let m = f.metadata().map_err(|_| ErrorCategory::IntegrityFailure)?;
             if !m.is_file()
-                || m.nlink() != 1
+                || !single_link(&m)
                 || (m.dev(), m.ino(), m.uid(), m.mode(), m.len())
                     != (self.device, self.inode, self.uid, self.mode, self.bytes)
                 || times(&m) != self.times
