@@ -28,6 +28,13 @@ These are implemented partly or fully. Freeze them: no new work, no acceptance r
 - Login startup acceptance (Mac SMAppService, Windows Startup LNK). Promote to v1 only if one native check passes without new code.
 - Acceptance A03 (boot identity part), A06, A07, A10, A12, A16–A21, A23, A24, A26, A30, A31, A37, A39: valuable, but not blocking a first usable release.
 
+## Post-v1 (owner decision 2026-10-28)
+
+Not v1 work; revisit after v1 ships.
+
+- App wording: show Gateway as "Hub" and Host as "Computer" (MCP calls the AI app the host). Code, wire and file names stay unchanged.
+- Claude as a client: first Claude Code / Claude Desktop against a local or LAN Gateway (docs and CA trust only); claude.ai connectors need a public route and OAuth on the Gateway and are a separate decision.
+
 ## v1 definition
 
 One journey per platform, run on the final candidate, recorded in one short result file:
