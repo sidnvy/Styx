@@ -67,6 +67,7 @@ async fn completed_stopped_host_control_binding_preserves_execution_refusal_and_
             browser_channel: None,
             persist_login: false,
             port,
+            lan_address: None,
         })
         .await
         .unwrap();

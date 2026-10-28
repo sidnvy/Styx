@@ -8,8 +8,56 @@ use crate::{
 };
 use std::io::Cursor;
 
+fn local_deployment(input: &LocalInput) -> Result<Vec<u8>, AppError> {
+    if input.port < 1024 {
+        return Err(AppError("app_input_invalid"));
+    }
+    crate::gateway::auth::lan_address(input.lan_address.is_some(), input.lan_address.as_deref())
+        .map_err(|_| AppError("app_lan_address_invalid"))?;
+    let origin = format!("https://127.0.0.1:{}", input.port);
+    let mut deployment = json!({"schema":1,"mode":"create-local","gateway":{"url":origin,"listenHost":"127.0.0.1","allowRemoteHosts":false}});
+    if let Some(address) = &input.lan_address {
+        deployment["gateway"]["allowRemoteHosts"] = json!(true);
+        deployment["gateway"]["lanAddress"] = json!(address);
+    }
+    serde_json::to_vec(&deployment).map_err(|_| AppError("app_input_invalid"))
+}
+
+#[derive(Serialize)]
+struct LanStatus {
+    enabled: bool,
+    address: Option<std::net::Ipv4Addr>,
+    origin: Option<String>,
+}
+impl LanStatus {
+    fn from_deployment(deployment: &Value) -> Result<Self, AppError> {
+        let gateway = &deployment["gateway"];
+        let address = crate::gateway::auth::lan_address(
+            gateway["allowRemoteHosts"].as_bool().unwrap_or(false),
+            gateway["lanAddress"].as_str(),
+        )
+        .map_err(|_| AppError("app_gateway_input_refused"))?;
+        let origin = address
+            .map(|address| {
+                let port = gateway["url"]
+                    .as_str()
+                    .and_then(|origin| url::Url::parse(origin).ok())
+                    .and_then(|url| url.port_or_known_default())
+                    .ok_or(AppError("app_gateway_input_refused"))?;
+                Ok(format!("https://{address}:{port}"))
+            })
+            .transpose()?;
+        Ok(Self {
+            enabled: address.is_some(),
+            address,
+            origin,
+        })
+    }
+}
+
 pub(super) struct LocalGateway {
     pub origin: String,
+    lan: LanStatus,
     pub ca: String,
     pub ca_sha: String,
     tls: GatewayClientTls,
@@ -51,6 +99,7 @@ impl LocalGateway {
         .collect::<Result<Vec<_>, _>>()?;
         let deployment: Value = serde_json::from_slice(inputs[0].bytes())
             .map_err(|_| AppError("app_gateway_input_refused"))?;
+        let lan = LanStatus::from_deployment(&deployment)?;
         let origin = deployment["gateway"]["url"]
             .as_str()
             .ok_or(AppError("app_gateway_input_refused"))?
@@ -78,6 +127,7 @@ impl LocalGateway {
         let result = Self {
             scope,
             origin,
+            lan,
             ca,
             ca_sha,
             tls,
@@ -266,7 +316,7 @@ impl LocalGateway {
                 .is_some_and(|r| r.worker.is_finished())
     }
     pub fn status(&self) -> Value {
-        json!({"origin":self.origin,"running":self.running.as_ref().is_some_and(|r| !r.worker.is_finished()),"listening":*self.observed.borrow(),"admission_fenced":self.is_fenced(),"cleanup":self.cleanup})
+        json!({"origin":self.origin,"lan":self.lan,"running":self.running.as_ref().is_some_and(|r| !r.worker.is_finished()),"listening":*self.observed.borrow(),"admission_fenced":self.is_fenced(),"cleanup":self.cleanup})
     }
     pub async fn settle(&mut self) -> Result<(), AppError> {
         if let Some(role) = self.running.take() {
@@ -386,6 +436,8 @@ impl HostApp {
         self.scope.validate()
     }
     pub(super) async fn resume_local(&mut self, input: LocalInput) -> Result<(), AppError> {
+        // LAN configuration belongs to the original Gateway deployment. Resume
+        // only pairs the local Host; re-sent setup input cannot change that choice.
         self.startup_diagnostic = startup_diagnostic::StartupDiagnostic::from_env();
         if let Some(diagnostic) = &self.startup_diagnostic {
             diagnostic.report("app_resume_local");
@@ -442,9 +494,8 @@ impl HostApp {
         {
             return Err(AppError("app_setup_already_exists"));
         }
-        if input.port < 1024 {
-            return Err(AppError("app_input_invalid"));
-        }
+        // Validate and serialize before acquiring a writer or publishing inputs.
+        let deployment = local_deployment(&input)?;
         let selection = self
             .runtime_selection_file
             .clone()
@@ -467,9 +518,6 @@ impl HostApp {
         parent
             .ensure_absent("app-local-gateway-input-v1.json")
             .map_err(|_| AppError("app_setup_already_exists"))?;
-        let origin = format!("https://127.0.0.1:{}", input.port);
-        let deployment = serde_json::to_vec(&json!({"schema":1,"mode":"create-local","gateway":{"url":origin,"listenHost":"127.0.0.1","allowRemoteHosts":false}}))
-            .map_err(|_| AppError("app_input_invalid"))?;
         // One container input writer covers BOTH fixed role inputs. Child
         // configuration writers remain the original C07/enrollment owners.
         self.input_writer = Some(
@@ -612,6 +660,50 @@ impl HostApp {
     }
 }
 
+#[cfg(test)]
+mod setup_tests {
+    use super::*;
+
+    fn input() -> LocalInput {
+        serde_json::from_value(json!({"label":"Test computer","computer":false,"browser":false,"browserChannel":null,"persistLogin":false}))
+            .unwrap()
+    }
+
+    #[test]
+    fn local_setup_without_lan_preserves_exact_deployment_bytes() {
+        let input = input();
+        assert!(input.lan_address.is_none());
+        assert_eq!(
+            local_deployment(&input).unwrap(),
+            br#"{"gateway":{"allowRemoteHosts":false,"listenHost":"127.0.0.1","url":"https://127.0.0.1:22022"},"mode":"create-local","schema":1}"#
+        );
+    }
+
+    #[test]
+    fn local_setup_lan_and_status_use_configured_address_and_port() {
+        for address in ["192.168.1.20", "10.1.2.3", "172.16.2.3", "100.64.0.20"] {
+            let mut input = input();
+            input.lan_address = Some(address.into());
+            input.port = 23456;
+            let deployment: Value =
+                serde_json::from_slice(&local_deployment(&input).unwrap()).unwrap();
+            assert_eq!(deployment["gateway"]["allowRemoteHosts"], true);
+            assert_eq!(deployment["gateway"]["lanAddress"], address);
+            assert_eq!(deployment["gateway"]["url"], "https://127.0.0.1:23456");
+            assert_eq!(
+                serde_json::to_value(LanStatus::from_deployment(&deployment).unwrap()).unwrap(),
+                json!({"enabled":true,"address":address,"origin":format!("https://{address}:23456")})
+            );
+        }
+        let deployment: Value =
+            serde_json::from_slice(&local_deployment(&input()).unwrap()).unwrap();
+        assert_eq!(
+            serde_json::to_value(LanStatus::from_deployment(&deployment).unwrap()).unwrap(),
+            json!({"enabled":false,"address":null,"origin":null})
+        );
+    }
+}
+
 #[cfg(all(test, target_os = "linux", target_env = "gnu"))]
 mod continuation_tests {
     use super::*;
@@ -619,6 +711,57 @@ mod continuation_tests {
         io::Write,
         os::unix::fs::{DirBuilderExt, OpenOptionsExt},
     };
+
+    #[tokio::test]
+    async fn local_setup_invalid_lan_refused_before_any_setup_write() {
+        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .ancestors()
+            .nth(3)
+            .unwrap()
+            .join("target")
+            .join(format!("styx-app-lan-refusal-{}", uuid::Uuid::new_v4()));
+        std::fs::DirBuilder::new()
+            .mode(0o700)
+            .create(&path)
+            .unwrap();
+        let mut app = HostApp::open(&path.join("profile"), &path.join("app-join-input-v1.json"))
+            .await
+            .unwrap();
+        let entries = || {
+            let mut entries = std::fs::read_dir(&path)
+                .unwrap()
+                .map(|entry| entry.unwrap().file_name())
+                .collect::<Vec<_>>();
+            entries.sort();
+            entries
+        };
+        let before = entries();
+        for address in [
+            "8.8.8.8",
+            "127.0.0.1",
+            "0.0.0.0",
+            "169.254.1.2",
+            "::1",
+            "",
+            "100.128.0.1",
+        ] {
+            let input: LocalInput = serde_json::from_value(json!({"label":"Test computer","computer":false,"browser":false,"browserChannel":null,"persistLogin":false,"lanAddress":address})).unwrap();
+            assert_eq!(
+                app.create_local(input).await.unwrap_err().code(),
+                "app_lan_address_invalid",
+                "{address}"
+            );
+            assert_eq!(entries(), before, "{address}");
+            assert!(app.input_writer.is_none());
+            assert!(app.local_gateway.is_none());
+            assert!(!app.unknown);
+            assert!(!path.join("app-local-gateway-input-v1.json").exists());
+            assert!(!path.join("gateway").exists());
+            assert!(!path.join("profile").exists());
+        }
+        drop(app);
+        std::fs::remove_dir_all(path).unwrap();
+    }
 
     #[tokio::test]
     async fn continuation_requires_absent_host_and_all_join_inputs() {

@@ -184,6 +184,7 @@ struct ProductSettingsView: View {
     }
     @ViewBuilder private var computers: some View {
         GroupBox(productText("这台 Mac", "This Mac")) { local.padding(8) }
+        if let notice = model.nativeLanJoinNotice { Text(notice).font(.callout).textSelection(.enabled) }
         if model.joined {
             Label(productText("由管理电脑管理电脑连接", "Computer connections are managed on the main computer"), systemImage: "link")
         } else {

@@ -88,6 +88,7 @@ async fn enroll(container: &Path, selection: &NativeRuntimeSelection) -> (HostAp
         browser_channel: None,
         persist_login: false,
         port,
+        lan_address: None,
     })
     .await
     .unwrap();
