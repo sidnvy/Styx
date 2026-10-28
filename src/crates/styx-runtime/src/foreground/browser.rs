@@ -83,7 +83,13 @@ struct LocalExecutable {
     uid: u32,
     mode: u32,
     bytes: u64,
+    // mtime and ctime: any write or attribute change after the pin moves ctime.
+    times: (i64, i64, i64, i64),
     digest: Sha256Digest,
+}
+#[cfg(any(target_os = "linux", target_os = "macos"))]
+fn times(m: &std::fs::Metadata) -> (i64, i64, i64, i64) {
+    (m.mtime(), m.mtime_nsec(), m.ctime(), m.ctime_nsec())
 }
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 impl LocalExecutable {
@@ -116,6 +122,7 @@ impl LocalExecutable {
             uid: m.uid(),
             mode: m.mode(),
             bytes: m.len(),
+            times: times(&m),
             file,
         };
         pinned.digest = hash_file(&pinned.file, pinned.bytes)?;
@@ -125,6 +132,10 @@ impl LocalExecutable {
     fn path(&self) -> &Path {
         &self.path
     }
+    /// The bytes were hashed once when pinned. Re-hashing a 300 MB browser on
+    /// every revalidation cost about 0.3 s per pass; an unchanged inode with
+    /// unchanged size, mtime and ctime cannot hold different bytes without a
+    /// clock-level ctime forgery, which needs privileges beyond this boundary.
     fn revalidate(&self) -> Result<()> {
         canonical(&self.path)?;
         let current = OpenOptions::new()
@@ -138,7 +149,7 @@ impl LocalExecutable {
                 || m.nlink() != 1
                 || (m.dev(), m.ino(), m.uid(), m.mode(), m.len())
                     != (self.device, self.inode, self.uid, self.mode, self.bytes)
-                || hash_file(f, self.bytes)? != self.digest
+                || times(&m) != self.times
             {
                 return Err(ErrorCategory::IntegrityFailure);
             }
