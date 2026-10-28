@@ -677,6 +677,24 @@ impl HostApp {
         self.configuration = Some(report);
         Ok(())
     }
+    async fn resume_desired_running(&mut self) -> Result<(), AppError> {
+        if self.running.is_some() || self.unknown {
+            return Ok(());
+        }
+        self.read_configuration().await?;
+        let wanted = self
+            .configuration
+            .as_ref()
+            .and_then(|report| report.desired.host)
+            .is_some_and(|host| host.run == NativeRunDesired::Running);
+        if !wanted {
+            return Ok(());
+        }
+        if let Some(gateway) = &mut self.local_gateway {
+            gateway.start().await?;
+        }
+        self.connect_host().await
+    }
     async fn connect_host(&mut self) -> Result<(), AppError> {
         if self.running.is_none() {
             let diagnostic = self.startup_diagnostic.clone();
@@ -1070,6 +1088,11 @@ impl HostApp {
                 // A failed observation is represented in service.error; this
                 // read never opens/reconciles a service configuration writer.
                 let _ = self.refresh_service_client().await;
+            } else if matches!(operation, Operation::StartupStatus) {
+                // Reopen reconnects a role the user left running, without
+                // re-pairing. Pause (Disconnect) records Stopped and is kept.
+                // A failure is visible in the snapshot; it is not this read's error.
+                let _ = self.resume_desired_running().await;
             }
             return Ok(self.snapshot().await);
         }
@@ -1196,6 +1219,11 @@ impl HostApp {
                 let value =
                     serde_json::to_value(report).map_err(|_| AppError("app_response_invalid"))?;
                 self.enrollment = Some(value.clone());
+                // A confirmed join connects at once; the claim itself already
+                // succeeded, so a connect failure shows in status, not here.
+                if value["status"] == "ready_to_connect" {
+                    let _ = self.connect_host().await;
+                }
                 Ok(value)
             }
             Operation::InspectHost => {
