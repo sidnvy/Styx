@@ -193,7 +193,17 @@ fn parse_snapshot(
                     .and_then(Value::as_array)
                     .map(|e| e.len() as u64)
     };
-    if !(object.get("elements_complete").and_then(Value::as_bool) == Some(true) || counts_complete)
+    // An ordinary (observed) read may be filtered by `query`: only the returned rows
+    // become clickable, so every returned row being present is what matters there.
+    let returned_all = observed
+        && object.get("returned_element_count").and_then(Value::as_u64)
+            == object
+                .get("elements")
+                .and_then(Value::as_array)
+                .map(|e| e.len() as u64);
+    if !(object.get("elements_complete").and_then(Value::as_bool) == Some(true)
+        || counts_complete
+        || returned_all)
         || object.get("truncated").and_then(Value::as_bool) != Some(false)
         || object
             .get("degraded")

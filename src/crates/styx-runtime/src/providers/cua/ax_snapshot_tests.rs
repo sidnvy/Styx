@@ -77,6 +77,16 @@ fn success_with_degradation_partial_or_conflicting_native_rows_never_installs() 
         partial.structured_content.as_mut().unwrap()[key] = value;
         assert!(parse_acquired(&partial, 42, 1234).is_err());
     }
+    // A filtered ordinary read on Windows: fewer rows than the window has, all of
+    // them returned. Observed reads accept it; acquisition still requires the whole tree.
+    let mut filtered = counted.clone();
+    filtered.structured_content.as_mut().unwrap()["total_element_count"] = json!(6);
+    filtered.structured_content.as_mut().unwrap()["element_count"] = json!(6);
+    assert!(parse_observed(&filtered, 42, 1234).is_ok());
+    assert!(parse_acquired(&filtered, 42, 1234).is_err());
+    let mut short = filtered.clone();
+    short.structured_content.as_mut().unwrap()["returned_element_count"] = json!(3);
+    assert!(parse_observed(&short, 42, 1234).is_err());
     for token in ["7", "s00000099:7", "s000000a1:2", "s000000a1:07"] {
         let mut result = acquired();
         result.structured_content.as_mut().unwrap()["elements"][0]["element_token"] = json!(token);
