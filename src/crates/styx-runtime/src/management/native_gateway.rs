@@ -652,6 +652,10 @@ mod platform {
         app_scope: Option<Arc<crate::app::HostScope>>,
     }
     impl FreshGatewayRuntime {
+        /// Reuse the exact release retained by this admitted Gateway.
+        pub(crate) fn verified_release(&self) -> Arc<VerifiedNativeRelease> {
+            self.candidate.clone()
+        }
         pub(crate) fn configuration_root(&self) -> OwnedConfigurationRoot {
             self.transactions
                 .lock()

@@ -96,6 +96,7 @@ pub(crate) use run::host_run_for_app;
 ))]
 pub(crate) use run::host_run_for_service;
 mod gateway;
+pub mod tunnel;
 #[cfg(any(
     all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
     all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"),

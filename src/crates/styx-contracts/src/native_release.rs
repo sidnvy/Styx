@@ -149,6 +149,7 @@ pub enum NativeExternalWorker {
     CodexExec,
     BrowserNode22,
     CuaNative,
+    TunnelClient,
 }
 impl NativeExternalWorker {
     pub fn prefix(self) -> &'static str {
@@ -156,6 +157,7 @@ impl NativeExternalWorker {
             Self::CodexExec => "workers/codex-exec",
             Self::BrowserNode22 => "workers/browser-node22",
             Self::CuaNative => "workers/cua-native",
+            Self::TunnelClient => "workers/tunnel-client",
         }
     }
     pub fn entrypoint(self, target: NativeReleaseTarget) -> String {
@@ -163,13 +165,18 @@ impl NativeExternalWorker {
             Self::CodexExec => "codex",
             Self::BrowserNode22 => "node",
             Self::CuaNative => "cua-driver",
+            Self::TunnelClient => "tunnel-client-runtime",
         };
         let suffix = if target == NativeReleaseTarget::WindowsX86_64Msvc {
             ".exe"
         } else {
             ""
         };
-        format!("{}/bin/{binary}{suffix}", self.prefix())
+        if self == Self::TunnelClient {
+            format!("{}/{binary}{suffix}", self.prefix())
+        } else {
+            format!("{}/bin/{binary}{suffix}", self.prefix())
+        }
     }
 }
 /// Package-relative exact membership of one independently sourced native worker.
@@ -351,6 +358,10 @@ fn required_worker_members(kind: NativeExternalWorker, target: NativeReleaseTarg
             }
         }
         NativeExternalWorker::CuaNative => required.push(format!("{prefix}/licenses/cua-LICENSE")),
+        NativeExternalWorker::TunnelClient => {
+            required.push(format!("{prefix}/LICENSE"));
+            required.push(format!("{prefix}/NOTICE"));
+        }
     }
     required
 }
@@ -389,8 +400,8 @@ impl NativeReleaseManifest {
                 }
             || self.files.len() < 3
             || self.files.len() > NATIVE_RUNTIME_RELEASE_FILES
-            || self.external_workers.len() > 3
-            || self.worker_closures.len() > 3
+            || self.external_workers.len() > 4
+            || self.worker_closures.len() > 4
         {
             return Err(invalid);
         }

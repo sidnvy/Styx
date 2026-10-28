@@ -422,7 +422,19 @@ pub(crate) fn spawn_cua_suspended(
 ) -> Result<SuspendedChild, SpawnFailure> {
     spawn_fixed(image, startup_budget, cwd, env, Entry::Cua)
 }
+/// Secure MCP Tunnel entry, constructed only by the trusted Gateway adapter.
+/// Reuses the same suspended-image verification, Job ownership and final wait.
+pub(crate) fn spawn_tunnel_suspended(
+    image: Arc<PinnedExecutable>,
+    startup_budget: Arc<tokio::sync::OwnedSemaphorePermit>,
+    cwd: PathBuf,
+    env: BTreeMap<OsString, OsString>,
+    arguments: crate::foreground::tunnel::Arguments,
+) -> Result<SuspendedChild, SpawnFailure> {
+    spawn_fixed(image, startup_budget, cwd, env, Entry::Tunnel(arguments))
+}
 enum Entry {
+    Tunnel(crate::foreground::tunnel::Arguments),
     Exec,
     Cua,
     Browser { worker: PathBuf, config: PathBuf },
@@ -466,6 +478,11 @@ fn command_line(path: &OsStr, entry: &Entry) -> io::Result<Vec<u16>> {
     let mut result = Vec::new();
     quote_argument(path, &mut result)?;
     let args: Vec<&OsStr> = match entry {
+        Entry::Tunnel(arguments) => arguments
+            .as_slice()
+            .iter()
+            .map(|arg| arg.as_os_str())
+            .collect(),
         Entry::Exec => vec![
             OsStr::new("exec-server"),
             OsStr::new("--listen"),

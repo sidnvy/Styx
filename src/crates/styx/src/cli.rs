@@ -400,6 +400,11 @@ enum HostJoinCommand {
 
 #[derive(Subcommand)]
 enum GatewayCommand {
+    /// Configure the Gateway-owned Secure MCP Tunnel transport.
+    Tunnel {
+        #[command(subcommand)]
+        command: GatewayTunnelCommand,
+    },
     /// Create one invitation and publish its secret only to a new private file.
     Invite {
         #[arg(long)]
@@ -457,6 +462,38 @@ enum GatewayCommand {
     Run {
         #[arg(long)]
         state_dir: Option<PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum GatewayTunnelCommand {
+    Configure {
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(long)]
+        tunnel_id: String,
+        #[arg(long)]
+        api_key_file: PathBuf,
+        #[arg(long)]
+        auto_start: bool,
+        #[arg(long, required = true)]
+        authorize: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    Status {
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(long)]
+        json: bool,
+    },
+    Remove {
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(long, required = true)]
+        authorize: bool,
+        #[arg(long)]
+        json: bool,
     },
 }
 
@@ -1467,6 +1504,59 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
                     json,
                 },
         } => transient_manager::stop(state_dir, owner_file, expected, json).await,
+        Command::Gateway {
+            command: GatewayCommand::Tunnel { command },
+        } => {
+            use foreground::tunnel;
+            let (result, json) = match command {
+                GatewayTunnelCommand::Configure {
+                    state_dir,
+                    tunnel_id,
+                    api_key_file,
+                    auto_start,
+                    authorize,
+                    json,
+                } => {
+                    let result = tokio::task::spawn_blocking(move || {
+                        tunnel::configure(
+                            &state_dir,
+                            &tunnel_id,
+                            &api_key_file,
+                            auto_start,
+                            authorize,
+                        )
+                    })
+                    .await;
+                    (result.unwrap_or_else(|_| Err(tunnel::worker_error())), json)
+                }
+                GatewayTunnelCommand::Status { state_dir, json } => {
+                    (tunnel::status(&state_dir).await, json)
+                }
+                GatewayTunnelCommand::Remove {
+                    state_dir,
+                    authorize,
+                    json,
+                } => {
+                    let result =
+                        tokio::task::spawn_blocking(move || tunnel::remove(&state_dir, authorize))
+                            .await;
+                    (result.unwrap_or_else(|_| Err(tunnel::worker_error())), json)
+                }
+            };
+            match result {
+                Ok(report) => {
+                    if json {
+                        if write_json(&report).is_err() {
+                            return error("output_unavailable");
+                        }
+                    } else {
+                        println!("Gateway tunnel configuration observed; use --json for details.");
+                    }
+                    ExitCode::SUCCESS
+                }
+                Err(e) => error(e.code()),
+            }
+        }
         Command::Gateway {
             command:
                 GatewayCommand::Invite {

@@ -42,6 +42,12 @@ pub(super) struct ProfileRelease {
 }
 fn fixed_legacy_worker(kind: NativeExternalWorker) -> &'static str {
     match (kind, cfg!(target_os = "windows")) {
+        (NativeExternalWorker::TunnelClient, true) => {
+            "workers/tunnel-client/tunnel-client-runtime.exe"
+        }
+        (NativeExternalWorker::TunnelClient, false) => {
+            "workers/tunnel-client/tunnel-client-runtime"
+        }
         (NativeExternalWorker::CodexExec, true) => "bin/codex.exe",
         (NativeExternalWorker::BrowserNode22, true) => "bin/node.exe",
         (NativeExternalWorker::CuaNative, true) => "bin/cua-driver.exe",
