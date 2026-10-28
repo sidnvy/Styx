@@ -31,7 +31,12 @@ impl BrowserBudget {
         }
     }
     fn for_tool(name: &str) -> Self {
-        if name == "browser_wait_for" {
+        // Page loads follow the worker's navigation timeout, not the short
+        // per-action one: a slow site or a cold browser start is not unknown.
+        if matches!(
+            name,
+            "browser_wait_for" | "browser_navigate" | "browser_navigate_back"
+        ) {
             Self {
                 host_timeout_ms: BROWSER_WAIT_PREPARE_TIMEOUT_MS,
                 response_secs: BROWSER_WAIT_RESPONSE_SECS,

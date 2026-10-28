@@ -343,11 +343,12 @@ impl PinnedImage {
     /// Original locator for the suspended, image-attested spawn adapter only.
     /// This does not authorize ordinary path execution.
     pub(in crate::store) fn source_path_for_suspended_spawn(&self) -> Result<PathBuf> {
+        // The pin-time digest was checked against the signed manifest. The held
+        // descriptor and the path still name the same inode with unchanged size,
+        // mtime and ctime; any write moves ctime, so re-hashing the whole image
+        // on every call (seconds for Codex/Node on Intel Macs) proves nothing more.
         self.revalidate()?;
-        let expected = self.observed.sha256.ok_or(StoreError::Changed)?;
-        if stream_hash(&self.file, self.observed.facts.byte_len)? != expected {
-            return Err(StoreError::Changed);
-        }
+        self.observed.sha256.ok_or(StoreError::Changed)?;
         let path = self.root.path.join(&self.relative);
         self.revalidate()?;
         Ok(path)

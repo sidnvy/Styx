@@ -132,7 +132,15 @@ fn browser_arguments_reuse_real_policy_without_owner_or_internal_metadata() {
     for native_tool in native_tools {
         let name = native_tool["name"].as_str().unwrap();
         assert!(is_public_browser_tool(name));
-        if name != "browser_wait_for" {
+        if [
+            "browser_wait_for",
+            "browser_navigate",
+            "browser_navigate_back",
+        ]
+        .contains(&name)
+        {
+            assert_eq!(BrowserBudget::for_tool(name), BrowserBudget::opening());
+        } else {
             assert_eq!(
                 BrowserBudget::for_tool(name),
                 BrowserBudget {
