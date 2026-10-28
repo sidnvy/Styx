@@ -280,6 +280,33 @@ impl Fields {
         }
     }
 }
+/// Produce the same canonical scalar JSON accepted by inspection. The link is
+/// a secret: callers publish it only to a new private file, never a report.
+pub(crate) fn build(
+    origin: &str,
+    invitation: &str,
+    expires_ms: u64,
+    ca_pem: &str,
+    now_ms: u64,
+) -> Result<Zeroizing<String>> {
+    let fields = Fields(vec![
+        ("caPem".into(), Atom::String(Zeroizing::new(ca_pem.into()))),
+        ("expiresAt".into(), Atom::Number(expires_ms.into())),
+        (
+            "invitation".into(),
+            Atom::String(Zeroizing::new(invitation.into())),
+        ),
+        ("origin".into(), Atom::String(Zeroizing::new(origin.into()))),
+        ("schema".into(), Atom::Number(1.into())),
+    ]);
+    let bytes =
+        Zeroizing::new(serde_json::to_vec(&fields).map_err(|_| error("pairing_link_invalid"))?);
+    let encoded = Zeroizing::new(URL_SAFE_NO_PAD.encode(bytes.as_slice()));
+    let link = Zeroizing::new(format!("styx://join#{}", encoded.as_str()));
+    inspect(&link, now_ms)?;
+    Ok(link)
+}
+
 pub(crate) fn inspect(link: &str, now_ms: u64) -> Result<InspectedLink> {
     if link.len() > MAX_LINK {
         return Err(error("pairing_link_size_invalid"));

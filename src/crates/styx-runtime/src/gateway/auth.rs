@@ -32,6 +32,35 @@ pub(crate) fn lan_address(
     }
 }
 
+/// Compatibility input and the bounded multi-interface input are exclusive.
+pub(crate) fn lan_addresses(
+    enabled: bool,
+    address: Option<&str>,
+    addresses: Option<&[String]>,
+) -> Result<Vec<std::net::Ipv4Addr>, GatewayAuthError> {
+    if address.is_some() && addresses.is_some() {
+        return Err(GatewayAuthError::InvalidConfiguration);
+    }
+    match addresses {
+        None => Ok(lan_address(enabled, address)?.into_iter().collect()),
+        Some(addresses) => {
+            if !enabled || !(1..=4).contains(&addresses.len()) {
+                return Err(GatewayAuthError::InvalidConfiguration);
+            }
+            let mut result = Vec::with_capacity(addresses.len());
+            for address in addresses {
+                let ip = lan_address(true, Some(address))?
+                    .ok_or(GatewayAuthError::InvalidConfiguration)?;
+                if result.contains(&ip) {
+                    return Err(GatewayAuthError::InvalidConfiguration);
+                }
+                result.push(ip);
+            }
+            Ok(result)
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, thiserror::Error)]
 pub enum GatewayAuthError {
     #[error("invalid Gateway admission configuration")]

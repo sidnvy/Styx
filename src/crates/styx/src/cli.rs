@@ -441,6 +441,12 @@ enum GatewayCommand {
         /// Origin to report for the Host deployment (default: LAN when enabled).
         #[arg(long, value_enum)]
         origin: Option<GatewayInviteOrigin>,
+        /// Select one of the Gateway's configured private IPv4 addresses.
+        #[arg(long, conflicts_with = "origin")]
+        origin_address: Option<std::net::Ipv4Addr>,
+        /// Export a secret styx://join link to a new private file.
+        #[arg(long)]
+        app_link_file: Option<PathBuf>,
         #[arg(long, required = true)]
         authorize: bool,
         #[arg(long)]
@@ -1649,26 +1655,31 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
                     invitation_file,
                     ttl_seconds,
                     origin,
+                    origin_address,
+                    app_link_file,
                     json,
                     ..
                 },
-        } => gateway_admin_result(
-            styx_runtime::management::native_gateway_admin::invite_with_origin(
-                &state_dir,
-                &invitation_file,
-                ttl_seconds,
+        } => {
+            use styx_runtime::management::native_gateway_admin::{self, InvitationOrigin};
+            let origin = origin_address.map(InvitationOrigin::Address).or_else(|| {
                 origin.map(|origin| match origin {
-                    GatewayInviteOrigin::Loopback => {
-                        styx_runtime::management::native_gateway_admin::InvitationOrigin::Loopback
-                    }
-                    GatewayInviteOrigin::Lan => {
-                        styx_runtime::management::native_gateway_admin::InvitationOrigin::Lan
-                    }
-                }),
+                    GatewayInviteOrigin::Loopback => InvitationOrigin::Loopback,
+                    GatewayInviteOrigin::Lan => InvitationOrigin::Lan,
+                })
+            });
+            gateway_admin_result(
+                native_gateway_admin::invite_with_options(
+                    &state_dir,
+                    &invitation_file,
+                    ttl_seconds,
+                    origin,
+                    app_link_file.as_deref(),
+                )
+                .await,
+                json,
             )
-            .await,
-            json,
-        ),
+        }
         Command::Gateway {
             command: GatewayCommand::Pending { state_dir, json },
         } => gateway_admin_result(

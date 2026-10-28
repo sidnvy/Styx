@@ -717,6 +717,7 @@ mod platform {
                     || deployment.gateway.openssl_config.is_some()
                     || deployment.gateway.allow_remote_hosts.is_some()
                     || deployment.gateway.lan_address.is_some()
+                    || deployment.gateway.lan_addresses.is_some()
                     || deployment.pairing_mode.as_deref() == Some("owner-local"))
             || deployment
                 .pairing_mode
@@ -732,9 +733,10 @@ mod platform {
             return Err(NativeManagementError::new(ErrorKind::Invalid));
         }
         if local {
-            crate::gateway::auth::lan_address(
+            crate::gateway::auth::lan_addresses(
                 deployment.gateway.allow_remote_hosts.unwrap_or(false),
                 deployment.gateway.lan_address.as_deref(),
+                deployment.gateway.lan_addresses.as_deref(),
             )
             .map_err(|_| NativeManagementError::new(ErrorKind::Invalid))?;
         }

@@ -115,6 +115,8 @@ pub struct AdminReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub invitation_file: Option<PathBuf>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub app_link_file: Option<PathBuf>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub expires_at: Option<u64>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub one_use: Option<bool>,
@@ -141,6 +143,7 @@ impl AdminReport {
             origin: None,
             origins: None,
             invitation_file: None,
+            app_link_file: None,
             expires_at: None,
             one_use: None,
             pending: None,
@@ -153,7 +156,13 @@ impl AdminReport {
     }
 }
 enum Action {
-    Invite(PathBuf, PathBuf, u64, Option<InvitationOrigin>),
+    Invite(
+        PathBuf,
+        PathBuf,
+        u64,
+        Option<InvitationOrigin>,
+        Option<PathBuf>,
+    ),
     Pending(PathBuf),
     Approve(PathBuf, ApprovalSelection),
 }
@@ -161,6 +170,7 @@ enum Action {
 pub enum InvitationOrigin {
     Loopback,
     Lan,
+    Address(std::net::Ipv4Addr),
 }
 pub async fn invite(
     state_dir: &Path,
@@ -175,11 +185,22 @@ pub async fn invite_with_origin(
     ttl_seconds: u64,
     origin: Option<InvitationOrigin>,
 ) -> Result<AdminReport> {
+    invite_with_options(state_dir, invitation_file, ttl_seconds, origin, None).await
+}
+/// Optionally export an App link containing the selected origin and public CA.
+pub async fn invite_with_options(
+    state_dir: &Path,
+    invitation_file: &Path,
+    ttl_seconds: u64,
+    origin: Option<InvitationOrigin>,
+    app_link_file: Option<&Path>,
+) -> Result<AdminReport> {
     owned(Action::Invite(
         state_dir.into(),
         invitation_file.into(),
         ttl_seconds,
         origin,
+        app_link_file.map(Path::to_path_buf),
     ))
     .await
 }
@@ -404,9 +425,7 @@ impl Material {
             return Err(refused("native_gateway_admin_origin"));
         }
         let mut origins = vec![endpoints.origin.clone()];
-        if let Some(origin) = endpoints.lan_origin() {
-            origins.push(origin);
-        }
+        origins.extend(endpoints.lan_origins());
         let now = clock_ms()? / 1000;
         if ready.not_before_unix < 0
             || ready.not_after_unix <= ready.not_before_unix
@@ -691,9 +710,19 @@ struct Approved {
     fingerprint: Sha256Digest,
     approved_capabilities: Capabilities,
 }
+fn invitation_app_link(
+    invite: &Invitation,
+    origin: &str,
+    ca: &[u8],
+    now: u64,
+) -> Result<Zeroizing<String>> {
+    let ca = std::str::from_utf8(ca).map_err(|_| unknown())?;
+    crate::app::pairing_link::build(origin, &invite.invitation, invite.expires_at, ca, now)
+        .map_err(|_| unknown())
+}
 async fn perform(action: Action) -> Result<AdminReport> {
     let state_dir = match &action {
-        Action::Invite(p, _, _, _) | Action::Pending(p) | Action::Approve(p, _) => p.clone(),
+        Action::Invite(p, _, _, _, _) | Action::Pending(p) | Action::Approve(p, _) => p.clone(),
     };
     let material = blocking(move || Material::open(state_dir)).await?;
     match action {
@@ -704,16 +733,24 @@ async fn perform(action: Action) -> Result<AdminReport> {
             report.pending = Some(rows);
             Ok(report)
         }
-        Action::Invite(path, output, ttl, selection) => {
+        Action::Invite(path, output, ttl, selection, app_output) => {
             if !(60..=600).contains(&ttl) {
                 return Err(refused("native_gateway_invitation_ttl"));
             }
             let origin = invitation_origin(&material.origins, selection)?;
             let origins = material.origins.clone();
-            let (material, output) = blocking(move || {
+            let (material, output, app_output) = blocking(move || {
                 material.validate()?;
                 let output = Output::preflight(output, &material)?;
-                Ok((material, output))
+                let app_output = app_output
+                    .map(|path| Output::preflight(path, &material))
+                    .transpose()?;
+                if app_output.as_ref().is_some_and(|app| {
+                    app.root.identity() == output.root.identity() && app.name == output.name
+                }) {
+                    return Err(refused("native_gateway_invitation_outputs_conflict"));
+                }
+                Ok((material, output, app_output))
             })
             .await?;
             let body = serde_json::to_vec(&serde_json::json!({"ttl_seconds":ttl}))
@@ -736,13 +773,32 @@ async fn perform(action: Action) -> Result<AdminReport> {
             {
                 return Err(unknown());
             }
-            let _material = checked(material).await.map_err(|_| unknown())?;
+            let material = checked(material).await.map_err(|_| unknown())?;
             let expires = invite.expires_at;
-            let destination = blocking(move || output.publish(invite.invitation.as_bytes()))
-                .await
-                .map_err(|_| unknown())?;
+            let link = if app_output.is_some() {
+                Some(invitation_app_link(
+                    &invite,
+                    &origin,
+                    material.files[4].bytes(),
+                    clock_ms().map_err(|_| unknown())?,
+                )?)
+            } else {
+                None
+            };
+            let (destination, app_destination) = blocking(move || {
+                let destination = output.publish(invite.invitation.as_bytes())?;
+                let app_destination = match (app_output, link) {
+                    (Some(output), Some(link)) => Some(output.publish(link.as_bytes())?),
+                    (None, None) => None,
+                    _ => return Err(unknown()),
+                };
+                Ok((destination, app_destination))
+            })
+            .await
+            .map_err(|_| unknown())?;
             let mut report = AdminReport::new("gateway_invite", path);
             report.invitation_file = Some(destination);
+            report.app_link_file = app_destination;
             report.expires_at = Some(expires);
             report.one_use = Some(true);
             report.origin = Some(origin);
@@ -786,9 +842,23 @@ async fn perform(action: Action) -> Result<AdminReport> {
     }
 }
 fn invitation_origin(origins: &[String], selected: Option<InvitationOrigin>) -> Result<String> {
+    if let Some(InvitationOrigin::Address(address)) = selected {
+        return origins
+            .iter()
+            .skip(1)
+            .find(|origin| {
+                url::Url::parse(origin)
+                    .ok()
+                    .and_then(|url| url.host_str()?.parse::<std::net::Ipv4Addr>().ok())
+                    == Some(address)
+            })
+            .cloned()
+            .ok_or_else(|| refused("native_gateway_origin_address_not_configured"));
+    }
     let index = match selected {
         Some(InvitationOrigin::Loopback) => 0,
         Some(InvitationOrigin::Lan) => 1,
+        Some(InvitationOrigin::Address(_)) => unreachable!("handled above"),
         None => usize::from(origins.len() > 1),
     };
     origins

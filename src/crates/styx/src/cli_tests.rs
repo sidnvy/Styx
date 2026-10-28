@@ -22,6 +22,63 @@ fn cli_gateway_invite_origin_is_a_closed_optional_selection() {
     }
 }
 #[test]
+fn cli_gateway_invite_app_link_address_and_ttl_boundaries() {
+    let base = [
+        "styx",
+        "gateway",
+        "invite",
+        "--state-dir",
+        "/private/gateway",
+        "--invitation-file",
+        "/private/invite",
+        "--authorize",
+        "--json",
+    ];
+    let cli = Cli::try_parse_from(base.into_iter().chain([
+        "--origin-address",
+        "10.0.2.19",
+        "--app-link-file",
+        "/private/join-link",
+    ]))
+    .unwrap();
+    let Command::Gateway {
+        command:
+            GatewayCommand::Invite {
+                origin_address,
+                app_link_file,
+                ttl_seconds,
+                ..
+            },
+    } = cli.command
+    else {
+        panic!("invite required")
+    };
+    assert_eq!(origin_address.unwrap().to_string(), "10.0.2.19");
+    assert_eq!(app_link_file.unwrap(), PathBuf::from("/private/join-link"));
+    assert_eq!(ttl_seconds, 600);
+    for ttl in ["60", "600"] {
+        assert!(Cli::try_parse_from(base.into_iter().chain(["--ttl-seconds", ttl])).is_ok());
+    }
+    for ttl in ["0", "59", "601"] {
+        assert!(Cli::try_parse_from(base.into_iter().chain(["--ttl-seconds", ttl])).is_err());
+    }
+    for address in ["::1", "hostname", "10.0.2.19:8795"] {
+        assert!(
+            Cli::try_parse_from(base.into_iter().chain(["--origin-address", address])).is_err()
+        );
+    }
+    assert!(
+        Cli::try_parse_from(base.into_iter().chain([
+            "--origin",
+            "loopback",
+            "--origin-address",
+            "10.0.2.19",
+        ]))
+        .is_err()
+    );
+}
+
+#[test]
 fn cli_host_mode_rejects_legacy_gateway_and_raw_credentials() {
     let cli =
         Cli::try_parse_from(["styx", "host", "run", "--state-dir", "/owned/private"]).unwrap();

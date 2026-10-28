@@ -531,7 +531,7 @@ mod platform {
             Limits::default(),
         )
         .map_err(|e| error(e.code()))?;
-        if let Some(address) = runtime.lan_address {
+        for address in &runtime.lan_addresses {
             service
                 .allow_remote_host(address.to_string())
                 .map_err(|e| error(e.code()))?;
@@ -540,12 +540,7 @@ mod platform {
             .root
             .try_execution_lease()
             .map_err(|_| error("gateway_execution_busy"))?;
-        let gateway_id = format!(
-            "paired.{}",
-            Sha256Digest::of_bytes(runtime.origin.as_bytes()).to_hex()
-        )
-        .try_into()
-        .map_err(|_| error("gateway_namespace_invalid"))?;
+        let gateway_id = crate::tls::paired_gateway_namespace(&runtime.ca_pin);
         let tls = runtime.tls.clone();
         let admitted = Arc::new(Admitted {
             lease,
@@ -789,19 +784,17 @@ mod platform {
         let listener = TcpListener::bind(admitted.address)
             .await
             .map_err(|_| error("gateway_listen_failed"))?;
-        let lan_listener = match admitted
-            .fresh
-            .as_ref()
-            .and_then(|runtime| runtime.lan_address)
-        {
-            Some(address) => Some((
-                TcpListener::bind(address)
-                    .await
-                    .map_err(|_| error("gateway_lan_listen_failed"))?,
-                address.to_string(),
-            )),
-            None => None,
-        };
+        let mut lan_listeners = Vec::new();
+        if let Some(runtime) = &admitted.fresh {
+            for address in &runtime.lan_addresses {
+                lan_listeners.push((
+                    TcpListener::bind(address)
+                        .await
+                        .map_err(|_| error("gateway_lan_listen_failed"))?,
+                    address.to_string(),
+                ));
+            }
+        }
         if let Some(d) = &diagnostic {
             d.mark("prelisten_validate");
         }
@@ -918,7 +911,7 @@ mod platform {
         let mut server = tokio::spawn(async move {
             let _keep = keep;
             server_app
-                .run_with_lan(listener, lan_listener, server_stop)
+                .run_with_lan_addresses(listener, lan_listeners, server_stop)
                 .await
         });
         if let Some(d) = &diagnostic {

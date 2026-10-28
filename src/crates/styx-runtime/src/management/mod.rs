@@ -119,6 +119,8 @@ struct Gateway {
     allow_remote_hosts: Option<bool>,
     #[serde(rename = "lanAddress")]
     lan_address: Option<String>,
+    #[serde(rename = "lanAddresses")]
+    lan_addresses: Option<Vec<String>>,
 }
 #[derive(Deserialize)]
 struct Ingress {
@@ -363,6 +365,7 @@ fn load(path: &Path) -> Result<Loaded> {
                 || d.gateway.listen_host.is_some()
                 || d.gateway.allow_remote_hosts.is_some()
                 || d.gateway.lan_address.is_some()
+                || d.gateway.lan_addresses.is_some()
                 || d.pairing_mode.as_deref() == Some("owner-local"))
         || d.pairing_mode
             .as_deref()
@@ -376,9 +379,10 @@ fn load(path: &Path) -> Result<Loaded> {
         return Err(ManagementError::Invalid);
     }
     if local {
-        crate::gateway::auth::lan_address(
+        crate::gateway::auth::lan_addresses(
             d.gateway.allow_remote_hosts.unwrap_or(false),
             d.gateway.lan_address.as_deref(),
+            d.gateway.lan_addresses.as_deref(),
         )
         .map_err(|_| ManagementError::Invalid)?;
     }

@@ -198,6 +198,7 @@ fn endpoint(origin: &str) -> Result<(String, SanType), IssuerError> {
 /// Unknown constraints/extensions are refused, not silently copied or ignored.
 /// `trusted_now_unix` is supplied by the trusted coordinator's monotonic floor /
 /// wall-clock policy; this function cannot authenticate a caller-supplied time.
+#[cfg(test)]
 pub(crate) fn issue_server_leaf(
     ca_pem: &[u8],
     ca_key: &PrivateKeyPem,
@@ -215,6 +216,7 @@ pub(crate) fn issue_server_leaf(
     )
 }
 
+#[cfg(test)]
 pub(crate) fn issue_server_leaf_with_lan(
     ca_pem: &[u8],
     ca_key: &PrivateKeyPem,
@@ -223,10 +225,34 @@ pub(crate) fn issue_server_leaf_with_lan(
     lan_address: Option<IpAddr>,
     trusted_now_unix: u64,
 ) -> Result<IssuedGatewayEndpoint, IssuerError> {
-    if let Some(address) = lan_address {
-        crate::gateway::auth::lan_address(true, Some(&address.to_string()))
-            .map_err(|_| IssuerError::InvalidOrigin)?;
-    }
+    issue_server_leaf_with_lan_addresses(
+        ca_pem,
+        ca_key,
+        expected_anchor,
+        original_origin,
+        &lan_address.into_iter().collect::<Vec<_>>(),
+        trusted_now_unix,
+    )
+}
+
+pub(crate) fn issue_server_leaf_with_lan_addresses(
+    ca_pem: &[u8],
+    ca_key: &PrivateKeyPem,
+    expected_anchor: &TrustAnchorPin,
+    original_origin: &str,
+    lan_addresses: &[IpAddr],
+    trusted_now_unix: u64,
+) -> Result<IssuedGatewayEndpoint, IssuerError> {
+    let addresses = lan_addresses
+        .iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>();
+    crate::gateway::auth::lan_addresses(
+        !addresses.is_empty(),
+        None,
+        (!addresses.is_empty()).then_some(addresses.as_slice()),
+    )
+    .map_err(|_| IssuerError::InvalidOrigin)?;
     let certificates = certificate_chain(ca_pem).map_err(|_| IssuerError::InvalidMaterial)?;
     if certificates.len() != 1 {
         return Err(IssuerError::InvalidMaterial);
@@ -337,8 +363,10 @@ pub(crate) fn issue_server_leaf_with_lan(
         .distinguished_name
         .push(DnType::CommonName, "Styx Gateway endpoint");
     params.subject_alt_names = vec![san];
-    if let Some(address) = lan_address {
-        for ip in ["127.0.0.1".parse().expect("fixed loopback"), address] {
+    if !lan_addresses.is_empty() {
+        for ip in std::iter::once("127.0.0.1".parse().expect("fixed loopback"))
+            .chain(lan_addresses.iter().copied())
+        {
             let san = SanType::IpAddress(ip);
             if !params.subject_alt_names.contains(&san) {
                 params.subject_alt_names.push(san);
