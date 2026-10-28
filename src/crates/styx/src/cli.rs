@@ -21,6 +21,11 @@ pub(crate) struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Back up stopped role roots, then set up or join again normally.
+    Role {
+        #[command(subcommand)]
+        command: RoleCommand,
+    },
     #[cfg(any(
         all(target_os = "linux", target_env = "gnu"),
         target_os = "macos",
@@ -323,6 +328,21 @@ impl Cli {
                 | Command::LinuxDesktopAssociation { .. }
         )
     }
+}
+#[derive(Subcommand)]
+enum RoleCommand {
+    Retire {
+        #[arg(long)]
+        state_dir: PathBuf,
+        #[arg(long)]
+        gateway_state_dir: Option<PathBuf>,
+        #[arg(long)]
+        allow_other_devices: bool,
+        #[arg(long)]
+        authorize: bool,
+        #[arg(long)]
+        json: bool,
+    },
 }
 #[derive(Subcommand)]
 enum HostCommand {
@@ -957,6 +977,58 @@ async fn stop_signal() -> io::Result<()> {
 pub(crate) async fn run(cli: Cli) -> ExitCode {
     use styx_runtime::foreground::{self, HostWireMode};
     match cli.command {
+        Command::Role {
+            command:
+                RoleCommand::Retire {
+                    state_dir,
+                    gateway_state_dir,
+                    allow_other_devices,
+                    authorize,
+                    json,
+                },
+        } => {
+            if !authorize {
+                return error("role_retire_authorization_required");
+            }
+            let result = tokio::task::spawn_blocking(move || {
+                styx_runtime::management::role_retire::retire_role(
+                    &state_dir,
+                    gateway_state_dir.as_deref(),
+                    styx_runtime::management::role_retire::RetireOptions {
+                        allow_other_devices,
+                    },
+                )
+            })
+            .await;
+            match result {
+                Ok(Ok(report)) => {
+                    if json {
+                        if write_json(&report).is_err() {
+                            return error("output_unavailable");
+                        }
+                    } else {
+                        println!(
+                            "Role retired; use --json for backup paths, then set up or join again."
+                        );
+                    }
+                    ExitCode::SUCCESS
+                }
+                Ok(Err(failure)) => {
+                    if json {
+                        let body =
+                            serde_json::json!({"error":failure.code,"retirement":failure.report});
+                        if write_json(&body).is_err() {
+                            return error("output_unavailable");
+                        }
+                    } else {
+                        eprintln!("{}", failure.code);
+                    }
+                    ExitCode::from(failure.exit_code())
+                }
+                Err(_) => error("role_retire_worker_unknown"),
+            }
+        }
+
         #[cfg(all(target_os = "linux", target_env = "gnu"))]
         Command::Service {
             action,

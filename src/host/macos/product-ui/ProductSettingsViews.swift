@@ -96,6 +96,9 @@ struct ProductSettingsView: View {
             }
             Section { LabeledContent(productText("版本", "Version"), value: Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "—") }
             if model.nativeHost {
+                if model.nativeSupportsOperation("retireRole") {
+                    Button(productText("更改这台电脑的角色…", "Change this computer's role…")) { model.nativeChangeRole() }.disabled(model.busy)
+                }
                 if model.nativeSupportsOperation("stageRuntime") || model.nativeSupportsOperation("recoverRuntimeUpdate") {
                 VStack(alignment: .leading, spacing: 8) {
                     Text(productText("原生运行组件", "Native runtime components")).font(.headline)

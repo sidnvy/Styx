@@ -26,6 +26,7 @@ pub(crate) mod native_join_http;
     all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")
 ))]
 mod native_join_protocol;
+pub mod role_retire;
 #[cfg(any(
     all(target_os = "linux", target_env = "gnu"),
     target_os = "macos",

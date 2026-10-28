@@ -151,3 +151,22 @@ persistent service and logout/reboot acceptance are separate paths. Native SDK
 proof does not establish actual account-side plugin acceptance. Historical Node
 setup/enrollment/service helpers remain archived implementation and interop
 material, not this default onboarding route.
+
+## Change this computer's role
+
+In App Settings choose **Change this computer's role…** to stop this computer,
+back up its settings, and return to **Set up this computer** or **Join an existing
+Gateway** without restarting the App. If its local Gateway has other approved
+devices, review their names and IDs and explicitly confirm **Disconnect these
+devices too**. Those devices will need to be paired again as well.
+
+On Linux stop the foreground roles or their service first, then use
+`styx role retire --state-dir ABS_HOST --gateway-state-dir ABS_LOCAL_GATEWAY --authorize --json`.
+Omit the Gateway option for Host only. A device-confirmation refusal lists the
+other devices; add `--allow-other-devices` only after reviewing them. Follow the
+[CLI guide](rust-core-rewrite/NATIVE-CLI-PAIRING.md#change-this-computers-role)
+for report fields and recovery, then repeat normal fresh bootstrap/join.
+
+The original roots become sibling `.retired-YYYYMMDDThhmmssZ` backups; they are
+never deleted or migrated. Keep each machine's publisher signing keys and pins.
+Retirement does not revoke a Host at a remote Gateway or move its other devices.

@@ -17,7 +17,7 @@ namespace StyxNative {
   internal static string Str(object obj,params string[] keys){return Get(obj,keys) as string??"";}
   internal static bool Yes(object obj,params string[] keys){return Equals(Get(obj,keys),true);}
  }
- sealed class NativeOperationException:IOException { internal readonly string Code;internal readonly object Budget;internal readonly bool Preflight;internal NativeOperationException(string code,object budget=null,bool preflight=false){Code=code;Budget=budget;Preflight=preflight;} }
+ sealed class NativeOperationException:IOException { internal readonly string Code;internal readonly object Budget,Retirement;internal readonly bool Preflight;internal NativeOperationException(string code,object budget=null,bool preflight=false,object retirement=null){Code=code;Budget=budget;Preflight=preflight;Retirement=retirement;} }
  // The installed outer package pins the bootstrap executable. Its hash is an
  // integrity boundary, not a substitute for Windows publisher authentication.
  sealed class NativeBootstrap:IDisposable {
@@ -73,7 +73,7 @@ namespace StyxNative {
   internal async Task<object> Call(string operation,Dictionary<string,object> input){
    await gate.WaitAsync();try{var p=child;if(Volatile.Read(ref closed)!=0||p==null||p.HasExited||sequence==Int32.MaxValue)throw new IOException("app_core_unavailable");int id=++sequence;string request=Json.Codec.Serialize(Json.Obj("schema",1,"id",id,"operation",operation,"input",input));if(request.Length>65536)throw new IOException("app_request_too_large");
     await p.StandardInput.WriteLineAsync(request);await p.StandardInput.FlushAsync();pendingRead=ReadLineBounded(p.StandardOutput,2097152);if(await Task.WhenAny(pendingRead,Task.Delay(150000))!=pendingRead){Dispose();throw new IOException("app_result_unknown_no_replay");}
-    string line=await pendingRead;pendingRead=null;if(line==null||Volatile.Read(ref closed)!=0)throw new IOException("app_result_unknown_no_replay");var response=Json.Codec.DeserializeObject(line);if(Convert.ToInt32(Json.Get(response,"id"))!=id){Dispose();throw new IOException("app_correlation_unknown_no_replay");}if(!Json.Yes(response,"ok"))throw new NativeOperationException(Json.Str(response,"error"));return Json.Get(response,"result");
+    string line=await pendingRead;pendingRead=null;if(line==null||Volatile.Read(ref closed)!=0)throw new IOException("app_result_unknown_no_replay");var response=Json.Codec.DeserializeObject(line);if(Convert.ToInt32(Json.Get(response,"id"))!=id){Dispose();throw new IOException("app_correlation_unknown_no_replay");}if(!Json.Yes(response,"ok"))throw new NativeOperationException(Json.Str(response,"error"),retirement:Json.Get(response,"retirement"));return Json.Get(response,"result");
    }catch(NativeOperationException){throw;}catch{Dispose();throw new IOException("app_result_unknown_no_replay");}finally{gate.Release();}
   }
   int maintenanceCustody;
@@ -585,12 +585,28 @@ namespace StyxNative {
    if((page=="overview"||page=="chat")&&owner.CurrentStatus!=null)Status(EvidenceStatus(owner.CurrentStatus));content.Controls.Add(statusReadout);content.Controls.Add(observationError);content.Controls.Add(feedback);
   }
   void Unavailable(string title){var button=StyxContext.Button(content,title+" — unavailable in this native slice",()=>Task.FromResult(0));button.Enabled=false;}
+  async Task ChangeRole(){
+   if(MessageBox.Show(this,"This computer will disconnect, back up its current settings, and be paired again.","Change this computer's role…",MessageBoxButtons.OKCancel,MessageBoxIcon.Question)!=DialogResult.OK)return;
+   var stopped=await owner.Call("quitAdmission");if(Json.Str(stopped,"quit","status")!="ready_to_quit")throw new IOException();
+   // The C# 5 compiler does not allow await inside catch blocks.
+   NativeOperationException refusal=null;object result=null;
+   try{result=await owner.Call("retireRole",Json.Obj("allowOtherDevices",false));}catch(NativeOperationException failure){if(failure.Code!="role_retire_gateway_has_devices")throw;refusal=failure;}
+   if(refusal!=null){
+    var devices=Json.Get(refusal.Retirement,"otherDevices") as object[];if(devices==null||devices.Length==0)throw new IOException();
+    var names=new System.Text.StringBuilder();foreach(var device in devices)names.AppendLine(Json.Str(device,"label")+" ("+Json.Str(device,"deviceId")+")");
+    using(var dialog=StyxContext.Window("Change this computer's role…",new Size(520,380))){var stack=StyxContext.Stack(dialog);StyxContext.Text(stack,names.ToString(),210);var confirm=StyxContext.Button(stack,"Disconnect these devices too",()=>Task.FromResult(0));confirm.DialogResult=DialogResult.OK;var cancel=StyxContext.Button(stack,"Cancel",()=>Task.FromResult(0));cancel.DialogResult=DialogResult.Cancel;dialog.CancelButton=cancel;if(dialog.ShowDialog(this)!=DialogResult.OK)return;}
+    result=await owner.Call("retireRole",Json.Obj("allowOtherDevices",true));
+   }
+   if(Json.Yes(result,"retirement","restartRequired"))throw new IOException();
+   localCreationSubmitted=false;joinOrigin="";joinCa="";await owner.RefreshAfterMutation();ShowPage("welcome");
+  }
   void NativeAction(string title,string operation,Func<Task> action){if(owner.Supports(operation))Action(title,action);else Unavailable(title);}
   string NativeStatus(object data){var enrollment=Json.Get(data,"enrollment");string text="Exec transport: "+Json.Str(data,"foreground","execConnection")+"\nHost: "+Json.Str(data,"foreground","status");if(Json.Get(data,"gateway")!=null)text+="\nLocal gateway address: "+Json.Str(data,"gateway","origin")+"\nLocal gateway: "+(Json.Yes(data,"gateway","running")&&Json.Yes(data,"gateway","listening")?"running":"status not confirmed");if(Json.Yes(data,"admission_fenced"))text+="\nThe last setup result is unconfirmed. Refresh status to review it; your existing settings have been retained.";string status=Json.Str(enrollment,"status");if(status.Length>0)text+="\nEnrollment: "+status+"\nDevice: "+Json.Str(enrollment,"device_id");if(status=="awaiting_approval")text+="\nCompare on your Gateway: "+Json.Str(enrollment,"comparison_code")+"\nFingerprint: "+Json.Str(enrollment,"fingerprint")+"\nApproval must be performed on the Gateway. Then check confirmation here.";return text+"\nTool execution, desktop control and target ChatGPT account acceptance are not inferred from connection status.";}
   void ShowRustPage(string name){
    if(name=="welcome"){
     if(localCreationSubmitted||Json.Yes(owner.CurrentStatus,"admission_fenced")||Json.Get(owner.CurrentStatus,"gateway")!=null||Json.Get(owner.CurrentStatus,"configuration")!=null||Json.Get(owner.CurrentStatus,"enrollment")!=null){Explain("Your existing settings and setup progress have been retained. Open this computer to review the current status.",65);Action("Open this computer",ContinueJoiningView,false);}
     else{Explain("Set up a local gateway and connect this computer, or join a gateway you already own.",65);NativeAction("Set up this computer","createLocal",()=>{ShowPage("create");return Task.FromResult(0);});NativeAction("Join an existing Gateway","inspectJoin",()=>{ShowPage("join");return Task.FromResult(0);});}
+    NativeAction("Change this computer's role…","retireRole",ChangeRole);
     NativeAction("Login startup","appLifecycle",async()=>{ShowPage("login-startup");await ReadLogin();});
    }else if(name=="login-startup"){
     Explain("Start Styx in the system tray when you sign in. Windows controls whether the registered entry is allowed to run. Quitting Styx keeps the next-login registration and does not restart this session.",110);
@@ -628,6 +644,7 @@ namespace StyxNative {
     Explain("Styx keeps your local connection and gateway running while the App is open. If you joined another computer, its gateway is still used.",85);RefreshAction();string enrollment=Json.Str(owner.CurrentStatus,"enrollment","status");
     if(enrollment=="awaiting_approval")NativeAction("Check confirmation","claimJoin",async()=>{var result=await owner.Call("claimJoin");string actual=Json.Str(result,"status");if(actual!="awaiting_approval"&&actual!="ready_to_connect")throw new IOException();await owner.RefreshAfterMutation();ShowPage("overview");Feedback(actual=="awaiting_approval"?"The Gateway has not approved this request. No connection was started.":"The Gateway confirmed this identity. Choose Reconnect to start the Host.");});
     NativeAction("Reconnect","connect",async()=>{await owner.Call("connect");await owner.RefreshAfterMutation();Feedback(StyxContext.ReconnectResult(owner.CurrentStatus));});NativeAction("Pause","disconnect",async()=>{await owner.Call("disconnect");await owner.RefreshAfterMutation();});
+    NativeAction("Change this computer's role…","retireRole",ChangeRole);
     Unavailable("Add or revoke computers");Unavailable("Edit capabilities");
     Explain("Runtime updates preserve your identity, pairing and settings. Both App roles are stopped first and stay stopped until you reconnect. The two configuration updates are separate transactions.",95);
     NativeAction("Stage runtime candidate","stageRuntime",async()=>{await owner.Call("stageRuntime",new Dictionary<string,object>{{"authorize",true}});await owner.RefreshAfterMutation();ShowPage("overview");});
