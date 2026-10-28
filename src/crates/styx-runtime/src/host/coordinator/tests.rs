@@ -709,11 +709,13 @@ async fn real_host_action_nonce_drop_ticket_and_terminate_scenario() {
         );
         authority.replace_trusted_facts(facts());
         let mut expired = context(&host, 1);
-        expired.deadline = MonotonicMillis(host.now().0 + 1);
+        // Long enough that preparation itself never races the deadline on a
+        // loaded machine; dispatch happens well after it.
+        expired.deadline = MonotonicMillis(host.now().0 + 50);
         let expired = host
             .prepare_action(&owner, resource_target(&resource), expired, &no_send)
             .unwrap();
-        tokio::time::sleep(Duration::from_millis(5)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
         assert!(matches!(
             host.dispatch_action(&owner, &expired.id, expired.payload_digest),
             Err(CoordinatorError::Admission(ErrorCategory::OperationTimeout))
