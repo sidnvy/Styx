@@ -21,7 +21,9 @@ Product work now follows `src/docs/rust-core-rewrite/REDUCED-SCOPE.md`; its sequ
 
 Existing evidence, Rust toolchain and Cargo caches referenced by the handoff retain their established paths. Do not rebuild, move signed installations, change identity/pairing, or replay unknown operations merely because the source directory moved.
 
-No active Codex worktree leases. Retired: `codex-windows-revalidate` (2026-10-28) merged and removed.
+Active lease (2026-10-28): `codex-macos-browser-cleanup` at /home/sid/Developer/worktrees/Styx/codex-macos-browser-cleanup, branch codex/macos-browser-cleanup, owner Claude (integrator), paths providers/browser/{mod,macos}.rs and platform/macos_process_tree.rs; purpose macOS Browser descendant custody; retire by merge into develop and removal.
+
+Retired: `codex-windows-revalidate` (2026-10-28) merged and removed.
 
 Retired: `codex-gateway-lan` (2026-10-28) merged and removed.
 
