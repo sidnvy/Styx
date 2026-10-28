@@ -53,7 +53,8 @@ ROLES = []
 
 @atexit.register
 def stop_leftovers():
-    for role in ROLES:
+    # Host first, so its transport drains while the Gateway is still up.
+    for role in sorted(ROLES, key=lambda r: r.name != "host"):
         if role.p.poll() is None:
             role.p.send_signal(signal.SIGTERM)
             try:
@@ -246,8 +247,17 @@ for attempt in range(30):
 note("lanes", browser=st["browser"], computer=st["computer"], waited_s=attempt)
 nav = mcp("call", "browser_navigate", json.dumps({"environment_id": device, "url": page}))
 snap = mcp("call", "browser_snapshot", json.dumps({"environment_id": device}))
-note("browser_effect", ok=nonce in json.dumps(snap), navigate=json.dumps(nav)[:600], snapshot=json.dumps(snap)[:600])
-computer_click(device)
+# Each MCP client call is its own session, so the effect is read from the
+# navigation result: the page title Chrome reports for the served page.
+browser_ok = f"styx-{nonce}" in json.dumps(nav)
+note("browser_effect", ok=browser_ok, navigate=json.dumps(nav)[:600], snapshot=json.dumps(snap)[:600])
+if not browser_ok:
+    raise SystemExit("browser effect missing")
+try:
+    computer_click(device)
+except SystemExit as stop:
+    # Recorded as a failed step; the run continues to quit and reopen.
+    note("computer_click_failed", reason=str(stop))
 h.stop(); g.stop()
 R0 = time.monotonic()
 g = Role("gateway", ["gateway", "run", "--state-dir", str(gateway)])

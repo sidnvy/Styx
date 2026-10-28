@@ -9,7 +9,7 @@
         any(target_arch = "x86_64", target_arch = "aarch64")
     )
 ))]
-use crate::store::{KnownDigests, PayloadLimits};
+use crate::store::PayloadLimits;
 use crate::{
     crypto::{PublisherFingerprint, PublisherVerifyingKey, RawReleaseManifest},
     store::{PayloadInventory, PinnedExecutable, PrivateRoot, RawFile, StoreError},
@@ -479,29 +479,6 @@ pub async fn inspect_selection(
 /// Re-open a canonical DATA selection through the existing C08 verifier. This
 /// neither admits ordinary traffic nor proves the cutover was committed.
 pub fn verify_selected(selection: &NativeRuntimeSelection) -> Result<VerifiedNativeRelease> {
-    verify_selected_known(selection, &KnownDigests::new())
-}
-/// Start-time verification for a role root: the signed manifest and every
-/// member's size and digest are checked as before, but a member whose file
-/// metadata is unchanged since the last full check reuses its recorded digest.
-pub fn verify_selected_cached(
-    selection: &NativeRuntimeSelection,
-    cache_dir: &Path,
-) -> Result<VerifiedNativeRelease> {
-    let known = digest_cache::load(cache_dir, &selection.manifest_sha256);
-    let verified = verify_selected_known(selection, &known)?;
-    digest_cache::store(
-        cache_dir,
-        &selection.manifest_sha256,
-        &known,
-        verified.inventory.members(),
-    );
-    Ok(verified)
-}
-fn verify_selected_known(
-    selection: &NativeRuntimeSelection,
-    known: &KnownDigests,
-) -> Result<VerifiedNativeRelease> {
     validate_selection_locator(selection)?;
     if !cfg!(any(
         all(
@@ -523,11 +500,10 @@ fn verify_selected_known(
     }
     let expected = PublisherFingerprint::parse(&selection.publisher_spki_sha256.to_hex())
         .map_err(|_| ReleaseError::Invalid)?;
-    let verified = verify_known(
+    let verified = verify(
         Path::new(&selection.payload_path),
         Path::new(&selection.publisher_file),
         &expected,
-        known,
     )?;
     if verified.selection_metadata()? != *selection {
         return Err(ReleaseError::Changed);
@@ -572,14 +548,6 @@ pub fn verify(
     publisher_file: &Path,
     expected: &PublisherFingerprint,
 ) -> Result<VerifiedNativeRelease> {
-    verify_known(payload, publisher_file, expected, &KnownDigests::new())
-}
-fn verify_known(
-    payload: &Path,
-    publisher_file: &Path,
-    expected: &PublisherFingerprint,
-    known: &KnownDigests,
-) -> Result<VerifiedNativeRelease> {
     #[cfg(any(
         all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
         all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"),
@@ -589,7 +557,7 @@ fn verify_known(
         )
     ))]
     {
-        verify_native(payload, publisher_file, expected, known)
+        verify_native(payload, publisher_file, expected)
     }
     #[cfg(not(any(
         all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
@@ -600,7 +568,7 @@ fn verify_known(
         )
     )))]
     {
-        let _ = (payload, publisher_file, expected, known);
+        let _ = (payload, publisher_file, expected);
         Err(ReleaseError::Unsupported)
     }
 }
@@ -616,7 +584,6 @@ fn verify_native(
     payload: &Path,
     publisher_path: &Path,
     expected: &PublisherFingerprint,
-    known: &KnownDigests,
 ) -> Result<VerifiedNativeRelease> {
     if !publisher_path.is_absolute() {
         return Err(ReleaseError::Invalid);
@@ -695,7 +662,11 @@ fn verify_native(
             return Err(ReleaseError::Invalid);
         }
     }
-    let inventory = root.payload_inventory_with_known(PayloadLimits::default(), known)?;
+    // Members unchanged since the last full check of this signed manifest
+    // reuse their recorded digests; every member is still compared below.
+    let manifest_sha256 = Sha256Digest::of_bytes(manifest_file.bytes());
+    let known = digest_cache::load(&manifest_sha256);
+    let inventory = root.payload_inventory_with_known(PayloadLimits::default(), &known)?;
     if inventory.members().len() != expected_members.len() {
         return Err(ReleaseError::Integrity);
     }
@@ -711,6 +682,8 @@ fn verify_native(
             .checked_add(member.bytes)
             .ok_or(ReleaseError::Capacity)?;
     }
+    // Recorded only after every member matched the signed manifest.
+    digest_cache::store(&manifest_sha256, &known, inventory.members());
     #[cfg(target_os = "windows")]
     let (executable, workers) = {
         let paths: Vec<&Path> = std::iter::once(Path::new(&manifest.entrypoint))
