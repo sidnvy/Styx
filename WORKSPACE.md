@@ -21,7 +21,7 @@ Product work now follows `src/docs/rust-core-rewrite/REDUCED-SCOPE.md`; its sequ
 
 Existing evidence, Rust toolchain and Cargo caches referenced by the handoff retain their established paths. Do not rebuild, move signed installations, change identity/pairing, or replay unknown operations merely because the source directory moved.
 
-Active Codex lease (2026-10-28): `/home/sid/Developer/worktrees/Styx/codex-windows-revalidate`, branch `codex/windows-revalidate`. Owner: Claude session integrating develop. Purpose: cheap Windows payload revalidation (Host start ~18 s on nab5). Paths: `store/windows_payload.rs`, `store/windows.rs`, `store/windows_ffi.rs`, Windows store tests. Retirement: merged into develop after measurement on nab5, then removed.
+No active Codex worktree leases. Retired: `codex-windows-revalidate` (2026-10-28) merged and removed.
 
 Retired: `codex-gateway-lan` (2026-10-28) merged and removed.
 
