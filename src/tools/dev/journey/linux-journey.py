@@ -19,6 +19,10 @@ styx = str(Path(payload) / ("bin/styx.exe" if WINDOWS else "bin/styx"))
 # Windows: each role gets its own process group so Ctrl+Break stops it gracefully.
 GROUP = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if WINDOWS else {}
 STOP = signal.CTRL_BREAK_EVENT if WINDOWS else signal.SIGTERM
+# Optional lanes, on unless set to 0: a machine without Chrome/Edge, or a macOS
+# CLI payload (Computer Use comes from the Swift App there), records them NOT RUN.
+BROWSER = os.environ.get("STYX_JOURNEY_BROWSER", "1") != "0"
+COMPUTER = os.environ.get("STYX_JOURNEY_COMPUTER", "1") != "0"
 inputs, gparent, hparent, hcwd = (work / n for n in ("inputs", "gateway-parent", "host-parent", "host-cwd"))
 for d in (work, inputs, gparent, hparent, hcwd):
     # Windows: Python 3.13 turns mode 0o700 into an OWNER RIGHTS ACL, which Styx's
@@ -266,13 +270,13 @@ ca_der = ssl.PEM_cert_to_DER_cert((gateway / "gateway-ca.pem").read_text())
 hdep = inputs / "host.json"
 hdep.write_text(json.dumps({"schema": 1, "mode": "join-existing",
     "gateway": {"url": url.rstrip("/"), "caFile": str(gateway / "gateway-ca.pem"), "expectedCaSha256": hashlib.sha256(ca_der).hexdigest()},
-    "host": {"label": "linux-journey", "cwd": str(hcwd), "shell": os.path.join(os.environ.get("SystemRoot", ""), "System32", "WindowsPowerShell", "v1.0", "powershell.exe") if WINDOWS else "/bin/bash", "computer": True, "browser": {"enabled": True, "headless": True, "channel": "chrome", "persistLogin": False}},
+    "host": {"label": "linux-journey", "cwd": str(hcwd), "shell": os.path.join(os.environ.get("SystemRoot", ""), "System32", "WindowsPowerShell", "v1.0", "powershell.exe") if WINDOWS else "/bin/bash", "computer": COMPUTER, "browser": {"enabled": BROWSER, "headless": True, "channel": "chrome", "persistLogin": False}},
     "runtimeSelectionFile": str(selection), "invitationFile": str(invitation)})); os.chmod(hdep, 0o600)
 req = run("host_join_request", ["host", "join", "request", "--parent-dir", str(hparent), "--name", "host", "--deployment-file", str(hdep), "--json"])
 pending = run("gateway_pending", ["gateway", "pending", "--state-dir", str(gateway), "--json"])
 note("join_request_keys", request=sorted(req), pending=json.dumps(pending)[:800])
 pick = lambda *k: next(req[x] for x in k if x in req)
-run("gateway_approve", ["gateway", "approve", "--state-dir", str(gateway), "--request-id", pick("request_id", "requestId"), "--device-id", pick("device_id", "deviceId"), "--fingerprint", pick("fingerprint"), "--comparison-code", pick("comparison_code", "comparisonCode"), "--enable-browser", "--enable-computer", "--authorize", "--json"])
+run("gateway_approve", ["gateway", "approve", "--state-dir", str(gateway), "--request-id", pick("request_id", "requestId"), "--device-id", pick("device_id", "deviceId"), "--fingerprint", pick("fingerprint"), "--comparison-code", pick("comparison_code", "comparisonCode"), *(["--enable-browser"] if BROWSER else []), *(["--enable-computer"] if COMPUTER else []), "--authorize", "--json"])
 claim = run("host_join_claim", ["host", "join", "claim", "--state-dir", str(host), "--json"])
 note("claim", status=claim.get("status"))
 device = pick("device_id", "deviceId")
@@ -301,25 +305,32 @@ class Page(http.server.BaseHTTPRequestHandler):
 server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Page)
 threading.Thread(target=server.serve_forever, daemon=True).start()
 page = f"http://127.0.0.1:{server.server_address[1]}/styx-journey"
-for attempt in range(30):
+for attempt in range(30 if BROWSER or COMPUTER else 0):
     st = json.loads(mcp("call", "get_execution_environment_status", json.dumps({"environment_id": device}))["result"]["content"][0]["text"])
     if st["browser"]["connection"] == "connected" and st["computer"]["connection"] == "connected":
         break
     time.sleep(1)
-note("lanes", browser=st["browser"], computer=st["computer"], waited_s=attempt)
-nav = mcp("call", "browser_navigate", json.dumps({"environment_id": device, "url": page}))
-snap = mcp("call", "browser_snapshot", json.dumps({"environment_id": device}))
-# Each MCP client call is its own session, so the effect is read from the
-# navigation result: the page title Chrome reports for the served page.
-browser_ok = f"styx-{nonce}" in json.dumps(nav)
-note("browser_effect", ok=browser_ok, navigate=json.dumps(nav)[:600], snapshot=json.dumps(snap)[:600])
-if not browser_ok:
-    raise SystemExit("browser effect missing")
-try:
-    computer_click(device)
-except SystemExit as stop:
-    # Recorded as a failed step; the run continues to quit and reopen.
-    note("computer_click_failed", reason=str(stop))
+if BROWSER or COMPUTER:
+    note("lanes", browser=st["browser"], computer=st["computer"], waited_s=attempt)
+if not BROWSER:
+    note("browser_not_run", reason="STYX_JOURNEY_BROWSER=0")
+else:
+    nav = mcp("call", "browser_navigate", json.dumps({"environment_id": device, "url": page}))
+    snap = mcp("call", "browser_snapshot", json.dumps({"environment_id": device}))
+    # Each MCP client call is its own session, so the effect is read from the
+    # navigation result: the page title Chrome reports for the served page.
+    browser_ok = f"styx-{nonce}" in json.dumps(nav)
+    note("browser_effect", ok=browser_ok, navigate=json.dumps(nav)[:600], snapshot=json.dumps(snap)[:600])
+    if not browser_ok:
+        raise SystemExit("browser effect missing")
+if not COMPUTER:
+    note("computer_click_not_run", reason="STYX_JOURNEY_COMPUTER=0")
+else:
+    try:
+        computer_click(device)
+    except SystemExit as stop:
+        # Recorded as a failed step; the run continues to quit and reopen.
+        note("computer_click_failed", reason=str(stop))
 h.stop(); g.stop()
 R0 = time.monotonic()
 g = Role("gateway", ["gateway", "run", "--state-dir", str(gateway)])
