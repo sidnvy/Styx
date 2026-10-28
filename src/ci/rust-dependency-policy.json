@@ -264,6 +264,11 @@
       "input": "--browser-references --browser-host and all explicit owned Browser inputs",
       "required_for": "actual headless Core/Host opaque refs, native navigation/tab invalidation and reopen ABA; not final crossplatform Browser/account/desktop release"
     },
+    "gateway::http::lan_tests::gateway_three_listeners_two_lan_addresses_join_and_host_link_requires_sockets": {
+      "kind": "assigned_private_lan_interface_fixture",
+      "input": "STYX_TEST_LAN_ADDRESSES set to two IPv4 addresses assigned to this machine in private or overlay ranges",
+      "required_for": "Hosts join and complete paired negotiation through each of two LAN listeners; not account, App or cross-machine acceptance"
+    },
     "gateway::http::lan_tests::gateway_two_listeners_lan_join_and_host_link_requires_sockets": {
       "kind": "assigned_private_lan_interface_fixture",
       "input": "STYX_TEST_LAN_ADDRESS set to an IPv4 address assigned to this machine in a private or overlay range",
