@@ -21,7 +21,7 @@ Product work now follows `src/docs/rust-core-rewrite/REDUCED-SCOPE.md`; its sequ
 
 Existing evidence, Rust toolchain and Cargo caches referenced by the handoff retain their established paths. Do not rebuild, move signed installations, change identity/pairing, or replay unknown operations merely because the source directory moved.
 
-Active Codex lease (2026-10-28): `/home/sid/Developer/worktrees/Styx/codex-gateway-lan`, branch `codex/gateway-lan`. Owner: Claude session integrating develop. Purpose: Gateway accepts Hosts over the LAN. Paths: `management/native_gateway.rs`, `management/native.rs`, `management/mod.rs`, `management/native_join.rs`, `foreground/gateway.rs`, `gateway/`, `tls/issuer.rs`, CLI invite option, `NATIVE-CLI-PAIRING.md`. Retirement: merged into develop, then removed.
+No active Codex worktree leases. Retired: `codex-gateway-lan` (2026-10-28) merged and removed.
 
 Retired: `codex-linux-computer` (2026-10-28) merged as f6f9a42 and removed.
 
