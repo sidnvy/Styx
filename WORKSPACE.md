@@ -21,7 +21,9 @@ Product work now follows `src/docs/rust-core-rewrite/REDUCED-SCOPE.md`; its sequ
 
 Existing evidence, Rust toolchain and Cargo caches referenced by the handoff retain their established paths. Do not rebuild, move signed installations, change identity/pairing, or replay unknown operations merely because the source directory moved.
 
-No active Codex worktree leases. Retired: `codex-app-lan-setup` (2026-10-28) merged as 6540762 and removed.
+Active lease (2026-10-28): `codex-retire-js-core` at /home/sid/Developer/worktrees/Styx/codex-retire-js-core, branch codex/retire-js-core, owner Claude (integrator), paths src/ JS outside src/crates plus .github/workflows and root package.json; purpose v1 A38 legacy JS core retirement; retire by merge into develop and removal.
+
+Retired: `codex-app-lan-setup` (2026-10-28) merged as 6540762 and removed.
 
 Retired: `codex-macos-browser-cleanup` (2026-10-28) merged as 0b6ebcf and removed.
 
