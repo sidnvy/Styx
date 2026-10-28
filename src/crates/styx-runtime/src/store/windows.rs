@@ -116,6 +116,10 @@ struct Opened {
     path: PathBuf,
     relative: PathBuf,
 }
+#[cfg(test)]
+thread_local! {
+    static OPEN_RELATIVE_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 /// A post-mkdir failure keeps the original child when it was successfully
 /// opened, and always preserves whether this call actually created the name.
 pub(super) struct FreshChildError {
@@ -531,6 +535,8 @@ impl Root {
         write: bool,
         create: bool,
     ) -> Result<Opened> {
+        #[cfg(test)]
+        OPEN_RELATIVE_CALLS.with(|calls| calls.set(calls.get() + 1));
         let raw = relative.to_str().ok_or(StoreError::InvalidRelativePath)?;
         if raw.ends_with(['\\', '/'])
             || raw
