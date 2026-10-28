@@ -7,6 +7,7 @@ use crate::{
 };
 use styx_contracts::error::{ErrorCategory, ExecutionCertainty};
 const MAX_COMPUTER_CONTEXTS: usize = 16;
+const COMPUTER_STARTUP_WAIT: Duration = Duration::from_secs(20);
 const MAX_COMPUTER_RESULT_BYTES: usize = styx_contracts::DESKTOP_BROWSER_FRAME_BYTES;
 
 /// Only Computer tools already present in the frozen public contract are routed.
@@ -250,11 +251,34 @@ impl PairedGatewayBackend {
         .await
         .unwrap_or(Err(super::super::RelayError::Unknown))
     }
+    /// Right after a Host connects its desktop may still be starting. A Busy
+    /// refusal at preparation is proven not dispatched and its record retired,
+    /// so the same request is issued again for a bounded time instead of
+    /// handing the client a Busy to poll on. Nothing dispatched is repeated.
     pub(super) async fn computer_call(
         &self,
         owner: &VerifiedGatewayOwner,
         name: &str,
         args: Option<Map<String, Value>>,
+    ) -> CallToolResult {
+        let deadline = tokio::time::Instant::now() + COMPUTER_STARTUP_WAIT;
+        loop {
+            let mut startup_busy = false;
+            let result = self
+                .computer_call_once(owner, name, args.clone(), &mut startup_busy)
+                .await;
+            if !startup_busy || tokio::time::Instant::now() >= deadline {
+                return result;
+            }
+            tokio::time::sleep(Duration::from_millis(500)).await;
+        }
+    }
+    async fn computer_call_once(
+        &self,
+        owner: &VerifiedGatewayOwner,
+        name: &str,
+        args: Option<Map<String, Value>>,
+        startup_busy: &mut bool,
     ) -> CallToolResult {
         let request = match ComputerRequest::parse(name, args) {
             Ok(v) => v,
@@ -333,6 +357,7 @@ impl PairedGatewayBackend {
                     if let Some((category, certainty)) = typed_error(&reply) {
                         if certainty == ExecutionCertainty::NotDispatched {
                             self.retire_computer(owner, &device, &cell);
+                            *startup_busy = category == ErrorCategory::Busy;
                         }
                         return computer_error(category, certainty);
                     }

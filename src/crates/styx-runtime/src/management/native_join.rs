@@ -37,6 +37,7 @@ pub struct JoinReport {
 pub struct JoinError {
     code: &'static str,
     exit: u8,
+    detail: Option<(&'static str, String)>,
     #[cfg(any(
         all(target_os = "windows", target_arch = "x86_64"),
         all(
@@ -54,10 +55,18 @@ impl JoinError {
     pub fn exit_code(&self) -> u8 {
         self.exit
     }
+    /// The deployment field that was refused and why, when that is known.
+    /// Deployment files hold paths and URLs, never credentials.
+    pub fn detail(&self) -> Option<(&'static str, &str)> {
+        self.detail
+            .as_ref()
+            .map(|(field, reason)| (*field, reason.as_str()))
+    }
     fn new(code: &'static str, exit: u8) -> Self {
         Self {
             code,
             exit,
+            detail: None,
             #[cfg(any(
                 all(target_os = "windows", target_arch = "x86_64"),
                 all(
@@ -344,6 +353,11 @@ mod platform {
     fn bad() -> JoinError {
         JoinError::new("native_join_invalid_input", 2)
     }
+    fn invalid(field: &'static str, reason: impl Into<String>) -> JoinError {
+        let mut error = bad();
+        error.detail = Some((field, reason.into()));
+        error
+    }
     fn unknown() -> JoinError {
         JoinError::new("native_join_unknown_inspect", 4)
     }
@@ -464,24 +478,42 @@ mod platform {
         _profile_root: Option<PathBuf>,
     }
     fn deployment(raw: &[u8]) -> Result<(Deployment, url::Url, bool)> {
-        let d: Deployment = serde_json::from_slice(raw).map_err(|_| bad())?;
-        let origin = url::Url::parse(&d.gateway.url).map_err(|_| bad())?;
-        if d.schema != 1
-            || d.mode != "join-existing"
-            || origin.scheme() != "https"
+        let d: Deployment =
+            serde_json::from_slice(raw).map_err(|e| invalid("deployment", e.to_string()))?;
+        if d.schema != 1 {
+            return Err(invalid("schema", "must be 1"));
+        }
+        if d.mode != "join-existing" {
+            return Err(invalid("mode", "must be \"join-existing\""));
+        }
+        let origin =
+            url::Url::parse(&d.gateway.url).map_err(|e| invalid("gateway.url", e.to_string()))?;
+        if origin.scheme() != "https"
             || !origin.username().is_empty()
             || origin.password().is_some()
             || origin.path() != "/"
             || origin.query().is_some()
             || origin.fragment().is_some()
             || d.gateway.url != origin.origin().ascii_serialization()
-            || !d.host.cwd.is_absolute()
-            || !d.host.shell.is_absolute()
-            || !d.gateway.ca_file.is_absolute()
-            || !d.runtime_selection_file.is_absolute()
-            || !d.invitation_file.is_absolute()
         {
-            return Err(bad());
+            return Err(invalid(
+                "gateway.url",
+                format!(
+                    "must be the bare https origin with no path or trailing slash, e.g. {}",
+                    origin.origin().ascii_serialization()
+                ),
+            ));
+        }
+        for (field, path) in [
+            ("host.cwd", &d.host.cwd),
+            ("host.shell", &d.host.shell),
+            ("gateway.caFile", &d.gateway.ca_file),
+            ("runtimeSelectionFile", &d.runtime_selection_file),
+            ("invitationFile", &d.invitation_file),
+        ] {
+            if !path.is_absolute() {
+                return Err(invalid(field, "must be an absolute path"));
+            }
         }
         let requested = d
             .host
@@ -489,7 +521,7 @@ mod platform {
             .as_ref()
             .map(|b| serde_json::from_str::<BrowserSelection>(b.get()))
             .transpose()
-            .map_err(|_| bad())?
+            .map_err(|e| invalid("host.browser", e.to_string()))?
             .is_some_and(|b| b.enabled);
         Ok((d, origin, requested))
     }
@@ -1326,6 +1358,47 @@ mod platform {
         };
         (work, ()) = io(work, move |w| w.append(File::Ready, &bytes)).await?;
         Ok(work.report("native_host_claim", "ready_to_connect", &pending))
+    }
+
+    #[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+    mod deployment_field_tests {
+        use super::*;
+
+        fn refused(value: serde_json::Value) -> (&'static str, String) {
+            let error = deployment(value.to_string().as_bytes()).err().unwrap();
+            assert_eq!(error.code(), "native_join_invalid_input");
+            let (field, reason) = error.detail().unwrap();
+            (field, reason.to_owned())
+        }
+
+        #[test]
+        fn join_deployment_refusals_name_the_field() {
+            let valid = serde_json::json!({
+                "schema": 1, "mode": "join-existing",
+                "gateway": {"url": "https://127.0.0.1:8443", "caFile": "/p/ca.pem",
+                    "expectedCaSha256": "00".repeat(32)},
+                "host": {"label": "l", "cwd": "/p/cwd", "shell": "/bin/bash",
+                    "browser": {"enabled": true, "headless": true, "persistLogin": false}},
+                "runtimeSelectionFile": "/p/sel.json", "invitationFile": "/p/inv.txt"
+            });
+            assert!(deployment(valid.to_string().as_bytes()).is_ok());
+
+            let mut slash = valid.clone();
+            slash["gateway"]["url"] = "https://127.0.0.1:8443/".into();
+            let (field, reason) = refused(slash);
+            assert_eq!(field, "gateway.url");
+            assert!(reason.contains("https://127.0.0.1:8443"), "{reason}");
+
+            let mut misspelt = valid.clone();
+            misspelt["host"]["browser"]["executable"] = "/usr/bin/chrome".into();
+            let (field, reason) = refused(misspelt);
+            assert_eq!(field, "host.browser");
+            assert!(reason.contains("executable"), "{reason}");
+
+            let mut relative = valid;
+            relative["host"]["cwd"] = "work".into();
+            assert_eq!(refused(relative).0, "host.cwd");
+        }
     }
 
     #[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]

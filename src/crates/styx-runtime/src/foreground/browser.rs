@@ -218,9 +218,30 @@ fn selected(profile: &LoadedLegacyProfile) -> Result<Option<PathBuf>> {
     }
     #[cfg(target_os = "linux")]
     {
-        Ok(Some(
-            d.executable.ok_or(ErrorCategory::CapabilityUnsupported)?,
-        ))
+        let path = match d.executable {
+            Some(path) => path,
+            None => {
+                // The real binaries, not the /usr/bin wrapper scripts or links:
+                // the pinned executable must be its own canonical path.
+                let paths: &[&str] = match d.channel.as_deref().unwrap_or("auto") {
+                    "chrome" => &["/opt/google/chrome/chrome"],
+                    "msedge" => &["/opt/microsoft/msedge/msedge"],
+                    "auto" => &[
+                        "/opt/google/chrome/chrome",
+                        "/opt/microsoft/msedge/msedge",
+                        "/usr/lib/chromium/chromium",
+                    ],
+                    _ => return Err(ErrorCategory::CapabilityUnsupported),
+                };
+                paths
+                    .iter()
+                    .map(PathBuf::from)
+                    .find(|path| path.is_file())
+                    .ok_or(ErrorCategory::CapabilityUnsupported)?
+            }
+        };
+        canonical(&path)?;
+        Ok(Some(path))
     }
     #[cfg(target_os = "windows")]
     {

@@ -631,7 +631,12 @@ fn join_result(
             }
         }
         Err(value) => {
-            eprintln!("{}", serde_json::json!({"schema":1,"error":value.code()}));
+            let mut report = serde_json::json!({"schema":1,"error":value.code()});
+            if let Some((field, reason)) = value.detail() {
+                report["field"] = field.into();
+                report["reason"] = reason.into();
+            }
+            eprintln!("{report}");
             ExitCode::from(value.exit_code())
         }
     }
