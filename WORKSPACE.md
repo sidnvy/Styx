@@ -21,7 +21,9 @@ Product work now follows `src/docs/rust-core-rewrite/REDUCED-SCOPE.md`; its sequ
 
 Existing evidence, Rust toolchain and Cargo caches referenced by the handoff retain their established paths. Do not rebuild, move signed installations, change identity/pairing, or replay unknown operations merely because the source directory moved.
 
-No active Codex worktree leases. Retired: `codex-retire-js-core` (2026-10-28) merged and removed.
+Active lease (2026-10-28): `codex-gateway-networks` at /home/sid/Developer/worktrees/Styx/codex-gateway-networks, branch codex/gateway-networks, owner Claude (integrator), paths gateway/, management/native_gateway*, tls/, enrollment/{http,service}.rs, foreground/gateway.rs, app/pairing_link.rs, styx cli.rs; purpose several private Gateway addresses, in-place network change, App join link; retire by merge into develop and removal.
+
+Retired: `codex-retire-js-core` (2026-10-28) merged and removed.
 
 Retired: `codex-app-lan-setup` (2026-10-28) merged as 6540762 and removed.
 
