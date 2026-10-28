@@ -198,7 +198,11 @@ def computer_click(device):
     nonce = uuid.uuid4().hex[:12]
     if WINDOWS:
         form = (f"Add-Type -AssemblyName System.Windows.Forms; $f=New-Object Windows.Forms.Form; $f.Text='styx-click-{nonce}';"
-                "$b=New-Object Windows.Forms.Button; $b.Text='Confirm'; $b.Add_Click({[Environment]::Exit(0)});"
+                "$b=New-Object Windows.Forms.Button; $b.Text='Confirm';"
+                # Close 1.5 s after the click: the Windows Cua driver inspects the window after
+                # invoking, and a window that vanishes at once turns the reply into an error.
+                "$t=New-Object Windows.Forms.Timer; $t.Interval=1500; $t.Add_Tick({[Environment]::Exit(0)});"
+                "$b.Add_Click({$b.Text='Clicked'; $t.Start()});"
                 "$f.Controls.Add($b); $f.TopMost=$true; [void]$f.ShowDialog(); exit 3")
         dialog = subprocess.Popen(["powershell", "-NoProfile", "-Command", form])
     else:
