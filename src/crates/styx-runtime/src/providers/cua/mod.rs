@@ -33,6 +33,13 @@ pub(crate) mod macos_source;
 #[cfg(target_os = "macos")]
 pub(crate) use macos::{MacProxySource, TrustedCuaLaunch};
 mod admission;
+mod click;
+mod driver_result;
+#[cfg(test)]
+pub(crate) mod fake_driver;
+#[cfg(any(target_os = "linux", target_os = "windows"))]
+pub(crate) mod permissions;
+pub(crate) use click::ClickRequest;
 pub(crate) mod ax_snapshot;
 mod ax_target;
 mod ax_write;
@@ -116,6 +123,7 @@ pub(crate) struct TrustedCuaLaunch {
     pub(crate) runtime_dir: PathBuf,
     pub(crate) wayland_display: String,
     pub(crate) hyprland_instance: String,
+    pub(crate) compositor_peer: (u32, u64),
     pub(crate) session_bus: PathBuf,
 }
 #[cfg(target_os = "windows")]
@@ -141,6 +149,8 @@ impl OwnedCuaConfig {
     #[cfg(target_os = "linux")]
     fn validate(&self) -> Result<()> {
         if self.launch.uid != nix::unistd::Uid::current().as_raw()
+            || self.launch.compositor_peer.0 == 0
+            || self.launch.compositor_peer.1 == 0
             || self.rpc_timeout.is_zero()
             || self.rpc_timeout > Duration::from_secs(30)
         {
@@ -180,7 +190,7 @@ impl OwnedCuaConfig {
     #[cfg(target_os = "linux")]
     fn digest(&self) -> Result<Sha256Digest> {
         self.validate()?;
-        bounded_bytes(&serde_json::json!({"session":self.launch.session,"uid":self.launch.uid,"runtime":self.launch.runtime_dir,"wayland":self.launch.wayland_display,"hyprland":self.launch.hyprland_instance,"bus":self.launch.session_bus,"image":self.driver.launch_path().map_err(|_|CuaError::PermissionDenied)?,"timeout_ms":self.rpc_timeout.as_millis(),"workspace":self.workspace,"home":self.home}),REQUEST_BYTES).map(|v|Sha256Digest::of_bytes(&v))
+        bounded_bytes(&serde_json::json!({"session":self.launch.session,"uid":self.launch.uid,"runtime":self.launch.runtime_dir,"wayland":self.launch.wayland_display,"hyprland":self.launch.hyprland_instance,"compositor_peer":self.launch.compositor_peer,"bus":self.launch.session_bus,"image":self.driver.launch_path().map_err(|_|CuaError::PermissionDenied)?,"timeout_ms":self.rpc_timeout.as_millis(),"workspace":self.workspace,"home":self.home}),REQUEST_BYTES).map(|v|Sha256Digest::of_bytes(&v))
     }
     #[cfg(target_os = "macos")]
     fn validate(&self) -> Result<()> {
@@ -449,6 +459,10 @@ struct Live {
     uncertain: bool,
     io_failed: bool,
     ax_once_available: bool,
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    permissions_available: bool,
+    #[cfg(any(target_os = "linux", target_os = "windows"))]
+    permissions: Option<permissions::DriverPermissions>,
     exit_success: Option<bool>,
     actions: BTreeMap<OperationId, (Sha256Digest, CuaEvidence, Option<CuaError>, CapabilityId)>,
 }
@@ -717,6 +731,10 @@ impl CuaOpenSlot {
                 uncertain: false,
                 io_failed: false,
                 ax_once_available: false,
+                #[cfg(any(target_os = "linux", target_os = "windows"))]
+                permissions_available: false,
+                #[cfg(any(target_os = "linux", target_os = "windows"))]
+                permissions: None,
                 exit_success: None,
                 actions: BTreeMap::new(),
             })),
@@ -766,7 +784,7 @@ impl CuaOpenSlot {
    #[cfg(target_os = "linux")]
    let (stdin,stdout,mut stderr) = {
    let path=config.driver.launch_path().map_err(|_|CuaError::PermissionDenied)?;
-   let launch=ScopeCommand::cua(path,config.workspace.clone(),config.home.clone(),config.launch.wayland_display.clone(),config.launch.hyprland_instance.clone()).map_err(CuaError::from)?;
+   let launch=ScopeCommand::cua(path,config.workspace.clone(),config.home.clone(),config.launch.wayland_display.clone(),config.launch.hyprland_instance.clone(),config.launch.compositor_peer,until).await.map_err(CuaError::from)?;
    let (mut cmd,scope)=LinuxOwnedScope::command(launch).map_err(CuaError::from)?;
    // Scope is retained before any command spawn or await; failed attestation
    // remains owned Unknown and is cleaned by that exact scope, never by name.
@@ -793,7 +811,13 @@ impl CuaOpenSlot {
    let peer=live.client.as_ref().ok_or(CuaError::Unknown)?.peer();let info=peer.peer_info().ok_or(CuaError::ProtocolMismatch)?;
    if !info.server_info.as_ref().is_some_and(|v|v.name=="cua-driver"&&v.version=="0.36.0"){return Err(CuaError::ProtocolMismatch)}
    let catalog=tokio::select!{_=resource.stop.cancelled()=>return Err(CuaError::Unknown),v=timeout_at(until,peer.list_tools(None))=>v.map_err(|_|CuaError::Unknown)?.map_err(|_|CuaError::ProtocolMismatch)?};
-   if catalog.next_cursor.is_some(){return Err(CuaError::Unsupported)}live.ax_once_available=validate_catalog(&catalog.tools)?;Ok(())
+   if catalog.next_cursor.is_some(){return Err(CuaError::Unsupported)}live.ax_once_available=validate_catalog(&catalog.tools)?;
+   #[cfg(any(target_os = "linux", target_os = "windows"))]
+   {
+     live.permissions_available = catalog.tools.iter().any(|tool| tool.name == "check_permissions");
+     permissions::query(&mut live, &resource.stop, until).await?;
+   }
+   Ok(())
   }.await;
         match result {
             Ok(()) => Ok(CuaOpenReceipt {
@@ -1031,6 +1055,13 @@ impl CuaActionSlot {
         ) {
             return refused("permit_binding", e);
         }
+        let click = match action.click_request() {
+            Ok(value) => value.is_some(),
+            Err(error) => return refused("click_request", error),
+        };
+        if click && write_gate.is_none() {
+            return refused("click_gate_missing", CuaError::PermissionDenied);
+        }
         let write_request = match action.accessibility_write_request() {
             Ok(value) => value,
             Err(error) => return refused("write_request", error),
@@ -1099,6 +1130,14 @@ impl CuaActionSlot {
                 capability,
             ),
         );
+        let mut write_gate = write_gate;
+        if click && let Err(error) = write_gate.take().expect("checked click gate")().await {
+            self.live.actions.insert(
+                operation.clone(),
+                (digest, CuaEvidence::NotDispatched, Some(error), capability),
+            );
+            return refused("click_gate", error);
+        }
         let (evidence, result, cause) = if let Some(request) = write_request {
             let stop = self.resource.stop.clone();
             ax_write::invoke(
@@ -1111,19 +1150,7 @@ impl CuaActionSlot {
             )
             .await
         } else {
-            // call_tool_once has no retry loop. From its first poll onwards a
-            // lost reply is possibly executed; cancellation is not a stop fact.
-            let response = tokio::select! {_=self.resource.stop.cancelled()=>None,result=timeout_at(until,peer.call_tool_once(params))=>Some(result)};
-            match response {
-                Some(Ok(Ok(CallToolResponse::Complete(value)))) => {
-                    if value.is_error == Some(true) || bounded_bytes(&value, FRAME_BYTES).is_err() {
-                        (CuaEvidence::Unknown, None, Some(CuaError::Unknown))
-                    } else {
-                        (CuaEvidence::Acknowledged, Some(value), None)
-                    }
-                }
-                _ => (CuaEvidence::Unknown, None, Some(CuaError::Unknown)),
-            }
+            driver_result::invoke(&peer, params, &self.resource.stop, until).await
         };
         if evidence == CuaEvidence::Unknown {
             self.live.uncertain = true
