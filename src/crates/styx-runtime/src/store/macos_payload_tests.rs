@@ -147,7 +147,14 @@ fn macos_payload_revalidate_nested_changes_native() {
     for dir in ["a", "a/b", "a/b/c", "a.d", "z"] {
         directory(&path.join(dir));
     }
-    for name in ["a/one", "a/b/two", "a/b/c/three", "a.d/four", "z/five", "top"] {
+    for name in [
+        "a/one",
+        "a/b/two",
+        "a/b/c/three",
+        "a.d/four",
+        "z/five",
+        "top",
+    ] {
         file(&path.join(name), name.as_bytes(), 0o600);
     }
     let root = Root::open(&path).unwrap();
@@ -160,16 +167,22 @@ fn macos_payload_revalidate_nested_changes_native() {
     inventory.inner.revalidate().unwrap();
     inventory.inner.revalidate().unwrap();
 
-    // Same bytes, new inode deep in the tree.
+    // Renamed away and back deep in the tree: its directory observation changes.
     let deep = path.join("a/b/c/three");
     std::fs::rename(&deep, path.join("a/b/c/moved")).unwrap();
     std::fs::rename(path.join("a/b/c/moved"), &deep).unwrap();
-    assert!(matches!(inventory.inner.revalidate(), Err(StoreError::Changed)));
+    assert!(matches!(
+        inventory.inner.revalidate(),
+        Err(StoreError::Changed)
+    ));
 
     // An added entry changes its directory's observation.
     let inventory = fresh();
     file(&path.join("a/b/extra"), b"x", 0o600);
-    assert!(matches!(inventory.inner.revalidate(), Err(StoreError::Changed)));
+    assert!(matches!(
+        inventory.inner.revalidate(),
+        Err(StoreError::Changed)
+    ));
     std::fs::remove_file(path.join("a/b/extra")).unwrap();
 
     // An ACL added to a nested member is refused, not skipped.
