@@ -179,7 +179,21 @@ fn parse_snapshot(
     {
         return Err(CuaError::ProtocolMismatch);
     }
-    if object.get("elements_complete").and_then(Value::as_bool) != Some(true)
+    // The Windows UIA driver reports elements_complete:false even when it returned
+    // every element; matching counts with nothing truncated prove the same thing.
+    let counts_complete = {
+        let count = |key| object.get(key).and_then(Value::as_u64);
+        let returned = count("returned_element_count");
+        returned.is_some()
+            && returned == count("total_element_count")
+            && returned == count("element_count")
+            && returned
+                == object
+                    .get("elements")
+                    .and_then(Value::as_array)
+                    .map(|e| e.len() as u64)
+    };
+    if !(object.get("elements_complete").and_then(Value::as_bool) == Some(true) || counts_complete)
         || object.get("truncated").and_then(Value::as_bool) != Some(false)
         || object
             .get("degraded")

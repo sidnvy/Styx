@@ -51,7 +51,6 @@ fn owned_ax_projection_preserves_actual_indices_and_labels_without_native_tokens
 fn success_with_degradation_partial_or_conflicting_native_rows_never_installs() {
     for (key, value) in [
         ("degraded", json!(true)),
-        ("elements_complete", json!(false)),
         ("truncated", json!(true)),
         ("display_only", json!(true)),
         ("returned_element_count", json!(1)),
@@ -64,6 +63,19 @@ fn success_with_degradation_partial_or_conflicting_native_rows_never_installs() 
         let mut result = acquired();
         result.structured_content.as_mut().unwrap()[key] = value;
         assert!(parse_acquired(&result, 42, 1234).is_err());
+    }
+    // Windows UIA reports elements_complete:false with every element returned:
+    // matching counts prove completeness, missing elements still never install.
+    let mut counted = acquired();
+    counted.structured_content.as_mut().unwrap()["elements_complete"] = json!(false);
+    assert!(parse_acquired(&counted, 42, 1234).is_ok());
+    for (key, value) in [
+        ("total_element_count", json!(3)),
+        ("element_count", json!(3)),
+    ] {
+        let mut partial = counted.clone();
+        partial.structured_content.as_mut().unwrap()[key] = value;
+        assert!(parse_acquired(&partial, 42, 1234).is_err());
     }
     for token in ["7", "s00000099:7", "s000000a1:2", "s000000a1:07"] {
         let mut result = acquired();
