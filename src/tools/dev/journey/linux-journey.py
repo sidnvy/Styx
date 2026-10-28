@@ -173,6 +173,12 @@ def computer_click(device):
     structured = state.get("structuredContent") or {}
     tokens = [e.get("element_token") for e in structured.get("elements", [])
               if "confirm" in json.dumps(e).lower() and e.get("element_token")]
+    # Default replies carry rows in tree_markdown, addressed as <snapshot_id>:<row>.
+    snapshot = structured.get("snapshot_id")
+    if not tokens and snapshot:
+        import re
+        tokens = [f"{snapshot}:{row}" for row in
+                  re.findall(r"\[(\d+)\][^\n]*Confirm", str(structured.get("tree_markdown", "")))]
     note("computer_state", tokens=tokens, tree=str(structured.get("tree_markdown", ""))[:600])
     if not tokens:
         raise SystemExit("Confirm button not found in the accessibility tree")

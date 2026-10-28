@@ -365,6 +365,9 @@ impl LinuxOwnedScope {
                 command
                     .arg("CUA_DRIVER_RS_TELEMETRY_ENABLED=0")
                     .arg("DO_NOT_TRACK=1")
+                    // Hyprland apps are mostly native Wayland windows; without this
+                    // backend the driver lists only XWayland windows.
+                    .arg("CUA_DRIVER_RS_ENABLE_WAYLAND=1")
                     .arg(format!("WAYLAND_DISPLAY={wayland_display}"))
                     .arg(format!("HYPRLAND_INSTANCE_SIGNATURE={hyprland_instance}"));
                 if let Some(display) = x11_display {
@@ -1166,7 +1169,7 @@ mod tests {
             launched
                 .args(&arguments[env + 1..arguments.len() - 1])
                 .env("DISPLAY", ":999")
-                .env("CUA_DRIVER_RS_ENABLE_WAYLAND", "1")
+                .env("CUA_DRIVER_RS_ENABLE_WAYLAND", "0")
                 .env("CUA_DRIVER_RS_TELEMETRY_ENABLED", "1")
                 .env("DO_NOT_TRACK", "0");
             let output = launched.output().await.unwrap();
@@ -1182,11 +1185,7 @@ mod tests {
             assert!(
                 environment.contains(&"HYPRLAND_INSTANCE_SIGNATURE=selected-instance".to_owned())
             );
-            assert!(
-                !environment
-                    .iter()
-                    .any(|value| value.starts_with("CUA_DRIVER_RS_ENABLE_WAYLAND="))
-            );
+            assert!(environment.contains(&"CUA_DRIVER_RS_ENABLE_WAYLAND=1".to_owned()));
             assert_eq!(
                 environment
                     .iter()
