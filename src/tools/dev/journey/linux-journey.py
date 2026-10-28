@@ -21,7 +21,10 @@ GROUP = {"creationflags": subprocess.CREATE_NEW_PROCESS_GROUP} if WINDOWS else {
 STOP = signal.CTRL_BREAK_EVENT if WINDOWS else signal.SIGTERM
 inputs, gparent, hparent, hcwd = (work / n for n in ("inputs", "gateway-parent", "host-parent", "host-cwd"))
 for d in (work, inputs, gparent, hparent, hcwd):
-    d.mkdir(mode=0o700, parents=False, exist_ok=False)
+    # Windows: Python 3.13 turns mode 0o700 into an OWNER RIGHTS ACL, which Styx's
+    # private-root check (current user, SYSTEM, Administrators only) refuses.
+    # Inherit the private run folder's rules instead.
+    d.mkdir(**({} if WINDOWS else {"mode": 0o700}), parents=False, exist_ok=False)
 gateway, host = gparent / "gateway", hparent / "host"
 url = f"https://127.0.0.1:{port}/"
 log = open(work / "journey.jsonl", "a")
@@ -135,11 +138,35 @@ def exec_effect(device, label):
     nonce = uuid.uuid4().hex
     target = hcwd / f"effect-{label}-{nonce}.txt"
     if WINDOWS:
-        command = f'<nul set /p ="%USERPROFILE%:{nonce}" > "{target}"'
+        # Windows Hosts run PowerShell; CreateNew refuses an existing file, like set -C.
+        # No double quotes: Windows command-line parsing strips them.
+        command = (f"$f=[IO.File]::Open('{target}','CreateNew'); $b=[Text.Encoding]::UTF8.GetBytes($env:USERPROFILE + ':{nonce}');"
+                   " $f.Write($b,0,$b.Length); $f.Close()")
     else:
         command = f'set -C; printf %s "$HOME:{nonce}" > {target}'
-    result = mcp("call", "exec_command", json.dumps({"environment_id": device, "cmd": command}))
-    note("exec_result_" + label, result=json.dumps(result)[:1500])
+    # One MCP session for the whole command, polled until it exits, as a model client
+    # does: closing the session ends the command's owner, which stops the command.
+    session = subprocess.Popen([sys.executable, "-I", str(Path(__file__).parent / "mcp_client.py"), str(gateway), url,
+        str(gateway / "gateway-ca.pem"), "session"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, text=True)
+
+    def call(name, arguments):
+        session.stdin.write(json.dumps({"name": name, "arguments": arguments}) + "\n")
+        session.stdin.flush()
+        return json.loads(session.stdout.readline())
+    try:
+        reply = call("exec_command", {"environment_id": device, "cmd": command})
+        polls = 0
+        while True:
+            value = (reply.get("result", {}).get("structuredContent") or {})
+            if value.get("exit_code") is not None or value.get("session_id") is None or polls >= 60:
+                break
+            polls += 1
+            reply = call("write_stdin", {"session_id": value["session_id"], "chars": "", "yield_time_ms": 1000})
+        result = reply
+        note("exec_result_" + label, polls=polls, result=json.dumps(result)[:1500])
+    finally:
+        session.stdin.close()
+        session.wait(timeout=30)
     deadline = time.monotonic() + 60
     while time.monotonic() < deadline and not target.exists():
         time.sleep(0.1)
@@ -235,7 +262,7 @@ ca_der = ssl.PEM_cert_to_DER_cert((gateway / "gateway-ca.pem").read_text())
 hdep = inputs / "host.json"
 hdep.write_text(json.dumps({"schema": 1, "mode": "join-existing",
     "gateway": {"url": url.rstrip("/"), "caFile": str(gateway / "gateway-ca.pem"), "expectedCaSha256": hashlib.sha256(ca_der).hexdigest()},
-    "host": {"label": "linux-journey", "cwd": str(hcwd), "shell": os.path.join(os.environ.get("SystemRoot", ""), "System32", "cmd.exe") if WINDOWS else "/bin/bash", "computer": True, "browser": {"enabled": True, "headless": True, "channel": "chrome", "persistLogin": False}},
+    "host": {"label": "linux-journey", "cwd": str(hcwd), "shell": os.path.join(os.environ.get("SystemRoot", ""), "System32", "WindowsPowerShell", "v1.0", "powershell.exe") if WINDOWS else "/bin/bash", "computer": True, "browser": {"enabled": True, "headless": True, "channel": "chrome", "persistLogin": False}},
     "runtimeSelectionFile": str(selection), "invitationFile": str(invitation)})); os.chmod(hdep, 0o600)
 req = run("host_join_request", ["host", "join", "request", "--parent-dir", str(hparent), "--name", "host", "--deployment-file", str(hdep), "--json"])
 pending = run("gateway_pending", ["gateway", "pending", "--state-dir", str(gateway), "--json"])
