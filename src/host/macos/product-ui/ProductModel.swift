@@ -173,6 +173,38 @@ enum ProductRestorationPolicy {
     let client: ProductCoreClient
     var nativeHost: Bool { client.isNativeHost }
     func nativeClaim() { perform { [self] in _ = try await client.native("claimJoin") } }
+    func nativeChangeRole() {
+        guard nativeSupportsOperation("retireRole") else { return }
+        let alert = NSAlert()
+        alert.messageText = productText("更改这台电脑的角色…", "Change this computer's role…")
+        alert.informativeText = productText("这台电脑将停止连接、备份现有设置并重新配对。", "This computer will disconnect, back up its current settings, and be paired again.")
+        alert.addButton(withTitle: productText("继续", "Continue"))
+        alert.addButton(withTitle: productText("取消", "Cancel"))
+        guard alert.runModal() == .alertFirstButtonReturn else { return }
+        perform { [self] in
+            let stopped = try await client.native("quitAdmission")
+            guard stopped["quit"]["status"].string == "ready_to_quit" else { throw ProductCoreError.invalidResponse }
+            let result: ProductJSON
+            do { result = try await client.native("retireRole", ["allowOtherDevices": .bool(false)]) }
+            catch let failure as ProductOwnedCoreRejection {
+                guard failure.response["error"].string == "role_retire_gateway_has_devices" else { throw failure }
+                let devices = failure.response["retirement"]["otherDevices"].array
+                guard !devices.isEmpty else { throw ProductCoreError.invalidResponse }
+                let confirmation = NSAlert()
+                confirmation.messageText = productText("断开这些设备的连接？", "Disconnect these devices too?")
+                confirmation.informativeText = devices.map { ($0["label"].string ?? "") + " (" + ($0["deviceId"].string ?? "") + ")" }.joined(separator: "\n")
+                confirmation.addButton(withTitle: productText("同时断开这些设备", "Disconnect these devices too"))
+                confirmation.addButton(withTitle: productText("取消", "Cancel"))
+                guard confirmation.runModal() == .alertFirstButtonReturn else { return }
+                result = try await client.native("retireRole", ["allowOtherDevices": .bool(true)])
+            }
+            guard result["retirement"]["restartRequired"] == .bool(false) else { throw ProductCoreError.invalidResponse }
+            try applyNative(result)
+            nativeLocalSetupSubmitted = false
+            inspection = .null; joinAcceptance = .null; joining = false
+            page = .welcome
+        }
+    }
     func nativePause() { guard nativeSupportsOperation("disconnect") else { return }; perform { [self] in _ = try await client.native("disconnect") } }
     var nativeRuntimeUpdate: ProductJSON { status["runtimeUpdate"] }
     func nativeStageRuntime() {

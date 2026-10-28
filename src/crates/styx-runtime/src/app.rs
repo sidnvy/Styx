@@ -9,6 +9,7 @@ mod maintenance;
 #[cfg(all(test, target_os = "linux", target_env = "gnu"))]
 mod maintenance_integration_tests;
 mod pairing_link;
+mod role_retire;
 mod runtime_update;
 mod service;
 pub(crate) mod startup_diagnostic;
@@ -199,6 +200,7 @@ enum Operation {
     Connect,
     Disconnect,
     QuitAdmission,
+    RetireRole,
     PrepareAppMaintenance,
     AppMaintenanceStatus,
     CancelAppMaintenance,
@@ -328,6 +330,7 @@ impl RetainedFailure {
     }
 }
 struct HostApp {
+    retire_failure: Option<crate::management::role_retire::RetireError>,
     runtime_update: Option<runtime_update::State>,
     service: Option<service::State>,
     local_gateway: Option<local_gateway::LocalGateway>,
@@ -371,6 +374,7 @@ impl HostApp {
         let scope = Arc::new(HostScope::open(state_dir)?);
         let (status, observed) = watch::channel(ConnectionStatus::stopped());
         let mut app = Self {
+            retire_failure: None,
             runtime_update: None,
             service: None,
             local_gateway: None,
@@ -927,6 +931,7 @@ impl HostApp {
                 "inspectHost",
                 "connect",
                 "disconnect",
+                "retireRole",
                 "stageRuntime",
                 "updateRuntime",
                 "runtimeUpdateStatus",
@@ -1007,7 +1012,8 @@ impl HostApp {
     ) -> Result<Value, AppError> {
         if !matches!(
             operation,
-            Operation::InspectJoin
+            Operation::RetireRole
+                | Operation::InspectJoin
                 | Operation::Join
                 | Operation::CreateLocal
                 | Operation::ResumeLocal
@@ -1067,6 +1073,9 @@ impl HostApp {
         }
         if self.service_client_or_unknown() {
             return Err(AppError("app_role_managed_by_service"));
+        }
+        if matches!(operation, Operation::RetireRole) {
+            return self.retire_role(decode_input(&input)?).await;
         }
         if matches!(operation, Operation::RuntimeUpdateStatus) {
             self.scope.validate()?;
@@ -1219,7 +1228,8 @@ impl HostApp {
                     json!({"quit":{"status":"ready_to_quit","ticketId":ticket},"cleanup":self.cleanup,"gateway":self.local_gateway.as_ref().map(|g|g.status())}),
                 )
             }
-            Operation::PrepareAppMaintenance
+            Operation::RetireRole
+            | Operation::PrepareAppMaintenance
             | Operation::AppMaintenanceStatus
             | Operation::CancelAppMaintenance
             | Operation::AppLifecycle
@@ -1317,7 +1327,7 @@ async fn serve_app<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         let response = match result {
             Ok(result) => json!({"id":request.id,"ok":true,"result":result}),
             Err(error) => {
-                json!({"id":request.id,"ok":false,"error":error.code(),"runtimeUpdate":app.runtime_update})
+                json!({"id":request.id,"ok":false,"error":error.code(),"runtimeUpdate":app.runtime_update,"retirement":app.retire_failure.as_ref().map(|error| &error.report)})
             }
         };
         let encoded =

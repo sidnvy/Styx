@@ -21,3 +21,35 @@ Each admin command emits schema1/operation/state_dir/operations_replayed:false. 
 Native managed installation/update/rollback, nontransient host pause/resume, direct LAN/internet bootstrap and non-Linux persistent-service integration remain separate incomplete product paths. These commands establish foreground pairing only; real effects and cleanup require the native acceptance journey.
 
 Reviewer checks: `cargo test -p styx-runtime tunnel -- --skip requires_loopback_sockets` runs the configuration, signed-payload availability and process-lifecycle scenarios without sockets. Run `cargo test -p styx-runtime requires_loopback_sockets` on a machine that permits loopback TCP binding for the health and real Gateway-owner scenarios; the latter compiles its own fake native client with `/usr/bin/cc`. These fixtures do not connect to the OpenAI control plane or establish account-side acceptance.
+
+## Change this computer's role
+
+Stop and join the original Host and (if local) Gateway first. On Linux, retire
+only this computer's chosen private role roots:
+
+```sh
+styx role retire --state-dir ABS_HOST --gateway-state-dir ABS_LOCAL_GATEWAY --authorize --json
+```
+
+Omit `--gateway-state-dir` for Host only; never supply a remote Gateway's root.
+A held execution/configuration lease refuses retirement. If the local Gateway
+has other approved devices, `role_retire_gateway_has_devices` reports their
+`deviceId` and `label` in `retirement.otherDevices`, without renaming anything.
+After reviewing them, explicitly add `--allow-other-devices` to disconnect them
+from this retired Gateway too; they must be re-paired separately.
+
+Each root is renamed in its existing parent to `<name>.retired-YYYYMMDDThhmmssZ`.
+The JSON report lists `oldPath`/`newPath`; nothing is deleted or migrated and an
+existing backup is never overwritten. A partial rename returns `outcome: unknown`
+and the paths already moved: preserve those backups and inspect the remaining
+paths instead of replaying the command. Afterwards use the normal fresh Gateway
+bootstrap plus Host pairing, or Host join flow, with the original root names.
+Publisher signing keys and pins stay on their original machines.
+
+In macOS/Windows App Settings choose **Change this computer's role…**. The App
+stops its roles, asks **Disconnect these devices too** if other approved devices
+exist, and backs up its fixed setup inputs alongside `host/` and `gateway/`.
+It returns to the existing welcome choices in the same process; no restart is
+required after success. Cancelling the device confirmation leaves the setup
+retained and stopped, ready to reconnect. It does not revoke this Host at a
+remote Gateway; its owner can do that there.

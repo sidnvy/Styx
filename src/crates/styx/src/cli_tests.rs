@@ -503,3 +503,58 @@ fn cli_tunnel_requires_authorization_and_only_file_credentials() {
     authorized.extend(["--authorize", "--json"]);
     assert!(Cli::try_parse_from(authorized).is_ok());
 }
+
+#[test]
+fn cli_role_retire_has_explicit_roots_and_authorization_boundary() {
+    let cli = Cli::try_parse_from([
+        "styx",
+        "role",
+        "retire",
+        "--state-dir",
+        "/owned/host",
+        "--gateway-state-dir",
+        "/owned/gateway",
+        "--allow-other-devices",
+        "--authorize",
+        "--json",
+    ])
+    .unwrap();
+    assert!(matches!(
+        cli.command,
+        Command::Role {
+            command: RoleCommand::Retire {
+                authorize: true,
+                allow_other_devices: true,
+                gateway_state_dir: Some(_),
+                json: true,
+                ..
+            }
+        }
+    ));
+    assert!(Cli::try_parse_from(["styx", "role", "retire", "--authorize", "--json"]).is_err());
+    assert!(
+        Cli::try_parse_from([
+            "styx",
+            "role",
+            "retire",
+            "--state-dir",
+            "/owned/host",
+            "--token",
+            "secret"
+        ])
+        .is_err()
+    );
+}
+#[tokio::test]
+async fn cli_role_retire_refuses_without_authorize_before_opening_roots() {
+    let cli = Cli::try_parse_from([
+        "styx",
+        "role",
+        "retire",
+        "--state-dir",
+        "/nonexistent/host",
+        "--json",
+    ])
+    .unwrap();
+    assert_eq!(run(cli).await, ExitCode::from(2));
+}
