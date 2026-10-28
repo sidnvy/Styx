@@ -21,7 +21,7 @@ Product work now follows `src/docs/rust-core-rewrite/REDUCED-SCOPE.md`; its sequ
 
 Existing evidence, Rust toolchain and Cargo caches referenced by the handoff retain their established paths. Do not rebuild, move signed installations, change identity/pairing, or replay unknown operations merely because the source directory moved.
 
-Active lease (2026-10-28): `codex-app-lan-setup` at /home/sid/Developer/worktrees/Styx/codex-app-lan-setup, branch codex/app-lan-setup, owner Claude (integrator), paths app.rs, app/, host/macos/product-ui, host/windows/Styx.cs; purpose App setup LAN option; retire by merge into develop and removal.
+No active Codex worktree leases. Retired: `codex-app-lan-setup` (2026-10-28) merged as 6540762 and removed.
 
 Retired: `codex-macos-browser-cleanup` (2026-10-28) merged as 0b6ebcf and removed.
 
