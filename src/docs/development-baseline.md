@@ -1,5 +1,7 @@
 # 共享开发基线
 
+Runtime note (A38): the JS Gateway/Host/Core and legacy setup are retired; follow [the Rust release scope](rust-core-rewrite/REDUCED-SCOPE.md).
+
 Styx 的公共集成分支是 `develop`。功能分支从 `develop` 建立，评审和验证后回到 `develop`；`main` 只接收经过评审、具有交付范围和验证记录的发布基线。平台目录或一台电脑上的开发副本不是另一套公共 Core。
 
 

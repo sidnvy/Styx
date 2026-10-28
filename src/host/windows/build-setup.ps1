@@ -3,7 +3,8 @@ param(
  [Parameter(Mandatory=$true)][string]$PackageDirectory,
  [Parameter(Mandatory=$true)][string]$OutputFile,
  [Parameter(Mandatory=$true)][string]$Compiler,
- [Parameter(Mandatory=$true)][string]$Version
+ [Parameter(Mandatory=$true)][string]$Version,
+ [Parameter(Mandatory=$true)][string]$Node
 )
 $ErrorActionPreference='Stop'
 Set-StrictMode -Version Latest
@@ -14,8 +15,7 @@ $stage=Join-Path ([IO.Path]::GetDirectoryName($OutputFile)) ('inno-build-'+[Guid
 $configFile=$stage+'.json'
 try {
  [ordered]@{packageDirectory=$PackageDirectory;compiler=[IO.Path]::GetFullPath($Compiler);outputDirectory=$stage;version=$Version;expectedPackageSha256=(Get-FileHash -LiteralPath (Join-Path $PackageDirectory 'windows-package.json') -Algorithm SHA256).Hash.ToLowerInvariant()} | ConvertTo-Json | Set-Content -LiteralPath $configFile -Encoding UTF8
- $node=Join-Path $PackageDirectory 'runtime\node.exe'
- & $node (Join-Path $PSScriptRoot 'platform-update\build-inno.mjs') $configFile
+ & $Node (Join-Path $PSScriptRoot 'platform-update\build-inno.mjs') $configFile
  if($LASTEXITCODE -ne 0){throw 'inno_setup_build_failed'}
  $receipt=Get-Content -LiteralPath (Join-Path $stage 'build-receipt.json') -Raw | ConvertFrom-Json
  Move-Item -LiteralPath $receipt.installer -Destination $OutputFile

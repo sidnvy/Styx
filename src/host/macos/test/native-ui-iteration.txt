@@ -1,3 +1,5 @@
+Historical workflow: A38 retired the JS launchers below; use src/host/macos/ci-native-build.mjs and src/docs/rust-core-rewrite/REDUCED-SCOPE.md.
+
 Local macOS native UI workflow
 
 From repository root:

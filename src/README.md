@@ -1,5 +1,7 @@
 # Styx runtime — Developer Preview
 
+Runtime note (A38): the JS Gateway/Host/Core and legacy setup are retired; follow [the Rust release scope](docs/rust-core-rewrite/REDUCED-SCOPE.md).
+
 **Scope: macOS, Linux (including Hyprland), Windows. No iOS.**
 
 One Styx project, two deployment roles: a model-facing MCP Gateway and native

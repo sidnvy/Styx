@@ -6,164 +6,15 @@ import path from 'node:path';
 import {execFileSync,spawnSync} from 'node:child_process';
 import {fileURLToPath,pathToFileURL} from 'node:url';
 import {createHash,generateKeyPairSync,sign} from 'node:crypto';
-import {buildWindowsApp,windowsExecutableArchitecture} from '../build-windows-app.mjs';
+import {buildWindowsApp} from '../build-windows-app.mjs';
 const digest=bytes=>createHash('sha256').update(bytes).digest('hex');
-const productSource=fileURLToPath(new URL('../../',import.meta.url));
-const sharedSources=['gateway/conversation-owners.mjs','onboarding/tunnel-context.mjs'];
-const skillSources=['styx-native-onboarding','styx-cli','styx-browser','styx-computer-use'].map(name=>'plugin/skills/'+name+'/SKILL.md');
-function fixture(t,{type='ed25519'}={}){
+function fixture(t){
  const dir=fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(),'styx-windows-builder-')));t.after(()=>fs.rmSync(dir,{recursive:true,force:true}));
- const sourceRoot=path.join(dir,'source');fs.mkdirSync(sourceRoot);const sourceFiles=[];
- const put=(name,data)=>{const file=path.join(sourceRoot,name);fs.mkdirSync(path.dirname(file),{recursive:true});fs.writeFileSync(file,data);sourceFiles.push(name);};
- for(const name of ['Styx.cs','HostUpdater.cs','SessionProbe.cs','PrivateStorage.cs','build.ps1','core-bridge.mjs','native-app-authority.mjs'])put('host/windows/'+name,'source fixture');
- for(const name of [...sharedSources,...skillSources])put(name,'source fixture');
- put('assets/brand/styx-logo.png','image fixture');put('package.json','{"type":"module"}');put('package-lock.json',JSON.stringify({lockfileVersion:3,packages:{'node_modules/@modelcontextprotocol/sdk':{version:'1.32.1',integrity:'sha512-unit-fixture'}}}));
- fs.mkdirSync(path.join(sourceRoot,'node_modules/@modelcontextprotocol/sdk'),{recursive:true});fs.writeFileSync(path.join(sourceRoot,'node_modules/@modelcontextprotocol/sdk/package.json'),'{"version":"1.32.1"}');
- const nodeBinary=path.join(dir,'node.exe'),pe=Buffer.alloc(256);pe.write('MZ');pe.writeUInt32LE(128,0x3c);pe.write('PE\0\0',128,'binary');pe.writeUInt16LE(0x8664,132);fs.writeFileSync(nodeBinary,pe);fs.writeFileSync(path.join(dir,'LICENSE'),'Node license fixture');fs.writeFileSync(path.join(dir,'node-provenance.json'),'{"upstream":"fixture, not verified"}');
- const {privateKey,publicKey}=generateKeyPairSync(type,type==='rsa'?{modulusLength:2048}:{}),pem=publicKey.export({type:'spki',format:'pem'});const publisherKeyFile=path.join(dir,'publisher.pem');fs.writeFileSync(publisherKeyFile,pem);
- const hostBundle=path.join(dir,'bundle');fs.mkdirSync(hostBundle);const entries=['payload','test/required-public-data','.bin/signed-required-file'].map(name=>{const bytes=Buffer.from('signed public fixture '+name),file=path.join(hostBundle,name);fs.mkdirSync(path.dirname(file),{recursive:true});fs.writeFileSync(file,bytes);return {path:name,sha256:digest(bytes),size:bytes.length,executable:false};});
- const manifest=Buffer.from(JSON.stringify({schema:1,version:'0.1.0-fixture',platform:'win32',arch:'x64',files:entries}));fs.writeFileSync(path.join(hostBundle,'manifest.json'),manifest);fs.writeFileSync(path.join(hostBundle,'manifest.sig'),sign(type==='ed25519'?null:'sha256',manifest,privateKey).toString('base64url'));
- return {dir,pem,publicKey,privateKey,sourceFiles,config:{legacyComparison:true,sourceRoot,sourceFiles,output:path.join(dir,'output'),nodeBinary,hostBundle,publisherKeyFile,publisherSha256:digest(publicKey.export({format:'der',type:'spki'})),compile:false}};
+ const sourceRoot=path.join(dir,'source'),sourceFiles=['host/windows/Styx.cs','host/windows/SessionProbe.cs','host/windows/PrivateStorage.cs','assets/brand/styx-logo.png'];
+ for(const name of sourceFiles){const file=path.join(sourceRoot,...name.split('/'));fs.mkdirSync(path.dirname(file),{recursive:true});fs.writeFileSync(file,'public source fixture');}
+ const {privateKey,publicKey}=generateKeyPairSync('ed25519'),publisherKeyFile=path.join(dir,'publisher.pem');fs.writeFileSync(publisherKeyFile,publicKey.export({type:'spki',format:'pem'}));
+ return {dir,privateKey,sourceFiles,config:{sourceRoot,output:path.join(dir,'output'),publisherKeyFile,publisherSha256:digest(publicKey.export({type:'spki',format:'der'}))}};
 }
-const noHost=config=>{const {hostBundle,publisherKeyFile,publisherSha256,...rest}=config;return rest;};
-test('SPKI DER pin and exact signed payload retain test and .bin members',t=>{const f=fixture(t),r=buildWindowsApp(f.config);assert.equal(r.signedHostBundleIncluded,true);assert.equal(r.nodeValidation,'windows_pe_machine_format_check_only');assert.equal(r.nodeUpstreamVerification,'not_performed_by_this_builder');assert.deepEqual(r.nodeNoticesIncluded,['LICENSE','node-provenance.json']);for(const file of ['test/required-public-data','.bin/signed-required-file'])assert.equal(fs.existsSync(path.join(f.config.output,'host-bundle',file)),true);assert.equal(fs.readFileSync(path.join(f.config.output,'runtime/LICENSE'),'utf8'),'Node license fixture');const runtime=JSON.parse(fs.readFileSync(path.join(f.config.output,'windows-runtime.json')));assert.equal(Object.hasOwn(runtime,'desktopApp'),false);assert.equal(Object.hasOwn(runtime,'desktopProbe'),false);});
-test('explicit source selection cannot omit a shared session module or packaged skill',t=>{
- for(const name of [...sharedSources,...skillSources,'host/windows/native-app-authority.mjs']){const f=fixture(t);f.config.sourceFiles=f.sourceFiles.filter(file=>file!==name);assert.throws(()=>buildWindowsApp(f.config),/required_tracked_public_source_missing/,name);assert.equal(fs.existsSync(f.config.output),false);}
-});
-test('staged product imports its Core and emits all four skills with independently checked inventory',{
- skip:!fs.existsSync(path.join(productSource,'packages/styx-browser-provider/node_modules/playwright-core/package.json'))?'independently locked Browser dependencies are required for product staging':false,timeout:60000
-},async t=>{
- const f=fixture(t),sourceFiles=execFileSync('git',['-C',productSource,'ls-files','-z','--','.'],{encoding:'utf8'}).split('\0').filter(Boolean);if(!sourceFiles.includes('host/windows/native-app-authority.mjs'))sourceFiles.push('host/windows/native-app-authority.mjs');buildWindowsApp({...noHost(f.config),sourceRoot:productSource,sourceFiles});
- const app=path.join(f.config.output,'vnext'),cli=JSON.parse(execFileSync(process.execPath,[path.join(app,'onboarding/cli.mjs'),'help'],{cwd:f.dir,encoding:'utf8',timeout:15000,env:{...process.env,NODE_PATH:'',NODE_OPTIONS:''}}));assert.ok(cli.commands.includes('plan STATE'));
- for(const name of [...sharedSources,...skillSources])assert.equal(digest(fs.readFileSync(path.join(app,name))),digest(fs.readFileSync(path.join(productSource,name))),name);
- const bridge=await import(pathToFileURL(path.join(app,'host/windows/core-bridge.mjs')));assert.equal(typeof bridge.createClient,'function');
- const api=await import(pathToFileURL(path.join(app,'plugin/package.mjs'))),connection={tunnelId:'tunnel_'+'a'.repeat(32)},receipt={version:1,connection,independentStyx:true,freshConnection:true,verifiedAt:new Date().toISOString(),serverName:'styx-vnext',tools:['list_execution_environments','get_execution_environment_status','exec_command','write_stdin'],method:'authenticated-mcp-discovery'};
- const generated=api.buildPackageFiles({connection},receipt);assert.deepEqual(generated.files.filter(file=>file.path.startsWith('skills/')).map(file=>file.path).sort(),skillSources.map(name=>name.slice('plugin/'.length)).sort());
- const manifest=JSON.parse(fs.readFileSync(path.join(f.config.output,'windows-package.json'))),inventory=(directory,prefix='')=>fs.readdirSync(directory,{withFileTypes:true}).flatMap(entry=>entry.isDirectory()?inventory(path.join(directory,entry.name),prefix+entry.name+'/'):[prefix+entry.name]);
- assert.deepEqual(inventory(f.config.output).filter(name=>name!=='windows-package.json').sort(),manifest.files.map(entry=>entry.path).sort());
- for(const entry of manifest.files){const bytes=fs.readFileSync(path.join(f.config.output,entry.path));assert.equal(bytes.length,entry.size,entry.path);assert.equal(digest(bytes),entry.sha256,entry.path);}
- const installer=await import(pathToFileURL(path.join(f.config.output,'install-windows-preview.mjs')));assert.equal((await installer.verifyPackage(f.config.output)).compiled,false);
-});
-test('PEM-byte fingerprint is rejected before creating output',t=>{const f=fixture(t);f.config.publisherSha256=digest(f.pem);assert.throws(()=>buildWindowsApp(f.config),/publisher_pin_mismatch/);assert.equal(fs.existsSync(f.config.output),false);});
-test('tampered signed release is rejected before creating output',t=>{const f=fixture(t);fs.appendFileSync(path.join(f.config.hostBundle,'payload'),'tampered');assert.throws(()=>buildWindowsApp(f.config),/release_file_metadata_mismatch/);assert.equal(fs.existsSync(f.config.output),false);});
-test('non-Ed25519 publisher is rejected',t=>{const f=fixture(t,{type:'rsa'});assert.throws(()=>buildWindowsApp(f.config),/invalid_release_signing_key/);});
-test('MZ alone and wrong machine are rejected; provenance is not inferred from format',t=>{const f=fixture(t);assert.equal(windowsExecutableArchitecture(f.config.nodeBinary),'x64');const bytes=fs.readFileSync(f.config.nodeBinary);bytes.writeUInt16LE(0xaa64,132);fs.writeFileSync(f.config.nodeBinary,bytes);assert.throws(()=>buildWindowsApp(f.config),/windows_node_architecture_mismatch/);fs.writeFileSync(f.config.nodeBinary,'MZ');assert.throws(()=>buildWindowsApp(f.config),/windows_pe_executable_required/);});
-test('tracked source selection excludes ignored private state and arbitrary local files',t=>{const f=fixture(t);execFileSync('git',['init','--quiet',f.config.sourceRoot]);execFileSync('git',['-C',f.config.sourceRoot,'add','--',...f.sourceFiles]);for(const name of ['host/.runtime/private-sentinel','host/.cache/token','host/untracked-local.json']){const file=path.join(f.config.sourceRoot,name);fs.mkdirSync(path.dirname(file),{recursive:true});fs.writeFileSync(file,'PRIVATE_SENTINEL_DO_NOT_SHIP');}delete f.config.sourceFiles;const r=buildWindowsApp(f.config);assert.equal(r.sourceSelection,'explicit_or_git_tracked_allowlist');for(const name of ['host/.runtime/private-sentinel','host/.cache/token','host/untracked-local.json'])assert.equal(fs.existsSync(path.join(f.config.output,'vnext',name)),false);});
-test('locked production dependencies retain runtime test modules, exclude private state and reject drift',t=>{
- const f=fixture(t),deps=path.join(f.config.sourceRoot,'node_modules/@modelcontextprotocol/sdk');fs.mkdirSync(path.join(deps,'.cache'));fs.writeFileSync(path.join(deps,'.cache/private'),'PRIVATE');
- fs.mkdirSync(path.join(deps,'tests'));fs.writeFileSync(path.join(deps,'tests/runtime.cjs'),'module.exports = "packaged production runtime";');fs.writeFileSync(path.join(deps,'index.cjs'),'module.exports = require("./tests/runtime.cjs");');fs.writeFileSync(path.join(deps,'package.json'),JSON.stringify({version:'1.32.1',main:'index.cjs'}));
- buildWindowsApp(f.config);assert.equal(fs.existsSync(path.join(f.config.output,'vnext/node_modules/@modelcontextprotocol/sdk/.cache')),false);
- const output=path.join(f.config.output,'vnext/node_modules/@modelcontextprotocol/sdk');assert.equal(execFileSync(process.execPath,['-e','process.stdout.write(require(process.argv[1]))',output],{encoding:'utf8'}),'packaged production runtime');
- fs.rmSync(f.config.output,{recursive:true});fs.writeFileSync(path.join(deps,'package.json'),'{"version":"different"}');assert.throws(()=>buildWindowsApp(f.config),/production_dependency_lock_mismatch/);assert.equal(fs.existsSync(f.config.output),false);
-});
-test('source root, source member and explicit binary symlinks are refused',{skip:process.platform==='win32'?'file symlink creation requires separate OS privilege; real package uses regular inputs':false},t=>{for(const kind of ['root','member','binary','openssl','tunnel']){const f=fixture(t);if(kind==='root'){const link=path.join(f.dir,'source-link');fs.symlinkSync(f.config.sourceRoot,link);f.config.sourceRoot=link;}else if(kind==='member'){const file=path.join(f.config.sourceRoot,'host/windows/Styx.cs'),actual=path.join(f.dir,'actual.cs');fs.renameSync(file,actual);fs.symlinkSync(actual,file);}else{const link=path.join(f.dir,kind+'-link.exe');fs.symlinkSync(f.config.nodeBinary,link);f.config[kind==='binary'?'nodeBinary':kind==='openssl'?'opensslBinary':'tunnelBinary']=link;}assert.throws(()=>buildWindowsApp(f.config),/redirected_package_input/);assert.equal(fs.existsSync(f.config.output),false);}});
-test('generated installer validates manifest and refuses uncompiled, tampered or extra payload',async t=>{const f=fixture(t);buildWindowsApp(noHost(f.config));const api=await import(pathToFileURL(path.join(f.config.output,'install-windows-preview.mjs')));const m=await api.verifyPackage(f.config.output);assert.equal(m.compiled,false);const target=path.join(os.homedir(),'styx-unit-fresh-target-'+process.pid);await assert.rejects(api.installPreview(f.config.output,target),/native_compile_required/);assert.equal(fs.existsSync(target),false);const file=path.join(f.config.output,'styx-logo.png');fs.appendFileSync(file,'tamper');await assert.rejects(api.verifyPackage(f.config.output),/preview_package_file_changed/);});
-test('fresh per-user copy and owned uninstall preserve unrelated/state data',async t=>{const f=fixture(t);buildWindowsApp(noHost(f.config));const mf=path.join(f.config.output,'windows-package.json'),m=JSON.parse(fs.readFileSync(mf));m.compiled=true;fs.writeFileSync(mf,JSON.stringify(m));const api=await import(pathToFileURL(path.join(f.config.output,'install-windows-preview.mjs')));const home=process.env.USERPROFILE??os.homedir(),relative=path.relative(home,process.cwd()),base=relative.startsWith('..')||path.isAbsolute(relative)?home:process.cwd();const parent=fs.mkdtempSync(path.join(base,'styx-unit-install-'));t.after(()=>fs.rmSync(parent,{recursive:true,force:true}));const target=path.join(parent,'fresh target'),state=path.join(parent,'device-state');fs.writeFileSync(state,'unchanged');await api.installPreview(f.config.output,target);assert.equal((await api.verifyPackage(target,{installed:true})).compiled,true);await assert.rejects(api.installPreview(f.config.output,target),/existing_target_refused/);fs.writeFileSync(path.join(target,'unrelated-user-file'),'keep');await assert.rejects(api.uninstallPreview(target),/unexpected_preview_package_members/);assert.equal(fs.readFileSync(path.join(target,'unrelated-user-file'),'utf8'),'keep');fs.unlinkSync(path.join(target,'unrelated-user-file'));await api.uninstallPreview(target);assert.equal(fs.existsSync(target),false);assert.equal(fs.readFileSync(state,'utf8'),'unchanged');});
-
-test('source/target overlap is refused and failed install preserves unexpected files',async t=>{const f=fixture(t);buildWindowsApp(noHost(f.config));const mf=path.join(f.config.output,'windows-package.json'),m=JSON.parse(fs.readFileSync(mf));m.compiled=true;fs.writeFileSync(mf,JSON.stringify(m));const api=await import(pathToFileURL(path.join(f.config.output,'install-windows-preview.mjs')));await assert.rejects(api.installPreview(f.config.output,path.join(f.config.output,'nested-target')),/source_target_overlap_refused/);const home=process.env.USERPROFILE??os.homedir(),relative=path.relative(home,process.cwd()),base=relative.startsWith('..')||path.isAbsolute(relative)?home:process.cwd(),parent=fs.mkdtempSync(path.join(base,'styx-unit-rollback-'));t.after(()=>fs.rmSync(parent,{recursive:true,force:true}));const target=path.join(parent,'fresh'),original=fs.copyFileSync;try{fs.copyFileSync=(source,destination,...rest)=>{if(destination.startsWith(target+path.sep)){fs.writeFileSync(path.join(target,'unknown-user-file'),'must remain');throw Error('copy_fixture_failure');}return original(source,destination,...rest);};await assert.rejects(api.installPreview(f.config.output,target),/copy_fixture_failure/);}finally{fs.copyFileSync=original;}assert.equal(fs.readFileSync(path.join(target,'unknown-user-file'),'utf8'),'must remain');assert.equal(JSON.parse(fs.readFileSync(path.join(target,'.styx-preview-failed-install.json'),'utf8')).status,'failed_install_retained_for_review');});
-
-test('portable TLS helper packages and pins its complete DLL/config/license closure before native use',async t=>{
- const f=fixture(t),directory=path.join(f.dir,'portable-tls');fs.mkdirSync(path.join(directory,'bin'),{recursive:true});fs.mkdirSync(path.join(directory,'ssl'));
- fs.copyFileSync(f.config.nodeBinary,path.join(directory,'bin/openssl.exe'));fs.writeFileSync(path.join(directory,'bin/libcrypto.dll'),'synthetic runtime dependency');fs.writeFileSync(path.join(directory,'ssl/openssl.cnf'),'synthetic configuration');fs.writeFileSync(path.join(directory,'LICENSE'),'test license');
- buildWindowsApp({...noHost(f.config),opensslBundle:{directory,executable:'bin/openssl.exe',config:'ssl/openssl.cnf'}});
- const root=f.config.output,pin=JSON.parse(fs.readFileSync(path.join(root,'windows-runtime.json'))).openssl;
- assert.equal(pin.path,'runtime/openssl/bin/openssl.exe');assert.equal(pin.files.length,4);
- const {verifyOpenSslBundle}=await import('./core-bridge.mjs');assert.equal(verifyOpenSslBundle(root,pin),path.join(root,'runtime/openssl/ssl/openssl.cnf'));assert.deepEqual(pin.config,pin.files.find(item=>item.path==='runtime/openssl/ssl/openssl.cnf'));
- for(const config of [{...pin.config,sha256:'0'.repeat(64)},{...pin.config,path:'runtime/openssl/../foreign.cnf'},{...pin.config,foreign:true},{}])assert.throws(()=>verifyOpenSslBundle(root,{...pin,config}),/invalid_tls_helper_bundle/);
- assert.throws(()=>verifyOpenSslBundle(root,{path:pin.path,sha256:pin.sha256,config:pin.config}),/invalid_tls_helper_bundle/);
- assert.equal(verifyOpenSslBundle(root,{path:pin.path,sha256:pin.sha256}),undefined);const legacy={...pin};delete legacy.config;assert.equal(verifyOpenSslBundle(root,legacy),undefined);
- const dll=path.join(root,'runtime/openssl/bin/libcrypto.dll'),original=fs.readFileSync(dll);fs.appendFileSync(dll,'tampered');assert.throws(()=>verifyOpenSslBundle(root,pin),/tls_helper_bundle_changed/);fs.writeFileSync(dll,original);
- const extra=path.join(root,'runtime/openssl/bin/foreign-provider.dll');fs.writeFileSync(extra,'unlisted');assert.throws(()=>verifyOpenSslBundle(root,pin),/tls_helper_bundle_changed/);fs.unlinkSync(extra);
- const cnf=path.join(root,'runtime/openssl/ssl/openssl.cnf'),configuration=fs.readFileSync(cnf);fs.appendFileSync(cnf,'tamper');assert.throws(()=>verifyOpenSslBundle(root,pin),/tls_helper_bundle_changed/);fs.writeFileSync(cnf,configuration);
- fs.unlinkSync(cnf);assert.throws(()=>verifyOpenSslBundle(root,pin));
- const invalid=fixture(t);assert.throws(()=>buildWindowsApp({...noHost(invalid.config),opensslBinary:invalid.config.nodeBinary,opensslBundle:{directory,executable:'bin/openssl.exe'}}),/invalid_openssl_bundle_input/);
-});
-
-test('TLS bundle configuration input cannot escape its directory or redirect to another file',{skip:process.platform==='win32'?'symlink creation requires a separate Windows developer privilege':false},t=>{
- for(const name of ['../foreign.cnf','ssl\\openssl.cnf','/foreign.cnf','ssl/./openssl.cnf','ssl/linked.cnf','ssl']){
-  const f=fixture(t),directory=path.join(f.dir,'portable');fs.mkdirSync(path.join(directory,'ssl'),{recursive:true});fs.copyFileSync(f.config.nodeBinary,path.join(directory,'openssl.exe'));const foreign=path.join(f.dir,'foreign.cnf');fs.writeFileSync(foreign,'foreign configuration');fs.symlinkSync(foreign,path.join(directory,'ssl/linked.cnf'));
-  assert.throws(()=>buildWindowsApp({...noHost(f.config),opensslBundle:{directory,executable:'openssl.exe',config:name}}),/invalid_openssl_bundle_input|redirected_package_input/);assert.equal(fs.existsSync(f.config.output),false);
- }
-});
-
-test('only the trusted native resource can supply the local TLS configuration',async t=>{
- const {validateUiConfig}=await import('../../onboarding/server.mjs'),{validateDeployment}=await import('../../onboarding/deployment-config.mjs');
- const f=fixture(t),configFile=path.join(f.dir,'openssl.cnf');fs.writeFileSync(configFile,'configuration fixture');
- const input={schema:1,mode:'create-local',gateway:{url:'https://127.0.0.1:37981'},host:{bundle:f.config.hostBundle,publisherKeyFile:f.config.publisherKeyFile,publisherSha256:f.config.publisherSha256,baseDir:path.join(f.dir,'host'),label:'TLS authority contract',computer:false}};
- const trusted={trustedOpenSSL:f.config.nodeBinary,trustedOpenSSLConfig:configFile};
- const accepted=validateUiConfig(input,trusted);assert.equal(accepted.gateway.opensslConfig,configFile);assert.equal(validateDeployment(accepted),accepted);
- for(const value of [configFile,'foreign.cnf',null])assert.throws(()=>validateUiConfig({...input,gateway:{...input.gateway,opensslConfig:value}},trusted),/invalid_configuration_fields/);
- assert.equal(Object.hasOwn(validateUiConfig(input,{trustedOpenSSL:f.config.nodeBinary}).gateway,'opensslConfig'),false);
- const join={...input,mode:'join-existing',invitationFile:path.join(f.dir,'invitation'),gateway:{url:'https://existing.styx.test'}};
- assert.equal(Object.hasOwn(validateUiConfig(join,trusted).gateway,'opensslConfig'),false);assert.throws(()=>validateDeployment({...join,gateway:{...join.gateway,opensslConfig:configFile}}),/join_cannot_prepare_gateway/);
- for(const value of ['relative.cnf',f.dir])assert.throws(()=>validateDeployment({...accepted,gateway:{...accepted.gateway,opensslConfig:value}}),/absolute_openssl_configuration_required|trusted_openssl_configuration_regular_file_required/);
- if(process.platform!=='win32'){const link=path.join(f.dir,'config-link');fs.symlinkSync(configFile,link);assert.throws(()=>validateDeployment({...accepted,gateway:{...accepted.gateway,opensslConfig:link}}),/trusted_openssl_configuration_regular_file_required/);}
-});
-
-test('native bridge passes the verified bundle configuration through authenticated HTTP creation',{timeout:180000},async t=>{
- const f=fixture(t),directory=path.join(f.dir,'portable');fs.mkdirSync(path.join(directory,'ssl'),{recursive:true});fs.copyFileSync(f.config.nodeBinary,path.join(directory,'openssl.exe'));fs.writeFileSync(path.join(directory,'ssl/openssl.cnf'),'configuration fixture');
- buildWindowsApp({...noHost(f.config),opensslBundle:{directory,executable:'openssl.exe',config:'ssl/openssl.cnf'}});
- const {startWindowsCore,bootstrap}=await import('./core-bridge.mjs'),stateRoot=path.join(f.dir,'native-state'),instance=await startWindowsCore(f.config.output,stateRoot);t.after(()=>instance.close());
- const {origin,token}=bootstrap(instance.url),headers={Authorization:'Bearer '+token},session=await(await fetch(origin+'/api/session',{headers})).json();
- const input={schema:1,mode:'create-local',gateway:{url:session.defaults.gatewayUrl},host:{bundle:f.config.hostBundle,publisherKeyFile:f.config.publisherKeyFile,publisherSha256:f.config.publisherSha256,baseDir:path.join(f.dir,'host'),label:'Native TLS creation contract',computer:false}};
- const post=data=>fetch(origin+'/api/create',{method:'POST',headers:{...headers,Origin:origin,'X-Styx-CSRF':session.csrf,'Content-Type':'application/json'},body:JSON.stringify(data)});
- const rejected=await post({...input,gateway:{...input.gateway,opensslConfig:path.join(f.dir,'injected.cnf')}});assert.equal(rejected.status,409);assert.equal(fs.existsSync(path.join(stateRoot,'deployment/deployment.json')),false);
- const created=await post(input);assert.equal(created.status,200,await created.text());
- const stored=JSON.parse(fs.readFileSync(path.join(stateRoot,'deployment/deployment.json')));assert.equal(stored.gateway.opensslConfig,path.join(f.config.output,'runtime/openssl/ssl/openssl.cnf'));assert.equal(stored.gateway.openssl,path.join(f.config.output,'runtime/openssl/openssl.exe'));
-});
-
-// Linux executes real OpenSSL behind a recording helper. The additional-listener
-// command is a contract fixture; this test does not claim Windows or LAN account acceptance.
-test('Core and additional-ingress req explicitly use the selected configuration despite an invalid inherited default',{skip:process.platform!=='linux',timeout:30000},async t=>{
- const f=fixture(t),configuration=path.join(f.dir,'selected config;literal.cnf'),capture=path.join(f.dir,'req-arguments.jsonl'),binary=path.join(f.dir,'record-openssl');
- fs.writeFileSync(configuration,'[req]\ndistinguished_name=styx_dn\n[styx_dn]\n');
- fs.writeFileSync(binary,'#!'+process.execPath+'\nconst fs=require("node:fs"),{spawnSync}=require("node:child_process");fs.appendFileSync('+JSON.stringify(capture)+',JSON.stringify(process.argv.slice(2))+"\\n");const r=spawnSync("/usr/bin/openssl",process.argv.slice(2),{stdio:"ignore",env:{...process.env,OPENSSL_CONF:'+JSON.stringify(path.join(f.dir,'absent-default.cnf'))+'}});process.exit(r.status??3);\n',{mode:0o700});
- const {createDeployment,advanceDeployment}=await import('../../onboarding/core.mjs'),{prepareAdditionalDeviceIngress}=await import('../../onboarding/device-ingress-setup.mjs');
- const config={schema:1,mode:'create-local',gateway:{url:'https://127.0.0.1:37981',openssl:binary,opensslConfig:configuration},host:{bundle:f.config.hostBundle,publisherKeyFile:f.config.publisherKeyFile,publisherSha256:f.config.publisherSha256,baseDir:path.join(f.dir,'host'),label:'Explicit OpenSSL configuration contract',computer:false}};
- const input=path.join(f.dir,'deployment-input.json'),state=path.join(f.dir,'deployment');fs.writeFileSync(input,JSON.stringify(config),{mode:0o600});createDeployment(input,{stateDir:state});
- const before=process.env.OPENSSL_CONF,result=await advanceDeployment(state,{authorize:['gateway.prepare']});assert.equal(result.steps.find(s=>s.id==='gateway.prepare').status,'succeeded');
- let descriptor;const additional=await prepareAdditionalDeviceIngress(state,{authorize:true,listenHost:'192.0.2.71'}, {addresses:()=>['192.0.2.71'],command:async(operation,value)=>{if(operation==='status')return {supported:true,status:'not_configured'};if(operation==='prepare'){descriptor=value;return {status:'prepared'}}if(operation==='enable')return {status:'listening',generation:value.generation,ingress:{certificate_sha256:descriptor.certificateSha256}};throw Error('unexpected_fixture_command')}});
- assert.equal(additional.status,'listening');const calls=fs.readFileSync(capture,'utf8').trim().split('\n').map(line=>JSON.parse(line));assert.equal(calls.length,2);for(const args of calls)assert.deepEqual(args.slice(0,3),['req','-config',configuration]);assert.equal(process.env.OPENSSL_CONF,before);
-});
-
-function progressFixture(t){
- const f=fixture(t);
- for(const name of ['host/installer.mjs','host/private-storage.mjs']){const file=path.join(f.config.sourceRoot,name);fs.mkdirSync(path.dirname(file),{recursive:true});fs.copyFileSync(path.join(productSource,name),file);f.sourceFiles.push(name);}
- for(let index=0;index<400;index++){const name='assets/progress-'+String(index).padStart(4,'0')+'.txt';fs.writeFileSync(path.join(f.config.sourceRoot,name),'Public progress fixture '+index);f.sourceFiles.push(name);}
- buildWindowsApp(f.config);return {...f,installer:path.join(f.config.output,'install-windows-preview.mjs')};
-}
-function assertProgress(messages,total){
- for(const message of messages){assert.deepEqual(Object.keys(message).sort(),['completed','phase','status','total']);assert.equal(message.status,'verifying_package');assert.ok(['files','signed_host'].includes(message.phase));assert.ok(Number.isSafeInteger(message.completed));assert.ok(Number.isSafeInteger(message.total));assert.ok(message.completed>=0&&message.completed<=message.total);}
- const files=messages.filter(message=>message.phase==='files');assert.equal(files[0].completed,0);assert.equal(files.at(-1).completed,total);assert.ok(files.length>=4);
- for(let index=1;index<files.length;index++){assert.equal(files[index].total,total);const advance=files[index].completed-files[index-1].completed;assert.ok(advance>0&&advance<=200);if(index<files.length-1)assert.ok(advance>=100);}
- assert.deepEqual(messages.filter(message=>message.phase==='signed_host'),[{status:'verifying_package',phase:'signed_host',completed:0,total:1},{status:'verifying_package',phase:'signed_host',completed:1,total:1}]);
-}
-test('optional package progress is bounded, completes both real verification phases and preserves the manifest',async t=>{
- const f=progressFixture(t),api=await import(pathToFileURL(f.installer)),manifestFile=path.join(f.config.output,'windows-package.json'),before=fs.readFileSync(manifestFile),messages=[];
- const verified=await api.verifyPackage(f.config.output,{onProgress:message=>messages.push(message)});assertProgress(messages,verified.files.length);assert.deepEqual(fs.readFileSync(manifestFile),before);assert.equal(verified.compiled,false);
- await assert.rejects(api.verifyPackage(f.config.output,{onProgress:true}),/invalid_preview_progress_callback/);
-});
-test('verify CLI keeps its default single result and emits only fixed NDJSON progress when explicitly requested',t=>{
- const f=progressFixture(t),run=args=>spawnSync(process.execPath,[f.installer,...args],{cwd:f.dir,encoding:'utf8',timeout:60000}),expected={status:'package_integrity_verified',compiled:false,authenticity:'not_verified_unsigned_preview'};
- const plain=run(['verify']);assert.equal(plain.status,0,plain.stderr);assert.equal(plain.stderr,'');assert.deepEqual(plain.stdout.trim().split('\n').map(line=>JSON.parse(line)),[expected]);
- const total=JSON.parse(fs.readFileSync(path.join(f.config.output,'windows-package.json'))).files.length;
- for(const args of [['verify','--progress'],['verify',f.config.output,'--progress']]){const result=run(args);assert.equal(result.status,0,result.stderr);assert.equal(result.stderr,'');const messages=result.stdout.trim().split('\n').map(line=>JSON.parse(line));assert.deepEqual(messages.pop(),expected);assertProgress(messages,total);assert.equal(result.stdout.includes(f.dir),false);assert.equal(result.stdout.includes('publisher.pem'),false);}
- for(const args of [['verify','--progress','--progress'],['verify','--progress',f.config.output],['verify',f.config.output,'--unknown'],['verify',f.config.output,'extra'],['install',f.config.output,'--progress']]){const result=run(args);assert.equal(result.status,2);assert.equal(result.stdout,'');assert.equal(JSON.parse(result.stderr).status,'FAIL');}
-});
-test('progress never converts a changed hash, extra member or invalid signed Host into a successful verification',async t=>{
- const f=progressFixture(t),api=await import(pathToFileURL(f.installer)),root=f.config.output,file=path.join(root,'vnext/assets/progress-0399.txt'),original=fs.readFileSync(file),manifestFile=path.join(root,'windows-package.json'),manifest=JSON.parse(fs.readFileSync(manifestFile));
- fs.writeFileSync(file,Buffer.alloc(original.length,0x78));const messages=[];await assert.rejects(api.verifyPackage(root,{onProgress:message=>messages.push(message)}),/preview_package_file_changed/);assert.ok(messages.some(message=>message.completed>=100));assert.ok(messages.every(message=>message.completed<message.total));
- const failed=spawnSync(process.execPath,[f.installer,'verify','--progress'],{encoding:'utf8',timeout:60000});assert.equal(failed.status,2);assert.equal(JSON.parse(failed.stderr).reason,'preview_package_file_changed');assert.ok(failed.stdout.trim().split('\n').map(line=>JSON.parse(line)).every(message=>message.status==='verifying_package'));assert.equal(failed.stdout.includes(f.dir),false);fs.writeFileSync(file,original);
- const extra=path.join(root,'unlisted-user-file');fs.writeFileSync(extra,'Private fixture must never be output');const extraMessages=[];await assert.rejects(api.verifyPackage(root,{onProgress:message=>extraMessages.push(message)}),/unexpected_preview_package_members/);assert.ok(extraMessages.every(message=>message.completed<message.total));fs.unlinkSync(extra);
- // Keep the unsigned outer inventory consistent so only the complete signed
- // Host verification can reject this modified signature.
- const signature=path.join(root,'host-bundle/manifest.sig');fs.writeFileSync(signature,'A'.repeat(86));const entry=manifest.files.find(item=>item.path==='host-bundle/manifest.sig');entry.size=fs.statSync(signature).size;entry.sha256=digest(fs.readFileSync(signature));fs.writeFileSync(manifestFile,JSON.stringify(manifest));
- const signedMessages=[];await assert.rejects(api.verifyPackage(root,{onProgress:message=>signedMessages.push(message)}),/release_signature_untrusted/);assert.deepEqual(signedMessages.filter(message=>message.phase==='signed_host'),[{status:'verifying_package',phase:'signed_host',completed:0,total:1}]);
- const rejected=spawnSync(process.execPath,[f.installer,'verify','--progress'],{encoding:'utf8',timeout:60000});assert.equal(rejected.status,2);assert.equal(JSON.parse(rejected.stderr).reason,'release_signature_untrusted');assert.ok(rejected.stdout.trim().split('\n').map(line=>JSON.parse(line)).every(message=>message.status==='verifying_package'));
-});
-
-// Header/signature/package controls only. Synthetic PE and temporary test key
-// are not a Windows executable, original publisher, native App or install proof.
 function nativeFixture(t){
  const f=fixture(t),payloadDir=path.join(f.dir,'native-payload');fs.mkdirSync(payloadDir);const pe=Buffer.alloc(256);pe.write('MZ');pe.writeUInt32LE(128,60);pe.write('PE\0\0',128,'binary');pe.writeUInt16LE(0x8664,132);pe.writeUInt16LE(2,148);pe.writeUInt16LE(2,150);pe.writeUInt16LE(0x20b,152);
  const bytes={'bin/styx.exe':pe,'LICENSE':Buffer.from('test license'),'source-inputs.json':Buffer.from('{"fixture":true}')};
@@ -186,7 +37,7 @@ test('native staging refuses foreign target, unexpected member and source overla
  const original=fs.readFileSync(path.join(f.payloadDir,'manifest.json'));assert.throws(()=>buildWindowsApp({...f.nativeConfig,output:path.join(f.payloadDir,'new-output')}),/native_input_output_overlap/);assert.deepEqual(fs.readFileSync(path.join(f.payloadDir,'manifest.json')),original);assert.equal(fs.existsSync(path.join(f.payloadDir,'new-output')),false);
 });
 
-test('missing native selection never silently falls back to Node management',()=>{assert.throws(()=>buildWindowsApp({}),/explicit_legacy_comparison_required/);});
+test('missing native selection never silently falls back to Node management',()=>{assert.throws(()=>buildWindowsApp({}),/native_runtime_required_for_product_app/);});
 
 // Package compatibility only; the fixture PE is never executed or installed.
 test('native staging preserves declared migrated readers and refuses unknown versions',t=>{

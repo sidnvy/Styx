@@ -7,22 +7,14 @@
     "node": ">=22"
   },
   "scripts": {
-    "test": "node --test --test-concurrency=1 gateway/test/*.test.mjs",
-    "test:exec": "node --test --test-concurrency=1 packages/styx-exec-adapter/test/*.test.mjs",
-    "test:gui": "node --test --test-concurrency=1 packages/styx-gui-broker/test/*.test.mjs",
-    "test:all": "npm run test && npm run test:exec && npm run test:gui && npm run test:host && npm run test:plugin && npm run test:onboarding && npm run test:browser && npm run test:windows && npm run test:ci",
-    "test:native:cua": "node host/run-native-cua.mjs",
-    "test:physical:cua": "node host/physical-cua-acceptance.mjs",
-    "test:host": "node --test --test-concurrency=1 host/test/*.test.mjs",
-    "test:linux-installer": "node --test --test-concurrency=1 host/test/linux-build.test.mjs host/test/linux-service.test.mjs host/test/installer.test.mjs",
+    "test": "npm run test:all",
+    "test:all": "node --test --test-concurrency=1 host/test/*.test.mjs host/macos/test/*.test.mjs host/windows/*.test.mjs host/windows/platform-update/*.test.mjs plugin/test/*.test.mjs packages/styx-browser-provider/test/*.test.mjs providers/browser-worker/*.test.mjs",
+    "test:host": "node --test --test-concurrency=1 host/test/*.test.mjs host/macos/test/*.test.mjs",
     "test:plugin": "node --test --test-concurrency=1 plugin/test/*.test.mjs",
-    "test:onboarding": "node --test --test-concurrency=1 onboarding/test/*.test.mjs onboarding/ui/server.test.mjs",
     "test:browser": "node --test --test-concurrency=1 packages/styx-browser-provider/test/*.test.mjs",
-    "test:windows": "node --test --test-concurrency=1 host/windows/*.test.mjs",
-    "test:ci": "node --test --test-concurrency=1 ci/test/*.test.mjs",
-    "quality": "node ci/quality.mjs",
-    "build:checked": "python3 tools/release/build-native-runtime.py",
-    "build:legacy:checked": "node ci/build-checked.mjs"
+    "test:windows": "node --test --test-concurrency=1 host/windows/*.test.mjs host/windows/platform-update/*.test.mjs",
+    "quality": "python3 -I -B ci/rust-quality.py",
+    "build:checked": "python3 tools/release/build-native-runtime.py"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.1",

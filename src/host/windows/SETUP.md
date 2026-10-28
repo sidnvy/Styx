@@ -1,5 +1,7 @@
 # Windows per-user setup preview
 
+Runtime note (A38): the JS Gateway/Host/Core and legacy setup are retired; follow [the Rust release scope](../../docs/rust-core-rewrite/REDUCED-SCOPE.md).
+
 `build-setup.ps1 -PackageDirectory <verified native package> -OutputFile <fresh StyxSetup.exe>` creates one self-extracting Windows executable using the existing .NET Framework compiler. Run `build-windows-app.mjs` first; setup refuses a package that has not been natively compiled or whose inventory has changed. No extra installer toolchain is downloaded.
 
 The setup window appears before extraction, reports preparation/checking progress, and offers Install (or Update), Restore previous, and Open Styx. It runs as the current user and installs under `%LOCALAPPDATA%\Programs\Styx`. The Start menu shortcut points to the stable `Styx.exe` launcher; a desktop shortcut is optional. An unrelated existing shortcut is never overwritten.

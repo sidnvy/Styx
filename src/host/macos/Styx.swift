@@ -1,4 +1,4 @@
-// Styx owns its embedded Cua lifetime. Native Host supervision is explicit opt-in;
+// Styx owns its embedded Cua lifetime and runs the Rust payload directly;
 // macOS TCC responsibility still requires measurement on the signed installed App.
 import AppKit
 import ApplicationServices
@@ -78,101 +78,12 @@ func makeEmbeddedDaemon(driver: URL, socketPath: String, pidFile: String) -> (Pr
     return (child, lifetime)
 }
 
-// The same signed native executable can supervise Host without starting AppKit,
-// Cua, onboarding, or requesting any permission. This changes the process tree;
-// it is NOT evidence that macOS attributes Exec/Automation requests to Styx.
-struct NativeHostInvocation {
-    let teamID: String
-    let node: String
-    let installRoot: String
-    let hostConfig: String
-    let publisherKey: String
-    var launchScript: String { installRoot + "/launch.mjs" }
-}
-func nativeHostInvocation(_ args: [String]) throws -> NativeHostInvocation? {
-    guard args.count > 1, args[1] == "--host-service" else { return nil }
-    guard args.count == 7,
-          args[2].count == 10, args[2].allSatisfy({ "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789".contains($0) }) else { throw HostError.unsafeRuntime }
-    for value in args[3...] {
-        guard value.hasPrefix("/"), URL(fileURLWithPath: value).standardizedFileURL.path == value,
-              !value.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) || $0.value == 0xfffe || $0.value == 0xffff }) else { throw HostError.unsafeRuntime }
-    }
-    guard args[3].hasPrefix(args[4] + "/") else { throw HostError.unsafeRuntime }
-    return NativeHostInvocation(teamID: args[2], node: args[3], installRoot: args[4], hostConfig: args[5], publisherKey: args[6])
-}
 func requireNativeHostFile(_ path: String, privateFile: Bool) throws {
     var info = stat()
     guard lstat(path, &info) == 0, info.st_mode & S_IFMT == S_IFREG,
           info.st_uid == getuid(), info.st_mode & 0o022 == 0,
           !privateFile || info.st_mode & 0o077 == 0 else { throw HostError.unsafeRuntime }
 }
-func runNativeHost(_ invocation: NativeHostInvocation) throws -> Never {
-    // A stable Team ID is required. Never accept the ad-hoc preview as a stable
-    // permission identity, and verify again after login/reboot before execution.
-    guard Bundle.main.bundleURL.standardizedFileURL.path == "/Applications/Styx.app",
-          Bundle.main.bundleIdentifier == bundleID else { throw HostError.unsafeRuntime }
-    let check = Process()
-    check.executableURL = URL(fileURLWithPath: "/usr/bin/codesign")
-    check.arguments = ["--verify", "--deep", "--strict", "-R",
-        "=anchor apple generic and identifier \"\(bundleID)\" and certificate leaf[subject.OU] = \"\(invocation.teamID)\"",
-        Bundle.main.bundleURL.path]
-    check.standardInput = FileHandle.nullDevice
-    check.standardOutput = FileHandle.nullDevice
-    check.standardError = FileHandle.nullDevice
-    try check.run(); check.waitUntilExit()
-    guard check.terminationReason == .exit, check.terminationStatus == 0 else { throw HostError.unsafeRuntime }
-    var rootInfo = stat()
-    guard lstat(invocation.installRoot, &rootInfo) == 0, rootInfo.st_mode & S_IFMT == S_IFDIR,
-          rootInfo.st_uid == getuid(), rootInfo.st_mode & 0o077 == 0 else { throw HostError.unsafeRuntime }
-    for file in [invocation.launchScript, invocation.hostConfig, invocation.publisherKey] {
-        try requireNativeHostFile(file, privateFile: true)
-    }
-    try requireNativeHostFile(invocation.node, privateFile: false)
-    guard FileManager.default.isExecutableFile(atPath: invocation.node) else { throw HostError.unsafeRuntime }
-    let child = Process()
-    child.executableURL = URL(fileURLWithPath: invocation.node)
-    child.arguments = [invocation.launchScript, invocation.installRoot, invocation.hostConfig, invocation.publisherKey]
-    child.currentDirectoryURL = URL(fileURLWithPath: invocation.installRoot)
-    child.standardInput = FileHandle.nullDevice
-    child.standardOutput = FileHandle.standardOutput
-    child.standardError = FileHandle.standardError
-    // Do not allow dynamic-loader or Node bootstrap injection into this fixed
-    // service entry point. These values are process diagnostics, not TCC proof.
-    var environment = ProcessInfo.processInfo.environment.filter {
-        !$0.key.hasPrefix("DYLD_") && !$0.key.hasPrefix("LD_") && !["NODE_OPTIONS", "NODE_PATH"].contains($0.key)
-    }
-    environment["STYX_NATIVE_LAUNCHER_PID"] = String(getpid())
-    environment["STYX_NATIVE_BUNDLE_ID"] = bundleID
-    environment["STYX_TCC_ATTRIBUTION"] = "NOT RUN"
-    child.environment = environment
-    var stopping = false
-    var signals: [DispatchSourceSignal] = []
-    for number in [SIGTERM, SIGINT] {
-        signal(number, SIG_IGN)
-        let source = DispatchSource.makeSignalSource(signal: number, queue: .main)
-        source.setEventHandler {
-            guard !stopping else { return }; stopping = true
-            if child.isRunning { kill(child.processIdentifier, number) }
-            // launchd cleans remaining members of this job's process group.
-            // PTY/detached process groups still require upstream Exec lifetime
-            // acceptance; this supervisor does not claim to contain them.
-            DispatchQueue.main.asyncAfter(deadline: .now() + 8) {
-                if child.isRunning { kill(child.processIdentifier, SIGKILL) }
-            }
-        }
-        source.resume(); signals.append(source)
-    }
-    child.terminationHandler = { terminated in
-        DispatchQueue.main.async {
-            exit(stopping ? 0 : terminated.terminationReason == .exit ? terminated.terminationStatus : 1)
-        }
-    }
-    try child.run()
-    // Keep the supervisor alive until Node exits; never re-pair, rewrite Host
-    // identity, or retry an interrupted request here. launchd restarts failures.
-    return withExtendedLifetime(signals) { dispatchMain() }
-}
-
 // Accept only the one private loopback bootstrap message from our owned child.
 func setupSessionURL(_ line: String) -> URL? {
     guard line.hasPrefix("STYX_SETUP_URL\t"),
@@ -681,69 +592,7 @@ private func stopAndWaitForOwnedDaemon(_ child: Process) -> Bool {
         }
         return
         #else
-        let node = bundledCoreExecutable(resources)
-        let launcher = resources.appendingPathComponent("onboarding/vnext/host/macos/setup-launcher.mjs")
-        guard FileManager.default.isExecutableFile(atPath: node.path),
-              FileManager.default.fileExists(atPath: launcher.path) else { throw HostError.daemonUnavailable }
-        let child = Process(), input = Pipe(), output = Pipe()
-        child.executableURL = node; child.arguments = [launcher.path, resources.path]
-        child.environment = ["PATH": "/usr/bin:/bin", "HOME": NSHomeDirectory(),
-            "TMPDIR": NSTemporaryDirectory(), "LANG": "en_US.UTF-8"]
-        child.standardInput = input; child.standardOutput = output; child.standardError = FileHandle.nullDevice
-        setupBuffer = ""; setupStatusLine?.title = "Local setup is starting…"
-        output.fileHandleForReading.readabilityHandler = { [weak self] handle in
-            let data = handle.availableData
-            if data.isEmpty { handle.readabilityHandler = nil; return }
-            guard let owner = self else { return }
-            DispatchQueue.main.async {
-                guard owner.setupProcess === child else { return }
-                guard let text = String(data: data, encoding: .utf8), owner.setupBuffer.utf8.count + data.count <= 4096 else {
-                    owner.stopSetup(); owner.setupStatusLine?.title = "Local setup protocol unavailable"; return
-                }
-                owner.setupBuffer += text
-                while let newline = owner.setupBuffer.firstIndex(of: "\n") {
-                    let line = String(owner.setupBuffer[..<newline])
-                    owner.setupBuffer.removeSubrange(...newline)
-                    guard owner.setupURL == nil, let url = setupSessionURL(line) else {
-                        owner.stopSetup(); owner.setupStatusLine?.title = "Local setup protocol unavailable"; return
-                    }
-                    owner.setupURL = url; owner.setupStatusLine?.title = "Local setup ready"
-                    #if STYX_PRODUCT_UI
-                    owner.observeProductComponents(url)
-                    if owner.setupWindow == nil { owner.setupWindow = owner.makeProductWindow(url) }
-                    if let model = owner.setupWindow?.model {
-                        Task {
-                            await model.bootstrap()
-                            if model.status["nativeStartup"]["status"].string == "reconciliation_required", model.error != nil {
-                                owner.setupWindow?.showSettings(.general)
-                            }
-                        }
-                    }
-                    if owner.menuOpenRequested { owner.toggleProductPanel() }
-                    #endif
-                    if owner.setupOpenRequested { owner.showSetup(url) }
-                }
-            }
-        }
-        child.terminationHandler = { [weak self] terminated in
-            guard let owner = self else { return }
-            DispatchQueue.main.async {
-                guard owner.setupProcess === terminated else { return }
-                owner.setupOutput?.fileHandleForReading.readabilityHandler = nil
-                try? owner.setupInput?.fileHandleForWriting.close()
-                owner.setupProcess = nil; owner.setupInput = nil; owner.setupOutput = nil; owner.setupURL = nil
-                owner.setupWindow?.close(); owner.setupWindow = nil
-                #if STYX_PRODUCT_UI
-                owner.componentTimer?.invalidate(); owner.componentTimer = nil
-                owner.computerUseRequested = false; owner.stop()
-                #endif
-                owner.setupStatusLine?.title = "Local setup stopped; reopen Settings"
-            }
-        }
-        setupProcess = child; setupInput = input; setupOutput = output
-        do { try child.run() }
-        catch { stopSetup(); throw error }
-        try? input.fileHandleForReading.close(); try? output.fileHandleForWriting.close()
+        throw HostError.daemonUnavailable
         #endif
     }
     func showSetup(_ url: URL) {
@@ -1422,36 +1271,6 @@ if CommandLine.arguments.contains("--self-test") {
     precondition(productSystemQuitReason(OSType(kAEReallyLogOut)))
     precondition(productSystemQuitReason(OSType(kAERestart)))
     #endif
-    // Parser-only assertions: no code signature checks, files, Host child,
-    // NSApplication, Cua, or OS permission APIs are reached by these cases.
-    let service = ["Styx", "--host-service", "ABCDEFGHIJ", "/private/styx/node", "/private/styx", "/private/host.json", "/private/publisher.pem"]
-    for valid in [service, ["Styx", "--host-service", "0123456789", "/private/用户 🧭 & <Styx> \"' $(literal);/releases/v1/bin/node", "/private/用户 🧭 & <Styx> \"' $(literal);", "/private/Host 用户 &.json", "/private/publisher.pem"]] {
-        guard let invocation = try? nativeHostInvocation(valid),
-              invocation.teamID == valid[2], invocation.node == valid[3],
-              invocation.installRoot == valid[4], invocation.hostConfig == valid[5],
-              invocation.publisherKey == valid[6], invocation.launchScript == valid[4] + "/launch.mjs" else { fatalError("native Host argv was changed or rejected") }
-    }
-    for ordinary in [[], ["Styx"], ["Styx", "--self-test"], ["Styx", "--other-mode"]] {
-        do { guard try nativeHostInvocation(ordinary) == nil else { fatalError("ordinary App argv selected Host mode") } }
-        catch { fatalError("ordinary App argv rejected by Host parser") }
-    }
-    func expectNativeHostRefused(_ invalid: [String]) {
-        do { _ = try nativeHostInvocation(invalid); fatalError("unsafe native Host argv accepted") }
-        catch HostError.unsafeRuntime { }
-        catch { fatalError("unexpected native Host parser error") }
-    }
-    for invalid in [Array(service.prefix(2)), Array(service.dropLast()), service + ["extra"]] { expectNativeHostRefused(invalid) }
-    for badTeam in ["", "adhoc", "ABCDEFGHI", "ABCDEFGHIJK", "ABCDEFGHIJ\n", "ABCDE-FGHI", "ABCDEFGHIJ\" or true"] {
-        var invalid = service; invalid[2] = badTeam; expectNativeHostRefused(invalid)
-    }
-    for badNode in ["/tmp/foreign-node", "/private/styx-other/node", "/private/styx", "/private/styx/../node"] {
-        var invalid = service; invalid[3] = badNode; expectNativeHostRefused(invalid)
-    }
-    for index in 3...6 {
-        for badPath in ["", "relative/path", "/private/../outside", "/private/./file", "/private//file", "/private/file\0", "/private/file\n", "/private/file\r", "/private/file\t", "/private/file\u{7f}", "/private/file\u{85}", "/private/file\u{fffe}", "/private/file\u{ffff}"] {
-            var invalid = service; invalid[index] = badPath; expectNativeHostRefused(invalid)
-        }
-    }
     let token = String(repeating: "a", count: 43)
     guard setupSessionURL("STYX_SETUP_URL\thttp://127.0.0.1:1234/#session=" + token) != nil else { fatalError("setup bootstrap rejected") }
     for bad in ["STYX_SETUP_URL\thttps://example.com/#session=" + token,
@@ -1578,16 +1397,6 @@ if CommandLine.arguments.contains("--self-test") {
     } catch { fputs("Styx self-test failed: \(error)\n", stderr); exit(1) }
 }
 #endif
-// This branch runs before NSApplication initialization: Gateway-only/headless
-// processes never acquire a Cua runtime merely by sharing the native executable.
-do {
-    if let invocation = try nativeHostInvocation(CommandLine.arguments) {
-        try runNativeHost(invocation)
-    }
-} catch {
-    fputs("Styx native Host supervisor refused its signed runtime configuration.\n", stderr)
-    exit(2)
-}
 MainActor.assumeIsolated {
     let app = NSApplication.shared
     let delegate = StyxDelegate()

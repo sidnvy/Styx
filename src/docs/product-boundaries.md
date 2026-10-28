@@ -1,5 +1,7 @@
 # Styx 产品边界与实现对照
 
+Runtime note (A38): the JS Gateway/Host/Core and legacy setup are retired; follow [the Rust release scope](rust-core-rewrite/REDUCED-SCOPE.md).
+
 2026-10-19：用户确认的目标架构。本文件区分目标与当前实现，不是功能完成声明。
 
 2026-10-20：用户已固定 v6 产品流程。最新实施约束与当前差异见

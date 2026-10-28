@@ -1,5 +1,7 @@
 # Windows native preview
 
+Runtime note (A38): the JS Gateway/Host/Core and legacy setup are retired; follow [the Rust release scope](../../docs/rust-core-rewrite/REDUCED-SCOPE.md).
+
 Native .NET Framework 4.8 Windows Forms shell, not a browser or WebView. Notification-area icon opens a daily connection panel. Settings has General, Computers and ChatGPT navigation; setup contains its own create/join stages. The approved orb is copied from `assets/brand/styx-logo.png`.
 
 The app owns a Node child through private stdin/stdout pipes. The child starts the existing onboarding Core HTTP server on an ephemeral loopback port; bearer and CSRF values stay inside that process. Exact allowlisted operations call the same server routes as the Mac app. Closing stdin drains Core through `close()`. No service or login task is installed by this preview. Keep Styx open to retain a foreground connection. The preview state identity is `%LOCALAPPDATA%\StyxPreview\WindowsFirst`, separate from established installations. `StyxPreview.exe --state-dir "C:\Users\YOUR_USER\Documents\STYX_TEST_STATE"` selects an explicit isolated test state. `STYX_NATIVE_STATE` remains supported; the explicit argument takes precedence. Neither option changes the packaged Core configuration format.
