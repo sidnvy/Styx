@@ -120,6 +120,14 @@ begin
       exit;
     end;
     NativeMaintenanceAttempted := True;
+    // v1: uninstall needs no App handoff (that maintenance protocol is post-v1).
+    // The native App holds this mutex for its whole life; Core and Host are its
+    // children, and user state lives outside the install root.
+    if Operation = 'uninstall' then begin
+      if CheckForMutexes(AppMutexName('')) then
+        Result := 'Styx is still running. Quit Styx from its menu, then uninstall again.';
+      exit;
+    end;
     if Operation = 'upgrade' then begin
       if not Exec(Gate, 'maintain-native-install "' + InstallRoot + '" upgrade "{#PackageHash}"', '', SW_HIDE, ewWaitUntilTerminated, Code) then Code := 2;
     end else if not Exec(Gate, 'maintain-native-install "' + InstallRoot + '" uninstall -', '', SW_HIDE, ewWaitUntilTerminated, Code) then Code := 2;
