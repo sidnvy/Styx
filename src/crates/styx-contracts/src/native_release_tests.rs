@@ -50,6 +50,9 @@ fn runtime(target: NativeReleaseTarget, kinds: &[NativeExternalWorker]) -> Nativ
         let entrypoint = kind.entrypoint(target);
         let mut members = vec![entrypoint.clone()];
         match kind {
+            NativeExternalWorker::TunnelClient => {
+                members.extend([format!("{prefix}/LICENSE"), format!("{prefix}/NOTICE")])
+            }
             NativeExternalWorker::CodexExec => members.extend([
                 format!("{prefix}/licenses/codex-LICENSE"),
                 format!("{prefix}/licenses/codex-NOTICE"),
@@ -354,4 +357,41 @@ fn host_admission_report_requires_explicit_signed_reader_declaration() {
             .is_err()
         );
     }
+}
+
+#[test]
+fn tunnel_client_is_optional_and_confined_to_its_fixed_directory() {
+    for target in [
+        NativeReleaseTarget::LinuxX86_64Gnu,
+        NativeReleaseTarget::WindowsX86_64Msvc,
+        NativeReleaseTarget::MacosX86_64,
+        NativeReleaseTarget::MacosAarch64,
+    ] {
+        runtime(target, &[]).validate().unwrap();
+        let mut manifest = runtime(target, &[NativeExternalWorker::TunnelClient]);
+        manifest.validate().unwrap();
+        let entry = NativeExternalWorker::TunnelClient.entrypoint(target);
+        replace_member(
+            &mut manifest,
+            &entry,
+            "workers/elsewhere/tunnel-client-runtime",
+        );
+        manifest.worker_closures[0].entrypoint = "workers/elsewhere/tunnel-client-runtime".into();
+        assert!(manifest.validate().is_err());
+    }
+    runtime(
+        NativeReleaseTarget::LinuxX86_64Gnu,
+        &[
+            NativeExternalWorker::CodexExec,
+            NativeExternalWorker::BrowserNode22,
+            NativeExternalWorker::CuaNative,
+            NativeExternalWorker::TunnelClient,
+        ],
+    )
+    .validate()
+    .unwrap();
+    assert_eq!(
+        serde_json::to_value(NativeExternalWorker::TunnelClient).unwrap(),
+        "tunnel_client"
+    );
 }

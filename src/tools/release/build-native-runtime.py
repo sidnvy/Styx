@@ -468,6 +468,36 @@ def accept_detached_signature(args, output, payload, manifest_raw, forbidden):
     return raw
 
 
+def tunnel_inputs(args, forbidden):
+    supplied = (args.tunnel_client, args.tunnel_client_sha256,
+                args.tunnel_client_license, args.tunnel_client_notice)
+    require(not any(supplied) or all(supplied), 'tunnel_client_inputs_incomplete')
+    if not any(supplied):
+        return None
+    require(HEX.fullmatch(args.tunnel_client_sha256) is not None, 'tunnel_client_sha256_invalid')
+    paths = [args.tunnel_client, args.tunnel_client_license, args.tunnel_client_notice]
+    for path in paths:
+        absolute(path)
+        no_symlinks(path)
+    binary_hash, binary_stat = hash_checked(args.tunnel_client, forbidden)
+    require(binary_hash == args.tunnel_client_sha256, 'tunnel_client_sha256_mismatch')
+    filename = 'tunnel-client-runtime.exe' if args.target == 'x86_64-pc-windows-msvc' else 'tunnel-client-runtime'
+    inputs = [(args.tunnel_client, filename, binary_hash, binary_stat, True)]
+    for path, name in [(args.tunnel_client_license, 'LICENSE'), (args.tunnel_client_notice, 'NOTICE')]:
+        digest, observed = hash_checked(path, forbidden, 1024 * 1024)
+        require(observed.st_size > 0, 'tunnel_client_notice_empty')
+        inputs.append((path, name, digest, observed, False))
+    # Raw upstream inputs are pinned by the operator and attested by this package's
+    # publisher. This digest identifies that exact input inventory, not an upstream signature.
+    inventory = encode(dict(version='0.0.17', files=[dict(path=name, sha256=digest, size=observed.st_size)
+                                                   for _, name, digest, observed, _ in inputs]))
+    prefix = 'workers/tunnel-client/'
+    closure = dict(kind='tunnel_client', version='0.0.17', source_manifest_sha256=sha(inventory),
+                   source_publisher_spki_sha256=args.expected_publisher, entrypoint=prefix + filename,
+                   members=[prefix + name for _, name, _, _, _ in inputs])
+    return closure, inputs
+
+
 def build(args):
     require(sys.platform == 'linux', 'builder_linux_only')
     require(re.fullmatch(r'[a-f0-9]{40}', args.source_revision) is not None, 'full_source_revision_required')
@@ -522,12 +552,17 @@ def build(args):
         source = inspect_worker(args.worker_release, args.worker_publisher_file, args.target,
                                 args.expected_publisher, forbidden, output) if kinds else None
         selections = [selected_worker(source, kind, args.target, forbidden) for kind in kinds]
+        tunnel = tunnel_inputs(args, forbidden)
+        if tunnel:
+            kinds = sorted(kinds + ['tunnel_client'])
         require(b'LICENSE\0' in git('ls-files', '-z', '--', 'LICENSE'), 'source_license_not_tracked')
         license_raw = read_bounded(REPO / 'LICENSE', 1024 * 1024)
         require(bool(license_raw), 'source_license_missing')
         source_raw = encode(dict(schema=1, revision=args.source_revision, build_receipt_sha256=sha(raw_receipt), inputs=inputs, target=args.target))
-        projected_files = 3 + sum(len(selected) for _, selected in selections)
+        projected_files = 3 + sum(len(selected) for _, selected in selections) + (3 if tunnel else 0)
         projected_bytes = binary_metadata.st_size + len(license_raw) + len(source_raw)
+        if tunnel:
+            projected_bytes += sum(observed.st_size for _, _, _, observed, _ in tunnel[1])
         if source:
             projected_bytes += sum(source['declared'][name]['size'] for _, selected in selections for name in selected)
         require(projected_files <= MAX_FILES and projected_bytes <= MAX_TOTAL, 'runtime_payload_capacity')
@@ -547,6 +582,14 @@ def build(args):
                 executable = destination == closure['entrypoint']
                 copy_checked(source['root'] / name, payload / destination, item['sha256'], forbidden,
                              executable, args.target if executable else None)
+                members.append(member(destination, payload, executable))
+            closures.append(closure)
+        if tunnel:
+            closure, tunnel_files = tunnel
+            for path, name, digest, observed, executable in tunnel_files:
+                destination = 'workers/tunnel-client/' + name
+                copy_checked(path, payload / destination, digest, forbidden, executable,
+                             args.target if executable else None)
                 members.append(member(destination, payload, executable))
             closures.append(closure)
         require(len(members) <= MAX_FILES and sum(item['size'] for item in members) <= MAX_TOTAL,
@@ -591,6 +634,11 @@ def build(args):
                     and read_bounded(source['public_file'], 4096) == source['public_raw'], 'worker_metadata_changed')
             for name, item in source['declared'].items():
                 require(hash_checked(source['root'] / name, forbidden)[0] == item['sha256'], 'worker_source_changed_after_packaging')
+        if tunnel:
+            for path, _, digest, observed, _ in tunnel[1]:
+                current_digest, current_stat = hash_checked(path, forbidden)
+                require(current_digest == digest and signature(current_stat) == signature(observed),
+                        'tunnel_client_source_changed_after_packaging')
         actual_files, _ = tree(payload, forbidden)
         require(set(actual_files) == set(names), 'payload_inventory_not_exact')
         for item in members:
@@ -656,6 +704,10 @@ def main():
     parser.add_argument('--target', choices=TARGETS, required=True)
     parser.add_argument('--relocated-binary', action='store_true',
                         help='accept copied bytes only with complete original producer/build-info evidence; preserve original receipt')
+    parser.add_argument('--tunnel-client', type=Path, help='pinned upstream v0.0.17 native binary; never executed')
+    parser.add_argument('--tunnel-client-sha256', help='required with --tunnel-client')
+    parser.add_argument('--tunnel-client-license', type=Path, help='required upstream LICENSE with --tunnel-client')
+    parser.add_argument('--tunnel-client-notice', type=Path, help='required upstream NOTICE with --tunnel-client')
     parser.add_argument('--worker-release', type=Path)
     parser.add_argument('--worker-publisher-file', type=Path)
     parser.add_argument('--worker-kind', action='append', choices=KINDS, default=[])

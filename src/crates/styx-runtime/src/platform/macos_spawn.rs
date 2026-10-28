@@ -478,6 +478,19 @@ impl RunningChild {
             exit_success: facts.exit.map(|exit| exit.success()),
         }
     }
+    /// Graceful stop of this unreaped child, serialized with its sole reaper.
+    pub(crate) fn request_terminate(&self) -> io::Result<()> {
+        let facts = self.shared.facts.lock().map_err(|_| io_error())?;
+        if facts.exit.is_some() {
+            return Ok(());
+        }
+        if facts.wait_unknown {
+            return Err(io_error());
+        }
+        // The reaper cannot release this PID while the same lock is held.
+        kill(self.shared.pid, Signal::SIGTERM)
+            .map_err(|error| io::Error::from_raw_os_error(error as i32))
+    }
     pub fn start_kill(&self) -> io::Result<()> {
         self.shared.terminate.store(true, Ordering::Release);
         let facts = self.shared.facts.lock().map_err(|_| io_error())?;

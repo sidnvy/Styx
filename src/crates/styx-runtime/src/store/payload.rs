@@ -88,7 +88,7 @@ impl PayloadInventory {
     /// workers. This mints image pins, never publisher or execution authority.
     #[cfg(target_os = "windows")]
     pub(crate) fn pin_executables(&self, relative: &[&Path]) -> Result<Vec<PinnedExecutable>> {
-        if relative.is_empty() || relative.len() > 4 {
+        if relative.is_empty() || relative.len() > 5 {
             return Err(StoreError::TooLarge);
         }
         // Reject the entire request before any filesystem observation. Windows

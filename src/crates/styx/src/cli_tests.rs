@@ -436,3 +436,70 @@ fn transient_manager_requires_explicit_mode_and_exact_stop_observation() {
         );
     }
 }
+
+#[test]
+fn cli_tunnel_requires_authorization_and_only_file_credentials() {
+    let args = [
+        "styx",
+        "gateway",
+        "tunnel",
+        "configure",
+        "--state-dir",
+        "/private/gateway",
+        "--tunnel-id",
+        "tunnel_abcdefgh",
+        "--api-key-file",
+        "/private/key",
+    ];
+    assert!(Cli::try_parse_from(args).is_err());
+    let mut authorized = args.to_vec();
+    authorized.extend(["--auto-start", "--authorize", "--json"]);
+    assert!(matches!(
+        Cli::try_parse_from(authorized.clone()).unwrap().command,
+        Command::Gateway {
+            command: GatewayCommand::Tunnel {
+                command: GatewayTunnelCommand::Configure {
+                    auto_start: true,
+                    authorize: true,
+                    json: true,
+                    ..
+                }
+            }
+        }
+    ));
+    for flag in [
+        "--api-key",
+        "--key",
+        "--binary",
+        "--tunnel-client",
+        "--proxy",
+    ] {
+        let mut invalid = authorized.clone();
+        invalid.extend([flag, "untrusted"]);
+        assert!(Cli::try_parse_from(invalid).is_err());
+    }
+    assert!(
+        Cli::try_parse_from([
+            "styx",
+            "gateway",
+            "tunnel",
+            "status",
+            "--state-dir",
+            "/private/gateway",
+            "--json"
+        ])
+        .is_ok()
+    );
+    let remove = [
+        "styx",
+        "gateway",
+        "tunnel",
+        "remove",
+        "--state-dir",
+        "/private/gateway",
+    ];
+    assert!(Cli::try_parse_from(remove).is_err());
+    let mut authorized = remove.to_vec();
+    authorized.extend(["--authorize", "--json"]);
+    assert!(Cli::try_parse_from(authorized).is_ok());
+}

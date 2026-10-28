@@ -665,6 +665,7 @@ mod platform {
         ))]
         service_scope: Option<Arc<crate::platform::native_service::ServiceScope>>,
     ) -> Result<GatewayForegroundOutcome, ForegroundError> {
+        let tunnel_state = path.clone();
         let (diagnostic, retained_candidate) = startup;
         if retained_candidate.is_some() && app_scope.is_none() {
             return Err(error("app_scope_required_for_retained_gateway_runtime"));
@@ -793,6 +794,15 @@ mod platform {
         if stop.is_cancelled() {
             return Err(error("gateway_start_cancelled"));
         }
+        let tunnel_port = listener
+            .local_addr()
+            .map_err(|_| error("gateway_listen_failed"))?
+            .port();
+        let tunnel_release = admitted
+            .fresh
+            .as_ref()
+            .ok_or(error("fresh_native_gateway_required"))?
+            .verified_release();
         let control_failed = CancellationToken::new();
         #[cfg(any(
             all(target_os = "linux", target_env = "gnu"),
@@ -895,6 +905,14 @@ mod platform {
             d.mark("listening");
         }
         emit(&events, &stop, "gateway_listening");
+        // The original Gateway task owns and joins its tunnel supervisor. Listener
+        // and local-control failures use the same stop token as SIGINT/SIGTERM.
+        let tunnel = crate::foreground::tunnel::start(
+            tunnel_state,
+            tunnel_port,
+            tunnel_release,
+            stop.clone(),
+        );
         let mut invalidated = false;
         let mut interval = tokio::time::interval(Duration::from_secs(1));
         interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
@@ -926,6 +944,8 @@ mod platform {
                 }
             }
         };
+        stop.cancel();
+        let tunnel_joined = tunnel.await.is_ok_and(|result| result.is_ok());
         #[cfg(any(
             all(target_os = "linux", target_env = "gnu"),
             target_os = "macos",
@@ -942,7 +962,7 @@ mod platform {
         // A timeout is not release. Keep the exact original input pins, writer
         // and execution lease while real blocking/read tasks finish.
         let mut joined = facts.blocking_jobs_joined;
-        let mut worker_failure = facts.worker_failure_observed;
+        let mut worker_failure = facts.worker_failure_observed || !tunnel_joined;
         #[cfg(any(
             all(target_os = "linux", target_env = "gnu"),
             target_os = "macos",
