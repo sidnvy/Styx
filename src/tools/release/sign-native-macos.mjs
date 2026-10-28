@@ -23,7 +23,11 @@ try {
   report.source_image_sha256=digest(binary);report.source_image_bytes=fs.statSync(binary).size;
   report.helper_sha256=digest(fileURLToPath(import.meta.url));
   report.planner_sha256=digest(fileURLToPath(new URL('../../host/build-macos-app.mjs',import.meta.url)));
-  need(path.basename(binary)==='styx','fixed_native_cli_required');
+  // Fixed payload executables only: the CLI and the pinned upstream tunnel worker
+  // (shipped unsigned upstream), each at its eventual packaged App location.
+  const packaged=new Map([['styx','Contents/Resources/native/bin/styx'],
+    ['tunnel-client-runtime','Contents/Resources/native/workers/tunnel-client/tunnel-client-runtime']]).get(path.basename(binary));
+  need(packaged!==undefined,'fixed_native_cli_required');
   const raw=fs.readFileSync(configuration),local=normalizeMacLocalSigning(JSON.parse(raw));
   need(local.identitySha1==='cb50cee601419f28b43756f4fc8aefdbf60abae2' &&
     local.certificateSha256==='90792ed11f23a00f0107450dbc184f992016569ca188454cfa286fe0022c2c1e',
@@ -32,7 +36,7 @@ try {
   // This logical App never exists. It chooses the SAME eventual packaged CLI
   // identifier/designated requirement; only the plan's exact final path is relocated.
   const app=path.join(path.dirname(binary),'Styx.app');
-  const logical=path.join(app,'Contents/Resources/native/bin/styx');
+  const logical=path.join(app,packaged);
   const plan=macLocalSigningPlan({app,localSigning:local,files:[logical],sealApp:false});
   need(plan.length===2,'fixed_sign_verify_plan_required');
   report.identifier=plan[0][1][plan[0][1].indexOf('--identifier')+1];

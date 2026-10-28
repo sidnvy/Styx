@@ -193,8 +193,21 @@ impl Root {
                 Some(digest) => digest,
                 None => stream_hash(&file, facts.facts.byte_len)?,
             };
+            // The name is re-resolved in the held directory; that directory's
+            // own path from the root is re-checked after its last entry below.
             if !same(&facts, &observe(&file, false)?)
-                || !same(&facts, &observe(&child(self, &path, false)?, false)?)
+                || !same(
+                    &facts,
+                    &observe(
+                        &open_at(
+                            &directory,
+                            &name,
+                            OFlag::O_RDONLY | OFlag::O_NONBLOCK,
+                            Mode::empty(),
+                        )?,
+                        false,
+                    )?,
+                )
             {
                 return Err(StoreError::Changed);
             }
@@ -220,15 +233,35 @@ impl Root {
 impl PayloadSnapshot {
     pub(in crate::store) fn revalidate(&self) -> Result<()> {
         self.root.validate_root()?;
+        // Sorted paths list each directory right before its contents, so every
+        // entry is reopened once relative to its already re-observed parent
+        // instead of walking from the root. Only the ancestor chain stays open.
+        let mut parents: Vec<(&Path, File)> = Vec::new();
         for (path, before) in &self.observed {
-            if !same(
-                before,
-                &observe(
-                    &child(&self.root, path, before.directory)?,
-                    before.directory,
+            let parent = path.parent();
+            while parents.last().is_some_and(|(p, _)| Some(*p) != parent) {
+                parents.pop();
+            }
+            let file = match (parents.last(), path.file_name()) {
+                (Some((_, directory)), Some(name)) => open_at(
+                    directory,
+                    name,
+                    OFlag::O_RDONLY
+                        | OFlag::O_NONBLOCK
+                        | if before.directory {
+                            OFlag::O_DIRECTORY
+                        } else {
+                            OFlag::empty()
+                        },
+                    Mode::empty(),
                 )?,
-            ) {
+                _ => child(&self.root, path, before.directory)?,
+            };
+            if !same(before, &observe(&file, before.directory)?) {
                 return Err(StoreError::Changed);
+            }
+            if before.directory {
+                parents.push((path, file));
             }
         }
         self.root.validate_root()

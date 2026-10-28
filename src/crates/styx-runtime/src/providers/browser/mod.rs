@@ -198,6 +198,8 @@ struct Live {
     #[cfg(target_os = "macos")]
     launch_unconfirmed: bool,
     #[cfg(target_os = "macos")]
+    process_tree: Option<crate::platform::macos_process_tree::ProcessTree>,
+    #[cfg(target_os = "macos")]
     original_browser_process: Option<macos::OriginalBrowserProcess>,
     client: Option<RunningService<RoleClient, BrowserClient>>,
     stderr: Option<JoinHandle<()>>,
@@ -630,6 +632,8 @@ impl BrowserOpenSlot {
                 suspended: None,
                 #[cfg(target_os = "macos")]
                 launch_unconfirmed: false,
+                #[cfg(target_os = "macos")]
+                process_tree: None,
                 #[cfg(target_os = "macos")]
                 original_browser_process: None,
                 client: None,
@@ -1247,6 +1251,13 @@ async fn cleanup(live: &mut Live, budget: Duration) -> BrowserCleanup {
     }
     let until = Instant::now() + budget.min(Duration::from_secs(30));
     let mut joined = !live.io_join_failed;
+    // Snapshot before closing MCP can cause Node/Chrome to exit and reparent helpers.
+    #[cfg(target_os = "macos")]
+    if live.child.is_some()
+        && let Some(tree) = &mut live.process_tree
+    {
+        tree.snapshot();
+    }
     if live.client_close.is_none()
         && let Some(mut client) = live.client.take()
     {
@@ -1330,21 +1341,10 @@ async fn cleanup(live: &mut Live, budget: Duration) -> BrowserCleanup {
                 }
             }
         } else if let Some(child) = &mut live.child {
-            // Closing the MCP service delivers EOF to the original Node worker.
-            // Its existing cleanup awaits the actual persistent context close.
-            match timeout_at(until, child.wait()).await {
-                Ok(Ok(exit)) => {
-                    worker_exited = true;
-                    worker_exit_success = Some(exit.success());
-                }
-                _ => {
-                    worker_exited = false;
-                    worker_exit_success = None;
-                }
-            }
-            // A direct Node wait cannot prove termination of detached Crashpad
-            // helpers. Keep the existing retained failure custody; no fake Job0.
-            descendants = BrowserDescendants::Unknown;
+            let facts = macos::stop(child, live.process_tree.as_mut(), until).await;
+            worker_exited = facts.0;
+            worker_exit_success = facts.1;
+            descendants = facts.2;
         } else {
             worker_exited = !live.launch_unconfirmed;
             worker_exit_success = None;
