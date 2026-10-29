@@ -210,6 +210,146 @@ pub async fn pending(state_dir: &Path) -> Result<AdminReport> {
 pub async fn approve(state_dir: &Path, selection: ApprovalSelection) -> Result<AdminReport> {
     owned(Action::Approve(state_dir.into(), selection)).await
 }
+
+/// Authenticated read-only native MCP discovery and connection observations.
+/// Uses the same original material/TLS checks as local admin; no raw credential
+/// or request content is returned. This is local evidence, not account acceptance.
+pub async fn observe(state_dir: &Path) -> Result<serde_json::Value> {
+    use rmcp::{
+        ClientServiceExt,
+        model::{CallToolRequestParams, ClientCapabilities, ClientConfig, Implementation},
+        service::ClientLifecycleMode,
+        transport::{
+            StreamableHttpClientTransport,
+            streamable_http_client::StreamableHttpClientTransportConfig,
+        },
+    };
+    let path = state_dir.to_owned();
+    let mut material = blocking(move || Material::open(path)).await?;
+    let key = material
+        .root
+        .read_raw("gateway-model.token", 4096)
+        .map_err(|_| refused("native_gateway_admin_material"))?;
+    let ready: Ready = serde_json::from_slice(material.files[3].bytes())
+        .map_err(|_| refused("native_gateway_admin_material"))?;
+    if !token(key.bytes())
+        || ready.files.get("gateway-model.token") != Some(&Sha256Digest::of_bytes(key.bytes()))
+    {
+        return Err(refused("native_gateway_admin_material"));
+    }
+    let client = reqwest::Client::builder()
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .tls_backend_preconfigured(material.tls.http_client_config())
+        .connect_timeout(std::time::Duration::from_secs(3))
+        .build()
+        .map_err(|_| refused("setup_mcp_client_failed"))?;
+    let config = StreamableHttpClientTransportConfig::with_uri(format!(
+        "{}/mcp",
+        material.origin.origin().ascii_serialization()
+    ))
+    .auth_header(
+        std::str::from_utf8(key.bytes())
+            .map_err(|_| refused("native_gateway_admin_material"))?
+            .to_owned(),
+    )
+    .reinit_on_expired_session(false)
+    .max_sse_event_size(crate::gateway::http::MESSAGE_BYTES)
+    .max_concurrent_requests(1);
+    material.files.push(key);
+    let transport = StreamableHttpClientTransport::with_client(client, config);
+    let running = tokio::time::timeout(
+        std::time::Duration::from_secs(5),
+        ClientConfig::new(
+            ClientCapabilities::default(),
+            Implementation::new("styx-cli-status", "1"),
+        )
+        .serve_with_lifecycle(transport, ClientLifecycleMode::Initialize),
+    )
+    .await
+    .map_err(|_| refused("setup_gateway_unavailable"))?
+    .map_err(|_| refused("setup_gateway_unavailable"))?;
+    let observed = async {
+        if running.peer_info().is_none_or(|info| {
+            info.server_info
+                .as_ref()
+                .is_none_or(|server| server.name != "styx-vnext")
+        }) {
+            return Err(refused("setup_native_discovery_required"));
+        }
+        let tools = running
+            .list_tools(None)
+            .await
+            .map_err(|_| refused("setup_mcp_discovery_failed"))?;
+        let names: Vec<_> = tools.tools.iter().map(|t| t.name.to_string()).collect();
+        if names.iter().collect::<BTreeSet<_>>().len() != names.len()
+            || names.iter().any(|name| {
+                ["env_", "project_", "service_", "cas_"]
+                    .iter()
+                    .any(|prefix| name.starts_with(prefix))
+            })
+        {
+            return Err(refused("setup_native_discovery_required"));
+        }
+        if [
+            "list_execution_environments",
+            "get_execution_environment_status",
+            "exec_command",
+            "write_stdin",
+        ]
+        .iter()
+        .any(|n| !names.iter().any(|t| t == n))
+        {
+            return Err(refused("setup_native_discovery_required"));
+        }
+        let list = running
+            .call_tool(CallToolRequestParams::new("list_execution_environments"))
+            .await
+            .map_err(|_| refused("setup_mcp_status_failed"))?;
+        if list.is_error == Some(true) {
+            return Err(refused("setup_mcp_status_failed"));
+        }
+        let list = list
+            .structured_content
+            .ok_or_else(|| refused("setup_mcp_status_failed"))?;
+        let mut environments = Vec::new();
+        for env in list["environments"]
+            .as_array()
+            .ok_or_else(|| refused("setup_mcp_status_failed"))?
+        {
+            let request = serde_json::from_value(serde_json::json!({"name":"get_execution_environment_status", "arguments":{"environment_id":env["environment_id"]}})).map_err(|_| refused("setup_mcp_status_failed"))?;
+            let status = running
+                .call_tool(request)
+                .await
+                .map_err(|_| refused("setup_mcp_status_failed"))?;
+            if status.is_error == Some(true) {
+                return Err(refused("setup_mcp_status_failed"));
+            }
+            environments.push(
+                status
+                    .structured_content
+                    .ok_or_else(|| refused("setup_mcp_status_failed"))?,
+            );
+        }
+        let tunnel = crate::foreground::tunnel::status(state_dir)
+            .await
+            .map_err(|_| refused("setup_tunnel_status_failed"))?;
+        let tunnel =
+            serde_json::to_value(tunnel).map_err(|_| refused("setup_tunnel_status_failed"))?;
+        Ok(
+            serde_json::json!({"origin":material.origin.origin().ascii_serialization(), "origins":material.origins, "tools":names, "environments":environments,"verification_scope":"authenticated-local-mcp-discovery","server_name":"styx-vnext","verified_at_unix_ms":clock_ms()?,"tunnel_id":tunnel["tunnelId"]}),
+        )
+    };
+    let result = tokio::time::timeout(std::time::Duration::from_secs(8), observed)
+        .await
+        .unwrap_or_else(|_| Err(refused("setup_mcp_status_timeout")));
+    tokio::time::timeout(std::time::Duration::from_secs(5), running.cancel())
+        .await
+        .map_err(|_| refused("setup_mcp_cleanup_unconfirmed"))?
+        .map_err(|_| refused("setup_mcp_cleanup_unconfirmed"))?;
+    material.validate()?;
+    result
+}
 async fn owned(action: Action) -> Result<AdminReport> {
     let permit = OPERATIONS
         .clone()

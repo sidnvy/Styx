@@ -8,6 +8,14 @@ use std::{
     process::ExitCode,
 };
 use tokio_util::sync::CancellationToken;
+#[path = "plugin_package.rs"]
+mod plugin_package;
+#[path = "setup.rs"]
+mod setup;
+#[path = "setup_prompt.rs"]
+mod setup_prompt;
+#[path = "status_view.rs"]
+mod status_view;
 
 #[derive(Parser)]
 #[command(
@@ -21,6 +29,24 @@ pub(crate) struct Cli {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Guided first-run setup; noninteractive use requires a private answers file.
+    Setup {
+        #[arg(long)]
+        root: Option<PathBuf>,
+        #[arg(long)]
+        answers: Option<PathBuf>,
+        /// Keep roles in this process instead of installing Linux user services.
+        #[arg(long)]
+        foreground: bool,
+        /// Test mode: stop and join foreground roles after connection is observed.
+        #[arg(long, requires = "foreground", requires = "answers", hide = true)]
+        exit_when_connected: bool,
+    },
+    /// Invite another computer to this hub and optionally review its request.
+    Invite {
+        #[arg(long)]
+        root: Option<PathBuf>,
+    },
     /// Back up stopped role roots, then set up or join again normally.
     Role {
         #[command(subcommand)]
@@ -198,10 +224,12 @@ enum Command {
     /// Inspect the existing deployment without connecting or starting services.
     Status {
         #[arg(long)]
-        state_dir: PathBuf,
+        state_dir: Option<PathBuf>,
+        #[arg(long, conflicts_with = "state_dir")]
+        root: Option<PathBuf>,
         #[arg(long)]
         json: bool,
-        #[arg(long)]
+        #[arg(long, requires = "state_dir")]
         native: bool,
     },
     /// Validate a profile, or inspect OS desktop candidates without granting access.
@@ -586,6 +614,29 @@ fn error(code: &str) -> ExitCode {
     // Curated codes only; runtime errors may contain private paths or inputs.
     eprintln!("{}", serde_json::json!({"schema":1,"error":code}));
     ExitCode::from(2)
+}
+fn setup_result(result: Result<(), setup::Failure>) -> ExitCode {
+    match result {
+        Ok(()) => ExitCode::SUCCESS,
+        Err(failure) => {
+            eprintln!(
+                "{}",
+                serde_json::json!({"schema":1,"error":failure.code,"outcome":if failure.exit == 4 {"unknown"} else {"stopped"},"operations_replayed":false})
+            );
+            if let Some(hint) = failure.hint() {
+                eprintln!("{hint}");
+            }
+            if failure.exit == 4 {
+                eprintln!(
+                    "Setup stopped with an unknown outcome. Preserve the original inputs and role roots. Check styx status and the original pending request/transaction before taking another action; do not request, approve or pair again automatically."
+                );
+                let _ = io::stdout().flush();
+                let _ = io::stderr().flush();
+                std::process::exit(4);
+            }
+            ExitCode::from(failure.exit)
+        }
+    }
 }
 fn write_json(value: &impl serde::Serialize) -> io::Result<()> {
     let stdout = io::stdout();
@@ -991,6 +1042,19 @@ async fn stop_signal() -> io::Result<()> {
 pub(crate) async fn run(cli: Cli) -> ExitCode {
     use styx_runtime::foreground::{self, HostWireMode};
     match cli.command {
+        Command::Setup {
+            root,
+            answers,
+            foreground,
+            exit_when_connected,
+        } => setup_result(setup::run(root, answers, foreground, exit_when_connected).await),
+        Command::Invite { root } => setup_result(setup::invite(root).await),
+        Command::Status {
+            state_dir: None,
+            root,
+            json,
+            ..
+        } => setup_result(status_view::run(root, json).await),
         Command::Role {
             command:
                 RoleCommand::Retire {
@@ -1358,8 +1422,9 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
         ),
         Command::Status {
             native: true,
-            state_dir,
+            state_dir: Some(state_dir),
             json,
+            ..
         } => native_result(
             styx_runtime::management::native::inspect(&state_dir, None).await,
             json,
@@ -1848,8 +1913,9 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
         } => desktop_diagnostics(json).await,
         Command::Status {
             native: false,
-            state_dir,
+            state_dir: Some(state_dir),
             json,
+            ..
         }
         | Command::Doctor {
             state_dir: Some(state_dir),

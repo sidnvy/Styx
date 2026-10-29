@@ -775,6 +775,7 @@ mod platform {
         )
         .map_err(|_| error("gateway_partition_invalid"))?;
         let mcp = GatewayHttp::new(policy, backend, budget);
+        mcp.observe_tunnel(crate::foreground::tunnel::observe_requests(&tunnel_state)?);
         let mcp_stop = mcp.paired_shutdown_handle();
         let app = EnrollmentHttp::new_paired(tls, shared.clone(), relay.clone(), mcp, vec![host])
             .map_err(|_| error("gateway_listener_configuration_invalid"))?;

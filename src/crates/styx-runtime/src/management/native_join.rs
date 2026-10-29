@@ -241,7 +241,7 @@ pub(crate) async fn inspect_for_app(scope: Arc<crate::app::HostScope>) -> Result
     {
         let path = scope.state_dir().to_owned();
         let retained = scope.clone();
-        platform::owned(async move { platform::inspect(path, scope).await })
+        platform::owned(async move { platform::inspect(path, Some(scope)).await })
             .await
             .map_err(|error| error.with_app_scope(retained))
     }
@@ -257,6 +257,13 @@ pub(crate) async fn inspect_for_app(scope: Arc<crate::app::HostScope>) -> Result
         let _ = scope;
         Err(JoinError::new("native_join_platform_unsupported", 3))
     }
+}
+
+/// Read the original CLI enrollment prefix without dispatching Join/Claim/Confirm.
+/// A partial or uncertain prefix is refused by the same inspector used by the App.
+pub async fn inspect(state_dir: &Path) -> Result<JoinReport> {
+    let path = state_dir.to_path_buf();
+    platform::owned(async move { platform::inspect(path, None).await }).await
 }
 
 #[cfg(any(
@@ -1078,9 +1085,9 @@ mod platform {
     }
     pub(super) async fn inspect(
         path: PathBuf,
-        scope: Arc<crate::app::HostScope>,
+        scope: Option<Arc<crate::app::HostScope>>,
     ) -> Result<JoinReport> {
-        let work = blocking(move || open(&path, Some(scope))).await?;
+        let work = blocking(move || open(&path, scope)).await?;
         let (_work, report) = io(work, |w| {
             // A strict complete prefix is required. Missing reply or a partial
             // Claim/Confirm has unknown outcome, never an invitation to retry.

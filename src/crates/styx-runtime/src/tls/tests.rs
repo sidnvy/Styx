@@ -2,6 +2,74 @@ use super::*;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[test]
+fn setup_http_verifier_keeps_chain_hostname_and_exact_leaf_checks() {
+    use rustls::client::danger::ServerCertVerifier;
+    let now = 1900000000;
+    let ca = generate_gateway_ca(now, now - 60, now + 86400 * 365)
+        .ok()
+        .unwrap();
+    let first = issue_server_leaf(
+        &ca.certificate_pem,
+        &ca.private_key,
+        &ca.anchor_pin,
+        "https://127.0.0.1:22022",
+        now,
+    )
+    .ok()
+    .unwrap();
+    let other = issue_server_leaf(
+        &ca.certificate_pem,
+        &ca.private_key,
+        &ca.anchor_pin,
+        "https://127.0.0.1:22022",
+        now,
+    )
+    .ok()
+    .unwrap();
+    let mut roots = RootCertStore::empty();
+    roots
+        .add(certificate_chain(&ca.certificate_pem).unwrap().remove(0))
+        .unwrap();
+    let chain =
+        rustls::client::WebPkiServerVerifier::builder_with_provider(Arc::new(roots), provider())
+            .build()
+            .unwrap();
+    let verifier = PinnedHttpPeer {
+        chain,
+        leaf: first.leaf_pin,
+    };
+    let leaf = certificate_chain(&first.certificate_chain_pem)
+        .unwrap()
+        .remove(0);
+    let other = certificate_chain(&other.certificate_chain_pem)
+        .unwrap()
+        .remove(0);
+    let name = ServerName::try_from("127.0.0.1").unwrap();
+    let clock = rustls::pki_types::UnixTime::since_unix_epoch(Duration::from_secs(now));
+    assert!(
+        verifier
+            .verify_server_cert(&leaf, &[], &name, &[], clock)
+            .is_ok()
+    );
+    assert!(
+        verifier
+            .verify_server_cert(&other, &[], &name, &[], clock)
+            .is_err()
+    );
+    assert!(
+        verifier
+            .verify_server_cert(
+                &leaf,
+                &[],
+                &ServerName::try_from("wrong.invalid").unwrap(),
+                &[],
+                clock
+            )
+            .is_err()
+    );
+}
+
+#[test]
 fn private_raw_key_debug_is_redacted_and_pin_domains_are_explicit() {
     let key =
         PrivateKeyPem::from_protected_reader_bytes(b"fixture-private-secret-never-print".to_vec())

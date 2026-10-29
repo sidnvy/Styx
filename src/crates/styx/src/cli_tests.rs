@@ -1,6 +1,50 @@
 //! Argument boundaries only. Subprocess/OS effects belong to interop acceptance.
 use super::*;
 #[test]
+fn cli_guided_setup_status_and_invite_preserve_low_level_status() {
+    assert!(Cli::try_parse_from(["styx", "setup"]).is_ok());
+    assert!(
+        Cli::try_parse_from([
+            "styx",
+            "setup",
+            "--answers",
+            "/private/answers.json",
+            "--foreground",
+            "--exit-when-connected"
+        ])
+        .is_ok()
+    );
+    assert!(Cli::try_parse_from(["styx", "setup", "--exit-when-connected"]).is_err());
+    assert!(
+        Cli::try_parse_from(["styx", "setup", "--foreground", "--exit-when-connected"]).is_err()
+    );
+    assert!(Cli::try_parse_from(["styx", "status", "--json"]).is_ok());
+    assert!(
+        Cli::try_parse_from([
+            "styx",
+            "status",
+            "--state-dir",
+            "/private/host",
+            "--native",
+            "--json"
+        ])
+        .is_ok()
+    );
+    assert!(Cli::try_parse_from(["styx", "status", "--native"]).is_err());
+    assert!(
+        Cli::try_parse_from([
+            "styx",
+            "status",
+            "--root",
+            "/private/setup",
+            "--state-dir",
+            "/private/host"
+        ])
+        .is_err()
+    );
+    assert!(Cli::try_parse_from(["styx", "invite", "--root", "/private/setup"]).is_ok());
+}
+#[test]
 fn cli_gateway_invite_origin_is_a_closed_optional_selection() {
     let base = [
         "styx",

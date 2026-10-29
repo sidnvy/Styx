@@ -18,6 +18,86 @@ use tokio_util::sync::CancellationToken;
 use zeroize::Zeroizing;
 
 const RETRY: Duration = Duration::from_secs(15);
+const OBSERVATION_HEADER: &str = "X-Styx-Tunnel-Observation: file:";
+
+/// Diagnostics only. A per-process random marker is supplied in the signed
+/// tunnel client's forwarding headers, never its discovery headers. It does
+/// not authorize requests or introduce conversation/owner authority.
+pub(crate) struct RequestObservation {
+    marker: Zeroizing<Vec<u8>>,
+    path: PathBuf,
+    root: PrivateRoot,
+    counters: std::sync::Mutex<(u64, Option<u64>)>,
+}
+impl RequestObservation {
+    pub(crate) fn record(&self, marker: &[u8]) {
+        if aws_lc_rs::constant_time::verify_slices_are_equal(marker, &self.marker).is_err() {
+            return;
+        }
+        let Ok(now) = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH) else {
+            return;
+        };
+        let Ok(now) = u64::try_from(now.as_millis()) else {
+            return;
+        };
+        let mut count = self.counters.lock().unwrap_or_else(|e| e.into_inner());
+        count.0 = count.0.saturating_add(1);
+        count.1 = Some(now);
+        if let Ok(bytes) = serde_json::to_vec(
+            &serde_json::json!({"schema":1,"requests":count.0,"last_seen_unix_ms":count.1}),
+        ) {
+            let _ = atomic_write(&self.path, &self.root, "request-observation.json", &bytes);
+        }
+    }
+}
+pub(crate) fn observe_requests(state: &Path) -> Result<Option<Arc<RequestObservation>>> {
+    let Some((path, root)) = directory(state, false)? else {
+        return Ok(None);
+    };
+    if connection(&root)?.is_none() {
+        return Ok(None);
+    }
+    let old = request_observation(state)?;
+    let marker = Zeroizing::new(uuid::Uuid::new_v4().simple().to_string().into_bytes());
+    atomic_write(&path, &root, "request-marker", &marker)?;
+    Ok(Some(Arc::new(RequestObservation {
+        marker,
+        path,
+        root,
+        counters: std::sync::Mutex::new((
+            old["requests"].as_u64().unwrap_or(0),
+            old["last_seen_unix_ms"].as_u64(),
+        )),
+    })))
+}
+/// Private metadata only: no request body, headers, account or conversation ID.
+pub fn request_observation(state: &Path) -> Result<serde_json::Value> {
+    let empty = || serde_json::json!({"schema":1,"requests":0,"last_seen_unix_ms":null});
+    let Some((_, root)) = directory(state, false)? else {
+        return Ok(empty());
+    };
+    if root.ensure_absent("request-observation.json").is_ok() {
+        return Ok(empty());
+    }
+    let raw = root
+        .read_raw("request-observation.json", 1024)
+        .map_err(|_| error("tunnel_observation_unavailable"))?;
+    #[derive(Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct Observation {
+        schema: u16,
+        requests: u64,
+        last_seen_unix_ms: Option<u64>,
+    }
+    let value: Observation =
+        serde_json::from_slice(raw.bytes()).map_err(|_| error("tunnel_observation_invalid"))?;
+    if value.schema != 1 {
+        return Err(error("tunnel_observation_invalid"));
+    }
+    Ok(
+        serde_json::json!({"schema":1,"requests":value.requests,"last_seen_unix_ms":value.last_seen_unix_ms}),
+    )
+}
 #[cfg(unix)]
 const STOP_TIMEOUT: Duration = Duration::from_secs(4);
 type Result<T> = std::result::Result<T, ForegroundError>;
@@ -644,12 +724,23 @@ fn prepare(
     }
     let header = Zeroizing::new(format!("Bearer {token}"));
     atomic_write(&path, &root, "gateway-header", header.as_bytes())?;
+    let mut args = arguments(&c, state, port);
+    // Only real forwarded MCP traffic has the observation marker. The client's
+    // automatic startup discovery still uses its separate original headers.
+    if root.ensure_absent("request-marker").is_err() {
+        root.read_raw("request-marker", 128)
+            .map_err(|_| error("tunnel_observation_unavailable"))?;
+        args.0.extend([
+            "--mcp.extra-headers".into(),
+            file_reference(OBSERVATION_HEADER, &path.join("request-marker")),
+        ]);
+    }
     Ok(Some(Prepared {
         path,
         _root: root,
         _owner: owner,
         image,
-        arguments: arguments(&c, state, port),
+        arguments: args,
     }))
 }
 /// Pins and the original release remain retained until this task reaps its last

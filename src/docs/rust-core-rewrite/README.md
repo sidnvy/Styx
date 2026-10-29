@@ -6,6 +6,8 @@
 
 > **Scope override (2026-10-27):** Legacy migration is out of the release scope; devices are freshly installed and re-paired. [REDUCED-SCOPE.md](REDUCED-SCOPE.md) defines v1, what is cut or deferred, and the execution sequence. It overrides conflicting parts of the documents below.
 
+Rust CLI first run: [CLI-ONBOARDING.md](CLI-ONBOARDING.md) documents `styx setup`, `styx invite`, `styx status`, the answers schema, interruption behavior and the current validation gaps.
+
 阅读顺序：
 
 1. [SPEC.md](SPEC.md)：范围、架构、责任、平台、迁移、工程与发布完成定义。
