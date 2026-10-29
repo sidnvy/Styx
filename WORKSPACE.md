@@ -21,7 +21,9 @@ Product work now follows `src/docs/rust-core-rewrite/REDUCED-SCOPE.md`; its sequ
 
 Existing evidence, Rust toolchain and Cargo caches referenced by the handoff retain their established paths. Do not rebuild, move signed installations, change identity/pairing, or replay unknown operations merely because the source directory moved.
 
-No active Codex worktree leases. Retired: `codex-computer-busy` (2026-10-29) merged and removed.
+Active lease (2026-10-29): `codex-join-retry` at /home/sid/Developer/worktrees/Styx/codex-join-retry, branch codex/join-retry, owner Claude (integrator), paths styx-runtime management/native_join*.rs, the Host join store, app join operations (app/*.rs join paths only), their tests; purpose a provably not-dispatched join (connect/TLS refusal) must not leave a stuck 'dispatch unknown' profile; retire by merge into develop and removal.
+
+Retired: `codex-computer-busy` (2026-10-29) merged and removed.
 
 Retired: `codex-mcp-sessions` (2026-10-29) merged and removed.
 
