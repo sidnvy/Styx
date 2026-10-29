@@ -39,6 +39,26 @@ async fn pair(
     cwd: &Path,
     browser: bool,
 ) -> Unwrapped {
+    pair_with_metadata(
+        client,
+        node,
+        admin,
+        device,
+        cwd,
+        browser,
+        ("Owned paired Exec", "linux"),
+    )
+    .await
+}
+async fn pair_with_metadata(
+    client: &Client,
+    node: &Mutex<NodeClient>,
+    admin: &str,
+    device: &DeviceId,
+    cwd: &Path,
+    browser: bool,
+    metadata: (&str, &str),
+) -> Unwrapped {
     let invitation = client
         .request(Method::POST, "/styx/enroll/invitations", Some(admin), b"{}")
         .await;
@@ -48,8 +68,8 @@ async fn pair(
     let payload = JoinPayload {
         invitation: invitation.invitation.expose().to_owned(),
         device_id: device.clone(),
-        label: "Owned paired Exec".into(),
-        platform: "linux".into(),
+        label: metadata.0.into(),
+        platform: metadata.1.into(),
         cwd: cwd.to_str().unwrap().into(),
         shell: "/bin/sh".into(),
         computer_requested: false,
@@ -936,4 +956,269 @@ impl crate::host::protocol::browser::BrowserBootstrap for CapacityBrowser {
     fn validate_control(&self) -> Result<(), styx_contracts::error::ErrorCategory> {
         Ok(())
     }
+}
+
+/// Real pairing persistence, admin authorization and MCP discovery; no native
+/// operation is executed by this inventory/revocation scenario.
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires sockets, STYX_TEST_PAIRED_ROOT, STYX_TEST_TLS_FIXTURES and STYX_TEST_NODE22; two real paired identities"]
+async fn named_computers_revoke_requires_sockets() {
+    let parent =
+        PathBuf::from(std::env::var("STYX_TEST_PAIRED_ROOT").expect("owned root required"));
+    std::fs::create_dir_all(&parent).unwrap();
+    let root = parent.join(uuid::Uuid::new_v4().to_string());
+    std::fs::create_dir(&root).unwrap();
+    std::fs::set_permissions(&root, std::fs::Permissions::from_mode(0o700)).unwrap();
+    let fixture = PathBuf::from(std::env::var("STYX_TEST_TLS_FIXTURES").unwrap());
+    let cert = std::fs::read(fixture.join("cert-a.pem")).unwrap();
+    let ca = std::fs::read(fixture.join("ca-a.pem")).unwrap();
+    let leaf_der = rustls_pemfile::certs(&mut std::io::Cursor::new(&cert))
+        .next()
+        .unwrap()
+        .unwrap();
+    let ca_der = rustls_pemfile::certs(&mut std::io::Cursor::new(&ca))
+        .next()
+        .unwrap()
+        .unwrap();
+    let leaf = GatewayLeafPin::from_certificate_der(&leaf_der);
+    let key = PrivateKeyPem::from_protected_reader_bytes(
+        std::fs::read(fixture.join("key-a.pem")).unwrap(),
+    )
+    .unwrap();
+    let tls = Arc::new(GatewayServerTls::from_pem(&cert, &key, leaf.clone()).unwrap());
+    drop(key);
+    let client_tls = Arc::new(
+        GatewayClientTls::from_pinned_ca_pem(
+            &ca,
+            TrustAnchorPin::from_certificate_der(&ca_der),
+            Some(leaf),
+        )
+        .unwrap(),
+    );
+    let mut roots = rustls::RootCertStore::empty();
+    roots.add(ca_der).unwrap();
+    let tls_config = rustls::ClientConfig::builder_with_provider(Arc::new(
+        rustls::crypto::aws_lc_rs::default_provider(),
+    ))
+    .with_protocol_versions(&[&rustls::version::TLS13])
+    .unwrap()
+    .with_root_certificates(roots)
+    .with_no_client_auth();
+    let raw = reqwest::Client::builder()
+        .tls_backend_preconfigured(tls_config)
+        .no_proxy()
+        .redirect(reqwest::redirect::Policy::none())
+        .connect_timeout(Duration::from_secs(5))
+        .build()
+        .unwrap();
+    let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap();
+    let host_header = format!("localhost:{}", address.port());
+    let admin = random_token();
+    let mcp = random_token();
+    let service = EnrollmentService::recover_existing(
+        fresh_store(&root.join("store")),
+        admin.as_bytes(),
+        Sha256Digest::of_bytes(mcp.as_bytes()),
+        vec![host_header.clone()],
+        Limits::default(),
+    )
+    .unwrap();
+    let gateway_id = GatewayId::try_from("owned-paired-gateway").unwrap();
+    let gateway_epoch =
+        GatewayEpoch::try_from(format!("owned-gateway-{}", uuid::Uuid::new_v4())).unwrap();
+    let partition = Arc::new(Semaphore::new(styx_contracts::HOST_QUEUED_BYTES));
+    let policy = Arc::new(
+        GatewayBearerPolicy::new(mcp.as_bytes(), vec![host_header.clone()], vec![]).unwrap(),
+    );
+    // Constructor is composed with the same service, TLS leaf and listener.
+    let shared = crate::enrollment::shared::SharedEnrollment::new(service);
+    let relay = RelayHandle::new(
+        shared.clone(),
+        gateway_id.clone(),
+        gateway_epoch,
+        partition
+            .clone()
+            .try_acquire_many_owned(16 * 1024 * 1024)
+            .unwrap(),
+    )
+    .unwrap();
+    let backend = Arc::new(PairedGatewayBackend::new(relay.clone(), None));
+    let http_budget = HttpBudget::from_reserved_partition(
+        Arc::new(Semaphore::new(crate::gateway::http::GATEWAY_HTTP_BYTES))
+            .try_acquire_many_owned(crate::gateway::http::GATEWAY_HTTP_BYTES as u32)
+            .unwrap(),
+    )
+    .unwrap();
+    let mcp_http = GatewayHttp::new(policy, backend.clone(), http_budget);
+    let app = EnrollmentHttp::new_paired(
+        tls,
+        shared,
+        relay,
+        mcp_http.clone(),
+        vec![host_header.clone()],
+    )
+    .unwrap();
+    let stop = CancellationToken::new();
+    let app_run = app.clone();
+    let run_stop = stop.clone();
+    let server = tokio::spawn(async move { app_run.run(listener, run_stop).await });
+    let client = Client {
+        tls: client_tls.clone(),
+        address,
+        host: host_header.clone(),
+    };
+
+    let node_a = Mutex::new(NodeClient::start().await);
+    let node_b = Mutex::new(NodeClient::start().await);
+    let first = DeviceId::try_from("styx-1123456789abcdef01234567").unwrap();
+    let second = DeviceId::try_from("styx-2123456789abcdef01234567").unwrap();
+    let _first_credential = pair_with_metadata(
+        &client,
+        &node_a,
+        &admin,
+        &first,
+        &root,
+        false,
+        ("Desk Linux", "linux"),
+    )
+    .await;
+    let _second_credential = pair_with_metadata(
+        &client,
+        &node_b,
+        &admin,
+        &second,
+        &root,
+        false,
+        ("Travel Mac", "darwin"),
+    )
+    .await;
+    let uri = format!("https://{host_header}/mcp");
+    let transport = StreamableHttpClientTransport::with_client(
+        raw,
+        StreamableHttpClientTransportConfig::with_uri(uri)
+            .auth_header(mcp.to_string())
+            .reinit_on_expired_session(false),
+    );
+    let running = ClientConfig::new(
+        ClientCapabilities::default(),
+        Implementation::new("named-computers-test", "1"),
+    )
+    .serve_with_lifecycle(transport, ClientLifecycleMode::Initialize)
+    .await
+    .unwrap();
+    let list = data(
+        running
+            .call_tool(call("list_execution_environments", json!({})))
+            .await
+            .unwrap(),
+    );
+    let environments = list["environments"].as_array().unwrap();
+    assert_eq!(environments.len(), 2);
+    for (id, label, platform) in [
+        (&first, "Desk Linux", "linux"),
+        (&second, "Travel Mac", "macos"),
+    ] {
+        let env = environments
+            .iter()
+            .find(|e| e["environment_id"] == id.as_str())
+            .unwrap();
+        assert_eq!(env["label"], label);
+        assert_eq!(env["platform"], platform);
+        let status = data(
+            running
+                .call_tool(call(
+                    "get_execution_environment_status",
+                    json!({"environment_id":id.as_str()}),
+                ))
+                .await
+                .unwrap(),
+        );
+        assert_eq!(status["label"], label);
+        assert_eq!(status["platform"], platform);
+    }
+    let body = encoded(&json!({"device_id":first.as_str()}));
+    // Model credentials and unauthenticated callers cannot administer pairings.
+    for bearer in [None, Some(mcp.as_ref())] {
+        assert_ne!(
+            client
+                .request(Method::POST, "/styx/enroll/revoke", bearer, &body)
+                .await
+                .status,
+            200
+        );
+    }
+    assert_eq!(
+        data(
+            running
+                .call_tool(call("list_execution_environments", json!({})))
+                .await
+                .unwrap()
+        )["environments"]
+            .as_array()
+            .unwrap()
+            .len(),
+        2
+    );
+    let origin = url::Url::parse(&format!("https://{host_header}/")).unwrap();
+    let inventory = crate::management::native_join_http::exchange_local_computers(
+        &origin,
+        &client_tls,
+        None,
+        admin.as_bytes(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(inventory.status, 200);
+    let rows: Value = serde_json::from_slice(&inventory.body).unwrap();
+    assert_eq!(rows.as_array().unwrap().len(), 2);
+    let revoked = crate::management::native_join_http::exchange_local_computers(
+        &origin,
+        &client_tls,
+        Some(&body),
+        admin.as_bytes(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(revoked.status, 200);
+    let list = data(
+        running
+            .call_tool(call("list_execution_environments", json!({})))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(list["environments"].as_array().unwrap().len(), 1);
+    assert_eq!(list["environments"][0]["environment_id"], second.as_str());
+    assert_eq!(list["environments"][0]["label"], "Travel Mac");
+    let removed = running
+        .call_tool(call(
+            "get_execution_environment_status",
+            json!({"environment_id":first.as_str()}),
+        ))
+        .await
+        .unwrap();
+    assert_eq!(removed.is_error, Some(true));
+    let inventory = client
+        .request(Method::GET, "/styx/enroll/devices", Some(&admin), &[])
+        .await;
+    let rows: Value = inventory.decode();
+    assert_eq!(
+        rows.as_array()
+            .unwrap()
+            .iter()
+            .find(|r| r["device_id"] == first.as_str())
+            .unwrap()["status"],
+        "revoked"
+    );
+    running.cancel().await.unwrap();
+    node_a.lock().await.stop().await;
+    node_b.lock().await.stop().await;
+    stop.cancel();
+    assert_joined(
+        &tokio::time::timeout(Duration::from_secs(20), server)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap(),
+    );
 }

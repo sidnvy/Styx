@@ -653,3 +653,58 @@ fn app_scope_update_retains_original_writer_and_recovers_exact_transaction() {
 // A descendant reuses only the existing disposable signed-fixture builders.
 #[path = "native_app_service_tests.rs"]
 mod app_service_tests;
+
+/// Exercise status's reader against an actual committed update and a stale
+/// setup selection, using the existing signed synthetic C07/C08 fixture.
+#[tokio::test]
+async fn status_selection_reads_committed_update_while_setup_copy_stays_old() {
+    let base = std::env::temp_dir().join(format!("styx-status-selection-{}", uuid::Uuid::new_v4()));
+    directory(&base);
+    let key = SigningKey::from_bytes(&[37u8; 32]);
+    let initial = candidate(&base, "setup", &key, false);
+    let selected = candidate(&base, "running", &key, true);
+    let profile = base.join("profile");
+    let mut tx = create(&profile, &initial, b"synthetic private fixture identity");
+    directory(&profile.join("inputs"));
+    let setup_file = profile.join("inputs/runtime-selection.json");
+    let setup_bytes = serde_json::to_vec(&initial).unwrap();
+    write(&setup_file, &setup_bytes, false);
+    tx.update_runtime(
+        verified(&base, "setup"),
+        verified(&base, "running"),
+        "status-runtime-update".try_into().unwrap(),
+        1,
+    )
+    .unwrap();
+    drop(tx);
+    let observed = crate::management::native_gateway_admin::committed_runtime_selection(
+        &profile.join("native"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(observed, selected);
+    assert_ne!(observed, initial);
+    assert_eq!(fs::read(&setup_file).unwrap(), setup_bytes);
+    assert_eq!(
+        release::verify_selected(&observed)
+            .unwrap()
+            .report()
+            .version,
+        "0.4.0-test.running"
+    );
+    // A canonical state replacement without the matching committed chain cannot
+    // fall back to the setup copy or become a reported running selection.
+    let canonical = profile.join("native/state.json");
+    let mut state: serde_json::Value =
+        serde_json::from_slice(&fs::read(&canonical).unwrap()).unwrap();
+    state[NATIVE_RUNTIME_SELECTION_KEY] = serde_json::to_value(&initial).unwrap();
+    fs::write(&canonical, serde_json::to_vec(&state).unwrap()).unwrap();
+    assert!(
+        crate::management::native_gateway_admin::committed_runtime_selection(
+            &profile.join("native")
+        )
+        .await
+        .is_err()
+    );
+    fs::remove_dir_all(base).unwrap();
+}

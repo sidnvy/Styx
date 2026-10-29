@@ -186,7 +186,7 @@ impl Failure {
             _owner: Some(Box::new(value)),
         }
     }
-    fn admin(value: admin::AdminError) -> Self {
+    pub(super) fn admin(value: admin::AdminError) -> Self {
         Self {
             code: value.code(),
             exit: value.exit_code(),

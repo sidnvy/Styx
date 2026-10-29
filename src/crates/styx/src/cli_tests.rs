@@ -680,3 +680,31 @@ async fn cli_role_retire_refuses_without_authorize_before_opening_roots() {
     .unwrap();
     assert_eq!(run(cli).await, ExitCode::from(2));
 }
+
+#[test]
+fn computers_accepts_root_before_or_after_remove_and_explicit_self_override() {
+    for argv in [
+        vec!["styx", "computers", "--root", "/owned", "--all"],
+        vec![
+            "styx",
+            "computers",
+            "--root",
+            "/owned",
+            "remove",
+            "Desk",
+            "--yes",
+        ],
+        vec![
+            "styx",
+            "computers",
+            "remove",
+            "styx-local",
+            "--root",
+            "/owned",
+            "--yes",
+            "--include-this-computer",
+        ],
+    ] {
+        assert!(Cli::try_parse_from(argv).is_ok());
+    }
+}

@@ -3,21 +3,51 @@ use serde_json::{Value, json};
 use std::path::{Path, PathBuf};
 use styx_runtime::management::{native, native_gateway_admin as admin, setup as inputs};
 
+fn read_selection(
+    path: &Path,
+) -> Result<Option<styx_contracts::native_management::NativeRuntimeSelection>, Failure> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let raw = inputs::read_private(path, 1024 * 1024)
+        .map_err(|_| Failure::new("status_runtime_selection_unavailable"))?;
+    serde_json::from_slice(&raw)
+        .map(Some)
+        .map_err(|_| Failure::new("status_runtime_selection_invalid"))
+}
+fn payload_version(
+    selection: &styx_contracts::native_management::NativeRuntimeSelection,
+) -> Result<Value, Failure> {
+    let candidate =
+        styx_runtime::release::verify_selected(selection).map_err(|e| Failure::new(e.code()))?;
+    Ok(json!({"version":candidate.report().version,"manifest_sha256":selection.manifest_sha256}))
+}
+fn current_payload(committed: &Value, role: Role) -> Value {
+    let name = if role == Role::Hub { "gateway" } else { "host" };
+    committed
+        .get(name)
+        .cloned()
+        .unwrap_or_else(|| json!({"version":"not selected"}))
+}
 pub(super) async fn observe(root: &Path) -> Result<Value, Failure> {
     let answers = Answers::load(&root.join("inputs/setup-intent.json"))?;
-    let payload = if root.join("inputs/runtime-selection.json").exists() {
-        let selection: styx_contracts::native_management::NativeRuntimeSelection =
-            serde_json::from_slice(
-                &inputs::read_private(&root.join("inputs/runtime-selection.json"), 1024 * 1024)
-                    .map_err(|_| Failure::new("status_runtime_selection_unavailable"))?,
-            )
-            .map_err(|_| Failure::new("status_runtime_selection_invalid"))?;
-        let candidate = styx_runtime::release::verify_selected(&selection)
-            .map_err(|e| Failure::new(e.code()))?;
-        json!({"version":candidate.report().version,"manifest_sha256":selection.manifest_sha256})
-    } else {
-        json!({"version":"not selected"})
+    let setup_payload = match read_selection(&root.join("inputs/runtime-selection.json")) {
+        Ok(Some(selection)) => payload_version(&selection).unwrap_or_else(
+            |_| json!({"version":"unavailable","manifest_sha256":selection.manifest_sha256}),
+        ),
+        Ok(None) => json!({"version":"not selected"}),
+        Err(error) => json!({"version":"unavailable","error":error.code}),
     };
+    let mut committed = json!({});
+    for name in ["gateway", "host"] {
+        if root.join(name).exists() {
+            committed[name] = match admin::committed_runtime_selection(&root.join(name)).await {
+                Ok(selection) => payload_version(&selection)?,
+                Err(error) => json!({"version":"unavailable","error":error.code()}),
+            };
+        }
+    }
+    let payload = current_payload(&committed, answers.role);
     let mut services = json!({});
     for (name, component) in [
         ("gateway", native::NativeComponent::Gateway),
@@ -50,7 +80,7 @@ pub(super) async fn observe(root: &Path) -> Result<Value, Failure> {
         }
     }
     let gateway = root.join("gateway");
-    let mut report = json!({"schema":1,"role":answers.role,"label":answers.label,"payload_version":payload["version"],"payload_manifest_sha256":payload["manifest_sha256"],"networks":answers.networks,"services":services,"operations_replayed":false});
+    let mut report = json!({"schema":1,"role":answers.role,"label":answers.label,"payload_version":payload["version"],"payload_manifest_sha256":payload["manifest_sha256"],"setup_payload_version":setup_payload["version"],"committed_payloads":committed,"networks":answers.networks,"services":services,"operations_replayed":false});
     if let Ok(raw) = inputs::read_private(&root.join("inputs/host-public-identity.json"), 16384)
         && let Ok(identity) = serde_json::from_slice::<Value>(&raw)
         && let Some(device) = identity["device_id"].as_str()
@@ -145,12 +175,31 @@ fn last_seen(timestamp: Option<u64>, now_ms: u64) -> String {
     )
 }
 fn render(v: &Value, root: &Path, now_ms: u64) -> String {
+    let version = v["payload_version"].as_str().unwrap_or("unknown");
+    let setup = v["setup_payload_version"].as_str();
+    let payload = if matches!(version, "unknown" | "unavailable" | "not selected") {
+        version.to_owned()
+    } else if let Some(setup) = setup.filter(|setup| *setup != version) {
+        format!("running {version} (set up with {setup})")
+    } else {
+        format!("running {version}")
+    };
     let mut lines = vec![format!(
         "Styx — {} ({})\nPayload: {}",
         v["label"].as_str().unwrap_or("computer"),
         v["role"].as_str().unwrap_or("unknown"),
-        v["payload_version"].as_str().unwrap_or("unknown")
+        payload
     )];
+    if let Some(roles) = v["committed_payloads"].as_object() {
+        for (name, role) in roles {
+            if role["version"].as_str().is_some_and(|v| v != version) {
+                lines.push(format!(
+                    "{name} payload: {}",
+                    role["version"].as_str().unwrap_or("unavailable")
+                ));
+            }
+        }
+    }
     if let Some(origins) = v["gateway"]["origins"].as_array() {
         for origin in origins {
             lines.push(format!(
@@ -228,6 +277,26 @@ fn render(v: &Value, root: &Path, now_ms: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn status_uses_committed_role_versions_when_setup_fixture_differs() {
+        let committed = json!({"gateway":{"version":"0.4.0-linux.34","manifest_sha256":"committed-gateway"},
+            "host":{"version":"0.4.0-linux.35","manifest_sha256":"committed-host"}});
+        let setup = json!({"version":"0.4.0-linux.31","manifest_sha256":"setup-time"});
+        let payload = current_payload(&committed, Role::Hub);
+        let report = json!({"payload_version":payload["version"],"setup_payload_version":setup["version"],"committed_payloads":committed});
+        let output = render(&report, Path::new("/owned"), 0);
+        assert_eq!(payload["manifest_sha256"], "committed-gateway");
+        assert!(output.contains("Payload: running 0.4.0-linux.34 (set up with 0.4.0-linux.31)"));
+        assert!(output.contains("host payload: 0.4.0-linux.35"));
+        assert_eq!(
+            current_payload(&committed, Role::Join)["version"],
+            "0.4.0-linux.35"
+        );
+        assert_eq!(
+            current_payload(&json!({}), Role::Hub)["version"],
+            "not selected"
+        );
+    }
     #[test]
     fn status_shows_session_capacity_and_close_counters() {
         let value =

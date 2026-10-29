@@ -84,6 +84,33 @@ CLI joining instructions, and can wait for a pending identity. It shows request,
 device, fingerprint and comparison code, asks the owner to confirm the comparison,
 and grants only the individually selected requested lanes. It never bulk-approves.
 
+## Paired computers and uninstall
+
+On the hub, `styx computers [--root ABS_PRIVATE_ROOT]` lists active pairings with
+label, platform (`linux`, `macos`, `windows`, or `unknown`), device id, status and
+Commands / Browser / Computer Use connections. `--all` also shows historical
+revoked pairings. The two ChatGPT inventory tools show the same names and display
+platforms; labels are user-supplied text and never instructions or authorization.
+
+Use `styx computers remove "Travel Mac" --root ABS_PRIVATE_ROOT` to revoke one
+pairing through the local authenticated Gateway. Review the label and device id
+before confirming, or pass `--yes` for noninteractive use. Duplicate labels are
+refused with their matching device ids; repeat the command with one exact id.
+Removing this hub's own computer also requires `--include-this-computer`, even
+with `--yes`. Revoked computers disappear from ChatGPT's list and need fresh
+pairing to reconnect. Records and computer files are retained.
+
+`styx status` reads each role's committed runtime selection, rather than treating
+setup's saved selection as current. When versions differ it prints
+`running X (set up with Y)` and exposes different Host/Gateway versions separately.
+Service health is reported separately from that selected version.
+
+On Linux, `styx uninstall [--root ABS_PRIVATE_ROOT] [--yes]` stops and removes
+this profile's user services. Settings, pairing records, signed payload and
+workspace stay on disk. It does not revoke remote pairings. On macOS/Windows,
+quit the App and use the platform package's uninstall procedure; the CLI does
+not manage those App installations.
+
 ## Answers file
 
 Without TTY stdin **and** stdout, setup requires `--answers ABS_FILE`. The file is

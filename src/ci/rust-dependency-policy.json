@@ -108,6 +108,11 @@
   ],
   "source_guard_limit": "lexical defense in depth; imports/aliases/macros/FFI still need review; not a Rust sandbox or a proof of no IO",
   "known_ignored": {
+    "enrollment::service::tests::paired_journey::named_computers_revoke_requires_sockets": {
+      "kind": "explicit_owned_loopback_enrollment",
+      "input": "STYX_TEST_PAIRED_ROOT, STYX_TEST_TLS_FIXTURES, STYX_TEST_NODE22; isolated private root and TLS listener",
+      "required_for": "two real paired identities, names/normalized platforms in both MCP inventory tools, admin/model negative controls, one revoke and remaining-device visibility; no native executor or package acceptance"
+    },
     "app::control_binding_tests::completed_stopped_host_control_binding_preserves_execution_refusal_and_integrity": {
       "kind": "explicit_signed_native_payload",
       "input": "STYX_TEST_APP_CONTROL_SELECTION absolute protected NativeRuntimeSelection file; isolated strict-TLS enrollment roots only",
