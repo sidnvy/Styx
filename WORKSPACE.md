@@ -21,7 +21,9 @@ Product work now follows `src/docs/rust-core-rewrite/REDUCED-SCOPE.md`; its sequ
 
 Existing evidence, Rust toolchain and Cargo caches referenced by the handoff retain their established paths. Do not rebuild, move signed installations, change identity/pairing, or replay unknown operations merely because the source directory moved.
 
-Active lease (2026-10-29): `codex-computers` at /home/sid/Developer/worktrees/Styx/codex-computers, branch codex/computers from c7315f3, owner Claude (integrator), paths styx-runtime gateway/paired backend computer listing, enrollment devices/revoke admin client, management/native_gateway_admin.rs, styx cli.rs/status_view.rs/setup.rs (computers + status version); purpose post-v1: computer names/OS in list_execution_environments, `styx computers list/remove`, status shows running version. NOT merged into develop until v1 (c36) closes; retire by merge after v1 and removal.
+Active lease (2026-10-29): `codex-upgrade` at /home/sid/Developer/worktrees/Styx/codex-upgrade, branch codex/upgrade from codex/computers (4a292e9), owner Claude (integrator), paths styx crate (new upgrade module, cli.rs), styx-runtime management service/runtime-select helpers only, their tests, CLI-ONBOARDING.md; purpose post-v1 `styx upgrade`; NOT merged into develop until v1 (c36) closes.
+
+Retired worktree: `codex-computers` (branch codex/computers kept at 4a292e9, merges after v1).
 
 Retired: `codex-join-retry` (2026-10-29) merged and removed.
 
