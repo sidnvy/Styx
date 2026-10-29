@@ -1390,11 +1390,20 @@ int main(int argc, char **argv) {
                 let config = connection(&PrivateRoot::open(&tunnel).unwrap())
                     .unwrap()
                     .unwrap();
-                let expected = arguments(&config, &state, port)
+                let mut expected = arguments(&config, &state, port)
                     .0
                     .into_iter()
                     .map(|v| v.into_string().unwrap())
                     .collect::<Vec<_>>();
+                // The Gateway adds the forwarded-request observation marker after
+                // the original headers; discovery headers stay unchanged.
+                expected.extend([
+                    "--mcp.extra-headers".to_owned(),
+                    format!(
+                        "{OBSERVATION_HEADER}{}",
+                        tunnel.join("request-marker").display()
+                    ),
+                ]);
                 let calls = fs::read_dir(&tunnel)
                     .unwrap()
                     .filter_map(|v| {
