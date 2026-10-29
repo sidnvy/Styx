@@ -272,9 +272,14 @@ enum ProductRestorationPolicy {
     @Published var joining = false
     // UI duplicate-submit guard only. Core remains the durable setup authority.
     @Published private(set) var nativeLocalSetupSubmitted = false
-    // Native Mac setup: Browser uses the system Google Chrome; Computer Use is not offered yet.
+    // Native Mac setup: Browser uses the system Google Chrome; Computer Use needs the
+    // owner's Accessibility and Screen Recording grants (Permissions page).
     var nativeBrowserChoice: [String: ProductJSON] {
         browser ? ["browser": .bool(true), "browserChannel": .string("chrome")] : ["browser": .bool(false), "browserChannel": .null]
+    }
+    /// With Computer Use chosen, ask for the two macOS grants before the overview.
+    var afterSetupPage: ProductPage {
+        computer && !(axGranted && screenGranted) ? .permissions : .overview
     }
     var nativeLanJoinNotice: String? {
         guard status["gateway"]["lan"]["enabled"].bool,
@@ -301,11 +306,11 @@ enum ProductRestorationPolicy {
             guard nativeCanResumeLocal else { throw ProductCoreError.rejected }
             nativeLocalSetupSubmitted = true
             // Explicit confirmation only; a failed or lost response is never replayed.
-            var choice: [String: ProductJSON] = ["label": .string(name), "computer": .bool(false), "persistLogin": .bool(false), "port": .number(Double(port))]
+            var choice: [String: ProductJSON] = ["label": .string(name), "computer": .bool(computer), "persistLogin": .bool(false), "port": .number(Double(port))]
             choice.merge(nativeBrowserChoice) { _, chosen in chosen }
             do {
                 try applyNative(try await client.native("resumeLocal", choice))
-                page = .overview
+                page = afterSetupPage
             } catch {
                 self.error = productText("继续设置的结果尚未确认。原有设置已保留，请刷新检查；不会自动重试配对。", "The continuation result is unconfirmed. Your settings are retained. Refresh to review; pairing will not retry automatically.")
             }
@@ -736,9 +741,9 @@ enum ProductRestorationPolicy {
             let joinExisting = joining
             if !joinExisting && !nativeCanCreateLocal { page = .overview; return }
             perform { [self] in
-                // This Mac slice offers Browser (system Chrome); Computer Use stays off.
-                // Selecting setup never grants desktop permission or invents readiness.
-                var choice: [String: ProductJSON] = ["label": .string(name), "computer": .bool(false), "persistLogin": .bool(false)]
+                // Selecting Computer Use never grants desktop permission or invents
+                // readiness; the Permissions page asks the owner for both grants.
+                var choice: [String: ProductJSON] = ["label": .string(name), "computer": .bool(computer), "persistLogin": .bool(false)]
                 choice.merge(nativeBrowserChoice) { _, chosen in chosen }
                 if joinExisting {
                     guard let origin = joinAcceptance["origin"].string,
@@ -746,12 +751,12 @@ enum ProductRestorationPolicy {
                     choice["approvedGatewayOrigin"] = .string(origin)
                     choice["approvedCaSha256"] = .string(ca)
                     _ = try await client.native("join", choice)
-                    joinAcceptance = .null; inspection = .null; page = .overview
+                    joinAcceptance = .null; inspection = .null; page = afterSetupPage
                 } else {
                     guard nativeCanCreateLocal else { throw ProductCoreError.rejected }
                     if allowRemoteHosts { choice["lanAddress"] = .string(lanAddress.trimmingCharacters(in: .whitespacesAndNewlines)) }
                     nativeLocalSetupSubmitted = true
-                    defer { if nativeLocalSetupSubmitted { page = .overview } }
+                    defer { if nativeLocalSetupSubmitted { page = afterSetupPage } }
                     // One request; omitted port uses Core's fixed default 22022.
                     // perform refreshes status after failure, never this mutation.
                     do { try applyNative(try await client.native("createLocal", choice)) }

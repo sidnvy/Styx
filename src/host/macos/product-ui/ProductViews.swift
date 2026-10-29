@@ -95,8 +95,9 @@ struct ProductView: View {
             heading(productText("继续本机设置", "Continue local setup"), productText("原管理端已准备完成，配对尚未开始。继续将保留原身份、证书和运行组件。", "The original Gateway is prepared and pairing has not started. Continuing preserves its identity, certificates and runtime."))
             if let notice = model.nativeLanJoinNotice { Text(notice).font(.callout).textSelection(.enabled) }
             TextField(productText("电脑名称", "Computer name"), text: $model.label)
+            Toggle(isOn: $model.computer) { ProductCapabilityLabel(kind: .computer) }
             Toggle(isOn: $model.browser) { ProductCapabilityLabel(kind: .browser) }
-            Text(productText("将启用命令执行，以及你选择的 Browser；Computer Use 将在后续版本提供。确认后仅提交一次配对。", "This enables command execution and, if selected, Browser. Computer Use comes in a later version. Confirming submits pairing once.")).font(.callout).foregroundStyle(.secondary)
+            Text(productText("将启用命令执行，以及你选择的 Computer Use 和 Browser。确认后仅提交一次配对。", "This enables command execution and, if selected, Computer Use and Browser. Confirming submits pairing once.")).font(.callout).foregroundStyle(.secondary)
             Button(productText("确认并继续设置", "Confirm and continue setup")) { model.resumeLocalSetup() }
                 .buttonStyle(.borderedProminent)
                 .disabled(model.busy || model.label.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
@@ -117,10 +118,8 @@ struct ProductView: View {
             ProductPanel(title: productText("这台电脑的功能", "Features on this computer")) {
                 ProductCapabilityLabel(kind: .cli)
                 Divider()
-                Toggle(isOn: model.nativeHost ? .constant(false) : $model.computer) { ProductCapabilityLabel(kind: .computer) }.disabled(model.nativeHost)
-                if model.nativeHost {
-                    Text(productText("Computer Use 将在后续版本提供。", "Computer Use comes in a later version.")).font(.caption).foregroundStyle(.secondary)
-                }
+                Toggle(isOn: $model.computer) { ProductCapabilityLabel(kind: .computer) }
+                Text(productText("需要你在系统设置中授予“辅助功能”和“屏幕录制”权限；下一步会引导你完成。", "Needs Accessibility and Screen Recording permission in System Settings; the next step guides you.")).font(.caption).foregroundStyle(.secondary)
                 Divider()
                 Toggle(isOn: $model.browser) { ProductCapabilityLabel(kind: .browser) }
                 Text(productText("自动准备专用浏览器；网站登录时由你确认。", "A dedicated browser is prepared for you. Sign in to websites when needed.")).font(.caption).foregroundStyle(.secondary)
