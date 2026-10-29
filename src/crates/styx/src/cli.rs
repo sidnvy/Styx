@@ -47,6 +47,14 @@ enum Command {
         #[arg(long)]
         root: Option<PathBuf>,
     },
+    /// Stop and remove this computer's Styx login services; data stays on disk.
+    Uninstall {
+        #[arg(long)]
+        root: Option<PathBuf>,
+        /// Do not ask for confirmation.
+        #[arg(long)]
+        yes: bool,
+    },
     /// Back up stopped role roots, then set up or join again normally.
     Role {
         #[command(subcommand)]
@@ -1054,6 +1062,7 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
             exit_when_connected,
         } => setup_result(setup::run(root, answers, foreground, exit_when_connected).await),
         Command::Invite { root } => setup_result(setup::invite(root).await),
+        Command::Uninstall { root, yes } => setup_result(setup::uninstall(root, yes).await),
         Command::Status {
             state_dir: None,
             root,

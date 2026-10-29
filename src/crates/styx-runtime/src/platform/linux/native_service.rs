@@ -477,10 +477,17 @@ impl Definition {
         self.ctl(if enabled { "enable" } else { "disable" }, false)
             .await?;
         let after = self.inspect().await?;
+        // Enabling/disabling reloads unit files. For a stopped unit (no main
+        // process) systemd may reset `failed` to `inactive` and clear the old
+        // invocation id; nothing is running either way, so neither is a change.
+        let stopped = |o: &ServiceObservation| {
+            o.main_pid == 0 && matches!(o.active.as_str(), "inactive" | "failed")
+        };
+        let both_stopped = stopped(&before) && stopped(&after);
         if after.enabled != Some(enabled)
             || before.main_pid != after.main_pid
-            || before.invocation_id != after.invocation_id
-            || before.active != after.active
+            || (!both_stopped
+                && (before.invocation_id != after.invocation_id || before.active != after.active))
         {
             return Err(ServiceError::Unknown);
         }
