@@ -470,3 +470,46 @@ asks to continue only after checking it on the hub. The hub still approves that
 exact request with the selected capabilities. A ChatGPT-enabled plan includes
 its tunnel key storage and the plugin output path; after export, waiting for the
 first ChatGPT request is optional.
+
+## Upgrade an existing Linux setup (post-v1)
+
+```sh
+styx upgrade --payload /absolute/path/to/new-signed-runtime
+# Noninteractive or a different setup root:
+styx upgrade --payload /absolute/path/to/new-signed-runtime --root /absolute/private/root --yes
+```
+
+Upgrade verifies the new signed payload using setup's recorded publisher PEM and
+fingerprint. `--publisher-file` and `--expected-publisher` override those inputs,
+but the publisher must match every role's currently committed publisher. An
+already selected manifest is refused unless an unfinished upgrade is resuming.
+The plan shows each affected role's current and new version and asks once for
+confirmation; noninteractive use requires `--yes`.
+
+Linux systemd user services are required. The command records their running and
+enabled settings, stops/removes Host before Gateway, selects the verified release
+through the existing native actor, then reinstalls Gateway before Host. Stopped
+roles stay stopped and disabled roles stay disabled. Pairing credentials, CA,
+tunnel and plugin exports remain in place. For a running local hub/computer,
+upgrade waits for the hub to confirm the same device's Exec and selected Browser
+connection. Join-only computers use setup's existing verification: check their
+connection with `styx status` on the hub.
+
+Before selection, a known failure restores the old services and settings. An
+uncertain step is never replayed: preserve the private receipts under
+`ROOT/inputs/upgrade-MANIFEST/`, inspect the exact original transaction using the
+printed `styx transaction` command, and resolve it before continuing. If an OS
+effect remains uncertain, inspect the service logs too; a committed configuration
+alone does not prove the OS operation completed. Rerun the **same command**, with
+the same payload and publisher inputs, to finish recovery or resume. Roles already
+on the new selection skip removal and selection. After selection, failures leave
+the recorded state for that resume rather than switching back to the old release.
+The old payload directories are printed and left untouched for later deletion.
+
+The ignored `cli::upgrade::linux::tests::upgrade_hub_requires_systemd_user` scenario
+requires `STYX_UPGRADE_OLD_PAYLOAD`, `STYX_UPGRADE_NEW_PAYLOAD`,
+`STYX_UPGRADE_PUBLISHER` and `STYX_UPGRADE_PIN`. It creates an isolated hub on port
+22123, checks both services' executable identities and same-device reconnection,
+then removes its services with the uninstall logic. Run only in an owned Linux
+systemd user session with that port free. It retains the printed private test
+root as evidence; ordinary unit tests do not establish systemd acceptance.

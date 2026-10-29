@@ -108,6 +108,11 @@
   ],
   "source_guard_limit": "lexical defense in depth; imports/aliases/macros/FFI still need review; not a Rust sandbox or a proof of no IO",
   "known_ignored": {
+    "cli::upgrade::linux::tests::upgrade_hub_requires_systemd_user": {
+      "kind": "explicit_owned_systemd_user_and_signed_payloads",
+      "input": "STYX_UPGRADE_OLD_PAYLOAD, STYX_UPGRADE_NEW_PAYLOAD, STYX_UPGRADE_PUBLISHER, STYX_UPGRADE_PIN; private temp profile, owned loopback port 22123 and systemd user session",
+      "required_for": "Linux same-device upgrade: real new service binary identities, authenticated same-device reconnection, preserved credentials and old payload, service uninstall; reviewer runs outside sandbox"
+    },
     "enrollment::service::tests::paired_journey::named_computers_revoke_requires_sockets": {
       "kind": "explicit_owned_loopback_enrollment",
       "input": "STYX_TEST_PAIRED_ROOT, STYX_TEST_TLS_FIXTURES, STYX_TEST_NODE22; isolated private root and TLS listener",

@@ -19,6 +19,9 @@ mod setup_prompt;
 #[path = "status_view.rs"]
 mod status_view;
 
+#[path = "upgrade.rs"]
+mod upgrade;
+
 #[derive(Parser)]
 #[command(
     name = "styx",
@@ -76,6 +79,19 @@ enum Command {
         #[arg(long)]
         root: Option<PathBuf>,
         /// Do not ask for confirmation.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Upgrade Linux services to a signed payload, keeping this computer paired.
+    Upgrade {
+        #[arg(long)]
+        payload: PathBuf,
+        #[arg(long)]
+        publisher_file: Option<PathBuf>,
+        #[arg(long)]
+        expected_publisher: Option<String>,
+        #[arg(long)]
+        root: Option<PathBuf>,
         #[arg(long)]
         yes: bool,
     },
@@ -1088,6 +1104,15 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
         Command::Invite { root } => setup_result(setup::invite(root).await),
         Command::Computers { root, all, command } => {
             setup_result(computers::run(root, all, command).await)
+        }
+        Command::Upgrade {
+            payload,
+            publisher_file,
+            expected_publisher,
+            root,
+            yes,
+        } => {
+            setup_result(upgrade::run(payload, publisher_file, expected_publisher, root, yes).await)
         }
         Command::Uninstall { root, yes } => setup_result(setup::uninstall(root, yes).await),
         Command::Status {
