@@ -10,6 +10,7 @@ use std::sync::Arc;
 use tokio_util::task::TaskTracker;
 
 pub(crate) trait ComputerBootstrap: Send + Sync {
+    fn release_profile(&self, _owner: &OwnerLease) {}
     fn prepare_profile(&self, owner: &OwnerLease) -> Result<OwnedCuaConfig, ErrorCategory>;
     fn validate_before_spawn(&self) -> Result<(), ErrorCategory>;
     fn validate_control(&self) -> Result<(), ErrorCategory>;
@@ -18,6 +19,7 @@ pub(super) struct ComputerInputs {
     source: Arc<dyn ComputerBootstrap>,
     tasks: TaskTracker,
     slots: Arc<tokio::sync::Semaphore>,
+    gate: Arc<tokio::sync::RwLock<()>>,
 }
 impl HostProtocol<'_> {
     pub(crate) fn with_computer_profiles(
@@ -32,9 +34,28 @@ impl HostProtocol<'_> {
         self.computer = Some(ComputerInputs {
             source,
             tasks: TaskTracker::new(),
+            gate: Arc::new(tokio::sync::RwLock::new(())),
             slots: Arc::new(tokio::sync::Semaphore::new(2)),
         });
         Ok(self)
+    }
+    pub(super) async fn release_computer_profile(
+        &self,
+        owner: OwnerLease,
+    ) -> Result<(), ErrorCategory> {
+        let Some(inputs) = &self.computer else {
+            return Ok(());
+        };
+        let guard = inputs.gate.clone().write_owned().await;
+        let source = inputs.source.clone();
+        inputs
+            .tasks
+            .spawn_blocking(move || {
+                let _guard = guard;
+                source.release_profile(&owner);
+            })
+            .await
+            .map_err(|_| ErrorCategory::IntegrityFailure)
     }
     pub(crate) async fn drain_computer_inputs(&self) {
         if let Some(inputs) = &self.computer {
@@ -59,10 +80,12 @@ impl HostProtocol<'_> {
             .try_acquire_owned()
             .map_err(|_| ErrorCategory::Busy)?;
         let source = inputs.source.clone();
+        let guard = inputs.gate.clone().read_owned().await;
         inputs
             .tasks
             .spawn_blocking(move || {
                 let _permit = permit;
+                let _guard = guard;
                 work(source)
             })
             .await
@@ -174,8 +197,12 @@ impl HostProtocol<'_> {
         match command {
             ComputerCommand::PrepareOpen => {
                 let bound = owner.clone();
+                let current = self.coordinator.clone();
                 let config = match self
                     .computer_input(move |source| {
+                        if !current.owner_is_active(&bound) {
+                            return Err(ErrorCategory::Unauthorized);
+                        }
                         source.validate_control()?;
                         source.prepare_profile(&bound)
                     })
@@ -225,6 +252,12 @@ impl HostProtocol<'_> {
                         snapshot: snapshot.into(),
                         dispatch: "existing_no_replay".into(),
                     },
+                    Ok(DesktopOpenSubmission::Completed(done))
+                        if done.evidence == CuaEvidence::NotDispatched
+                            && done.cause == Some(CuaError::Busy) =>
+                    {
+                        rejection(ErrorCategory::Busy)
+                    }
                     Ok(DesktopOpenSubmission::Completed(done)) => Reply::Start {
                         snapshot: done.snapshot.into(),
                         dispatch: match done.evidence {
@@ -440,7 +473,7 @@ pub(crate) async fn assert_pending_factory_keeps_owner_control_live(
         .unwrap();
     let owner = OwnerRef {
         owner_id: "desktop-startup:owner".try_into().unwrap(),
-        owner_epoch: "desktop-startup-owner-epoch".try_into().unwrap(),
+        owner_epoch: paired_owner_epoch(&"desktop-startup-gateway-epoch".try_into().unwrap(), 1),
     };
     assert!(matches!(
         protocol.control(&Call::OwnerOpen {

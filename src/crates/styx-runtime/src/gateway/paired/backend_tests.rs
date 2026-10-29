@@ -184,3 +184,32 @@ fn authenticated_host_errors_preserve_certainty_and_read_cursor_evidence() {
         assert!(HostFailure::from_exchange(&Err(error)).is_none());
     }
 }
+
+#[test]
+fn known_capacity_is_retryable_and_never_an_unknown_action() {
+    fn value(r: CallToolResult) -> Value {
+        serde_json::from_str(&r.content[0].as_text().unwrap().text).unwrap()
+    }
+    let busy = HostFailure {
+        category: styx_contracts::error::ErrorCategory::Busy,
+        certainty: styx_contracts::error::ExecutionCertainty::NotDispatched,
+        cursor_may_be_consumed: false,
+    };
+    let mut unknown = true;
+    let result = value(busy.mutation_result(&mut unknown, 17));
+    assert_eq!(result["error"], "capacity_busy");
+    assert_eq!(result["uncertain"], false);
+    assert_eq!(result["retryable"], true);
+    assert!(!unknown);
+    for cause in ["capacity", "busy", "capacity_busy"] {
+        let r = value(failure(cause, None, false));
+        assert_eq!(r["error"], "capacity_busy");
+        assert_eq!(r["uncertain"], false);
+        assert_eq!(r["retryable"], true);
+    }
+    assert_eq!(
+        value(failure("outcome_unknown", None, true))["uncertain"],
+        true,
+        "missing replies must retain uncertainty"
+    );
+}

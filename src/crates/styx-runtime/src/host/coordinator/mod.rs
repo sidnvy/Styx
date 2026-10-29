@@ -713,6 +713,23 @@ impl HostCoordinator {
     }
     /// Fresh access deadline/grant facts, not the start deadline. Read failure does not
     /// rewrite historical start outcome or synthesize an empty successful page.
+    /// Delivery after physical release is historical output, never permission
+    /// to access the retired provider again. Recheck owner/policy under State.
+    pub(crate) fn validate_settled_exec_delivery(
+        &self,
+        owner: &OwnerLease,
+        id: &OperationId,
+        digest: Sha256Digest,
+        context: &PreparedContext,
+    ) -> Result<(), CoordinatorError> {
+        let state = self.inner.state.lock().expect("Host state mutex");
+        let check = || -> Result<(), ErrorCategory> {
+            validate_exec_context(context)?;
+            state.ledger.inspect(owner, id, digest)?;
+            styx_core::policy::check_admission(context, &state.exec_facts()?, self.now())
+        };
+        check().map_err(CoordinatorError::OutputDeliveryDenied)
+    }
     pub async fn read(
         &self,
         owner: &OwnerLease,
@@ -1018,3 +1035,22 @@ impl HostAuthority {
 }
 #[cfg(test)]
 mod tests;
+
+impl HostCoordinator {
+    pub(crate) fn owner_is_active(&self, owner: &OwnerLease) -> bool {
+        self.inner
+            .state
+            .lock()
+            .is_ok_and(|state| state.ledger.validate_owner(owner).is_ok())
+    }
+}
+
+#[cfg(test)]
+impl HostCoordinator {
+    pub(crate) fn retained_exec_processes_for_test(&self) -> usize {
+        self.inner.exec_adapter().unwrap().retained_processes()
+    }
+    pub(crate) async fn close_exec_fixture_for_test(&self) {
+        self.inner.exec_adapter().unwrap().close_fixture_io().await;
+    }
+}

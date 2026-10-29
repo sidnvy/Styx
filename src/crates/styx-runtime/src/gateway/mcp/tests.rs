@@ -34,7 +34,11 @@ fn verified_owner() -> VerifiedGatewayOwner {
         AUTHORIZATION,
         HeaderValue::from_static("Bearer AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"),
     );
-    policy.authorize(&headers).unwrap().new_mcp_session_owner()
+    policy
+        .authorize(&headers)
+        .unwrap()
+        .new_mcp_session_owner()
+        .unwrap()
 }
 struct RecordingBackend {
     calls: Mutex<Vec<(String, String)>>,

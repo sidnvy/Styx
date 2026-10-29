@@ -10,15 +10,17 @@ use super::{
     link::{HostWssLink, LinkEndpoint},
 };
 use crate::providers::codex::{
-    ActionAcknowledgment, ActionEvidence, ActionReceipt, DispatchEvidence, ProcessAction,
-    StartProcess,
+    ActionAcknowledgment, ActionEvidence, ActionReceipt, DispatchEvidence, ExecError,
+    ProcessAction, StartProcess,
 };
 #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
 pub(crate) mod browser;
 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
 pub(crate) mod computer;
+mod owner_order;
 pub mod wire;
 use futures_util::{FutureExt, StreamExt, stream::FuturesUnordered};
+pub(crate) use owner_order::epoch_key as paired_owner_epoch;
 use std::{
     collections::{BTreeMap, BTreeSet},
     io::Write,
@@ -101,6 +103,7 @@ struct OwnerRecord {
 }
 #[derive(Default)]
 struct OwnerRegistry {
+    order: owner_order::Order,
     owners: BTreeMap<(OwnerId, OwnerEpoch), OwnerRecord>,
     active_epoch: Option<GatewayEpoch>,
     retired_epochs: BTreeSet<GatewayEpoch>,
@@ -374,6 +377,31 @@ impl<'a> HostProtocol<'a> {
         }
         Ok(())
     }
+    async fn read_exec(
+        &self,
+        owner: &OwnerLease,
+        id: &OperationId,
+        digest: Sha256Digest,
+        context: &PreparedContext,
+        max_bytes: usize,
+        wait: Duration,
+    ) -> Result<crate::providers::codex::ProcessOutput, CoordinatorError> {
+        let output = self
+            .coordinator
+            .read(owner, id, digest, context, max_bytes, wait)
+            .await?;
+        if output.liveness == ExecutionLiveness::Exited && output.drain == OutputDrain::Drained {
+            // Release provider storage before reporting terminal success. This
+            // uses the existing fair quiescence gate and Core release proofs;
+            // it neither fences the still-open owner nor cancels live work.
+            let remaining =
+                Duration::from_millis(context.deadline.0.saturating_sub(self.coordinator.now().0));
+            self.authority.collect_provider_retention(remaining).await?;
+            self.coordinator
+                .validate_settled_exec_delivery(owner, id, digest, context)?;
+        }
+        Ok(output)
+    }
     fn control(&self, call: &Call) -> Option<Reply> {
         let (owner, revision) = match call {
             Call::OwnerOpen {
@@ -390,6 +418,9 @@ impl<'a> HostProtocol<'a> {
         }
         let mut registry = self.owners.lock().expect("owner registry");
         let key = (owner.owner_id.clone(), owner.owner_epoch.clone());
+        let Some(epoch) = registry.active_epoch.clone() else {
+            return Some(rejection(ErrorCategory::Unauthorized));
+        };
         if let Some(revision) = revision {
             if registry.stopping {
                 return Some(rejection(ErrorCategory::Unauthorized));
@@ -410,6 +441,9 @@ impl<'a> HostProtocol<'a> {
             if registry.owners.len() >= OWNER_LIMIT {
                 return Some(rejection(ErrorCategory::Busy));
             }
+            if let Err(error) = registry.order.admit(&epoch, owner) {
+                return Some(rejection(error));
+            }
             match self
                 .authority
                 .register_verified_owner(owner.owner_id.clone(), owner.owner_epoch.clone())
@@ -424,7 +458,10 @@ impl<'a> HostProtocol<'a> {
                         },
                     );
                 }
-                Err(e) => return Some(coordinator_error(e, false)),
+                Err(e) => {
+                    registry.order.complete(owner); // authoritative NotCreated
+                    return Some(coordinator_error(e, false));
+                }
             }
             Some(Reply::OwnerOpened {
                 owner: owner.clone(),
@@ -439,18 +476,8 @@ impl<'a> HostProtocol<'a> {
                     }
                     entry.lease = None;
                 }
-            } else {
-                if registry.owners.len() >= OWNER_LIMIT {
-                    return Some(rejection(ErrorCategory::Busy));
-                }
-                registry.owners.insert(
-                    key,
-                    OwnerRecord {
-                        lease: None,
-                        revision: self.coordinator.grant_revision(),
-                        cleanup: None,
-                    },
-                );
+            } else if let Err(error) = registry.order.fence_unseen(&epoch, owner) {
+                return Some(rejection(error));
             }
             Some(Reply::OwnerRevoked {
                 owner: owner.clone(),
@@ -530,9 +557,23 @@ impl<'a> HostProtocol<'a> {
                     .get(&(owner.owner_id.clone(), owner.owner_epoch.clone()))
                     .and_then(|entry| entry.cleanup.clone());
                 let Some(cleanup) = cleanup else {
-                    return rejection(ErrorCategory::Unauthorized);
+                    let registry = self.owners.lock().expect("owner registry");
+                    return if registry
+                        .active_epoch
+                        .as_ref()
+                        .is_some_and(|epoch| registry.order.completed(epoch, &owner))
+                    {
+                        Reply::OwnerCleanup {
+                            owner,
+                            complete: true,
+                        }
+                    } else {
+                        rejection(ErrorCategory::Unauthorized)
+                    };
                 };
-                let complete = match self
+                let until =
+                    tokio::time::Instant::now() + Duration::from_millis(u64::from(timeout_ms));
+                let mut complete = match self
                     .authority
                     .cleanup_owner(&cleanup, Duration::from_millis(u64::from(timeout_ms)))
                 {
@@ -542,6 +583,30 @@ impl<'a> HostProtocol<'a> {
                         .is_ok_and(|facts| facts.physical_complete),
                     Err(_) => false,
                 };
+                if complete {
+                    #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]
+                    {
+                        let released = tokio::time::timeout_at(until, async {
+                            self.release_browser_profile(cleanup.owner().clone())
+                                .await?;
+                            self.release_computer_profile(cleanup.owner().clone()).await
+                        })
+                        .await;
+                        complete = matches!(released, Ok(Ok(())));
+                    }
+                }
+                if complete {
+                    let mut registry = self.owners.lock().expect("owner registry");
+                    if let Some(record) = registry
+                        .owners
+                        .get_mut(&(owner.owner_id.clone(), owner.owner_epoch.clone()))
+                    {
+                        record.cleanup = None;
+                    }
+                    for key in registry.order.complete(&owner) {
+                        registry.owners.remove(&key);
+                    }
+                }
                 Reply::OwnerCleanup { owner, complete }
             }
             Call::PrepareStart {
@@ -589,6 +654,15 @@ impl<'a> HostProtocol<'a> {
                         dispatch: "existing_no_replay".into(),
                     },
                     Ok(StartSubmission::Submitted(ticket)) => match ticket.wait().await {
+                        Ok(v) if v.dispatch == DispatchEvidence::NotDispatched => {
+                            // This typed completion proves the adapter sent no
+                            // action bytes. Do not erase it into a generic Start.
+                            rejection(match v.cause {
+                                Some(ExecError::Capacity) => ErrorCategory::Busy,
+                                Some(ExecError::InvalidRequest) => ErrorCategory::InvalidRequest,
+                                _ => ErrorCategory::StateConflict,
+                            })
+                        }
                         Ok(v) => Reply::Start {
                             snapshot: v.snapshot.into(),
                             dispatch: match v.dispatch {
@@ -637,8 +711,7 @@ impl<'a> HostProtocol<'a> {
                     Err(e) => return rejection(e),
                 };
                 match self
-                    .coordinator
-                    .read(
+                    .read_exec(
                         &owner,
                         &target.operation_id,
                         target.payload_digest,
@@ -1066,3 +1139,6 @@ mod tests;
 
 #[cfg(test)]
 mod paired_tests;
+
+#[cfg(test)]
+mod exec_capacity_tests;

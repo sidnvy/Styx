@@ -54,6 +54,11 @@ impl DeferredComputer {
     }
 }
 impl ComputerBootstrap for DeferredComputer {
+    fn release_profile(&self, owner: &OwnerLease) {
+        if let Ok(factory) = self.original_factory() {
+            factory.release_profile(owner);
+        }
+    }
     fn prepare_profile(&self, owner: &OwnerLease) -> Result<OwnedCuaConfig, ErrorCategory> {
         self.original_factory()?.prepare_profile(owner)
     }

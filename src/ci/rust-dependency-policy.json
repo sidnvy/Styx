@@ -525,6 +525,11 @@
       "kind": "explicit_signed_native_payload",
       "input": "STYX_TEST_APP_CONTROL_SELECTION absolute protected signed Linux NativeRuntimeSelection supporting native_app_runtime_selected_v1; new disposable strict-TLS enrollment and C07 runtime staging only",
       "required_for": "original live App maintenance current-runtime independence, immutable launch/bootstrap history, same-ticket cancel/full Quit and same-bytes input replacement Unknown; no installed App, service registration or native process exit acceptance"
+    },
+    "enrollment::service::tests::paired_journey::paired_session_capacity_turnover_requires_sockets": {
+      "kind": "explicit_external_runtime",
+      "input": "STYX_TEST_PAIRED_ROOT, STYX_TEST_TLS_FIXTURES, STYX_TEST_CODEX_BIN, STYX_TEST_BROWSER_NODE/WORKER/EXECUTABLE, Node22; isolated owned loopback roots",
+      "required_for": "1050 native Gateway/Host DELETE cycles and 1050 abandon/eviction cycles; exact native effects; live Exec and open Browser protected from expiry; native-tab allocation sample and stale HTTP 404"
     }
   },
   "change_policy": "dependency or ignored-test additions require explicit policy review; preserve mature Cargo tooling rather than replacing its resolver/compiler/lints",

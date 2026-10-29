@@ -34,7 +34,7 @@ pub fn authenticated_mcp_session<B: GatewayToolBackend>(
     let principal = policy.authorize(headers)?;
     Ok(GatewayMcp::new(
         backend,
-        principal.new_mcp_session_owner(),
+        principal.new_mcp_session_owner()?,
         INSTRUCTIONS.clone(),
     ))
 }

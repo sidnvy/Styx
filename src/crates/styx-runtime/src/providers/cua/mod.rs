@@ -146,6 +146,36 @@ pub(crate) struct OwnedCuaConfig {
     pub(crate) environment: BTreeMap<String, String>,
 }
 impl OwnedCuaConfig {
+    pub(crate) fn retained_profile_bytes(&self) -> usize {
+        // Session identities have fixed contract maxima; shared source/image
+        // Arcs are not multiplied by the number of owner profiles.
+        let bytes =
+            std::mem::size_of::<Self>() + 4096 + self.workspace.capacity() + self.home.capacity();
+        #[cfg(target_os = "linux")]
+        let bytes = bytes
+            + self.launch.runtime_dir.capacity()
+            + self.launch.session_bus.capacity()
+            + self.launch.wayland_display.capacity()
+            + self.launch.hyprland_instance.capacity();
+        #[cfg(target_os = "windows")]
+        let bytes = bytes
+            + self
+                .environment
+                .iter()
+                .map(|(k, v)| 128 + k.capacity() + v.capacity())
+                .sum::<usize>();
+        #[cfg(target_os = "macos")]
+        let bytes = bytes + macos::profile_launch_bytes(&self.launch);
+        bytes
+    }
+    pub(crate) fn validate_metadata_bound(&self) -> Result<()> {
+        if self.retained_profile_bytes() > 128 * 1024 {
+            Err(CuaError::InvalidRequest)
+        } else {
+            Ok(())
+        }
+    }
+
     #[cfg(target_os = "linux")]
     fn validate(&self) -> Result<()> {
         if self.launch.uid != nix::unistd::Uid::current().as_raw()
@@ -208,6 +238,7 @@ pub struct CuaOpenSpec {
 }
 impl CuaOpenSpec {
     pub(crate) fn for_config(config: &OwnedCuaConfig) -> Result<Self> {
+        config.validate_metadata_bound()?;
         Ok(Self {
             config_digest: config.digest()?,
         })

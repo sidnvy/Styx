@@ -284,7 +284,11 @@ fn resolve_native_cwd(base: &str, path: &str, windows: bool) -> Result<String, &
     Ok(clean.into())
 }
 fn failure(code: &str, session: Option<u64>, uncertain: bool) -> CallToolResult {
-    let mut value = json!({"error": code, "uncertain": uncertain});
+    let busy = !uncertain && matches!(code, "busy" | "capacity" | "capacity_busy");
+    let mut value = json!({"error":if busy {"capacity_busy"} else {code}, "uncertain": uncertain});
+    if busy {
+        value["retryable"] = json!(true);
+    }
     if let Some(id) = session {
         value["session_id"] = json!(id);
     }
@@ -315,15 +319,22 @@ impl HostFailure {
     }
     fn result(self, session: u64) -> CallToolResult {
         let category = serde_json::to_value(self.category).expect("fixed error enum");
-        let code = category
-            .as_str()
-            .expect("fixed error name")
-            .to_ascii_lowercase();
+        let busy = self.category == styx_contracts::error::ErrorCategory::Busy
+            && self.certainty == styx_contracts::error::ExecutionCertainty::NotDispatched
+            && !self.cursor_may_be_consumed;
+        let code = if busy {
+            "capacity_busy".to_owned()
+        } else {
+            category
+                .as_str()
+                .expect("fixed error name")
+                .to_ascii_lowercase()
+        };
         CallToolResult::error(vec![ContentBlock::text(json!({
             "error":code,"category":category,"execution_certainty":self.certainty,
             "cursor_may_be_consumed":self.cursor_may_be_consumed,
             "uncertain":self.certainty == styx_contracts::error::ExecutionCertainty::Unknown || self.cursor_may_be_consumed,
-            "session_id":session,
+            "session_id":session,"retryable":busy,
         }).to_string())])
     }
     fn mutation_result(self, uncertain: &mut bool, session: u64) -> CallToolResult {
@@ -443,12 +454,14 @@ impl PairedGatewayBackend {
             .unwrap_or(Err(super::RelayError::Unknown))
     }
     fn active(&self, owner: &VerifiedGatewayOwner) -> bool {
-        self.state
-            .lock()
-            .expect("paired state")
-            .owners
-            .get(owner.owner_id())
-            .is_none_or(|o| o.principal == owner.principal_fingerprint() && !o.closing)
+        !owner.is_fenced()
+            && self
+                .state
+                .lock()
+                .expect("paired state")
+                .owners
+                .get(owner.owner_id())
+                .is_none_or(|o| o.principal == owner.principal_fingerprint() && !o.closing)
     }
     fn reserve(
         &self,
@@ -597,6 +610,13 @@ impl PairedGatewayBackend {
                 if certainty == styx_contracts::error::ExecutionCertainty::NotDispatched {
                     r.start_refusal = Some(error);
                 }
+                if certainty == styx_contracts::error::ExecutionCertainty::NotDispatched {
+                    self.state
+                        .lock()
+                        .expect("paired state")
+                        .sessions
+                        .remove(&id);
+                }
                 return error.mutation_result(&mut r.start_unknown, id);
             }
             _ => return failure("outcome_unknown", Some(id), true),
@@ -646,6 +666,13 @@ impl PairedGatewayBackend {
                 };
                 if certainty == styx_contracts::error::ExecutionCertainty::NotDispatched {
                     r.start_refusal = Some(error);
+                }
+                if certainty == styx_contracts::error::ExecutionCertainty::NotDispatched {
+                    self.state
+                        .lock()
+                        .expect("paired state")
+                        .sessions
+                        .remove(&id);
                 }
                 return error.mutation_result(&mut r.start_unknown, id);
             }
@@ -1022,22 +1049,35 @@ impl GatewayToolBackend for PairedGatewayBackend {
     }
 }
 impl GatewayOwnerLifecycle for PairedGatewayBackend {
+    fn owner_has_live_work(&self, owner: &VerifiedGatewayOwner) -> bool {
+        let Ok(state) = self.state.lock() else {
+            return true;
+        };
+        state
+            .sessions
+            .values()
+            .any(|e| e.owner == *owner.owner_id())
+            || state.browsers.owner_has_live_work(owner)
+            || {
+                #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
+                {
+                    state.computers.owner_has_live_work(owner)
+                }
+                #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows")))]
+                {
+                    false
+                }
+            }
+    }
     fn fence_owner(&self, owner: &VerifiedGatewayOwner) -> Result<(), OwnerFenceError> {
+        owner.fence();
         let mut state = self.state.lock().expect("paired state");
-        if !state.owners.contains_key(owner.owner_id()) && state.owners.len() >= MAX_OWNERS {
-            return Err(OwnerFenceError);
+        if let Some(entry) = state.owners.get_mut(owner.owner_id()) {
+            if entry.principal != owner.principal_fingerprint() {
+                return Err(OwnerFenceError);
+            }
+            entry.closing = true;
         }
-        let entry = state
-            .owners
-            .entry(owner.owner_id().clone())
-            .or_insert(OwnerState {
-                principal: owner.principal_fingerprint(),
-                closing: true,
-            });
-        if entry.principal != owner.principal_fingerprint() {
-            return Err(OwnerFenceError);
-        }
-        entry.closing = true;
         drop(state);
         self.relay.fence_owner(owner).map_err(|_| OwnerFenceError)
     }
@@ -1046,7 +1086,7 @@ impl GatewayOwnerLifecycle for PairedGatewayBackend {
             return OwnerCleanup::Unknown;
         }
         // Only exact per-owner Host settlement releases local resource slots.
-        // The fence tombstone remains: a stale HTTP owner cannot bind again.
+        // The shared sequence ledger preserves fencing after map compaction.
         match tokio::time::timeout(budget, self.relay.cleanup_owner(owner, budget)).await {
             Ok(Ok(true)) => {
                 #[cfg(test)]
@@ -1057,9 +1097,11 @@ impl GatewayOwnerLifecycle for PairedGatewayBackend {
                     entry.owner != *owner.owner_id()
                         || entry.principal != owner.principal_fingerprint()
                 });
+                state.owners.remove(owner.owner_id());
                 state.browsers.clear_owner(owner);
                 #[cfg(any(target_os = "linux", target_os = "macos", target_os = "windows"))]
                 state.computers.clear_owner(owner);
+                owner.cleanup_complete();
                 OwnerCleanup::Complete
             }
             _ => OwnerCleanup::Unknown,

@@ -37,6 +37,7 @@ async fn pair(
     admin: &str,
     device: &DeviceId,
     cwd: &Path,
+    browser: bool,
 ) -> Unwrapped {
     let invitation = client
         .request(Method::POST, "/styx/enroll/invitations", Some(admin), b"{}")
@@ -52,7 +53,7 @@ async fn pair(
         cwd: cwd.to_str().unwrap().into(),
         shell: "/bin/sh".into(),
         computer_requested: false,
-        browser_requested: Some(false),
+        browser_requested: Some(browser),
         public_key_pem: node.hello.public_a.clone(),
     };
     let signature = node.sign_join("a", &payload).await;
@@ -80,7 +81,7 @@ async fn pair(
         )
         .await;
     assert_eq!(comparison, joined.comparison_code);
-    let approved = client.request(Method::POST, "/styx/enroll/approve", Some(admin), &encoded(&json!({"request_id":joined.request_id,"fingerprint":joined.fingerprint,"enable_computer":false,"enable_browser":false}))).await;
+    let approved = client.request(Method::POST, "/styx/enroll/approve", Some(admin), &encoded(&json!({"request_id":joined.request_id,"fingerprint":joined.fingerprint,"enable_computer":false,"enable_browser":browser}))).await;
     assert_eq!(approved.status, 200);
     let claim = ClaimRequest {
         request_id: &joined.request_id,
@@ -179,6 +180,16 @@ fn read_process_birth(path: &Path) -> std::io::Result<u64> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires owned paired root, fixed Codex/Node22 and TLS fixtures; actual enrollment to MCP/WSS/native Exec journey"]
 async fn actual_paired_tls_mcp_codex_nonce_owner_and_revocation_journey() {
+    paired_journey(false).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires sockets and STYX_TEST_PAIRED_ROOT/TLS_FIXTURES/CODEX_BIN plus Node22; >1000 actual Gateway/Host owner cycles"]
+async fn paired_session_capacity_turnover_requires_sockets() {
+    paired_journey(true).await;
+}
+
+async fn paired_journey(capacity: bool) {
     let parent =
         PathBuf::from(std::env::var("STYX_TEST_PAIRED_ROOT").expect("owned root required"));
     std::fs::create_dir_all(&parent).unwrap();
@@ -261,15 +272,20 @@ async fn actual_paired_tls_mcp_codex_nonce_owner_and_revocation_journey() {
     .unwrap();
     let backend = Arc::new(PairedGatewayBackend::new(relay.clone(), None));
     let http_budget = HttpBudget::from_reserved_partition(
-        partition
-            .clone()
-            .try_acquire_many_owned(32 * 1024 * 1024)
+        Arc::new(Semaphore::new(crate::gateway::http::GATEWAY_HTTP_BYTES))
+            .try_acquire_many_owned(crate::gateway::http::GATEWAY_HTTP_BYTES as u32)
             .unwrap(),
     )
     .unwrap();
     let mcp_http = GatewayHttp::new(policy, backend.clone(), http_budget);
-    let app = EnrollmentHttp::new_paired(tls, shared, relay, mcp_http, vec![host_header.clone()])
-        .unwrap();
+    let app = EnrollmentHttp::new_paired(
+        tls,
+        shared,
+        relay,
+        mcp_http.clone(),
+        vec![host_header.clone()],
+    )
+    .unwrap();
     let stop = CancellationToken::new();
     let app_run = app.clone();
     let run_stop = stop.clone();
@@ -281,7 +297,7 @@ async fn actual_paired_tls_mcp_codex_nonce_owner_and_revocation_journey() {
     };
     let node = Mutex::new(NodeClient::start().await);
     let device = DeviceId::try_from("styx-1123456789abcdef01234567").unwrap();
-    let credential = pair(&client, &node, &admin, &device, &root).await;
+    let credential = pair(&client, &node, &admin, &device, &root, capacity).await;
     let generation =
         HostGeneration::try_from(format!("owned-host-{}", uuid::Uuid::new_v4())).unwrap();
     let codex = PathBuf::from(std::env::var("STYX_TEST_CODEX_BIN").unwrap());
@@ -308,6 +324,14 @@ async fn actual_paired_tls_mcp_codex_nonce_owner_and_revocation_journey() {
         .await
         .unwrap(),
     );
+    if capacity {
+        let mut browser_facts = facts(device.clone());
+        browser_facts.descriptor.capability_id = CapabilityId::BrowserHeadless;
+        browser_facts.descriptor.scope = Scope::Browser;
+        host.authority()
+            .configure_browser(browser_facts, host.reserve_browser_io().unwrap())
+            .unwrap();
+    }
     let endpoint_text = format!("wss://{host_header}/styx/host/v3/{}/exec", device.as_str());
     // Negative upgrades share the actual listener and use independent random
     // connection generations; a later positive path rules out blanket failure.
@@ -350,6 +374,7 @@ async fn actual_paired_tls_mcp_codex_nonce_owner_and_revocation_journey() {
     let host_task = host.clone();
     let proto_device = device.clone();
     let proto_tls = client_tls.clone();
+    let host_root = root.clone();
     let protocol_job = tokio::spawn(async move {
         let protocol = host_task
             .paired_protocol(PairedTrustedProfile {
@@ -359,6 +384,13 @@ async fn actual_paired_tls_mcp_codex_nonce_owner_and_revocation_journey() {
                 host_generation: generation,
             })
             .unwrap();
+        let protocol = if capacity {
+            protocol
+                .with_browser_profiles(Arc::new(CapacityBrowser { root: host_root }))
+                .unwrap()
+        } else {
+            protocol
+        };
         let tcp = TcpStream::connect(address).await.unwrap();
         let mut link = HostWssLink::connect(
             &endpoint,
@@ -392,6 +424,9 @@ async fn actual_paired_tls_mcp_codex_nonce_owner_and_revocation_journey() {
             .with_protocol_version(serde_json::from_value(json!("2025-11-25")).unwrap())
             .serve_with_lifecycle(transport, ClientLifecycleMode::Initialize)
         };
+        if capacity {
+            capacity_cycles(&raw, &uri, mcp.as_ref(), &device, &mcp_http, &root_work).await;
+        }
         let owner_a = connect().await.unwrap();
         let owner_b = connect().await.unwrap();
         let public: Value = serde_json::from_str(include_str!(
@@ -546,7 +581,11 @@ async fn actual_paired_tls_mcp_codex_nonce_owner_and_revocation_journey() {
         owner_b.cancel().await.unwrap();
         json!({"native_nonce":nonce,"start_effect_count":1,"wrong_device_legacy_route_wrong_credential_upgrades":"all rejected","cross_owner_input":"rejected_without_effect","host_policy_denial":"PERMISSION_DENIED/not_dispatched with no file effect","authorized_stdin":"observed_by_independent_file_read","closed_owner_shell":"original pid/starttime absent", "closed_owner_pid":pid,"closed_owner_starttime":process_birth,"host_physical_cleanup_complete":backend.observed_physical_cleanups()>=1, "other_owner_after_delete":"survived","revoked_device":"new_exec_rejected_without_effect","scope":"synthetic owned Linux loopback, not native package/account acceptance"})
     });
-    let result = tokio::time::timeout(Duration::from_secs(90), &mut worker).await;
+    let result = tokio::time::timeout(
+        Duration::from_secs(if capacity { 900 } else { 90 }),
+        &mut worker,
+    )
+    .await;
     if result.is_err() {
         worker.abort();
         let _ = worker.await;
@@ -587,4 +626,314 @@ async fn actual_paired_tls_mcp_codex_nonce_owner_and_revocation_journey() {
         serde_json::to_vec_pretty(&report).unwrap(),
     )
     .unwrap();
+}
+
+async fn capacity_cycles(
+    raw: &reqwest::Client,
+    uri: &str,
+    token: &str,
+    device: &DeviceId,
+    http: &Arc<GatewayHttp<PairedGatewayBackend>>,
+    root: &Path,
+) {
+    async fn post(
+        raw: &reqwest::Client,
+        uri: &str,
+        token: &str,
+        sid: Option<&str>,
+        body: Value,
+    ) -> reqwest::Response {
+        let mut r = raw
+            .post(uri)
+            .bearer_auth(token)
+            .header("accept", "application/json, text/event-stream");
+        if let Some(sid) = sid {
+            r = r
+                .header("mcp-session-id", sid)
+                .header("mcp-protocol-version", "2025-11-25");
+        }
+        r.json(&body).send().await.unwrap()
+    }
+    async fn tool(
+        raw: &reqwest::Client,
+        uri: &str,
+        token: &str,
+        sid: &str,
+        name: &str,
+        args: Value,
+    ) -> Value {
+        let r=post(raw,uri,token,Some(sid),json!({"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":name,"arguments":args}})).await;
+        assert_eq!(r.status(), reqwest::StatusCode::OK);
+        let text = r.text().await.unwrap();
+        let reply: Value = if text.starts_with('{') {
+            serde_json::from_str(&text).unwrap()
+        } else {
+            text.lines()
+                .filter_map(|line| line.strip_prefix("data:"))
+                .find_map(|line| serde_json::from_str::<Value>(line.trim()).ok())
+                .unwrap()
+        };
+        assert!(reply.get("error").is_none(), "{reply}");
+        assert_ne!(reply["result"]["isError"], true, "{reply}");
+        reply["result"]["structuredContent"].clone()
+    }
+    let mut first = None;
+    for abandon in [false, true] {
+        for n in 0..1050 {
+            if abandon {
+                http.age_idle_sessions_for_test(Duration::from_secs(61));
+            }
+            let r=post(raw,uri,token,None,json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"paired-capacity-oracle","version":"1"}}})).await;
+            assert_eq!(
+                r.status(),
+                reqwest::StatusCode::OK,
+                "cycle {n}, abandon={abandon}"
+            );
+            let sid = r.headers()["mcp-session-id"].to_str().unwrap().to_owned();
+            r.bytes().await.unwrap();
+            let r = post(
+                raw,
+                uri,
+                token,
+                Some(&sid),
+                json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+            )
+            .await;
+            assert_eq!(r.status(), reqwest::StatusCode::ACCEPTED);
+            r.bytes().await.unwrap();
+            if n == 0 && !abandon {
+                let until = tokio::time::Instant::now() + Duration::from_secs(10);
+                loop {
+                    let status = tool(
+                        raw,
+                        uri,
+                        token,
+                        &sid,
+                        "get_execution_environment_status",
+                        json!({"environment_id":device.as_str()}),
+                    )
+                    .await;
+                    if status["exec"]["connection"] == "connected" {
+                        break;
+                    }
+                    assert!(
+                        tokio::time::Instant::now() < until,
+                        "Host connection not ready"
+                    );
+                    tokio::time::sleep(Duration::from_millis(20)).await;
+                }
+            }
+            let mut result=tool(raw,uri,token,&sid,"exec_command",json!({"cmd":"printf 'cycle\\n' >> turnover.txt","login":false,"environment_id":device.as_str(),"yield_time_ms":100})).await;
+            for _ in 0..50 {
+                let Some(process) = result["session_id"].as_u64() else {
+                    break;
+                };
+                result = tool(
+                    raw,
+                    uri,
+                    token,
+                    &sid,
+                    "write_stdin",
+                    json!({"session_id":process,"chars":"","yield_time_ms":100}),
+                )
+                .await;
+            }
+            assert_eq!(
+                result["exit_code"], 0,
+                "must independently settle the original exec before abandoning"
+            );
+            if first.is_none() {
+                first = Some(sid.clone());
+            }
+            if !abandon {
+                let r = raw
+                    .delete(uri)
+                    .bearer_auth(token)
+                    .header("mcp-session-id", &sid)
+                    .header("mcp-protocol-version", "2025-11-25")
+                    .send()
+                    .await
+                    .unwrap();
+                assert_eq!(r.status(), reqwest::StatusCode::ACCEPTED);
+                r.bytes().await.unwrap();
+            }
+            assert!(http.retained_sessions() <= 64);
+        }
+    }
+    assert_eq!(
+        std::fs::read_to_string(root.join("turnover.txt"))
+            .unwrap()
+            .lines()
+            .count(),
+        2100,
+        "independent native effects"
+    );
+    http.age_idle_sessions_for_test(Duration::from_secs(601));
+    http.expire_idle_for_test().await;
+    // Actual native work has no background GET: only backend ownership can
+    // protect this session after advancing the test's idle clock.
+    let r=post(raw,uri,token,None,json!({"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"live-native-oracle","version":"1"}}})).await;
+    assert_eq!(r.status(), reqwest::StatusCode::OK);
+    let live = r.headers()["mcp-session-id"].to_str().unwrap().to_owned();
+    r.bytes().await.unwrap();
+    post(
+        raw,
+        uri,
+        token,
+        Some(&live),
+        json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+    )
+    .await
+    .bytes()
+    .await
+    .unwrap();
+    let started=tool(raw,uri,token,&live,"exec_command",json!({"cmd":"printf '%s' \"$$\" > protected.pid; IFS= read -r value; printf '%s' \"$value\" > protected.txt","login":false,"environment_id":device.as_str(),"yield_time_ms":100})).await;
+    let process = started["session_id"].as_u64().unwrap();
+    let until = tokio::time::Instant::now() + Duration::from_secs(5);
+    while !root.join("protected.pid").exists() {
+        assert!(tokio::time::Instant::now() < until);
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let pid = std::fs::read_to_string(root.join("protected.pid")).unwrap();
+    assert!(Path::new(&format!("/proc/{pid}/stat")).exists());
+    http.age_idle_sessions_for_test(Duration::from_secs(601));
+    http.expire_idle_for_test().await;
+    assert!(
+        Path::new(&format!("/proc/{pid}/stat")).exists(),
+        "expiry must preserve the original running exec"
+    );
+    let before = live_allocations();
+    tool(
+        raw,
+        uri,
+        token,
+        &live,
+        "browser_tabs",
+        json!({"action":"new","environment_id":device.as_str()}),
+    )
+    .await;
+    let browser_bytes = live_allocations().saturating_sub(before);
+    let mut result = tool(
+        raw,
+        uri,
+        token,
+        &live,
+        "write_stdin",
+        json!({"session_id":process,"chars":"still-owned\n","yield_time_ms":100}),
+    )
+    .await;
+    for _ in 0..50 {
+        let Some(process) = result["session_id"].as_u64() else {
+            break;
+        };
+        result = tool(
+            raw,
+            uri,
+            token,
+            &live,
+            "write_stdin",
+            json!({"session_id":process,"chars":"","yield_time_ms":100}),
+        )
+        .await;
+    }
+    assert_eq!(result["exit_code"], 0);
+    file_within(&root.join("protected.txt"), "still-owned").await;
+    http.age_idle_sessions_for_test(Duration::from_secs(601));
+    http.expire_idle_for_test().await;
+    tool(
+        raw,
+        uri,
+        token,
+        &live,
+        "browser_tabs",
+        json!({"action":"list","environment_id":device.as_str()}),
+    )
+    .await;
+    tool(
+        raw,
+        uri,
+        token,
+        &live,
+        "browser_close",
+        json!({"environment_id":device.as_str()}),
+    )
+    .await;
+    http.age_idle_sessions_for_test(Duration::from_secs(601));
+    http.expire_idle_for_test().await;
+    assert_eq!(
+        raw.get(uri)
+            .bearer_auth(token)
+            .header("mcp-session-id", &live)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        reqwest::StatusCode::NOT_FOUND
+    );
+    println!(
+        "SESSION_MEMORY open_native_tab_parent_process_increment={browser_bytes} (Gateway+Host Rust in one fixture; native browser processes excluded)"
+    );
+    let r = raw
+        .get(uri)
+        .bearer_auth(token)
+        .header("mcp-session-id", first.unwrap())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(r.status(), reqwest::StatusCode::NOT_FOUND);
+    println!(
+        "paired production Gateway/Host: 1050 DELETE + 1050 abandoned native-exec owners; status={}",
+        http.status()
+    );
+}
+
+#[allow(unsafe_code)] // glibc read-only, pointer-free allocator statistics; test fixture only.
+fn live_allocations() -> usize {
+    let info = unsafe { libc::mallinfo2() };
+    info.uordblks + info.hblkhd
+}
+struct CapacityBrowser {
+    root: PathBuf,
+}
+impl crate::host::protocol::browser::BrowserBootstrap for CapacityBrowser {
+    fn prepare_profile(
+        &self,
+        owner: &styx_core::operations::OwnerLease,
+    ) -> Result<crate::providers::browser::OwnedBrowserConfig, styx_contracts::error::ErrorCategory>
+    {
+        let directory = self.root.join(format!(
+            "browser-{}",
+            Sha256Digest::of_bytes(owner.owner_id().as_str().as_bytes()).to_hex()
+        ));
+        let profile = directory.join("profile");
+        let output = directory.join("output");
+        let workspace = directory.join("workspace");
+        for path in [&directory, &profile, &output, &workspace] {
+            std::fs::create_dir_all(path)
+                .map_err(|_| styx_contracts::error::ErrorCategory::IntegrityFailure)?;
+            std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+                .map_err(|_| styx_contracts::error::ErrorCategory::IntegrityFailure)?;
+        }
+        Ok(crate::providers::browser::OwnedBrowserConfig {
+            node_binary: std::env::var_os("STYX_TEST_BROWSER_NODE")
+                .expect("owned Node22 input")
+                .into(),
+            worker_entry: std::env::var_os("STYX_TEST_BROWSER_WORKER")
+                .expect("owned worker input")
+                .into(),
+            browser_binary: std::env::var_os("STYX_TEST_BROWSER_EXECUTABLE")
+                .expect("owned browser input")
+                .into(),
+            workspace_dir: workspace,
+            profile_dir: profile,
+            output_dir: output,
+            rpc_timeout: Duration::from_secs(8),
+        })
+    }
+    fn validate_before_spawn(&self) -> Result<(), styx_contracts::error::ErrorCategory> {
+        Ok(())
+    }
+    fn validate_control(&self) -> Result<(), styx_contracts::error::ErrorCategory> {
+        Ok(())
+    }
 }

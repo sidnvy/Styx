@@ -33,7 +33,7 @@ use styx_core::operations::OwnerLease;
 #[path = "browser_windows.rs"]
 mod windows;
 
-const MAX_OWNERS: usize = 16;
+const MAX_OWNERS: usize = 64;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 const MAX_BROWSER_BYTES: u64 = 512 * 1024 * 1024;
 type Result<T> = std::result::Result<T, ErrorCategory>;
@@ -437,6 +437,12 @@ impl LocalBrowser {
     }
 }
 impl BrowserBootstrap for LocalBrowser {
+    fn release_profile(&self, owner: &OwnerLease) {
+        if let Ok(mut owners) = self.owners.lock() {
+            owners.retain(|entry| &entry.owner != owner);
+        }
+    }
+
     fn prepare_profile(&self, owner: &OwnerLease) -> Result<OwnedBrowserConfig> {
         self.validate_inputs(true)?;
         let mut owners = self
@@ -505,6 +511,9 @@ impl BrowserBootstrap for LocalBrowser {
             ]),
             ..config
         };
+        config
+            .validate_metadata_bound()
+            .map_err(|_| ErrorCategory::InvalidRequest)?;
         owners.push(OwnerProfile {
             owner: owner.clone(),
             profile: private,

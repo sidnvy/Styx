@@ -80,11 +80,30 @@ impl<L: GatewayOwnerLifecycle> BoundedManager<L> {
         let facts = self.life.facts.lock().expect("session lifetime");
         !self.created.load(Ordering::Acquire) || facts.transport_joined
     }
+    pub(super) async fn close_idle(&self) -> Result<(), SessionError> {
+        let id = self.id.lock().expect("SDK session id").clone();
+        if let Some(id) = id {
+            self.close_session(&id).await
+        } else {
+            if !self.created.load(Ordering::Acquire) {
+                self.life
+                    .facts
+                    .lock()
+                    .expect("session lifetime")
+                    .transport_joined = true;
+            }
+            self.life
+                .wait_complete()
+                .await
+                .map_err(|_| SessionError::Refused)
+        }
+    }
     pub fn new(life: Arc<Life<L>>) -> Self {
         let mut inner = LocalSessionManager::default();
         inner.session_config.channel_capacity = 1;
         inner.session_config.init_timeout = Some(Duration::from_secs(5));
-        inner.session_config.keep_alive = Some(Duration::from_secs(60));
+        // Only the Gateway timer can see active HTTP streams and live owner work.
+        inner.session_config.keep_alive = None;
         inner.session_config.sse_retry = None;
         inner.session_config.completed_cache_ttl = Duration::ZERO;
         Self {

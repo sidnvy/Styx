@@ -256,9 +256,12 @@ pub async fn observe(state_dir: &Path) -> Result<serde_json::Value> {
     .reinit_on_expired_session(false)
     .max_sse_event_size(crate::gateway::http::MESSAGE_BYTES)
     .max_concurrent_requests(1);
+    let status_token = std::str::from_utf8(key.bytes())
+        .map_err(|_| refused("native_gateway_admin_material"))?
+        .to_owned();
     material.files.push(key);
-    let transport = StreamableHttpClientTransport::with_client(client, config);
-    let running = tokio::time::timeout(
+    let transport = StreamableHttpClientTransport::with_client(client.clone(), config);
+    let running = match tokio::time::timeout(
         std::time::Duration::from_secs(5),
         ClientConfig::new(
             ClientCapabilities::default(),
@@ -267,8 +270,25 @@ pub async fn observe(state_dir: &Path) -> Result<serde_json::Value> {
         .serve_with_lifecycle(transport, ClientLifecycleMode::Initialize),
     )
     .await
-    .map_err(|_| refused("setup_gateway_unavailable"))?
-    .map_err(|_| refused("setup_gateway_unavailable"))?;
+    {
+        Ok(Ok(running)) => running,
+        _ => {
+            if let Some(counters) = session_counters(
+                &client,
+                &material.origin.origin().ascii_serialization(),
+                &status_token,
+            )
+            .await
+            {
+                material.validate()?;
+                return Ok(
+                    serde_json::json!({"origin":material.origin.origin().ascii_serialization(),"origins":material.origins,
+                    "state":"discovery_unavailable","verification_scope":"authenticated-http-status","mcp_sessions":counters}),
+                );
+            }
+            return Err(refused("setup_gateway_unavailable"));
+        }
+    };
     let observed = async {
         if running.peer_info().is_none_or(|info| {
             info.server_info
@@ -348,7 +368,48 @@ pub async fn observe(state_dir: &Path) -> Result<serde_json::Value> {
         .map_err(|_| refused("setup_mcp_cleanup_unconfirmed"))?
         .map_err(|_| refused("setup_mcp_cleanup_unconfirmed"))?;
     material.validate()?;
-    result
+    let mut result = result?;
+    if let Some(counters) = session_counters(
+        &client,
+        &material.origin.origin().ascii_serialization(),
+        &status_token,
+    )
+    .await
+    {
+        result["mcp_sessions"] = counters;
+    }
+    Ok(result)
+}
+// This authenticated unknown-session probe allocates no MCP owner and works
+// even when every session slot belongs to live work.
+async fn session_counters(
+    client: &reqwest::Client,
+    origin: &str,
+    token: &str,
+) -> Option<serde_json::Value> {
+    let response = client
+        .get(format!("{origin}/mcp"))
+        .bearer_auth(token)
+        .header("mcp-session-id", "styx-status-observation")
+        .timeout(std::time::Duration::from_secs(3))
+        .send()
+        .await
+        .ok()?;
+    if response.status() != reqwest::StatusCode::NOT_FOUND {
+        return None;
+    }
+    let mut counters = serde_json::Map::new();
+    for name in ["open", "capacity", "expired", "evicted"] {
+        let value = response
+            .headers()
+            .get(format!("x-styx-sessions-{name}"))?
+            .to_str()
+            .ok()?
+            .parse::<u64>()
+            .ok()?;
+        counters.insert(name.into(), serde_json::json!(value));
+    }
+    Some(serde_json::Value::Object(counters))
 }
 async fn owned(action: Action) -> Result<AdminReport> {
     let permit = OPERATIONS

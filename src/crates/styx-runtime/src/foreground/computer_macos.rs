@@ -166,6 +166,12 @@ impl LocalComputer {
     }
 }
 impl ComputerBootstrap for LocalComputer {
+    fn release_profile(&self, owner: &OwnerLease) {
+        if let Ok(mut owners) = self.owners.lock() {
+            owners.retain(|entry| &entry.owner != owner);
+        }
+    }
+
     fn prepare_profile(&self, owner: &OwnerLease) -> Result<OwnedCuaConfig> {
         self.validate(true)?;
         let mut owners = self
@@ -181,7 +187,7 @@ impl ComputerBootstrap for LocalComputer {
         {
             return Err(ErrorCategory::Unauthorized);
         }
-        if owners.len() >= 16 {
+        if owners.len() >= 64 {
             return Err(ErrorCategory::Busy);
         }
         let root = Directory::fresh(&self.runtime.path)?;
@@ -194,6 +200,9 @@ impl ComputerBootstrap for LocalComputer {
             home,
         };
         let config = self.config(&owned)?;
+        config
+            .validate_metadata_bound()
+            .map_err(|_| ErrorCategory::InvalidRequest)?;
         owners.push(owned);
         Ok(config)
     }

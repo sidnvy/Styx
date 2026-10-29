@@ -245,6 +245,47 @@ pub struct CodexStdio {
     provider_id: String,
 }
 impl CodexStdio {
+    /// Official RPC/adapter paths over owned in-memory pipes; no native effects.
+    #[cfg(test)]
+    pub(crate) fn fixture_io(limit: usize) -> (Self, tokio::io::DuplexStream) {
+        let (client, server) = tokio::io::duplex(65536);
+        let (reader, writer) = tokio::io::split(client);
+        let partition = Arc::new(
+            Arc::new(tokio::sync::Semaphore::new(16 * 1024 * 1024))
+                .try_acquire_many_owned(16 * 1024 * 1024)
+                .unwrap(),
+        );
+        let rpc = Rpc::new_with_reserved_partition(
+            writer,
+            reader,
+            Duration::from_secs(1),
+            limit,
+            partition.clone(),
+        );
+        (
+            Self {
+                rpc,
+                _rpc_partition: partition,
+                child: tokio::sync::Mutex::new(None),
+                stderr_task: tokio::sync::Mutex::new(None),
+                records: Mutex::new(HashMap::new()),
+                actions: Mutex::new(BTreeMap::new()),
+                operations: Mutex::new(BTreeMap::new()),
+                limit,
+                session_id: "owned-memory-fixture".into(),
+                provider_id: "codex".into(),
+            },
+            server,
+        )
+    }
+    #[cfg(test)]
+    pub(crate) fn retained_processes(&self) -> usize {
+        self.operations.lock().unwrap().len()
+    }
+    #[cfg(test)]
+    pub(crate) async fn close_fixture_io(&self) {
+        self.rpc.close().await;
+    }
     pub fn session_id(&self) -> &str {
         &self.session_id
     }
