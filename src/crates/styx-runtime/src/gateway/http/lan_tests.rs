@@ -234,7 +234,9 @@ async fn gateway_lan_scenario(ips: Vec<Ipv4Addr>) {
         policy,
         backend,
         HttpBudget::from_reserved_partition(
-            partition.try_acquire_many_owned(32 * 1024 * 1024).unwrap(),
+            Arc::new(Semaphore::new(crate::gateway::http::GATEWAY_HTTP_BYTES))
+                .try_acquire_many_owned(crate::gateway::http::GATEWAY_HTTP_BYTES as u32)
+                .unwrap(),
         )
         .unwrap(),
     );

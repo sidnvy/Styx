@@ -8,6 +8,9 @@ use http::{
 use std::collections::BTreeSet;
 use styx_contracts::identity::{OwnerId, Sha256Digest};
 use uuid::Uuid;
+mod owners;
+use owners::Owners;
+use std::sync::{Arc, Mutex};
 
 /// An explicit LAN bind is limited to private networks and user-run overlays.
 /// Never turn a missing address into a wildcard bind.
@@ -72,6 +75,7 @@ pub enum GatewayAuthError {
 }
 
 pub struct GatewayBearerPolicy {
+    owners: Arc<Mutex<Owners>>,
     token_digest: Sha256Digest,
     allowed_hosts: BTreeSet<String>,
     allowed_origins: BTreeSet<String>,
@@ -87,6 +91,7 @@ impl std::fmt::Debug for GatewayBearerPolicy {
 }
 #[derive(Clone)]
 pub struct AuthenticatedGatewayPrincipal {
+    owners: Arc<Mutex<Owners>>,
     digest: Sha256Digest,
 }
 impl std::fmt::Debug for AuthenticatedGatewayPrincipal {
@@ -98,6 +103,8 @@ impl std::fmt::Debug for AuthenticatedGatewayPrincipal {
 /// No Deserialize and no public constructor accepting an OwnerId.
 #[derive(Clone)]
 pub struct VerifiedGatewayOwner {
+    owners: Arc<Mutex<Owners>>,
+    sequence: u64,
     owner_id: OwnerId,
     principal: Sha256Digest,
 }
@@ -109,6 +116,29 @@ impl std::fmt::Debug for VerifiedGatewayOwner {
     }
 }
 impl VerifiedGatewayOwner {
+    pub(crate) fn is_fenced(&self) -> bool {
+        self.owners.lock().map_or(true, |o| o.fenced(self.sequence))
+    }
+    pub(crate) fn fence(&self) {
+        self.owners
+            .lock()
+            .expect("owner ledger")
+            .fence(self.sequence);
+    }
+    pub(crate) fn cleanup_complete(&self) {
+        self.owners
+            .lock()
+            .expect("owner ledger")
+            .complete(self.sequence);
+    }
+    pub(crate) fn with_admission<T>(&self, f: impl FnOnce() -> T) -> Option<T> {
+        let owners = self.owners.lock().ok()?;
+        if owners.fenced(self.sequence) {
+            return None;
+        }
+        Some(f())
+    }
+
     pub fn owner_id(&self) -> &OwnerId {
         &self.owner_id
     }
@@ -122,13 +152,21 @@ impl AuthenticatedGatewayPrincipal {
         verify_slices_are_equal(self.digest.as_bytes(), owner.principal.as_bytes()).is_ok()
     }
     /// Factory is confined to Gateway adapters after an authenticated ingress.
-    pub(super) fn new_mcp_session_owner(&self) -> VerifiedGatewayOwner {
-        VerifiedGatewayOwner {
+    pub(super) fn new_mcp_session_owner(&self) -> Result<VerifiedGatewayOwner, GatewayAuthError> {
+        let sequence = self
+            .owners
+            .lock()
+            .map_err(|_| GatewayAuthError::Forbidden)?
+            .mint()
+            .ok_or(GatewayAuthError::Forbidden)?;
+        Ok(VerifiedGatewayOwner {
+            owners: self.owners.clone(),
+            sequence,
             owner_id: format!("mcp-session:{}", Uuid::new_v4())
                 .try_into()
                 .expect("fixed UUID owner syntax"),
             principal: self.digest,
-        }
+        })
     }
 }
 impl GatewayBearerPolicy {
@@ -177,6 +215,7 @@ impl GatewayBearerPolicy {
             return Err(GatewayAuthError::InvalidConfiguration);
         }
         Ok(Self {
+            owners: Arc::new(Mutex::new(Owners::default())),
             token_digest: Sha256Digest::of_bytes(token),
             allowed_hosts: allowed_hosts.into_iter().collect(),
             allowed_origins: allowed_origins.into_iter().collect(),
@@ -230,6 +269,7 @@ impl GatewayBearerPolicy {
         )
         .map_err(|_| GatewayAuthError::Unauthenticated)?;
         Ok(AuthenticatedGatewayPrincipal {
+            owners: self.owners.clone(),
             digest: self.token_digest,
         })
     }
@@ -293,11 +333,13 @@ mod tests {
         let a = policy
             .authorize(&headers())
             .unwrap()
-            .new_mcp_session_owner();
+            .new_mcp_session_owner()
+            .unwrap();
         let b = policy
             .authorize(&headers())
             .unwrap()
-            .new_mcp_session_owner();
+            .new_mcp_session_owner()
+            .unwrap();
         assert_ne!(a.owner_id(), b.owner_id());
         assert_eq!(a.principal_fingerprint(), b.principal_fingerprint());
         assert!(!format!("{policy:?}").contains(&token));

@@ -20,7 +20,7 @@ use std::{
 use styx_contracts::{error::ErrorCategory, session::SessionBinding};
 use styx_core::operations::OwnerLease;
 
-const MAX_OWNERS: usize = 16;
+const MAX_OWNERS: usize = 64;
 const RPC_TIMEOUT: Duration = Duration::from_secs(10);
 type Result<T> = std::result::Result<T, ErrorCategory>;
 struct OwnerDirectories {
@@ -228,6 +228,12 @@ impl LocalComputer {
     }
 }
 impl ComputerBootstrap for LocalComputer {
+    fn release_profile(&self, owner: &OwnerLease) {
+        if let Ok(mut owners) = self.owners.lock() {
+            owners.retain(|entry| &entry.owner != owner);
+        }
+    }
+
     fn prepare_profile(&self, owner: &OwnerLease) -> Result<OwnedCuaConfig> {
         self.validate_inputs(true)?;
         let mut owners = self
@@ -270,6 +276,9 @@ impl ComputerBootstrap for LocalComputer {
         owned.temporary.revalidate().map_err(map_directory)?;
         self.validate_source()?;
         let config = self.config(&owned)?;
+        config
+            .validate_metadata_bound()
+            .map_err(|_| ErrorCategory::InvalidRequest)?;
         owners.push(owned);
         Ok(config)
     }

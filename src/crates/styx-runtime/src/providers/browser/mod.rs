@@ -436,7 +436,39 @@ impl std::fmt::Debug for BrowserOpenFailure {
     }
 }
 impl OwnedBrowserConfig {
+    /// Owned metadata only; executable pins and I/O budgets are shared Arcs.
+    pub(crate) fn retained_profile_bytes(&self) -> usize {
+        let bytes = std::mem::size_of::<Self>()
+            + [
+                &self.node_binary,
+                &self.worker_entry,
+                &self.browser_binary,
+                &self.workspace_dir,
+                &self.profile_dir,
+                &self.output_dir,
+            ]
+            .iter()
+            .map(|p| p.capacity())
+            .sum::<usize>();
+        #[cfg(any(target_os = "windows", target_os = "macos"))]
+        let bytes = bytes
+            + self
+                .environment
+                .iter()
+                .map(|(k, v)| 128 + k.capacity() + v.capacity())
+                .sum::<usize>();
+        bytes
+    }
+    pub(crate) fn validate_metadata_bound(&self) -> Result<()> {
+        if self.retained_profile_bytes() > 128 * 1024 {
+            Err(BrowserError::InvalidRequest)
+        } else {
+            Ok(())
+        }
+    }
+
     fn validate(&self) -> Result<()> {
+        self.validate_metadata_bound()?;
         if self.rpc_timeout.is_zero() || self.rpc_timeout > Duration::from_secs(35) {
             return Err(BrowserError::InvalidRequest);
         }
@@ -1459,3 +1491,35 @@ mod tests;
 #[cfg(all(test, target_os = "linux"))]
 #[path = "link_reference_tests.rs"]
 mod link_reference_tests;
+
+#[cfg(all(test, target_os = "linux", target_env = "gnu"))]
+#[test]
+fn sixty_four_profile_metadata_has_an_enforced_memory_bound() {
+    let path = PathBuf::from(format!("/{}", "x".repeat(4094)));
+    let config = OwnedBrowserConfig {
+        node_binary: path.clone(),
+        worker_entry: path.clone(),
+        browser_binary: path.clone(),
+        workspace_dir: path.clone(),
+        profile_dir: path.clone(),
+        output_dir: path,
+        rpc_timeout: Duration::from_secs(1),
+    };
+    config.validate_metadata_bound().unwrap();
+    let profiles: Vec<_> = (0..64).map(|_| config.clone()).collect();
+    let measured = profiles
+        .iter()
+        .map(OwnedBrowserConfig::retained_profile_bytes)
+        .sum::<usize>();
+    assert!(measured < 64 * 128 * 1024);
+    let mut oversized = config;
+    oversized.node_binary.reserve(128 * 1024);
+    assert!(oversized.validate_metadata_bound().is_err());
+    println!(
+        "PROFILE_METADATA Linux Browser: copies={} inline_bytes={} owned_bytes={} per_copy={} enforced_limit_per_copy=131072 aggregate_limit_64=8388608",
+        profiles.len(),
+        std::mem::size_of::<OwnedBrowserConfig>(),
+        measured,
+        measured / 64
+    );
+}

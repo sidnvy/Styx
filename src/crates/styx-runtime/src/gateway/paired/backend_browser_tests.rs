@@ -233,3 +233,12 @@ fn browser_results_are_bounded_and_missing_execution_receipts_remain_uncertain()
         assert_eq!(lost["uncertain"], true);
     }
 }
+
+#[test]
+fn pre_dispatch_capacity_is_known_and_retryable() {
+    let result = browser_error(ErrorCategory::Busy, ExecutionCertainty::NotDispatched);
+    let value: Value = serde_json::from_str(&result.content[0].as_text().unwrap().text).unwrap();
+    assert_eq!(value["error"], "capacity_busy");
+    assert_eq!(value["uncertain"], false);
+    assert_eq!(value["retryable"], true);
+}

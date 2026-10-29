@@ -8,7 +8,7 @@ use crate::{
     providers::browser_contract::BrowserAction,
 };
 use styx_contracts::error::{ErrorCategory, ExecutionCertainty};
-const MAX_BROWSER_CONTEXTS: usize = 16;
+const MAX_BROWSER_CONTEXTS: usize = 64;
 const MAX_BROWSER_RESULT_BYTES: usize = 128 * 1024;
 
 /// Only Browser tools already present in the frozen public contract are routed.
@@ -121,6 +121,11 @@ impl BrowserContexts {
             })
         });
     }
+    pub(super) fn owner_has_live_work(&self, owner: &VerifiedGatewayOwner) -> bool {
+        self.entries.iter().any(|((id, _), entry)| {
+            id == owner.owner_id() && entry.principal == owner.principal_fingerprint()
+        })
+    }
     pub(super) fn clear_owner(&mut self, owner: &VerifiedGatewayOwner) {
         self.entries.retain(|(id, _), entry| {
             id != owner.owner_id() || entry.principal != owner.principal_fingerprint()
@@ -143,6 +148,9 @@ fn same_action(snapshot: &Snapshot, action: &ActionRef, target: &ResourceTarget)
         && snapshot.target.as_ref() == Some(target)
 }
 fn browser_error(category: ErrorCategory, certainty: ExecutionCertainty) -> CallToolResult {
+    if category == ErrorCategory::Busy && certainty == ExecutionCertainty::NotDispatched {
+        return failure("capacity_busy", None, false);
+    }
     let code = serde_json::to_value(category).expect("fixed category");
     CallToolResult::error(vec![ContentBlock::text(json!({"error":code.as_str().unwrap_or("RESULT_UNKNOWN").to_ascii_lowercase(),"category":code,"execution_certainty":certainty,"uncertain":certainty!=ExecutionCertainty::NotDispatched}).to_string())])
 }
@@ -183,10 +191,11 @@ impl PairedGatewayBackend {
     ) -> Result<Option<Arc<AsyncMutex<BrowserResource>>>, &'static str> {
         let mut state = self.state.lock().expect("paired state");
         state.collect_settled();
-        if state
-            .owners
-            .get(owner.owner_id())
-            .is_some_and(|o| o.closing || o.principal != owner.principal_fingerprint())
+        if owner.is_fenced()
+            || state
+                .owners
+                .get(owner.owner_id())
+                .is_some_and(|o| o.closing || o.principal != owner.principal_fingerprint())
         {
             return Err("permission_denied");
         }

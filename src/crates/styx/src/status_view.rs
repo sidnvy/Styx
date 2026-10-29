@@ -167,6 +167,13 @@ fn render(v: &Value, root: &Path, now_ms: u64) -> String {
                 .unwrap_or("unavailable")
         ));
     }
+    if let Some(capacity) = v["gateway"]["mcp_sessions"]["capacity"].as_u64() {
+        let sessions = &v["gateway"]["mcp_sessions"];
+        lines.push(format!(
+            "MCP sessions: {}/{} open; {} expired; {} evicted",
+            sessions["open"], capacity, sessions["expired"], sessions["evicted"]
+        ));
+    }
     let tunnel = v["tunnel"]["status"].as_str();
     lines.push(
         if tunnel == Some("not_configured") || (v["role"] == "hub" && tunnel.is_none()) {
@@ -221,6 +228,15 @@ fn render(v: &Value, root: &Path, now_ms: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn status_shows_session_capacity_and_close_counters() {
+        let value =
+            json!({"gateway":{"mcp_sessions":{"open":17,"capacity":64,"expired":11,"evicted":29}}});
+        assert!(
+            render(&value, Path::new("/owned"), 0)
+                .contains("MCP sessions: 17/64 open; 11 expired; 29 evicted")
+        );
+    }
     #[test]
     fn status_distinguishes_off_from_disconnected_without_guessing_remote_settings() {
         let report =

@@ -195,6 +195,9 @@ impl TrustedCuaLaunch {
         })
     }
 }
+pub(super) fn profile_launch_bytes(launch: &TrustedCuaLaunch) -> usize {
+    launch.workspace_path.capacity() + launch.home_path.capacity()
+}
 pub(super) fn validate_config(config: &OwnedCuaConfig) -> Result<()> {
     if config.rpc_timeout.is_zero()
         || config.rpc_timeout > std::time::Duration::from_secs(30)

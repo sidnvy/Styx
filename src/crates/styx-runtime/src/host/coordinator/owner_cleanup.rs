@@ -6,6 +6,11 @@ pub struct OwnerCleanupHandle {
     inner: Arc<Inner>,
     authority: Arc<OwnerCleanupAuthority>,
 }
+impl OwnerCleanupHandle {
+    pub(crate) fn owner(&self) -> &OwnerLease {
+        self.authority.owner()
+    }
+}
 impl std::fmt::Debug for OwnerCleanupHandle {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.write_str("OwnerCleanupHandle([REDACTED])")

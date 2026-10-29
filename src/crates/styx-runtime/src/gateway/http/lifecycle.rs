@@ -19,6 +19,10 @@ pub struct OwnerFenceError;
 /// an action stopped. Cleanup implementations must retain action ownership if
 /// their waiter is dropped, and must not report Complete from a cancel ACK.
 pub trait GatewayOwnerLifecycle: Send + Sync + 'static {
+    /// Missing/uncertain liveness protects the owner from automatic close.
+    fn owner_has_live_work(&self, _owner: &VerifiedGatewayOwner) -> bool {
+        true
+    }
     fn fence_owner(&self, owner: &VerifiedGatewayOwner) -> Result<(), OwnerFenceError>;
     fn cleanup_owner(
         &self,
@@ -41,6 +45,7 @@ pub(super) struct Supervisor {
     pub accepting_cleanup_jobs: std::sync::atomic::AtomicBool,
 }
 pub(super) struct Life<L: GatewayOwnerLifecycle> {
+    pub activity: Mutex<Activity>,
     pub owner: VerifiedGatewayOwner,
     pub lifecycle: Arc<L>,
     pub facts: Mutex<CloseFacts>,
@@ -51,7 +56,28 @@ pub(super) struct Life<L: GatewayOwnerLifecycle> {
     pub _session_slot: tokio::sync::OwnedSemaphorePermit,
     pub _budget: Arc<super::HttpBudget>,
 }
+pub(super) struct Activity {
+    pub last: tokio::time::Instant,
+    pub users: usize,
+}
+pub(super) struct ActivityGuard<L: GatewayOwnerLifecycle>(Arc<Life<L>>);
+impl<L: GatewayOwnerLifecycle> Drop for ActivityGuard<L> {
+    fn drop(&mut self) {
+        let mut a = self.0.activity.lock().expect("session activity");
+        a.users -= 1;
+        a.last = tokio::time::Instant::now();
+    }
+}
 impl<L: GatewayOwnerLifecycle> Life<L> {
+    pub(super) fn activity(self: &Arc<Self>) -> Option<ActivityGuard<L>> {
+        let mut a = self.activity.lock().expect("session activity");
+        if !self.is_active() {
+            return None;
+        }
+        a.users += 1;
+        a.last = tokio::time::Instant::now();
+        Some(ActivityGuard(self.clone()))
+    }
     pub fn is_active(&self) -> bool {
         !self.facts.lock().expect("session lifetime").closing
     }
@@ -96,6 +122,7 @@ impl<L: GatewayOwnerLifecycle> Life<L> {
             // Explicit idempotent fence reconciliation is not business replay.
             self.lifecycle.fence_owner(&self.owner)?;
             f.fenced = true;
+            self.owner.fence();
         }
         if !f.fenced {
             return Err(OwnerFenceError);
@@ -139,6 +166,9 @@ impl<L: GatewayOwnerLifecycle> Life<L> {
                     .lifecycle
                     .cleanup_owner(&this.owner, Duration::from_secs(5))
                     .await;
+                if result == OwnerCleanup::Complete {
+                    this.owner.cleanup_complete();
+                }
                 this.facts.lock().expect("session lifetime").cleanup = Some(result);
                 this.changed.notify_waiters();
             });

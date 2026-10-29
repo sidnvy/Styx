@@ -36,6 +36,7 @@ pub(super) struct DesktopLane {
 pub(crate) struct DesktopOpenCompletion {
     pub(crate) snapshot: OperationSnapshot,
     pub(crate) evidence: CuaEvidence,
+    pub(crate) cause: Option<CuaError>,
 }
 pub(crate) enum DesktopOpenSubmission {
     Completed(DesktopOpenCompletion),
@@ -285,7 +286,7 @@ impl HostAuthority {
                 Err(ErrorCategory::StateConflict.into())
             };
         }
-        if lane.profiles.len() >= 16 {
+        if lane.profiles.len() >= 64 {
             return Err(CoordinatorError::Busy);
         }
         for old in lane.profiles.values() {
@@ -538,6 +539,7 @@ impl HostCoordinator {
                     return Ok(DesktopOpenSubmission::Completed(DesktopOpenCompletion {
                         snapshot,
                         evidence: CuaEvidence::NotDispatched,
+                        cause: Some(CuaError::Busy),
                     }));
                 }
                 Err(e) => return Err(e.into()),
@@ -563,7 +565,7 @@ impl HostCoordinator {
             jobs.spawn_on(
                 async move {
                     let _slot = job_slot;
-                    let (evidence, _cause, opened) = match slot.spawn_owned(permit, config).await {
+                    let (evidence, cause, opened) = match slot.spawn_owned(permit, config).await {
                         Ok(r) => (r.evidence, None, Some(r.handle)),
                         Err(r) => (r.evidence, Some(r.cause), r.handle),
                     };
@@ -622,6 +624,7 @@ impl HostCoordinator {
                                 DesktopOpenSubmission::Completed(DesktopOpenCompletion {
                                     snapshot,
                                     evidence,
+                                    cause,
                                 })
                             })
                             .map_err(CoordinatorError::from),

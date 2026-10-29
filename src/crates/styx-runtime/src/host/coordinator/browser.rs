@@ -181,7 +181,7 @@ impl HostAuthority {
                 Err(ErrorCategory::StateConflict.into())
             };
         }
-        if lane.profiles.len() >= 16 {
+        if lane.profiles.len() >= 64 {
             return Err(CoordinatorError::Busy);
         }
         for other in lane.profiles.values() {

@@ -33,11 +33,16 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayToolBackend for Backe
         if !self.admitted(owner) {
             return Err(refused());
         }
-        let _slot = self
-            .calls
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| refused())?;
+        let _slot = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            self.calls.clone().acquire_owned(),
+        )
+        .await
+        .map_err(|_| refused())?
+        .map_err(|_| refused())?;
+        if !self.admitted(owner) {
+            return Err(refused());
+        }
         let result = self.backend.list_tools(owner, request).await?;
         if !bounded_message(&result) {
             let _ = self.life.close();
@@ -65,7 +70,11 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayToolBackend for Backe
             if !admitted || !life.is_active() {
                 return Err(refused());
             }
-            let slot = slots.try_acquire_owned().map_err(|_| refused())?;
+            let slot =
+                tokio::time::timeout(std::time::Duration::from_secs(5), slots.acquire_owned())
+                    .await
+                    .map_err(|_| refused())?
+                    .map_err(|_| refused())?;
             let supervisor = life.supervisor.upgrade().ok_or_else(refused)?;
             let (tx, rx) = oneshot::channel();
             #[cfg(test)]

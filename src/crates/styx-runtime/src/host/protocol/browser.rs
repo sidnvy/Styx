@@ -12,6 +12,7 @@ use std::sync::Arc;
 use tokio_util::task::TaskTracker;
 
 pub(crate) trait BrowserBootstrap: Send + Sync {
+    fn release_profile(&self, _owner: &OwnerLease) {}
     /// Includes control and full worker-input validation before profile creation.
     fn prepare_profile(&self, owner: &OwnerLease) -> Result<OwnedBrowserConfig, ErrorCategory>;
     fn validate_before_spawn(&self) -> Result<(), ErrorCategory>;
@@ -21,6 +22,7 @@ pub(super) struct BrowserInputs {
     source: Arc<dyn BrowserBootstrap>,
     tasks: TaskTracker,
     slots: Arc<tokio::sync::Semaphore>,
+    gate: Arc<tokio::sync::RwLock<()>>,
 }
 impl HostProtocol<'_> {
     pub(crate) fn with_browser_profiles(
@@ -33,9 +35,28 @@ impl HostProtocol<'_> {
         self.browser = Some(BrowserInputs {
             source,
             tasks: TaskTracker::new(),
+            gate: Arc::new(tokio::sync::RwLock::new(())),
             slots: Arc::new(tokio::sync::Semaphore::new(2)),
         });
         Ok(self)
+    }
+    pub(super) async fn release_browser_profile(
+        &self,
+        owner: OwnerLease,
+    ) -> Result<(), ErrorCategory> {
+        let Some(inputs) = &self.browser else {
+            return Ok(());
+        };
+        let guard = inputs.gate.clone().write_owned().await;
+        let source = inputs.source.clone();
+        inputs
+            .tasks
+            .spawn_blocking(move || {
+                let _guard = guard;
+                source.release_profile(&owner);
+            })
+            .await
+            .map_err(|_| ErrorCategory::IntegrityFailure)
     }
     pub(crate) async fn drain_browser_inputs(&self) {
         if let Some(inputs) = &self.browser {
@@ -60,10 +81,12 @@ impl HostProtocol<'_> {
             .try_acquire_owned()
             .map_err(|_| ErrorCategory::Busy)?;
         let source = inputs.source.clone();
+        let guard = inputs.gate.clone().read_owned().await;
         inputs
             .tasks
             .spawn_blocking(move || {
                 let _permit = permit;
+                let _guard = guard;
                 work(source)
             })
             .await
@@ -177,8 +200,14 @@ impl HostProtocol<'_> {
         match command {
             BrowserCommand::PrepareOpen => {
                 let bound = owner.clone();
+                let current = self.coordinator.clone();
                 let config = match self
-                    .browser_input(move |source| source.prepare_profile(&bound))
+                    .browser_input(move |source| {
+                        if !current.owner_is_active(&bound) {
+                            return Err(ErrorCategory::Unauthorized);
+                        }
+                        source.prepare_profile(&bound)
+                    })
                     .await
                 {
                     Ok(v) => v,
@@ -221,6 +250,12 @@ impl HostProtocol<'_> {
                         dispatch: "existing_no_replay".into(),
                     },
                     Ok(BrowserOpenSubmission::Submitted(ticket)) => match ticket.wait().await {
+                        Ok(done)
+                            if done.evidence == BrowserActionEvidence::NotDispatched
+                                && done.cause == Some(BrowserError::Busy) =>
+                        {
+                            rejection(ErrorCategory::Busy)
+                        }
                         Ok(done) => Reply::Start {
                             snapshot: done.snapshot.into(),
                             dispatch: match done.evidence {
@@ -310,6 +345,14 @@ impl HostProtocol<'_> {
                                     && done.cleanup_error.is_none()
                                     && done.retention_error.is_none()
                             });
+                            if cleanup_complete == Some(true) {
+                                // A closed native context must not consume the
+                                // provider's retained-record quota until DELETE.
+                                self.authority
+                                    .collect_provider_retention(Duration::from_secs(1))
+                                    .await
+                                    .ok();
+                            }
                             Reply::BrowserAction {
                                 snapshot: done.snapshot.into(),
                                 dispatch: match done.receipt.evidence {

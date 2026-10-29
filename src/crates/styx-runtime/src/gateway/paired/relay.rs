@@ -25,6 +25,7 @@ pub enum RelayError {
     Unauthorized,
     #[error("offline")]
     Offline,
+    /// Capacity/admission refusal before this request's frame was sent.
     #[error("busy")]
     Busy,
     #[error("invalid request")]
@@ -117,6 +118,20 @@ enum TargetKind {
     ComputerResource,
     ComputerAction,
 }
+struct TargetRecord {
+    digest: Sha256Digest,
+    kind: TargetKind,
+    parent: Option<OperationId>,
+}
+fn retire_resource_targets(
+    targets: &mut BTreeMap<OperationId, TargetRecord>,
+    id: &OperationId,
+) -> usize {
+    let before = targets.len();
+    targets.retain(|key, record| key != id && record.parent.as_ref() != Some(id));
+    before - targets.len()
+}
+
 struct Binding {
     owner: VerifiedGatewayOwner,
     reference: OwnerRef,
@@ -124,7 +139,7 @@ struct Binding {
     entry: Arc<Entry>,
     route: Mutex<Arc<Entry>>,
     rebind: tokio::sync::Mutex<()>,
-    targets: Mutex<BTreeMap<OperationId, (Sha256Digest, TargetKind)>>,
+    targets: Mutex<BTreeMap<OperationId, TargetRecord>>,
     revoked: Arc<Mutex<bool>>,
     ready: AtomicBool,
     admitted_records: AtomicUsize,
@@ -188,7 +203,8 @@ pub(crate) struct Inner {
     shutdown_lock: tokio::sync::Mutex<()>,
     shutdown_failed: AtomicBool,
     unconfirmed_drains: AtomicUsize,
-    fenced: Mutex<Vec<(OwnerId, Sha256Digest)>>,
+    opening: tokio::sync::Mutex<()>,
+    next_owner: std::sync::atomic::AtomicU64,
 }
 #[derive(Clone)]
 pub struct RelayHandle {
@@ -223,7 +239,8 @@ impl RelayHandle {
                 shutdown_lock: tokio::sync::Mutex::new(()),
                 shutdown_failed: AtomicBool::new(false),
                 unconfirmed_drains: AtomicUsize::new(0),
-                fenced: Mutex::new(vec![]),
+                opening: tokio::sync::Mutex::new(()),
+                next_owner: std::sync::atomic::AtomicU64::new(1),
             }),
         })
     }
@@ -527,6 +544,7 @@ impl RelayHandle {
         device: &DeviceId,
         lane: Lane,
     ) -> Result<BoundOwner, RelayError> {
+        let _opening = self.inner.opening.lock().await;
         if self.is_fenced(owner)? {
             return Err(RelayError::Unauthorized);
         }
@@ -568,9 +586,13 @@ impl RelayHandle {
         }
         let reference = OwnerRef {
             owner_id: owner.owner_id().clone(),
-            owner_epoch: format!("paired-owner-{}", uuid::Uuid::new_v4())
-                .try_into()
-                .map_err(|_| RelayError::Invalid)?,
+            owner_epoch: crate::host::protocol::paired_owner_epoch(
+                &self.inner.epoch,
+                self.inner
+                    .next_owner
+                    .fetch_update(Ordering::Relaxed, Ordering::Relaxed, |n| n.checked_add(1))
+                    .map_err(|_| RelayError::Busy)?,
+            ),
         };
         let binding = Arc::new(Binding {
             owner: owner.clone(),
@@ -591,28 +613,27 @@ impl RelayHandle {
             if *admission {
                 return Err(RelayError::Unauthorized);
             }
-            let fenced = self.inner.fenced.lock().map_err(|_| RelayError::Unknown)?;
-            if fenced
-                .iter()
-                .any(|(id, p)| id == owner.owner_id() && *p == owner.principal_fingerprint())
-            {
-                return Err(RelayError::Unauthorized);
-            }
-            let mut b = self
-                .inner
-                .bindings
-                .lock()
-                .map_err(|_| RelayError::Unknown)?;
-            if b.len() >= 128
-                || b.iter().any(|existing| {
-                    existing.owner.owner_id() == owner.owner_id()
-                        && existing.owner.principal_fingerprint() == owner.principal_fingerprint()
-                        && existing.entry.device == *device
+            owner
+                .with_admission(|| {
+                    let mut b = self
+                        .inner
+                        .bindings
+                        .lock()
+                        .map_err(|_| RelayError::Unknown)?;
+                    if b.len() >= 128
+                        || b.iter().any(|existing| {
+                            existing.owner.owner_id() == owner.owner_id()
+                                && existing.owner.principal_fingerprint()
+                                    == owner.principal_fingerprint()
+                                && existing.entry.device == *device
+                        })
+                    {
+                        return Err(RelayError::Busy);
+                    }
+                    b.push(binding.clone());
+                    Ok(())
                 })
-            {
-                return Err(RelayError::Busy);
-            }
-            b.push(binding.clone());
+                .ok_or(RelayError::Unauthorized)??;
         }
         match self
             .exchange(
@@ -647,6 +668,24 @@ impl RelayHandle {
         }
     }
     pub async fn call(&self, b: &BoundOwner, call: Call) -> Result<Reply, RelayError> {
+        match self.call_inner(b, call).await {
+            Err(RelayError::Busy) => Ok(Reply::Error {
+                category: styx_contracts::error::ErrorCategory::Busy,
+                certainty: styx_contracts::error::ExecutionCertainty::NotDispatched,
+                cursor_may_be_consumed: false,
+            }),
+            result => result,
+        }
+    }
+    async fn call_inner(&self, b: &BoundOwner, call: Call) -> Result<Reply, RelayError> {
+        let read_target = match &call {
+            Call::Read { target, .. } => Some(target.operation_id.clone()),
+            _ => None,
+        };
+        let start_target = match &call {
+            Call::DispatchStart { target, .. } => Some(target.operation_id.clone()),
+            _ => None,
+        };
         if self.is_fenced(&b.inner.owner)?
             || *b.inner.revoked.lock().map_err(|_| RelayError::Unknown)?
             || !b.inner.ready.load(Ordering::Acquire)
@@ -844,10 +883,11 @@ impl RelayHandle {
         }
         {
             let targets = b.inner.targets.lock().map_err(|_| RelayError::Unknown)?;
-            if target
-                .as_ref()
-                .is_some_and(|(id, d, kind)| targets.get(id) != Some(&(*d, *kind)))
-            {
+            if target.as_ref().is_some_and(|(id, d, kind)| {
+                !targets
+                    .get(id)
+                    .is_some_and(|r| r.digest == *d && r.kind == *kind)
+            }) {
                 return Err(RelayError::Unauthorized);
             }
             if new_record && targets.len() >= 256 {
@@ -864,9 +904,63 @@ impl RelayHandle {
         {
             return Err(RelayError::Busy);
         }
-        let reply = self
+        let reply = match self
             .exchange(&entry, call, Some(b.inner.revoked.clone()))
-            .await?;
+            .await
+        {
+            Err(RelayError::Busy) => {
+                if new_record {
+                    b.inner.admitted_records.fetch_sub(1, Ordering::AcqRel);
+                }
+                return Err(RelayError::Busy);
+            }
+            result => result?,
+        };
+        if new_record
+            && matches!(
+                &reply,
+                Reply::Error {
+                    certainty: styx_contracts::error::ExecutionCertainty::NotDispatched,
+                    ..
+                }
+            )
+        {
+            b.inner.admitted_records.fetch_sub(1, Ordering::AcqRel);
+        }
+        let retired = match (&reply, read_target.as_ref(), start_target.as_ref()) {
+            (
+                Reply::Read {
+                    liveness: styx_contracts::operation::ExecutionLiveness::Exited,
+                    output_drain: styx_contracts::operation::OutputDrain::Drained,
+                    ..
+                },
+                Some(id),
+                _,
+            ) => Some(id),
+            (
+                Reply::Error {
+                    certainty: styx_contracts::error::ExecutionCertainty::NotDispatched,
+                    ..
+                },
+                _,
+                Some(id),
+            ) => Some(id),
+            (
+                Reply::BrowserAction {
+                    snapshot,
+                    cleanup_complete: Some(true),
+                    ..
+                },
+                _,
+                _,
+            ) => snapshot.target.as_ref().map(|target| &target.operation_id),
+            _ => None,
+        };
+        if let Some(id) = retired {
+            let mut targets = b.inner.targets.lock().map_err(|_| RelayError::Unknown)?;
+            let count = retire_resource_targets(&mut targets, id);
+            b.inner.admitted_records.fetch_sub(count, Ordering::AcqRel);
+        }
         if self.is_fenced(&b.inner.owner)?
             || *b.inner.revoked.lock().map_err(|_| RelayError::Unknown)?
             || !b.inner.ready.load(Ordering::Acquire)
@@ -884,41 +978,33 @@ impl RelayHandle {
         {
             let mut targets = b.inner.targets.lock().map_err(|_| RelayError::Unknown)?;
             if let Some(existing) = targets.get(&snapshot.operation_id) {
-                if existing != &(snapshot.payload_digest, record_kind) {
+                if existing.digest != snapshot.payload_digest || existing.kind != record_kind {
                     return Err(RelayError::Unknown);
                 }
-            } else {
+            } else if new_record {
                 if targets.len() >= 256 {
                     return Err(RelayError::Unknown);
                 }
                 targets.insert(
                     snapshot.operation_id.clone(),
-                    (snapshot.payload_digest, record_kind),
+                    TargetRecord {
+                        digest: snapshot.payload_digest,
+                        kind: record_kind,
+                        parent: snapshot.target.as_ref().map(|t| t.operation_id.clone()),
+                    },
                 );
             }
         }
+        // Child action correlations remain available for reconciliation until
+        // their original resource has independently exited and drained. A
+        // transport-level reply alone does not prove Gateway result delivery.
         Ok(reply)
     }
     fn is_fenced(&self, owner: &VerifiedGatewayOwner) -> Result<bool, RelayError> {
-        Ok(self
-            .inner
-            .fenced
-            .lock()
-            .map_err(|_| RelayError::Unknown)?
-            .iter()
-            .any(|(id, p)| id == owner.owner_id() && *p == owner.principal_fingerprint()))
+        Ok(owner.is_fenced())
     }
     pub fn fence_owner(&self, owner: &VerifiedGatewayOwner) -> Result<(), RelayError> {
-        let mut fenced = self.inner.fenced.lock().map_err(|_| RelayError::Unknown)?;
-        if !fenced
-            .iter()
-            .any(|(id, p)| id == owner.owner_id() && *p == owner.principal_fingerprint())
-        {
-            if fenced.len() >= 128 {
-                return Err(RelayError::Busy);
-            }
-            fenced.push((owner.owner_id().clone(), owner.principal_fingerprint()));
-        }
+        owner.fence();
         for b in self
             .inner
             .bindings
@@ -987,6 +1073,11 @@ impl RelayHandle {
                 return Ok(false);
             }
         }
+        self.inner
+            .bindings
+            .lock()
+            .map_err(|_| RelayError::Unknown)?
+            .retain(|b| b.owner.owner_id() != owner.owner_id());
         Ok(true)
     }
     pub fn fence_transport(&self) {
@@ -1042,5 +1133,63 @@ impl RelayHandle {
             self.inner.shutdown_failed.store(true, Ordering::Release);
             Err(RelayError::Unknown)
         }
+    }
+}
+
+#[cfg(test)]
+mod settled_targets_tests {
+    use super::*;
+    #[test]
+    fn settled_exec_releases_only_its_resource_and_child_action_routes() {
+        let op = |n| OperationId {
+            host_generation: "target-fixture".try_into().unwrap(),
+            owner_epoch: "target-owner".try_into().unwrap(),
+            sequence: n,
+        };
+        let digest = Sha256Digest::of_bytes(b"owned-target");
+        let mut targets = BTreeMap::new();
+        targets.insert(
+            op(1),
+            TargetRecord {
+                digest,
+                kind: TargetKind::ExecResource,
+                parent: None,
+            },
+        );
+        targets.insert(
+            op(2),
+            TargetRecord {
+                digest,
+                kind: TargetKind::ExecAction,
+                parent: Some(op(1)),
+            },
+        );
+        targets.insert(
+            op(3),
+            TargetRecord {
+                digest,
+                kind: TargetKind::ExecResource,
+                parent: None,
+            },
+        );
+        assert_eq!(retire_resource_targets(&mut targets, &op(1)), 2);
+        assert!(targets.contains_key(&op(3)));
+        assert_eq!(retire_resource_targets(&mut targets, &op(1)), 0);
+        for n in 4..=1200 {
+            targets.insert(
+                op(n),
+                TargetRecord {
+                    digest,
+                    kind: TargetKind::ExecResource,
+                    parent: None,
+                },
+            );
+            assert_eq!(retire_resource_targets(&mut targets, &op(n)), 1);
+        }
+        assert_eq!(
+            targets.len(),
+            1,
+            "completed history must not exhaust routing capacity"
+        );
     }
 }

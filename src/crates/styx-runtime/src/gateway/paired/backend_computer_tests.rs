@@ -63,3 +63,12 @@ fn computer_routes_validate_native_arguments_and_preserve_typed_results() {
     assert!(Phase::Unknown.blocks_dispatch());
     assert!(!Phase::Ready.blocks_dispatch());
 }
+
+#[test]
+fn pre_dispatch_capacity_is_known_and_retryable() {
+    let result = computer_error(ErrorCategory::Busy, ExecutionCertainty::NotDispatched);
+    let value: Value = serde_json::from_str(&result.content[0].as_text().unwrap().text).unwrap();
+    assert_eq!(value["error"], "capacity_busy");
+    assert_eq!(value["uncertain"], false);
+    assert_eq!(value["retryable"], true);
+}

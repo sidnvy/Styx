@@ -89,6 +89,12 @@ impl GatewayToolBackend for CounterBackend {
     }
 }
 impl GatewayOwnerLifecycle for CounterBackend {
+    fn owner_has_live_work(&self, owner: &VerifiedGatewayOwner) -> bool {
+        self.pending_owners
+            .lock()
+            .unwrap()
+            .contains_key(owner.owner_id().as_str())
+    }
     fn fence_owner(&self, owner: &VerifiedGatewayOwner) -> Result<(), OwnerFenceError> {
         if self.fail_fence_once.swap(false, Ordering::AcqRel) {
             return Err(OwnerFenceError);
@@ -173,6 +179,23 @@ fn outbound_limit_precedes_sdk_cache_and_partition_cannot_be_empty() {
     assert!(!session::bounded_message(&"x".repeat(MESSAGE_BYTES)));
     let root = Arc::new(Semaphore::new(1));
     assert!(HttpBudget::from_reserved_partition(root.try_acquire_owned().unwrap()).is_err());
+    let maximum = HttpBudget::from_reserved_partition(
+        Arc::new(Semaphore::new(MAX_HTTP_BYTES))
+            .try_acquire_many_owned(MAX_HTTP_BYTES as u32)
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(maximum.capacity, 80);
+    assert_eq!(maximum._partition.num_permits(), 128 * 1024 * 1024);
+    let over = MAX_HTTP_BYTES + SESSION_BYTES;
+    assert!(
+        HttpBudget::from_reserved_partition(
+            Arc::new(Semaphore::new(over))
+                .try_acquire_many_owned(over as u32)
+                .unwrap()
+        )
+        .is_err()
+    );
 }
 #[tokio::test]
 #[ignore = "requires STYX_TEST_HTTP_ROOT; owned loopback official SDK counter-backend development scenario"]
@@ -183,8 +206,8 @@ async fn official_sdk_tcp_auth_sessions_limits_and_pending_close() {
         let token="owned-development-fixture-token-aaaaaaaaaaaa".to_owned();
         let policy=Arc::new(GatewayBearerPolicy::new(token.as_bytes(),vec![address.to_string()],vec!["https://approved.example".into()]).unwrap());
         let backend=Arc::new(CounterBackend{tools:serde_json::from_value(surface()["tools"].clone()).unwrap(),fenced:Mutex::new(BTreeSet::new()),calls:Mutex::new(vec![]),pending:AtomicUsize::new(0),attempts:AtomicUsize::new(0),fail_fence_once:std::sync::atomic::AtomicBool::new(false),arrived:tokio::sync::Notify::new(),pending_owners:Mutex::new(BTreeMap::new()),path:root.join("counter-effects.txt")});
-        let shared=Arc::new(Semaphore::new(styx_contracts::HOST_QUEUED_BYTES));
-        let budget=HttpBudget::from_reserved_partition(shared.clone().try_acquire_many_owned((32*1024*1024)as u32).unwrap()).unwrap();
+        let shared=Arc::new(Semaphore::new(GATEWAY_HTTP_BYTES));
+        let budget=HttpBudget::from_reserved_partition(shared.clone().try_acquire_many_owned(GATEWAY_HTTP_BYTES as u32).unwrap()).unwrap();
         let app=GatewayHttp::new(policy,backend.clone(),budget.clone());let server=app.clone().serve_owned(listener).await.unwrap();
         let raw=reqwest::Client::new();
         let versions=["2024-10-07","2024-11-05","2025-03-26","2025-06-18","2025-11-25"];
@@ -228,7 +251,7 @@ async fn official_sdk_tcp_auth_sessions_limits_and_pending_close() {
         let owners:BTreeSet<_>=backend.calls.lock().unwrap().iter().map(|x|x.0.clone()).collect();assert_eq!(owners.len(),5);
         assert_eq!(backend.calls.lock().unwrap().len(),6);assert_eq!(std::fs::read_to_string(&backend.path).unwrap().lines().count(),1);
         let report=server.shutdown(Duration::from_secs(5)).await;assert!(report.connections_joined&&report.lifecycle_jobs_joined);assert_eq!(report.unresolved_sessions,0);
-        drop(server);drop(app);drop(budget);assert_eq!(shared.available_permits(),styx_contracts::HOST_QUEUED_BYTES);
+        drop(server);drop(app);drop(budget);assert_eq!(shared.available_permits(),GATEWAY_HTTP_BYTES);
         println!("HTTP owned development fixture={} PASS: real official SDK all5, frozen tools, auth each verb, isolated opaque owners, oldest header shim all3verbs, unknown/oversize refused, one pending nonce effect then real fence+observed SDK transport close+cleanup; not native/account/TLS",root.display());
     }).await.unwrap();
 }
@@ -258,17 +281,17 @@ async fn close_fences_late_admission_retries_fence_and_double_shutdown_keeps_own
         format!("Bearer {token}").parse().unwrap(),
     );
     let principal = policy.authorize(&headers).unwrap();
-    let shared = Arc::new(Semaphore::new(styx_contracts::HOST_QUEUED_BYTES));
+    let shared = Arc::new(Semaphore::new(GATEWAY_HTTP_BYTES));
     let budget = HttpBudget::from_reserved_partition(
         shared
             .clone()
-            .try_acquire_many_owned((32 * 1024 * 1024) as u32)
+            .try_acquire_many_owned(GATEWAY_HTTP_BYTES as u32)
             .unwrap(),
     )
     .unwrap();
     let app = GatewayHttp::new(policy, backend.clone(), budget.clone());
     let session = app
-        .create_session(principal.new_mcp_session_owner())
+        .create_session(principal.new_mcp_session_owner().unwrap())
         .unwrap();
     // This pure control fixture never constructed an SDK worker. It must not be
     // reported as a real SDK close/join observation from the TCP scenario.
@@ -327,17 +350,14 @@ async fn close_fences_late_admission_retries_fence_and_double_shutdown_keeps_own
     assert_eq!(a.unresolved_sessions, 0);
     assert_eq!(b.unresolved_sessions, 0);
     assert!(
-        app.create_session(principal.new_mcp_session_owner())
+        app.create_session(principal.new_mcp_session_owner().unwrap())
             .is_err()
     );
     assert_eq!(backend.attempts.load(Ordering::Acquire), 0);
     drop(server);
     drop(app);
     drop(budget);
-    assert_eq!(
-        shared.available_permits(),
-        styx_contracts::HOST_QUEUED_BYTES
-    );
+    assert_eq!(shared.available_permits(), GATEWAY_HTTP_BYTES);
 }
 
 /// Actual HTTP transport pressure. The barrier only holds already-admitted
@@ -362,8 +382,8 @@ async fn actual_tcp_slow_post_readers_do_not_starve_bodyless_control() {
             arrived: tokio::sync::Notify::new(), pending_owners: Mutex::new(BTreeMap::new()),
             path: root.join("unused-effects.txt"),
         });
-        let shared = Arc::new(Semaphore::new(styx_contracts::HOST_QUEUED_BYTES));
-        let budget = HttpBudget::from_reserved_partition(shared.clone().try_acquire_many_owned(32 * 1024 * 1024).unwrap()).unwrap();
+        let shared = Arc::new(Semaphore::new(GATEWAY_HTTP_BYTES));
+        let budget = HttpBudget::from_reserved_partition(shared.clone().try_acquire_many_owned(GATEWAY_HTTP_BYTES as u32).unwrap()).unwrap();
         let app = GatewayHttp::new(policy, backend.clone(), budget.clone());
         let server = app.clone().serve_owned(listener).await.unwrap();
         let client = reqwest::Client::new();
@@ -454,11 +474,11 @@ async fn actual_tcp_slow_post_readers_do_not_starve_bodyless_control() {
         assert_eq!(app.body_readers.available_permits(), 16);
         assert_eq!(app.control.available_permits(), 2);
         assert_eq!(app.requests.available_permits(), 16);
-        assert_eq!(app.connections.available_permits(), 32);
+        assert_eq!(app.connections.available_permits(), 128);
         assert_eq!(backend.fenced.lock().unwrap().len(), 4);
         assert_eq!(backend.attempts.load(Ordering::Acquire), 0);
         drop(server); drop(app); drop(budget);
-        assert_eq!(shared.available_permits(), styx_contracts::HOST_QUEUED_BYTES);
+        assert_eq!(shared.available_permits(), GATEWAY_HTTP_BYTES);
         println!("actual TCP pressure PASS fixture={}: 16 observed slow POST readers held; GET entered; two independent DELETE controls simultaneously admitted before SDK effect; third429; two202 and exact fences before pressure release; all owned admissions/connections/partition returned. No native/TLS/account evidence. POST cancel still shares body capacity; SDK detached joins unknown", root.display());
     }).await.unwrap();
 }
@@ -524,20 +544,20 @@ async fn process_quit_joins_local_sdk_workers_without_forging_remote_owner_clean
         format!("Bearer {token}").parse().unwrap(),
     );
     let principal = policy.authorize(&headers).unwrap();
-    let partition = Arc::new(Semaphore::new(styx_contracts::HOST_QUEUED_BYTES));
+    let partition = Arc::new(Semaphore::new(GATEWAY_HTTP_BYTES));
     let budget = HttpBudget::from_reserved_partition(
         partition
             .clone()
-            .try_acquire_many_owned(32 * 1024 * 1024)
+            .try_acquire_many_owned(GATEWAY_HTTP_BYTES as u32)
             .unwrap(),
     )
     .unwrap();
     let app = GatewayHttp::new(policy, backend.clone(), budget.clone());
     let attempted = app
-        .create_session(principal.new_mcp_session_owner())
+        .create_session(principal.new_mcp_session_owner().unwrap())
         .unwrap();
     let untouched = app
-        .create_session(principal.new_mcp_session_owner())
+        .create_session(principal.new_mcp_session_owner().unwrap())
         .unwrap();
     assert!(
         untouched.manager.local_transport_quiescent(),
@@ -638,8 +658,8 @@ async fn process_quit_joins_local_sdk_workers_without_forging_remote_owner_clean
     drop(server);
     drop(app);
     drop(budget);
-    assert_eq!(
-        partition.available_permits(),
-        styx_contracts::HOST_QUEUED_BYTES
-    );
+    assert_eq!(partition.available_permits(), GATEWAY_HTTP_BYTES);
 }
+
+#[path = "capacity_tests.rs"]
+mod capacity;
