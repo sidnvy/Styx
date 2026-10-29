@@ -21,7 +21,11 @@ Product work now follows `src/docs/rust-core-rewrite/REDUCED-SCOPE.md`; its sequ
 
 Existing evidence, Rust toolchain and Cargo caches referenced by the handoff retain their established paths. Do not rebuild, move signed installations, change identity/pairing, or replay unknown operations merely because the source directory moved.
 
-No active Codex worktree leases. Retired: `codex-join-retry` (2026-10-29) merged and removed.
+Active lease (2026-10-29): `codex-hub-links` at /home/sid/Developer/worktrees/Styx/codex-hub-links, branch codex/hub-links, owner Claude (integrator), paths styx-runtime gateway/paired/{relay,mod,transport}.rs, foreground/gateway.rs and enrollment/paired_journey.rs (relay budget wiring), their tests; purpose v1 blocker: a hub accepts only two connected computers (32 MiB relay / 16 MiB per link); retire by merge into develop and removal.
+
+Post-v1 branches waiting for v1 to close (no worktree): codex/computers (4a292e9), codex/upgrade (5b7cf3a).
+
+Retired: `codex-join-retry` (2026-10-29) merged and removed.
 
 Retired: `codex-computer-busy` (2026-10-29) merged and removed.
 
