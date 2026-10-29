@@ -754,6 +754,11 @@ fn join_result(
         }
         Err(value) => {
             let mut report = serde_json::json!({"schema":1,"error":value.code()});
+            if let Some(hint) = value.hint() {
+                report["hint"] = hint.into();
+                report["retryable"] = value.retryable().into();
+                report["uncertain"] = value.uncertain().into();
+            }
             if let Some((field, reason)) = value.detail() {
                 report["field"] = field.into();
                 report["reason"] = reason.into();

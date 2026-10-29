@@ -289,7 +289,7 @@ pub fn retire_role(
 /// collision appearing after preflight. There is no overwrite fallback.
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[allow(unsafe_code)] // Official no-replace rename ABI only.
-fn rename_exclusive(from: &Path, to: &Path) -> std::io::Result<()> {
+pub(crate) fn rename_exclusive(from: &Path, to: &Path) -> std::io::Result<()> {
     use std::os::unix::ffi::OsStrExt;
     let from = std::ffi::CString::new(from.as_os_str().as_bytes())?;
     let to = std::ffi::CString::new(to.as_os_str().as_bytes())?;
@@ -314,7 +314,7 @@ fn rename_exclusive(from: &Path, to: &Path) -> std::io::Result<()> {
 }
 #[cfg(target_os = "windows")]
 #[allow(unsafe_code)] // Official MoveFileExW ABI, with no replacement flag.
-fn rename_exclusive(from: &Path, to: &Path) -> std::io::Result<()> {
+pub(crate) fn rename_exclusive(from: &Path, to: &Path) -> std::io::Result<()> {
     use std::os::windows::ffi::OsStrExt;
     let from: Vec<u16> = from.as_os_str().encode_wide().chain(Some(0)).collect();
     let to: Vec<u16> = to.as_os_str().encode_wide().chain(Some(0)).collect();

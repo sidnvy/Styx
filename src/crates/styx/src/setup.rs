@@ -116,6 +116,14 @@ impl std::fmt::Debug for Failure {
 }
 impl Failure {
     pub fn hint(&self) -> Option<&'static str> {
+        if let Some(error) = self
+            ._owner
+            .as_ref()
+            .and_then(|owner| owner.downcast_ref::<native_join::JoinError>())
+            && let Some(hint) = error.hint()
+        {
+            return Some(hint);
+        }
         match self.code {
             "gateway_listen_failed" | "gateway_lan_listen_failed" => Some(
                 "The hub could not open its network port. Check whether another program is using it, then choose a free port.",

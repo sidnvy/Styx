@@ -297,6 +297,45 @@ fn initialize(
     }
     Ok(store)
 }
+/// Called only by the creating Join operation after NotDispatched, after all
+/// child/store/writer handles have been closed (required by Windows). Recheck
+/// the original private root identity; never overwrite or delete a backup.
+/// Fixed App inputs move first, so a failure cannot expose a fresh Host path.
+pub(crate) fn move_unsent_join(
+    path: &std::path::Path,
+    expected: &crate::store::RootIdentity,
+    unix_ms: u64,
+    app_inputs: &[std::path::PathBuf],
+) -> std::io::Result<()> {
+    let root = PrivateRoot::open(path).map_err(std::io::Error::other)?;
+    if &root.identity() != expected {
+        return Err(std::io::Error::other("join root changed"));
+    }
+    drop(root);
+    let suffix = format!(".join-not-sent-{unix_ms}");
+    for source in app_inputs
+        .iter()
+        .map(std::path::PathBuf::as_path)
+        .chain(Some(path))
+    {
+        // CLI joins have no App inputs; an App requestJoin using an external
+        // deployment may also have none. Existing inputs are preserved as-is.
+        if source != path {
+            match std::fs::symlink_metadata(source) {
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error),
+                Ok(_) => (),
+            }
+        }
+        let mut name = source
+            .file_name()
+            .ok_or_else(|| std::io::Error::other("join name"))?
+            .to_os_string();
+        name.push(&suffix);
+        crate::management::role_retire::rename_exclusive(source, &source.with_file_name(name))?;
+    }
+    Ok(())
+}
 impl NativeHostJoinStore {
     pub(crate) fn from_binding(binding: NativeRootBinding) -> Result<Self, NativeRootFailure> {
         #[cfg(any(

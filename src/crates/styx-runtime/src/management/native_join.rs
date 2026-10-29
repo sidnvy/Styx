@@ -37,6 +37,7 @@ pub struct JoinReport {
 pub struct JoinError {
     code: &'static str,
     exit: u8,
+    retryable: bool,
     detail: Option<(&'static str, String)>,
     #[cfg(any(
         all(target_os = "windows", target_arch = "x86_64"),
@@ -52,6 +53,15 @@ impl JoinError {
     pub fn code(&self) -> &'static str {
         self.code
     }
+    pub fn retryable(&self) -> bool {
+        self.retryable
+    }
+    pub fn uncertain(&self) -> bool {
+        self.exit == 4
+    }
+    pub fn hint(&self) -> Option<&'static str> {
+        self.retryable.then_some("The pairing request was not sent. Check that this computer can reach the hub, then try a new join link.")
+    }
     pub fn exit_code(&self) -> u8 {
         self.exit
     }
@@ -66,6 +76,7 @@ impl JoinError {
         Self {
             code,
             exit,
+            retryable: false,
             detail: None,
             #[cfg(any(
                 all(target_os = "windows", target_arch = "x86_64"),
@@ -175,11 +186,24 @@ pub(crate) async fn request_for_app(
             .to_owned();
         let deployment = deployment_file.to_owned();
         let retained = scope.clone();
-        platform::owned(
-            async move { platform::request(parent, name, deployment, Some(scope)).await },
-        )
-        .await
-        .map_err(|error| error.with_app_scope(retained))
+        let attempt = scope
+            .scope_for_join()
+            .map_err(|_| JoinError::new("native_join_app_scope_changed", 4))?;
+        let result = platform::owned(async move {
+            platform::request(parent, name, deployment, Some(attempt)).await
+        })
+        .await;
+        // The attempt's Work has closed on success or safe recovery. Bind the
+        // long-lived App scope only when a root remains; unknown errors retain
+        // the original Work and continue to fence all enrollment operations.
+        if result.is_ok() {
+            retained.bind().map_err(|_| {
+                JoinError::new("native_join_app_scope_changed", 4).with_app_scope(retained.clone())
+            })?;
+        } else if !result.as_ref().is_err_and(|error| error.retryable()) {
+            let _ = retained.bind();
+        }
+        result.map_err(|error| error.with_app_scope(retained))
     }
     #[cfg(not(any(
         all(target_os = "windows", target_arch = "x86_64"),
@@ -335,6 +359,9 @@ mod platform {
     }
     impl JoinError {
         pub(super) fn with_app_scope(mut self, scope: Arc<crate::app::HostScope>) -> Self {
+            if self.retryable {
+                return self;
+            }
             let retained = self._retained.take();
             self._retained = Some(Box::new(Retained::App {
                 _scope: scope,
@@ -1014,6 +1041,9 @@ mod platform {
         {
             Ok(value) => value,
             Err(error) => {
+                if error.certainty == http::JoinHttpCertainty::NotDispatched {
+                    return blocking(move || recover_unsent(work, error.code())).await;
+                }
                 return Err(JoinError::new(error.code(), 4).keep(Retained::Work {
                     _work: Box::new(work),
                 }));
@@ -1047,6 +1077,53 @@ mod platform {
         .await?;
         work = next;
         Ok(work.report("native_host_request", "awaiting_approval", &pending))
+    }
+    fn recover_unsent(work: Work, code: &'static str) -> Result<JoinReport> {
+        // Never infer this permission from persisted phases on reopen. Only
+        // this creating request's transport result can authorize recovery.
+        let checked = (|| {
+            work.validate()?;
+            if work
+                .store
+                .read(File::JoinDispatched)
+                .map_err(|_| unknown())?
+                .is_none()
+                || work
+                    .store
+                    .read(File::JoinReply)
+                    .map_err(|_| unknown())?
+                    .is_some()
+            {
+                return Err(unknown());
+            }
+            clock_ms()
+        })();
+        let now = match checked {
+            Ok(now) => now,
+            Err(_) => {
+                return Err(JoinError::new(code, 4).keep(Retained::Work {
+                    _work: Box::new(work),
+                }));
+            }
+        };
+        let identity = work.root.identity();
+        let path = work.state_dir.clone();
+        let scope = work.app_scope.clone();
+        // Includes the journal/configuration writer, PrivateRoots and Input
+        // handles. The App pin must also close before Windows can rename.
+        drop(work);
+        let inputs = scope
+            .as_ref()
+            .map_or_else(Vec::new, |s| s.unsent_join_inputs());
+        drop(scope);
+        if crate::store::native_root::host::move_unsent_join(&path, &identity, now, &inputs)
+            .is_err()
+        {
+            return Err(JoinError::new(code, 4));
+        }
+        let mut error = JoinError::new(code, 2);
+        error.retryable = true;
+        Err(error)
     }
     fn open(path: &Path, app_scope: Option<Arc<crate::app::HostScope>>) -> Result<Work> {
         open_with_candidate(path, app_scope, None)
