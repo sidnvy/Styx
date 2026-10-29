@@ -3,6 +3,8 @@
 //! arbitrary call-supplied paths, legacy adoption or mutation replay lives here.
 #[cfg(all(test, target_os = "linux", target_env = "gnu"))]
 mod control_binding_tests;
+#[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+mod join_retry_tests;
 mod local_gateway;
 mod login;
 mod maintenance;
@@ -170,6 +172,28 @@ impl HostScope {
                 .map_err(|_| AppError("app_scope_changed"))?,
         }
         Ok(())
+    }
+    /// A join attempt owns its child handles until transport settlement. The
+    /// App binds its long-lived scope only after that operation returns.
+    pub(crate) fn scope_for_join(&self) -> Result<Arc<Self>, AppError> {
+        self.validate()?;
+        if self.root.get().is_some() {
+            return Err(AppError("app_join_already_exists"));
+        }
+        Ok(Arc::new(Self::in_container(
+            self.container.clone(),
+            self.state_dir.clone(),
+        )?))
+    }
+    pub(crate) fn unsent_join_inputs(&self) -> Vec<PathBuf> {
+        [
+            "app-join-input-v1.json",
+            "app-join-ca-v1.pem",
+            "app-join-invitation-v1",
+        ]
+        .into_iter()
+        .map(|name| self.container.parent_path.join(name))
+        .collect()
     }
     pub(crate) fn bind(&self) -> Result<(), AppError> {
         if self.root.get().is_none() {
@@ -353,6 +377,7 @@ struct HostApp {
     status: watch::Sender<ConnectionStatus>,
     cleanup: Option<ForegroundOutcome>,
     retained: Option<RetainedFailure>,
+    join_retry: Option<(&'static str, &'static str)>,
     unknown: bool,
     quit_ticket: Option<String>,
     login: login::Login,
@@ -395,6 +420,7 @@ impl HostApp {
             status,
             cleanup: None,
             retained: None,
+            join_retry: None,
             unknown: false,
             quit_ticket: None,
             login: login::Login::default(),
@@ -645,7 +671,18 @@ impl HostApp {
     }
     fn join_error(&mut self, e: native_join::JoinError) -> AppError {
         let code = e.code();
-        if e.exit_code() == 4 {
+        self.join_retry = None;
+        if e.retryable() {
+            // The original operation archived the root and fixed inputs, and
+            // released every root pin. Keep the same App instance/container.
+            self.input_writer = None;
+            self.configuration = None;
+            self.enrollment = None;
+            self.inspected_join = None;
+            self.native_computer_requested = None;
+            self.native_runtime = None;
+            self.join_retry = e.hint().map(|hint| (code, hint));
+        } else if e.exit_code() == 4 {
             self.retained = Some(RetainedFailure::Join(e));
         }
         AppError(code)
@@ -1357,7 +1394,15 @@ async fn serve_app<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         let response = match result {
             Ok(result) => json!({"id":request.id,"ok":true,"result":result}),
             Err(error) => {
-                json!({"id":request.id,"ok":false,"error":error.code(),"runtimeUpdate":app.runtime_update,"retirement":app.retire_failure.as_ref().map(|error| &error.report)})
+                let mut response = json!({"id":request.id,"ok":false,"error":error.code(),"runtimeUpdate":app.runtime_update,"retirement":app.retire_failure.as_ref().map(|error| &error.report)});
+                if let Some((code, hint)) = app.join_retry
+                    && code == error.code()
+                {
+                    response["hint"] = json!(hint);
+                    response["retryable"] = json!(true);
+                    response["uncertain"] = json!(false);
+                }
+                response
             }
         };
         let encoded =

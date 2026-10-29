@@ -190,3 +190,40 @@ fn native_host_pending_closed_chain_reopen_and_sticky_unknown_aggregate() {
         "native_host_store_closed_chain=true; root_writer_retained=true; remote_join_and_TLS=NOT_RUN"
     );
 }
+
+#[test]
+fn unsent_join_move_preserves_private_root_and_refuses_backup_collision() {
+    use std::os::unix::fs::DirBuilderExt as _;
+    let parent = std::env::temp_dir().join(format!("styx-unsent-store-{}", uuid::Uuid::new_v4()));
+    fs::DirBuilder::new().mode(0o700).create(&parent).unwrap();
+    let path = parent.join("host");
+    fs::DirBuilder::new().mode(0o700).create(&path).unwrap();
+    let identity = PrivateRoot::open(&path).unwrap().identity();
+    // A raced/pre-existing destination is never replaced, even when empty.
+    let backup = parent.join("host.join-not-sent-1000");
+    fs::DirBuilder::new().mode(0o700).create(&backup).unwrap();
+    let original = fs::metadata(&backup).unwrap().ino();
+    assert!(move_unsent_join(&path, &identity, 1000, &[]).is_err());
+    assert_eq!(fs::metadata(&backup).unwrap().ino(), original);
+    assert_eq!(PrivateRoot::open(&path).unwrap().identity(), identity);
+    // Failure to preserve an App input also leaves the root at the old path.
+    let input = parent.join("app-join-input-v1.json");
+    fs::write(&input, b"attempt data").unwrap();
+    fs::write(
+        parent.join("app-join-input-v1.json.join-not-sent-1001"),
+        b"existing data",
+    )
+    .unwrap();
+    assert!(move_unsent_join(&path, &identity, 1001, std::slice::from_ref(&input)).is_err());
+    assert!(path.is_dir());
+    assert_eq!(fs::read(input).unwrap(), b"attempt data");
+    move_unsent_join(&path, &identity, 1002, &[]).unwrap();
+    assert!(!path.exists());
+    let saved = parent.join("host.join-not-sent-1002");
+    assert_eq!(PrivateRoot::open(&saved).unwrap().identity(), identity);
+    assert_eq!(
+        fs::metadata(saved).unwrap().permissions().mode() & 0o777,
+        0o700
+    );
+    fs::remove_dir_all(parent).unwrap();
+}
