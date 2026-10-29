@@ -21,6 +21,36 @@ pub(super) struct ComputerInputs {
     slots: Arc<tokio::sync::Semaphore>,
     gate: Arc<tokio::sync::RwLock<()>>,
 }
+impl ComputerInputs {
+    async fn run<T: Send + 'static>(
+        &self,
+        work: impl FnOnce(Arc<dyn ComputerBootstrap>) -> Result<T, ErrorCategory> + Send + 'static,
+    ) -> Result<T, ErrorCategory> {
+        if self.tasks.is_closed() {
+            return Err(ErrorCategory::Busy);
+        }
+        // Readers queued behind profile release must not consume validation
+        // slots: those slots bound actual blocking work, not gate waiters.
+        let guard = self.gate.clone().read_owned().await;
+        if self.tasks.is_closed() {
+            return Err(ErrorCategory::Busy);
+        }
+        let permit = self
+            .slots
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| ErrorCategory::Busy)?;
+        let source = self.source.clone();
+        self.tasks
+            .spawn_blocking(move || {
+                let _permit = permit;
+                let _guard = guard;
+                work(source)
+            })
+            .await
+            .map_err(|_| ErrorCategory::IntegrityFailure)?
+    }
+}
 impl HostProtocol<'_> {
     pub(crate) fn with_computer_profiles(
         mut self,
@@ -67,29 +97,11 @@ impl HostProtocol<'_> {
         &self,
         work: impl FnOnce(Arc<dyn ComputerBootstrap>) -> Result<T, ErrorCategory> + Send + 'static,
     ) -> Result<T, ErrorCategory> {
-        let inputs = self
-            .computer
+        self.computer
             .as_ref()
-            .ok_or(ErrorCategory::CapabilityUnsupported)?;
-        if inputs.tasks.is_closed() {
-            return Err(ErrorCategory::Busy);
-        }
-        let permit = inputs
-            .slots
-            .clone()
-            .try_acquire_owned()
-            .map_err(|_| ErrorCategory::Busy)?;
-        let source = inputs.source.clone();
-        let guard = inputs.gate.clone().read_owned().await;
-        inputs
-            .tasks
-            .spawn_blocking(move || {
-                let _permit = permit;
-                let _guard = guard;
-                work(source)
-            })
+            .ok_or(ErrorCategory::CapabilityUnsupported)?
+            .run(work)
             .await
-            .map_err(|_| ErrorCategory::IntegrityFailure)?
     }
     fn existing_computer_dispatch(
         &self,
@@ -529,4 +541,52 @@ pub(crate) async fn assert_pending_factory_keeps_owner_control_live(
     drop(protocol);
     let cleanup = host.shutdown_owned(Duration::from_secs(1)).await.unwrap();
     assert!(cleanup.supervised_jobs_joined);
+}
+
+#[cfg(test)]
+mod input_tests {
+    use super::*;
+
+    struct Bootstrap;
+    impl ComputerBootstrap for Bootstrap {
+        fn prepare_profile(&self, _: &OwnerLease) -> Result<OwnedCuaConfig, ErrorCategory> {
+            unreachable!("input gate test never opens a native profile")
+        }
+        fn validate_before_spawn(&self) -> Result<(), ErrorCategory> {
+            Ok(())
+        }
+        fn validate_control(&self) -> Result<(), ErrorCategory> {
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn computer_input_waiting_readers_do_not_hold_slots() {
+        let inputs = ComputerInputs {
+            source: Arc::new(Bootstrap),
+            tasks: TaskTracker::new(),
+            slots: Arc::new(tokio::sync::Semaphore::new(2)),
+            gate: Arc::new(tokio::sync::RwLock::new(())),
+        };
+        let writer = inputs.gate.clone().write_owned().await;
+        {
+            let first = inputs.run(|source| source.validate_control());
+            let second = inputs.run(|source| source.validate_control());
+            let third = inputs.run(|source| source.validate_control());
+            tokio::pin!(first, second, third);
+            assert!(futures_util::poll!(&mut first).is_pending());
+            assert!(futures_util::poll!(&mut second).is_pending());
+            assert!(futures_util::poll!(&mut third).is_pending());
+            assert_eq!(inputs.slots.available_permits(), 2);
+            // Cancel queued readers while profile release still holds the gate.
+        }
+        drop(writer);
+        inputs
+            .run(|source| source.validate_control())
+            .await
+            .unwrap();
+        inputs.tasks.close();
+        inputs.tasks.wait().await;
+        assert_eq!(inputs.slots.available_permits(), 2);
+    }
 }
