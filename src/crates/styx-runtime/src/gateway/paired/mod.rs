@@ -6,7 +6,32 @@ pub use relay::{BoundOwner, DeviceStatus, RelayError, RelayHandle};
 
 pub mod backend;
 pub use backend::PairedGatewayBackend;
-pub const PAIRED_LINK_BYTES: usize = 16 * 1024 * 1024;
+/// Gateway-only reservation; Host link queues retain their independent budget.
+/// Reservation measurement (Linux x86_64, Rust 1.97.1, 2026-10-29):
+/// an isolated System GlobalAlloc counter recorded requested live/peak bytes
+/// around the production WebSocketConfig and decode_message, over AWS-LC
+/// Rustls TLS 1.3 and a 64 KiB Tokio duplex (no sockets). Both TLS configs use
+/// the Gateway's TLS 1.3/1.2 + http/1.1 settings with a disposable RSA-3072 cert.
+/// Workloads are reproduced by transport's
+/// exec_snapshot_and_screenshot_at_frame_ceiling_use_production_decoder test.
+/// Idle TLS + WS: 277,483 bytes. Peak traffic increments at exactly 2,097,152
+/// wire bytes: Exec stdout 6,272,451; Browser text snapshot 6,274,182;
+/// screenshot base64 6,274,176. The counter conservatively includes both TLS
+/// endpoints and peer-side WS write/copy allocations, excludes shared config,
+/// Hyper, command queues and executor/provider memory (separately budgeted),
+/// and measures requested allocations rather than RSS or kernel socket memory.
+/// Idle plus largest measured increment = 6,551,665 bytes. 8 MiB leaves
+/// 1,836,943 bytes (28.0%) for four 256 KiB requests (three queued plus one
+/// sending), Hyper/control/task overhead and allocator rounding. Incoming
+/// frame/message (2 MiB), WS write buffer (2 MiB + 64 KiB), three commands and
+/// two in-flight business calls plus one control remain bounded independently.
+/// This is a capped reservation, not an allocator-enforced RSS bound for every
+/// possible JSON shape. Native socket/platform acceptance remains separate.
+pub const PAIRED_LINK_BYTES: usize = 8 * 1024 * 1024;
+pub const GATEWAY_RELAY_BYTES: usize = 256 * 1024 * 1024;
+pub const CONNECTED_COMPUTERS_CAPACITY: usize = GATEWAY_RELAY_BYTES / PAIRED_LINK_BYTES;
+pub const CAPACITY_ERROR_CODE: &str = "gateway_wss_capacity_exhausted";
+pub const CAPACITY_HINT: &str = "This hub is at its limit of 32 connected computers. Disconnect a computer from this hub, then reconnect.";
 
 #[cfg(all(test, target_os = "linux", target_env = "gnu"))]
 mod namespace_tests {

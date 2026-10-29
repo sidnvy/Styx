@@ -751,9 +751,9 @@ mod platform {
             d.mark("reconcile_done");
         }
         let shared = SharedEnrollment::new(service);
-        let partition = Arc::new(Semaphore::new(styx_contracts::HOST_QUEUED_BYTES));
-        // Relay keeps its existing partition. HTTP owns a separate capped
-        // queue reservation; Host/link sizing remains unchanged.
+        let partition = Arc::new(Semaphore::new(crate::gateway::paired::GATEWAY_RELAY_BYTES));
+        // Gateway relay and MCP each own a capped reservation, independent of
+        // Host-side queues and link sizing.
         let relay = RelayHandle::new(
             shared.clone(),
             gateway_id,
@@ -761,7 +761,7 @@ mod platform {
                 .map_err(|_| error("gateway_epoch_invalid"))?,
             partition
                 .clone()
-                .try_acquire_many_owned(32 * 1024 * 1024)
+                .try_acquire_many_owned(crate::gateway::paired::GATEWAY_RELAY_BYTES as u32)
                 .map_err(|_| error("gateway_partition_unavailable"))?,
         )
         .map_err(|_| error("gateway_relay_invalid"))?;

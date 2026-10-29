@@ -1,4 +1,4 @@
-use super::GatewayExecProfile;
+use super::{GATEWAY_RELAY_BYTES, GatewayExecProfile, PAIRED_LINK_BYTES};
 #[path = "drain.rs"]
 mod drain;
 use crate::{
@@ -197,14 +197,56 @@ pub(crate) struct Inner {
     pub gateway: GatewayId,
     pub epoch: GatewayEpoch,
     pub state: Mutex<State>,
-    pub slots: Arc<Semaphore>,
-    pub _budget: OwnedSemaphorePermit,
+    pub links: LinkSlots,
     bindings: Mutex<Vec<Arc<Binding>>>,
     shutdown_lock: tokio::sync::Mutex<()>,
-    shutdown_failed: AtomicBool,
+    pub(crate) shutdown_failed: AtomicBool,
     unconfirmed_drains: AtomicUsize,
     opening: tokio::sync::Mutex<()>,
     next_owner: std::sync::atomic::AtomicU64,
+}
+/// The reservation lives at least as long as every admitted socket task.
+pub(crate) struct LinkSlots {
+    slots: Arc<Semaphore>,
+    capacity: usize,
+    _budget: OwnedSemaphorePermit,
+}
+impl LinkSlots {
+    fn new(budget: OwnedSemaphorePermit) -> Result<Self, RelayError> {
+        let bytes = budget.num_permits();
+        if !(PAIRED_LINK_BYTES..=GATEWAY_RELAY_BYTES).contains(&bytes)
+            || !bytes.is_multiple_of(PAIRED_LINK_BYTES)
+        {
+            return Err(RelayError::Invalid);
+        }
+        Ok(Self {
+            slots: Arc::new(Semaphore::new(bytes / PAIRED_LINK_BYTES)),
+            capacity: bytes / PAIRED_LINK_BYTES,
+            _budget: budget,
+        })
+    }
+    pub(crate) fn admit(&self) -> Result<OwnedSemaphorePermit, &'static str> {
+        self.slots
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| super::CAPACITY_ERROR_CODE)
+    }
+}
+impl State {
+    /// Only already-finished tasks may be joined here. Retain panic evidence for
+    /// shutdown; dropping a running JoinHandle would detach an owned transport.
+    pub(crate) fn reap_finished(&mut self) -> bool {
+        use futures_util::FutureExt;
+        let mut joined = true;
+        self.tasks.retain_mut(|(_, task)| {
+            if !task.is_finished() {
+                return true;
+            }
+            joined &= matches!(task.now_or_never(), Some(Ok(())));
+            false
+        });
+        joined
+    }
 }
 #[derive(Clone)]
 pub struct RelayHandle {
@@ -217,12 +259,7 @@ impl RelayHandle {
         epoch: GatewayEpoch,
         budget: OwnedSemaphorePermit,
     ) -> Result<Self, RelayError> {
-        let bytes = budget.num_permits();
-        if !(16 * 1024 * 1024..=64 * 1024 * 1024).contains(&bytes)
-            || !bytes.is_multiple_of(16 * 1024 * 1024)
-        {
-            return Err(RelayError::Invalid);
-        }
+        let links = LinkSlots::new(budget)?;
         Ok(Self {
             inner: Arc::new(Inner {
                 shared,
@@ -233,8 +270,7 @@ impl RelayHandle {
                     closing: false,
                     tasks: vec![],
                 }),
-                slots: Arc::new(Semaphore::new(bytes / (16 * 1024 * 1024))),
-                _budget: budget,
+                links,
                 bindings: Mutex::new(vec![]),
                 shutdown_lock: tokio::sync::Mutex::new(()),
                 shutdown_failed: AtomicBool::new(false),
@@ -243,6 +279,15 @@ impl RelayHandle {
                 next_owner: std::sync::atomic::AtomicU64::new(1),
             }),
         })
+    }
+    /// Physical slot occupancy includes negotiation and transport settlement.
+    /// It does not count three capability lanes as three computers.
+    pub fn connection_counts(&self) -> (usize, usize) {
+        let links = &self.inner.links;
+        (
+            links.capacity - links.slots.available_permits(),
+            links.capacity,
+        )
     }
     pub(crate) async fn authorize(&self, e: &Entry) -> Result<(), RelayError> {
         self.authorize_for(e, Lane::Exec).await
@@ -1191,5 +1236,83 @@ mod settled_targets_tests {
             1,
             "completed history must not exhaust routing capacity"
         );
+    }
+}
+
+#[cfg(test)]
+mod connection_capacity_tests {
+    use super::*;
+    fn reserve(bytes: usize) -> Result<LinkSlots, RelayError> {
+        LinkSlots::new(
+            Arc::new(Semaphore::new(bytes))
+                .try_acquire_many_owned(bytes as u32)
+                .unwrap(),
+        )
+    }
+    #[test]
+    fn thirty_two_links_admitted_next_refused_and_disconnect_releases_slot() {
+        let links = reserve(GATEWAY_RELAY_BYTES).unwrap();
+        let mut admitted = (0..32).map(|_| links.admit().unwrap()).collect::<Vec<_>>();
+        assert_eq!(links.capacity, 32);
+        assert_eq!(
+            links.admit().unwrap_err(),
+            super::super::CAPACITY_ERROR_CODE
+        );
+        drop(admitted.pop());
+        let replacement = links.admit().unwrap();
+        assert!(links.admit().is_err());
+        drop(replacement);
+        drop(admitted);
+        assert_eq!(links.slots.available_permits(), 32);
+    }
+    #[tokio::test]
+    async fn two_hundred_reconnections_release_permits_and_reap_completed_tasks() {
+        let links = reserve(GATEWAY_RELAY_BYTES).unwrap();
+        // Other computers remain connected while one repeatedly disconnects.
+        let others = (0..31).map(|_| links.admit().unwrap()).collect::<Vec<_>>();
+        let mut state = State {
+            entries: BTreeMap::new(),
+            closing: false,
+            tasks: vec![],
+        };
+        for _ in 0..200 {
+            assert!(state.reap_finished());
+            let slot = links.admit().unwrap();
+            let stop = CancellationToken::new();
+            let stopped = stop.clone();
+            let job = tokio::spawn(async move {
+                let _slot = slot;
+                stopped.cancelled().await;
+            });
+            state.tasks.push((stop.clone(), job));
+            assert!(links.admit().is_err());
+            stop.cancel();
+            while !state.tasks.last().unwrap().1.is_finished() {
+                tokio::task::yield_now().await;
+            }
+            assert_eq!(links.slots.available_permits(), 1);
+        }
+        assert!(state.reap_finished());
+        assert!(state.tasks.is_empty());
+        drop(others);
+        assert_eq!(links.slots.available_permits(), 32);
+    }
+    #[test]
+    fn gateway_reservation_is_capped_and_independent_of_host_queue_budget() {
+        assert_eq!(GATEWAY_RELAY_BYTES, 32 * PAIRED_LINK_BYTES);
+        assert!(reserve(GATEWAY_RELAY_BYTES + PAIRED_LINK_BYTES).is_err());
+        assert!(reserve(PAIRED_LINK_BYTES - 1).is_err());
+        assert!(reserve(PAIRED_LINK_BYTES + 1).is_err());
+        let source = Arc::new(Semaphore::new(GATEWAY_RELAY_BYTES));
+        let links = LinkSlots::new(
+            source
+                .clone()
+                .try_acquire_many_owned(GATEWAY_RELAY_BYTES as u32)
+                .unwrap(),
+        )
+        .unwrap();
+        assert_eq!(source.available_permits(), 0);
+        drop(links);
+        assert_eq!(source.available_permits(), GATEWAY_RELAY_BYTES);
     }
 }

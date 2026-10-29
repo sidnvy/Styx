@@ -180,16 +180,22 @@ fn read_process_birth(path: &Path) -> std::io::Result<u64> {
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires owned paired root, fixed Codex/Node22 and TLS fixtures; actual enrollment to MCP/WSS/native Exec journey"]
 async fn actual_paired_tls_mcp_codex_nonce_owner_and_revocation_journey() {
-    paired_journey(false).await;
+    paired_journey(false, 1).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires sockets and STYX_TEST_PAIRED_ROOT/TLS_FIXTURES/CODEX_BIN plus Node22; >1000 actual Gateway/Host owner cycles"]
 async fn paired_session_capacity_turnover_requires_sockets() {
-    paired_journey(true).await;
+    paired_journey(true, 1).await;
 }
 
-async fn paired_journey(capacity: bool) {
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires sockets and STYX_TEST_PAIRED_ROOT/TLS_FIXTURES/CODEX_BIN/NODE22; five real paired Hosts with independent native effects"]
+async fn five_connected_computers_exec_requires_sockets() {
+    paired_journey(false, 5).await;
+}
+
+async fn paired_journey(capacity: bool, computers: usize) {
     let parent =
         PathBuf::from(std::env::var("STYX_TEST_PAIRED_ROOT").expect("owned root required"));
     std::fs::create_dir_all(&parent).unwrap();
@@ -254,7 +260,7 @@ async fn paired_journey(capacity: bool) {
     let gateway_id = GatewayId::try_from("owned-paired-gateway").unwrap();
     let gateway_epoch =
         GatewayEpoch::try_from(format!("owned-gateway-{}", uuid::Uuid::new_v4())).unwrap();
-    let partition = Arc::new(Semaphore::new(styx_contracts::HOST_QUEUED_BYTES));
+    let partition = Arc::new(Semaphore::new(crate::gateway::paired::GATEWAY_RELAY_BYTES));
     let policy = Arc::new(
         GatewayBearerPolicy::new(mcp.as_bytes(), vec![host_header.clone()], vec![]).unwrap(),
     );
@@ -266,7 +272,7 @@ async fn paired_journey(capacity: bool) {
         gateway_epoch,
         partition
             .clone()
-            .try_acquire_many_owned(16 * 1024 * 1024)
+            .try_acquire_many_owned(crate::gateway::paired::GATEWAY_RELAY_BYTES as u32)
             .unwrap(),
     )
     .unwrap();
@@ -281,7 +287,7 @@ async fn paired_journey(capacity: bool) {
     let app = EnrollmentHttp::new_paired(
         tls,
         shared,
-        relay,
+        relay.clone(),
         mcp_http.clone(),
         vec![host_header.clone()],
     )
@@ -296,6 +302,30 @@ async fn paired_journey(capacity: bool) {
         host: host_header.clone(),
     };
     let node = Mutex::new(NodeClient::start().await);
+    if computers > 1 {
+        let work = many_connected_computers(
+            &client,
+            &admin,
+            &mcp,
+            &raw,
+            &client_tls,
+            &gateway_id,
+            &relay,
+            &root,
+            computers,
+        );
+        let result = tokio::time::timeout(Duration::from_secs(120), work).await;
+        stop.cancel();
+        let transport = tokio::time::timeout(Duration::from_secs(20), server)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        node.lock().await.stop().await;
+        assert_joined(&transport);
+        result.expect("five-computer independent-effect deadline");
+        return;
+    }
     let device = DeviceId::try_from("styx-1123456789abcdef01234567").unwrap();
     let credential = pair(&client, &node, &admin, &device, &root, capacity).await;
     let generation =
@@ -936,4 +966,194 @@ impl crate::host::protocol::browser::BrowserBootstrap for CapacityBrowser {
     fn validate_control(&self) -> Result<(), styx_contracts::error::ErrorCategory> {
         Ok(())
     }
+}
+
+// Real enrollment, production TLS/WSS, independent native Codex processes and
+// MCP calls. These roots are disposable and never touch an installed profile.
+#[allow(clippy::too_many_arguments)]
+async fn many_connected_computers(
+    client: &Client,
+    admin: &str,
+    model: &str,
+    raw: &reqwest::Client,
+    tls: &Arc<GatewayClientTls>,
+    gateway: &GatewayId,
+    relay: &RelayHandle,
+    root: &Path,
+    computers: usize,
+) {
+    let mut hosts = Vec::new();
+    let mut jobs = Vec::new();
+    let mut devices = Vec::new();
+    let mut nonces = Vec::new();
+    for n in 0..computers {
+        let work = root.join(format!("computer-{n}"));
+        std::fs::create_dir(&work).unwrap();
+        std::fs::set_permissions(&work, std::fs::Permissions::from_mode(0o700)).unwrap();
+        let device = DeviceId::try_from(format!("styx-{n:024x}")).unwrap();
+        // Each real computer has its own key/fingerprint, as Core requires.
+        let node = Mutex::new(NodeClient::start().await);
+        let credential = pair(client, &node, admin, &device, &work, false).await;
+        node.lock().await.stop().await;
+        let generation =
+            HostGeneration::try_from(format!("computer-{n}-{}", uuid::Uuid::new_v4())).unwrap();
+        let host = Arc::new(
+            OwnedExecHost::spawn(
+                OwnedExecutorConfig {
+                    binary: PathBuf::from(std::env::var("STYX_TEST_CODEX_BIN").unwrap()),
+                    cwd: work.clone(),
+                    environment: BTreeMap::from([
+                        ("PATH".into(), "/usr/bin:/bin".into()),
+                        ("HOME".into(), work.display().to_string()),
+                        (
+                            "CODEX_HOME".into(),
+                            work.join("codex-home").display().to_string(),
+                        ),
+                    ]),
+                    rpc_timeout: Duration::from_secs(3),
+                    retained_process_limit: 16,
+                },
+                generation.clone(),
+                facts(device.clone()),
+                4,
+            )
+            .await
+            .unwrap(),
+        );
+        let endpoint = format!(
+            "wss://{}/styx/host/v3/{}/exec",
+            client.host,
+            device.as_str()
+        );
+        let trusted = PairedTrustedProfile {
+            endpoint: endpoint.clone(),
+            gateway_namespace: gateway.clone(),
+            device_id: device.clone(),
+            host_generation: generation,
+        };
+        let endpoint = LinkEndpoint::parse(&endpoint).unwrap();
+        let bearer =
+            SecretBearer::from_protected_reader(credential.credential.expose().to_owned()).unwrap();
+        let mut link = HostWssLink::connect(
+            &endpoint,
+            tls,
+            TcpStream::connect(client.address).await.unwrap(),
+            LinkAuthentication::Bearer(&bearer),
+            ConnectionGeneration::try_from(format!("computer-wire-{n}")).unwrap(),
+            host.link_budget(),
+        )
+        .await
+        .unwrap();
+        let stop = CancellationToken::new();
+        let run_stop = stop.clone();
+        let run_host = host.clone();
+        let job = tokio::spawn(async move {
+            let protocol = run_host.paired_protocol(trusted).unwrap();
+            let result = protocol
+                .run_connection_with_stop(&mut link, &run_stop)
+                .await;
+            let shutdown = link.shutdown(Duration::from_secs(5)).await;
+            (result, shutdown)
+        });
+        jobs.push((stop, job));
+        hosts.push(host);
+        devices.push(device);
+        nonces.push(uuid::Uuid::new_v4().to_string());
+    }
+    let until = tokio::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        if relay
+            .devices()
+            .await
+            .unwrap()
+            .iter()
+            .filter(|d| d.online)
+            .count()
+            == computers
+        {
+            break;
+        }
+        assert!(
+            tokio::time::Instant::now() < until,
+            "all five physical Host links must be ready together"
+        );
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    assert_eq!(relay.connection_counts(), (computers, 32));
+    let mut owners = Vec::new();
+    for (n, device) in devices.iter().enumerate() {
+        let config =
+            StreamableHttpClientTransportConfig::with_uri(format!("https://{}/mcp", client.host))
+                .auth_header(model.to_owned())
+                .reinit_on_expired_session(false)
+                .max_concurrent_requests(1);
+        let owner = ClientConfig::new(
+            ClientCapabilities::default(),
+            Implementation::new("many-computers-oracle", "1"),
+        )
+        .with_protocol_version(serde_json::from_value(json!("2025-11-25")).unwrap())
+        .serve_with_lifecycle(
+            StreamableHttpClientTransport::with_client(raw.clone(), config),
+            ClientLifecycleMode::Initialize,
+        )
+        .await
+        .unwrap();
+        let effect = root.join(format!("computer-{n}/independent-effect.txt"));
+        assert!(!effect.exists());
+        // One dispatch per computer; a missing effect never causes replay.
+        let command = format!("printf '%s' '{}' > independent-effect.txt", nonces[n]);
+        data(owner.call_tool(call("exec_command", json!({"cmd":command,"login":false,"environment_id":device.as_str(),"yield_time_ms":100}))).await.unwrap());
+        file_within(&effect, &nonces[n]).await;
+        assert_eq!(relay.connection_counts(), (computers, 32));
+        owners.push(owner);
+    }
+    // The status probe allocates no owner and observes physical computers once,
+    // independently of how many Exec/Browser/Computer lanes each advertises.
+    let status = raw
+        .get(format!("https://{}/mcp", client.host))
+        .bearer_auth(model)
+        .header("mcp-session-id", "styx-status-observation")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(status.status(), reqwest::StatusCode::NOT_FOUND);
+    assert_eq!(
+        status.headers()["x-styx-computers-connected"],
+        computers.to_string()
+    );
+    assert_eq!(status.headers()["x-styx-computers-capacity"], "32");
+    for owner in owners {
+        owner.cancel().await.unwrap();
+    }
+    for (stop, job) in jobs {
+        stop.cancel();
+        let (result, shutdown) = tokio::time::timeout(Duration::from_secs(20), job)
+            .await
+            .unwrap()
+            .unwrap();
+        result.unwrap();
+        shutdown.unwrap();
+    }
+    for host in hosts {
+        let cleanup = host.shutdown_owned(Duration::from_secs(10)).await.unwrap();
+        assert!(
+            cleanup.supervised_jobs_joined
+                && cleanup.native.as_ref().is_some_and(|n| n.executor_exited
+                    && n.reader_task_reaped
+                    && n.stderr_task_reaped)
+        );
+    }
+    let until = tokio::time::Instant::now() + Duration::from_secs(5);
+    while relay.connection_counts().0 != 0 {
+        assert!(
+            tokio::time::Instant::now() < until,
+            "all disconnected computers release their slots"
+        );
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    std::fs::write(root.join("many-computers-observation.json"), serde_json::to_vec_pretty(&json!({
+        "connected_computers":computers,"capacity":32,"devices":devices,"independent_effect_nonces":nonces,
+        "effects":"computer-N/independent-effect.txt; exact unique nonce bytes read independently",
+        "slots_after_disconnect":0,"scope":"owned loopback TLS/WSS and real native Exec; not installed-platform acceptance"
+    })).unwrap()).unwrap();
 }

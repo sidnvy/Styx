@@ -283,7 +283,7 @@ pub async fn observe(state_dir: &Path) -> Result<serde_json::Value> {
                 material.validate()?;
                 return Ok(
                     serde_json::json!({"origin":material.origin.origin().ascii_serialization(),"origins":material.origins,
-                    "state":"discovery_unavailable","verification_scope":"authenticated-http-status","mcp_sessions":counters}),
+                    "state":"discovery_unavailable","verification_scope":"authenticated-http-status","mcp_sessions":counters["mcp_sessions"],"computers":counters["computers"]}),
                 );
             }
             return Err(refused("setup_gateway_unavailable"));
@@ -376,7 +376,8 @@ pub async fn observe(state_dir: &Path) -> Result<serde_json::Value> {
     )
     .await
     {
-        result["mcp_sessions"] = counters;
+        result["mcp_sessions"] = counters["mcp_sessions"].clone();
+        result["computers"] = counters["computers"].clone();
     }
     Ok(result)
 }
@@ -409,7 +410,20 @@ async fn session_counters(
             .ok()?;
         counters.insert(name.into(), serde_json::json!(value));
     }
-    Some(serde_json::Value::Object(counters))
+    let computers = ["connected", "capacity"]
+        .into_iter()
+        .map(|name| {
+            let value = response
+                .headers()
+                .get(format!("x-styx-computers-{name}"))?
+                .to_str()
+                .ok()?
+                .parse::<u64>()
+                .ok()?;
+            Some((name.to_owned(), serde_json::json!(value)))
+        })
+        .collect::<Option<serde_json::Map<_, _>>>();
+    Some(serde_json::json!({"mcp_sessions":counters,"computers":computers}))
 }
 async fn owned(action: Action) -> Result<AdminReport> {
     let permit = OPERATIONS

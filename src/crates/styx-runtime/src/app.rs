@@ -316,18 +316,36 @@ struct ConnectionStatus {
     status: &'static str,
     #[serde(rename = "execConnection")]
     exec_connection: &'static str,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    error: Option<&'static str>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    hint: Option<&'static str>,
 }
 impl ConnectionStatus {
+    fn hub_full() -> Self {
+        Self {
+            status: "hub_full",
+            // Existing native views display this field as text. Keep the
+            // actionable message visible without requiring a native UI change.
+            exec_connection: crate::gateway::paired::CAPACITY_HINT,
+            error: Some(crate::gateway::paired::CAPACITY_ERROR_CODE),
+            hint: Some(crate::gateway::paired::CAPACITY_HINT),
+        }
+    }
     fn stopped() -> Self {
         Self {
             status: "stopped",
             exec_connection: "disconnected",
+            error: None,
+            hint: None,
         }
     }
     fn unknown() -> Self {
         Self {
             status: "unknown",
             exec_connection: "unknown",
+            error: None,
+            hint: None,
         }
     }
 }
@@ -772,18 +790,33 @@ impl HostApp {
             let status = self.status.clone();
             let event_task = tokio::spawn(async move {
                 while let Some(event) = received.recv().await {
+                    if event.reason == Some(crate::gateway::paired::CAPACITY_ERROR_CODE) {
+                        status.send_replace(ConnectionStatus::hub_full());
+                        continue;
+                    }
+                    if status.borrow().error == Some(crate::gateway::paired::CAPACITY_ERROR_CODE)
+                        && matches!(event.event, "connecting" | "reconnecting" | "disconnected")
+                    {
+                        continue;
+                    }
                     let status_value = match event.event {
                         "connected" => ConnectionStatus {
                             status: "connected",
                             exec_connection: "connected",
+                            error: None,
+                            hint: None,
                         },
                         "connecting" | "reconnecting" => ConnectionStatus {
                             status: "started",
                             exec_connection: "connecting",
+                            error: None,
+                            hint: None,
                         },
                         "disconnected" => ConnectionStatus {
                             status: "started",
                             exec_connection: "disconnected",
+                            error: None,
+                            hint: None,
                         },
                         _ => continue,
                     };
@@ -793,6 +826,8 @@ impl HostApp {
             self.status.send_replace(ConnectionStatus {
                 status: "started",
                 exec_connection: "connecting",
+                error: None,
+                hint: None,
             });
             let verified_runtime = self.native_runtime.clone();
             if let Some(d) = &diagnostic {
@@ -906,6 +941,12 @@ impl HostApp {
                         "{}",
                         json!({"schema":1,"event":"app_role_failed","cause":cause,"events_joined":events.is_ok()})
                     );
+                    if cause == crate::gateway::paired::CAPACITY_ERROR_CODE && events.is_ok() {
+                        // host_run returns this admission error only after its
+                        // owned local executor and input jobs have settled.
+                        self.status.send_replace(ConnectionStatus::hub_full());
+                        return Ok(());
+                    }
                     self.unknown = true;
                     self.status.send_replace(ConnectionStatus::unknown());
                     return Err(AppError("app_cleanup_unknown"));
@@ -1426,4 +1467,22 @@ async fn serve_app<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
         return Err(error);
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod hub_capacity_message_tests {
+    use super::*;
+    #[test]
+    fn full_hub_message_is_visible_to_existing_native_views() {
+        let status = serde_json::to_value(ConnectionStatus::hub_full()).unwrap();
+        assert_eq!(status["error"], crate::gateway::paired::CAPACITY_ERROR_CODE);
+        assert!(
+            status["execConnection"]
+                .as_str()
+                .unwrap()
+                .contains("This hub is at its limit of 32 connected computers")
+        );
+        assert_eq!(status["execConnection"], status["hint"]);
+        assert_ne!(status["status"], "started");
+    }
 }

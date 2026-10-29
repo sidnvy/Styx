@@ -108,6 +108,11 @@
   ],
   "source_guard_limit": "lexical defense in depth; imports/aliases/macros/FFI still need review; not a Rust sandbox or a proof of no IO",
   "known_ignored": {
+    "enrollment::service::tests::paired_journey::five_connected_computers_exec_requires_sockets": {
+      "kind": "explicit_external_runtime",
+      "input": "STYX_TEST_PAIRED_ROOT, STYX_TEST_TLS_FIXTURES, STYX_TEST_CODEX_BIN, STYX_TEST_NODE22; isolated owned loopback roots",
+      "required_for": "one production Gateway, five simultaneously paired real Hosts, one native Exec per computer with independent unique file effect, authenticated connection-count status and all disconnected slots released; reviewer runs outside socket-denied sandbox"
+    },
     "app::control_binding_tests::completed_stopped_host_control_binding_preserves_execution_refusal_and_integrity": {
       "kind": "explicit_signed_native_payload",
       "input": "STYX_TEST_APP_CONTROL_SELECTION absolute protected NativeRuntimeSelection file; isolated strict-TLS enrollment roots only",
