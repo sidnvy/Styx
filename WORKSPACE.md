@@ -21,7 +21,9 @@ Product work now follows `src/docs/rust-core-rewrite/REDUCED-SCOPE.md`; its sequ
 
 Existing evidence, Rust toolchain and Cargo caches referenced by the handoff retain their established paths. Do not rebuild, move signed installations, change identity/pairing, or replay unknown operations merely because the source directory moved.
 
-No active Codex worktree leases. Retired: `codex-styx-setup` (2026-10-29) merged as e693a81 and removed.
+Active lease (2026-10-29): `codex-mcp-sessions` at /home/sid/Developer/worktrees/Styx/codex-mcp-sessions, branch codex/mcp-sessions, owner Claude (integrator), paths styx-runtime gateway/**, foreground/gateway.rs and enrollment/paired_journey.rs (budget wiring), paired backend live-work query, styx status_view.rs, ci/rust-dependency-policy.json; purpose production MCP session capacity, idle expiry and eviction; retire by merge into develop and removal.
+
+Retired: `codex-styx-setup` (2026-10-29) merged as e693a81 and removed.
 
 Retired: `codex-gateway-networks` (2026-10-28) merged as c98e768 and removed.
 
