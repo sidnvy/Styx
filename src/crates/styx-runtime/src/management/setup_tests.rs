@@ -19,8 +19,7 @@ fn directory(name: &str) -> PathBuf {
 fn setup_pinned_tls_configuration_is_accepted_by_http_client() {
     let now = 1900000000;
     let ca = crate::tls::generate_gateway_ca(now, now - 60, now + 86400 * 365)
-        .ok()
-        .expect("test CA");
+        .unwrap_or_else(|_| panic!("test CA"));
     let tls =
         crate::tls::GatewayClientTls::from_pinned_ca_pem(&ca.certificate_pem, ca.anchor_pin, None)
             .unwrap();

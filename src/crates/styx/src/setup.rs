@@ -212,13 +212,13 @@ fn hostname() -> String {
         .unwrap_or_else(|| "This computer".into())
 }
 pub(super) fn now_ms() -> Result<u64> {
-    Ok(u64::try_from(
+    u64::try_from(
         SystemTime::now()
             .duration_since(UNIX_EPOCH)
             .map_err(|_| Failure::new("setup_clock_unavailable"))?
             .as_millis(),
     )
-    .map_err(|_| Failure::new("setup_clock_unavailable"))?)
+    .map_err(|_| Failure::new("setup_clock_unavailable"))
 }
 fn shell_default() -> PathBuf {
     if cfg!(windows) {
@@ -295,15 +295,14 @@ impl Answers {
         {
             return Err("setup_join_cannot_configure_hub".into());
         }
-        if let Some(tunnel) = &self.tunnel {
-            if !plugin_package::tunnel_id(&tunnel.id)
+        if let Some(tunnel) = &self.tunnel
+            && (!plugin_package::tunnel_id(&tunnel.id)
                 || tunnel
                     .api_key_file
                     .as_ref()
-                    .is_some_and(|p| !p.is_absolute())
-            {
-                return Err("setup_tunnel_choices_invalid".into());
-            }
+                    .is_some_and(|p| !p.is_absolute()))
+        {
+            return Err("setup_tunnel_choices_invalid".into());
         }
         if self.browser
             && self
@@ -320,14 +319,13 @@ impl Answers {
         {
             return Err("setup_absolute_join_link_file_required".into());
         }
-        if let Some(plugin) = &self.plugin {
-            if self.tunnel.is_none()
+        if let Some(plugin) = &self.plugin
+            && (self.tunnel.is_none()
                 || !plugin.output.is_absolute()
                 || plugin.output.file_name().and_then(|p| p.to_str()) != Some("styx-native")
-                || inputs::plugin_display_name(&plugin.display_name).is_none()
-            {
-                return Err("setup_plugin_choices_invalid".into());
-            }
+                || inputs::plugin_display_name(&plugin.display_name).is_none())
+        {
+            return Err("setup_plugin_choices_invalid".into());
         }
         const ACTIONS: &[&str] = &[
             "inputs",
