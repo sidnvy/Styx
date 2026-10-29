@@ -283,3 +283,31 @@ fn gateway_invite_exports_private_link_without_overwriting_existing_file() {
     assert_eq!(std::fs::read(&path).unwrap(), secret);
     std::fs::remove_dir_all(parent).unwrap();
 }
+
+#[test]
+fn computers_inventory_normalizes_platforms_and_refuses_unbounded_labels() {
+    let row = |id: &str, platform: &str| {
+        json!({"device_id":id,"label":"Desk", "platform":platform,
+        "status":"approved","connections":{"exec":true,"browser":false,"computer":null}})
+    };
+    let mut rows = json!([
+        row("styx-linux", "linux"),
+        row("styx-mac", "darwin"),
+        row("styx-win", "win32"),
+        row("styx-other", "arbitrary text")
+    ]);
+    let parsed = computers_body(&serde_json::to_vec(&rows).unwrap()).unwrap();
+    assert_eq!(
+        parsed
+            .iter()
+            .map(|r| r.platform.as_str())
+            .collect::<Vec<_>>(),
+        ["linux", "macos", "windows", "unknown"]
+    );
+    rows[0]["label"] = json!("界".repeat(72));
+    assert!(computers_body(&serde_json::to_vec(&rows).unwrap()).is_ok());
+    rows[0]["label"] = json!("界".repeat(73));
+    assert!(computers_body(&serde_json::to_vec(&rows).unwrap()).is_err());
+    rows[0]["label"] = json!("terminal\u{001b}[2J");
+    assert!(computers_body(&serde_json::to_vec(&rows).unwrap()).is_err());
+}

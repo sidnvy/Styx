@@ -113,6 +113,16 @@
       "input": "STYX_TEST_PAIRED_ROOT, STYX_TEST_TLS_FIXTURES, STYX_TEST_CODEX_BIN, STYX_TEST_NODE22; isolated owned loopback roots",
       "required_for": "one production Gateway, five simultaneously paired real Hosts, one native Exec per computer with independent unique file effect, authenticated connection-count status and all disconnected slots released; reviewer runs outside socket-denied sandbox"
     },
+    "cli::upgrade::linux::tests::upgrade_hub_requires_systemd_user": {
+      "kind": "explicit_owned_systemd_user_and_signed_payloads",
+      "input": "STYX_UPGRADE_OLD_PAYLOAD, STYX_UPGRADE_NEW_PAYLOAD, STYX_UPGRADE_PUBLISHER, STYX_UPGRADE_PIN; private temp profile, owned loopback port 22123 and systemd user session",
+      "required_for": "Linux same-device upgrade: real new service binary identities, authenticated same-device reconnection, preserved credentials and old payload, service uninstall; reviewer runs outside sandbox"
+    },
+    "enrollment::service::tests::paired_journey::named_computers_revoke_requires_sockets": {
+      "kind": "explicit_owned_loopback_enrollment",
+      "input": "STYX_TEST_PAIRED_ROOT, STYX_TEST_TLS_FIXTURES, STYX_TEST_NODE22; isolated private root and TLS listener",
+      "required_for": "two real paired identities, names/normalized platforms in both MCP inventory tools, admin/model negative controls, one revoke and remaining-device visibility; no native executor or package acceptance"
+    },
     "app::control_binding_tests::completed_stopped_host_control_binding_preserves_execution_refusal_and_integrity": {
       "kind": "explicit_signed_native_payload",
       "input": "STYX_TEST_APP_CONTROL_SELECTION absolute protected NativeRuntimeSelection file; isolated strict-TLS enrollment roots only",

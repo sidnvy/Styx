@@ -28,7 +28,7 @@ pub(super) struct Payload {
     #[serde(deserialize_with = "deserialize_publisher_pin")]
     pub expected_publisher: String,
 }
-fn normalize_publisher_pin(value: &str) -> String {
+pub(super) fn normalize_publisher_pin(value: &str) -> String {
     value
         .chars()
         .filter(|c| *c != ':' && !c.is_whitespace())
@@ -147,14 +147,14 @@ impl Failure {
             _owner: None,
         }
     }
-    fn unknown(code: &'static str) -> Self {
+    pub(super) fn unknown(code: &'static str) -> Self {
         Self {
             code,
             exit: 4,
             _owner: None,
         }
     }
-    fn native(value: native::NativeManagementError) -> Self {
+    pub(super) fn native(value: native::NativeManagementError) -> Self {
         let exit = value.exit_code();
         #[cfg(any(
             all(target_os = "linux", target_env = "gnu"),
@@ -186,7 +186,7 @@ impl Failure {
             _owner: Some(Box::new(value)),
         }
     }
-    fn admin(value: admin::AdminError) -> Self {
+    pub(super) fn admin(value: admin::AdminError) -> Self {
         Self {
             code: value.code(),
             exit: value.exit_code(),
@@ -785,7 +785,7 @@ async fn service(_: &Session, _: &Path, _: native::NativeComponent, _: &str) -> 
     Err("setup_user_services_unsupported".into())
 }
 
-async fn wait_gateway(path: &Path) -> Result<Value> {
+pub(super) async fn wait_gateway(path: &Path) -> Result<Value> {
     let until = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
         match admin::observe(path).await {
@@ -798,6 +798,31 @@ async fn wait_gateway(path: &Path) -> Result<Value> {
         }
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
+}
+pub(super) async fn wait_computer(
+    gateway: &Path,
+    device: Option<&str>,
+    browser: bool,
+) -> Result<()> {
+    let until = tokio::time::Instant::now() + Duration::from_secs(60);
+    loop {
+        let observed = admin::observe(gateway).await.map_err(Failure::admin)?;
+        if observed["environments"].as_array().is_some_and(|envs| {
+            envs.iter().any(|env| {
+                device.is_none_or(|id| env["environment_id"] == id)
+                    && env["exec"]["connection"] == "connected"
+                    && (!browser || env["browser"]["connection"] == "connected")
+            })
+        }) {
+            println!("This computer connected (confirmed by the hub).");
+            break;
+        }
+        if tokio::time::Instant::now() >= until {
+            return Err("setup_computer_connection_timeout_check_status".into());
+        }
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+    Ok(())
 }
 fn deployment_host(session: &Session, origin: &str, ca_hash: &str) -> Value {
     let a = &session.answers;
@@ -1317,26 +1342,7 @@ async fn execute(session: &mut Session, foreground: bool, running: &mut Foregrou
                 ""
             }
         );
-        let until = tokio::time::Instant::now() + Duration::from_secs(60);
-        loop {
-            let observed = admin::observe(&gateway).await.map_err(Failure::admin)?;
-            if observed["environments"].as_array().is_some_and(|envs| {
-                envs.iter().any(|env| {
-                    device
-                        .as_ref()
-                        .is_none_or(|id| env["environment_id"] == *id)
-                        && env["exec"]["connection"] == "connected"
-                        && (!a.browser || env["browser"]["connection"] == "connected")
-                })
-            }) {
-                println!("This computer connected (confirmed by the hub).");
-                break;
-            }
-            if tokio::time::Instant::now() >= until {
-                return Err("setup_computer_connection_timeout_check_status".into());
-            }
-            tokio::time::sleep(Duration::from_millis(300)).await;
-        }
+        wait_computer(&gateway, device.as_deref(), a.browser).await?;
         if a.tunnel.is_some() {
             connect_chatgpt(session, &gateway).await?;
         }
@@ -1809,6 +1815,73 @@ pub(super) async fn invite(root: Option<PathBuf>) -> Result<()> {
     }
 }
 
+/// Shared stop/disable/uninstall ordering and process-exit observation. The
+/// caller owns dispatch receipts and confirmation of uncertain replies.
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+pub(super) async fn uninstall_role(
+    path: &Path,
+    dir: &str,
+    component: native::NativeComponent,
+    mut step: impl AsyncFnMut(
+        native::service::ServiceAction,
+        native::service::ServiceReport,
+    ) -> Result<()>,
+) -> Result<()> {
+    use native::service::{ServiceAction, manage};
+    for _ in 0..4 {
+        let before = manage(path, ServiceAction::Status, component, None, None)
+            .await
+            .map_err(Failure::native)?;
+        let os = &before.os;
+        let desired = serde_json::to_value(&before.desired)
+            .map_err(|_| Failure::new("uninstall_state_invalid"))?;
+        let running = desired[dir]["run"] == "running"
+            || !matches!(os["active"].as_str(), Some("inactive" | "failed") | None);
+        let action = if os["installed"] != true {
+            break;
+        } else if running {
+            ServiceAction::Stop
+        } else if os["enabled"] == true {
+            ServiceAction::Disable
+        } else {
+            ServiceAction::Uninstall
+        };
+        let stopping = action == ServiceAction::Stop;
+        step(action, before).await?;
+        if stopping {
+            // The stopping service still reads its records while it exits;
+            // the next step must not overlap that exit.
+            let until = std::time::Instant::now() + Duration::from_secs(15);
+            while !running_roles(path).is_empty() {
+                if std::time::Instant::now() >= until {
+                    return Err(Failure::unknown("uninstall_role_did_not_exit"));
+                }
+                tokio::time::sleep(Duration::from_millis(200)).await;
+            }
+        }
+    }
+    let after = manage(path, ServiceAction::Status, component, None, None)
+        .await
+        .map_err(Failure::native)?;
+    if after.os["installed"] == true {
+        return Err(Failure::unknown("uninstall_service_still_installed"));
+    }
+    Ok(())
+}
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
+pub(super) fn service_action_name(action: native::service::ServiceAction) -> &'static str {
+    use native::service::ServiceAction;
+    match action {
+        ServiceAction::Install => "install",
+        ServiceAction::Start => "start",
+        ServiceAction::Enable => "enable",
+        ServiceAction::Stop => "stop",
+        ServiceAction::Disable => "disable",
+        ServiceAction::Uninstall => "uninstall",
+        ServiceAction::Status => "status",
+    }
+}
+
 /// Stop and remove this computer's Styx login services (Linux). Data folders
 /// stay in place. Each step reads the current state first; an "unknown" reply
 /// is accepted only when Styx's own records show that step committed.
@@ -1845,39 +1918,14 @@ pub(super) async fn uninstall(root: Option<PathBuf>, yes: bool) -> Result<()> {
     }
     for (label, dir, component) in &roles {
         let path = root.join(dir);
-        for _ in 0..4 {
-            let before = manage(&path, ServiceAction::Status, *component, None, None)
-                .await
-                .map_err(Failure::native)?;
-            let os = &before.os;
-            let desired = serde_json::to_value(&before.desired)
-                .map_err(|_| Failure::new("uninstall_state_invalid"))?;
-            let running = desired[dir]["run"] == "running"
-                || !matches!(os["active"].as_str(), Some("inactive" | "failed") | None);
-            let action = if os["installed"] != true {
-                break;
-            } else if running {
-                ServiceAction::Stop
-            } else if os["enabled"] == true {
-                ServiceAction::Disable
-            } else {
-                ServiceAction::Uninstall
-            };
-            let name = match action {
-                ServiceAction::Stop => "stop",
-                ServiceAction::Disable => "disable",
-                _ => "uninstall",
-            };
+        uninstall_role(&path, dir, *component, async |action, before| {
+            let name = service_action_name(action);
             let tx = format!("uninstall-{dir}-{name}-{}", now_ms()?)
                 .try_into()
                 .map_err(|_| Failure::new("setup_transaction_id_invalid"))?;
-            let stopping = action == ServiceAction::Stop;
             match manage(&path, action, *component, Some(tx), Some(before.revision)).await {
                 Ok(_) => println!("{label}: {name} done."),
                 Err(error) => {
-                    // Never replay: continue only if this exact step committed.
-                    // Status reads can fail briefly while systemd reloads units
-                    // after enable/disable; reading again is not an action.
                     let mut after = None;
                     for _ in 0..25 {
                         if let Ok(report) =
@@ -1895,24 +1943,9 @@ pub(super) async fn uninstall(root: Option<PathBuf>, yes: bool) -> Result<()> {
                     println!("{label}: {name} done (confirmed from Styx's records).");
                 }
             }
-            if stopping {
-                // The stopping service still reads its records while it exits;
-                // the next step must not overlap that exit.
-                let until = std::time::Instant::now() + Duration::from_secs(15);
-                while !running_roles(&path).is_empty() {
-                    if std::time::Instant::now() >= until {
-                        return Err(Failure::unknown("uninstall_role_did_not_exit"));
-                    }
-                    tokio::time::sleep(Duration::from_millis(200)).await;
-                }
-            }
-        }
-        let after = manage(&path, ServiceAction::Status, *component, None, None)
-            .await
-            .map_err(Failure::native)?;
-        if after.os["installed"] == true {
-            return Err(Failure::unknown("uninstall_service_still_installed"));
-        }
+            Ok(())
+        })
+        .await?;
     }
     let remaining = running_roles(&root);
     if !remaining.is_empty() {

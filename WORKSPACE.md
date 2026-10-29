@@ -21,9 +21,7 @@ Product work now follows `src/docs/rust-core-rewrite/REDUCED-SCOPE.md`; its sequ
 
 Existing evidence, Rust toolchain and Cargo caches referenced by the handoff retain their established paths. Do not rebuild, move signed installations, change identity/pairing, or replay unknown operations merely because the source directory moved.
 
-No active Codex worktree leases. Retired: `codex-hub-links` (2026-10-29) merged and removed.
-
-Post-v1 branches waiting for v1 to close (no worktree): codex/computers (4a292e9), codex/upgrade (5b7cf3a).
+No active Codex worktree leases. Retired: `codex-hub-links` (2026-10-29) merged and removed. Post-v1 branches `codex/computers` and `codex/upgrade` merged into develop after v1 (candidate 37) closed; their worktrees were already removed.
 
 Retired: `codex-join-retry` (2026-10-29) merged and removed.
 

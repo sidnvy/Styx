@@ -8,6 +8,8 @@ use std::{
     process::ExitCode,
 };
 use tokio_util::sync::CancellationToken;
+#[path = "computers.rs"]
+mod computers;
 #[path = "plugin_package.rs"]
 mod plugin_package;
 #[path = "setup.rs"]
@@ -16,6 +18,9 @@ mod setup;
 mod setup_prompt;
 #[path = "status_view.rs"]
 mod status_view;
+
+#[path = "upgrade.rs"]
+mod upgrade;
 
 #[derive(Parser)]
 #[command(
@@ -26,6 +31,18 @@ mod status_view;
 pub(crate) struct Cli {
     #[command(subcommand)]
     command: Command,
+}
+#[derive(Subcommand)]
+enum ComputersCommand {
+    /// Revoke one paired computer by exact label or device id.
+    Remove {
+        selector: String,
+        #[arg(long)]
+        yes: bool,
+        /// Allow revoking this hub's own local computer.
+        #[arg(long)]
+        include_this_computer: bool,
+    },
 }
 #[derive(Subcommand)]
 enum Command {
@@ -47,11 +64,34 @@ enum Command {
         #[arg(long)]
         root: Option<PathBuf>,
     },
+    /// List paired computers, or revoke one computer's pairing on this hub.
+    Computers {
+        #[arg(long, global = true)]
+        root: Option<PathBuf>,
+        /// Include historical revoked pairings in the list.
+        #[arg(long)]
+        all: bool,
+        #[command(subcommand)]
+        command: Option<ComputersCommand>,
+    },
     /// Stop and remove this computer's Styx login services; data stays on disk.
     Uninstall {
         #[arg(long)]
         root: Option<PathBuf>,
         /// Do not ask for confirmation.
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Upgrade Linux services to a signed payload, keeping this computer paired.
+    Upgrade {
+        #[arg(long)]
+        payload: PathBuf,
+        #[arg(long)]
+        publisher_file: Option<PathBuf>,
+        #[arg(long)]
+        expected_publisher: Option<String>,
+        #[arg(long)]
+        root: Option<PathBuf>,
         #[arg(long)]
         yes: bool,
     },
@@ -1062,6 +1102,18 @@ pub(crate) async fn run(cli: Cli) -> ExitCode {
             exit_when_connected,
         } => setup_result(setup::run(root, answers, foreground, exit_when_connected).await),
         Command::Invite { root } => setup_result(setup::invite(root).await),
+        Command::Computers { root, all, command } => {
+            setup_result(computers::run(root, all, command).await)
+        }
+        Command::Upgrade {
+            payload,
+            publisher_file,
+            expected_publisher,
+            root,
+            yes,
+        } => {
+            setup_result(upgrade::run(payload, publisher_file, expected_publisher, root, yes).await)
+        }
         Command::Uninstall { root, yes } => setup_result(setup::uninstall(root, yes).await),
         Command::Status {
             state_dir: None,

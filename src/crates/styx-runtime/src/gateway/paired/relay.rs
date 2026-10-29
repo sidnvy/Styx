@@ -50,6 +50,8 @@ impl RelayError {
 #[derive(Clone, Debug)]
 pub struct DeviceStatus {
     pub device_id: DeviceId,
+    pub label: String,
+    pub platform: String,
     pub online: bool,
     pub browser_online: bool,
     pub computer_online: bool,
@@ -405,6 +407,8 @@ impl RelayHandle {
             };
             devices.push(DeviceStatus {
                 device_id: p.device_id,
+                label: p.label,
+                platform: p.platform,
                 online,
                 browser_online,
                 computer_online,

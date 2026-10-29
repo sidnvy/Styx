@@ -94,6 +94,41 @@ pub struct PendingDevice {
     pub browser_requested: bool,
     pub gateway_origin: String,
 }
+/// Public inventory DATA from the existing admin route, never a Host credential.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct PairedComputer {
+    pub device_id: DeviceId,
+    pub label: String,
+    pub platform: String,
+    pub status: String,
+    pub connections: ComputerConnections,
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub struct ComputerConnections {
+    pub exec: Option<bool>,
+    pub browser: Option<bool>,
+    pub computer: Option<bool>,
+}
+fn computers_body(raw: &[u8]) -> Result<Vec<PairedComputer>> {
+    if raw.len() > LIMIT {
+        return Err(refused("native_gateway_computers_invalid"));
+    }
+    let mut rows: Vec<PairedComputer> =
+        serde_json::from_slice(raw).map_err(|_| refused("native_gateway_computers_invalid"))?;
+    let mut ids = BTreeSet::new();
+    for row in &mut rows {
+        if row.label.is_empty()
+            || row.label.chars().count() > 72
+            || row.label.chars().any(char::is_control)
+            || !matches!(row.status.as_str(), "approved" | "revoked")
+            || !ids.insert(row.device_id.clone())
+        {
+            return Err(refused("native_gateway_computers_invalid"));
+        }
+        row.platform = crate::gateway::paired::backend::display_platform(&row.platform).into();
+    }
+    Ok(rows)
+}
 pub struct ApprovalSelection {
     pub request_id: String,
     pub device_id: DeviceId,
@@ -123,6 +158,8 @@ pub struct AdminReport {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pending: Option<Vec<PendingDevice>>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub computers: Option<Vec<PairedComputer>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<&'static str>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub request_id: Option<String>,
@@ -147,6 +184,7 @@ impl AdminReport {
             expires_at: None,
             one_use: None,
             pending: None,
+            computers: None,
             status: None,
             request_id: None,
             device_id: None,
@@ -164,6 +202,8 @@ enum Action {
         Option<PathBuf>,
     ),
     Pending(PathBuf),
+    Computers(PathBuf),
+    Revoke(PathBuf, DeviceId),
     Approve(PathBuf, ApprovalSelection),
 }
 #[derive(Clone, Copy)]
@@ -209,6 +249,39 @@ pub async fn pending(state_dir: &Path) -> Result<AdminReport> {
 }
 pub async fn approve(state_dir: &Path, selection: ApprovalSelection) -> Result<AdminReport> {
     owned(Action::Approve(state_dir.into(), selection)).await
+}
+
+/// Read the local Gateway's inventory, including historical revoked records.
+pub async fn computers(state_dir: &Path) -> Result<Vec<PairedComputer>> {
+    owned(Action::Computers(state_dir.into()))
+        .await?
+        .computers
+        .ok_or_else(|| refused("native_gateway_computers_invalid"))
+}
+/// One revoke POST. An unknown result is retained as unknown, never retried.
+pub async fn revoke_computer(state_dir: &Path, device_id: DeviceId) -> Result<AdminReport> {
+    owned(Action::Revoke(state_dir.into(), device_id)).await
+}
+/// Read the selection committed by the original native state/journal chain.
+/// This observes configuration DATA; it does not claim a process is healthy.
+pub async fn committed_runtime_selection(state_dir: &Path) -> Result<NativeRuntimeSelection> {
+    let path = state_dir.to_owned();
+    blocking(move || {
+        let root = PrivateRoot::open(&path).map_err(|_| refused("status_private_root"))?;
+        let marker_raw = root
+            .read_raw(".styx-native-root-v1.json", LIMIT)
+            .map_err(|_| refused("status_runtime_selection_unavailable"))?;
+        let state_raw = root
+            .read_raw("state.json", LIMIT)
+            .map_err(|_| refused("status_runtime_selection_unavailable"))?;
+        let marker = native_state::decode_marker(marker_raw.bytes())
+            .map_err(|_| refused("status_runtime_selection_invalid"))?;
+        let state = native_state::decode_state(state_raw.bytes(), &marker)
+            .map_err(|_| refused("status_runtime_selection_invalid"))?;
+        crate::store::native_host_snapshot::validated_runtime_selection(&root, &state, &marker)
+            .map_err(|_| refused("status_runtime_selection_invalid"))
+    })
+    .await
 }
 
 /// Authenticated read-only native MCP discovery and connection observations.
@@ -937,10 +1010,60 @@ fn invitation_app_link(
 }
 async fn perform(action: Action) -> Result<AdminReport> {
     let state_dir = match &action {
-        Action::Invite(p, _, _, _, _) | Action::Pending(p) | Action::Approve(p, _) => p.clone(),
+        Action::Invite(p, _, _, _, _)
+        | Action::Pending(p)
+        | Action::Approve(p, _)
+        | Action::Computers(p)
+        | Action::Revoke(p, _) => p.clone(),
     };
     let material = blocking(move || Material::open(state_dir)).await?;
     match action {
+        Action::Computers(path) => {
+            let response = http::exchange_local_computers(
+                &material.origin,
+                &material.tls,
+                None,
+                &material.token,
+            )
+            .await
+            .map_err(http_error)?;
+            accepted_status(response.status)?;
+            if response.leaf_pin != material.leaf {
+                return Err(refused("native_gateway_admin_material_changed"));
+            }
+            let rows = computers_body(&response.body)?;
+            let _material = checked(material).await?;
+            let mut report = AdminReport::new("gateway_computers", path);
+            report.computers = Some(rows);
+            Ok(report)
+        }
+        Action::Revoke(path, device_id) => {
+            let body = serde_json::to_vec(&serde_json::json!({"device_id":device_id}))
+                .map_err(|_| refused("native_gateway_admin_input"))?;
+            let material = checked(material).await?;
+            let response = http::exchange_local_computers(
+                &material.origin,
+                &material.tls,
+                Some(&body),
+                &material.token,
+            )
+            .await
+            .map_err(http_error)?;
+            accepted_status(response.status)?;
+            let reply: serde_json::Value =
+                serde_json::from_slice(&response.body).map_err(|_| unknown())?;
+            if response.leaf_pin != material.leaf
+                || reply["status"] != "revoked"
+                || reply["device_id"] != device_id.as_str()
+            {
+                return Err(unknown());
+            }
+            let _material = checked(material).await.map_err(|_| unknown())?;
+            let mut report = AdminReport::new("gateway_revoke", path);
+            report.device_id = Some(device_id);
+            report.status = Some("revoked");
+            Ok(report)
+        }
         Action::Pending(path) => {
             let rows = read_pending(&material).await?;
             let _material = checked(material).await?;

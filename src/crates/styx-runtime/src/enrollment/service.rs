@@ -1051,6 +1051,7 @@ impl EnrollmentService {
                 let p = verified.profile();
                 Ok(GatewayExecProfile {
                     device_id: d.id,
+                    label: p.label.clone(),
                     browser_approved: !maintenance_only && d.grant.browser,
                     computer_approved: !maintenance_only && d.grant.computer,
                     capability_generation: d.generation,
@@ -1150,6 +1151,8 @@ mod controller_tests;
 #[derive(Clone, Debug)]
 pub struct GatewayExecProfile {
     pub device_id: DeviceId,
+    /// Presentation only; never participates in transport or operation authority.
+    pub label: String,
     /// Recovered Core metadata only; a live Browser ConnectionLease authorizes.
     pub browser_approved: bool,
     /// Metadata only; a live independent Computer ConnectionLease authorizes.

@@ -301,6 +301,19 @@ pub(crate) async fn exchange_local_pending(
     )
     .await
 }
+/// Fixed computer administration routes; reuse once-only TLS exchange semantics.
+pub(crate) async fn exchange_local_computers(
+    origin: &url::Url,
+    tls: &GatewayClientTls,
+    revoke: Option<&[u8]>,
+    bearer: &[u8],
+) -> Result<JoinHttpResponse, JoinHttpError> {
+    let (method, path, body) = match revoke {
+        Some(body) => (hyper::Method::POST, "/styx/enroll/revoke", body),
+        None => (hyper::Method::GET, "/styx/enroll/devices", &[][..]),
+    };
+    exchange_once(origin, tls, method, path, body, Some(bearer), MAX_TIMEOUT).await
+}
 fn post_path(path: &str) -> bool {
     matches!(
         path,
@@ -329,11 +342,14 @@ async fn exchange_once(
     let allowed = (method == hyper::Method::POST
         && (post_path(path)
             || (bearer.is_some()
-                && matches!(path, "/styx/enroll/invitations" | "/styx/enroll/approve"))))
+                && matches!(
+                    path,
+                    "/styx/enroll/invitations" | "/styx/enroll/approve" | "/styx/enroll/revoke"
+                ))))
         || (method == hyper::Method::GET
             && body.is_empty()
             && bearer.is_some()
-            && (path == "/styx/enroll/pending"
+            && (matches!(path, "/styx/enroll/pending" | "/styx/enroll/devices")
                 || path
                     .strip_prefix("/styx/enroll/self/")
                     .and_then(|p| p.strip_suffix("/capabilities"))
@@ -467,18 +483,25 @@ async fn exchange_once(
             if status.is_redirection() {
                 return Err(unknown(JoinHttpErrorKind::RedirectRefused));
             }
-            let body = Limited::new(response.into_body(), RESPONSE_BYTES)
-                .collect()
-                .await
-                .map_err(|e| {
-                    let error = unknown(if e.is::<LengthLimitError>() {
-                        JoinHttpErrorKind::ResponseTooLarge
-                    } else {
-                        JoinHttpErrorKind::Http
-                    });
-                    observe_http_failure(error, HttpFailureStage::Body, e.as_ref(), true, false)
-                })?
-                .to_bytes();
+            let body = Limited::new(
+                response.into_body(),
+                if path == "/styx/enroll/devices" {
+                    1024 * 1024
+                } else {
+                    RESPONSE_BYTES
+                },
+            )
+            .collect()
+            .await
+            .map_err(|e| {
+                let error = unknown(if e.is::<LengthLimitError>() {
+                    JoinHttpErrorKind::ResponseTooLarge
+                } else {
+                    JoinHttpErrorKind::Http
+                });
+                observe_http_failure(error, HttpFailureStage::Body, e.as_ref(), true, false)
+            })?
+            .to_bytes();
             Ok(JoinHttpResponse {
                 status: status.as_u16(),
                 body: Zeroizing::new(body.to_vec()),

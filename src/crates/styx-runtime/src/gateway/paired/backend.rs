@@ -13,6 +13,25 @@ mod browser;
 #[path = "backend_computer.rs"]
 mod computer;
 
+/// Human-facing metadata only. Unknown stored text is never echoed as an OS.
+pub(crate) fn display_platform(stored: &str) -> &'static str {
+    match stored {
+        "linux" => "linux",
+        "darwin" => "macos",
+        "win32" => "windows",
+        _ => "unknown",
+    }
+}
+/// Enrollment currently bounds labels to 72 Unicode characters. Keep the same
+/// output bound even if a future internal metadata source has a looser reader.
+fn display_label(stored: &str) -> String {
+    stored.chars().take(72).collect()
+}
+
+fn environment_summary(d: &super::DeviceStatus) -> Value {
+    json!({"environment_id":d.device_id.as_str(),"label":display_label(&d.label),"platform":display_platform(&d.platform),"kind":"paired","connection":if d.online || d.browser_online || d.computer_online {"connected"} else {"disconnected"}})
+}
+
 static PUBLIC: LazyLock<Vec<Tool>> = LazyLock::new(|| {
     let value: Value = serde_json::from_str(include_str!(
         "../../../../../docs/rust-core-rewrite/PUBLIC-MCP-V1.json"
@@ -1018,7 +1037,7 @@ impl GatewayToolBackend for PairedGatewayBackend {
                 }
                 match self.relay.devices().await {
                     Ok(devices) => success(
-                        json!({"environments":devices.iter().map(|d| json!({"environment_id":d.device_id.as_str(),"kind":"paired","connection":if d.online || d.browser_online || d.computer_online {"connected"} else {"disconnected"}})).collect::<Vec<_>>()}),
+                        json!({"environments":devices.iter().map(environment_summary).collect::<Vec<_>>()}),
                     ),
                     Err(e) => failure(e.code(), None, false),
                 }
@@ -1037,7 +1056,7 @@ impl GatewayToolBackend for PairedGatewayBackend {
                         .find(|d| d.device_id.as_str() == a.environment_id)
                     {
                         Some(d) => success(
-                            json!({"environment_id":a.environment_id,"kind":"paired","access":"allowed","exec":{"configured":true,"connection":if d.online {"connected"} else {"disconnected"},"readiness":"unknown","version":"unknown"},"browser":{"configured":"unknown","connection":if d.browser_online {"connected"} else {"disconnected"},"readiness":"unknown","version":"unknown"},"computer":{"configured":"unknown","connection":if d.computer_online {"connected"} else {"disconnected"},"permission":"unknown","readiness":"unknown","version":"unknown"}}),
+                            json!({"environment_id":a.environment_id,"label":display_label(&d.label),"platform":display_platform(&d.platform),"kind":"paired","access":"allowed","exec":{"configured":true,"connection":if d.online {"connected"} else {"disconnected"},"readiness":"unknown","version":"unknown"},"browser":{"configured":"unknown","connection":if d.browser_online {"connected"} else {"disconnected"},"readiness":"unknown","version":"unknown"},"computer":{"configured":"unknown","connection":if d.computer_online {"connected"} else {"disconnected"},"permission":"unknown","readiness":"unknown","version":"unknown"}}),
                         ),
                         None => failure("environment_unavailable", None, false),
                     },
