@@ -79,6 +79,7 @@ struct Session<B: GatewayToolBackend + GatewayOwnerLifecycle> {
     get: Arc<Semaphore>,
 }
 pub struct GatewayHttp<B: GatewayToolBackend + GatewayOwnerLifecycle> {
+    tunnel_observation: Mutex<Option<Arc<crate::foreground::tunnel::RequestObservation>>>,
     policy: Arc<GatewayBearerPolicy>,
     backend: Arc<B>,
     budget: Arc<HttpBudget>,
@@ -122,6 +123,7 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayHttp<B> {
         budget: Arc<HttpBudget>,
     ) -> Arc<Self> {
         Arc::new(Self {
+            tunnel_observation: Mutex::new(None),
             policy,
             backend,
             budget,
@@ -142,6 +144,12 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayHttp<B> {
             #[cfg(test)]
             admission_probe: Mutex::new(None),
         })
+    }
+    pub(crate) fn observe_tunnel(
+        &self,
+        observation: Option<Arc<crate::foreground::tunnel::RequestObservation>>,
+    ) {
+        *self.tunnel_observation.lock().expect("tunnel observation") = observation;
     }
     fn collect_closed(&self) {
         self.sessions
@@ -246,7 +254,25 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayHttp<B> {
         self: Arc<Self>,
         request: Request<hyper::body::Incoming>,
     ) -> Result<Response<HeldBody>, Infallible> {
-        Ok(self.handle_inner(request).await)
+        let marker = if request.method() == Method::POST {
+            request.headers().get("x-styx-tunnel-observation").cloned()
+        } else {
+            None
+        };
+        let response = self.handle_inner(request).await;
+        // Observation follows existing bearer/path/protocol admission. The
+        // marker grants no authority and does not alter a response or session.
+        if response.status().is_success()
+            && let Some(marker) = marker
+            && let Some(observation) = self
+                .tunnel_observation
+                .lock()
+                .expect("tunnel observation")
+                .as_ref()
+        {
+            observation.record(marker.as_bytes());
+        }
+        Ok(response)
     }
     async fn handle_inner(&self, request: Request<hyper::body::Incoming>) -> Response<HeldBody> {
         let principal = match self.policy.authorize(request.headers()) {

@@ -382,6 +382,14 @@ pub async fn inspect(
     blocking(move || platform::inspect(&path, id.as_ref())).await
 }
 
+/// Startup inspection under the original writer. Re-establish admission only
+/// for an exactly COMMITTED canonical tip, using the existing coordinator.
+/// Pending phases, orphans and uncertain outcomes are never completed here.
+pub async fn inspect_completed(state_dir: &Path) -> Result<NativeManagementReport> {
+    let path = state_dir.to_owned();
+    blocking(move || platform::inspect_completed(&path)).await
+}
+
 #[cfg(any(
     all(target_os = "linux", target_env = "gnu"),
     target_os = "windows",
@@ -967,6 +975,12 @@ mod platform {
             report(transactions, "inspect", transaction)
         })
     }
+    pub(super) fn inspect_completed(path: &Path) -> Result<NativeManagementReport> {
+        use_managed_transactions(path, None, |transactions| {
+            reconcile_complete_tip(transactions, false)?;
+            report(transactions, "inspect_completed", None)
+        })
+    }
 }
 #[cfg(not(any(
     all(target_os = "linux", target_env = "gnu"),
@@ -1001,6 +1015,9 @@ mod platform {
         Err(NativeManagementError::new(ErrorKind::Unsupported))
     }
     pub(super) fn inspect(_: &Path, _: Option<&TransactionId>) -> Result<NativeManagementReport> {
+        Err(NativeManagementError::new(ErrorKind::Unsupported))
+    }
+    pub(super) fn inspect_completed(_: &Path) -> Result<NativeManagementReport> {
         Err(NativeManagementError::new(ErrorKind::Unsupported))
     }
 }

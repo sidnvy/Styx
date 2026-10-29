@@ -364,6 +364,24 @@ pub struct PrivateRoot {
     inner: platform::Root,
 }
 impl PrivateRoot {
+    /// Bounded CLI input/plugin export using the existing exclusive private
+    /// file writer. This never writes canonical state, journal or grant data.
+    pub(crate) fn create_setup_export(
+        &self,
+        name: &std::ffi::OsStr,
+        bytes: &[u8],
+    ) -> Result<RawFile> {
+        let path = checked_relative(Path::new(name))?;
+        if path.components().count() != 1 || bytes.is_empty() || bytes.len() > 1024 * 1024 {
+            return Err(StoreError::TooLarge);
+        }
+        self.inner.create_private_export(
+            path.to_str().ok_or(StoreError::InvalidRelativePath)?,
+            bytes,
+            &|_| {},
+        )?;
+        self.read_raw(path, bytes.len())
+    }
     /// Opens an existing root without creating or changing it. Linux rejects
     /// symlinks in the root path, even if they resolve inside the same directory.
     pub fn open(path: impl AsRef<Path>) -> Result<Self> {

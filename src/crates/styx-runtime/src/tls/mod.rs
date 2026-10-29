@@ -266,9 +266,56 @@ fn deadline(timeout: Duration) -> Result<tokio::time::Instant, TlsError> {
 /// Legacy CA-file+hostname profiles remain CA-file+hostname profiles: a missing
 /// leaf pin is not inferred from the CA pin, and configured leaf pins are kept.
 pub struct GatewayClientTls {
+    http_config: Arc<rustls::ClientConfig>,
     connector: TlsConnector,
     leaf_pin: Option<GatewayLeafPin>,
     anchor_pins: Vec<TrustAnchorPin>,
+}
+#[derive(Debug)]
+struct PinnedHttpPeer {
+    chain: Arc<rustls::client::WebPkiServerVerifier>,
+    leaf: GatewayLeafPin,
+}
+impl rustls::client::danger::ServerCertVerifier for PinnedHttpPeer {
+    fn verify_server_cert(
+        &self,
+        certificate: &CertificateDer<'_>,
+        intermediates: &[CertificateDer<'_>],
+        name: &ServerName<'_>,
+        ocsp: &[u8],
+        now: rustls::pki_types::UnixTime,
+    ) -> Result<rustls::client::danger::ServerCertVerified, rustls::Error> {
+        let proof = self
+            .chain
+            .verify_server_cert(certificate, intermediates, name, ocsp, now)?;
+        if GatewayLeafPin::from_certificate_der(certificate) != self.leaf {
+            return Err(rustls::Error::InvalidCertificate(
+                rustls::CertificateError::ApplicationVerificationFailure,
+            ));
+        }
+        Ok(proof)
+    }
+    fn verify_tls12_signature(
+        &self,
+        message: &[u8],
+        certificate: &CertificateDer<'_>,
+        signature: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        self.chain
+            .verify_tls12_signature(message, certificate, signature)
+    }
+    fn verify_tls13_signature(
+        &self,
+        message: &[u8],
+        certificate: &CertificateDer<'_>,
+        signature: &rustls::DigitallySignedStruct,
+    ) -> Result<rustls::client::danger::HandshakeSignatureValid, rustls::Error> {
+        self.chain
+            .verify_tls13_signature(message, certificate, signature)
+    }
+    fn supported_verify_schemes(&self) -> Vec<rustls::SignatureScheme> {
+        self.chain.supported_verify_schemes()
+    }
 }
 impl std::fmt::Debug for GatewayClientTls {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -279,6 +326,9 @@ impl std::fmt::Debug for GatewayClientTls {
     }
 }
 impl GatewayClientTls {
+    pub(crate) fn http_client_config(&self) -> rustls::ClientConfig {
+        self.http_config.as_ref().clone()
+    }
     pub fn from_pinned_ca_pem(
         ca_pem: &[u8],
         expected_anchor: TrustAnchorPin,
@@ -316,11 +366,28 @@ impl GatewayClientTls {
         let mut config = ClientConfig::builder_with_provider(provider())
             .with_protocol_versions(&[&rustls::version::TLS13, &rustls::version::TLS12])
             .map_err(|_| TlsError::ConfigurationRejected)?
-            .with_root_certificates(roots)
+            .with_root_certificates(roots.clone())
             .with_no_client_auth();
         config.alpn_protocols = vec![b"http/1.1".to_vec()];
+        let mut http_config = config.clone();
+        if let Some(leaf) = &configured_leaf {
+            let chain = rustls::client::WebPkiServerVerifier::builder_with_provider(
+                Arc::new(roots),
+                provider(),
+            )
+            .build()
+            .map_err(|_| TlsError::ConfigurationRejected)?;
+            http_config
+                .dangerous()
+                .set_certificate_verifier(Arc::new(PinnedHttpPeer {
+                    chain,
+                    leaf: leaf.clone(),
+                }));
+        }
+        let config = Arc::new(config);
         Ok(Self {
-            connector: TlsConnector::from(Arc::new(config)),
+            http_config: Arc::new(http_config),
+            connector: TlsConnector::from(config),
             leaf_pin: configured_leaf,
             anchor_pins: expected_anchors.to_vec(),
         })

@@ -264,6 +264,11 @@
       "input": "--browser-references --browser-host and all explicit owned Browser inputs",
       "required_for": "actual headless Core/Host opaque refs, native navigation/tab invalidation and reopen ABA; not final crossplatform Browser/account/desktop release"
     },
+    "management::setup::scenario_tests::setup_hub_answers_foreground_connects_and_resumes_without_pairing_requires_sockets": {
+      "kind": "real_signed_payload_fixture",
+      "input": "STYX_SETUP_TEST_PAYLOAD, STYX_SETUP_TEST_PUBLISHER and STYX_SETUP_TEST_PIN naming an installed signed Linux payload, plus target/debug/styx built from the same source",
+      "required_for": "styx setup --answers hub run reaches this computer connected in foreground mode and a rerun resumes without re-pairing; not systemd service, tunnel or ChatGPT acceptance"
+    },
     "gateway::http::lan_tests::gateway_three_listeners_two_lan_addresses_join_and_host_link_requires_sockets": {
       "kind": "assigned_private_lan_interface_fixture",
       "input": "STYX_TEST_LAN_ADDRESSES set to two IPv4 addresses assigned to this machine in private or overlay ranges",

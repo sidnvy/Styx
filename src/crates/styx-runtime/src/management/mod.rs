@@ -33,6 +33,7 @@ pub mod role_retire;
     target_os = "windows"
 ))]
 pub(crate) mod service_control;
+pub mod setup;
 use crate::store::{PrivateRoot, RawFile, StoreError};
 use serde::{
     Deserialize, Serialize,
