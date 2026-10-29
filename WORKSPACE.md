@@ -21,7 +21,9 @@ Product work now follows `src/docs/rust-core-rewrite/REDUCED-SCOPE.md`; its sequ
 
 Existing evidence, Rust toolchain and Cargo caches referenced by the handoff retain their established paths. Do not rebuild, move signed installations, change identity/pairing, or replay unknown operations merely because the source directory moved.
 
-No active Codex worktree leases. Retired: `codex-gateway-networks` (2026-10-28) merged as c98e768 and removed.
+Active lease (2026-10-29): `codex-styx-setup` at /home/sid/Developer/worktrees/Styx/codex-styx-setup, branch codex/styx-setup, owner Claude (integrator), paths src/crates/styx/src/ (setup, prompt, plugin package, status, cli.rs), additive styx-runtime helpers, crates/styx Cargo.toml + Cargo.lock + ci/rust-dependency-policy.json (one prompt crate), docs CLI-ONBOARDING.md; purpose interactive `styx setup`/`invite`/`status` onboarding; retire by merge into develop and removal.
+
+Retired: `codex-gateway-networks` (2026-10-28) merged as c98e768 and removed.
 
 Retired: `codex-retire-js-core` (2026-10-28) merged and removed.
 
