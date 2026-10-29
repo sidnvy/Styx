@@ -21,7 +21,9 @@ Product work now follows `src/docs/rust-core-rewrite/REDUCED-SCOPE.md`; its sequ
 
 Existing evidence, Rust toolchain and Cargo caches referenced by the handoff retain their established paths. Do not rebuild, move signed installations, change identity/pairing, or replay unknown operations merely because the source directory moved.
 
-No active Codex worktree leases. Retired: `codex-mcp-sessions` (2026-10-29) merged and removed.
+Active lease (2026-10-29): `codex-computer-busy` at /home/sid/Developer/worktrees/Styx/codex-computer-busy, branch codex/computer-busy, owner Claude (integrator), paths styx-runtime host/coordinator/desktop.rs, host/protocol/computer.rs, gateway/paired/backend_computer.rs, gateway/http/lifecycle.rs and their tests; purpose Windows Computer Use open refused as capacity_busy after a previous session's teardown (c33 regression); retire by merge into develop and removal.
+
+Retired: `codex-mcp-sessions` (2026-10-29) merged and removed.
 
 Retired: `codex-styx-setup` (2026-10-29) merged as e693a81 and removed.
 
