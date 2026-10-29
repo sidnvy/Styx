@@ -254,25 +254,7 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayHttp<B> {
         self: Arc<Self>,
         request: Request<hyper::body::Incoming>,
     ) -> Result<Response<HeldBody>, Infallible> {
-        let marker = if request.method() == Method::POST {
-            request.headers().get("x-styx-tunnel-observation").cloned()
-        } else {
-            None
-        };
-        let response = self.handle_inner(request).await;
-        // Observation follows existing bearer/path/protocol admission. The
-        // marker grants no authority and does not alter a response or session.
-        if response.status().is_success()
-            && let Some(marker) = marker
-            && let Some(observation) = self
-                .tunnel_observation
-                .lock()
-                .expect("tunnel observation")
-                .as_ref()
-        {
-            observation.record(marker.as_bytes());
-        }
-        Ok(response)
+        Ok(self.handle_inner(request).await)
     }
     async fn handle_inner(&self, request: Request<hyper::body::Incoming>) -> Response<HeldBody> {
         let principal = match self.policy.authorize(request.headers()) {
@@ -379,9 +361,22 @@ impl<B: GatewayToolBackend + GatewayOwnerLifecycle> GatewayHttp<B> {
                     ClientRequest::InitializeRequest(r) => {
                         initialize_version = Some(r.params.protocol_version.as_str().to_owned())
                     }
-                    ClientRequest::PingRequest(_)
-                    | ClientRequest::ListToolsRequest(_)
-                    | ClientRequest::CallToolRequest(_) => {}
+                    ClientRequest::CallToolRequest(_) => {
+                        // Only a tool call shows ChatGPT used Styx: the tunnel
+                        // client's own startup probe sends initialize/tools/list
+                        // with the same forwarding headers. Recorded after bearer
+                        // admission; the marker grants no authority.
+                        if let Some(marker) = parts.headers.get("x-styx-tunnel-observation")
+                            && let Some(observation) = self
+                                .tunnel_observation
+                                .lock()
+                                .expect("tunnel observation")
+                                .as_ref()
+                        {
+                            observation.record(marker.as_bytes());
+                        }
+                    }
+                    ClientRequest::PingRequest(_) | ClientRequest::ListToolsRequest(_) => {}
                     _ => return plain(StatusCode::BAD_REQUEST),
                 },
                 ClientJsonRpcMessage::Notification(n) => match &n.notification {
