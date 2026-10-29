@@ -436,7 +436,11 @@ async fn connect(
         LinkError::Tls(_) => ForegroundError("gateway_tls_handshake_rejected"),
         LinkError::UpgradeStatus(400) => ForegroundError("gateway_wss_request_rejected"),
         LinkError::UpgradeStatus(403) => ForegroundError("gateway_wss_admission_refused"),
-        LinkError::UpgradeStatus(429) => ForegroundError("gateway_wss_capacity_exhausted"),
+        LinkError::UpgradeStatus(429) => {
+            let code = crate::gateway::paired::CAPACITY_ERROR_CODE;
+            eprintln!("{}", serde_json::json!({"schema":1,"error":code,"hint":crate::gateway::paired::CAPACITY_HINT}));
+            ForegroundError(code)
+        },
         LinkError::UpgradeStatus(503) => ForegroundError("gateway_wss_unavailable"),
         LinkError::UpgradeStatus(_) | LinkError::HandshakeRejected => {
             ForegroundError("gateway_wss_upgrade_rejected")
@@ -1016,7 +1020,14 @@ async fn run_owned(
                                     next = Some(v);
                                     break;
                                 }
-                                Err(_) => event(&events, &cancel, "disconnected", &device, None),
+                                Err(error) => event_with_reason(
+                                    &events,
+                                    &cancel,
+                                    "disconnected",
+                                    &device,
+                                    None,
+                                    Some(error.code()),
+                                ),
                             }
                         }
                         let Some(connected) = next else {
@@ -1030,7 +1041,17 @@ async fn run_owned(
                     }
                 }
                 Ok(None) => {}
-                Err(error) => failure = Some(error),
+                Err(error) => {
+                    event_with_reason(
+                        &events,
+                        &cancel,
+                        "disconnected",
+                        &device,
+                        None,
+                        Some(error.code()),
+                    );
+                    failure = Some(error);
+                }
             }
             // Same original input jobs remain owned through every link failure.
             #[cfg(any(target_os = "linux", target_os = "windows", target_os = "macos"))]

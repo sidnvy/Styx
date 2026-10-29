@@ -167,6 +167,12 @@ fn render(v: &Value, root: &Path, now_ms: u64) -> String {
                 .unwrap_or("unavailable")
         ));
     }
+    if let (Some(connected), Some(capacity)) = (
+        v["gateway"]["computers"]["connected"].as_u64(),
+        v["gateway"]["computers"]["capacity"].as_u64(),
+    ) {
+        lines.push(format!("Connected computers: {connected}/{capacity}"));
+    }
     if let Some(capacity) = v["gateway"]["mcp_sessions"]["capacity"].as_u64() {
         let sessions = &v["gateway"]["mcp_sessions"];
         lines.push(format!(
@@ -228,6 +234,14 @@ fn render(v: &Value, root: &Path, now_ms: u64) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn status_shows_connected_computers_and_hub_capacity() {
+        let report = json!({"gateway":{"computers":{"connected":32,"capacity":32}}});
+        assert!(
+            render(&report, Path::new("/owned/styx"), 0).contains("Connected computers: 32/32")
+        );
+        assert!(!render(&json!({}), Path::new("/owned/styx"), 0).contains("Connected computers:"));
+    }
     #[test]
     fn status_shows_session_capacity_and_close_counters() {
         let value =

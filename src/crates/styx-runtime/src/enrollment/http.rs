@@ -33,7 +33,9 @@ use tokio::{
 };
 use tokio_util::sync::CancellationToken;
 
-const CONNECTIONS: usize = 16;
+// Upgraded Host sockets retain their listener permit. Leave the existing HTTP
+// allowance available even when every computer slot is occupied.
+const CONNECTIONS: usize = crate::gateway::paired::CONNECTED_COMPUTERS_CAPACITY + 16;
 const REQUESTS: usize = 8;
 const BODY_BYTES: usize = 16 * 1024;
 const RESPONSE_BYTES: usize = 1024 * 1024;
@@ -154,7 +156,7 @@ impl EnrollmentHttp {
         }
         let mut app = Self::from_shared(tls, service, allowed_hosts)?;
         let inner = Arc::get_mut(&mut app).ok_or(HttpError::Configuration)?;
-        inner.relay = Some(relay);
+        inner.relay = Some(relay.clone());
         let stop_mcp = mcp.paired_shutdown_handle();
         inner.mcp_stop = Some(Arc::new(move || {
             let mcp = stop_mcp.clone();
@@ -162,9 +164,23 @@ impl EnrollmentHttp {
         }));
         inner.mcp = Some(Arc::new(move |request| {
             let mcp = mcp.clone();
+            let relay = relay.clone();
             Box::pin(async move {
                 match mcp.handle(request).await {
-                    Ok(response) => response.map(BodyExt::boxed),
+                    Ok(mut response) => {
+                        // These headers exist only on the authenticated status
+                        // probe already accepted by GatewayHttp.
+                        if response.headers().contains_key("x-styx-sessions-capacity") {
+                            let (connected, capacity) = relay.connection_counts();
+                            response
+                                .headers_mut()
+                                .insert("x-styx-computers-connected", connected.into());
+                            response
+                                .headers_mut()
+                                .insert("x-styx-computers-capacity", capacity.into());
+                        }
+                        response.map(BodyExt::boxed)
+                    }
                     Err(never) => match never {},
                 }
             })

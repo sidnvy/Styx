@@ -30,9 +30,38 @@ use tokio_tungstenite::{
     },
 };
 use tokio_util::sync::CancellationToken;
-// Fits the existing16MiB paired reservation: two business replies plus control.
+// Frame, write-buffer, command-queue and in-flight limits remain per link.
 const FRAME: usize = 2 * 1024 * 1024;
 const RETAINED_CONNECTIONS: usize = 128;
+// A blackholed idle socket must not retain a computer slot indefinitely.
+// Only a received Pong resets this clock; business traffic cannot hide a loss.
+struct Heartbeat {
+    deadline: tokio::time::Instant,
+    awaiting_pong: bool,
+}
+impl Heartbeat {
+    fn new(now: tokio::time::Instant) -> Self {
+        Self {
+            deadline: now + Duration::from_secs(10),
+            awaiting_pong: false,
+        }
+    }
+    fn tick(&mut self, now: tokio::time::Instant) -> Result<bool, RelayError> {
+        if now < self.deadline {
+            return Ok(false);
+        }
+        if self.awaiting_pong {
+            return Err(RelayError::Offline);
+        }
+        self.awaiting_pong = true;
+        self.deadline = now + Duration::from_secs(5);
+        Ok(true)
+    }
+    fn pong(&mut self, now: tokio::time::Instant) {
+        self.awaiting_pong = false;
+        self.deadline = now + Duration::from_secs(10);
+    }
+}
 pub(crate) fn device_path(path: &str) -> Option<DeviceId> {
     let s = path.strip_prefix("/styx/host/v3/")?.strip_suffix("/exec")?;
     if !s.starts_with("styx-")
@@ -51,6 +80,20 @@ fn reject(status: u16) -> Response<Full<Bytes>> {
         .header("connection", "close")
         .header("cache-control", "no-store")
         .body(Full::new(Bytes::new()))
+        .expect("static response")
+}
+fn capacity_refusal(code: &'static str, capacity: usize) -> Response<Full<Bytes>> {
+    let hint = format!(
+        "This hub is at its limit of {capacity} connected computers. Disconnect a computer from this hub, then reconnect."
+    );
+    Response::builder()
+        .status(429)
+        .header("connection", "close")
+        .header("cache-control", "no-store")
+        .header("content-type", "application/json")
+        .body(Full::new(Bytes::from(
+            serde_json::json!({"error":code,"hint":hint,"capacity":capacity}).to_string(),
+        )))
         .expect("static response")
 }
 struct LiveFence(Arc<Entry>);
@@ -103,9 +146,9 @@ impl RelayHandle {
                 Ok(r) => r,
                 Err(_) => return reject(400),
             };
-        let slot = match self.inner.slots.clone().try_acquire_owned() {
+        let slot = match self.inner.links.admit() {
             Ok(p) => p,
-            Err(_) => return reject(429),
+            Err(code) => return capacity_refusal(code, self.connection_counts().1),
         };
         let generation: ConnectionGeneration =
             match format!("paired-{}", uuid::Uuid::new_v4()).try_into() {
@@ -153,6 +196,9 @@ impl RelayHandle {
         let mut lease = Some(lease);
         let attached = {
             if let Ok(mut state) = self.inner.state.lock() {
+                if !state.reap_finished() {
+                    self.inner.shutdown_failed.store(true, Ordering::Release);
+                }
                 if !state.closing && state.tasks.len() < RETAINED_CONNECTIONS {
                     let lease = lease.take().expect("admitted lease");
                     let task = tokio::spawn(async move {
@@ -229,14 +275,20 @@ impl RelayHandle {
                                 state.entries.insert(device.clone(),e.clone());
                             }
                             let mut pending:BTreeMap<RequestId,Pending>=BTreeMap::new();
+                            let mut heartbeat = Heartbeat::new(tokio::time::Instant::now());
                             loop {
                                 let until=pending.values().map(|p|p.deadline).min()
-                                    .unwrap_or_else(||tokio::time::Instant::now()+Duration::from_secs(30));
+                                    .unwrap_or(heartbeat.deadline).min(heartbeat.deadline);
                                 tokio::select! {
                                     _=task_stop.cancelled()=>break,
                                     _=tokio::time::sleep_until(until)=>{
-                                        if !pending.is_empty(){return Err(RelayError::Unknown)}
-                                        relay.control_lane(&e).await?;
+                                        let now = tokio::time::Instant::now();
+                                        if pending.values().any(|p| p.deadline <= now) { return Err(RelayError::Unknown); }
+                                        if heartbeat.tick(now)? {
+                                            relay.control_lane(&e).await?;
+                                            tokio::time::timeout(Duration::from_secs(5), sink.send(Message::Ping(Bytes::new())))
+                                                .await.map_err(|_| RelayError::Unknown)?.map_err(|_| RelayError::Unknown)?;
+                                        }
                                     },
                                     command=rx.recv()=>{
                                         let Some(command)=command else{break};
@@ -276,6 +328,14 @@ impl RelayHandle {
                                         let response=match response? {
                                             Incoming::Response(response)=>response,
                                             Incoming::Control(control)=>{relay.begin_transport_drain(&e,control)?;continue},
+                                            Incoming::Ping=>{
+                                                tokio::time::timeout(Duration::from_secs(5), sink.flush()).await.map_err(|_|RelayError::Unknown)?.map_err(|_|RelayError::Unknown)?;
+                                                continue;
+                                            },
+                                            Incoming::Pong=>{
+                                                heartbeat.pong(tokio::time::Instant::now());
+                                                continue;
+                                            },
                                         };
                                         if response.connection_generation!=e.host_connection{return Err(RelayError::Invalid)}
                                         let Some(p)=pending.remove(&response.request_id) else{return Err(RelayError::Invalid)};
@@ -415,25 +475,41 @@ async fn guarded_send<S: Sink<Message> + Unpin>(
         .map_err(|_| RelayError::Unknown)??;
     tokio::select! {_=stop.cancelled()=>Err(RelayError::Unknown),r=tokio::time::timeout(Duration::from_secs(5),sink.flush())=>r.map_err(|_|RelayError::Unknown)?.map_err(|_|RelayError::Unknown)}
 }
-#[derive(serde::Deserialize)]
-#[serde(untagged)]
 enum Incoming {
     Response(Box<WireResponse>),
     Control(HostControl),
+    Ping,
+    Pong,
+}
+fn decode_message(text: &str) -> Result<Incoming, RelayError> {
+    // Borrow only the discriminant, then parse the selected DTO directly.
+    // serde's untagged Content tree otherwise duplicates the entire frame.
+    #[derive(serde::Deserialize)]
+    struct Kind<'a> {
+        #[serde(borrow)]
+        kind: Option<&'a str>,
+    }
+    let kind: Kind<'_> = serde_json::from_str(text).map_err(|_| RelayError::Invalid)?;
+    if kind.kind.is_some() {
+        serde_json::from_str(text)
+            .map(Incoming::Control)
+            .map_err(|_| RelayError::Invalid)
+    } else {
+        serde_json::from_str(text)
+            .map(|response| Incoming::Response(Box::new(response)))
+            .map_err(|_| RelayError::Invalid)
+    }
 }
 async fn read_message<
     S: futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
 >(
     source: &mut S,
 ) -> Result<Incoming, RelayError> {
-    loop {
-        match source.next().await {
-            Some(Ok(Message::Text(text))) if text.len() <= FRAME => {
-                return serde_json::from_str(text.as_str()).map_err(|_| RelayError::Invalid);
-            }
-            Some(Ok(Message::Ping(_) | Message::Pong(_))) => {}
-            _ => return Err(RelayError::Unknown),
-        }
+    match source.next().await {
+        Some(Ok(Message::Text(text))) if text.len() <= FRAME => decode_message(text.as_str()),
+        Some(Ok(Message::Ping(_))) => Ok(Incoming::Ping),
+        Some(Ok(Message::Pong(_))) => Ok(Incoming::Pong),
+        _ => Err(RelayError::Unknown),
     }
 }
 async fn read_response<
@@ -441,9 +517,12 @@ async fn read_response<
 >(
     source: &mut S,
 ) -> Result<WireResponse, RelayError> {
-    match read_message(source).await? {
-        Incoming::Response(response) => Ok(*response),
-        Incoming::Control(_) => Err(RelayError::Invalid),
+    loop {
+        match read_message(source).await? {
+            Incoming::Response(response) => return Ok(*response),
+            Incoming::Control(_) => return Err(RelayError::Invalid),
+            Incoming::Ping | Incoming::Pong => {}
+        }
     }
 }
 
@@ -476,3 +555,107 @@ fn exec_negotiated(features: &[String], write: bool, terminate: bool, read_resum
 #[cfg(test)]
 #[path = "lane_independence_tests.rs"]
 mod lane_independence_tests;
+
+#[cfg(test)]
+mod capacity_tests {
+    use super::*;
+    use http_body_util::BodyExt;
+    #[test]
+    fn idle_blackholed_connection_expires_and_live_pong_renews() {
+        let start = tokio::time::Instant::now();
+        let mut dead = Heartbeat::new(start);
+        assert!(!dead.tick(start + Duration::from_secs(9)).unwrap());
+        assert!(dead.tick(start + Duration::from_secs(10)).unwrap());
+        assert!(!dead.tick(start + Duration::from_secs(14)).unwrap());
+        assert!(matches!(
+            dead.tick(start + Duration::from_secs(15)),
+            Err(RelayError::Offline)
+        ));
+        let mut live = Heartbeat::new(start);
+        for n in 0..200 {
+            let at = start + Duration::from_secs(n * 14 + 10);
+            assert!(live.tick(at).unwrap());
+            live.pong(at + Duration::from_secs(4));
+        }
+    }
+    #[tokio::test]
+    async fn full_hub_returns_clear_stable_code_capacity_and_hint() {
+        let response = capacity_refusal(super::super::CAPACITY_ERROR_CODE, 32);
+        assert_eq!(response.status(), 429);
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        assert_eq!(body["error"], super::super::CAPACITY_ERROR_CODE);
+        assert_eq!(body["capacity"], 32);
+        assert_eq!(body["hint"], super::super::CAPACITY_HINT);
+    }
+    // This exact workload was also run in an isolated System allocator counter;
+    // see the reservation report next to PAIRED_LINK_BYTES.
+    fn ceiling_response(kind: &str) -> String {
+        let mut value = serde_json::json!({"request_id":"fixture-reply","connection_generation":"fixture-connection","reply":{}});
+        value["reply"] = if kind == "exec" {
+            serde_json::json!({"status":"read","chunks":[{"stream":"stdout","text":""}],"liveness":"running","output_drain":"open","exit_code":null,"read_resume":false})
+        } else {
+            serde_json::json!({"status":"browser_action","snapshot":{"operation_id":{"host_generation":"fixture-host","owner_epoch":"fixture-owner","sequence":1},"payload_digest":"0000000000000000000000000000000000000000000000000000000000000000","target":null,"state":"succeeded","liveness":"not_applicable","output_drain":"drained"},"dispatch":"completed","result":{"content":[if kind == "screenshot" {serde_json::json!({"type":"image","mimeType":"image/png","data":""})} else {serde_json::json!({"type":"text","text":""})}]},"cause":null,"cleanup_complete":null})
+        };
+        let length = FRAME - serde_json::to_string(&value).unwrap().len();
+        if kind == "exec" {
+            value["reply"]["chunks"][0]["text"] = serde_json::Value::String("x".repeat(length));
+        } else {
+            let field = if kind == "screenshot" { "data" } else { "text" };
+            value["reply"]["result"]["content"][0][field] =
+                serde_json::Value::String("x".repeat(length));
+        }
+        let text = serde_json::to_string(&value).unwrap();
+        assert_eq!(text.len(), FRAME);
+        text
+    }
+    #[tokio::test]
+    async fn exec_snapshot_and_screenshot_at_frame_ceiling_use_production_decoder() {
+        for kind in ["exec", "snapshot", "screenshot"] {
+            let (peer, server) = tokio::io::duplex(64 * 1024);
+            let config = WebSocketConfig::default()
+                .max_message_size(Some(FRAME))
+                .max_frame_size(Some(FRAME))
+                .max_write_buffer_size(FRAME + 64 * 1024);
+            let mut peer = WebSocketStream::from_raw_socket(peer, Role::Client, Some(config)).await;
+            let mut server =
+                WebSocketStream::from_raw_socket(server, Role::Server, Some(config)).await;
+            let text = ceiling_response(kind);
+            // Multiple pages exercise streaming and high-water buffer reuse.
+            for _ in 0..3 {
+                let (sent, received) = tokio::join!(
+                    peer.send(Message::Text(text.clone().into())),
+                    read_message(&mut server)
+                );
+                sent.unwrap();
+                assert!(matches!(received, Ok(Incoming::Response(_))), "{kind}");
+            }
+        }
+    }
+    #[tokio::test]
+    async fn oversized_incoming_frame_is_refused() {
+        let (peer, server) = tokio::io::duplex(64 * 1024);
+        let mut peer = WebSocketStream::from_raw_socket(peer, Role::Client, None).await;
+        let config = WebSocketConfig::default()
+            .max_message_size(Some(FRAME))
+            .max_frame_size(Some(FRAME));
+        let mut server = WebSocketStream::from_raw_socket(server, Role::Server, Some(config)).await;
+        let sender =
+            tokio::spawn(
+                async move { peer.send(Message::Text("x".repeat(FRAME + 1).into())).await },
+            );
+        assert!(read_message(&mut server).await.is_err());
+        drop(server);
+        let _ = sender.await.unwrap();
+    }
+    #[test]
+    fn frame_ceiling_and_direct_response_decode_remain_enforced() {
+        let mut out = Bounded(Vec::new());
+        out.write_all(&vec![b'x'; FRAME]).unwrap();
+        assert!(out.write_all(b"x").is_err());
+        assert_eq!(out.0.len(), FRAME);
+        let message = r#"{"request_id":"fixture-reply","connection_generation":"fixture-connection","reply":{"status":"unsupported","feature":"fixture"}}"#;
+        assert!(matches!(decode_message(message), Ok(Incoming::Response(_))));
+        assert!(decode_message(r#"{"kind":"unknown"}"#).is_err());
+    }
+}
