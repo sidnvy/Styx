@@ -3,8 +3,8 @@
 use super::desktop_source::DesktopSource;
 use super::*;
 use crate::providers::cua::{
-    CuaAction, CuaError, CuaEvidence, CuaHandle, CuaIoBudget, CuaOpenSpec, CuaReceipt, CuaWorker,
-    OwnedCuaConfig,
+    CuaAction, CuaError, CuaEvidence, CuaHandle, CuaIoBudget, CuaOpenSlot, CuaOpenSpec, CuaReceipt,
+    CuaWorker, OwnedCuaConfig,
 };
 use crate::session::ProviderEvidence;
 use std::collections::BTreeMap;
@@ -31,6 +31,11 @@ pub(super) struct DesktopLane {
     pub(super) ax_observation: Option<super::desktop_observation::OwnedAxObservation>,
     profiles: BTreeMap<OwnerId, DesktopProfile>,
     pub(super) handles: BTreeMap<OperationId, CuaHandle>,
+}
+struct DesktopOpenAdmission {
+    execution: OwnedRwLockReadGuard<()>,
+    slot: Result<CuaOpenSlot, CuaError>,
+    waited: bool,
 }
 #[derive(Debug)]
 pub(crate) struct DesktopOpenCompletion {
@@ -480,20 +485,123 @@ impl HostCoordinator {
             .ledger
             .prepare_desktop_agent(owner, context, payload, self.now())?)
     }
+    /// Wait only for fenced owners' original workers. A live context is a real
+    /// capacity refusal. No job/worker permit or execution read gate is held
+    /// while waiting, so cleanup can reap and collect under its write gate.
+    async fn reserve_desktop_open(
+        &self,
+        owner: &OwnerLease,
+        id: &OperationId,
+        digest: Sha256Digest,
+    ) -> Result<DesktopOpenAdmission, CoordinatorError> {
+        let deadline = {
+            let state = self.inner.state.lock().expect("Host state mutex");
+            state.ledger.inspect_context(owner, id, digest)?.deadline
+        };
+        let until = tokio::time::Instant::now()
+            + Duration::from_millis(deadline.0.saturating_sub(self.now().0));
+        let mut waited = false;
+        loop {
+            if self.now().0 >= deadline.0 {
+                return Err(CoordinatorError::Busy);
+            }
+            let execution = match self.inner.execution_gate.clone().try_read_owned() {
+                Ok(execution) => execution,
+                Err(_) => {
+                    waited = true;
+                    tokio::time::timeout_at(until, self.inner.execution_gate.clone().read_owned())
+                        .await
+                        .map_err(|_| CoordinatorError::Busy)?
+                }
+            };
+            {
+                let state = self.inner.state.lock().expect("Host state mutex");
+                let context = state.ledger.inspect_context(owner, id, digest)?;
+                let lane = desktop(&state)?;
+                validate_context(lane, &context)?;
+                if state.shutting_down || self.now().0 >= deadline.0 {
+                    return Err(CoordinatorError::Busy);
+                }
+                let slot = lane.worker.try_reserve_open();
+                if !matches!(slot, Err(CuaError::Busy)) {
+                    return Ok(DesktopOpenAdmission {
+                        execution,
+                        slot,
+                        waited,
+                    });
+                }
+                // Include starts dispatched before the provider has registered
+                // a handle. The ledger and opaque owner lease remain authoritative
+                // during that registration gap; profile presence alone is not
+                // evidence that a worker occupies the desktop.
+                let mut closing = false;
+                let mut live = false;
+                for resource_owner in lane.worker.resources()?.iter().map(CuaHandle::owner).chain(
+                    state
+                        .ledger
+                        .retained_provider_records()
+                        .iter()
+                        .filter(|key| {
+                            key.resource_domain() == ResourceDomain::DesktopAgent
+                                && key.snapshot().target.is_none()
+                                && matches!(
+                                    key.snapshot().state,
+                                    OperationState::Dispatched
+                                        | OperationState::Running
+                                        | OperationState::Unknown
+                                )
+                                && key.snapshot().liveness != ExecutionLiveness::Exited
+                        })
+                        .map(ProviderRecordKey::owner),
+                ) {
+                    if state.ledger.validate_owner(resource_owner).is_ok() {
+                        live = true;
+                    } else {
+                        closing = true;
+                    }
+                }
+                if live || !closing {
+                    return Ok(DesktopOpenAdmission {
+                        execution,
+                        slot,
+                        waited,
+                    });
+                }
+            }
+            drop(execution);
+            waited = true;
+            // Provider cleanup is independently supervised and may outlive this
+            // deadline or a dropped waiter. Never cancel/recreate its worker.
+            tokio::time::sleep_until(
+                until.min(tokio::time::Instant::now() + Duration::from_millis(10)),
+            )
+            .await;
+        }
+    }
     pub(crate) async fn dispatch_desktop_open(
         &self,
         owner: &OwnerLease,
         id: &OperationId,
         digest: Sha256Digest,
     ) -> Result<DesktopOpenSubmission, CoordinatorError> {
-        self.refresh_desktop_source().await?;
+        let snapshot = self.inspect_desktop(owner, id, digest, false)?;
+        if snapshot.state != OperationState::Reserved {
+            return Ok(DesktopOpenSubmission::Existing(snapshot));
+        }
+        let admission = loop {
+            self.refresh_desktop_source().await?;
+            let admission = self.reserve_desktop_open(owner, id, digest).await?;
+            if !admission.waited {
+                break admission;
+            }
+            // Source/provider facts can expire during a slow reap. Release this
+            // provisional reservation and refresh before the final reservation;
+            // never hold a worker slot across a fresh asynchronous observation.
+        };
+        let DesktopOpenAdmission {
+            execution, slot, ..
+        } = admission;
         let rx = {
-            let execution = self
-                .inner
-                .execution_gate
-                .clone()
-                .try_read_owned()
-                .map_err(|_| CoordinatorError::Busy)?;
             let job_slot = self
                 .inner
                 .slots
@@ -517,7 +625,7 @@ impl HostCoordinator {
             }
             let config = profile(desktop(&state)?, owner)?.config.clone();
             let admission = facts(&state, CapabilityId::DesktopWindowsRead)?;
-            let slot = match desktop(&state)?.worker.try_reserve_open() {
+            let slot = match slot {
                 Ok(slot) => slot,
                 Err(CuaError::Busy) => {
                     let permit =
@@ -1084,3 +1192,7 @@ pub(super) fn test_lane(binding: SessionBinding, budget: Arc<CuaIoBudget>) -> De
         handles: BTreeMap::new(),
     }
 }
+
+#[cfg(all(test, target_os = "linux"))]
+#[path = "desktop_open_tests.rs"]
+mod open_tests;
