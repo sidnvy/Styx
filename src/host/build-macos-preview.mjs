@@ -57,7 +57,7 @@ export function prepareNativeMacPreview(config){
  const {destination,version,buildNumber,sourceRevision,cuaBinary,sdkPath,moduleCachePath,nativeRuntime,prepareOnly}=config;
  assert(prepareOnly===true&&process.platform==='darwin','native_app_prepare_only_required');
  assert(ABS(destination)&&!fs.existsSync(destination)&&/^[a-f0-9]{40}$/.test(sourceRevision??''),'fresh_native_app_destination_required');
- assert(nativeRuntime.expectedPublisher==='ebb36f9dff7022d8921443bdc30c6236d18dd0535aa2cdce838d1c5b327bab67','original_native_app_publisher_required');
+ assert(nativeRuntime.expectedPublisher==='cb06529011b4c35ffc79f76440beeb88c6e3615e60d993d1485b5be45b307819','original_native_app_publisher_required');
  const observedSources=macNativeSwiftSources(),sourceFiles=Object.fromEntries([observedSources.source,...observedSources.additionalSources,path.join(ROOT,'host/macos/StyxUpdater.swift'),path.join(ROOT,'host/macos/render-brand-icons.swift')].map(file=>[path.relative(ROOT,file).split(path.sep).join('/'),sha(file)]));
  const verified=verifyNativeMacRuntime(nativeRuntime,process.arch);
  assert(sourceRevision===verified.report.source_revision,'native_app_source_revision_mismatch');
@@ -186,7 +186,7 @@ export function finalizeNativeMacPreview(config){
  const local=normalizeMacLocalSigning(localSigning);
  // This bridge preserves the exact retained rc12 identity; no replacement
  // signing certificate or new publisher is inferred from candidate bytes.
- assert(local.identitySha1==='cb50cee601419f28b43756f4fc8aefdbf60abae2'&&local.certificateSha256==='90792ed11f23a00f0107450dbc184f992016569ca188454cfa286fe0022c2c1e'&&expectedPublisherSha256==='ebb36f9dff7022d8921443bdc30c6236d18dd0535aa2cdce838d1c5b327bab67','original_native_app_identity_required');
+ assert(local.identitySha1==='cb50cee601419f28b43756f4fc8aefdbf60abae2'&&local.certificateSha256==='90792ed11f23a00f0107450dbc184f992016569ca188454cfa286fe0022c2c1e'&&expectedPublisherSha256==='cb06529011b4c35ffc79f76440beeb88c6e3615e60d993d1485b5be45b307819','original_native_app_identity_required');
  const receiptPath=path.join(nativePreparedSource,'prepared-native-app.json');assert(sha(receiptPath)===preparedReceiptSha256,'prepared_native_app_receipt_changed');
  const metadata=JSON.parse(fs.readFileSync(receiptPath,'utf8')),originalApp=path.join(nativePreparedSource,'image-root/Styx.app');
  assert(metadata.schema===1&&metadata.kind==='prepared_native_rust_app'&&metadata.delivery==='NOT FINALIZED'&&(crossArchSignOnly?metadata.arch==='x64'&&process.arch==='arm64':metadata.arch===process.arch)&&metadata.readerActualWait===true&&metadata.readerExitCode===0&&metadata.nativeRuntime.publisherSpkiSha256===expectedPublisherSha256&&JSON.stringify(preparedPreviewInventory(originalApp))===JSON.stringify(metadata.files),'prepared_native_app_changed');
@@ -242,7 +242,7 @@ export function completeNativeMacPreview(config){
  assert(config&&Object.keys(config).every(k=>['signedPendingSource','pendingReceiptSha256','destination','expectedPublisherSha256','createDmg'].includes(k)),'invalid_native_app_completion');
  const {signedPendingSource,pendingReceiptSha256,destination,expectedPublisherSha256,createDmg=true}=config;
  assert(typeof createDmg==='boolean','invalid_native_create_dmg');
- assert(ABS(signedPendingSource)&&ABS(destination)&&!fs.existsSync(destination)&&/^[a-f0-9]{64}$/.test(pendingReceiptSha256??'')&&expectedPublisherSha256==='ebb36f9dff7022d8921443bdc30c6236d18dd0535aa2cdce838d1c5b327bab67','native_app_completion_inputs_required');
+ assert(ABS(signedPendingSource)&&ABS(destination)&&!fs.existsSync(destination)&&/^[a-f0-9]{64}$/.test(pendingReceiptSha256??'')&&expectedPublisherSha256==='cb06529011b4c35ffc79f76440beeb88c6e3615e60d993d1485b5be45b307819','native_app_completion_inputs_required');
  const relative=path.relative(signedPendingSource,destination),reverse=path.relative(destination,signedPendingSource),outside=p=>p==='..'||p.startsWith('..'+path.sep)||path.isAbsolute(p);
  assert(outside(relative)&&outside(reverse),'native_app_destination_overlap');
  const receiptPath=path.join(signedPendingSource,'signed-pending-app.json');requirePrivateFile(receiptPath);assert(sha(receiptPath)===pendingReceiptSha256,'signed_pending_receipt_changed');
