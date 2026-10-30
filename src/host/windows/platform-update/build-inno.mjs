@@ -8,7 +8,7 @@ import {verifyNativeWindowsRuntimeInput} from '../../build-windows-app.mjs';
 const here=path.dirname(fileURLToPath(import.meta.url));
 const hash=file=>createHash('sha256').update(fs.readFileSync(file)).digest('hex');
 const assert=(value,code)=>{if(!value)throw Error(code);};
-const originalPublisher='f524e2e87f4cda2bc2b52d448233ae347b05c00730374f6b379a8aafe1cc2566';
+const originalPublisher='cb06529011b4c35ffc79f76440beeb88c6e3615e60d993d1485b5be45b307819';
 function verifyNativePackage(root,expected){
  const inventory=JSON.parse(fs.readFileSync(path.join(root,'windows-package.json'),'utf8'));
  assert(inventory.schema===1&&inventory.nativeRuntime===true&&inventory.compiled===true&&inventory.arch==='x64'&&inventory.sourceProvenance?.status==='SAME_REVISION_TRACKED_ARCHIVE_BOUND'&&inventory.sourceProvenance.sourceRevision===inventory.sourceRevision&&/^[a-f0-9]{40}$/.test(inventory.sourceRevision??''),'native_compiled_same_revision_package_required');

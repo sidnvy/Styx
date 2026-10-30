@@ -19,7 +19,7 @@ import time
 import xml.etree.ElementTree as ET
 
 LIMIT = 256 * 1024
-PIN = "ebb36f9dff7022d8921443bdc30c6236d18dd0535aa2cdce838d1c5b327bab67"
+PIN = "cb06529011b4c35ffc79f76440beeb88c6e3615e60d993d1485b5be45b307819"
 REQUEST_FIELDS = set("schema kind uid username role state_dir state_root canonical_sha256 transaction_id revision definition_path definition_plist definition_sha256 label executable_path executable_sha256 runtime_selection".split())
 REPAIR_FIELDS = {"old_definition_sha256", "old_definition_identity", "old_runtime_selection", "original_registration"}
 LIFECYCLE_FIELDS = {"action", "original_desired", "original_definition_identity", "original_registration", "original_enabled"}
