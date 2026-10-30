@@ -2,7 +2,7 @@
   "schema": 1,
   "algorithm": "Ed25519",
   "publisherSpkiSha256": "cb06529011b4c35ffc79f76440beeb88c6e3615e60d993d1485b5be45b307819",
-  "publicKey": "release-publisher.pem",
+  "publicKey": "release-publisher.pub",
   "establishedOn": "2026-10-31",
   "scope": "Styx native runtime releases on Linux macOS and Windows",
   "privateKeyDistributed": false

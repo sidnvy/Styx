@@ -2,7 +2,7 @@
 
 The owner authorized a fresh publisher on 2026-10-31. Linux, macOS and Windows
 native runtime releases now use the Ed25519 public key in
-`src/release-publisher.pem`, recorded by `src/release-publisher.json`.
+`src/release-publisher.pub`, recorded by `src/release-publisher.json`.
 
 SPKI SHA256: `cb06529011b4c35ffc79f76440beeb88c6e3615e60d993d1485b5be45b307819`. This pin is part of the reviewed source and
 compiled App/installer trust anchors. A public key supplied inside a downloaded
