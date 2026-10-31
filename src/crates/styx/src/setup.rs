@@ -18,7 +18,13 @@ use tokio_util::sync::CancellationToken;
 #[serde(rename_all = "lowercase")]
 pub(super) enum Role {
     Hub,
+    Gateway,
     Join,
+}
+impl Role {
+    pub(super) fn owns_gateway(self) -> bool {
+        matches!(self, Self::Hub | Self::Gateway)
+    }
 }
 #[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -305,6 +311,14 @@ impl Answers {
         {
             return Err("setup_external_publisher_pin_required".into());
         }
+        if self.role == Role::Gateway
+            && (self.browser
+                || self.computer
+                || self.browser_executable.is_some()
+                || self.join_link_file.is_some())
+        {
+            return Err("setup_gateway_only_cannot_enable_host".into());
+        }
         if self.role == Role::Join
             && (!self.networks.is_empty() || self.tunnel.is_some() || self.plugin.is_some())
         {
@@ -381,10 +395,13 @@ fn interactive(root: &Path) -> Result<(Answers, Option<String>)> {
     println!(
         "Welcome to Styx. This setup connects only the computers and capabilities you approve."
     );
-    println!("1. Set up this computer as the hub (Styx Gateway)\n2. Join an existing hub");
+    println!(
+        "1. Set up this computer as the hub (Styx Gateway)\n2. Join an existing hub\n3. Gateway only (for a headless VM; pair other computers later)"
+    );
     let role = match prompt::line("Role", Some("1"))?.as_str() {
         "1" => Role::Hub,
         "2" => Role::Join,
+        "3" => Role::Gateway,
         _ => return Err("setup_role_invalid".into()),
     };
     println!(
@@ -418,7 +435,7 @@ fn interactive(root: &Path) -> Result<(Answers, Option<String>)> {
     let mut join_link_file = None;
     let mut pasted_link = None;
     let mut port = default_port();
-    if role == Role::Hub {
+    if role.owns_gateway() {
         port = prompt::line("Hub HTTPS port", Some("22022"))?
             .parse()
             .map_err(|_| Failure::new("setup_port_invalid"))?;
@@ -485,27 +502,32 @@ fn interactive(root: &Path) -> Result<(Answers, Option<String>)> {
         join_link_file = Some(file);
     }
     let label = prompt::line("This computer's label", Some(&hostname()))?;
-    println!(
-        "Choose a folder for commands and Browser Automation. Use a dedicated folder such as ~/Styx so Browser Automation can keep your private Styx files separate."
-    );
-    let workspace = PathBuf::from(prompt::line(
-        "Workspace folder",
-        home()?.join("Styx").to_str(),
-    )?);
-    let browser_executable = browser_default();
-    let browser = if let Some(path) = &browser_executable {
-        println!("Detected browser: {}", path.display());
-        prompt::confirm("Enable Browser Automation for this computer?")?
+    let (workspace, browser_executable, browser, computer) = if role == Role::Gateway {
+        (root.join("unused-host-workspace"), None, false, false)
     } else {
         println!(
-            "Chrome/Edge was not found. Browser Automation is off; install a supported browser before enabling it."
+            "Choose a folder for commands and Browser Automation. Use a dedicated folder such as ~/Styx so Browser Automation can keep your private Styx files separate."
         );
-        false
+        let workspace = PathBuf::from(prompt::line(
+            "Workspace folder",
+            home()?.join("Styx").to_str(),
+        )?);
+        let browser_executable = browser_default();
+        let browser = if let Some(path) = &browser_executable {
+            println!("Detected browser: {}", path.display());
+            prompt::confirm("Enable Browser Automation for this computer?")?
+        } else {
+            println!(
+                "Chrome/Edge was not found. Browser Automation is off; install a supported browser before enabling it."
+            );
+            false
+        };
+        println!(
+            "Computer Use can observe and act on your desktop after the platform's permission checks. Enable it only for a desktop session you intend to share."
+        );
+        let computer = prompt::confirm("Enable Computer Use for this computer?")?;
+        (workspace, browser_executable, browser, computer)
     };
-    println!(
-        "Computer Use can observe and act on your desktop after the platform's permission checks. Enable it only for a desktop session you intend to share."
-    );
-    let computer = prompt::confirm("Enable Computer Use for this computer?")?;
     let answers = Answers {
         schema: 1,
         role,
@@ -875,12 +897,14 @@ fn plan_steps(answers: &Answers, foreground: bool, root: &Path) -> Vec<String> {
             "Check the signed Styx files in {} against your publisher fingerprint.",
             answers.payload.payload_dir.display()
         ),
-        format!(
+    ];
+    if answers.role != Role::Gateway {
+        steps.push(format!(
             "Use {} for commands and Browser Automation; create it privately if needed.",
             answers.workspace.display()
-        ),
-    ];
-    if answers.role == Role::Hub {
+        ));
+    }
+    if answers.role.owns_gateway() {
         let networks = if answers.networks.is_empty() {
             "only on this computer".to_owned()
         } else {
@@ -902,28 +926,33 @@ fn plan_steps(answers: &Answers, foreground: bool, root: &Path) -> Vec<String> {
             steps.push("Connect ChatGPT through a Secure MCP Tunnel and save its API key privately. Briefly stop and restart an existing hub service if configuration requires it.".into());
         }
         steps.push(if foreground { "Run the hub in this terminal until Ctrl-C." } else { "Install, start and enable the hub as your systemd user service at login. No sudo or linger." }.into());
-        steps.push("Pair this computer with its own hub using its exact local identity.".into());
+        if answers.role == Role::Hub {
+            steps
+                .push("Pair this computer with its own hub using its exact local identity.".into());
+        }
     } else {
         steps.push("Save your join link privately, check the other hub's security fingerprint and comparison code with you, then pair this computer after approval.".into());
     }
-    steps.push(format!(
-        "Enable commands for “{}”; Browser Automation {}; Computer Use {}.",
-        answers.label,
-        if answers.browser { "on" } else { "off" },
-        if answers.computer { "on" } else { "off" }
-    ));
-    steps.push(if foreground { "Run this computer's connection in this terminal until Ctrl-C." } else { "Install, start and enable this computer's connection as your systemd user service at login. No sudo or linger." }.into());
-    steps.push(
-        if answers.role == Role::Hub {
-            "Wait for the hub to confirm this computer is connected."
-        } else {
-            "Show how to check this computer's connection on the hub."
-        }
-        .into(),
-    );
+    if answers.role != Role::Gateway {
+        steps.push(format!(
+            "Enable commands for “{}”; Browser Automation {}; Computer Use {}.",
+            answers.label,
+            if answers.browser { "on" } else { "off" },
+            if answers.computer { "on" } else { "off" }
+        ));
+        steps.push(if foreground { "Run this computer's connection in this terminal until Ctrl-C." } else { "Install, start and enable this computer's connection as your systemd user service at login. No sudo or linger." }.into());
+        steps.push(
+            if answers.role.owns_gateway() {
+                "Wait for the hub to confirm this computer is connected."
+            } else {
+                "Show how to check this computer's connection on the hub."
+            }
+            .into(),
+        );
+    }
     if let Some(plugin) = &answers.plugin {
         steps.push(format!("Write the ChatGPT plugin “{}” to {} and a ZIP beside it, then show you how to install it. Nothing is uploaded.", plugin.display_name, plugin.output.display()));
-    } else if answers.role == Role::Hub && answers.tunnel.is_none() {
+    } else if answers.role.owns_gateway() && answers.tunnel.is_none() {
         steps.push("Leave ChatGPT off for now and show how to connect it later.".into());
     }
     steps
@@ -1191,7 +1220,7 @@ async fn execute(session: &mut Session, foreground: bool, running: &mut Foregrou
         }
         session.skip("Installed Styx version");
     }
-    if !a.workspace.exists() {
+    if a.role != Role::Gateway && !a.workspace.exists() {
         session.consent(
             "workspace",
             "Create the selected workspace as a private directory.",
@@ -1207,7 +1236,7 @@ async fn execute(session: &mut Session, foreground: bool, running: &mut Foregrou
     if !session.input("setup-intent.json").exists() {
         session.json_new("setup-intent.json", &session.answers)?;
     }
-    if a.role == Role::Hub {
+    if a.role.owns_gateway() {
         if !gateway.exists() {
             session.consent("gateway", "Create this hub with a private security identity and the network addresses you selected.")?;
             if !session.input("gateway-deployment.json").exists() {
@@ -1327,8 +1356,23 @@ async fn execute(session: &mut Session, foreground: bool, running: &mut Foregrou
         }
         wait_gateway(&gateway).await?;
     }
-    let device = pair(session, (a.role == Role::Hub).then_some(gateway.as_path())).await?;
-    if a.role == Role::Hub {
+    if a.role == Role::Gateway {
+        if a.tunnel.is_some() {
+            connect_chatgpt(session, &gateway).await?;
+        }
+        println!(
+            "Gateway-only setup complete. No local Host, command executor, browser or desktop was installed."
+        );
+        println!("Check Styx: styx status --root {}", root.display());
+        println!("Add a computer: styx invite --root {}", root.display());
+        return Ok(());
+    }
+    let device = pair(
+        session,
+        (a.role.owns_gateway()).then_some(gateway.as_path()),
+    )
+    .await?;
+    if a.role.owns_gateway() {
         println!("Pairing this computer with its own hub… done");
     }
     if foreground {
@@ -1351,7 +1395,7 @@ async fn execute(session: &mut Session, foreground: bool, running: &mut Foregrou
         )
         .await?;
     }
-    if a.role == Role::Hub {
+    if a.role.owns_gateway() {
         println!(
             "Waiting for the hub to see this computer connected for commands{}…",
             if a.browser {
@@ -1371,7 +1415,7 @@ async fn execute(session: &mut Session, foreground: bool, running: &mut Foregrou
     }
     println!(
         "Setup complete. {}",
-        if a.role == Role::Hub {
+        if a.role.owns_gateway() {
             "This hub and this computer's connection are running."
         } else {
             "This computer's connection is running; check its connection on the hub."
@@ -1383,7 +1427,7 @@ async fn execute(session: &mut Session, foreground: bool, running: &mut Foregrou
         if a.computer { "on" } else { "off" }
     );
     println!("Check Styx: styx status --root {}", root.display());
-    if a.role == Role::Hub {
+    if a.role.owns_gateway() {
         println!(
             "Add another computer: styx invite --root {}",
             root.display()
@@ -1545,7 +1589,7 @@ pub(super) async fn run(
     } else {
         interactive(&root)?
     };
-    if intent.exists() && answers.role == Role::Hub && answers.tunnel.is_none() {
+    if intent.exists() && answers.role.owns_gateway() && answers.tunnel.is_none() {
         if let Ok(status) = styx_runtime::foreground::tunnel::status(&root.join("gateway")).await {
             let status = serde_json::to_value(status)
                 .map_err(|_| Failure::new("setup_tunnel_status_failed"))?;
@@ -1705,7 +1749,7 @@ pub(super) async fn invite(root: Option<PathBuf>) -> Result<()> {
     }
     let root = root.map(Ok).unwrap_or_else(root_default)?;
     let answers = Answers::load(&root.join("inputs/setup-intent.json"))?;
-    if answers.role != Role::Hub {
+    if !answers.role.owns_gateway() {
         return Err("invite_requires_local_hub".into());
     }
     let session = Session {
@@ -2040,6 +2084,29 @@ mod tests {
     use super::*;
     fn valid() -> Value {
         json!({"schema":1,"role":"hub","payload":{"payload_dir":"/p/runtime","publisher_file":"/p/publisher.pem","expected_publisher":"a".repeat(64)},"label":"workstation","workspace":"/p/work","shell":"/bin/bash","approve":[]})
+    }
+    #[test]
+    fn gateway_only_plan_never_pairs_or_runs_a_local_host() {
+        let mut value = valid();
+        value["role"] = json!("gateway");
+        value["browser"] = json!(false);
+        value["browser_executable"] = Value::Null;
+        value["computer"] = json!(false);
+        let answers: Answers = serde_json::from_value(value.clone()).unwrap();
+        answers.validate().unwrap();
+        let plan = plan_steps(&answers, false, Path::new("/private/setup"));
+        let text = plan.join("\n");
+        assert!(text.contains("Styx Gateway"));
+        assert!(!text.contains("Pair this computer"));
+        assert!(!text.contains("Enable commands"));
+        assert!(!text.contains("computer's connection"));
+        value["computer"] = json!(true);
+        assert!(
+            serde_json::from_value::<Answers>(value)
+                .unwrap()
+                .validate()
+                .is_err()
+        );
     }
     #[test]
     fn plan_consent_never_supplies_automation_approval_or_new_identity_decisions() {
