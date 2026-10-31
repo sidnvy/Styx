@@ -10,6 +10,8 @@ use std::{
 use tokio_util::sync::CancellationToken;
 #[path = "computers.rs"]
 mod computers;
+#[path = "install.rs"]
+mod install;
 #[path = "plugin_command.rs"]
 mod plugin_command;
 #[path = "plugin_package.rs"]
@@ -82,6 +84,19 @@ enum PluginCommand {
 }
 #[derive(Subcommand)]
 enum Command {
+    /// Install a verified Linux CLI into your private bin directory.
+    Install {
+        #[arg(long)]
+        payload_dir: PathBuf,
+        #[arg(long)]
+        publisher_file: PathBuf,
+        #[arg(long)]
+        expected_publisher: String,
+        #[arg(long)]
+        bin_dir: Option<PathBuf>,
+        #[arg(long)]
+        authorize: bool,
+    },
     /// Configure or export this hub's plugin name, descriptions and icon.
     Plugin {
         #[arg(long, global = true, conflicts_with = "gateway_state_dir")]
@@ -1141,6 +1156,22 @@ async fn stop_signal() -> io::Result<()> {
 pub(crate) async fn run(cli: Cli) -> ExitCode {
     use styx_runtime::foreground::{self, HostWireMode};
     match cli.command {
+        Command::Install {
+            payload_dir,
+            publisher_file,
+            expected_publisher,
+            bin_dir,
+            authorize,
+        } => setup_result(
+            install::run(
+                payload_dir,
+                publisher_file,
+                expected_publisher,
+                bin_dir,
+                authorize,
+            )
+            .await,
+        ),
         Command::Plugin {
             root,
             gateway_state_dir,

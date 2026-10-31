@@ -23,7 +23,11 @@ fn payload_version(
     Ok(json!({"version":candidate.report().version,"manifest_sha256":selection.manifest_sha256}))
 }
 fn current_payload(committed: &Value, role: Role) -> Value {
-    let name = if role == Role::Hub { "gateway" } else { "host" };
+    let name = if role.owns_gateway() {
+        "gateway"
+    } else {
+        "host"
+    };
     committed
         .get(name)
         .cloned()
@@ -88,7 +92,7 @@ pub(super) async fn observe(root: &Path) -> Result<Value, Failure> {
         report["this_computer"] =
             json!({"device_id":device,"browser":answers.browser,"computer":answers.computer});
     }
-    if answers.role == Role::Hub && gateway.exists() {
+    if answers.role.owns_gateway() && gateway.exists() {
         report["gateway"] = match admin::observe(&gateway).await {
             Ok(observed) => observed,
             Err(error) => json!({"state":"unavailable","error":error.code()}),
