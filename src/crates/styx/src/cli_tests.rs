@@ -708,3 +708,52 @@ fn computers_accepts_root_before_or_after_remove_and_explicit_self_override() {
         assert!(Cli::try_parse_from(argv).is_ok());
     }
 }
+
+#[test]
+fn plugin_details_are_owner_local_and_do_not_accept_credentials_or_conflicting_icons() {
+    assert!(Cli::try_parse_from(["styx", "plugin", "configure"]).is_ok());
+    assert!(
+        Cli::try_parse_from([
+            "styx",
+            "plugin",
+            "--gateway-state-dir",
+            "/private/gateway",
+            "configure",
+            "--plugin-id",
+            "styx-vm",
+            "--display-name",
+            "我的 Styx",
+            "--default-icon",
+            "--yes"
+        ])
+        .is_ok()
+    );
+    assert!(
+        Cli::try_parse_from([
+            "styx",
+            "plugin",
+            "configure",
+            "--icon-file",
+            "/image.png",
+            "--default-icon"
+        ])
+        .is_err()
+    );
+    assert!(Cli::try_parse_from(["styx", "plugin", "configure", "--token", "SECRET"]).is_err());
+    assert!(Cli::try_parse_from(["styx", "plugin", "export"]).is_err());
+    assert!(
+        Cli::try_parse_from(["styx", "plugin", "export", "--output", "/private/styx-vm"]).is_ok()
+    );
+    assert!(
+        Cli::try_parse_from([
+            "styx",
+            "plugin",
+            "--root",
+            "/a",
+            "--gateway-state-dir",
+            "/b",
+            "show"
+        ])
+        .is_err()
+    );
+}

@@ -71,6 +71,8 @@ pub(super) struct Tunnel {
 #[serde(deny_unknown_fields)]
 pub(super) struct Plugin {
     pub display_name: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<styx_runtime::management::plugin_presentation::Profile>,
     pub output: PathBuf,
     #[serde(default)]
     pub wait: bool,
@@ -196,7 +198,12 @@ impl Failure {
 }
 impl From<&'static str> for Failure {
     fn from(value: &'static str) -> Self {
-        Self::new(value)
+        match value {
+            "plugin_profile_save_unconfirmed_check_before_retry" | "plugin_publication_unknown" => {
+                Self::unknown(value)
+            }
+            _ => Self::new(value),
+        }
     }
 }
 type Result<T> = std::result::Result<T, Failure>;
@@ -331,7 +338,11 @@ impl Answers {
             && (self.tunnel.is_none()
                 || !plugin.output.is_absolute()
                 || plugin.output.file_name().and_then(|p| p.to_str()) != Some("styx-native")
-                || inputs::plugin_display_name(&plugin.display_name).is_none())
+                || inputs::plugin_display_name(&plugin.display_name).is_none()
+                || plugin.profile.as_ref().is_some_and(|p| {
+                    p.presentation.display_name != plugin.display_name
+                        || p.clone().normalized().is_err()
+                }))
         {
             return Err("setup_plugin_choices_invalid".into());
         }
@@ -358,7 +369,7 @@ impl Answers {
         Ok(())
     }
     pub(super) fn load(file: &Path) -> Result<Self> {
-        let raw = inputs::read_private(file, 64 * 1024)
+        let raw = inputs::read_private(file, 512 * 1024)
             .map_err(|_| Failure::new("setup_private_answers_file_required"))?;
         let value: Self =
             serde_json::from_slice(&raw).map_err(|_| Failure::new("setup_answers_invalid"))?;
@@ -837,8 +848,15 @@ fn plugin_questions(label: &str) -> Result<Plugin> {
     println!(
         "Choose a display name that differs from any Styx plugin already installed in your ChatGPT account."
     );
+    let profile = super::plugin_command::questions(None, &format!("Styx ({label})"))?;
+    super::plugin_command::preview(&profile)?;
+    let preview = prompt::line("New HTML preview file (optional; Enter skips)", None)?;
+    if !preview.is_empty() {
+        super::plugin_command::preview_file(Path::new(&preview), &profile)?;
+    }
     Ok(Plugin {
-        display_name: prompt::line("Plugin display name", Some(&format!("Styx ({label})")))?,
+        display_name: profile.presentation.display_name.clone(),
+        profile: Some(profile),
         output: prompt::line(
             "New plugin output directory (must end in styx-native)",
             home()?.join("Styx/plugin/styx-native").to_str(),
@@ -1401,7 +1419,7 @@ async fn connect_chatgpt(session: &mut Session, gateway: &Path) -> Result<()> {
         tokio::time::sleep(Duration::from_secs(1)).await;
     }
     if session.input("plugin-intent.json").exists() {
-        let raw = inputs::read_private(&session.input("plugin-intent.json"), 16384)
+        let raw = inputs::read_private(&session.input("plugin-intent.json"), 512 * 1024)
             .map_err(|_| Failure::new("setup_plugin_intent_unavailable"))?;
         let plugin: Plugin = serde_json::from_slice(&raw)
             .map_err(|_| Failure::new("setup_plugin_intent_invalid"))?;
@@ -1409,7 +1427,7 @@ async fn connect_chatgpt(session: &mut Session, gateway: &Path) -> Result<()> {
             .answers
             .plugin
             .as_ref()
-            .is_some_and(|p| p.output != plugin.output || p.display_name != plugin.display_name)
+            .is_some_and(|p| p != &plugin)
         {
             return Err("setup_existing_plugin_differs".into());
         }
@@ -1420,16 +1438,35 @@ async fn connect_chatgpt(session: &mut Session, gateway: &Path) -> Result<()> {
         .plugin
         .as_ref()
         .ok_or_else(|| Failure::new("setup_plugin_choices_required"))?;
+    let profile = plugin
+        .profile
+        .clone()
+        .unwrap_or_else(|| {
+            styx_runtime::management::plugin_presentation::Profile::initial(&plugin.display_name)
+        })
+        .normalized()?;
+    let profile_directory = gateway.join("plugin-presentation");
+    let saved = styx_runtime::management::plugin_presentation::load(&profile_directory)?;
+    if saved.as_ref().is_some_and(|s| s.profile != profile) {
+        return Err("setup_existing_plugin_differs".into());
+    }
     if !session.completed("plugin") {
         session.consent("plugin", "Check the hub connection and create the ChatGPT plugin folder and ZIP. No secret is included and nothing is uploaded.")?;
         let discovery = admin::observe(gateway).await.map_err(Failure::admin)?;
         if !session.input("plugin-intent.json").exists() {
             session.json_new("plugin-intent.json", plugin)?;
         }
+        if saved.is_none() {
+            styx_runtime::management::plugin_presentation::save(
+                &profile_directory,
+                0,
+                profile.clone(),
+            )?;
+        }
         session.begin("plugin")?;
-        plugin_package::write(
+        plugin_package::write_profile(
             &plugin.output,
-            &plugin.display_name,
+            &profile,
             &session
                 .answers
                 .tunnel
@@ -1441,9 +1478,9 @@ async fn connect_chatgpt(session: &mut Session, gateway: &Path) -> Result<()> {
         session.done("plugin")?;
     } else {
         let discovery = admin::observe(gateway).await.map_err(Failure::admin)?;
-        plugin_package::verify_existing(
+        plugin_package::verify_profile(
             &plugin.output,
-            &plugin.display_name,
+            &profile,
             &session
                 .answers
                 .tunnel
@@ -1538,7 +1575,7 @@ pub(super) async fn run(
     if !automated && answers.tunnel.is_some() && answers.plugin.is_none() {
         let plugin_intent = root.join("inputs/plugin-intent.json");
         answers.plugin = Some(if plugin_intent.exists() {
-            let raw = inputs::read_private(&plugin_intent, 16384)
+            let raw = inputs::read_private(&plugin_intent, 512 * 1024)
                 .map_err(|_| Failure::new("setup_plugin_intent_unavailable"))?;
             serde_json::from_slice(&raw).map_err(|_| Failure::new("setup_plugin_intent_invalid"))?
         } else {

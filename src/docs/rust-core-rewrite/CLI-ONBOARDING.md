@@ -513,3 +513,55 @@ requires `STYX_UPGRADE_OLD_PAYLOAD`, `STYX_UPGRADE_NEW_PAYLOAD`,
 then removes its services with the uninstall logic. Run only in an owned Linux
 systemd user session with that port free. It retains the printed private test
 root as evidence; ordinary unit tests do not establish systemd acceptance.
+
+
+## Plugin name, descriptions and icon
+
+`styx setup` now asks for plugin presentation before showing the setup plan.
+Enter keeps each suggested value. For the icon, Enter keeps the current choice,
+`default` selects the formal Styx logo, and a file path selects a custom PNG.
+The optional HTML preview displays the actual large/small icon and escaped text;
+export and preview use the same bytes. An image path is read into the bounded
+input snapshot, so a later file change cannot silently change a resumed export.
+
+On the Gateway computer, edit/export later without repeating setup or pairing:
+
+```sh
+styx plugin show
+styx plugin configure
+styx plugin export --output /absolute/private/export/styx-native
+```
+
+For a standalone Gateway installed without `styx setup`, select its original
+private profile with `styx plugin --gateway-state-dir /absolute/gateway ...`.
+The configured Gateway must be online for authenticated discovery. These commands
+never request a runtime API key or change tunnel, pairing or service settings.
+
+`configure` accepts `--display-name`, `--short-description`, `--long-description`,
+`--icon-file`, `--default-icon`, and `--preview-file` for local automation.
+`--yes` confirms a supplied configuration/export; otherwise an owner terminal
+confirmation is required. `--icon-file` and `--default-icon` are mutually exclusive.
+`--plugin-id` is an explicit **first-creation only** identity choice. To update
+an existing plugin such as `styx-vm`, use that exact identity the first time you
+save its profile. Changing the display name later never changes it.
+
+The export directory must be fresh and end in the saved identity or `styx-native`;
+a ZIP is created beside it. Existing exports are never overwritten. A saved
+profile is stored on the Gateway in private immutable presentation revisions;
+a stale edit conflicts rather than replacing a newer selection. Keep an
+unconfirmed save or export for inspection before retrying.
+
+Name/short/full descriptions allow 64/30/2000 Unicode scalar values. Images are
+8-bit, noninterlaced, square PNGs, 48–1024 pixels and at most 256 KiB, without
+animation or embedded text/EXIF/ICC payloads. PNG decoding uses the maintained
+`png` crate with bounded resources; CRC, pixel and allowed-chunk checks precede
+publication. The default is the exact approved 512×512 RGBA Styx logo. `logo` and
+`composerIcon` always reference the same image, with transparency preserved.
+
+Native macOS and Windows Apps expose **Name, icon and plugin ZIP…** for a local
+Gateway they own, using the same Core profile and archive implementation. Host-only
+Apps direct the user to the Gateway instead of creating another plugin profile.
+App save panels own the final ZIP file write; Core does not accept arbitrary
+export paths. Creating/exporting a ZIP is separate from updating/installing the
+plugin in ChatGPT and actual tool acceptance. Existing installed builds must be
+updated before these newly added commands/screens are available.

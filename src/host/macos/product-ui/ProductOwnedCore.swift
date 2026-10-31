@@ -36,7 +36,7 @@ final class ProductOwnedCore: @unchecked Sendable {
     private var maintenanceUnknown = false
     private var sequence = 0
     private var buffer = Data()
-    private static let operations: Set<String> = ["startupStatus", "status", "createLocal", "resumeLocal", "inspectJoin", "join", "requestJoin", "claimJoin", "inspectHost", "connect", "disconnect", "quitAdmission", "retireRole", "appLifecycle", "appLogin", "appLoginResult", "stageRuntime", "updateRuntime", "runtimeUpdateStatus", "recoverRuntimeUpdate", "transferToService", "serviceStatus", "prepareServiceFirstStart", "stopService", "prepareAppMaintenance", "appMaintenanceStatus", "cancelAppMaintenance"]
+    private static let operations: Set<String> = ["pluginRead", "pluginSave", "pluginExport", "startupStatus", "status", "createLocal", "resumeLocal", "inspectJoin", "join", "requestJoin", "claimJoin", "inspectHost", "connect", "disconnect", "quitAdmission", "retireRole", "appLifecycle", "appLogin", "appLoginResult", "stageRuntime", "updateRuntime", "runtimeUpdateStatus", "recoverRuntimeUpdate", "transferToService", "serviceStatus", "prepareServiceFirstStart", "stopService", "prepareAppMaintenance", "appMaintenanceStatus", "cancelAppMaintenance"]
 
     // Only the fixed package bootstrap below can construct this owner.
     private init(cli: URL, selection: URL, state: URL, cliPin: FileHandle, selectionPin: FileHandle) throws {
@@ -276,7 +276,7 @@ final class ProductOwnedCore: @unchecked Sendable {
             // package verification and process I/O remain off the UI thread.
             let choice: Bool? = Thread.isMainThread
                 ? MainActor.assumeIsolated { chooseExistingProfile() }
-                : DispatchQueue.main.sync { chooseExistingProfile() }
+                : DispatchQueue.main.sync { MainActor.assumeIsolated { chooseExistingProfile() } }
             guard let choice else { throw ProductOwnedCoreError.selectionCancelled }
             return choice ? original : separate
         }
