@@ -765,6 +765,15 @@ impl Foreground {
 }
 
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn service_steps() -> [(&'static str, native::service::ServiceAction); 3] {
+    use native::service::ServiceAction;
+    [
+        ("install", ServiceAction::Install),
+        ("enable", ServiceAction::Enable),
+        ("start", ServiceAction::Start),
+    ]
+}
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
 async fn service(
     session: &Session,
     path: &Path,
@@ -783,11 +792,10 @@ async fn service(
         return Ok(());
     }
     session.consent(step, "Install, start and enable this role as your systemd --user service. It starts at user login; Styx never uses sudo or enables linger.")?;
-    for (name, action) in [
-        ("install", ServiceAction::Install),
-        ("start", ServiceAction::Start),
-        ("enable", ServiceAction::Enable),
-    ] {
+    // Enable while stopped: starting a service only proves systemd admission,
+    // not readiness of the Gateway's original live configuration writer.
+    // Enabling immediately after start can race its private control endpoint.
+    for (name, action) in service_steps() {
         let before = manage(path, ServiceAction::Status, role, None, None)
             .await
             .map_err(Failure::native)?;
@@ -2084,6 +2092,15 @@ mod tests {
     use super::*;
     fn valid() -> Value {
         json!({"schema":1,"role":"hub","payload":{"payload_dir":"/p/runtime","publisher_file":"/p/publisher.pem","expected_publisher":"a".repeat(64)},"label":"workstation","workspace":"/p/work","shell":"/bin/bash","approve":[]})
+    }
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[test]
+    fn service_enable_precedes_start_without_a_live_writer_dependency() {
+        use native::service::ServiceAction;
+        let steps = service_steps();
+        assert!(matches!(steps[0], ("install", ServiceAction::Install)));
+        assert!(matches!(steps[1], ("enable", ServiceAction::Enable)));
+        assert!(matches!(steps[2], ("start", ServiceAction::Start)));
     }
     #[test]
     fn gateway_only_plan_never_pairs_or_runs_a_local_host() {
