@@ -10,6 +10,8 @@ use std::{
 use tokio_util::sync::CancellationToken;
 #[path = "computers.rs"]
 mod computers;
+#[path = "plugin_command.rs"]
+mod plugin_command;
 #[path = "plugin_package.rs"]
 mod plugin_package;
 #[path = "setup.rs"]
@@ -45,7 +47,51 @@ enum ComputersCommand {
     },
 }
 #[derive(Subcommand)]
+enum PluginCommand {
+    /// Show the saved identity, presentation and icon fingerprint.
+    Show,
+    /// Edit plugin details; an existing identity is retained.
+    Configure {
+        #[arg(long)]
+        display_name: Option<String>,
+        #[arg(long)]
+        short_description: Option<String>,
+        #[arg(long)]
+        long_description: Option<String>,
+        #[arg(long, conflicts_with = "default_icon")]
+        icon_file: Option<PathBuf>,
+        #[arg(long)]
+        default_icon: bool,
+        /// For first creation, use the identity of the existing plugin to update.
+        #[arg(long)]
+        plugin_id: Option<String>,
+        #[arg(long)]
+        preview_file: Option<PathBuf>,
+        #[arg(long)]
+        yes: bool,
+    },
+    /// Export the saved details and this hub's verified connection, without uploading.
+    Export {
+        #[arg(long)]
+        output: PathBuf,
+        #[arg(long)]
+        preview_file: Option<PathBuf>,
+        #[arg(long)]
+        yes: bool,
+    },
+}
+#[derive(Subcommand)]
 enum Command {
+    /// Configure or export this hub's plugin name, descriptions and icon.
+    Plugin {
+        #[arg(long, global = true, conflicts_with = "gateway_state_dir")]
+        root: Option<PathBuf>,
+        /// Owner-only Gateway profile for a Gateway installed without styx setup.
+        #[arg(long, global = true)]
+        gateway_state_dir: Option<PathBuf>,
+        #[command(subcommand)]
+        command: PluginCommand,
+    },
     /// Guided first-run setup; noninteractive use requires a private answers file.
     Setup {
         #[arg(long)]
@@ -1095,6 +1141,11 @@ async fn stop_signal() -> io::Result<()> {
 pub(crate) async fn run(cli: Cli) -> ExitCode {
     use styx_runtime::foreground::{self, HostWireMode};
     match cli.command {
+        Command::Plugin {
+            root,
+            gateway_state_dir,
+            command,
+        } => setup_result(plugin_command::run(root, gateway_state_dir, command).await),
         Command::Setup {
             root,
             answers,

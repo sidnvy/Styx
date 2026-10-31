@@ -714,12 +714,8 @@ mod continuation_tests {
 
     #[tokio::test]
     async fn local_setup_invalid_lan_refused_before_any_setup_write() {
-        let path = Path::new(env!("CARGO_MANIFEST_DIR"))
-            .ancestors()
-            .nth(3)
-            .unwrap()
-            .join("target")
-            .join(format!("styx-app-lan-refusal-{}", uuid::Uuid::new_v4()));
+        let path =
+            std::env::temp_dir().join(format!("styx-app-lan-refusal-{}", uuid::Uuid::new_v4()));
         std::fs::DirBuilder::new()
             .mode(0o700)
             .create(&path)
