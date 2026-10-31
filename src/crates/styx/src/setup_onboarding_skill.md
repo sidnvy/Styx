@@ -49,9 +49,13 @@ runtime API key locally in setup's hidden prompt (or an owner-private file for
 authorized automation). Never request the key in chat or put it in command
 arguments, environment variables, plugin files, logs or screenshots.
 
-Setup exports the verified allowlisted plugin directory and ZIP. Its stable
-identity is `styx-native`; its display name may differ to avoid clashing with an
-existing plugin. Import/install or update the ZIP through the account's supported
+Setup asks for the plugin display name, descriptions and optional PNG icon,
+shows a preview, then exports the verified allowlisted directory and ZIP. The
+Styx logo is the default for both large and small icons. The saved plugin identity
+is independent of its display name. To change details later, run `styx plugin
+configure` on the hub, then `styx plugin export --output ABS_NEW_DIRECTORY`.
+Use `--plugin-id` only on first creation to match an existing plugin identity;
+later renames retain that identity. A Host joining a hub uses the hub's plugin. Import/install or update the ZIP through the account's supported
 plugin workflow. The MCP connection declares `tunnelId` and No authentication:
 the local tunnel client supplies the Gateway's model-only bearer. This does not
 remove the Gateway's authentication requirement. The tunnel is the account MCP

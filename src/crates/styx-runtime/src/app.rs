@@ -11,6 +11,7 @@ mod maintenance;
 #[cfg(all(test, target_os = "linux", target_env = "gnu"))]
 mod maintenance_integration_tests;
 pub(crate) mod pairing_link;
+mod plugin;
 mod role_retire;
 mod runtime_update;
 mod service;
@@ -212,6 +213,9 @@ struct EmptyInput {}
 #[derive(Deserialize)]
 #[serde(rename_all = "camelCase")]
 enum Operation {
+    PluginRead,
+    PluginSave,
+    PluginExport,
     StartupStatus,
     Status,
     CreateLocal,
@@ -1059,6 +1063,9 @@ impl HostApp {
         } else if cfg!(target_os = "macos") {
             supported.extend(["serviceStatus", "prepareServiceFirstStart", "stopService"]);
         }
+        if self.local_gateway.is_some() && !self.admission_fenced() {
+            supported.extend(["pluginRead", "pluginSave", "pluginExport"]);
+        }
         json!({"schema":1,"maintenance":self.maintenance_status()["maintenance"],"runtimeUpdate":self.runtime_update,"service":self.service,"configuration":configuration,"foreground":*self.observed.borrow(),"admission_fenced":self.admission_fenced(),"desktop_intent":{"schema":1,"computer_requested":computer_requested,"source":"approved_host_configuration"},"cleanup":self.cleanup,"gateway":self.local_gateway.as_ref().map(|g| g.status()),"enrollment":self.enrollment,"mode":"rust_host","supportedOperations":supported})
     }
     async fn dispatch(
@@ -1110,7 +1117,9 @@ impl HostApp {
     ) -> Result<Value, AppError> {
         if !matches!(
             operation,
-            Operation::RetireRole
+            Operation::PluginSave
+                | Operation::PluginExport
+                | Operation::RetireRole
                 | Operation::InspectJoin
                 | Operation::Join
                 | Operation::CreateLocal
@@ -1130,6 +1139,9 @@ impl HostApp {
         self.reap_runtime_update(false).await;
         self.reap().await?;
         match operation {
+            Operation::PluginRead | Operation::PluginSave | Operation::PluginExport => {
+                return self.plugin_request(operation, input).await;
+            }
             Operation::AppLifecycle => return self.login_read(input),
             Operation::AppLogin => return self.login_authorize(input),
             Operation::AppLoginResult => return self.login_complete(input),
@@ -1336,7 +1348,10 @@ impl HostApp {
                     json!({"quit":{"status":"ready_to_quit","ticketId":ticket},"cleanup":self.cleanup,"gateway":self.local_gateway.as_ref().map(|g|g.status())}),
                 )
             }
-            Operation::RetireRole
+            Operation::PluginRead
+            | Operation::PluginSave
+            | Operation::PluginExport
+            | Operation::RetireRole
             | Operation::PrepareAppMaintenance
             | Operation::AppMaintenanceStatus
             | Operation::CancelAppMaintenance
