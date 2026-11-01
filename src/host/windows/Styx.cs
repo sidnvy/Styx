@@ -21,7 +21,7 @@ namespace StyxNative {
  // The installed outer package pins the bootstrap executable. Its hash is an
  // integrity boundary, not a substitute for Windows publisher authentication.
  sealed class NativeBootstrap:IDisposable {
-  internal const string PublisherPin="cb06529011b4c35ffc79f76440beeb88c6e3615e60d993d1485b5be45b307819";
+  internal const string PublisherPin="bbb49c2626c3d4ef3cf9e1679db5305b100cee4a8c41c29c958ede82fb868bed";
   internal readonly string Root,Cli,Payload,Publisher,CliSha,ManifestSha;internal string Selection;
   readonly FileStream cliPin;
   internal static string Hash(Stream stream){using(var sha=System.Security.Cryptography.SHA256.Create()){stream.Position=0;string v=BitConverter.ToString(sha.ComputeHash(stream)).Replace("-","").ToLowerInvariant();stream.Position=0;return v;}}

@@ -74,7 +74,7 @@ internal static class InstallGate {
  }
  // This is the install engine's read-only native package admission. It does
  // not stage/select a runtime or claim old App/worker settlement from PID absence.
- const string NativePublisher="cb06529011b4c35ffc79f76440beeb88c6e3615e60d993d1485b5be45b307819";
+ const string NativePublisher="bbb49c2626c3d4ef3cf9e1679db5305b100cee4a8c41c29c958ede82fb868bed";
  static string NativePath(string root,string relative){
   if(String.IsNullOrEmpty(relative)||relative.Length>=512||Path.IsPathRooted(relative)||relative.Contains(":")||relative.Contains("\\"))throw new IOException("native_path_invalid");
   foreach(string part in relative.Split('/'))if(part==""||part=="."||part==".."||part.EndsWith(" ")||part.EndsWith("."))throw new IOException("native_path_invalid");

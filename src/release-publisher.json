@@ -1,9 +1,10 @@
 {
   "schema": 1,
   "algorithm": "Ed25519",
-  "publisherSpkiSha256": "cb06529011b4c35ffc79f76440beeb88c6e3615e60d993d1485b5be45b307819",
+  "publisherSpkiSha256": "bbb49c2626c3d4ef3cf9e1679db5305b100cee4a8c41c29c958ede82fb868bed",
   "publicKey": "release-publisher.pub",
-  "establishedOn": "2026-10-31",
+  "establishedOn": "2026-11-01",
   "scope": "Styx native runtime releases on Linux macOS and Windows",
-  "privateKeyDistributed": false
+  "privateKeyDistributed": false,
+  "keyCustody": "Workstation owner-private publisher directory"
 }

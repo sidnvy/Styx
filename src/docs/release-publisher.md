@@ -1,17 +1,17 @@
 # Fixed release publisher
 
-The owner authorized a fresh publisher on 2026-10-31. Linux, macOS and Windows
+The owner authorized a new fixed Workstation publisher on 2026-11-01, replacing the unavailable PilotMac signing identity for fresh installs. Linux, macOS and Windows
 native runtime releases now use the Ed25519 public key in
 `src/release-publisher.pub`, recorded by `src/release-publisher.json`.
 
-SPKI SHA256: `cb06529011b4c35ffc79f76440beeb88c6e3615e60d993d1485b5be45b307819`. This pin is part of the reviewed source and
+SPKI SHA256: `bbb49c2626c3d4ef3cf9e1679db5305b100cee4a8c41c29c958ede82fb868bed`. This pin is part of the reviewed source and
 compiled App/installer trust anchors. A public key supplied inside a downloaded
 package does not establish trust. Old publisher packages are not accepted under
 this pin; first install and re-pairing are explicit owner-authorized actions.
 
-The private key stays on PilotMac in its private StyxPublisher directory.
+The private key stays on Workstation in its owner-private Styx publisher directory. The old PilotMac key and old publisher material are preserved, never copied or overwritten.
 Prepare an exact immutable manifest, independently review its digest, sign on
-PilotMac, then verify the raw 64-byte signature with the pinned public key before
+Workstation, then verify the raw 64-byte signature with the pinned public key before
 packaging or deployment. Never copy private key bytes into a build, client,
 repository, Gateway or chat. Reuse this publisher for later releases; rotation
 requires another explicit owner decision. An offline private-key backup is a
