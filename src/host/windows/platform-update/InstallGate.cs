@@ -179,6 +179,9 @@ internal static class InstallGate {
   AppContext.SetSwitch("Switch.System.IO.UseLegacyPathHandling",false);
   AppContext.SetSwitch("Switch.System.IO.BlockLongPaths",false);
   try{
+   // Per-user packages require TokenOwner to be the actual user. Do not
+   // extract administrator-owned files and then attempt to repair ownership.
+   if(args.Length==1&&args[0]=="check-native-user"){using(var identity=WindowsIdentity.GetCurrent())return identity.User!=null&&identity.Owner!=null&&identity.User.Value==identity.Owner.Value?0:2;}
    if(args.Length>0&&args[0]=="verify-native")return VerifyNative(args);
    if(args.Length>0&&args[0]=="maintain-native-install")return MaintainNative(args);
    if(args.Length==2&&args[0]=="check-native-install"&&Path.IsPathRooted(args[1])){
