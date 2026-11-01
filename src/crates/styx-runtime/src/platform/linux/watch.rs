@@ -173,6 +173,26 @@ impl State {
             },
         )
     }
+    fn invalidate_session(
+        &mut self,
+        events: &mpsc::Sender<WatchEvent>,
+        session_id: &str,
+        reason: InvalidationReason,
+    ) -> Result<(), WatchStop> {
+        let items: Vec<_> = self
+            .previous
+            .iter()
+            .filter(|c| c.session_id == session_id)
+            .map(|c| Invalidation {
+                key: c.into(),
+                reason,
+            })
+            .collect();
+        if items.is_empty() {
+            return Ok(());
+        }
+        self.send(events, WatchChange::Invalidations { items })
+    }
     fn reconcile(
         &mut self,
         events: &mpsc::Sender<WatchEvent>,
@@ -298,6 +318,29 @@ fn signal_reason(message: &Message, owner: &str) -> Result<Option<InvalidationRe
         }
         for key in changed.keys().chain(invalidated.iter()) {
             bounded(key).map_err(WatchStop::Discovery)?;
+        }
+        // Idle/accounting metadata is not a Desktop identity or authorization
+        // boundary. Relevant changes still invalidate their exact login instance.
+        const BOUND: &[&str] = &[
+            "LockedHint",
+            "Active",
+            "State",
+            "Type",
+            "Class",
+            "User",
+            "Seat",
+            "Leader",
+            "TimestampMonotonic",
+            "Scope",
+            "Remote",
+            "Service",
+        ];
+        if !changed
+            .keys()
+            .chain(invalidated.iter())
+            .any(|key| BOUND.contains(&key.as_str()))
+        {
+            return Ok(None);
         }
         return Ok(Some(
             if changed.contains_key("LockedHint") || invalidated.iter().any(|p| p == "LockedHint") {
@@ -495,7 +538,25 @@ pub(crate) async fn watch_current_user(
                 },
                 notice=signals.next()=>match notice {
                     Some(Ok(message))=>if let Some(reason)=signal_reason(&message,&state.owner)? {
-                        state.invalidate(&events,reason)?;due=Instant::now()+DEBOUNCE;
+                        if reason != InvalidationReason::TopologyChanged {
+                            // Resolve the authenticated signal's actual Session Id
+                            // through logind. Never guess D-Bus path escaping or
+                            // revoke every graphical session for an unrelated SSH
+                            // login. Failure still fences the whole source.
+                            let path = message.header().path().map(|p| p.to_string())
+                                .ok_or(WatchStop::Discovery(DiscoveryError::InvalidFacts))?;
+                            let id = before_deadline(Instant::now()+WORK, async {
+                                let proxy = zbus::Proxy::new(&connection, state.owner.as_str(), path.as_str(), SESSION_INTERFACE)
+                                    .await.map_err(|_| DiscoveryError::Unavailable)?;
+                                let id: String = proxy.get_property("Id").await.map_err(|_| DiscoveryError::Unavailable)?;
+                                bounded(&id)?;
+                                Ok(id)
+                            }).await.map_err(WatchStop::Discovery)?;
+                            state.invalidate_session(&events, &id, reason)?;
+                        }
+                        // A topology hint can name another login. Only stable
+                        // reconciliation identifies known instances that changed.
+                        due=Instant::now()+DEBOUNCE;
                     },
                     _=>return Err(WatchStop::SourceEnded),
                 },

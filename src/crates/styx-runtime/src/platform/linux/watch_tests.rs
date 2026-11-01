@@ -219,3 +219,65 @@ async fn watcher_deltas_signals_backpressure_and_cancel_are_fenced_batch() {
         "synthetic watcher SDK-message/delta batch: full identity and lock/unlock invalidation; owner replacement; atomic invalid snapshots; bounded overflow/EOF fence; no real logind subscription, Desktop or device operation"
     );
 }
+
+#[tokio::test]
+async fn unrelated_login_signals_do_not_revoke_the_selected_desktop() {
+    let selected = candidate_sample();
+    let mut ssh = selected.clone();
+    ssh.session_id = "ssh-session".into();
+    ssh.seat = None;
+    ssh.backend = "tty".into();
+    let mut current = state();
+    current.previous = vec![selected.clone(), ssh.clone()];
+    let (events, mut rx) = mpsc::channel(QUEUE);
+    current
+        .invalidate_session(
+            &events,
+            &ssh.session_id,
+            InvalidationReason::PropertiesChanged,
+        )
+        .unwrap();
+    let WatchChange::Invalidations { items } = rx.recv().await.unwrap().change else {
+        panic!("invalidation");
+    };
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].key, CandidateKey::from(&ssh));
+    current
+        .reconcile(&events, snapshot(vec![selected.clone()]), 1000)
+        .unwrap();
+    let WatchChange::Invalidations { items } = rx.recv().await.unwrap().change else {
+        panic!("removed");
+    };
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].key, CandidateKey::from(&ssh));
+    assert!(matches!(
+        rx.recv().await.unwrap().change,
+        WatchChange::Snapshot { .. }
+    ));
+    let idle = Message::signal(
+        "/org/freedesktop/login1/session/c7",
+        "org.freedesktop.DBus.Properties",
+        "PropertiesChanged",
+    )
+    .unwrap()
+    .sender(":1.7")
+    .unwrap()
+    .build(&(
+        SESSION_INTERFACE,
+        HashMap::from([("IdleHint", OwnedValue::from(true))]),
+        Vec::<String>::new(),
+    ))
+    .unwrap();
+    assert_eq!(signal_reason(&idle, ":1.7").unwrap(), None);
+    current
+        .invalidate_session(
+            &events,
+            &selected.session_id,
+            InvalidationReason::LockBoundary,
+        )
+        .unwrap();
+    let WatchChange::Invalidations { items } = rx.recv().await.unwrap().change else {
+        panic!("lock");
+    };
+    assert_eq!(items[0].key, CandidateKey::from(&selected));
+}

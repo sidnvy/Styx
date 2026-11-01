@@ -1109,10 +1109,14 @@ impl CuaActionSlot {
             Err(error) => return refused("write_request", error),
         };
         let write_attempt = permit.purpose() == OperationPurpose::DesktopAccessibilityWriteAttempt;
-        if write_attempt != write_request.is_some()
-            || (write_attempt && (!self.live.ax_once_available || write_gate.is_none()))
-        {
+        if write_attempt != write_request.is_some() || (write_attempt && write_gate.is_none()) {
             return refused("write_contract", CuaError::PermissionDenied);
+        }
+        if write_attempt && !self.live.ax_once_available {
+            // A stock read/click worker lacks the two required native once-only
+            // ports. This is a package capability gap, not an OS denial. Never
+            // fall back to raw keyboard input or a second unbound native call.
+            return refused("write_extension_missing", CuaError::Unsupported);
         }
         if permit.purpose() != OperationPurpose::Execute
             && !write_attempt

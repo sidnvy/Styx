@@ -730,7 +730,16 @@ fn require_membership(pid: u32, expected: &str) -> ServiceResult<()> {
 fn group_empty(events: &File) -> ServiceResult<bool> {
     use std::os::unix::fs::FileExt as _;
     let mut buf = [0; 4096];
-    let n = events.read_at(&mut buf, 0).map_err(unknown)?;
+    let n = match events.read_at(&mut buf, 0) {
+        Ok(n) => n,
+        // kernfs keeps the held inode/nlink after cgroup removal, but reads of
+        // this originally captured cgroup.events FD return ENODEV. A removed
+        // cgroup has no member processes. Do not reopen its reusable pathname;
+        // every other error remains unknown. The caller still proves original
+        // process exit, manager success, invocation and held cgroup identity.
+        Err(error) if error.raw_os_error() == Some(nix::libc::ENODEV) => return Ok(true),
+        Err(error) => return Err(unknown(error)),
+    };
     if n == buf.len() {
         return Err(ServiceError::Unknown);
     }
