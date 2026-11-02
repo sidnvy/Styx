@@ -832,7 +832,7 @@ impl Cgroup {
         if metadata.nlink() == 0
             || std::fs::read_link(format!("/proc/self/fd/{}", self.directory.as_raw_fd()))
                 .map_err(|_| ScopeError::CleanupUnconfirmed)?
-                == PathBuf::from(deleted)
+                == deleted
         {
             return Ok(true);
         }
