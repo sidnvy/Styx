@@ -1065,7 +1065,7 @@ impl HostCoordinator {
                             if click.is_none()
                                 && let Some(observation) = write_observation.as_ref()
                             {
-                                observation.validate_delivery(&state)?;
+                                let f = observation.write_result_facts(&state)?;
                                 if receipt.evidence != CuaEvidence::Acknowledged {
                                     return Ok(());
                                 }

@@ -510,7 +510,7 @@ async fn desktop_set_value_retains_its_read_binding_across_permission_refresh() 
     context.capability = CapabilityId::DesktopAccessibility;
     context.session = Some(binding);
     context.observation = Some(observation);
-    validate_dispatch(
+    let facts = validate_dispatch(
         &state,
         &owner,
         &resource,
@@ -519,4 +519,95 @@ async fn desktop_set_value_retains_its_read_binding_across_permission_refresh() 
         MonotonicMillis(1),
     )
     .unwrap();
+    let action = state
+        .ledger
+        .prepare_desktop_accessibility_write_attempt(
+            &owner,
+            resource,
+            context.clone(),
+            translated.to_operation_payload().unwrap(),
+            MonotonicMillis(1),
+        )
+        .unwrap();
+    let DispatchDisposition::ExecuteOnce(_permit) = state
+        .ledger
+        .dispatch(
+            &owner,
+            &action.id,
+            action.payload_digest,
+            &facts,
+            MonotonicMillis(1),
+        )
+        .unwrap()
+    else {
+        panic!("expected one write permit");
+    };
+    let retained = state
+        .desktop
+        .as_mut()
+        .unwrap()
+        .ax_observation
+        .take()
+        .unwrap();
+    // The native write ACK is a synthetic result here; test the real result
+    // authorization path after a fresh permission observation, not OS effects.
+    state
+        .ledger
+        .record_action_result(&action.id, ActionResult::Acknowledged, MonotonicMillis(2))
+        .unwrap();
+    let binding = desktop(&state).unwrap().binding.clone();
+    state
+        .sessions
+        .provider(
+            &binding,
+            evidence(CapabilityId::DesktopAccessibility),
+            Duration::from_secs(60),
+        )
+        .unwrap();
+    let refreshed =
+        super::super::desktop_read::acquisition_facts(&state, CapabilityId::DesktopAccessibility)
+            .unwrap();
+    assert_ne!(refreshed.current_observation, context.observation);
+    assert!(
+        state
+            .ledger
+            .authorize_desktop_accessibility_write_result(
+                &owner,
+                &action.id,
+                action.payload_digest,
+                &refreshed,
+                MonotonicMillis(2),
+            )
+            .is_err()
+    );
+    let delivery = retained.write_result_facts(&state).unwrap();
+    state
+        .ledger
+        .authorize_desktop_accessibility_write_result(
+            &owner,
+            &action.id,
+            action.payload_digest,
+            &delivery,
+            MonotonicMillis(2),
+        )
+        .unwrap();
+    let mut denied = evidence(CapabilityId::DesktopAccessibility);
+    denied.authorization = Authorization::Denied;
+    state
+        .sessions
+        .provider(&binding, denied, Duration::from_secs(60))
+        .unwrap();
+    let delivery = retained.write_result_facts(&state).unwrap();
+    assert!(
+        state
+            .ledger
+            .authorize_desktop_accessibility_write_result(
+                &owner,
+                &action.id,
+                action.payload_digest,
+                &delivery,
+                MonotonicMillis(2),
+            )
+            .is_err()
+    );
 }

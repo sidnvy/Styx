@@ -206,6 +206,18 @@ impl OwnedAxObservation {
         )?;
         Ok(())
     }
+    /// A permission refresh supplies current grants, not a replacement tree.
+    /// Delivery must retain the same acquired observation used by this write.
+    pub(super) fn write_result_facts(
+        &self,
+        state: &State,
+    ) -> Result<AdmissionFacts, CoordinatorError> {
+        self.validate_delivery(state)?;
+        let mut facts =
+            super::desktop_read::acquisition_facts(state, CapabilityId::DesktopAccessibility)?;
+        facts.current_observation = Some(self.observation.clone());
+        Ok(facts)
+    }
     pub(super) fn validate_delivery(&self, state: &State) -> Result<(), CoordinatorError> {
         let lane = desktop(state)?;
         if lane.source.fenced()
