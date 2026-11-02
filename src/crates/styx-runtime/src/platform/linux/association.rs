@@ -1393,7 +1393,50 @@ impl LinuxAssociationLease {
     /// Compare fresh original-owned-worker observations without rebinding or
     /// granting authority. Window response content is intentionally excluded.
     pub(crate) fn same_source(&self, other: &Self) -> bool {
-        self.facts.same_source(&other.facts)
+        let unchanged = self.facts.same_source(&other.facts);
+        if !unchanged {
+            eprintln!(
+                "{}",
+                serde_json::json!({"schema":1,
+                "event":"styx_desktop_source_comparison", "same_source":false,
+                "changed_fields":self.source_change_fields(other)})
+            );
+        }
+        unchanged
+    }
+    /// Read-only diagnostics: fixed field names, never observed values.
+    fn source_change_fields(&self, other: &Self) -> Vec<&'static str> {
+        let mut changed = Vec::new();
+        macro_rules! check {
+            ($($field:ident),+ $(,)?) => { $(
+                if self.facts.$field != other.facts.$field {
+                    changed.push(stringify!($field));
+                }
+            )+ };
+        }
+        check!(
+            schema,
+            boot,
+            uid,
+            candidate,
+            login_owner,
+            manager_owner,
+            manager_process,
+            leader,
+            anchor,
+            anchor_argv,
+            bind,
+            envelope,
+            wm,
+            wm_env,
+            bind_process,
+            wm_main,
+            wayland,
+            hyprland,
+            hyprland_events,
+            sources
+        );
+        changed
     }
 
     /// ONLY root's private original-owned-worker completion may call this.

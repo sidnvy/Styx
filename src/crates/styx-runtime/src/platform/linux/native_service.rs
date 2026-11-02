@@ -499,8 +499,8 @@ impl Definition {
         // management owner already holds the inactive execution lease before
         // committing Running. Do not clear or reinterpret its failed receipt,
         // and refuse failed units that may still own descendants.
-        let stopped = before.active == "inactive"
-            || (before.active == "failed" && before.cgroup.is_empty());
+        let stopped =
+            before.active == "inactive" || (before.active == "failed" && before.cgroup.is_empty());
         if !before.installed || !stopped || before.main_pid != 0 {
             return Err(ServiceError::Conflict);
         }
