@@ -302,3 +302,21 @@ fn fresh_source_comparison_preserves_identity_but_not_window_contents() {
     assert_eq!(evidence.query_counts(), (1, 1));
     assert_eq!(evidence.response_sha256().0, Sha256Digest::of_bytes(b"[]"));
 }
+
+#[test]
+fn approved_uwsm_main_updates_do_not_expand_other_source_authority() {
+    for (_, digest) in SUPPORTED_UWSM_MAIN {
+        assert!(source_hash_supported(SOURCES[0].0, digest));
+        for (path, _) in SOURCES.iter().skip(1) {
+            assert!(!source_hash_supported(path, digest));
+        }
+        assert!(!source_hash_supported("/tmp/main.py", digest));
+        let mut changed = digest.to_owned();
+        changed.replace_range(..1, if digest.starts_with('0') { "1" } else { "0" });
+        assert!(!source_hash_supported(SOURCES[0].0, &changed));
+    }
+    for (path, digest) in SOURCES.iter().skip(1) {
+        assert!(source_hash_supported(path, digest));
+        assert!(!source_hash_supported(SOURCES[0].0, digest));
+    }
+}

@@ -893,10 +893,36 @@ const SOURCES: [(&str, &str); 6] = [
         "b135a2ebe7c591213e75e9860077afedbc8a9ac5baa9604312c629cdb837bb4a",
     ),
 ];
+// Audited Arch package source bundles. The five shell/unit files below are
+// byte-identical across these releases; only main.py changed. Both 0.27.x
+// archives were checked against the Arch signing key and installed file hashes.
+// This remains a fixed compatibility allowlist, never a root-owned-file bypass.
+const SUPPORTED_UWSM_MAIN: [(&str, &str); 3] = [
+    ("0.26.6", SOURCES[0].1),
+    (
+        "0.27.0",
+        "349f77c961efb64713992416d678ddd6986c0b698a0db2090ac1f184268944cb",
+    ),
+    (
+        "0.27.1",
+        "7dd6363244c101c7a0e7641684e29b6a13905e98f9fc3a4c81421e536a976c72",
+    ),
+];
+fn source_hash_supported(path: &str, digest: &str) -> bool {
+    if path == SOURCES[0].0 {
+        return SUPPORTED_UWSM_MAIN
+            .iter()
+            .any(|(_, expected)| *expected == digest);
+    }
+    SOURCES
+        .iter()
+        .skip(1)
+        .any(|(expected_path, expected)| *expected_path == path && *expected == digest)
+}
 fn sources() -> Result<Vec<SourceFact>> {
     SOURCES
         .iter()
-        .map(|(path, expected)| {
+        .map(|(path, _)| {
             let file = File::from(
                 open(
                     Path::new(path),
@@ -911,7 +937,7 @@ fn sources() -> Result<Vec<SourceFact>> {
             }
             let bytes = limited(file, 1024 * 1024)?;
             let digest = Sha256Digest::of_bytes(&bytes);
-            if digest.to_hex() != *expected {
+            if !source_hash_supported(path, &digest.to_hex()) {
                 return Err(AssociationError::Unsupported);
             }
             Ok(SourceFact {
@@ -1508,7 +1534,7 @@ impl LinuxAssociationLease {
             agent_instance,
             protocol_version: 1,
             provenance:
-                "kernel/logind+UWSM0.26.6 exact lifecycle bridge; owned per-session Rust Desktop supervisor required".into(),
+                "kernel/logind+fixed audited UWSM source bundle and exact lifecycle bridge; owned per-session Rust Desktop supervisor required".into(),
         })
     }
 }
