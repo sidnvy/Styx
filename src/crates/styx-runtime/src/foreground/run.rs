@@ -206,7 +206,7 @@ async fn prepare_computer(
     custody: &computer_startup::DeferredComputer,
 ) -> Result<Option<Arc<dyn crate::host::protocol::computer::ComputerBootstrap>>, ForegroundError> {
     let enabled = custody
-        .read_profile(Duration::from_secs(30), || {
+        .read_before_source(Duration::from_secs(30), || {
             let retained = admitted.clone();
             async move {
                 tokio::task::spawn_blocking(move || {
@@ -223,17 +223,15 @@ async fn prepare_computer(
     }
     #[cfg(target_os = "linux")]
     let source = {
-        // Zero candidates is normal on a headless Host; multiple candidates are
-        // ambiguous. Never pick the first desktop or inherit stale SSH/tmux env.
-        let snapshot = super::discover_desktop_candidates().await?;
-        if snapshot.candidates.len() != 1 {
-            return Err(ForegroundError("desktop_selection_required"));
-        }
-        crate::host::coordinator::DesktopSource::start(
-            snapshot.candidates.into_iter().next().expect("exactly one"),
-        )
-        .await
-        .map_err(|e| ForegroundError(e.code()))?
+        // A login service may precede the graphical session. Wait only for an
+        // empty candidate set, before acquiring the sole original source.
+        // Ambiguity and discovery errors never select or retry another desktop.
+        let candidate = custody
+            .desktop_candidate(Duration::from_secs(30), super::discover_desktop_candidates)
+            .await?;
+        crate::host::coordinator::DesktopSource::start(candidate)
+            .await
+            .map_err(|e| ForegroundError(e.code()))?
     };
     #[cfg(target_os = "windows")]
     let source = crate::host::coordinator::DesktopSource::start()
@@ -296,7 +294,7 @@ async fn prepare_computer(
     custody: &computer_startup::DeferredComputer,
 ) -> Result<Option<Arc<dyn crate::host::protocol::computer::ComputerBootstrap>>, ForegroundError> {
     let enabled = custody
-        .read_profile(Duration::from_secs(30), || {
+        .read_before_source(Duration::from_secs(30), || {
             let retained = admitted.clone();
             async move {
                 tokio::task::spawn_blocking(move || retained.profile.computer_enabled())
