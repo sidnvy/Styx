@@ -45,6 +45,12 @@ namespace StyxNative {
   static void Validate(string path,bool directory){NativeBootstrap.NoRedirect(path);System.Security.AccessControl.FileSystemSecurity security=directory?(System.Security.AccessControl.FileSystemSecurity)Directory.GetAccessControl(path):File.GetAccessControl(path);if(!User.Equals(security.GetOwner(typeof(System.Security.Principal.SecurityIdentifier)))||!security.AreAccessRulesProtected)throw new IOException("app_private_owner_required");foreach(System.Security.AccessControl.FileSystemAccessRule rule in security.GetAccessRules(true,true,typeof(System.Security.Principal.SecurityIdentifier))){var sid=(System.Security.Principal.SecurityIdentifier)rule.IdentityReference;if(!sid.Equals(User)&&!sid.Equals(SystemSid)&&!sid.Equals(Admins))throw new IOException("app_private_acl_required");}}
   static System.Security.AccessControl.DirectorySecurity DirectoryAcl(){var acl=new System.Security.AccessControl.DirectorySecurity();acl.SetOwner(User);acl.SetAccessRuleProtection(true,false);foreach(var sid in new[]{User,SystemSid,Admins})acl.AddAccessRule(new System.Security.AccessControl.FileSystemAccessRule(sid,System.Security.AccessControl.FileSystemRights.FullControl,System.Security.AccessControl.InheritanceFlags.ContainerInherit|System.Security.AccessControl.InheritanceFlags.ObjectInherit,System.Security.AccessControl.PropagationFlags.None,System.Security.AccessControl.AccessControlType.Allow));return acl;}
   static void DirectoryPrivate(string path){if(File.Exists(path))throw new IOException("app_private_directory_required");if(!Directory.Exists(path)){string parent=Path.GetDirectoryName(path);if(!Directory.Exists(parent))throw new IOException("app_private_parent_missing");NativeBootstrap.NoRedirect(parent);Directory.CreateDirectory(path,DirectoryAcl());}Validate(path,true);}
+  internal static void PrepareOwnerDirectory(string state){
+   foreach(string name in new[]{"deployment","deployment.json","state.json","host","gateway","device","service.json",".styx-native-root-v1.json"})if(File.Exists(Path.Combine(state,name))||Directory.Exists(Path.Combine(state,name)))throw new NativeOperationException("app_legacy_install_present");
+   string standard=Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),"StyxPreview","WindowsFirst");
+   if(String.Equals(state,standard,StringComparison.OrdinalIgnoreCase)&&!Directory.Exists(Path.GetDirectoryName(state)))DirectoryPrivate(Path.GetDirectoryName(state));
+   DirectoryPrivate(state);
+  }
   internal static string Prepare(string state,string selection,out string profile,out string candidate){
    // Refuse old installations before creating any state or candidate files.
    // The UI never adopts, repairs, moves or replaces the old layout.
@@ -62,9 +68,16 @@ namespace StyxNative {
  sealed class Core:IDisposable {
   readonly SemaphoreSlim gate=new SemaphoreSlim(1,1);readonly NativeBootstrap bootstrap;readonly FileStream selectionPin;Process child;Task stderrDrain;Task<string> pendingRead;CancellationTokenRegistration cancellationRegistration;int sequence;int closed;bool childStarted;
   internal bool CleanupConfirmed {get;private set;}
+  internal object ObservedExit {get;private set;}
   internal readonly string ProfileDirectory;
   internal static async Task<string> ReadLineBounded(StreamReader reader,int limit){var text=new System.Text.StringBuilder();var b=new char[1];while(await reader.ReadAsync(b,0,1).ConfigureAwait(false)!=0){if(b[0]=='\n')return text.ToString().TrimEnd('\r');if(text.Length>=limit)throw new IOException("app_frame_too_large");text.Append(b[0]);}if(text.Length!=0)throw new IOException("app_incomplete_frame");return null;}
   internal static async Task Drain(StreamReader reader){var b=new char[4096];while(await reader.ReadAsync(b,0,b.Length).ConfigureAwait(false)!=0){}}
+#if STYX_QUIT_TEST
+  // Standalone lifecycle regression only. The release builder never defines
+  // STYX_QUIT_TEST; product Core construction still requires NativeBootstrap.
+  internal Core(Process fixture){bootstrap=null;selectionPin=null;ProfileDirectory=null;child=fixture;childStarted=true;stderrDrain=Drain(fixture.StandardError);}
+#endif
+  void ReleasePins(){if(selectionPin!=null)selectionPin.Dispose();if(bootstrap!=null)bootstrap.Dispose();}
   internal Core(NativeBootstrap verified,string state,CancellationToken cancellation){
    bootstrap=verified;string profile,selection;PrivateAppFiles.Prepare(state,verified.Selection,out profile,out selection);ProfileDirectory=profile;selectionPin=new FileStream(selection,FileMode.Open,FileAccess.Read,FileShare.Read);
    try{var info=bootstrap.StartInfo("__app-core --state-dir "+NativeBootstrap.Quote(ProfileDirectory)+" --runtime-selection-file "+NativeBootstrap.Quote(selection));info.RedirectStandardInput=true;
@@ -72,33 +85,43 @@ namespace StyxNative {
   }
   internal async Task<object> Call(string operation,Dictionary<string,object> input){
    await gate.WaitAsync();try{var p=child;if(Volatile.Read(ref closed)!=0||p==null||p.HasExited||sequence==Int32.MaxValue)throw new IOException("app_core_unavailable");int id=++sequence;string request=Json.Codec.Serialize(Json.Obj("schema",1,"id",id,"operation",operation,"input",input));if(request.Length>65536)throw new IOException("app_request_too_large");
-    await p.StandardInput.WriteLineAsync(request);await p.StandardInput.FlushAsync();pendingRead=ReadLineBounded(p.StandardOutput,2097152);if(await Task.WhenAny(pendingRead,Task.Delay(150000))!=pendingRead){Dispose();throw new IOException("app_result_unknown_no_replay");}
+    await p.StandardInput.WriteLineAsync(request);await p.StandardInput.FlushAsync();pendingRead=ReadLineBounded(p.StandardOutput,2097152);if(!(operation=="quitAdmission"&&Volatile.Read(ref shutdownCustody)==1)&&await Task.WhenAny(pendingRead,Task.Delay(150000))!=pendingRead){Dispose();throw new IOException("app_result_unknown_no_replay");}
     string line=await pendingRead;pendingRead=null;if(line==null||Volatile.Read(ref closed)!=0)throw new IOException("app_result_unknown_no_replay");var response=Json.Codec.DeserializeObject(line);if(Convert.ToInt32(Json.Get(response,"id"))!=id){Dispose();throw new IOException("app_correlation_unknown_no_replay");}if(!Json.Yes(response,"ok"))throw new NativeOperationException(Json.Str(response,"error"),retirement:Json.Get(response,"retirement"));return Json.Get(response,"result");
    }catch(NativeOperationException){throw;}catch{Dispose();throw new IOException("app_result_unknown_no_replay");}finally{gate.Release();}
   }
-  int maintenanceCustody;
+  int shutdownCustody;
   internal object MaintenanceIdentity(){var p=child;if(p==null||Volatile.Read(ref closed)!=0||p.HasExited)throw new IOException("maintenance_core_unavailable");IntPtr held=p.Handle;return Json.Obj("pid",p.Id,"creationFileTime",MaintenancePeer.Birth(p));}
-  internal async Task BeginMaintenanceCustody(){await gate.WaitAsync();try{if(Volatile.Read(ref closed)!=0||pendingRead!=null||child==null||child.HasExited||Interlocked.CompareExchange(ref maintenanceCustody,1,0)!=0)throw new IOException("maintenance_core_custody_unavailable");}finally{gate.Release();}}
-  internal void ReleaseMaintenanceCustody(){if(Volatile.Read(ref closed)!=0||pendingRead!=null)throw new IOException("maintenance_core_custody_unknown");Interlocked.Exchange(ref maintenanceCustody,0);}
-  internal async Task<object> SettleMaintenance(){
+  internal async Task BeginMaintenanceCustody(){await gate.WaitAsync();try{if(Volatile.Read(ref closed)!=0||pendingRead!=null||child==null||child.HasExited||Interlocked.CompareExchange(ref shutdownCustody,1,0)!=0)throw new IOException("maintenance_core_custody_unavailable");}finally{gate.Release();}}
+  internal void ReleaseMaintenanceCustody(){if(Volatile.Read(ref closed)!=0||pendingRead!=null)throw new IOException("maintenance_core_custody_unknown");Interlocked.Exchange(ref shutdownCustody,0);}
+  internal Task BeginQuitCustody(){return BeginMaintenanceCustody();}
+  internal void ReleaseQuitCustody(){ReleaseMaintenanceCustody();}
+  internal Task<object> SettleQuit(){return SettleOwnedExit(true);}
+  internal Task<object> SettleMaintenance(){return SettleOwnedExit(false);}
+  async Task<object> SettleOwnedExit(bool quit){
    await gate.WaitAsync();try{
-    var p=child;if(p==null||Volatile.Read(ref maintenanceCustody)!=1||pendingRead!=null||Interlocked.CompareExchange(ref closed,1,0)!=0)throw new IOException("maintenance_core_custody_unknown");
+    var p=child;
+    if(p==null||(!quit&&pendingRead!=null)||(Volatile.Read(ref shutdownCustody)!=1&&!(quit&&p.HasExited))||Interlocked.CompareExchange(ref closed,1,0)!=0)throw new IOException("maintenance_core_custody_unknown");
+    Interlocked.Exchange(ref shutdownCustody,1);
     int pid=p.Id;string birth=MaintenancePeer.Birth(p);p.StandardInput.Close();
+    // If the original reply was lost, close only this owner's stdin and join
+    // the same read before draining. EOF invokes Core's existing owned cleanup;
+    // no RPC, action or process signal is repeated.
+    var reading=pendingRead;if(reading!=null){try{await reading;}catch(IOException){}pendingRead=null;}
     // No deadline or signal: keep this exact Process and both readers until
     // EOF and actual exit. Core's full quit ticket precedes this method.
     var stdout=Drain(p.StandardOutput);await Task.Run(()=>p.WaitForExit());await stdout;if(stderrDrain!=null)await stderrDrain;
-    int code=p.ExitCode;if(code!=0)throw new IOException("maintenance_core_exit_unconfirmed");
-    CleanupConfirmed=true;selectionPin.Dispose();bootstrap.Dispose();cancellationRegistration.Dispose();p.Dispose();child=null;
+    int code=p.ExitCode;ObservedExit=Json.Obj("pid",pid,"creationFileTime",birth,"exitCode",code,"stdinEof",true,"ioJoined",true);if(code!=0)throw new IOException("maintenance_core_exit_unconfirmed");
+    CleanupConfirmed=true;ReleasePins();cancellationRegistration.Dispose();p.Dispose();child=null;
     return Json.Obj("pid",pid,"creationFileTime",birth,"exitCode",code,"stdinEof",true,"ioJoined",true);
    }finally{gate.Release();}
   }
   public void Dispose(){
    // Maintenance retains its original handles on uncertainty; it never enters
    // the ordinary UI cleanup deadline/kill path.
-   if(Volatile.Read(ref maintenanceCustody)==1)return;
+   if(Volatile.Read(ref shutdownCustody)==1)return;
    if(Interlocked.Exchange(ref closed,1)!=0)return;var p=child;bool clean=true;if(p!=null&&childStarted){try{p.StandardInput.Close();}catch{clean=false;}try{if(!p.WaitForExit(10000)){clean=false;try{p.Kill();}catch{}}p.WaitForExit();}catch{clean=false;throw new IOException("app_child_cleanup_unknown");}
-    try{var reading=pendingRead;if(reading!=null)reading.GetAwaiter().GetResult();Drain(p.StandardOutput).GetAwaiter().GetResult();if(stderrDrain!=null)stderrDrain.GetAwaiter().GetResult();}catch{clean=false;}CleanupConfirmed=clean&&p.ExitCode==0;p.Dispose();child=null;
-   }else if(p!=null){p.Dispose();child=null;}selectionPin.Dispose();bootstrap.Dispose();cancellationRegistration.Dispose();
+    try{var reading=pendingRead;if(reading!=null)reading.GetAwaiter().GetResult();Drain(p.StandardOutput).GetAwaiter().GetResult();if(stderrDrain!=null)stderrDrain.GetAwaiter().GetResult();}catch{clean=false;}ObservedExit=Json.Obj("pid",p.Id,"creationFileTime",MaintenancePeer.Birth(p),"exitCode",p.ExitCode,"stdinEof",true,"ioJoined",clean);CleanupConfirmed=clean&&p.ExitCode==0;p.Dispose();child=null;
+   }else if(p!=null){p.Dispose();child=null;}ReleasePins();cancellationRegistration.Dispose();
   }
  }
  sealed class PackageProgress {internal string Phase;internal int Completed,Total;}
@@ -233,7 +256,8 @@ namespace StyxNative {
  sealed class StyxContext:ApplicationContext {
   readonly string root,state;readonly NotifyIcon tray;readonly Icon icon;readonly Form panel;readonly Settings settings;readonly CancellationTokenSource startupCancellation=new CancellationTokenSource();readonly Stopwatch startupClock=Stopwatch.StartNew();readonly bool startupTest,loginStartup;readonly System.Windows.Forms.Timer startupTimer;
   VerificationTiming verificationTiming;Core core;bool busy,closing,starting,startupHostUpdateAttempted,loginChangeUnconfirmed,actionsGatedDuringStartup=true;int mutationRevision,progressEvents;long firstPaintTicks=-1,verificationStartedTicks=-1,verifiedTicks=-1,readyTicks=-1;object snapshot;Task<object> observation;TaskCompletionSource<bool> mutationDone;readonly Label message;
-  internal int ResultCode=2;
+  internal int ResultCode=0;
+  LocalAppControl localControl;Task<object> quitWork;string quitPhase="running";object quitResult,startupCoreExit;
   internal object CurrentStatus { get { return snapshot; } }
   internal bool RustHost {get{return Json.Str(snapshot,"mode")=="rust_host";}}
   internal bool Supports(string operation){var values=Json.Get(snapshot,"supportedOperations") as object[];if(values==null)return false;foreach(var item in values)if(Equals(item,operation))return true;return false;}
@@ -242,7 +266,7 @@ namespace StyxNative {
   internal bool LoginChangeAllowed {get{return !loginChangeUnconfirmed;}}
   [DllImport("user32.dll")]static extern bool DestroyIcon(IntPtr hIcon);
   internal static Icon BrandIcon(string file){using(var original=Image.FromFile(file))using(var bitmap=new Bitmap(original,new Size(32,32))){IntPtr handle=bitmap.GetHicon();try{return (Icon)Icon.FromHandle(handle).Clone();}finally{DestroyIcon(handle);}}}
-  internal StyxContext(string resourceRoot,string stateDirectory,bool test,bool testStartup=false,bool fromLogin=false){
+  internal StyxContext(string resourceRoot,string stateDirectory,bool test,bool testStartup=false,bool fromLogin=false,LocalAppControl control=null){
    root=resourceRoot;state=stateDirectory;startupTest=testStartup;loginStartup=fromLogin;icon=BrandIcon(Path.Combine(root,"styx-logo.png"));
    panel=Window("Styx",new Size(340,420));panel.ShowInTaskbar=false;panel.FormBorderStyle=FormBorderStyle.FixedToolWindow;
    var stack=Stack(panel);Logo(stack,64);Heading(stack,"Your computer, connected");
@@ -251,7 +275,10 @@ namespace StyxNative {
    Button(stack,"Pause connection",async()=>{await Run(async()=>{await Call("disconnect");await RefreshAfterMutation();});});
    Button(stack,"Settings",()=>{OpenSettings();return Task.FromResult(0);});
    panel.FormClosing+=(s,e)=>{if(!closing){e.Cancel=true;panel.Hide();}};
-   settings=new Settings(this,icon);startupTimer=new System.Windows.Forms.Timer {Interval=50};startupTimer.Tick+=async(s,e)=>{startupTimer.Stop();await InitializeCore();};tray=new NotifyIcon { Icon=icon,Text="Styx — open to view connection",Visible=!test };
+   settings=new Settings(this,icon);
+   localControl=control;
+   if(localControl!=null){settings.CreateControl();var handle=settings.Handle;localControl.Start(LocalControlOnUi,()=>settings.BeginInvoke(new Action(Quit)));}
+   startupTimer=new System.Windows.Forms.Timer {Interval=50};startupTimer.Tick+=async(s,e)=>{startupTimer.Stop();await InitializeCore();};tray=new NotifyIcon { Icon=icon,Text="Styx — open to view connection",Visible=!test };
    var menu=new ContextMenuStrip();menu.Items.Add("Open Styx",null,(s,e)=>ShowPanel());menu.Items.Add("Settings",null,(s,e)=>OpenSettings());menu.Items.Add("Quit Styx",null,async(s,e)=>await RequestQuit());tray.ContextMenuStrip=menu;tray.MouseClick+=(s,e)=>{if(e.Button==MouseButtons.Left)ShowPanel();};
    if(!test){
     starting=true;settings.Startup("Opening Styx…",true,false);message.Text="Opening Styx…";
@@ -341,7 +368,7 @@ namespace StyxNative {
    }catch(NativeOperationException error){startupFailure=error.Code;}catch{}
    // Framework's C# compiler cannot await inside catch. Dispose the failed
    // owned child here without blocking the native window or replaying work.
-   var failed=pending??core;core=null;if(failed!=null)await Task.Run(()=>failed.Dispose());else if(verifiedRuntime!=null)verifiedRuntime.Dispose();if(closing)return;starting=false;
+   var failed=pending??core;core=null;if(failed!=null){await Task.Run(()=>failed.Dispose());if(!failed.CleanupConfirmed){startupCoreExit=failed.ObservedExit;ResultCode=4;if(startupCoreExit==null)core=failed;}}else if(verifiedRuntime!=null)verifiedRuntime.Dispose();if(closing)return;starting=false;
    if(startupFailure=="app_legacy_install_present"){message.Text="An older Styx installation was found in this profile. Remove it before using this version; Styx did not change it.";settings.Startup(message.Text,false,true);return;}
    message.Text="Styx needs attention. Open Settings to retry.";
    settings.Startup(packageVerified?"Connection settings could not open. Retry to reconnect; your settings are retained.":"Styx could not finish checking the app. Keep the app folder intact, then retry.",false,true);
@@ -469,12 +496,68 @@ namespace StyxNative {
    var cancelled=await Call("runtimeUpgradeCancel",Json.Obj("ticketId",ticket));if(Json.Str(cancelled,"handoff","status")!="cancelled")throw new IOException();settings.Feedback("The waiting update was cancelled. You can start it again when ready.");
   },"Checking the component update…","The update recovery could not be confirmed. Keep Styx open; your recovery record is retained.");}
   async Task AdmitQuit(){var result=await Call("quitAdmission");if(Json.Str(result,"quit","status")!="ready_to_quit"||!System.Text.RegularExpressions.Regex.IsMatch(Json.Str(result,"quit","ticketId"),"^[a-f0-9]{32}$"))throw new IOException();}
-  internal Task RequestQuit(){
-   if(starting||busy){OpenSettings();settings.Feedback("Wait for the current operation to finish before quitting Styx.");return Task.FromResult(0);}
-   if(core==null){Quit();return Task.FromResult(0);}
-   OpenSettings();return Run(async()=>{await AdmitQuit();settings.BeginInvoke(new Action(Quit));},"Checking running tasks…","Styx could not confirm that it is ready to quit. Keep it open and try again after checking the connection.");
+  object QuitReply(string status,string code=null,object exit=null){return Json.Obj("status",status,"code",code,"coreExit",exit);}
+  async Task<object> LocalControlOnUi(string operation){
+   var done=new TaskCompletionSource<object>();
+   settings.BeginInvoke(new Action(async()=>{
+    try{
+     if(operation=="identity"){object identity=null;try{if(core!=null)identity=core.MaintenanceIdentity();}catch(IOException){}done.TrySetResult(identity);}
+     else if(operation=="status")done.TrySetResult(Json.Obj("status",quitPhase,"starting",starting,"busy",busy));
+     else if(operation=="show"){OpenSettings();done.TrySetResult(Json.Obj("status","shown"));}
+     else if(operation=="quit")done.TrySetResult(await RequestQuitResult());
+     else throw new IOException("app_control_operation_invalid");
+    }catch{done.TrySetResult(QuitReply("unknown","app_quit_unconfirmed"));}
+   }));
+   return await done.Task;
   }
-  internal void Quit(){if(closing)return;closing=true;if(core!=null){core.Dispose();if(!core.CleanupConfirmed){closing=false;settings.Feedback("The owned Rust process did not exit cleanly. No successful quit receipt is claimed; retain this result for recovery.");ResultCode=4;return;}}if(maintenancePipe!=null)maintenancePipe.Dispose();startupTimer.Stop();startupTimer.Dispose();startupCancellation.Cancel();tray.Visible=false;settings.Close();settings.Dispose();panel.Close();tray.Dispose();icon.Dispose();ExitThread();}
+  internal Task<object> RequestQuitResult(){
+   if(quitWork!=null&&quitPhase=="running"&&quitWork.IsCompleted)quitWork=null;
+   if(quitWork!=null)return quitWork;
+   if(starting||busy)return Task.FromResult(QuitReply("busy",starting?"app_starting":"app_operation_in_progress"));
+   quitWork=PrepareQuit();return quitWork;
+  }
+  async Task<object> PrepareQuit(){
+   busy=true;mutationDone=new TaskCompletionSource<bool>();quitPhase="stopping";mutationRevision++;settings.Enabled=false;
+   message.Text="Stopping Styx…";settings.Feedback("Stopping this Styx instance and its tasks…");
+   try{
+    var reading=observation;if(reading!=null){try{await reading;}catch{}if(observation==reading)observation=null;}
+    object exit=null;
+    if(core==null&&startupCoreExit!=null){ResultCode=4;quitPhase="ready_to_exit";quitResult=QuitReply("ready_to_exit","app_core_exited_unclean",startupCoreExit);return quitResult;}
+    if(core!=null&&core.ObservedExit!=null){
+     if(!core.CleanupConfirmed)ResultCode=4;
+     quitPhase="ready_to_exit";quitResult=QuitReply("ready_to_exit",core.CleanupConfirmed?null:"app_core_exited_unclean",core.ObservedExit);return quitResult;
+    }
+    if(core!=null){
+     // Retain the original child/readers; Quit never enters the timed kill path.
+     await core.BeginQuitCustody();
+     try{await AdmitQuit();}
+     catch(NativeOperationException e){
+      if(e.Code=="app_runtime_update_in_progress"||e.Code=="app_login_in_progress"){
+       core.ReleaseQuitCustody();quitPhase="running";quitWork=null;busy=false;settings.Enabled=true;mutationDone.TrySetResult(true);
+       settings.Feedback("Styx is finishing another operation. Try Quit again when it finishes.");
+       quitResult=QuitReply("busy",e.Code);return quitResult;
+      }
+      throw;
+     }
+     exit=await core.SettleQuit();
+    }
+    quitPhase="ready_to_exit";quitResult=QuitReply("ready_to_exit",null,exit);return quitResult;
+   }catch{}
+   // Framework C# cannot await in catch. This is still the same retained
+   // shutdown job: EOF joins original work, never another Quit RPC or a kill.
+   if(core!=null&&core.ObservedExit==null){try{await core.SettleQuit();}catch{}}
+   ResultCode=4;
+   if(core!=null&&core.ObservedExit!=null){quitPhase="ready_to_exit";quitResult=QuitReply("ready_to_exit","app_quit_admission_unconfirmed",core.ObservedExit);return quitResult;}
+   quitPhase="unknown";quitResult=QuitReply("unknown","app_quit_unconfirmed");
+   settings.Feedback("Styx could not confirm that its tasks have stopped. The original shutdown is retained; it will not be repeated or force-killed.");
+   return quitResult;
+  }
+  internal async Task RequestQuit(){
+   var result=await RequestQuitResult();
+   if(Json.Str(result,"status")=="ready_to_exit")Quit();
+   else if(Json.Str(result,"status")=="busy"){OpenSettings();settings.Feedback("Styx is finishing another operation. Try Quit again when it finishes.");}
+  }
+  internal void Quit(){if(closing)return;closing=true;if(core!=null){core.Dispose();if(!core.CleanupConfirmed&&core.ObservedExit==null){closing=false;settings.Feedback("The owned Rust process did not exit cleanly. No successful quit receipt is claimed; retain this result for recovery.");ResultCode=4;return;}if(!core.CleanupConfirmed)ResultCode=4;}if(localControl!=null)localControl.Dispose();if(maintenancePipe!=null)maintenancePipe.Dispose();startupTimer.Stop();startupTimer.Dispose();startupCancellation.Cancel();tray.Visible=false;settings.Close();settings.Dispose();panel.Close();tray.Dispose();icon.Dispose();ExitThread();}
   internal void Verify(){var budget=Json.Obj("volumes",new object[]{Json.Obj("requiredBytes",2147483648d,"availableBytes",1073741824d)});if(!SpaceFeedback(budget,true).Contains("upgrade has not started")||SpaceFeedback(budget,false).Contains("upgrade has not started")||!SpaceFeedback(budget,true).Contains("Required:"))throw new Exception("space_feedback_failed");if(panel.Controls.Count!=1||settings.Controls.Count!=1||icon.Width<16)throw new Exception("native_shell_failed");settings.Verify();}
  }
  sealed class Settings:Form {
@@ -832,6 +915,71 @@ namespace StyxNative {
   internal static string PipeName(string root){return "Styx.NativeMaintenance.v1."+System.Security.Principal.WindowsIdentity.GetCurrent().User.Value+"."+Scope(root);}
   internal static bool SetupPresent(string root){Mutex mutex;if(!Mutex.TryOpenExisting("Global\\Styx.Install."+Scope(root),out mutex))return false;mutex.Dispose();return true;}
  }
+ // Local current-user owner endpoint. It requests the same Quit path as the
+ // tray; it cannot execute commands, change a profile or stop another owner.
+ sealed class LocalAppControl:IDisposable {
+  [StructLayout(LayoutKind.Sequential)]struct Information {public uint Attributes;public System.Runtime.InteropServices.ComTypes.FILETIME Created,Accessed,Written;public uint Volume,SizeHigh,SizeLow,Links,IndexHigh,IndexLow;}
+  [DllImport("kernel32.dll",CharSet=CharSet.Unicode,ExactSpelling=true,SetLastError=true)]static extern Microsoft.Win32.SafeHandles.SafeFileHandle CreateFileW(string path,uint access,uint share,IntPtr security,uint creation,uint flags,IntPtr template);
+  [DllImport("kernel32.dll",SetLastError=true)][return:MarshalAs(UnmanagedType.Bool)]static extern bool GetFileInformationByHandle(Microsoft.Win32.SafeHandles.SafeFileHandle file,out Information info);
+  readonly Microsoft.Win32.SafeHandles.SafeFileHandle profilePin;
+  readonly System.IO.Pipes.NamedPipeServerStream[] pipes;
+  readonly string root,state,sid;Task serving;int disposed;
+  internal LocalAppControl(string resources,string directory){
+   root=Path.GetFullPath(resources).TrimEnd('\\');state=Path.GetFullPath(directory).TrimEnd('\\');
+   PrivateAppFiles.PrepareOwnerDirectory(state);NativeBootstrap.NoRedirect(state);
+   sid=System.Security.Principal.WindowsIdentity.GetCurrent().User.Value;
+   profilePin=CreateFileW(state,0x80,3,IntPtr.Zero,3,0x02200000,IntPtr.Zero);
+   try{
+    Information info;if(profilePin.IsInvalid||!GetFileInformationByHandle(profilePin,out info)||(info.Attributes&0x410)!=0x10)throw new IOException("app_control_profile_refused");
+    ulong fileId=((ulong)info.IndexHigh<<32)|info.IndexLow;
+    string name="Styx.AppControl.v1."+sid+"."+((ulong)info.Volume).ToString("x16")+"."+fileId.ToString("x16");
+    var security=new System.IO.Pipes.PipeSecurity();var user=new System.Security.Principal.SecurityIdentifier(sid);security.SetOwner(user);security.SetAccessRuleProtection(true,false);security.AddAccessRule(new System.IO.Pipes.PipeAccessRule(user,System.IO.Pipes.PipeAccessRights.FullControl,System.Security.AccessControl.AccessControlType.Allow));
+    pipes=new System.IO.Pipes.NamedPipeServerStream[2];
+    try{for(int i=0;i<pipes.Length;i++)pipes[i]=new System.IO.Pipes.NamedPipeServerStream(name,System.IO.Pipes.PipeDirection.InOut,2,System.IO.Pipes.PipeTransmissionMode.Byte,System.IO.Pipes.PipeOptions.Asynchronous,4096,4096,security);}catch{foreach(var item in pipes)if(item!=null)item.Dispose();throw;}
+   }catch{profilePin.Dispose();throw;}
+  }
+  static Task<string> Frame(StreamReader reader){return Core.ReadLineBounded(reader,8192);}
+  internal void Start(Func<string,Task<object>> onUi,Action exit){
+   if(serving!=null)throw new IOException("app_control_already_started");
+   var tasks=new Task[pipes.Length];for(int i=0;i<pipes.Length;i++)tasks[i]=Serve(pipes[i],onUi,exit);serving=Task.WhenAll(tasks);
+  }
+  Task Serve(System.IO.Pipes.NamedPipeServerStream pipe,Func<string,Task<object>> onUi,Action exit){
+   return Task.Run(async()=>{
+    while(Volatile.Read(ref disposed)==0){
+     bool ready=false;
+     try{
+      await Task.Factory.FromAsync(pipe.BeginWaitForConnection,pipe.EndWaitForConnection,null).ConfigureAwait(false);
+      using(var peer=MaintenancePeer.Connected(pipe,false)){
+       // The caller is the fixed CLI bundled with this original App. A path,
+       // caller-supplied PID or a second profile does not confer authority.
+       if(!MaintenancePeer.Same(peer.MainModule.FileName,Path.Combine(root,"native","bin","styx.exe")))throw new IOException("app_control_caller_refused");
+       using(var reader=new StreamReader(pipe,new System.Text.UTF8Encoding(false,true),false,4096,true))
+       using(var writer=new StreamWriter(pipe,new System.Text.UTF8Encoding(false,true),4096,true)){
+        var codec=new JavaScriptSerializer {MaxJsonLength=8192};
+        using(var self=Process.GetCurrentProcess()){
+         var core=await onUi("identity").ConfigureAwait(false);
+         await writer.WriteLineAsync(codec.Serialize(Json.Obj("schema",1,"kind","styx-local-app-owner","pid",self.Id,"creationFileTime",MaintenancePeer.Birth(self),"ownerSid",sid,"stateDirectory",state,"core",core))).ConfigureAwait(false);await writer.FlushAsync().ConfigureAwait(false);
+        }
+        string line=await Frame(reader).ConfigureAwait(false);if(line==null)throw new IOException("app_control_request_missing");
+        var request=codec.DeserializeObject(line);var fields=request as Dictionary<string,object>;
+        string operation=Json.Str(request,"operation"),id=Json.Str(request,"id");
+        if(fields==null||fields.Count!=4||!Equals(Json.Get(request,"schema"),1)||!System.Text.RegularExpressions.Regex.IsMatch(id,"\\A[a-f0-9]{32}\\z")||(operation!="quit"&&operation!="status")||!MaintenancePeer.Same(Json.Str(request,"stateDirectory"),state)||peer.HasExited)throw new IOException("app_control_request_invalid");
+        // Await the original UI task. Client disconnect/timeout cannot cancel,
+        // replay or substitute its admitted shutdown.
+        object result=await onUi(operation).ConfigureAwait(false);ready=operation=="quit"&&Json.Str(result,"status")=="ready_to_exit";
+        await writer.WriteLineAsync(codec.Serialize(Json.Obj("schema",1,"id",id,"result",result))).ConfigureAwait(false);await writer.FlushAsync().ConfigureAwait(false);
+       }
+      }
+     }catch(IOException){}catch(ObjectDisposedException){break;}catch(System.ComponentModel.Win32Exception){}catch(InvalidOperationException){}catch(ArgumentException){}
+     finally{
+      if(ready){try{exit();}catch(InvalidOperationException){} }
+      if(Volatile.Read(ref disposed)==0){try{pipe.Disconnect();}catch(IOException){}catch(InvalidOperationException){}}
+     }
+    }
+   });
+  }
+  public void Dispose(){if(Interlocked.Exchange(ref disposed,1)==0){foreach(var item in pipes)item.Dispose();profilePin.Dispose();}}
+ }
  static class InstallCoordination {
   // Inno owns versioned program files; Core state remains outside the install tree.
   static Mutex appMutex;
@@ -861,9 +1009,11 @@ namespace StyxNative {
     }
     if(!Path.IsPathRooted(state))throw new ArgumentException();state=Path.GetFullPath(state);
     if(!InstallCoordination.Enter(root)){if(!test&&!startupTest)MessageBox.Show("Styx is being installed or updated. Open it again when Setup has finished.","Styx",MessageBoxButtons.OK,MessageBoxIcon.Information);return 3;}
-    var app=new StyxContext(root,state,test,startupTest,fromLogin);
+    LocalAppControl control=null;
+    if(!test&&!startupTest){try{control=new LocalAppControl(root,state);}catch(IOException){MessageBox.Show("Styx could not acquire this profile. It may already be open. Keep the existing instance and review it before starting another.","Styx",MessageBoxButtons.OK,MessageBoxIcon.Information);return 3;}}
+    var app=new StyxContext(root,state,test,startupTest,fromLogin,control);
     if(test){app.Verify();app.Quit();File.WriteAllText(Path.Combine(root,"native-self-test.json"),"{\"status\":\"PASS\",\"pages\":9,\"uiConstruction\":true,\"joinStateRendering\":true,\"editingAndEvidenceState\":true,\"desktopAcceptance\":\"NOT RUN\",\"serviceMutation\":\"NOT RUN\"}");return 0;}
-    Application.Run(app);InstallCoordination.KeepAlive();return startupTest?app.ResultCode:0;
+    Application.Run(app);InstallCoordination.KeepAlive();return app.ResultCode;
    }catch{if(!test&&!startupTest)MessageBox.Show("Styx could not open. Check that the app resources and runtime are present.","Styx",MessageBoxButtons.OK,MessageBoxIcon.Information);return 2;}
   }
  }

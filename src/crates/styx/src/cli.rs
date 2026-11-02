@@ -83,7 +83,28 @@ enum PluginCommand {
     },
 }
 #[derive(Subcommand)]
+enum LocalAppCommand {
+    Status {
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+}
+#[derive(Subcommand)]
 enum Command {
+    /// Quit the current user's native Windows App through its original owner.
+    Quit {
+        #[arg(long)]
+        state_dir: Option<PathBuf>,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Read the local native Windows App owner without contacting a Gateway.
+    App {
+        #[command(subcommand)]
+        command: LocalAppCommand,
+    },
     /// Install a verified Linux CLI into your private bin directory.
     Install {
         #[arg(long)]
@@ -1153,9 +1174,66 @@ async fn stop_signal() -> io::Result<()> {
     tokio::signal::ctrl_c().await
 }
 
+async fn local_app(
+    state_dir: Option<PathBuf>,
+    operation: styx_runtime::app_control::Operation,
+    json: bool,
+) -> ExitCode {
+    #[cfg(not(target_os = "windows"))]
+    {
+        let _ = (state_dir, operation, json);
+        error("local_app_control_windows_only")
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let path = match state_dir.or_else(|| {
+            std::env::var_os("LOCALAPPDATA")
+                .map(|p| PathBuf::from(p).join("StyxPreview/WindowsFirst"))
+        }) {
+            Some(path) => path,
+            None => return error("app_control_state_dir_required"),
+        };
+        match styx_runtime::app_control::request(&path, operation).await {
+            Ok(report) => {
+                let code = report.exit_code();
+                if json {
+                    if write_json(&report).is_err() {
+                        return error("output_unavailable");
+                    }
+                } else {
+                    eprintln!(
+                        "Styx App: {}{}",
+                        report.status,
+                        report
+                            .code
+                            .as_ref()
+                            .map(|s| format!(" ({s})"))
+                            .unwrap_or_default()
+                    );
+                }
+                ExitCode::from(code)
+            }
+            Err(err) => error(err.0),
+        }
+    }
+}
+
 pub(crate) async fn run(cli: Cli) -> ExitCode {
     use styx_runtime::foreground::{self, HostWireMode};
     match cli.command {
+        Command::Quit { state_dir, json } => {
+            local_app(state_dir, styx_runtime::app_control::Operation::Quit, json).await
+        }
+        Command::App {
+            command: LocalAppCommand::Status { state_dir, json },
+        } => {
+            local_app(
+                state_dir,
+                styx_runtime::app_control::Operation::Status,
+                json,
+            )
+            .await
+        }
         Command::Install {
             payload_dir,
             publisher_file,
