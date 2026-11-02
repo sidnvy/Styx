@@ -179,6 +179,30 @@ pub(super) fn diagnostic(stage: &'static str, code: &str) {
     );
 }
 
+fn diagnostic_reply(value: &CallToolResult) {
+    if std::env::var_os("STYX_CUA_DIAGNOSTICS").as_deref() != Some(std::ffi::OsStr::new("1")) {
+        return;
+    }
+    let data = value.structured_content.as_ref().and_then(Value::as_object);
+    use std::io::Write as _;
+    // Shape predicates only: never values, target handles, paths, native text
+    // or arbitrary error strings. These diagnostics grant no execution fact.
+    let _ = writeln!(
+        std::io::stderr().lock(),
+        "{}",
+        serde_json::json!({
+            "event":"styx_cua_private_write_reply",
+            "is_error":value.is_error,
+            "structured":data.is_some(),
+            "fields":data.map(|d|d.len()),
+            "schema_1":data.is_some_and(|d|d.get("schema").and_then(Value::as_u64)==Some(1)),
+            "consumed":data.is_some_and(|d|d.get("target_consumed").and_then(Value::as_bool)==Some(true)),
+            "acknowledged":data.is_some_and(|d|d.get("outcome").and_then(Value::as_str)==Some("acknowledged")),
+            "effect_unverified":data.is_some_and(|d|d.get("effect").and_then(Value::as_str)==Some("unverified")),
+            "native_write_unknown":data.is_some_and(|d|d.get("code").and_then(Value::as_str)==Some("native_write_unknown"))
+        })
+    );
+}
 fn pre_send_code(code: &str) -> bool {
     matches!(
         code,
@@ -310,35 +334,41 @@ pub(super) async fn invoke(
         v=timeout_at(until,peer.call_tool_once(write))=>Some(v)
     };
     match response {
-        Some(Ok(Ok(CallToolResponse::Complete(value)))) => match write_evidence(&value) {
-            CuaEvidence::Acknowledged => (
-                CuaEvidence::Acknowledged,
-                Some(CallToolResult::structured(serde_json::json!({
-                    "schema":1,"target_consumed":true,"outcome":"acknowledged","effect":"unverified"
-                }))),
-                None,
-            ),
-            CuaEvidence::NotDispatched => {
-                // Only write_evidence's exact four-field not-dispatched proof
-                // can reach here. Never emit an unvalidated native error/code.
-                if let Some(code) = value
-                    .structured_content
-                    .as_ref()
-                    .and_then(|data| data.get("code"))
-                    .and_then(Value::as_str)
-                    .filter(|code| pre_send_code(code))
-                {
-                    diagnostic("private_write_reply", code);
-                }
-                (
-                    CuaEvidence::NotDispatched,
+        Some(Ok(Ok(CallToolResponse::Complete(value)))) => {
+            diagnostic_reply(&value);
+            match write_evidence(&value) {
+                CuaEvidence::Acknowledged => (
+                    CuaEvidence::Acknowledged,
+                    Some(CallToolResult::structured(serde_json::json!({
+                        "schema":1,"target_consumed":true,"outcome":"acknowledged","effect":"unverified"
+                    }))),
                     None,
-                    Some(CuaError::PermissionDenied),
-                )
+                ),
+                CuaEvidence::NotDispatched => {
+                    // Only write_evidence's exact four-field not-dispatched proof
+                    // can reach here. Never emit an unvalidated native error/code.
+                    if let Some(code) = value
+                        .structured_content
+                        .as_ref()
+                        .and_then(|data| data.get("code"))
+                        .and_then(Value::as_str)
+                        .filter(|code| pre_send_code(code))
+                    {
+                        diagnostic("private_write_reply", code);
+                    }
+                    (
+                        CuaEvidence::NotDispatched,
+                        None,
+                        Some(CuaError::PermissionDenied),
+                    )
+                }
+                CuaEvidence::Unknown => (CuaEvidence::Unknown, None, Some(CuaError::Unknown)),
             }
-            CuaEvidence::Unknown => (CuaEvidence::Unknown, None, Some(CuaError::Unknown)),
-        },
-        _ => (CuaEvidence::Unknown, None, Some(CuaError::Unknown)),
+        }
+        _ => {
+            diagnostic("private_write_transport", "no_complete_reply");
+            (CuaEvidence::Unknown, None, Some(CuaError::Unknown))
+        }
     }
 }
 

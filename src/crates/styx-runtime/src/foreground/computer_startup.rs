@@ -32,6 +32,56 @@ impl DeferredComputer {
         assert!(slot.is_none(), "one original desktop source per startup");
         *slot = Some(source);
     }
+    // This retries only a read-only profile check before any desktop source
+    // exists. The same initialization job owns every check and is joined on
+    // shutdown; no candidate, source or possibly dispatched action is replayed.
+    pub(super) async fn read_profile<T, F, Fut>(
+        &self,
+        budget: Duration,
+        mut read: F,
+    ) -> Result<T, ForegroundError>
+    where
+        F: FnMut() -> Fut,
+        Fut: std::future::Future<Output = Result<T, ForegroundError>>,
+    {
+        let until = Instant::now() + budget;
+        loop {
+            if !matches!(
+                *self
+                    .readiness
+                    .lock()
+                    .expect("desktop startup readiness mutex"),
+                Readiness::Pending
+            ) || self
+                .source
+                .lock()
+                .expect("desktop startup source mutex")
+                .is_some()
+            {
+                return Err(ForegroundError("computer_startup_closed"));
+            }
+            let result = read().await;
+            if !matches!(
+                *self
+                    .readiness
+                    .lock()
+                    .expect("desktop startup readiness mutex"),
+                Readiness::Pending
+            ) {
+                return Err(ForegroundError("computer_startup_closed"));
+            }
+            match result {
+                Err(error)
+                    if error.code() == "native_service_configuration_pending"
+                        && Instant::now() < until =>
+                {
+                    tokio::time::sleep_until(until.min(Instant::now() + Duration::from_millis(50)))
+                        .await;
+                }
+                other => return other,
+            }
+        }
+    }
     fn original_factory(&self) -> Result<Arc<dyn ComputerBootstrap>, ErrorCategory> {
         match &*self
             .readiness
@@ -197,6 +247,88 @@ mod tests {
         fn validate_control(&self) -> Result<(), ErrorCategory> {
             Ok(())
         }
+    }
+    #[tokio::test]
+    async fn service_transaction_pending_keeps_original_initialization_until_commit() {
+        use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+        let ready = Arc::new(AtomicBool::new(false));
+        let reads = Arc::new(AtomicUsize::new(0));
+        let (entered, observed) = tokio::sync::oneshot::channel();
+        let (state, count) = (ready.clone(), reads.clone());
+        let mut init = InitializationJob::spawn(move |shared| async move {
+            let mut entered = Some(entered);
+            let result = shared
+                .read_profile(Duration::from_secs(1), || {
+                    count.fetch_add(1, Ordering::SeqCst);
+                    if let Some(entered) = entered.take() {
+                        let _ = entered.send(());
+                    }
+                    std::future::ready(if state.load(Ordering::SeqCst) {
+                        Ok(true)
+                    } else {
+                        Err(ForegroundError("native_service_configuration_pending"))
+                    })
+                })
+                .await;
+            result
+                .ok()
+                .map(|_| Arc::new(ReadyFactory) as Arc<dyn ComputerBootstrap>)
+        });
+        observed.await.unwrap();
+        let original = init.job.as_ref().unwrap().id();
+        assert_eq!(init.shared.validate_control(), Err(ErrorCategory::Busy));
+        assert!(!init.job.as_ref().unwrap().is_finished());
+        ready.store(true, Ordering::SeqCst);
+        assert_eq!(init.job.as_ref().unwrap().id(), original);
+        assert!(init.settle(Instant::now() + Duration::from_secs(1)).await);
+        assert!(reads.load(Ordering::SeqCst) >= 2);
+        assert_eq!(init.shared.validate_control(), Ok(()));
+    }
+    #[tokio::test]
+    async fn pending_profile_shutdown_and_nontransient_errors_never_open_desktop() {
+        let (entered, observed) = tokio::sync::oneshot::channel();
+        let mut init = InitializationJob::spawn(move |shared| async move {
+            let mut entered = Some(entered);
+            let result = shared
+                .read_profile(Duration::from_secs(30), || {
+                    if let Some(entered) = entered.take() {
+                        let _ = entered.send(());
+                    }
+                    std::future::ready(Err::<bool, _>(ForegroundError(
+                        "native_service_configuration_pending",
+                    )))
+                })
+                .await;
+            assert_eq!(result.unwrap_err().code(), "computer_startup_closed");
+            None
+        });
+        observed.await.unwrap();
+        init.close_admission();
+        assert!(init.settle(Instant::now() + Duration::from_secs(1)).await);
+        assert_eq!(init.shared.validate_control(), Err(ErrorCategory::Busy));
+        let shared = DeferredComputer {
+            readiness: Mutex::new(Readiness::Pending),
+            source: Mutex::new(None),
+        };
+        let mut calls = 0;
+        let error = shared
+            .read_profile(Duration::from_secs(30), || {
+                calls += 1;
+                std::future::ready(Err::<bool, _>(ForegroundError("legacy_profile_changed")))
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), "legacy_profile_changed");
+        assert_eq!(calls, 1);
+        let error = shared
+            .read_profile(Duration::ZERO, || {
+                std::future::ready(Err::<bool, _>(ForegroundError(
+                    "native_service_configuration_pending",
+                )))
+            })
+            .await
+            .unwrap_err();
+        assert_eq!(error.code(), "native_service_configuration_pending");
     }
     /// Actual Tokio task/waiter faults, not a desktop/native provider acceptance.
     #[tokio::test]

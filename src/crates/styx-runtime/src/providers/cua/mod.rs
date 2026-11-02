@@ -446,6 +446,25 @@ impl CuaCleanup {
         self.worker_exited && self.io_joined && self.physical_settlement_confirmed()
     }
 }
+pub(crate) fn trace_write_settlement(
+    evidence: CuaEvidence,
+    ledger: bool,
+    audit: bool,
+    delivery: bool,
+) {
+    if std::env::var_os("STYX_CUA_DIAGNOSTICS").as_deref() != Some(std::ffi::OsStr::new("1")) {
+        return;
+    }
+    use std::io::Write as _;
+    let _ = writeln!(
+        std::io::stderr().lock(),
+        "{}",
+        serde_json::json!({
+            "event":"styx_cua_write_settlement", "native_acknowledged":matches!(evidence,CuaEvidence::Acknowledged),
+            "native_unknown":matches!(evidence,CuaEvidence::Unknown), "ledger_recorded":ledger,"audit_recorded":audit,"delivery_admitted":delivery
+        })
+    );
+}
 pub struct CuaIoBudget {
     _partition: OwnedSemaphorePermit,
     active: Arc<Semaphore>,

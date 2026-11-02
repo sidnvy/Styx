@@ -1139,6 +1139,14 @@ impl HostCoordinator {
                         }
                         Ok(())
                     });
+                    if write_observation.is_some() && click.is_none() {
+                        crate::providers::cua::trace_write_settlement(
+                            receipt.evidence,
+                            result.is_ok(),
+                            audit.is_ok(),
+                            delivery.is_ok(),
+                        );
+                    }
                     drop(state);
                     drop(guard);
                     let response = result.map_err(CoordinatorError::from).and_then(|snapshot| {

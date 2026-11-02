@@ -205,11 +205,19 @@ async fn prepare_computer(
     host: &OwnedExecHost,
     custody: &computer_startup::DeferredComputer,
 ) -> Result<Option<Arc<dyn crate::host::protocol::computer::ComputerBootstrap>>, ForegroundError> {
-    let retained = admitted.clone();
-    let enabled =
-        tokio::task::spawn_blocking(move || retained.profile.pin_cua_driver().map(|p| p.is_some()))
-            .await
-            .map_err(|_| ForegroundError("profile_reader_failed"))??;
+    let enabled = custody
+        .read_profile(Duration::from_secs(30), || {
+            let retained = admitted.clone();
+            async move {
+                tokio::task::spawn_blocking(move || {
+                    retained.profile.pin_cua_driver().map(|p| p.is_some())
+                })
+                .await
+                .map_err(|_| ForegroundError("profile_reader_failed"))?
+                .map_err(ForegroundError::from)
+            }
+        })
+        .await?;
     if !enabled {
         return Ok(None);
     }
@@ -287,10 +295,17 @@ async fn prepare_computer(
     host: &OwnedExecHost,
     custody: &computer_startup::DeferredComputer,
 ) -> Result<Option<Arc<dyn crate::host::protocol::computer::ComputerBootstrap>>, ForegroundError> {
-    let retained = admitted.clone();
-    let enabled = tokio::task::spawn_blocking(move || retained.profile.computer_enabled())
-        .await
-        .map_err(|_| ForegroundError("profile_reader_failed"))??;
+    let enabled = custody
+        .read_profile(Duration::from_secs(30), || {
+            let retained = admitted.clone();
+            async move {
+                tokio::task::spawn_blocking(move || retained.profile.computer_enabled())
+                    .await
+                    .map_err(|_| ForegroundError("profile_reader_failed"))?
+                    .map_err(ForegroundError::from)
+            }
+        })
+        .await?;
     if !enabled {
         return Ok(None);
     }
