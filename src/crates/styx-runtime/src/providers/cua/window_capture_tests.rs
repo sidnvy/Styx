@@ -221,3 +221,51 @@ fn pinned_windows_capture_only_shape_is_observation_only_and_still_target_bound(
         );
     }
 }
+
+#[test]
+fn minimal_explicit_read_modalities_get_bounded_public_defaults() {
+    use super::super::{CuaAction, DesktopReadRequest};
+    let capture = CuaAction::new(
+        "get_window_state".into(),
+        json!({"pid":42,"window_id":1234,"include_accessibility_tree":false})
+            .as_object()
+            .unwrap()
+            .clone(),
+    )
+    .unwrap();
+    let Some(DesktopReadRequest::WindowCapture(request)) = capture.desktop_read_request().unwrap()
+    else {
+        panic!("capture default was not classified")
+    };
+    assert_eq!(request.max_image_dimension, 1024);
+    assert_eq!(request.timeout_ms, 1000);
+    let payload: Value = serde_json::from_slice(&capture.to_operation_payload().unwrap()).unwrap();
+    assert!(payload["arguments"].get("tree_format").is_none());
+    let tree = CuaAction::new(
+        "get_window_state".into(),
+        json!({"pid":42,"window_id":1234,"include_screenshot":false})
+            .as_object()
+            .unwrap()
+            .clone(),
+    )
+    .unwrap();
+    assert!(matches!(
+        tree.desktop_read_request().unwrap(),
+        Some(DesktopReadRequest::Accessibility(_))
+    ));
+    for (key, value) in [
+        ("max_image_dimension", json!(0)),
+        ("timeout_ms", json!(2001)),
+    ] {
+        let mut args = json!({"pid":42,"window_id":1234,"include_accessibility_tree":false})
+            .as_object()
+            .unwrap()
+            .clone();
+        args.insert(key.into(), value);
+        let action = CuaAction::new("get_window_state".into(), args).unwrap();
+        assert!(
+            action.desktop_read_request().is_err(),
+            "explicit invalid {key} must never become a default"
+        );
+    }
+}

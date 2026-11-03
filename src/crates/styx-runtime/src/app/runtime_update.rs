@@ -22,35 +22,66 @@ pub(super) struct UpdateInput {
 
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct RoleInput {
-    gateway: bool,
-    root_sha256: Sha256Digest,
+pub(super) struct RoleInput {
+    pub(super) gateway: bool,
+    pub(super) root_sha256: Sha256Digest,
     before_sha256: Sha256Digest,
     previous: NativeRuntimeSelection,
     stop_transaction: TransactionId,
     stop_sequence: u64,
     stop_required: bool,
-    select_transaction: TransactionId,
-    select_sequence: u64,
+    pub(super) select_transaction: TransactionId,
+    pub(super) select_sequence: u64,
 }
 #[derive(Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
-struct OriginalInput {
+pub(super) struct OriginalInput {
     schema: u16,
     transaction_id: TransactionId,
-    container_sha256: Sha256Digest,
-    selection_file: String,
-    selection_sha256: Sha256Digest,
-    selection: NativeRuntimeSelection,
-    roles: Vec<RoleInput>,
+    pub(super) container_sha256: Sha256Digest,
+    pub(super) selection_file: String,
+    pub(super) selection_sha256: Sha256Digest,
+    pub(super) selection: NativeRuntimeSelection,
+    pub(super) roles: Vec<RoleInput>,
 }
-struct SelectionPin {
+impl OriginalInput {
+    pub(super) fn validate_shape(&self, id: &TransactionId) -> Result<(), AppError> {
+        if self.schema != 1
+            || &self.transaction_id != id
+            || self.roles.is_empty()
+            || self.roles.len() > 2
+            || self.roles[0].gateway
+            || self.roles.get(1).is_some_and(|r| !r.gateway)
+            || self.selection_file.contains('/')
+            || self.selection_file.contains('\\')
+            || self.selection_file != format!("{}.json", self.selection_sha256.to_hex())
+        {
+            return Err(AppError("app_runtime_original_input_invalid"));
+        }
+        for role in &self.roles {
+            let suffix = if role.gateway { "gateway" } else { "host" };
+            if role.stop_sequence == 0
+                || role.stop_transaction.as_str() != format!("{}-{suffix}-stop", id.as_str())
+                || role.select_transaction.as_str() != format!("{}-{suffix}-select", id.as_str())
+                || role
+                    .stop_sequence
+                    .checked_add(u64::from(role.stop_required))
+                    != Some(role.select_sequence)
+                || role.previous.publisher_spki_sha256 != self.selection.publisher_spki_sha256
+            {
+                return Err(AppError("app_runtime_original_input_invalid"));
+            }
+        }
+        Ok(())
+    }
+}
+pub(super) struct SelectionPin {
     root: PrivateRoot,
-    file: RawFile,
-    selection: NativeRuntimeSelection,
+    pub(super) file: RawFile,
+    pub(super) selection: NativeRuntimeSelection,
 }
 impl SelectionPin {
-    fn open(path: &Path) -> Result<Self, AppError> {
+    pub(super) fn open(path: &Path) -> Result<Self, AppError> {
         let root = PrivateRoot::open(
             path.parent()
                 .ok_or(AppError("app_runtime_selection_invalid"))?,
@@ -73,11 +104,11 @@ impl SelectionPin {
             selection,
         })
     }
-    fn validate(&self) -> Result<(), AppError> {
+    pub(super) fn validate(&self) -> Result<(), AppError> {
         same_file(&self.root, &self.file)
     }
 }
-fn same_file(root: &PrivateRoot, file: &RawFile) -> Result<(), AppError> {
+pub(super) fn same_file(root: &PrivateRoot, file: &RawFile) -> Result<(), AppError> {
     let current = root
         .read_raw(file.relative_path(), 65536)
         .map_err(|_| AppError("app_runtime_input_changed"))?;
@@ -86,7 +117,7 @@ fn same_file(root: &PrivateRoot, file: &RawFile) -> Result<(), AppError> {
     }
     Ok(())
 }
-fn root_digest(root: &PrivateRoot) -> Result<Sha256Digest, AppError> {
+pub(super) fn root_digest(root: &PrivateRoot) -> Result<Sha256Digest, AppError> {
     serde_json::to_vec(&root.identity())
         .map(|raw| Sha256Digest::of_bytes(&raw))
         .map_err(|_| AppError("app_runtime_input_invalid"))
@@ -421,32 +452,7 @@ impl Work {
             .map_err(|_| AppError("app_runtime_original_input_required"))?;
         let input: OriginalInput = serde_json::from_slice(raw.bytes())
             .map_err(|_| AppError("app_runtime_original_input_invalid"))?;
-        if input.schema != 1
-            || &input.transaction_id != id
-            || input.roles.is_empty()
-            || input.roles.len() > 2
-            || input.roles[0].gateway
-            || input.roles.get(1).is_some_and(|r| !r.gateway)
-            || input.selection_file.contains('/')
-            || input.selection_file.contains('\\')
-            || input.selection_file != format!("{}.json", input.selection_sha256.to_hex())
-        {
-            return Err(AppError("app_runtime_original_input_invalid"));
-        }
-        for role in &input.roles {
-            let suffix = if role.gateway { "gateway" } else { "host" };
-            if role.stop_sequence == 0
-                || role.stop_transaction.as_str() != format!("{}-{suffix}-stop", id.as_str())
-                || role.select_transaction.as_str() != format!("{}-{suffix}-select", id.as_str())
-                || role
-                    .stop_sequence
-                    .checked_add(u64::from(role.stop_required))
-                    != Some(role.select_sequence)
-                || role.previous.publisher_spki_sha256 != input.selection.publisher_spki_sha256
-            {
-                return Err(AppError("app_runtime_original_input_invalid"));
-            }
-        }
+        input.validate_shape(id)?;
         let stage = SelectionPin::open(
             &self
                 .scope

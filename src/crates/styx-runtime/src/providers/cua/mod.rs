@@ -267,6 +267,31 @@ impl CuaAction {
         {
             arguments.insert("tree_format".into(), Value::String("elements".into()));
         }
+        if name == "get_window_state" {
+            if arguments.get("include_accessibility_tree") == Some(&Value::Bool(false))
+                && arguments.get("include_screenshot") != Some(&Value::Bool(false))
+            {
+                arguments
+                    .entry("include_screenshot")
+                    .or_insert(Value::Bool(true));
+                for (key, default) in [("max_image_dimension", 1024), ("timeout_ms", 1000)] {
+                    arguments.entry(key).or_insert(Value::from(default));
+                }
+            } else if arguments.get("include_screenshot") == Some(&Value::Bool(false))
+                && arguments.get("include_accessibility_tree") != Some(&Value::Bool(false))
+            {
+                arguments
+                    .entry("include_accessibility_tree")
+                    .or_insert(Value::Bool(true));
+                for (key, default) in [
+                    ("max_elements", 250),
+                    ("max_depth", 25),
+                    ("timeout_ms", 1000),
+                ] {
+                    arguments.entry(key).or_insert(Value::from(default));
+                }
+            }
+        }
         let value = Self { name, arguments };
         value.validate()?;
         Ok(value)

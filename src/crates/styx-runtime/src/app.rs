@@ -16,6 +16,7 @@ mod plugin;
 mod role_retire;
 mod runtime_update;
 mod service;
+mod startup;
 pub(crate) mod startup_diagnostic;
 
 use crate::{
@@ -406,6 +407,7 @@ struct HostApp {
     login: login::Login,
     maintenance: Option<maintenance::State>,
     startup_diagnostic: Option<startup_diagnostic::StartupDiagnostic>,
+    startup_profile: Option<Arc<crate::store::native_host_snapshot::NativeHostSnapshot>>,
     // Last owner drops only after role workers, retained failures and writers.
     scope: Arc<HostScope>,
 }
@@ -456,9 +458,13 @@ impl HostApp {
             login: login::Login::default(),
             maintenance: None,
             startup_diagnostic: diagnostic,
+            startup_profile: None,
         };
         if app.scope.root.get().is_some() {
             if app.observe_service_client().await? {
+                return Ok(app);
+            }
+            if app.try_ready_startup().await? {
                 return Ok(app);
             }
             if app.observe_runtime_update()? {
@@ -728,6 +734,7 @@ impl HostApp {
             self.inspected_join = None;
             self.native_computer_requested = None;
             self.native_runtime = None;
+            self.startup_profile = None;
             self.join_retry = e.hint().map(|hint| (code, hint));
         } else if e.exit_code() == 4 {
             self.retained = Some(RetainedFailure::Join(e));
@@ -765,7 +772,18 @@ impl HostApp {
         if self.running.is_some() || self.unknown {
             return Ok(());
         }
-        self.read_configuration().await?;
+        if let Some(profile) = self.startup_profile.clone() {
+            if tokio::task::spawn_blocking(move || profile.revalidate())
+                .await
+                .map_err(|_| AppError("app_startup_observation_failed"))?
+                .is_err()
+            {
+                self.unknown = true;
+                return Err(AppError("app_startup_observation_changed"));
+            }
+        } else {
+            self.read_configuration().await?;
+        }
         let wanted = self
             .configuration
             .as_ref()
@@ -797,10 +815,15 @@ impl HostApp {
             if let Some(d) = &diagnostic {
                 d.report("app_host_desired_ready");
             }
+            let startup_profile = self.startup_profile.take();
             let desktop_intent = if self.native_computer_requested == Some(false) {
                 // The original native seed explicitly declined Computer. Starting
                 // Exec still loads and verifies its own complete Host profile below.
                 None
+            } else if startup_profile.is_some() {
+                // Metadata only. Actual Host execution still loads and validates
+                // canonical Running through its existing independent port.
+                startup_profile
             } else {
                 let intent_scope = self.scope.clone();
                 let runtime = self.native_runtime.clone();
@@ -1203,6 +1226,19 @@ impl HostApp {
                 | Operation::StopService
         ) {
             let _: EmptyInput = decode_input(&input)?;
+        }
+        // Only unchanged reads may retain the startup observation. Every
+        // explicit operation re-enters its existing mutable coordinator.
+        if !matches!(
+            operation,
+            Operation::Status
+                | Operation::StartupStatus
+                | Operation::ServiceStatus
+                | Operation::RuntimeUpdateStatus
+                | Operation::AppLifecycle
+                | Operation::PluginRead
+        ) {
+            self.startup_profile = None;
         }
         self.reap_runtime_update(false).await;
         if matches!(operation, Operation::QuitAdmission) && !self.maintenance_fenced() {

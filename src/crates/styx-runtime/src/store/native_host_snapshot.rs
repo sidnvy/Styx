@@ -74,6 +74,7 @@ pub(crate) struct NativeHostSnapshot {
     namespace: File,
     namespace_identity: (u64, u64),
     journal: JournalObservation,
+    canonical: native_state::ValidatedNativeState,
     pins: Vec<Pin>,
     seed: NativeHostJoinSeed,
     current_selection: NativeRuntimeSelection,
@@ -178,6 +179,14 @@ impl NativeHostSnapshot {
             None,
             RunPolicy::Execution,
         )
+    }
+    /// Current-state observation only; Stopped remains valid DATA here. The
+    /// execution loader continues to require its separate Execution policy.
+    pub(crate) fn observe_for_app(
+        path: &Path,
+        scope: Arc<crate::app::HostScope>,
+    ) -> JournalResult<Self> {
+        Self::open_source(path, Some(scope), None, RunPolicy::ControlBinding)
     }
     pub(crate) fn open_for_app(
         path: &Path,
@@ -461,6 +470,7 @@ impl NativeHostSnapshot {
             namespace,
             namespace_identity,
             journal,
+            canonical,
             pins,
             seed,
             current_selection,
@@ -614,6 +624,14 @@ impl NativeHostSnapshot {
             }
         }
         Ok(())
+    }
+    /// Borrowed canonical DATA, not writer/recovery/execution authority.
+    pub(crate) fn canonical(&self) -> &native_state::ValidatedNativeState {
+        &self.canonical
+    }
+    pub(crate) fn management_inventory(&self) -> JournalResult<management::ManagementInventory> {
+        self.revalidate()?;
+        management::readonly_inventory(&self.journal)
     }
     pub(crate) fn root_identity(&self) -> RootIdentity {
         self.root.identity()

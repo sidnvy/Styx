@@ -283,6 +283,21 @@ pub(crate) async fn inspect_for_app(scope: Arc<crate::app::HostScope>) -> Result
     }
 }
 
+/// Same complete inspector, retaining an already authenticated formal release.
+/// The receiver still compares it with current C07 and revalidates every member.
+pub(crate) async fn inspect_for_app_retained(
+    scope: Arc<crate::app::HostScope>,
+    runtime: Arc<crate::release::VerifiedNativeRelease>,
+) -> Result<JoinReport> {
+    let path = scope.state_dir().to_path_buf();
+    let retained = scope.clone();
+    platform::owned(async move {
+        platform::inspect_with_candidate(path, Some(scope), Some(runtime)).await
+    })
+    .await
+    .map_err(|error| error.with_app_scope(retained))
+}
+
 /// Read the original CLI enrollment prefix without dispatching Join/Claim/Confirm.
 /// A partial or uncertain prefix is refused by the same inspector used by the App.
 pub async fn inspect(state_dir: &Path) -> Result<JoinReport> {
@@ -1125,9 +1140,6 @@ mod platform {
         error.retryable = true;
         Err(error)
     }
-    fn open(path: &Path, app_scope: Option<Arc<crate::app::HostScope>>) -> Result<Work> {
-        open_with_candidate(path, app_scope, None)
-    }
     fn open_with_candidate(
         path: &Path,
         app_scope: Option<Arc<crate::app::HostScope>>,
@@ -1164,7 +1176,14 @@ mod platform {
         path: PathBuf,
         scope: Option<Arc<crate::app::HostScope>>,
     ) -> Result<JoinReport> {
-        let work = blocking(move || open(&path, scope)).await?;
+        inspect_with_candidate(path, scope, None).await
+    }
+    pub(super) async fn inspect_with_candidate(
+        path: PathBuf,
+        scope: Option<Arc<crate::app::HostScope>>,
+        candidate: Option<Arc<release::VerifiedNativeRelease>>,
+    ) -> Result<JoinReport> {
+        let work = blocking(move || open_with_candidate(&path, scope, candidate)).await?;
         let (_work, report) = io(work, |w| {
             // A strict complete prefix is required; absence/partial Claim or
             // Confirm stays unknown and never authorizes a network retry.
