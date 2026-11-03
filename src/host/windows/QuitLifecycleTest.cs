@@ -23,9 +23,12 @@ namespace StyxNative {
     string line;int calls=0;
     while((line=Console.ReadLine())!=null){
      var request=Json.Codec.DeserializeObject(line);calls++;File.WriteAllText(Path.Combine(dir,"calls"),calls.ToString());
-     if(mode=="observe"&&Json.Str(request,"operation")=="status"){
+     if(mode.StartsWith("observe",StringComparison.Ordinal)&&Json.Str(request,"operation")=="status"){
       string state=calls==1?"connected":"disconnected";System.Threading.Thread.Sleep(150);
-      Console.WriteLine(Json.Codec.Serialize(Json.Obj("id",Convert.ToInt32(Json.Get(request,"id")),"ok",true,"result",Json.Obj("mode","rust_host","supportedOperations",new object[]{"status","quitAdmission"},"foreground",Json.Obj("status",state=="connected"?"connected":"started","execConnection",state)))));Console.Out.Flush();continue;
+      Console.WriteLine(Json.Codec.Serialize(Json.Obj("id",Convert.ToInt32(Json.Get(request,"id")),"ok",true,"result",Json.Obj("mode","rust_host","supportedOperations",new object[]{"status","quitAdmission","fixtureFailure"},"foreground",Json.Obj("status",state=="connected"?"connected":"started","execConnection",state)))));Console.Out.Flush();continue;
+     }
+     if(mode=="observe-mutation"&&Json.Str(request,"operation")=="fixtureFailure"){
+      Console.WriteLine(Json.Codec.Serialize(Json.Obj("id",Convert.ToInt32(Json.Get(request,"id")),"ok",false,"error","fixture_failure")));Console.Out.Flush();continue;
      }
      bool refuse=mode=="busy"&&!File.Exists(Path.Combine(dir,"release"));
      if(worker.IdSafe()!=0){worker.StandardInput.Close();worker.WaitForExit();File.WriteAllText(Path.Combine(dir,"worker-exit"),worker.ExitCode.ToString());}
@@ -72,12 +75,21 @@ namespace StyxNative {
      if(mode=="dispose"){
       var disposing=Task.Run(()=>core.Dispose());await Task.Delay(10500);Check(!child.HasExited&&!disposing.IsCompleted,"ordinary_cleanup_force_killed_original_core");File.WriteAllText(Path.Combine(dir,"release"),"release");await disposing;Check(core.CleanupConfirmed,"ordinary_eof_not_joined");
      }
-     if(mode=="observe"){
-      Set(context,"snapshot",Json.Obj("mode","rust_host","supportedOperations",new object[]{"status","quitAdmission"},"foreground",Json.Obj("status","started","execConnection","connecting")));
+     if(mode.StartsWith("observe",StringComparison.Ordinal)){
+      Set(context,"snapshot",Json.Obj("mode","rust_host","supportedOperations",new object[]{"status","quitAdmission","fixtureFailure"},"foreground",Json.Obj("status","started","execConnection","connecting")));
+      Set(context,"snapshot",Json.Obj("mode","rust_host","supportedOperations",new object[]{"status","quitAdmission","fixtureFailure"},"configuration",Json.Obj(),"foreground",Json.Obj("status","started","execConnection","connecting")));settings.ShowStatus(Get(context,"snapshot"));
+      var content=(FlowLayoutPanel)Get(settings,"content");var draft=new TextBox {Text="keep this draft"};content.Controls.Add(draft);
+      if(mode=="observe-mutation"){
+       var reading=(Task)typeof(StyxContext).GetMethod("ObserveStatus",Fields).Invoke(context,null);
+       await Until(()=>File.Exists(Path.Combine(dir,"calls")),5);
+       await context.Run(async()=>{await context.Call("fixtureFailure");},"changing fixture…","fixture mutation failed");await reading;
+       Check(settings.Enabled&&settings.HasFeedback("fixture mutation failed"),"mutation_feedback_or_controls_lost");
+       Check(Json.Str(Get(context,"snapshot"),"foreground","execConnection")=="connecting","invalidated_read_overwrote_mutation");
+      }
       var timer=(System.Windows.Forms.Timer)Get(context,"statusTimer");timer.Start();
-      await Until(()=>Json.Str(Get(context,"snapshot"),"foreground","execConnection")=="connected",5);
+      if(mode=="observe")await Until(()=>Json.Str(Get(context,"snapshot"),"foreground","execConnection")=="connected",5);
       await Until(()=>Json.Str(Get(context,"snapshot"),"foreground","execConnection")=="disconnected",5);timer.Stop();
-      Check(File.ReadAllText(Path.Combine(dir,"calls"))=="2","status_observation_backlog");
+      Check(File.ReadAllText(Path.Combine(dir,"calls"))==(mode=="observe"?"2":"3"),"status_observation_backlog");if(mode=="observe-mutation")Check(settings.HasFeedback("fixture mutation failed"),"poll_erased_mutation_failure");Check(!draft.IsDisposed&&draft.Parent==content&&draft.Text=="keep this draft","observation_rebuilt_controls_or_lost_draft");
      }
      var first=context.RequestQuitResult();var second=context.RequestQuitResult();Check(Object.ReferenceEquals(first,second),"quit_dispatched_twice");
      if(mode=="slow"){
