@@ -59,11 +59,6 @@ fn os(error: crate::platform::linux::native_service::ServiceError) -> NativeMana
 }
 /// No mutation retry. A lost caller detaches the ONE owned operation. Unknown
 /// retains its original scope/utility custody and budget until process teardown.
-/// systemd reports a unit whose process exited with an error as `failed`;
-/// like `inactive`, nothing of it is running.
-fn not_running(active: &str) -> bool {
-    matches!(active, "inactive" | "failed")
-}
 pub async fn manage(
     state_dir: &Path,
     action: ServiceAction,
@@ -208,13 +203,13 @@ pub async fn manage(
                 return Err(NativeManagementError::new(ErrorKind::Conflict));
             }
             if action == ServiceAction::Start
-                && (original.run != NativeRunDesired::Stopped || !not_running(&before.active))
+                && (original.run != NativeRunDesired::Stopped || !before.stopped_for_mutation())
             {
                 return Err(NativeManagementError::new(ErrorKind::Conflict));
             }
             if action == ServiceAction::Uninstall
                 && (original.run != NativeRunDesired::Stopped
-                    || !not_running(&before.active)
+                    || !before.stopped_for_mutation()
                     || before.enabled != Some(false))
             {
                 return Err(NativeManagementError::new(ErrorKind::Conflict));

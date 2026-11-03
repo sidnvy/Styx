@@ -499,9 +499,7 @@ impl Definition {
         // management owner already holds the inactive execution lease before
         // committing Running. Do not clear or reinterpret its failed receipt,
         // and refuse failed units that may still own descendants.
-        let stopped =
-            before.active == "inactive" || (before.active == "failed" && before.cgroup.is_empty());
-        if !before.installed || !stopped || before.main_pid != 0 {
+        if !before.stopped_for_mutation() {
             return Err(ServiceError::Conflict);
         }
         self.ctl("start", true).await?;
@@ -622,11 +620,7 @@ impl Definition {
     }
     pub(crate) async fn uninstall(&mut self) -> ServiceResult<ServiceObservation> {
         let before = self.inspect().await?;
-        if !before.installed
-            || before.enabled != Some(false)
-            || before.active != "inactive"
-            || before.main_pid != 0
-        {
+        if !before.stopped_for_mutation() || before.enabled != Some(false) {
             return Err(ServiceError::Conflict);
         }
         self.validate()?;
@@ -788,6 +782,14 @@ pub(crate) struct ServiceObservation {
     pub(crate) runtime_health: &'static str,
 }
 impl ServiceObservation {
+    // A failed invocation is terminal only after both its main process and
+    // cgroup are gone. Use the same precondition before the configuration
+    // commit and before the OS operation; neither layer may accept more.
+    pub(crate) fn stopped_for_mutation(&self) -> bool {
+        self.installed
+            && self.main_pid == 0
+            && (self.active == "inactive" || (self.active == "failed" && self.cgroup.is_empty()))
+    }
     fn absent(unit: String, role: ServiceRole) -> Self {
         Self {
             schema: 1,
@@ -917,5 +919,31 @@ impl ServiceScope {
     /// or accept a different manager, runtime selection, or execution process.
     pub(crate) fn validate_identity(&self) -> ServiceResult<()> {
         self.peer.validate_identity()
+    }
+}
+
+#[cfg(test)]
+mod mutation_tests {
+    use super::*;
+    #[test]
+    fn failed_units_require_both_main_process_and_cgroup_absence() {
+        let mut os = ServiceObservation::absent("owned-test.service".into(), ServiceRole::Host);
+        assert!(!os.stopped_for_mutation());
+        os.installed = true;
+        os.active = "failed".into();
+        assert!(os.stopped_for_mutation());
+        os.main_pid = 42;
+        assert!(!os.stopped_for_mutation());
+        os.main_pid = 0;
+        os.cgroup = "/retained-original-cgroup".into();
+        assert!(!os.stopped_for_mutation());
+        os.active = "inactive".into();
+        assert!(os.stopped_for_mutation());
+        os.main_pid = 42;
+        assert!(!os.stopped_for_mutation());
+        os.main_pid = 0;
+        os.active = "deactivating".into();
+        os.cgroup.clear();
+        assert!(!os.stopped_for_mutation());
     }
 }

@@ -639,7 +639,9 @@ mod platform {
             transaction_id: id.clone(),
             sequence: observation.intent.sequence,
             observed_stage,
-            receipt: None,
+            // Return the original validated phase receipt, not an OS-derived
+            // success claim. Read-only callers can then correlate a lost reply.
+            receipt: observation.phase_receipts.last().cloned(),
             recovered: false,
         })
     }
