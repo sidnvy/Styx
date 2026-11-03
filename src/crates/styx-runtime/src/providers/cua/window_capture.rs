@@ -77,6 +77,14 @@ pub(crate) fn project_acquired(
     result: &CallToolResult,
     request: &WindowCaptureRequest,
 ) -> Result<CallToolResult> {
+    project_native_capture(result, request, cfg!(target_os = "windows"))
+}
+
+fn project_native_capture(
+    result: &CallToolResult,
+    request: &WindowCaptureRequest,
+    windows: bool,
+) -> Result<CallToolResult> {
     request.validate()?;
     bounded(result)?;
     if result.is_error == Some(true) {
@@ -89,12 +97,19 @@ pub(crate) fn project_acquired(
         .ok_or(CuaError::ProtocolMismatch)?;
     if object.get("pid").and_then(Value::as_u64) != Some(u64::from(request.pid))
         || object.get("window_id").and_then(Value::as_u64) != Some(request.window_id)
-        || object.get("coordinate_frame").and_then(Value::as_str) != Some("window")
-        || object
-            .get("screenshot_frame_valid")
-            .and_then(Value::as_bool)
-            != Some(true)
         || object.get("screenshot_mime_type").and_then(Value::as_str) != Some("image/png")
+    {
+        return Err(CuaError::ProtocolMismatch);
+    }
+    // Pinned Cua 0.36 Windows capture-only responses omit the Linux frame
+    // markers. Their exact HWND/PID capture and delivered PNG dimensions are
+    // checked below; never turn this read into an input observation. Explicit
+    // contradictory markers still refuse, including on Windows.
+    let coordinate_frame = object.get("coordinate_frame");
+    let frame_valid = object.get("screenshot_frame_valid");
+    if coordinate_frame.is_some_and(|v| v.as_str() != Some("window"))
+        || frame_valid.is_some_and(|v| v.as_bool() != Some(true))
+        || (!windows && (coordinate_frame.is_none() || frame_valid.is_none()))
     {
         return Err(CuaError::ProtocolMismatch);
     }
@@ -147,6 +162,32 @@ pub(crate) fn project_acquired(
         || object.get("screenshot_height").and_then(Value::as_u64) != Some(u64::from(height))
     {
         return Err(CuaError::ProtocolMismatch);
+    }
+    if windows {
+        // Windows reports the requested window's GetWindowRect geometry and a
+        // DWM bitmap which may exclude its invisible border. Resizing cannot
+        // make either delivered dimension larger than that native window.
+        let bounds = object
+            .get("window_bounds")
+            .and_then(Value::as_object)
+            .ok_or(CuaError::ProtocolMismatch)?;
+        for key in ["x", "y"] {
+            bounds
+                .get(key)
+                .and_then(Value::as_i64)
+                .and_then(|n| i32::try_from(n).ok())
+                .ok_or(CuaError::ProtocolMismatch)?;
+        }
+        for (key, delivered) in [("width", width), ("height", height)] {
+            let native = bounds
+                .get(key)
+                .and_then(Value::as_u64)
+                .filter(|n| (1..=i32::MAX as u64).contains(n))
+                .ok_or(CuaError::ProtocolMismatch)?;
+            if u64::from(delivered) > native {
+                return Err(CuaError::ProtocolMismatch);
+            }
+        }
     }
     // Whitelist instead of preserving native cache/capture IDs, metadata, old
     // text, annotations or arbitrary extension fields. This is not an input ref.

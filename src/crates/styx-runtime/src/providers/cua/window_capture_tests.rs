@@ -12,7 +12,7 @@ fn request() -> WindowCaptureRequest {
 }
 fn acquired() -> CallToolResult {
     let mut result = CallToolResult::structured(
-        json!({"pid":42,"window_id":1234,"coordinate_frame":"window","screenshot_frame_valid":true,"screenshot_width":1,"screenshot_height":1,"screenshot_mime_type":"image/png","snapshot_id":"s000000a1","invalidated_snapshot_ids":["s00000099"],"capture_id":"native-private-correlation","screenshot_refreshed_snapshot":true}),
+        json!({"pid":42,"window_id":1234,"coordinate_frame":"window","screenshot_frame_valid":true,"screenshot_width":1,"screenshot_height":1,"screenshot_mime_type":"image/png","window_bounds":{"x":-2,"y":0,"width":1,"height":1},"snapshot_id":"s000000a1","invalidated_snapshot_ids":["s00000099"],"capture_id":"native-private-correlation","screenshot_refreshed_snapshot":true}),
     );
     result.content = vec![
         ContentBlock::text("native token s000000a1:7 debug"),
@@ -172,4 +172,52 @@ fn conflicting_target_ambiguous_content_and_malformed_or_oversized_images_refuse
         project_acquired(&bad, &request()),
         Err(CuaError::Busy)
     ));
+}
+
+#[test]
+fn pinned_windows_capture_only_shape_is_observation_only_and_still_target_bound() {
+    // Shape from the actual 2026-11-03 Windows worker response (pinned source
+    // b88afe57... tools/impl_.rs); native PNG/readback acceptance is separate.
+    let mut native = acquired();
+    let object = native
+        .structured_content
+        .as_mut()
+        .unwrap()
+        .as_object_mut()
+        .unwrap();
+    object.remove("coordinate_frame");
+    object.remove("screenshot_frame_valid");
+    assert!(project_native_capture(&native, &request(), false).is_err());
+    let projected = project_native_capture(&native, &request(), true).unwrap();
+    let value = projected.structured_content.as_ref().unwrap();
+    assert_eq!(value["input_authorized"], json!(false));
+    assert_eq!(value["capture_observation_only"], json!(true));
+    assert!(
+        !serde_json::to_string(&projected)
+            .unwrap()
+            .contains("capture_id")
+    );
+    assert!(matches!(&projected.content[1],ContentBlock::Image(image) if image.data==PNG));
+    for (key, value) in [
+        ("coordinate_frame", json!("desktop")),
+        ("screenshot_frame_valid", json!(false)),
+        ("pid", json!(43)),
+        ("window_id", json!(1235)),
+        ("screenshot_width", json!(2)),
+        ("window_bounds", json!({"x":0,"y":0,"width":0,"height":1})),
+        ("window_bounds", json!({"x":0,"width":1,"height":1})),
+        ("window_bounds", json!({"x":0,"y":0,"width":1.5,"height":1})),
+        ("window_bounds", json!({"x":0,"y":0,"width":1,"height":0})),
+        ("window_bounds", Value::Null),
+        ("screenshot_error", json!("unavailable")),
+        ("screenshot_composited", json!(true)),
+        ("elements", json!([])),
+    ] {
+        let mut bad = native.clone();
+        bad.structured_content.as_mut().unwrap()[key] = value;
+        assert!(
+            project_native_capture(&bad, &request(), true).is_err(),
+            "{key}"
+        );
+    }
 }
