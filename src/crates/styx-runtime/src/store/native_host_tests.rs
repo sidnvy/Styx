@@ -262,7 +262,13 @@ const PREFIX_PHASES: [&[u8]; 5] = [
 fn coherent_prefix_keeps_partial_absence_and_complete_original_bytes() {
     let f = PrefixFixture::new();
     let mut store = f.store();
-    for count in 0..=5 {
+    for (count, next) in NativeHostJoinFile::ALL
+        .into_iter()
+        .zip(PREFIX_PHASES)
+        .map(Some)
+        .chain(std::iter::once(None))
+        .enumerate()
+    {
         let prefix = store.read_prefix().unwrap();
         for (index, observed) in prefix.iter().enumerate() {
             assert_eq!(
@@ -273,10 +279,8 @@ fn coherent_prefix_keeps_partial_absence_and_complete_original_bytes() {
         let (canonical, seed) = store.readstate_and_seed().unwrap();
         assert_eq!(canonical.state().revision, 0);
         assert_eq!(seed, SEED_BYTES);
-        if count < 5 {
-            store
-                .append(NativeHostJoinFile::ALL[count], PREFIX_PHASES[count])
-                .unwrap();
+        if let Some((file, raw)) = next {
+            store.append(file, raw).unwrap();
         }
     }
 }
