@@ -73,13 +73,15 @@ pub(super) async fn stop(live: &mut Live, until: Instant) {
         child.take_stdin();
         child.take_stdout();
         child.take_stderr();
-        if child.start_kill().is_ok() {
-            if let Ok(Ok(status)) = timeout_at(until, child.wait()).await {
-                // wait() requires root_waited AND original Job ActiveProcesses0
-                // AND actual original supervisor join; never termination ACK.
-                live.exit_success = Some(status.success());
-                live.scope_confirmed = true;
-            }
+        // cleanup() already owns client.close(), which sends MCP EOF. Wait
+        // for that same worker to drain; terminating its Job here raced the
+        // normal close and turned a successful session into exit code 1.
+        // A deadline leaves the original child retained and cleanup unproven.
+        if let Ok(Ok(status)) = timeout_at(until, child.wait()).await {
+            // wait() requires root_waited AND original Job ActiveProcesses0
+            // AND actual original supervisor join; never an EOF acknowledgement.
+            live.exit_success = Some(status.success());
+            live.scope_confirmed = true;
         }
     } else if live.identity.is_none() {
         live.scope_confirmed = true; // Strict local pre-spawn failure only.
