@@ -99,3 +99,11 @@ Status is observed once per second through the same Core, at most one observatio
 Ordinary Core cleanup sends EOF and concurrently drains both original pipes before waiting for exit. It has no timed force-kill path. An unknown RPC result still reports failure and is not sent again. A long cleanup remains owned while the UI awaits it asynchronously.
 
 The bootstrap hashes the original CLI once while its original non-writable/non-deletable file handle remains held. Each new bootstrap lifetime authenticates again; native signed-payload and manifest checks remain in place. Real Windows file-lock negatives and native process/WinForms scenarios must accompany this change.
+
+## Coherent startup observations (2026-11-04)
+
+An actual signed candidate painted in 494 ms but answered the App's initial Core read only after about 46.5 seconds. A separate original Core measured 32.0 seconds for open plus plain status and 7.8 seconds for startupStatus; Host admission/executor startup followed separately. These observations are a failed performance qualification, not evidence that the UI should skip verification.
+
+Native enrollment inspection now reads its fixed five-phase prefix as one bounded read-only batch under the original configuration writer. Complete C07, material and phase validation brackets capture; each captured file must also match its original pin, and the canonical state digest must stay unchanged. Replacement during capture returns no prefix. State and its original seed are observed together instead of repeating the same full state read to return borrowed immutable seed bytes. These returned bytes remain DATA; network/append boundaries retain their original complete validation and unknown outcomes are never retried.
+
+The App reuses its original formal verified release for the desktop-intent snapshot through the existing full retained-selection/member revalidation port. It does not reuse a receipt, accept a new path or weaken desktop source checks. Automatic resume observes Running and schedules the original strict Host admission without writing Running again; only an explicit Connect changes that intent. A newer Stopped state must therefore remain stopped. Native performance and effects still require measurement on the resulting candidate.

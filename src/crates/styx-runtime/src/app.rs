@@ -421,7 +421,14 @@ impl HostApp {
         if !deployment_file.is_absolute() {
             return Err(AppError("app_deployment_invalid"));
         }
+        let diagnostic = startup_diagnostic::StartupDiagnostic::from_env();
+        if let Some(d) = &diagnostic {
+            d.report("app_scope_open_begin");
+        }
         let scope = Arc::new(HostScope::open(state_dir)?);
+        if let Some(d) = &diagnostic {
+            d.report("app_scope_open_ready");
+        }
         let (status, observed) = watch::channel(ConnectionStatus::stopped());
         let mut app = Self {
             retire_failure: None,
@@ -448,7 +455,7 @@ impl HostApp {
             quit_ticket: None,
             login: login::Login::default(),
             maintenance: None,
-            startup_diagnostic: None,
+            startup_diagnostic: diagnostic,
         };
         if app.scope.root.get().is_some() {
             if app.observe_service_client().await? {
@@ -456,6 +463,9 @@ impl HostApp {
             }
             if app.observe_runtime_update()? {
                 return Ok(app);
+            }
+            if let Some(d) = &app.startup_diagnostic {
+                d.report("app_configuration_read_begin");
             }
             if let Err(error) = app.read_configuration().await {
                 if app.retained.is_none() {
@@ -465,7 +475,13 @@ impl HostApp {
                 app.enrollment = Some(json!({"status":"incomplete","error":error.code()}));
                 return Ok(app);
             }
+            if let Some(d) = &app.startup_diagnostic {
+                d.report("app_configuration_read_ready");
+            }
             {
+                if let Some(d) = &app.startup_diagnostic {
+                    d.report("app_enrollment_inspect_begin");
+                }
                 match native_join::inspect_for_app(app.scope.clone()).await {
                     Ok(report) => {
                         app.native_computer_requested = Some(report.computer_requested);
@@ -482,6 +498,9 @@ impl HostApp {
                     }
                 }
             }
+        }
+        if let Some(d) = &app.startup_diagnostic {
+            d.report("app_open_ready");
         }
         Ok(app)
     }
@@ -758,15 +777,23 @@ impl HostApp {
         if let Some(gateway) = &mut self.local_gateway {
             gateway.start().await?;
         }
-        self.connect_host().await
+        // Resume observes Running; it must never overwrite a newer Stopped
+        // intent. Original Host admission rechecks canonical Running itself.
+        self.start_host().await
     }
     async fn connect_host(&mut self) -> Result<(), AppError> {
+        if self.running.is_none() {
+            self.set_desired(NativeRunDesired::Running).await?;
+            self.start_host().await?;
+        }
+        Ok(())
+    }
+    async fn start_host(&mut self) -> Result<(), AppError> {
         if self.running.is_none() {
             let diagnostic = self.startup_diagnostic.clone();
             if let Some(d) = &diagnostic {
                 d.report("app_connect_host");
             }
-            self.set_desired(NativeRunDesired::Running).await?;
             if let Some(d) = &diagnostic {
                 d.report("app_host_desired_ready");
             }
@@ -776,13 +803,23 @@ impl HostApp {
                 None
             } else {
                 let intent_scope = self.scope.clone();
+                let runtime = self.native_runtime.clone();
                 tokio::task::spawn_blocking(move || {
-                    crate::store::native_host_snapshot::NativeHostSnapshot::open_for_app(
-                        intent_scope.state_dir(),
-                        intent_scope.clone(),
-                    )
-                    .ok()
-                    .map(Arc::new)
+                    use crate::store::native_host_snapshot::NativeHostSnapshot;
+                    // Reuse the original formal release, with its existing full
+                    // selection/member revalidation; never a receipt/path cache.
+                    let snapshot = match runtime {
+                        Some(runtime) => NativeHostSnapshot::open_for_app_retained(
+                            intent_scope.state_dir(),
+                            intent_scope.clone(),
+                            runtime,
+                        ),
+                        None => NativeHostSnapshot::open_for_app(
+                            intent_scope.state_dir(),
+                            intent_scope.clone(),
+                        ),
+                    };
+                    snapshot.ok().map(Arc::new)
                 })
                 .await
                 .ok()

@@ -604,7 +604,7 @@ mod platform {
     impl Work {
         fn validate(&self) -> Result<()> {
             validate_app_scope(self.app_scope.as_deref(), &self.state_dir)?;
-            let state = self.store.readstate().map_err(|_| unknown())?;
+            let (state, seed) = self.store.readstate_and_seed().map_err(|_| unknown())?;
             if !state
                 .state()
                 .desired
@@ -639,7 +639,7 @@ mod platform {
                     .manifest()
                     .minimum_reader
                     .supports_state_reader(state.state().reader_contract)
-                || self.store.seed_binding().map_err(|_| unknown())? != self.seed_raw.as_slice()
+                || seed != self.seed_raw.as_slice()
                 || self
                     .store
                     .configuration_root()
@@ -741,7 +741,7 @@ mod platform {
     ) -> Result<Work> {
         let loaded: Result<_> = (|| {
             validate_app_scope(app_scope.as_deref(), &path)?;
-            let state = store.readstate().map_err(|_| unknown())?;
+            let (state, seed) = store.readstate_and_seed().map_err(|_| unknown())?;
             if !state
                 .state()
                 .desired
@@ -760,7 +760,7 @@ mod platform {
             {
                 return Err(unknown());
             }
-            let seed_raw = Zeroizing::new(store.seed_binding().map_err(|_| unknown())?.to_vec());
+            let seed_raw = Zeroizing::new(seed.to_vec());
             let seed: NativeHostJoinSeed =
                 serde_json::from_slice(&seed_raw).map_err(|_| unknown())?;
             let deployment_input = Input::open(&path.join("deployment.json"), LIMIT)?;
@@ -1166,23 +1166,13 @@ mod platform {
     ) -> Result<JoinReport> {
         let work = blocking(move || open(&path, scope)).await?;
         let (_work, report) = io(work, |w| {
-            // A strict complete prefix is required. Missing reply or a partial
-            // Claim/Confirm has unknown outcome, never an invitation to retry.
-            // Inspect one bounded read-only prefix under the original writer.
-            // Each store read still checks every original phase/material pin
-            // and journal tip. No network or mutation occurs between reads;
-            // validate the complete release before and after this batch instead
-            // of streaming that same closure separately for every phase file.
+            // A strict complete prefix is required; absence/partial Claim or
+            // Confirm stays unknown and never authorizes a network retry.
+            // One fixed read-only batch validates all original files and the
+            // complete C07 history before/after capture under the same owner.
             w.validate()?;
-            let dispatched = w.store.read(File::JoinDispatched).map_err(|_| unknown())?;
-            let reply = w.store.read(File::JoinReply).map_err(|_| unknown())?;
-            let credential = w.store.read(File::Credential).map_err(|_| unknown())?;
-            let confirm = w
-                .store
-                .read(File::ConfirmDispatched)
-                .map_err(|_| unknown())?;
-            let ready = w.store.read(File::Ready).map_err(|_| unknown())?;
-            w.validate()?;
+            let [dispatched, reply, credential, confirm, ready] =
+                w.store.read_prefix().map_err(|_| unknown())?;
             if dispatched.is_none() {
                 return Err(JoinError::new("native_join_dispatch_unknown_no_retry", 4));
             }
@@ -1239,22 +1229,14 @@ mod platform {
     ) -> Result<JoinReport> {
         let work = blocking(move || open_with_candidate(&path, app_scope, candidate)).await?;
         let (work, (reply, ready_raw, mut credential, confirm_dispatched)) = io(work, |w| {
-            // One read-only prefix under the same original writer, as in
-            // inspect above. Every store.read still verifies its original pins
-            // and journal tip; no append or HTTP occurs between these reads.
+            // All local prefix reads complete before any HTTP or append.
+            // No cached prefix is used as authority for a later operation.
             w.validate()?;
-            let reply = w
-                .store
-                .read(File::JoinReply)
-                .map_err(|_| unknown())?
-                .ok_or_else(|| JoinError::new("native_join_dispatch_unknown_no_retry", 4))?;
-            let ready = w.store.read(File::Ready).map_err(|_| unknown())?;
-            let credential = w.store.read(File::Credential).map_err(|_| unknown())?;
-            let confirm = w
-                .store
-                .read(File::ConfirmDispatched)
-                .map_err(|_| unknown())?
-                .is_some();
+            let [_, reply, credential, confirm, ready] =
+                w.store.read_prefix().map_err(|_| unknown())?;
+            let reply =
+                reply.ok_or_else(|| JoinError::new("native_join_dispatch_unknown_no_retry", 4))?;
+            let confirm = confirm.is_some();
             w.validate()?;
             Ok((reply, ready, credential, confirm))
         })

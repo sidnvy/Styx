@@ -467,8 +467,48 @@ impl NativeHostJoinStore {
         self.binding
             .with_binding(|configuration, _| self.validate_locked(configuration))
     }
+    /// One complete observation binds the canonical state and original seed.
+    /// Borrowed bytes are DATA for this boundary, never future admission.
+    pub(crate) fn readstate_and_seed(&self) -> JournalResult<(ValidatedNativeState, &[u8])> {
+        let state = self.readstate()?;
+        Ok((state, &self.seed))
+    }
+    /// Read the fixed five-phase prefix under the SAME configuration writer.
+    /// Complete C07/material/phase validation brackets the batch. Every captured
+    /// file also has to match its original pin; no result escapes on change.
+    pub(crate) fn read_prefix(&self) -> JournalResult<[Option<Zeroizing<Vec<u8>>>; 5]> {
+        self.read_prefix_inner(|| Ok(()))
+    }
+    fn read_prefix_inner(
+        &self,
+        after_capture: impl FnOnce() -> JournalResult<()>,
+    ) -> JournalResult<[Option<Zeroizing<Vec<u8>>>; 5]> {
+        self.binding.with_binding(|configuration, _| {
+            let before = self.validate_locked(configuration)?;
+            let mut prefix = std::array::from_fn(|_| None);
+            for file in NativeHostJoinFile::ALL {
+                match (
+                    optional(&configuration.root, file)?,
+                    self.phases.get(file.index()),
+                ) {
+                    (Some(raw), Some(pin)) if pin.matches(&raw) => {
+                        prefix[file.index()] = Some(Zeroizing::new(raw.bytes));
+                    }
+                    (None, None) => {}
+                    _ => return Err(JournalError::Unknown),
+                }
+            }
+            after_capture()?;
+            let after = self.validate_locked(configuration)?;
+            if before.raw_sha256() != after.raw_sha256() {
+                return Err(JournalError::Unknown);
+            }
+            Ok(prefix)
+        })
+    }
     /// Revalidated before returning. These borrowed cached bytes are data, not a
     /// promise of future filesystem stability or an enrollment capability.
+    #[cfg(test)]
     pub(crate) fn seed_binding(&self) -> JournalResult<&[u8]> {
         self.readstate()?;
         Ok(&self.seed)
