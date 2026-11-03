@@ -462,6 +462,64 @@ async fn connect(
         _ => ForegroundError("gateway_transport_refused"),
     })
 }
+fn retain_transport_outcome(
+    previous: Option<crate::host::protocol::wire::TransportDrainOutcome>,
+    current: crate::host::protocol::wire::TransportDrainOutcome,
+) -> crate::host::protocol::wire::TransportDrainOutcome {
+    use crate::host::protocol::wire::TransportDrainOutcome::{Complete, Unknown, Unsupported};
+    match (previous, current) {
+        (Some(Unknown), _) | (_, Unknown) => Unknown,
+        (Some(Unsupported), _) | (_, Unsupported) => Unsupported,
+        _ => Complete,
+    }
+}
+
+#[cfg(test)]
+mod connection_recovery_tests {
+    use super::*;
+    use crate::host::protocol::wire::TransportDrainOutcome::{Complete, Unknown, Unsupported};
+    #[test]
+    fn successful_new_link_cannot_clear_an_old_missing_receipt() {
+        assert_eq!(retain_transport_outcome(Some(Unknown), Complete), Unknown);
+        assert_eq!(retain_transport_outcome(Some(Complete), Unknown), Unknown);
+        assert_eq!(
+            retain_transport_outcome(Some(Unsupported), Complete),
+            Unsupported
+        );
+        assert_eq!(retain_transport_outcome(None, Complete), Complete);
+        assert_eq!(retain_transport_outcome(Some(Complete), Complete), Complete);
+    }
+    #[test]
+    fn temporary_network_wait_is_not_authorization_to_retry_rejected_credentials_or_tls() {
+        for code in [
+            "gateway_connect_failed",
+            "gateway_connect_timeout",
+            "gateway_wss_unavailable",
+        ] {
+            assert!(retryable_connect_error(code));
+        }
+        for code in [
+            "gateway_wss_admission_refused",
+            "gateway_tls_handshake_rejected",
+            "gateway_wss_request_rejected",
+            "gateway_leaf_pin_mismatch",
+        ] {
+            assert!(!retryable_connect_error(code));
+        }
+    }
+}
+
+fn retryable_connect_error(code: &str) -> bool {
+    matches!(
+        code,
+        "gateway_connect_timeout"
+            | "gateway_connect_failed"
+            | "gateway_tls_timeout"
+            | "gateway_transport_deadline"
+            | "gateway_wss_unavailable"
+            | crate::gateway::paired::CAPACITY_ERROR_CODE
+    )
+}
 fn facts(device: &DeviceId) -> AdmissionFacts {
     // These are bootstrap-local facts after the original credential's strict
     // WSS admission, not v3 per-chat grants or client-supplied tool authority.
@@ -873,19 +931,49 @@ async fn run_owned(
     // No remote transport exists until after the local signed inputs, executor
     // and optional providers are ready. Local failure still settles this host.
     let mut remote_transport_drain = None;
+    let mut settled_transports = None;
     match session {
         Ok(session) => {
-            let connection: ConnectionGeneration = uuid::Uuid::new_v4()
-                .to_string()
-                .try_into()
-                .expect("UUID identity");
-            let initial = if cancel.is_cancelled() {
-                Ok(None)
-            } else {
+            let initial = loop {
+                if cancel.is_cancelled() {
+                    break Ok(None);
+                }
+                let connection: ConnectionGeneration = uuid::Uuid::new_v4()
+                    .to_string()
+                    .try_into()
+                    .expect("UUID identity");
                 event(&events, &cancel, "connecting", &device, Some(&connection));
-                tokio::select! {
-                    _=cancel.cancelled()=>Ok(None),
-                    result=connect(&admitted.profile,connection,host.link_budget())=>result.map(Some),
+                let attempt = tokio::select! {
+                    _=cancel.cancelled()=>break Ok(None),
+                    result=connect(&admitted.profile,connection,host.link_budget())=>result,
+                };
+                match attempt {
+                    Ok(link) => break Ok(Some(link)),
+                    Err(error) if retryable_connect_error(error.code()) => {
+                        // No protocol/business request has been dispatched. Reuse
+                        // this original Host; each authenticated link has a fresh
+                        // generation. Never retry a native action or weaken TLS.
+                        event_with_reason(
+                            &events,
+                            &cancel,
+                            "disconnected",
+                            &device,
+                            None,
+                            Some(error.code()),
+                        );
+                        tokio::select! {
+                            _=cancel.cancelled()=>break Ok(None),
+                            _=tokio::time::sleep(Duration::from_secs(2))=>{},
+                        }
+                        if let Err(error) = validate(&admitted).await {
+                            match error.code() {
+                                "native_service_configuration_pending" => continue,
+                                "native_service_stop_requested" => break Ok(None),
+                                _ => break Err(error),
+                            }
+                        }
+                    }
+                    Err(error) => break Err(error),
                 }
             };
             match initial {
@@ -969,12 +1057,15 @@ async fn run_owned(
                                 }
                             }
                         };
+                        if mode == HostWireMode::PairedV3 {
+                            let observed = result.as_ref().ok().copied().flatten().unwrap_or(
+                                crate::host::protocol::wire::TransportDrainOutcome::Unknown,
+                            );
+                            let retained = retain_transport_outcome(settled_transports, observed);
+                            settled_transports = Some(retained);
+                            remote_transport_drain = Some(retained);
+                        }
                         let disconnected = if cancel.is_cancelled() {
-                            if mode == HostWireMode::PairedV3 {
-                                remote_transport_drain = Some(result.ok().flatten().unwrap_or(
-                                    crate::host::protocol::wire::TransportDrainOutcome::Unknown,
-                                ));
-                            }
                             false
                         } else {
                             event(

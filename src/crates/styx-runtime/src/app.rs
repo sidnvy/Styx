@@ -3,6 +3,7 @@
 //! arbitrary call-supplied paths, legacy adoption or mutation replay lives here.
 #[cfg(all(test, target_os = "linux", target_env = "gnu"))]
 mod control_binding_tests;
+mod exit;
 #[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 mod join_retry_tests;
 mod local_gateway;
@@ -659,6 +660,9 @@ impl HostApp {
         Ok(())
     }
     fn available(&self) -> Result<(), AppError> {
+        self.available_for(false)
+    }
+    fn available_for(&self, local_exit: bool) -> Result<(), AppError> {
         self.scope.validate()?;
         if self.service_fenced() {
             return Err(AppError("app_service_original_operation_unknown"));
@@ -669,14 +673,16 @@ impl HostApp {
         if let Some(error) = &self.retained {
             return Err(AppError(error.code()));
         }
-        if self.unknown {
+        if self.unknown || (!local_exit && self.remote_cleanup_unconfirmed()) {
             return Err(AppError("app_cleanup_unknown"));
         }
-        if self
-            .local_gateway
-            .as_ref()
-            .is_some_and(|gateway| gateway.is_fenced())
-        {
+        if self.local_gateway.as_ref().is_some_and(|gateway| {
+            if local_exit {
+                gateway.local_exit_fenced()
+            } else {
+                gateway.is_fenced()
+            }
+        }) {
             return Err(AppError("app_gateway_fenced"));
         }
         if self.quit_ticket.is_some() {
@@ -861,7 +867,12 @@ impl HostApp {
             Some(gateway) => gateway.settle().await,
             None => Ok(()),
         };
-        if gateway.is_err() {
+        if gateway.is_err()
+            && self
+                .local_gateway
+                .as_ref()
+                .is_some_and(|g| g.local_exit_fenced())
+        {
             self.unknown = true;
         }
         host.and(gateway)?;
@@ -871,7 +882,23 @@ impl HostApp {
         Ok(())
     }
     async fn set_desired(&mut self, run: NativeRunDesired) -> Result<(), AppError> {
-        self.available()?;
+        self.set_desired_for(run, false).await
+    }
+    async fn set_desired_for(
+        &mut self,
+        run: NativeRunDesired,
+        local_stop: bool,
+    ) -> Result<(), AppError> {
+        if local_stop
+            && (run != NativeRunDesired::Stopped
+                || self
+                    .cleanup
+                    .as_ref()
+                    .is_some_and(|c| !c.local_stop_complete()))
+        {
+            return Err(AppError("app_cleanup_unknown"));
+        }
+        self.available_for(local_stop)?;
         self.read_configuration().await?;
         let report = self
             .configuration
@@ -907,6 +934,9 @@ impl HostApp {
         Ok(())
     }
     async fn settle(&mut self) -> Result<(), AppError> {
+        self.settle_host(false).await
+    }
+    async fn settle_host(&mut self, local_exit: bool) -> Result<(), AppError> {
         if let Some(role) = self.running.take() {
             role.cancel.cancel();
             let outcome = role.worker.await;
@@ -916,10 +946,10 @@ impl HostApp {
                     let complete = outcome.is_complete() && events.is_ok();
                     let locally_joined = outcome.local_stop_complete() && events.is_ok();
                     self.cleanup = Some(outcome);
-                    if complete {
+                    if complete || (local_exit && locally_joined) {
                         self.status.send_replace(ConnectionStatus::stopped());
                     } else {
-                        self.unknown = true;
+                        self.unknown |= !locally_joined;
                         self.status.send_replace(ConnectionStatus::unknown());
                         let cause = if locally_joined {
                             "remote_transport_drain_unconfirmed"
@@ -957,7 +987,7 @@ impl HostApp {
                 }
             }
         }
-        if self.unknown {
+        if self.unknown || (!local_exit && self.remote_cleanup_unconfirmed()) {
             return Err(AppError("app_cleanup_unknown"));
         }
         Ok(())
@@ -976,6 +1006,7 @@ impl HostApp {
         self.service_fenced()
             || self.runtime_update_fenced()
             || self.unknown
+            || self.remote_cleanup_unconfirmed()
             || self.retained.is_some()
             || self.quit_ticket.is_some()
             || self
@@ -1137,7 +1168,17 @@ impl HostApp {
             let _: EmptyInput = decode_input(&input)?;
         }
         self.reap_runtime_update(false).await;
-        self.reap().await?;
+        if matches!(operation, Operation::QuitAdmission) && !self.maintenance_fenced() {
+            if self
+                .running
+                .as_ref()
+                .is_some_and(|r| r.worker.is_finished())
+            {
+                self.settle_host(true).await?;
+            }
+        } else {
+            self.reap().await?;
+        }
         match operation {
             Operation::PluginRead | Operation::PluginSave | Operation::PluginExport => {
                 return self.plugin_request(operation, input).await;
@@ -1243,11 +1284,14 @@ impl HostApp {
         // Stopping our own captured role remains safe even if scope validation
         // has failed. Never leave it running because a configuration write was refused.
         if matches!(operation, Operation::QuitAdmission) {
-            self.settle_all().await?;
+            self.settle_for_quit().await?;
         } else if matches!(operation, Operation::Disconnect) {
-            self.settle().await?;
+            self.settle_host(true).await?;
         }
-        self.available()?;
+        self.available_for(
+            (matches!(operation, Operation::QuitAdmission) && !self.maintenance_fenced())
+                || matches!(operation, Operation::Disconnect),
+        )?;
         match operation {
             Operation::ResumeLocal => Err(AppError("app_local_checkpoint_refused")),
             Operation::CreateLocal => {
@@ -1334,18 +1378,22 @@ impl HostApp {
                 Ok(self.snapshot().await)
             }
             Operation::Disconnect => {
-                self.settle().await?;
-                self.set_desired(NativeRunDesired::Stopped).await?;
+                self.settle_host(true).await?;
+                self.record_pause_uncertainty(&uuid::Uuid::new_v4().simple().to_string())
+                    .await?;
+                self.set_desired_for(NativeRunDesired::Stopped, true)
+                    .await?;
                 Ok(self.snapshot().await)
             }
             Operation::QuitAdmission => {
                 // This ticket is only admission. Here admission is deliberately
                 // issued after actual owned-role settlement, never after kill.
-                self.settle_all().await?;
+                self.settle_for_quit().await?;
                 let ticket = uuid::Uuid::new_v4().simple().to_string();
+                self.record_exit_uncertainty(&ticket).await?;
                 self.quit_ticket = Some(ticket.clone());
                 Ok(
-                    json!({"quit":{"status":"ready_to_quit","ticketId":ticket},"cleanup":self.cleanup,"gateway":self.local_gateway.as_ref().map(|g|g.status())}),
+                    json!({"quit":{"status":"ready_to_quit","scope":"local_app","ticketId":ticket},"cleanup":self.cleanup,"gateway":self.local_gateway.as_ref().map(|g|g.status())}),
                 )
             }
             Operation::PluginRead
@@ -1474,7 +1522,11 @@ async fn serve_app<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
             break;
         }
     }
-    app.settle_all().await?;
+    app.settle_for_quit().await?;
+    if app.quit_ticket.is_none() {
+        app.record_exit_uncertainty(&uuid::Uuid::new_v4().simple().to_string())
+            .await?;
+    }
     if app.retained.is_some() {
         return Err(AppError("app_operation_unknown"));
     }

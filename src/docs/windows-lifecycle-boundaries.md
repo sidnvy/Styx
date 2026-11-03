@@ -89,3 +89,13 @@ defines it. These fixtures cover active owned workers, disconnected component
 state, long drains, busy refusal, abnormal/early Core exit, lost replies, and
 same-profile reservation. They do not establish signed Host execution, remote
 Computer Use, or acceptance against an unavailable production Gateway.
+
+## 2026-11-04 design correction
+
+Ordinary App Quit and bundled local `quit` judge local exit after the original Core, native work, stdout/stderr and event tasks have actually joined. Gateway availability is not an exit prerequisite. Core's `scope=local_app` ticket is not remote cleanup proof: a missing remote drain remains Unknown in the cleanup object and in a private immutable `app-local-exit-<ticket>.json` observation beside the profile container. No old result is cleared or action replayed. Maintenance/update handoff retains its strict full-settlement check.
+
+Status is observed once per second through the same Core, at most one observation in flight. Mutations and shutdown pause observation; mutation revisions reject stale responses. Observing status does not reconnect a Paused profile or execute tools. The original Host retries only temporary initial network availability failures; credential and certificate refusals remain refusals.
+
+Ordinary Core cleanup sends EOF and concurrently drains both original pipes before waiting for exit. It has no timed force-kill path. An unknown RPC result still reports failure and is not sent again. A long cleanup remains owned while the UI awaits it asynchronously.
+
+The bootstrap hashes the original CLI once while its original non-writable/non-deletable file handle remains held. Each new bootstrap lifetime authenticates again; native signed-payload and manifest checks remain in place. Real Windows file-lock negatives and native process/WinForms scenarios must accompany this change.

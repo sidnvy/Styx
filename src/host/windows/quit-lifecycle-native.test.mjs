@@ -16,7 +16,7 @@ test('original Quit custody joins owned work, preserves uncertainty and refuses 
  const exe=path.join(root,'QuitLifecycleTest.exe'),csc=path.join(process.env.WINDIR,'Microsoft.NET/Framework64/v4.0.30319/csc.exe');
  const built=spawnSync(csc,['/nologo','/warn:4','/warnaserror+','/define:STYX_QUIT_TEST','/target:exe','/main:StyxNative.QuitLifecycleTest','/reference:System.Windows.Forms.dll','/reference:System.Drawing.dll','/reference:System.Web.Extensions.dll','/out:'+exe,path.join(here,'Styx.cs'),path.join(here,'QuitLifecycleTest.cs')],{encoding:'utf8',windowsHide:true});
  assert.equal(built.status,0,built.stdout+built.stderr);
- for(const mode of ['idle','active','disconnected','slow','busy','failed','startup-failed','crashed','lost','reservation']){
+ for(const mode of ['idle','active','disconnected','slow','busy','failed','startup-failed','crashed','lost','reservation','observe','dispose','bootstrap']){
   const dir=path.join(root,mode),run=spawnSync(exe,[resources,dir,mode],{encoding:'utf8',timeout:60000,windowsHide:true});
   assert.equal(run.status,0,`${mode}: ${fs.existsSync(path.join(dir,'failure.txt'))?fs.readFileSync(path.join(dir,'failure.txt'),'utf8'):run.error||run.stderr}`);
   const result=JSON.parse(fs.readFileSync(path.join(dir,'result.json'),'utf8'));assert.equal(result.status,'PASS');
