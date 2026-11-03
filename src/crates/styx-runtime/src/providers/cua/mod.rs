@@ -259,6 +259,7 @@ impl CuaAction {
         // list; the markdown view carries native tokens and is always removed.
         // A default (markdown) read would therefore return nothing actionable.
         if name == "get_window_state"
+            && arguments.get("include_accessibility_tree") != Some(&Value::Bool(false))
             && matches!(
                 arguments.get("tree_format").and_then(Value::as_str),
                 None | Some("markdown")

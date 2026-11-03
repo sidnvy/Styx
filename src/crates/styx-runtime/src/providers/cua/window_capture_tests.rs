@@ -63,6 +63,36 @@ fn request_is_explicit_bounded_window_capture_with_no_other_branch() {
     );
 }
 #[test]
+fn public_action_preserves_capture_only_and_default_accessibility_routes() {
+    use super::super::{CuaAction, DesktopReadRequest};
+    let capture = CuaAction::new("get_window_state".into(), arguments()).unwrap();
+    assert!(matches!(
+        capture.desktop_read_request().unwrap(),
+        Some(DesktopReadRequest::WindowCapture(_))
+    ));
+    let tree = CuaAction::new(
+        "get_window_state".into(),
+        json!({"pid":42,"window_id":1234,"include_screenshot":false,
+            "include_accessibility_tree":true,"max_elements":64,"max_depth":8,"timeout_ms":2000})
+        .as_object()
+        .unwrap()
+        .clone(),
+    )
+    .unwrap();
+    assert!(matches!(
+        tree.desktop_read_request().unwrap(),
+        Some(DesktopReadRequest::Accessibility(_))
+    ));
+    let mut extra = arguments();
+    extra.insert("full_output".into(), json!(true));
+    assert!(
+        CuaAction::new("get_window_state".into(), extra)
+            .unwrap()
+            .desktop_read_request()
+            .is_err()
+    );
+}
+#[test]
 fn projection_keeps_exact_image_bytes_and_discards_all_native_refs() {
     let result = project_acquired(&acquired(), &request()).unwrap();
     assert!(
