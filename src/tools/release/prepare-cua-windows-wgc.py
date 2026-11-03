@@ -19,6 +19,9 @@ CAPTURE_SHA = '480e7715c970df0d32459e3ac97fe13911f20f79d01d76f08f75c7fdc0fc8b98'
 LOCK = 'libs/cua-driver/rust/Cargo.lock'
 LOCK_SHA = 'f9d49ce2dccdc43b2f7f027185301138fdd45eab4f9a556aace4cb0f4a98d46c'
 FRAGMENT = REPO / 'src/host/windows/cua-window-dpi-capture.rs'
+BASELINE = REPO / 'src/providers/cua-native/source.json'
+BASELINE_SHA = 'da892240124277eb707bc717774ab63bd7de117ee4a171b237cc207b85ad1b5b'
+BASELINE_PATCH_SHA = '0dbd26de72aa13076ee69a247e8ec3b362df771aa4d8c3515aeb5510d0052e71'
 ANCHOR = 'fn screenshot_window_mapped(hwnd: u64) -> Result<(Vec<u8>, bool, Option<FrameGeometry>)> {\n'
 
 
@@ -51,6 +54,12 @@ def main():
     require(archive.is_file() and not archive.is_symlink(), 'original_archive_required')
     require(digest(archive) == ARCHIVE_SHA, 'fixed_upstream_archive_mismatch')
     require(not output.exists() and not output.is_relative_to(REPO), 'fresh_external_build_input_required')
+    require(digest(BASELINE) == BASELINE_SHA, 'fixed_native_baseline_manifest_required')
+    baseline = json.loads(BASELINE.read_bytes())
+    patch = BASELINE.parent / baseline['patch']
+    require(digest(patch) == BASELINE_PATCH_SHA == baseline['patch_sha256']
+            and baseline['upstream_commit'] == COMMIT
+            and baseline['official_archive_sha256'] == ARCHIVE_SHA, 'fixed_native_baseline_patch_required')
     fragment = FRAGMENT.read_bytes()
     require(fragment and len(fragment) <= 16384, 'bounded_reviewed_fragment_required')
     output.mkdir(mode=0o700, parents=False)
@@ -83,6 +92,20 @@ def main():
     capture = output / CAPTURE
     require(digest(capture) == CAPTURE_SHA and digest(output / LOCK) == LOCK_SHA,
             'fixed_upstream_capture_or_lock_mismatch')
+    for item in baseline['files']:
+        path = output / item['path']
+        require((not path.exists()) if item['original_sha256'] is None
+                else path.is_file() and digest(path) == item['original_sha256'],
+                'original_native_baseline_file_mismatch')
+    # Mature patch utility, exact hunk context, then byte-exact final hashes.
+    applied = subprocess.run(['patch', '--batch', '--forward', '--fuzz=0', '-p1',
+                              '-i', str(patch)], cwd=output, capture_output=True, text=True)
+    require(applied.returncode == 0, 'native_baseline_patch_failed')
+    for item in baseline['files']:
+        require(digest(output / item['path']) == item['final_sha256'],
+                'patched_native_baseline_file_mismatch')
+    require(digest(output / LOCK) == baseline['patched_lock_sha256']
+            and digest(capture) == CAPTURE_SHA, 'native_baseline_lock_or_capture_changed')
     original = capture.read_text(encoding='utf-8')
     require(original.count(ANCHOR) == 1, 'original_capture_boundary_required')
     injected = (fragment.decode('utf-8') + '\n' + ANCHOR
@@ -90,12 +113,17 @@ def main():
                 + '        return Ok(capture);\n'
                 + '    }\n')
     capture.write_text(original.replace(ANCHOR, injected), encoding='utf-8', newline='\n')
+    (output / 'styx-native-baseline-source.json').write_bytes(BASELINE.read_bytes())
     files = {str(path.relative_to(output)).replace('\\', '/'): digest(path)
              for path in sorted(output.rglob('*')) if path.is_file()}
     receipt = {'schema': 1, 'scope': 'THIRD_PARTY_BUILD_INPUT_NOT_BUILT_OR_SIGNED',
                'upstream_repository': 'trycua/cua', 'upstream_commit': COMMIT,
                'upstream_archive_sha256': ARCHIVE_SHA, 'upstream_capture_sha256': CAPTURE_SHA,
-               'upstream_cargo_lock_sha256': LOCK_SHA, 'product_source_revision': head,
+               'upstream_cargo_lock_sha256': LOCK_SHA,
+               'patched_cargo_lock_sha256': baseline['patched_lock_sha256'],
+               'native_baseline_manifest_sha256': BASELINE_SHA,
+               'native_baseline_patch_sha256': BASELINE_PATCH_SHA,
+               'product_source_revision': head,
                'product_source_status': 'DIRTY_CHECK_ONLY' if dirty else 'CLEAN',
                'development_check': args.development_check,
                'fragment_sha256': hashlib.sha256(fragment).hexdigest(),

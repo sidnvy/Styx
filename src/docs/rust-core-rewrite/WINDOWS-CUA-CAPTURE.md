@@ -26,13 +26,17 @@ continues to require fresh AX evidence and current Core admission.
 
 Upstream: [capture.rs](https://github.com/trycua/cua/blob/6d6c734c127025fb39ad5d585a10382808b39dc1/libs/cua-driver/rust/crates/platform-windows/src/capture.rs),
 [wgc.rs](https://github.com/trycua/cua/blob/6d6c734c127025fb39ad5d585a10382808b39dc1/libs/cua-driver/rust/crates/platform-windows/src/wgc.rs).
-No dependency versions or Cargo.lock are changed.
+The existing `src/providers/cua-native/source.json` and its exact once-write/drain
+patch remain mandatory. Their patched Cargo.lock is retained without any further
+change. A raw upstream rebuild omits the private AX completeness/value/once-write
+and drain implementation, and is not a valid Styx worker even if screenshots work.
 
 ## Reproducible input
 
 `src/tools/release/prepare-cua-windows-wgc.py` verifies the immutable upstream
 archive, capture module and Cargo.lock, extracts bounded dependency inputs to a
-fresh external directory, and inserts the reviewed
+fresh external directory, verifies and applies the existing native baseline patch
+with zero fuzz and exact original/final file hashes, then inserts the reviewed
 `src/host/windows/cua-window-dpi-capture.rs` fragment at one exact boundary.
 It records every prepared file hash. Release preparation requires a clean exact
 Styx source revision; `--development-check` explicitly labels an unfrozen check.
@@ -42,6 +46,10 @@ Archive: `https://codeload.github.com/trycua/cua/tar.gz/6d6c734c127025fb39ad5d58
 SHA256: `157acdc2fd0bf5c480af2bdbe4a69f75a709551627f851caee16346234fdedef`.
 Original Cargo.lock SHA256:
 `f9d49ce2dccdc43b2f7f027185301138fdd45eab4f9a556aace4cb0f4a98d46c`.
+Mandatory baseline patch SHA256:
+`0dbd26de72aa13076ee69a247e8ec3b362df771aa4d8c3515aeb5510d0052e71`;
+its exact patched lock SHA256:
+`978a9b7e0bc2855af210f26c28dadc29f1a9b978df2677385332f1fc6bf39964`.
 
 On NAB5 use the existing Rust 1.97.1/MSVC toolchain and one owned Cargo cache,
 4 Cargo jobs and 2 CMake jobs. Verify the prepared file manifest before use.

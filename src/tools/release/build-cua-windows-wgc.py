@@ -52,8 +52,22 @@ def main():
             and receipt['product_source_revision'] == args.source_revision
             and receipt['product_source_status'] == 'CLEAN' and receipt['development_check'] is False
             and receipt['upstream_commit'] == '6d6c734c127025fb39ad5d585a10382808b39dc1'
-            and receipt['upstream_cargo_lock_sha256'] == 'f9d49ce2dccdc43b2f7f027185301138fdd45eab4f9a556aace4cb0f4a98d46c',
+            and receipt['upstream_cargo_lock_sha256'] == 'f9d49ce2dccdc43b2f7f027185301138fdd45eab4f9a556aace4cb0f4a98d46c'
+            and receipt.get('patched_cargo_lock_sha256') == '978a9b7e0bc2855af210f26c28dadc29f1a9b978df2677385332f1fc6bf39964'
+            and receipt.get('native_baseline_manifest_sha256') == 'da892240124277eb707bc717774ab63bd7de117ee4a171b237cc207b85ad1b5b'
+            and receipt.get('native_baseline_patch_sha256') == '0dbd26de72aa13076ee69a247e8ec3b362df771aa4d8c3515aeb5510d0052e71',
             'frozen_pinned_source_required')
+    baseline_path = root / 'styx-native-baseline-source.json'
+    require(baseline_path.is_file() and digest(baseline_path) == receipt['native_baseline_manifest_sha256'],
+            'actual_native_baseline_manifest_required')
+    baseline = json.loads(baseline_path.read_bytes())
+    require(all((root / item['path']).is_file()
+                and digest(root / item['path']) == item['final_sha256']
+                for item in baseline['files']), 'actual_native_baseline_files_required')
+    require(receipt['fragment_sha256'] == '4152524e7e238236842e80d6e6b77216c5376509eca2816d6007ea7e8119fb23'
+            and digest(root / 'libs/cua-driver/rust/crates/platform-windows/src/capture.rs')
+            == receipt['patched_capture_sha256'] == '18afbedb7ed7fb8638a6e37cb5ca2d891ed082a5b215b87db711f9d4d61c708f',
+            'actual_reviewed_capture_required')
     inspect(root, receipt)
     output.mkdir(mode=0o700)
     env = os.environ.copy()
@@ -69,6 +83,9 @@ def main():
     build = {'schema': 1, 'scope': 'NATIVE_WORKER_BUILD_NOT_PLATFORM_ACCEPTANCE',
              'source_revision': args.source_revision, 'upstream_commit': receipt['upstream_commit'],
              'prepared_inputs_sha256': hashlib.sha256(raw).hexdigest(),
+             'native_baseline_manifest_sha256': receipt['native_baseline_manifest_sha256'],
+             'native_baseline_patch_sha256': receipt['native_baseline_patch_sha256'],
+             'patched_cargo_lock_sha256': receipt['patched_cargo_lock_sha256'],
              'fragment_sha256': receipt['fragment_sha256'],
              'patched_capture_sha256': receipt['patched_capture_sha256'],
              'jobs': args.jobs, 'cmake_jobs': 2, 'command': command,
