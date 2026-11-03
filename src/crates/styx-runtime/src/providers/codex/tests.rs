@@ -1813,3 +1813,98 @@ async fn retained_read_pages_leave_a_control_rpc_slot_and_refuse_before_another_
     drop((first, second, a, b));
     worker.await.unwrap();
 }
+
+#[tokio::test]
+async fn complete_native_events_retain_delayed_output_without_replaying_an_expired_read() {
+    use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+    let mut auth = authority();
+    let (_, id, _) = auth.issue(spec(&std::env::temp_dir(), "unused", false));
+    let owner = auth.owner.clone();
+    let (adapter, handle, server) = fixture_adapter(owner.clone(), id);
+    let process = handle.process_id.clone();
+    let (complete_tx, complete_rx) = tokio::sync::oneshot::channel();
+    let (done_tx, done_rx) = tokio::sync::oneshot::channel();
+    let tail = "尾🙂";
+    let worker = tokio::spawn(async move {
+        let (r, mut w) = tokio::io::split(server);
+        let mut lines = BufReader::new(r).lines();
+        w.write_all(format!("{}\n",json!({"method":"process/output","params":{"processId":process,"seq":1,"stream":"stdout","chunk":STANDARD.encode("abc")}})).as_bytes()).await.unwrap();
+        let q: Value = serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+        assert_eq!(q["method"], "process/read");
+        w.write_all(format!("{}\n",json!({"id":q["id"],"result":{"chunks":[{"seq":1,"stream":"stdout","chunk":STANDARD.encode("abc")}],"nextSeq":2,"exited":false,"exitCode":null,"closed":false,"failure":null}})).as_bytes()).await.unwrap();
+        complete_rx.await.unwrap();
+        for event in [
+            json!({"method":"process/output","params":{"processId":process,"seq":2,"stream":"stdout","chunk":STANDARD.encode(tail)}}),
+            json!({"method":"process/exited","params":{"processId":process,"seq":3,"exitCode":0}}),
+            json!({"method":"process/closed","params":{"processId":process,"seq":4}}),
+        ] {
+            w.write_all(format!("{event}\n").as_bytes()).await.unwrap();
+        }
+        // Native read retention may already have expired. Any second read would
+        // lose the original outcome; the complete pushed prefix supplies it.
+        tokio::select! {
+            _=done_rx=>{},
+            q=lines.next_line()=>panic!("unexpected native read after complete original events: {q:?}"),
+        }
+    });
+    let first = adapter
+        .read(&owner, &handle, 2, Duration::ZERO)
+        .await
+        .unwrap();
+    assert_eq!(first.chunks[0].text, "ab");
+    assert_eq!(first.drain, OutputDrain::Open);
+    let second = adapter
+        .read(&owner, &handle, 2, Duration::ZERO)
+        .await
+        .unwrap();
+    assert_eq!(second.chunks[0].text, "c");
+    complete_tx.send(()).unwrap();
+    tokio::time::timeout(Duration::from_secs(1), async {
+        while adapter
+            .rpc
+            .observation(&handle.process_id)
+            .unwrap()
+            .closed
+            .is_none()
+        {
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .unwrap();
+    let partial = adapter
+        .read(&owner, &handle, 1, Duration::ZERO)
+        .await
+        .unwrap();
+    assert_eq!(partial.drain, OutputDrain::Open);
+    assert_eq!(
+        adapter.retire(&owner, &handle).await.unwrap_err(),
+        ExecError::ResourceUnsettled
+    );
+    let mut rest: String = partial.chunks.into_iter().map(|c| c.text).collect();
+    let mut drained = false;
+    for _ in 0..16 {
+        let page = adapter
+            .read(&owner, &handle, 1, Duration::ZERO)
+            .await
+            .unwrap();
+        assert_eq!(page.exit_code, Some(0));
+        for c in page.chunks {
+            rest.push_str(&c.text);
+        }
+        if page.drain == OutputDrain::Drained {
+            drained = true;
+            break;
+        }
+    }
+    assert!(drained);
+    assert_eq!(rest, tail);
+    let again = adapter
+        .read(&owner, &handle, 1, Duration::ZERO)
+        .await
+        .unwrap();
+    assert!(again.chunks.is_empty());
+    assert_eq!(again.exit_code, Some(0));
+    done_tx.send(()).unwrap();
+    worker.await.unwrap();
+}

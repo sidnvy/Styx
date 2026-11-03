@@ -17,6 +17,10 @@ use tokio_util::codec::{FramedRead, LinesCodec};
 const MAX_INFLIGHT: usize = (styx_contracts::OPERATION_METADATA_BYTES
     - styx_contracts::EXEC_FRAME_BYTES)
     / (2 * styx_contracts::EXEC_FRAME_BYTES);
+const EVENT_CACHE_BYTES: usize = styx_contracts::OPERATION_METADATA_BYTES
+    - styx_contracts::EXEC_FRAME_BYTES
+    - MAX_INFLIGHT * 2 * styx_contracts::EXEC_FRAME_BYTES;
+
 pub(super) struct BudgetedReply {
     pub(super) result: Result<Value, ExecError>,
     pub(super) _permit: tokio::sync::OwnedSemaphorePermit,
@@ -66,6 +70,7 @@ pub(super) struct Rpc {
     stdin: tokio::sync::Mutex<Option<Box<dyn tokio::io::AsyncWrite + Unpin + Send>>>,
     pending: Mutex<HashMap<u64, Pending>>,
     observations: Mutex<HashMap<String, Observation>>,
+    retained_events: Mutex<super::event_cache::RetainedEvents>,
     sequence: AtomicU64,
     closed: AtomicBool,
     timeout: Duration,
@@ -111,6 +116,7 @@ impl Rpc {
             stdin: tokio::sync::Mutex::new(Some(Box::new(stdin))),
             pending: Mutex::new(HashMap::new()),
             observations: Mutex::new(HashMap::new()),
+            retained_events: Mutex::new(super::event_cache::RetainedEvents::new(EVENT_CACHE_BYTES)),
             sequence: AtomicU64::new(0),
             closed: AtomicBool::new(false),
             timeout,
@@ -160,20 +166,28 @@ impl Rpc {
                 .get("method")
                 .and_then(Value::as_str)
                 .ok_or(ExecError::InvalidFrame)?;
-            if matches!(method, "process/exited" | "process/closed") {
+            if matches!(
+                method,
+                "process/output" | "process/exited" | "process/closed"
+            ) {
                 let params = message.get("params").ok_or(ExecError::InvalidFrame)?;
                 let id = params
                     .get("processId")
                     .and_then(Value::as_str)
                     .ok_or(ExecError::InvalidFrame)?;
-                if let Some(observation) = self
-                    .observations
-                    .lock()
-                    .expect("observation mutex")
-                    .get_mut(id)
+                if method != "process/output"
+                    && let Some(observation) = self
+                        .observations
+                        .lock()
+                        .expect("observation mutex")
+                        .get_mut(id)
                 {
                     observation.notice(method, params);
                 }
+                self.retained_events
+                    .lock()
+                    .expect("retained event mutex")
+                    .observe(id, method, params);
             }
             return Ok(());
         }
@@ -214,6 +228,10 @@ impl Rpc {
             return Err(ExecError::Capacity);
         }
         observations.insert(id.to_owned(), Observation::default());
+        self.retained_events
+            .lock()
+            .expect("retained event mutex")
+            .register(id);
         Ok(())
     }
     pub fn observation(&self, id: &str) -> Option<Observation> {
@@ -223,10 +241,30 @@ impl Rpc {
             .get(id)
             .cloned()
     }
+    pub(super) fn take_completed_events(
+        &self,
+        id: &str,
+        cursor: Option<u64>,
+    ) -> Option<super::event_cache::Completed> {
+        self.retained_events
+            .lock()
+            .expect("retained event mutex")
+            .take_completed(id, cursor)
+    }
+    pub(super) fn disable_event_cache(&self, id: &str) {
+        self.retained_events
+            .lock()
+            .expect("retained event mutex")
+            .disable(id);
+    }
     pub fn unregister(&self, id: &str) {
         self.observations
             .lock()
             .expect("observation mutex")
+            .remove(id);
+        self.retained_events
+            .lock()
+            .expect("retained event mutex")
             .remove(id);
     }
     pub fn fail(&self, error: ExecError) {

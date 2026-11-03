@@ -7,8 +7,9 @@ use zeroize::Zeroize;
 pub(super) struct BufferedOutput {
     chunks: VecDeque<(String, Vec<u8>)>,
     offset: usize,
-    _wire_budget: tokio::sync::OwnedSemaphorePermit,
-    _buffer_slot: tokio::sync::OwnedSemaphorePermit,
+    _wire_budget: Option<tokio::sync::OwnedSemaphorePermit>,
+    _buffer_slot: Option<tokio::sync::OwnedSemaphorePermit>,
+    _event_budget: Vec<tokio::sync::OwnedSemaphorePermit>,
 }
 impl BufferedOutput {
     fn take(&mut self, mut remaining: usize) -> Vec<(String, Vec<u8>)> {
@@ -56,7 +57,7 @@ impl CodexStdio {
         }
         let mut record = self.owned(owner, handle).await?;
         record.select_read_mode(ReadMode::Decoded)?;
-        if record.drained {
+        if record.drained && record.pending_output.is_none() {
             if let Some(observation) = self.rpc.observation(&handle.process_id) {
                 check_observation(&record, &observation)?;
                 if record.last_exit.is_none() {
@@ -77,7 +78,46 @@ impl CodexStdio {
                 exit_code: record.last_exit,
             });
         }
-        if record.pending_output.is_none() {
+        if record.pending_output.is_none()
+            && let Some(events) = self
+                .rpc
+                .take_completed_events(&handle.process_id, record.cursor)
+        {
+            let observation = self
+                .rpc
+                .observation(&handle.process_id)
+                .ok_or(ExecError::UnknownHandle)?;
+            check_observation(&record, &observation)?;
+            if observation.exited != Some(events.exit)
+                || observation.closed != Some(events.closed)
+                || record.last_exit.is_some_and(|code| code != events.exit.1)
+            {
+                return Err(ExecError::InvalidFrame);
+            }
+            let mut chunks = VecDeque::new();
+            let mut budgets = Vec::new();
+            for chunk in events.chunks {
+                let (stream, bytes, budget) = chunk.into_parts();
+                chunks.push_back((stream, bytes));
+                budgets.push(budget);
+            }
+            record.cursor = Some(events.closed);
+            record.last_exit = Some(events.exit.1);
+            record.output_closed = true;
+            // Every event from start through the original exit/close is present.
+            // No native read (or retry of a missing native record) is required.
+            record.drained = true;
+            if !chunks.is_empty() {
+                record.pending_output = Some(BufferedOutput {
+                    chunks,
+                    offset: 0,
+                    _wire_budget: None,
+                    _buffer_slot: None,
+                    _event_budget: budgets,
+                });
+            }
+        }
+        if record.pending_output.is_none() && !record.drained {
             let slot = self.rpc.reserve_read_buffer()?;
             let reply = self
                 .rpc
@@ -130,8 +170,9 @@ impl CodexStdio {
                 record.pending_output = Some(BufferedOutput {
                     chunks: validated.chunks.into(),
                     offset: 0,
-                    _wire_budget: reply._permit,
-                    _buffer_slot: slot,
+                    _wire_budget: Some(reply._permit),
+                    _buffer_slot: Some(slot),
+                    _event_budget: vec![],
                 });
             }
         }

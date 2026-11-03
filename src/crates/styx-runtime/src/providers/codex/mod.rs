@@ -7,6 +7,7 @@
 //! is discovered, adopted, restarted or replaced.
 mod child;
 mod continuation;
+mod event_cache;
 mod output;
 mod read;
 mod retention;
@@ -215,6 +216,8 @@ struct Record {
     decoder: OutputDecoder,
     pending_output: Option<read::BufferedOutput>,
     output_closed: bool,
+    // Native EOF observed; pending_output must also be empty before delivery
+    // drain or physical release can be reported.
     drained: bool,
     input_unknown: Option<OperationId>,
     last_exit: Option<i32>,
@@ -593,6 +596,7 @@ impl CodexStdio {
         // Select before the first await that can emit an RPC. Cancelling a
         // waiting read does not grant another consumer access to this process.
         record.select_read_mode(ReadMode::Raw)?;
+        self.rpc.disable_event_cache(&handle.process_id);
         let native = self
             .rpc
             .request(
@@ -823,7 +827,11 @@ impl CodexStdio {
     #[cfg(test)]
     async fn retire(&self, owner: &OwnerLease, handle: &ProcessHandle) -> Result<(), ExecError> {
         let mut record = self.owned(owner, handle).await?;
-        if !record.drained || record.last_exit.is_none() || record.input_unknown.is_some() {
+        if !record.drained
+            || record.pending_output.is_some()
+            || record.last_exit.is_none()
+            || record.input_unknown.is_some()
+        {
             return Err(ExecError::ResourceUnsettled);
         }
         record.retired = true;
