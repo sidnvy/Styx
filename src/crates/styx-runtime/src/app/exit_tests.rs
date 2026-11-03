@@ -143,6 +143,7 @@ async fn incomplete_local_cleanup_never_admits_a_local_exit() {
 
 #[tokio::test]
 async fn remote_unknown_cannot_authorize_installation_handoff() {
+    let _serial = super::super::maintenance::TEST_SERIAL.lock().await;
     let f = Fixture::new();
     let mut app = f.app().await;
     let install = f.0.join("Styx.app");

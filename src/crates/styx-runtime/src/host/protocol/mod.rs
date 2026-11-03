@@ -1088,6 +1088,11 @@ fn coordinator_error(error: CoordinatorError, read: bool) -> Reply {
         CoordinatorError::ReadDeadline => {
             (ErrorCategory::OperationTimeout, ExecutionCertainty::Unknown)
         }
+        CoordinatorError::Executor(crate::providers::codex::ExecError::Capacity) if read => {
+            // A decoded read buffer is reserved before any native request or
+            // cursor advance. A saturated caller may wait without poisoning it.
+            (ErrorCategory::Busy, ExecutionCertainty::NotDispatched)
+        }
         CoordinatorError::ResponseLost | CoordinatorError::Executor(_) => {
             (ErrorCategory::ResultUnknown, ExecutionCertainty::Unknown)
         }
@@ -1118,7 +1123,7 @@ fn coordinator_error(error: CoordinatorError, read: bool) -> Reply {
     Reply::Error {
         category,
         certainty,
-        cursor_may_be_consumed: read,
+        cursor_may_be_consumed: read && certainty != ExecutionCertainty::NotDispatched,
     }
 }
 struct BoundedJson(Vec<u8>, usize);

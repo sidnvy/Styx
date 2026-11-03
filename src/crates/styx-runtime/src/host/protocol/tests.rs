@@ -832,3 +832,38 @@ async fn actual_canonical_tls_wss_host_action_journey() {
 
 #[path = "drain_tests.rs"]
 mod drain;
+
+#[test]
+fn read_capacity_before_dispatch_keeps_cursor_retryable_but_unknown_never_does() {
+    use crate::providers::codex::ExecError;
+    assert!(matches!(
+        coordinator_error(CoordinatorError::Executor(ExecError::Capacity), true),
+        Reply::Error {
+            category: ErrorCategory::Busy,
+            certainty: ExecutionCertainty::NotDispatched,
+            cursor_may_be_consumed: false
+        }
+    ));
+    for error in [
+        CoordinatorError::Executor(ExecError::InvalidFrame),
+        CoordinatorError::ReadDeadline,
+        CoordinatorError::ResponseLost,
+    ] {
+        assert!(matches!(
+            coordinator_error(error, true),
+            Reply::Error {
+                certainty: ExecutionCertainty::Unknown,
+                cursor_may_be_consumed: true,
+                ..
+            }
+        ));
+    }
+    assert!(matches!(
+        coordinator_error(CoordinatorError::Executor(ExecError::Capacity), false),
+        Reply::Error {
+            category: ErrorCategory::ResultUnknown,
+            certainty: ExecutionCertainty::Unknown,
+            ..
+        }
+    ));
+}

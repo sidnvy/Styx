@@ -17,9 +17,9 @@ use tokio_util::codec::{FramedRead, LinesCodec};
 const MAX_INFLIGHT: usize = (styx_contracts::OPERATION_METADATA_BYTES
     - styx_contracts::EXEC_FRAME_BYTES)
     / (2 * styx_contracts::EXEC_FRAME_BYTES);
-struct BudgetedReply {
-    result: Result<Value, ExecError>,
-    _permit: tokio::sync::OwnedSemaphorePermit,
+pub(super) struct BudgetedReply {
+    pub(super) result: Result<Value, ExecError>,
+    pub(super) _permit: tokio::sync::OwnedSemaphorePermit,
 }
 struct Pending {
     reply: oneshot::Sender<BudgetedReply>,
@@ -70,6 +70,7 @@ pub(super) struct Rpc {
     closed: AtomicBool,
     timeout: Duration,
     permits: Arc<tokio::sync::Semaphore>,
+    read_buffers: Arc<tokio::sync::Semaphore>,
     observation_limit: usize,
     reader_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
@@ -114,6 +115,9 @@ impl Rpc {
             closed: AtomicBool::new(false),
             timeout,
             permits: Arc::new(tokio::sync::Semaphore::new(MAX_INFLIGHT)),
+            // A retained page keeps its existing RPC reservation. Leave one
+            // original wire slot for termination/cleanup; no new peer budget.
+            read_buffers: Arc::new(tokio::sync::Semaphore::new(MAX_INFLIGHT - 1)),
             observation_limit,
             reader_task: Mutex::new(None),
         });
@@ -245,7 +249,22 @@ impl Rpc {
             observation.lost = true;
         }
     }
+    pub(super) fn reserve_read_buffer(
+        &self,
+    ) -> Result<tokio::sync::OwnedSemaphorePermit, ExecError> {
+        self.read_buffers
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| ExecError::Capacity)
+    }
     pub async fn request(&self, method: &str, params: Value) -> Result<Value, ExecError> {
+        self.request_budgeted(method, params).await?.result
+    }
+    pub(super) async fn request_budgeted(
+        &self,
+        method: &str,
+        params: Value,
+    ) -> Result<BudgetedReply, ExecError> {
         if self.closed.load(Ordering::SeqCst) {
             return Err(ExecError::NotSent);
         }
@@ -321,7 +340,7 @@ impl Rpc {
             }
         }
         match tokio::time::timeout(self.timeout, receiver).await {
-            Ok(Ok(reply)) => reply.result,
+            Ok(Ok(reply)) => Ok(reply),
             Ok(Err(_)) => Err(ExecError::TransportLost),
             Err(_) => {
                 self.pending.lock().expect("pending mutex").remove(&id);

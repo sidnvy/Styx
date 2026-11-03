@@ -8,6 +8,7 @@
 mod child;
 mod continuation;
 mod output;
+mod read;
 mod retention;
 mod rpc;
 use base64::{Engine as _, engine::general_purpose::STANDARD};
@@ -212,6 +213,8 @@ struct Record {
     cursor: Option<u64>,
     gaps: u64,
     decoder: OutputDecoder,
+    pending_output: Option<read::BufferedOutput>,
+    output_closed: bool,
     drained: bool,
     input_unknown: Option<OperationId>,
     last_exit: Option<i32>,
@@ -461,6 +464,8 @@ impl CodexStdio {
                 cursor: None,
                 gaps: 0,
                 decoder: OutputDecoder::default(),
+                pending_output: None,
+                output_closed: false,
                 drained: false,
                 retired: false,
                 input_unknown: None,
@@ -568,80 +573,7 @@ impl CodexStdio {
         max_bytes: usize,
         wait: Duration,
     ) -> Result<ProcessOutput, ExecError> {
-        if max_bytes == 0 || max_bytes > 65536 || wait > Duration::from_secs(1) {
-            return Err(ExecError::InvalidRequest);
-        }
-        let mut record = self.owned(owner, handle).await?;
-        record.select_read_mode(ReadMode::Decoded)?;
-        if record.drained {
-            if let Some(observation) = self.rpc.observation(&handle.process_id) {
-                if observation.invalid {
-                    return Err(ExecError::InvalidFrame);
-                }
-                if record.last_exit.is_none() {
-                    record.last_exit = observation.exited.map(|(_, code)| code);
-                }
-                if record.last_exit.is_some() {
-                    self.rpc.unregister(&handle.process_id);
-                }
-            }
-            return Ok(ProcessOutput {
-                chunks: vec![],
-                liveness: if record.last_exit.is_some() {
-                    ExecutionLiveness::Exited
-                } else {
-                    ExecutionLiveness::Unknown
-                },
-                drain: OutputDrain::Drained,
-                exit_code: record.last_exit,
-            });
-        }
-        let reply=self.rpc.request("process/read",json!({"processId":handle.process_id,"afterSeq":record.cursor,"maxBytes":max_bytes,"waitMs":wait.as_millis() as u64})).await?;
-        let page: ReadPage = serde_json::from_value(reply).map_err(|_| ExecError::InvalidFrame)?;
-        let validated = output::validate(&page, record.cursor, record.gaps, max_bytes)?;
-        if page.failure.is_some() {
-            return Err(ExecError::ProcessFailure);
-        }
-        let observation = self
-            .rpc
-            .observation(&handle.process_id)
-            .ok_or(ExecError::UnknownHandle)?;
-        if observation.invalid {
-            return Err(ExecError::InvalidFrame);
-        }
-        let drained = page.closed && page.chunks.is_empty();
-        let chunks = record.decoder.decode(validated.chunks, drained)?;
-        record.cursor = Some(validated.cursor);
-        record.gaps = validated.gaps;
-        record.drained = drained;
-        if page.exited {
-            record.last_exit = page.exit_code;
-        }
-        // A closed pipe does not imply process exit. Native process/read or an
-        // authenticated process/exited notification must independently prove it.
-        if record.last_exit.is_none() {
-            record.last_exit = observation.exited.map(|(_, code)| code);
-        }
-        if record.drained && record.last_exit.is_some() {
-            self.rpc.unregister(&handle.process_id);
-        }
-        let liveness = if record.last_exit.is_some() {
-            ExecutionLiveness::Exited
-        } else if page.closed || observation.lost {
-            ExecutionLiveness::Unknown
-        } else {
-            ExecutionLiveness::Running
-        };
-        Ok(ProcessOutput {
-            chunks,
-            liveness,
-            drain: if drained {
-                OutputDrain::Drained
-            } else {
-                OutputDrain::Open
-            },
-            exit_code: record.last_exit,
-        })
+        self.read_decoded(owner, handle, max_bytes, wait).await
     }
     /// Read the native page using the caller's cursor, never the decoded
     /// consumer's cursor or a synthesized drained cache. The Core coordinator
@@ -675,7 +607,9 @@ impl CodexStdio {
             serde::Deserialize::deserialize(&native).map_err(|_| ExecError::InvalidFrame)?;
         // Validation is per request: repeats and earlier cursors remain native
         // read-only operations, not consumption of the decoded stream.
-        output::validate(&page, after_seq, 0, max_bytes)?;
+        // Preserve the upstream whole-chunk page and its exact native cursor.
+        // maxBytes is a batching hint, bounded by the existing wire frame.
+        output::validate(&page, after_seq, 0, styx_contracts::EXEC_FRAME_BYTES)?;
         let observation = self
             .rpc
             .observation(&handle.process_id)
@@ -773,11 +707,20 @@ impl CodexStdio {
     ) -> Result<CleanupReadEvidence, ExecError> {
         use zeroize::Zeroize;
         let mut record = self.owned(authority.owner(), handle).await?;
+        // Original validated page stays owned until delivery or revoked cleanup.
+        // Dropping it zeroizes cached bytes and releases its RPC reservation.
+        record.pending_output = None;
         if !record.drained {
-            let reply = self.rpc.request("process/read", json!({"processId":handle.process_id,"afterSeq":record.cursor,"maxBytes":65536,"waitMs":50})).await?;
+            let reply = self.rpc.request_budgeted("process/read", json!({"processId":handle.process_id,"afterSeq":record.cursor,"maxBytes":65536,"waitMs":50})).await?;
             let page: ReadPage =
-                serde_json::from_value(reply).map_err(|_| ExecError::InvalidFrame)?;
-            let mut validated = output::validate(&page, record.cursor, record.gaps, 65536)?;
+                serde_json::from_value(reply.result?).map_err(|_| ExecError::InvalidFrame)?;
+            let _wire_budget = reply._permit;
+            let mut validated = output::validate(
+                &page,
+                record.cursor,
+                record.gaps,
+                styx_contracts::EXEC_FRAME_BYTES,
+            )?;
             for (_, bytes) in &mut validated.chunks {
                 bytes.zeroize();
             }
@@ -851,10 +794,11 @@ impl CodexStdio {
                 .request("process/terminate", json!({"processId":handle.process_id}))
                 .await;
             loop {
-                let reply=self.rpc.request("process/read",json!({"processId":handle.process_id,"afterSeq":null,"maxBytes":65536,"waitMs":50})).await?;
+                let reply=self.rpc.request_budgeted("process/read",json!({"processId":handle.process_id,"afterSeq":null,"maxBytes":65536,"waitMs":50})).await?;
                 let page: ReadPage =
-                    serde_json::from_value(reply).map_err(|_| ExecError::InvalidFrame)?;
-                output::validate(&page, None, 0, 65536)?;
+                    serde_json::from_value(reply.result?).map_err(|_| ExecError::InvalidFrame)?;
+                let _wire_budget = reply._permit;
+                output::validate(&page, None, 0, styx_contracts::EXEC_FRAME_BYTES)?;
                 if page.failure.is_some() {
                     return Ok::<TerminationEvidence, ExecError>(TerminationEvidence::Unknown);
                 }

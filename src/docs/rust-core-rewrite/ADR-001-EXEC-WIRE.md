@@ -30,3 +30,11 @@ The final Rust↔Rust candidate must pass the strong contract. Passing the legac
 4. Complete Rust Gateway transport/registry/auth and Rust↔Rust tests, then migration through signed versioned payloads.
 
 Required negative controls include spoofed owner metadata, registry generation substituted for HostGeneration, stale connection/owner token, duplicate start/write, changed payload, ambiguous ACK, queued read before start, transport resume without executor respawn, raw/decoded mode mixing, fake v2 WebSocket echo, and silent downgrade. Effects and cleanup must be observed independently. No live profile or signed artifact was changed to make this decision.
+
+## Native output pagination correction, 2026-11-04
+
+The pinned Windows Codex executor returns whole output chunks: a `process/read` with `maxBytes:1500` returned a valid 1544-byte chunk. This is a batching hint, not a native frame limit. The adapter retains the existing hard wire-frame bound, sequence/base64 checks, owner checks and independent process-exit/output-drain facts.
+
+Decoded consumers retain each validated native page under its original RPC memory reservation and deliver bounded byte slices through the same incremental UTF-8 decoder. They advance the native cursor only after retaining the validated page, never issue a second native read while bytes remain, and require an empty closed page to prove drain. Two retained pages leave one original RPC slot for control/cleanup. Saturation refuses a decoded read before dispatch, with its cursor unchanged; unknown reads still prohibit replay. Revoked-owner cleanup discards and zeroizes the original retained bytes. Raw-page mode preserves the upstream page and cursor without splitting or re-encoding it. Cancellation and cleanup apply the hard frame bound rather than the batching hint.
+
+Contract regressions are separate from signed Gateway/Host native acceptance. Original failed reads and their independent one-time effects remain evidence; they are never retried to validate this correction.
