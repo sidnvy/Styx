@@ -47,3 +47,21 @@ Markdown placeholder. The adapter validates this specific shape and geometry,
 then projects only the exact image and target. It discards the placeholder and
 all native snapshot/capture references; this read never authorizes input.
 Protocol/reference PASS remains distinct from installed Gateway acceptance.
+
+
+## macOS exact element click capability evidence
+
+The pinned mature Mac `click` element route performs AX actions and can restore
+key-window state. The original authenticated daemon's fresh Accessibility
+permission and successful current window probe therefore provide its Pointer
+and WindowsControl capability evidence. Leaving both permanently unavailable
+incorrectly rejects an exact observed element before native dispatch, even
+when AX text input and window capture work.
+
+This registration does not supply target authority. Host still requires the
+same owner/resource/process/window, a fresh complete AX observation and native
+token, every grant, and the final source refresh before one dispatch. All other
+mutating routes without an exact Host click/write binding remain refused;
+Keyboard remains unavailable. Missing native permission or current window
+probe cannot authorize the click. Original not-dispatched receipts are retained,
+and actual independent button effects remain required for acceptance.
