@@ -294,9 +294,9 @@ impl CuaAction {
         }
         if name == "click" && arguments.contains_key("element_token") {
             // The public native schema permits explicit defaults. Canonicalize
-            // only the existing exact-element/background/left route; other
-            // buttons, foreground delivery and extra target shapes still fail
-            // the strict click contract before any write is dispatched.
+            // only defaults here. The exact-target contract separately admits
+            // the explicit Windows foreground context-menu gesture; unsupported
+            // gestures and extra target shapes still fail before any dispatch.
             for (key, default) in [("button", "left"), ("delivery_mode", "background")] {
                 if arguments.get(key).and_then(Value::as_str) == Some(default) {
                     arguments.remove(key);

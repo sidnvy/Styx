@@ -138,6 +138,7 @@ impl OwnedAxObservation {
             pid: Some(read.pid),
             window_id: Some(read.window_id),
             element_token: request.element_token.clone(),
+            gesture: request.gesture,
         })
     }
     pub(super) fn click_facts(
