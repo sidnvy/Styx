@@ -292,6 +292,17 @@ impl CuaAction {
                 }
             }
         }
+        if name == "click" && arguments.contains_key("element_token") {
+            // The public native schema permits explicit defaults. Canonicalize
+            // only the existing exact-element/background/left route; other
+            // buttons, foreground delivery and extra target shapes still fail
+            // the strict click contract before any write is dispatched.
+            for (key, default) in [("button", "left"), ("delivery_mode", "background")] {
+                if arguments.get(key).and_then(Value::as_str) == Some(default) {
+                    arguments.remove(key);
+                }
+            }
+        }
         let value = Self { name, arguments };
         value.validate()?;
         Ok(value)

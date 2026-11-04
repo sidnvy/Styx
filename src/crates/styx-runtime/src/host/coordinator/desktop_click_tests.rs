@@ -198,9 +198,28 @@ fn prepare(
 }
 #[tokio::test]
 async fn desktop_click_fresh_token_dispatches_once_and_unknown_is_never_replayed() {
-    for unknown in [false, true] {
+    for (unknown, defaults) in [
+        (false, json!({})),
+        (true, json!({})),
+        (false, json!({"button":"left"})),
+        (true, json!({"button":"left"})),
+        (false, json!({"delivery_mode":"background"})),
+        (true, json!({"delivery_mode":"background"})),
+        (false, json!({"button":"left","delivery_mode":"background"})),
+        (true, json!({"button":"left","delivery_mode":"background"})),
+    ] {
         let (mut state, owner, resource) = fixture().await;
-        let (action, context) = prepare(&state, &owner, &resource, &click("s00000002:1")).unwrap();
+        let mut arguments = json!({"element_token":"s00000002:1"})
+            .as_object()
+            .unwrap()
+            .clone();
+        arguments.extend(defaults.as_object().unwrap().clone());
+        let request = CuaAction::new("click".into(), arguments).unwrap();
+        assert_eq!(
+            request.to_operation_payload().unwrap(),
+            click("s00000002:1").to_operation_payload().unwrap()
+        );
+        let (action, context) = prepare(&state, &owner, &resource, &request).unwrap();
         assert_eq!(
             action.click_request().unwrap().unwrap().element_token,
             "s00000001:1"
@@ -484,6 +503,20 @@ async fn desktop_click_requires_current_os_evidence_and_latest_owned_window_read
     )
     .unwrap();
     assert!(pixel.click_request().is_err());
+    for unsupported in [
+        json!({"button":"right"}),
+        json!({"button":"middle"}),
+        json!({"delivery_mode":"foreground"}),
+    ] {
+        let mut arguments = json!({"element_token":"s00000003:1"})
+            .as_object()
+            .unwrap()
+            .clone();
+        arguments.extend(unsupported.as_object().unwrap().clone());
+        let request = CuaAction::new("click".into(), arguments).unwrap();
+        assert!(request.click_request().is_err());
+        assert!(prepare(&state, &owner, &resource, &request).is_err());
+    }
 }
 
 #[tokio::test]
