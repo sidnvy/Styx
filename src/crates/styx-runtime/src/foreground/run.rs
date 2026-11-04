@@ -307,6 +307,24 @@ async fn prepare_computer(
     if !enabled {
         return Ok(None);
     }
+    // The App needs this Core's configured intent before publishing its Cua
+    // descriptor. Wait only for absent publication, before retaining any source.
+    // Invalid hints, dead owners, signature/peer failures and an acquired source
+    // are never retried or replaced. Exec and lifecycle remain independently live.
+    custody
+        .read_before_source(Duration::from_secs(30), || async {
+            use crate::providers::cua::macos_source::{BindingError, MacSourceCandidate};
+            tokio::task::spawn_blocking(MacSourceCandidate::check_discovery_presence)
+                .await
+                .map_err(|_| ForegroundError("computer_bootstrap_failed"))?
+                .map_err(|error| {
+                    ForegroundError(match error {
+                        BindingError::NotPublished => "desktop_session_not_ready",
+                        _ => "desktop_source_unavailable",
+                    })
+                })
+        })
+        .await?;
     let source = crate::host::coordinator::DesktopSource::start()
         .await
         .map_err(|e| ForegroundError(e.code()))?;

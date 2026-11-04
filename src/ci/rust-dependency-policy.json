@@ -556,6 +556,16 @@
       "kind": "explicit_owned_cgroup_v2",
       "input": "STYX_TEST_CGROUP_PARENT absolute canonical current-user delegated cgroup v2 directory; creates and removes one empty uniquely named cgroup only",
       "required_for": "actual retained kernel fd deletion with nonzero link count and same-path replacement negative; no process launch, Host, Gateway or desktop acceptance"
+    },
+    "providers::cua::macos_source::installed_source_tests::installed_source_binding_read_only": {
+      "kind": "explicit_installed_macos_source_read_only",
+      "input": "STYX_TEST_INSTALLED_MAC_SOURCE=read-only; owner-authorized installed /Applications/Styx.app and its live original embedded Cua",
+      "required_for": "fixed original certificate/images, protected descriptor, process births, kernel peer and original-FD console facts; no session/input, no GUI or installation acceptance"
+    },
+    "providers::cua::macos_source::installed_source_tests::installed_source_windows_read_only": {
+      "kind": "explicit_installed_macos_source_window_read_and_original_drain",
+      "input": "STYX_TEST_INSTALLED_MAC_SOURCE=read-only; same owner-authorized installed original Mac App/Cua",
+      "required_for": "native read-only window acquisition and same original probe transport drain, joined tasks; no input, screenshots or final GUI acceptance"
     }
   },
   "change_policy": "dependency or ignored-test additions require explicit policy review; preserve mature Cargo tooling rather than replacing its resolver/compiler/lints",
