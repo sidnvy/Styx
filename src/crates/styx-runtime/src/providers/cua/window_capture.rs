@@ -77,13 +77,27 @@ pub(crate) fn project_acquired(
     result: &CallToolResult,
     request: &WindowCaptureRequest,
 ) -> Result<CallToolResult> {
-    project_native_capture(result, request, cfg!(target_os = "windows"))
+    let shape = if cfg!(target_os = "windows") {
+        CaptureShape::Windows
+    } else if cfg!(target_os = "macos") {
+        CaptureShape::Macos
+    } else {
+        CaptureShape::Framed
+    };
+    project_native_capture(result, request, shape)
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum CaptureShape {
+    Framed,
+    Windows,
+    Macos,
 }
 
 fn project_native_capture(
     result: &CallToolResult,
     request: &WindowCaptureRequest,
-    windows: bool,
+    shape: CaptureShape,
 ) -> Result<CallToolResult> {
     request.validate()?;
     bounded(result)?;
@@ -106,10 +120,12 @@ fn project_native_capture(
     // checked below; never turn this read into an input observation. Explicit
     // contradictory markers still refuse, including on Windows.
     let coordinate_frame = object.get("coordinate_frame");
+    let macos = shape == CaptureShape::Macos && coordinate_frame.is_none();
     let frame_valid = object.get("screenshot_frame_valid");
     if coordinate_frame.is_some_and(|v| v.as_str() != Some("window"))
         || frame_valid.is_some_and(|v| v.as_bool() != Some(true))
-        || (!windows && (coordinate_frame.is_none() || frame_valid.is_none()))
+        || (shape != CaptureShape::Windows && frame_valid.is_none())
+        || (shape == CaptureShape::Framed && coordinate_frame.is_none())
     {
         return Err(CuaError::ProtocolMismatch);
     }
@@ -119,11 +135,30 @@ fn project_native_capture(
         "screenshot_file_path",
         "follow_up",
         "elements",
-        "tree_markdown",
     ] {
         if object.contains_key(key) {
             return Err(CuaError::Unsupported);
         }
+    }
+    // Pinned macOS capture-only replies carry an empty Markdown placeholder,
+    // not an AX observation. Require the complete zero-tree shape, never keep
+    // its snapshot/capture refs, and still require explicit native frame validity.
+    if macos {
+        if object.get("tree_markdown").and_then(Value::as_str) != Some("")
+            || object.get("tree_format").and_then(Value::as_str) != Some("markdown")
+            || object.get("elements_complete").and_then(Value::as_bool) != Some(false)
+            || [
+                "element_count",
+                "returned_element_count",
+                "total_element_count",
+            ]
+            .iter()
+            .any(|key| object.get(*key).and_then(Value::as_u64) != Some(0))
+        {
+            return Err(CuaError::ProtocolMismatch);
+        }
+    } else if object.contains_key("tree_markdown") {
+        return Err(CuaError::Unsupported);
     }
     for key in ["degraded", "screenshot_composited", "popup", "display_only"] {
         if object.get(key).is_some_and(|v| v.as_bool() != Some(false)) {
@@ -163,7 +198,7 @@ fn project_native_capture(
     {
         return Err(CuaError::ProtocolMismatch);
     }
-    if windows {
+    if shape == CaptureShape::Windows {
         // Windows reports the requested window's GetWindowRect geometry and a
         // DWM bitmap which may exclude its invisible border. Resizing cannot
         // make either delivered dimension larger than that native window.
@@ -187,6 +222,39 @@ fn project_native_capture(
             if u64::from(delivered) > native {
                 return Err(CuaError::ProtocolMismatch);
             }
+        }
+    }
+    if macos {
+        let bounds = object
+            .get("window_bounds")
+            .and_then(Value::as_object)
+            .ok_or(CuaError::ProtocolMismatch)?;
+        let number = |key: &str| {
+            bounds
+                .get(key)
+                .and_then(Value::as_f64)
+                .filter(|n| n.is_finite() && n.abs() <= f64::from(i32::MAX))
+                .ok_or(CuaError::ProtocolMismatch)
+        };
+        number("x")?;
+        number("y")?;
+        let native_width = number("width")?;
+        let native_height = number("height")?;
+        let scale = object
+            .get("screenshot_scale")
+            .and_then(Value::as_f64)
+            .filter(|n| n.is_finite() && *n > 0.0 && *n <= 16.0)
+            .ok_or(CuaError::ProtocolMismatch)?;
+        // Mac bounds are points, screenshot_scale is the original backing
+        // scale, and the PNG may be downsampled with one pixel of rounding.
+        if native_width <= 0.0
+            || native_height <= 0.0
+            || f64::from(width) > (native_width * scale).ceil()
+            || f64::from(height) > (native_height * scale).ceil()
+            || (f64::from(width) * native_height - f64::from(height) * native_width).abs()
+                > native_width + native_height
+        {
+            return Err(CuaError::ProtocolMismatch);
         }
     }
     // Whitelist instead of preserving native cache/capture IDs, metadata, old

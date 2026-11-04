@@ -20,8 +20,8 @@ LOCK = 'libs/cua-driver/rust/Cargo.lock'
 LOCK_SHA = 'f9d49ce2dccdc43b2f7f027185301138fdd45eab4f9a556aace4cb0f4a98d46c'
 FRAGMENT = REPO / 'src/host/windows/cua-window-dpi-capture.rs'
 BASELINE = REPO / 'src/providers/cua-native/source.json'
-BASELINE_SHA = '1fcb611e78e51f28025384e045bfaa372d90263625864044d10c36bf5a2b9610'
-BASELINE_PATCH_SHA = '6a59500c26f6ae725e817d3cbcc57ef8a65b935aecf30e496408192c4598ef41'
+BASELINE_SHA = 'ae7aa76d6b0568114e8e3d04bdb9836eca9dc8e8449363e55a40539ae8112d83'
+BASELINE_PATCH_SHA = '5f93cba2d2a25c7d8d14f2acd081974fa9f6bcd5ee46dc25993ae837f093d117'
 ANCHOR = 'fn screenshot_window_mapped(hwnd: u64) -> Result<(Vec<u8>, bool, Option<FrameGeometry>)> {\n'
 
 

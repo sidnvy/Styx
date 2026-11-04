@@ -187,8 +187,8 @@ fn pinned_windows_capture_only_shape_is_observation_only_and_still_target_bound(
         .unwrap();
     object.remove("coordinate_frame");
     object.remove("screenshot_frame_valid");
-    assert!(project_native_capture(&native, &request(), false).is_err());
-    let projected = project_native_capture(&native, &request(), true).unwrap();
+    assert!(project_native_capture(&native, &request(), CaptureShape::Framed).is_err());
+    let projected = project_native_capture(&native, &request(), CaptureShape::Windows).unwrap();
     let value = projected.structured_content.as_ref().unwrap();
     assert_eq!(value["input_authorized"], json!(false));
     assert_eq!(value["capture_observation_only"], json!(true));
@@ -216,7 +216,7 @@ fn pinned_windows_capture_only_shape_is_observation_only_and_still_target_bound(
         let mut bad = native.clone();
         bad.structured_content.as_mut().unwrap()[key] = value;
         assert!(
-            project_native_capture(&bad, &request(), true).is_err(),
+            project_native_capture(&bad, &request(), CaptureShape::Windows).is_err(),
             "{key}"
         );
     }
@@ -268,4 +268,135 @@ fn minimal_explicit_read_modalities_get_bounded_public_defaults() {
             "explicit invalid {key} must never become a default"
         );
     }
+}
+
+#[test]
+fn pinned_macos_capture_only_shape_preserves_png_without_input_refs() {
+    // Shape and field meanings from the original owned Mac response captured
+    // 2026-11-05. Real PNG rendering and Gateway acceptance remain separate.
+    let mut png_bytes = Vec::new();
+    {
+        let mut encoder = png::Encoder::new(&mut png_bytes, 40, 40);
+        encoder.set_color(png::ColorType::Rgb);
+        encoder.set_depth(png::BitDepth::Eight);
+        encoder
+            .write_header()
+            .unwrap()
+            .write_image_data(&[0; 40 * 40 * 3])
+            .unwrap();
+    }
+    let mac_png = STANDARD.encode(&png_bytes);
+    let mut native = acquired();
+    native.content = vec![ContentBlock::image(mac_png.clone(), "image/png")];
+    let object = native
+        .structured_content
+        .as_mut()
+        .unwrap()
+        .as_object_mut()
+        .unwrap();
+    object.remove("coordinate_frame");
+    object.insert(
+        "window_bounds".into(),
+        json!({"x":-2.5,"y":0.0,"width":20.0,"height":20.0}),
+    );
+    object.insert("screenshot_width".into(), json!(40));
+    object.insert("screenshot_height".into(), json!(40));
+    object.insert("screenshot_scale".into(), json!(2.0));
+    object.insert("tree_format".into(), json!("markdown"));
+    object.insert("tree_markdown".into(), json!(""));
+    object.insert("elements_complete".into(), json!(false));
+    for key in [
+        "element_count",
+        "returned_element_count",
+        "total_element_count",
+    ] {
+        object.insert(key.into(), json!(0));
+    }
+    assert!(project_native_capture(&native, &request(), CaptureShape::Framed).is_err());
+    assert!(project_native_capture(&native, &request(), CaptureShape::Windows).is_err());
+    let projected = project_native_capture(&native, &request(), CaptureShape::Macos).unwrap();
+    assert!(matches!(&projected.content[1], ContentBlock::Image(value) if value.data == mac_png));
+    let text = serde_json::to_string(&projected).unwrap();
+    for field in [
+        "tree_markdown",
+        "snapshot_id",
+        "capture_id",
+        "element_token",
+    ] {
+        assert!(!text.contains(field));
+    }
+    assert_eq!(
+        projected.structured_content.as_ref().unwrap()["input_authorized"],
+        json!(false)
+    );
+    for (key, value) in [
+        ("pid", json!(43)),
+        ("window_id", json!(1235)),
+        ("coordinate_frame", json!("desktop")),
+        ("screenshot_frame_valid", json!(false)),
+        ("tree_markdown", json!("unproven tree")),
+        ("tree_format", json!("elements")),
+        ("elements_complete", json!(true)),
+        ("element_count", json!(1)),
+        ("returned_element_count", json!(1)),
+        ("total_element_count", json!(1)),
+        ("elements", json!([])),
+        ("screenshot_scale", json!(0)),
+        ("screenshot_scale", json!(-1)),
+        ("screenshot_scale", Value::Null),
+        ("window_bounds", json!({"x":0,"y":0,"width":0,"height":1})),
+        ("window_bounds", json!({"x":0,"y":0,"width":80,"height":40})),
+        ("window_bounds", json!({"x":0,"y":0,"width":1,"height":1})),
+        ("window_bounds", json!({"width":1,"height":1})),
+    ] {
+        let mut bad = native.clone();
+        bad.structured_content.as_mut().unwrap()[key] = value;
+        assert!(
+            project_native_capture(&bad, &request(), CaptureShape::Macos).is_err(),
+            "{key}"
+        );
+    }
+    let mut bad = native;
+    bad.structured_content
+        .as_mut()
+        .unwrap()
+        .as_object_mut()
+        .unwrap()
+        .remove("screenshot_frame_valid");
+    assert!(project_native_capture(&bad, &request(), CaptureShape::Macos).is_err());
+}
+
+#[test]
+#[ignore = "requires original owned Mac native capture and Gateway request evidence file"]
+fn original_owned_macos_capture_projection_reference() {
+    let path = std::env::var_os("STYX_TEST_MAC_CAPTURE_REFERENCE")
+        .expect("explicit original capture evidence");
+    assert!(std::fs::metadata(&path).unwrap().len() <= FRAME_BYTES as u64);
+    let evidence: Value = serde_json::from_slice(&std::fs::read(path).unwrap()).unwrap();
+    let request = WindowCaptureRequest::classify(
+        "get_window_state",
+        evidence["request"].as_object().unwrap(),
+    )
+    .unwrap()
+    .unwrap();
+    let native: CallToolResult =
+        serde_json::from_value(evidence["native_response"]["result"].clone()).unwrap();
+    let projected = project_native_capture(&native, &request, CaptureShape::Macos).unwrap();
+    let image = projected
+        .content
+        .iter()
+        .find_map(|part| match part {
+            ContentBlock::Image(image) => Some(image),
+            _ => None,
+        })
+        .unwrap();
+    let png = STANDARD.decode(&image.data).unwrap();
+    assert_eq!(
+        styx_contracts::identity::Sha256Digest::of_bytes(&png).to_hex(),
+        evidence["expected_png_sha256"].as_str().unwrap()
+    );
+    assert_eq!(
+        projected.structured_content.as_ref().unwrap()["input_authorized"],
+        json!(false)
+    );
 }

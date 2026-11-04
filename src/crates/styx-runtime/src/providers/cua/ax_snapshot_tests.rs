@@ -139,3 +139,37 @@ fn whole_response_and_reference_limits_fail_without_returning_partial_maps() {
         Err(CuaError::Busy)
     ));
 }
+
+#[test]
+fn read_only_rows_never_mint_native_or_host_input_refs() {
+    let mut original = acquired();
+    let row = &mut original.structured_content.as_mut().unwrap()["elements"][0];
+    row["read_only"] = json!(true);
+    row["role"] = json!("AXStaticText");
+    row.as_object_mut().unwrap().remove("element_token");
+    let parsed = parse_acquired(&original, 42, 1234).unwrap();
+    assert!(!parsed.contains_native_token("s000000a1:7"));
+    assert!(parsed.native_token_for("s000000b2", "s000000b2:7").is_err());
+    assert_eq!(
+        parsed.native_token_for("s000000b2", "s000000b2:2").unwrap(),
+        "s000000a1:2"
+    );
+    let projected = parsed.rewrite_result(&original, "s000000b2").unwrap();
+    let rows = &projected.structured_content.as_ref().unwrap()["elements"];
+    assert_eq!(rows[0]["read_only"], json!(true));
+    assert!(rows[0].get("element_token").is_none());
+    assert_eq!(rows[1]["element_token"], json!("s000000b2:2"));
+    // Neither contradictory tokens nor a type-confused/duplicated read-only
+    // record may enter the retained map, even while another row is actionable.
+    for flag in [json!(false), json!("true"), Value::Null] {
+        let mut bad = original.clone();
+        bad.structured_content.as_mut().unwrap()["elements"][0]["read_only"] = flag;
+        assert!(parse_acquired(&bad, 42, 1234).is_err());
+    }
+    let mut bad = original.clone();
+    bad.structured_content.as_mut().unwrap()["elements"][0]["element_token"] = json!("s000000a1:7");
+    assert!(parse_acquired(&bad, 42, 1234).is_err());
+    let mut bad = original;
+    bad.structured_content.as_mut().unwrap()["elements"][0]["element_index"] = json!(2);
+    assert!(parse_acquired(&bad, 42, 1234).is_err());
+}

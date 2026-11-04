@@ -5,7 +5,7 @@
   "upstream_version": "0.36.0",
   "official_archive_sha256": "157acdc2fd0bf5c480af2bdbe4a69f75a709551627f851caee16346234fdedef",
   "patch": "cua-0.36.0-styx-once.patch",
-  "patch_sha256": "6a59500c26f6ae725e817d3cbcc57ef8a65b935aecf30e496408192c4598ef41",
+  "patch_sha256": "5f93cba2d2a25c7d8d14f2acd081974fa9f6bcd5ee46dc25993ae837f093d117",
   "files": [
     {
       "path": "libs/cua-driver/rust/Cargo.lock",
@@ -131,9 +131,9 @@
       "path": "libs/cua-driver/rust/crates/platform-macos/src/ax/styx_private.rs",
       "original_sha256": null,
       "original_git_blob_sha1": null,
-      "final_sha256": "902eaf87a05dbae0fbdf5f99d636d19ccc0a9c0a8424e09d8c82650f2d1bd291",
+      "final_sha256": "2f2cbcf30f95d54621d5eaa2674c07702daec4888639701430abf5b57f17b8e9",
       "original_bytes": 0,
-      "final_bytes": 25632
+      "final_bytes": 29346
     },
     {
       "path": "libs/cua-driver/rust/crates/platform-macos/src/cursor/overlay.rs",
@@ -187,9 +187,9 @@
       "path": "libs/cua-driver/rust/crates/platform-macos/src/tools/styx_private.rs",
       "original_sha256": null,
       "original_git_blob_sha1": null,
-      "final_sha256": "2674b24b23c79cf6390ce1f3dea4677321bd527b4bcd771f08288412c702326b",
+      "final_sha256": "25726279e17f4a005c081d22a27729902bb649a4a094aeceb51ed164fb8208c9",
       "original_bytes": 0,
-      "final_bytes": 17140
+      "final_bytes": 17378
     },
     {
       "path": "libs/cua-driver/rust/crates/platform-windows/Cargo.toml",

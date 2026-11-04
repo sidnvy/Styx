@@ -3021,11 +3021,12 @@
  
 --- /dev/null
 +++ b/libs/cua-driver/rust/crates/platform-macos/src/ax/styx_private.rs
-@@ -0,0 +1,714 @@
+@@ -0,0 +1,802 @@
 +//! Restricted Styx AX path. It retains original AX objects; it never relocates
 +//! a target by row number, parent traversal, keyboard focus, or remote token.
 +//! AX notifications are an observed invalidation fence, not an atomic remote
-+//! object generation. Unsupported notifications make this path unavailable.
++//! object generation. A row without native invalidation remains read-only.
++//! Required window invalidation and all input-target checks remain mandatory.
 +
 +use super::{
 +    bindings::*,
@@ -3038,12 +3039,13 @@
 +    base::{CFEqual, CFGetTypeID, CFRelease, CFRetain, CFTypeRef, TCFType},
 +    string::{CFString, CFStringGetLength, CFStringGetTypeID, CFStringRef},
 +};
-+use serde_json::{json, Value};
++use serde_json::{Value, json};
 +use std::{
 +    ffi::c_void,
 +    sync::{
++        Arc,
 +        atomic::{AtomicBool, Ordering},
-+        mpsc, Arc,
++        mpsc,
 +    },
 +    thread,
 +    time::{Duration, Instant},
@@ -3324,8 +3326,16 @@
 +                            };
 +                            // Already registered is safe only on this exact observer/object.
 +                            if code != kAXErrorSuccess && code != -25209 {
-+                                thread_state.invalid.store(true, Ordering::Release);
-+                                result = Err("target_invalidated");
++                                // An unsupported per-object notification is not an
++                                // ended observer. The caller may expose that object
++                                // only as a token-free read-only row. Required window
++                                // subscriptions still propagate this error and refuse.
++                                if code == -25207 {
++                                    result = Err("notification_unsupported");
++                                } else {
++                                    thread_state.invalid.store(true, Ordering::Release);
++                                    result = Err("target_invalidated");
++                                }
 +                                break;
 +                            }
 +                        }
@@ -3419,6 +3429,7 @@
 +    window: RetainedElement,
 +    pub(crate) elements: Vec<RetainedElement>,
 +    pub(crate) rows: Vec<Value>,
++    read_only: Vec<bool>,
 +    captured: Instant,
 +}
 +impl CompleteSnapshot {
@@ -3547,6 +3558,7 @@
 +    )?;
 +    let mut elements = Vec::new();
 +    let mut rows = Vec::new();
++    let mut read_only_rows = Vec::new();
 +    let mut stack = vec![(window.clone(), 0usize, None::<usize>)];
 +    while let Some((element, depth, parent)) = stack.pop() {
 +        check_time(deadline)?;
@@ -3561,11 +3573,19 @@
 +        }
 +        timeout(&element, deadline)?;
 +        pid_matches(&element, pid)?;
-+        fence.watch(&element, &["AXUIElementDestroyed"], deadline)?;
++        let read_only = match fence.watch(&element, &["AXUIElementDestroyed"], deadline) {
++            Ok(()) => false,
++            Err("notification_unsupported") => true,
++            Err(error) => return Err(error),
++        };
 +        let role = string_attr(&element, "AXRole")?
 +            .filter(|role| !role.is_empty() && role.len() <= 256)
 +            .ok_or("object_unavailable")?;
-+        let label = string_attr(&element, "AXTitle")?;
++        let label = string_attr(&element, "AXTitle")?
++            .filter(|value| !value.is_empty())
++            .or(string_attr(&element, "AXDescription")?.filter(|value| !value.is_empty()))
++            .or(string_attr(&element, "AXIdentifier")?.filter(|value| !value.is_empty()));
++        let enabled = unsafe { copy_bool_attr(raw(&element), "AXEnabled") };
 +        let secure = string_attr(&element, "AXSubrole")?.as_deref() == Some("AXSecureTextField");
 +        let value = if secure {
 +            None
@@ -3573,7 +3593,13 @@
 +            string_attr(&element, "AXValue")?
 +        };
 +        let index = elements.len();
-+        let mut row = json!({"element_index":index,"role":role,"depth":depth});
++        let mut row = json!({"element_index":index,"role":role,"depth":depth,"password":secure});
++        if read_only {
++            row["read_only"] = json!(true);
++        }
++        if let Some(enabled) = enabled {
++            row["enabled"] = json!(enabled);
++        }
 +        if let Some(parent) = parent {
 +            row["parent_index"] = json!(parent);
 +        }
@@ -3595,6 +3621,7 @@
 +        }
 +        elements.push(element);
 +        rows.push(row);
++        read_only_rows.push(read_only);
 +    }
 +    if rows.is_empty()
 +        || serde_json::to_vec(&rows)
@@ -3611,6 +3638,7 @@
 +        session,
 +        elements,
 +        rows,
++        read_only: read_only_rows,
 +        window,
 +        fence,
 +        captured: Instant::now(),
@@ -3673,6 +3701,9 @@
 +    element: RetainedElement,
 +) -> NativeResult<EditableTarget> {
 +    let deadline = Instant::now() + Duration::from_secs(3);
++    if snapshot.read_only.get(row) != Some(&false) {
++        return Err("editable_unavailable");
++    }
 +    let original = snapshot.elements.get(row).ok_or("stale_observation")?;
 +    if !same_object(original, &element) {
 +        return Err("target_identity_changed");
@@ -3734,6 +3765,63 @@
 +        WriteOutcome::Acknowledged
 +    } else {
 +        WriteOutcome::Unknown
++    }
++}
++
++#[cfg(test)]
++mod installed_read_only_tests {
++    use super::*;
++
++    // Runs only from the authorized actual App's Gateway Exec ancestry. It
++    // observes a disposable owned fixture and acquires, but never writes, a target.
++    #[test]
++    #[ignore = "requires explicit owned Mac fixture PID/window and original App GUI ancestry"]
++    fn owned_window_read_only_rows_never_acquire_input() {
++        let pid = std::env::var("STYX_TEST_MAC_AX_PID")
++            .unwrap()
++            .parse::<i32>()
++            .unwrap();
++        let window = std::env::var("STYX_TEST_MAC_AX_WINDOW")
++            .unwrap()
++            .parse::<u32>()
++            .unwrap();
++        let snapshot = Arc::new(
++            capture(pid, window, 64, 8, Instant::now() + Duration::from_secs(2))
++                .expect("native_complete_owned_window_read"),
++        );
++        let readonly: Vec<_> = snapshot
++            .read_only
++            .iter()
++            .enumerate()
++            .filter_map(|(row, read_only)| read_only.then_some(row))
++            .collect();
++        assert!(
++            !readonly.is_empty(),
++            "actual unsupported-notification negative required"
++        );
++        for row in &readonly {
++            assert!(matches!(
++                acquire(snapshot.clone(), *row, snapshot.elements[*row].clone()),
++                Err("editable_unavailable")
++            ));
++        }
++        let input = snapshot
++            .rows
++            .iter()
++            .position(|row| {
++                row["label"].as_str() == Some("Styx verification input")
++                    && row["role"].as_str() == Some("AXTextField")
++                    && row["enabled"].as_bool() == Some(true)
++            })
++            .expect("observed_owned_editable_row");
++        let acquired = acquire(snapshot.clone(), input, snapshot.elements[input].clone())
++            .expect("original_observed_editable_target_read_only_acquisition");
++        drop(acquired);
++        eprintln!(
++            "MAC_AX_READ_ONLY rows={} readonly_rows={} readonly_acquire=REFUSED observed_editable_acquire=PASS native_writes=0",
++            snapshot.rows.len(),
++            readonly.len()
++        );
 +    }
 +}
 --- a/libs/cua-driver/rust/crates/platform-macos/src/cursor/overlay.rs
@@ -5314,17 +5402,17 @@
              cua_driver_core::session::register_scoped_session_revive_hook(move |session_id| {
 --- /dev/null
 +++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/styx_private.rs
-@@ -0,0 +1,455 @@
+@@ -0,0 +1,459 @@
 +//! Internal adapter operations: no new public Styx tool or authorization owner.
 +use super::ToolState;
 +use crate::ax::styx_private::{self as native, CompleteSnapshot, EditableTarget, WriteOutcome};
 +use async_trait::async_trait;
 +use cua_driver_core::{
-+    element_token::{format_snapshot_id, parse_token, token_for, ResolvedElement},
++    element_token::{ResolvedElement, format_snapshot_id, parse_token, token_for},
 +    protocol::ToolResult,
 +    tool::{Tool, ToolDef, ToolRegistry},
 +};
-+use serde_json::{json, Value};
++use serde_json::{Value, json};
 +use std::{
 +    sync::{Arc, Mutex, OnceLock},
 +    time::{Duration, Instant},
@@ -5548,7 +5636,11 @@
 +    };
 +    let mut rows = native.rows.clone();
 +    for (index, row) in rows.iter_mut().enumerate() {
-+        row["element_token"] = json!(token_for(id, index));
++        // An unobserved native object is descriptive only. Never publish a
++        // native token that Core could translate into a Host input alias.
++        if row.get("read_only").and_then(Value::as_bool) != Some(true) {
++            row["element_token"] = json!(token_for(id, index));
++        }
 +    }
 +    let count = rows.len();
 +    let data = json!({

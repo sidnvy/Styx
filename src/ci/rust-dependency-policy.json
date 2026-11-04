@@ -566,6 +566,11 @@
       "kind": "explicit_installed_macos_source_window_read_and_original_drain",
       "input": "STYX_TEST_INSTALLED_MAC_SOURCE=read-only; same owner-authorized installed original Mac App/Cua",
       "required_for": "native read-only window acquisition and same original probe transport drain, joined tasks; no input, screenshots or final GUI acceptance"
+    },
+    "providers::cua::window_capture::tests::original_owned_macos_capture_projection_reference": {
+      "kind": "original_owned_macos_capture_response_projection",
+      "input": "STYX_TEST_MAC_CAPTURE_REFERENCE explicit bounded evidence file containing original native response, original Gateway request and independently recorded PNG hash",
+      "required_for": "exact original Mac capture bytes and strict target/geometry/empty-tree projection; no new native call or input, not GUI/platform acceptance"
     }
   },
   "change_policy": "dependency or ignored-test additions require explicit policy review; preserve mature Cargo tooling rather than replacing its resolver/compiler/lints",
