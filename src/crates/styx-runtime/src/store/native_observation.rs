@@ -7,7 +7,6 @@ use styx_contracts::identity::Sha256Digest;
 pub(crate) struct NativeObservation {
     pub(crate) canonical: native_state::ValidatedNativeState,
     pub(crate) inventory: management::ManagementInventory,
-    pub(crate) admission_fenced: bool,
 }
 pub(crate) fn read(path: &Path) -> JournalResult<NativeObservation> {
     const NS: &str = ".styx-management-journal-v1";
@@ -42,9 +41,7 @@ pub(crate) fn read(path: &Path) -> JournalResult<NativeObservation> {
                 let identity = super::native_host_snapshot::directory_identity(&namespace)?;
                 let scan = files::scan(&namespace, JournalBudget::default())?;
                 let inventory = management::readonly_inventory(&scan)?;
-                let admission_fenced = management::validate_observed_native_tip(
-                    &scan, &canonical, &marker, &inventory,
-                )?;
+                management::validate_observed_native_tip(&scan, &canonical, &marker, &inventory)?;
                 for file in &scan.files {
                     let raw = root
                         .read_raw(format!("{NS}/{}", file.name), MAX)
@@ -85,7 +82,6 @@ pub(crate) fn read(path: &Path) -> JournalResult<NativeObservation> {
                 Ok(NativeObservation {
                     canonical,
                     inventory,
-                    admission_fenced,
                 })
             })();
             Ok(result)

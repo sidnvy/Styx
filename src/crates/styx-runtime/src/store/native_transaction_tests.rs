@@ -389,7 +389,7 @@ async fn native_inspect_is_coherent_while_original_writer_is_held_and_never_reco
         .await
         .unwrap();
     assert_eq!(first.revision, 0);
-    assert!(!first.admission_fenced);
+    assert!(first.admission_fenced);
     let raw = target(&coordinator, "query-original-1", 1);
     let committed = coordinator.apply_target(&raw).unwrap().committed;
     let before = fs::read(path.join("state.json")).unwrap();
@@ -397,7 +397,7 @@ async fn native_inspect_is_coherent_while_original_writer_is_held_and_never_reco
         .await
         .unwrap();
     assert_eq!(report.revision, 1);
-    assert!(!report.admission_fenced);
+    assert!(report.admission_fenced);
     let tx = report.transaction.unwrap();
     assert_eq!(tx.receipt.unwrap(), committed);
     assert!(!tx.recovered);

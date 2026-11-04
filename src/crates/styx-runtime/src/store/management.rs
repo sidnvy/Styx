@@ -65,7 +65,7 @@ pub(super) fn validate_observed_native_tip(
     canonical: &super::native_state::ValidatedNativeState,
     marker: &styx_contracts::native_management::NativeRootMarker,
     inventory: &ManagementInventory,
-) -> JournalResult<bool> {
+) -> JournalResult<()> {
     let pending = inventory
         .transactions
         .last()
@@ -75,8 +75,7 @@ pub(super) fn validate_observed_native_tip(
                 .is_none_or(|p| p.stage != DurableStage::Committed)
         })
         .map(|tx| &tx.intent.transaction_id);
-    validate_fresh_native_tip(scan, canonical, marker, pending)?;
-    Ok(pending.is_some())
+    validate_fresh_native_tip(scan, canonical, marker, pending)
 }
 
 /// Replay every original fresh-root assignment, including the one closed runtime

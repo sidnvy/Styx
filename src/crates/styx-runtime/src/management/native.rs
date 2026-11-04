@@ -1003,7 +1003,10 @@ mod platform {
             revision: observed.canonical.state().revision,
             canonical_state_sha256: observed.canonical.raw_sha256(),
             desired: observed.canonical.state().desired.clone(),
-            admission_fenced: observed.admission_fenced,
+            // Preserve the public conservative boundary: this read-only view
+            // holds no execution admission/recovery proof. It does not fence
+            // the actual original coordinator or claim that runtime is healthy.
+            admission_fenced: true,
             transaction,
         })
     }
