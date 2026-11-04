@@ -746,7 +746,7 @@ fn native_platform() -> &'static str {
         "linux"
     }
 }
-fn directory_identity(directory: &File) -> JournalResult<(u64, u64)> {
+pub(super) fn directory_identity(directory: &File) -> JournalResult<(u64, u64)> {
     #[cfg(target_os = "windows")]
     {
         super::windows_file_identity(directory).map_err(|_| JournalError::Unknown)

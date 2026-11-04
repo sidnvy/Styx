@@ -1045,7 +1045,7 @@ impl HostCoordinator {
                         let f = if let (Some(request), Some(observation)) =
                             (click.as_ref(), write_observation.as_ref())
                         {
-                            observation.click_facts(
+                            observation.click_result_facts(
                                 &state,
                                 bound.owner(),
                                 bound.target(),
@@ -1139,7 +1139,7 @@ impl HostCoordinator {
                         }
                         Ok(())
                     });
-                    if write_observation.is_some() && click.is_none() {
+                    if write_observation.is_some() {
                         crate::providers::cua::trace_write_settlement(
                             receipt.evidence,
                             result.is_ok(),

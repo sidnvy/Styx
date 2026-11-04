@@ -790,6 +790,11 @@ impl ServiceObservation {
             && self.main_pid == 0
             && (self.active == "inactive" || (self.active == "failed" && self.cgroup.is_empty()))
     }
+    pub(crate) fn start_allowed(&self, desired: NativeRunDesired) -> bool {
+        self.stopped_for_mutation()
+            && (desired == NativeRunDesired::Stopped
+                || (desired == NativeRunDesired::Running && self.active == "failed"))
+    }
     fn absent(unit: String, role: ServiceRole) -> Self {
         Self {
             schema: 1,
@@ -932,11 +937,18 @@ mod mutation_tests {
         os.installed = true;
         os.active = "failed".into();
         assert!(os.stopped_for_mutation());
+        assert!(os.start_allowed(NativeRunDesired::Running));
+        os.active = "inactive".into();
+        assert!(!os.start_allowed(NativeRunDesired::Running));
+        assert!(os.start_allowed(NativeRunDesired::Stopped));
+        os.active = "failed".into();
+
         os.main_pid = 42;
         assert!(!os.stopped_for_mutation());
         os.main_pid = 0;
         os.cgroup = "/retained-original-cgroup".into();
         assert!(!os.stopped_for_mutation());
+        assert!(!os.start_allowed(NativeRunDesired::Running));
         os.active = "inactive".into();
         assert!(os.stopped_for_mutation());
         os.main_pid = 42;

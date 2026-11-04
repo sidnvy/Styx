@@ -104,7 +104,7 @@ impl OwnedAxObservation {
             )?;
         Ok(())
     }
-    fn click_target(
+    fn click_binding(
         &self,
         state: &State,
         owner: &OwnerLease,
@@ -133,13 +133,23 @@ impl OwnedAxObservation {
         {
             return Err(ErrorCategory::StaleObservation.into());
         }
-        self.target.validate()?;
         Ok(crate::providers::cua::ClickRequest {
             pid: Some(read.pid),
             window_id: Some(read.window_id),
             element_token: request.element_token.clone(),
             gesture: request.gesture,
         })
+    }
+    fn click_target(
+        &self,
+        state: &State,
+        owner: &OwnerLease,
+        resource: &ResourceTarget,
+        request: &crate::providers::cua::ClickRequest,
+    ) -> Result<crate::providers::cua::ClickRequest, CoordinatorError> {
+        let request = self.click_binding(state, owner, resource, request)?;
+        self.target.validate()?;
+        Ok(request)
     }
     pub(super) fn click_facts(
         &self,
@@ -151,6 +161,29 @@ impl OwnedAxObservation {
         now: MonotonicMillis,
     ) -> Result<AdmissionFacts, CoordinatorError> {
         let request = self.click_target(state, owner, resource, request)?;
+        self.click_bound_facts(state, context, &request, now)
+    }
+    /// Deliver only the original action receipt. A successful click may close
+    /// its window or process. This cannot mint an observation or authorize input.
+    pub(super) fn click_result_facts(
+        &self,
+        state: &State,
+        owner: &OwnerLease,
+        resource: &ResourceTarget,
+        context: &PreparedContext,
+        request: &crate::providers::cua::ClickRequest,
+        now: MonotonicMillis,
+    ) -> Result<AdmissionFacts, CoordinatorError> {
+        let request = self.click_binding(state, owner, resource, request)?;
+        self.click_bound_facts(state, context, &request, now)
+    }
+    fn click_bound_facts(
+        &self,
+        state: &State,
+        context: &PreparedContext,
+        request: &crate::providers::cua::ClickRequest,
+        now: MonotonicMillis,
+    ) -> Result<AdmissionFacts, CoordinatorError> {
         if context.observation.as_ref() != Some(&self.observation)
             || !self.parsed.contains_native_token(&request.element_token)
         {

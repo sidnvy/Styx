@@ -6,6 +6,18 @@ pub(super) fn outcome(
     if bounded_bytes(&value, FRAME_BYTES).is_err() {
         return (CuaEvidence::Unknown, None, Some(CuaError::Unknown));
     }
+    if std::env::var_os("STYX_CUA_DIAGNOSTICS").as_deref() == Some(std::ffi::OsStr::new("1")) {
+        use std::io::Write as _;
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "{}",
+            serde_json::json!({
+                "event":"styx_cua_native_action_reply", "is_error":value.is_error,
+                "structured":value.structured_content.is_some(),
+                "effect_unknown":value.structured_content.as_ref().and_then(|v| v.get("effect")).and_then(Value::as_str)==Some("unknown")
+            })
+        );
+    }
     let data = value.structured_content.as_ref();
     let effect = data.and_then(|v| v.get("effect")).and_then(Value::as_str);
     if effect == Some("unknown") {

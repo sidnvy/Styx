@@ -371,3 +371,52 @@ fn native_service_autostart_follow_and_refusal_batch() {
     );
     assert_eq!(tx.readstate().unwrap().raw_bytes(), before);
 }
+
+#[tokio::test]
+async fn native_inspect_is_coherent_while_original_writer_is_held_and_never_recovers() {
+    let base = std::env::temp_dir().join(format!("styx-readonly-inspect-{}", uuid::Uuid::new_v4()));
+    fs::create_dir(&base).unwrap();
+    fs::set_permissions(&base, fs::Permissions::from_mode(0o700)).unwrap();
+    let mut coordinator = create(&base);
+    let path = base.join("native");
+    assert!(
+        PrivateRoot::open(&path)
+            .unwrap()
+            .try_existing_configuration_writer()
+            .is_err()
+    );
+    let first = crate::management::native::inspect(&path, None)
+        .await
+        .unwrap();
+    assert_eq!(first.revision, 0);
+    assert!(!first.admission_fenced);
+    let raw = target(&coordinator, "query-original-1", 1);
+    let committed = coordinator.apply_target(&raw).unwrap().committed;
+    let before = fs::read(path.join("state.json")).unwrap();
+    let report = crate::management::native::inspect(&path, Some("query-original-1"))
+        .await
+        .unwrap();
+    assert_eq!(report.revision, 1);
+    assert!(!report.admission_fenced);
+    let tx = report.transaction.unwrap();
+    assert_eq!(tx.receipt.unwrap(), committed);
+    assert!(!tx.recovered);
+    assert_eq!(fs::read(path.join("state.json")).unwrap(), before);
+    assert!(coordinator.configuration_root().ensure_admission().is_ok());
+    private_write(
+        &path.join(".styx-management-journal-v1/unowned-file"),
+        b"retained unknown evidence",
+    );
+    assert!(
+        crate::management::native::inspect(&path, Some("query-original-1"))
+            .await
+            .is_err()
+    );
+    assert_eq!(
+        fs::read(path.join(".styx-management-journal-v1/unowned-file")).unwrap(),
+        b"retained unknown evidence"
+    );
+    assert_eq!(fs::read(path.join("state.json")).unwrap(), before);
+    drop(coordinator);
+    fs::remove_dir_all(base).unwrap();
+}

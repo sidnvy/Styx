@@ -33,7 +33,7 @@ fn evidence(capability: CapabilityId) -> crate::session::ProviderEvidence {
         recovery: Recovery::None,
     }
 }
-async fn fixture() -> (State, OwnerLease, ResourceTarget) {
+async fn fixture_for_pid(pid: u32) -> (State, OwnerLease, ResourceTarget) {
     let facts = AdmissionFacts {
         device_id: context().device_id,
         grant_revision: 1,
@@ -139,7 +139,6 @@ async fn fixture() -> (State, OwnerLease, ResourceTarget) {
         operation_id: open.id,
         payload_digest: open.payload_digest,
     };
-    let pid = std::process::id();
     // Query projection has fewer returned elements than the complete walk.
     let read = CallToolResult::structured(
         json!({"pid":pid,"window_id":42,"elements_complete":true,"truncated":false,"element_count":2,"total_element_count":2,"returned_element_count":1,"snapshot_id":"s00000001","tree_markdown":"native text","elements":[{"element_index":1,"element_token":"s00000001:1","role":"button","depth":0,"name":"Confirm"}]}),
@@ -174,6 +173,9 @@ async fn fixture() -> (State, OwnerLease, ResourceTarget) {
     )
     .unwrap();
     (state, owner, resource)
+}
+async fn fixture() -> (State, OwnerLease, ResourceTarget) {
+    fixture_for_pid(std::process::id()).await
 }
 fn click(token: &str) -> CuaAction {
     CuaAction::new(
@@ -643,4 +645,85 @@ async fn desktop_set_value_retains_its_read_binding_across_permission_refresh() 
             )
             .is_err()
     );
+}
+
+#[tokio::test]
+async fn desktop_click_receipt_survives_original_target_exit_but_cannot_authorize_input() {
+    let mut child = std::process::Command::new("/bin/sleep")
+        .arg("60")
+        .spawn()
+        .unwrap();
+    let (mut state, owner, resource) = fixture_for_pid(child.id()).await;
+    let (action, context) = prepare(&state, &owner, &resource, &click("s00000002:1")).unwrap();
+    let request = action.click_request().unwrap().unwrap();
+    let retained = state
+        .desktop
+        .as_mut()
+        .unwrap()
+        .ax_observation
+        .take()
+        .unwrap();
+    retained
+        .click_facts(
+            &state,
+            &owner,
+            &resource,
+            &context,
+            &request,
+            MonotonicMillis(1),
+        )
+        .unwrap();
+    // Exact owned process exits. A result has no reason to inspect a replacement PID.
+    child.kill().unwrap();
+    child.wait().unwrap();
+    assert!(
+        retained
+            .click_facts(
+                &state,
+                &owner,
+                &resource,
+                &context,
+                &request,
+                MonotonicMillis(2)
+            )
+            .is_err()
+    );
+    retained
+        .click_result_facts(
+            &state,
+            &owner,
+            &resource,
+            &context,
+            &request,
+            MonotonicMillis(2),
+        )
+        .unwrap();
+    let mut wrong = action.click_request().unwrap().unwrap();
+    wrong.window_id = Some(43);
+    assert!(
+        retained
+            .click_result_facts(
+                &state,
+                &owner,
+                &resource,
+                &context,
+                &wrong,
+                MonotonicMillis(2)
+            )
+            .is_err()
+    );
+    state.facts.grant_revision += 1;
+    assert!(
+        retained
+            .click_result_facts(
+                &state,
+                &owner,
+                &resource,
+                &context,
+                &request,
+                MonotonicMillis(2)
+            )
+            .is_err()
+    );
+    assert!(prepare(&state, &owner, &resource, &click("s00000002:1")).is_err());
 }
