@@ -5,7 +5,7 @@
   "upstream_version": "0.36.0",
   "official_archive_sha256": "157acdc2fd0bf5c480af2bdbe4a69f75a709551627f851caee16346234fdedef",
   "patch": "cua-0.36.0-styx-once.patch",
-  "patch_sha256": "2cf0a4af8f55aa545fa77032254620d9aee55bd269b7b444d10a83b35f526deb",
+  "patch_sha256": "6a59500c26f6ae725e817d3cbcc57ef8a65b935aecf30e496408192c4598ef41",
   "files": [
     {
       "path": "libs/cua-driver/rust/Cargo.lock",
@@ -200,12 +200,20 @@
       "final_bytes": 3946
     },
     {
+      "path": "libs/cua-driver/rust/crates/platform-windows/src/input/mouse.rs",
+      "original_sha256": "f30555c8233b1c4d93a03983f63393e8a442c2cb9249f78870e0df784d29c791",
+      "original_git_blob_sha1": "d6f4fbabcf8a73ba32a76411bda7ca6c54ae2f74",
+      "final_sha256": "9045872fb554f385e61f1611c22bd24723f9b97ba2c87736b43ed2ee6d20a7de",
+      "original_bytes": 43463,
+      "final_bytes": 44316
+    },
+    {
       "path": "libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs",
       "original_sha256": "8db99aefc501c8747b825be534dbf48602f1e1423fb553c886eb9c84e864ef8f",
       "original_git_blob_sha1": "94d1c68610ccb4db9fb55bbf39cbca8110df5bf2",
-      "final_sha256": "92779e75b1afc23c11c833fd792646132badc4f8eaaf4c5bfcea011b9f7c6fbb",
+      "final_sha256": "cfceb4504aec06b5251e84d9f7bb344a7628aa2aa155550afed3ed44c6d3b540",
       "original_bytes": 510570,
-      "final_bytes": 511158
+      "final_bytes": 513280
     },
     {
       "path": "libs/cua-driver/rust/crates/platform-windows/src/tools/mod.rs",

@@ -5786,6 +5786,51 @@
      "Win32_Foundation",
      "Win32_UI_Accessibility",
      "Win32_UI_WindowsAndMessaging",
+--- a/libs/cua-driver/rust/crates/platform-windows/src/input/mouse.rs
++++ b/libs/cua-driver/rust/crates/platform-windows/src/input/mouse.rs
+@@ -466,6 +466,21 @@
+     send_click_synthesized_mods_impl(target, sx, sy, count, button, modifiers, true)
+ }
+ 
++/// Exact post-dispatch fact: every requested mouse/modifier event was inserted,
++/// but the resulting foreground moved elsewhere. This grants no authority over
++/// that new window and does not verify the user-visible effect.
++#[derive(Debug)]
++pub(crate) struct CompletedClickFocusChanged {
++    pub(crate) target: u64,
++    pub(crate) actual: u64,
++}
++impl std::fmt::Display for CompletedClickFocusChanged {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        write!(f, "foreground_unavailable: exact target HWND 0x{:x} or a verified same-process post-action window was not foreground after the click (actual foreground HWND 0x{:x})", self.target, self.actual)
++    }
++}
++impl std::error::Error for CompletedClickFocusChanged {}
++
+ fn send_click_synthesized_mods_impl(
+     target: u64,
+     sx: i32,
+@@ -700,13 +715,13 @@
+                 foreground_target.expect("foreground target captured before input"),
+                 actual.0 as usize as u64,
+             ) {
+-                bail!(
+-                    "foreground_unavailable: exact target HWND {:?} or a verified same-process \
+-                     post-action window was not foreground after the click \
+-                     (actual foreground HWND {:?})",
+-                    target.0,
+-                    actual.0
+-                );
++                // Keep the strict API error for existing callers. The retained
++                // click adapter can distinguish this exact completed-dispatch
++                // receipt from a pre-dispatch failure or a partial SendInput.
++                return Err(CompletedClickFocusChanged {
++                    target: target.0 as usize as u64,
++                    actual: actual.0 as usize as u64,
++                }.into());
+             }
+         }
+     }
 --- a/libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs
 +++ b/libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs
 @@ -124,6 +124,13 @@
@@ -5829,7 +5874,34 @@
          let display_only = match cua_driver_core::window_state_view::display_only(&args) {
              Ok(display_only) => display_only,
              Err(refusal) => return refusal,
-@@ -10208,6 +10221,7 @@
+@@ -3285,6 +3298,10 @@
+     ToolResult::text(message)
+         .with_structured(json!({ "path": path, "verified": false, "effect": "unverifiable" }))
+         .with_action_record(record)
++}
++
++fn completed_click_focus_change(error: &anyhow::Error) -> bool {
++    error.downcast_ref::<crate::input::mouse::CompletedClickFocusChanged>().is_some()
+ }
+ 
+ pub struct ClickTool {
+@@ -3890,6 +3907,15 @@
+                         "✅ Performed SendInput click on [{idx}] at screen ({cx},{cy}) (delivery_mode:foreground)."
+                     ))
+                     .with_structured(json!({ "path": "pixel", "verified": false, "effect": "unverifiable" })),
++                    Ok(Err(e)) if completed_click_focus_change(&e) => {
++                        // Exact retained target and visibility/UIPI/foreground
++                        // checks already preceded SendInput. All requested events
++                        // were inserted. A tray menu may legitimately belong to a
++                        // different process; a new fresh observation must verify it.
++                        ToolResult::text(format!(
++                            "Sent the complete foreground click on [{idx}] at ({cx},{cy}); post-action foreground changed. The effect requires a fresh observation."
++                        )).with_structured(json!({ "path": "pixel", "verified": false, "effect": "unverifiable" }))
++                    }
+                     Ok(Err(e)) => ToolResult::error(e.to_string()),
+                     Err(e) => ToolResult::error(format!("Task error: {e}")),
+                 };
+@@ -10208,6 +10234,7 @@
  ) -> ToolRegistry {
      let mut r = ToolRegistry::new_with_protected_consent_provider(provider);
      let state = ToolState::new(Some(r.capture_service()));
@@ -5837,7 +5909,7 @@
      let cursor_outcome_reader = {
          let cursor_registry = state.cursor_registry.clone();
          cua_driver_core::session::register_scoped_cursor_outcome_reader(std::sync::Arc::new(
-@@ -10257,8 +10271,10 @@
+@@ -10257,8 +10284,10 @@
      // `register_all` session_end hook (platform-macos/src/tools/mod.rs).
      let cursor_registry = state.cursor_registry.clone();
      let snapshots = state.snapshots.clone();
@@ -5848,7 +5920,7 @@
              snapshots.retire_session_screenshots(session_id);
              cursor_registry.remove(session_id);
              crate::overlay::remove_cursor(session_id.to_owned());
-@@ -10271,6 +10287,8 @@
+@@ -10271,6 +10300,8 @@
      r.retain_cursor_outcome_reader(cursor_outcome_reader);
      r.retain_session_end_hook(session_end_hook);
      r.retain_session_revive_hook(session_revive_hook);
@@ -5857,6 +5929,24 @@
      if let Some(runtime_scope) = cua_driver_core::tool::current_dispatch_runtime_scope() {
          let prefix = format!("__cua_runtime_{runtime_scope}:");
          let cursor_registry = state.cursor_registry.clone();
+@@ -10477,3 +10508,17 @@
+ mod display_only_tests;
+ #[cfg(test)]
+ mod value_write_readback_tests;
++
++#[cfg(test)]
++mod completed_click_receipt_tests {
++    use super::completed_click_focus_change;
++    #[test]
++    fn completed_dispatch_is_typed_and_never_inferred_from_error_text() {
++        let receipt: anyhow::Error = crate::input::mouse::CompletedClickFocusChanged { target: 1, actual: 2 }.into();
++        assert!(completed_click_focus_change(&receipt));
++        let copied_text = anyhow::anyhow!(receipt.to_string());
++        assert!(!completed_click_focus_change(&copied_text));
++        assert!(!completed_click_focus_change(&anyhow::anyhow!("SendInput inserted fewer modifier or mouse events than expected for the foreground click.")));
++        assert!(!completed_click_focus_change(&anyhow::anyhow!("foreground_unavailable: no mouse input was sent")));
++    }
++}
 --- a/libs/cua-driver/rust/crates/platform-windows/src/tools/mod.rs
 +++ b/libs/cua-driver/rust/crates/platform-windows/src/tools/mod.rs
 @@ -11,6 +11,8 @@
