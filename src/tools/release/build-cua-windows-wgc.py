@@ -54,8 +54,8 @@ def main():
             and receipt['upstream_commit'] == '6d6c734c127025fb39ad5d585a10382808b39dc1'
             and receipt['upstream_cargo_lock_sha256'] == 'f9d49ce2dccdc43b2f7f027185301138fdd45eab4f9a556aace4cb0f4a98d46c'
             and receipt.get('patched_cargo_lock_sha256') == '978a9b7e0bc2855af210f26c28dadc29f1a9b978df2677385332f1fc6bf39964'
-            and receipt.get('native_baseline_manifest_sha256') == 'da892240124277eb707bc717774ab63bd7de117ee4a171b237cc207b85ad1b5b'
-            and receipt.get('native_baseline_patch_sha256') == '0dbd26de72aa13076ee69a247e8ec3b362df771aa4d8c3515aeb5510d0052e71',
+            and receipt.get('native_baseline_manifest_sha256') == '2b42d54684bfebbb3f045fe38148bf153743357af74de83e86ff6d6204eda502'
+            and receipt.get('native_baseline_patch_sha256') == '2cf0a4af8f55aa545fa77032254620d9aee55bd269b7b444d10a83b35f526deb',
             'frozen_pinned_source_required')
     baseline_path = root / 'styx-native-baseline-source.json'
     require(baseline_path.is_file() and digest(baseline_path) == receipt['native_baseline_manifest_sha256'],
