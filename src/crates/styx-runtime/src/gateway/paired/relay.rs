@@ -143,6 +143,9 @@ struct Binding {
     rebind: tokio::sync::Mutex<()>,
     targets: Mutex<BTreeMap<OperationId, TargetRecord>>,
     revoked: Arc<Mutex<bool>>,
+    // Local transport drain waits for an admitted call to consume its receipt.
+    // Explicit owner/enrollment revocation never waits on this handoff.
+    receipts: tokio::sync::RwLock<()>,
     ready: AtomicBool,
     admitted_records: AtomicUsize,
     cleanup: Mutex<drain::BindingCleanup>,
@@ -651,6 +654,7 @@ impl RelayHandle {
             rebind: tokio::sync::Mutex::new(()),
             targets: Mutex::new(BTreeMap::new()),
             revoked: Arc::new(Mutex::new(false)),
+            receipts: tokio::sync::RwLock::new(()),
             ready: AtomicBool::new(false),
             admitted_records: AtomicUsize::new(0),
             cleanup: Mutex::new(drain::BindingCleanup::default()),
@@ -727,6 +731,11 @@ impl RelayHandle {
         }
     }
     async fn call_inner(&self, b: &BoundOwner, call: Call) -> Result<Reply, RelayError> {
+        let _receipt = b
+            .inner
+            .receipts
+            .try_read()
+            .map_err(|_| RelayError::Unauthorized)?;
         let read_target = match &call {
             Call::Read { target, .. } => Some(target.operation_id.clone()),
             _ => None,
