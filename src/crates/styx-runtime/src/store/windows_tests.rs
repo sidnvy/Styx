@@ -391,3 +391,135 @@ fn windows_browser_runtime_assets_are_fresh_and_nonreplaceable() {
     drop(held);
     std::fs::remove_file(path).unwrap();
 }
+
+#[test]
+#[ignore = "STYX_TEST_WINDOWS_STORE_ROOT; owned NTFS journal read, bounds, hard-link/ADS/ACL negatives and late root ACL refusal only; no runtime/service/UI"]
+fn windows_journal_read_batch_preserves_original_bytes_and_private_boundaries() {
+    use crate::store::secure_journal::{JournalBudget, JournalError, files};
+    let parent_path = PathBuf::from(
+        std::env::var_os("STYX_TEST_WINDOWS_STORE_ROOT").expect("explicit owned private parent"),
+    );
+    let parent = Root::open(&parent_path).unwrap();
+    let name = format!("journal-read-batch-{}", uuid::Uuid::new_v4());
+    let root = parent.open_or_create_private_child(&name).unwrap();
+    let path = parent_path.join(&name);
+    let first = b"original first\n";
+    let second = b"original second \xe4\xb8\xad\xe6\x96\x87\n";
+    // An elevated Windows token may default a raw new file to Administrators.
+    // The production private publisher sets current TokenUser ownership at
+    // creation; the ordinary reader must keep refusing the raw default.
+    root.create_private_export("a.json", first, &|_| {})
+        .unwrap();
+    root.create_private_export("b.json", second, &|_| {})
+        .unwrap();
+    let scan = files::scan(&root.directory, JournalBudget::default()).unwrap();
+    assert_eq!(scan.total_bytes, first.len() + second.len());
+    assert_eq!(scan.files.len(), 2);
+    assert_eq!(scan.files[0].name, "a.json");
+    assert_eq!(scan.files[0].bytes, first);
+    assert_eq!(scan.files[1].name, "b.json");
+    assert_eq!(scan.files[1].bytes, second);
+    assert!(matches!(
+        files::scan(
+            &root.directory,
+            JournalBudget {
+                max_files: 1,
+                ..JournalBudget::default()
+            }
+        ),
+        Err(JournalError::BudgetExceeded)
+    ));
+    let refused = root.with_read_batch(|batch| {
+        assert!(matches!(
+            batch.read_raw(Path::new("a.json"), 1),
+            Err(StoreError::TooLarge)
+        ));
+        assert!(batch.read_raw(Path::new("a.json:stream"), 1024).is_err());
+        assert!(std::fs::rename(&path, parent_path.join("unexpected-root-move")).is_err());
+    });
+    refused.unwrap();
+    let alias = path.join("alias.json");
+    std::fs::hard_link(path.join("a.json"), &alias).unwrap();
+    assert!(files::scan(&root.directory, JournalBudget::default()).is_err());
+    std::fs::remove_file(&alias).unwrap();
+    let acl = |target: &Path, grant: bool| {
+        let mut command = Command::new("icacls.exe");
+        command.arg(target);
+        if grant {
+            command.args(["/grant", "*S-1-1-0:(R)"]);
+        } else {
+            command.args(["/remove:g", "*S-1-1-0"]);
+        }
+        assert!(command.output().unwrap().status.success());
+    };
+    acl(&path.join("a.json"), true);
+    assert!(files::scan(&root.directory, JournalBudget::default()).is_err());
+    acl(&path.join("a.json"), false);
+    // A member was read successfully, then the original directory becomes
+    // non-private. The entire enclosing result must fail rather than publish
+    // that earlier byte observation as a successfully validated scan.
+    let late = root.with_read_batch(|batch| {
+        let bytes = batch.read_raw(Path::new("a.json"), 1024).unwrap().bytes;
+        acl(&path, true);
+        bytes
+    });
+    assert!(matches!(late, Err(StoreError::NotPrivate)));
+    acl(&path, false);
+    let recovered = files::scan(&root.directory, JournalBudget::default()).unwrap();
+    assert_eq!(recovered.files[0].bytes, first);
+    assert_eq!(recovered.files[1].bytes, second);
+    assert_eq!(root.identity(), Root::open(&path).unwrap().identity());
+}
+
+#[test]
+#[ignore = "requires STYX_TEST_WINDOWS_READONLY_JOURNAL; owner-selected existing private namespace; read only, no lock creation/recovery/runtime/service/input"]
+fn windows_existing_journal_read_batch_readonly_diagnostic() {
+    use crate::store::secure_journal::{JournalBudget, files};
+    let path = PathBuf::from(
+        std::env::var_os("STYX_TEST_WINDOWS_READONLY_JOURNAL")
+            .expect("explicit existing namespace"),
+    );
+    let root = Root::open(&path).unwrap();
+    let budget = JournalBudget::default();
+    let warm = files::scan(&root.directory, budget).unwrap();
+    let before = std::time::Instant::now();
+    let mut original = Vec::new();
+    let mut total = 0usize;
+    for entry in std::fs::read_dir(&path).unwrap() {
+        assert!(original.len() < budget.max_files);
+        let name = entry.unwrap().file_name().into_string().unwrap();
+        let raw = root
+            .read_raw(
+                Path::new(&name),
+                budget.max_file_bytes.min(budget.max_bytes - total),
+            )
+            .unwrap();
+        total += raw.bytes.len();
+        original.push((name, raw.bytes));
+    }
+    root.validate_root().unwrap();
+    let repeated_ms = before.elapsed().as_secs_f64() * 1000.0;
+    original.sort_by(|a, b| a.0.cmp(&b.0));
+    let before = std::time::Instant::now();
+    let batched = files::scan(&root.directory, budget).unwrap();
+    let batched_ms = before.elapsed().as_secs_f64() * 1000.0;
+    assert_eq!(warm.total_bytes, total);
+    assert_eq!(batched.total_bytes, total);
+    assert_eq!(batched.files.len(), original.len());
+    assert_eq!(warm.files.len(), original.len());
+    for ((old, current), initial) in original.iter().zip(&batched.files).zip(&warm.files) {
+        assert_eq!(old.0, current.name);
+        assert_eq!(old.1, current.bytes);
+        assert_eq!(initial.name, current.name);
+        assert_eq!(initial.bytes, current.bytes);
+    }
+    println!(
+        "{}",
+        serde_json::json!({
+            "scope":"same_existing_private_journal_readonly_no_runtime_or_startup_acceptance",
+            "members":original.len(),"bytes":total,"identical_original_bytes":true,
+            "repeated_full_directory_walk_ms":repeated_ms,"batched_original_directory_ms":batched_ms,
+            "writes":false,"recovery_or_operations_replayed":false
+        })
+    );
+}

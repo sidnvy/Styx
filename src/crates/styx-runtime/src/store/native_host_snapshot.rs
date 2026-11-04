@@ -340,33 +340,55 @@ impl NativeHostSnapshot {
         let mut ca = Vec::new();
         let mut identity = Zeroizing::new(Vec::new());
         let mut credential = Zeroizing::new(Vec::new());
-        for &(name, limit) in INPUTS {
-            let raw = pin(&root, name, limit, &mut pins, &mut identities)?;
-            match name {
-                ".styx-native-root-v1.json" => marker_raw = raw,
-                "deployment.json" => deployment_raw = raw,
-                "state.json" => state_raw = raw,
-                SEED => seed_raw = raw,
-                READY => ready_raw = raw,
-                "host-ca.pem" => ca = raw,
-                "host-identity.pem" => identity = Zeroizing::new(raw),
-                "host-credential.token" => credential = Zeroizing::new(raw),
-                _ => (), // Protocol-phase business validation belongs to the join client.
+        let mut read_inputs = |reader: &dyn Fn(&str, usize) -> JournalResult<super::RawFile>| {
+            for &(name, limit) in INPUTS {
+                let raw = pin(reader, name, limit, &mut pins, &mut identities)?;
+                match name {
+                    ".styx-native-root-v1.json" => marker_raw = raw,
+                    "deployment.json" => deployment_raw = raw,
+                    "state.json" => state_raw = raw,
+                    SEED => seed_raw = raw,
+                    READY => ready_raw = raw,
+                    "host-ca.pem" => ca = raw,
+                    "host-identity.pem" => identity = Zeroizing::new(raw),
+                    "host-credential.token" => credential = Zeroizing::new(raw),
+                    _ => (), // Protocol-phase business validation belongs to the join client.
+                }
             }
-        }
-        for file in &journal.files {
-            let name = format!("{NAMESPACE}/{}", file.name);
-            let raw = pin(
-                &root,
-                &name,
-                JournalBudget::default().max_file_bytes,
-                &mut pins,
-                &mut identities,
-            )?;
-            if raw != file.bytes() {
-                return Err(JournalError::Unknown);
+            for file in &journal.files {
+                let name = format!("{NAMESPACE}/{}", file.name);
+                let raw = pin(
+                    reader,
+                    &name,
+                    JournalBudget::default().max_file_bytes,
+                    &mut pins,
+                    &mut identities,
+                )?;
+                if raw != file.bytes() {
+                    return Err(JournalError::Unknown);
+                }
             }
-        }
+            Ok::<(), JournalError>(())
+        };
+        // Windows holds the original root/ancestors without delete sharing.
+        // Group this one complete input observation, retaining every member's
+        // ACL/streams/file-ID/bytes check and full directory validation on both
+        // sides. Other platforms keep their original per-read path.
+        #[cfg(target_os = "windows")]
+        root.inner
+            .with_read_batch(|batch| {
+                read_inputs(&|path, limit| {
+                    batch
+                        .read_raw(Path::new(path), limit)
+                        .map_err(|_| JournalError::Unknown)
+                })
+            })
+            .map_err(|_| JournalError::Unknown)??;
+        #[cfg(not(target_os = "windows"))]
+        read_inputs(&|path, limit| {
+            root.read_raw(path, limit)
+                .map_err(|_| JournalError::Unknown)
+        })?;
         let marker =
             native_state::decode_marker(&marker_raw).map_err(|_| JournalError::Conflict)?;
         if !matches_root(&root.identity(), &marker.root_identity) {
@@ -573,6 +595,44 @@ impl NativeHostSnapshot {
         ))]
         successor: Option<&super::native_live_tip::ServiceTipProof>,
     ) -> JournalResult<()> {
+        #[cfg(target_os = "windows")]
+        {
+            self.root
+                .inner
+                .with_read_batch(|batch| {
+                    self.check_pins_with(
+                        &|path, limit| {
+                            batch
+                                .read_raw(Path::new(path), limit)
+                                .map_err(|_| JournalError::Unknown)
+                        },
+                        successor,
+                    )
+                })
+                .map_err(|_| JournalError::Unknown)?
+        }
+        #[cfg(not(target_os = "windows"))]
+        {
+            self.check_pins_with(
+                &|path, limit| {
+                    self.root
+                        .read_raw(path, limit)
+                        .map_err(|_| JournalError::Unknown)
+                },
+                successor,
+            )
+        }
+    }
+    fn check_pins_with(
+        &self,
+        reader: &dyn Fn(&str, usize) -> JournalResult<super::RawFile>,
+        #[cfg(any(
+            all(target_os = "linux", target_env = "gnu"),
+            target_os = "macos",
+            target_os = "windows"
+        ))]
+        successor: Option<&super::native_live_tip::ServiceTipProof>,
+    ) -> JournalResult<()> {
         for pin in &self.pins {
             #[cfg(any(
                 all(target_os = "linux", target_env = "gnu"),
@@ -584,19 +644,14 @@ impl NativeHostSnapshot {
             {
                 proof.read_state(&self.root, pin.limit)?
             } else {
-                self.root
-                    .read_raw(&pin.path, pin.limit)
-                    .map_err(|_| JournalError::Unknown)?
+                reader(&pin.path, pin.limit)?
             };
             #[cfg(not(any(
                 all(target_os = "linux", target_env = "gnu"),
                 target_os = "macos",
                 target_os = "windows"
             )))]
-            let raw = self
-                .root
-                .read_raw(&pin.path, pin.limit)
-                .map_err(|_| JournalError::Unknown)?;
+            let raw = reader(&pin.path, pin.limit)?;
             let matches = raw.observation() == &pin.observation
                 && Sha256Digest::of_bytes(raw.bytes()) == pin.digest;
             #[cfg(any(
@@ -744,15 +799,13 @@ fn matches_root(actual: &RootIdentity, marker: &NativeRootIdentity) -> bool {
 }
 
 fn pin(
-    root: &PrivateRoot,
+    reader: &dyn Fn(&str, usize) -> JournalResult<super::RawFile>,
     path: &str,
     limit: usize,
     pins: &mut Vec<Pin>,
     identities: &mut BTreeSet<(u64, u64)>,
 ) -> JournalResult<Vec<u8>> {
-    let raw = root
-        .read_raw(path, limit)
-        .map_err(|_| JournalError::Unknown)?;
+    let raw = reader(path, limit)?;
     if raw.bytes().is_empty()
         || !identities.insert((raw.observation().device, raw.observation().inode))
     {
