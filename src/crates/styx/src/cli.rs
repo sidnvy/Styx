@@ -749,12 +749,16 @@ fn setup_result(result: Result<(), setup::Failure>) -> ExitCode {
     match result {
         Ok(()) => ExitCode::SUCCESS,
         Err(failure) => {
-            eprintln!(
-                "{}",
-                serde_json::json!({"schema":1,"error":failure.code,"outcome":if failure.exit == 4 {"unknown"} else {"stopped"},"operations_replayed":false})
-            );
-            if let Some(hint) = failure.hint() {
-                eprintln!("{hint}");
+            if setup_prompt::enhanced() {
+                setup_prompt::failure(failure.code, failure.hint(), failure.exit == 4);
+            } else {
+                eprintln!(
+                    "{}",
+                    serde_json::json!({"schema":1,"error":failure.code,"outcome":if failure.exit == 4 {"unknown"} else {"stopped"},"operations_replayed":false})
+                );
+                if let Some(hint) = failure.hint() {
+                    eprintln!("{hint}");
+                }
             }
             if failure.exit == 4 {
                 eprintln!(
