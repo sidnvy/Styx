@@ -276,6 +276,40 @@ impl WindowReadEvidence {
 struct ReadWorkspace {
     id: i64,
 }
+// Hyprland may represent an unassigned special workspace with explicit empty
+// metadata and no ID. Keep that absence distinct from an observed workspace ID.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum ReadSpecialWorkspace {
+    Assigned(ReadWorkspace),
+    Unassigned(EmptySpecialWorkspace),
+}
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct EmptySpecialWorkspace {
+    address: String,
+    #[serde(rename = "type")]
+    kind: String,
+    name: String,
+}
+impl ReadSpecialWorkspace {
+    fn validate(&self) -> Result<()> {
+        match self {
+            Self::Assigned(workspace) => {
+                let _ = workspace.id;
+                Ok(())
+            }
+            Self::Unassigned(workspace)
+                if workspace.address.is_empty()
+                    && workspace.kind.is_empty()
+                    && workspace.name.is_empty() =>
+            {
+                Ok(())
+            }
+            Self::Unassigned(_) => Err(AssociationError::Untrusted),
+        }
+    }
+}
 #[derive(Deserialize)]
 struct ReadMonitor {
     id: i64,
@@ -286,7 +320,7 @@ struct ReadMonitor {
     #[serde(rename = "activeWorkspace")]
     active_workspace: ReadWorkspace,
     #[serde(rename = "specialWorkspace")]
-    special_workspace: ReadWorkspace,
+    special_workspace: ReadSpecialWorkspace,
 }
 #[derive(Deserialize)]
 struct ReadClient {
@@ -325,7 +359,8 @@ fn decode_window_reply(query: WindowQuery, bytes: &[u8]) -> Result<QueryReadEvid
                     return Err(AssociationError::Untrusted);
                 }
                 // Typed workspace IDs are observed, not interpreted as grants.
-                let _ = (m.active_workspace.id, m.special_workspace.id);
+                let _ = m.active_workspace.id;
+                m.special_workspace.validate()?;
             }
             monitors.len()
         }
