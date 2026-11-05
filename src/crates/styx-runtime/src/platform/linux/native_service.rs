@@ -495,7 +495,11 @@ impl Definition {
     }
     pub(crate) async fn start(&self) -> ServiceResult<ServiceObservation> {
         let before = self.inspect().await?;
-        if !before.installed || before.active != "inactive" || before.main_pid != 0 {
+        // A failed invocation with no remaining cgroup is terminal too. The
+        // management owner already holds the inactive execution lease before
+        // committing Running. Do not clear or reinterpret its failed receipt,
+        // and refuse failed units that may still own descendants.
+        if !before.stopped_for_mutation() {
             return Err(ServiceError::Conflict);
         }
         self.ctl("start", true).await?;
@@ -616,11 +620,7 @@ impl Definition {
     }
     pub(crate) async fn uninstall(&mut self) -> ServiceResult<ServiceObservation> {
         let before = self.inspect().await?;
-        if !before.installed
-            || before.enabled != Some(false)
-            || before.active != "inactive"
-            || before.main_pid != 0
-        {
+        if !before.stopped_for_mutation() || before.enabled != Some(false) {
             return Err(ServiceError::Conflict);
         }
         self.validate()?;
@@ -730,7 +730,16 @@ fn require_membership(pid: u32, expected: &str) -> ServiceResult<()> {
 fn group_empty(events: &File) -> ServiceResult<bool> {
     use std::os::unix::fs::FileExt as _;
     let mut buf = [0; 4096];
-    let n = events.read_at(&mut buf, 0).map_err(unknown)?;
+    let n = match events.read_at(&mut buf, 0) {
+        Ok(n) => n,
+        // kernfs keeps the held inode/nlink after cgroup removal, but reads of
+        // this originally captured cgroup.events FD return ENODEV. A removed
+        // cgroup has no member processes. Do not reopen its reusable pathname;
+        // every other error remains unknown. The caller still proves original
+        // process exit, manager success, invocation and held cgroup identity.
+        Err(error) if error.raw_os_error() == Some(nix::libc::ENODEV) => return Ok(true),
+        Err(error) => return Err(unknown(error)),
+    };
     if n == buf.len() {
         return Err(ServiceError::Unknown);
     }
@@ -773,6 +782,19 @@ pub(crate) struct ServiceObservation {
     pub(crate) runtime_health: &'static str,
 }
 impl ServiceObservation {
+    // A failed invocation is terminal only after both its main process and
+    // cgroup are gone. Use the same precondition before the configuration
+    // commit and before the OS operation; neither layer may accept more.
+    pub(crate) fn stopped_for_mutation(&self) -> bool {
+        self.installed
+            && self.main_pid == 0
+            && (self.active == "inactive" || (self.active == "failed" && self.cgroup.is_empty()))
+    }
+    pub(crate) fn start_allowed(&self, desired: NativeRunDesired) -> bool {
+        self.stopped_for_mutation()
+            && (desired == NativeRunDesired::Stopped
+                || (desired == NativeRunDesired::Running && self.active == "failed"))
+    }
     fn absent(unit: String, role: ServiceRole) -> Self {
         Self {
             schema: 1,
@@ -902,5 +924,38 @@ impl ServiceScope {
     /// or accept a different manager, runtime selection, or execution process.
     pub(crate) fn validate_identity(&self) -> ServiceResult<()> {
         self.peer.validate_identity()
+    }
+}
+
+#[cfg(test)]
+mod mutation_tests {
+    use super::*;
+    #[test]
+    fn failed_units_require_both_main_process_and_cgroup_absence() {
+        let mut os = ServiceObservation::absent("owned-test.service".into(), ServiceRole::Host);
+        assert!(!os.stopped_for_mutation());
+        os.installed = true;
+        os.active = "failed".into();
+        assert!(os.stopped_for_mutation());
+        assert!(os.start_allowed(NativeRunDesired::Running));
+        os.active = "inactive".into();
+        assert!(!os.start_allowed(NativeRunDesired::Running));
+        assert!(os.start_allowed(NativeRunDesired::Stopped));
+        os.active = "failed".into();
+
+        os.main_pid = 42;
+        assert!(!os.stopped_for_mutation());
+        os.main_pid = 0;
+        os.cgroup = "/retained-original-cgroup".into();
+        assert!(!os.stopped_for_mutation());
+        assert!(!os.start_allowed(NativeRunDesired::Running));
+        os.active = "inactive".into();
+        assert!(os.stopped_for_mutation());
+        os.main_pid = 42;
+        assert!(!os.stopped_for_mutation());
+        os.main_pid = 0;
+        os.active = "deactivating".into();
+        os.cgroup.clear();
+        assert!(!os.stopped_for_mutation());
     }
 }

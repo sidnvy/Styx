@@ -302,3 +302,66 @@ fn fresh_source_comparison_preserves_identity_but_not_window_contents() {
     assert_eq!(evidence.query_counts(), (1, 1));
     assert_eq!(evidence.response_sha256().0, Sha256Digest::of_bytes(b"[]"));
 }
+
+#[test]
+fn approved_uwsm_main_updates_do_not_expand_other_source_authority() {
+    for (_, digest) in SUPPORTED_UWSM_MAIN {
+        assert!(source_hash_supported(SOURCES[0].0, digest));
+        for (path, _) in SOURCES.iter().skip(1) {
+            assert!(!source_hash_supported(path, digest));
+        }
+        assert!(!source_hash_supported("/tmp/main.py", digest));
+        let mut changed = digest.to_owned();
+        changed.replace_range(..1, if digest.starts_with('0') { "1" } else { "0" });
+        assert!(!source_hash_supported(SOURCES[0].0, &changed));
+    }
+    for (path, digest) in SOURCES.iter().skip(1) {
+        assert!(source_hash_supported(path, digest));
+        assert!(!source_hash_supported(SOURCES[0].0, digest));
+    }
+}
+
+#[test]
+fn monitor_read_accepts_explicit_unassigned_special_workspace_without_inventing_id() {
+    // Shape observed from the authenticated niuda compositor after user reboot.
+    // This regression is a parser check, not native desktop acceptance.
+    let original = serde_json::json!([{
+        "id":0,"name":"HEADLESS-1","width":1920,"height":1080,"scale":1,
+        "activeWorkspace":{"address":"2","id":2,"type":"normal","name":"2"},
+        "specialWorkspace":{"address":"","type":"","name":""}
+    }]);
+    let bytes = serde_json::to_vec(&original).unwrap();
+    let observed = decode_window_reply(WindowQuery::Monitors, &bytes).unwrap();
+    assert_eq!(observed.object_count, 1);
+    assert_eq!(observed.raw_sha256, Sha256Digest::of_bytes(&bytes));
+    for invalid in [
+        serde_json::json!({}),
+        serde_json::json!(null),
+        serde_json::json!({"address":"0x1","type":"","name":""}),
+        serde_json::json!({"address":"","type":"special","name":""}),
+        serde_json::json!({"address":"","type":"","name":"hidden"}),
+        serde_json::json!({"address":"","type":"","name":"","id":null}),
+        serde_json::json!({"address":"","type":"","name":"","id":"0"}),
+        serde_json::json!({"address":"","type":"","name":"","unexpected":true}),
+    ] {
+        let mut changed = original.clone();
+        changed[0]["specialWorkspace"] = invalid;
+        assert!(
+            decode_window_reply(
+                WindowQuery::Monitors,
+                &serde_json::to_vec(&changed).unwrap()
+            )
+            .is_err()
+        );
+    }
+    let mut missing_active_identity = original;
+    missing_active_identity[0]["activeWorkspace"] =
+        serde_json::json!({"address":"","type":"","name":""});
+    assert!(
+        decode_window_reply(
+            WindowQuery::Monitors,
+            &serde_json::to_vec(&missing_active_identity).unwrap()
+        )
+        .is_err()
+    );
+}

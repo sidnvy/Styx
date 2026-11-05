@@ -303,6 +303,8 @@ fn require_initialized_profile(
                 origin: String,
                 not_before_unix: i64,
                 not_after_unix: i64,
+                #[serde(default, rename = "renew_endpoint")]
+                _renew_endpoint: bool,
                 files: std::collections::BTreeMap<String, Sha256Digest>,
             }
             let ready_file = held.capture("gateway-ready-v1.json", NATIVE_STATE_BYTES)?;

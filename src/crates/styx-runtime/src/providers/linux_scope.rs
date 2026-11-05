@@ -824,7 +824,16 @@ impl Cgroup {
         {
             return Err(ScopeError::CleanupUnconfirmed);
         }
-        if metadata.nlink() == 0 {
+        // kernfs can retain nlink=2 after removal. The kernel's dentry label
+        // on this original pinned cgroup fd still records deletion. This is
+        // not absence of a pathname, nor evidence from a replacement cgroup.
+        let mut deleted = self.path.as_os_str().to_owned();
+        deleted.push(" (deleted)");
+        if metadata.nlink() == 0
+            || std::fs::read_link(format!("/proc/self/fd/{}", self.directory.as_raw_fd()))
+                .map_err(|_| ScopeError::CleanupUnconfirmed)?
+                == deleted
+        {
             return Ok(true);
         }
         match std::fs::symlink_metadata(&self.path) {
@@ -1062,6 +1071,58 @@ async fn read_bounded(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    #[ignore = "requires an explicitly selected delegated cgroup v2 parent"]
+    fn removed_original_cgroup_is_observed_without_zero_link_count() {
+        let parent = PathBuf::from(std::env::var_os("STYX_TEST_CGROUP_PARENT").unwrap());
+        assert!(parent.is_absolute());
+        assert_eq!(std::fs::canonicalize(&parent).unwrap(), parent);
+        let parent_fd = open_directory(&parent).unwrap();
+        assert_eq!(
+            nix::sys::statfs::fstatfs(&parent_fd)
+                .unwrap()
+                .filesystem_type(),
+            nix::sys::statfs::CGROUP2_SUPER_MAGIC
+        );
+        assert_eq!(
+            parent_fd.metadata().unwrap().uid(),
+            nix::unistd::Uid::current().as_raw()
+        );
+        let path = parent.join(format!(
+            "styx-scope-removal-test-{}",
+            uuid::Uuid::new_v4().simple()
+        ));
+        std::fs::create_dir(&path).unwrap();
+        struct Created(PathBuf);
+        impl Drop for Created {
+            fn drop(&mut self) {
+                let _ = std::fs::remove_dir(&self.0);
+            }
+        }
+        let _owned = Created(path.clone());
+        let directory = open_directory(&path).unwrap();
+        let metadata = directory.metadata().unwrap();
+        let mut group = Cgroup {
+            events: open_nofollow(&path.join("cgroup.events"), false).unwrap(),
+            directory,
+            kill: None,
+            device: metadata.dev(),
+            inode: metadata.ino(),
+            path,
+        };
+        assert_eq!(group.empty(), Ok(true));
+        std::fs::remove_dir(&group.path).unwrap();
+        assert!(!group.path.exists());
+        let nlink = group.directory.metadata().unwrap().nlink();
+        // Prove the original kernel object, even if another cgroup appears at
+        // the same path. No process is launched or migrated by this scenario.
+        std::fs::create_dir(&group.path).unwrap();
+        assert_ne!(std::fs::metadata(&group.path).unwrap().ino(), group.inode);
+        assert_eq!(group.empty(), Ok(true), "removed original nlink={nlink}");
+        group.inode = group.inode.wrapping_add(1);
+        assert_eq!(group.empty(), Err(ScopeError::CleanupUnconfirmed));
+        println!("original_cgroup_removed=true held_nlink={nlink} replacement_not_adopted=true");
+    }
     struct SocketDirectory(PathBuf);
     impl SocketDirectory {
         fn new() -> Self {

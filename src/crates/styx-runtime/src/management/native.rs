@@ -639,7 +639,9 @@ mod platform {
             transaction_id: id.clone(),
             sequence: observation.intent.sequence,
             observed_stage,
-            receipt: None,
+            // Return the original validated phase receipt, not an OS-derived
+            // success claim. Read-only callers can then correlate a lost reply.
+            receipt: observation.phase_receipts.last().cloned(),
             recovered: false,
         })
     }
@@ -970,9 +972,42 @@ mod platform {
         path: &Path,
         id: Option<&TransactionId>,
     ) -> Result<NativeManagementReport> {
-        use_transactions(path, |transactions| {
-            let transaction = id.map(|id| observed(transactions, id)).transpose()?;
-            report(transactions, "inspect", transaction)
+        let observed = crate::store::native_observation::read(path)
+            .map_err(|_| NativeManagementError::new(ErrorKind::Unknown))?;
+        let transaction = id
+            .map(|id| {
+                let tx = observed
+                    .inventory
+                    .transactions
+                    .iter()
+                    .find(|tx| &tx.intent.transaction_id == id)
+                    .ok_or_else(|| NativeManagementError::new(ErrorKind::Conflict))?;
+                Ok(NativeTransactionReport {
+                    transaction_id: id.clone(),
+                    sequence: tx.intent.sequence,
+                    observed_stage: tx
+                        .phase_receipts
+                        .last()
+                        .map(|r| r.stage)
+                        .or_else(|| tx.prepared.as_ref().map(|p| p.journal.stage)),
+                    receipt: tx.phase_receipts.last().cloned(),
+                    recovered: false,
+                })
+            })
+            .transpose()?;
+        Ok(NativeManagementReport {
+            schema: 1,
+            configuration_only: true,
+            operation: "inspect",
+            runtime_health: "not_observed",
+            revision: observed.canonical.state().revision,
+            canonical_state_sha256: observed.canonical.raw_sha256(),
+            desired: observed.canonical.state().desired.clone(),
+            // Preserve the public conservative boundary: this read-only view
+            // holds no execution admission/recovery proof. It does not fence
+            // the actual original coordinator or claim that runtime is healthy.
+            admission_fenced: true,
+            transaction,
         })
     }
     pub(super) fn inspect_completed(path: &Path) -> Result<NativeManagementReport> {

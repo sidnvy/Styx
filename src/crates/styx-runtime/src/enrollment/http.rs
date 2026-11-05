@@ -78,7 +78,6 @@ pub struct EnrollmentHttp {
     >,
     mcp: Option<McpRouter>,
     allowed_hosts: BTreeSet<String>,
-    leaf: Sha256Digest,
     ingress: PairingIngressGeneration,
     connections: Arc<Semaphore>,
     requests: Arc<Semaphore>,
@@ -118,8 +117,6 @@ impl EnrollmentHttp {
         {
             return Err(HttpError::Configuration);
         }
-        let leaf = Sha256Digest::try_from(tls.certificate_pin().as_hex())
-            .map_err(|_| HttpError::Configuration)?;
         let ingress = PairingIngressGeneration::try_from(format!(
             "enrollment-listener-{}",
             uuid::Uuid::new_v4()
@@ -132,7 +129,6 @@ impl EnrollmentHttp {
             mcp: None,
             mcp_stop: None,
             allowed_hosts: allowed_hosts.into_iter().collect(),
-            leaf,
             ingress,
             connections: Arc::new(Semaphore::new(CONNECTIONS)),
             requests: Arc::new(Semaphore::new(REQUESTS)),
@@ -300,7 +296,13 @@ impl EnrollmentHttp {
         };
         let pairing = PairingContext {
             origin: format!("https://{host}"),
-            leaf: self.leaf,
+            leaf: match parts.extensions.get::<crate::tls::GatewayLeafPin>() {
+                Some(pin) => match Sha256Digest::try_from(pin.as_hex()) {
+                    Ok(leaf) => leaf,
+                    Err(_) => return failure(500, "tls_connection_binding_missing", true),
+                },
+                None => return failure(500, "tls_connection_binding_missing", true),
+            },
             ingress_generation: self.ingress.clone(),
             window: None,
         };
@@ -477,8 +479,9 @@ impl EnrollmentHttp {
             let stop = cancel.clone();
             connections.spawn(async move {
                 let slot = Arc::new(slot);
-                let tls = tokio::select! { _ = stop.cancelled() => return, result = app.tls.accept(tcp, IO_TIMEOUT) => match result { Ok(tls) => tls, Err(_) => return } };
-                let service = hyper::service::service_fn(move |request| {
+                let (tls, leaf) = tokio::select! { _ = stop.cancelled() => return, result = app.tls.accept_with_leaf(tcp, IO_TIMEOUT) => match result { Ok(tls) => tls, Err(_) => return } };
+                let service = hyper::service::service_fn(move |mut request: Request<hyper::body::Incoming>| {
+                    request.extensions_mut().insert(leaf.clone());
                     let app = app.clone();
                     let slot = slot.clone();
                     let lan_host = lan_host.clone();

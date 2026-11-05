@@ -213,12 +213,10 @@ impl DesktopSource {
         self.with_observation(|value|{
   // Empty list alone never grants TCC. Authorization is independently the
   // original daemon AX/screen-recording observation; unsupported lanes stay so.
-  let (available,authorized)=match capability {
-   CapabilityId::DesktopWindowsRead=>(value.windows.is_some(),value.native.permissions.accessibility),
-   CapabilityId::DesktopAccessibility=>(true,value.native.permissions.accessibility),
-   CapabilityId::DesktopCapture=>(false,value.native.permissions.screen_recording),
-   _=>(false,false),
-  };
+  let (available,authorized)=native_capability_evidence(
+   capability,value.windows.is_some(),value.native.permissions.accessibility,
+   value.native.permissions.screen_recording,
+  );
   Ok(ProviderEvidence{capability,provider:"macos-app-owned-native".try_into().map_err(|_|DesktopSourceError::Unavailable)?,availability:if available{Availability::Available}else{Availability::Unavailable},authorization:if authorized{Authorization::Granted}else if available{Authorization::Required}else{Authorization::Unknown},provenance:format!("same authenticated facts FD list_windows count={} sha256={}; separate original daemon TCC facts",value.windows.as_ref().map(|v|v.count).unwrap_or(0),value.windows.as_ref().map(|v|v.digest.to_hex()).unwrap_or_else(||"not_observed".into())),reason:if !available{Some(ErrorCategory::CapabilityUnsupported)}else if !authorized{Some(ErrorCategory::PermissionRequired)}else{None},recovery:if available&&authorized{Recovery::None}else{Recovery::Rediscover}})
  })
     }
@@ -266,4 +264,59 @@ impl DesktopSource {
 
 pub(crate) fn source_stop_complete(report: &DesktopSourceStop) -> bool {
     report.complete()
+}
+
+/// The pinned Mac element-click implementation performs AX actions and may
+/// restore key-window state. Its pointer/control capability intents therefore
+/// require the original daemon's Accessibility authorization and a successful
+/// current window probe, alongside the existing exact Host-owned AX target.
+/// This does not authorize unbound pointer/key routes: submit_desktop_action
+/// still rejects every mutating route without an exact click/write binding.
+fn native_capability_evidence(
+    capability: CapabilityId,
+    windows_observed: bool,
+    accessibility: bool,
+    screen_recording: bool,
+) -> (bool, bool) {
+    match capability {
+        CapabilityId::DesktopWindowsRead
+        | CapabilityId::DesktopPointer
+        | CapabilityId::DesktopWindowsControl => (windows_observed, accessibility),
+        CapabilityId::DesktopAccessibility => (true, accessibility),
+        CapabilityId::DesktopCapture => (false, screen_recording),
+        _ => (false, false),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn mac_element_click_capabilities_require_current_window_probe_and_native_ax_permission() {
+        for capability in [
+            CapabilityId::DesktopWindowsRead,
+            CapabilityId::DesktopPointer,
+            CapabilityId::DesktopWindowsControl,
+        ] {
+            for windows in [false, true] {
+                for ax in [false, true] {
+                    assert_eq!(
+                        native_capability_evidence(capability, windows, ax, true),
+                        (windows, ax)
+                    );
+                }
+            }
+        }
+        assert_eq!(
+            native_capability_evidence(CapabilityId::DesktopKeyboard, true, true, true),
+            (false, false)
+        );
+        // Capture remains a separate original-frame acquisition, never an
+        // implicit general screenshot/input authorization.
+        assert_eq!(
+            native_capability_evidence(CapabilityId::DesktopCapture, true, true, true),
+            (false, true)
+        );
+    }
 }

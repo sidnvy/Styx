@@ -441,6 +441,7 @@ impl GatewayClientTls {
 pub struct GatewayServerTls {
     acceptor: TlsAcceptor,
     leaf_pin: GatewayLeafPin,
+    renewal: Option<Arc<renewal::EndpointRenewal>>,
 }
 impl std::fmt::Debug for GatewayServerTls {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -473,6 +474,7 @@ impl GatewayServerTls {
         Ok(Self {
             acceptor: TlsAcceptor::from(Arc::new(config)),
             leaf_pin: expected_leaf,
+            renewal: None,
         })
     }
     pub fn certificate_pin(&self) -> &GatewayLeafPin {
@@ -483,17 +485,35 @@ impl GatewayServerTls {
         tcp: TcpStream,
         timeout: Duration,
     ) -> Result<tokio_rustls::server::TlsStream<TcpStream>, TlsError> {
+        self.accept_with_leaf(tcp, timeout)
+            .await
+            .map(|(stream, _)| stream)
+    }
+    pub(crate) async fn accept_with_leaf(
+        &self,
+        tcp: TcpStream,
+        timeout: Duration,
+    ) -> Result<(tokio_rustls::server::TlsStream<TcpStream>, GatewayLeafPin), TlsError> {
         let until = deadline(timeout)?;
-        tokio::time::timeout_at(until, self.acceptor.accept(tcp))
+        let (acceptor, pin) = if let Some(renewal) = &self.renewal {
+            // Renewal is done by the Gateway's original owned blocking
+            // validation job. Accept only takes the current bounded snapshot.
+            renewal.current()?
+        } else {
+            (self.acceptor.clone(), self.leaf_pin.clone())
+        };
+        let stream = tokio::time::timeout_at(until, acceptor.accept(tcp))
             .await
             .map_err(|_| TlsError::HandshakeTimeout)?
-            .map_err(classify_handshake)
+            .map_err(classify_handshake)?;
+        Ok((stream, pin))
     }
 }
 #[cfg(test)]
 mod tests;
 
 mod issuer;
+mod renewal;
 #[cfg(test)]
 pub(crate) use issuer::issue_server_leaf;
 pub(crate) use issuer::{generate_gateway_ca, issue_server_leaf_with_lan_addresses};

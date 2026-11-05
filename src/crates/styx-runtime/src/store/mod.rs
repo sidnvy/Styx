@@ -22,6 +22,12 @@ pub(crate) mod native_host_snapshot;
     target_os = "windows"
 ))]
 pub(crate) mod native_live_tip;
+#[cfg(any(
+    all(target_os = "linux", target_env = "gnu"),
+    target_os = "windows",
+    target_os = "macos"
+))]
+pub(crate) mod native_observation;
 pub mod native_root;
 pub mod native_state;
 pub mod native_transaction;

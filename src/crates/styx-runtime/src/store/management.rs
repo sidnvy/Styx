@@ -53,9 +53,34 @@ pub(super) fn validate_readonly_native_tip(
     validate_fresh_native_tip(scan, canonical, marker, None)
 }
 
+/// Pure inspection may describe the final pending transaction, but never
+/// authorize execution, reconcile its durability or grant a writer.
+#[cfg(any(
+    all(target_os = "linux", target_env = "gnu"),
+    target_os = "windows",
+    target_os = "macos"
+))]
+pub(super) fn validate_observed_native_tip(
+    scan: &super::secure_journal::JournalObservation,
+    canonical: &super::native_state::ValidatedNativeState,
+    marker: &styx_contracts::native_management::NativeRootMarker,
+    inventory: &ManagementInventory,
+) -> JournalResult<()> {
+    let pending = inventory
+        .transactions
+        .last()
+        .filter(|tx| {
+            tx.phase_receipts
+                .last()
+                .is_none_or(|p| p.stage != DurableStage::Committed)
+        })
+        .map(|tx| &tx.intent.transaction_id);
+    validate_fresh_native_tip(scan, canonical, marker, pending)
+}
+
 /// Replay every original fresh-root assignment, including the one closed runtime
-/// promotion. `pending` is only for the original coordinator after canonical
-/// publication; read-only callers can never accept an unfinished transaction.
+/// promotion. A pending tip can be described by inspection or reconciled by
+/// the original coordinator; only the latter can attest durability/admission.
 #[cfg(any(
     all(target_os = "linux", target_env = "gnu"),
     target_os = "windows",

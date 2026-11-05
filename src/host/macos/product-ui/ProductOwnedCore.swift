@@ -13,7 +13,7 @@ enum ProductOwnedCoreError: Error {
 struct ProductOwnedCoreRejection: Error, Sendable {
     let response: ProductJSON
 }
-private let productOriginalMacPublisher = "ebb36f9dff7022d8921443bdc30c6236d18dd0535aa2cdce838d1c5b327bab67"
+private let productOriginalMacPublisher = "bbb49c2626c3d4ef3cf9e1679db5305b100cee4a8c41c29c958ede82fb868bed"
 private let productOriginalAppRequirement = "identifier \"app.styx.host\" and certificate leaf = H\"cb50cee601419f28b43756f4fc8aefdbf60abae2\""
 private func productDigest(_ raw: Data) -> String { SHA256.hash(data: raw).map { String(format: "%02x", $0) }.joined() }
 

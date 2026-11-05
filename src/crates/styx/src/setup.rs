@@ -18,7 +18,13 @@ use tokio_util::sync::CancellationToken;
 #[serde(rename_all = "lowercase")]
 pub(super) enum Role {
     Hub,
+    Gateway,
     Join,
+}
+impl Role {
+    pub(super) fn owns_gateway(self) -> bool {
+        matches!(self, Self::Hub | Self::Gateway)
+    }
 }
 #[derive(Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -135,6 +141,9 @@ impl Failure {
             ),
             "native_release_publisher_untrusted" | "native_release_payload_integrity" => Some(
                 "The installed Styx files did not match the trusted publisher or signature. Check the fingerprint against the download page / release notes and obtain the matching signed download.",
+            ),
+            "setup_tunnel_client_missing" => Some(
+                "This signed runtime does not include an available ChatGPT tunnel component. Use the Gateway package with tunnel-client, then resume this same setup. Keep your saved tunnel ID and API key.",
             ),
             "setup_tunnel_not_ready_check_status" => Some(
                 "The ChatGPT tunnel is not ready. Check your internet connection, tunnel ID and API key with styx status, then run styx setup again.",
@@ -305,6 +314,14 @@ impl Answers {
         {
             return Err("setup_external_publisher_pin_required".into());
         }
+        if self.role == Role::Gateway
+            && (self.browser
+                || self.computer
+                || self.browser_executable.is_some()
+                || self.join_link_file.is_some())
+        {
+            return Err("setup_gateway_only_cannot_enable_host".into());
+        }
         if self.role == Role::Join
             && (!self.networks.is_empty() || self.tunnel.is_some() || self.plugin.is_some())
         {
@@ -378,15 +395,24 @@ impl Answers {
     }
 }
 fn interactive(root: &Path) -> Result<(Answers, Option<String>)> {
-    println!(
-        "Welcome to Styx. This setup connects only the computers and capabilities you approve."
-    );
-    println!("1. Set up this computer as the hub (Styx Gateway)\n2. Join an existing hub");
-    let role = match prompt::line("Role", Some("1"))?.as_str() {
-        "1" => Role::Hub,
-        "2" => Role::Join,
+    prompt::section("Styx setup");
+    prompt::info("Connect only the computers and capabilities you approve.");
+    prompt::section("This computer's role");
+    let role = match prompt::select(
+        "Role",
+        &[
+            "Hub (Gateway and this computer)",
+            "Join an existing Gateway",
+            "Gateway only (headless VM; pair other computers later)",
+        ],
+        0,
+    )? {
+        0 => Role::Hub,
+        1 => Role::Join,
+        2 => Role::Gateway,
         _ => return Err("setup_role_invalid".into()),
     };
+    prompt::section("Trusted release");
     println!(
         "Styx checks that your installed files are authentic. You need the publisher public key file and the fingerprint from the download page / release notes."
     );
@@ -418,7 +444,8 @@ fn interactive(root: &Path) -> Result<(Answers, Option<String>)> {
     let mut join_link_file = None;
     let mut pasted_link = None;
     let mut port = default_port();
-    if role == Role::Hub {
+    if role.owns_gateway() {
+        prompt::section("Gateway network");
         port = prompt::line("Hub HTTPS port", Some("22022"))?
             .parse()
             .map_err(|_| Failure::new("setup_port_invalid"))?;
@@ -437,34 +464,19 @@ fn interactive(root: &Path) -> Result<(Answers, Option<String>)> {
                 Vec::new()
             }
         };
-        for (i, address) in addresses.iter().enumerate() {
-            let kind = inputs::interface_kind(&address.interface)
-                .map(|kind| format!(" ({kind})"))
-                .unwrap_or_default();
-            println!("{}. {}{kind} {}", i + 1, address.interface, address.address);
+        let choices = addresses
+            .iter()
+            .map(|address| {
+                let kind = inputs::interface_kind(&address.interface)
+                    .map(|kind| format!(" ({kind})"))
+                    .unwrap_or_default();
+                format!("{}{kind} {}", address.interface, address.address)
+            })
+            .collect::<Vec<_>>();
+        for index in prompt::networks(&choices)? {
+            networks.push(addresses[index].address);
         }
-        let selection = prompt::line(
-            "Network numbers, separated by commas (empty for none)",
-            None,
-        )?;
-        if !selection.is_empty() {
-            for part in selection.split(',') {
-                let index = part
-                    .trim()
-                    .parse::<usize>()
-                    .map_err(|_| Failure::new("setup_network_choices_invalid"))?;
-                networks.push(
-                    addresses
-                        .get(
-                            index
-                                .checked_sub(1)
-                                .ok_or_else(|| Failure::new("setup_network_choices_invalid"))?,
-                        )
-                        .ok_or_else(|| Failure::new("setup_network_choices_invalid"))?
-                        .address,
-                );
-            }
-        }
+        prompt::section("ChatGPT connection");
         println!(
             "ChatGPT connects with a Secure MCP Tunnel. Create a tunnel in your account using https://developers.openai.com/api/docs/guides/secure-mcp-tunnels . Styx hides your API key as you type and saves it privately."
         );
@@ -484,28 +496,34 @@ fn interactive(root: &Path) -> Result<(Answers, Option<String>)> {
         pasted_link = Some(link);
         join_link_file = Some(file);
     }
+    prompt::section("Computer name");
     let label = prompt::line("This computer's label", Some(&hostname()))?;
-    println!(
-        "Choose a folder for commands and Browser Automation. Use a dedicated folder such as ~/Styx so Browser Automation can keep your private Styx files separate."
-    );
-    let workspace = PathBuf::from(prompt::line(
-        "Workspace folder",
-        home()?.join("Styx").to_str(),
-    )?);
-    let browser_executable = browser_default();
-    let browser = if let Some(path) = &browser_executable {
-        println!("Detected browser: {}", path.display());
-        prompt::confirm("Enable Browser Automation for this computer?")?
+    let (workspace, browser_executable, browser, computer) = if role == Role::Gateway {
+        (root.join("unused-host-workspace"), None, false, false)
     } else {
         println!(
-            "Chrome/Edge was not found. Browser Automation is off; install a supported browser before enabling it."
+            "Choose a folder for commands and Browser Automation. Use a dedicated folder such as ~/Styx so Browser Automation can keep your private Styx files separate."
         );
-        false
+        let workspace = PathBuf::from(prompt::line(
+            "Workspace folder",
+            home()?.join("Styx").to_str(),
+        )?);
+        let browser_executable = browser_default();
+        let browser = if let Some(path) = &browser_executable {
+            println!("Detected browser: {}", path.display());
+            prompt::confirm("Enable Browser Automation for this computer?")?
+        } else {
+            println!(
+                "Chrome/Edge was not found. Browser Automation is off; install a supported browser before enabling it."
+            );
+            false
+        };
+        println!(
+            "Computer Use can observe and act on your desktop after the platform's permission checks. Enable it only for a desktop session you intend to share."
+        );
+        let computer = prompt::confirm("Enable Computer Use for this computer?")?;
+        (workspace, browser_executable, browser, computer)
     };
-    println!(
-        "Computer Use can observe and act on your desktop after the platform's permission checks. Enable it only for a desktop session you intend to share."
-    );
-    let computer = prompt::confirm("Enable Computer Use for this computer?")?;
     let answers = Answers {
         schema: 1,
         role,
@@ -594,7 +612,9 @@ impl Session {
         }
     }
     fn skip(&self, step: &str) {
-        println!("{step}: already complete; keeping existing state.");
+        prompt::success(&format!(
+            "{step}: already complete; keeping existing state."
+        ));
     }
 }
 
@@ -669,7 +689,17 @@ impl Foreground {
             tokio::sync::mpsc::channel::<styx_runtime::foreground::ForegroundEvent>(32);
         let events = tokio::spawn(async move {
             while let Some(event) = receive.recv().await {
-                println!("{}", runtime_event_line(&event));
+                if prompt::enhanced() {
+                    match event.event {
+                        "gateway_loading" => prompt::info("Starting Gateway…"),
+                        "gateway_listening" => prompt::success("Gateway is listening"),
+                        "gateway_stopped" => prompt::info("Gateway stopped"),
+                        "connected" => prompt::success("This computer is connected"),
+                        _ => prompt::info(&runtime_event_line(&event)),
+                    }
+                } else {
+                    println!("{}", runtime_event_line(&event));
+                }
             }
         });
         Self {
@@ -743,6 +773,15 @@ impl Foreground {
 }
 
 #[cfg(all(target_os = "linux", target_env = "gnu"))]
+fn service_steps() -> [(&'static str, native::service::ServiceAction); 3] {
+    use native::service::ServiceAction;
+    [
+        ("install", ServiceAction::Install),
+        ("enable", ServiceAction::Enable),
+        ("start", ServiceAction::Start),
+    ]
+}
+#[cfg(all(target_os = "linux", target_env = "gnu"))]
 async fn service(
     session: &Session,
     path: &Path,
@@ -761,11 +800,10 @@ async fn service(
         return Ok(());
     }
     session.consent(step, "Install, start and enable this role as your systemd --user service. It starts at user login; Styx never uses sudo or enables linger.")?;
-    for (name, action) in [
-        ("install", ServiceAction::Install),
-        ("start", ServiceAction::Start),
-        ("enable", ServiceAction::Enable),
-    ] {
+    // Enable while stopped: starting a service only proves systemd admission,
+    // not readiness of the Gateway's original live configuration writer.
+    // Enabling immediately after start can race its private control endpoint.
+    for (name, action) in service_steps() {
         let before = manage(path, ServiceAction::Status, role, None, None)
             .await
             .map_err(Failure::native)?;
@@ -797,10 +835,14 @@ async fn service(_: &Session, _: &Path, _: native::NativeComponent, _: &str) -> 
 }
 
 pub(super) async fn wait_gateway(path: &Path) -> Result<Value> {
+    let waiting = prompt::waiting("Checking the Gateway connection…");
     let until = tokio::time::Instant::now() + Duration::from_secs(30);
     loop {
         match admin::observe(path).await {
-            Ok(v) => return Ok(v),
+            Ok(v) => {
+                waiting.finish("Gateway authenticated and ready");
+                return Ok(v);
+            }
             Err(e) => {
                 if tokio::time::Instant::now() >= until {
                     return Err(Failure::admin(e));
@@ -875,12 +917,14 @@ fn plan_steps(answers: &Answers, foreground: bool, root: &Path) -> Vec<String> {
             "Check the signed Styx files in {} against your publisher fingerprint.",
             answers.payload.payload_dir.display()
         ),
-        format!(
+    ];
+    if answers.role != Role::Gateway {
+        steps.push(format!(
             "Use {} for commands and Browser Automation; create it privately if needed.",
             answers.workspace.display()
-        ),
-    ];
-    if answers.role == Role::Hub {
+        ));
+    }
+    if answers.role.owns_gateway() {
         let networks = if answers.networks.is_empty() {
             "only on this computer".to_owned()
         } else {
@@ -902,28 +946,33 @@ fn plan_steps(answers: &Answers, foreground: bool, root: &Path) -> Vec<String> {
             steps.push("Connect ChatGPT through a Secure MCP Tunnel and save its API key privately. Briefly stop and restart an existing hub service if configuration requires it.".into());
         }
         steps.push(if foreground { "Run the hub in this terminal until Ctrl-C." } else { "Install, start and enable the hub as your systemd user service at login. No sudo or linger." }.into());
-        steps.push("Pair this computer with its own hub using its exact local identity.".into());
+        if answers.role == Role::Hub {
+            steps
+                .push("Pair this computer with its own hub using its exact local identity.".into());
+        }
     } else {
         steps.push("Save your join link privately, check the other hub's security fingerprint and comparison code with you, then pair this computer after approval.".into());
     }
-    steps.push(format!(
-        "Enable commands for “{}”; Browser Automation {}; Computer Use {}.",
-        answers.label,
-        if answers.browser { "on" } else { "off" },
-        if answers.computer { "on" } else { "off" }
-    ));
-    steps.push(if foreground { "Run this computer's connection in this terminal until Ctrl-C." } else { "Install, start and enable this computer's connection as your systemd user service at login. No sudo or linger." }.into());
-    steps.push(
-        if answers.role == Role::Hub {
-            "Wait for the hub to confirm this computer is connected."
-        } else {
-            "Show how to check this computer's connection on the hub."
-        }
-        .into(),
-    );
+    if answers.role != Role::Gateway {
+        steps.push(format!(
+            "Enable commands for “{}”; Browser Automation {}; Computer Use {}.",
+            answers.label,
+            if answers.browser { "on" } else { "off" },
+            if answers.computer { "on" } else { "off" }
+        ));
+        steps.push(if foreground { "Run this computer's connection in this terminal until Ctrl-C." } else { "Install, start and enable this computer's connection as your systemd user service at login. No sudo or linger." }.into());
+        steps.push(
+            if answers.role.owns_gateway() {
+                "Wait for the hub to confirm this computer is connected."
+            } else {
+                "Show how to check this computer's connection on the hub."
+            }
+            .into(),
+        );
+    }
     if let Some(plugin) = &answers.plugin {
         steps.push(format!("Write the ChatGPT plugin “{}” to {} and a ZIP beside it, then show you how to install it. Nothing is uploaded.", plugin.display_name, plugin.output.display()));
-    } else if answers.role == Role::Hub && answers.tunnel.is_none() {
+    } else if answers.role.owns_gateway() && answers.tunnel.is_none() {
         steps.push("Leave ChatGPT off for now and show how to connect it later.".into());
     }
     steps
@@ -1191,7 +1240,7 @@ async fn execute(session: &mut Session, foreground: bool, running: &mut Foregrou
         }
         session.skip("Installed Styx version");
     }
-    if !a.workspace.exists() {
+    if a.role != Role::Gateway && !a.workspace.exists() {
         session.consent(
             "workspace",
             "Create the selected workspace as a private directory.",
@@ -1207,7 +1256,7 @@ async fn execute(session: &mut Session, foreground: bool, running: &mut Foregrou
     if !session.input("setup-intent.json").exists() {
         session.json_new("setup-intent.json", &session.answers)?;
     }
-    if a.role == Role::Hub {
+    if a.role.owns_gateway() {
         if !gateway.exists() {
             session.consent("gateway", "Create this hub with a private security identity and the network addresses you selected.")?;
             if !session.input("gateway-deployment.json").exists() {
@@ -1327,8 +1376,23 @@ async fn execute(session: &mut Session, foreground: bool, running: &mut Foregrou
         }
         wait_gateway(&gateway).await?;
     }
-    let device = pair(session, (a.role == Role::Hub).then_some(gateway.as_path())).await?;
-    if a.role == Role::Hub {
+    if a.role == Role::Gateway {
+        if a.tunnel.is_some() {
+            connect_chatgpt(session, &gateway).await?;
+        }
+        println!(
+            "Gateway-only setup complete. No local Host, command executor, browser or desktop was installed."
+        );
+        println!("Check Styx: styx status --root {}", root.display());
+        println!("Add a computer: styx invite --root {}", root.display());
+        return Ok(());
+    }
+    let device = pair(
+        session,
+        (a.role.owns_gateway()).then_some(gateway.as_path()),
+    )
+    .await?;
+    if a.role.owns_gateway() {
         println!("Pairing this computer with its own hub… done");
     }
     if foreground {
@@ -1351,7 +1415,7 @@ async fn execute(session: &mut Session, foreground: bool, running: &mut Foregrou
         )
         .await?;
     }
-    if a.role == Role::Hub {
+    if a.role.owns_gateway() {
         println!(
             "Waiting for the hub to see this computer connected for commands{}…",
             if a.browser {
@@ -1371,7 +1435,7 @@ async fn execute(session: &mut Session, foreground: bool, running: &mut Foregrou
     }
     println!(
         "Setup complete. {}",
-        if a.role == Role::Hub {
+        if a.role.owns_gateway() {
             "This hub and this computer's connection are running."
         } else {
             "This computer's connection is running; check its connection on the hub."
@@ -1383,7 +1447,7 @@ async fn execute(session: &mut Session, foreground: bool, running: &mut Foregrou
         if a.computer { "on" } else { "off" }
     );
     println!("Check Styx: styx status --root {}", root.display());
-    if a.role == Role::Hub {
+    if a.role.owns_gateway() {
         println!(
             "Add another computer: styx invite --root {}",
             root.display()
@@ -1399,9 +1463,8 @@ async fn execute(session: &mut Session, foreground: bool, running: &mut Foregrou
 }
 
 async fn connect_chatgpt(session: &mut Session, gateway: &Path) -> Result<()> {
-    println!(
-        "Waiting for the ChatGPT tunnel to be ready… You will then install the plugin in ChatGPT."
-    );
+    prompt::section("Connect ChatGPT");
+    let waiting = prompt::waiting("Waiting for the ChatGPT tunnel to be ready…");
     let until = tokio::time::Instant::now() + Duration::from_secs(60);
     loop {
         let status = serde_json::to_value(
@@ -1410,7 +1473,11 @@ async fn connect_chatgpt(session: &mut Session, gateway: &Path) -> Result<()> {
                 .map_err(|e| Failure::new(e.code()))?,
         )
         .map_err(|_| Failure::new("setup_tunnel_status_failed"))?;
+        if status["available"] != true {
+            return Err("setup_tunnel_client_missing".into());
+        }
         if status["transport"] == "ready" {
+            waiting.finish("ChatGPT tunnel is ready");
             break;
         }
         if tokio::time::Instant::now() >= until {
@@ -1520,12 +1587,60 @@ async fn connect_chatgpt(session: &mut Session, gateway: &Path) -> Result<()> {
     Ok(())
 }
 
+async fn require_tunnel_client(answers: &Answers, root: &Path) -> Result<()> {
+    if !answers.role.owns_gateway() || answers.tunnel.is_none() {
+        return Ok(());
+    }
+    let available = if root.join("gateway").exists() {
+        let status = styx_runtime::foreground::tunnel::status(&root.join("gateway"))
+            .await
+            .map_err(|e| Failure::new(e.code()))?;
+        serde_json::to_value(status).map_err(|_| Failure::new("setup_tunnel_status_failed"))?["available"]
+            == true
+    } else {
+        let selection = styx_runtime::release::inspect_selection(
+            &answers.payload.payload_dir,
+            &answers.payload.publisher_file,
+            &answers.payload.expected_publisher,
+        )
+        .await
+        .map_err(|e| Failure::new(e.code()))?;
+        let release = styx_runtime::release::verify_selected(&selection)
+            .map_err(|e| Failure::new(e.code()))?;
+        release.manifest().worker_closures.iter().any(|worker| {
+            worker.kind == styx_contracts::native_release::NativeExternalWorker::TunnelClient
+        })
+    };
+    if !available {
+        return Err("setup_tunnel_client_missing".into());
+    }
+    Ok(())
+}
+
 pub(super) async fn run(
     root: Option<PathBuf>,
     answers_file: Option<PathBuf>,
     foreground_mode: bool,
     exit_when_connected: bool,
 ) -> Result<()> {
+    // console restores termios before raising SIGINT on Ctrl-C. Register the
+    // same Tokio signal handling used by the running setup before prompts too,
+    // so a read error can unwind Dialoguer and restore the terminal cursor.
+    #[cfg(unix)]
+    let _prompt_interrupt = if prompt::enhanced() {
+        Some(
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())
+                .map_err(|_| Failure::new("setup_signal_failed"))?,
+        )
+    } else {
+        None
+    };
+    #[cfg(windows)]
+    let _prompt_interrupt = if prompt::enhanced() {
+        Some(tokio::signal::windows::ctrl_c().map_err(|_| Failure::new("setup_signal_failed"))?)
+    } else {
+        None
+    };
     let root = root.map(Ok).unwrap_or_else(root_default)?;
     if !root.is_absolute() {
         return Err("setup_absolute_root_required".into());
@@ -1545,7 +1660,7 @@ pub(super) async fn run(
     } else {
         interactive(&root)?
     };
-    if intent.exists() && answers.role == Role::Hub && answers.tunnel.is_none() {
+    if intent.exists() && answers.role.owns_gateway() && answers.tunnel.is_none() {
         if let Ok(status) = styx_runtime::foreground::tunnel::status(&root.join("gateway")).await {
             let status = serde_json::to_value(status)
                 .map_err(|_| Failure::new("setup_tunnel_status_failed"))?;
@@ -1572,6 +1687,7 @@ pub(super) async fn run(
             });
         }
     }
+    require_tunnel_client(&answers, &root).await?;
     if !automated && answers.tunnel.is_some() && answers.plugin.is_none() {
         let plugin_intent = root.join("inputs/plugin-intent.json");
         answers.plugin = Some(if plugin_intent.exists() {
@@ -1639,7 +1755,8 @@ pub(super) async fn run(
     }
     let foreground = foreground_mode || !cfg!(all(target_os = "linux", target_env = "gnu"));
     if !automated {
-        println!("Styx will do the following (completed steps will be kept):");
+        prompt::section("Review setup");
+        prompt::info("Completed steps will be kept. Styx will:");
         for (index, step) in plan_steps(&session.answers, foreground, &session.root)
             .iter()
             .enumerate()
@@ -1705,7 +1822,7 @@ pub(super) async fn invite(root: Option<PathBuf>) -> Result<()> {
     }
     let root = root.map(Ok).unwrap_or_else(root_default)?;
     let answers = Answers::load(&root.join("inputs/setup-intent.json"))?;
-    if answers.role != Role::Hub {
+    if !answers.role.owns_gateway() {
         return Err("invite_requires_local_hub".into());
     }
     let session = Session {
@@ -2040,6 +2157,38 @@ mod tests {
     use super::*;
     fn valid() -> Value {
         json!({"schema":1,"role":"hub","payload":{"payload_dir":"/p/runtime","publisher_file":"/p/publisher.pem","expected_publisher":"a".repeat(64)},"label":"workstation","workspace":"/p/work","shell":"/bin/bash","approve":[]})
+    }
+    #[cfg(all(target_os = "linux", target_env = "gnu"))]
+    #[test]
+    fn service_enable_precedes_start_without_a_live_writer_dependency() {
+        use native::service::ServiceAction;
+        let steps = service_steps();
+        assert!(matches!(steps[0], ("install", ServiceAction::Install)));
+        assert!(matches!(steps[1], ("enable", ServiceAction::Enable)));
+        assert!(matches!(steps[2], ("start", ServiceAction::Start)));
+    }
+    #[test]
+    fn gateway_only_plan_never_pairs_or_runs_a_local_host() {
+        let mut value = valid();
+        value["role"] = json!("gateway");
+        value["browser"] = json!(false);
+        value["browser_executable"] = Value::Null;
+        value["computer"] = json!(false);
+        let answers: Answers = serde_json::from_value(value.clone()).unwrap();
+        answers.validate().unwrap();
+        let plan = plan_steps(&answers, false, Path::new("/private/setup"));
+        let text = plan.join("\n");
+        assert!(text.contains("Styx Gateway"));
+        assert!(!text.contains("Pair this computer"));
+        assert!(!text.contains("Enable commands"));
+        assert!(!text.contains("computer's connection"));
+        value["computer"] = json!(true);
+        assert!(
+            serde_json::from_value::<Answers>(value)
+                .unwrap()
+                .validate()
+                .is_err()
+        );
     }
     #[test]
     fn plan_consent_never_supplies_automation_approval_or_new_identity_decisions() {

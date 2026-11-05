@@ -214,6 +214,7 @@ impl CodexStdio {
             let mut state = resource.state.clone().lock_owned().await;
             if state.retired
                 || !state.drained
+                || state.pending_output.is_some()
                 || state.last_exit.is_none()
                 || snapshot.liveness != ExecutionLiveness::Exited
                 || snapshot.output_drain != OutputDrain::Drained

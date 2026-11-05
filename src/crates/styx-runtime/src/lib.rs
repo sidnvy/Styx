@@ -25,3 +25,5 @@ pub mod release;
     target_os = "macos"
 ))]
 pub mod app;
+
+pub mod app_control;

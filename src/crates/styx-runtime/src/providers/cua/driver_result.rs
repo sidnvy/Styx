@@ -6,6 +6,19 @@ pub(super) fn outcome(
     if bounded_bytes(&value, FRAME_BYTES).is_err() {
         return (CuaEvidence::Unknown, None, Some(CuaError::Unknown));
     }
+    if std::env::var_os("STYX_CUA_DIAGNOSTICS").as_deref() == Some(std::ffi::OsStr::new("1")) {
+        use std::io::Write as _;
+        let _ = writeln!(
+            std::io::stderr().lock(),
+            "{}",
+            serde_json::json!({
+                "event":"styx_cua_native_action_reply", "is_error":value.is_error,
+                "structured":value.structured_content.is_some(),
+                "native_code":value.structured_content.as_ref().and_then(|v|v.get("code")).and_then(Value::as_str).filter(|s|s.len()<=64 && s.bytes().all(|b|b.is_ascii_lowercase()||b==b'_'||b.is_ascii_digit())),
+                "effect_unknown":value.structured_content.as_ref().and_then(|v| v.get("effect")).and_then(Value::as_str)==Some("unknown")
+            })
+        );
+    }
     let data = value.structured_content.as_ref();
     let effect = data.and_then(|v| v.get("effect")).and_then(Value::as_str);
     if effect == Some("unknown") {
@@ -19,7 +32,21 @@ pub(super) fn outcome(
             .and_then(Value::as_str);
         // SnapshotStore's structured refusal is issued before resolving an
         // action. Other native code must explicitly report effect:none.
-        let before_dispatch = effect == Some("none")
+        // The pinned bridge issues this exact refusal before pointer dispatch
+        // when the retained element has no usable native geometry. Do not infer
+        // no-input from arbitrary text or from other effect:refused errors.
+        let geometry_refusal = data.is_some_and(|d| {
+            d.as_object().is_some_and(|d| d.len() == 4)
+                && d.get("refusal")
+                    .and_then(Value::as_object)
+                    .is_some_and(|r| r.len() == 2 && r.get("message").is_some_and(Value::is_string))
+                && d.get("status").and_then(Value::as_str) == Some("refused")
+                && effect == Some("refused")
+                && direct == Some("element_not_visible")
+                && refusal == Some("element_not_visible")
+        });
+        let before_dispatch = geometry_refusal
+            || effect == Some("none")
             || (effect.is_none()
                 && matches!(
                     refusal,
@@ -36,7 +63,8 @@ pub(super) fn outcome(
                 | "stale_snapshot"
                 | "element_outside_target_window"
                 | "window_not_found"
-                | "window_gone",
+                | "window_gone"
+                | "element_not_visible",
             ) => Some(CuaError::StaleObservation),
             Some("permission_denied" | "permission_required") => Some(CuaError::PermissionDenied),
             _ => None,
@@ -111,6 +139,26 @@ mod tests {
             ),
             (
                 serde_json::json!({"code":"permission_denied"}),
+                CuaError::Unknown,
+                CuaEvidence::Unknown,
+            ),
+            (
+                serde_json::json!({"status":"refused","code":"element_not_visible","effect":"refused","refusal":{"code":"element_not_visible","message":"native geometry unavailable"}}),
+                CuaError::StaleObservation,
+                CuaEvidence::NotDispatched,
+            ),
+            (
+                serde_json::json!({"code":"element_not_visible","effect":"unknown"}),
+                CuaError::Unknown,
+                CuaEvidence::Unknown,
+            ),
+            (
+                serde_json::json!({"status":"refused","code":"element_not_visible","effect":"refused","refusal":{"code":"element_not_visible","message":"native geometry unavailable"},"execution_state":"unknown"}),
+                CuaError::Unknown,
+                CuaEvidence::Unknown,
+            ),
+            (
+                serde_json::json!({"code":"element_not_visible","effect":"refused"}),
                 CuaError::Unknown,
                 CuaEvidence::Unknown,
             ),

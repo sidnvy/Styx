@@ -74,7 +74,7 @@ internal static class InstallGate {
  }
  // This is the install engine's read-only native package admission. It does
  // not stage/select a runtime or claim old App/worker settlement from PID absence.
- const string NativePublisher="f524e2e87f4cda2bc2b52d448233ae347b05c00730374f6b379a8aafe1cc2566";
+ const string NativePublisher="bbb49c2626c3d4ef3cf9e1679db5305b100cee4a8c41c29c958ede82fb868bed";
  static string NativePath(string root,string relative){
   if(String.IsNullOrEmpty(relative)||relative.Length>=512||Path.IsPathRooted(relative)||relative.Contains(":")||relative.Contains("\\"))throw new IOException("native_path_invalid");
   foreach(string part in relative.Split('/'))if(part==""||part=="."||part==".."||part.EndsWith(" ")||part.EndsWith("."))throw new IOException("native_path_invalid");
@@ -179,6 +179,9 @@ internal static class InstallGate {
   AppContext.SetSwitch("Switch.System.IO.UseLegacyPathHandling",false);
   AppContext.SetSwitch("Switch.System.IO.BlockLongPaths",false);
   try{
+   // Per-user packages require TokenOwner to be the actual user. Do not
+   // extract administrator-owned files and then attempt to repair ownership.
+   if(args.Length==1&&args[0]=="check-native-user"){using(var identity=WindowsIdentity.GetCurrent())return identity.User!=null&&identity.Owner!=null&&identity.User.Value==identity.Owner.Value?0:2;}
    if(args.Length>0&&args[0]=="verify-native")return VerifyNative(args);
    if(args.Length>0&&args[0]=="maintain-native-install")return MaintainNative(args);
    if(args.Length==2&&args[0]=="check-native-install"&&Path.IsPathRooted(args[1])){

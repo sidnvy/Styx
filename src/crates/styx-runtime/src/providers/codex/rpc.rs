@@ -17,9 +17,13 @@ use tokio_util::codec::{FramedRead, LinesCodec};
 const MAX_INFLIGHT: usize = (styx_contracts::OPERATION_METADATA_BYTES
     - styx_contracts::EXEC_FRAME_BYTES)
     / (2 * styx_contracts::EXEC_FRAME_BYTES);
-struct BudgetedReply {
-    result: Result<Value, ExecError>,
-    _permit: tokio::sync::OwnedSemaphorePermit,
+const EVENT_CACHE_BYTES: usize = styx_contracts::OPERATION_METADATA_BYTES
+    - styx_contracts::EXEC_FRAME_BYTES
+    - MAX_INFLIGHT * 2 * styx_contracts::EXEC_FRAME_BYTES;
+
+pub(super) struct BudgetedReply {
+    pub(super) result: Result<Value, ExecError>,
+    pub(super) _permit: tokio::sync::OwnedSemaphorePermit,
 }
 struct Pending {
     reply: oneshot::Sender<BudgetedReply>,
@@ -66,10 +70,12 @@ pub(super) struct Rpc {
     stdin: tokio::sync::Mutex<Option<Box<dyn tokio::io::AsyncWrite + Unpin + Send>>>,
     pending: Mutex<HashMap<u64, Pending>>,
     observations: Mutex<HashMap<String, Observation>>,
+    retained_events: Mutex<super::event_cache::RetainedEvents>,
     sequence: AtomicU64,
     closed: AtomicBool,
     timeout: Duration,
     permits: Arc<tokio::sync::Semaphore>,
+    read_buffers: Arc<tokio::sync::Semaphore>,
     observation_limit: usize,
     reader_task: Mutex<Option<tokio::task::JoinHandle<()>>>,
 }
@@ -110,10 +116,14 @@ impl Rpc {
             stdin: tokio::sync::Mutex::new(Some(Box::new(stdin))),
             pending: Mutex::new(HashMap::new()),
             observations: Mutex::new(HashMap::new()),
+            retained_events: Mutex::new(super::event_cache::RetainedEvents::new(EVENT_CACHE_BYTES)),
             sequence: AtomicU64::new(0),
             closed: AtomicBool::new(false),
             timeout,
             permits: Arc::new(tokio::sync::Semaphore::new(MAX_INFLIGHT)),
+            // A retained page keeps its existing RPC reservation. Leave one
+            // original wire slot for termination/cleanup; no new peer budget.
+            read_buffers: Arc::new(tokio::sync::Semaphore::new(MAX_INFLIGHT - 1)),
             observation_limit,
             reader_task: Mutex::new(None),
         });
@@ -156,20 +166,28 @@ impl Rpc {
                 .get("method")
                 .and_then(Value::as_str)
                 .ok_or(ExecError::InvalidFrame)?;
-            if matches!(method, "process/exited" | "process/closed") {
+            if matches!(
+                method,
+                "process/output" | "process/exited" | "process/closed"
+            ) {
                 let params = message.get("params").ok_or(ExecError::InvalidFrame)?;
                 let id = params
                     .get("processId")
                     .and_then(Value::as_str)
                     .ok_or(ExecError::InvalidFrame)?;
-                if let Some(observation) = self
-                    .observations
-                    .lock()
-                    .expect("observation mutex")
-                    .get_mut(id)
+                if method != "process/output"
+                    && let Some(observation) = self
+                        .observations
+                        .lock()
+                        .expect("observation mutex")
+                        .get_mut(id)
                 {
                     observation.notice(method, params);
                 }
+                self.retained_events
+                    .lock()
+                    .expect("retained event mutex")
+                    .observe(id, method, params);
             }
             return Ok(());
         }
@@ -210,6 +228,10 @@ impl Rpc {
             return Err(ExecError::Capacity);
         }
         observations.insert(id.to_owned(), Observation::default());
+        self.retained_events
+            .lock()
+            .expect("retained event mutex")
+            .register(id);
         Ok(())
     }
     pub fn observation(&self, id: &str) -> Option<Observation> {
@@ -219,10 +241,30 @@ impl Rpc {
             .get(id)
             .cloned()
     }
+    pub(super) fn take_completed_events(
+        &self,
+        id: &str,
+        cursor: Option<u64>,
+    ) -> Option<super::event_cache::Completed> {
+        self.retained_events
+            .lock()
+            .expect("retained event mutex")
+            .take_completed(id, cursor)
+    }
+    pub(super) fn disable_event_cache(&self, id: &str) {
+        self.retained_events
+            .lock()
+            .expect("retained event mutex")
+            .disable(id);
+    }
     pub fn unregister(&self, id: &str) {
         self.observations
             .lock()
             .expect("observation mutex")
+            .remove(id);
+        self.retained_events
+            .lock()
+            .expect("retained event mutex")
             .remove(id);
     }
     pub fn fail(&self, error: ExecError) {
@@ -245,7 +287,22 @@ impl Rpc {
             observation.lost = true;
         }
     }
+    pub(super) fn reserve_read_buffer(
+        &self,
+    ) -> Result<tokio::sync::OwnedSemaphorePermit, ExecError> {
+        self.read_buffers
+            .clone()
+            .try_acquire_owned()
+            .map_err(|_| ExecError::Capacity)
+    }
     pub async fn request(&self, method: &str, params: Value) -> Result<Value, ExecError> {
+        self.request_budgeted(method, params).await?.result
+    }
+    pub(super) async fn request_budgeted(
+        &self,
+        method: &str,
+        params: Value,
+    ) -> Result<BudgetedReply, ExecError> {
         if self.closed.load(Ordering::SeqCst) {
             return Err(ExecError::NotSent);
         }
@@ -321,7 +378,7 @@ impl Rpc {
             }
         }
         match tokio::time::timeout(self.timeout, receiver).await {
-            Ok(Ok(reply)) => reply.result,
+            Ok(Ok(reply)) => Ok(reply),
             Ok(Err(_)) => Err(ExecError::TransportLost),
             Err(_) => {
                 self.pending.lock().expect("pending mutex").remove(&id);

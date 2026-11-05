@@ -3021,11 +3021,12 @@
  
 --- /dev/null
 +++ b/libs/cua-driver/rust/crates/platform-macos/src/ax/styx_private.rs
-@@ -0,0 +1,714 @@
+@@ -0,0 +1,802 @@
 +//! Restricted Styx AX path. It retains original AX objects; it never relocates
 +//! a target by row number, parent traversal, keyboard focus, or remote token.
 +//! AX notifications are an observed invalidation fence, not an atomic remote
-+//! object generation. Unsupported notifications make this path unavailable.
++//! object generation. A row without native invalidation remains read-only.
++//! Required window invalidation and all input-target checks remain mandatory.
 +
 +use super::{
 +    bindings::*,
@@ -3038,12 +3039,13 @@
 +    base::{CFEqual, CFGetTypeID, CFRelease, CFRetain, CFTypeRef, TCFType},
 +    string::{CFString, CFStringGetLength, CFStringGetTypeID, CFStringRef},
 +};
-+use serde_json::{json, Value};
++use serde_json::{Value, json};
 +use std::{
 +    ffi::c_void,
 +    sync::{
++        Arc,
 +        atomic::{AtomicBool, Ordering},
-+        mpsc, Arc,
++        mpsc,
 +    },
 +    thread,
 +    time::{Duration, Instant},
@@ -3324,8 +3326,16 @@
 +                            };
 +                            // Already registered is safe only on this exact observer/object.
 +                            if code != kAXErrorSuccess && code != -25209 {
-+                                thread_state.invalid.store(true, Ordering::Release);
-+                                result = Err("target_invalidated");
++                                // An unsupported per-object notification is not an
++                                // ended observer. The caller may expose that object
++                                // only as a token-free read-only row. Required window
++                                // subscriptions still propagate this error and refuse.
++                                if code == -25207 {
++                                    result = Err("notification_unsupported");
++                                } else {
++                                    thread_state.invalid.store(true, Ordering::Release);
++                                    result = Err("target_invalidated");
++                                }
 +                                break;
 +                            }
 +                        }
@@ -3419,6 +3429,7 @@
 +    window: RetainedElement,
 +    pub(crate) elements: Vec<RetainedElement>,
 +    pub(crate) rows: Vec<Value>,
++    read_only: Vec<bool>,
 +    captured: Instant,
 +}
 +impl CompleteSnapshot {
@@ -3547,6 +3558,7 @@
 +    )?;
 +    let mut elements = Vec::new();
 +    let mut rows = Vec::new();
++    let mut read_only_rows = Vec::new();
 +    let mut stack = vec![(window.clone(), 0usize, None::<usize>)];
 +    while let Some((element, depth, parent)) = stack.pop() {
 +        check_time(deadline)?;
@@ -3561,11 +3573,19 @@
 +        }
 +        timeout(&element, deadline)?;
 +        pid_matches(&element, pid)?;
-+        fence.watch(&element, &["AXUIElementDestroyed"], deadline)?;
++        let read_only = match fence.watch(&element, &["AXUIElementDestroyed"], deadline) {
++            Ok(()) => false,
++            Err("notification_unsupported") => true,
++            Err(error) => return Err(error),
++        };
 +        let role = string_attr(&element, "AXRole")?
 +            .filter(|role| !role.is_empty() && role.len() <= 256)
 +            .ok_or("object_unavailable")?;
-+        let label = string_attr(&element, "AXTitle")?;
++        let label = string_attr(&element, "AXTitle")?
++            .filter(|value| !value.is_empty())
++            .or(string_attr(&element, "AXDescription")?.filter(|value| !value.is_empty()))
++            .or(string_attr(&element, "AXIdentifier")?.filter(|value| !value.is_empty()));
++        let enabled = unsafe { copy_bool_attr(raw(&element), "AXEnabled") };
 +        let secure = string_attr(&element, "AXSubrole")?.as_deref() == Some("AXSecureTextField");
 +        let value = if secure {
 +            None
@@ -3573,7 +3593,13 @@
 +            string_attr(&element, "AXValue")?
 +        };
 +        let index = elements.len();
-+        let mut row = json!({"element_index":index,"role":role,"depth":depth});
++        let mut row = json!({"element_index":index,"role":role,"depth":depth,"password":secure});
++        if read_only {
++            row["read_only"] = json!(true);
++        }
++        if let Some(enabled) = enabled {
++            row["enabled"] = json!(enabled);
++        }
 +        if let Some(parent) = parent {
 +            row["parent_index"] = json!(parent);
 +        }
@@ -3595,6 +3621,7 @@
 +        }
 +        elements.push(element);
 +        rows.push(row);
++        read_only_rows.push(read_only);
 +    }
 +    if rows.is_empty()
 +        || serde_json::to_vec(&rows)
@@ -3611,6 +3638,7 @@
 +        session,
 +        elements,
 +        rows,
++        read_only: read_only_rows,
 +        window,
 +        fence,
 +        captured: Instant::now(),
@@ -3673,6 +3701,9 @@
 +    element: RetainedElement,
 +) -> NativeResult<EditableTarget> {
 +    let deadline = Instant::now() + Duration::from_secs(3);
++    if snapshot.read_only.get(row) != Some(&false) {
++        return Err("editable_unavailable");
++    }
 +    let original = snapshot.elements.get(row).ok_or("stale_observation")?;
 +    if !same_object(original, &element) {
 +        return Err("target_identity_changed");
@@ -3734,6 +3765,63 @@
 +        WriteOutcome::Acknowledged
 +    } else {
 +        WriteOutcome::Unknown
++    }
++}
++
++#[cfg(test)]
++mod installed_read_only_tests {
++    use super::*;
++
++    // Runs only from the authorized actual App's Gateway Exec ancestry. It
++    // observes a disposable owned fixture and acquires, but never writes, a target.
++    #[test]
++    #[ignore = "requires explicit owned Mac fixture PID/window and original App GUI ancestry"]
++    fn owned_window_read_only_rows_never_acquire_input() {
++        let pid = std::env::var("STYX_TEST_MAC_AX_PID")
++            .unwrap()
++            .parse::<i32>()
++            .unwrap();
++        let window = std::env::var("STYX_TEST_MAC_AX_WINDOW")
++            .unwrap()
++            .parse::<u32>()
++            .unwrap();
++        let snapshot = Arc::new(
++            capture(pid, window, 64, 8, Instant::now() + Duration::from_secs(2))
++                .expect("native_complete_owned_window_read"),
++        );
++        let readonly: Vec<_> = snapshot
++            .read_only
++            .iter()
++            .enumerate()
++            .filter_map(|(row, read_only)| read_only.then_some(row))
++            .collect();
++        assert!(
++            !readonly.is_empty(),
++            "actual unsupported-notification negative required"
++        );
++        for row in &readonly {
++            assert!(matches!(
++                acquire(snapshot.clone(), *row, snapshot.elements[*row].clone()),
++                Err("editable_unavailable")
++            ));
++        }
++        let input = snapshot
++            .rows
++            .iter()
++            .position(|row| {
++                row["label"].as_str() == Some("Styx verification input")
++                    && row["role"].as_str() == Some("AXTextField")
++                    && row["enabled"].as_bool() == Some(true)
++            })
++            .expect("observed_owned_editable_row");
++        let acquired = acquire(snapshot.clone(), input, snapshot.elements[input].clone())
++            .expect("original_observed_editable_target_read_only_acquisition");
++        drop(acquired);
++        eprintln!(
++            "MAC_AX_READ_ONLY rows={} readonly_rows={} readonly_acquire=REFUSED observed_editable_acquire=PASS native_writes=0",
++            snapshot.rows.len(),
++            readonly.len()
++        );
 +    }
 +}
 --- a/libs/cua-driver/rust/crates/platform-macos/src/cursor/overlay.rs
@@ -5314,17 +5402,17 @@
              cua_driver_core::session::register_scoped_session_revive_hook(move |session_id| {
 --- /dev/null
 +++ b/libs/cua-driver/rust/crates/platform-macos/src/tools/styx_private.rs
-@@ -0,0 +1,455 @@
+@@ -0,0 +1,459 @@
 +//! Internal adapter operations: no new public Styx tool or authorization owner.
 +use super::ToolState;
 +use crate::ax::styx_private::{self as native, CompleteSnapshot, EditableTarget, WriteOutcome};
 +use async_trait::async_trait;
 +use cua_driver_core::{
-+    element_token::{format_snapshot_id, parse_token, token_for, ResolvedElement},
++    element_token::{ResolvedElement, format_snapshot_id, parse_token, token_for},
 +    protocol::ToolResult,
 +    tool::{Tool, ToolDef, ToolRegistry},
 +};
-+use serde_json::{json, Value};
++use serde_json::{Value, json};
 +use std::{
 +    sync::{Arc, Mutex, OnceLock},
 +    time::{Duration, Instant},
@@ -5548,7 +5636,11 @@
 +    };
 +    let mut rows = native.rows.clone();
 +    for (index, row) in rows.iter_mut().enumerate() {
-+        row["element_token"] = json!(token_for(id, index));
++        // An unobserved native object is descriptive only. Never publish a
++        // native token that Core could translate into a Host input alias.
++        if row.get("read_only").and_then(Value::as_bool) != Some(true) {
++            row["element_token"] = json!(token_for(id, index));
++        }
 +    }
 +    let count = rows.len();
 +    let data = json!({
@@ -5786,9 +5878,68 @@
      "Win32_Foundation",
      "Win32_UI_Accessibility",
      "Win32_UI_WindowsAndMessaging",
+--- a/libs/cua-driver/rust/crates/platform-windows/src/input/mouse.rs
++++ b/libs/cua-driver/rust/crates/platform-windows/src/input/mouse.rs
+@@ -466,6 +466,21 @@
+     send_click_synthesized_mods_impl(target, sx, sy, count, button, modifiers, true)
+ }
+ 
++/// Exact post-dispatch fact: every requested mouse/modifier event was inserted,
++/// but the resulting foreground moved elsewhere. This grants no authority over
++/// that new window and does not verify the user-visible effect.
++#[derive(Debug)]
++pub(crate) struct CompletedClickFocusChanged {
++    pub(crate) target: u64,
++    pub(crate) actual: u64,
++}
++impl std::fmt::Display for CompletedClickFocusChanged {
++    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
++        write!(f, "foreground_unavailable: exact target HWND 0x{:x} or a verified same-process post-action window was not foreground after the click (actual foreground HWND 0x{:x})", self.target, self.actual)
++    }
++}
++impl std::error::Error for CompletedClickFocusChanged {}
++
+ fn send_click_synthesized_mods_impl(
+     target: u64,
+     sx: i32,
+@@ -700,13 +715,13 @@
+                 foreground_target.expect("foreground target captured before input"),
+                 actual.0 as usize as u64,
+             ) {
+-                bail!(
+-                    "foreground_unavailable: exact target HWND {:?} or a verified same-process \
+-                     post-action window was not foreground after the click \
+-                     (actual foreground HWND {:?})",
+-                    target.0,
+-                    actual.0
+-                );
++                // Keep the strict API error for existing callers. The retained
++                // click adapter can distinguish this exact completed-dispatch
++                // receipt from a pre-dispatch failure or a partial SendInput.
++                return Err(CompletedClickFocusChanged {
++                    target: target.0 as usize as u64,
++                    actual: actual.0 as usize as u64,
++                }.into());
+             }
+         }
+     }
 --- a/libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs
 +++ b/libs/cua-driver/rust/crates/platform-windows/src/tools/impl_.rs
-@@ -634,6 +634,7 @@
+@@ -124,6 +124,13 @@
+     if let Some(refusal) = minimized_element_refusal(hwnd, idx, cx, cy, action_verb) {
+         return Err(refusal);
+     }
++    if admitted.as_ref().is_some_and(|element| element.is_uia() && element.rect.is_none()) {
++        let message = "The retained UIA element has no valid native rectangle; no pointer input was sent.";
++        return Err(ToolResult::error(message).with_structured(json!({
++            "status":"refused", "code":"element_not_visible", "effect":"refused",
++            "refusal":{"code":"element_not_visible", "message":message}
++        })));
++    }
+     let cached_center_in_window = crate::input::point_in_window_bounds(hwnd, cx, cy);
+     if cached_center_in_window && !crate::input::point_on_virtual_desktop(cx, cy) {
+         let message = format!(
+@@ -634,6 +641,7 @@
  use cua_driver_core::snapshot_store::ZoomContext;
  
  pub struct ToolState {
@@ -5796,7 +5947,7 @@
      pub snapshots: Arc<Snapshots>,
      pub cursor_registry: Arc<CursorRegistry>,
      pub config: Arc<RwLock<DriverConfig>>,
-@@ -646,6 +647,7 @@
+@@ -646,6 +654,7 @@
      ) -> Arc<Self> {
          Arc::new(Self {
              snapshots: Arc::new(Snapshots::new()),
@@ -5804,7 +5955,7 @@
              cursor_registry: Arc::new(CursorRegistry::new()),
              config: Arc::new(RwLock::new(load_driver_config())),
              capture_bridge: capture_service
-@@ -1269,6 +1271,10 @@
+@@ -1269,6 +1278,10 @@
      }
  
      async fn invoke(&self, args: Value) -> ToolResult {
@@ -5815,7 +5966,34 @@
          let display_only = match cua_driver_core::window_state_view::display_only(&args) {
              Ok(display_only) => display_only,
              Err(refusal) => return refusal,
-@@ -10208,6 +10214,7 @@
+@@ -3285,6 +3298,10 @@
+     ToolResult::text(message)
+         .with_structured(json!({ "path": path, "verified": false, "effect": "unverifiable" }))
+         .with_action_record(record)
++}
++
++fn completed_click_focus_change(error: &anyhow::Error) -> bool {
++    error.downcast_ref::<crate::input::mouse::CompletedClickFocusChanged>().is_some()
+ }
+ 
+ pub struct ClickTool {
+@@ -3890,6 +3907,15 @@
+                         "✅ Performed SendInput click on [{idx}] at screen ({cx},{cy}) (delivery_mode:foreground)."
+                     ))
+                     .with_structured(json!({ "path": "pixel", "verified": false, "effect": "unverifiable" })),
++                    Ok(Err(e)) if completed_click_focus_change(&e) => {
++                        // Exact retained target and visibility/UIPI/foreground
++                        // checks already preceded SendInput. All requested events
++                        // were inserted. A tray menu may legitimately belong to a
++                        // different process; a new fresh observation must verify it.
++                        ToolResult::text(format!(
++                            "Sent the complete foreground click on [{idx}] at ({cx},{cy}); post-action foreground changed. The effect requires a fresh observation."
++                        )).with_structured(json!({ "path": "pixel", "verified": false, "effect": "unverifiable" }))
++                    }
+                     Ok(Err(e)) => ToolResult::error(e.to_string()),
+                     Err(e) => ToolResult::error(format!("Task error: {e}")),
+                 };
+@@ -10208,6 +10234,7 @@
  ) -> ToolRegistry {
      let mut r = ToolRegistry::new_with_protected_consent_provider(provider);
      let state = ToolState::new(Some(r.capture_service()));
@@ -5823,7 +6001,7 @@
      let cursor_outcome_reader = {
          let cursor_registry = state.cursor_registry.clone();
          cua_driver_core::session::register_scoped_cursor_outcome_reader(std::sync::Arc::new(
-@@ -10257,8 +10264,10 @@
+@@ -10257,8 +10284,10 @@
      // `register_all` session_end hook (platform-macos/src/tools/mod.rs).
      let cursor_registry = state.cursor_registry.clone();
      let snapshots = state.snapshots.clone();
@@ -5834,7 +6012,7 @@
              snapshots.retire_session_screenshots(session_id);
              cursor_registry.remove(session_id);
              crate::overlay::remove_cursor(session_id.to_owned());
-@@ -10271,6 +10280,8 @@
+@@ -10271,6 +10300,8 @@
      r.retain_cursor_outcome_reader(cursor_outcome_reader);
      r.retain_session_end_hook(session_end_hook);
      r.retain_session_revive_hook(session_revive_hook);
@@ -5843,6 +6021,24 @@
      if let Some(runtime_scope) = cua_driver_core::tool::current_dispatch_runtime_scope() {
          let prefix = format!("__cua_runtime_{runtime_scope}:");
          let cursor_registry = state.cursor_registry.clone();
+@@ -10477,3 +10508,17 @@
+ mod display_only_tests;
+ #[cfg(test)]
+ mod value_write_readback_tests;
++
++#[cfg(test)]
++mod completed_click_receipt_tests {
++    use super::completed_click_focus_change;
++    #[test]
++    fn completed_dispatch_is_typed_and_never_inferred_from_error_text() {
++        let receipt: anyhow::Error = crate::input::mouse::CompletedClickFocusChanged { target: 1, actual: 2 }.into();
++        assert!(completed_click_focus_change(&receipt));
++        let copied_text = anyhow::anyhow!(receipt.to_string());
++        assert!(!completed_click_focus_change(&copied_text));
++        assert!(!completed_click_focus_change(&anyhow::anyhow!("SendInput inserted fewer modifier or mouse events than expected for the foreground click.")));
++        assert!(!completed_click_focus_change(&anyhow::anyhow!("foreground_unavailable: no mouse input was sent")));
++    }
++}
 --- a/libs/cua-driver/rust/crates/platform-windows/src/tools/mod.rs
 +++ b/libs/cua-driver/rust/crates/platform-windows/src/tools/mod.rs
 @@ -11,6 +11,8 @@
@@ -6355,16 +6551,27 @@
  use windows::core::{Interface, BSTR};
 --- a/libs/cua-driver/rust/crates/platform-windows/src/uia/snapshot.rs
 +++ b/libs/cua-driver/rust/crates/platform-windows/src/uia/snapshot.rs
-@@ -15,6 +15,16 @@
+@@ -15,6 +15,27 @@
  }
  
  impl RetainedElement {
 +    pub(crate) fn from_owned_uia(element: IUIAutomationElement) -> Self {
++        // Retaining the exact UIA object must retain its native geometry too.
++        // (0,0)/None was a placeholder, not authority for a foreground gesture.
++        let rect = unsafe { element.CurrentBoundingRectangle() }
++            .ok()
++            .filter(|r| r.right > r.left && r.bottom > r.top)
++            .map(|r| (r.left, r.top, r.right, r.bottom));
++        let center = rect.map(|(l, t, r, b)| {
++            // The mean of two i32 coordinates fits i32; sum in i64 first.
++            (((i64::from(l) + i64::from(r)) / 2) as i32,
++             ((i64::from(t) + i64::from(b)) / 2) as i32)
++        }).unwrap_or((0, 0));
 +        Self {
 +            ptr: element.into_raw() as usize,
 +            kind: SnapshotKind::Uia,
-+            center: (0, 0),
-+            rect: None,
++            center,
++            rect,
 +            msaa_role: None,
 +        }
 +    }
@@ -6372,7 +6579,7 @@
      pub fn as_ptr(&self) -> usize {
          self.ptr
      }
-@@ -100,6 +110,10 @@
+@@ -100,6 +121,10 @@
  }
  
  impl UiaSnapshot {
@@ -7447,5 +7654,147 @@
 +            return Err("session_disconnected");
 +        }
 +        input(self.desktop.0)
++    }
++}
+diff --git a/libs/cua-driver/rust/crates/platform-linux/src/wayland/hyprland.rs b/libs/cua-driver/rust/crates/platform-linux/src/wayland/hyprland.rs
+--- a/libs/cua-driver/rust/crates/platform-linux/src/wayland/hyprland.rs
++++ b/libs/cua-driver/rust/crates/platform-linux/src/wayland/hyprland.rs
+@@ -22,6 +22,37 @@
+ #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+ struct Workspace {
+     id: i64,
++}
++
++// An absent special workspace is distinct from an assigned compositor ID.
++#[derive(Clone, Debug, Deserialize)]
++#[serde(untagged)]
++enum SpecialWorkspace {
++    Assigned(Workspace),
++    Unassigned(EmptySpecialWorkspace),
++}
++#[derive(Clone, Debug, Deserialize)]
++#[serde(deny_unknown_fields)]
++struct EmptySpecialWorkspace {
++    address: String,
++    #[serde(rename = "type")]
++    kind: String,
++    name: String,
++}
++impl SpecialWorkspace {
++    fn observed_id(&self) -> Result<Option<i64>> {
++        match self {
++            Self::Assigned(workspace) => Ok(Some(workspace.id)),
++            Self::Unassigned(workspace)
++                if workspace.address.is_empty()
++                    && workspace.kind.is_empty()
++                    && workspace.name.is_empty() =>
++            {
++                Ok(None)
++            }
++            Self::Unassigned(_) => bail!("invalid unassigned Hyprland special workspace"),
++        }
++    }
+ }
+ 
+ #[derive(Clone, Debug, Deserialize)]
+@@ -48,7 +79,7 @@
+     #[serde(rename = "activeWorkspace")]
+     active_workspace: Workspace,
+     #[serde(rename = "specialWorkspace")]
+-    special_workspace: Workspace,
++    special_workspace: SpecialWorkspace,
+     /// A monitor in DPMS standby still owns its workspaces, but nothing on it
+     /// is visible to the user.
+     #[serde(rename = "dpmsStatus", default = "powered_by_default")]
+@@ -793,12 +824,14 @@
+     // output is on. With every output in standby the display is only idle,
+     // so its workspaces stay on screen.
+     let any_powered = monitors.iter().any(|m| m.dpms_status);
+-    let active = monitors
+-        .into_iter()
+-        .filter(|m| m.dpms_status || !any_powered)
+-        .flat_map(|m| [m.active_workspace.id, m.special_workspace.id])
+-        .filter(|id| *id != 0)
+-        .collect();
++    let mut active = HashSet::new();
++    for monitor in monitors.iter().filter(|m| m.dpms_status || !any_powered) {
++        active.insert(monitor.active_workspace.id);
++        if let Some(id) = monitor.special_workspace.observed_id()? {
++            active.insert(id);
++        }
++    }
++    active.remove(&0);
+     windows_from_clients(query("j/clients")?, &active)
+ }
+ 
+@@ -1797,3 +1830,70 @@
+         assert!(serde_json::from_value::<DisplayMonitor>(value).is_err());
+     }
+ }
++
++#[cfg(test)]
++mod styx_empty_special_workspace_tests {
++    use super::*;
++
++    #[test]
++    fn observed_unassigned_workspace_is_absent_not_zero_or_a_visibility_grant() {
++        let empty = r#"{"address":"","type":"","name":""}"#;
++        let original_error = serde_json::from_str::<Workspace>(empty).unwrap_err();
++        eprintln!("original native workspace decoder: {original_error}");
++        assert!(original_error.to_string().contains("missing field `id`"));
++        let special = serde_json::from_str::<SpecialWorkspace>(empty).unwrap();
++        assert_eq!(special.observed_id().unwrap(), None);
++        let assigned = serde_json::from_str::<SpecialWorkspace>(r#"{"id":-99}"#).unwrap();
++        assert_eq!(assigned.observed_id().unwrap(), Some(-99));
++        for invalid in [
++            r#"{}"#,
++            r#"null"#,
++            r#"{"address":"0x1","type":"","name":""}"#,
++            r#"{"address":"","type":"special","name":""}"#,
++            r#"{"address":"","type":"","name":"hidden"}"#,
++            r#"{"address":"","type":"","name":"","id":null}"#,
++            r#"{"address":"","type":"","name":"","id":"0"}"#,
++            r#"{"address":"","type":"","name":"","unexpected":true}"#,
++        ] {
++            assert!(serde_json::from_str::<SpecialWorkspace>(invalid)
++                .map_or(true, |value| value.observed_id().is_err()));
++        }
++    }
++
++    #[test]
++    #[ignore = "explicit owned visible window and authorized read-only native capture required"]
++    fn actual_owned_native_window_and_png_read_reference() {
++        let pid: u32 = std::env::var("STYX_TEST_HYPR_PID")
++            .unwrap()
++            .parse()
++            .unwrap();
++        let address: u64 = std::env::var("STYX_TEST_HYPR_WINDOW")
++            .unwrap()
++            .parse()
++            .unwrap();
++        let output = PathBuf::from(std::env::var("STYX_TEST_HYPR_PNG").unwrap());
++        assert!(output.is_absolute() && !output.exists());
++        let before = windows_for_reference(pid, address);
++        assert!(before.visible && before.xwayland == Some(false));
++        let bytes = capture(address, Some(pid)).unwrap();
++        assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
++        let image = image::load_from_memory(&bytes).unwrap();
++        assert_eq!(
++            (image.width(), image.height()),
++            (before.width, before.height)
++        );
++        assert_eq!(before, windows_for_reference(pid, address));
++        std::fs::write(output, bytes).unwrap();
++        println!("actual original native compositor target and PNG PASS; no input, no Core authorization or GUI acceptance claim");
++    }
++
++    fn windows_for_reference(pid: u32, address: u64) -> Window {
++        let mut windows = list_windows()
++            .unwrap()
++            .into_iter()
++            .filter(|window| window.pid == pid && window.address == address);
++        let found = windows.next().expect("exact owned native window required");
++        assert!(windows.next().is_none());
++        found
 +    }
 +}

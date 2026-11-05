@@ -327,3 +327,57 @@ async fn unknown_cleanup_retains_profile_record_until_inflight_preparation_and_r
     assert!(protocol.owner(&owner).is_err());
     host.shutdown_owned(Duration::from_secs(5)).await.unwrap();
 }
+
+#[tokio::test]
+async fn local_stop_withdraws_admission_without_revoking_original_pending_receipt() {
+    let (host, device, generation) = registry_host();
+    let protocol = host
+        .paired_protocol(PairedTrustedProfile {
+            endpoint: "wss://localhost/receipt-drain".into(),
+            gateway_namespace: "receipt-drain".try_into().unwrap(),
+            device_id: device,
+            host_generation: generation,
+        })
+        .unwrap();
+    let epoch: GatewayEpoch = "receipt-drain-epoch".try_into().unwrap();
+    protocol.accept_epoch(&epoch).unwrap();
+    let owner = OwnerRef {
+        owner_id: "fixture:receipt".try_into().unwrap(),
+        owner_epoch: paired_owner_epoch(&epoch, 1),
+    };
+    assert!(matches!(
+        protocol.control(&Call::OwnerOpen {
+            owner: owner.clone(),
+            grant_revision: 1
+        }),
+        Some(Reply::OwnerOpened { .. })
+    ));
+    protocol.owners.lock().unwrap().stopping = true;
+    assert!(
+        protocol.owner(&owner).is_err(),
+        "new business is fenced immediately"
+    );
+    assert!(
+        protocol.receipt_owner(&owner).is_ok(),
+        "original admitted receipt remains owned"
+    );
+    assert!(!matches!(
+        protocol.control(&Call::OwnerOpen {
+            owner: owner.clone(),
+            grant_revision: 1
+        }),
+        Some(Reply::OwnerOpened { .. })
+    ));
+    assert!(matches!(
+        protocol.control(&Call::OwnerRevoke {
+            owner: owner.clone()
+        }),
+        Some(Reply::OwnerRevoked { fenced: true, .. })
+    ));
+    assert!(
+        protocol.receipt_owner(&owner).is_err(),
+        "explicit owner revocation still wins"
+    );
+    let cleanup = host.shutdown_owned(Duration::from_secs(2)).await.unwrap();
+    assert!(cleanup.supervised_jobs_joined);
+}

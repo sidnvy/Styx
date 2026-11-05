@@ -6,7 +6,10 @@ use rmcp::model::CallToolResult;
 use serde::Serialize;
 use serde_json::Value;
 use sha2::{Digest, Sha256};
-use std::{collections::BTreeMap, io::Write};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    io::Write,
+};
 use styx_contracts::identity::Sha256Digest;
 
 const RESPONSE_BYTES: usize = 1024 * 1024;
@@ -93,6 +96,13 @@ impl ParsedAxSnapshot {
                 .get("element_index")
                 .and_then(Value::as_u64)
                 .ok_or(CuaError::ProtocolMismatch)?;
+            // Read-only rows never acquire either a native or a Host input ref.
+            if element.get("read_only") == Some(&Value::Bool(true)) {
+                if element.contains_key("element_token") || self.tokens.contains_key(&index) {
+                    return Err(CuaError::ProtocolMismatch);
+                }
+                continue;
+            }
             if !self.tokens.contains_key(&index) {
                 return Err(CuaError::ProtocolMismatch);
             }
@@ -260,6 +270,7 @@ fn parse_snapshot(
         return Err(CuaError::ProtocolMismatch);
     }
     let mut tokens = BTreeMap::new();
+    let mut indices = BTreeSet::new();
     let mut retained = 128 + native.len();
     for element in elements {
         let element = element.as_object().ok_or(CuaError::ProtocolMismatch)?;
@@ -267,11 +278,7 @@ fn parse_snapshot(
             .get("element_index")
             .and_then(Value::as_u64)
             .ok_or(CuaError::ProtocolMismatch)?;
-        let token = element
-            .get("element_token")
-            .and_then(Value::as_str)
-            .ok_or(CuaError::ProtocolMismatch)?;
-        if token != format!("{native}:{index}")
+        if !indices.insert(index)
             || !element
                 .get("role")
                 .and_then(Value::as_str)
@@ -280,13 +287,31 @@ fn parse_snapshot(
         {
             return Err(CuaError::ProtocolMismatch);
         }
+        let read_only = match element.get("read_only") {
+            None | Some(Value::Bool(false)) => false,
+            Some(Value::Bool(true)) => true,
+            Some(_) => return Err(CuaError::ProtocolMismatch),
+        };
+        if read_only {
+            // Unsupported per-object native invalidation permits descriptive
+            // reads only. A token on such a row is contradictory and refused.
+            if element.contains_key("element_token") {
+                return Err(CuaError::ProtocolMismatch);
+            }
+            continue;
+        }
+        let token = element
+            .get("element_token")
+            .and_then(Value::as_str)
+            .ok_or(CuaError::ProtocolMismatch)?;
+        if token != format!("{native}:{index}") {
+            return Err(CuaError::ProtocolMismatch);
+        }
         retained = retained
             .checked_add(token.len() + ENTRY_OVERHEAD)
             .filter(|bytes| *bytes <= RETAINED_BYTES)
             .ok_or(CuaError::Busy)?;
-        if tokens.insert(index, token.into()).is_some() {
-            return Err(CuaError::ProtocolMismatch);
-        }
+        tokens.insert(index, token.into());
     }
     Ok(ParsedAxSnapshot {
         native_snapshot_id: native.into(),

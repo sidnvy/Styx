@@ -547,6 +547,8 @@ struct Ready {
     origin: String,
     not_before_unix: i64,
     not_after_unix: i64,
+    #[serde(default)]
+    renew_endpoint: bool,
     files: BTreeMap<String, Sha256Digest>,
 }
 struct Material {
@@ -557,7 +559,7 @@ struct Material {
     tls: GatewayClientTls,
     origin: url::Url,
     origins: Vec<String>,
-    leaf: GatewayLeafPin,
+    leaf: Option<GatewayLeafPin>,
     token: Zeroizing<Vec<u8>>,
 }
 fn root_identity(root: &PrivateRoot) -> NativeRootIdentity {
@@ -718,7 +720,7 @@ impl Material {
         if ready.not_before_unix < 0
             || ready.not_after_unix <= ready.not_before_unix
             || now < ready.not_before_unix as u64
-            || now >= ready.not_after_unix as u64
+            || (!ready.renew_endpoint && now >= ready.not_after_unix as u64)
         {
             return Err(refused("native_gateway_admin_certificate_expired"));
         }
@@ -729,11 +731,11 @@ impl Material {
         if chain.is_empty() || chain.len() > 8 {
             return Err(refused("native_gateway_admin_tls_material"));
         }
-        let leaf = GatewayLeafPin::from_certificate_der(&chain[0]);
+        let leaf = (!ready.renew_endpoint).then(|| GatewayLeafPin::from_certificate_der(&chain[0]));
         let tls = GatewayClientTls::from_pinned_ca_pem(
             files[4].bytes(),
             TrustAnchorPin::from_certificate_der(&ca),
-            Some(leaf.clone()),
+            leaf.clone(),
         )
         .map_err(|_| refused("native_gateway_admin_tls_material"))?;
         if !token(files[6].bytes()) {
@@ -951,7 +953,11 @@ async fn read_pending(material: &Material) -> Result<Vec<PendingDevice>> {
         .await
         .map_err(http_error)?;
     accepted_status(response.status)?;
-    if response.leaf_pin != material.leaf {
+    if material
+        .leaf
+        .as_ref()
+        .is_some_and(|leaf| &response.leaf_pin != leaf)
+    {
         return Err(refused("native_gateway_pending_binding_mismatch"));
     }
     pending_body(
@@ -1028,7 +1034,11 @@ async fn perform(action: Action) -> Result<AdminReport> {
             .await
             .map_err(http_error)?;
             accepted_status(response.status)?;
-            if response.leaf_pin != material.leaf {
+            if material
+                .leaf
+                .as_ref()
+                .is_some_and(|leaf| &response.leaf_pin != leaf)
+            {
                 return Err(refused("native_gateway_admin_material_changed"));
             }
             let rows = computers_body(&response.body)?;
@@ -1052,7 +1062,10 @@ async fn perform(action: Action) -> Result<AdminReport> {
             accepted_status(response.status)?;
             let reply: serde_json::Value =
                 serde_json::from_slice(&response.body).map_err(|_| unknown())?;
-            if response.leaf_pin != material.leaf
+            if material
+                .leaf
+                .as_ref()
+                .is_some_and(|leaf| &response.leaf_pin != leaf)
                 || reply["status"] != "revoked"
                 || reply["device_id"] != device_id.as_str()
             {
