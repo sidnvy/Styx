@@ -7656,3 +7656,145 @@
 +        input(self.desktop.0)
 +    }
 +}
+diff --git a/libs/cua-driver/rust/crates/platform-linux/src/wayland/hyprland.rs b/libs/cua-driver/rust/crates/platform-linux/src/wayland/hyprland.rs
+--- a/libs/cua-driver/rust/crates/platform-linux/src/wayland/hyprland.rs
++++ b/libs/cua-driver/rust/crates/platform-linux/src/wayland/hyprland.rs
+@@ -22,6 +22,37 @@
+ #[derive(Clone, Debug, Deserialize, PartialEq, Eq)]
+ struct Workspace {
+     id: i64,
++}
++
++// An absent special workspace is distinct from an assigned compositor ID.
++#[derive(Clone, Debug, Deserialize)]
++#[serde(untagged)]
++enum SpecialWorkspace {
++    Assigned(Workspace),
++    Unassigned(EmptySpecialWorkspace),
++}
++#[derive(Clone, Debug, Deserialize)]
++#[serde(deny_unknown_fields)]
++struct EmptySpecialWorkspace {
++    address: String,
++    #[serde(rename = "type")]
++    kind: String,
++    name: String,
++}
++impl SpecialWorkspace {
++    fn observed_id(&self) -> Result<Option<i64>> {
++        match self {
++            Self::Assigned(workspace) => Ok(Some(workspace.id)),
++            Self::Unassigned(workspace)
++                if workspace.address.is_empty()
++                    && workspace.kind.is_empty()
++                    && workspace.name.is_empty() =>
++            {
++                Ok(None)
++            }
++            Self::Unassigned(_) => bail!("invalid unassigned Hyprland special workspace"),
++        }
++    }
+ }
+ 
+ #[derive(Clone, Debug, Deserialize)]
+@@ -48,7 +79,7 @@
+     #[serde(rename = "activeWorkspace")]
+     active_workspace: Workspace,
+     #[serde(rename = "specialWorkspace")]
+-    special_workspace: Workspace,
++    special_workspace: SpecialWorkspace,
+     /// A monitor in DPMS standby still owns its workspaces, but nothing on it
+     /// is visible to the user.
+     #[serde(rename = "dpmsStatus", default = "powered_by_default")]
+@@ -793,12 +824,14 @@
+     // output is on. With every output in standby the display is only idle,
+     // so its workspaces stay on screen.
+     let any_powered = monitors.iter().any(|m| m.dpms_status);
+-    let active = monitors
+-        .into_iter()
+-        .filter(|m| m.dpms_status || !any_powered)
+-        .flat_map(|m| [m.active_workspace.id, m.special_workspace.id])
+-        .filter(|id| *id != 0)
+-        .collect();
++    let mut active = HashSet::new();
++    for monitor in monitors.iter().filter(|m| m.dpms_status || !any_powered) {
++        active.insert(monitor.active_workspace.id);
++        if let Some(id) = monitor.special_workspace.observed_id()? {
++            active.insert(id);
++        }
++    }
++    active.remove(&0);
+     windows_from_clients(query("j/clients")?, &active)
+ }
+ 
+@@ -1797,3 +1830,70 @@
+         assert!(serde_json::from_value::<DisplayMonitor>(value).is_err());
+     }
+ }
++
++#[cfg(test)]
++mod styx_empty_special_workspace_tests {
++    use super::*;
++
++    #[test]
++    fn observed_unassigned_workspace_is_absent_not_zero_or_a_visibility_grant() {
++        let empty = r#"{"address":"","type":"","name":""}"#;
++        let original_error = serde_json::from_str::<Workspace>(empty).unwrap_err();
++        eprintln!("original native workspace decoder: {original_error}");
++        assert!(original_error.to_string().contains("missing field `id`"));
++        let special = serde_json::from_str::<SpecialWorkspace>(empty).unwrap();
++        assert_eq!(special.observed_id().unwrap(), None);
++        let assigned = serde_json::from_str::<SpecialWorkspace>(r#"{"id":-99}"#).unwrap();
++        assert_eq!(assigned.observed_id().unwrap(), Some(-99));
++        for invalid in [
++            r#"{}"#,
++            r#"null"#,
++            r#"{"address":"0x1","type":"","name":""}"#,
++            r#"{"address":"","type":"special","name":""}"#,
++            r#"{"address":"","type":"","name":"hidden"}"#,
++            r#"{"address":"","type":"","name":"","id":null}"#,
++            r#"{"address":"","type":"","name":"","id":"0"}"#,
++            r#"{"address":"","type":"","name":"","unexpected":true}"#,
++        ] {
++            assert!(serde_json::from_str::<SpecialWorkspace>(invalid)
++                .map_or(true, |value| value.observed_id().is_err()));
++        }
++    }
++
++    #[test]
++    #[ignore = "explicit owned visible window and authorized read-only native capture required"]
++    fn actual_owned_native_window_and_png_read_reference() {
++        let pid: u32 = std::env::var("STYX_TEST_HYPR_PID")
++            .unwrap()
++            .parse()
++            .unwrap();
++        let address: u64 = std::env::var("STYX_TEST_HYPR_WINDOW")
++            .unwrap()
++            .parse()
++            .unwrap();
++        let output = PathBuf::from(std::env::var("STYX_TEST_HYPR_PNG").unwrap());
++        assert!(output.is_absolute() && !output.exists());
++        let before = windows_for_reference(pid, address);
++        assert!(before.visible && before.xwayland == Some(false));
++        let bytes = capture(address, Some(pid)).unwrap();
++        assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
++        let image = image::load_from_memory(&bytes).unwrap();
++        assert_eq!(
++            (image.width(), image.height()),
++            (before.width, before.height)
++        );
++        assert_eq!(before, windows_for_reference(pid, address));
++        std::fs::write(output, bytes).unwrap();
++        println!("actual original native compositor target and PNG PASS; no input, no Core authorization or GUI acceptance claim");
++    }
++
++    fn windows_for_reference(pid: u32, address: u64) -> Window {
++        let mut windows = list_windows()
++            .unwrap()
++            .into_iter()
++            .filter(|window| window.pid == pid && window.address == address);
++        let found = windows.next().expect("exact owned native window required");
++        assert!(windows.next().is_none());
++        found
++    }
++}

@@ -5,7 +5,7 @@
   "upstream_version": "0.36.0",
   "official_archive_sha256": "157acdc2fd0bf5c480af2bdbe4a69f75a709551627f851caee16346234fdedef",
   "patch": "cua-0.36.0-styx-once.patch",
-  "patch_sha256": "5f93cba2d2a25c7d8d14f2acd081974fa9f6bcd5ee46dc25993ae837f093d117",
+  "patch_sha256": "a7fbc44edfa3f0f8be2b2da1b6563b16ff8055d6b97cdbd088b92077e3c5e512",
   "files": [
     {
       "path": "libs/cua-driver/rust/Cargo.lock",
@@ -262,6 +262,14 @@
       "final_sha256": "ec10b3d3cbf15c6074a409062f4308eb8151862771566aeaba4883ad61da0647",
       "original_bytes": 0,
       "final_bytes": 11958
+    },
+    {
+      "path": "libs/cua-driver/rust/crates/platform-linux/src/wayland/hyprland.rs",
+      "original_sha256": "73d614b6ddef642fd8c682e89e91fe1876189f947253ef4c58d6eed83af6e420",
+      "original_git_blob_sha1": "9aaa2a05352f7ec5a88f8e84bdd5e7d47551fe21",
+      "final_sha256": "dbe909a523f13692ee66526197560200d75621143ccc0a3df4d8eb961d2ff136",
+      "original_bytes": 68014,
+      "final_bytes": 72012
     }
   ],
   "rust_toolchain": "1.97.1",
