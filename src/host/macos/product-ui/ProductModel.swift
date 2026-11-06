@@ -433,7 +433,7 @@ enum ProductRestorationPolicy {
     var accepted: Bool { acceptance["complete"].bool }
     var browserNotApproved: Bool { browserObservation["status"].string == "not_approved" && browserObservation["approved"] == .bool(false) }
     var computerNotApproved: Bool { joined && deployment?.computerRequested == true && status["foreground"]["computerRequested"] == .bool(false) }
-    var computerApproved: Bool { ProductCapabilityPolicy.computerApproved(status["foreground"]) }
+    var computerApproved: Bool { nativeHost ? status["desktop_intent"]["computer_requested"].bool : ProductCapabilityPolicy.computerApproved(status["foreground"]) }
     var preparationStages: [ProductPreparationStage] { ProductPreparationPolicy.stages(deployment, browser: browserObservation, foreground: status["foreground"], nativeStartup: status["nativeStartup"], activity: preparationActivity) }
     var signingUpgradeIncomplete: Bool { !signingUpgradeNeedsReview && (signingUpgradeState["status"].string == "required" || status["nativeStartup"]["reason"].string == "native_signing_registration_required") }
     var signingUpgradeNeedsReview: Bool { signingUpgradeState["status"].string == "needs_review" || status["nativeStartup"]["reason"].string == "native_signing_upgrade_requires_review" }
@@ -643,6 +643,11 @@ enum ProductRestorationPolicy {
     func openLoginSettings() { ProductLoginStartup.openSettings() }
     private func reportFailure(_ failure: Error? = nil) {
         ProductNativeDiagnostics.event("operation_failed page=" + String(describing: page))
+        if let rejected = failure as? ProductOwnedCoreRejection,
+           rejected.response["retryable"] == .bool(true), rejected.response["uncertain"] == .bool(false) {
+            error = productText("配对请求尚未发送。请确认两台电脑网络可达，并在网关电脑的系统提示中允许 styx 接受传入连接。处理后粘贴新邀请，再核对并提交；不会自动重试。", "The pairing request was not sent. Check network access and allow styx incoming connections in the hub computer’s system prompt. Then paste a new invitation, review it and submit again. Styx will not retry automatically.")
+            return
+        }
         if let core = failure as? ProductCoreError, case .loginChangeUnconfirmed = core {
             loginOperation = "unknown"
             error = productText("登录启动更改的结果未确认，Styx 不会重复执行。请在系统设置中核对当前状态。", "The login startup change is unconfirmed and will not be repeated. Check its current state in System Settings.")

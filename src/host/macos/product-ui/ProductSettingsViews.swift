@@ -153,12 +153,21 @@ struct ProductSettingsView: View {
         VStack(alignment: .leading, spacing: 16) {
             Section(productText("允许 ChatGPT 在这台电脑上做什么", "What ChatGPT can do on this computer")) {
                 ProductCapabilityLabel(kind: .cli)
-                Toggle(isOn: $model.computer) { ProductCapabilityLabel(kind: .computer) }.disabled(model.joined)
-                Toggle(isOn: $model.browser) { ProductCapabilityLabel(kind: .browser) }.disabled(model.joined)
-                if !model.joined {
-                    Button(productText("应用更改", "Apply changes")) { model.updateCapabilities() }.disabled(model.busy)
+                if model.nativeHost {
+                    let selected = model.status["enrollment"]["selected_features"]
+                    if selected != .null {
+                        Label(productText("操作电脑", "Computer Use") + ": " + (selected["computer"].bool ? productText("已选择", "Selected") : productText("未选择", "Not selected")), systemImage: "desktopcomputer")
+                        Label(productText("浏览器自动化", "Browser Automation") + ": " + (selected["browser"].bool ? productText("已选择", "Selected") : productText("未选择", "Not selected")), systemImage: "globe")
+                    }
+                    Text(productText("功能在首次设置或加入时选择，不代表已获网关批准或系统权限。此版本更改功能需通过“更改这台电脑的角色”重新设置并配对。", "Features are selected during setup or joining; selection does not confirm Gateway approval or system permissions. To change features in this version, use Change this computer’s role, set up again and re-pair.")).font(.caption).foregroundStyle(.secondary)
                 } else {
-                    Text(productText("这些功能在加入时选定。如需更改，请在发出邀请的电脑上管理。", "These features were selected when joining. Manage changes on the computer that sent the invitation.")).font(.caption).foregroundStyle(.secondary)
+                    Toggle(isOn: $model.computer) { ProductCapabilityLabel(kind: .computer) }.disabled(model.joined)
+                    Toggle(isOn: $model.browser) { ProductCapabilityLabel(kind: .browser) }.disabled(model.joined)
+                    if !model.joined {
+                        Button(productText("应用更改", "Apply changes")) { model.updateCapabilities() }.disabled(model.busy)
+                    } else {
+                        Text(productText("这些功能在加入时选定。如需更改，请在发出邀请的电脑上管理。", "These features were selected when joining. Manage changes on the computer that sent the invitation.")).font(.caption).foregroundStyle(.secondary)
+                    }
                 }
             }
             if model.computerApproved {
@@ -167,7 +176,7 @@ struct ProductSettingsView: View {
                     permission(productText("屏幕录制", "Screen Recording"), model.screenGranted, true)
                 }
             }
-            if !model.localPrepared || model.foregroundRecoveryNeeded {
+            if model.nativeHost ? (model.nativeCanCreateLocal || model.nativeCanResumeLocal) : (!model.localPrepared || model.foregroundRecoveryNeeded) {
                 Button(productText("继续设置", "Continue setup")) { controller?.showOnboarding() }
             }
         }.frame(maxWidth: .infinity, alignment: .leading)

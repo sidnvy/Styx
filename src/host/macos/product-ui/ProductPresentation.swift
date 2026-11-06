@@ -343,7 +343,10 @@ struct ProductDailyPanel: View {
                 ProductMenuRow(title: productText("添加电脑", "Add computer"), symbol: "plus") {
                     model.beginDeviceInvitation()
                 }.disabled(model.busy)
-                if model.invitationExpanded { ProductInvitationView(model: model).padding(.horizontal, 10).padding(.bottom, 8) }
+                if model.invitationExpanded {
+                    ProductInvitationView(model: model).padding(.horizontal, 10).padding(.bottom, 8)
+                    ProductPendingIdentities(model: model)
+                }
             }
             ProductMenuRow(title: "ChatGPT", symbol: "globe", disclosure: true) { showSettings(.chat) }
         }
@@ -409,7 +412,7 @@ struct ProductInvitationView: View {
                         Text(productText("邀请有效期为 10 分钟", "Invitations expire after 10 minutes")).font(.caption2).foregroundStyle(.secondary)
                         Text(productText("等待另一台电脑加入", "Waiting for the other computer")).font(.caption).foregroundStyle(.secondary)
                         DisclosureGroup(productText("另一台电脑连不上？", "Can't connect from the other computer?")) {
-                            Text(productText("如果 macOS 询问是否允许 Styx Core 接受传入连接，请亲自选择。允许后，在另一台电脑继续加入；拒绝后，可以关闭邀请，稍后再试。", "If macOS asks whether Styx Core can accept incoming connections, make your choice in that system alert. After allowing it, continue joining on the other computer. If you decline, close this invitation and try later.")).font(.caption).foregroundStyle(.secondary)
+                            Text(productText("如果 macOS 询问是否允许 styx 接受传入连接，请亲自选择。允许后，在另一台电脑继续加入；拒绝后，可以关闭邀请，稍后再试。", "If macOS asks whether styx can accept incoming connections, make your choice in that system alert. After allowing it, continue joining on the other computer. If you decline, close this invitation and try later.")).font(.caption).foregroundStyle(.secondary)
                             Text(productText("没有出现提示时，请确认另一台电脑能访问所选网络地址。创建邀请不代表对方已经连通。", "If no alert appears, check that the other computer can reach the selected network address. An invitation does not confirm that connection.")).font(.caption).foregroundStyle(.secondary)
                         }
                     }
@@ -444,7 +447,7 @@ struct ProductInvitationView: View {
                 Button(productText("创建邀请", "Create invitation")) { model.beginDeviceInvitation() }
             }
             if let error = model.invitationError { Text(error).font(.caption).foregroundStyle(.red) }
-            if model.invitationWindowOpen {
+            if model.invitationWindowOpen || model.nativeHost && model.invitationExpanded {
                 Button(model.nativeHost ? productText("关闭面板", "Close panel") : productText("关闭邀请", "Close invitation")) { model.closeDeviceInvitation() }
                 Text(productText("已连接的电脑仍可使用。", "Connected computers remain available.")).font(.caption2).foregroundStyle(.secondary)
             }

@@ -25,6 +25,8 @@ pub struct JoinReport {
     pub expires_at: Option<u64>,
     pub service_started: bool,
     pub runtime_health: &'static str,
+    /// Display-only setup choices, never evidence of current Gateway approval.
+    pub selected_features: SelectedFeatures,
     // Original verified seed intent, used only to omit an optional desktop read.
     // It is never accepted from, or exposed as, a public enrollment DTO.
     #[serde(skip)]
@@ -32,6 +34,11 @@ pub struct JoinReport {
     // Original formal runtime authority, never serialized or accepted from a DTO.
     #[serde(skip)]
     pub(crate) verified_runtime: Arc<crate::release::VerifiedNativeRelease>,
+}
+#[derive(Serialize)]
+pub struct SelectedFeatures {
+    pub computer: bool,
+    pub browser: bool,
 }
 #[must_use]
 pub struct JoinError {
@@ -692,6 +699,10 @@ mod platform {
                 expires_at: Some(pending.expires_at),
                 service_started: false,
                 runtime_health: "not_started",
+                selected_features: SelectedFeatures {
+                    computer: self.seed.computer_requested,
+                    browser: self.seed.browser_requested,
+                },
                 computer_requested: self.seed.computer_requested,
                 verified_runtime: self.candidate.clone(),
             }

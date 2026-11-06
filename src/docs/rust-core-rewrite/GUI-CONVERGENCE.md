@@ -43,13 +43,30 @@ OS grants and account provisioning are user-owned prerequisites when needed.
 
 ## Current work, not an acceptance claim
 
-Product: connecting native inventory/invitation/approval/revoke and Tunnel UI.
-Architecture: adding original-App-scope adapters to existing Rust owners.
-Integration: development on the existing develop checkout, no new worktree.
-Release: no final candidate built yet; current installed packages remain the
-November 6 test candidates until an exact replacement is verified.
-Reliability: run real disposable TLS pairing and mutation-negative scenarios
-before producing packages; then verify native installed effects separately.
+Product: native inventory/invitation/approval/revoke and Tunnel UI are connected.
+Installed testing exposed a missing Mac transport allowlist entry (fixed in
+fdb1ef9), a missing pending-approval view in the native tray, misleading feature
+editing controls, and lost actionable join-failure feedback. The latter UI fixes
+are the next candidate. Feature selection remains first-run/re-pair in this
+release; selected features are displayed as choices, never approval evidence.
+Architecture: original-App-scope adapters reuse the existing Rust owners. There
+is no new management authority or JS runtime.
+Integration: development remains in the existing develop checkout, no worktree.
+Release: fdb1ef9 full-worker Mac DMG (1116) and Windows Inno (0.4.20261107.2)
+were built and installed on PilotMac and NAB5. They are intermediate candidates.
+Reliability: disposable real TLS pairing, binding refusal, self-revoke refusal,
+revoke and reopen passed. Installed fdb1ef9 Mac Exec file effect, HTTP 401 negative
+and Browser navigation/readback/close passed. Windows GUI joining did not pass:
+macOS ALF logs show its incoming connection held pending the styx firewall prompt.
+Computer Use found the Mac fixture window but window read returned permission
+required. Neither result is end-to-end acceptance. The owner subsequently confirmed system grants; a fresh LAN TLS probe responded.
+The independent account Tunnel was created with explicit owner approval:
+`tunnel_6aee2359dfb48191b3a50e2ba095b595`. Pairing, Computer Use and account
+acceptance must still be rerun on the final candidate; production stays intact.
+Evidence: `/home/sid/Developer/Artifacts/Styx/20261107-gui-convergence/`, with
+exact fdb1ef9 inputs and quality receipt under `candidate-2/`. Installed native
+effects are retained on PilotMac under
+`/Users/it-bootstrap/Developer/Artifacts/Styx/20261107-gui-fdb1ef9/`.
 Decision: Stable remains NO-GO until the above journey and explicit release
 gates close. Public signing/distribution and deferred services/auto-update are
 not silently promoted into this task.
