@@ -68,6 +68,14 @@ original FD after discovery withdrawal. New actions remain fenced; process,
 socket and image checks and the actual drain acknowledgement remain required.
 The failed installed run is not lifecycle acceptance; a fresh candidate must
 repeat the real read/effect, withdrawal cleanup and normal Quit/reopen journey.
+The 2845635 reference DMG (1118) subsequently passed installed Mac Exec, Browser,
+exact-window screenshot, AX click and text input with independent fixture
+readback. Normal tray Quit ended App/Core/Cua and the Hub listener without
+forced termination. The original-FD withdrawal scenario also passed, using the
+corrected native test fixture (ef076b5). Separate tree and screenshot reads and
+explicit text-write target fields are now explained in the MCP instructions;
+unsupported combined reads are not treated as missing OS permission. Final
+same-revision packages, Windows pairing and account acceptance remain pending.
 The independent account Tunnel was created with explicit owner approval:
 `tunnel_6aee2359dfb48191b3a50e2ba095b595`. Pairing, Computer Use and account
 acceptance must still be rerun on the final candidate; production stays intact.
