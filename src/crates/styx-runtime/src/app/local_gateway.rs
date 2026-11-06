@@ -4,7 +4,7 @@ use super::*;
 use crate::{
     management::native_join_http,
     store::RawFile,
-    tls::{GatewayClientTls, GatewayLeafPin, TrustAnchorPin},
+    tls::{GatewayClientTls, TrustAnchorPin},
 };
 use std::io::Cursor;
 
@@ -21,6 +21,15 @@ fn local_deployment(input: &LocalInput) -> Result<Vec<u8>, AppError> {
         deployment["gateway"]["lanAddress"] = json!(address);
     }
     serde_json::to_vec(&deployment).map_err(|_| AppError("app_input_invalid"))
+}
+
+// The protected CA and exact origin are the local admin trust boundary. A
+// renewing Gateway presents a fresh CA-signed leaf on startup; the immutable
+// bootstrap chain is evidence, not a pin for future admin connections. Hostname
+// and normal certificate validity checks remain enabled in GatewayClientTls.
+fn local_admin_tls(ca: &[u8], anchor: TrustAnchorPin) -> Result<GatewayClientTls, AppError> {
+    GatewayClientTls::from_pinned_ca_pem(ca, anchor, None)
+        .map_err(|_| AppError("app_gateway_input_refused"))
 }
 
 #[derive(Serialize)]
@@ -117,12 +126,7 @@ impl LocalGateway {
         }
         let anchor = TrustAnchorPin::from_certificate_der(&anchors[0]);
         let ca_sha = anchor.as_hex();
-        let tls = GatewayClientTls::from_pinned_ca_pem(
-            ca.as_bytes(),
-            anchor,
-            Some(GatewayLeafPin::from_certificate_der(&chain[0])),
-        )
-        .map_err(|_| AppError("app_gateway_input_refused"))?;
+        let tls = local_admin_tls(ca.as_bytes(), anchor)?;
         let (ready, observed) = watch::channel(false);
         let result = Self {
             scope,
@@ -678,6 +682,94 @@ impl HostApp {
 #[cfg(test)]
 mod setup_tests {
     use super::*;
+
+    #[tokio::test]
+    async fn local_admin_accepts_renewed_leaf_but_refuses_other_ca_and_hostname() {
+        use crate::tls::{GatewayLeafPin, GatewayServerTls, generate_gateway_ca};
+        use std::time::{Duration, SystemTime, UNIX_EPOCH};
+        use tokio::io::{AsyncReadExt, AsyncWriteExt};
+        let now = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_secs();
+        let ca = generate_gateway_ca(now, now - 60, now + 86400 * 365)
+            .ok()
+            .unwrap();
+        let wrong_ca = generate_gateway_ca(now, now - 60, now + 86400 * 365)
+            .ok()
+            .unwrap();
+        let original = crate::tls::issue_server_leaf(
+            &ca.certificate_pem,
+            &ca.private_key,
+            &ca.anchor_pin,
+            "https://127.0.0.1:22022",
+            now,
+        )
+        .unwrap();
+        let certs = rustls_pemfile::certs(&mut Cursor::new(&original.certificate_chain_pem))
+            .collect::<Result<Vec<_>, _>>()
+            .unwrap();
+        let old_pin = GatewayLeafPin::from_certificate_der(&certs[0]);
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let address = listener.local_addr().unwrap();
+        let valid = local_admin_tls(&ca.certificate_pem, ca.anchor_pin.clone()).unwrap();
+        let wrong = local_admin_tls(&wrong_ca.certificate_pem, wrong_ca.anchor_pin).unwrap();
+        let stale = GatewayClientTls::from_pinned_ca_pem(
+            &ca.certificate_pem,
+            ca.anchor_pin.clone(),
+            Some(old_pin.clone()),
+        )
+        .unwrap();
+        let server = GatewayServerTls::renewing(
+            ca.certificate_pem,
+            ca.private_key,
+            ca.anchor_pin,
+            format!("https://{address}"),
+            vec![],
+        )
+        .unwrap();
+        assert_ne!(server.certificate_pin(), &old_pin);
+        let serving = tokio::spawn(async move {
+            let mut effects = 0;
+            for _ in 0..4 {
+                let (tcp, _) = listener.accept().await.unwrap();
+                if let Ok((mut stream, _)) =
+                    server.accept_with_leaf(tcp, Duration::from_secs(5)).await
+                {
+                    let mut nonce = [0; 5];
+                    if stream.read_exact(&mut nonce).await.is_ok() {
+                        assert_eq!(&nonce, b"proof");
+                        effects += 1;
+                        stream.write_all(b"ACK").await.unwrap();
+                    }
+                }
+            }
+            effects
+        });
+        for (client, host) in [
+            (&stale, "127.0.0.1"),
+            (&wrong, "127.0.0.1"),
+            (&valid, "wrong.example"),
+        ] {
+            let tcp = tokio::net::TcpStream::connect(address).await.unwrap();
+            assert!(
+                client
+                    .connect(host, tcp, Duration::from_secs(5))
+                    .await
+                    .is_err()
+            );
+        }
+        let tcp = tokio::net::TcpStream::connect(address).await.unwrap();
+        let mut stream = valid
+            .connect("127.0.0.1", tcp, Duration::from_secs(5))
+            .await
+            .unwrap();
+        stream.write_all(b"proof").await.unwrap();
+        let mut ack = [0; 3];
+        stream.read_exact(&mut ack).await.unwrap();
+        assert_eq!(&ack, b"ACK");
+        assert_eq!(serving.await.unwrap(), 1);
+    }
 
     fn input() -> LocalInput {
         serde_json::from_value(json!({"label":"Test computer","computer":false,"browser":false,"browserChannel":null,"persistLogin":false}))
