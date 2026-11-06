@@ -76,6 +76,14 @@ corrected native test fixture (ef076b5). Separate tree and screenshot reads and
 explicit text-write target fields are now explained in the MCP instructions;
 unsupported combined reads are not treated as missing OS permission. Final
 same-revision packages, Windows pairing and account acceptance remain pending.
+The a67ef91 candidate (Mac 1119, Windows 0.4.20261107.5) exposed a Mac
+overview navigation defect: View chat connection still used the legacy
+preparation gate. First-run and Settings now share the Rust-backed Tunnel and
+Custom MCP view; reopening native onboarding also bypasses that legacy gate.
+Native Swift typechecking passed; installed verification remains pending.
+NAB5's candidate-5 installation failed with zero free bytes on C: and Inno
+completed rollback. This is an installation failure, not Windows acceptance;
+the original failure log is retained and a new attempt requires available space.
 The independent account Tunnel was created with explicit owner approval:
 `tunnel_6aee2359dfb48191b3a50e2ba095b595`. Pairing, Computer Use and account
 acceptance must still be rerun on the final candidate; production stays intact.

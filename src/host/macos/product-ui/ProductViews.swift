@@ -263,7 +263,9 @@ struct ProductView: View {
     private var chat: some View {
         VStack(alignment: .leading, spacing: 20) {
             heading(productText("连接 ChatGPT", "Connect ChatGPT"))
-            if model.joined {
+            if model.nativeHost {
+                ProductNativeChatView(model: model)
+            } else if model.joined {
                 ProductPanel(title: productText("由管理电脑管理", "Managed on the main computer")) {
                     Text(productText("回到 ChatGPT，在已有 Styx 的聊天中选择这台电脑。", "Return to ChatGPT and select this computer in a chat using the existing Styx plugin."))
                     approvalNotice
@@ -580,7 +582,7 @@ struct ProductAcceptanceField: NSViewRepresentable {
     func showPreferences() { showSettings(.general) }
     func showOnboarding() {
         menuPopover?.performClose(nil)
-        if model.page == .overview { model.page = model.localPrepared ? (model.accepted ? .overview : .chat) : .preparation }
+        if !model.nativeHost && model.page == .overview { model.page = model.localPrepared ? (model.accepted ? .overview : .chat) : .preparation }
         present()
     }
     func showSettings(_ section: ProductSettingsSection) {

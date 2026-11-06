@@ -220,37 +220,7 @@ struct ProductSettingsView: View {
     private var chat: some View {
         VStack(alignment: .leading, spacing: 16) {
             if model.nativeHost {
-                Text(productText("ChatGPT 中的 Styx", "Styx in ChatGPT")).font(.headline)
-                if model.nativeSupportsOperation("tunnelSave") {
-                    ProductTunnelStatus(model: model, showNextStep: false)
-                    if !model.tunnelID.isEmpty { Text(model.tunnelID).textSelection(.enabled) }
-                    Button(productText("配置 Tunnel…", "Configure Tunnel…")) { editTunnel = true }.disabled(model.busy)
-                    Text(productText("保存时会短暂断开本 App 管理的连接，随后自动恢复。请先完成正在运行的任务。", "Saving briefly pauses connections managed by this App, then reconnects. Finish active tasks first.")).font(.caption)
-                } else {
-                    Text(productText("这台电脑已加入其他管理电脑，请复用那里的 Styx 连接。", "This computer uses another hub. Use that hub's existing Styx connection."))
-                }
-                Text(productText("等待 Tunnel 就绪后，在目标 ChatGPT 账号打开 Plugins → Add → Add custom MCP server。填写名称，通过 Choose icon 上传下方图标，Connection 选择 Tunnel，粘贴这里显示的 Tunnel ID，Authentication 选择 No authentication。运行密钥只保存在 Styx。", "When the tunnel is ready, open Plugins → Add → Add custom MCP server in the intended ChatGPT account. Enter a name, upload the icon below with Choose icon, select Connection: Tunnel, paste the Tunnel ID shown here, and select Authentication: No authentication. Keep the runtime key only in Styx."))
-                Button(productText("保存 Styx 上传图标…", "Save Styx upload icon…")) { model.saveBrandIcon() }.accessibilityIdentifier("styx-native-custom-mcp-save-icon")
-                Text(productText("复用已有连接，不要删除正式插件。创建并连接后刷新已安装详情页，检查 Styx Logo，再选择 Try in chat 并发送 List my Styx computers。Custom MCP 不会安装 ZIP 中的技能。", "Reuse an existing connection; do not delete a production plugin. After creating and connecting, refresh the installed details and check the Styx logo. Choose Try in chat and send: List my Styx computers. Custom MCP does not install the ZIP’s skills."))
-                Button(productText("打开 ChatGPT Plugins", "Open ChatGPT Plugins")) { model.openOfficial("https://chatgpt.com/plugins") }
-                DisclosureGroup(productText("高级：旧版 ZIP 导出", "Advanced: legacy ZIP export")) {
-                    ProductPluginCompatibilityNote()
-                    if model.nativeSupportsOperation("pluginRead") {
-                        Text(productText("预览并导出这台管理电脑的插件名称、描述和图标。保存后在 ChatGPT 更新已有插件。", "Preview and export this hub’s plugin name, descriptions and icon. Then update the existing plugin in ChatGPT."))
-                        Button(productText("名称、图标与插件 ZIP…", "Name, icon and plugin ZIP…")) {
-                            model.perform {
-                                let current = try await model.client.read("plugin")["plugin"]
-                                model.plugin = current
-                                model.pluginIdentity = current["selection"]["pluginId"].string ?? "styx"
-                                model.pluginName = current["presentation"]["displayName"].string ?? "Styx"
-                                model.pluginDescription = current["presentation"]["shortDescription"].string ?? ""
-                                model.pluginLongDescription = current["presentation"]["longDescription"].string ?? ""
-                                model.pluginIcon = current["presentation"]["icon"]
-                                editPackage = true
-                            }
-                        }.disabled(model.busy)
-                    }
-                }
+                ProductNativeChatView(model: model)
             } else if model.joined {
                 Label(productText("聊天连接由管理电脑管理", "Chat is managed on the main computer"), systemImage: "globe")
             } else {
@@ -302,6 +272,50 @@ struct ProductSettingsView: View {
         case .unavailable: return productText("连接失败", "Connection failed")
         case .unknown: return productText("状态尚未确认", "Not observed")
         }
+    }
+}
+
+// Both first-run and Settings use the same Rust-backed connection editor.
+struct ProductNativeChatView: View {
+    @ObservedObject var model: ProductModel
+    @State private var editTunnel = false
+    @State private var editPackage = false
+    var body: some View {
+        VStack(alignment: .leading, spacing: 16) {
+            Text(productText("ChatGPT 中的 Styx", "Styx in ChatGPT")).font(.headline)
+            if model.nativeSupportsOperation("tunnelSave") {
+                ProductTunnelStatus(model: model, showNextStep: false)
+                if !model.tunnelID.isEmpty { Text(model.tunnelID).textSelection(.enabled) }
+                Button(productText("配置 Tunnel…", "Configure Tunnel…")) { editTunnel = true }.disabled(model.busy)
+                Text(productText("保存时会短暂断开本 App 管理的连接，随后自动恢复。请先完成正在运行的任务。", "Saving briefly pauses connections managed by this App, then reconnects. Finish active tasks first.")).font(.caption)
+            } else {
+                Text(productText("这台电脑已加入其他管理电脑，请复用那里的 Styx 连接。", "This computer uses another hub. Use that hub's existing Styx connection."))
+            }
+            Text(productText("等待 Tunnel 就绪后，在目标 ChatGPT 账号打开 Plugins → Add → Add custom MCP server。填写名称，通过 Choose icon 上传下方图标，Connection 选择 Tunnel，粘贴这里显示的 Tunnel ID，Authentication 选择 No authentication。运行密钥只保存在 Styx。", "When the tunnel is ready, open Plugins → Add → Add custom MCP server in the intended ChatGPT account. Enter a name, upload the icon below with Choose icon, select Connection: Tunnel, paste the Tunnel ID shown here, and select Authentication: No authentication. Keep the runtime key only in Styx."))
+            Button(productText("保存 Styx 上传图标…", "Save Styx upload icon…")) { model.saveBrandIcon() }.accessibilityIdentifier("styx-native-custom-mcp-save-icon")
+            Text(productText("复用已有连接，不要删除正式插件。创建并连接后刷新已安装详情页，检查 Styx Logo，再选择 Try in chat 并发送 List my Styx computers。Custom MCP 不会安装 ZIP 中的技能。", "Reuse an existing connection; do not delete a production plugin. After creating and connecting, refresh the installed details and check the Styx logo. Choose Try in chat and send: List my Styx computers. Custom MCP does not install the ZIP’s skills."))
+            Button(productText("打开 ChatGPT Plugins", "Open ChatGPT Plugins")) { model.openOfficial("https://chatgpt.com/plugins") }
+            DisclosureGroup(productText("高级：旧版 ZIP 导出", "Advanced: legacy ZIP export")) {
+                ProductPluginCompatibilityNote()
+                if model.nativeSupportsOperation("pluginRead") {
+                    Text(productText("预览并导出这台管理电脑的插件名称、描述和图标。保存后在 ChatGPT 更新已有插件。", "Preview and export this hub’s plugin name, descriptions and icon. Then update the existing plugin in ChatGPT."))
+                    Button(productText("名称、图标与插件 ZIP…", "Name, icon and plugin ZIP…")) {
+                        model.perform {
+                            let current = try await model.client.read("plugin")["plugin"]
+                            model.plugin = current
+                            model.pluginIdentity = current["selection"]["pluginId"].string ?? "styx"
+                            model.pluginName = current["presentation"]["displayName"].string ?? "Styx"
+                            model.pluginDescription = current["presentation"]["shortDescription"].string ?? ""
+                            model.pluginLongDescription = current["presentation"]["longDescription"].string ?? ""
+                            model.pluginIcon = current["presentation"]["icon"]
+                            editPackage = true
+                        }
+                    }.disabled(model.busy)
+                }
+            }
+        }
+        .sheet(isPresented: $editTunnel) { ProductTunnelEditor(model: model) }
+        .sheet(isPresented: $editPackage) { ProductPackageEditor(model: model) }
     }
 }
 
